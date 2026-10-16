@@ -101,8 +101,8 @@ pub use estimator::{ProcessingEstimator, StageRates, StageSample};
 pub use events::{EventReceiver, MeetingEventBus};
 pub use export_retries::ExportRetries;
 pub use intake::{
-    AdmissionFolders, Attendee, LocalRecordingIntake, LocalRecordingIntakeError, RecordingIntake,
-    RecordingResult,
+    AdmissionFolders, Attendee, LocalRecordingIntake, LocalRecordingIntakeError, NotedUpload,
+    RecordingIntake, RecordingResult,
 };
 pub use lane_merger::LaneMerger;
 pub use pipeline::{

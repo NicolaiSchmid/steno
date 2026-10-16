@@ -35,12 +35,14 @@
 //! clock passes that time, and a later launch recovers it.
 //!
 //! A recording can also be left with no row at all: a phone upload copied
-//! into its meeting folder before a crash or a failed commit (the phone's
-//! retry admits it into a new folder), a row a power loss took before it
-//! was durable, a local recording whose meeting was deleted while it
-//! recorded. After the rows left `recording`, the launch adopts each such
-//! master where it is, as a meeting with its folder's id (`adopt_orphans`),
-//! and the main window says so. Only a master this install wrote is
+//! into its meeting folder before a crash or a failed commit, a row a
+//! power loss took before it was durable, a local recording whose meeting
+//! was deleted while it recorded. After the rows left `recording`, the
+//! launch adopts each such master where it is, as a meeting with its
+//! folder's id (`adopt_orphans`), and the main window says so. A phone
+//! copy that holds the upload it was noted for is adopted with that
+//! upload's ledger row, so the phone's retry is answered with this
+//! meeting, not admitted as a second one. Only a master this install wrote is
 //! adopted: the record in [`crate::audio_folders`] names it from before
 //! its row until a launch finds that row durable, so a meeting folder
 //! another install put into a shared audio folder (a second computer
@@ -78,13 +80,13 @@ use std::time::{Duration, SystemTime};
 use chrono::Utc;
 use steno_audio::writer::{CafHeader, CafReadError, CafStreamWriter, WavStreamWriter};
 use steno_core::{
-    AudioAsset, AudioFormat, AudioLane, AudioRetention, Meeting, MeetingSource, RecordingEndReason,
-    RecordingLayout, Store, StoreError,
+    AdmissionCommit, AudioAsset, AudioFormat, AudioLane, AudioRetention, Meeting, MeetingSource,
+    RecordingEndReason, RecordingLayout, Store, StoreError,
     paths::{file_url, file_url_path},
 };
 use steno_pipeline::{
-    LocalRecordingIntake, LocalRecordingIntakeError, READ_STOPPED, ReadStage, ReadingMarks,
-    RecordingResult,
+    LocalRecordingIntake, LocalRecordingIntakeError, NotedUpload, READ_STOPPED, ReadStage,
+    ReadingMarks, RecordingResult,
 };
 use uuid::Uuid;
 
@@ -1005,6 +1007,15 @@ fn adopted(
 /// name is left alone ([`orphans`]), and nothing in the handover inbox is
 /// adopted: it holds files, not meeting folders.
 ///
+/// A phone copy noted with its upload ([`crate::audio_folders::uploads`])
+/// that holds that upload whole is adopted with the upload's ledger row
+/// ([`Store::adopt_upload_durably`]), so the phone's retry is answered
+/// with this meeting; when the ledger already holds the upload (a retry
+/// admitted it elsewhere first), nothing is written, the entry is
+/// forgotten and the copy stays where it is. A copy noted with no upload
+/// (an older build's), or one that holds other bytes, is adopted as any
+/// recording with no meeting.
+///
 /// An adopted master's entry stays: the insert commits under
 /// `synchronous = NORMAL`, so a power loss can still take it, and a later
 /// launch forgets the entry once its row is durable (`forget_settled`).
@@ -1055,6 +1066,11 @@ pub(crate) fn adopt_orphans(
     };
     let mut recorded = listed_at_launch.clone();
     recorded.retain(|meeting_id, _| read_again.contains_key(meeting_id));
+    let uploads =
+        crate::audio_folders::uploads(&interrupted.support_directory).unwrap_or_else(|error| {
+            tracing::debug!(%error, "the noted uploads were not read; copies are adopted without them");
+            BTreeMap::new()
+        });
     let others = other_folders(store, &interrupted.known_folders).unwrap_or_else(|error| {
         tracing::debug!(%error, "the stored assets' folders were not listed");
         interrupted.known_folders.clone()
@@ -1069,7 +1085,8 @@ pub(crate) fn adopt_orphans(
     let found = orphans(&folders, &ids, &recorded);
     let _entered = runtime.enter();
     let mut adopted_ids = Vec::new();
-    // No master to lose: forgotten whether or not the store is durable.
+    // No master to lose, or a copy of a recording the ledger holds:
+    // forgotten whether or not the store is durable.
     let mut gone = Vec::new();
     // Kept with their entries, and warned about in one line.
     let mut unrecovered = Vec::new();
@@ -1083,19 +1100,25 @@ pub(crate) fn adopt_orphans(
         let now = (pipeline.dependencies().now)();
         let saved =
             adopted(orphan, &settings, zone, now, reading).and_then(|(meeting, asset, held)| {
-                save_adopted(store, pipeline, &meeting, &asset, held).map(|()| held)
+                let upload = uploads.get(&meeting_id);
+                adopt(store, pipeline, orphan, upload, &meeting, &asset, held)
+                    .map(|admitted| (admitted, held))
             });
         // Warn names the meeting; an error, which can name its folder,
         // goes to debug.
         match saved {
             // Listed and failed, so not among the adopted: their note
             // says they are being processed.
-            Ok(true) => {
+            Ok((None, true)) => {
                 tracing::warn!(%meeting_id, "a recording with no meeting was listed, failed and unread");
             }
-            Ok(false) => {
+            Ok((None, false)) => {
                 tracing::warn!(%meeting_id, "a recording with no meeting was recovered");
                 adopted_ids.push(meeting_id);
+            }
+            Ok((Some(admitted), _)) => {
+                tracing::warn!(%meeting_id, %admitted, "a copy of a phone recording admitted as another meeting is left where it is");
+                gone.push(meeting_id);
             }
             // A header and no audio: it holds no master either.
             Err(RecoveryError::Unrecoverable(Unrecoverable::Empty)) => {
@@ -1131,6 +1154,59 @@ pub(crate) fn adopt_orphans(
         tracing::debug!(%error, "recording folders with no master not forgotten");
     }
     adopted_ids
+}
+
+/// Saves `orphan` as `meeting` with `asset` and processes it, or, `held`
+/// ([`ReadingMarks`]), saves them failed and leaves it. With the ledger
+/// row of `upload` when the orphan is a phone copy noted with it that
+/// holds it whole ([`Store::adopt_upload_durably`]): `Some` the ledger's
+/// meeting when the ledger already held it, and nothing is written.
+/// Otherwise as any recording with no meeting ([`save_adopted`]).
+/// A copy that cannot be read now is [`RecoveryError::Unreachable`], kept
+/// for the next launch.
+fn adopt(
+    store: &Store,
+    pipeline: &steno_pipeline::ProcessingPipeline,
+    orphan: &Orphan,
+    upload: Option<&NotedUpload>,
+    meeting: &Meeting,
+    asset: &AudioAsset,
+    held: bool,
+) -> Result<Option<Uuid>, RecoveryError> {
+    let noted = match upload.filter(|_| meeting.source == MeetingSource::Phone) {
+        Some(upload) => upload
+            .is_held_by(&orphan.master)
+            .map_err(|error| {
+                tracing::debug!(meeting_id = %meeting.id, %error, "a phone copy could not be read");
+                RecoveryError::Unreachable
+            })?
+            .then_some(upload),
+        None => None,
+    };
+    let Some(upload) = noted else {
+        return save_adopted(store, pipeline, meeting, asset, held).map(|()| None);
+    };
+    let committed = store
+        .adopt_upload_durably(
+            meeting,
+            asset,
+            upload.recording_id,
+            upload.byte_count,
+            &upload.sha256,
+        )
+        .map_err(|error| RecoveryError::NotSaved(error.into()))?;
+    match committed {
+        AdmissionCommit::Wrote => {
+            // Saved: a pipeline that cannot take it now leaves it `queued`
+            // for the next launch's resume; one `held` is saved failed and
+            // left.
+            if !held && let Err(failure) = pipeline.enqueue_saved(meeting, asset) {
+                tracing::warn!(meeting_id = %meeting.id, stage = failure.stage.as_str(), "an adopted phone recording not enqueued");
+            }
+            Ok(None)
+        }
+        AdmissionCommit::Earlier(admitted) => Ok(Some(admitted)),
+    }
 }
 
 #[cfg(test)]

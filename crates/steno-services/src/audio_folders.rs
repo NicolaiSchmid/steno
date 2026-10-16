@@ -9,6 +9,7 @@
 //! | File | What it holds | Written by | Read by |
 //! |------|---------------|------------|---------|
 //! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written: a recording's from its start until its start fails (nothing was recorded), it is deleted (forgotten before its rows go, and recorded again when the delete is refused, its commit fails or a panic unwinds it) or a launch finds its row durable and no longer `recording`; a phone upload's from before its copy until its admission commits durably or its copy is gone (`AdmissionRecord`); one with no row until a launch adopts its master (from then on as any row's) or finds that its folder holds none (no master, a CAF short of one whole frame, or a header with no audio) | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first, and adopts only a recording with no meeting that this record names ([`crate::recovery`]) |
+//! | `UPLOADS_FILE` | The upload each phone admission's copy holds (recording id, size, SHA-256), by meeting id, from before the copy until its entry in `RECORDED_FILE` is forgotten. A file of its own, so an older build reads `RECORDED_FILE` as before and adopts the copy as before | `note_upload`, `forget` | `uploads`: the launch adopts a copy that holds its upload with the upload's ledger row ([`crate::recovery`]), and the phone's retry admits into the copy (`AdmissionRecord`); an entry missing or unreadable is today's adoption, with no ledger row |
 //! | `KNOWN_FILE` | Every audio folder a recording was written to or the setting left, oldest first | `remember` | `known`: crash recovery looks in these folders after the two that decide a meeting ([`crate::recovery`]) |
 //!
 //! A reader returns the error of a file that cannot be read or does not
@@ -22,13 +23,17 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use steno_pipeline::AdmissionFolders;
+use steno_pipeline::{AdmissionFolders, NotedUpload};
 use uuid::Uuid;
 
 use crate::files;
 
 /// The name of the per-meeting record in the support directory.
 pub(crate) const RECORDED_FILE: &str = "recording-folders.json";
+
+/// The name of the record of the uploads phone admissions copied, in the
+/// support directory.
+pub(crate) const UPLOADS_FILE: &str = "admission-uploads.json";
 
 /// The name of the list of known folders in the support directory.
 pub(crate) const KNOWN_FILE: &str = "audio-folders.json";
@@ -64,9 +69,12 @@ pub(crate) fn record(
     )
 }
 
-/// Drops the entries of `meeting_ids`: their meetings completed, failed or
-/// went. Returns the entries it dropped, so a delete that does not go
-/// through can record its entry again.
+/// Drops the entries of `meeting_ids`, and the uploads noted for them:
+/// their meetings completed, failed or went. Returns the folders it
+/// dropped, so a delete that does not go through can record its entry
+/// again; an upload is not noted again, so such a copy is adopted as any
+/// recording with no meeting. An upload that cannot be forgotten is
+/// logged: no copy is adopted by it without its folder's entry.
 pub(crate) fn forget(
     support_directory: &Path,
     meeting_ids: &[Uuid],
@@ -85,18 +93,64 @@ pub(crate) fn forget(
             !forgotten.is_empty()
         },
     )?;
+    if let Err(error) = change(
+        support_directory,
+        UPLOADS_FILE,
+        |_| BTreeMap::new(),
+        |uploads: &mut BTreeMap<Uuid, NotedUpload>| {
+            let before = uploads.len();
+            uploads.retain(|id, _| !meeting_ids.contains(id));
+            uploads.len() != before
+        },
+    ) {
+        tracing::debug!(%error, "the uploads of forgotten recording folders not forgotten");
+    }
     Ok(forgotten)
 }
 
-/// The phone intake's notes of the folder each upload is copied into
-/// ([`AdmissionFolders`]), in the record under the support directory
-/// (`record`, `forget`). Rust only.
+/// The upload each phone admission's copy under `support_directory`
+/// holds, by meeting id.
+pub(crate) fn uploads(support_directory: &Path) -> std::io::Result<BTreeMap<Uuid, NotedUpload>> {
+    read(&support_directory.join(UPLOADS_FILE))
+}
+
+/// Notes `upload` as the one meeting `meeting_id`'s copy holds. A record
+/// that does not parse is set aside and started afresh: its copies are
+/// adopted as before.
+pub(crate) fn note_upload(
+    support_directory: &Path,
+    meeting_id: Uuid,
+    upload: &NotedUpload,
+) -> std::io::Result<()> {
+    change(
+        support_directory,
+        UPLOADS_FILE,
+        |_| BTreeMap::new(),
+        |uploads: &mut BTreeMap<Uuid, NotedUpload>| {
+            uploads.insert(meeting_id, upload.clone()).as_ref() != Some(upload)
+        },
+    )
+}
+
+/// The phone intake's notes of the folder each upload is copied into and
+/// of the upload ([`AdmissionFolders`]), in the records under the support
+/// directory (`note_upload`, `record`, `forget`). Rust only.
 pub(crate) struct AdmissionRecord {
     pub(crate) support_directory: PathBuf,
 }
 
 impl AdmissionFolders for AdmissionRecord {
-    fn copying(&self, meeting_id: Uuid, audio_folder: &Path) -> std::io::Result<()> {
+    /// The upload first, so a folder this build records names its upload
+    /// unless that note failed; then the copy is adopted as before.
+    fn copying(
+        &self,
+        meeting_id: Uuid,
+        audio_folder: &Path,
+        upload: &NotedUpload,
+    ) -> std::io::Result<()> {
+        if let Err(error) = note_upload(&self.support_directory, meeting_id, upload) {
+            tracing::debug!(%meeting_id, %error, "an admission's upload not noted");
+        }
         record(&self.support_directory, meeting_id, audio_folder).inspect_err(|error| {
             // The admission is refused; the error can name the user's
             // folder: debug alone.
@@ -110,6 +164,17 @@ impl AdmissionFolders for AdmissionRecord {
             // The next launch forgets an entry whose meeting has a row.
             tracing::debug!(%meeting_id, %error, "an admission's folder not forgotten");
         }
+    }
+
+    /// The first copy noted for `upload` whose folder is still recorded. A
+    /// record that cannot be read gives none: the upload is copied again.
+    fn noted_copy(&self, upload: &NotedUpload) -> Option<(Uuid, PathBuf)> {
+        let uploads = uploads(&self.support_directory).ok()?;
+        let mut recorded = recorded(&self.support_directory).ok()?;
+        uploads
+            .into_iter()
+            .filter(|(_, noted)| noted == upload)
+            .find_map(|(meeting_id, _)| Some((meeting_id, recorded.remove(&meeting_id)?)))
     }
 }
 
@@ -311,6 +376,43 @@ mod tests {
             recorded(dir.path()).unwrap(),
             BTreeMap::from([(second, PathBuf::from("/b"))])
         );
+    }
+
+    /// A phone copy's upload is noted with its folder and found by its
+    /// bytes while the folder is recorded; forgetting the folder forgets
+    /// the upload. The record of folders keeps the shape an older build
+    /// reads.
+    #[test]
+    fn an_admissions_upload_is_noted_with_its_folder_and_forgotten_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let folders = AdmissionRecord {
+            support_directory: dir.path().to_path_buf(),
+        };
+        let upload = NotedUpload {
+            recording_id: Uuid::new_v4(),
+            byte_count: 3,
+            sha256: vec![7; 32],
+        };
+        let other = NotedUpload {
+            sha256: vec![8; 32],
+            ..upload.clone()
+        };
+        let (meeting_id, audio) = (Uuid::new_v4(), dir.path().join("audio"));
+        folders.copying(meeting_id, &audio, &upload).unwrap();
+
+        assert_eq!(
+            folders.noted_copy(&upload),
+            Some((meeting_id, audio.clone()))
+        );
+        assert_eq!(folders.noted_copy(&other), None, "other bytes");
+        let older: BTreeMap<Uuid, PathBuf> =
+            serde_json::from_slice(&std::fs::read(dir.path().join(RECORDED_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(older, BTreeMap::from([(meeting_id, audio)]));
+
+        folders.settled(meeting_id);
+        assert_eq!(folders.noted_copy(&upload), None);
+        assert!(uploads(dir.path()).unwrap().is_empty());
     }
 
     /// Writers on many threads at once (phone admissions on several

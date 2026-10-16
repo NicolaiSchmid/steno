@@ -93,6 +93,8 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(test)]
+mod admission_copy_tests;
 pub mod app;
 pub mod audio_folders;
 pub mod auto_stop;

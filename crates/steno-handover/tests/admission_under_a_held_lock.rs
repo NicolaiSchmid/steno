@@ -62,7 +62,12 @@ struct Noted {
 }
 
 impl AdmissionFolders for Noted {
-    fn copying(&self, meeting_id: Uuid, audio_folder: &Path) -> std::io::Result<()> {
+    fn copying(
+        &self,
+        meeting_id: Uuid,
+        audio_folder: &Path,
+        _: &steno_pipeline::NotedUpload,
+    ) -> std::io::Result<()> {
         self.folders
             .lock()
             .unwrap()

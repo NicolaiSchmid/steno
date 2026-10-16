@@ -12,11 +12,11 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use steno_core::{
-    AudioAsset, AudioFormat, AudioLane, AudioRetention, HandoverIntake, HandoverReceipt,
-    HandoverState, Meeting, MeetingSource, MeetingState, MeetingStateKind, PairedDevice,
-    Participant, ParticipantRole, RecordingEndReason, RecordingLayout, RecordingMetadata, Store,
-    StoreError, TitleOrigin, async_trait, derived_uuid, paths::file_url, paths::file_url_path,
-    protocols::BoundaryResult,
+    AdmissionCommit, AudioAsset, AudioFormat, AudioLane, AudioRetention, HandoverIntake,
+    HandoverReceipt, HandoverState, Meeting, MeetingSource, MeetingState, MeetingStateKind,
+    PairedDevice, Participant, ParticipantRole, RecordingEndReason, RecordingLayout,
+    RecordingMetadata, Store, StoreError, TitleOrigin, async_trait, derived_uuid, paths::file_url,
+    paths::file_url_path, protocols::BoundaryResult,
 };
 use uuid::Uuid;
 
@@ -74,29 +74,77 @@ pub fn default_title(
 }
 
 /// Where the phone intake notes the meeting folder it copies an upload
-/// into, from before the copy until the admission commits or the copy is
-/// gone. A copy left with no meeting (a crash before the commit, a commit
-/// and its `failed` save both failing) is then one this install wrote,
-/// which the launch adopts, unlike a meeting folder another install wrote
-/// into a shared audio folder (`steno_services`' recovery). The app's
-/// notes go into the record of recording folders beside the database;
-/// `()` notes nothing. Rust only.
+/// into, and the upload the copy holds, from before the copy until the
+/// admission commits or the copy is gone. A copy left with no meeting (a
+/// crash before the commit, a commit and its `failed` save both failing)
+/// is then one this install wrote, which the launch adopts, unlike a
+/// meeting folder another install wrote into a shared audio folder
+/// (`steno_services`' recovery). The launch adopts a copy that holds the
+/// upload it was noted for with that upload's ledger row, and the phone's
+/// retry admits into it ([`AdmissionFolders::noted_copy`]), so the
+/// recording is one meeting either way. The app's notes go into the
+/// records beside the database; `()` notes nothing. Rust only.
 pub trait AdmissionFolders: Send + Sync {
-    /// Before the copy of meeting `meeting_id`'s upload into
+    /// Before the copy of `upload` into meeting `meeting_id`'s folder in
     /// `audio_folder`. An error refuses the admission before anything is
     /// copied or committed; the phone keeps its copy and tries again.
-    fn copying(&self, meeting_id: Uuid, audio_folder: &Path) -> std::io::Result<()>;
+    fn copying(
+        &self,
+        meeting_id: Uuid,
+        audio_folder: &Path,
+        upload: &NotedUpload,
+    ) -> std::io::Result<()>;
     /// The admission of `meeting_id` committed, or its copy is gone. A
     /// failure is the implementation's to log.
     fn settled(&self, meeting_id: Uuid);
+    /// The meeting id and audio folder of a copy of `upload` that an
+    /// earlier admission noted and did not settle, if any. None by
+    /// default, and for a note that names no upload (an older build's).
+    fn noted_copy(&self, _upload: &NotedUpload) -> Option<(Uuid, std::path::PathBuf)> {
+        None
+    }
 }
 
 impl AdmissionFolders for () {
-    fn copying(&self, _: Uuid, _: &Path) -> std::io::Result<()> {
+    fn copying(&self, _: Uuid, _: &Path, _: &NotedUpload) -> std::io::Result<()> {
         Ok(())
     }
 
     fn settled(&self, _: Uuid) {}
+}
+
+/// The upload a phone admission's copy holds, as the admission ledger
+/// keys it: the recording id, the size and the SHA-256. Noted with the
+/// copy's folder ([`AdmissionFolders::copying`]). Rust only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotedUpload {
+    pub recording_id: Uuid,
+    pub byte_count: i64,
+    pub sha256: Vec<u8>,
+}
+
+impl NotedUpload {
+    /// The upload `metadata` announces.
+    #[must_use]
+    pub fn of(metadata: &RecordingMetadata) -> Self {
+        NotedUpload {
+            recording_id: metadata.recording_id,
+            byte_count: metadata.byte_count,
+            sha256: metadata.sha256.clone(),
+        }
+    }
+
+    /// Whether the file at `path` is this upload whole: its size and its
+    /// SHA-256. A copy cut short (a crash during the copy) is not, so
+    /// neither the launch nor a retry answers the phone with it.
+    pub fn is_held_by(&self, path: &Path) -> std::io::Result<bool> {
+        let len = std::fs::metadata(path)?.len();
+        if i64::try_from(len).ok() != Some(self.byte_count) {
+            return Ok(false);
+        }
+        Ok(steno_core::content_hash::sha256_of_file(path)? == self.sha256)
+    }
 }
 
 /// Admits a fully received phone recording: copies the file into the
@@ -131,7 +179,11 @@ impl AdmissionFolders for () {
 /// that drops `admit` (a phone that hung up mid-admit) leaves the
 /// admission to finish and its meeting enqueued (Rust only: hyper drops
 /// a request's future when the phone hangs up). The copy's folder is
-/// noted before the copy ([`AdmissionFolders`], Rust only).
+/// noted before the copy ([`AdmissionFolders`], Rust only). A copy an
+/// earlier admission of the same bytes noted and left with no meeting
+/// (its commit and its `failed` save both gave up under a lock another
+/// process held) is admitted where it is, not copied again, and is never
+/// removed by this admission: the launch may be adopting it (Rust only).
 /// Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
 pub struct RecordingIntake {
     store: Arc<Store>,
@@ -311,16 +363,26 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
     }
 
     let settings = store.settings()?;
-    let meeting_id = Uuid::new_v4();
     let timestamp = now();
-    let audio_folder = file_url_path(&settings.audio_folder)
-        .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
-    let layout = RecordingLayout::new(&audio_folder, meeting_id);
-    // The copy and its folder are on the disk before the receipt says
-    // complete: the phone deletes its own copy on that answer.
-    folders.copying(meeting_id, &audio_folder)?;
-    let destination = copy_into_new_folder(file, &layout, metadata.format)
-        .inspect_err(|_| folders.settled(meeting_id))?;
+    let upload = NotedUpload::of(metadata);
+    // A copy an earlier admission left: a second copy would be a second
+    // meeting once the launch adopts the first.
+    let reused = reusable_copy(store, folders.as_ref(), &upload, metadata.format)?;
+    let is_reused = reused.is_some();
+    let (meeting_id, layout, destination) = if let Some(reused) = reused {
+        reused
+    } else {
+        let meeting_id = Uuid::new_v4();
+        let audio_folder = file_url_path(&settings.audio_folder)
+            .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
+        let layout = RecordingLayout::new(&audio_folder, meeting_id);
+        // The copy and its folder are on the disk before the receipt says
+        // complete: the phone deletes its own copy on that answer.
+        folders.copying(meeting_id, &audio_folder, &upload)?;
+        let destination = copy_into_new_folder(file, &layout, metadata.format)
+            .inspect_err(|_| folders.settled(meeting_id))?;
+        (meeting_id, layout, destination)
+    };
 
     let meeting = Meeting {
         id: meeting_id,
@@ -366,45 +428,79 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
     receipt.state = HandoverState::Complete { meeting_id };
     receipt.updated_at = timestamp;
 
-    let admitted = match store.save_admission_durably(&receipt, &meeting, &asset) {
-        Ok(admitted) => {
+    let committed = match store.commit_admission_durably(&receipt, &meeting, &asset) {
+        Ok(committed) => {
             folders.settled(meeting_id);
-            admitted
+            committed
         }
         Err(error) => {
-            if matches!(error, StoreError::ReceiptOfAnotherUpload(_)) {
-                // The refusal wrote nothing, and another upload's
-                // receipt is left as it is.
+            // The refusal of another upload's receipt wrote nothing, and
+            // that receipt is left as it is. Any other failed commit is not
+            // proof that nothing committed: a WAL sync that fails leaves
+            // the commit's frames in the WAL, and recovery after a crash
+            // replays them. The durable `failed` save writes over them, or
+            // voids them when the WAL restarts, so the copy goes only once
+            // that save is on the disk; otherwise it stays, still noted,
+            // so the next launch adopts it unless a replay brings its
+            // meeting back. A copy an earlier admission left stays noted
+            // either way.
+            let copy_goes = matches!(error, StoreError::ReceiptOfAnotherUpload(_)) || {
+                receipt.state = HandoverState::Failed(format!("admit: {error}"));
+                save_failed_receipt(store, &receipt)
+            };
+            if copy_goes && !is_reused {
                 let _ = std::fs::remove_file(&destination);
                 folders.settled(meeting_id);
-            } else {
-                // A failed commit is not proof that nothing committed: a
-                // WAL sync that fails leaves the commit's frames in the
-                // WAL, and recovery after a crash replays them. The
-                // durable `failed` save writes over them, or voids them
-                // when the WAL restarts, so the copy goes only once that
-                // save is on the disk; otherwise it stays, still noted,
-                // so the next launch adopts it unless a replay brings
-                // its meeting back.
-                receipt.state = HandoverState::Failed(format!("admit: {error}"));
-                if save_failed_receipt(store, &receipt) {
-                    let _ = std::fs::remove_file(&destination);
-                    folders.settled(meeting_id);
-                }
             }
             return Err(error.into());
         }
     };
     let _ = std::fs::remove_file(file);
-    if admitted != meeting_id {
-        // The ledger held these bytes with a meeting: the receipt is
-        // complete with it, and this copy and its folder belong to no
-        // meeting.
-        let _ = std::fs::remove_file(&destination);
-        let _ = std::fs::remove_dir(&layout.directory);
-        return Ok(Admission::Answered(admitted));
+    match committed {
+        AdmissionCommit::Wrote => Ok(Admission::Admitted(Box::new((meeting, asset)))),
+        AdmissionCommit::Earlier(admitted) => {
+            // The ledger held these bytes with a meeting: the receipt is
+            // complete with it. A new copy and its folder belong to no
+            // meeting. A copy an earlier admission left is that meeting's
+            // master when the launch adopted it meanwhile, and is left
+            // alone otherwise too.
+            if !is_reused {
+                let _ = std::fs::remove_file(&destination);
+                let _ = std::fs::remove_dir(&layout.directory);
+            }
+            Ok(Admission::Answered(admitted))
+        }
     }
-    Ok(Admission::Admitted(Box::new((meeting, asset))))
+}
+
+/// The copy of `upload` that `folders` noted for an earlier admission which
+/// neither committed nor removed it, when its meeting has no row and the
+/// copy still holds the upload whole ([`NotedUpload::is_held_by`]): its
+/// meeting id, layout and master in `format`. A copy that cannot be read
+/// or holds other bytes is left to the launch, and the upload is copied
+/// again.
+fn reusable_copy(
+    store: &Store,
+    folders: &dyn AdmissionFolders,
+    upload: &NotedUpload,
+    format: AudioFormat,
+) -> BoundaryResult<Option<(Uuid, RecordingLayout, std::path::PathBuf)>> {
+    let Some((meeting_id, audio_folder)) = folders.noted_copy(upload) else {
+        return Ok(None);
+    };
+    if store.meeting(meeting_id)?.is_some() {
+        return Ok(None);
+    }
+    let layout = RecordingLayout::new(&audio_folder, meeting_id);
+    let master = layout.master(format);
+    match upload.is_held_by(&master) {
+        Ok(true) => Ok(Some((meeting_id, layout, master))),
+        held => {
+            // The error can name the user's folder: debug alone.
+            tracing::debug!(%meeting_id, ?held, "a noted copy of the upload is not admitted into");
+            Ok(None)
+        }
+    }
 }
 
 /// The durable `failed` save of `receipt` after a failed admission commit,
@@ -1417,7 +1513,12 @@ mod tests {
     }
 
     impl AdmissionFolders for NotedFolders {
-        fn copying(&self, meeting_id: Uuid, audio_folder: &Path) -> std::io::Result<()> {
+        fn copying(
+            &self,
+            meeting_id: Uuid,
+            audio_folder: &Path,
+            _: &NotedUpload,
+        ) -> std::io::Result<()> {
             if self.refuse.load(Ordering::SeqCst) {
                 return Err(std::io::Error::other("read-only"));
             }
