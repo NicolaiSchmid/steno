@@ -76,7 +76,7 @@ pub use protocols::{
 };
 pub use recording_layout::RecordingLayout;
 pub use store::{
-    ChangeMark, DeletedMeeting, ExpiredAsset, SearchHit, SettingProblem, StageRateRow, Store,
-    StoreError,
+    AdmissionCommit, ChangeMark, DeletedMeeting, ExpiredAsset, SearchHit, SettingProblem,
+    StageRateRow, Store, StoreError,
 };
 pub use string_enum::UnknownCase;

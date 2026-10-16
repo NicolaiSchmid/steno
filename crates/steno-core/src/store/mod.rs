@@ -36,6 +36,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use assets::ExpiredAsset;
+pub use handover::AdmissionCommit;
 pub use meetings::DeletedMeeting;
 pub use search::{SearchHit, fts5_pattern};
 pub use settings::{PARAKEET_V3_ENGINE_ID, SettingProblem};

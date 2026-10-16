@@ -492,3 +492,80 @@ fn every_open_backfills_the_ledger_from_admitted_receipts() {
     );
     assert_eq!(ledger_rows(&store).len(), 2);
 }
+
+/// The launch's adoption of a phone copy writes the meeting, its asset and
+/// the upload's ledger row in one transaction and leaves the receipt as it
+/// is. Bytes the ledger already holds, with a meeting or with one the user
+/// deleted, write nothing and give the row's meeting, and a meeting id
+/// with a row is refused. The intake's commit into the same meeting id
+/// afterwards is answered by the ledger, not written again. Rust only.
+#[test]
+fn an_adopted_copy_is_written_with_its_ledger_row_unless_the_ledger_holds_its_bytes() {
+    let store = Store::in_memory().unwrap();
+    store.save_paired_device(&device(), &[1; 32]).unwrap();
+    let unfinished = receipt(HandoverState::Verifying);
+    store.save_handover_receipt(&unfinished).unwrap();
+    let (complete, meeting, asset) = admission("516EADE8-40E5-4434-8AAF-000000000001", vec![7; 32]);
+    let (recording_id, byte_count) = (complete.recording_id, complete.byte_count);
+    let adopt = |meeting: &Meeting, asset: &AudioAsset, sha256: &[u8]| {
+        store.adopt_upload_durably(meeting, asset, recording_id, byte_count, sha256)
+    };
+
+    assert_eq!(
+        adopt(&meeting, &asset, &[7; 32]).unwrap(),
+        AdmissionCommit::Wrote
+    );
+    assert_eq!(
+        store.meeting(meeting.id).unwrap().map(|m| m.id),
+        Some(meeting.id)
+    );
+    assert_eq!(store.asset(meeting.id).unwrap(), Some(asset.clone()));
+    assert_eq!(
+        store
+            .admitted_meeting(recording_id, byte_count, &[7; 32])
+            .unwrap(),
+        Some(meeting.id)
+    );
+    assert_eq!(
+        store.handover_receipt(recording_id).unwrap(),
+        Some(unfinished),
+        "the receipt is left as it is"
+    );
+    assert_eq!(
+        store
+            .commit_admission_durably(&complete, &meeting, &asset)
+            .unwrap(),
+        AdmissionCommit::Earlier(meeting.id),
+        "the intake's commit into the adopted copy is answered by the ledger"
+    );
+
+    let (_, second, second_asset) = admission("516EADE8-40E5-4434-8AAF-000000000002", vec![7; 32]);
+    assert_eq!(
+        adopt(&second, &second_asset, &[7; 32]).unwrap(),
+        AdmissionCommit::Earlier(meeting.id)
+    );
+    store.delete_meeting(meeting.id).unwrap();
+    assert_eq!(
+        adopt(&second, &second_asset, &[7; 32]).unwrap(),
+        AdmissionCommit::Earlier(meeting.id),
+        "a deleted meeting's bytes are not adopted back"
+    );
+    assert_eq!(store.meeting(second.id).unwrap(), None);
+
+    assert_eq!(
+        adopt(&second, &second_asset, &[8; 32]).unwrap(),
+        AdmissionCommit::Wrote
+    );
+    let (_, _, third_asset) = admission("516EADE8-40E5-4434-8AAF-000000000003", vec![9; 32]);
+    assert!(matches!(
+        adopt(&second, &third_asset, &[9; 32]),
+        Err(StoreError::MeetingExists(id)) if id == second.id
+    ));
+    assert_eq!(
+        store
+            .admitted_meeting(recording_id, byte_count, &[9; 32])
+            .unwrap(),
+        None,
+        "the refusal writes nothing"
+    );
+}
