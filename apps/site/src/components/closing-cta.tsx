@@ -4,8 +4,6 @@ import { platformIcon } from "@/components/platform-icons";
 import { cn } from "@/lib/cn";
 import { listedLinuxTargets, platformIds, platforms, site } from "@/lib/site";
 
-const linuxInstalls = listedLinuxTargets.length > 0;
-
 export function ClosingCta() {
 	return (
 		<section
@@ -39,7 +37,7 @@ export function ClosingCta() {
 				<ul
 					className={cn(
 						"mx-auto mt-10 grid max-w-[720px] grid-cols-1 gap-px overflow-hidden rounded-lg border border-border bg-border",
-						linuxInstalls ? "sm:grid-cols-2" : "sm:grid-cols-3",
+						platforms.linux.released ? "sm:grid-cols-2" : "sm:grid-cols-3",
 					)}
 				>
 					{platformIds.map((id) => {
@@ -67,18 +65,18 @@ export function ClosingCta() {
 								</div>
 								{installs.length > 0 && (
 									<ul className="flex flex-col gap-2">
-										{installs.map(({ name: target, install }) => (
+										{installs.map((target) => (
 											<li
 												className="grid grid-cols-1 items-center gap-x-4 gap-y-1 sm:grid-cols-[72px_minmax(0,1fr)]"
-												key={target}
+												key={target.name}
 											>
 												<span className="font-mono text-[11px] text-fg-dim">
-													{target}
+													{target.name}
 												</span>
 												<Command
 													className="w-full"
-													command={install.line}
-													shell={install.shell}
+													command={target.install}
+													shell={target.shell}
 												/>
 											</li>
 										))}
