@@ -19,7 +19,8 @@
 //! - **Clearing it**: only a speech engine that loaded in a meeting's
 //!   processing: the mark goes and the next recording warms up again. A
 //!   load that takes the app down there leaves the mark, and its meeting
-//!   is quarantined at the next launch ([`crate::reading`]).
+//!   is counted by the reading marks ([`crate::reading`]): read once
+//!   more, and quarantined the second time in a row.
 //!
 //! A folder that cannot be written leaves the warm-up unguarded, as
 //! before: the failure is logged at `warn` and the warm-up runs. The

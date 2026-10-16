@@ -1155,48 +1155,92 @@ fn recording_files(asset: &steno_core::AudioAsset) -> Vec<(PathBuf, Vec<u8>)> {
     files
 }
 
-/// A process killed while it reads a recording (a failed allocation in
-/// the decoder aborts it the same way: nothing runs after) leaves the
-/// read's marker. The next launch quarantines that meeting: it fails with
-/// "Steno stopped while reading this recording", its files are kept as
-/// they were, and nothing reads it again; the other queued meeting is
-/// processed as before. Process again reads it once more and clears the
-/// marker. A17 of `.plans/2026-10-07-stable-promotion.md`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_read_killed_quarantines_its_meeting_and_the_launch_runs_the_others() {
-    let dir = tempfile::tempdir().unwrap();
-    let markers = dir
-        .path()
+/// The children for the reading tests: each processes the asset in `bad`
+/// and is killed in its decode, `kills` in a row, each over the marks
+/// the one before left. Returns the marks' folder.
+fn killed_in_the_decode(dir: &Path, bad: &steno_core::AudioAsset, kills: usize) -> PathBuf {
+    let marks = dir
         .join("support")
         .join(steno_pipeline::ReadingMarks::FOLDER);
+    std::fs::write(dir.join("bad"), bad.id.to_string()).unwrap();
+    for kill in 1..=kills {
+        let reading = dir.join("reading");
+        let _ = std::fs::remove_file(&reading);
+        let mut child = spawn_test("kill_tests::child_decodes_until_killed", dir, Gate::Open);
+        kill_when(&mut child, dir, "the decode", || reading.exists());
+        assert_eq!(
+            std::fs::read_dir(&marks).unwrap().count(),
+            kill,
+            "each kill's mark outlived it"
+        );
+    }
+    marks
+}
+
+/// The next launch over the database the children used.
+async fn launched_after(dir: &Path) -> (Arc<Store>, crate::App) {
+    let store = Arc::new(Store::open(dir.join("steno.sqlite")).unwrap());
+    let app = app_over_fakes(dir, &store, synthetic_capture());
+    let host = Arc::new(app.host().unwrap());
+    app.launch(&host);
+    app.launch_finished().await;
+    app.pipeline.current().wait_until_idle().await;
+    (store, app)
+}
+
+/// A process killed once while it reads a recording (a failed allocation
+/// in the decoder aborts it the same way: nothing runs after; so does a
+/// force quit or a power loss) costs that meeting nothing: the next launch
+/// processes it again with the others, and its mark goes. A17 of
+/// `.plans/2026-10-07-stable-promotion.md`, "the breaker counts".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_killed_once_is_processed_at_the_next_launch() {
+    let dir = tempfile::tempdir().unwrap();
     let (bad, bad_asset, good) = {
         let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
         let (bad, bad_asset) = queued_call(&store, dir.path());
         let (good, _) = queued_call(&store, dir.path());
         (bad, bad_asset, good)
     };
-    std::fs::write(dir.path().join("bad"), bad_asset.id.to_string()).unwrap();
-    let before = recording_files(&bad_asset);
-    let mut child = spawn_test(
-        "kill_tests::child_decodes_until_killed",
-        dir.path(),
-        Gate::Open,
-    );
-    let reading = dir.path().join("reading");
-    kill_when(&mut child, dir.path(), "the decode", || reading.exists());
-    assert_eq!(
-        std::fs::read_dir(&markers).unwrap().count(),
-        1,
-        "the read's marker outlived the kill"
-    );
+    let marks = killed_in_the_decode(dir.path(), &bad_asset, 1);
 
-    let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
-    let app = app_over_fakes(dir.path(), &store, synthetic_capture());
-    let host = Arc::new(app.host().unwrap());
-    app.launch(&host);
-    app.launch_finished().await;
+    let (store, app) = launched_after(dir.path()).await;
+    for meeting in [bad.id, good.id] {
+        assert_eq!(
+            store.meeting(meeting).unwrap().unwrap().state,
+            MeetingState::Ready
+        );
+    }
+    assert!(
+        !app.pipeline
+            .current()
+            .dependencies()
+            .reading_marks
+            .holds(bad.id)
+    );
+    assert_eq!(std::fs::read_dir(&marks).unwrap().count(), 0);
+}
+
+/// Killed twice in a row while it reads the same recording, the meeting
+/// is quarantined at the next launch: it fails with "Steno stopped while
+/// reading this recording", its files are kept as they were, and nothing
+/// reads it again; the other queued meeting is processed as before.
+/// Process again reads it once more and clears the marks. A17 of
+/// `.plans/2026-10-07-stable-promotion.md`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_killed_twice_quarantines_its_meeting_and_the_launch_runs_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bad, bad_asset, good) = {
+        let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+        let (bad, bad_asset) = queued_call(&store, dir.path());
+        let (good, _) = queued_call(&store, dir.path());
+        (bad, bad_asset, good)
+    };
+    let before = recording_files(&bad_asset);
+    let marks = killed_in_the_decode(dir.path(), &bad_asset, 2);
+
+    let (store, app) = launched_after(dir.path()).await;
     let current = app.pipeline.current();
-    current.wait_until_idle().await;
     assert_eq!(
         store.meeting(bad.id).unwrap().unwrap().state,
         MeetingState::Failed {
@@ -1217,5 +1261,86 @@ async fn a_read_killed_quarantines_its_meeting_and_the_launch_runs_the_others() 
         MeetingState::Ready
     );
     assert!(!current.dependencies().reading_marks.holds(bad.id));
-    assert_eq!(std::fs::read_dir(&markers).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&marks).unwrap().count(), 0);
+}
+
+/// The child's decoder for the quit test: a decode says so in `reading`
+/// and waits until `open` is there.
+struct DecodeUntilOpened {
+    reading: PathBuf,
+    open: PathBuf,
+}
+
+#[steno_core::async_trait]
+impl steno_core::AudioDecoder for DecodeUntilOpened {
+    async fn decode(
+        &self,
+        _: &steno_core::AudioAsset,
+        _: steno_core::AudioLane,
+    ) -> steno_core::BoundaryResult<steno_core::AudioBuffer16k> {
+        Reports::append(&self.reading, b"1");
+        while !self.open.exists() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err("the app quit".into())
+    }
+
+    fn mixdown_format(&self) -> steno_core::AudioFormat {
+        steno_core::AudioFormat::Wav16kInt16
+    }
+
+    async fn mixdown(
+        &self,
+        _: &steno_core::AudioAsset,
+        _: &Path,
+    ) -> steno_core::BoundaryResult<()> {
+        Ok(())
+    }
+}
+
+/// The app's own quit ([`crate::App::shutdown`]) during a read removes its
+/// mark: the quit ended the read, not the file, so the next launch counts
+/// nothing against the meeting and processes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_apps_quit_during_a_read_leaves_no_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+    let (meeting, asset) = queued_call(&store, dir.path());
+    let reading = dir.path().join("reading");
+    let open = dir.path().join("open");
+    let decoder = Arc::new(DecodeUntilOpened {
+        reading: reading.clone(),
+        open: open.clone(),
+    });
+    let app = app_decoding(dir.path(), &store, decoder);
+    let pipeline = app.pipeline.current();
+    let processing = tokio::spawn(async move { pipeline.process(asset.id).await });
+    let marks = dir
+        .path()
+        .join("support")
+        .join(steno_pipeline::ReadingMarks::FOLDER);
+    let started = Instant::now();
+    while !reading.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the decode began"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(std::fs::read_dir(&marks).unwrap().count(), 1);
+    app.shutdown();
+    assert_eq!(
+        std::fs::read_dir(&marks).unwrap().count(),
+        0,
+        "the quit removed it"
+    );
+    std::fs::write(&open, b"").unwrap();
+    let _ = processing.await;
+    drop(app);
+
+    let (store, _app) = launched_after(dir.path()).await;
+    assert_eq!(
+        store.meeting(meeting.id).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
 }

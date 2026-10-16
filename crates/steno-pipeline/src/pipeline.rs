@@ -57,7 +57,7 @@ use crate::events::MeetingEventBus;
 use crate::export_retries::ExportRetries;
 use crate::intake::RecordingResult;
 use crate::lane_merger::{ClusterSpeaker, LaneMerger};
-use crate::reading::{READ_STOPPED, ReadStage, Reading, ReadingMarks};
+use crate::reading::{READ_STOPPED, ReadStage, ReadingMarks};
 use crate::run::ProcessingRun;
 use crate::sample_clips::{self, ClipProbe, ClipStep};
 use crate::warm_up_mark::WarmUpMark;
@@ -1340,26 +1340,41 @@ impl ProcessingPipeline {
         self.inner.dependencies.quit_latch.is_set()
     }
 
-    /// The marker of a read of `asset`'s recording in `stage`
-    /// ([`ReadingMarks`]); the read is marked while the guard lives.
-    fn reading(&self, asset: &AudioAsset, stage: ReadStage) -> Reading<'_> {
+    /// `read` of `asset`'s recording, marked in `stage` while it runs
+    /// ([`ReadingMarks::marked`], off the workers); unmarked without one.
+    async fn marked<T>(
+        &self,
+        asset: &AudioAsset,
+        stage: Option<ReadStage>,
+        read: impl Future<Output = T>,
+    ) -> T {
+        let Some(stage) = stage else {
+            return read.await;
+        };
         let master = file_url_path(&asset.url).unwrap_or_default();
-        self.inner.dependencies.reading_marks.reading(
-            asset.meeting_id,
-            Some(asset.id),
-            &master,
-            stage,
-        )
+        self.inner
+            .dependencies
+            .reading_marks
+            .marked(asset.meeting_id, Some(asset.id), master, stage, read)
+            .await
     }
 
-    /// [`reading`](Self::reading) of the speech engine's load or a
-    /// transcription of `asset`, for an engine in this process; `None`
+    /// A run of `meeting_id` ended with the app alive, every read it began
+    /// returned: the count of reads that ended with the app starts again
+    /// ([`ReadingMarks::read_through`]), off the workers.
+    async fn read_through(&self, meeting_id: Uuid) {
+        let marks = Arc::clone(&self.inner.dependencies.reading_marks);
+        let _ = off_the_workers(move || marks.read_through(meeting_id)).await;
+    }
+
+    /// The stage the speech engine's load and transcriptions are marked
+    /// in: for an engine in this process, whose abort ends the app; none
     /// for one whose abort ends only its child.
-    fn speech_reading(&self, asset: &AudioAsset) -> Option<Reading<'_>> {
+    fn speech_stage(&self) -> Option<ReadStage> {
         self.inner
             .dependencies
             .speech_in_process
-            .then(|| self.reading(asset, ReadStage::Transcribe))
+            .then_some(ReadStage::Transcribe)
     }
 
     /// Writes `Meeting(queued)` plus the asset in one transaction and starts
@@ -2296,6 +2311,9 @@ impl ProcessingPipeline {
                     Box::pin(self.process_until_persist(&asset, meeting)),
                 )
                 .await;
+                if !self.quitting() {
+                    self.read_through(meeting_id).await;
+                }
                 let persisted = match until_persist {
                     Ok(asset) => asset,
                     Err(failure) if self.quitting() => return Err(failure),
@@ -2446,10 +2464,8 @@ impl ProcessingPipeline {
     ) -> Result<AudioAsset> {
         let claim = self.speech_engine().claim();
         let transcribed: Result<_> = async {
-            {
-                let _loading = self.speech_reading(asset);
-                self.warm_up_for_job(meeting.id).await?;
-            }
+            self.marked(asset, self.speech_stage(), self.warm_up_for_job(meeting.id))
+                .await?;
             let (meeting_id, now) = (meeting.id, self.now());
             let settings = attributing(
                 PipelineStage::Decode,
@@ -3148,32 +3164,24 @@ impl ProcessingPipeline {
         for (index, lane) in ordered_lanes(&asset.lanes).into_iter().enumerate() {
             // Release the previous lane before decoding the next.
             drop(last.take());
-            let reading = self.reading(asset, ReadStage::Decode);
+            let decode = self.marked(asset, Some(ReadStage::Decode), decoder.decode(asset, lane));
             let buffer = if index == 0 {
-                self.run(
-                    PipelineStage::Decode,
-                    0,
-                    meeting_id,
-                    decoder.decode(asset, lane),
-                )
-                .await?
+                self.run(PipelineStage::Decode, 0, meeting_id, decode)
+                    .await?
             } else {
-                attributing(PipelineStage::Decode, decoder.decode(asset, lane).await)?
+                attributing(PipelineStage::Decode, decode.await)?
             };
-            drop(reading);
             damage = damage.max(buffer.damage);
             seconds = seconds.max(buffer.duration());
             let lane_hint = hint.clone();
-            let transcribing = self.speech_reading(asset);
+            let transcription = self.marked(
+                asset,
+                self.speech_stage(),
+                engine.transcribe(&buffer, lane_hint.as_ref()),
+            );
             let segments = self
-                .run(
-                    PipelineStage::Transcribe,
-                    index,
-                    meeting_id,
-                    engine.transcribe(&buffer, lane_hint.as_ref()),
-                )
+                .run(PipelineStage::Transcribe, index, meeting_id, transcription)
                 .await?;
-            drop(transcribing);
             hint = elect_language(&segments).or(hint);
             lanes.insert(lane, segments);
             last = Some(DecodedLane { lane, buffer });
@@ -3238,10 +3246,11 @@ impl ProcessingPipeline {
             };
             let buffer = match handed {
                 Some(handed_lane) if handed_lane.lane == lane => handed_lane.buffer,
-                _ => {
-                    let _reading = self.reading(asset, ReadStage::Decode);
-                    attributing(PipelineStage::Diarize, decoder.decode(asset, lane).await)?
-                }
+                _ => attributing(
+                    PipelineStage::Diarize,
+                    self.marked(asset, Some(ReadStage::Decode), decoder.decode(asset, lane))
+                        .await,
+                )?,
             };
             let result = attributing(PipelineStage::Diarize, diarizer.diarize(&buffer).await)?;
             if lane == AudioLane::Mic && result.clusters.len() < 2 {
@@ -3592,9 +3601,9 @@ impl ProcessingPipeline {
                 })?;
                 attributing(PipelineStage::Persist, layout.create_directories(false))?;
                 let path = layout.mixdown(decoder.mixdown_format());
-                let reading = self.reading(asset, ReadStage::Mixdown);
-                attributing(PipelineStage::Persist, decoder.mixdown(asset, &path).await)?;
-                drop(reading);
+                let mixed = decoder.mixdown(asset, &path);
+                let mixed = self.marked(asset, Some(ReadStage::Mixdown), mixed).await;
+                attributing(PipelineStage::Persist, mixed)?;
                 mixdown = Some(file_url(&path, false));
             }
             let (meeting_id, fallback) = (meeting.id, asset.clone());
@@ -3915,7 +3924,7 @@ pub fn ensure_me_participant(
 /// the async workers, and returns what it returned. A panic in `work`
 /// resumes here; a task the runtime cancelled before it ran (the runtime
 /// shutting down) is an error.
-async fn off_the_workers<T: Send + 'static>(
+pub(crate) async fn off_the_workers<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> std::io::Result<T> {
     tokio::task::spawn_blocking(work)

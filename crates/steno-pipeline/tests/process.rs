@@ -1162,10 +1162,10 @@ async fn a_coreml_exception_fails_the_meeting_retryably_with_its_audio_kept() {
     }
 }
 
-/// The stages of the reading markers' files present while each call ran.
+/// The stages of the reading marks' files present while each call ran.
 type SeenStages = Arc<Mutex<Vec<(&'static str, Vec<String>)>>>;
 
-/// The markers' stages in `folder` now, sorted.
+/// The marks' stages in `folder` now, sorted.
 fn marked_stages(folder: &Path) -> Vec<String> {
     let mut stages: Vec<String> = std::fs::read_dir(folder)
         .into_iter()
@@ -1173,14 +1173,15 @@ fn marked_stages(folder: &Path) -> Vec<String> {
         .filter_map(Result::ok)
         .filter_map(|entry| std::fs::read(entry.path()).ok())
         .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .filter_map(|marker| marker["stage"].as_str().map(str::to_owned))
+        .filter_map(|mark| mark["stage"].as_str().map(str::to_owned))
         .collect();
     stages.sort();
     stages
 }
 
 /// A speech engine that notes which reads are marked while it loads and
-/// transcribes.
+/// transcribes, and hears nothing on its second lane: a call's tap that
+/// carried no conversation, so the diarizer decodes the mic lane itself.
 struct MarkWatchingEngine {
     inner: FakeSpeechEngine,
     folder: PathBuf,
@@ -1210,19 +1211,64 @@ impl steno_core::SpeechEngine for MarkWatchingEngine {
         audio: &steno_core::AudioBuffer16k,
         hint: Option<&steno_core::LanguageTag>,
     ) -> steno_core::protocols::BoundaryResult<Vec<RawSegment>> {
-        self.seen
-            .lock()
-            .unwrap()
-            .push(("transcribe", marked_stages(&self.folder)));
-        self.inner.transcribe(audio, hint).await
+        let second = {
+            let mut seen = self.seen.lock().unwrap();
+            seen.push(("transcribe", marked_stages(&self.folder)));
+            seen.iter()
+                .filter(|(call, _)| *call == "transcribe")
+                .count()
+                == 2
+        };
+        let segments = self.inner.transcribe(audio, hint).await?;
+        Ok(if second { Vec::new() } else { segments })
     }
 }
 
-/// Every read of a recording is marked while it runs and only then: none
-/// is left once the meeting is ready. A speech engine in this process is
-/// marked while it loads and transcribes, since an abort inside it ends
-/// the app; one in the sidecar is not, its abort ending only its child
-/// (A17 of `.plans/2026-10-07-stable-promotion.md`).
+/// A decoder that notes which reads are marked while it decodes a lane
+/// (for the transcript or the diarizer) and mixes down.
+struct MarkWatchingDecoder {
+    inner: Arc<WavDecoder>,
+    folder: PathBuf,
+    seen: SeenStages,
+}
+
+#[async_trait]
+impl steno_core::AudioDecoder for MarkWatchingDecoder {
+    async fn decode(
+        &self,
+        asset: &AudioAsset,
+        lane: AudioLane,
+    ) -> steno_core::protocols::BoundaryResult<steno_core::AudioBuffer16k> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(("decode", marked_stages(&self.folder)));
+        self.inner.decode(asset, lane).await
+    }
+
+    fn mixdown_format(&self) -> AudioFormat {
+        self.inner.mixdown_format()
+    }
+
+    async fn mixdown(
+        &self,
+        asset: &AudioAsset,
+        to: &Path,
+    ) -> steno_core::protocols::BoundaryResult<()> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(("mixdown", marked_stages(&self.folder)));
+        self.inner.mixdown(asset, to).await
+    }
+}
+
+/// Every read of a recording is marked while it runs and only then: each
+/// lane's decode for the transcript and for the diarizer, and the
+/// mixdown; none is left once the meeting is ready. A speech engine in
+/// this process is marked while it loads and transcribes, since an abort
+/// inside it ends the app; one in the sidecar is not, its abort ending
+/// only its child (A17 of `.plans/2026-10-07-stable-promotion.md`).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_reads_of_a_recording_are_marked_while_they_run() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1236,11 +1282,15 @@ async fn the_reads_of_a_recording_are_marked_while_they_run() {
             seen: seen.clone(),
         });
         let marks = Arc::new(ReadingMarks::at_launch(&support, &world.store, world.now));
-        let pipeline = ProcessingPipeline::new(
-            with_engine(&world, engine)
-                .with_reading_marks(marks)
-                .with_speech_in_process(in_process),
-        );
+        let mut dependencies = with_engine(&world, engine)
+            .with_reading_marks(marks)
+            .with_speech_in_process(in_process);
+        dependencies.decoder = Arc::new(MarkWatchingDecoder {
+            inner: world.decoder.clone(),
+            folder: folder.clone(),
+            seen: seen.clone(),
+        });
+        let pipeline = ProcessingPipeline::new(dependencies);
         let meeting = enqueue_call(&world, &pipeline);
         pipeline.wait_until_idle().await;
         assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
@@ -1251,21 +1301,25 @@ async fn the_reads_of_a_recording_are_marked_while_they_run() {
             Vec::new()
         };
         let seen = seen.lock().unwrap().clone();
-        assert_eq!(
-            seen,
-            [
-                ("prepare", speech.clone()),
-                ("transcribe", speech.clone()),
-                ("transcribe", speech),
-            ],
-            "in process: {in_process}"
-        );
+        let decode = ("decode", vec!["decode".to_owned()]);
+        let transcribe = ("transcribe", speech.clone());
+        let mut expected = vec![("prepare", speech)];
+        // The transcript's two lanes, then the mic lane for the diarizer.
+        expected.extend([
+            decode.clone(),
+            transcribe.clone(),
+            decode.clone(),
+            transcribe,
+        ]);
+        expected.extend([decode, ("mixdown", vec!["mixdown".to_owned()])]);
+        assert_eq!(seen, expected, "in process: {in_process}");
     }
 }
 
-/// A meeting the launch quarantined is not resumed, at launch or on a
-/// later resume, even when the launch could not mark it failed; Process
-/// again runs it.
+/// A meeting the launch quarantined (a second read in a row that ended
+/// with the app) is not resumed, at launch or on a later resume, even when
+/// the launch could not mark it failed; Process again runs it, and its
+/// marks go once the run reads through.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quarantined_meeting_is_never_resumed() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1279,8 +1333,11 @@ async fn a_quarantined_meeting_is_never_resumed() {
         .save_meeting_with_asset(&meeting, &asset)
         .unwrap();
     let master = file_url_path(&asset.url).unwrap();
-    let killed = ReadingMarks::at_launch(&support, &world.store, world.now);
-    std::mem::forget(killed.reading(meeting.id, Some(asset.id), &master, ReadStage::Decode));
+    // Two launches in a row ended in a read of it.
+    for _ in 0..2 {
+        let killed = Arc::new(ReadingMarks::at_launch(&support, &world.store, world.now));
+        std::mem::forget(killed.reading(meeting.id, Some(asset.id), &master, ReadStage::Decode));
+    }
     let marks = Arc::new(ReadingMarks::at_launch(&support, &world.store, world.now));
     // As if the launch's write had been refused.
     world
@@ -1307,6 +1364,46 @@ async fn a_quarantined_meeting_is_never_resumed() {
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
     assert!(!marks.holds(meeting.id));
+    assert_eq!(
+        marked_stages(&support.join(ReadingMarks::FOLDER)),
+        Vec::<String>::new()
+    );
+}
+
+/// A meeting whose first read ended with the app is not held: the launch
+/// resumes it, and once its run reads through, its mark goes and the
+/// count starts again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_meeting_whose_read_ended_with_the_app_once_is_resumed() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let support = world.dir.path().join("support");
+    let mut meeting = call_meeting(world.now);
+    meeting.id = Uuid::new_v4();
+    meeting.state = MeetingState::Processing;
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    world
+        .store
+        .save_meeting_with_asset(&meeting, &asset)
+        .unwrap();
+    let master = file_url_path(&asset.url).unwrap();
+    let killed = Arc::new(ReadingMarks::at_launch(&support, &world.store, world.now));
+    std::mem::forget(killed.reading(meeting.id, Some(asset.id), &master, ReadStage::Decode));
+    let marks = Arc::new(ReadingMarks::at_launch(&support, &world.store, world.now));
+    assert!(!marks.holds(meeting.id));
+    let pipeline = ProcessingPipeline::new(
+        world
+            .pipeline
+            .dependencies()
+            .clone()
+            .with_reading_marks(marks),
+    );
+    assert_eq!(pipeline.resume_unfinished().unwrap(), [meeting.id]);
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert_eq!(
+        marked_stages(&support.join(ReadingMarks::FOLDER)),
+        Vec::<String>::new()
+    );
 }
 
 /// A lane that cannot be decoded fails the job in `decode`, after the

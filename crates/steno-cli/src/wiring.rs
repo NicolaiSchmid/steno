@@ -79,7 +79,7 @@ impl DatabaseOptions {
 
     /// The reads of a recording marked beside the database, as the app
     /// marks them ([`steno_pipeline::ReadingMarks`]), read as a launch
-    /// reads them: a marker a crash left quarantines its meeting in
+    /// reads them: a mark a crash left quarantines its meeting in
     /// `store`, which only `process --meeting` (Process again) runs again.
     /// The command holds the database's lock, so the app is not running.
     pub fn reading_marks(
@@ -370,7 +370,7 @@ pub fn dependencies(
             });
             // One sidecar engine for both, so they share its child.
             let sidecar = Arc::new(steno_services::speech::sidecar_engine(&speech));
-            in_process = speech.runtime(engine) == steno_speech::SpeechRuntime::CoreMlInProcess;
+            in_process = speech.runtime(engine).runs_in_process();
             (
                 // The flag names the engine for this run, as the Swift CLI's
                 // `makeSpeechEngine(engine, ...)` did; the stored id does not.

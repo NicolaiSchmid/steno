@@ -37,7 +37,7 @@ use uuid::Uuid;
 /// The syncs a durable write makes, and its waits before it tries a busy
 /// file again ([`retried`]); the disk and the clock in the product, a
 /// recorder in the tests, which check what is synced and when.
-trait Syncs {
+pub(crate) trait Syncs {
     /// Flushes `file`, written at `path`, to the disk.
     fn file(&self, file: &File, path: &Path) -> std::io::Result<()>;
     /// Makes the entries of `directory` (a rename, a new folder) durable.
@@ -54,7 +54,7 @@ trait Syncs {
 }
 
 /// The product's syncs.
-struct Disk;
+pub(crate) struct Disk;
 
 impl Syncs for Disk {
     fn file(&self, file: &File, _path: &Path) -> std::io::Result<()> {
@@ -129,7 +129,17 @@ const STALE_AFTER: Duration = Duration::from_secs(60);
 /// failure removes the temporary; temporaries a killed writer left behind
 /// are removed by a later write once they are a minute old.
 pub fn replace_file(path: &Path, data: &[u8], access: Access) -> std::io::Result<()> {
-    write_durably(&Disk, path, access, |file| file.write_all(data))
+    replace_file_with(&Disk, path, data, access)
+}
+
+/// [`replace_file`] through `syncs`.
+pub(crate) fn replace_file_with(
+    syncs: &dyn Syncs,
+    path: &Path,
+    data: &[u8],
+    access: Access,
+) -> std::io::Result<()> {
+    write_durably(syncs, path, access, |file| file.write_all(data))
 }
 
 /// Copies `source` to `destination` the way [`replace_file`] writes: into a
@@ -151,13 +161,15 @@ fn copy_durably_with(syncs: &dyn Syncs, source: &Path, destination: &Path) -> st
 }
 
 /// Removes the file at `path` and syncs its folder, so the removal survives
-/// a power loss too; a file that is not there is removed already.
+/// a power loss too; a file that is not there is removed already. On
+/// Windows a file another handle holds for a moment (an antivirus scan) is
+/// tried again ([`retried`]).
 pub fn remove_durably(path: &Path) -> std::io::Result<()> {
     remove_durably_with(&Disk, path)
 }
 
-fn remove_durably_with(syncs: &dyn Syncs, path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
+pub(crate) fn remove_durably_with(syncs: &dyn Syncs, path: &Path) -> std::io::Result<()> {
+    match retried(syncs, || std::fs::remove_file(path)) {
         Ok(()) => syncs.directory(folder_of(path)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -200,7 +212,10 @@ fn folder_of(path: &Path) -> &Path {
     }
 }
 
-fn create_dir_all_durably_with(syncs: &dyn Syncs, directory: &Path) -> std::io::Result<()> {
+pub(crate) fn create_dir_all_durably_with(
+    syncs: &dyn Syncs,
+    directory: &Path,
+) -> std::io::Result<()> {
     let missing: Vec<&Path> = directory
         .ancestors()
         .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
