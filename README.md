@@ -161,7 +161,7 @@ PC"; choose *More info*, then *Run anyway*). Steno updates itself from then on.
 
 ### Linux: GNOME
 
-Ubuntu 24.04 or Debian 13, or newer. Two builds, both checked the same way:
+Ubuntu 24.04 or Debian 13, or newer. Take one of the two builds:
 
 - `steno-desktop_<version>_amd64.deb` installs Steno for the whole system and asks for
   your password at each update. Take this one unless you have a reason not to.
@@ -239,11 +239,13 @@ opens the phone's port and mDNS in the firewall, and turns on PipeWire and, unle
 Secret Service or SSH agent runs, GNOME Keyring for Steno's secrets. Log out and in once
 after the first switch. To update, move the input to the new tag and switch again. Without
 the module, `nix profile install github:NicolaiSchmid/steno/v<version>#steno` installs the
-app alone. Under Hyprland, the recording bubble and the meeting prompt need the window
-rules in the desktop README's [Hyprland](apps/desktop/README.md#hyprland) section, which
-also says where NixOS puts the file; its
+app alone.
+
+Under Hyprland, the recording bubble and the meeting prompt need window rules: the desktop
+README's [Hyprland](apps/desktop/README.md#hyprland) section has them and says where NixOS
+puts the file. The rest is in its
 [Nix package and NixOS module](apps/desktop/README.md#the-nix-package-and-the-nixos-module)
-section has the rest.
+section.
 
 ## How it works
 
