@@ -90,9 +90,7 @@ impl Setup {
 
     /// A launch, once its choice is made.
     async fn launch(&self) -> SecretServiceStore {
-        let store = self.store(&[]);
-        store.chosen().await;
-        store
+        self.launch_with_phones(None).await
     }
 
     /// A launch whose move reads the phones paired in `phones`, once its
@@ -618,19 +616,15 @@ async fn both_kept_through_the_move(
             ),
             "{case}: {loaded:?}"
         );
-        assert_eq!(setup.record().recorded().unwrap(), pin, "{case}");
     } else {
         assert_eq!(
             loaded.unwrap().fingerprint(),
             service.fingerprint(),
             "{case}"
         );
-        assert_eq!(
-            setup.record().recorded().unwrap(),
-            Some(fingerprint(service)),
-            "{case}"
-        );
     }
+    let recorded = fingerprint(if pinned { &file } else { service });
+    assert_eq!(setup.record().recorded().unwrap(), Some(recorded), "{case}");
     both_kept("the load");
 
     drop(setup.launch_with_phones(database.clone()).await);
