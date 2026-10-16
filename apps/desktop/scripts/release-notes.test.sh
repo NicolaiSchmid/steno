@@ -102,7 +102,7 @@ handoff=(
   'everything that plays on the default output'
   'WebKitGTK'"'"'s file descriptor leak'
   'GNOME shows no tray icon without the AppIndicator extension'
-  'Started by an `exec-once` line instead, a logout while the session is still starting can cut a recording'"'"'s save short.'
+  'If an `exec-once` line starts it instead, a logout while the session is still starting can cut a recording'"'"'s save short.'
 )
 for version in 0.11.0-rc.1 0.11.0-rc.12 0.11.0 0.11.1 0.12.0-rc.1 0.10.0; do
   text="$(notes_for "$version")"
