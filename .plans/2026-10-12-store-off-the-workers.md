@@ -732,8 +732,9 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   visible, so the next pass reloads again (the `Store::change_mark` doc).
 - **The bounds.** "Live" is `LIVE` (1 s) in the services' checks as for
   2a, and check 20 waits one poll interval and `LIVE`; the feed's checks
-  16, 18 and 21 keep 100 ms, and check 16 gives the save `LIVE`. Check 23's stopped row is "out of `recording`": the
-  pipeline may have taken it up before the pass ran.
+  16, 18 and 21 keep 100 ms, and check 16 gives the save `LIVE`. Check
+  23's stopped row is "out of `recording`": the pipeline may have taken it
+  up before the pass ran.
 - **Check 12** holds forced passes, since an idle tick no longer reloads:
   an event's request, then one the test makes. The burst test commits
   every 100 ms meanwhile, so each tick reloads.
@@ -909,8 +910,8 @@ blocking pool (`kill_tests.rs`, and #278's quit tests).
   holds it, and other reads wait for it, never for a write; today they wait
   on the one connection that also writes. The stop's save is not among
   them: it reads on the writer, inside its own transaction (WP2c's
-  as-built). The nesting assert keeps a nested
-  read from waiting on its own reader forever.
+  as-built). The nesting assert keeps a nested read from waiting on its own
+  reader forever.
 - **Ordering of events.** Within a pipeline task, each await keeps the write
   before the event that announces it. The follower requests its reload after
   it applied the event, and a pass reads the mark before it reloads, so a

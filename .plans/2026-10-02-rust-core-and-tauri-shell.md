@@ -1601,13 +1601,13 @@ still has to draw the window side. `[ ]` is not ported yet.
   thread that holds it (a Stop from the tray joins the recorder's level thread, which
   publishes; since P40 PR 2c, #304, the level thread only pokes the `recording`
   feed, which sends from a thread of its own), and the tray's setters wait for the
-  main thread when called from another. So the shell's window sink queues every snapshot and delivers it on the
-  main thread, in emit order (`WindowSink` in `apps/desktop/src-tauri/src/host.rs`);
-  before, a Stop from the tray froze the app.
+  main thread when called from another. So the shell's window sink queues every
+  snapshot and delivers it on the main thread, in emit order (`WindowSink` in
+  `apps/desktop/src-tauri/src/host.rs`); before, a Stop from the tray froze the app.
 - The host calls the recorder's commands with its lock released: the recorder reports
   each change through `Host::recorder_changed`, which took that lock (since P40 PR 2c,
-  #304, it takes none), so a failed
-  start, whose permission re-read ran under it, froze the caller.
+  #304, it takes none), so a failed start, whose permission re-read ran under it,
+  froze the caller.
 - The shell's seams WP6b leaves open, each with the package that closes it: (1) closed
   by S2: the services' `DetectionController` raises and clears the prompt through
   `panels::set_prompt` (`host::ShellPromptPanel`) and hears of its X and its Record
@@ -1627,8 +1627,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   (`.plans/2026-10-07-stable-promotion.md`, D3); the QR encoder, the other half of
   this seam, landed with S4.
 - The two-second pairing poll (`Host::refresh_pairing`, since P40 PR 2c, #304, the
-  reload pass's light part) rides on the store poll in `App::launch` and runs whether or not a code is shown, where Swift ran it only while
-  the Phones pane showed one.
+  reload pass's light part) rides on the store poll in `App::launch` and runs whether
+  or not a code is shown, where Swift ran it only while the Phones pane showed one.
 - At `warn`, the default level, a log line carries ids, stages, counts and error kinds,
   never transcript or model text, audio, a file path or a secret; the full text goes to
   `debug` (`steno_services::log_to_stderr`). The CLI prints a failed run once, as Swift
