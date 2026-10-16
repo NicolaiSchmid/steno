@@ -38,8 +38,9 @@ export function Privacy() {
 						title="There is no Steno server."
 					>
 						Every row on the right is a design constraint, not a policy page.
-						Any code path that sends bytes over the network is a destination you
-						configured, or the text-only model client. Audio has no way out.
+						Only transcript text leaves your computer, to the model endpoint you
+						configured. Beyond that, Steno only downloads its speech models and
+						checks for updates. Audio has no way out.
 					</SectionHead>
 					<Checklist
 						items={[

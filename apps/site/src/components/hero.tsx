@@ -3,7 +3,7 @@ import { Command } from "@/components/command";
 import { DownloadButton } from "@/components/download-button";
 import { GitHubMark } from "@/components/github-mark";
 import { ProductFrame } from "@/components/product-frame";
-import { site } from "@/lib/site";
+import { platforms, site } from "@/lib/site";
 
 export function Hero() {
 	return (
@@ -64,10 +64,12 @@ export function Hero() {
 							strokeWidth={2}
 						/>
 					</a>
-					<div className="hidden flex-wrap items-center justify-center gap-x-2 gap-y-2 text-[13px] text-fg-dim tracking-[-0.005em] sm:inline-flex">
-						<span>Also via Homebrew:</span>
-						<Command command={site.brew} />
-					</div>
+					{platforms.mac.released && (
+						<div className="hidden flex-wrap items-center justify-center gap-x-2 gap-y-2 text-[13px] text-fg-dim tracking-[-0.005em] sm:inline-flex">
+							<span>Also via Homebrew:</span>
+							<Command command={site.brew} />
+						</div>
+					)}
 				</div>
 			</div>
 			{/* The rise keyframe ends on `transform: none`, so the tilt lives one level in. */}
