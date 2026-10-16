@@ -23,7 +23,7 @@ use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
     DamagedAudio, ExportRetries, MeetingEventBus, PipelineDependencies, RecordingIntake,
-    RetentionSweep,
+    RetentionSweep, WarmUpMark,
 };
 
 use crate::block_on;
@@ -294,10 +294,8 @@ pub struct GraphSecrets {
 /// the meeting completes with its raw transcript and without a summary
 /// instead of failing at it, and its summary can be run again once a key
 /// is saved.
-/// is saved. The decode stage records what of each recording it replaced
-/// by silence in `damaged_audio`, the support directory's
-/// [`DamagedAudio`], which the detail reads, and the retention rule is to
-/// ask.
+/// is saved. The pipeline carries the support directory's files in
+/// `support` ([`SupportFiles`]), and the retention rule is to ask.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,
@@ -305,7 +303,7 @@ pub fn pipeline_dependencies(
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
-    damaged_audio: &Arc<DamagedAudio>,
+    support: &SupportFiles,
 ) -> Result<BuiltPipeline, BuildError> {
     let settings = store.settings()?;
     let api_key = api_key(secrets.secrets.as_ref(), runtime).unwrap_or_else(|warning| {
@@ -340,7 +338,8 @@ pub fn pipeline_dependencies(
         events.clone(),
     )
     .with_speech_engine(speech_engine)
-    .with_damaged_audio(damaged_audio.clone());
+    .with_damaged_audio(support.damaged_audio.clone())
+    .with_warm_up_mark(support.warm_up_mark.clone());
     let dependencies = match passes {
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
         None => dependencies,
@@ -354,8 +353,30 @@ pub fn pipeline_dependencies(
     })
 }
 
+/// What every build of the pipeline, the first and each reload, shares
+/// from the support directory.
+#[derive(Debug, Clone)]
+pub struct SupportFiles {
+    /// What of each recording the decode stage replaced by silence, which
+    /// the detail reads.
+    pub damaged_audio: Arc<DamagedAudio>,
+    /// The recordings' warm-up mark, read once by the launch.
+    pub warm_up_mark: Arc<WarmUpMark>,
+}
+
+impl SupportFiles {
+    /// Both in memory, writing nothing: for the tests.
+    #[must_use]
+    pub fn in_memory() -> Self {
+        SupportFiles {
+            damaged_audio: Arc::new(DamagedAudio::in_memory()),
+            warm_up_mark: Arc::new(WarmUpMark::in_memory()),
+        }
+    }
+}
+
 /// [`pipeline_dependencies`] over clones of its inputs, for the reloads,
-/// every build sharing `damaged_audio`.
+/// every build sharing `support`.
 fn make_dependencies(
     store: &Arc<Store>,
     engines: &Arc<SpeechEngines>,
@@ -363,26 +384,20 @@ fn make_dependencies(
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
-    damaged_audio: &Arc<DamagedAudio>,
+    support: &SupportFiles,
 ) -> MakeDependencies {
-    let (store, engines, secrets, codex, events, runtime, damaged_audio) = (
+    let (store, engines, secrets, codex, events, runtime, support) = (
         store.clone(),
         engines.clone(),
         secrets.clone(),
         codex.clone(),
         events.clone(),
         runtime.clone(),
-        damaged_audio.clone(),
+        support.clone(),
     );
     Arc::new(move || {
         pipeline_dependencies(
-            &store,
-            &engines,
-            &secrets,
-            &codex,
-            &events,
-            &runtime,
-            &damaged_audio,
+            &store, &engines, &secrets, &codex, &events, &runtime, &support,
         )
     })
 }
@@ -708,6 +723,12 @@ pub fn build_with_import(
     // meeting's entry goes at launch.
     let damaged_audio = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
     damaged_audio.retain(|meeting_id| store.meeting(meeting_id).map_or(true, |m| m.is_some()));
+    // The launch check of the recordings' warm-up: a mark a warm-up left
+    // when it ended with the app turns it off ([`WarmUpMark`]).
+    let support = SupportFiles {
+        damaged_audio,
+        warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
+    };
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
     let withheld_api_key = graph_secrets
@@ -721,7 +742,7 @@ pub fn build_with_import(
         &codex,
         &events,
         &runtime,
-        &damaged_audio,
+        &support,
     );
     let pipeline = Arc::new(
         CurrentPipeline::new(make()?, make, runtime.clone()).resuming_when({
@@ -3758,7 +3779,7 @@ mod tests {
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
-            &Arc::new(DamagedAudio::in_memory()),
+            &SupportFiles::in_memory(),
         )
         .expect("the graph builds without the key");
         assert!(built.dependencies.cleaner.is_none());
@@ -3784,7 +3805,10 @@ mod tests {
     async fn every_build_records_damage_in_the_apps_store() {
         let (dir, store) = temp_store();
         let paths = StenoPaths::new(dir.path().join("support"));
-        let damaged = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
+        let support = SupportFiles {
+            damaged_audio: Arc::new(DamagedAudio::in_directory(&paths.support_directory)),
+            warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
+        };
         let make = make_dependencies(
             &store,
             &Arc::new(SpeechEngines::new(SpeechSetup::new(
@@ -3795,11 +3819,18 @@ mod tests {
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
-            &damaged,
+            &support,
         );
         for _build in 0..2 {
             let built = make().unwrap();
-            assert!(Arc::ptr_eq(&built.dependencies.damaged_audio, &damaged));
+            assert!(Arc::ptr_eq(
+                &built.dependencies.damaged_audio,
+                &support.damaged_audio
+            ));
+            assert!(Arc::ptr_eq(
+                &built.dependencies.warm_up_mark,
+                &support.warm_up_mark
+            ));
         }
     }
 
@@ -3819,7 +3850,7 @@ mod tests {
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
-            &Arc::new(DamagedAudio::in_memory()),
+            &SupportFiles::in_memory(),
         )
         .unwrap();
         let cleaner = built.dependencies.cleaner.expect("an endpoint is set");

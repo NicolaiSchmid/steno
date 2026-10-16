@@ -2,7 +2,8 @@
 //! `preferences.json`, the CLI's `meeting.json`; Swift:
 //! `Data.write(to:options: .atomic)`), copying a recording so it survives a
 //! power loss (the phone intake), creating folders whose entries survive
-//! one (a new meeting folder among them), and reading and writing a JSON
+//! one (a new meeting folder among them), removing a file so the removal
+//! survives one (the warm-up mark), and reading and writing a JSON
 //! file this process owns, set aside when it does not parse
 //! (`preferences.json`, `export-retries.json`; `damaged-audio.json` is
 //! left in place instead, see [`DamagedAudio`](crate::DamagedAudio)). The
@@ -147,6 +148,16 @@ fn copy_durably_with(syncs: &dyn Syncs, source: &Path, destination: &Path) -> st
     write_durably(syncs, destination, Access::Default, |file| {
         std::io::copy(&mut reader, file).map(|_| ())
     })
+}
+
+/// Removes the file at `path` and syncs its folder, so the removal survives
+/// a power loss too; a file that is not there is removed already.
+pub fn remove_durably(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Disk.directory(folder_of(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// `std::fs::create_dir_all`, with the parent of every folder it creates

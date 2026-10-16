@@ -33,7 +33,9 @@ use steno_core::{MeetingState, MeetingStateKind, RecordingEndReason, Store, path
 use steno_host::services::Recorder as _;
 
 use crate::recorder::MakeCaptureSession;
-use crate::testing::{an_hour_later, app_over_fakes, synthetic_capture, synthetic_capture_through};
+use crate::testing::{
+    an_hour_later, app_over_fakes, app_warming_up, synthetic_capture, synthetic_capture_through,
+};
 
 /// The directory the child records under; unset outside a child.
 const DIRECTORY: &str = "STENO_KILL_TEST_DIRECTORY";
@@ -263,10 +265,16 @@ impl Drop for ChildGuard {
 /// Starts the child over `directory` with `gate`, its output in files
 /// there.
 fn spawn_child(directory: &Path, gate: Gate) -> ChildGuard {
+    spawn_test("kill_tests::child_records_until_killed", directory, gate)
+}
+
+/// Starts the ignored test `name` of this binary as the child over
+/// `directory` with `gate`, its output in files there.
+fn spawn_test(name: &str, directory: &Path, gate: Gate) -> ChildGuard {
     let output = |name: &str| Stdio::from(std::fs::File::create(directory.join(name)).unwrap());
     let child = Command::new(std::env::current_exe().unwrap())
         .args([
-            "kill_tests::child_records_until_killed",
+            name,
             "--exact",
             "--ignored",
             "--nocapture",
@@ -519,4 +527,152 @@ async fn a_kill_after_the_folder_changed_recovers_from_the_folder_it_started_in(
             .parent(),
         Some(audio_folder(dir.path()).as_path())
     );
+}
+
+/// The child's speech engine for the warm-up test: its load says so in
+/// `loading` under the child's directory and waits for the kill, as a load
+/// that a `CoreML` abort ends would never return.
+struct LoadUntilKilled {
+    inner: steno_core::testing::FakeSpeechEngine,
+    loading: PathBuf,
+}
+
+#[steno_core::async_trait]
+impl steno_core::SpeechEngine for LoadUntilKilled {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
+        self.inner.supported_languages()
+    }
+
+    async fn prepare(&self) -> steno_core::BoundaryResult<()> {
+        Reports::append(&self.loading, b"1");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    async fn transcribe(
+        &self,
+        audio: &steno_core::AudioBuffer16k,
+        hint: Option<&steno_core::LanguageTag>,
+    ) -> steno_core::BoundaryResult<Vec<steno_core::RawSegment>> {
+        self.inner.transcribe(audio, hint).await
+    }
+}
+
+/// The warm-up's mark in the support directory of `directory`.
+fn warm_up_mark(directory: &Path) -> PathBuf {
+    directory
+        .join("support")
+        .join(steno_pipeline::WarmUpMark::FILE_NAME)
+}
+
+/// The child: starts a recording whose warm-up loads the speech engine in
+/// this process, as `CoreML` on the Mac, and is killed in that load.
+/// Passes at once outside a child.
+#[test]
+#[ignore = "the kill tests run it in a child process"]
+fn child_warms_up_until_killed() {
+    let Ok(directory) = std::env::var(DIRECTORY) else {
+        return;
+    };
+    die_with_the_parent();
+    let directory = PathBuf::from(directory);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
+    let engine = Arc::new(LoadUntilKilled {
+        inner: steno_core::testing::FakeSpeechEngine::default(),
+        loading: directory.join("loading"),
+    });
+    let app = app_warming_up(&directory, &store, synthetic_capture(), engine);
+    app.recorder.start(CaptureMode::InPerson, None);
+    assert_eq!(app.recorder.status().error, None);
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Starts an in-person recording on `app` and stops it after `seconds`;
+/// the meeting's id.
+fn record(app: &crate::App, seconds: f64) -> uuid::Uuid {
+    tokio::task::block_in_place(|| {
+        app.recorder.start(CaptureMode::InPerson, None);
+        let status = app.recorder.status();
+        assert_eq!(status.error, None);
+        std::thread::sleep(Duration::from_secs_f64(seconds));
+        assert_eq!(
+            app.recorder.status().state,
+            steno_bridge::RecordingState::Recording
+        );
+        app.recorder.stop();
+        status.meeting_id.expect("a meeting")
+    })
+}
+
+/// A warm-up killed in its model load (an abort no `@catch` stops ends the
+/// app the same way) leaves its mark, so the next launch skips the
+/// warm-up: a recording then loads nothing while it runs, records and is
+/// saved, and its processing loads the engine, which clears the mark, so
+/// the recording after it warms up again. A15 of
+/// `.plans/2026-10-07-stable-promotion.md`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_warm_up_killed_turns_the_warm_up_off_until_a_meeting_loads_the_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = spawn_test(
+        "kill_tests::child_warms_up_until_killed",
+        dir.path(),
+        Gate::Open,
+    );
+    let loading = dir.path().join("loading");
+    kill_when(&mut child, dir.path(), "the warm-up's load", || {
+        loading.exists()
+    });
+    assert!(
+        warm_up_mark(dir.path()).exists(),
+        "the mark outlived the kill"
+    );
+
+    let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+    let engine = Arc::new(steno_core::testing::FakeSpeechEngine::default());
+    let app = app_warming_up(dir.path(), &store, synthetic_capture(), engine.clone());
+    let current = app.pipeline.current();
+    assert!(current.dependencies().warm_up_mark.skipping());
+
+    let skipped = record(&app, 0.5);
+    current.wait_until_idle().await;
+    let meeting = store.meeting(skipped).unwrap().unwrap();
+    assert_eq!(meeting.end_reason, Some(RecordingEndReason::Manual));
+    assert_eq!(meeting.state, MeetingState::Ready);
+    assert!(meeting.duration > 0.0);
+    assert_eq!(
+        engine.preparations.count(),
+        1,
+        "the processing's load alone: no warm-up while recording"
+    );
+    assert!(
+        !warm_up_mark(dir.path()).exists(),
+        "the load cleared the mark"
+    );
+    assert!(!current.dependencies().warm_up_mark.skipping());
+
+    let warmed = record(&app, 0.5);
+    current.wait_until_idle().await;
+    assert_eq!(
+        store.meeting(warmed).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
+    assert_eq!(
+        engine.preparations.count(),
+        3,
+        "this recording's warm-up and its processing's load"
+    );
+    assert!(!warm_up_mark(dir.path()).exists());
 }
