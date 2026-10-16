@@ -93,11 +93,17 @@
 //!   frame through the crate's own CAF reader (the chunk walk
 //!   [`CafFile`](crate::writer::CafFile) uses) before symphonia is
 //!   tried, as the Swift test demands.
+//! - **Sizes symphonia allocates from**: before its demuxer opens an MP4
+//!   or CAF file, the boxes or chunks and the sample tables are walked
+//!   (`sizes`), and a size the file cannot hold fails the decode as an
+//!   unsupported file, since symphonia would reserve it and a failed
+//!   allocation aborts the process. Rust only.
 
 pub mod priming;
 pub mod resample;
 pub mod salvage;
 pub mod sinc;
+mod sizes;
 
 use std::path::{Path, PathBuf};
 
@@ -756,6 +762,9 @@ impl SymphoniaFrames {
     }
 
     fn probe(path: &Path) -> Result<Self, CodecError> {
+        // Before symphonia sees a byte: a size it would allocate that the
+        // file cannot hold aborts the process ([`sizes`]).
+        sizes::check(path)?;
         let file = std::fs::File::open(path).map_err(|e| io_error(path, &e))?;
         let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
@@ -767,8 +776,9 @@ impl SymphoniaFrames {
         // size to its offset unchecked, which panics in a debug build on a
         // 64-bit size near 2^64, and subtracts the 4 bytes of version and
         // flags from a `mean` or `name` box's length unchecked, which in a
-        // release build wraps into a capacity overflow (ilst.rs:536).
-        // Nothing the probe built outlives it.
+        // release build wraps into a capacity overflow (ilst.rs:536). The
+        // size check above refuses both now; the catch stays for whatever
+        // it does not model. Nothing the probe built outlives it.
         let probed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crash_log::expected(|| {
                 symphonia::default::get_probe().format(

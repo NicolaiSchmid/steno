@@ -409,26 +409,32 @@ async fn the_phones_aac_and_mp3_decode_as_before() {
 /// A phone file whose container is cut short (its `moov` after the
 /// `mdat`, as ffmpeg and the recorder write it: cut mid-audio, mid-index
 /// and one byte short) fails as it did before damaged packets became
-/// silence, with the same error in every path: the container cannot be
-/// read, which is not a packet to replace.
+/// silence, in every path: the container cannot be read, which is not a
+/// packet to replace. The error names the cut `moov` where the size check
+/// (`codec::sizes`) finds it before symphonia does, which the whole-file
+/// decoder, symphonia alone, reports as the end of the stream.
 #[tokio::test]
 async fn a_truncated_container_fails_as_before() {
     let directory = scratch();
     let bytes = std::fs::read(fixture("tone-440-44k1-500ms.m4a")).unwrap();
+    let codec = SymphoniaAudioCodec::new();
     for keep in [3_000, 6_600, 7_000, bytes.len() - 1] {
         let path = directory.path().join(format!("cut-{keep}.m4a"));
         std::fs::write(&path, &bytes[..keep]).unwrap();
         let what = format!("cut at {keep} of {}", bytes.len());
+        let asset = asset(&path, AudioFormat::M4aAac, &[AudioLane::Mixed], &[]);
         assert!(
             SymphoniaAudioCodec::decode_path(&path, 0, AudioLane::Mixed).is_err(),
             "{what}"
         );
-        assert_file_matches(
-            &what,
-            &asset(&path, AudioFormat::M4aAac, &[AudioLane::Mixed], &[]),
-            directory.path(),
-        )
-        .await;
+        assert!(
+            codec.decode(&asset, AudioLane::Mixed).await.is_err(),
+            "{what}"
+        );
+        assert!(
+            whole_file::decode(&asset, AudioLane::Mixed).is_err(),
+            "{what}: whole-file"
+        );
     }
 }
 

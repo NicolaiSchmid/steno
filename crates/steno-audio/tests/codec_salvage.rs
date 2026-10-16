@@ -616,14 +616,15 @@ fn a_packet_the_decoder_refuses_becomes_silence_in_a_salvage() {
     assert!(decoded.damage.salvaged);
 }
 
-/// A file that makes symphonia's probe panic fails as one it refuses, with
+/// A file that made symphonia's probe panic fails as one it refuses, with
 /// the file kept: symphonia 0.5.5's MP4 reader adds a box's size to its
 /// offset unchecked, so a `free` box whose 64-bit size is 2^64 - 1 after
-/// the `ftyp` overflows in a debug build (and is an error in a release
-/// one). With the phone's brands the salvage then refuses it too, as with
-/// another major brand. Neither file is written to. With the app's
-/// crash-log hook installed, the caught panics write no crash log and the
-/// one already in the folder stays.
+/// the `ftyp` overflowed in a debug build. The size check
+/// (`codec::sizes`) now refuses the box before the probe sees it, so
+/// nothing panics in either build. With the phone's brands the salvage
+/// then refuses it too, as with another major brand. Neither file is
+/// written to. With the app's crash-log hook installed, no crash log is
+/// written and the one already in the folder stays.
 #[test]
 fn a_file_the_probe_panics_on_fails_and_is_kept() {
     thread_local! {
@@ -660,10 +661,11 @@ fn a_file_the_probe_panics_on_fails_and_is_kept() {
     }
     // The default hook again, for the assertions below and the other tests.
     drop(std::panic::take_hook());
-    // A release build's probe returns an error for these sizes instead.
-    if cfg!(debug_assertions) {
-        assert_eq!(PANICS.with(std::cell::Cell::get), 2, "the probe panicked");
-    }
+    assert_eq!(
+        PANICS.with(std::cell::Cell::get),
+        0,
+        "the size check refused the files before the probe"
+    );
     let logs: Vec<_> = std::fs::read_dir(support.path())
         .unwrap()
         .map(|entry| entry.unwrap().path())
