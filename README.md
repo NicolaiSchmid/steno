@@ -1,18 +1,19 @@
 <p align="center">
-  <img src="docs/assets/banner.svg" alt="Steno — bot-free meeting recorder for the Mac" width="100%">
+  <img src="docs/assets/banner.svg" alt="Steno, the bot-free meeting recorder" width="100%">
 </p>
 
 <p align="center">
   <a href="https://github.com/NicolaiSchmid/steno/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/NicolaiSchmid/steno?label=release"></a>
   <a href="https://github.com/NicolaiSchmid/steno/actions/workflows/rust-ci.yml"><img alt="Rust CI" src="https://img.shields.io/github/actions/workflow/status/NicolaiSchmid/steno/rust-ci.yml?branch=main&label=Rust%20CI"></a>
   <a href="https://github.com/NicolaiSchmid/steno/actions/workflows/mobile-ci.yml"><img alt="Mobile CI" src="https://img.shields.io/github/actions/workflow/status/NicolaiSchmid/steno/mobile-ci.yml?branch=main&label=Mobile%20CI"></a>
-  <img alt="Desktop: macOS 15+ on Apple Silicon" src="https://img.shields.io/badge/desktop-macOS%2015%2B%20%C2%B7%20Apple%20Silicon-000000">
+  <img alt="Desktop: macOS 15+ on Apple Silicon" src="https://img.shields.io/badge/desktop-macOS%2015%2B%20%28Apple%20Silicon%29-000000">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
 <p align="center">
   <b>Steno records your meetings without joining them, turns the recording into a summary,
-  transcript and tasks on your own Mac, and writes the result into your Obsidian vault.</b><br>
+  transcript and tasks on your own computer, and writes the result into your Obsidian
+  vault.</b><br>
   No bot in the call. No cloud account. No subscription. Audio never leaves the machine.
 </p>
 
@@ -39,11 +40,11 @@ and keep your notes behind their login. Steno takes the opposite route:
 
 | | Hosted bot recorders | Steno |
 |---|---|---|
-| **Captures audio by** | A bot joins the meeting | Core Audio taps the apps already playing on your Mac |
+| **Captures audio by** | A bot joins the meeting | The system's own audio API (Core Audio, WASAPI, PipeWire) taps the apps already playing on your computer |
 | **Everyone on the call sees** | "Notetaker has joined" | Nothing |
-| **Audio is processed** | In the vendor's cloud | On your Mac, after the meeting |
+| **Audio is processed** | In the vendor's cloud | On your computer, after the meeting |
 | **Notes live in** | The vendor's app | Plain files in your Obsidian vault |
-| **Works for** | Supported video platforms | Zoom, Teams, Meet, FaceTime, Slack, phone calls via Continuity, in-person meetings |
+| **Works for** | Supported video platforms | Zoom, Teams, Meet, FaceTime, Slack, phone calls via Continuity on macOS, in-person meetings |
 | **Cost** | Monthly subscription | Free, open source, your own LLM endpoint |
 
 It was built to match the day-to-day quality of commercial meeting recorders for one
@@ -52,7 +53,9 @@ person and their friends, with files instead of lock-in.
 ## Install
 
 Every release carries the builds for all three desktops, on the
-[latest release](https://github.com/NicolaiSchmid/steno/releases/latest) page. Pick the
+[latest release](https://github.com/NicolaiSchmid/steno/releases/latest) page. The desktop
+badge above and the [site](https://steno.nicolaischmid.com) name the desktops whose build
+has passed its checks on a real machine; the other builds are on the release too. Pick the
 section for your system.
 
 On first launch Steno walks you through what it needs: the microphone, the system audio
@@ -83,37 +86,82 @@ nix profile install github:NicolaiSchmid/steno#steno
 ```
 
 Installed with Homebrew or from the disk image, Steno updates itself: it checks once a
-day and offers Install and Relaunch (Settings > General has both switches). A Nix install
-updates with the flake instead (Nix details below). If you ran the Swift app, version 0.10
-or earlier, it offers this app as an update within a week (the rollout is phased; Check for
-Updates gets it at once) and installs it at the same path. macOS then asks once more for
-its permissions, and for the login keychain password once per stored secret (choose
-*Always Allow*).
+day and offers Install and Relaunch. Settings > General has *Check for updates
+automatically* and *Install updates automatically*. A Nix install updates with the flake
+instead (Nix details below).
+
+Already running the Swift app, version 0.10 or earlier? Install nothing. It offers 0.11.0
+as an update within a week (the rollout is phased; Check for Updates gets it at once) and
+installs it at the same path. macOS then asks once more for its permissions, and for the
+login keychain password once per stored secret (choose *Always Allow*).
+
+<details>
+<summary><b>Homebrew details: tap, release candidates, nix-darwin</b></summary>
+<br>
+
+The tap ([NicolaiSchmid/homebrew-tap](https://github.com/NicolaiSchmid/homebrew-tap))
+follows stable releases only; release candidates are on the
+[releases page](https://github.com/NicolaiSchmid/steno/releases). The installed app
+updates itself, so Homebrew may still list the version it installed; run
+`brew upgrade --greedy --cask nicolaischmid/tap/steno` to bring it in step. With
+nix-darwin's Homebrew module:
+
+```nix
+homebrew.taps = [ "nicolaischmid/tap" ];
+homebrew.casks = [ "nicolaischmid/tap/steno" ];
+```
+
+</details>
+
+<details>
+<summary><b>Nix details: nix-darwin, home-manager, updates on macOS</b></summary>
+<br>
+
+On `aarch64-darwin`, `flake.nix` installs the released `Steno.app` unchanged (no rebuild,
+no re-signing).
+
+With nix-darwin, add the flake as an input and put `steno.packages.aarch64-darwin.steno`
+in `environment.systemPackages`; nix-darwin links `Applications/Steno.app` into
+`/Applications/Nix Apps`. With home-manager use `home.packages` and link the app yourself
+(`home.file` into `~/Applications`, or the `mac-app-util` module); home-manager does not
+link `Applications/` on its own. `nix run` does not apply, the output is an app bundle
+with no `bin/`.
+
+The app runs from the read-only Nix store, so its updater can download a new version but
+cannot install it. Update by bumping `release.version` and `release.hash` at the top of
+`flake.nix` (the release workflow prints both in its job summary) or by moving the flake
+input that pins this repository, then rebuild. To stop the daily check from offering updates
+it cannot apply, turn off *Check for updates automatically* in Settings > General.
+
+nix-darwin users who want in-app updates can use the Homebrew cask through
+`homebrew.casks` instead; it installs into `/Applications`, where the updater can write.
+
+</details>
 
 ### Windows
 
-Windows on x64. Download one of the two installers from the latest release:
+Windows 10 or 11 on x64. Download one of the two installers from the latest release:
 
 - `Steno_<version>_x64-setup.exe` installs for your account alone and needs no
   administrator rights. Take this one unless you have a reason not to.
 - `Steno_<version>_x64_en-US.msi` installs for every account on the computer and asks for
   administrator rights, at the install and at each update.
 
-The installers are not code-signed yet, so SmartScreen asks first ("Windows protected your
-PC"; choose *More info*, then *Run anyway*). Before you run one, check it against the
-release's `SHA256SUMS`. In PowerShell, this must print `True`:
+Before you run it, check it against the release's `SHA256SUMS`. In PowerShell, this must
+print `True`:
 
 ```powershell
 (Get-FileHash .\Steno_<version>_x64-setup.exe).Hash -eq '<its hash in SHA256SUMS>'
 ```
 
-Steno updates itself from then on.
+The installers are not code-signed yet, so SmartScreen asks first ("Windows protected your
+PC"; choose *More info*, then *Run anyway*). Steno updates itself from then on.
 
 ### Linux: GNOME
 
 Ubuntu 24.04 or Debian 13, or newer. Download `steno-desktop_<version>_amd64.deb` (or the
-`.AppImage`), its `.asc`, `SHA256SUMS` and `SHA256SUMS.asc` into one directory, then check
-and install them there:
+`.AppImage`), its `.asc` (the `.sig` beside it is the updater's), `SHA256SUMS` and
+`SHA256SUMS.asc` into one directory, then check and install them there:
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/NicolaiSchmid/steno/v<version>/apps/desktop/release-signing-key.asc
@@ -134,7 +182,8 @@ The tray icon needs GNOME's AppIndicator extension: on by default on Ubuntu, and
 Debian `sudo apt install gnome-shell-extension-appindicator`, then log out and in and turn
 it on in the Extensions app. Without it there is no tray, and closing the main window
 quits Steno, saving a recording first. If `ufw` is on, `sudo ufw allow 23820/tcp` lets the
-phone reach Steno. The `.deb` and the AppImage update themselves.
+phone reach Steno. The AppImage updates itself in place; the `.deb` updates itself too,
+and asks for your password at each update.
 
 ### Linux: Omarchy
 
@@ -150,8 +199,8 @@ run `gpg --keyserver keyserver.ubuntu.com --recv-keys 048B527950E4F609B90E63495F
 and install again. The `ufw` rule lets the phone reach Steno.
 
 - Start Steno from the Omarchy launcher, or with `uwsm-app -- steno-desktop` from a
-  terminal or a key binding. Started any other way, a logout can end it before it saves
-  a recording.
+  terminal or a key binding. Started by an `exec-once` line instead, a logout while the
+  session is still starting can cut a recording's save short.
 - The tray icon sits in the bar's drawer. A right click opens its menu, which holds every
   action.
 - The recording bubble and the meeting prompt need Hyprland window rules to float, stay
@@ -177,72 +226,28 @@ steno.nixosModules.default
 { programs.steno.enable = true; }
 ```
 
-The module installs Steno, starts it with your graphical session, opens the phone's port
-and mDNS in the firewall, and turns on PipeWire and, unless another Secret Service runs,
-GNOME Keyring for Steno's secrets. Log out and in once after the first switch. To update, move the input to the new tag and
-switch again. Without the module, `nix profile install
-github:NicolaiSchmid/steno/v<version>#steno` installs the app alone. Under Hyprland, the
-panels need the window rules in the desktop README's
-[Hyprland](apps/desktop/README.md#hyprland) section, which also says where NixOS puts
-the file.
-
-<details>
-<summary><b>Homebrew details: tap, release candidates, nix-darwin</b></summary>
-<br>
-
-The tap ([NicolaiSchmid/homebrew-tap](https://github.com/NicolaiSchmid/homebrew-tap))
-follows stable releases only; release candidates are on the
-[releases page](https://github.com/NicolaiSchmid/steno/releases). The installed app
-updates itself, so Homebrew may still list the version it installed; run
-`brew upgrade --greedy --cask nicolaischmid/tap/steno` to bring it in step. With
-nix-darwin's Homebrew module:
-
-```nix
-homebrew.taps = [ "nicolaischmid/tap" ];
-homebrew.casks = [ "nicolaischmid/tap/steno" ];
-```
-
-</details>
-
-<details>
-<summary><b>Nix details: nix-darwin, home-manager, updates</b></summary>
-<br>
-
-On `aarch64-darwin`, `flake.nix` installs the released `Steno.app` unchanged (no rebuild,
-no re-signing).
-
-With nix-darwin, add the flake as an input and put `steno.packages.aarch64-darwin.steno`
-in `environment.systemPackages`; nix-darwin links `Applications/Steno.app` into
-`/Applications/Nix Apps`. With home-manager use `home.packages` and link the app yourself
-(`home.file` into `~/Applications`, or the `mac-app-util` module); home-manager does not
-link `Applications/` on its own. `nix run` does not apply, the output is an app bundle
-with no `bin/`.
-
-The app runs from the read-only Nix store, so its updater can download a new version but
-cannot install it. Update by bumping `release.version` and `release.hash` at the top of
-`flake.nix` (the release workflow prints both in its job summary) or by moving the flake
-input that pins this repository, then rebuild. To stop the daily check from offering updates
-it cannot apply, turn off "Check for updates automatically" in Settings > General.
-
-nix-darwin users who want in-app updates can use the Homebrew cask through
-`homebrew.casks` instead; it installs into `/Applications`, where the updater can write.
-
-On Linux the flake builds the app from source instead; the NixOS section above and the
-desktop README's [Nix package and NixOS module](apps/desktop/README.md#the-nix-package-and-the-nixos-module)
-have the details.
-
-</details>
+The module installs Steno, starts it with your graphical session (one that reaches
+`graphical-session.target`: GNOME, Plasma, or Hyprland with `programs.hyprland.withUWSM`),
+opens the phone's port and mDNS in the firewall, and turns on PipeWire and, unless another
+Secret Service or SSH agent runs, GNOME Keyring for Steno's secrets. Log out and in once
+after the first switch. To update, move the input to the new tag and switch again. Without
+the module, `nix profile install github:NicolaiSchmid/steno/v<version>#steno` installs the
+app alone. Under Hyprland, the panels need the window rules in the desktop README's
+[Hyprland](apps/desktop/README.md#hyprland) section, which also says where NixOS puts the
+file. The desktop README's
+[Nix package and NixOS module](apps/desktop/README.md#the-nix-package-and-the-nixos-module)
+has the rest.
 
 ## How it works
 
 ```mermaid
 flowchart LR
     subgraph capture["1 · Capture"]
-        apps["Zoom · Teams · Meet<br>FaceTime · Continuity call"] -->|Core Audio process tap| them["“them” lane"]
+        apps["Zoom · Teams · Meet<br>FaceTime · Continuity call"] -->|Core Audio · WASAPI · PipeWire| them["“them” lane"]
         mic["Your microphone"] -->|echo-cancelled| me["“me” lane"]
         phone["iPhone recorder"] -.->|local network handover| room["in-person recording"]
     end
-    subgraph process["2 · Process, on your Mac"]
+    subgraph process["2 · Process, on your computer"]
         stt["Transcribe<br>Parakeet TDT v3"] --> dia["Diarize and match<br>known voices"] --> llm["LLM cleanup, summary,<br>tasks · text only"]
     end
     subgraph deliver["3 · Deliver"]
@@ -252,9 +257,11 @@ flowchart LR
 ```
 
 1. **Capture.** When another app opens your microphone, a small prompt asks whether to
-   record. Say yes, or start and stop from the menu bar at any time. The other side of
-   the call comes from a Core Audio process tap, your side from the mic, kept as two
-   separate lanes so Steno always knows who is "me" and who is "them".
+   record. Say yes, or start and stop from the menu bar or the tray at any time. The
+   other side of the call comes from the system's own audio API (a Core Audio process tap
+   on macOS, WASAPI process loopback on Windows, the PipeWire monitor on Linux), your side
+   from the mic, kept as two separate lanes so Steno always knows who is "me" and who is
+   "them".
 2. **Process.** After the meeting, the recording is transcribed on-device with
    Parakeet TDT v3, diarized, and matched against the voices Steno has heard before.
    Only the resulting transcript text goes to the LLM endpoint you configured, which
@@ -332,14 +339,15 @@ summary without touching the transcript.
 <td width="50%" valign="top">
 
 **Records without a bot**<br>
-Core Audio process taps for the other side, your mic for you. Nobody in the call sees a
-notetaker, and it works for anything that plays audio on your Mac, including phone calls
-taken via Continuity and in-person meetings.
+The system's own audio API for the other side (Core Audio on macOS, WASAPI on Windows,
+PipeWire on Linux), your mic for you. Nobody in the call sees a notetaker, and it works
+for anything that plays audio on your computer, including in-person meetings and, on
+macOS, phone calls taken via Continuity.
 
 </td>
 <td width="50%" valign="top">
 
-**Everything on your Mac**<br>
+**Everything on your computer**<br>
 Transcription, diarization and speaker matching run on-device. The only network traffic
 Steno generates is transcript text to the LLM endpoint you chose.
 
@@ -349,9 +357,8 @@ Steno generates is transcript text to the LLM endpoint you chose.
 <td valign="top">
 
 **Remembers voices**<br>
-Name a speaker once and Steno recognises them next time. Unknown speakers get a
-ten-second clip to listen to, plus name suggestions from the conversation and the
-calendar invite.
+Name a speaker once and Steno recognises them next time. Unknown speakers come with name
+suggestions from the conversation and the calendar invite.
 
 </td>
 <td valign="top">
@@ -366,8 +373,8 @@ casing and product names every speech model gets wrong.
 <td valign="top">
 
 **Knows when a meeting starts**<br>
-A prompt appears when another app opens the microphone. Calendar titles and attendees
-are filled in from EventKit, no Google Calendar API involved.
+A prompt appears when another app opens the microphone. On macOS, calendar titles and
+attendees are filled in from EventKit, no Google Calendar API involved.
 
 </td>
 <td valign="top">
@@ -390,7 +397,7 @@ forever, with a per-meeting override.
 
 **Bring your own model**<br>
 Any OpenAI-compatible endpoint works for post-processing, from a hosted API to a model
-running on the same Mac. Base URL and API key, nothing else.
+running on the same computer. Base URL and API key, nothing else.
 
 </td>
 </tr>
@@ -400,28 +407,31 @@ running on the same Mac. Base URL and API key, nothing else.
 
 | Data | Where it goes |
 |---|---|
-| Meeting audio | Stays on your Mac, in a folder you choose. Deleted per your retention setting. |
+| Meeting audio | Stays on your computer, in a folder you choose. Deleted per your retention setting. |
 | Transcript text | Sent to the LLM endpoint **you** configure, and only there. |
 | Speaker voice embeddings | Stored in the local SQLite database. Never uploaded. |
 | Summary, tasks, notes | Written to your vault. The app never runs git or syncs anything itself. |
-| Phone recordings | Travel from your iPhone to your Mac over the local network only, TLS with pinned keys. |
+| Phone recordings | Travel from your iPhone to your computer over the local network only, TLS with pinned keys. |
 
-There is no Steno server. Disk encryption is FileVault's job.
+There is no Steno server. Disk encryption is your system's job (FileVault on macOS,
+BitLocker on Windows, LUKS on Linux).
 
 ## Phone companion
 
-For meetings away from the Mac there is a deliberately dumb iOS recorder in
+For meetings away from the computer there is a deliberately dumb iOS recorder in
 [`mobile/`](mobile/). It records, keeps a local queue, and hands the files to your paired
-Mac over the local network when both are on the same Wi-Fi. Pairing is a one-time QR
-scan; transport is HTTPS with pinned certificates. Processing happens on the Mac with the
-same pipeline as any in-person recording. The phone holds no notes and needs no account.
+computer over the local network when both are on the same Wi-Fi. Pairing is a one-time QR
+scan; transport is HTTPS with pinned certificates. Processing happens on the computer with
+the same pipeline as any in-person recording. The phone holds no notes and needs no
+account.
 
 ## What Steno does not do
 
-Steno is scoped on purpose. It does not run on Intel Macs. There is no live transcript
-during the call, no chat over your meetings, no editing of generated text inside the app,
-no team features, no hosted service and no App Store build. The app is
-the source of truth for your data; reading, searching and automation happen in your vault.
+Steno is scoped on purpose. It does not run on Intel Macs, and on Windows and Linux it
+runs on x64 only. There is no live transcript during the call, no chat over your
+meetings, no editing of generated text inside the app, no team features, no hosted service
+and no App Store build. The app is the source of truth for your data; reading, searching
+and automation happen in your vault.
 
 ## For developers
 
@@ -436,9 +446,9 @@ original Swift app and its package stay in the tree until the Swift removal (S9 
 ```
 AGENTS.md           conventions for coding agents (CLAUDE.md links here)
 Cargo.toml          Rust workspace; crates/ holds steno-core, steno-audio, steno-speech,
-                    steno-diarize, steno-llm, steno-adapters, steno-handover,
-                    steno-pipeline, steno-services, steno-host, steno-bridge and the
-                    `steno` CLI (steno-cli)
+                    steno-speech-coreml, steno-speech-sidecar, steno-diarize, steno-llm,
+                    steno-adapters, steno-handover, steno-pipeline, steno-services,
+                    steno-host, steno-bridge, steno-macos and the `steno` CLI (steno-cli)
 apps/desktop/       Tauri 2 shell for macOS, Windows and Linux, release scripts, own README
 apps/macos/web/     the web UI every window shows, own README
 apps/site/          landing page (steno.nicolaischmid.com), Next.js static export in the root pnpm workspace
@@ -450,7 +460,8 @@ Package.swift       the Swift app's package: StenoCore, StenoAudio, StenoSpeech,
 apps/macos/         the Swift app over that package, xcodegen project, own README
 .plans/             scope and dated implementation plans
 docs/research/      teardown of commercial recorders and the open-source landscape
-.github/workflows/  Rust, Swift, web, site, Nix, AUR and mobile CI; the desktop release on `v*` tags
+.github/workflows/  repository, Rust, Swift, web, site, Nix, AUR and mobile CI; mobile delivery;
+                    the desktop release on `v*` tags
 ```
 
 ```sh
@@ -465,8 +476,9 @@ The phone side: [`mobile/README.md`](mobile/README.md). Conventions, review prio
 the plan workflow: [`AGENTS.md`](AGENTS.md). Everything that is not UI lives in the
 crates, so the CLI, the desktop app and any future surface share one implementation.
 
-The Swift package builds and tests with `swift build && swift test` (the Apple-only
-modules need macOS); building the Swift app: [`apps/macos/README.md`](apps/macos/README.md).
+The Swift package still builds and tests with `swift build && swift test` (the Apple-only
+modules need macOS); [`apps/macos/README.md`](apps/macos/README.md) covers building the
+Swift app.
 
 ## Background
 
