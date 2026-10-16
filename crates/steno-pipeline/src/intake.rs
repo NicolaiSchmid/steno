@@ -111,7 +111,8 @@ impl AdmissionFolders for () {
 /// without its meeting. When that commit fails, the receipt is saved
 /// `failed` durably ([`Store::save_handover_receipt_durably`], tried again
 /// while the database is busy, up to
-/// [`RecordingIntake::FAILED_SAVE_ATTEMPTS`] in all), and the copy is
+/// [`RecordingIntake::FAILED_SAVE_ATTEMPTS`] in all, with the writer free
+/// between the tries), and the copy is
 /// removed only once that save succeeds: a failed commit can still
 /// be replayed after a crash, and its meeting then needs the copy. The
 /// phone keeps its own copy either way. Bytes the admission ledger already
@@ -123,8 +124,9 @@ impl AdmissionFolders for () {
 /// the meeting waits `queued` for the next launch's resume. The
 /// admission, the enqueue included, runs in a task of its own, so a caller
 /// that drops `admit` (a phone that hung up mid-admit) leaves the
-/// admission to finish and its meeting enqueued. The copy's
-/// folder is noted before the copy ([`AdmissionFolders`], Rust only).
+/// admission to finish and its meeting enqueued (Rust only: hyper drops
+/// a request's future when the phone hangs up). The copy's folder is
+/// noted before the copy ([`AdmissionFolders`], Rust only).
 /// Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
 pub struct RecordingIntake {
     store: Arc<Store>,
@@ -138,9 +140,17 @@ impl RecordingIntake {
     /// How many times the `failed` receipt save after a failed admission
     /// commit is tried while another connection holds the database: each
     /// try already waits out the store's five-second busy timeout. The
-    /// copy goes only once that save is on the disk, so every try shortens
-    /// the hold that leaves a copy for the launch to adopt. Rust only.
+    /// copy goes only once that save is on the disk, so each try lengthens
+    /// the hold the admission outlasts without leaving a copy for the
+    /// launch to adopt. Rust only.
     pub const FAILED_SAVE_ATTEMPTS: usize = 3;
+
+    /// How long the intake waits, with the writer free, before each try of
+    /// the `failed` save: a write of this process that queued for the
+    /// writer behind the busy commit or the try before (a host write, a
+    /// pipeline step) takes it meanwhile, so none waits more than one busy
+    /// timeout behind the admission. Rust only.
+    pub const FAILED_SAVE_BACK_OFF: std::time::Duration = std::time::Duration::from_millis(200);
 
     #[must_use]
     pub fn new(store: Arc<Store>, enqueue: Enqueue, now: Now, zone: FixedOffset) -> Self {
@@ -185,11 +195,8 @@ enum Admission {
 
 #[async_trait]
 impl HandoverIntake for RecordingIntake {
-    /// The reads, the durable copy and the commit are one step on the
-    /// store's facade (`Store::writing`): the copy is blocking file I/O,
-    /// and the commit must follow it. The enqueue runs after it, in the
-    /// same task, which a dropped `admit` does not cancel: the enqueue
-    /// survives a dropped request. A panic in the task resumes here.
+    /// The store step (`Store::writing`) holds the reads, the durable copy,
+    /// the commit and the `failed` save; a panic in the task resumes here.
     async fn admit(
         &self,
         file: &Path,
@@ -395,9 +402,12 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
 /// The durable `failed` save of `receipt` after a failed admission commit,
 /// tried again while the database is busy, up to
 /// [`RecordingIntake::FAILED_SAVE_ATTEMPTS`] in all: whether it is on the
-/// disk.
+/// disk. Each try waits [`RecordingIntake::FAILED_SAVE_BACK_OFF`] first,
+/// holding nothing: every store call takes the writer only for itself, so
+/// a write queued behind the commit or the try before runs in between.
 fn save_failed_receipt(store: &Store, receipt: &HandoverReceipt) -> bool {
     for attempt in 1..=RecordingIntake::FAILED_SAVE_ATTEMPTS {
+        std::thread::sleep(RecordingIntake::FAILED_SAVE_BACK_OFF);
         match store.save_handover_receipt_durably(receipt) {
             Err(error) if error.is_busy() => {
                 tracing::debug!(attempt, "the failed receipt's save found the database busy");
@@ -841,6 +851,49 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// A write of this process that queues for the writer while the
+    /// `failed` save waits out another connection's lock runs between the
+    /// save's tries, not after all of them: it ends, busy, within about one
+    /// busy timeout behind the try it queued behind, plus its own. Once the
+    /// lock goes, the next try saves.
+    #[test]
+    fn a_write_queued_behind_the_failed_save_runs_between_its_tries() {
+        /// The store's busy timeout.
+        const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("steno.sqlite");
+        let store = Arc::new(Store::open(&path).unwrap());
+        let now = Utc::now();
+        let (device, metadata) = paired_phone(&store, now);
+        let receipt = receipt_of(
+            &device,
+            &metadata,
+            HandoverState::Failed("admit: busy".to_owned()),
+            now,
+        );
+        let settings = store.settings().unwrap();
+        let hold = WriteLockHold::new(&path);
+        let saving = std::thread::spawn({
+            let store = store.clone();
+            move || save_failed_receipt(&store, &receipt)
+        });
+        // The first try waits out the lock by now.
+        std::thread::sleep(RecordingIntake::FAILED_SAVE_BACK_OFF * 3);
+        let queued = std::time::Instant::now();
+        let written = store.save_settings(&settings);
+        let waited = queued.elapsed();
+        drop(hold);
+        assert!(written.is_err_and(|error| error.is_busy()));
+        // Most of a busy timeout behind the first try, then its own. A
+        // write that also waited out the second try waits a busy timeout
+        // more; a load of 40 to 70 adds well under the margin.
+        assert!(
+            waited < 2 * BUSY_TIMEOUT + std::time::Duration::from_secs(2),
+            "the write waited {waited:?}"
+        );
+        assert!(saving.join().unwrap(), "the try after the write saved");
     }
 
     #[tokio::test]
