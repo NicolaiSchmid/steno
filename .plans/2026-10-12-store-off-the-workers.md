@@ -311,8 +311,9 @@ anything changed. PR 2c gives the reloads one owner:
 - **Direct callers stay.** `store_changed` stays public and runs a forced
   pass on the caller's thread: the launch's first load (`app.rs:1277`), the
   launch's reconcile once it adopted the interrupted recordings
-  (`app.rs:1421` at PR 1's head), the reread after a keyring answer, and the
-  host's tests.
+  (`app.rs:1421` at PR 1's head), and the host's tests. As built, the reread
+  after a keyring answer calls `secrets_changed` and `phones_changed`
+  instead, and the light part follows the key on every pass.
 
 **The lock order**, from first taken to last:
 
@@ -393,9 +394,9 @@ beside the app, and P15's lock is unchanged.
   `crates/steno-core/src/store/mod.rs` plus the host's handle; 2b is mostly
   mechanical over about 90 call sites. They may share one PR. Risk: low to
   medium, from the in-memory store's double role.
-- **PR 2c (WP2c): the `recording` feed and the reload owner.** After 2a,
-  since the gate reads the host's reader. About 350 lines. Risk: medium to
-  low; the feed has no lock under it.
+- **PR 2c (WP2c, #304): the `recording` feed and the reload owner.** After
+  2a, since the gate reads the host's reader. Risk: medium to low; the feed
+  has no lock under it.
 
 The plan's earlier PR 3 (the write mutex, every write's read, write and
 apply, the delete's undo among them, the "view models held" assert and the
@@ -693,7 +694,7 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
 - **Tests:** checks 1 and 2 (the settings-save cases), 16, 18, 19, 20, 21, 22
   and 23; check 12 keeps passing with the poll as the owner.
 
-**As built** (PR 2c):
+**As built** (#304):
 
 - **A third flag in the feed.** Beside "page ready" and "resend", a "poked"
   flag that the hook and the start set and each pass swaps; `page.ready`
@@ -703,7 +704,12 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   neither flag set and no snapshot held back (the unpark of a poke an
   earlier pass already answered) sends nothing, so no duplicate goes
   out. It starts set, so the first pass reads the status even when a
-  move came before the thread could be woken.
+  move came before the thread could be woken. `page.ready` sets "resend"
+  before "page ready", and a pass reads "page ready" first and takes
+  "resend" only when it is set, so a `page.ready` that lands during a pass
+  that began before it gets one `recording`, not two (the first review
+  measured the order test failing 14 times in 200 with the flags taken
+  the other way; a test pauses the first pass there to pin it).
 - **What goes at once.** A snapshot that differs from the last one sent
   in anything but the levels (the countdown and the denied permissions as
   well as the state, the meeting and the messages); otherwise it waits
@@ -717,15 +723,16 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   is the same pass forced, and runs the light part too.
   `Host::refresh_pairing` goes into the light part.
   `Host::reload_requested` is what the owner awaits beside its tick, and
-  `Host::reload_requests` (hidden) counts the requests for check 23.
+  `Host::reload_request_count` (hidden) counts the requests for check 23;
+  `Host::own_store` (hidden) hands check 16 the host's handle.
 - **The in-memory mark** is the commit count alone: no other connection
   can reach a private in-memory database. The commit hook runs just
   before a commit is visible, so a mark can count a commit a read still
   misses; on a file the reader's `data_version` moves only once it is
   visible, so the next pass reloads again (the `Store::change_mark` doc).
 - **The bounds.** "Live" is `LIVE` (1 s) in the services' checks as for
-  2a, and check 20 waits one poll interval and `LIVE`; checks 16 and 21
-  keep 100 ms. Check 23's stopped row is "out of `recording`": the
+  2a, and check 20 waits one poll interval and `LIVE`; the feed's checks
+  16, 18 and 21 keep 100 ms, and check 16 gives the save `LIVE`. Check 23's stopped row is "out of `recording`": the
   pipeline may have taken it up before the pass ran.
 - **Check 12** holds forced passes, since an idle tick no longer reloads:
   an event's request, then one the test makes. The burst test commits
@@ -736,8 +743,30 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   pairing test run a pass. `GatedPipeline` moved to the services' testing
   kit, whose `TimedSink` keeps the thread that sent each snapshot.
 - **The recorder's hook rule** holds in the code as it is
-  (`CaptureRecorder::notify` runs with the recorder's locks released);
-  nothing in the recorder changed.
+  (`CaptureRecorder::notify` runs with the recorder's locks released); no
+  recorder code changed, and checks 16 and 23 are its tests.
+- **The stop's save reads on the writer.** The local intake's `complete`
+  read the settings (for the default retention) and the row on the shared
+  reader before its commit, so a stop's save waited for any shared read in
+  flight, a long list load or an export, before its write. The stop's
+  save is the write that must never wait for a read, so
+  `Store::save_stopped_recording` now makes both reads inside its own
+  `IMMEDIATE` transaction on the writer, and resolves the retention and
+  the queued row there; the pipeline's `enqueue_stopped_recording` hands
+  it the stop's duration, end reason and retention and returns the row as
+  saved. The transaction gains two small selects and no file step; each
+  busy retry of `complete` (`COMMIT_ATTEMPTS`) is a fresh transaction that
+  reads again. Only after a commit that failed for another reason does
+  the intake read the row, to say why. The phone admission
+  (`RecordingIntake::admit`) shares none of this code and keeps its reads:
+  the settings name the audio folder its file copy goes into, which must
+  come before the commit and outside it.
+- **Small tests beside the checks:** a forced pass runs the light part
+  (`a_forced_pass_follows_what_the_store_does_not_hold`), `Host::new`
+  reads the mark before its loads
+  (`a_commit_during_the_hosts_loads_shows_at_the_first_pass`), the feed's
+  thread ends with the host (`the_feed_ends_with_the_host`), and a request
+  that races a tick still reloads (`a_request_beside_a_tick_still_reloads`).
 
 ## Acceptance
 
@@ -745,7 +774,8 @@ Each check that needs the lock holds another connection's write transaction
 (`WriteLockHold`, from #278) for 7 s. Each one runs on a runtime with one
 worker, so a wait on that worker shows as a missed deadline. "Live" means the
 observed thing happens within 200 ms during the hold. As built, "live" is 1 s
-in the services' checks (200 ms in the store's checks 10 and 15), checks 2
+in the services' checks (200 ms in the store's checks 10 and 15; 100 ms in
+the feed's checks 16, 18 and 21, and check 20 is one poll and 1 s), checks 2
 and 4 add a 2 s bound from the user's side, and check 11 holds 2 s
 (WP2a's and WP2b's as-built). Every check fails without its PR, on `main`,
 except the guards (checks 17, 18, 20 and 22), which pass on `main` and fail on
@@ -771,12 +801,12 @@ as an outcome, and checks 19 to 23 are new.
 | 13 | Pipeline runs on the workers | every `store_waits` test passes on one worker, including the quit during a run's wait | `store_waits.rs` | 2b |
 | 14 | Removed | The deadlock test for the host write mutex, the emitter's leaf and the reader checkout, and the "view models held" assert. None of those exists in this cut. What is left of the order (decision 3) is checked by the nesting assert (check 15) and by checks 1, 2, 16 and 21, which hold the view-model lock while the feed and a stop run | | |
 | 15 | The readers' own rules | `a_write_through_read_fails_on_both_stores` (file and in-memory, `query_only`, the host's reader included); `a_store_call_inside_a_store_closure_asserts`; `the_checkpoint_waits_for_reads_in_flight_and_holds_off_new_ones` (on both readers); `the_in_memory_checkpoint_takes_its_one_lock_once` (returns at once, as `checkpoint_store` at launch in the app tests needs) | `crates/steno-core/src/store/mod.rs` tests | 2a |
-| 16 | The stop's hook behind a slow reload | `a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files`: a forced reload is held in flight with the view-model lock taken (a gated `export_keeps_failing`), then the recorder stops; `Stopping` reaches the sink within 100 ms, and the session's files finish while the reload is still held | `crates/steno-services/src/recorder.rs` tests | 2c |
+| 16 | The stop's hook behind a slow reload | `a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files`: a forced reload is held in flight with the view-model lock and the host's reader taken (a gated `export_keeps_failing`, inside a read on the host's reader), and another thread's read holds the shared reader for 3 s; then the recorder stops. `Stopping` reaches the sink within 100 ms of the recorder's notice, the meeting is saved within `LIVE` of it, and the stop ends with its files finished while both reads are still held. The stop's save reads the row and the settings on the writer, inside its own transaction, so it waits for no read | `crates/steno-services/src/recorder.rs` tests | 2c |
 | 17 | The delete's files and rows | `a_kill_after_the_entry_is_forgotten_keeps_the_meeting`, `a_kill_after_the_delete_commits_never_brings_the_meeting_back` and `a_kill_before_a_kept_meetings_entry_is_restored_keeps_it`: a child process deletes through the host, is killed at a gate between two steps, and the next launch lists the meeting with its recording, or does not list it and adopts no master, exactly once. A guard, not a fix: it passes on `main`, and runs with 2a, which changes the checkpoint that the forget and the undo fall back to | `crates/steno-services/src/kill_tests.rs` | 2a |
-| 18 | `page.ready` against the page's first command | Restated as an outcome: `a_command_before_page_ready_loses_no_snapshot`: a command reaches the host before `page.ready`; once `page.ready` arrives, every topic, `recording` included, reaches the sink live, with the command's effect. Which of the two reaches the host first stays open (a probe saw the command first in 29 of 300 runs before PR 1 and 42 of 300 at its head). A guard: on `main` the `recording` the command's publish stamped arrives at most 50 ms late, within the 200 ms, so the check passes there and fails on a 2c that loses a topic | `crates/steno-host/src/recording_feed.rs` tests | 2c |
+| 18 | `page.ready` against the page's first command | Restated as an outcome: `a_command_before_page_ready_loses_no_snapshot`: a command reaches the host before `page.ready`; once `page.ready` arrives, every topic, `recording` included, reaches the sink live, with the command's effect. Which of the two reaches the host first stays open (a probe saw the command first in 29 of 300 runs before PR 1 and 42 of 300 at its head). A guard: on `main` the `recording` the command's publish stamped arrives at most 50 ms late, within the feed's 100 ms (`LIVE` in the feed's tests), so the check passes there and fails on a 2c that loses a topic | `crates/steno-host/src/recording_feed.rs` tests | 2c |
 | 19 | An idle app reloads and resends every 2 s | `an_idle_app_sends_no_list_detail_or_progress`: with the page ready and no commit, ten polls send no `meetings.list`, `meeting.detail` or `progress` snapshot | `crates/steno-services/src/app.rs` tests | 2c |
-| 20 | Another process's commit | `a_commit_from_another_process_shows_within_one_poll`: a second connection retitles a meeting, and the list carries the title within one poll interval and 200 ms; `an_in_process_commit_shows_within_one_poll` does the same through the in-memory store's writer (the commit count). A guard for the gate | `app.rs` tests, `crates/steno-core/src/store/mod.rs` tests (`change_mark`) | 2c |
-| 21 | The feed's own rules | `the_recording_feed_sends_nothing_before_page_ready` (levels and a state change before `page.ready` reach no sink; the first snapshot goes out after it); `the_recording_feed_runs_while_the_view_models_are_held` (with the view-model lock held by a test, level updates reach the sink live and `Stopping` within 100 ms); `a_second_page_ready_gets_the_recording_again` (a reloaded page, with the recorder idle and its status unchanged, gets one `recording` snapshot); `a_held_level_update_stamps_no_interval` (a level update held back by the throttle neither becomes the last status sent nor restarts the 50 ms, and goes out when its interval ends); two level updates inside one interval fold into one send, which `recording_follows_the_recorder_and_the_start_selects_the_live_row` in `crates/steno-host/tests/main_window.rs` checks today through `next_flush_due` and checks here instead | `crates/steno-host/src/recording_feed.rs` tests | 2c |
+| 20 | Another process's commit | `a_commit_from_another_process_shows_within_one_poll`: a second connection retitles a meeting, and the list carries the title within one poll interval and `LIVE` (1 s); `an_in_process_commit_shows_within_one_poll` does the same through the in-memory store's writer (the commit count). A guard for the gate | `app.rs` tests, `crates/steno-core/src/store/mod.rs` tests (`change_mark`) | 2c |
+| 21 | The feed's own rules | `the_recording_feed_sends_nothing_before_page_ready` (levels and a state change before `page.ready` reach no sink; the first snapshot goes out after it); `the_recording_feed_runs_while_the_view_models_are_held` (with the view-model lock held by a test, level updates reach the sink live and `Stopping` within 100 ms); `a_second_page_ready_gets_the_recording_again` (a reloaded page, with the recorder idle and its status unchanged, gets one `recording` snapshot); `a_held_level_update_stamps_no_interval` (a level update held back by the throttle neither becomes the last status sent nor restarts the 50 ms, and goes out when its interval ends); two level updates inside one interval fold into one send, the fold case moved here from `recording_follows_the_recorder_and_the_start_selects_the_live_row` in `crates/steno-host/tests/main_window.rs`; `a_page_ready_during_the_first_pass_sends_the_recording_once` (a `page.ready` that lands inside a pass gets one `recording`) | `crates/steno-host/src/recording_feed.rs` tests | 2c |
 | 22 | What the store does not show | `an_event_without_a_commit_still_reloads` (`StoreBusy`, `OperationFailed` and `ModelsMissing` with no commit reach the detail and the progress live); `a_permission_granted_outside_the_app_shows_within_one_poll` (the light part runs every tick). A guard for the gate | `app.rs` tests | 2c |
 | 23 | One owner for the reloads | `reload_requests_during_a_pass_run_one_more_pass` (ten requests during a held pass run exactly one more forced reload; the count is of forced reloads, not passes, since a tick can land beside the stored permit); `a_stop_asks_for_a_reload_per_move` (`Stopping` and then `Idle` are two moves, and each asks for one; the stopped meeting's `queued` row reaches the list live after the save, from a forced pass, not from the stop's thread). The host test `the_list_follows_the_recorders_state_and_meeting` (`crates/steno-host/tests/main_window.rs:1949`) moves here: the host crate has no reload owner, so the list now follows through the services' poll task | `app.rs` tests, `recorder.rs` tests | 2c |
 
@@ -864,9 +894,9 @@ blocking pool (`kill_tests.rs`, and #278's quit tests).
   the next reload instead of within 2 s. The Swift app followed only the
   database, through GRDB's observation, so this matches it.
 - **The pairing poll still sends.** The light part's pairing refresh
-  schedules `settings.phone` on every tick (`refresh_pairing`,
-  `host.rs:937-948`), so an idle app still sends that one small snapshot every
-  2 s. The change feed after stable can make it change-driven.
+  schedules `settings.phone` on every tick (the light part,
+  `follow_outside_the_store`), so an idle app still sends that one small
+  snapshot every 2 s. The change feed after stable can make it change-driven.
 - **The feed's order against `page.ready`.** The first `recording` snapshot
   now comes from the feed's thread, after `page.ready`'s batch has gone out.
   The page takes topics in any order, but the host's tests that count the
@@ -877,7 +907,9 @@ blocking pool (`kill_tests.rs`, and #278's quit tests).
 - **Readers run out.** The shared reader serves the detection poll, the
   pipeline, the handover and the delivery. A long read (a search, an export)
   holds it, and other reads wait for it, never for a write; today they wait
-  on the one connection that also writes. The nesting assert keeps a nested
+  on the one connection that also writes. The stop's save is not among
+  them: it reads on the writer, inside its own transaction (WP2c's
+  as-built). The nesting assert keeps a nested
   read from waiting on its own reader forever.
 - **Ordering of events.** Within a pipeline task, each await keeps the write
   before the event that announces it. The follower requests its reload after
