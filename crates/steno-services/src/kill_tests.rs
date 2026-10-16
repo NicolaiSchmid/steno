@@ -7,8 +7,10 @@
 //! points are gates in the child's file writer, a test seam the product
 //! does not have: before the first write, after some frames, after the
 //! first periodic sync, and in the stop, between the writer's finish and
-//! the save. The writer counts its frames and its syncs into files the
-//! test reads, so the test knows what reached the files before the kill.
+//! the save. One more holds inside the stop's save, in the store's commit
+//! probe, before the commit. The writer counts its frames and its syncs
+//! into files the test reads, so the test knows what reached the files
+//! before the kill.
 //! A kill keeps the page cache, so these tests show what a crash leaves,
 //! not what a power loss does; that each sync is a full sync of the data
 //! is the writers' own test
@@ -500,6 +502,75 @@ async fn a_kill_between_the_writers_finish_and_the_save_recovers_the_recording()
         assert_eq!(sidecar.len() as u64, counted / 3, "{}", lane.as_str());
     }
 
+    let recovered = assert_recovered(&relaunch(dir.path()).await, (counted, 0));
+    assert_eq!(recovered, counted, "the finished master, whole");
+}
+
+/// The child: records a call under its directory, stops once 20 writes
+/// are counted, and holds inside the stop's save until it is killed: in
+/// the transaction that writes the asset, the row written `queued` and
+/// the writer's lock held, before the commit. Passes at once outside a
+/// child.
+#[test]
+#[ignore = "the kill tests run it in a child process"]
+fn child_holds_inside_the_stops_save_until_killed() {
+    let Ok(directory) = std::env::var(DIRECTORY) else {
+        return;
+    };
+    die_with_the_parent();
+    let directory = PathBuf::from(directory);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
+    let reports = Reports(directory.clone());
+    {
+        let reports = Reports(directory.clone());
+        store.probe_commits(move |connection| {
+            let assets: i64 = connection
+                .query_row("SELECT count(*) FROM audioAsset", [], |row| row.get(0))
+                .unwrap();
+            if assets > 0 {
+                hold_at_the_gate(&reports);
+            }
+        });
+    }
+    let app = app_over_fakes(&directory, &store, gated_capture(Gate::Open, &directory));
+    app.recorder.start(CaptureMode::Call, None);
+    assert_eq!(app.recorder.status().error, None);
+    while reports.write_count() < 20 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    app.recorder.stop();
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Killed inside the stop's save, before its commit: nothing of the save
+/// lands, the row is still `recording`, and the next launch recovers the
+/// recording whole, as after a kill just before the save.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kill_inside_the_stops_save_recovers_the_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let reports = Reports(dir.path().to_path_buf());
+    let mut child = spawn_test(
+        "kill_tests::child_holds_inside_the_stops_save_until_killed",
+        dir.path(),
+        Gate::Open.name(),
+    );
+    kill_when(&mut child, dir.path(), "the save's gate", || {
+        reports.gated().exists()
+    });
+    let (counted, _) = reports.written();
+    assert_eq!(
+        the_meeting(dir.path()).state,
+        MeetingState::Recording,
+        "the save did not commit"
+    );
     let recovered = assert_recovered(&relaunch(dir.path()).await, (counted, 0));
     assert_eq!(recovered, counted, "the finished master, whole");
 }
