@@ -16,8 +16,8 @@
 //!
 //! Audio the backend's thread missed goes through
 //! [`LaneFrameSink::write_missed`]: zeros on every lane as one callback of
-//! their own, counted beside the drops; the design is in
-//! [`realtime::missed`](super::missed). Rust only.
+//! their own or, past the fill limit, only counted, beside the drops; the
+//! design is in [`realtime::missed`](super::missed). Rust only.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

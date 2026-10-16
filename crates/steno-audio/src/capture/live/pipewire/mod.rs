@@ -33,9 +33,9 @@
 //! `process` dequeues the buffer, turns its chunk into a [`SliceView`] with
 //! [`interleaved_view`] and, while the gate is open, hands it to
 //! [`deliver_slices`], the safe form of the IOProc body the macOS backend
-//! uses. No allocation, no lock,
-//! no log (proven for the body in `tests/realtime.rs` and on the real
-//! data-loop thread in `tests/pipewire.rs`).
+//! uses. No allocation, no lock, no log (proven for the body in
+//! `tests/realtime.rs` and on the real data-loop thread in
+//! `tests/pipewire.rs`).
 //!
 //! A data-loop thread the scheduler holds up misses graph cycles while the
 //! daemon runs the graph on time (A18; the design is in
@@ -43,7 +43,8 @@
 //! cycle's `pw_time` ticks, converted from the graph's rate to the
 //! stream's 48 kHz, and writes what it missed as zeros before the cycle;
 //! `stop()` compares `CLOCK_MONOTONIC` with the last cycle's `pw_time`.
-//! `pw_stream_get_time_n` copies the time `pw_stream` stored for the cycle
+//! `Stream::time` (`pw_stream_get_time`, pipewire-rs being built without
+//! its `v0_3_50` feature) copies the time `pw_stream` stored for the cycle
 //! (a sequence-locked copy, no system call). A quantum that changes resets
 //! the clock: at a new quantum the ticks jump by up to two of its cycles
 //! while the wall clock does not (1 792 frames at 256 to 1 024, 3 584 at
@@ -381,7 +382,7 @@ fn deliver_cycle(
 }
 
 /// The frames missed before a cycle of `frames` whose stream time is
-/// `time`, its ticks and their rate (none when `pw_stream_get_time_n`
+/// `time`, its ticks and their rate (none when `pw_stream_get_time`
 /// failed): `clock` advanced to the ticks, at the graph clock's rate
 /// against the stream's [`SAMPLE_RATE`]. A time without a usable rate, a
 /// graph rate that changed and a cycle of another length (a quantum that
@@ -1521,7 +1522,8 @@ fn runs_realtime(stat: &str) -> Option<bool> {
 /// without real-time scheduling: `module-rt` (from `client.conf`) got
 /// neither `RLIMIT_RTPRIO` nor RealtimeKit. A busy computer can then hold
 /// the thread up long enough to miss graph cycles, which the capture
-/// writes as silence and counts (see the module doc). `/proc` is read only
+/// writes as silence, or past the fill limit only counts (see the module
+/// doc). `/proc` is read only
 /// until the line was logged. Rust only.
 fn warn_without_realtime() {
     static WARNED: AtomicBool = AtomicBool::new(false);
@@ -1532,7 +1534,7 @@ fn warn_without_realtime() {
         tracing::warn!(
             "PipeWire's data-loop thread runs without real-time scheduling (RealtimeKit \
              missing or refused, no RLIMIT_RTPRIO): a busy computer can make the capture \
-             miss cycles, which are written as silence"
+             miss cycles, which are written as silence or counted"
         );
     }
 }
@@ -1723,6 +1725,7 @@ impl CaptureBackend for LiveCaptureBackend {
     /// Returns within `STOP_TIMEOUT` (2 s) once it has the backend (a
     /// `start` in progress holds it), plus the microseconds of a delivery
     /// inside the gate; what it leaves behind then is in the module doc.
+    ///
     /// What the data-loop thread missed after its last cycle, up to the
     /// moment before the gate closes, is written once it has
     /// (`missed_at_stop`); not for a stop the session makes to rebuild,

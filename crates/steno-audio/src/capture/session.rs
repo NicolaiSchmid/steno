@@ -435,10 +435,10 @@ impl Streak {
     }
 }
 
-/// Per-lane counts the sink keeps in samples at the device's rate (ring
-/// overruns, missed audio), in samples at [`SAMPLE_RATE`]. The
-/// sink keeps counting across a rebuild, so each stream's share is
-/// rescaled at that stream's rate once it has stopped.
+/// Per-lane counts the sink keeps at the device's rate (ring overruns,
+/// missed audio), held in samples at [`SAMPLE_RATE`]. The sink keeps
+/// counting across a rebuild, so each stream's share is rescaled at that
+/// stream's rate once it has stopped.
 #[derive(Default)]
 struct LaneCounts {
     /// The sink's counts at the last fold.

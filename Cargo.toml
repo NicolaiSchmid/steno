@@ -155,7 +155,8 @@ objc2-event-kit = { version = "0.3", default-features = false, features = ["std"
 # Without `unsafe`: on macOS the plain `fsync` the recording writer falls
 # back to when a file system refuses `F_FULLFSYNC` (a WebDAV share answers
 # ENOTTY), and on Linux and macOS the `statfs` the pipeline reads a folder's
-# file system with, and the macOS updater's `access(2)` on the bundle.
+# file system with, and the macOS updater's `access(2)` on the bundle; on
+# Linux the `CLOCK_MONOTONIC` the PipeWire capture's stop reads (`time`).
 # Already in the lock (`tempfile` uses it).
 rustix = { version = "1.1", features = ["fs", "time"] }
 # Adapters: IANA time zones for the dates in the notes (Swift's `TimeZone`),
