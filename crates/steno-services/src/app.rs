@@ -100,7 +100,8 @@ pub struct AppOptions {
     /// How long [`build`] waits for the database's lock while another
     /// process holds it ([`DatabaseLock::acquire_within`]):
     /// [`LOCK_PATIENCE`] in the product, whose update relaunch starts the
-    /// new process before the old one has exited; zero in the tests.
+    /// new process before the old one has exited; the hang guard in the
+    /// tests, and zero or a short window in a test of the refusal.
     pub lock_patience: std::time::Duration,
     /// The shell runs from an installed app bundle
     /// ([`HostConfig::installed_bundle`]); false for the CLI and the tests,
@@ -3123,7 +3124,9 @@ mod tests {
         recording.state = steno_core::MeetingState::Recording;
         first.store.save_meeting(&recording).unwrap();
 
-        let refused = build(options_under(&support)).err().unwrap();
+        let mut second = options_under(&support);
+        second.lock_patience = std::time::Duration::ZERO;
+        let refused = build(second).err().unwrap();
         assert!(
             matches!(&refused, BuildError::Lock(DatabaseLockError::Held(path)) if path == &support.join("steno.lock")),
             "{refused:?}"
@@ -3151,11 +3154,42 @@ mod tests {
         let _first = DatabaseLock::acquire(&garbage).unwrap();
         let mut options = options_under(&support);
         options.database_path = Some(garbage.clone());
+        options.lock_patience = std::time::Duration::ZERO;
         let refused = build(options).err().unwrap();
         assert!(
             matches!(&refused, BuildError::Lock(DatabaseLockError::Held(_))),
             "{refused:?}"
         );
+    }
+
+    /// A test's relaunch waits out a lock that outlives the app it
+    /// dropped: a child another test forked before the drop holds a copy
+    /// of the lock's file until it execs. A second holder stands in for
+    /// that child and lets go once the relaunch has waited a short window
+    /// for it; a relaunch that gives up at once fails within the window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relaunch_in_a_test_waits_out_a_lock_held_past_the_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        std::fs::create_dir_all(&support).unwrap();
+        let forked_copy = DatabaseLock::acquire(&support.join("steno.sqlite")).unwrap();
+
+        let options = options_under(&support);
+        let mut relaunch = tokio::task::spawn_blocking(move || build(options));
+        let window = std::time::Duration::from_millis(200);
+        if let Ok(early) = tokio::time::timeout(window, &mut relaunch).await {
+            panic!(
+                "the relaunch ended while the lock was held: {:?}",
+                early.unwrap().map(|_| ())
+            );
+        }
+        drop(forked_copy);
+        let relaunched = tokio::time::timeout(HANG_GUARD, relaunch)
+            .await
+            .expect("the relaunch hung")
+            .unwrap()
+            .unwrap();
+        assert!(relaunched.database_lock.is_some());
     }
 
     /// An update's relaunch starts the new app before the old one has

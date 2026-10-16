@@ -290,7 +290,11 @@ impl Drop for SyntheticRecorder {
 
 /// The options of the product's graph under `support`, without a
 /// capture backend, a keyring, an updater, permissions, a calendar,
-/// detection or the Swift import's marker.
+/// detection or the Swift import's marker. The database's lock waits up
+/// to [`HANG_GUARD`]: once a test dropped its app, a child that another
+/// test forked before the drop holds a copy of the lock's file until it
+/// execs, so a relaunch that does not wait can find the lock still held.
+/// A test of the refusal itself sets its own patience.
 pub fn options_under(support: &std::path::Path) -> crate::AppOptions {
     crate::AppOptions {
         paths: steno_core::StenoPaths::new(support),
@@ -305,7 +309,7 @@ pub fn options_under(support: &std::path::Path) -> crate::AppOptions {
         version: "0.0.0".to_owned(),
         make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
         detection: None,
-        lock_patience: Duration::ZERO,
+        lock_patience: HANG_GUARD,
         installed_bundle: false,
         import_marker: None,
     }
