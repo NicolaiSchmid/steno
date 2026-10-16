@@ -560,10 +560,15 @@ pub fn choose_certificate(
         now: (choice.now)(),
     });
     let (line, reason) = match decided.outcome {
+        // The decision serves one of the certificates it was given; should
+        // that ever not hold, the import waits instead of ending with
+        // nothing to import over certificates that exist.
         Outcome::Serve(chosen) => {
-            return Ok(certificates
+            return certificates
                 .into_iter()
-                .find(|certificate| fingerprint(certificate) == chosen));
+                .find(|certificate| fingerprint(certificate) == chosen)
+                .map(Some)
+                .ok_or_else(NotImported::failed);
         }
         Outcome::Wait(Reason::Replaced) => (REPLACED_PAIRING, WaitReason::Replaced),
         Outcome::Wait(Reason::PartlyReplaced) => {
