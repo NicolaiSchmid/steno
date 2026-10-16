@@ -41,7 +41,8 @@ use steno_host::services::{FileSystem, LeftRecording, Recorder};
 
 use crate::recorder::MakeCaptureSession;
 use crate::testing::{
-    an_hour_later, app_over_fakes, app_warming_up, synthetic_capture, synthetic_capture_through,
+    an_hour_later, app_decoding, app_over_fakes, app_warming_up, synthetic_capture,
+    synthetic_capture_through,
 };
 
 /// The directory the child records under; unset outside a child.
@@ -1058,4 +1059,163 @@ async fn a_kill_before_a_kept_meetings_entry_is_restored_keeps_it() {
     let dir = tempfile::tempdir().unwrap();
     let (meeting_id, listed) = delete_killed_at(dir.path(), DeleteGate::BeforeRestore).await;
     assert_listed_with_its_recording(dir.path(), meeting_id, &listed);
+}
+
+/// The child's decoder for the reading test: a decode says so in `reading`
+/// under the child's directory and waits for the kill, as a decode that a
+/// failed allocation aborts never returns.
+struct DecodeUntilKilled {
+    reading: PathBuf,
+}
+
+#[steno_core::async_trait]
+impl steno_core::AudioDecoder for DecodeUntilKilled {
+    async fn decode(
+        &self,
+        _: &steno_core::AudioAsset,
+        _: steno_core::AudioLane,
+    ) -> steno_core::BoundaryResult<steno_core::AudioBuffer16k> {
+        Reports::append(&self.reading, b"1");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    fn mixdown_format(&self) -> steno_core::AudioFormat {
+        steno_core::AudioFormat::Wav16kInt16
+    }
+
+    async fn mixdown(
+        &self,
+        _: &steno_core::AudioAsset,
+        _: &Path,
+    ) -> steno_core::BoundaryResult<()> {
+        Ok(())
+    }
+}
+
+/// The child: processes the asset whose id is in `bad` under its
+/// directory, and is killed in the decode. Passes at once outside a child.
+#[test]
+#[ignore = "the kill tests run it in a child process"]
+fn child_decodes_until_killed() {
+    let Ok(directory) = std::env::var(DIRECTORY) else {
+        return;
+    };
+    die_with_the_parent();
+    let directory = PathBuf::from(directory);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
+    let decoder = Arc::new(DecodeUntilKilled {
+        reading: directory.join("reading"),
+    });
+    let app = app_decoding(&directory, &store, decoder);
+    let asset_id: uuid::Uuid = std::fs::read_to_string(directory.join("bad"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let _ = runtime.block_on(app.pipeline.current().process(asset_id));
+    unreachable!("the decode never returns");
+}
+
+/// A queued call meeting with its recording under `directory/audio`.
+fn queued_call(store: &Store, directory: &Path) -> (steno_core::Meeting, steno_core::AudioAsset) {
+    let mut meeting = steno_core::testing::sample_data::meeting();
+    meeting.id = uuid::Uuid::new_v4();
+    meeting.state = MeetingState::Queued;
+    let asset = steno_pipeline::fixtures::two_lane_call(
+        &audio_folder(directory),
+        meeting.id,
+        steno_core::AudioRetention::DeleteAfterProcessing,
+    )
+    .unwrap();
+    store.save_meeting_with_asset(&meeting, &asset).unwrap();
+    (meeting, asset)
+}
+
+/// Every file of `asset`'s meeting folder with its bytes.
+fn recording_files(asset: &steno_core::AudioAsset) -> Vec<(PathBuf, Vec<u8>)> {
+    let master = file_url_path(&asset.url).unwrap();
+    let mut files: Vec<_> = std::fs::read_dir(master.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .map(|path| {
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// A process killed while it reads a recording (a failed allocation in
+/// the decoder aborts it the same way: nothing runs after) leaves the
+/// read's marker. The next launch quarantines that meeting: it fails with
+/// "Steno stopped while reading this recording", its files are kept as
+/// they were, and nothing reads it again; the other queued meeting is
+/// processed as before. Process again reads it once more and clears the
+/// marker. A17 of `.plans/2026-10-07-stable-promotion.md`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_killed_quarantines_its_meeting_and_the_launch_runs_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let markers = dir
+        .path()
+        .join("support")
+        .join(steno_pipeline::ReadingMarks::FOLDER);
+    let (bad, bad_asset, good) = {
+        let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+        let (bad, bad_asset) = queued_call(&store, dir.path());
+        let (good, _) = queued_call(&store, dir.path());
+        (bad, bad_asset, good)
+    };
+    std::fs::write(dir.path().join("bad"), bad_asset.id.to_string()).unwrap();
+    let before = recording_files(&bad_asset);
+    let mut child = spawn_test(
+        "kill_tests::child_decodes_until_killed",
+        dir.path(),
+        Gate::Open,
+    );
+    let reading = dir.path().join("reading");
+    kill_when(&mut child, dir.path(), "the decode", || reading.exists());
+    assert_eq!(
+        std::fs::read_dir(&markers).unwrap().count(),
+        1,
+        "the read's marker outlived the kill"
+    );
+
+    let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+    let app = app_over_fakes(dir.path(), &store, synthetic_capture());
+    let host = Arc::new(app.host().unwrap());
+    app.launch(&host);
+    app.launch_finished().await;
+    let current = app.pipeline.current();
+    current.wait_until_idle().await;
+    assert_eq!(
+        store.meeting(bad.id).unwrap().unwrap().state,
+        MeetingState::Failed {
+            reason: steno_pipeline::READ_STOPPED.to_owned()
+        }
+    );
+    assert_eq!(recording_files(&bad_asset), before, "kept as it was");
+    assert_eq!(
+        store.meeting(good.id).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
+    assert!(current.dependencies().reading_marks.holds(bad.id));
+
+    current.process_again(bad.id).unwrap();
+    current.wait_until_idle().await;
+    assert_eq!(
+        store.meeting(bad.id).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
+    assert!(!current.dependencies().reading_marks.holds(bad.id));
+    assert_eq!(std::fs::read_dir(&markers).unwrap().count(), 0);
 }

@@ -23,8 +23,8 @@ use steno_host::services::{
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
-    DamagedAudio, ExportRetries, MeetingEventBus, PipelineDependencies, RecordingIntake,
-    RetentionSweep, WarmUpMark,
+    DamagedAudio, ExportRetries, MeetingEventBus, PipelineDependencies, ReadingMarks,
+    RecordingIntake, RetentionSweep, WarmUpMark,
 };
 
 use crate::block_on;
@@ -45,6 +45,7 @@ use crate::secrets::{KeepsApiKey, SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 use crate::swift_import::{GraphImport, HandoverGate, ImportGate, ImportMarker, ImportStep};
 use crate::updates::{IdleGate, ScheduleParts, UpdateSchedule, UpdateSource};
+use steno_speech::SpeechRuntime;
 
 /// What stops the graph from being built: another process holds the
 /// database ([`DatabaseLock`]), or the database could not be opened or
@@ -368,7 +369,9 @@ pub fn pipeline_dependencies(
     )
     .with_speech_engine(speech_engine)
     .with_damaged_audio(support.damaged_audio.clone())
-    .with_warm_up_mark(support.warm_up_mark.clone());
+    .with_warm_up_mark(support.warm_up_mark.clone())
+    .with_reading_marks(support.reading_marks.clone())
+    .with_speech_in_process(engine_runtime == SpeechRuntime::CoreMlInProcess);
     let dependencies = match passes {
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
         None => dependencies,
@@ -391,6 +394,9 @@ pub struct SupportFiles {
     pub damaged_audio: Arc<DamagedAudio>,
     /// The recordings' warm-up mark, read once by the launch.
     pub warm_up_mark: Arc<WarmUpMark>,
+    /// The reads of a recording, marked; the meetings the launch
+    /// quarantined for one that ended with the app.
+    pub reading_marks: Arc<ReadingMarks>,
 }
 
 impl SupportFiles {
@@ -400,6 +406,7 @@ impl SupportFiles {
         SupportFiles {
             damaged_audio: Arc::new(DamagedAudio::in_memory()),
             warm_up_mark: Arc::new(WarmUpMark::in_memory()),
+            reading_marks: Arc::new(ReadingMarks::in_memory()),
         }
     }
 }
@@ -758,11 +765,18 @@ pub fn build_with_import(
     // meeting's entry goes at launch.
     let damaged_audio = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
     damaged_audio.retain(|meeting_id| store.meeting(meeting_id).map_or(true, |m| m.is_some()));
-    // The launch check of the recordings' warm-up: a mark left over from a
-    // warm-up that ended with the app turns it off ([`WarmUpMark`]).
+    // The launch check, before anything reads a recording: a mark left over
+    // from a warm-up that ended with the app turns the warm-up off
+    // ([`WarmUpMark`]), and a marker a read left quarantines its meeting
+    // ([`ReadingMarks`]).
     let support = SupportFiles {
         damaged_audio,
         warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
+        reading_marks: Arc::new(ReadingMarks::at_launch(
+            &paths.support_directory,
+            &store,
+            chrono::Utc::now(),
+        )),
     };
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
@@ -4017,6 +4031,7 @@ mod tests {
         let support = SupportFiles {
             damaged_audio: Arc::new(DamagedAudio::in_directory(&paths.support_directory)),
             warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
+            reading_marks: Arc::new(ReadingMarks::in_memory()),
         };
         let make = make_dependencies(
             &store,

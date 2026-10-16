@@ -402,18 +402,45 @@ pub fn app_warming_up(
     app_over_build(root, store, make_session, in_process, &fakes)
 }
 
+/// [`app_over_fakes`] reading every recording through `decoder`.
+pub fn app_decoding(
+    root: &std::path::Path,
+    store: &Arc<Store>,
+    decoder: Arc<dyn steno_core::AudioDecoder>,
+) -> crate::App {
+    let mut dependencies = fake_dependencies(store, "fake-engine");
+    dependencies.decoder = decoder;
+    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
+    app_over_build(
+        root,
+        store,
+        synthetic_capture(),
+        built(dependencies),
+        &fakes,
+    )
+}
+
 /// [`app_over_fakes`] over the build `first` (every reload builds it again)
-/// and the host's `fakes`.
+/// and the host's `fakes`, its reads marked in `root/support`, which the
+/// launch check reads first (`steno_pipeline::ReadingMarks`).
 fn app_over_build(
     root: &std::path::Path,
     store: &Arc<Store>,
     make_session: MakeCaptureSession,
-    first: BuiltPipeline,
+    mut first: BuiltPipeline,
     fakes: &steno_host::fakes::FakeServices,
 ) -> crate::App {
     let mut settings = store.settings().unwrap();
     settings.audio_folder = steno_core::paths::file_url(&root.join("audio"), true);
     store.save_settings(&settings).unwrap();
+    first.dependencies =
+        first
+            .dependencies
+            .with_reading_marks(Arc::new(steno_pipeline::ReadingMarks::at_launch(
+                &root.join("support"),
+                store,
+                chrono::Utc::now(),
+            )));
     let pipeline = current_pipeline_of(first);
     let zone = chrono::FixedOffset::east_opt(0).unwrap();
     let recorder = crate::recorder::CaptureRecorder::new(

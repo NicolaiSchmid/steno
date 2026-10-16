@@ -269,7 +269,8 @@ impl Process {
                 llm,
                 events.clone(),
             )?
-            .with_damaged_audio(self.database.damaged_audio()?),
+            .with_damaged_audio(self.database.damaged_audio()?)
+            .with_reading_marks(self.database.reading_marks(store)?),
         );
         let printer = tokio::spawn(async move {
             while let Ok(event) = receiver.recv().await {

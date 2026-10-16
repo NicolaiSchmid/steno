@@ -64,7 +64,7 @@
 //! | `queue_upload` | Queues a phone meeting left `recording` with its stored asset |
 //! | `other_folders`, `find_master` | Where else a master may be, and which folder holds it (`Lookup`) |
 //! | `salvage` | The asset a master's header and sidecars give, as its capture would have handed it over |
-//! | `adopt_orphans`, `orphans` | The launch's adoption of the masters in the audio folders that have no row and that the record names |
+//! | `adopt_orphans`, `orphans` | The launch's adoption of the masters in the audio folders that have no row and that the record names; one whose read of its length ended with the app is listed failed and unread (`steno_pipeline::ReadingMarks`) |
 //! | `meeting_folders` | The audio folders a meeting's folder may be in, which a delete removes it from when no asset names it |
 //! | [`LiveRecordingCheck`] | When a master counts as still written; the app's field, so tests inject the clock, and the recorder's check before a delete |
 //!
@@ -82,7 +82,10 @@ use steno_core::{
     RecordingLayout, Store, StoreError,
     paths::{file_url, file_url_path},
 };
-use steno_pipeline::{LocalRecordingIntake, LocalRecordingIntakeError, RecordingResult};
+use steno_pipeline::{
+    LocalRecordingIntake, LocalRecordingIntakeError, READ_STOPPED, ReadStage, ReadingMarks,
+    RecordingResult,
+};
 use uuid::Uuid;
 
 /// Why a meeting's master cannot be recovered; the meeting fails as it
@@ -845,6 +848,24 @@ fn first_ids(ids: &[Uuid]) -> String {
         .join(", ")
 }
 
+/// Saves an adopted recording's rows and processes it, or, quarantined
+/// ([`ReadingMarks`]), saves them failed and leaves it.
+fn save_adopted(
+    store: &Store,
+    pipeline: &steno_pipeline::ProcessingPipeline,
+    meeting: &Meeting,
+    asset: &AudioAsset,
+) -> Result<(), RecoveryError> {
+    if pipeline.dependencies().reading_marks.holds(meeting.id) {
+        return store
+            .insert_meeting_with_asset(meeting, asset)
+            .map_err(|error| RecoveryError::NotSaved(error.into()));
+    }
+    pipeline
+        .enqueue_new(meeting, asset)
+        .map_err(|failure| RecoveryError::NotSaved(failure.into()))
+}
+
 /// The meeting and asset an orphan's master gives: a CAF the Mac wrote is
 /// [salvaged](salvage) as a call (two channels) or an in-person recording
 /// (one) with the end reason `failed`, as an interrupted recording is; an
@@ -854,12 +875,16 @@ fn first_ids(ids: &[Uuid]) -> String {
 /// not when the phone recorded it), and gets the source's default title,
 /// the settings' template, `queued`, and the retention Keep forever: the
 /// master outlived its row, so it is one the user kept, and a shorter
-/// default would delete it once processed. The user can change it.
+/// default would delete it once processed. The user can change it. The
+/// read of the declared length is marked ([`ReadingMarks`]); a recording
+/// whose marker a crash left is adopted unread, length 0, and failed with
+/// [`READ_STOPPED`] instead of queued (A17).
 fn adopted(
     orphan: &Orphan,
     settings: &steno_core::Settings,
     zone: chrono::FixedOffset,
     now: chrono::DateTime<Utc>,
+    reading: &ReadingMarks,
 ) -> Result<(Meeting, AudioAsset), RecoveryError> {
     let Orphan {
         meeting_id,
@@ -885,15 +910,24 @@ fn adopted(
             )
         }
         AudioFormat::M4aAac | AudioFormat::Wav16kInt16 => {
-            let duration = steno_audio::SymphoniaAudioCodec::declared_duration(master)
-                .inspect_err(|error| {
-                    tracing::debug!(%meeting_id, %error, "an adopted recording's length is not known");
-                })
-                .ok()
-                .flatten()
-                .unwrap_or(0.0);
+            let asset_id = Uuid::new_v4();
+            // A recording whose last read here ended with the app is
+            // adopted unread, its length unknown.
+            let duration = if reading.holds(*meeting_id) {
+                0.0
+            } else {
+                let _reading =
+                    reading.reading(*meeting_id, Some(asset_id), master, ReadStage::Duration);
+                steno_audio::SymphoniaAudioCodec::declared_duration(master)
+                    .inspect_err(|error| {
+                        tracing::debug!(%meeting_id, %error, "an adopted recording's length is not known");
+                    })
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0.0)
+            };
             let asset = AudioAsset {
-                id: Uuid::new_v4(),
+                id: asset_id,
                 meeting_id: *meeting_id,
                 url: file_url(master, false),
                 format: *format,
@@ -921,7 +955,13 @@ fn adopted(
         source,
         calendar_event_id: None,
         tags: Vec::new(),
-        state: steno_core::MeetingState::Queued,
+        state: if reading.holds(*meeting_id) {
+            steno_core::MeetingState::Failed {
+                reason: READ_STOPPED.to_owned(),
+            }
+        } else {
+            steno_core::MeetingState::Queued
+        },
         end_reason,
         title_origin: steno_core::TitleOrigin::Default,
         template_id: settings.default_template_id.clone(),
@@ -1031,15 +1071,18 @@ pub(crate) fn adopt_orphans(
             tracing::warn!(%meeting_id, "a recording with no meeting is still written; the next launch looks again");
             continue;
         }
-        let rows = adopted(orphan, &settings, zone, (pipeline.dependencies().now)());
-        let saved = rows.and_then(|(meeting, asset)| {
-            pipeline
-                .enqueue_new(&meeting, &asset)
-                .map_err(|failure| RecoveryError::NotSaved(failure.into()))
-        });
+        let reading = &pipeline.dependencies().reading_marks;
+        let now = (pipeline.dependencies().now)();
+        let saved = adopted(orphan, &settings, zone, now, reading)
+            .and_then(|(meeting, asset)| save_adopted(store, pipeline, &meeting, &asset));
         // Warn names the meeting; an error, which can name its folder,
         // goes to debug.
         match saved {
+            // Listed and failed, so not among the adopted: their note
+            // says they are being processed.
+            Ok(()) if reading.holds(meeting_id) => {
+                tracing::warn!(%meeting_id, "a recording with no meeting was listed, failed and unread");
+            }
             Ok(()) => {
                 tracing::warn!(%meeting_id, "a recording with no meeting was recovered");
                 adopted_ids.push(meeting_id);
@@ -2070,6 +2113,53 @@ mod tests {
             harness.store.meeting(m4a).unwrap().unwrap().state,
             MeetingState::Ready
         );
+    }
+
+    /// A phone master whose read of its length ended with the app (the
+    /// launch that adopted it was killed in the read) is listed at the
+    /// next launch failed with "Steno stopped while reading this
+    /// recording", unread (length 0) and not processed, its file as it
+    /// was, and not among the recordings the main window says are being
+    /// processed; Process again reads and processes it (A17).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_phone_master_whose_length_read_ended_with_the_app_is_listed_failed_and_unread() {
+        let mut harness = Harness::new();
+        let m4a = phone_orphan(&harness, "tone-440-44k1-500ms.m4a", AudioFormat::M4aAac);
+        let master = RecordingLayout::new(&harness.audio_folder(), m4a).master(AudioFormat::M4aAac);
+        let before = std::fs::read(&master).unwrap();
+        let support = harness.dir.path().join("support");
+        let killed = ReadingMarks::at_launch(&support, &harness.store, Utc::now());
+        std::mem::forget(killed.reading(m4a, None, &master, ReadStage::Duration));
+        let marks = Arc::new(ReadingMarks::at_launch(
+            &support,
+            &harness.store,
+            Utc::now(),
+        ));
+        assert!(marks.holds(m4a));
+        harness.pipeline = current_pipeline(
+            fake_dependencies(&harness.store, "fake-engine").with_reading_marks(marks.clone()),
+        );
+
+        let adopted = reconcile_at_launch(&harness, &[], &an_hour_later());
+        assert_eq!(adopted, Vec::<Uuid>::new());
+        harness.pipeline.current().wait_until_idle().await;
+        let meeting = harness.store.meeting(m4a).unwrap().unwrap();
+        assert_eq!(
+            meeting.state,
+            MeetingState::Failed {
+                reason: READ_STOPPED.to_owned()
+            }
+        );
+        assert_eq!(meeting.duration, 0.0, "its length was not read");
+        assert_eq!(std::fs::read(&master).unwrap(), before);
+
+        harness.pipeline.current().process_again(m4a).unwrap();
+        harness.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            harness.store.meeting(m4a).unwrap().unwrap().state,
+            MeetingState::Ready
+        );
+        assert!(!marks.holds(m4a));
     }
 
     /// Only a meeting folder with a master and no row that the record
