@@ -113,7 +113,7 @@ impl LevelSlot {
         }
     }
 
-    /// The processing thread's levels for the next reader, whom it wakes
+    /// The processing thread's levels for the next reader, which it wakes
     /// (one more [`Wake::signal`], the cost the relay's wake already has).
     #[inline(always)]
     pub fn publish(&self, mic: LaneLevel, system: Option<LaneLevel>) {

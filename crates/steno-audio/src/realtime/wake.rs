@@ -1,8 +1,8 @@
-//! The consumer wake-up behind the rings: a counting signal the producer
-//! raises without a lock and the consumer waits on with a timeout. Swift
-//! uses a `DispatchSemaphore`; this is the same shape over a futex-free
-//! `Mutex<u32>` and `Condvar`, taken only on the consumer side and in
-//! `signal` when a waiter is actually parked.
+//! The consumer wake-up behind the rings and the level slot: a counting
+//! signal the producer raises without a lock and the consumer waits on
+//! with a timeout. Swift uses a `DispatchSemaphore`; this is the same
+//! shape over a futex-free `Mutex<u32>` and `Condvar`, taken only on the
+//! consumer side and in `signal` when a waiter is actually parked.
 //!
 //! The producer path (`signal`) is an atomic increment plus, when the
 //! consumer is parked, one `notify_one`. `notify_one` is the one call on

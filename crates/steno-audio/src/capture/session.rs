@@ -347,8 +347,10 @@ struct Active {
     writer_thread: Option<WriterThread>,
     levels: Arc<LevelSlot>,
     /// Hands the slot's levels to the subscribers from a thread of its own,
-    /// so a slow sync on the writer's never freezes the meter (A20);
-    /// stopped after the processing thread (`Core::stop_processing`).
+    /// so a slow sync on the writer thread never freezes the meter (A20 of
+    /// `.plans/2026-10-07-stable-promotion.md`). It runs for the whole
+    /// recording, across rebuilds, since the slot is shared; `finish()`
+    /// stops it after the processing thread (`Core::stop_processing`).
     level_publisher: LevelPublisher,
     ended_on_device_loss: bool,
     /// Rebuilds that succeeded.
@@ -1309,11 +1311,10 @@ impl Core {
         finished
     }
 
-    /// `finish()`'s stop of what writes and reads the level slot, the
-    /// backend already stopped: the processing thread, its canceller kept
-    /// for the next recording, then the level publisher, which hands on
-    /// the slot's last change. Returns the recording's loudest system-lane
-    /// sample.
+    /// Stops, for `finish()` and with the backend already stopped, the
+    /// processing thread (its canceller kept for the next recording) and
+    /// then the level publisher, so the slot's last change goes out.
+    /// Returns the recording's loudest system-lane sample.
     fn stop_processing(&self, active: &mut Active) -> f32 {
         let mut system_peak = active.system_peak_so_far;
         if let Some(mut processing) = active.processing.take() {

@@ -1,6 +1,6 @@
 //! Held syncs, behind the `test-support` feature: a session's writer
-//! whose periodic sync of the files waits until the test lets it go, as a
-//! `FlushFileBuffers` or an `fsync` on a slow disk does, so a test can
+//! whose periodic sync of the files blocks, as a `FlushFileBuffers` or an
+//! `fsync` on a slow disk does, until the test lets it go, so a test can
 //! prove what keeps going while the writer thread is stuck in one (the
 //! level stream, A20 of `.plans/2026-10-07-stable-promotion.md`). Rust
 //! only: Swift synced at the close alone.
@@ -59,7 +59,7 @@ impl HeldSyncs {
     /// Waits up to `timeout` for a sync to begin, and so to be held while
     /// no release came; whether one did.
     #[must_use]
-    pub fn wait_until_one_began(&self, timeout: Duration) -> bool {
+    pub fn wait_for_a_held_sync(&self, timeout: Duration) -> bool {
         let (state, _) = self
             .gate
             .changed

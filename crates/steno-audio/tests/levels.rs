@@ -61,7 +61,7 @@ fn levels_keep_reaching_the_consumer_while_the_writer_is_held_in_a_sync() {
     // The first sync comes after 5 s of audio, which the real-time
     // backend takes 5 s to deliver.
     assert_eq!(SYNC_INTERVAL_FRAMES, 5 * FRAMES_PER_SECOND);
-    let began = held.wait_until_one_began(HANG_GUARD);
+    let began = held.wait_for_a_held_sync(HANG_GUARD);
     let since = Instant::now();
     let before_the_hold = levels.try_iter().count();
     let mut arrivals = Vec::new();
