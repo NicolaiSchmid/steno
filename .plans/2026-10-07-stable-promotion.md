@@ -318,6 +318,7 @@ why and the alternative.
   the audio processing is stable and ideally the final version before we
   cutover to the tauri version."
   - **Reading:** no change to the audio and speech path is planned after the
+    cutover. A1 to A10, A12 to A18 and A20 land before `0.11.0-rc.1`, so the
     cutover. A1 to A10, A12 to A17, A19 and A20 land before `0.11.0-rc.1`, so the
     rehearsals run on the final pipeline. A fix found during the candidates
     becomes a new candidate and restarts the stability count (G2).
@@ -331,7 +332,7 @@ why and the alternative.
     | AAC priming (23 to 48 ms late on phone recordings) | Fixed (A9, #246) | The decoder reads the edit list (ffmpeg's files), else iTunes' gapless tag (`AVAudioFile`, so the Swift app's mixdowns: 2 112 samples), else the 2 112 AVFoundation assumes, but only in the layout of the phone's `AVAudioRecorder`, which writes neither box (major brand `M4A `, `mp42`, no `udta`, and an `esds` with ES_ID 0 and stream byte 0x14). Any other file that declares neither keeps every sample: Android's recorder primes 1 024 and declares nothing, and 25 ms of priming is harmless where 25 ms of speech is not. It drops exactly that many frames, so the decode starts where AVFoundation's did (checked on files from Apple's encoder in both layouts); every other input decodes bit for bit as before. |
     | Call mode without an output client (the tap's IOProc runs only once another client opens the output) | Fixed first (A10) | Forge reproduces the loss over SSH: 0 callbacks while nothing plays. The tap aggregate runs only while a process the tap includes drives the output. The Swift app shares the defect and keeps its exclusion of its own process until the handoff, so this is not a regression, but D3 makes the loss blocking. The fix includes Steno in the tap, so the rule is: no in-app playback while recording, enforced by `Playback`. |
     | A phone recording without a `moov` (AVFoundation and symphonia both refuse it) | Fixed (A14) | The phone's recorder writes the index only when it stops, so a crash, a jetsam kill or a force-quit leaves the audio with no index, and the phone's crash recovery still hands it over. Under D3 that recording must not be lost: the decoder reads such a file from the packets' own bits with the phone's fixed settings, in the recorder's layout only, and the meeting says it was cut off. The Swift app keeps failing it. |
-    | A capture thread that misses cycles (the audio of those cycles gone, the master short of wall time, no count and no notice; Swift's IOProc reads no time stamps either) | Fixed (A18) | Under D3 a loss must never be silent. Each backend reads its callback's position on the device's or the graph's clock and writes what was missed as zeros, so the master stays on wall time and the lanes stay aligned, and the note after the stop counts it. |
+    | A capture thread that misses cycles (the audio of those cycles gone, the master short of wall time, no count and no notice; Swift's IOProc reads no time stamps either) | Fixed (A18, #297) | Under D3 a loss must never be silent. Each backend reads its callback's position on its clock and writes what its thread missed as silence, or counts it when the jump is too long to fill, and the note after the stop says how much is missing; the A18 item has the design. |
     | A damaged AAC packet (AVFoundation conceals it; symphonia stopped the whole decode) | Fixed (A12, #264) | Under D3 one bad packet must not lose a phone recording. The packet becomes silence of its container duration, so later audio keeps its time; the meeting says how long the silence lasts. A file in which more than half of the packets fail is an error, never a meeting of silence. |
 
   - **A known limit, A11** (Nicolai, 2026-10-12): a Bluetooth headset that is
@@ -478,7 +479,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
 | A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured (it aborts on Linux, not on the Mac); every read of a recording marked durably, the in-process CoreML stage included; a recording whose read ended with the app read once more, and quarantined the second time in a row ("Steno stopped while reading this recording") with the file kept and Process again offered; the allocations bounded by a walk of the boxes, chunks and tables before symphonia opens a file, its reader the one the file's first bytes name (MP4, CAF or WAV) and opened where the walk began, any other kind of file refused plainly; kill tests for one kill and for two | audio (#298) |
-| A18 | A capture thread that misses cycles never loses audio silently: on PipeWire, Core Audio and WASAPI the missed frames are written as silence on every lane, counted in the statistics and in the note about missing audio; PipeWire's data-loop thread without real-time scheduling is a warning | audio (`fix/a18-capture-missed-cycles`) |
+| A18 | A capture thread that misses cycles never loses audio silently: on PipeWire, Core Audio and WASAPI the missed frames are written as silence on every lane, counted in the statistics and in the note about missing audio; PipeWire's data-loop thread without real-time scheduling is a warning | audio (#297) |
 | A19 | No in-process speech beside a live recording, and the speech sidecar after a CoreML abort: a job waits to load or run CoreML while a recording starts, runs or stops ("Waiting for the recording to finish"); a warm-up mark or a CoreML reading mark left by a crash turns the speech sidecar on in CoreML's place, durably, until the user turns the Neural Engine back on in Settings ("Use again"), the meeting waiting for the sidecar's models with "Neural Engine off after a crash: download the speech models in Settings"; kill tests for a load killed in a job and in a warm-up | audio |
 | A20 | The level meter never freezes behind a sync of the files: the levels go out from a thread of their own (`steno-levels`, woken by each publish into `LevelSlot`) instead of from the writer thread, whose periodic `sync_data` (P21; `FlushFileBuffers` on Windows) froze the meter and the `recording` snapshot for as long as it took, 1.0 to 1.3 s on a hosted runner; the sync, its cadence and the files are unchanged | audio |
 
@@ -494,6 +495,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | X6 | The AUR package `steno-desktop-bin` | Omarchy |
 | X7 | The flake's Linux package and NixOS module | NixOS |
 | X8 | The Linux gate on each target | each |
+| A18 | Steno's PipeWire data-loop thread gets real-time scheduling (RealtimeKit, or an `RLIMIT_RTPRIO` for the user): the "First Linux release" item of `.plans/2026-10-02-rust-core-and-tauri-shell.md` and the stalled recording in the Linux gates | each |
 
 **Also landing before the first candidate,** losing nothing but changing the code
 the rehearsals run: #215 (the folder note names the platform, merged), #217 (no
@@ -1707,48 +1709,72 @@ Each lands before `0.11.0-rc.1`.
   (a packet flagged as a data discontinuity, until now only counted and
   logged) lose the same way. Lands before `0.11.0-rc.1`, ahead of A16: a
   fix inside the backends and the statistics, no restructuring of the
-  capture.
-  - **The fix.** Each callback says where its first frame sits on its
+  capture. The code's account is the module doc of
+  `crates/steno-audio/src/realtime/missed.rs`.
+  - **Finding it.** Each callback says where its first frame sits on its
     clock: PipeWire's `pw_time` ticks (converted from the graph's rate to
     the stream's 48 kHz), the IOProc's input sample time, and WASAPI's
     device position on a packet flagged as a discontinuity.
     `realtime::CycleClock` compares it with where the audio delivered so
-    far ends, the fills included, and reports the frames missed, when that
-    is more than half the last callback (cycles are missed whole) and at
-    most `MISSED_FILL_LIMIT`. Frames delivered at or behind that end (a
-    cycle delivered twice, a buffer PipeWire kept from a stall and hands
-    over in a second callback at the same position) count against the
-    next jump.
-    The backend writes them as zeros on every lane before the callback's
-    own frames (`LaneFrameSink::fill_missed`), on the real-time thread:
-    integer arithmetic, one more reservation, no allocation, no lock, no
-    system call, no log. On WASAPI the microphone's fill is a silent
-    packet that still pulls the system stream's frames for that time, and
-    the system stream's fill is zeros in its staging ring, so the lanes
-    stay aligned. The session counts the zeros per lane at each stream's
-    rate into `CaptureStatistics::missed_seconds` (the lane that missed
-    most), logs them at `warn` after the stop, and the recorder adds them
-    to the gaps in the existing note, "About N seconds of the recording
-    are missing", from about a second on as before. The first callback, a
-    callback after a reset, a clock that goes back or repeats, a graph
-    rate that changes and, on PipeWire, a quantum that changes start the
-    clock afresh. Every start and rebuild begins a new clock, so the
-    session's gap between two streams is never counted again.
-  - **The bound.** `MISSED_FILL_LIMIT` is one second at the stream's
-    rate: half the session's two-second rings, so the fill fits beside a
-    processing thread up to a second behind (a fill the rings cannot take
-    counts as dropped, as any refused callback), and half of
-    `STALL_TIMEOUT`, so no jump it fills was a stall the session rebuilt
-    for and filled as a gap. A longer jump (a computer that slept, a clock
-    that was reset) is not filled: the master falls short of wall time by
-    it, and the recorder's note counts that from the wall time, as it does
-    for a gap past `MAXIMUM_GAP`. `duration` keeps its meaning, the
-    seconds the master holds, silence included.
+    far ends, the fills included, and reports the frames missed when that
+    is more than half the last callback (cycles are missed whole). Frames
+    delivered at or behind that end (a cycle delivered twice, a buffer
+    PipeWire kept from a stall and hands over in a second callback at the
+    same position) count against the next jump, so the master never runs
+    longer than wall time. The first callback, a callback after a reset, a
+    clock that goes back, a graph rate that changes and, on PipeWire, a
+    quantum that changes start the clock afresh. Every start and rebuild
+    begins a new clock, so the session's gap between two streams is never
+    counted again.
+  - **Writing it.** A jump of at most `MISSED_FILL_LIMIT` (one second at
+    the stream's rate) is written as zeros on every lane before the
+    callback's own frames (`LaneFrameSink::write_missed`), on the
+    real-time thread: integer arithmetic, one more reservation, no
+    allocation, no lock, no system call, no log. A longer one (a process
+    stopped for seconds, a computer that slept) is not written, with no
+    upper bound on what is counted: the master falls short of wall time by
+    it. The rings count both beside the drops; the session reports them per
+    lane at each stream's rate as `CaptureStatistics::missed_seconds` and
+    `unfilled_seconds` (the lane that lost most) and logs them at `warn`
+    after the stop. The recorder's existing note, "About N seconds of the
+    recording are missing", from about a second on as before, counts gap +
+    missed + the larger of the unfilled seconds and the wall time the master
+    lacks beyond the clocks' drift; without the unfilled seconds the drift
+    allowance (3.6 s in an hour) hid a 2.4 s stall in any recording over 41
+    minutes. `duration` keeps its meaning, the seconds the master holds,
+    silence included.
+  - **The lanes stay aligned**, for the mixdown, the echo canceller and
+    diarization, after a fill and after a jump too long to fill. On PipeWire
+    and Core Audio one callback writes every lane, so both lose the same
+    span. On WASAPI the microphone's thread writes the system lane too, from
+    the system stream's staging ring: its fill is a silent packet that
+    still pulls the system audio of that time; the system thread's own loss
+    is only counted, since the microphone's pulls already pad its lane with
+    zeros while it is out (it staged zeros at first, which slipped 110 ms of
+    real system audio per 200 ms stall and counted the same frames twice);
+    the microphone's lateness covers what it fills, so its kept packets do
+    not slip the queue before the fill pulls it; and its jump too long to
+    fill drops the system audio queued for that time.
+  - **At the stop.** A thread held up in the last moments before the stop
+    shows no jump, since no callback comes after it (lost 1 run in 3 before
+    this). PipeWire's `stop()` compares `CLOCK_MONOTONIC`, read before the
+    capture's gate closes, with the last delivered cycle's `pw_time`; Core
+    Audio's reads `AudioDeviceGetCurrentTime` before the IOProc stops.
+    `CycleClock::missed_until` judges it by the same rule, the callback in
+    flight aside, and the stop writes it once no callback runs, while the
+    session's writer is still open. WASAPI reads no position at the stop:
+    each stream drains once more, and the clock reads those packets'
+    positions. A stop for a rebuild reads nothing; the gap covers that time.
+  - **The bound.** One second is half the session's two-second rings, so
+    the fill fits beside a processing thread up to a second behind (a fill
+    the rings cannot take counts as dropped, as any refused callback), and
+    half of `STALL_TIMEOUT`, so no jump it fills was a stall the session
+    rebuilt for and filled as a gap.
   - **Fewer misses.** The capture's client context loads PipeWire's
     `module-rt` from `client.conf`, which asks for real-time scheduling of
     the data-loop thread, directly under `RLIMIT_RTPRIO` or through
     RealtimeKit; nothing in the stream's flags or properties was missing.
-    Where neither grants it (atlas, a container), `start` now logs once per
+    Where neither grants it (atlas, a container), `start` logs once per
     process at `warn` that the thread runs without it. Measured in the
     1-CPU container beside a hog, ten-second call captures, seconds
     missed per run:
@@ -1766,49 +1792,59 @@ Each lands before `0.11.0-rc.1`.
     Real-time scheduling cuts the misses when the machine is busy, but not
     to zero: the container's CPU quota throttles every thread in it. The
     counts matched an independent tally of the tick jumps in `process`, and
-    nothing was dropped. A starvation in the last moments before the stop
-    stays unfilled: no cycle shows its jump before the gate closes.
-  - **A buffer kept from a stall.** In the half-CPU container a stall of
-    five cycles was followed by a second callback at the same position
-    with a buffer the stream had kept. A clock that compared each callback
-    with the last one's end filled all five cycles and then got one of
-    them as audio, leaving the master up to 126 ms longer than the wall
-    time of a ten-second run. Following where the delivered audio ends
-    fixed that: in five more half-CPU runs every master stayed within the
-    wall time of its start and stop, the tally of tick jumps above the
-    count by the kept buffers.
+    nothing was dropped.
   - **Quantum changes.** At a new quantum PipeWire's graph clock jumps by
     up to two of the new cycles while the wall clock moves by one old and
     one new (256 to 1 024 frames: 2 048 ticks in 27.6 ms; 512 to 2 048:
-    4 096 ticks in 55.6 ms), which read as a false jump of 1 792 and
-    3 584 frames, a master 0.1 s longer than wall time over fifteen
-    changes. A cycle more than an eighth longer or shorter than the last
-    therefore starts the clock afresh; the 10 to 20 ms of wall time each
-    change costs on the private daemon stays unfilled, as before.
+    4 096 ticks in 55.6 ms), so a cycle more than an eighth longer or
+    shorter than the last starts the clock afresh; the 10 to 20 ms of wall
+    time each change costs on the private daemon stays unfilled.
   - **Gates.** Unit tests of the clock on synthetic positions (a jump, the
     first cycle, a reset, an empty cycle, a clock that goes back or
-    repeats, a wrap past `u64::MAX`, the limit and one frame over it, an
-    hour asleep, a resampled graph's rounding, a rate change, a quantum
-    change); the sink's fill and its refusal; the session over the
-    synthetic backend, which misses 100 ms (filled, on both lanes at the
-    same frames, counted, not dropped) and 1.5 s (left out); the recorder's
-    note after two misses of 0.75 s; the allocation count of the fill
-    through the PipeWire gate and both WASAPI bodies; the live probe test
-    with the master on wall time and the missed seconds printed, which in
-    the half-CPU container passes with 1.6 and 2.1 s filled and fails with
-    the PipeWire fill removed (masters of 8.3 and 8.7 s against 9.6 s of
-    wall time); the container runs above; one live Core Audio call capture
-    on Forge, which counted nothing missed. Mutations each fail a test:
-    the fill removed, the count removed, the jump off by one either way,
-    the session's count dropped, the limit removed, a kept buffer not
-    counted against the next jump, the quantum reset removed, the WASAPI
-    microphone's count removed, the note without the missed seconds.
-  - **Left.** Core Audio's and WASAPI's fills are unit-tested and
-    compiled in CI, not provoked on hardware (no load tests on Forge, no
-    Windows machine); WASAPI's device position is read as the stream's
-    frames, as Microsoft documents it, which a Windows machine must
-    confirm (a position that does not move fills nothing). Owner: audio.
-    It blocks stable (D3).
+    repeats, a wrap past `u64::MAX`, the limit and one frame over it, 2.5 s
+    and an hour counted unfilled, a resampled graph's rounding, a rate
+    change, a quantum change, the reading at the stop); the sink's fill, its
+    refusal and the unfilled count; PipeWire's fill before the cycle, its
+    reading at the stop and its scheduling-policy parse; the session over the
+    synthetic backend, which misses 100 ms (filled on both lanes at the same
+    frames, counted, not dropped) and 2.5 s (counted unfilled, both lanes the
+    same length), and a miss before a rebuild to 24 kHz (counted at the old
+    rate); the lane that missed most; the recorder's note after two misses of
+    0.75 s, and for a gap, missed cycles and an unfilled jump together in an
+    hour's recording; the WASAPI bodies with both threads out and the
+    microphone's alone for 200 and 300 ms (the lag stays the target, nothing
+    slips or counts twice) and the microphone's unfilled jump; the allocation
+    count of the fill through the PipeWire gate and both WASAPI bodies.
+    CI's live PipeWire tests stop their own process with `SIGSTOP` from a
+    child shell: three stops of 0.6 s are filled (1.73 to 1.75 s) with the
+    master on wall time; one of 2.5 s is counted unfilled (2.48 to 2.50 s);
+    one that ends just after the stop is counted (0.60 s); both lanes keep
+    the same length. The same runs in the 1-CPU container passed 3 of 3
+    each. After a 2.5 s stall left unfilled, every later moment of the
+    recording, a transcript's time stamps included, sits 2.42 to 2.66 s
+    early against the wall clock, the unfilled seconds within the stop's
+    timing. Two live Core Audio call captures on Forge: stopped twice for
+    0.6 s mid-capture, one counted 1.24 s on both lanes; stopped for 0.6 s
+    across the end of its capture, the other counted 0.60 s at the stop,
+    with 4.03 s of frames in 4.09 s. Mutations each fail a test: the fill
+    removed or after the cycle, the count removed, the jump off by one
+    either way, a kept buffer not counted against the next jump, the
+    session's count dropped or taken from the lane that missed least, the
+    rebuild's fold without the missed counts, the limit removed, an
+    unfilled jump filled, the unfilled count removed, the reading at the
+    stop without the callback in flight, the quantum reset removed, the
+    WASAPI follower staging zeros, its lateness without the fill, the
+    microphone's unfilled jump not dropping the system audio, the note
+    without the missed or the unfilled seconds or with the larger of gap
+    and missed instead of their sum, the scheduling check taking
+    `SCHED_OTHER` for real time.
+  - **Left.** WASAPI's fill is unit-tested and compiled in CI, not
+    provoked on hardware (no Windows machine); its device position is read
+    as the stream's frames, as Microsoft documents it, and the engine is
+    taken to keep the oldest packets of a stall, which the Windows gate's
+    step 9 confirms. Nicolai's gate steps (step 6 of R5 on the Mac, the
+    stalled recording in the Linux gates, step 9 of the Windows gate) stop
+    the app's process as the tests do. Owner: audio. It blocks stable (D3).
 - **A19 No in-process speech beside a live recording, and the speech
   sidecar after a CoreML abort.** Found by #296's code review: an abort in
   CoreML's load that no `@catch` stops (a failed allocation, an IOSurface
@@ -2729,6 +2765,13 @@ except case e.
      Pass: for each command, the peak of the resident memory of `steno` plus its
      children (each second, the sum of `ps -o rss=` over `steno` and `pgrep -P
      <steno>`) stays under A1's soak bound, and the transcripts are complete.
+  6. A stalled recording (A18). Record a call; a minute in, stop the app's
+     process three times for 0.6 s, a few seconds apart, in Terminal:
+     `p=$(pgrep -x steno-desktop); for i in 1 2 3; do kill -STOP $p; sleep 0.6;
+     kill -CONT $p; sleep 3; done`. Record another minute and stop. Pass when
+     the note after the stop says "About 2 seconds of the recording are
+     missing." and the meeting transcribes as usual. A heavy load in another
+     app does not do this reliably: the IO thread runs at real-time priority.
 - **R6 Rollback drill** (**Nicolai**, R3's account; the database is v5 by now).
   1. Save the Tauri app's requirement without its prefix
      (`mkdir -p ~/steno-r6 && codesign -d -r- ~/Applications/Steno.app 2>/dev/null | sed -n 's/^designated => //p' > ~/steno-r6/tauri-dr.txt`)
@@ -3235,7 +3278,16 @@ nix-collect-garbage -d` on NixOS. Step 0
 passes when the meeting and the pairing are kept and, after a logout and login,
 Steno starts once, as the new version. Each target's step 1 sets up its step 0;
 steps 2 onward run on the candidate under test. On `v0.11.0`, R8 repeats step 0
-from the last candidate and one recording.
+from the last candidate and one recording. Every target also runs one more
+step on the candidate, the stalled recording (A18): `journalctl --user -b 0 |
+grep -i "without real-time scheduling"` prints nothing, and
+`ps -L -o tid,cls,rtprio,comm -p $(pidof -s steno-desktop) | grep data-loop`
+shows `FF` or `RR` (RealtimeKit installed and running; on NixOS
+`security.rtkit.enable`); then record a call, stop the app's process three
+times for 0.6 s a minute in (`p=$(pidof -s steno-desktop); for i in 1 2 3; do
+kill -STOP $p; sleep 0.6; kill -CONT $p; sleep 3; done`), record another
+minute and stop. Pass when the note after the stop says "About 2 seconds of
+the recording are missing." and the meeting transcribes as usual.
 The status queries used throughout (`sqlite3`, or `nix-shell -p sqlite` on
 NixOS, for `q`):
 
@@ -3480,6 +3532,16 @@ candidate:
 8. With the MSI install, choose Install and Relaunch while another MSI package
    is installing (its progress bar moving), so `msiexec` exits at once with
    1618: Steno is back on the old version within 10 s.
+9. A stalled recording (A18), with `RUST_LOG=steno_audio=info`. Record a call
+   with nothing playing for a minute, then play something: the log at the stop
+   shows no "packets after a glitch" line. Record a call while something plays,
+   and suspend the app's process three times for 0.6 s (Sysinternals'
+   `pssuspend steno-desktop`, `Start-Sleep -Milliseconds 600`, `pssuspend -r
+   steno-desktop`). Pass when the note after the stop says "About 2 seconds of
+   the recording are missing.", the log's "packets after a glitch" lines add
+   up to about 1.8 s missed, and its "system stream staging" line shows 0
+   skipped (slipped): the engine kept the oldest packets of each stall, as the
+   fill expects, and the lanes stayed aligned.
 
 ## Order of operations and gates
 
