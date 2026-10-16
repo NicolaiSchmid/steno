@@ -704,8 +704,8 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   earlier pass already answered) sends nothing, so no duplicate goes
   out. It starts set, so the first pass reads the status even when a
   move came before the thread could be woken.
-- **What goes at once.** A snapshot whose anything but the levels differs
-  from the last one sent (the countdown and the denied permissions as
+- **What goes at once.** A snapshot that differs from the last one sent
+  in anything but the levels (the countdown and the denied permissions as
   well as the state, the meeting and the messages); otherwise it waits
   out the interval.
 - **The owner is one function,** `own_the_reloads(host, every)` in
