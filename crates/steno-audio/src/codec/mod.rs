@@ -70,8 +70,8 @@
 //!   the mono test tone, 5 * 10^-3 on the stereo one, `tests/codec.rs`). A
 //!   file with more damaged packets than clean ones fails
 //!   ([`MAX_DAMAGED_SHARE`]), so a corrupt file never becomes a meeting of
-//!   silence. A panic in symphonia's probe is caught the same way and
-//!   fails the file as the probe's error does: its MP4 reader panics on a
+//!   silence. A panic in symphonia's demuxer is caught the same way and
+//!   fails the file as the demuxer's error does: its MP4 reader panics on a
 //!   box size near 2^64 in a debug build, and on a metadata `mean` or
 //!   `name` box too short for its version and flags in a release build
 //!   too, where the length wraps and the read asks for about 2^64 bytes.
@@ -143,7 +143,7 @@ pub enum CodecError {
         /// Channels the file has.
         channels: usize,
     },
-    /// Symphonia could not probe or decode the container or codec.
+    /// Symphonia could not demux or decode the container or codec.
     #[error("unsupported audio format: {0}")]
     UnsupportedFormat(String),
     /// Not a kind of file Steno reads: not an MP4, CAF or WAV file from its
@@ -726,7 +726,7 @@ impl SymphoniaFrames {
     /// it cannot read for want of a `moov` is salvaged ([`salvage`]), and
     /// any other file it cannot read fails as before.
     fn open(path: &Path) -> Result<Self, CodecError> {
-        match Self::probe(path) {
+        match Self::demux(path) {
             Ok(frames) => Ok(frames),
             Err(error) => match salvage(path) {
                 Some(packets) => {
@@ -765,7 +765,7 @@ impl SymphoniaFrames {
         })
     }
 
-    fn probe(path: &Path) -> Result<Self, CodecError> {
+    fn demux(path: &Path) -> Result<Self, CodecError> {
         // Before symphonia sees a byte: a size it would allocate that the
         // file cannot hold aborts the process ([`sizes`]). The reader opens
         // the file where the walk started.
@@ -1009,15 +1009,11 @@ fn demuxer(
 ) -> symphonia::core::errors::Result<Box<dyn FormatReader>> {
     use symphonia::core::io::ReadBytes as _;
     use symphonia::default::formats::{CafReader, IsoMp4Reader, WavReader};
-    // Gapless, as the probe opened them.
-    let options = FormatOptions {
-        enable_gapless: true,
-        ..FormatOptions::default()
-    };
+    let options = FormatOptions::default();
     Ok(match start {
         sizes::Start::Mp4 => {
-            // As symphonia's probe leaves the stream: past the first box's
-            // size, from where the reader steps back 4 bytes.
+            // As symphonia's own probe would leave the stream: past the
+            // first box's size, from where the reader steps back 4 bytes.
             stream.ignore_bytes(4)?;
             Box::new(IsoMp4Reader::try_new(stream, &options)?)
         }
