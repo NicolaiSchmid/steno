@@ -8,7 +8,9 @@
 //!
 //! A write that does not fit is refused as a whole (the caller keeps lanes
 //! aligned by refusing every lane of that callback) and counted in
-//! `dropped_samples`.
+//! `dropped_samples`. Beside it the ring counts what its producer reported
+//! of audio its thread missed (`missed_samples`, written as zeros;
+//! `unfilled_samples`, not written: [`CycleClock`](super::CycleClock)).
 //!
 //! # Safety model
 //!
@@ -34,6 +36,8 @@ pub struct LaneRingBuffer {
     write_index: AtomicUsize,
     read_index: AtomicUsize,
     dropped: AtomicUsize,
+    missed: AtomicUsize,
+    unfilled: AtomicUsize,
 }
 
 // SAFETY: see the module doc. Shared access from exactly one producer and
@@ -66,6 +70,8 @@ impl LaneRingBuffer {
             write_index: AtomicUsize::new(0),
             read_index: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
+            missed: AtomicUsize::new(0),
+            unfilled: AtomicUsize::new(0),
         }
     }
 
@@ -92,6 +98,17 @@ impl LaneRingBuffer {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    /// Zeros written in place of audio the producer's thread missed.
+    pub fn missed_samples(&self) -> usize {
+        self.missed.load(Ordering::Relaxed)
+    }
+
+    /// Audio the producer's thread missed and did not write: a jump past
+    /// [`MISSED_FILL_LIMIT`](super::MISSED_FILL_LIMIT).
+    pub fn unfilled_samples(&self) -> usize {
+        self.unfilled.load(Ordering::Relaxed)
+    }
+
     /// Producer side. Whether `count` samples fit right now.
     #[inline(always)]
     pub fn has_room(&self, count: usize) -> bool {
@@ -104,6 +121,20 @@ impl LaneRingBuffer {
     #[inline(always)]
     pub fn record_drop(&self, count: usize) {
         self.dropped.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Producer side. Records `count` zeros written in place of audio the
+    /// producer's thread missed.
+    #[inline(always)]
+    pub fn record_missed(&self, count: usize) {
+        self.missed.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Producer side. Records `count` samples the producer's thread missed
+    /// and did not write.
+    #[inline(always)]
+    pub fn record_unfilled(&self, count: usize) {
+        self.unfilled.fetch_add(count, Ordering::Relaxed);
     }
 
     /// Producer side. The write index when `count` more samples fit; `None`,
@@ -258,8 +289,8 @@ impl LaneRingBuffer {
         samples
     }
 
-    /// Empties the ring and zeroes its storage so a restart never replays
-    /// stale frames. Only while no producer and no consumer runs; the
+    /// Empties the ring, zeroes its storage so a restart never replays
+    /// stale frames, and zeroes its counts. Only while no producer and no consumer runs; the
     /// `&mut` borrow is not required because the session holds the ring in
     /// an `Arc`, so the contract is documented rather than typed.
     pub fn clear(&self) {
@@ -270,5 +301,7 @@ impl LaneRingBuffer {
         self.read_index.store(0, Ordering::SeqCst);
         self.write_index.store(0, Ordering::SeqCst);
         self.dropped.store(0, Ordering::SeqCst);
+        self.missed.store(0, Ordering::SeqCst);
+        self.unfilled.store(0, Ordering::SeqCst);
     }
 }

@@ -101,8 +101,27 @@ impl LaneRings {
             .collect()
     }
 
-    /// Zeroes every ring so a restart never replays stale frames. Only
-    /// while no producer runs.
+    /// Zeros written per channel in place of audio the producer's thread
+    /// missed.
+    #[must_use]
+    pub fn missed_samples(&self) -> Vec<usize> {
+        self.rings
+            .iter()
+            .map(LaneRingBuffer::missed_samples)
+            .collect()
+    }
+
+    /// Samples per channel the producer's thread missed and did not write.
+    #[must_use]
+    pub fn unfilled_samples(&self) -> Vec<usize> {
+        self.rings
+            .iter()
+            .map(LaneRingBuffer::unfilled_samples)
+            .collect()
+    }
+
+    /// Zeroes every ring and its counts so a restart never replays stale
+    /// frames. Only while no producer runs.
     pub fn clear(&self) {
         for ring in &self.rings {
             ring.clear();

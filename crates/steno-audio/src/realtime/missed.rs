@@ -1,51 +1,104 @@
-//! The audio a capture thread missed: a callback's position against where
-//! the last one ended (A18 of `.plans/2026-10-07-stable-promotion.md`).
-//! Rust only: Swift's IOProc reads no timestamps.
+//! The audio a capture thread missed (A18 of
+//! `.plans/2026-10-07-stable-promotion.md`): how the backends find it,
+//! write it and count it, stated here once. Rust only: Swift's IOProc reads
+//! no time stamps.
+//!
+//! # Finding it
 //!
 //! Each backend's callback says where its first frame sits on the device's
 //! or the graph's clock: PipeWire's `pw_time` ticks, the IOProc's input
-//! sample time on macOS, WASAPI's device position. A capture thread the
-//! scheduler held up misses cycles: the daemon, the HAL or the engine runs
-//! on, the audio of those cycles is gone, and the next callback's position
-//! sits past where the audio delivered so far ends. [`CycleClock::advance`]
-//! turns that jump into frames, which the backend writes as silence on
-//! every lane before the callback's own frames
-//! ([`LaneFrameSink::fill_missed`]), so the master stays on wall time and
-//! the lanes stay aligned, and which the session counts in
-//! [`CaptureStatistics::missed_seconds`] for the recorder's note about
-//! missing audio.
+//! sample time on macOS, WASAPI's device position on a packet flagged as a
+//! discontinuity. A capture thread the scheduler held up misses cycles: the
+//! daemon, the HAL or the engine runs on, the audio of those cycles is gone,
+//! and the next callback's position sits past where the audio delivered so
+//! far ends. [`CycleClock::advance`] turns that jump into frames
+//! ([`Missed`]) when it is more than half the last callback: cycles are
+//! missed whole, and less is a resampler's rounding.
 //!
-//! The clock follows where the delivered audio ends, the fills included,
-//! not only where the last callback ended: after a stall PipeWire can hand
-//! over a buffer it kept from the stall in a second callback at the same
-//! position (measured in a throttled container: a jump of five cycles, then
-//! one more buffer), and that buffer's frames count against the next jump
-//! instead of leaving the master a cycle longer than wall time for each.
+//! The clock follows where the delivered audio ends, the fills included.
+//! Frames a callback delivers at or behind that end (a cycle delivered
+//! twice; a buffer PipeWire kept from a stall and hands over in a second
+//! callback at the same position, measured in a throttled container) count
+//! against the next jump, so the master never runs longer than wall time.
+//! Such a kept buffer lands after the zeros of the stall it came from,
+//! misplaced by at most that stall; the length is right.
+//! The first callback, one after a reset, a clock that goes back, a rate
+//! that changes and, on PipeWire, a quantum that changes start the clock
+//! afresh. Every start and rebuild begins a new clock, so the session's gap
+//! between two streams is never counted again.
 //!
-//! A jump of more than [`MISSED_FILL_LIMIT`] is not filled: one that long
-//! (a computer that slept, a clock that was reset) is left to the
-//! session's handling of time the master does not hold. The master falls
-//! short by it, and the recorder's note counts the wall time it lacks. The
-//! limit is under [`CaptureSession::STALL_TIMEOUT`], so no jump the fill
-//! takes can be a stall whose rebuild writes a gap for the same time.
+//! # Writing it
+//!
+//! A jump of at most [`MISSED_FILL_LIMIT`] is [`Missed::fill`]: the backend
+//! writes it as zeros on every lane before the callback's own frames
+//! ([`LaneFrameSink::write_missed`]), so the master stays on wall time. A
+//! longer one (a process stopped for seconds, a computer that slept) is
+//! [`Missed::unfilled`]: nothing is written, the master falls short of wall
+//! time by it, and it is counted. The session reports both, per lane at each
+//! stream's rate, as [`CaptureStatistics::missed_seconds`] and
+//! [`CaptureStatistics::unfilled_seconds`] and logs them at `warn` after the
+//! stop; the recorder's note "About N seconds of the recording are missing"
+//! adds them to the gaps.
+//!
+//! The lanes lose the same span either way, so they stay aligned for the
+//! mixdown, the echo canceller and diarization: on PipeWire and macOS one
+//! callback writes every lane, and on WASAPI the microphone's thread writes
+//! the system lane too, from the system stream's staging ring
+//! ([`StreamBody::write_missed`](super::StreamBody::write_missed)).
+//!
+//! # At the stop
+//!
+//! A thread held up in the last moments before the stop shows no jump: no
+//! callback comes after it. [`CycleClock::missed_until`] reads the clock at
+//! the stop against the same end, the callback in flight then aside:
+//! PipeWire compares `CLOCK_MONOTONIC` with the last cycle's `pw_time`,
+//! macOS reads `AudioDeviceGetCurrentTime`. The stop writes what it finds
+//! once the callbacks have ended, while the session's writer is still open.
+//! WASAPI reads no position at the stop: one last drain hands over what the
+//! engine still holds, and the clock reads those packets' positions as
+//! before. A stop for a rebuild reads nothing: the session's gap covers that
+//! time.
+//!
+//! # The bound
+//!
+//! The limit is one second at the stream's rate. That is half the session's
+//! two-second rings, so the fill fits beside a processing thread up to a
+//! second behind (a fill the rings cannot take counts as dropped, as any
+//! refused callback), and half of [`CaptureSession::STALL_TIMEOUT`], so no
+//! jump the fill takes can be a stall whose rebuild writes a gap for the
+//! same time.
 //!
 //! Real-time safe: integer arithmetic on plain fields, nothing else.
 //!
-//! [`LaneFrameSink::fill_missed`]: super::LaneFrameSink::fill_missed
+//! [`LaneFrameSink::write_missed`]: super::LaneFrameSink::write_missed
 //! [`CaptureStatistics::missed_seconds`]: crate::capture::CaptureStatistics::missed_seconds
+//! [`CaptureStatistics::unfilled_seconds`]: crate::capture::CaptureStatistics::unfilled_seconds
 //! [`CaptureSession::STALL_TIMEOUT`]: crate::capture::CaptureSession::STALL_TIMEOUT
 
 use std::time::Duration;
 
-/// The longest jump [`CycleClock::advance`] reports for filling: one
-/// second. That is half the session's two-second rings, so the fill fits
-/// beside a consumer up to a second behind, and half of
-/// [`CaptureSession::STALL_TIMEOUT`], so a jump it fills was never a stall
-/// the session rebuilt for. See the module doc for what happens to a
-/// longer one.
-///
-/// [`CaptureSession::STALL_TIMEOUT`]: crate::capture::CaptureSession::STALL_TIMEOUT
+/// The longest jump [`CycleClock::advance`] reports as [`Missed::fill`]:
+/// one second (see the module doc).
 pub const MISSED_FILL_LIMIT: Duration = Duration::from_secs(1);
+
+/// The frames a [`CycleClock`] found missed: those to write as silence and
+/// those of a jump too long for that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Missed {
+    /// Frames to write as zeros before the callback's own, at most
+    /// [`MISSED_FILL_LIMIT`].
+    pub fill: usize,
+    /// Frames of a jump past [`MISSED_FILL_LIMIT`]: counted, never written.
+    pub unfilled: usize,
+}
+
+impl Missed {
+    /// Nothing missed.
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        self.fill == 0 && self.unfilled == 0
+    }
+}
 
 /// Where the audio a capture delivered ends on its clock, and how that
 /// clock counts frames; see the module doc. One per started stream, owned
@@ -55,7 +108,7 @@ pub struct CycleClock {
     /// Stream frames per `ticks` clock ticks.
     frames: u64,
     ticks: u64,
-    /// The most frames [`Self::advance`] reports.
+    /// The most frames [`Self::advance`] reports to fill.
     limit: usize,
     /// The first callback's position since the last [`Self::reset`], from
     /// which positions count in stream frames; `None` before it.
@@ -123,39 +176,30 @@ impl CycleClock {
     }
 
     /// One callback whose first frame sits at `position` on the clock and
-    /// which delivers `frames`: returns the frames missed before it, to be
-    /// filled with silence. That is how far `position` passed the end of
-    /// the audio delivered so far, in stream frames, when that is more than
-    /// half the last callback's frames (cycles are missed whole; this
-    /// leaves room for a resampler's rounding) and at most the limit; the
-    /// audio then ends at `position`, plus `frames`. It is 0 for the first
-    /// callback, after a reset, after a callback without frames, and for a
-    /// jump over the limit, and the clock follows on from this callback; a
-    /// shortfall of half a callback or less is forgotten the same way. A
-    /// position at or behind the end (a cycle delivered twice, a buffer
-    /// kept from a stall) reports nothing and moves the end on by `frames`,
-    /// so those frames count against the next jump; one more than the limit
-    /// behind it, or behind the first callback (a clock that went back),
-    /// starts afresh. Positions wrap: one just past `u64::MAX` follows on
-    /// from one just before.
+    /// which delivers `frames`: the frames missed before it. That is how far
+    /// `position` passed the end of the audio delivered so far, in stream
+    /// frames, when that is more than half the last callback's frames: up to
+    /// the limit to fill, past it unfilled. The audio then ends at
+    /// `position`, plus `frames`. Nothing for the first callback, after a
+    /// reset and after a callback without frames, and the clock follows on
+    /// from this callback; a shortfall of half a callback or less is
+    /// forgotten the same way. A position at or behind the end (a cycle
+    /// delivered twice, a buffer kept from a stall) reports nothing and
+    /// moves the end on by `frames`, so those frames count against the next
+    /// jump; one more than the limit behind it, or behind the first callback
+    /// (a clock that went back), starts afresh. Positions wrap: one just past
+    /// `u64::MAX` follows on from one just before.
     #[inline(always)]
-    pub fn advance(&mut self, position: u64, frames: usize) -> usize {
+    pub fn advance(&mut self, position: u64, frames: usize) -> Missed {
         let last_frames = std::mem::replace(&mut self.last_frames, frames);
-        let since = self.origin.map(|origin| position.wrapping_sub(origin));
-        // More than half the ring of positions ahead is behind the origin.
-        let Some(since) = since.filter(|since| *since <= u64::MAX / 2) else {
+        let Some(at) = self.at(position) else {
             self.origin = Some(position);
             self.end = frames as u64;
-            return 0;
+            return Missed::default();
         };
-        let at = self.frames_in(since);
-        let mut missed = 0;
+        let mut missed = Missed::default();
         if at > self.end {
-            let gap = at - self.end;
-            if last_frames > 0 && gap > last_frames as u64 / 2 && gap <= self.limit as u64 {
-                // At most the limit, a `usize`.
-                missed = gap as usize;
-            }
+            missed = self.jump(at - self.end, last_frames);
             self.end = at;
         } else if self.end - at > self.limit as u64 {
             self.origin = Some(position);
@@ -163,6 +207,56 @@ impl CycleClock {
         }
         self.end = self.end.saturating_add(frames as u64);
         missed
+    }
+
+    /// The frames missed after the last callback, for a stream stopped
+    /// while the clock reads `position`: how far that passed the end of the
+    /// audio delivered, less one callback of the last one's length (the one
+    /// in flight at the stop), under [`Self::advance`]'s rule. Nothing
+    /// before the first callback, after a reset and for a position behind
+    /// the first callback. Changes nothing.
+    #[must_use]
+    pub fn missed_until(&self, position: u64) -> Missed {
+        let Some(at) = self.at(position) else {
+            return Missed::default();
+        };
+        let in_flight = self.end.saturating_add(self.last_frames as u64);
+        if at <= in_flight {
+            return Missed::default();
+        }
+        self.jump(at - in_flight, self.last_frames)
+    }
+
+    /// `position` in stream frames since the origin; `None` before the
+    /// first callback and for a position behind it (more than half the
+    /// ring of positions ahead).
+    #[inline(always)]
+    fn at(&self, position: u64) -> Option<u64> {
+        let since = position.wrapping_sub(self.origin?);
+        (since <= u64::MAX / 2).then(|| self.frames_in(since))
+    }
+
+    /// A jump of `gap` frames after a callback of `last_frames`: nothing
+    /// for half a callback or less, or after a callback without frames;
+    /// else filled up to the limit, unfilled past it.
+    #[inline(always)]
+    fn jump(&self, gap: u64, last_frames: usize) -> Missed {
+        if last_frames == 0 || gap <= last_frames as u64 / 2 {
+            return Missed::default();
+        }
+        // At most the limit, a `usize`; past it, as many as a `usize` holds.
+        let frames = usize::try_from(gap).unwrap_or(usize::MAX);
+        if gap <= self.limit as u64 {
+            Missed {
+                fill: frames,
+                unfilled: 0,
+            }
+        } else {
+            Missed {
+                fill: 0,
+                unfilled: frames,
+            }
+        }
     }
 
     /// `ticks` clock ticks in stream frames, to the nearest frame.
@@ -178,13 +272,20 @@ impl CycleClock {
 mod tests {
     use super::*;
 
-    /// A 48 kHz clock fed one callback per entry of `cycles` (position,
-    /// frames); what each reported.
+    /// `clock` fed one callback per entry of `cycles` (position, frames);
+    /// what each reported to fill.
     fn run(clock: &mut CycleClock, cycles: &[(u64, usize)]) -> Vec<usize> {
         cycles
             .iter()
-            .map(|&(position, frames)| clock.advance(position, frames))
+            .map(|&(position, frames)| clock.advance(position, frames).fill)
             .collect()
+    }
+
+    fn unfilled(frames: usize) -> Missed {
+        Missed {
+            fill: 0,
+            unfilled: frames,
+        }
     }
 
     #[test]
@@ -203,17 +304,17 @@ mod tests {
     #[test]
     fn the_first_cycle_and_one_after_a_reset_or_an_empty_cycle_report_nothing() {
         let mut clock = CycleClock::new(48_000.0);
-        assert_eq!(clock.advance(1_000_000, 480), 0, "the first cycle");
-        assert_eq!(clock.advance(1_000_480, 480), 0);
+        assert_eq!(clock.advance(1_000_000, 480).fill, 0, "the first cycle");
+        assert_eq!(clock.advance(1_000_480, 480).fill, 0);
         clock.reset();
-        assert_eq!(clock.advance(5_000_000, 480), 0, "after a reset");
-        assert_eq!(clock.advance(5_000_480, 0), 0);
+        assert_eq!(clock.advance(5_000_000, 480).fill, 0, "after a reset");
+        assert_eq!(clock.advance(5_000_480, 0).fill, 0);
         assert_eq!(
-            clock.advance(5_009_600, 480),
+            clock.advance(5_009_600, 480).fill,
             0,
             "a cycle without frames says nothing of the next"
         );
-        assert_eq!(clock.advance(5_010_080, 480), 0);
+        assert_eq!(clock.advance(5_010_080, 480).fill, 0);
     }
 
     #[test]
@@ -247,11 +348,11 @@ mod tests {
             [0, 0, 0, 0, 0]
         );
         assert_eq!(
-            clock.advance(2_880, 480),
+            clock.advance(2_880, 480).fill,
             480,
             "two cycles missed, less the one delivered twice"
         );
-        assert_eq!(clock.advance(3_360, 480), 0);
+        assert_eq!(clock.advance(3_360, 480).fill, 0);
     }
 
     #[test]
@@ -280,10 +381,14 @@ mod tests {
         // before that count against nothing.
         let mut clock = CycleClock::new(48_000.0);
         for _ in 0..102 {
-            assert_eq!(clock.advance(0, 480), 0);
+            assert_eq!(clock.advance(0, 480).fill, 0);
         }
-        assert_eq!(clock.advance(480, 480), 0);
-        assert_eq!(clock.advance(1_440, 480), 480, "a cycle missed after it");
+        assert_eq!(clock.advance(480, 480).fill, 0);
+        assert_eq!(
+            clock.advance(1_440, 480).fill,
+            480,
+            "a cycle missed after it"
+        );
     }
 
     #[test]
@@ -304,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn a_jump_over_the_limit_is_not_filled_and_one_at_it_is() {
+    fn a_jump_over_the_limit_is_unfilled_without_a_bound_and_one_at_it_is_filled() {
         let mut clock = CycleClock::new(48_000.0);
         assert_eq!(
             run(&mut clock, &[(0, 480), (480 + 48_000, 480)]),
@@ -312,24 +417,73 @@ mod tests {
             "a second, the limit"
         );
         assert_eq!(
-            run(&mut clock, &[(48_960 + 48_001, 480), (97_441, 480)]),
-            [0, 0],
-            "a frame over it, and the clock follows on from there"
+            clock.advance(48_960 + 48_001, 480),
+            unfilled(48_001),
+            "a frame over it is counted, not filled"
+        );
+        assert!(
+            clock.advance(97_441, 480).is_none(),
+            "and the clock follows on from there"
+        );
+        let mut stopped = CycleClock::new(48_000.0);
+        stopped.advance(0, 480);
+        assert_eq!(
+            stopped.advance(480 + 120_000, 480),
+            unfilled(120_000),
+            "2.5 s, past the session's stall timeout"
         );
         let mut slept = CycleClock::new(48_000.0);
+        slept.advance(0, 480);
         assert_eq!(
-            run(&mut slept, &[(0, 480), (480 + 48_000 * 3_600, 480)]),
-            [0, 0],
-            "an hour asleep writes no hour of zeros"
+            slept.advance(480 + 48_000 * 3_600, 480),
+            unfilled(48_000 * 3_600),
+            "an hour asleep writes no hour of zeros, and counts it"
         );
         let mut slow = CycleClock::new(16_000.0);
         assert_eq!(
-            run(
-                &mut slow,
-                &[(0, 160), (160 + 16_000, 160), (16_320 + 16_001, 160)]
-            ),
-            [0, 16_000, 0],
+            run(&mut slow, &[(0, 160), (160 + 16_000, 160)]),
+            [0, 16_000],
             "the limit is a second at the stream's rate"
+        );
+        assert_eq!(slow.advance(16_320 + 16_001, 160), unfilled(16_001));
+    }
+
+    #[test]
+    fn at_the_stop_the_clock_reads_what_passed_the_end_less_the_callback_in_flight() {
+        let mut clock = CycleClock::new(48_000.0);
+        assert!(clock.missed_until(1_000).is_none(), "nothing delivered yet");
+        run(&mut clock, &[(0, 480), (480, 480)]);
+        // The audio ends at 960; the callback in flight takes it to 1 440.
+        for (position, fill) in [(960, 0), (1_440, 0), (1_680, 0), (1_681, 241), (2_400, 960)] {
+            assert_eq!(clock.missed_until(position).fill, fill, "at {position}");
+        }
+        assert_eq!(
+            clock.missed_until(1_440 + 48_000),
+            Missed {
+                fill: 48_000,
+                unfilled: 0
+            }
+        );
+        assert_eq!(clock.missed_until(1_440 + 120_000), unfilled(120_000));
+        assert!(
+            clock.missed_until(u64::MAX - 10).is_none(),
+            "behind the first callback"
+        );
+        assert!(clock.advance(960, 480).is_none(), "it changed nothing");
+        clock.reset();
+        assert!(clock.missed_until(1_000_000).is_none(), "after a reset");
+        // On another scale: nanosecond ticks, as PipeWire's stop reads them.
+        let mut clock = CycleClock::new(48_000.0);
+        clock.rescale(48_000, 1_000_000_000);
+        clock.advance(5_000_000_000, 480);
+        assert!(
+            clock.missed_until(5_020_000_000).is_none(),
+            "one cycle late"
+        );
+        assert_eq!(
+            clock.missed_until(5_600_000_000).fill,
+            28_800 - 960,
+            "0.6 s on, less the cycle delivered and the one in flight"
         );
     }
 
@@ -348,16 +502,24 @@ mod tests {
         );
         clock.rescale(48_000, 44_100);
         assert_eq!(
-            clock.advance(3_087, 480),
+            clock.advance(3_087, 480).fill,
             480,
             "the same scale keeps the clock"
         );
         clock.rescale(48_000, 96_000);
-        assert_eq!(clock.advance(9_000_000, 480), 0, "a new rate starts afresh");
-        assert_eq!(clock.advance(9_000_960, 480), 0);
+        assert_eq!(
+            clock.advance(9_000_000, 480).fill,
+            0,
+            "a new rate starts afresh"
+        );
+        assert_eq!(clock.advance(9_000_960, 480).fill, 0);
         clock.rescale(0, 96_000);
-        assert_eq!(clock.advance(9_001_920, 480), 0, "a zero scale is ignored");
-        assert_eq!(clock.advance(9_003_840, 480), 480);
+        assert_eq!(
+            clock.advance(9_001_920, 480).fill,
+            0,
+            "a zero scale is ignored"
+        );
+        assert_eq!(clock.advance(9_003_840, 480).fill, 480);
     }
 
     #[test]
@@ -369,7 +531,7 @@ mod tests {
         let mut position = 0;
         for cycle in 0..1_000u64 {
             let frames = if cycle % 2 == 0 { 1_114 } else { 1_115 };
-            assert_eq!(clock.advance(position, frames), 0, "cycle {cycle}");
+            assert_eq!(clock.advance(position, frames).fill, 0, "cycle {cycle}");
             position += 1_024;
         }
     }
@@ -390,10 +552,11 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_or_odd_rate_fills_nothing() {
+    fn a_zero_or_odd_rate_fills_nothing_and_counts_the_jump() {
         for rate in [0.0, -48_000.0, f64::NAN] {
             let mut clock = CycleClock::new(rate);
-            assert_eq!(run(&mut clock, &[(0, 480), (1_920, 480)]), [0, 0], "{rate}");
+            clock.advance(0, 480);
+            assert_eq!(clock.advance(1_920, 480), unfilled(1_440), "{rate}");
         }
     }
 }

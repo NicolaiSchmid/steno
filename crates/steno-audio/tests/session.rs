@@ -5368,17 +5368,21 @@ fn zero_runs(samples: &[f32], shortest: usize) -> Vec<(usize, usize)> {
     runs
 }
 
-/// A capture thread that misses cycles (A18 of the stable-promotion plan):
-/// the synthetic producer skips 100 ms one second in, which its clock
-/// reports and the sink fills with zeros on both lanes at the same frames,
-/// so the master holds the whole four seconds less only the jump past the
-/// limit: 1.5 s two seconds in, left out rather than written as zeros. The
-/// filled frames count as missed, not as dropped or as a gap.
+/// A capture thread that misses cycles (A18 of
+/// `.plans/2026-10-07-stable-promotion.md`): the synthetic producer skips
+/// 100 ms one second in, which its clock reports and the sink fills with
+/// zeros on both lanes at the same frames, and 2.5 s two seconds in, past
+/// the fill limit and the session's stall timeout, which is counted and
+/// left out. The master holds the five seconds less the 2.5 s, both lanes
+/// alike; the filled frames count as missed, the rest as unfilled, neither
+/// as dropped or as a gap.
 #[test]
 fn missed_cycles_are_written_as_silence_on_every_lane_and_counted() {
     let directory = tempfile::tempdir().unwrap();
     let backend = Arc::new(SyntheticCaptureBackend::new(
-        tones(&call(), 4.0).miss_at(1.0, 4_800).miss_at(2.0, 72_000),
+        tones(&call(), 5.0)
+            .miss_at(1.0, 4_800)
+            .miss_at(2.0, 120_000),
     ));
     let mut configuration = configuration(CaptureMode::Call, directory.path(), false);
     configuration.echo_cancellation = false;
@@ -5396,19 +5400,67 @@ fn missed_cycles_are_written_as_silence_on_every_lane_and_counted() {
     let statistics = &result.statistics;
     assert!(statistics.dropped_frames.is_empty(), "{statistics:?}");
     assert_eq!(statistics.gap_seconds, 0.0);
-    assert_eq!(statistics.missed_seconds, 0.1, "the 100 ms, not the 1.5 s");
+    assert_eq!(statistics.missed_seconds, 0.1, "the 100 ms filled");
+    assert_eq!(statistics.unfilled_seconds, 2.5, "the 2.5 s counted");
     assert!(
         (statistics.duration - 2.5).abs() < 0.02,
-        "four seconds less the jump past the limit: {}",
+        "five seconds less the jump past the limit: {}",
         statistics.duration
     );
     let master = master_of(&result);
     assert_eq!(master.channels.len(), 2);
+    assert_eq!(
+        master.channels[0].len(),
+        master.channels[1].len(),
+        "both lanes lost the same span"
+    );
     for (lane, samples) in call().iter().zip(&master.channels) {
         assert_eq!(
             zero_runs(samples, 16),
             [(48_000, 4_800)],
-            "{lane:?}: zeros exactly where the frames were missed"
+            "{lane:?}: zeros exactly where the frames were filled"
         );
     }
+}
+
+/// What a stream's thread missed counts at that stream's rate when a
+/// rebuild moves the recording to another: 2 400 frames missed at 48 kHz
+/// are 50 ms, not the 100 ms they would be at the restarted 24 kHz.
+#[test]
+fn missed_cycles_before_a_rebuild_count_at_the_old_streams_rate() {
+    let directory = tempfile::tempdir().unwrap();
+    let hands_free = CaptureStream {
+        sample_rate: 24_000.0,
+        input_latency_frames: 240,
+        output_latency_frames: 4_800,
+        ..CaptureStream::SYNTHETIC
+    };
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 2.0)
+            .miss_at(0.5, 2_400)
+            .change_device_after(1.0)
+            .stream_after_restart(hands_free),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        Arc::new(ManualClock::new()),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        recv(&notices),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert!(matches!(
+        recv(&notices),
+        CaptureNotice::DeviceResumed { .. }
+    ));
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.device_changes, 1);
+    assert_eq!(result.statistics.missed_seconds, 0.05);
 }

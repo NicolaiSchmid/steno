@@ -167,14 +167,12 @@
 //! good.
 //!
 //! Audio the backend's own thread missed while its stream ran (cycles the
-//! scheduler did not give it; A18 of `.plans/2026-10-07-stable-promotion.md`)
-//! is no stall: the backend writes it as zeros on every lane before its next
-//! callback ([`LaneFrameSink::fill_missed`],
-//! [`CycleClock`](crate::realtime::CycleClock)), and the session counts it
-//! per lane at each stream's rate into
-//! [`CaptureStatistics::missed_seconds`], logged at `warn` after the stop.
-//! A jump too long for that fill leaves the master short of wall time, which
-//! the recorder's note counts. Rust only.
+//! scheduler did not give it) is no stall: the backend writes it as zeros
+//! or counts it, and the session folds those counts per lane at each
+//! stream's rate into [`CaptureStatistics::missed_seconds`] and
+//! [`CaptureStatistics::unfilled_seconds`], logged at `warn` after the
+//! stop. A18, the design in [`realtime::missed`](crate::realtime::missed);
+//! Rust only.
 //!
 //! # Threads
 //!
@@ -377,9 +375,8 @@ struct Active {
     /// listeners are live before the gap is written); `resume` starts the
     /// next rebuild from it instead of losing it.
     pending_change: Option<DeviceChangeReason>,
-    /// The ring overruns of the streams a rebuild has stopped, and the zeros
-    /// they wrote for audio their thread missed, each counted at its own
-    /// rate.
+    /// The ring overruns of the streams a rebuild has stopped, and what
+    /// their thread missed, each counted at its own rate.
     ring_counts: RingCounts,
     /// The watch thread, over a backend that delivers continuously.
     watch: Option<Watch>,
@@ -436,7 +433,7 @@ impl Streak {
 }
 
 /// Per-lane counts the sink keeps in samples at the device's rate (ring
-/// overruns, zeros for missed audio), in samples at [`SAMPLE_RATE`]. The
+/// overruns, missed audio), in samples at [`SAMPLE_RATE`]. The
 /// sink keeps counting across a rebuild, so each stream's share is
 /// rescaled at that stream's rate once it has stopped.
 #[derive(Default)]
@@ -460,12 +457,13 @@ impl LaneCounts {
 }
 
 /// The sink's per-lane counts of one recording: its ring overruns, and
-/// the zeros written for audio a capture thread missed
-/// ([`LaneFrameSink::fill_missed`]).
+/// the audio a capture thread missed, written as zeros or not
+/// ([`LaneFrameSink::write_missed`]).
 #[derive(Default)]
 struct RingCounts {
     dropped: LaneCounts,
     missed: LaneCounts,
+    unfilled: LaneCounts,
 }
 
 impl RingCounts {
@@ -474,27 +472,48 @@ impl RingCounts {
     fn fold(&mut self, sink: &LaneFrameSink, rate: f64) {
         self.dropped.fold(sink.dropped_samples(), rate);
         self.missed.fold(sink.missed_samples(), rate);
+        self.unfilled.fold(sink.unfilled_samples(), rate);
+    }
+
+    /// The ring overruns per lane in whole 10 ms frames at [`SAMPLE_RATE`].
+    fn dropped_frames(&self) -> BTreeMap<AudioLane, usize> {
+        self.dropped
+            .at_output_rate
+            .iter()
+            .map(|(lane, samples)| (*lane, samples / FRAME_SIZE))
+            .collect()
     }
 
     /// Seconds of zeros written for missed audio on the lane that missed
-    /// most, for [`CaptureStatistics::missed_seconds`]; logged at `warn`
-    /// with every lane's count when there are any.
+    /// most, for [`CaptureStatistics::missed_seconds`].
     fn missed_seconds(&self) -> f64 {
-        let most = self
-            .missed
-            .at_output_rate
-            .values()
-            .max()
-            .copied()
-            .unwrap_or(0);
-        let seconds = most as f64 / SAMPLE_RATE;
-        if most > 0 {
+        Self::most_seconds(&self.missed)
+    }
+
+    /// Seconds of missed audio not written on the lane that lost most, for
+    /// [`CaptureStatistics::unfilled_seconds`].
+    fn unfilled_seconds(&self) -> f64 {
+        Self::most_seconds(&self.unfilled)
+    }
+
+    /// The largest lane's count in `counts`, in seconds.
+    fn most_seconds(counts: &LaneCounts) -> f64 {
+        counts.at_output_rate.values().max().copied().unwrap_or(0) as f64 / SAMPLE_RATE
+    }
+
+    /// The `warn` line after the stop, when the capture's thread missed
+    /// anything: the seconds and every lane's samples, filled and not.
+    fn log_missed(&self) {
+        let (missed, unfilled) = (self.missed_seconds(), self.unfilled_seconds());
+        if missed > 0.0 || unfilled > 0.0 {
             tracing::warn!(
                 missed = ?self.missed.at_output_rate,
-                "the capture's thread missed {seconds:.3} s of audio, written as silence"
+                unfilled = ?self.unfilled.at_output_rate,
+                "the capture's thread missed {:.3} s of audio: {missed:.3} s written as \
+                 silence, {unfilled:.3} s too long to fill and left out",
+                missed + unfilled
             );
         }
-        seconds
     }
 }
 
@@ -1434,11 +1453,11 @@ impl Core {
         let write_failure = writer_thread.take_error();
         let sync_failure = writer_thread.take_sync_error();
         let mut writer = writer_thread.take_writer().ok_or_else(writer_lost)?;
-        // Read before `clear()`, which zeroes the ring overrun counts. Whole
-        // frames still in the rings never reached the relay: a restarted
-        // backend delivered them after a stop overtook its rebuild, with no
-        // processing thread running yet. They count as dropped. The rings
-        // hold the device's rate; the counts are 48 kHz frames.
+        // Read before `clear()`, which zeroes the rings' counts (overruns,
+        // missed audio). Whole frames still in the rings never reached the
+        // relay: a restarted backend delivered them after a stop overtook
+        // its rebuild, with no processing thread running yet. They count as
+        // dropped. The rings hold the device's rate; the counts are 48 kHz.
         active.ring_counts.fold(&active.sink, ring_rate);
         let undrained =
             CaptureStream::rescaled(active.sink.available_to_read(), ring_rate, SAMPLE_RATE)
@@ -1462,10 +1481,7 @@ impl Core {
             )));
         }
         let lanes = self.configuration.lanes();
-        let mut dropped: BTreeMap<AudioLane, usize> = BTreeMap::new();
-        for (lane, samples) in &active.ring_counts.dropped.at_output_rate {
-            *dropped.entry(*lane).or_default() += samples / FRAME_SIZE;
-        }
+        let mut dropped = active.ring_counts.dropped_frames();
         if undrained > 0 {
             for lane in &lanes {
                 *dropped.entry(*lane).or_default() += undrained;
@@ -1485,7 +1501,9 @@ impl Core {
             device_changes: active.device_changes,
             gap_seconds: active.gap_seconds,
             missed_seconds: active.ring_counts.missed_seconds(),
+            unfilled_seconds: active.ring_counts.unfilled_seconds(),
         };
+        active.ring_counts.log_missed();
         let asset = AudioAsset {
             id: Uuid::new_v4(),
             meeting_id: active.meeting_id,
@@ -2508,6 +2526,27 @@ mod tests {
     use crate::capture::CaptureMode;
     use crate::testing::{HANG_GUARD, SyntheticCaptureBackend};
     use crate::writer::{LaneFrames, RecordingFiles};
+
+    /// What a capture thread missed counts on the lane that missed most,
+    /// each stream's share at that stream's rate: the WASAPI follower's lane
+    /// can miss more than the microphone's.
+    #[test]
+    fn missed_audio_counts_on_the_lane_that_missed_most_at_each_streams_rate() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+        sink.ring(0).record_missed(4_800);
+        sink.ring(1).record_missed(2_400);
+        sink.ring(1).record_unfilled(48_000);
+        let mut counts = RingCounts::default();
+        counts.fold(&sink, 24_000.0);
+        sink.ring(1).record_missed(7_200);
+        counts.fold(&sink, SAMPLE_RATE);
+        assert_eq!(
+            counts.missed_seconds(),
+            0.25,
+            "the system lane: 2 400 at 24 kHz and 7 200 at 48 kHz, above the microphone's 0.2 s"
+        );
+        assert_eq!(counts.unfilled_seconds(), 2.0, "48 000 at 24 kHz");
+    }
 
     /// The production writer, except that every write fails as a full disk
     /// does and `finish()` waits for `release`, which holds the writer

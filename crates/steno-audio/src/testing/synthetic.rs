@@ -40,15 +40,16 @@
 //! `stall_after` sets): by default a producer whose `seconds` ran out is
 //! the end of a test's audio, not a stall.
 //!
-//! Missed cycles, for the fill of audio a starved thread missed (Rust
-//! only): `miss_at` makes the first start's producer skip that many frames
-//! at that many seconds in, as a capture thread the scheduler held up: the
-//! tones run on and the skipped frames are never delivered (paced on the
-//! wall clock, the producer waits them out), and the next callback's
+//! Missed cycles (A18, the design in [`realtime::missed`](crate::realtime::missed);
+//! Rust only): `miss_at` makes the first start's producer skip that many
+//! frames at that many seconds in, as a capture thread the scheduler held
+//! up: the tones run on and the skipped frames are never delivered (paced
+//! on the wall clock, the producer waits them out), and the next callback's
 //! position on the producer's clock sits past them. Each callback goes
-//! through a [`CycleClock`] as a live backend's does, and the frames it
-//! reports are written with [`LaneFrameSink::fill_missed`] first, so the
-//! skipped frames count towards `seconds` and `frames_delivered`.
+//! through a [`CycleClock`] as a live backend's does, and what it reports
+//! goes through [`LaneFrameSink::write_missed`] first, so filled frames
+//! count towards `seconds` and `frames_delivered`, and a jump past the
+//! fill limit is only counted.
 //!
 //! Held outages, behind the `test-support` feature (Rust only):
 //! `hold_outages` makes every device change, and the first start's
@@ -602,7 +603,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
                             std::thread::sleep(due - now);
                         }
                     } else {
-                        let room = frames + missed;
+                        let room = frames + missed.fill;
                         if !sink.rings().has_room(room) {
                             first_offered.finish();
                         }
@@ -617,9 +618,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         }
                     }
                     generator.fill(frames);
-                    if missed > 0 {
-                        sink.fill_missed(missed);
-                    }
+                    sink.write_missed(missed);
                     if sink.begin_callback(frames) {
                         for lane in 0..lane_count {
                             sink.write_slice(lane, generator.buffer(lane));

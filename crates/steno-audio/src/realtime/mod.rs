@@ -30,7 +30,7 @@ pub use io_proc::{
 #[cfg(target_os = "macos")]
 pub use io_proc::{MAX_BUFFERS, silence_output};
 pub use level_meter::{LevelMeter, LevelSlot};
-pub use missed::{CycleClock, MISSED_FILL_LIMIT};
+pub use missed::{CycleClock, MISSED_FILL_LIMIT, Missed};
 pub use processing::{ProcessingConfiguration, ProcessingThread};
 pub use rate_converter::RateConverter;
 pub use relay::FrameRelay;

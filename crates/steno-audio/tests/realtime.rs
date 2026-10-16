@@ -4,7 +4,8 @@
 //! `deliver_slices` through the capture's gate on Linux), the WASAPI
 //! capture threads' two stream bodies (`FollowerLane` and
 //! `PacketRouter`), the fill of audio a capture thread missed (`CycleClock`
-//! and `fill_missed`, A18), the macOS IOProc's first-callback mark, the
+//! and `write_missed`, A18 of `.plans/2026-10-07-stable-promotion.md`), the
+//! macOS IOProc's first-callback mark, the
 //! processing loop with the real Speex canceller, its far-end delay line,
 //! metering, the raw-mic copy and the relay hand-off run one second of
 //! audio on the test's thread under the counting allocator and allocate
@@ -32,9 +33,9 @@ use std::sync::Arc;
 
 use steno_audio::capture::{ChannelRef, LaneSource, SplitStreamPlan, StreamLayout};
 use steno_audio::realtime::{
-    BufferView, CycleClock, FirstCallback, FollowerLane, FrameRelay, LaneFrameSink, PacketRouter,
-    ProcessingConfiguration, ProcessingThread, SliceView, StreamBody, deliver, deliver_slices,
-    interleaved_view,
+    BufferView, CycleClock, FirstCallback, FollowerLane, FrameRelay, LaneFrameSink, Missed,
+    PacketRouter, ProcessingConfiguration, ProcessingThread, SliceView, StreamBody, deliver,
+    deliver_slices, interleaved_view,
 };
 use steno_audio::testing::AudioFixtures;
 use steno_audio::testing::rt::CountingAllocator;
@@ -490,7 +491,8 @@ fn the_two_stream_bodies_allocate_nothing() {
     );
 }
 
-/// The fill of audio a capture thread missed (A18): the clock that reads
+/// The fill of audio a capture thread missed (A18 of
+/// `.plans/2026-10-07-stable-promotion.md`): the clock that reads
 /// each cycle's position and the zeros it reports, through the sink as the
 /// PipeWire and macOS callbacks write them and through both two-stream
 /// bodies as the WASAPI threads do, allocate nothing. Every tenth cycle is
@@ -527,9 +529,7 @@ fn the_missed_cycle_fill_allocates_nothing() {
             };
             let missed = clock.advance(cycle * CYCLE as u64, CYCLE);
             through_the_gate(|| {
-                if missed > 0 {
-                    sink.fill_missed(missed);
-                }
+                sink.write_missed(missed);
                 deliver_slices(&[view], &sources, &sink);
             });
         }
@@ -549,6 +549,7 @@ fn the_missed_cycle_fill_allocates_nothing() {
 
     // The two-stream bodies: the master misses 4 periods and the
     // follower 2, each told before its next packet.
+    let filled = |fill| Missed { fill, unfilled: 0 };
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let follower = Arc::new(FollowerLane::for_streams(CYCLE, 4_800));
@@ -566,7 +567,7 @@ fn the_missed_cycle_fill_allocates_nothing() {
     let allocations = CountingAllocator::allocations_during(|| {
         for period in 0..50 {
             if period == 20 {
-                staging.fill_missed(2, 2 * CYCLE);
+                staging.write_missed(2, filled(2 * CYCLE));
             }
             staging.handle(SliceView {
                 frames: CYCLE,
@@ -574,7 +575,7 @@ fn the_missed_cycle_fill_allocates_nothing() {
                 samples: Some(&tap),
             });
             if period == 30 {
-                master.fill_missed(1, 4 * CYCLE);
+                master.write_missed(1, filled(4 * CYCLE));
             }
             master.handle(SliceView {
                 frames: CYCLE,
@@ -595,7 +596,7 @@ fn the_missed_cycle_fill_allocates_nothing() {
     assert_eq!(
         sink.missed_samples(),
         BTreeMap::from([(AudioLane::Mic, 4 * CYCLE), (AudioLane::System, 2 * CYCLE)]),
-        "the master's zeros on its lane, the follower's on its own"
+        "the master's zeros on its lane, the follower's count on its own"
     );
 }
 
