@@ -163,11 +163,11 @@ pub const MANAGED_CHECK: &str = steno_host::settings::snapshots::MANAGED_UPDATES
 pub const DISTRIBUTION_VARIABLE: &str = "STENO_DISTRIBUTION";
 
 /// Where Nix keeps its builds, read-only to everything but Nix itself.
-pub const NIX_STORE: &str = "/nix/store";
+const NIX_STORE: &str = "/nix/store";
 
 /// Whether a package manager delivers this app's updates (stable plan X5):
 /// [`DISTRIBUTION_VARIABLE`] is `aur` or `nix`, or the running binary lies
-/// in [`NIX_STORE`] once its links are resolved. The environment (the AUR
+/// in `/nix/store` once its links are resolved. The environment (the AUR
 /// wrapper) wins over the value the build was given (the Nix package), so a
 /// Nix build can be told otherwise at run time; a binary in the store is
 /// managed whatever the variable says, since an update would have to
