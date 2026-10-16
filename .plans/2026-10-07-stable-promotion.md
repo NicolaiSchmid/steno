@@ -1714,8 +1714,8 @@ Each lands before `0.11.0-rc.1`.
   - **Finding it.** Each callback says where its first frame sits on its
     clock: PipeWire's `pw_time` ticks (converted from the graph's rate to
     the stream's 48 kHz), the IOProc's input sample time, and WASAPI's
-    device position on a packet flagged as a discontinuity, once its unit
-    is measured (see **Left**).
+    device position on a packet flagged as a discontinuity, filled once its
+    unit is measured and counted otherwise (see **Left**).
     `realtime::CycleClock` compares it with where the audio delivered so
     far ends, the fills included, and reports the frames missed when that
     is more than half the last callback (cycles are missed whole). Frames
@@ -1831,7 +1831,12 @@ Each lands before `0.11.0-rc.1`.
     (counted once, as the note says), the microphone's unfilled jump, and
     the device positions measured in either unit from 8 to 192 kHz (each
     jump filled exactly), and at 16 and 96 kHz against a 48 kHz engine,
-    with no mix format and 1.1 % off (none filled); the allocation count of
+    with no mix format and 1.1 % off (none filled, each counted), a jump
+    while still measuring (counted), an unflagged idle of 25 ms or 10 s, a
+    step back, jitter and invalid positions during the measurement (none
+    skews it), and the system or the microphone thread out for 0.9 and
+    1.5 s over the positions of each verdict (each counted, as the note
+    says); the allocation count of
     the fill and the unfilled jumps through the PipeWire gate and both
     WASAPI bodies. CI's live PipeWire tests stop their own process with `SIGSTOP`
     from a child shell, a guard that resumes the process and reaps the shell
@@ -1872,8 +1877,13 @@ Each lands before `0.11.0-rc.1`.
     removed, a rebuild that counts a late unfilled jump on top of its gap,
     one that takes it back when no gap was written, beyond the gap's
     length, with the jump counted before the stall, or at a device change's
-    rebuild, and device positions filled before they are measured, in a unit
-    they were not measured in, or with no mix format.
+    rebuild, the take-back on one lane only or from an earlier rebuild's
+    gap, and device positions filled before they are measured, in a unit
+    they were not measured in, or with no mix format, a jump outside
+    `Fills` not counted, counted as filled, at one position a frame once
+    counting only, or without the packet before it, a step back counted,
+    and the measurement without its bound, its half-packet slack or the
+    engine's rate in it.
   - **Left.** WASAPI's fill is unit-tested and compiled in CI, not
     provoked on hardware (no Windows machine). Microsoft leaves the device
     position's unit open under `AUTOCONVERTPCM`: the 48 kHz frames the
@@ -1884,9 +1894,15 @@ Each lands before `0.11.0-rc.1`.
     (`split_streams::DevicePositions`) and fills a jump only when the
     position advances within 1 % of one a delivered frame, or of the mix
     format's rate against 48 kHz. Otherwise, and with no mix format (as
-    process loopback may give), nothing is filled: the note counts the loss
-    from the length against wall time, and the stop logs the ratio at
-    `warn`. The engine is taken to keep the oldest packets of a stall.
+    process loopback may give), nothing is filled: the jump is counted
+    unfilled at the measured ratio, and in a stream's first two seconds,
+    while it is measured, at one position a frame, so the note says it (an
+    overcount at worst, never wrong silence), and the stop logs the ratio
+    at `warn` when the stream had discontinuities. A clean packet that
+    advances more than half a packet past what either unit explains (an
+    idle endpoint loopback whose next packet is not flagged) stays out of
+    the measurement. The engine is taken to keep the oldest packets of a
+    stall.
     Step 9 of the Windows gate checks both on hardware. A process stopped
     for over 2 s may still be rebuilt after its thread has delivered again
     (the watch thread wakes first), which costs a gap of 10 to 20 ms,
@@ -3597,9 +3613,9 @@ candidate:
    lines:
    - Each says "jumps filled", with a ratio within 1 % of 1.0000 or of the
      engine's rate over 48 000 (0.9188 at 44.1 kHz, 0.3333 at 16 kHz, 2.0000
-     at 96 kHz). A line that says "jumps not filled" at `warn` fails the
-     step, unless it is the system stream on process loopback and says "no
-     mix format": then that stream counts only, by design.
+     at 96 kHz). A line that says "jumps counted, not filled" at `warn`
+     fails the step, unless it is the system stream on process loopback and
+     says "no mix format": then that stream counts only, by design.
    - The note after the stop says "About 3 seconds of the recording are
      missing.", and each stream that filled has a "packets after a glitch"
      line of about 3 s missed.
@@ -3610,6 +3626,18 @@ candidate:
      not suspended and still shows about a second skipped had the
      microphone's thread alone stalled for 1.2 to 2.5 s: its note must count
      that time too.
+
+   Then record a call for a minute while something plays, pause the
+   playback for 10 s halfway, and play again. Do it on endpoint loopback,
+   which delivers nothing while nothing plays: Steno uses it only where
+   process loopback fails to start, so run it on a Windows build without
+   process loopback (an older Windows 10) or wherever the start says
+   "Endpoint loopback", and do it once on process loopback too. Pass: the
+   stop shows no "packets after a glitch" line and no note about missing
+   audio, and the system stream's "device positions advanced" line says
+   "jumps filled" with the ratio as above (the idle left out of the
+   measurement). Write down which loopback each run used; with no
+   endpoint loopback machine, say so beside the step.
 
 ## Order of operations and gates
 

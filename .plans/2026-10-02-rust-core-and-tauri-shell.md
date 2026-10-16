@@ -2217,9 +2217,12 @@ it:
   only when the measurement explains it (`split_streams::DevicePositions`):
   over the first two seconds of clean packets the position must advance
   within 1 % of one a delivered frame, or of the mix format's rate against
-  48 kHz. Otherwise, and with no mix format, nothing is filled and the
-  recorder's note counts the loss from the length against wall time. The
-  stop logs each stream's ratio, at `warn` when nothing was filled. The
+  48 kHz. Otherwise, and with no mix format, nothing is filled: the jump
+  is counted unfilled at the measured ratio, or at one position a frame
+  while the stream is still measured, so the note says it. A clean packet
+  that advances more than either unit explains stays out of the
+  measurement. The stop logs each stream's ratio, at `warn` when it had
+  discontinuities and filled none. The
   engine is taken to keep the oldest packets of a stall. Step 9 of the
   stable plan's Windows gate checks both on hardware, at 48 and 44.1 kHz,
   on a hands-free headset and above 48 kHz, and names the loopback.
