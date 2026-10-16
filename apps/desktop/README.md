@@ -1621,18 +1621,18 @@ version, whose tag moves the lanes as usual.
 
 The first stable release, `v0.11.0`, leaves `desktop-stable` no earlier
 release to go back to. Delete the lane's manifest instead, so stable
-installs are offered nothing. Their check then fails on the missing
-manifest, and Settings > General reads "Could not check for updates",
-until the fix forward writes the lane again:
+installs are offered nothing: their check fails on the missing manifest,
+and Settings > General reads "Could not check for updates", until the fix
+forward writes the lane again:
 
 ```sh
 gh release delete-asset desktop-stable latest.json --yes
 ```
 
 When fresh downloads are bad too, take the release out of "latest" with
-`gh release edit v<version> --prerelease`, and in the same hour take the
-platform off the site's released list (`apps/site/src/lib/site.ts`) and
-the root README's desktop badge. For a later release, `releases/latest`
+`gh release edit v<version> --prerelease`, and in the same hour set the
+platform's flag in `apps/site/src/lib/site.ts` back to false and take it
+off the root README's desktop badge. For a later release, `releases/latest`
 then falls back to the previous stable release. For `v0.11.0`, which has
 no stable release before it, it answers 404: for every desktop's download
 button, and for the feed of build 244 (`v0.9.0-rc.1`), the one Swift

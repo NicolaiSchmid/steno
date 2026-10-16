@@ -54,9 +54,8 @@ person and their friends, with files instead of lock-in.
 
 Every release carries the builds for all three desktops, on the
 [latest release](https://github.com/NicolaiSchmid/steno/releases/latest) page. The desktop
-badge above and the [site](https://steno.nicolaischmid.com) name the desktops whose build
-has passed its checks on a real machine; the other builds are on the release too. Pick the
-section for your system.
+badge above and the [site](https://steno.nicolaischmid.com) list only the desktops whose
+build has passed its checks on a real machine. Pick the section for your system.
 
 On first launch Steno walks you through what it needs: the microphone, the system audio
 of your calls and, on macOS, optionally your calendar for meeting titles and attendee
@@ -182,8 +181,8 @@ The tray icon needs GNOME's AppIndicator extension: on by default on Ubuntu, and
 Debian `sudo apt install gnome-shell-extension-appindicator`, then log out and in and turn
 it on in the Extensions app. Without it there is no tray, and closing the main window
 quits Steno, saving a recording first. If `ufw` is on, `sudo ufw allow 23820/tcp` lets the
-phone reach Steno. The AppImage updates itself in place; the `.deb` updates itself too,
-and asks for your password at each update.
+phone reach Steno. Both builds update themselves: the AppImage in place, the `.deb` after
+asking for your password each time.
 
 ### Linux: Omarchy
 
