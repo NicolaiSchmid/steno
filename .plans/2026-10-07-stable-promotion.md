@@ -475,7 +475,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
 | A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
-| A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured; a durable working marker, and quarantine at launch ("Steno stopped while reading this recording") with the file kept and Process again offered; kill tests; the allocations bounded only if a real trigger exists (`fix/a17-crash-loop-breaker`: a real trigger exists on Linux, none on the Mac; the marker and the quarantine built for every read, the in-process CoreML stage included; bounding the allocations waits for main's ruling) | audio, after #263 |
+| A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured; a durable working marker, and quarantine at launch ("Steno stopped while reading this recording") with the file kept and Process again offered; kill tests; the allocations bounded only if a real trigger exists (`fix/a17-crash-loop-breaker`: a real trigger exists on Linux, none on the Mac; the marker and the quarantine built for every read, the in-process CoreML stage included; the allocations bounded by a walk of the boxes, chunks and sample tables before symphonia opens a file, main's choice; the fuzz of every size and count field aborts nothing under 8 GiB) | audio, after #263 |
 | A20 | The level meter never freezes behind a sync of the files: the levels go out from a thread of their own (`steno-levels`, woken by each publish into `LevelSlot`) instead of from the writer thread, whose periodic `sync_data` (P21; `FlushFileBuffers` on Windows) froze the meter and the `recording` snapshot for as long as it took, 1.0 to 1.3 s on a hosted runner; the sync, its cadence and the files are unchanged | audio |
 
 **Per Linux target, blocking that target's listing (D6):**
@@ -1613,10 +1613,33 @@ Each lands before `0.11.0-rc.1`.
     for byte, processes the other queued meeting, and Process again makes
     it ready; an orphan whose length read stopped is listed failed and
     unread, then processed by Process again.
-  - Not built: bounding the allocations (part c). The measurement found a
-    real trigger, so the choice between pre-checking the box and chunk sizes
-    against the file's length and moving the probe and decode into a child
-    is main's.
+  - The allocations bounded (part c, main's choice of the two, 2026-10-16:
+    the pre-check, not a child): before symphonia's demuxer opens an MP4 or
+    CAF file, `steno_audio::codec::sizes` walks its boxes or chunks (the
+    box reader is the priming reader's) and refuses, as an unsupported
+    file (the meeting fails retryably, the file is kept), a box or chunk
+    larger than the file or its parent or shorter than its header, a
+    sample table (`stts`, `stsc`, `stsz`, `stco`, `co64`, `trun`) counting
+    more entries than its box holds, a sample larger than the file (in
+    `stsz`, `trun`, or a `tfhd` or `trex` default), a box symphonia
+    subtracts a fixed header from that is shorter (`hdlr`, an `ilst` item's
+    `data`, `mean`, `name`), and a CAF packet table counting more packets
+    than its entries can describe. The top-level media data is exempt: a
+    file cut off ends inside it, and symphonia reads it a packet at a time.
+    Every path that opens a file with symphonia (the declared length, the
+    decode, the mixdown, the pipeline) goes through the one probe that runs
+    the walk; the salvage of a file without a `moov` reads its packets with
+    its own bounded reader and symphonia's AAC decoder only. Not bounded,
+    and small by their encoding: an `esds` descriptor (at most 256 MiB) and
+    a FLAC metadata block (16 MiB); a CAF channel layout reserves nothing.
+    Gate: every measured case is refused (a test that would abort its
+    binary without the walk), every fixture reads, and a fuzz that sets the
+    size and count fields of the fixtures' boxes, chunks and tables to
+    boundary and random values runs in a child held to 8 GiB of address
+    space: 120 000 cases (release and debug, 3 seeds) in a 1-CPU container
+    abort nothing; with the walk removed the fuzz aborts at case 48 (a
+    1 TiB `kuki`). CI runs 400 cases on every platform. The breaker stays,
+    for anything the walk does not model.
   - Owner: audio. It blocks stable (D3).
 - **A20 The level meter never freezes behind a sync of the files.** Found
   by P40's check 1 (`locked_store_tests`), which failed on Windows with no
