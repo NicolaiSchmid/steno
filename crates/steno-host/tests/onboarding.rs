@@ -1296,9 +1296,15 @@ fn the_stored_vault_is_checked_once_on_page_one() {
 
     let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
     onboarding.page_ready().unwrap();
-    assert_eq!(
-        harness.sink.last(BridgeTopic::Onboarding).unwrap()["vaultAccess"],
-        json!({ "name": "Work Vault", "state": "checking" })
+    // The row reads checking before the write starts, so that snapshot is
+    // out whether or not the write has ended by now.
+    let checking = json!({ "name": "Work Vault", "state": "checking" });
+    assert!(
+        harness
+            .sink
+            .all(BridgeTopic::Onboarding)
+            .iter()
+            .any(|snapshot| snapshot["vaultAccess"] == checking)
     );
     harness.wait_for("the check", vault_row_is("writable"));
     onboarding.page_ready().unwrap();
