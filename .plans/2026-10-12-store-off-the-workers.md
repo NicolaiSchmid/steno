@@ -605,11 +605,10 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   timeout does under a long busy wait. So `RecordingIntake::admit` runs the
   admission (the store step, its commit included, then the enqueue) in a
   task of its own that the request awaits but cannot cancel, and the
-  handover's `Engine::admit`
-  runs in one too, which holds the `completing` mark and ends the receipt in
-  memory `complete` or `failed`. A phone that hangs up
-  mid-admit leaves its meeting committed and enqueued once, and its retry
-  is answered from that receipt with no upload again
+  handover's `Engine::admit` runs in one too, which holds the `completing`
+  mark and ends the receipt in memory `complete` or `failed`. A phone that
+  hangs up mid-admit leaves its meeting committed and enqueued once, and its
+  retry is answered from that receipt with no upload again
   (`tests/admission_under_a_held_lock.rs` in `steno-handover`); a retry
   while the admission still waits gets the 409 that lists every chunk. An
   admission in flight when the app stops (its phone hung up, or the

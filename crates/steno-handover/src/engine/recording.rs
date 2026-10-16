@@ -746,19 +746,18 @@ impl Engine {
     /// real intake wrote this same receipt and deleted the file. Then every
     /// file of the recording goes: the verified file if the intake left it,
     /// the metadata sidecar, and a partial a re-announce opened during the
-    /// intake. A replayed complete returns the same id
-    /// through the early `complete` check. When another device announced
-    /// the same recording id meanwhile (this one was revoked during the
-    /// intake), only the verified file goes, and the rest is that phone's
-    /// upload ([`Engine::discard_own`]); no other request creates the
-    /// verified file while this admission holds the `completing` mark
-    /// ([`Completing::admit`]). On
-    /// failure the verified file stays for the phone's retry and the reason
-    /// is fixed text, because the error may name the file's path; unless
-    /// memory holds a receipt of other bytes by then (the phone announced
-    /// another file under the id during the intake): that upload's
-    /// `complete` would hand this file to the intake unhashed
-    /// ([`Engine::verified_file`]), so it goes.
+    /// intake. A replayed complete returns the same id through the early
+    /// `complete` check. When another device announced the same recording
+    /// id meanwhile (this one was revoked during the intake), only the
+    /// verified file goes, and the rest is that phone's upload
+    /// ([`Engine::discard_own`]); no other request creates the verified
+    /// file while this admission holds the `completing` mark
+    /// ([`Completing::admit`]). On failure the verified file stays for the
+    /// phone's retry and the reason is fixed text, because the error may
+    /// name the file's path; unless memory holds a receipt of other bytes
+    /// by then (the phone announced another file under the id during the
+    /// intake): that upload's `complete` would hand this file to the intake
+    /// unhashed ([`Engine::verified_file`]), so it goes.
     async fn admit(
         &self,
         file: &std::path::Path,
