@@ -276,6 +276,26 @@ fn device_positions_no_unit_explains_count_what_was_lost() {
     );
 }
 
+/// Positions that never move (as CI's process loopback reports them) never
+/// panic on the audio thread, whatever the mix format says, a 0 Hz one
+/// included: they measure no unit, fill nothing, and a flagged packet reads
+/// no jump from them.
+#[test]
+fn positions_that_never_move_divide_nothing_by_zero() {
+    for engine_rate in [None, Some(0), Some(16_000), Some(48_000)] {
+        let mut positions = DevicePositions::new(engine_rate);
+        measure(&mut positions, 7, 0, 2 * CALIBRATION_PACKETS);
+        assert_eq!(
+            positions.verdict(),
+            PositionVerdict::CountsOnly,
+            "{engine_rate:?}"
+        );
+        assert_eq!(positions.ratio(), Some(0.0));
+        assert_eq!(positions.packet(Some(7), 480, true), Missed::default());
+        assert_eq!(positions.packet(Some(7), 0, true), Missed::default());
+    }
+}
+
 /// A position the engine flags as invalid starts the clock afresh: the
 /// packet after it reports nothing, the one after that reads on.
 #[test]

@@ -207,7 +207,8 @@ impl DevicePositions {
     #[must_use]
     pub fn new(engine_rate: Option<u32>) -> Self {
         Self {
-            engine_rate,
+            // A mix format at 0 Hz names no unit.
+            engine_rate: engine_rate.filter(|rate| *rate > 0),
             verdict: PositionVerdict::Measuring,
             clock: CycleClock::new(SAMPLE_RATE),
             last: None,
@@ -276,7 +277,10 @@ impl DevicePositions {
         } else {
             (1, 1)
         };
-        let read = (u128::from(advance) * frames + ticks / 2) / ticks;
+        // `ticks` is never 0 here; a 0 would read nothing, not panic.
+        let read = (u128::from(advance) * frames + ticks / 2)
+            .checked_div(ticks)
+            .unwrap_or(0);
         let gap = read.saturating_sub(last_frames as u128);
         if last_frames == 0 || gap <= (last_frames / 2) as u128 {
             return Missed::default();

@@ -267,8 +267,11 @@ impl CycleClock {
     /// `ticks` clock ticks in stream frames, to the nearest frame.
     #[inline(always)]
     fn frames_in(&self, ticks: u64) -> u64 {
+        // `rescale` keeps `ticks` above 0; a 0 would read nothing, not
+        // panic on the audio thread.
         let frames = (u128::from(ticks) * u128::from(self.frames) + u128::from(self.ticks / 2))
-            / u128::from(self.ticks);
+            .checked_div(u128::from(self.ticks))
+            .unwrap_or(0);
         u64::try_from(frames).unwrap_or(u64::MAX)
     }
 }
