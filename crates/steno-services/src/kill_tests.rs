@@ -530,11 +530,20 @@ async fn a_kill_after_the_folder_changed_recovers_from_the_folder_it_started_in(
 }
 
 /// The child's speech engine for the warm-up test: its load says so in
-/// `loading` under the child's directory and waits for the kill, as a load
-/// that a `CoreML` abort ends would never return.
+/// `loading` under the child's directory, with whether the warm-up's mark
+/// was on disk as it started, and waits for the kill, as a load that a
+/// `CoreML` abort ends would never return.
 struct LoadUntilKilled {
     inner: steno_core::testing::FakeSpeechEngine,
     loading: PathBuf,
+    mark: PathBuf,
+}
+
+impl LoadUntilKilled {
+    /// What `loading` says when the mark was on disk as the load started.
+    const MARKED: &[u8] = b"marked";
+    /// What `loading` says when it was not.
+    const UNMARKED: &[u8] = b"unmarked";
 }
 
 #[steno_core::async_trait]
@@ -548,7 +557,11 @@ impl steno_core::SpeechEngine for LoadUntilKilled {
     }
 
     async fn prepare(&self) -> steno_core::BoundaryResult<()> {
-        Reports::append(&self.loading, b"1");
+        let marked = self.mark.exists();
+        Reports::append(
+            &self.loading,
+            if marked { Self::MARKED } else { Self::UNMARKED },
+        );
         loop {
             std::thread::park();
         }
@@ -591,6 +604,7 @@ fn child_warms_up_until_killed() {
     let engine = Arc::new(LoadUntilKilled {
         inner: steno_core::testing::FakeSpeechEngine::default(),
         loading: directory.join("loading"),
+        mark: warm_up_mark(&directory),
     });
     let app = app_warming_up(&directory, &store, synthetic_capture(), engine);
     app.recorder.start(CaptureMode::InPerson, None);
@@ -633,8 +647,13 @@ async fn a_warm_up_killed_turns_the_warm_up_off_until_a_meeting_loads_the_models
     );
     let loading = dir.path().join("loading");
     kill_when(&mut child, dir.path(), "the warm-up's load", || {
-        loading.exists()
+        std::fs::read(&loading).is_ok_and(|said| !said.is_empty())
     });
+    assert_eq!(
+        std::fs::read(&loading).unwrap(),
+        LoadUntilKilled::MARKED,
+        "the mark was on disk before the load started"
+    );
     assert!(
         warm_up_mark(dir.path()).exists(),
         "the mark outlived the kill"
