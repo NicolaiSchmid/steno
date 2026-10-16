@@ -1338,10 +1338,11 @@ impl ProcessingPipeline {
 
     /// [`ProcessingPipeline::enqueue`] of the Mac recording `meeting_id`
     /// that stopped with `result`, the local intake's: the rows are written
-    /// through [`Store::save_stopped_recording`], so only while the meeting
-    /// is still `recording`, the asset with `retention`, else the settings'
-    /// default; the row and the settings are read in the commit's own
-    /// transaction, on the writer. Returns the meeting as saved. Rust only.
+    /// through [`Store::save_stopped_recording`], only while the meeting is
+    /// still `recording`. The asset gets `retention`, else the settings'
+    /// default. The row and the default retention are read in the commit's
+    /// own transaction, on the writer. Returns the meeting as saved. Rust
+    /// only.
     pub fn enqueue_stopped_recording(
         &self,
         meeting_id: Uuid,
@@ -1389,7 +1390,8 @@ impl ProcessingPipeline {
     /// `enqueue` once the asset is claimed, its rows written through
     /// `save` at the pipeline's now, with the asset pointed at
     /// `meeting_id`: the claim is held from the check to the run's end, so
-    /// a second call cannot start a second run.
+    /// a second call cannot start a second run. Returns what `save`
+    /// returned.
     fn enqueue_claimed<T>(
         &self,
         meeting_id: Uuid,

@@ -629,13 +629,14 @@ impl LocalRecordingIntake {
     /// (`retention`, else the settings' default as it is now) with
     /// `expires_at` cleared, and enqueues the meeting: the meeting, now
     /// `queued`, and its asset in one commit, which writes only while the
-    /// row is still `recording` and keeps what else was saved on it since
-    /// ([`Store::save_stopped_recording`]). The commit reads the row and
-    /// the settings in its own transaction, on the writer, so the save
-    /// never waits for a read in flight on a reader (a reload's, a
-    /// command's). A commit that finds the database busy is tried again,
-    /// up to [`Self::COMMIT_ATTEMPTS`] in all, while
-    /// [`Self::retrying_while`]'s check allows, and each try reads again.
+    /// row is still `recording` and keeps what else was saved on it since.
+    /// The commit makes its own reads; [`Store::save_stopped_recording`]
+    /// says where, and why no settings row fails it.
+    ///
+    /// A commit that finds the database busy is tried again, up to
+    /// [`Self::COMMIT_ATTEMPTS`] in all, while [`Self::retrying_while`]'s
+    /// check allows, and each try reads again.
+    ///
     /// A meeting that is not `recording` when the commit reads it is left
     /// alone, its row untouched, and one deleted meanwhile is not brought
     /// back. Any other failure leaves the meeting `recording` and returns
