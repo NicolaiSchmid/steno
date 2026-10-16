@@ -70,6 +70,16 @@ ignore = [
   # tray need; no maintained GTK 3 binding exists to move to, and it runs
   # in the compiler only, never in a shipped binary.
   { id = "RUSTSEC-2024-0370", reason = "build-time macro of the GTK 3 bindings Tauri depends on; nothing to upgrade to" },
+  # zip 4.6.1 is yanked. On 2026-10-16 upstream yanked every release but
+  # 9.0.3, as it does after an advisory (zip-rs/zip2 #315): three GitHub
+  # advisories against ZipArchive::extract up to 9.0.0 (GHSA-4v9h-p7m9-rh26,
+  # GHSA-vv5m-jxxh-4627, GHSA-4684-h2q9-2vcp), none in RustSec yet.
+  # tauri-plugin-updater (2.13.1 here, 2.14.0 the latest) requires zip ^4 and
+  # uses it on Windows only, to unpack a zipped update after its signature
+  # checks out; Steno's updates are not zipped (createUpdaterArtifacts =
+  # true). This entry covers the yank of this one version only; a RustSec
+  # advisory still fails. Revisit on 2026-11-15.
+  { crate = "zip@4.6.1", reason = "upstream yanks all but the latest; tauri-plugin-updater requires zip ^4 and uses it on Windows only, for signed updates Steno does not zip; revisit 2026-11-15" },
 ]
 
 [bans]

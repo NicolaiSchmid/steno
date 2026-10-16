@@ -509,6 +509,11 @@ after the port".
 - The speech settings without a Settings row, which
   `.plans/2026-10-07-speech-settings-ui.md` plans; the untested `steno-llm`
   cleanup paths.
+- The updater's zip. `deny.toml` accepts the yanked zip 4.6.1 that
+  `tauri-plugin-updater` requires (#300). Move to a `tauri-plugin-updater`
+  that uses zip 9.0.1 or later when it ships, or by 2026-11-15, whichever
+  comes first. Steno never unzips an update (its Windows install writes the
+  signed installer itself), so nothing is lost meanwhile.
 
 ## Work packages
 
