@@ -2141,7 +2141,7 @@ parity item until a plan says otherwise:
   callback's position on its clock (`realtime::CycleClock`), writes what was
   missed as zeros on every lane, counts a jump too long to fill, and reads
   the clock once more at the stop; the counts are
-  `CaptureStatistics::missed_seconds` and `unfilled_seconds`, and the note
+  `CaptureStatistics::filled_seconds` and `unfilled_seconds`, and the note
   "About N seconds of the recording are missing" adds them.
 - **The files are synced while recording, the relay holds 20 s, and the
   warnings are joined** (stable plan rows P21 and P23,
@@ -2208,14 +2208,16 @@ it:
   `RUST_LOG=steno_audio=info`; `tests/live_windows.rs` prints them). Measure
   the slip rate on a USB headset against built-in speakers; a plan decides
   whether to resample instead.
-- **Engine data loss is filled from the device position** (A18). A packet
+- **Engine data loss is filled from the device position** (A18). On a packet
   the engine flags as a discontinuity (the capture thread was late and the
-  engine lost data), the first aside, has the frames its device position
-  passed handled as on the other backends (see the Audio item above), and
-  the packets and the seconds are logged at stop. The position is read as
-  the stream's frames, as Microsoft documents `GetBuffer`, and the engine is
-  taken to keep the oldest packets of a stall; step 9 of the stable plan's
-  Windows gate checks both under `AUTOCONVERTPCM` and on process loopback.
+  engine lost data), the first aside, the frames its device position skipped
+  are filled or counted as on the other backends (see the Audio item above),
+  and the packets and the seconds are logged at stop. The position is read
+  at the engine's mix-format rate and converted to the stream's 48 kHz
+  (`split_streams::device_position_clock`), and the engine is taken to keep
+  the oldest packets of a stall; Microsoft documents neither under
+  `AUTOCONVERTPCM`, so step 9 of the stable plan's Windows gate checks both,
+  with the default devices at 44.1 kHz and on process loopback.
 - **A system-only capture skips silence.** With the `[System]` lane
   override the system stream is the master, and endpoint loopback
   delivers no packet while nothing plays, so the recording is shorter than
