@@ -2981,4 +2981,67 @@ mod tests {
     async fn a_boundary_may_use_the_timer_from_inside_a_runtime() {
         block_on(a_boundary_with_a_timeout());
     }
+    /// A commit that lands while [`Host::new`] loads its view models (here
+    /// from the clock, which the progress asks once the list has loaded)
+    /// reaches the list at the first pass of the reload owner: the change
+    /// mark is read before the loads, so the commit moved it.
+    #[test]
+    fn a_commit_during_the_hosts_loads_shows_at_the_first_pass() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        use chrono::{DateTime, Utc};
+        use steno_bridge::BridgeTopic;
+        use steno_core::Store;
+        use uuid::Uuid;
+
+        use crate::fakes::FakeServices;
+        use crate::services::Clock;
+        use crate::{Host, HostConfig};
+
+        /// Saves a new meeting on each reading while `committing`.
+        struct CommittingClock {
+            store: Arc<Store>,
+            now: DateTime<Utc>,
+            committing: AtomicBool,
+            saved: Mutex<Vec<Uuid>>,
+        }
+
+        impl Clock for CommittingClock {
+            fn now(&self) -> DateTime<Utc> {
+                if self.committing.load(Ordering::SeqCst) {
+                    let mut meeting = steno_core::testing::sample_data::meeting();
+                    meeting.id = Uuid::new_v4();
+                    self.store.save_meeting(&meeting).unwrap();
+                    self.saved.lock().unwrap().push(meeting.id);
+                }
+                self.now
+            }
+        }
+
+        let now = steno_core::json::parse_date("2026-09-29T12:50:00.000Z").unwrap();
+        let store = Arc::new(Store::in_memory().unwrap());
+        let clock = Arc::new(CommittingClock {
+            store: store.clone(),
+            now,
+            committing: AtomicBool::new(true),
+            saved: Mutex::default(),
+        });
+        let mut services = FakeServices::new(now).services();
+        services.clock = clock.clone();
+        let host = Host::new(store, services, HostConfig::default()).unwrap();
+        clock.committing.store(false, Ordering::SeqCst);
+        let saved = clock.saved.lock().unwrap().clone();
+        assert!(!saved.is_empty(), "the clock committed during the loads");
+
+        host.reload_pass();
+        let list = host
+            .snapshot(BridgeTopic::MeetingsList)
+            .unwrap()
+            .to_string()
+            .to_lowercase();
+        for id in saved {
+            assert!(list.contains(&id.to_string()), "{id} listed: {list}");
+        }
+    }
 }
