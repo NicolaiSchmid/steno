@@ -1,8 +1,10 @@
 //! The safe wrapper over `objc2-core-ml`: load a compiled `.mlmodelc`,
-//! allocate `MLMultiArray` inputs, run a prediction, read the outputs. The
-//! only module in the crate that may contain `unsafe`; every block states
-//! the invariant it relies on. Nothing above this module sees a pointer,
-//! an `NSArray` or an Objective-C object.
+//! allocate `MLMultiArray` inputs, run a prediction, read the outputs, and
+//! [`contained`], the autorelease pool and `@catch` every one of those
+//! calls runs in. The only module in the crate that may contain `unsafe`;
+//! every block states the invariant it relies on. Nothing above this
+//! module sees a pointer, an `NSArray`, an Objective-C object or an
+//! Objective-C exception.
 //!
 //! Binding choice and the API gaps are in
 //! `.plans/spikes/2026-10-01-spike-coreml-rust.md`: `objc2-core-ml` is
@@ -53,8 +55,14 @@ use crate::SpeechError;
 ///   becomes [`SpeechError::Exception`] with its name and reason, so the
 ///   meeting fails like any other speech failure and its audio is kept.
 ///   A C++ exception or an abort inside CoreML is not an Objective-C
-///   exception and still ends the process; the pipeline's working marker
-///   (A17) keeps that from repeating at every launch.
+///   exception and still ends the process; the recorder's warm-up mark
+///   (`steno_pipeline::WarmUpMark`) and the pipeline's crash-loop guard
+///   keep that from repeating at every recording and every launch; A17
+///   (#298) adds a working marker over the speech stage.
+///
+/// The catch needs Rust frames that unwind: under `panic = "abort"` every
+/// exception would abort the process again, so such a build does not
+/// compile.
 pub fn contained<T>(work: impl FnOnce() -> Result<T, SpeechError>) -> Result<T, SpeechError> {
     // Unwind safety, asserted: an exception unwinds `work` midway (objc2
     // runs the Rust destructors on the way, releasing what was retained),
@@ -65,6 +73,12 @@ pub fn contained<T>(work: impl FnOnce() -> Result<T, SpeechError>) -> Result<T, 
     objc2::exception::catch(AssertUnwindSafe(|| autoreleasepool(|_| work())))
         .unwrap_or_else(|exception| Err(exception_error(exception)))
 }
+
+#[cfg(panic = "abort")]
+compile_error!(
+    "steno-speech-coreml needs panic = \"unwind\": `coreml::contained` catches CoreML's \
+     Objective-C exceptions by unwinding the Rust frames between the throw and the catch"
+);
 
 /// The error for a caught exception: an `NSException`'s name and reason;
 /// any other object thrown (the runtime allows it) by its class.
@@ -178,7 +192,7 @@ impl Model {
     /// `units`; CoreML compiles for the Neural Engine on first load and
     /// caches the result, so a cold load takes seconds and a warm one
     /// about one. Run it inside [`contained`].
-    pub fn load(path: &Path, units: ComputeUnits) -> Result<Model, SpeechError> {
+    pub(crate) fn load(path: &Path, units: ComputeUnits) -> Result<Model, SpeechError> {
         let load_error = |message: String| SpeechError::ModelLoad {
             path: path.to_path_buf(),
             message,
@@ -217,7 +231,7 @@ impl Model {
     /// One prediction. Run it inside [`contained`] with the building of
     /// its inputs and the reading of its outputs, so one pool drains what
     /// all three leave autoreleased and an exception stays out of Rust.
-    pub fn predict(&self, inputs: &Inputs) -> Result<Outputs, SpeechError> {
+    pub(crate) fn predict(&self, inputs: &Inputs) -> Result<Outputs, SpeechError> {
         let provider: &ProtocolObject<dyn MLFeatureProvider> =
             ProtocolObject::from_ref(&*inputs.inner);
         // SAFETY: `predictionFromFeatures_error` takes a feature provider
@@ -310,12 +324,12 @@ impl Array {
     }
 
     /// A zero-filled `f32` array.
-    pub fn zeros_f32(shape: &[usize]) -> Result<Array, SpeechError> {
+    pub(crate) fn zeros_f32(shape: &[usize]) -> Result<Array, SpeechError> {
         Array::alloc(shape, MLMultiArrayDataType::Float32)
     }
 
     /// A zero-filled `i32` array.
-    pub fn zeros_i32(shape: &[usize]) -> Result<Array, SpeechError> {
+    pub(crate) fn zeros_i32(shape: &[usize]) -> Result<Array, SpeechError> {
         Array::alloc(shape, MLMultiArrayDataType::Int32)
     }
 
@@ -499,7 +513,7 @@ pub struct Inputs {
 }
 
 /// Build the provider for `items`, each a feature name and its array.
-pub fn inputs(items: &[(&str, &Array)]) -> Result<Inputs, SpeechError> {
+pub(crate) fn inputs(items: &[(&str, &Array)]) -> Result<Inputs, SpeechError> {
     let keys: Vec<Retained<NSString>> = items
         .iter()
         .map(|(name, _)| NSString::from_str(name))
@@ -534,7 +548,7 @@ pub struct Outputs {
 
 impl Outputs {
     /// The multi-array output called `name`.
-    pub fn array(&self, name: &'static str) -> Result<Array, SpeechError> {
+    pub(crate) fn array(&self, name: &'static str) -> Result<Array, SpeechError> {
         // SAFETY: `featureValueForName` and `multiArrayValue` are lookups
         // on a live provider that return retained objects or nil.
         let array = unsafe {
@@ -700,5 +714,21 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(error, SpeechError::CoreMl(text) if text == "refused"));
+    }
+
+    /// What a call leaves autoreleased is released by the time `contained`
+    /// returns, so a missed fast autorelease handshake cannot pile up
+    /// IOSurfaces across calls.
+    #[test]
+    fn what_a_call_leaves_autoreleased_is_released_before_it_returns() {
+        let weak = contained(|| {
+            let object = objc2::runtime::NSObject::new();
+            let weak = objc2::rc::Weak::from_retained(&object);
+            let _ = Retained::autorelease_ptr(object);
+            assert!(weak.load().is_some(), "alive in the pool");
+            Ok(weak)
+        })
+        .unwrap();
+        assert!(weak.load().is_none(), "the pool drained it");
     }
 }

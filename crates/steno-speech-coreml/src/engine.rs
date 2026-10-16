@@ -195,6 +195,12 @@ impl CoreMlParakeetEngine {
         let result = work(transcriber);
         // An Objective-C exception stopped a model call midway, so the
         // models go, as after a panic, and the next call loads them again.
+        // That reload is best effort: Cocoa is not exception safe, so
+        // nothing promises what a framework holds after one. Only real
+        // models exercise this branch (measured on the Mac with CoreML's
+        // own allocation exception: the process lived on, and each later
+        // call loaded the models again); the tests' synthetic exceptions
+        // never reach a loaded engine.
         if result.as_ref().is_err_and(SpeechError::is_exception) {
             *slot = None;
         }
