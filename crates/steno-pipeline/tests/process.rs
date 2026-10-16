@@ -1225,6 +1225,30 @@ async fn a_job_whose_warm_up_fails_releases_the_engine_too() {
     assert_eq!(engine.0.releases.count(), 1);
 }
 
+/// A speech engine that does not load keeps a warm-up mark left over in
+/// place: only a load that succeeded turns the warm-up back on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_whose_speech_engine_does_not_load_keeps_the_mark_left_over() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let support = tempfile::tempdir().unwrap();
+    let left_over = support.path().join(WarmUpMark::FILE_NAME);
+    std::fs::write(&left_over, b"1\n").unwrap();
+    let mark = Arc::new(WarmUpMark::at_launch(support.path()));
+    let engine = Arc::new(UnloadableEngine(FakeSpeechEngine::default()));
+    let dependencies = with_engine(&world, engine).with_warm_up_mark(mark.clone());
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        meeting_state(&world, meeting),
+        MeetingState::Failed {
+            reason: "decode: no speech model".to_owned()
+        }
+    );
+    assert!(mark.skipping(), "the warm-up stays off");
+    assert!(left_over.exists());
+}
+
 /// Which call of a [`GatedEngine`] is gated.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Gate {
