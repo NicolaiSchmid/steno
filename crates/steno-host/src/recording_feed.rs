@@ -452,6 +452,21 @@ mod tests {
         warned.warning = Some("The disk is nearly full.".to_owned());
         assert_eq!(sent.wait(&warned, false, ms(52)), None);
         assert_eq!(sent.wait(&at(0.4), true, ms(53)), None);
+
+        // Through the feed: a level update right after a send is held,
+        // and still goes out once the interval ends.
+        let (host, fakes, sink) = host();
+        host.page_ready().unwrap();
+        sink.nth_recording(1, PATIENCE)
+            .expect("page.ready's snapshot");
+        thread::sleep(2 * RECORDING_INTERVAL);
+        recording_with(&fakes, 0.1);
+        host.recorder_changed();
+        sink.nth_recording(2, PATIENCE).expect("the first level");
+        recording_with(&fakes, 0.2);
+        host.recorder_changed();
+        let (_, level) = sink.nth_recording(3, PATIENCE).expect("the held level");
+        assert_eq!(level["level"]["mic"], 0.2);
     }
 
     /// P40 check 18: a command that reaches the host before `page.ready`
