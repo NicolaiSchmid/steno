@@ -113,10 +113,9 @@ impl AdmissionFolders for () {
 /// `failed` durably ([`Store::save_handover_receipt_durably`], tried again
 /// while the database is busy, up to
 /// [`RecordingIntake::FAILED_SAVE_ATTEMPTS`] in all, with the writer free
-/// between the tries), and the copy is
-/// removed only once that save succeeds: a failed commit can still
-/// be replayed after a crash, and its meeting then needs the copy. The
-/// phone keeps its own copy either way. Bytes the admission ledger already
+/// between the tries), and the copy is removed only once that save
+/// succeeds: a failed commit can still be replayed after a crash, and its
+/// meeting then needs the copy. The phone keeps its own copy either way. Bytes the admission ledger already
 /// holds with a meeting (another device's upload of them, taken over
 /// during the first admission) are that meeting: the receipt is completed
 /// with it, the copy goes, and nothing is enqueued.

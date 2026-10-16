@@ -1266,8 +1266,9 @@ impl App {
     /// write is a committed transaction by then, so the store has nothing
     /// left to flush, except a phone admission in flight at the stop: it
     /// still finishes after this returns, or the exit cuts it as a crash
-    /// would, between the durable copy and the atomic commit. A handover
-    /// still waiting for its listener gets none after this
+    /// would: a copy without its commit is noted, and the next launch
+    /// adopts it (at worst a duplicate meeting, never a lost one). A
+    /// handover still waiting for its listener gets none after this
     /// ([`ListenerHandover::close`]). Swift: `AppController.shutdown`,
     /// whose pipeline died with the app, so the next launch resumed its
     /// job.
