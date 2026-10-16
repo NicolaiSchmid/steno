@@ -466,7 +466,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A12 | An undecodable AAC packet becomes silence of its length, counted and shown on the meeting | audio (#264) |
 | A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
-| A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio, after #263 |
+| A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings (`fix/a15-coreml-iosurface`: in a build with debug assertions every output CoreML returned stayed autoreleased, about 6 300 IOSurface regions per 10 minutes of audio, until one could not be allocated; a plain release build stayed flat over 9.3 h and ten 1-hour meetings; one autorelease pool and one `@catch` per model call and model load, the warm-up's included, make both builds flat and an exception an ordinary speech error; a warm-up that ended with the app turns the warm-up off until a meeting's processing loads the models) | audio, after #263 |
 | A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured; a durable working marker, and quarantine at launch ("Steno stopped while reading this recording") with the file kept and Process again offered; kill tests; the allocations bounded only if a real trigger exists | audio, after #263 |
 
@@ -1474,7 +1474,52 @@ Each lands before `0.11.0-rc.1`.
     leaks; an Objective-C exception from CoreML is caught at the FFI boundary
     (the crate's `coreml` module), so the meeting fails retryably with its
     audio kept; Nicolai runs a debug build of the app over several meetings
-    and checks that nothing aborts and memory stays flat.
+    and checks that nothing aborts and memory stays flat (step 5 of "Order
+    of operations and gates").
+  - Measured on Forge (macOS 26, 24 GB), the corpus's 10-minute files and
+    the first six joined into one hour: in a release build with debug
+    assertions the footprint went from 26 MB to 462 MB and the IOSurface
+    regions from 2 to 6 271 over the first file, and the second file
+    aborted at about 9 200, exactly as in #279; a plain release build stayed
+    at 331 to 337 MB and about 70 regions over the corpus 8 times (9.3 h),
+    and at 551 to 559 MB over ten 1-hour meetings, so no plain build reaches
+    the wall within a day. The cause: CoreML returns its feature values and
+    output arrays (IOSurfaces) at +0, and objc2 skips its autorelease
+    elision under debug assertions, so each was autoreleased, and only the
+    prediction itself ran in a pool; a plain build depended on the
+    elision, an inlining accident.
+  - Fixed (`fix/a15-coreml-iosurface`): `coreml::contained` runs every
+    model call (its inputs, the prediction, the output reads) and every
+    model load inside one autorelease pool and one Objective-C `@catch`
+    (objc2's `exception::catch`). Both builds now stay flat over the same
+    9.3 h and 10 h (337 and 557 MB, about 71 regions), the debug-assert
+    build passes the parity corpus (mean of files 8.46 %, as before), and
+    the transcripts are unchanged (the same token counts per file). A caught
+    exception becomes `SpeechError::Exception` ("CoreML raised <name>:
+    <reason>"), the engine drops its models so the next call loads them
+    again, and the meeting fails at `decode` (the job's load) or
+    `transcribe` like any speech failure: no retention stamp, every audio
+    file kept, Process again offered. The recorder's warm-up loads through
+    the same call, so an exception there costs one `warn` line with the
+    name and reason and the recording carries on. The warm-up runs only
+    when the user starts a recording, never at launch or on a capture
+    restart, so it cannot loop at launch; but an abort no `@catch` stops (a
+    C++ exception, a failed allocation) would end every recording at the
+    same point (main, 2026-10-16). So the warm-up is marked on disk while it
+    runs (`warm-up-in-progress` in the support directory, written and
+    removed durably); a launch that finds the mark left over skips the
+    warm-up from then on, says so once at `warn`, and the first meeting
+    loads the models in its processing instead; only a load there clears
+    the mark, after which recordings warm up again. Such an abort in a
+    meeting's own processing is A17's.
+  - Tests: a real `NSException` raised inside `contained` (with the Rust
+    frames unwound and the next call run), the shared pipeline's four
+    workers over a backend that raises through it, the job failing
+    retryably with its audio kept under "delete after processing", a
+    recording whose warm-up fails running on to a saved recording with one
+    log line, and a kill test: a child killed in the warm-up's load, the
+    next launch's recording warming nothing up and saved, its processing
+    clearing the mark, the recording after it warming up again.
   - Owner: audio. It blocks stable (D3).
 - **A16 Extra windows for the ONNX engine.** A2's design (#263) on the ONNX
   engine: every gap of 2.5 s or more (`MIN_GAP_SECONDS`) decoded in extra
@@ -2553,6 +2598,14 @@ candidate:
 
      Nicolai keeps the tally (meeting, platform, candidate, result) in one
      GitHub issue.
+   - **A15's check** (**Nicolai**, on the Mac): a debug build of the
+     candidate (`cargo build -p steno-desktop -p steno-speech-sidecar`, as
+     the desktop README's "Run" says) transcribes several real meetings with
+     CoreML, one over an hour among them, in one session. Pass when no
+     meeting fails with "CoreML raised", the app never quits, and
+     `footprint -p steno-desktop` taken after each meeting stays within
+     about 100 MB of the value after the first, with the IOSurface row
+     under 200 regions.
    - A fix becomes a new candidate. The steps it touches run again, and a fix to
      the audio path or a new P package restarts the R5 soak and the stability
      count.
