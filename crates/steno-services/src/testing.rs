@@ -805,13 +805,14 @@ impl TimedSink {
 }
 
 /// One `recorder_changed` the recorder's hook made: when it began, how
-/// long it took, on which thread, and whether the recorder's auto-stop was
-/// armed once it returned.
+/// long it took, on which thread, and the recorder's state and whether its
+/// auto-stop was armed once it returned.
 #[derive(Debug, Clone)]
 pub struct HookCall {
     pub began: Instant,
     pub took: Duration,
     pub thread: Option<String>,
+    pub state: steno_bridge::RecordingState,
     pub armed: bool,
 }
 
@@ -848,11 +849,13 @@ pub fn hosted(store: &Arc<Store>, recorder: &Arc<crate::recorder::CaptureRecorde
         let began = Instant::now();
         host.recorder_changed();
         let took = began.elapsed();
+        let status = recorder.status();
         calls.lock().unwrap().push(HookCall {
             began,
             took,
             thread: std::thread::current().name().map(str::to_owned),
-            armed: recorder.status().auto_stop.is_some(),
+            state: status.state,
+            armed: status.auto_stop.is_some(),
         });
     }));
     Hosted { host, sink, hooks }

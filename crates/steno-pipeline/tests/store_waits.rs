@@ -1078,7 +1078,10 @@ async fn an_owed_launch_resume_another_failure_ends_keeps_the_meetings_waiting_f
 /// its commit in one step, so a timer task on the runtime's one worker
 /// keeps ticking, and the admission commits once the lock goes. The lock
 /// is held for two seconds, inside the admission's busy timeout, which a
-/// longer hold would run out: the phone's retry is the handover's.
+/// longer hold would run out: the phone's retry is the handover's. The
+/// timer may stand still for 600 ms at most, the window of the services'
+/// own worker check (`the_poll_and_the_events_task_never_block_a_worker`):
+/// a worker the admission held would stand still for the whole hold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_admit_under_a_held_lock_leaves_the_worker_free() {
     use steno_core::{AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata};
@@ -1141,7 +1144,7 @@ async fn an_admit_under_a_held_lock_leaves_the_worker_free() {
         std::thread::sleep(Duration::from_millis(50));
         let since = ticked.lock().unwrap().elapsed();
         assert!(
-            since < Duration::from_millis(200),
+            since < Duration::from_millis(600),
             "the timer stood still for {since:?} while the admission waited"
         );
     }

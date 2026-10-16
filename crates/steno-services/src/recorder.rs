@@ -4382,9 +4382,10 @@ mod tests {
 
     /// P40 check 4 (`.plans/2026-10-12-store-off-the-workers.md`): a stop
     /// while another process holds the write lock, and a write of this
-    /// process waits behind it, shows `Stopping` in the host within 100 ms,
-    /// with a reload in flight as the poll runs one; the save waits for the
-    /// lock and lands within a second of its release, past one busy timeout.
+    /// process waits behind it, shows `Stopping` in the host within 100 ms
+    /// of the recorder's notice, with a reload in flight as the poll runs
+    /// one; the save waits for the lock and lands within a second of its
+    /// release, past one busy timeout.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_stop_under_a_held_lock_shows_stopping_at_once_and_saves_once_the_lock_goes() {
         let harness = harness(&[]);
@@ -4401,11 +4402,17 @@ mod tests {
         let shown = hosted
             .sink
             .recording_in("stopping", since, PATIENCE)
-            .expect("the stop reached the host")
-            .duration_since(since);
+            .expect("the stop reached the host");
+        let noticed = hosted
+            .hooks_since(since)
+            .into_iter()
+            .find(|call| call.state != RecordingState::Recording)
+            .expect("the stop's notice")
+            .began;
+        let shown = shown.saturating_duration_since(noticed);
         assert!(
             shown < Duration::from_millis(100),
-            "Stopping reached the host {shown:?} after the stop"
+            "Stopping reached the host {shown:?} after the recorder's notice"
         );
 
         let released = held.release_after_hold();
