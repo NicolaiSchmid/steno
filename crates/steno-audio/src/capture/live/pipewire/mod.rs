@@ -30,10 +30,10 @@
 //!
 //! The stream runs with `RT_PROCESS`, so its `process` callback runs on
 //! PipeWire's data-loop thread, which is the real-time path here:
-//! `process` dequeues the buffer, turns its chunk into a
-//! [`SliceView`] with [`interleaved_view`]
-//! and, while the gate is open, hands it to [`deliver_slices`], the safe
-//! form of the IOProc body the macOS backend uses. No allocation, no lock,
+//! `process` dequeues the buffer, turns its chunk into a [`SliceView`] with
+//! [`interleaved_view`] and, while the gate is open, hands it to
+//! [`deliver_slices`], the safe form of the IOProc body the macOS backend
+//! uses. No allocation, no lock,
 //! no log (proven for the body in `tests/realtime.rs` and on the real
 //! data-loop thread in `tests/pipewire.rs`).
 //!
@@ -343,13 +343,13 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
     };
-    let datas = buffer.datas_mut();
-    let Some(data) = datas.first_mut() else {
+    let Some(data) = buffer.datas_mut().first_mut() else {
         return;
     };
     let chunk = data.chunk();
     let (offset, size, stride) = (chunk.offset(), chunk.size(), chunk.stride());
-    // The memory is the buffer's while it is dequeued; `buffer` outlives
+    // The buffer's memory, mapped by `MAP_BUFFERS` and valid while the
+    // buffer stays dequeued, until `buffer` drops at the end of this call;
     // the view borrows it.
     let memory = data.data();
     let view = interleaved_view(memory.as_deref(), offset, size, stride, rt.channels);

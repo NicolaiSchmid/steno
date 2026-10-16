@@ -454,6 +454,11 @@ impl LaneCounts {
             *seen = count;
         }
     }
+
+    /// The largest lane's count, in seconds.
+    fn most_seconds(&self) -> f64 {
+        self.at_output_rate.values().max().copied().unwrap_or(0) as f64 / SAMPLE_RATE
+    }
 }
 
 /// The sink's per-lane counts of one recording: its ring overruns, and
@@ -487,18 +492,13 @@ impl RingCounts {
     /// Seconds of zeros written for missed audio on the lane that missed
     /// most, for [`CaptureStatistics::missed_seconds`].
     fn missed_seconds(&self) -> f64 {
-        Self::most_seconds(&self.missed)
+        self.missed.most_seconds()
     }
 
     /// Seconds of missed audio not written on the lane that lost most, for
     /// [`CaptureStatistics::unfilled_seconds`].
     fn unfilled_seconds(&self) -> f64 {
-        Self::most_seconds(&self.unfilled)
-    }
-
-    /// The largest lane's count in `counts`, in seconds.
-    fn most_seconds(counts: &LaneCounts) -> f64 {
-        counts.at_output_rate.values().max().copied().unwrap_or(0) as f64 / SAMPLE_RATE
+        self.unfilled.most_seconds()
     }
 
     /// The `warn` line after the stop, when the capture's thread missed
