@@ -285,6 +285,58 @@ fn stages(events: &[MeetingEvent]) -> Vec<PipelineStage> {
         .collect()
 }
 
+/// `RetentionApplied` follows the durable stamp: a follower that reads
+/// the asset as the event arrives (the app sweeps and reloads on it)
+/// finds `expires_at` set. A commit probe holds the stamp's commit for a
+/// moment, so an event posted before it would be read first.
+#[tokio::test(flavor = "multi_thread")]
+async fn retention_applied_is_posted_after_its_stamp() {
+    let world = world(
+        true,
+        Some(|vault| FakeDestination::new(vault)),
+        AudioRetention::KeepDays(30),
+    );
+    world.store.probe_commits(|connection| {
+        let stamped: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM audioAsset WHERE expiresAt IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if stamped > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    });
+    let mut receiver = world.events.subscribe();
+    let store = world.store.clone();
+    let follower = tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(MeetingEvent::RetentionApplied { meeting_id }) => {
+                    return store.asset(meeting_id).unwrap().unwrap().expires_at;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("the follower missed events: {error}"),
+            }
+        }
+    });
+
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepDays(30));
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let stamped = tokio::time::timeout(PATIENCE, follower)
+        .await
+        .expect("RetentionApplied was posted")
+        .unwrap();
+    assert_eq!(
+        stamped,
+        Some(world.now + Duration::days(30)),
+        "the stamp was on the disk when the event arrived"
+    );
+}
+
 // One flow, as the Swift test: every assertion reads the run before it.
 #[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread")]
