@@ -71,14 +71,11 @@
 //!
 //! An IO thread the scheduler holds up past its deadline misses cycles:
 //! the HAL reports an overload, and the next input time stamp's sample time
-//! sits past where the last buffer ended, the audio between gone. `io_proc`
-//! reads that sample time against where the audio delivered so far ends
-//! ([`CycleClock`], in the aggregate's frames) and writes the missed frames
-//! as zeros on every lane before the callback's own
-//! ([`LaneFrameSink::fill_missed`]), so the master stays on wall time and
-//! the session counts them (A18 of `.plans/2026-10-07-stable-promotion.md`;
-//! Rust only, Swift reads no time stamps). A time stamp without a valid
-//! sample time resets the clock; every start begins a new one.
+//! sits past where the last buffer ended (A18; the design is in
+//! [`realtime::missed`](crate::realtime::missed)). `io_proc` reads that
+//! sample time and writes what was missed as zeros before the callback's
+//! own frames; `stop()` reads `AudioDeviceGetCurrentTime` before the IOProc
+//! stops. A time stamp without a valid sample time resets the clock.
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -110,8 +107,8 @@ use crate::capture::{
 };
 use crate::realtime::io_proc::callback_frames;
 use crate::realtime::{
-    BufferView, CycleClock, FirstCallback, LaneFrameSink, MAX_BUFFERS, RateConverter, deliver,
-    first_callback_line, silence_output,
+    BufferView, CycleClock, FirstCallback, LaneFrameSink, MAX_BUFFERS, Missed, RateConverter,
+    deliver, first_callback_line, silence_output,
 };
 
 /// Shared with the IOProc through a raw pointer; boxed so it never moves,
@@ -120,30 +117,52 @@ struct CallbackContext {
     sink: Arc<LaneFrameSink>,
     sources: Vec<LaneSource>,
     first_callback: FirstCallback,
-    /// Where the delivered audio ends in the aggregate's sample time. A
-    /// `Cell`: only the IO thread touches it, one callback at a time, and
-    /// only through the shared reference `io_proc` makes.
+    /// Where the delivered audio ends in the aggregate's input sample time,
+    /// and how far the IO cycle's own sample time (`now`) ran ahead of the
+    /// input's in the last callback, for `stop()`'s reading. `Cell`s: only
+    /// the IO thread touches them, one callback at a time, and only through
+    /// the shared reference `io_proc` makes; `stop()` reads them once the
+    /// IOProc is destroyed.
     clock: Cell<CycleClock>,
+    input_lag: Cell<f64>,
+}
+
+/// Whether `time` carries a sample time to read.
+fn sample_time(time: &AudioTimeStamp) -> Option<f64> {
+    (time.mFlags.0 & AudioTimeStampFlags::SampleTimeValid.0 != 0
+        && time.mSampleTime.is_finite()
+        && time.mSampleTime >= 0.0)
+        .then_some(time.mSampleTime)
 }
 
 /// The frames missed before a callback of `frames` whose input time stamp
 /// is `time`: `clock` advanced to its sample time; a stamp without a valid
 /// one resets the clock and reports nothing. Real-time safe.
 #[inline(always)]
-fn missed_before(clock: &Cell<CycleClock>, time: &AudioTimeStamp, frames: usize) -> usize {
+fn missed_before(clock: &Cell<CycleClock>, time: &AudioTimeStamp, frames: usize) -> Missed {
     let mut cycles = clock.get();
-    let valid = time.mFlags.0 & AudioTimeStampFlags::SampleTimeValid.0 != 0
-        && time.mSampleTime.is_finite()
-        && time.mSampleTime >= 0.0;
-    let missed = if valid {
+    let missed = match sample_time(time) {
         // A finite sample time at or above 0, to the nearest frame.
-        cycles.advance(time.mSampleTime.round() as u64, frames)
-    } else {
-        cycles.reset();
-        0
+        Some(sample) => cycles.advance(sample.round() as u64, frames),
+        None => {
+            cycles.reset();
+            Missed::default()
+        }
     };
     clock.set(cycles);
     missed
+}
+
+/// What the IO thread missed after its last callback, for a device whose
+/// sample time read `now` at the stop: [`CycleClock::missed_until`] at the
+/// input sample time that matches it.
+fn missed_at_stop(clock: CycleClock, input_lag: f64, now: Option<f64>) -> Missed {
+    let input = now.map(|now| now - input_lag);
+    match input.filter(|input| input.is_finite() && *input >= 0.0) {
+        // A finite sample time at or above 0, to the nearest frame.
+        Some(input) => clock.missed_until(input.round() as u64),
+        None => Missed::default(),
+    }
 }
 
 /// The IOProc. Builds a stack array of [`BufferView`]s from the HAL's
@@ -164,8 +183,8 @@ unsafe extern "C-unwind" fn io_proc(
         // SAFETY: `client` is the boxed `CallbackContext` registered in
         // `start`, alive until the IOProc is destroyed (which happens before
         // the box is dropped), and the HAL calls the IOProc one cycle at a
-        // time, so the context's `Cell` is never touched from two threads at
-        // once; `input`, `now` and `input_time` are the HAL's, valid for the
+        // time, so the context's `Cell`s are never touched from two threads
+        // at once; `input`, `now` and `input_time` are the HAL's, valid for the
         // call.
         unsafe {
             let ctx = &*client.cast::<CallbackContext>();
@@ -189,9 +208,11 @@ unsafe extern "C-unwind" fn io_proc(
             }
             let views = &views[..count];
             let frames = callback_frames(views, &ctx.sources);
-            let missed = missed_before(&ctx.clock, input_time.as_ref(), frames);
-            if missed > 0 {
-                ctx.sink.fill_missed(missed);
+            let input_time = input_time.as_ref();
+            ctx.sink
+                .write_missed(missed_before(&ctx.clock, input_time, frames));
+            if let (Some(now), Some(input)) = (sample_time(now.as_ref()), sample_time(input_time)) {
+                ctx.input_lag.set(now - input);
             }
             deliver(views, &ctx.sources, &ctx.sink);
         }
@@ -664,6 +685,7 @@ impl CaptureBackend for LiveCaptureBackend {
             sources: layout.sources.clone(),
             first_callback: FirstCallback::new(),
             clock: Cell::new(CycleClock::new(sample_rate)),
+            input_lag: Cell::new(0.0),
         });
         let context_ptr: *const CallbackContext = &raw const *context;
         let started = (hal::host_time_now(), Instant::now());
@@ -838,8 +860,19 @@ impl CaptureBackend for LiveCaptureBackend {
             started: (host_started, started_at),
             ..
         } = active;
+        let now = io_proc.current_sample_time();
         drop(io_proc);
-        // The IOProc is stopped: nothing writes the mark any more.
+        // The IOProc is destroyed: nothing writes the context any more, so
+        // what the IO thread missed after its last callback goes into the
+        // sink from here, unless the session stops for a rebuild, whose gap
+        // covers that time.
+        if !context.sink.device_change_reported() {
+            context.sink.write_missed(missed_at_stop(
+                context.clock.get(),
+                context.input_lag.get(),
+                now,
+            ));
+        }
         start_log!(
             info,
             "{}",

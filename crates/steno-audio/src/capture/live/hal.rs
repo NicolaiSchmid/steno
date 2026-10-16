@@ -22,14 +22,14 @@ use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2_core_audio::{
     AudioConvertHostTimeToNanos, AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID,
-    AudioDeviceIOProc, AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop,
-    AudioGetCurrentHostTime, AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
-    AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap,
-    AudioHardwareIOProcStreamUsage, AudioObjectAddPropertyListener, AudioObjectGetPropertyData,
-    AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
-    AudioObjectPropertyScope, AudioObjectPropertySelector, AudioObjectRemovePropertyListener,
-    AudioObjectSetPropertyData, CATapDescription, CATapMuteBehavior,
-    kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
+    AudioDeviceGetCurrentTime, AudioDeviceIOProc, AudioDeviceIOProcID, AudioDeviceStart,
+    AudioDeviceStop, AudioGetCurrentHostTime, AudioHardwareCreateAggregateDevice,
+    AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice,
+    AudioHardwareDestroyProcessTap, AudioHardwareIOProcStreamUsage, AudioObjectAddPropertyListener,
+    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
+    AudioObjectPropertyAddress, AudioObjectPropertyScope, AudioObjectPropertySelector,
+    AudioObjectRemovePropertyListener, AudioObjectSetPropertyData, CATapDescription,
+    CATapMuteBehavior, kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
     kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey,
     kAudioAggregateDevicePropertyActiveSubDeviceList, kAudioAggregateDevicePropertyMainSubDevice,
     kAudioAggregateDeviceSubDeviceListKey, kAudioAggregateDeviceTapAutoStartKey,
@@ -44,7 +44,8 @@ use objc2_core_audio::{
     kAudioSubTapUIDKey, kAudioTapPropertyFormat,
 };
 use objc2_core_audio_types::{
-    AudioBufferList, AudioStreamBasicDescription, kAudioFormatFlagIsNonInterleaved,
+    AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
+    kAudioFormatFlagIsNonInterleaved,
 };
 use objc2_core_foundation::{CFDictionary, CFRetained, CFString};
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
@@ -681,6 +682,22 @@ impl IoProc {
             });
         }
         Ok(Self { device, proc_id })
+    }
+
+    /// The device's sample time now, while the IOProc runs
+    /// (`AudioDeviceGetCurrentTime`); `None` when the HAL gives none.
+    #[must_use]
+    pub fn current_sample_time(&self) -> Option<f64> {
+        // SAFETY: every field of `AudioTimeStamp` is an integer, a float or
+        // a struct of them, so all zeros is a valid value.
+        let mut time = unsafe { std::mem::MaybeUninit::<AudioTimeStamp>::zeroed().assume_init() };
+        time.mFlags = AudioTimeStampFlags::SampleTimeValid;
+        // SAFETY: a valid device id and a live out-pointer to a stamp.
+        let status = unsafe { AudioDeviceGetCurrentTime(self.device, NonNull::from(&mut time)) };
+        (status == 0
+            && time.mFlags.contains(AudioTimeStampFlags::SampleTimeValid)
+            && time.mSampleTime.is_finite())
+        .then_some(time.mSampleTime)
     }
 
     /// Whether each of the device's input streams is on for this IOProc.

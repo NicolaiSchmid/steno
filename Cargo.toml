@@ -157,7 +157,7 @@ objc2-event-kit = { version = "0.3", default-features = false, features = ["std"
 # ENOTTY), and on Linux and macOS the `statfs` the pipeline reads a folder's
 # file system with, and the macOS updater's `access(2)` on the bundle.
 # Already in the lock (`tempfile` uses it).
-rustix = { version = "1.1", features = ["fs"] }
+rustix = { version = "1.1", features = ["fs", "time"] }
 # Adapters: IANA time zones for the dates in the notes (Swift's `TimeZone`),
 # the machine's zone name, and the canonical decomposition `Slug` strips
 # diacritics with (the core's `Person::names_match` folds names with it too).

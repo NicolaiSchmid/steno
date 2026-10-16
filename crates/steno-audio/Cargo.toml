@@ -40,6 +40,7 @@ windows-core.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire.workspace = true
+rustix.workspace = true
 serde_json.workspace = true
 
 [build-dependencies]

@@ -51,7 +51,9 @@
 //! resumes. A daemon killed mid-recording and started again (the harness's
 //! `--kill-daemons` and `--start-daemons`) is reported as the audio service
 //! restarting, and the recording resumes on the new daemon with its gap
-//! covering the outage.
+//! covering the outage. A recording whose process is stopped and resumed
+//! (`SIGSTOP`, `SIGCONT`) fills and counts the cycles it missed, counts a
+//! stop too long to fill, and counts one that ends just after its stop.
 //!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
@@ -81,7 +83,7 @@ use steno_audio::capture::{
     DeviceChangeReason,
 };
 use steno_audio::testing::rt::CountingAllocator;
-use steno_audio::writer::WavStreamWriter;
+use steno_audio::writer::{WavFile, WavStreamWriter};
 use steno_audio::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, LaneFrameSink, LiveCaptureBackend,
     SAMPLE_RATE, SystemClock,
@@ -1085,7 +1087,7 @@ fn a_daemon_killed_and_started_again_resumes_the_recording() {
 /// on, probes of a source whose owner is stopped answer `false`, one once
 /// the owner resumed `true`, and the recording got no report, no gap and
 /// no dropped frame. Its master, the cycles the capture's thread missed in
-/// it as zeros (A18 of the stable-promotion plan), is at most 0.1 s
+/// it as zeros (A18 of `.plans/2026-10-07-stable-promotion.md`), is at most 0.1 s
 /// shorter than the wall time from the end of its start to its stop, and
 /// at most 0.1 s longer than the wall time from before its start to the
 /// end of its stop. The probe's own stream is not the recording's, so a
@@ -1143,8 +1145,8 @@ fn probing_a_chosen_source_costs_the_recording_nothing() {
         statistics.dropped_frames
     );
     let master = statistics.duration;
-    // The cycles the capture's thread missed (A18) are in the master as
-    // zeros, so it stays on wall time however busy the machine is.
+    // The cycles the capture's thread missed are in the master as zeros,
+    // so it stays on wall time however busy the machine is.
     let missed = statistics.missed_seconds;
     println!(
         "the master: {master:.3} s against {stopping:.3} to {wall:.3} s of wall time, \
@@ -1154,6 +1156,167 @@ fn probing_a_chosen_source_costs_the_recording_nothing() {
         master > stopping - 0.1 && master < wall + 0.1,
         "every frame while the probes ran, missed cycles as zeros: {master:.3} s \
          ({missed:.3} s missed) against {stopping:.3} to {wall:.3} s"
+    );
+}
+
+/// A call recording of about `length` whose whole process a child shell
+/// stops (`SIGSTOP`) for each of `stops` seconds and resumes (`SIGCONT`),
+/// the first one second in and one second apart: the stable plan's gate
+/// procedure for A18 (`.plans/2026-10-07-stable-promotion.md`), which no
+/// load does as surely. The test thread is stopped with the rest, so the
+/// recording's stop comes once it wakes at `length` or after the last
+/// stop, whichever is later.
+struct StoppedRun {
+    statistics: steno_audio::capture::CaptureStatistics,
+    /// The wall time from the end of the start to the stop, and from
+    /// before the start to the end of the stop.
+    stopping: f64,
+    wall: f64,
+    /// Each lane's 16 kHz sidecar, in samples.
+    lanes: Vec<usize>,
+}
+
+fn stopped_run(stops: &[f64], length: Duration) -> StoppedRun {
+    show_logs();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let session = CaptureSession::with_backend(
+        CaptureConfiguration::new(CaptureMode::Call, directory.path()),
+        Arc::new(LiveCaptureBackend::new()),
+        None,
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        Arc::new(SystemClock::new()),
+    )
+    .expect("the session");
+    let pid = std::process::id();
+    let script = stops
+        .iter()
+        .map(|seconds| format!("sleep 1; kill -STOP {pid}; sleep {seconds}; kill -CONT {pid}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let starting = Instant::now();
+    session.start(Uuid::new_v4()).expect("the start");
+    let started = Instant::now();
+    let mut stopper = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .spawn()
+        .expect("the shell that stops this process");
+    std::thread::sleep(length);
+    let stopping = started.elapsed().as_secs_f64();
+    let result = session.stop().expect("the recording");
+    let wall = starting.elapsed().as_secs_f64();
+    assert!(stopper.wait().expect("the shell").success());
+    let lanes = CALL
+        .iter()
+        .map(|lane| {
+            let path = steno_core::paths::file_url_path(&result.asset.sidecars_16k[lane])
+                .expect("a sidecar path");
+            WavFile::read_16k_mono(&path).expect("the sidecar").len()
+        })
+        .collect();
+    let run = StoppedRun {
+        statistics: result.statistics,
+        stopping,
+        wall,
+        lanes,
+    };
+    let statistics = &run.statistics;
+    println!(
+        "stopped for {stops:?} s: master {:.3} s against {stopping:.3} to {wall:.3} s of wall \
+         time, {:.3} s missed and filled, {:.3} s missed and not, gap {:.3} s, {} device \
+         changes, dropped {:?}, lanes {:?} samples at 16 kHz",
+        statistics.duration,
+        statistics.missed_seconds,
+        statistics.unfilled_seconds,
+        statistics.gap_seconds,
+        statistics.device_changes,
+        statistics.dropped_frames,
+        run.lanes
+    );
+    assert_eq!(run.lanes[0], run.lanes[1], "both lanes lost the same span");
+    assert!(
+        statistics.dropped_frames.is_empty(),
+        "{:?}",
+        statistics.dropped_frames
+    );
+    run
+}
+
+/// Three stops of 0.6 s: the cycles missed in each are filled with
+/// silence and counted, about 1.8 s less what PipeWire kept across each
+/// stop (about 50 ms), so the master stays on wall time.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_recording_stopped_three_times_fills_and_counts_what_it_missed() {
+    let run = stopped_run(&[0.6, 0.6, 0.6], Duration::from_secs(6));
+    let statistics = &run.statistics;
+    assert!(
+        (1.5..=1.9).contains(&statistics.missed_seconds),
+        "{:.3} s counted for 1.8 s stopped",
+        statistics.missed_seconds
+    );
+    assert_eq!(statistics.unfilled_seconds, 0.0);
+    let master = statistics.duration;
+    assert!(
+        master > run.stopping - 0.1 && master < run.wall + 0.1,
+        "the master on wall time: {master:.3} s against {:.3} to {:.3} s",
+        run.stopping,
+        run.wall
+    );
+}
+
+/// One stop of 2.5 s, past the fill limit and the session's stall
+/// timeout, whose watchdog is stopped with the rest: the missed audio is
+/// not filled but counted, and the master falls short of wall time by
+/// that much. Every later moment of the recording (a transcript's time
+/// stamps) then sits that much early against the wall clock; the test
+/// prints it. Should the watchdog wake first and rebuild, the gap counts
+/// the stop instead.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_recording_stopped_too_long_to_fill_counts_what_it_missed() {
+    let run = stopped_run(&[2.5], Duration::from_secs(5));
+    let statistics = &run.statistics;
+    let counted = statistics.unfilled_seconds + statistics.gap_seconds;
+    assert!(
+        (2.2..=2.7).contains(&counted),
+        "{counted:.3} s counted for 2.5 s stopped"
+    );
+    let master = statistics.duration;
+    let held = master + statistics.unfilled_seconds;
+    assert!(
+        held > run.stopping - 0.15 && held < run.wall + 0.15,
+        "the master and the unfilled audio on wall time: {held:.3} s against {:.3} to {:.3} s",
+        run.stopping,
+        run.wall
+    );
+    println!(
+        "after the stop the recording runs {:.3} to {:.3} s early against the wall clock",
+        run.stopping - master,
+        run.wall - master
+    );
+}
+
+/// A stop of 0.6 s that ends just after the recording's stop was due:
+/// no cycle may come after it, so the backend's `stop()` reads the
+/// clock and counts it. Nothing of it is silent: about 0.6 s missed, less
+/// the cycle delivered last and the one in flight.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_recording_stopped_just_before_its_stop_counts_what_it_missed() {
+    let run = stopped_run(&[0.6], Duration::from_millis(1_300));
+    let statistics = &run.statistics;
+    let counted = statistics.missed_seconds + statistics.unfilled_seconds;
+    assert!(
+        (0.4..=0.7).contains(&counted),
+        "{counted:.3} s counted for 0.6 s stopped at the end"
+    );
+    let master = statistics.duration;
+    assert!(
+        master > run.stopping - 0.1 && master < run.wall + 0.1,
+        "the master on wall time: {master:.3} s against {:.3} to {:.3} s",
+        run.stopping,
+        run.wall
     );
 }
 
