@@ -165,9 +165,10 @@ mirror.
   `checkpoint_store` runs it at launch in the app tests.
 - **Nesting is a deadlock rule, and stays one.** A `Store` call inside a
   `read` or `write` closure is forbidden: a nested read on the same reader
-  waits on its own mutex forever. A thread-local "inside a store closure"
-  flag, set for the closure's length, makes every `Store` entry point
-  `debug_assert!` that it is clear.
+  waits on its own mutex forever. A thread-local set of the databases the
+  thread is inside a store call on, each entered for the call's length,
+  makes every `Store` entry point `debug_assert!` that its database is not
+  in it.
 
 What a reader sees:
 
@@ -403,7 +404,7 @@ deadlock test) moves whole to `.plans/2026-10-15-host-actor.md`.
 **The plan's own commit.** #278 merged first; PR 1 was rebased onto it and
 carries the plan and the P40 row, so the table reads P39 then P40. This
 revision and the stable plan's P40 row and entry for the smaller cut land with
-the next P40 PR.
+PR 2a and 2b (#299).
 
 ## Work packages
 
@@ -521,6 +522,38 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   1, 2 and 6, and check 17, the delete's kill tests, as a guard: 2a changes
   the checkpoint that the forget and the undo fall back to.
 
+**As built** (#299, with 2b):
+
+- **Five lock entry points, not four.** `Store::on_writer` (test builds
+  only) hands a test the writer's connection outside a transaction. The
+  tests that tuned the writer through `read` (its busy timeout, its busy
+  handler, `query_only`) would now tune a reader.
+- **The nesting assert is per database.** The thread keeps a set of the
+  databases it is inside a store call on, not one flag, so a call on
+  another database's store inside a closure (a second process's store, in
+  a test) is allowed.
+- **The checkpoint under another process's lock** keeps both readers
+  through `wal_checkpoint`'s busy wait, up to 5 s. That is accepted: its
+  only callers are the launch and the recorder's fallbacks when a
+  recording's folder record cannot be written or forgotten (a stop, a
+  delete), and the `Store` doc says so. A checkpoint that waits for the
+  writer holds no reader (`a_checkpoint_waiting_for_the_writer_holds_no_reader`).
+- **"Live" is 1 s** (`steno_services::testing::LIVE`), not 200 ms: five
+  times under the busy timeout every regression waits out, and loose
+  enough for a machine at a load of 40 to 70 under `nice 19`, where 200 ms
+  flaked. Checks 2 and 4 add a coarse bound from the user's side,
+  `END_TO_END` (2 s): check 4 from the stop to `Stopping` in the host,
+  check 2 from the device change's first notice to the countdown armed
+  again. Each fails with the stop sleeping 3 s before its notice, or the
+  re-arm waiting on a store write. Check 4's narrow bound runs from the
+  recorder's notice. Check 2's device change is held until the countdown
+  is armed and the write waits (`hold_outages`), and check 1 counts at
+  least three hook calls during the hold.
+- **Extra tests:** `the_hosts_reads_do_not_wait_for_a_read_on_the_shared_reader`,
+  `one_host_reader_at_a_time`, and `the_host_reads_on_a_reader_of_its_own`
+  (`crates/steno-host/tests/main_window.rs`), which pins the host on its
+  own reader.
+
 ### WP2b: the facade and the async call sites (PR 2b, or with 2a)
 
 - **The facade.** `Store::reading` and `Store::writing` behind the `tokio`
@@ -556,6 +589,44 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   (`clippy::all` with `-D warnings`), so a std guard held across the facade's
   await fails the build.
 - **Tests:** checks 11 and 13.
+
+**As built** (#299, with 2a):
+
+- **About 55 store calls became 36 facade steps:** 27 in `pipeline.rs`, 1
+  in `RecordingIntake::admit` (the reads, the durable copy and the commit),
+  1 in the speaker memory, 5 in the delivery coordinator and 2 in the
+  handover. `retention.rs`, `lib.rs`, `sample_clips.rs`, `recovery.rs` and
+  the services' `handover.rs` had no async store call: recovery's async
+  functions run under `block_on` on the launch's blocking task, and the
+  services' handover goes through the engine. `mark_pending` stays a
+  synchronous trait method, called inside a `writing` step.
+- **The phone admission runs to its end.** On `main` the admission ran from
+  its reads to its enqueue in one poll. Through the facade it awaits, and
+  hyper drops a request's future when the phone hangs up, which its 10 s
+  timeout does under a long busy wait. So the admission (the step, the
+  commit and the enqueue) runs in a task of its own that the request awaits
+  but cannot cancel, in `RecordingIntake::admit`, and the handover's
+  `Engine::admit` runs in one too, which holds the `completing` mark and
+  ends the receipt in memory `complete` or `failed`. A phone that hangs up
+  mid-admit leaves its meeting committed and enqueued once, and its retry
+  is answered from that receipt with no upload again
+  (`tests/admission_under_a_held_lock.rs` in `steno-handover`).
+- **The `failed` receipt save is tried again** while the database is busy,
+  up to `RecordingIntake::FAILED_SAVE_ATTEMPTS` (3) in all, as the local
+  intake's commit is: the copy goes only once that save is on the disk.
+- **The two notifications log a panic.** `updates_changed` and
+  `phones_changed` run on the blocking pool with nothing awaiting them, so
+  a panic in either is logged at error, by name, without its message.
+- **Check 11** holds the lock 2 s, not 7 s, and allows a 600 ms stall of the
+  timer, check 12's window: a 7 s hold runs out the admit's busy timeout,
+  and the admission has no retry of its commit. The check still fails on
+  `main`, where the worker stands still for the whole hold. The admission
+  under 7 s and 12 s holds is pinned over TLS through the real service
+  instead.
+- **Check 12** (`the_poll_and_the_events_task_never_block_a_worker`) asks
+  the runtime's one worker to run a task while a reload is held at the
+  gate, bounded only by `HANG_GUARD`, in place of a timer's 200 ms gaps,
+  which load could fail.
 
 ### WP2c: the `recording` feed and the reload owner (PR 2c)
 
@@ -602,7 +673,9 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
 Each check that needs the lock holds another connection's write transaction
 (`WriteLockHold`, from #278) for 7 s. Each one runs on a runtime with one
 worker, so a wait on that worker shows as a missed deadline. "Live" means the
-observed thing happens within 200 ms during the hold. Every check fails without
+observed thing happens within 200 ms during the hold. As built, "live" is 1 s,
+checks 2 and 4 add a 2 s bound from the user's side, and check 11 holds 2 s
+(WP2a's and WP2b's as-built). Every check fails without
 its PR, on `main`, except the guards (checks 17, 18, 20 and 22), which pass on
 `main` and fail on a PR that breaks what they pin. The numbers are the plan's
 earlier ones: check 14 is removed, check 9 moves whole to
@@ -621,7 +694,7 @@ as an outcome, and checks 19 to 23 are new.
 | 8 | Start under the lock | `a_start_under_a_held_lock_is_refused_and_the_ui_stays_live`: after about 5 s the start is refused with "Steno could not create the meeting.", no capture opened, and checks 1 and 6 hold meanwhile | `recorder.rs` tests | 2a |
 | 9 | Moved | A host write of the user's own under a held lock (the settings save, and the delete's undo) moves whole to `.plans/2026-10-15-host-actor.md`: those writes keep the view-model lock until the host actor | | |
 | 10 | Detection's settings poll | `a_read_does_not_wait_behind_a_write_that_waits_on_another_connection` (the store, on the shared reader and on the host's), and `the_detection_poll_reads_the_settings_while_a_write_waits` | `crates/steno-core/src/store/mod.rs` tests, `crates/steno-services/src/detection/tests.rs` | 2a |
-| 11 | Handover admit on a worker | `an_admit_under_a_held_lock_leaves_the_worker_free`: a timer ticks live during the wait, and the admit commits once the lock goes | `crates/steno-pipeline/tests/store_waits.rs` | 2b |
+| 11 | Handover admit on a worker | `an_admit_under_a_held_lock_leaves_the_worker_free`: a timer ticks live during the wait, and the admit commits once the lock goes. As built the lock is held 2 s, not 7 s, and the timer may stall 600 ms (check 12's window): a 7 s hold runs out the admit's busy timeout (WP2b's as-built) | `crates/steno-pipeline/tests/store_waits.rs` | 2b |
 | 12 | The 2 s poll and the events task | `the_poll_and_the_events_task_never_block_a_worker`: a timer task on the services runtime keeps ticking live while a forced reload is held at a gate (a gated fake pipeline's `export_keeps_failing`, which the detail's reload calls); `the_event_follower_takes_one_event_at_a_time` (no task per waiting event), `a_held_poll_is_not_followed_by_a_burst` (`MissedTickBehavior::Delay`) and `the_event_followers_sweep_never_blocks_a_worker` (the sweep's write held by another connection). 2c keeps them passing with the poll as the reload owner; since an idle tick no longer reloads, the held reload comes from a forced pass | `crates/steno-services/src/app.rs` tests | 1 (passes) |
 | 13 | Pipeline runs on the workers | every `store_waits` test passes on one worker, including the quit during a run's wait | `store_waits.rs` | 2b |
 | 14 | Removed | The deadlock test for the host write mutex, the emitter's leaf and the reader checkout, and the "view models held" assert. None of those exists in this cut. What is left of the order (decision 3) is checked by the nesting assert (check 15) and by checks 1, 2, 16 and 21, which hold the view-model lock while the feed and a stop run | | |
@@ -743,7 +816,21 @@ blocking pool (`kill_tests.rs`, and #278's quit tests).
 - **A dropped future's write still lands.** A quit or a `select!` that drops a
   facade future does not stop the closure. Code after such a drop must not
   assume the write did not happen. This is the same as a process killed
-  mid-write, which recovery already handles.
+  mid-write, which recovery already handles. The phone admission goes
+  further: its enqueue and the handover's receipt run in tasks of their own,
+  so a dropped `complete` leaves a whole admission (WP2b's as-built).
+- **The checkpoint under another process's lock** keeps both readers
+  through `wal_checkpoint`'s busy wait, up to 5 s, so reads wait with it.
+  The launch and the recorder's fallbacks when a folder record cannot be
+  written or forgotten (a stop, a delete) are its only callers, so the UI
+  meets it only in that fallback.
+- **A copy left for the launch.** An admission whose commit and every
+  `failed` save run out their busy timeouts leaves its copy, still noted,
+  and the launch adopts it; a later retry that admits then gives a
+  duplicate meeting, never a lost one. That needs another process to hold
+  the lock for more than about 25 s over the wire (the `verifying` write,
+  the commit and three tries of the save), as on `main` it needed about
+  15 s.
 - **The blocking pool.** Tokio's default is 512 threads; idle ones end after
   10 s. Each caller waiting on the writer's mutex holds one pool thread, and
   the app has a handful of such callers (the pipeline's one run, the delivery,

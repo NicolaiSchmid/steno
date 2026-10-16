@@ -1646,8 +1646,9 @@ The table above names each package and its owner. Their tests:
   `crates/steno-services/src/pipeline.rs`.
 - **P40.** Smaller cut (Nicolai, 2026-10-15). Each check in the plan's
   Acceptance table that needs the lock holds another connection's
-  `BEGIN IMMEDIATE` for 7 s, on a runtime with one worker: the levels, the
-  `recording` snapshot and the device notices reach the host within 200 ms,
+  `BEGIN IMMEDIATE` for 7 s (check 11, 2 s), on a runtime with one worker:
+  the levels, the `recording` snapshot and the device notices reach the host
+  live (1 s as built in #299; the plan said 200 ms),
   during a pipeline write's wait and during the user's own settings save's;
   the UI's commands answer during a pipeline write's wait; the tray's Record
   and Launch at login return before the host answers, reach it in click
