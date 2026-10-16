@@ -437,6 +437,39 @@ fn an_idle_gap_or_a_step_back_does_not_skew_the_measurement() {
     assert_eq!(clocks.lose(50), filled(24_000));
 }
 
+/// Once the positions moved, a clean packet that advances more than 1.5
+/// times what the ratio measured so far explains stays out of the sums,
+/// below what the engine's rate allows too: 16 kHz positions on a 96 kHz
+/// engine (whose rate allows 2.5 a frame), with an unflagged idle of five
+/// packets after ten, still read a later loss in full.
+#[test]
+fn an_idle_inside_the_rate_bound_stays_out_once_the_ratio_is_measured() {
+    let mut clocks = Clocks::new(Some(96_000), 160, 0);
+    clocks.clean(10).skip(5).clean(200);
+    assert_eq!(clocks.positions.ratio(), Some(160.0 / 480.0));
+    assert_counted(clocks.lose(50), 24_000, "after the idle");
+}
+
+/// A QPC measured off by more than 2 % over two seconds is not read, even
+/// when its last clean pair happened to match: pairs in turn exact and 1.4
+/// times real time measure 1.2 times, and a flagged packet whose QPC reads
+/// three times the loss counts what the positions read.
+#[test]
+fn a_qpc_measured_off_is_not_read_even_after_a_matching_pair() {
+    let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
+    for packet in 0..2 * CALIBRATION_PACKETS {
+        assert!(clocks.deliver(false, false).is_none());
+        if packet % 2 == 0 {
+            clocks.next.qpc += 40_000;
+        }
+    }
+    clocks.clean(1);
+    assert!(!clocks.positions.fills());
+    clocks.skip(50);
+    clocks.next.qpc += 2 * 50 * QPC_PACKET;
+    assert_counted(clocks.deliver(true, false), 24_000, "the positions");
+}
+
 /// Device positions that jitter by a few frames a packet around one a
 /// frame (470 and 490 in turn) stay in the measurement, and read a loss.
 #[test]
