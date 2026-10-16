@@ -10,11 +10,13 @@ use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use uuid::Uuid;
 
 use super::convert::{DbDate, DbEnum, DbJson, DbUuid, RowExt as _};
-use super::{Result, Store, StoreError, assets, people, query_all, tasks, transcript, upsert_sql};
+use super::{
+    Result, Store, StoreError, assets, people, query_all, settings, tasks, transcript, upsert_sql,
+};
 use crate::model::{
-    AudioAsset, Decision, LanguageTag, Meeting, MeetingState, MeetingStateKind, MeetingTask,
-    Participant, Speaker, SpeakerNameSuggestion, SummaryDocument, TitleOrigin, TranscriptSegment,
-    derived_uuid,
+    AudioAsset, AudioRetention, Decision, LanguageTag, Meeting, MeetingState, MeetingStateKind,
+    MeetingTask, Participant, RecordingEndReason, Speaker, SpeakerNameSuggestion, SummaryDocument,
+    TitleOrigin, TranscriptSegment, derived_uuid,
 };
 use crate::paths::file_url_path;
 
@@ -218,26 +220,51 @@ impl Store {
 
     /// A stopped recording's commit (`LocalRecordingIntake::complete`,
     /// through `ProcessingPipeline::enqueue_stopped_recording`), in one
-    /// transaction and only while the stored row is still `recording`: the
-    /// row takes `meeting`'s duration, end reason, state and `updatedAt`
-    /// and keeps the rest as stored (a title or notes saved since the
-    /// caller read it), and `asset` is saved. A row that moved on fails with
-    /// [`StoreError::NotRecording`] and one that is gone with
+    /// transaction on the writer, which also makes the commit's reads (the
+    /// row and the settings), so the save never waits for a read in flight
+    /// on a reader. It writes only while the stored row is still
+    /// `recording`: the row turns `queued` with `duration`, `end_reason`
+    /// and `now` as its `updatedAt`, and keeps the rest as stored (a title
+    /// or notes saved since the recording began). `asset` is saved with
+    /// the retention `retention`, else the settings' default as stored
+    /// now, and no `expires_at`. Returns the row as saved. A row that moved
+    /// on fails with [`StoreError::NotRecording`] and one that is gone with
     /// [`StoreError::MeetingNotFound`], and nothing is written, so a
     /// recording deleted or failed meanwhile is not brought back. Rust
-    /// only: Swift's `complete` saved the row it had read.
-    pub fn save_stopped_recording(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
+    /// only: Swift's `complete` read the row and the settings first and
+    /// saved the row it had read.
+    pub fn save_stopped_recording(
+        &self,
+        meeting_id: Uuid,
+        duration: f64,
+        end_reason: RecordingEndReason,
+        asset: &AudioAsset,
+        retention: Option<AudioRetention>,
+        now: DateTime<Utc>,
+    ) -> Result<Meeting> {
         self.write(|transaction| {
-            let mut stored = current(transaction, meeting.id)?;
+            let mut stored = current(transaction, meeting_id)?;
             if stored.state != MeetingState::Recording {
-                return Err(StoreError::NotRecording(meeting.id, stored.state.kind()));
+                return Err(StoreError::NotRecording(meeting_id, stored.state.kind()));
             }
-            stored.duration = meeting.duration;
-            stored.end_reason.clone_from(&meeting.end_reason);
-            stored.state = meeting.state.clone();
-            stored.updated_at = meeting.updated_at;
+            let retention = match retention {
+                Some(retention) => retention,
+                None => settings::stored(transaction)?.default_retention,
+            };
+            stored.duration = duration;
+            stored.end_reason = Some(end_reason);
+            stored.state = MeetingState::Queued;
+            stored.updated_at = now;
             save(transaction, &stored)?;
-            assets::save(transaction, asset)
+            assets::save(
+                transaction,
+                &AudioAsset {
+                    retention,
+                    expires_at: None,
+                    ..asset.clone()
+                },
+            )?;
+            Ok(stored)
         })
     }
 

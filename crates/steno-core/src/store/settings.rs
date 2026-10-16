@@ -18,7 +18,7 @@
 //! (Whisper, Parakeet Ultra and the German Parakeet the Swift app offered)
 //! to it. Rust only.
 
-use rusqlite::{OptionalExtension as _, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::Deserialize;
 use serde::de::{self, Deserializer, Visitor};
 use serde_json::Value;
@@ -136,6 +136,41 @@ fn undecodable_row(defaults: &Settings, merged: &Value) -> Option<StoreError> {
         })
 }
 
+/// Every stored setting row, as key and JSON text.
+fn stored_rows(connection: &Connection) -> Result<Vec<(String, String)>> {
+    query_all(connection, "SELECT key, value FROM setting", [], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })
+}
+
+/// `defaults` overlaid with `rows` ([`Store::settings_with_defaults`]).
+fn overlaid(defaults: &Settings, rows: Vec<(String, String)>) -> Result<Settings> {
+    let mut merged = object(defaults)?;
+    for (key, value) in rows {
+        if key == HANDOVER_PORT_KEY && json::from_column_str::<Option<u16>>(&value).is_err() {
+            tracing::warn!(
+                target: "steno::store",
+                "the stored {HANDOVER_PORT_KEY} is not a port from 0 to 65535, so it is ignored"
+            );
+            continue;
+        }
+        let Ok(value) = json::from_column_str(&value) else {
+            return Err(StoreError::UndecodableSetting {
+                key,
+                problem: SettingProblem::NotJson,
+            });
+        };
+        merged.insert(key, value);
+    }
+    decode(defaults, &Value::Object(merged))
+}
+
+/// The settings as stored, over the defaults, read on `connection`: inside
+/// a write's transaction, so the write needs no reader.
+pub(super) fn stored(connection: &Connection) -> Result<Settings> {
+    overlaid(&Settings::default(), stored_rows(connection)?)
+}
+
 impl Store {
     /// The defaults overlaid with every stored row.
     pub fn settings(&self) -> Result<Settings> {
@@ -145,29 +180,8 @@ impl Store {
     /// [`Store::settings`] over explicit defaults (tests pass one with a
     /// known audio folder).
     pub fn settings_with_defaults(&self, defaults: &Settings) -> Result<Settings> {
-        let rows = self.read(|connection| {
-            query_all(connection, "SELECT key, value FROM setting", [], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-        })?;
-        let mut merged = object(defaults)?;
-        for (key, value) in rows {
-            if key == HANDOVER_PORT_KEY && json::from_column_str::<Option<u16>>(&value).is_err() {
-                tracing::warn!(
-                    target: "steno::store",
-                    "the stored {HANDOVER_PORT_KEY} is not a port from 0 to 65535, so it is ignored"
-                );
-                continue;
-            }
-            let Ok(value) = json::from_column_str(&value) else {
-                return Err(StoreError::UndecodableSetting {
-                    key,
-                    problem: SettingProblem::NotJson,
-                });
-            };
-            merged.insert(key, value);
-        }
-        decode(defaults, &Value::Object(merged))
+        let rows = self.read(stored_rows)?;
+        overlaid(defaults, rows)
     }
 
     /// Writes every property and removes the rows of known properties that

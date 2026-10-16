@@ -55,6 +55,7 @@ use crate::damaged_audio::DamagedAudio;
 use crate::estimator::{ProcessingEstimator, StageRates, StageSample, absorbing};
 use crate::events::MeetingEventBus;
 use crate::export_retries::ExportRetries;
+use crate::intake::RecordingResult;
 use crate::lane_merger::{ClusterSpeaker, LaneMerger};
 use crate::run::ProcessingRun;
 use crate::sample_clips::{self, ClipProbe, ClipStep};
@@ -1189,6 +1190,15 @@ pub fn tap_carried_no_conversation(lanes: &BTreeMap<AudioLane, Vec<RawSegment>>)
         && tap_speech < TAP_CONVERSATION_MAXIMUM_SECONDS
 }
 
+/// `meeting`, `queued` at `now`: what `enqueue` and `enqueue_new` save.
+fn queued(meeting: &Meeting, now: DateTime<Utc>) -> Meeting {
+    Meeting {
+        state: MeetingState::Queued,
+        updated_at: now,
+        ..meeting.clone()
+    }
+}
+
 fn attributing<T, E: fmt::Display + 'static>(
     stage: PipelineStage,
     result: std::result::Result<T, E>,
@@ -1308,8 +1318,10 @@ impl ProcessingPipeline {
     /// pipeline [quits](Self::quit), the meeting is saved and stays
     /// `queued` for the next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let claim = self.claim_or_refuse(meeting, asset)?;
-        self.enqueue_claimed(meeting, asset, claim, Store::save_meeting_with_asset)
+        let claim = self.claim_or_refuse(meeting.id, asset)?;
+        self.enqueue_claimed(meeting.id, asset, claim, |store, now, asset| {
+            store.save_meeting_with_asset(&queued(meeting, now), asset)
+        })
     }
 
     /// [`ProcessingPipeline::enqueue`] of a meeting that has no row yet,
@@ -1318,18 +1330,36 @@ impl ProcessingPipeline {
     /// the id written meanwhile fails the enqueue and is left as it is.
     /// Rust only.
     pub fn enqueue_new(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let claim = self.claim_or_refuse(meeting, asset)?;
-        self.enqueue_claimed(meeting, asset, claim, Store::insert_meeting_with_asset)
+        let claim = self.claim_or_refuse(meeting.id, asset)?;
+        self.enqueue_claimed(meeting.id, asset, claim, |store, now, asset| {
+            store.insert_meeting_with_asset(&queued(meeting, now), asset)
+        })
     }
 
-    /// [`ProcessingPipeline::enqueue`] of a Mac recording that stopped, the
-    /// local intake's: the rows are written through
-    /// [`Store::save_stopped_recording`], so only while the meeting is
-    /// still `recording`, checked in the commit's own transaction. Rust
-    /// only.
-    pub fn enqueue_stopped_recording(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let claim = self.claim_or_refuse(meeting, asset)?;
-        self.enqueue_claimed(meeting, asset, claim, Store::save_stopped_recording)
+    /// [`ProcessingPipeline::enqueue`] of the Mac recording `meeting_id`
+    /// that stopped with `result`, the local intake's: the rows are written
+    /// through [`Store::save_stopped_recording`], with the asset's
+    /// `retention`, else the settings' default, so only while the meeting
+    /// is still `recording`, and the row and the settings are read in the
+    /// commit's own transaction, on the writer. Returns the meeting as
+    /// saved. Rust only.
+    pub fn enqueue_stopped_recording(
+        &self,
+        meeting_id: Uuid,
+        result: &RecordingResult,
+        retention: Option<AudioRetention>,
+    ) -> Result<Meeting> {
+        let claim = self.claim_or_refuse(meeting_id, &result.asset)?;
+        self.enqueue_claimed(meeting_id, &result.asset, claim, |store, now, asset| {
+            store.save_stopped_recording(
+                meeting_id,
+                result.duration,
+                result.end_reason.clone(),
+                asset,
+                retention,
+                now,
+            )
+        })
     }
 
     /// [`ProcessingPipeline::enqueue`] of a meeting the caller saved
@@ -1341,43 +1371,44 @@ impl ProcessingPipeline {
     /// nothing starts and the meeting waits `queued` for the next launch.
     /// Swift: `ProcessingPipeline.enqueueSaved`.
     pub fn enqueue_saved(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let claim = self.claim_or_refuse(meeting, asset)?;
+        let claim = self.claim_or_refuse(meeting.id, asset)?;
         self.start(asset, Turn::Now(None), claim);
         Ok(())
     }
 
     /// [`ProcessingPipeline::claim_start`] for `enqueue` and
     /// `enqueue_saved`, refused as a failed `decode`.
-    fn claim_or_refuse(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<AssetClaim> {
-        self.claim_start(meeting.id, asset.id).ok_or_else(|| {
+    fn claim_or_refuse(&self, meeting_id: Uuid, asset: &AudioAsset) -> Result<AssetClaim> {
+        self.claim_start(meeting_id, asset.id).ok_or_else(|| {
             PipelineFailure::new(
                 PipelineStage::Decode,
-                format!("meeting {} is already being processed", meeting.id),
+                format!("meeting {meeting_id} is already being processed"),
             )
         })
     }
 
     /// `enqueue` once the asset is claimed, its rows written through
-    /// `save`: the claim is held from the check to the run's end, so a
-    /// second call cannot start a second run.
-    fn enqueue_claimed(
+    /// `save` at the pipeline's now, with the asset pointed at
+    /// `meeting_id`: the claim is held from the check to the run's end, so
+    /// a second call cannot start a second run.
+    fn enqueue_claimed<T>(
         &self,
-        meeting: &Meeting,
+        meeting_id: Uuid,
         asset: &AudioAsset,
         claim: AssetClaim,
-        save: fn(&Store, &Meeting, &AudioAsset) -> std::result::Result<(), StoreError>,
-    ) -> Result<()> {
-        let mut queued = meeting.clone();
-        queued.state = MeetingState::Queued;
-        queued.updated_at = self.now();
+        save: impl FnOnce(&Store, DateTime<Utc>, &AudioAsset) -> std::result::Result<T, StoreError>,
+    ) -> Result<T> {
         let mut asset = asset.clone();
-        asset.meeting_id = meeting.id;
-        attributing(PipelineStage::Decode, save(self.store(), &queued, &asset))?;
+        asset.meeting_id = meeting_id;
+        let saved = attributing(
+            PipelineStage::Decode,
+            save(self.store(), self.now(), &asset),
+        )?;
         // Processed afresh: earlier runs that ended with the app no longer
         // count against it.
         RunCount::of(&asset).clear();
         self.start(&asset, Turn::Now(None), claim);
-        Ok(())
+        Ok(saved)
     }
 
     /// Processes a `ready` or `failed` meeting again from `decode`, with its
@@ -1466,7 +1497,11 @@ impl ProcessingPipeline {
             return Err(ReprocessError::AudioGone(meeting_id));
         }
         asset.expires_at = None;
-        Ok(self.enqueue_claimed(&meeting, &asset, claim, Store::save_meeting_with_asset)?)
+        Ok(
+            self.enqueue_claimed(meeting_id, &asset, claim, |store, now, asset| {
+                store.save_meeting_with_asset(&queued(&meeting, now), asset)
+            })?,
+        )
     }
 
     /// Claims `asset_id` for a background run of `meeting_id` in the

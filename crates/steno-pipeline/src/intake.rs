@@ -22,26 +22,31 @@ use uuid::Uuid;
 
 use crate::pipeline::{Now, PipelineFailure, ProcessingPipeline};
 
-/// Hands a queued meeting and its asset to the pipeline. The production
-/// wiring is [`ProcessingPipeline::enqueue`] for the local intake, which
-/// saves the rows, and [`ProcessingPipeline::enqueue_saved`] for the
-/// phone's, which saved them itself; tests pass a counting closure.
+/// Hands a queued meeting and its asset to the pipeline: the phone
+/// intake's, which saved them itself. The production wiring is
+/// [`ProcessingPipeline::enqueue_saved`]; tests pass a counting closure.
 pub type Enqueue = Arc<
     dyn Fn(Meeting, AudioAsset) -> Pin<Box<dyn Future<Output = Result<(), PipelineFailure>> + Send>>
         + Send
         + Sync,
 >;
 
-/// `enqueue` (one of [`ProcessingPipeline`]'s enqueues) on `pipeline`.
-fn enqueue_through(
-    pipeline: ProcessingPipeline,
-    enqueue: fn(&ProcessingPipeline, &Meeting, &AudioAsset) -> Result<(), PipelineFailure>,
-) -> Enqueue {
-    Arc::new(move |meeting, asset| {
-        let pipeline = pipeline.clone();
-        Box::pin(async move { enqueue(&pipeline, &meeting, &asset) })
-    })
-}
+/// Commits the Mac recording that stopped, by its meeting id, its result
+/// and the retention to give its asset (`None`: the settings' default),
+/// and hands it to the pipeline: the local intake's. The production
+/// wiring is [`ProcessingPipeline::enqueue_stopped_recording`], which
+/// commits through [`Store::save_stopped_recording`] and returns the
+/// meeting as saved; tests pass a closure that commits the same way or
+/// fails.
+pub type EnqueueStopped = Arc<
+    dyn Fn(
+            Uuid,
+            RecordingResult,
+            Option<AudioRetention>,
+        ) -> Pin<Box<dyn Future<Output = Result<Meeting, PipelineFailure>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// "Phone recording 2026-09-24 11:00" in the given zone.
 #[must_use]
@@ -177,7 +182,10 @@ impl RecordingIntake {
         let now = pipeline.dependencies().now.clone();
         Self::new(
             store,
-            enqueue_through(pipeline, ProcessingPipeline::enqueue_saved),
+            Arc::new(move |meeting, asset| {
+                let pipeline = pipeline.clone();
+                Box::pin(async move { pipeline.enqueue_saved(&meeting, &asset) })
+            }),
             now,
             zone,
         )
@@ -484,7 +492,7 @@ impl LocalRecordingIntakeError {
 /// to the pipeline; `fail` records why a recording never made it.
 pub struct LocalRecordingIntake {
     store: Arc<Store>,
-    enqueue: Enqueue,
+    enqueue: EnqueueStopped,
     now: Now,
     zone: FixedOffset,
     keep_trying: Box<dyn Fn() -> bool + Send + Sync>,
@@ -492,7 +500,7 @@ pub struct LocalRecordingIntake {
 
 impl LocalRecordingIntake {
     #[must_use]
-    pub fn new(store: Arc<Store>, enqueue: Enqueue, now: Now, zone: FixedOffset) -> Self {
+    pub fn new(store: Arc<Store>, enqueue: EnqueueStopped, now: Now, zone: FixedOffset) -> Self {
         LocalRecordingIntake {
             store,
             enqueue,
@@ -522,7 +530,12 @@ impl LocalRecordingIntake {
         let now = pipeline.dependencies().now.clone();
         Self::new(
             store,
-            enqueue_through(pipeline, ProcessingPipeline::enqueue_stopped_recording),
+            Arc::new(move |meeting_id, result, retention| {
+                let pipeline = pipeline.clone();
+                Box::pin(async move {
+                    pipeline.enqueue_stopped_recording(meeting_id, &result, retention)
+                })
+            }),
             now,
             zone,
         )
@@ -617,16 +630,19 @@ impl LocalRecordingIntake {
     /// `expires_at` cleared, and enqueues the meeting: the meeting, now
     /// `queued`, and its asset in one commit, which writes only while the
     /// row is still `recording` and keeps what else was saved on it since
-    /// ([`Store::save_stopped_recording`]). A commit that finds the
-    /// database busy is tried again, up to [`Self::COMMIT_ATTEMPTS`] in
-    /// all, while [`Self::retrying_while`]'s check allows. A meeting that
-    /// is not `recording`, when `complete` reads it or when it commits, is
-    /// left alone, its row untouched, and one deleted meanwhile is not
-    /// brought back. Any other failure leaves the meeting `recording` and
-    /// returns the error: the recording stays on disk, and the next
-    /// launch's recovery finds it there and queues it. Swift marked the
-    /// meeting failed without its asset, so the recording was lost to the
-    /// list; the retry and the recording kept are Rust only.
+    /// ([`Store::save_stopped_recording`]). The commit reads the row and
+    /// the settings in its own transaction, on the writer, so the save
+    /// never waits for a read in flight on a reader (a reload's, a
+    /// command's). A commit that finds the database busy is tried again,
+    /// up to [`Self::COMMIT_ATTEMPTS`] in all, while
+    /// [`Self::retrying_while`]'s check allows, and each try reads again.
+    /// A meeting that is not `recording` when the commit reads it is left
+    /// alone, its row untouched, and one deleted meanwhile is not brought
+    /// back. Any other failure leaves the meeting `recording` and returns
+    /// the error: the recording stays on disk, and the next launch's
+    /// recovery finds it there and queues it. Swift marked the meeting
+    /// failed without its asset, so the recording was lost to the list;
+    /// the retry and the recording kept are Rust only.
     pub async fn complete(
         &self,
         meeting_id: Uuid,
@@ -658,52 +674,28 @@ impl LocalRecordingIntake {
         result: RecordingResult,
         retention: Option<AudioRetention>,
     ) -> Result<Meeting, LocalRecordingIntakeError> {
-        let timestamp = (self.now)();
-        let retention = match retention {
-            Some(retention) => retention,
-            None => self.store.settings()?.default_retention,
+        let failure = match (self.enqueue)(meeting_id, result, retention).await {
+            Ok(meeting) => return Ok(meeting),
+            Err(failure) => failure,
         };
-        let current = self
-            .store
-            .meeting(meeting_id)?
-            .ok_or(StoreError::MeetingNotFound(meeting_id))?;
-        if current.state != MeetingState::Recording {
-            return Err(LocalRecordingIntakeError::NotRecording(
-                meeting_id,
-                current.state.kind(),
-            ));
-        }
-        // The enqueue writes the meeting and the asset in one commit, so a
-        // failed one leaves the row as it was.
-        let mut meeting = current;
-        meeting.duration = result.duration;
-        meeting.end_reason = Some(result.end_reason);
-        meeting.updated_at = timestamp;
-        meeting.state = MeetingState::Queued;
-        let mut asset = result.asset;
-        asset.meeting_id = meeting_id;
-        asset.retention = retention;
-        asset.expires_at = None;
-        if let Err(failure) = (self.enqueue)(meeting.clone(), asset).await {
-            // The commit checks the row again: one that moved on or went
-            // since it was read above is not this recording's to save.
-            if !failure.is_busy()
-                && let Ok(now) = self.store.meeting(meeting_id)
-            {
-                match now {
-                    None => return Err(StoreError::MeetingNotFound(meeting_id).into()),
-                    Some(now) if now.state != MeetingState::Recording => {
-                        return Err(LocalRecordingIntakeError::NotRecording(
-                            meeting_id,
-                            now.state.kind(),
-                        ));
-                    }
-                    Some(_) => {}
+        // The failure is the pipeline's, so the row says why: one that
+        // moved on or went is not this recording's to save. Read only
+        // after a failure that was not busy, which the caller retries.
+        if !failure.is_busy()
+            && let Ok(now) = self.store.meeting(meeting_id)
+        {
+            match now {
+                None => return Err(StoreError::MeetingNotFound(meeting_id).into()),
+                Some(now) if now.state != MeetingState::Recording => {
+                    return Err(LocalRecordingIntakeError::NotRecording(
+                        meeting_id,
+                        now.state.kind(),
+                    ));
                 }
+                Some(_) => {}
             }
-            return Err(failure.into());
         }
-        Ok(meeting)
+        Err(failure.into())
     }
 
     /// Marks the meeting failed: a capture that could not start or could
@@ -920,26 +912,22 @@ mod tests {
         }
     }
 
+    /// The commit reads the row in its own transaction and refuses one
+    /// that is not `recording`: nothing is written, and the error says the
+    /// row's state.
     #[tokio::test]
-    async fn completing_a_meeting_that_is_not_recording_writes_and_enqueues_nothing() {
+    async fn completing_a_meeting_that_is_not_recording_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
         let mut meeting = steno_core::testing::sample_data::meeting();
         meeting.state = MeetingState::Ready;
         store.save_meeting(&meeting).unwrap();
         let before = store.meeting(meeting.id).unwrap().unwrap();
-        let enqueued = Arc::new(AtomicBool::new(false));
-        let enqueue: Enqueue = {
-            let enqueued = enqueued.clone();
-            Arc::new(move |_, _| {
-                enqueued.store(true, Ordering::SeqCst);
-                Box::pin(async { Ok(()) })
-            })
-        };
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let later = before.updated_at + chrono::Duration::hours(1);
         let intake = LocalRecordingIntake::new(
             store.clone(),
-            enqueue,
+            committing_enqueue(store.clone(), calls.clone(), |_| {}),
             Arc::new(move || later),
             FixedOffset::east_opt(0).unwrap(),
         );
@@ -979,7 +967,8 @@ mod tests {
             before,
             "the row is untouched and not marked failed"
         );
-        assert!(!enqueued.load(Ordering::SeqCst));
+        assert!(store.asset(meeting.id).unwrap().is_none(), "no asset");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one commit, refused");
     }
 
     /// A Mac recording `begin` wrote, and what its capture handed back.
@@ -989,7 +978,9 @@ mod tests {
             .with_timezone(&Utc);
         let intake = LocalRecordingIntake::new(
             store.clone(),
-            Arc::new(|_, _| Box::pin(async { Ok(()) })),
+            Arc::new(|_, _, _| {
+                Box::pin(async { Err(PipelineFailure::new(PipelineStage::Decode, "unused")) })
+            }),
             Arc::new(move || at),
             FixedOffset::east_opt(0).unwrap(),
         );
@@ -1032,18 +1023,36 @@ mod tests {
         store: Arc<Store>,
         calls: Arc<std::sync::atomic::AtomicUsize>,
         after_call: impl Fn(usize) + Send + Sync + 'static,
-    ) -> Enqueue {
+    ) -> EnqueueStopped {
         let after_call = Arc::new(after_call);
-        Arc::new(move |meeting, asset| {
+        Arc::new(move |meeting_id, result, retention| {
             let (store, calls, after_call) = (store.clone(), calls.clone(), after_call.clone());
             Box::pin(async move {
-                let committed = store
-                    .save_stopped_recording(&meeting, &asset)
-                    .map_err(|error| PipelineFailure::wrapping(&error, PipelineStage::Decode));
+                let committed = commit_stopped(&store, meeting_id, &result, retention);
                 after_call(calls.fetch_add(1, Ordering::SeqCst) + 1);
                 committed
             })
         })
+    }
+
+    /// The pipeline's commit of a stopped recording, its error wrapped the
+    /// same way.
+    fn commit_stopped(
+        store: &Store,
+        meeting_id: Uuid,
+        result: &RecordingResult,
+        retention: Option<AudioRetention>,
+    ) -> Result<Meeting, PipelineFailure> {
+        store
+            .save_stopped_recording(
+                meeting_id,
+                result.duration,
+                result.end_reason.clone(),
+                &result.asset,
+                retention,
+                Utc::now(),
+            )
+            .map_err(|error| PipelineFailure::wrapping(&error, PipelineStage::Decode))
     }
 
     /// A commit that finds another connection holding the database is
@@ -1122,9 +1131,9 @@ mod tests {
         let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
         let (meeting, result) = a_recording(&store, dir.path());
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let enqueue: Enqueue = {
+        let enqueue: EnqueueStopped = {
             let calls = calls.clone();
-            Arc::new(move |_, _| {
+            Arc::new(move |_, _, _| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async {
                     Err(PipelineFailure::new(
@@ -1177,24 +1186,22 @@ mod tests {
         assert_eq!(store.meeting(meeting.id).unwrap().unwrap(), meeting);
     }
 
-    /// The commit checks the row again in its own transaction: a recording
-    /// failed or deleted between `complete`'s read and its commit (here by
-    /// the enqueue, just before it commits as the pipeline does) is not
-    /// brought back `queued`, and nothing is written; a note saved
-    /// meanwhile on one still `recording` is kept by the commit.
+    /// The commit reads the row in its own transaction: a recording failed
+    /// or deleted before its commit (here by the enqueue, just before it
+    /// commits as the pipeline does) is not brought back `queued`, and
+    /// nothing is written; a note saved meanwhile on one still `recording`
+    /// is kept by the commit.
     #[tokio::test]
     async fn a_recording_that_moved_on_before_the_commit_is_not_brought_back() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
-        let before_commit = |change: fn(&Store, Uuid)| -> Enqueue {
+        let before_commit = |change: fn(&Store, Uuid)| -> EnqueueStopped {
             let store = store.clone();
-            Arc::new(move |meeting: Meeting, asset: AudioAsset| {
+            Arc::new(move |meeting_id, result, retention| {
                 let store = store.clone();
                 Box::pin(async move {
-                    change(&store, meeting.id);
-                    store
-                        .save_stopped_recording(&meeting, &asset)
-                        .map_err(|error| PipelineFailure::wrapping(&error, PipelineStage::Decode))
+                    change(&store, meeting_id);
+                    commit_stopped(&store, meeting_id, &result, retention)
                 })
             })
         };
@@ -1783,7 +1790,7 @@ mod tests {
             unreached_pipeline(&store, Utc::now()),
             FixedOffset::east_opt(0).unwrap(),
         );
-        let failure = (intake.enqueue)(meeting.clone(), result.asset)
+        let failure = (intake.enqueue)(meeting.id, result, None)
             .await
             .unwrap_err();
         assert_eq!(
