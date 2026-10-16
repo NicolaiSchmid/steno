@@ -84,7 +84,7 @@ if [[ "$version" == 0.11.0 ]]; then
 - The system audio lane records everything that plays on the default output, not only the call.
 - Very long sessions can run into WebKitGTK's file descriptor leak ([#160](https://github.com/NicolaiSchmid/steno/issues/160)).
 - GNOME shows no tray icon without the AppIndicator extension; closing the main window then quits Steno, and saves a recording first.
-- On Hyprland, start Steno from the app launcher or with `uwsm-app -- steno-desktop`: one started outside `uwsm` runs in Hyprland's own unit, which stops it at logout after at most 10 s.
+- On Hyprland, start Steno from the app launcher or with `uwsm-app -- steno-desktop`. Started by an `exec-once` line instead, a logout while the session is still starting can cut a recording's save short.
 EOF
 fi
 cat <<EOF
