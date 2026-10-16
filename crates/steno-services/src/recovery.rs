@@ -893,6 +893,9 @@ fn adopted(
         format,
         modified,
     } = orphan;
+    // A recording whose last read here ended with the app is adopted
+    // unread and failed.
+    let held = reading.holds(*meeting_id);
     let (source, asset, duration, end_reason) = match format {
         AudioFormat::Caf48kFloat32 => {
             // One channel is an in-person recording; the salvage as a call
@@ -911,9 +914,7 @@ fn adopted(
         }
         AudioFormat::M4aAac | AudioFormat::Wav16kInt16 => {
             let asset_id = Uuid::new_v4();
-            // A recording whose last read here ended with the app is
-            // adopted unread, its length unknown.
-            let duration = if reading.holds(*meeting_id) {
+            let duration = if held {
                 0.0
             } else {
                 let _reading =
@@ -955,7 +956,7 @@ fn adopted(
         source,
         calendar_event_id: None,
         tags: Vec::new(),
-        state: if reading.holds(*meeting_id) {
+        state: if held {
             steno_core::MeetingState::Failed {
                 reason: READ_STOPPED.to_owned(),
             }
