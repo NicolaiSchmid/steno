@@ -1826,7 +1826,8 @@ The table above names each package and its owner. Their tests:
   P40 closes with #304. The feed's checks hold 100 ms, and check 20 allows
   one 2 s poll and 1 s.
 - **P40 follow-up: the copy an admission left is one meeting** (Nicolai's
-  ruling, 2026-10-16; the same as main before it, and nothing was lost). A
+  ruling, 2026-10-16. Not a regression: main made the same second meeting
+  before this change, and no audio was lost either way). A
   phone admission whose commit and `failed` save both give up under a lock
   held past about 20 s leaves its noted copy; the next launch adopted it with
   no ledger row, and the phone's retry admitted a second meeting. Decided:
@@ -1839,16 +1840,35 @@ The table above names each package and its owner. Their tests:
   (`Store::adopt_upload_durably`), so the phone's retry is answered with that
   meeting from the ledger; a retry before the launch, or while the lock is
   still held, admits into the noted copy instead of copying again, and never
-  removes it. Bytes the ledger already holds are not adopted, and their copy
-  stays where it is. A note with no upload (an older build's), or a copy
-  that holds other bytes, is adopted as before. No schema change. Where:
+  removes it. Bytes the ledger already holds are not adopted. When that
+  row's meeting was deleted, the launch removes the noted copy whose size
+  and SHA-256 match it, because the user deleted those bytes. This is the
+  one exception to keeping audio. When the meeting still exists, the copy
+  stays and only its note goes. Any doubt keeps the copy and its note: one
+  that cannot be read, one cut short or holding other bytes. No delete can
+  be undone, so a meeting the adoption's transaction finds gone stays gone.
+  A note with no upload (an older build's), or a copy that holds other
+  bytes, is adopted as a recording with no meeting, without a ledger row.
+  The record of uploads never grows: a refused folder note forgets its
+  upload, and each launch forgets the uploads whose folder has no entry.
+  Two defences keep one master to one asset row (Nicolai's ruling,
+  2026-10-17, after a read fault produced a kept-forever and a
+  delete-after-processing row for one master): the admission's commit
+  refuses a meeting id that already has a row and no ledger row
+  (`MeetingExists`), and the retention sweep never removes a master
+  another asset row still needs (kept forever, not due yet, or its meeting
+  busy), logging the ids at info. No schema change. Where:
   `crates/steno-pipeline/src/intake.rs` (`NotedUpload`, `reusable_copy`),
   `crates/steno-services/src/audio_folders.rs`,
   `crates/steno-services/src/recovery.rs` (`adopt`),
-  `crates/steno-core/src/store/handover.rs`; tests in
+  `crates/steno-core/src/store/handover.rs`,
+  `crates/steno-core/src/store/assets.rs` (`keeper_of_master`); tests in
   `crates/steno-services/src/admission_copy_tests.rs` (with a 20 ms busy
-  timeout through `Store::on_writer`), `crates/steno-core/tests/handover_store.rs`
-  and `audio_folders.rs`.
+  timeout through `Store::on_writer`),
+  `crates/steno-services/src/admission_kill_tests.rs` (a real kill at each
+  step of the admission and the adoption, and the retry racing the
+  launch), `crates/steno-core/tests/handover_store.rs`, `audio_folders.rs`
+  and `crates/steno-pipeline/src/retention.rs`.
 
 ### X: the Linux targets (D6)
 
