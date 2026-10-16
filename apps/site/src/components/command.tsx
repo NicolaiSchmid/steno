@@ -6,10 +6,17 @@ interface CommandProps {
 	className?: string;
 	/** False for a line that goes in a config file: no `$` prompt. */
 	shell?: boolean;
+	/** The copy button's accessible name, when a page shows several. */
+	label?: string;
 }
 
 /** A one-line command in a tile with a copy control. */
-export function Command({ command, className, shell = true }: CommandProps) {
+export function Command({
+	command,
+	className,
+	shell = true,
+	label = shell ? "Copy command" : "Copy line",
+}: CommandProps) {
 	return (
 		<div
 			className={cn(
@@ -21,7 +28,7 @@ export function Command({ command, className, shell = true }: CommandProps) {
 				{shell && <span className="select-none text-fg-faint">$ </span>}
 				{command}
 			</code>
-			<CopyButton label={shell ? "Copy command" : "Copy line"} text={command} />
+			<CopyButton label={label} text={command} />
 		</div>
 	);
 }

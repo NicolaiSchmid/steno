@@ -39,9 +39,12 @@ Cloudflare Pages or a plain web server, upload `out/`.
 URLs, install commands and the platforms (name, whether a build is released,
 the note under it) live in `src/lib/site.ts`. Change them there, nowhere else.
 A desktop is listed once its gate in `.plans/2026-10-07-stable-promotion.md`
-has passed: Windows by `windowsReleased`, each Linux target (GNOME, Omarchy,
-NixOS) by its own `released` in `linuxTargets`. A listed Linux target adds its
-name to the Linux note and its install line to the closing section.
+has passed: macOS by `macReleased`, Windows by `windowsReleased`, each Linux
+target (GNOME, Omarchy, NixOS) by its own `released` in `linuxTargets`. A
+listed Linux target adds its name to the Linux note and its install line to
+the closing section. A Rollback sets a flag back to false. The desktop badge
+at the top of the root README names the same desktops; change it in the same
+commit.
 
 The facts on `/recording-law` (the country rows, cases, sources and the
 `reviewed` date) live in `src/lib/recording-law.ts`. Change them there, and

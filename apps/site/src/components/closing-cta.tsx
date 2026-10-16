@@ -76,6 +76,7 @@ export function ClosingCta() {
 												<Command
 													className="w-full"
 													command={target.install}
+													label={`Copy the ${target.name} install line`}
 													shell={target.shell}
 												/>
 											</li>

@@ -35,8 +35,8 @@ export function HowItsBuilt() {
 		<section className="border-border border-t py-16 sm:py-24" id="built">
 			<div className="mx-auto max-w-[1240px] px-5 sm:px-8">
 				<SectionHead eyebrow="How it's built" title="One core, every desktop.">
-					Steno runs every desktop on one Rust core and the same interface. Only
-					audio capture and the speech runtime change from system to system, and
+					Steno is one Rust core and one interface on every desktop. Only audio
+					capture and the speech runtime change from system to system, and
 					capture uses each system's own audio API.
 				</SectionHead>
 				<ul className="grid gap-5 lg:grid-cols-3">
