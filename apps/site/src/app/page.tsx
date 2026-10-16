@@ -7,7 +7,7 @@ import { HowItWorks } from "@/components/how-it-works";
 import { HowItsBuilt } from "@/components/how-its-built";
 import { OpenSource } from "@/components/open-source";
 import { Privacy } from "@/components/privacy";
-import { site } from "@/lib/site";
+import { platformIds, platforms, site } from "@/lib/site";
 
 const jsonLd = {
 	"@context": "https://schema.org",
@@ -16,7 +16,10 @@ const jsonLd = {
 	description: site.description,
 	url: site.url,
 	applicationCategory: "BusinessApplication",
-	operatingSystem: "macOS",
+	operatingSystem: platformIds
+		.filter((id) => platforms[id].released)
+		.map((id) => platforms[id].name)
+		.join(", "),
 	offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
 	license: "https://opensource.org/licenses/MIT",
 	downloadUrl: site.download,
