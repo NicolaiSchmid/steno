@@ -642,9 +642,10 @@ fn entries_fit(found: Mp4Box, from: u64, count: u64, entry: u64) -> Result<(), S
     Ok(())
 }
 
-/// A four-character code as text.
+/// A four-character code as text, a byte outside printable ASCII escaped
+/// (`\xa9nam`), so a refusal's reason holds no control character.
 fn name(kind: [u8; 4]) -> String {
-    String::from_utf8_lossy(&kind).into_owned()
+    kind.escape_ascii().to_string()
 }
 
 #[cfg(test)]

@@ -536,7 +536,9 @@ fn refused(path: &Path) -> String {
         matches!(duration, CodecError::UnsupportedFormat(_)),
         "{duration}"
     );
-    duration.to_string()
+    let text = duration.to_string();
+    assert!(!text.chars().any(char::is_control), "{text:?}");
+    text
 }
 
 /// The plain refusal of a file that is no MP4, CAF or WAV from its first
@@ -1166,6 +1168,15 @@ fn a_wav_is_walked_up_to_its_audio() {
     );
     let error = refused(&write(dir.path(), "past.wav", &past));
     assert!(error.contains("the `LIST` chunk at byte 36"), "{error}");
+    // A phone file behind a RIFF header: its first box's size is read as a
+    // chunk's type, named with its bytes escaped.
+    let phone = std::fs::read(fixture(PHONE)).unwrap();
+    let behind = [wav(Some(4), &[]).as_slice(), &phone].concat();
+    let error = refused(&write(dir.path(), "behind.wav", &behind));
+    assert!(
+        error.contains("the `\\x00\\x00\\x00\\x1c` chunk at byte 12"),
+        "{error}"
+    );
     let short = wav(None, &[(b"fmt ", padded, None), (b"data", ramp16(), None)]);
     let error = refused(&write(dir.path(), "short.wav", &short));
     assert!(
