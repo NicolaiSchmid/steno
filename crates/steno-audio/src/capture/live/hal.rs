@@ -684,20 +684,19 @@ impl IoProc {
         Ok(Self { device, proc_id })
     }
 
-    /// The device's sample time now, while the IOProc runs
-    /// (`AudioDeviceGetCurrentTime`); `None` when the HAL gives none.
+    /// The device's time now, while the IOProc runs
+    /// (`AudioDeviceGetCurrentTime`), asked for its sample time; `None`
+    /// when the call fails. Whether the stamp carries a sample time is the
+    /// caller's to check, as for the IOProc's stamps.
     #[must_use]
-    pub fn current_sample_time(&self) -> Option<f64> {
+    pub fn current_time(&self) -> Option<AudioTimeStamp> {
         // SAFETY: every field of `AudioTimeStamp` is an integer, a float or
         // a struct of them, so all zeros is a valid value.
         let mut time = unsafe { std::mem::MaybeUninit::<AudioTimeStamp>::zeroed().assume_init() };
         time.mFlags = AudioTimeStampFlags::SampleTimeValid;
         // SAFETY: a valid device id and a live out-pointer to a stamp.
         let status = unsafe { AudioDeviceGetCurrentTime(self.device, NonNull::from(&mut time)) };
-        (status == 0
-            && time.mFlags.contains(AudioTimeStampFlags::SampleTimeValid)
-            && time.mSampleTime.is_finite())
-        .then_some(time.mSampleTime)
+        (status == 0).then_some(time)
     }
 
     /// Whether each of the device's input streams is on for this IOProc.

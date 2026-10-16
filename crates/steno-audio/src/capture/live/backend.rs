@@ -127,7 +127,8 @@ struct CallbackContext {
     input_lag: Cell<f64>,
 }
 
-/// Whether `time` carries a sample time to read.
+/// The sample time `time` carries: flagged valid, finite and at or above
+/// 0, so it rounds to a frame.
 fn sample_time(time: &AudioTimeStamp) -> Option<f64> {
     (time.mFlags.0 & AudioTimeStampFlags::SampleTimeValid.0 != 0
         && time.mSampleTime.is_finite()
@@ -142,7 +143,6 @@ fn sample_time(time: &AudioTimeStamp) -> Option<f64> {
 fn missed_before(clock: &Cell<CycleClock>, time: &AudioTimeStamp, frames: usize) -> Missed {
     let mut cycles = clock.get();
     let missed = if let Some(sample) = sample_time(time) {
-        // A finite sample time at or above 0, to the nearest frame.
         cycles.advance(sample.round() as u64, frames)
     } else {
         cycles.reset();
@@ -153,12 +153,12 @@ fn missed_before(clock: &Cell<CycleClock>, time: &AudioTimeStamp, frames: usize)
 }
 
 /// What the IO thread missed after its last callback, for a device whose
-/// sample time read `now` at the stop: [`CycleClock::missed_until`] at the
-/// input sample time that matches it.
+/// sample time read `now` at the stop ([`sample_time`]):
+/// [`CycleClock::missed_until`] at the input sample time that matches it,
+/// nothing for one before the first.
 fn missed_at_stop(clock: CycleClock, input_lag: f64, now: Option<f64>) -> Missed {
     now.map(|now| now - input_lag)
-        .filter(|input| input.is_finite() && *input >= 0.0)
-        // A finite sample time at or above 0, to the nearest frame.
+        .filter(|input| *input >= 0.0)
         .map_or_else(Missed::default, |input| {
             clock.missed_until(input.round() as u64)
         })
@@ -859,7 +859,7 @@ impl CaptureBackend for LiveCaptureBackend {
             started: (host_started, started_at),
             ..
         } = active;
-        let now = io_proc.current_sample_time();
+        let now = io_proc.current_time();
         drop(io_proc);
         // The IOProc is destroyed: nothing writes the context any more, so
         // what the IO thread missed after its last callback goes into the
@@ -869,7 +869,7 @@ impl CaptureBackend for LiveCaptureBackend {
             context.sink.write_missed(missed_at_stop(
                 context.clock.get(),
                 context.input_lag.get(),
-                now,
+                now.as_ref().and_then(sample_time),
             ));
         }
         start_log!(
