@@ -1386,7 +1386,8 @@ fn a_bundle_nix_darwin_copied_is_managed() {
 
 /// A bundle in home-manager's `Applications/Home Manager Apps` under a home
 /// folder that stands in for `$HOME` is managed; one in the home's own
-/// `Applications` is not, and no home adds no folder.
+/// `Applications` is not, and an unset, empty or relative home adds no
+/// folder.
 #[test]
 fn a_bundle_home_manager_copied_is_managed() {
     let home = tempfile::tempdir().unwrap();
@@ -1396,6 +1397,7 @@ fn a_bundle_home_manager_copied_is_managed() {
     let own = copied_bundle(&home.path().join("Applications"));
     assert!(!runs_from(&own, &folders));
     assert_eq!(nix_folders(Some(OsStr::new(""))), nix_folders(None));
+    assert_eq!(nix_folders(Some(OsStr::new("."))), nix_folders(None));
     assert_eq!(nix_folders(None).len(), 2);
 }
 
@@ -1467,6 +1469,47 @@ fn a_link_into_the_nix_store_is_managed() {
     assert!(!runs_from(&copied, std::slice::from_ref(&store)));
     std::os::unix::fs::symlink(root.join("nix"), root.join("nix-link")).unwrap();
     assert!(runs_from(&linked, &[root.join("nix-link/store")]));
+}
+
+/// Set in the child [`a_binary_home_manager_copied_is_managed_when_it_runs`]
+/// runs.
+#[cfg(unix)]
+const COPIED_CHILD: &str = "STENO_COPIED_TEST_CHILD";
+
+/// [`updates_are_managed`] reads the running binary and `HOME`: this test
+/// binary, linked or copied into home-manager's folder under a stand-in home and run
+/// there with `STENO_DISTRIBUTION` unset, is managed.
+#[cfg(unix)]
+#[test]
+fn a_binary_home_manager_copied_is_managed_when_it_runs() {
+    if std::env::var_os(COPIED_CHILD).is_some() {
+        assert!(updates_are_managed());
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    // Beside the test binary, so the hard link stays on one file system.
+    let dir = tempfile::tempdir_in(exe.parent().unwrap()).unwrap();
+    let home = dir.path().join("home");
+    let folder = home.join(HOME_MANAGER_APPS);
+    std::fs::create_dir_all(&folder).unwrap();
+    let copied = folder.join(exe.file_name().unwrap());
+    if std::fs::hard_link(&exe, &copied).is_err() {
+        std::fs::copy(&exe, &copied).unwrap();
+    }
+    let name = "updates::tests::a_binary_home_manager_copied_is_managed_when_it_runs";
+    let output = std::process::Command::new(&copied)
+        .args(["--exact", name, "--test-threads=1"])
+        .env("HOME", &home)
+        .env_remove(DISTRIBUTION_VARIABLE)
+        .env(COPIED_CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// A time in the future (the clock was set back) is due, so a bad stored

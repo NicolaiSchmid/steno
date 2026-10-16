@@ -170,15 +170,16 @@ const NIX_STORE: &str = "/nix/store";
 /// copy.
 const NIX_DARWIN_APPS: &str = "/Applications/Nix Apps";
 /// Where home-manager (25.11 and later, `targets.darwin.copyApps`) copies
-/// a package's apps, under the home folder; its next switch replaces the
-/// copy.
+/// a package's apps by default, under the home folder; its next switch
+/// replaces the copy. A folder set in `targets.darwin.copyApps.directory`
+/// is not recognised.
 const HOME_MANAGER_APPS: &str = "Applications/Home Manager Apps";
 
 /// Whether a package manager delivers this app's updates (stable plan X5):
 /// [`DISTRIBUTION_VARIABLE`] is `aur` or `nix`, the environment's value (the
 /// AUR wrapper) before the build's (the Nix package), or the running binary,
 /// its links resolved, lies in a folder Nix fills: the store, nix-darwin's
-/// `/Applications/Nix Apps` or home-manager's
+/// `/Applications/Nix Apps` or home-manager's default
 /// `~/Applications/Home Manager Apps`. Such a binary is managed whatever
 /// the variable says: an update cannot replace it in the read-only store,
 /// and the next switch would undo one made to a copy. This covers the
@@ -205,32 +206,38 @@ fn managed_install(
         || executable.is_some_and(|executable| runs_from(executable, folders))
 }
 
+/// Whether the variable says a package manager delivers the updates: the
+/// environment's value before the build's is `aur` or `nix`.
 fn managed_by(environment: Option<&str>, build: Option<&str>) -> bool {
     matches!(environment.or(build), Some("aur" | "nix"))
 }
 
 /// The folders Nix fills: the store, nix-darwin's copies, and
-/// home-manager's under `home` unless it is unset or empty (which would
-/// make the folder relative). They exist only on the Mac, apart from the
-/// store, so elsewhere no binary lies in them.
+/// home-manager's default folder under `home`, left out when `home` is
+/// unset or not absolute (the folder would resolve against the working
+/// directory). Off the Mac only the store exists, so the other two match
+/// nothing there.
 fn nix_folders(home: Option<&OsStr>) -> Vec<PathBuf> {
     let mut folders = vec![PathBuf::from(NIX_STORE), PathBuf::from(NIX_DARWIN_APPS)];
     folders.extend(
-        home.filter(|home| !home.is_empty())
-            .map(|home| Path::new(home).join(HOME_MANAGER_APPS)),
+        home.map(Path::new)
+            .filter(|home| home.is_absolute())
+            .map(|home| home.join(HOME_MANAGER_APPS)),
     );
     folders
 }
 
-/// Whether `executable` lies in one of `folders`, all with their links
-/// resolved. A path that cannot be resolved is taken as it is.
+/// Whether `executable`, [`resolved`], lies in one of `folders`, as given
+/// or resolved.
 fn runs_from(executable: &Path, folders: &[PathBuf]) -> bool {
     let executable = resolved(executable);
     folders
         .iter()
-        .any(|folder| executable.starts_with(resolved(folder)))
+        .any(|folder| executable.starts_with(folder) || executable.starts_with(resolved(folder)))
 }
 
+/// `path` with its links resolved, or as given when it cannot be (it does
+/// not exist).
 fn resolved(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
