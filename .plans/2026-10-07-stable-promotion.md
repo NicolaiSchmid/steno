@@ -1889,8 +1889,17 @@ Each lands before `0.11.0-rc.1`.
     one that takes it back when no gap was written, beyond the gap's
     length, with the jump counted before the stall, or at a device change's
     rebuild, the take-back on one lane only or from an earlier rebuild's
-    gap; on WASAPI, mutants of the clocks' rule (listed in the pull
-    request's last cycle) each fail a test or the property test.
+    gap; on WASAPI, the QPC never filling, filling while measured, at a
+    10 % tolerance, kept after a timestamp error, or read when it did not
+    match or measured off; a timestamp error's pair in the sums; the QPC's
+    pair bound, the reading cap, the 1:1, mix-format, measured or QPC
+    reading, the fill limit or the count-only rule removed; the position
+    bound by rate or by measure alone, removed, or the measured ratio
+    exact; a 0 Hz mix format kept; a step back read; the last position
+    dropped after a timestamp error; the gap without the last packet; the
+    follower's padding ignored, without the target, summed, not held for
+    the re-prime, not cleared, not run; its flag not set; a wrapping
+    counter; the half-packet rule strict; a ratio without rounding.
   - **The property test.** `crates/steno-audio/tests/wasapi_loss_property.rs`
     runs random packet streams through `DevicePositions`, the master's
     router and the recorder's note (1 000 streams in CI, fixed seed; 20 000
