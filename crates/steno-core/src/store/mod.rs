@@ -631,12 +631,13 @@ struct Inside(usize);
 impl Inside {
     fn enter(connections: &Arc<Connections>) -> Inside {
         let database = Arc::as_ptr(connections).addr();
-        let nested = INSIDE.with_borrow(|inside| inside.contains(&database));
-        debug_assert!(
-            !nested,
-            "a Store call inside a Store closure waits on its own lock"
-        );
-        INSIDE.with_borrow_mut(|inside| inside.push(database));
+        INSIDE.with_borrow_mut(|inside| {
+            debug_assert!(
+                !inside.contains(&database),
+                "a Store call inside a Store closure waits on its own lock"
+            );
+            inside.push(database);
+        });
         Inside(database)
     }
 }
