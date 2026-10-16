@@ -128,7 +128,7 @@ use crate::services::{Services, VaultRefusal};
 use crate::settings::{
     AudioSettingsViewModel, GeneralSettingsViewModel, KeyRead, LlmPreset, LlmSettingsViewModel,
     ObsidianSettingsViewModel, PhonesSettingsViewModel, SpeechSettingsViewModel, llm::Probe,
-    overview, snapshots as settings_snapshots,
+    obsidian::VaultSave, overview, snapshots as settings_snapshots,
 };
 use crate::setup::engine_notice;
 use crate::speakers::{OptionKind, SpeakerOption as ModelOption};
@@ -1392,6 +1392,42 @@ impl Host {
         });
     }
 
+    /// A command on the Export section whose `edit` may begin a save: the
+    /// vault check ([`VaultSave::validate`]) writes and removes a probe
+    /// file in the vault, so it runs with the lock released, and the save
+    /// lands under it again. Rust only: Swift validated on the main actor.
+    fn export_command(
+        &self,
+        edit: impl FnOnce(&mut ObsidianSettingsViewModel) -> Option<VaultSave>,
+    ) {
+        let mut save = None;
+        self.settings_command(BridgeTopic::SettingsExport, |inner| {
+            save = edit(&mut inner.obsidian);
+        });
+        let Some(save) = save else {
+            return;
+        };
+        let validated = save.validate(&self.shared.services);
+        self.settings_command(BridgeTopic::SettingsExport, |inner| {
+            inner.obsidian.finish_save(save, validated, &inner.store);
+        });
+    }
+
+    /// Page 2's vault save, checked with the lock released as
+    /// [`export_command`](Self::export_command) checks the Export section's.
+    fn onboarding_vault_command(&self, begin: impl FnOnce(&mut OnboardingViewModel) -> VaultSave) {
+        let save = self.onboarding_command(|inner| begin(&mut inner.onboarding));
+        let validated = save.validate(&self.shared.services);
+        self.onboarding_command(|inner| {
+            inner.onboarding.finish_save_vault(
+                save,
+                validated,
+                &inner.store,
+                &self.shared.services,
+            );
+        });
+    }
+
     fn command(&self, topics: &[BridgeTopic], body: impl FnOnce(&mut Inner)) {
         {
             let mut inner = self.lock();
@@ -2472,46 +2508,34 @@ impl BridgeHost for Host {
     // settings.export
 
     fn settings_export_set_enabled(&self, params: SetBoolParams) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsExport, |inner| {
-            inner
-                .obsidian
-                .set_enabled(params.value, &inner.store, &self.shared.services);
-        });
+        self.export_command(|obsidian| obsidian.set_enabled(params.value));
         Ok(())
     }
 
     fn settings_export_choose_vault(&self) -> Outcome<ChosenPathReply> {
         let current = self.lock().obsidian.vault_url();
         Ok(self.choose(current.as_deref(), |folder| {
-            self.settings_command(BridgeTopic::SettingsExport, |inner| {
-                inner
-                    .obsidian
-                    .choose_vault(folder, &inner.store, &self.shared.services);
-            });
+            self.export_command(|obsidian| obsidian.choose_vault(folder));
         }))
     }
 
     fn settings_export_update(&self, params: ExportUpdateParams) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsExport, |inner| {
+        self.export_command(|obsidian| {
             if let Some(people) = params.people_folder {
-                inner.obsidian.people_folder = people;
+                obsidian.people_folder = people;
             }
             if let Some(tag) = params.task_tag {
-                inner.obsidian.task_tag = tag;
+                obsidian.task_tag = tag;
             }
-            if let Some(include) = params.include_audio {
-                inner
-                    .obsidian
-                    .set_include_audio(include, &inner.store, &self.shared.services);
-            }
+            params
+                .include_audio
+                .and_then(|include| obsidian.set_include_audio(include))
         });
         Ok(())
     }
 
     fn settings_export_save(&self) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsExport, |inner| {
-            inner.obsidian.commit(&inner.store, &self.shared.services);
-        });
+        self.export_command(ObsidianSettingsViewModel::commit);
         Ok(())
     }
 
@@ -2677,20 +2701,12 @@ impl BridgeHost for Host {
     fn onboarding_choose_vault(&self) -> Outcome<ChosenPathReply> {
         let current = self.lock().onboarding.obsidian.vault_url();
         Ok(self.choose(current.as_deref(), |folder| {
-            self.onboarding_command(|inner| {
-                inner
-                    .onboarding
-                    .choose_vault(folder, &inner.store, &self.shared.services);
-            });
+            self.onboarding_vault_command(|onboarding| onboarding.choose_vault(folder));
         }))
     }
 
     fn onboarding_save_vault(&self) -> Outcome<()> {
-        self.onboarding_command(|inner| {
-            inner
-                .onboarding
-                .save_vault(&inner.store, &self.shared.services);
-        });
+        self.onboarding_vault_command(OnboardingViewModel::begin_save_vault);
         Ok(())
     }
 

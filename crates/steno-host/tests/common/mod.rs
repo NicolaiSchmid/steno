@@ -338,6 +338,31 @@ pub fn within_five_seconds<R: Send + 'static>(
         .unwrap_or_else(|_| panic!("{what} did not return within five seconds"))
 }
 
+/// What "live" means for a call that must not wait on a held vault check:
+/// one call that must not wait on the vault, as `LIVE` in
+/// `steno_services::testing` says it for the held store.
+pub const LIVE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Holds the fake's vault checks: each says on the returned receiver that
+/// it began, then waits until the returned sender sends or drops, or five
+/// seconds pass, so a check the host runs under its lock fails the test's
+/// bound instead of hanging it.
+pub fn hold_vault_checks(
+    harness: &Harness,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (began, checking) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    *harness.fakes.export_validator.on_validate.lock().unwrap() = Some(Arc::new(move |_| {
+        let _ = began.send(());
+        let _ = released
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(5));
+    }));
+    (checking, release)
+}
+
 // The sample meeting the bridge fixtures describe
 // (`Sources/StenoBridge/BridgeSamples.swift`),
 // as rows the pipeline would have left: three persons, the ready meeting

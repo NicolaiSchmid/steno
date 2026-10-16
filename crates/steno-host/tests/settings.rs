@@ -1856,6 +1856,55 @@ fn the_codex_preset_stores_nothing_until_confirmed_and_picks_the_first_model() {
     );
 }
 
+/// The vault check writes and removes a probe file in the vault, which a
+/// slow folder or the Mac's Files and Folders prompt can hold, so the host
+/// runs it with its lock released: while a check is held, the recorder's
+/// level hook and another command reach the host within [`LIVE`] and the
+/// section reads unsaved; once the check answers, the vault is stored.
+/// Rust only: Swift validated on the main actor.
+#[test]
+fn a_held_vault_check_leaves_the_host_live() {
+    let harness = Harness::builder()
+        .choose(Some("/Users/nicolai/Notes/Work Vault"))
+        .build();
+    harness
+        .host
+        .settings_export_set_enabled(SetBoolParams { value: true })
+        .unwrap();
+    let (checking, release) = hold_vault_checks(&harness);
+    let saving = std::thread::spawn({
+        let host = harness.host.clone();
+        move || host.settings_export_choose_vault()
+    });
+    checking
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the vault check began");
+    let since = std::time::Instant::now();
+    harness.host.recorder_changed();
+    let levels = since.elapsed();
+    let since = std::time::Instant::now();
+    harness.host.settings_recording_refresh_devices().unwrap();
+    let command = since.elapsed();
+    let during = harness.snapshot(BridgeTopic::SettingsExport);
+    release.send(()).unwrap();
+    saving.join().unwrap().unwrap();
+
+    assert!(levels < LIVE, "the level hook took {levels:?}");
+    assert!(command < LIVE, "the Settings command took {command:?}");
+    assert_eq!(during["saved"], false);
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Users/nicolai/Notes/Work Vault"
+    );
+    assert_eq!(harness.snapshot(BridgeTopic::SettingsExport)["saved"], true);
+}
+
 /// Swift: `testObsidianValidationSurfacesTheDestinationMessageVerbatim`,
 /// `testObsidianDisabledSavesNilWithoutValidating`, `testObsidianCommitWaitsForAVaultAndSavesOnChoice`.
 #[test]
@@ -2098,6 +2147,36 @@ fn an_export_edit_keeps_unknown_rows_and_obsidian_fields() {
             .contains("futureFolder"),
         "the bridge shows only the fields it knows"
     );
+}
+
+/// Two vault saves whose checks overlap: only the later one stores,
+/// whichever check answers first, and a reload while a check runs keeps
+/// the form the user chose. Rust only: Swift's checks did not overlap.
+#[test]
+fn only_the_latest_of_two_vault_saves_stores() {
+    let harness = Harness::builder().build();
+    let mut model = steno_host::settings::ObsidianSettingsViewModel::default();
+    model.load(&harness.store);
+    assert!(model.set_enabled(true).is_none(), "no vault yet");
+    let first = model
+        .choose_vault(std::path::Path::new("/Vaults/First"))
+        .unwrap();
+    let second = model
+        .choose_vault(std::path::Path::new("/Vaults/Second"))
+        .unwrap();
+    model.load(&harness.store);
+    assert_eq!(
+        model.vault_path, "/Vaults/Second",
+        "the reload kept the form"
+    );
+
+    model.finish_save(second, Ok(()), &harness.store);
+    model.finish_save(first, Ok(()), &harness.store);
+    let stored = harness.store.settings().unwrap().obsidian.unwrap();
+    assert_eq!(stored.vault_path, "/Vaults/Second");
+    assert!(model.saved);
+    model.load(&harness.store);
+    assert_eq!(model.vault_path, "/Vaults/Second", "loads again once saved");
 }
 
 /// The unknown fields may belong to the vault, so choosing another vault

@@ -591,6 +591,38 @@ fn saving_summaries_configures_the_endpoint_and_rebuilds_the_pipeline() {
     );
 }
 
+/// Page 2's vault save checks the vault with the host's lock released, as
+/// the Export section's does: while the check is held, the recorder's
+/// level hook and another command reach the host within [`LIVE`]; once it
+/// answers, the row is saved. Rust only.
+#[test]
+fn a_held_vault_check_on_page_two_leaves_the_host_live() {
+    let harness = builder().choose(Some("/Users/nicolai/Notes")).build();
+    let (checking, release) = hold_vault_checks(&harness);
+    let saving = std::thread::spawn({
+        let host = harness.host.clone();
+        move || host.onboarding_choose_vault()
+    });
+    checking
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the vault check began");
+    let since = std::time::Instant::now();
+    harness.host.recorder_changed();
+    let levels = since.elapsed();
+    let since = std::time::Instant::now();
+    harness.host.onboarding_refresh().unwrap();
+    let command = since.elapsed();
+    release.send(()).unwrap();
+    saving.join().unwrap().unwrap();
+
+    assert!(levels < LIVE, "the level hook took {levels:?}");
+    assert!(command < LIVE, "the onboarding command took {command:?}");
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["setup"][1],
+        json!({"kind": "vault", "savedLine": "Saved: Notes", "state": "saved"})
+    );
+}
+
 /// Swift: `testSavingTheVaultValidatesThroughTheDestination`, `vaultRowReadsTheObsidianModel`.
 #[test]
 fn saving_the_vault_validates_through_the_destination() {

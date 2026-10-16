@@ -777,10 +777,24 @@ impl LlmService for FakeLlmService {
 }
 
 /// Accepts every vault unless a refusal is set.
-#[derive(Debug, Default)]
+/// A hook a test installs to hold a vault check: called on the checking
+/// thread with none of the fake's locks held, before the check answers.
+pub type ValidateHook = Arc<dyn Fn(&ObsidianSettings) + Send + Sync>;
+
+#[derive(Default)]
 pub struct FakeExportValidator {
     pub failure: Mutex<Option<VaultRefusal>>,
     pub validated: Mutex<Vec<ObsidianSettings>>,
+    pub on_validate: Mutex<Option<ValidateHook>>,
+}
+
+impl std::fmt::Debug for FakeExportValidator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeExportValidator")
+            .field("failure", &*lock(&self.failure))
+            .field("validated", &*lock(&self.validated))
+            .finish_non_exhaustive()
+    }
 }
 
 impl FakeExportValidator {
@@ -805,6 +819,10 @@ impl FakeExportValidator {
 
 impl ExportValidator for FakeExportValidator {
     fn validate(&self, settings: &ObsidianSettings) -> Result<(), VaultRefusal> {
+        let hook = lock(&self.on_validate).clone();
+        if let Some(hook) = hook {
+            hook(settings);
+        }
         lock(&self.validated).push(settings.clone());
         lock(&self.failure).clone().map_or(Ok(()), Err)
     }
