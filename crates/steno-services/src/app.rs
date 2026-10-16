@@ -4721,6 +4721,58 @@ mod tests {
         owner.abort();
     }
 
+    /// A forced pass runs the light part too: with no reload owner, a
+    /// microphone permission granted in the system's settings shows at
+    /// the next [`Host::store_changed`].
+    #[test]
+    fn a_forced_pass_follows_what_the_store_does_not_hold() {
+        use steno_bridge::{PermissionKind, PermissionState};
+        let (_dir, store) = temp_store();
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        let states = &fakes.permissions.states;
+        states
+            .lock()
+            .unwrap()
+            .insert(PermissionKind::Microphone, PermissionState::Denied);
+        let (host, _sink) = idle_host(&store, &fakes, None);
+        let denied = host.snapshot(BridgeTopic::SettingsRecording).unwrap()["subtitle"].clone();
+        states
+            .lock()
+            .unwrap()
+            .insert(PermissionKind::Microphone, PermissionState::Granted);
+        host.store_changed();
+        assert_ne!(
+            host.snapshot(BridgeTopic::SettingsRecording).unwrap()["subtitle"],
+            denied,
+            "the grant shows after a forced pass"
+        );
+    }
+
+    /// A request that races a tick is honoured with nothing committed: the
+    /// owner here ticks every millisecond, so most requests land beside a
+    /// tick, and each one still reloads the detail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_request_beside_a_tick_still_reloads() {
+        let (_dir, store) = temp_store();
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        let pipeline = Arc::new(GatedPipeline::default());
+        let (host, sink) = idle_host(&store, &fakes, Some(pipeline.clone()));
+        let owner = tokio::spawn(own_the_reloads(
+            host.clone(),
+            std::time::Duration::from_millis(1),
+        ));
+        passes(&sink, std::time::Instant::now(), 3);
+        for request in 1..=20 {
+            let before = pipeline.gate.reloads();
+            host.request_reload();
+            assert!(
+                pipeline.gate.wait_for(LIVE, |state| state.reloads > before),
+                "request {request} reloaded nothing"
+            );
+        }
+        owner.abort();
+    }
+
     /// P40 check 23: ten requests made while a pass is held run exactly
     /// one more forced reload once it goes on: the pass took the flag
     /// before it read the mark, and the `Notify`'s stored permit wakes the
