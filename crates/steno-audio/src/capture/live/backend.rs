@@ -928,6 +928,31 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
 
+    /// At the stop, the device's sample time less how far the IO cycle's
+    /// own ran ahead of the input's is read against where the delivered
+    /// audio ends, the callback in flight aside.
+    #[test]
+    fn the_stop_reads_the_device_time_at_the_input_time() {
+        let mut clock = CycleClock::new(48_000.0);
+        clock.advance(10_000, 512);
+        clock.advance(10_512, 512);
+        let lag = 1_100.0;
+        assert!(missed_at_stop(clock, lag, None).is_none(), "no reading");
+        assert!(
+            missed_at_stop(clock, lag, Some(10_512.0 + lag + 512.0)).is_none(),
+            "on time"
+        );
+        assert_eq!(
+            missed_at_stop(clock, lag, Some(10_512.0 + lag + 28_800.0)).fill,
+            28_800 - 1_024,
+            "0.6 s on, less the callback delivered and the one in flight"
+        );
+        assert!(
+            missed_at_stop(clock, 1e9, Some(5.0)).is_none(),
+            "a reading before the first input time"
+        );
+    }
+
     /// Runs the watch loop on its own thread; every judgement goes to the
     /// returned receiver.
     fn watching(

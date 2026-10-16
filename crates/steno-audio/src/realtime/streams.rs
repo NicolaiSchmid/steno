@@ -45,16 +45,20 @@
 //! [`FollowerLane::for_streams`]), plus the follower's worst lateness in a
 //! window (it lowers the window's lowest queue and so hides drift), plus up
 //! to two windows of drift (about 0.1 ms at 100 ppm), and never by more
-//! than one period plus the master's buffer (the immediate slip). The
-//! plan's parity list tracks both the missing resampling and this error.
+//! than one period plus the master's buffer (the immediate slip), plus the
+//! fill limit behind a master that fills what it missed
+//! ([`FollowerLane::for_streams_filling`]). The plan's parity list tracks
+//! both the missing resampling and this error.
 //!
 //! Audio a capture thread missed (A18; the design is in
 //! [`realtime::missed`](super::missed)) goes through
 //! [`StreamBody::write_missed`] before the packet that showed it. The
 //! master fills it as a silent packet that still pulls the follower's
-//! frames for that time; the follower only counts it, since the master's
-//! pulls already pad its lane with zeros while it is out. A master's jump
-//! too long to fill drops the follower's audio for that time with it.
+//! frames for that time, and its kept packets do not slip that audio first
+//! ([`FollowerLane::for_streams_filling`]); the follower only counts it,
+//! since the master's pulls already pad its lane with zeros while it is
+//! out. A master's jump too long to fill drops the follower's audio for
+//! that time with it.
 //!
 //! Real-time: [`StreamBody::handle`] and [`StreamBody::write_missed`]
 //! allocate nothing and take no lock; the scratch buffers are allocated
@@ -64,9 +68,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::io_proc::{SliceView, deliver_slices};
-use super::missed::Missed;
+use super::missed::{MISSED_FILL_LIMIT, Missed};
 use super::ring::LaneRingBuffer;
 use super::sink::LaneFrameSink;
+use crate::SAMPLE_RATE;
 use crate::capture::layout::LaneSource;
 
 /// The follower stream's staging ring and the jitter-buffer policy the
@@ -152,6 +157,17 @@ impl FollowerLane {
         let period = period.max(1);
         Self::new(2 * period, 3 * period, Self::SLIP_WINDOW, Self::CAPACITY)
             .with_max_lateness(master_buffer)
+    }
+
+    /// [`Self::for_streams`] behind a master that writes what its thread
+    /// missed as silence ([`StreamBody::write_missed`]), as the WASAPI
+    /// backend's does: it can run late by its buffer and by up to
+    /// [`MISSED_FILL_LIMIT`] more, whose fill pulls the follower's audio
+    /// queued meanwhile, so that queue must not slip at once.
+    #[must_use]
+    pub fn for_streams_filling(period: usize, master_buffer: usize) -> Self {
+        let fill_limit = (MISSED_FILL_LIMIT.as_secs_f64() * SAMPLE_RATE) as usize;
+        Self::for_streams(period, master_buffer.saturating_add(fill_limit))
     }
 
     /// The most the master can run late, in frames; a queue more than this

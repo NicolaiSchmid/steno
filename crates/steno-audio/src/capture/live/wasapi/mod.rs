@@ -103,7 +103,7 @@ use crate::capture::{
     SplitStreamPlan, StreamSource,
 };
 use crate::detection::EndpointFlow;
-use crate::realtime::{FollowerLane, LaneFrameSink, MISSED_FILL_LIMIT, PacketRouter, StreamBody};
+use crate::realtime::{FollowerLane, LaneFrameSink, PacketRouter, StreamBody};
 
 /// How long `start` waits, in total, for the stream threads to open and
 /// start their streams (process loopback activation included) and for the
@@ -854,16 +854,12 @@ impl CaptureBackend for LiveCaptureBackend {
         };
         let mic = info(StreamSource::Microphone);
         let system = info(StreamSource::System);
-        // The master can run late by its buffer, and by what it fills once
-        // it ran later still (`realtime::missed`), and keep its alignment.
         let master_buffer = info(plan.master).map_or(0, |i| i.sizes.buffer_frames);
-        let master_lateness =
-            master_buffer + (MISSED_FILL_LIMIT.as_secs_f64() * SAMPLE_RATE) as usize;
         let follower = plan.follower.and_then(|source| {
             info(source).map(|i| {
-                Arc::new(FollowerLane::for_streams(
+                Arc::new(FollowerLane::for_streams_filling(
                     i.sizes.period_frames,
-                    master_lateness,
+                    master_buffer,
                 ))
             })
         });

@@ -872,8 +872,8 @@ struct Outage {
 }
 
 /// The two stream bodies as the WASAPI backend builds them (the follower
-/// behind a master that runs late by its 100 ms buffer and by what it
-/// fills), over 400 periods in which source frame `f` of either stream is
+/// behind a master with a 100 ms buffer that fills what it missed), over
+/// 400 periods in which source frame `f` of either stream is
 /// `f + 1`. From period 50 the follower's thread is out for
 /// `follower_out` periods and the master's for `master_out` (0: never);
 /// each resumes with the ten oldest packets the engine kept, then reports
@@ -883,7 +883,7 @@ fn run_outage(follower_out: usize, master_out: usize) -> Outage {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = Arc::new(LaneFrameSink::new(&lanes));
-    let follower = Arc::new(FollowerLane::for_streams(PERIOD, 4_800 + 48_000));
+    let follower = Arc::new(FollowerLane::for_streams_filling(PERIOD, 4_800));
     let mut master = StreamBody::Master {
         router: PacketRouter::new(
             plan.layout.sources.clone(),
@@ -1010,7 +1010,7 @@ fn an_unfilled_jump_of_the_master_drops_the_follower_audio_of_that_time() {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = LaneFrameSink::new(&lanes);
-    let follower = Arc::new(FollowerLane::for_streams(PERIOD, 4_800 + 48_000));
+    let follower = Arc::new(FollowerLane::for_streams_filling(PERIOD, 4_800));
     let mut router = PacketRouter::new(
         plan.layout.sources.clone(),
         Some(Arc::clone(&follower)),
@@ -1055,4 +1055,27 @@ fn an_unfilled_jump_of_the_master_drops_the_follower_audio_of_that_time() {
     );
     assert_eq!(sink.available_to_read(), PERIOD, "nothing written for it");
     assert_eq!(follower.slipped_frames(), 0, "not a slip");
+}
+
+/// The follower's thread alone out for 150 to 300 ms: the master padded
+/// its lane with zeros meanwhile, so the follower only counts what it lost.
+/// Its kept packets still land late, as any late packets do, until the
+/// queue slips back to the target within two slip windows, and that slip
+/// stays the same however long the outage: zeros staged for the lost part
+/// would queue up and slip as much real system audio again.
+#[test]
+fn a_stall_of_the_follower_alone_stages_no_zeros() {
+    for out in [15, 20, 30] {
+        let outage = run_outage(out, 0);
+        assert_eq!(outage.system_missed, (out - ENGINE_PERIODS) * PERIOD);
+        assert_eq!(outage.mic_missed, 0);
+        assert_eq!(
+            (outage.slipped, outage.system_dropped),
+            (3_840, 3_840),
+            "{out} periods: only the kept packets' lateness slips: {outage:?}"
+        );
+        let (period, lag) = *outage.lags.last().unwrap();
+        assert_eq!(lag, 960, "{outage:?}");
+        assert!(period <= 50 + out + 100, "{outage:?}");
+    }
 }
