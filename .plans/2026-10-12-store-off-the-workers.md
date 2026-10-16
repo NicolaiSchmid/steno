@@ -706,10 +706,11 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   out. It starts set, so the first pass reads the status even when a
   move came before the thread could be woken. `page.ready` sets "resend"
   before "page ready", and a pass reads "page ready" first and takes
-  "resend" only when it is set, so a `page.ready` that lands during a pass
-  that began before it gets one `recording`, not two (the first review
-  measured the order test failing 14 times in 200 with the flags taken
-  the other way; a test pauses the first pass there to pin it).
+  "resend" only when "page ready" is set, so a `page.ready` that lands
+  during a pass that began before it gets one `recording`, not two (with
+  the flags taken the other way, the order test failed 14 times in 200;
+  `a_page_ready_during_the_first_pass_sends_the_recording_once` pins the
+  order).
 - **What goes at once.** A snapshot that differs from the last one sent
   in anything but the levels (the countdown and the denied permissions as
   well as the state, the meeting and the messages); otherwise it waits
@@ -758,16 +759,34 @@ the Swift import is pending. Both are named in the host's `# Threads` doc.
   saved. The transaction gains two small selects and no file step; each
   busy retry of `complete` (`COMMIT_ATTEMPTS`) is a fresh transaction that
   reads again. Only after a commit that failed for another reason does
-  the intake read the row, to say why. The phone admission
+  the intake read the row, on the shared reader, to say why. The phone admission
   (`RecordingIntake::admit`) shares none of this code and keeps its reads:
   the settings name the audio folder its file copy goes into, which must
   come before the commit and outside it.
+- **No settings row fails a stop's save.** The save reads only the
+  `defaultRetention` row: a missing one is the default, and one that
+  cannot be read saves the asset kept forever, which deletes nothing, with
+  a warning that names the key and not the value. Before, any bad row,
+  of any key, failed the save and left the meeting `recording` until the
+  row was fixed, on `main` as well; the launch already refuses a bad row
+  (#295), so this covers a row that went bad mid-session. Recovery's
+  `complete(None)` takes the same path.
 - **Small tests beside the checks:** a forced pass runs the light part
   (`a_forced_pass_follows_what_the_store_does_not_hold`), `Host::new`
   reads the mark before its loads
   (`a_commit_during_the_hosts_loads_shows_at_the_first_pass`), the feed's
   thread ends with the host (`the_feed_ends_with_the_host`), and a request
   that races a tick still reloads (`a_request_beside_a_tick_still_reloads`).
+  The stop's save writes its columns
+  (`the_stopped_recordings_save_writes_its_columns`), waits out another
+  writer (`the_stopped_recordings_save_waits_out_another_writer`), and
+  never fails on a settings row
+  (`an_unreadable_default_retention_saves_the_stop_kept_forever`,
+  `an_unrelated_unreadable_setting_does_not_touch_the_stops_save`,
+  `a_missing_default_retention_saves_the_stop_with_the_default`); each
+  busy try reads again (`each_try_of_a_busy_commit_reads_the_settings_again`);
+  and a kill inside the save, before its commit, recovers the recording
+  (`a_kill_inside_the_stops_save_recovers_the_recording`).
 
 ## Acceptance
 
@@ -802,14 +821,14 @@ as an outcome, and checks 19 to 23 are new.
 | 13 | Pipeline runs on the workers | every `store_waits` test passes on one worker, including the quit during a run's wait | `store_waits.rs` | 2b |
 | 14 | Removed | The deadlock test for the host write mutex, the emitter's leaf and the reader checkout, and the "view models held" assert. None of those exists in this cut. What is left of the order (decision 3) is checked by the nesting assert (check 15) and by checks 1, 2, 16 and 21, which hold the view-model lock while the feed and a stop run | | |
 | 15 | The readers' own rules | `a_write_through_read_fails_on_both_stores` (file and in-memory, `query_only`, the host's reader included); `a_store_call_inside_a_store_closure_asserts`; `the_checkpoint_waits_for_reads_in_flight_and_holds_off_new_ones` (on both readers); `the_in_memory_checkpoint_takes_its_one_lock_once` (returns at once, as `checkpoint_store` at launch in the app tests needs) | `crates/steno-core/src/store/mod.rs` tests | 2a |
-| 16 | The stop's hook behind a slow reload | `a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files`: a forced reload is held in flight with the view-model lock and the host's reader taken (a gated `export_keeps_failing`, inside a read on the host's reader), and another thread's read holds the shared reader for 3 s; then the recorder stops. `Stopping` reaches the sink within 100 ms of the recorder's notice, the meeting is saved within `LIVE` of it, and the stop ends with its files finished while both reads are still held. The stop's save reads the row and the settings on the writer, inside its own transaction, so it waits for no read | `crates/steno-services/src/recorder.rs` tests | 2c |
+| 16 | The stop's hook behind a slow reload | `a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files`: a forced reload is held in flight with the view-model lock and the host's reader taken (a gated `export_keeps_failing`, inside a read on the host's reader), and another thread's read holds the shared reader for 3 s; then the recorder stops. `Stopping` reaches the sink within 100 ms of the recorder's notice, the meeting is saved within `LIVE` of it, and the stop ends with its files finished while both reads are still held. The stop's save reads the row and the default retention on the writer, inside its own transaction, so it waits for no read | `crates/steno-services/src/recorder.rs` tests | 2c |
 | 17 | The delete's files and rows | `a_kill_after_the_entry_is_forgotten_keeps_the_meeting`, `a_kill_after_the_delete_commits_never_brings_the_meeting_back` and `a_kill_before_a_kept_meetings_entry_is_restored_keeps_it`: a child process deletes through the host, is killed at a gate between two steps, and the next launch lists the meeting with its recording, or does not list it and adopts no master, exactly once. A guard, not a fix: it passes on `main`, and runs with 2a, which changes the checkpoint that the forget and the undo fall back to | `crates/steno-services/src/kill_tests.rs` | 2a |
 | 18 | `page.ready` against the page's first command | Restated as an outcome: `a_command_before_page_ready_loses_no_snapshot`: a command reaches the host before `page.ready`; once `page.ready` arrives, every topic, `recording` included, reaches the sink live, with the command's effect. Which of the two reaches the host first stays open (a probe saw the command first in 29 of 300 runs before PR 1 and 42 of 300 at its head). A guard: on `main` the `recording` the command's publish stamped arrives at most 50 ms late, within the feed's 100 ms (`LIVE` in the feed's tests), so the check passes there and fails on a 2c that loses a topic | `crates/steno-host/src/recording_feed.rs` tests | 2c |
 | 19 | An idle app reloads and resends every 2 s | `an_idle_app_sends_no_list_detail_or_progress`: with the page ready and no commit, ten polls send no `meetings.list`, `meeting.detail` or `progress` snapshot | `crates/steno-services/src/app.rs` tests | 2c |
 | 20 | Another process's commit | `a_commit_from_another_process_shows_within_one_poll`: a second connection retitles a meeting, and the list carries the title within one poll interval and `LIVE` (1 s); `an_in_process_commit_shows_within_one_poll` does the same through the in-memory store's writer (the commit count). A guard for the gate | `app.rs` tests, `crates/steno-core/src/store/mod.rs` tests (`change_mark`) | 2c |
-| 21 | The feed's own rules | `the_recording_feed_sends_nothing_before_page_ready` (levels and a state change before `page.ready` reach no sink; the first snapshot goes out after it); `the_recording_feed_runs_while_the_view_models_are_held` (with the view-model lock held by a test, level updates reach the sink live and `Stopping` within 100 ms); `a_second_page_ready_gets_the_recording_again` (a reloaded page, with the recorder idle and its status unchanged, gets one `recording` snapshot); `a_held_level_update_stamps_no_interval` (a level update held back by the throttle neither becomes the last status sent nor restarts the 50 ms, and goes out when its interval ends); two level updates inside one interval fold into one send, the fold case moved here from `recording_follows_the_recorder_and_the_start_selects_the_live_row` in `crates/steno-host/tests/main_window.rs`; `a_page_ready_during_the_first_pass_sends_the_recording_once` (a `page.ready` that lands inside a pass gets one `recording`) | `crates/steno-host/src/recording_feed.rs` tests | 2c |
+| 21 | The feed's own rules | `the_recording_feed_sends_nothing_before_page_ready` (levels and a state change before `page.ready` reach no sink; the first snapshot goes out after it); `the_recording_feed_runs_while_the_view_models_are_held` (with the view-model lock held by a test, level updates reach the sink live and `Stopping` within 100 ms); `a_second_page_ready_gets_the_recording_again` (a reloaded page, with the recorder idle and its status unchanged, gets one `recording` snapshot); `a_held_level_update_stamps_no_interval` (a level update held back by the throttle neither becomes the last status sent nor restarts the 50 ms, and goes out when its interval ends; two level updates inside one interval fold into one send, the fold case moved here from `recording_follows_the_recorder_and_the_start_selects_the_live_row` in `crates/steno-host/tests/main_window.rs`); `a_page_ready_during_the_first_pass_sends_the_recording_once` (a `page.ready` that lands inside a pass gets one `recording`) | `crates/steno-host/src/recording_feed.rs` tests | 2c |
 | 22 | What the store does not show | `an_event_without_a_commit_still_reloads` (`StoreBusy`, `OperationFailed` and `ModelsMissing` with no commit reach the detail and the progress live); `a_permission_granted_outside_the_app_shows_within_one_poll` (the light part runs every tick). A guard for the gate | `app.rs` tests | 2c |
-| 23 | One owner for the reloads | `reload_requests_during_a_pass_run_one_more_pass` (ten requests during a held pass run exactly one more forced reload; the count is of forced reloads, not passes, since a tick can land beside the stored permit); `a_stop_asks_for_a_reload_per_move` (`Stopping` and then `Idle` are two moves, and each asks for one; the stopped meeting's `queued` row reaches the list live after the save, from a forced pass, not from the stop's thread). The host test `the_list_follows_the_recorders_state_and_meeting` (`crates/steno-host/tests/main_window.rs:1949`) moves here: the host crate has no reload owner, so the list now follows through the services' poll task | `app.rs` tests, `recorder.rs` tests | 2c |
+| 23 | One owner for the reloads | `reload_requests_during_a_pass_run_one_more_pass` (ten requests during a held pass run exactly one more forced reload; the count is of forced reloads, not passes, since a tick can land beside the stored permit); `a_stop_asks_for_a_reload_per_move` (`Stopping` and then `Idle` are two moves, and each asks for one; the stopped meeting's row, out of `recording`, reaches the list live after the save, from a forced pass, not from the stop's thread). The host test `the_list_follows_the_recorders_state_and_meeting` (`crates/steno-host/tests/main_window.rs:1949`) moves here: the host crate has no reload owner, so the list now follows through the services' poll task | `app.rs` tests, `recorder.rs` tests | 2c |
 
 **Check 7's smoke** runs on the `xvfb-recording-linux.sh` harness, with the
 stand-in tray host that `close-without-tray-linux.sh` uses. It records, holds

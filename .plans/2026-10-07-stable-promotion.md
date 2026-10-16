@@ -1656,10 +1656,12 @@ The table above names each package and its owner. Their tests:
   `Stopping` at once and saves within 1 s of the lock's release; a start is
   refused after the timeout; a read never waits for a write; the handover's
   admit leaves its worker free; #278's `store_waits` pass on one worker; a
-  stop during a slow reload finishes its files at once and saves within 1 s,
-  with both readers held, since its save reads on the writer; the `recording` feed
-  sends nothing before `page.ready` and keeps sending while the view-model
-  lock is held; an idle app sends no list, detail or progress; another
+  stop during a slow reload finishes its files at once and saves within 1
+  s, with both readers held, since its save reads on the writer; no
+  settings row fails a stop's save (one unreadable `defaultRetention` row
+  keeps the audio forever, with a warning); the `recording` feed sends
+  nothing before `page.ready` and keeps sending while the view-model lock
+  is held; an idle app sends no list, detail or progress; another
   process's commit shows within one poll; a command that reaches the host
   before `page.ready` loses no snapshot; a kill between the delete's steps
   never loses or brings back a recording. A settings save that waits, and a
@@ -1672,8 +1674,8 @@ The table above names each package and its owner. Their tests:
   `apps/desktop/scripts/locked-store-linux.sh`, which stops through the
   tray's menu. The smoke took 26 s on atlas, under the 2 minutes, so it runs
   in `rust-ci.yml`'s Linux hosted job ("Desktop stop under a locked store").
-  P40 closes with #304: the feed's checks keep 100 ms, and check 20 allows
-  one poll and 1 s.
+  P40 closes with #304. The feed's checks hold 100 ms, and check 20 allows
+  one 2 s poll and 1 s.
 
 ### X: the Linux targets (D6)
 
