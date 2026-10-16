@@ -144,7 +144,8 @@ impl RecordingFeed {
         self.wake();
     }
 
-    /// Wakes the feed's thread; at the host's drop, so it ends.
+    /// Wakes the feed's thread: for a poke, a `page.ready`, and at the
+    /// host's drop, so it ends.
     pub(crate) fn wake(&self) {
         if let Some(thread) = self.thread.get() {
             thread.unpark();

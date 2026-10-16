@@ -995,7 +995,8 @@ impl Host {
 
     /// The host's own store handle, whose reader its reloads read on
     /// ([`Store::with_own_reader`]), so a test can hold that reader. Takes
-    /// the view-model lock.
+    /// the view-model lock. Tests only; never call it under the view-model
+    /// lock or hold its reader.
     #[doc(hidden)]
     #[must_use]
     pub fn own_store(&self) -> Arc<Store> {

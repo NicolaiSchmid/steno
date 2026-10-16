@@ -985,7 +985,8 @@ pub struct GatedPipeline {
 }
 
 impl GatedPipeline {
-    /// From now on the gate is passed inside a read on `store`'s reader.
+    /// From now on the gate is passed inside a read on `store`'s reader;
+    /// the first call wins.
     pub fn gate_inside_reads_on(&self, store: Arc<Store>) {
         let _ = self.reader.set(store);
     }

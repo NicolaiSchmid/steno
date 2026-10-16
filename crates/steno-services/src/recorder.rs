@@ -4407,16 +4407,17 @@ mod tests {
     }
 
     /// P40 check 16: a stop while a forced reload is held in flight with
-    /// the view-model lock and the host's reader taken (the detail asks the
-    /// pipeline whether its export keeps failing, at a gate inside a read
-    /// on the host's reader, as a reload behind a slow store would wait),
-    /// and while another thread's read holds the shared reader for three
-    /// seconds (a long list load, an export). `Stopping` shows in the host
-    /// within 100 ms of the recorder's notice, the meeting is saved within
-    /// [`LIVE`] of it, and the stop ends with its files finished while both
-    /// reads are still held: the hook only pokes the `recording` feed,
-    /// which takes no host lock, and the save reads the row and the
-    /// settings on the writer, inside its own transaction.
+    /// the view-model lock and the host's reader taken, and while another
+    /// thread's read holds the shared reader for three seconds, as a long
+    /// list load or an export does. The reload waits where the detail asks
+    /// the pipeline whether its export keeps failing, at a gate inside a
+    /// read on the host's reader, as a reload behind a slow store would.
+    /// `Stopping` shows in the host within 100 ms of the recorder's notice,
+    /// the meeting is saved within [`LIVE`] of it, and the stop ends with
+    /// its files finished while both reads are still held. The hook only
+    /// pokes the `recording` feed, which takes no host lock, and the save
+    /// reads the row and the default retention on the writer, inside its
+    /// own transaction.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files() {
         const FEED: Duration = Duration::from_millis(100);
