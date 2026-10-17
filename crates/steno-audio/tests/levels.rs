@@ -4,8 +4,8 @@
 //! Windows, a slow or external disk); the levels go out from a thread of
 //! their own, so the meter does not freeze meanwhile. The sync is held
 //! through [`HeldSyncs`] (behind `test-support`), so the test does not
-//! depend on how slow the disk is. Rust only: Swift synced at the close
-//! alone.
+//! depend on how slow the disk is. Rust only: Swift syncs only at the
+//! close.
 //!
 //! A test binary of its own, so no other test shares the machine with the
 //! one claim here that reads wall time: how late a level reaches the
@@ -77,8 +77,8 @@ fn levels_keep_reaching_the_consumer_while_the_writer_is_held_in_a_sync() {
     held.release();
     let result = session.stop().unwrap();
 
-    assert!(began, "the writer's sync began");
-    assert!(before_the_hold > 0, "levels came before the hold");
+    assert!(began, "the writer's sync never began");
+    assert!(before_the_hold > 0, "no level came before the hold");
     let mut last = since;
     for (at, level) in &arrivals {
         let gap = at.duration_since(last);

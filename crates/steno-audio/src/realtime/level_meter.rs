@@ -80,9 +80,8 @@ impl LevelMeter {
 }
 
 /// The latest [`LaneLevels`] written by the processing thread as atomic bit
-/// patterns, read by whoever publishes them (the session's
-/// [`LevelPublisher`](crate::capture::LevelPublisher)), which each publish
-/// wakes.
+/// patterns, read by whoever hands them on (the session's level
+/// publisher, `capture::level_publisher`), which each publish wakes.
 /// The reader may observe a torn pair across a publish; levels feed a
 /// meter, nothing else, so no lock is worth it.
 #[derive(Debug)]

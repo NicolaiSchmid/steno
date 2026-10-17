@@ -1,6 +1,7 @@
 //! The level publisher: a thread of its own that hands the processing
 //! thread's levels on whenever their generation in [`LevelSlot`] changed,
-//! woken by each publish into the slot (10 Hz, every 100 ms of audio).
+//! woken by each publish into the slot (by default 10 Hz, every 100 ms of
+//! audio).
 //! Swift: `publishLevelsIfChanged` in `Sources/StenoAudio/Writer/WriterThread.swift`.
 //!
 //! Rust only: Swift's writer thread does that between its writes, and the
@@ -45,8 +46,9 @@ impl LevelPublisher {
     /// lost: the default level interval, 100 ms.
     pub const POLL: Duration = Duration::from_millis(100);
 
-    /// Spawns the thread over `slot`; it calls `on_levels` with every
-    /// generation it sees change, from the slot's generation now on.
+    /// Spawns the thread over `slot`; it calls `on_levels` with the slot's
+    /// levels each time their generation changes, counting from the
+    /// generation at this call.
     #[must_use]
     pub fn start(slot: Arc<LevelSlot>, on_levels: LevelsHandler) -> Self {
         let stop_requested = Arc::new(AtomicBool::new(false));

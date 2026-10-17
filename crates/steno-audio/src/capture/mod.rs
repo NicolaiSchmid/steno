@@ -1,15 +1,15 @@
-//! Capture: the backend seam, the session state machine over it, the
-//! level publisher it runs beside the writer, the stream layout, the
-//! device-change comparison, the two-stream plan (`split_streams`), the
-//! live backends (Core Audio, PipeWire, WASAPI), how loud their starts
-//! log while restarts go on (`start_log`) and the Mac's system audio
-//! permission probe (`permission`).
+//! Capture: the backend seam, the session state machine over it and its
+//! level publisher, the stream layout, the device-change comparison, the
+//! two-stream plan (`split_streams`), the live backends (Core Audio,
+//! PipeWire, WASAPI), how loud their starts log while restarts go on
+//! (`start_log`) and the Mac's system audio permission probe
+//! (`permission`).
 //! Swift: `Sources/StenoAudio/Capture/`.
 
 pub mod backend;
 pub mod configuration;
 pub mod layout;
-pub mod level_publisher;
+pub(crate) mod level_publisher;
 pub mod live;
 pub mod nominal_rate;
 pub mod permission;
@@ -24,7 +24,6 @@ pub use configuration::{
     CaptureStatistics, DeviceChangeReason, LaneLevel, LaneLevels,
 };
 pub use layout::{ChannelRef, LaneSource, StreamLayout};
-pub use level_publisher::LevelPublisher;
 pub use live::LiveCaptureBackend;
 pub use nominal_rate::NominalSampleRate;
 pub use session::{CaptureSession, RecordingWriterFactory};

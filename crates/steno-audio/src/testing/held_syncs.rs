@@ -3,7 +3,7 @@
 //! `fsync` on a slow disk does, until the test lets it go, so a test can
 //! prove what keeps going while the writer thread is stuck in one (the
 //! level stream, A20 of `.plans/2026-10-07-stable-promotion.md`). Rust
-//! only: Swift synced at the close alone.
+//! only: Swift syncs only at the close.
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -56,14 +56,14 @@ impl HeldSyncs {
         })
     }
 
-    /// Waits up to `timeout` for a sync to begin, and so to be held while
-    /// no release came; whether one did.
+    /// Blocks until a sync begins, for up to `patience`; whether one did.
+    /// Before a [`release`](Self::release), that sync is held.
     #[must_use]
-    pub fn wait_for_a_held_sync(&self, timeout: Duration) -> bool {
+    pub fn wait_for_a_held_sync(&self, patience: Duration) -> bool {
         let (state, _) = self
             .gate
             .changed
-            .wait_timeout_while(self.gate.lock(), timeout, |state| !state.began)
+            .wait_timeout_while(self.gate.lock(), patience, |state| !state.began)
             .unwrap_or_else(PoisonError::into_inner);
         state.began
     }

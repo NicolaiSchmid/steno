@@ -23,7 +23,8 @@
 //! are now (backing off on the clock between tries, as often as below),
 //! fills the gap with silence through the relay so the master stays on
 //! wall time, starts a processing thread built for the new latencies, and
-//! keeps the sink, the relay, the writer thread, the writer and the files.
+//! keeps the sink, the relay, the level slot and its publisher, the writer
+//! thread, the writer and the files.
 //! The state stays `Recording`; `notices` carries `DeviceChanged` and
 //! `DeviceResumed`, and `StillRestarting` and `Delivering` (below). From the
 //! old stream's stop until the restarted one delivers, the levels read
@@ -169,8 +170,8 @@
 //!
 //! Swift's actor becomes one mutex over the session state. The rule that
 //! keeps it deadlock-free: **no thread is joined while the mutex is held**
-//! (one bounded exception on Linux, below). The backend's producer, the
-//! processing thread, the writer thread and the level publisher all call
+//! (one bounded exception on Linux, below). The backend's producer,
+//! `steno-wfail` (for the writer thread) and the level publisher call
 //! back into the session (device changes, write errors, levels) and take
 //! the mutex to do so;
 //! teardown therefore moves the recording out of the state under the
@@ -1191,8 +1192,9 @@ impl Core {
             }
             watch
         });
-        // Last, so nothing after the publisher's start can panic and drop
-        // it, joining its thread, with the mutex held.
+        // Last but for the processing thread's start: until it runs nothing
+        // publishes into the slot, so a panic there drops the publisher,
+        // which then joins at once even with the mutex held.
         let level_publisher = LevelPublisher::start(
             Arc::clone(&levels),
             Box::new(move |levels| {
@@ -1326,18 +1328,18 @@ impl Core {
         system_peak
     }
 
-    /// Rebuild abandoned and joined, backend off, rings drained, relay
-    /// drained, files closed, asset built. The asset is built even when
-    /// a write or closing the files failed (its paths are fixed at start
-    /// and the duration is what the master holds); the failure comes back
-    /// in [`CaptureResult::failure`]: a failed write or close, else the
-    /// device loss that ended the recording, else a sync that failed while
-    /// recording. `WriterFailed` with no asset when there is nothing to
-    /// hand out: the writer thread died and took the writer with it, or
-    /// the master is gone from disk (its folder deleted while recording; an
-    /// unlinked file still writes and closes without an error). The caller
-    /// has set the state to `Stopping`; the threads are stopped with the
-    /// lock released (see the module doc).
+    /// Rebuild abandoned and joined, backend off, rings drained, the last
+    /// level handed on, relay drained, files closed, asset built. The asset
+    /// is built even when a write or closing the files failed (its paths
+    /// are fixed at start and the duration is what the master holds); the
+    /// failure comes back in [`CaptureResult::failure`]: a failed write or
+    /// close, else the device loss that ended the recording, else a sync
+    /// that failed while recording. `WriterFailed` with no asset when there
+    /// is nothing to hand out: the writer thread died and took the writer
+    /// with it, or the master is gone from disk (its folder deleted while
+    /// recording; an unlinked file still writes and closes without an
+    /// error). The caller has set the state to `Stopping`; the threads are
+    /// stopped with the lock released (see the module doc).
     fn finish(&self) -> Result<CaptureResult, CaptureError> {
         let mut active = self
             .lock()

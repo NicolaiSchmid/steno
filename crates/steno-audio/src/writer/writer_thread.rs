@@ -1,9 +1,9 @@
 //! The serial writer: drains [`FrameRelay`] on its own thread and hands
 //! each frame to the [`RecordingWriting`] implementation.
 //! Swift: `Sources/StenoAudio/Writer/WriterThread.swift`, which also
-//! republishes the levels; in Rust the session's
-//! [`LevelPublisher`](crate::capture::LevelPublisher) does, on a thread of
-//! its own, so a slow sync here does not freeze the meter (A20 of
+//! republishes the levels; in Rust the session's level publisher
+//! (`capture::level_publisher`) does, on a thread of its own, so a slow
+//! sync here does not freeze the meter (A20 of
 //! `.plans/2026-10-07-stable-promotion.md`).
 //!
 //! Every [`SYNC_INTERVAL_FRAMES`] frames the thread
