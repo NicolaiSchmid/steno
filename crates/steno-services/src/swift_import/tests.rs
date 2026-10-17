@@ -1471,7 +1471,7 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
             "nothing left to import"
         );
         let gated = app.gated_handover.clone().unwrap();
-        tokio::time::timeout(crate::testing::PATIENCE, gated.clone().follow(|| {}))
+        tokio::time::timeout(crate::testing::HANG_GUARD, gated.clone().follow(|| {}))
             .await
             .expect("the listener is adopted, waiting");
         assert!(gated.service().is_none(), "unreadable: {unreadable}");
@@ -1628,7 +1628,7 @@ async fn settings_try_again_or_pair_again_ends_a_denied_export() {
             tokio::task::block_in_place(|| gated.try_again())
         };
         answer.unwrap();
-        tokio::time::timeout(crate::testing::PATIENCE, follow)
+        tokio::time::timeout(crate::testing::HANG_GUARD, follow)
             .await
             .expect("the listener comes up")
             .unwrap();
@@ -1708,7 +1708,7 @@ async fn an_import_pair_again_that_stopped_is_decided_by_the_next_read() {
                 let follow = tokio::spawn(gated.clone().follow(|| {}));
                 keychain.allow_export();
                 tokio::task::block_in_place(|| gated.try_again()).unwrap();
-                tokio::time::timeout(crate::testing::PATIENCE, follow)
+                tokio::time::timeout(crate::testing::HANG_GUARD, follow)
                     .await
                     .expect("the listener comes up")
                     .unwrap();
