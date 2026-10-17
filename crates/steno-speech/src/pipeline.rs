@@ -1480,6 +1480,18 @@ mod tests {
         let late = [piece(2, 14.0), piece(7, 19.76)];
         let ids: Vec<u32> = joined(&chunk, &late, &next).iter().map(|t| t.0).collect();
         assert_eq!(ids, [6, 2, 7, 7, 27, 14]);
+        // Two copies of one piece each: the window's falls away; and one
+        // of two pieces against three, with every piece of it.
+        let late = [piece(2, 14.0), piece(7, 19.92)];
+        let alone = [piece(7, 20.0), piece(14, 21.0)];
+        assert_eq!(
+            joined(&chunk, &late, &alone),
+            [(6, at(9.92)), (2, at(14.0)), (7, at(20.0)), (14, at(21.0))]
+        );
+        let late = [piece(2, 14.0), piece(7, 19.84), piece(27, 19.92)];
+        let longer = [piece(7, 20.0), piece(27, 20.08), piece(37, 20.16)];
+        let ids: Vec<u32> = joined(&chunk, &late, &longer).iter().map(|t| t.0).collect();
+        assert_eq!(ids, [6, 2, 7, 27, 37]);
         // The known limit: a chunk that begins with the rest of a word the
         // window heard whole gives that piece twice.
         let whole = [piece(2, 14.0), piece(7, 19.84), piece(27, 19.92)];
@@ -2142,6 +2154,48 @@ mod tests {
         assert_ne!(first[0].frame, later[0].frame);
         let (tied, _) = recover_with(&[(0.0, 6.0), (0.04, 6.0)]);
         assert_eq!(tied, first);
+    }
+
+    #[test]
+    fn a_recovery_must_hear_more_in_the_chunks_window_than_the_chunk_did() {
+        // The chunk (1 to 9 s) owns up to 8 s and heard one word, at
+        // 8.48 s: in its window, past its owned span. The 6 s extension
+        // hears that word and no other, so it is not accepted.
+        let (mut config, samples) = empty_chunk_fixture(106);
+        config.recovery.extensions_seconds = vec![(0.0, 6.0)];
+        let mut t = transcriber(config, 160);
+        let mut stats = DecodeStats::default();
+        let chunk = span((0.0, 8.0), (1.0, 9.0), true);
+        let original = vec![piece(5, 8.48)];
+        let kept = t.recover(&samples, &chunk, original.clone(), &mut stats);
+        assert_eq!(kept.unwrap(), original);
+        assert_eq!((stats.recoveries_tried, stats.recoveries_accepted), (1, 0));
+    }
+
+    #[test]
+    fn a_recovery_counts_a_word_on_its_chunks_last_frame() {
+        // Word 5 from 9 s, the end of the chunk (1 to 9 s), whose last
+        // frame starts at 8.96 s. The 6 s extension starts on the chunk's
+        // grid, half a frame off the recording's, and hears the word on
+        // its frame from 9 s: the chunk's last frame, which counts.
+        let mut samples = vec![0.0f32; 14 * SAMPLE_RATE];
+        samples[9 * SAMPLE_RATE..9 * SAMPLE_RATE + 2 * FRAME_SAMPLES].fill(0.005);
+        let config = PipelineConfig {
+            recovery: RecoveryConfig {
+                extensions_seconds: vec![(0.0, 6.0)],
+                ..RecoveryConfig::default()
+            },
+            ..PipelineConfig::default()
+        };
+        let mut t = transcriber(config, 160);
+        let mut stats = DecodeStats::default();
+        let kept = t.recover(&samples, &chunk_span(), Vec::new(), &mut stats);
+        let kept = kept.unwrap();
+        assert_eq!(stats.recoveries_accepted, 1);
+        assert_eq!(
+            kept.iter().map(|t| (t.id, t.sample())).collect::<Vec<_>>(),
+            [(5, 9 * SAMPLE_RATE)]
+        );
     }
 
     #[test]
