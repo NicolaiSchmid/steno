@@ -599,7 +599,10 @@ impl Host {
         onboarding.load(&own, &services, key);
         let mut list = MeetingListViewModel::new(config.zone);
         list.reload(&own);
-        let mut progress = ProcessingProgressModel::default();
+        let mut progress = ProcessingProgressModel {
+            speech_fallback: services.speech_models.speech_fallback(),
+            ..ProcessingProgressModel::default()
+        };
         progress.meetings_changed(&list.all, services.clock.now());
         let app = AppState {
             speech_engine_notice: services.preferences.flag(engine_notice::PENDING_KEY),
@@ -2539,6 +2542,18 @@ impl BridgeHost for Host {
     fn settings_transcription_remove(&self, params: AssetIdParams) -> Outcome<()> {
         let asset = parse_asset(&params)?;
         self.models_command(|inner| inner.speech.remove(asset, &self.shared.services));
+        Ok(())
+    }
+
+    /// The rows change to the Neural Engine's model, and a meeting waiting
+    /// for the speech sidecar's models stops saying the Neural Engine is
+    /// off.
+    fn settings_transcription_use_neural_engine(&self) -> Outcome<()> {
+        self.models_command(|inner| {
+            inner.speech.use_neural_engine(&self.shared.services);
+            inner.progress.speech_fallback = inner.speech.neural_engine_off;
+            inner.publisher.schedule(BridgeTopic::Progress);
+        });
         Ok(())
     }
 

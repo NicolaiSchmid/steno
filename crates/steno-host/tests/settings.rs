@@ -679,6 +679,50 @@ fn errors_are_sentences_with_the_details_apart() {
     assert_eq!(recording["devices"], json!([]));
 }
 
+/// While the speech sidecar stands in for the Neural Engine, which ended
+/// the app, Transcription says so and offers it again; the action ends the
+/// fallback and rebuilds the pipeline, and the offer goes. Rust only
+/// (A19).
+#[test]
+fn transcription_offers_the_neural_engine_again_after_the_fallback() {
+    assert!(
+        Harness::builder()
+            .build()
+            .snapshot(BridgeTopic::SettingsTranscription)
+            .get("neuralEngineOff")
+            .is_none(),
+        "left out while the Neural Engine is on"
+    );
+    let harness = Harness::builder()
+        .seed(|_, fakes| {
+            fakes
+                .speech_models
+                .speech_fallback
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsTranscription)["neuralEngineOff"],
+        true
+    );
+
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert!(
+        !harness
+            .fakes
+            .speech_models
+            .speech_fallback
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(*harness.fakes.pipeline.reloads.lock().unwrap(), 1);
+    let transcription = harness.snapshot(BridgeTopic::SettingsTranscription);
+    assert!(transcription.get("neuralEngineOff").is_none());
+    assert!(transcription.get("error").is_none());
+}
+
 /// Swift: `testSpeechEngineChangeReloadsThePipeline`, `testSpeechDownloadStreamsProgressToInstalled`.
 #[test]
 fn transcription_switches_engines_and_downloads_assets() {

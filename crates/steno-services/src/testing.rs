@@ -377,9 +377,11 @@ pub fn app_over_fakes(
 }
 
 /// [`app_over_fakes`] with `engine` run in this process, as `CoreML` is on
-/// the Mac, its models and the diarizer's installed, and the warm-up mark
-/// of `root/support` read as a launch reads it: a recording warms `engine`
-/// up, unless a mark left there turns the warm-up off.
+/// the Mac (its load and transcriptions marked as reads, and run only
+/// while no recording is under way), its models and the diarizer's
+/// installed, and the warm-up mark of `root/support` read as a launch
+/// reads it: a recording warms `engine` up, unless a mark left there turns
+/// the warm-up off.
 pub fn app_warming_up(
     root: &std::path::Path,
     store: &Arc<Store>,
@@ -390,7 +392,8 @@ pub fn app_warming_up(
         .with_speech_engine(steno_pipeline::SharedSpeechEngine::new(engine))
         .with_warm_up_mark(Arc::new(steno_pipeline::WarmUpMark::at_launch(
             &root.join("support"),
-        )));
+        )))
+        .with_speech_in_process(true);
     let in_process = BuiltPipeline {
         dependencies,
         engine: BuiltEngine {
@@ -423,6 +426,84 @@ pub fn app_decoding(
     )
 }
 
+/// The app's launch over `root/support` with two speech engines: `coreml`
+/// in this process, as `CoreML` is on the Mac, and `sidecar` in its
+/// place, as the speech sidecar. The launch reads the warm-up mark and the
+/// reading marks there, and the fallback over them
+/// (`steno_pipeline::SpeechFallback`), as `build_with_import` does; every
+/// build runs `coreml`, the Mac's default on every platform, unless the
+/// fallback is on, and the model service is the app's over
+/// `root/models`, every model installed. The fallback ends through the
+/// host's model service (`SpeechModels::end_speech_fallback`) and a
+/// reload.
+pub fn app_falling_back(
+    root: &std::path::Path,
+    store: &Arc<Store>,
+    coreml: Arc<dyn steno_core::SpeechEngine>,
+    sidecar: Arc<dyn steno_core::SpeechEngine>,
+) -> crate::App {
+    let support = root.join("support");
+    let warm_up_mark = Arc::new(steno_pipeline::WarmUpMark::at_launch(&support));
+    let reading_marks = Arc::new(steno_pipeline::ReadingMarks::at_launch(
+        &support,
+        store,
+        chrono::Utc::now(),
+    ));
+    let fallback = Arc::new(steno_pipeline::SpeechFallback::at_launch(
+        &support,
+        &warm_up_mark,
+        &reading_marks,
+    ));
+    let setup = crate::speech::testing::setup(
+        &root.join("models"),
+        steno_speech::SpeechSettings::default(),
+    )
+    .with_fallback(fallback);
+    let models = crate::speech::ModelStoreSpeechModels::new(&setup);
+    crate::speech::testing::install_every_model(&models);
+    let engines = Arc::new(crate::speech::SpeechEngines::with_builder(
+        setup,
+        Box::new(move |runtime| match runtime {
+            SpeechRuntime::CoreMlInProcess => coreml.clone(),
+            SpeechRuntime::OnnxSidecar => sidecar.clone(),
+        }),
+    ));
+    let make: MakeDependencies = {
+        let store = store.clone();
+        Arc::new(move || {
+            let runtime = crate::speech::unless_falling_back(
+                SpeechRuntime::CoreMlInProcess,
+                &engines.setup().fallback,
+            );
+            Ok(BuiltPipeline {
+                dependencies: fake_dependencies(&store, "parakeet-v3")
+                    .with_speech_engine(engines.engine(runtime))
+                    .with_warm_up_mark(warm_up_mark.clone())
+                    .with_reading_marks(reading_marks.clone())
+                    .with_speech_in_process(runtime.runs_in_process()),
+                engine: BuiltEngine {
+                    engine_id: "parakeet-v3".to_owned(),
+                    runtime,
+                },
+            })
+        })
+    };
+    let pipeline = Arc::new(CurrentPipeline::new(
+        make().unwrap(),
+        make,
+        tokio::runtime::Handle::current(),
+    ));
+    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
+    app_over_pipeline(
+        root,
+        store,
+        synthetic_capture(),
+        pipeline,
+        Arc::new(models),
+        &fakes,
+    )
+}
+
 /// [`app_over_fakes`] over the build `first` (every reload builds it again)
 /// and the host's `fakes`, its reads marked in `root/support`, which the
 /// launch check reads first (`steno_pipeline::ReadingMarks`).
@@ -433,9 +514,6 @@ fn app_over_build(
     mut first: BuiltPipeline,
     fakes: &steno_host::fakes::FakeServices,
 ) -> crate::App {
-    let mut settings = store.settings().unwrap();
-    settings.audio_folder = steno_core::paths::file_url(&root.join("audio"), true);
-    store.save_settings(&settings).unwrap();
     first.dependencies =
         first
             .dependencies
@@ -444,20 +522,43 @@ fn app_over_build(
                 store,
                 chrono::Utc::now(),
             )));
-    let pipeline = current_pipeline_of(first);
+    app_over_pipeline(
+        root,
+        store,
+        make_session,
+        current_pipeline_of(first),
+        fakes.speech_models.clone(),
+        fakes,
+    )
+}
+
+/// [`app_over_fakes`] over `pipeline` and `speech_models`, the rest of the
+/// host's services from `fakes`, recording into `root/audio`.
+fn app_over_pipeline(
+    root: &std::path::Path,
+    store: &Arc<Store>,
+    make_session: MakeCaptureSession,
+    pipeline: Arc<CurrentPipeline>,
+    speech_models: Arc<dyn steno_host::services::SpeechModels>,
+    fakes: &steno_host::fakes::FakeServices,
+) -> crate::App {
+    let mut settings = store.settings().unwrap();
+    settings.audio_folder = steno_core::paths::file_url(&root.join("audio"), true);
+    store.save_settings(&settings).unwrap();
     let zone = chrono::FixedOffset::east_opt(0).unwrap();
     let recorder = crate::recorder::CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
         make_session,
         fakes.permissions.clone(),
-        fakes.speech_models.clone(),
+        speech_models.clone(),
         zone,
         tokio::runtime::Handle::current(),
         root.join("support"),
     );
     let mut services = fakes.services();
     services.recorder = recorder.clone();
+    services.speech_models = speech_models;
     crate::App {
         paths: steno_core::StenoPaths::new(root.join("support")),
         store: store.clone(),

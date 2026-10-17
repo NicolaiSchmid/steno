@@ -226,6 +226,14 @@ impl<M: SpeechModels> SpeechModels for ResumingSpeechModels<M> {
     fn expected_bytes(&self, asset: ModelAsset) -> i64 {
         self.inner.expected_bytes(asset)
     }
+
+    fn speech_fallback(&self) -> bool {
+        self.inner.speech_fallback()
+    }
+
+    fn end_speech_fallback(&self) -> BoundaryResult<()> {
+        self.inner.end_speech_fallback()
+    }
 }
 
 #[cfg(test)]

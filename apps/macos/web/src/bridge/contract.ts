@@ -97,6 +97,7 @@ export const bridgeMethods = [
 	"settings.transcription.setEngine",
 	"settings.transcription.download",
 	"settings.transcription.remove",
+	"settings.transcription.useNeuralEngine",
 	"settings.summaries.selectPreset",
 	"settings.summaries.update",
 	"settings.summaries.save",
@@ -586,6 +587,8 @@ export const transcriptionSettingsSnapshot = z
 				.strict(),
 		),
 		allInstalled: z.boolean(),
+		/** Rust host only: the Neural Engine ended the app while it transcribed, so the processor transcribes until the user turns it back on. */
+		neuralEngineOff: z.boolean().optional(),
 		...errorFields,
 	})
 	.strict();
@@ -955,6 +958,7 @@ export const methodParams = {
 	"settings.transcription.setEngine": setStringParams,
 	"settings.transcription.download": assetIDParams,
 	"settings.transcription.remove": assetIDParams,
+	"settings.transcription.useNeuralEngine": null,
 	"settings.summaries.selectPreset": setStringParams,
 	"settings.summaries.update": summariesUpdateParams,
 	"settings.summaries.save": null,

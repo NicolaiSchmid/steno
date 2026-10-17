@@ -39,6 +39,27 @@ describe("TranscriptionSection", () => {
 		);
 	});
 
+	it("offers the Neural Engine again once it was turned off after a crash", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness("scenario=neural-engine-off");
+		renderWithBridge(<TranscriptionSection />, harness);
+		expect(screen.getByTestId("neural-engine-off")).toHaveTextContent(
+			"Turned off after a crash",
+		);
+		await user.click(screen.getByTestId("use-neural-engine"));
+		expect(
+			callsTo(harness.transport, "settings.transcription.useNeuralEngine"),
+		).toEqual([
+			{ method: "settings.transcription.useNeuralEngine", params: null },
+		]);
+	});
+
+	it("shows no Neural Engine row while it is on", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(<TranscriptionSection />, harness);
+		expect(screen.queryByTestId("neural-engine-off")).not.toBeInTheDocument();
+	});
+
 	it("offers a retry with the failure folded away when a download failed", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=download-failed");

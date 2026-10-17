@@ -1324,7 +1324,13 @@ impl CaptureRecorder {
             .clone()
     }
 
+    /// Every change of the status ends here, with no lock held: the
+    /// pipelines learn whether a recording is under way (live from
+    /// `Starting` to `Idle`), so no job runs `CoreML` beside one
+    /// ([`steno_pipeline::live_recording`]).
     fn notify(&self) {
+        let live = self.inner().status.state != RecordingState::Idle;
+        self.pipeline.live_recording().set(live);
         self.changes.notify_all();
         if let Some(hook) = self.hook() {
             hook();
@@ -3415,6 +3421,40 @@ mod tests {
             steno_core::MeetingStateKind::Recording
         );
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
+    }
+
+    /// Every pipeline sees a recording as under way from its start to the
+    /// end of its stop, and as over once the recorder is idle again, so no
+    /// job runs `CoreML` beside it (A19 of
+    /// `.plans/2026-10-07-stable-promotion.md`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_pipelines_see_a_recording_from_its_start_to_the_end_of_its_stop() {
+        let harness = harness(&[]);
+        let live = || {
+            harness
+                .recorder
+                .pipeline
+                .current()
+                .dependencies()
+                .live_recording
+                .is_live()
+        };
+        assert!(!live());
+        let start_seen = held_in(&harness.recorder, RecordingState::Starting);
+        let starter = harness.recorder.clone();
+        let starting = std::thread::spawn(move || start(&starter));
+        start_seen.recv_timeout(PATIENCE).expect("the start began");
+        assert!(live(), "starting");
+        starting.join().unwrap();
+        assert!(live(), "recording");
+        let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
+        let stopper = harness.recorder.clone();
+        let stopping = std::thread::spawn(move || stop(&stopper));
+        stop_seen.recv_timeout(PATIENCE).expect("the stop began");
+        assert!(live(), "stopping");
+        stopping.join().unwrap();
+        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
+        assert!(!live(), "idle");
     }
 
     /// A Quit while a manual Stop is still saving waits for that save:

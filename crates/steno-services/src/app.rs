@@ -24,7 +24,7 @@ use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
     DamagedAudio, ExportRetries, MeetingEventBus, PipelineDependencies, ReadingMarks,
-    RecordingIntake, RetentionSweep, WarmUpMark,
+    RecordingIntake, RetentionSweep, SpeechFallback, WarmUpMark,
 };
 
 use crate::block_on;
@@ -757,8 +757,6 @@ pub fn build_with_import(
         }
         other => BuildError::Store(other),
     })?;
-    let engines = Arc::new(SpeechEngines::new(SpeechSetup::new(&settings, &paths)));
-    let speech = engines.setup();
     // What the decoder replaced by silence per meeting, in the support
     // directory, which the detail reads through `HostPipeline`; a deleted
     // meeting's entry goes at launch.
@@ -767,7 +765,8 @@ pub fn build_with_import(
     // The launch check, before anything reads a recording: a mark left over
     // from a warm-up that ended with the app turns the warm-up off
     // ([`WarmUpMark`]), and a mark a read left quarantines its meeting
-    // ([`ReadingMarks`]).
+    // ([`ReadingMarks`]). Either, from `CoreML`, turns the speech sidecar on
+    // in its place ([`SpeechFallback`]), before the engines are built.
     let support = SupportFiles {
         damaged_audio,
         warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
@@ -777,6 +776,15 @@ pub fn build_with_import(
             chrono::Utc::now(),
         )),
     };
+    let fallback = Arc::new(SpeechFallback::at_launch(
+        &paths.support_directory,
+        &support.warm_up_mark,
+        &support.reading_marks,
+    ));
+    let engines = Arc::new(SpeechEngines::new(
+        SpeechSetup::new(&settings, &paths).with_fallback(fallback),
+    ));
+    let speech = engines.setup();
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
     let withheld_api_key = graph_secrets
@@ -1184,7 +1192,7 @@ fn follow_event(host: &Host, sweep: &RetentionSweep, event: Option<&MeetingEvent
     };
     host.apply_meeting_event(event);
     match event {
-        MeetingEvent::Progress { .. } => {}
+        MeetingEvent::Progress { .. } | MeetingEvent::WaitingForRecording { .. } => {}
         MeetingEvent::RetentionApplied { .. } => {
             run_sweep(sweep);
             host.request_reload();

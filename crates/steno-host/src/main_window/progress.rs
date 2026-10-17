@@ -39,22 +39,34 @@ pub enum Parked {
     ModelsMissing,
     /// Another process held the store ([`MeetingEvent::StoreBusy`]).
     StoreBusy,
+    /// The job waits for the recording under way before it runs the speech
+    /// engine in the app's process ([`MeetingEvent::WaitingForRecording`]).
+    Recording,
 }
 
 impl Parked {
-    /// What the entry says instead of a stage.
-    pub(crate) const fn title(self) -> &'static str {
+    /// What the entry says instead of a stage; `speech_fallback`: the
+    /// speech sidecar stands in for the engine in the app's process
+    /// ([`ProcessingProgressModel::speech_fallback`]).
+    pub(crate) const fn title(self, speech_fallback: bool) -> &'static str {
         match self {
+            Parked::ModelsMissing if speech_fallback => {
+                ProgressEntry::FALLBACK_MODELS_MISSING_TITLE
+            }
             Parked::ModelsMissing => ProgressEntry::MODELS_MISSING_TITLE,
             Parked::StoreBusy => ProgressEntry::STORE_BUSY_TITLE,
+            Parked::Recording => ProgressEntry::RECORDING_TITLE,
         }
     }
 
-    /// The entry's bridge stage.
+    /// The entry's bridge stage. A job waiting for the recording keeps
+    /// `waiting`: the page says it starts when the current meeting
+    /// finishes, which the recording is.
     pub(crate) const fn stage(self) -> &'static str {
         match self {
             Parked::ModelsMissing => ProgressEntry::MODELS_MISSING_STAGE,
             Parked::StoreBusy => ProgressEntry::STORE_BUSY_STAGE,
+            Parked::Recording => ProgressEntry::WAITING_STAGE,
         }
     }
 }
@@ -64,6 +76,9 @@ impl ProgressEntry {
     /// event.
     pub const WAITING_TITLE: &'static str = "Waiting to process";
 
+    /// The bridge stage before a run's first event.
+    pub const WAITING_STAGE: &'static str = "waiting";
+
     /// The title of a meeting whose run was refused for a missing model,
     /// `PipelineFailure::MODELS_MISSING` in `steno-pipeline`.
     pub const MODELS_MISSING_TITLE: &'static str = "Download the speech models in Settings";
@@ -72,6 +87,15 @@ impl ProgressEntry {
     /// pipeline's stages; the page drops "starts when the current meeting
     /// finishes" for it.
     pub const MODELS_MISSING_STAGE: &'static str = "modelsMissing";
+
+    /// [`Self::MODELS_MISSING_TITLE`] while the speech sidecar stands in
+    /// for the Neural Engine, which ended the app: its models are the ones
+    /// to download, and this says why. Rust only.
+    pub const FALLBACK_MODELS_MISSING_TITLE: &'static str = "Download the speech models in Settings; Steno stopped using the Neural Engine after a crash";
+
+    /// The title of a meeting whose job waits for the recording under way
+    /// before it runs the speech engine in the app's process. Rust only.
+    pub const RECORDING_TITLE: &'static str = "Waiting for the recording to finish";
 
     /// The title of a meeting whose run met the store locked by another
     /// process (the other app, another program).
@@ -89,12 +113,14 @@ impl ProgressEntry {
 
     /// `stage_label` plus an ellipsis, "Transcribing…"; [`Self::WAITING_TITLE`]
     /// before the first event, [`Self::MODELS_MISSING_TITLE`] after a
-    /// refusal for a missing model and [`Self::STORE_BUSY_TITLE`] after one
-    /// by a busy store.
+    /// refusal for a missing model ([`Self::FALLBACK_MODELS_MISSING_TITLE`]
+    /// with `speech_fallback`, [`ProcessingProgressModel::speech_fallback`]),
+    /// [`Self::STORE_BUSY_TITLE`] after one by a busy store and
+    /// [`Self::RECORDING_TITLE`] while the job waits for a recording.
     #[must_use]
-    pub fn title(&self) -> String {
+    pub fn title(&self, speech_fallback: bool) -> String {
         if let Some(parked) = self.parked {
-            return parked.title().to_owned();
+            return parked.title(speech_fallback).to_owned();
         }
         self.progress.as_ref().map_or_else(
             || Self::WAITING_TITLE.to_owned(),
@@ -122,6 +148,10 @@ impl ProgressEntry {
 #[derive(Debug, Default)]
 pub struct ProcessingProgressModel {
     pub entries: BTreeMap<Uuid, ProgressEntry>,
+    /// The speech sidecar stands in for the engine in the app's process,
+    /// which ended the app (`SpeechModels::speech_fallback`): a meeting
+    /// waiting for models says so. Rust only.
+    pub speech_fallback: bool,
 }
 
 impl ProcessingProgressModel {
@@ -134,8 +164,8 @@ impl ProcessingProgressModel {
     /// even when an earlier run's entry is still there; any other stage
     /// updates the meeting's entry and never lowers its fraction. Progress
     /// for a meeting without an entry drives nothing. `deleted` evicts.
-    /// `modelsMissing` and `storeBusy` start an entry without progress that
-    /// says so, until the next run's first event.
+    /// `modelsMissing`, `storeBusy` and `waitingForRecording` start an
+    /// entry without progress that says so, until the run's next event.
     pub fn apply(&mut self, event: &MeetingEvent, now: DateTime<Utc>) {
         match event {
             MeetingEvent::Progress {
@@ -175,6 +205,9 @@ impl ProcessingProgressModel {
             }
             MeetingEvent::StoreBusy { meeting_id } => {
                 self.park(*meeting_id, Parked::StoreBusy, now);
+            }
+            MeetingEvent::WaitingForRecording { meeting_id } => {
+                self.park(*meeting_id, Parked::Recording, now);
             }
             MeetingEvent::SpeakersNeedReview { .. }
             | MeetingEvent::RetentionApplied { .. }

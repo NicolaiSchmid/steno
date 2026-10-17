@@ -11,16 +11,22 @@
 //! - **The mark**: [`WarmUpMark::FILE_NAME`] in the support directory,
 //!   written durably ([`replace_file`]: synced, renamed, the folder synced)
 //!   before the warm-up starts and removed the same way once it returns,
-//!   failed or not, since the app lived through it.
+//!   failed or not, since the app lived through it. It holds a random id
+//!   of its own, so the fallback ([`crate::SpeechFallback`]) tells a mark
+//!   it has seen from a new one.
 //! - **The launch check**: [`WarmUpMark::at_launch`]. A mark there is a
 //!   warm-up that ended with the app, so from then on recordings skip the
 //!   warm-up, and the launch says so once at `warn`. The first meeting then
 //!   loads the models in its processing, after the recording.
-//! - **Clearing it**: only a speech engine that loaded in a meeting's
-//!   processing: the mark goes and the next recording warms up again. A
+//! - **Clearing it**: only the engine in this process, loaded in a
+//!   meeting's processing (the speech sidecar standing in for it does not
+//!   count): the mark goes and the next recording warms up again. A
 //!   load that takes the app down there leaves the mark, and its meeting
 //!   is counted by the reading marks ([`crate::reading`]): read once
-//!   more, and quarantined the second time in a row.
+//!   more, and quarantined the second time in a row. A mark left over
+//!   also turns the fallback on: the jobs run the speech sidecar instead
+//!   ([`crate::SpeechFallback`]), and no meeting loads the models in this
+//!   process until the user turns the engine back on.
 //!
 //! A folder that cannot be written leaves the warm-up unguarded, as
 //! before: the failure is logged at `warn` and the warm-up runs. The
@@ -40,6 +46,8 @@ use crate::ProcessingPipeline;
 pub struct WarmUpMark {
     /// `None` in memory (the tests, the CLI): nothing is written.
     path: Option<PathBuf>,
+    /// The id of the mark the launch found left over, if any.
+    left_over: Option<String>,
     state: Mutex<State>,
 }
 
@@ -60,6 +68,7 @@ impl WarmUpMark {
     pub fn in_memory() -> Self {
         WarmUpMark {
             path: None,
+            left_over: None,
             state: Mutex::default(),
         }
     }
@@ -70,7 +79,12 @@ impl WarmUpMark {
     #[must_use]
     pub fn at_launch(support_directory: &Path) -> Self {
         let path = support_directory.join(Self::FILE_NAME);
-        let skipping = path.exists();
+        // A mark that cannot be read still turns the warm-up off.
+        let left_over = path.exists().then(|| {
+            std::fs::read_to_string(&path)
+                .map_or_else(|_| "unreadable".to_owned(), |id| id.trim().to_owned())
+        });
+        let skipping = left_over.is_some();
         if skipping {
             tracing::warn!(
                 "the last warm-up of the speech models ended with the app; recordings skip it \
@@ -79,11 +93,19 @@ impl WarmUpMark {
         }
         WarmUpMark {
             path: Some(path),
+            left_over,
             state: Mutex::new(State {
                 skipping,
                 running: 0,
             }),
         }
+    }
+
+    /// The id of the mark the launch found left over: a warm-up that ended
+    /// with the app. Earlier builds wrote `1` in every mark.
+    #[must_use]
+    pub fn left_over(&self) -> Option<&str> {
+        self.left_over.as_deref()
     }
 
     /// Whether recordings skip the warm-up now.
@@ -102,7 +124,11 @@ impl WarmUpMark {
         state.running += 1;
         if state.running == 1
             && let Some(path) = &self.path
-            && let Err(error) = replace_file(path, b"1\n", Access::Default)
+            && let Err(error) = replace_file(
+                path,
+                format!("{}\n", uuid::Uuid::new_v4()).as_bytes(),
+                Access::Default,
+            )
         {
             tracing::warn!(%error, "the warm-up mark could not be written; the warm-up runs unguarded");
         }

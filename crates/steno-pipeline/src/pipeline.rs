@@ -57,6 +57,7 @@ use crate::events::MeetingEventBus;
 use crate::export_retries::ExportRetries;
 use crate::intake::RecordingResult;
 use crate::lane_merger::{ClusterSpeaker, LaneMerger};
+use crate::live_recording::LiveRecording;
 use crate::reading::{READ_STOPPED, ReadStage, ReadingMarks};
 use crate::run::ProcessingRun;
 use crate::sample_clips::{self, ClipProbe, ClipStep};
@@ -698,6 +699,11 @@ struct SharedEngineState {
     /// that start together load each engine once, and a warm-up never
     /// overlaps a release.
     preparing: AsyncMutex<()>,
+    /// The jobs' turn at an engine in this process: held from the wait for
+    /// a recording to finish through the call, so a job queued behind
+    /// another's call waits for the recording too once its turn comes
+    /// ([`crate::live_recording`]).
+    turn: AsyncMutex<()>,
 }
 
 impl SharedSpeechEngine {
@@ -712,6 +718,7 @@ impl SharedSpeechEngine {
             engine,
             count: Mutex::new(0),
             preparing: AsyncMutex::new(()),
+            turn: AsyncMutex::new(()),
         }))
     }
 
@@ -858,6 +865,11 @@ pub struct PipelineDependencies {
     /// an abort inside it ends the app. `false` from [`new`](Self::new); the
     /// speech sidecar's abort ends only its child.
     pub speech_in_process: bool,
+    /// Whether a recording is under way: a job runs no engine in this
+    /// process meanwhile ([`crate::live_recording`]). Never live from
+    /// [`new`](Self::new); the app shares its recorder's with
+    /// [`with_live_recording`](Self::with_live_recording).
+    pub live_recording: LiveRecording,
 }
 
 impl PipelineDependencies {
@@ -892,6 +904,7 @@ impl PipelineDependencies {
             warm_up_mark: Arc::new(WarmUpMark::in_memory()),
             reading_marks: Arc::new(ReadingMarks::in_memory()),
             speech_in_process: false,
+            live_recording: LiveRecording::default(),
         }
     }
 
@@ -991,6 +1004,15 @@ impl PipelineDependencies {
     #[must_use]
     pub fn with_speech_in_process(mut self, in_process: bool) -> Self {
         self.speech_in_process = in_process;
+        self
+    }
+
+    /// Waits for `live` to be idle before each call of an engine in this
+    /// process, instead of the one from [`new`](Self::new), which is never
+    /// live.
+    #[must_use]
+    pub fn with_live_recording(mut self, live: LiveRecording) -> Self {
+        self.live_recording = live;
         self
     }
 }
@@ -1378,6 +1400,53 @@ impl ProcessingPipeline {
             .dependencies
             .speech_in_process
             .then_some(ReadStage::Transcribe)
+    }
+
+    /// For an engine in this process, the job's turn at it, taken once no
+    /// recording is under way ([`crate::live_recording`]): while one is,
+    /// the meeting says so ([`MeetingEvent::WaitingForRecording`]) and the
+    /// job waits, holding its turn, so the jobs behind it wait too. The
+    /// call that follows (`stage`: the load, or a lane's transcription)
+    /// runs under the turn. A quit during the wait ends the job as any
+    /// failure after the quit does: the meeting stays for the next launch.
+    /// `None` for an engine whose abort ends only its child.
+    async fn in_process_turn(
+        &self,
+        meeting_id: Uuid,
+        stage: PipelineStage,
+    ) -> Result<Option<tokio::sync::MutexGuard<'_, ()>>> {
+        if !self.inner.dependencies.speech_in_process {
+            return Ok(None);
+        }
+        let live = &self.inner.dependencies.live_recording;
+        let mut waits = live.is_live();
+        if waits {
+            self.waiting_for_recording(meeting_id);
+        }
+        let turn = self.speech_engine().0.turn.lock().await;
+        if live.is_live() {
+            if !waits {
+                self.waiting_for_recording(meeting_id);
+            }
+            waits = true;
+            live.until_idle().await;
+        }
+        if waits {
+            tracing::info!(target: BACKGROUND_RUN_LOG, %meeting_id, "the recording is over; the speech engine runs");
+        }
+        if self.quitting() {
+            return Err(PipelineFailure::new(stage, "the app is quitting"));
+        }
+        Ok(Some(turn))
+    }
+
+    /// Says that `meeting_id`'s job waits for the recording under way.
+    fn waiting_for_recording(&self, meeting_id: Uuid) {
+        tracing::info!(target: BACKGROUND_RUN_LOG, %meeting_id, "waiting for the recording to finish before the speech engine runs");
+        self.inner
+            .dependencies
+            .events
+            .post(MeetingEvent::WaitingForRecording { meeting_id });
     }
 
     /// Writes `Meeting(queued)` plus the asset in one transaction and starts
@@ -2177,8 +2246,9 @@ impl ProcessingPipeline {
     /// does not load goes through [`carry_on_after`](Self::carry_on_after)
     /// and does not fail the job: `diarize` then falls back to
     /// [`diarization_without_diarizer`](Self::diarization_without_diarizer).
-    /// A speech engine that loaded clears a [`WarmUpMark`] left over, so
-    /// recordings warm up again. Rust only: Swift fails the meeting.
+    /// A speech engine in this process that loaded clears a
+    /// [`WarmUpMark`] left over, so recordings warm up again. Rust only:
+    /// Swift fails the meeting.
     async fn warm_up_for_job(&self, meeting_id: Uuid) -> Result<()> {
         match self.warm_up().await {
             Ok(()) => {
@@ -2195,8 +2265,13 @@ impl ProcessingPipeline {
     }
 
     /// Clears a [`WarmUpMark`] left over, off the workers: its removal
-    /// syncs the disk.
+    /// syncs the disk. Only for an engine in this process, the one the
+    /// warm-up loads: the speech sidecar standing in for it
+    /// ([`SpeechFallback`](crate::SpeechFallback)) proves nothing of it.
     async fn speech_engine_loaded(&self) {
+        if !self.inner.dependencies.speech_in_process {
+            return;
+        }
         let mark = Arc::clone(&self.inner.dependencies.warm_up_mark);
         let _ = off_the_workers(move || mark.speech_engine_loaded()).await;
     }
@@ -2468,8 +2543,12 @@ impl ProcessingPipeline {
     ) -> Result<AudioAsset> {
         let claim = self.speech_engine().claim();
         let transcribed: Result<_> = async {
+            let turn = self
+                .in_process_turn(meeting.id, PipelineStage::Decode)
+                .await?;
             self.marked(asset, self.speech_stage(), self.warm_up_for_job(meeting.id))
                 .await?;
+            drop(turn);
             let (meeting_id, now) = (meeting.id, self.now());
             let settings = attributing(
                 PipelineStage::Decode,
@@ -3178,6 +3257,9 @@ impl ProcessingPipeline {
             damage = damage.max(buffer.damage);
             seconds = seconds.max(buffer.duration());
             let lane_hint = hint.clone();
+            let turn = self
+                .in_process_turn(meeting_id, PipelineStage::Transcribe)
+                .await?;
             let transcription = self.marked(
                 asset,
                 self.speech_stage(),
@@ -3186,6 +3268,7 @@ impl ProcessingPipeline {
             let segments = self
                 .run(PipelineStage::Transcribe, index, meeting_id, transcription)
                 .await?;
+            drop(turn);
             hint = elect_language(&segments).or(hint);
             lanes.insert(lane, segments);
             last = Some(DecodedLane { lane, buffer });

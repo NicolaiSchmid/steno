@@ -601,6 +601,9 @@ pub struct FakeSpeechModels {
     pub progress: Mutex<Vec<(f64, String)>>,
     pub download_failure: Mutex<Option<String>>,
     pub on_download: Mutex<Option<DownloadHook>>,
+    /// What [`SpeechModels::speech_fallback`] answers; ended by
+    /// [`SpeechModels::end_speech_fallback`].
+    pub speech_fallback: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for FakeSpeechModels {
@@ -623,6 +626,7 @@ impl Default for FakeSpeechModels {
             ]),
             download_failure: Mutex::new(None),
             on_download: Mutex::new(None),
+            speech_fallback: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -684,6 +688,17 @@ impl SpeechModels for FakeSpeechModels {
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()> {
         lock(&self.removals).push(asset);
         lock(&self.installed).remove(&asset);
+        Ok(())
+    }
+
+    fn speech_fallback(&self) -> bool {
+        self.speech_fallback
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn end_speech_fallback(&self) -> BoundaryResult<()> {
+        self.speech_fallback
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }

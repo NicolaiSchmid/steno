@@ -135,6 +135,27 @@ export function TranscriptionSection() {
 					/>
 				</FormCard>
 			) : null}
+			{transcription.neuralEngineOff ? (
+				<FormCard title="Neural Engine">
+					<FormRow
+						control={
+							<Button
+								data-testid="use-neural-engine"
+								onClick={() =>
+									send(client, "settings.transcription.useNeuralEngine")
+								}
+								size="sm"
+								variant="outline"
+							>
+								Use again
+							</Button>
+						}
+						data-testid="neural-engine-off"
+						description="Steno stopped using the Neural Engine after it crashed while transcribing. Meetings are transcribed on the processor instead, which is slower."
+						label="Turned off after a crash"
+					/>
+				</FormCard>
+			) : null}
 			<FormCard
 				footer={
 					transcription.allInstalled

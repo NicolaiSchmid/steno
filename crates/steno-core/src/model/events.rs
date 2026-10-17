@@ -75,6 +75,12 @@ pub enum MeetingEvent {
     /// once the store lets the run through. Rust only: the Swift pipeline
     /// failed the meeting.
     StoreBusy { meeting_id: Uuid },
+    /// Posted when a job waits to run an in-process speech engine (`CoreML`
+    /// on the Mac) until the recording under way has stopped: an abort in
+    /// the engine would end the recording too. The meeting stays `queued`
+    /// or `processing`, and the job goes on once the recorder is idle. Rust
+    /// only: the Swift pipeline ran `CoreML` beside a recording.
+    WaitingForRecording { meeting_id: Uuid },
     /// Posted when a summary re-run or a re-export fails after the
     /// pipeline accepted it. The services start both in the background and
     /// return at once, so this is how the failure reaches the detail's
@@ -120,6 +126,7 @@ impl MeetingEvent {
             | MeetingEvent::Deleted { meeting_id }
             | MeetingEvent::ModelsMissing { meeting_id }
             | MeetingEvent::StoreBusy { meeting_id }
+            | MeetingEvent::WaitingForRecording { meeting_id }
             | MeetingEvent::OperationFailed { meeting_id, .. } => *meeting_id,
         }
     }

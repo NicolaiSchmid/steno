@@ -14,10 +14,12 @@
 //! | [`run`] | One run's progress state with the monotonic clamp |
 //! | [`crash_loop`] | Launch recovery's guard against a crash loop: the runs that ended with the app, counted in the meeting's folder |
 //! | [`reading`] | [`ReadingMarks`], every read of a recording marked in the support directory: a meeting whose read ended with the app is read once more, and quarantined ([`READ_STOPPED`]) the second time in a row until Process again |
+//! | [`speech_fallback`] | [`SpeechFallback`], the speech sidecar in place of the engine in the app's process once that engine ended the app, until the user turns it back on |
 //! | [`warm_up_mark`] | [`WarmUpMark`], the recording's warm-up marked in the support directory, so one that ended with the app turns the warm-up off until a job loads the speech engine |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
 //! | [`intake`] | The phone intake ([`RecordingIntake`], which notes its copies' folders and uploads ([`NotedUpload`]) in [`AdmissionFolders`]) and the Mac one ([`LocalRecordingIntake`]) |
 //! | [`lane_merger`] | The lanes into one ordered transcript |
+//! | [`live_recording`] | [`LiveRecording`], whether a recording is under way: a job runs no speech engine in the app's process meanwhile |
 //! | [`speaker_memory`] | The store-backed cosine `SpeakerMemory` |
 //! | [`retention`] | [`RetentionSweep`] over expired assets |
 //! | [`sample_clips`] | The speakers' sample clips written under each run's own names, named by the merge, and the files of the meeting's speakers that no row names swept after it |
@@ -88,12 +90,14 @@ pub mod files;
 pub mod fixtures;
 pub mod intake;
 pub mod lane_merger;
+pub mod live_recording;
 pub mod pipeline;
 pub mod reading;
 pub mod retention;
 pub mod run;
 pub mod sample_clips;
 pub mod speaker_memory;
+pub mod speech_fallback;
 pub mod warm_up_mark;
 
 pub use damaged_audio::DamagedAudio;
@@ -105,6 +109,7 @@ pub use intake::{
     RecordingIntake, RecordingResult,
 };
 pub use lane_merger::LaneMerger;
+pub use live_recording::LiveRecording;
 pub use pipeline::{
     BACKGROUND_RUN_LOG, FailureKind, InFlight, JobHold, ModelWaits, MonotonicClock, Now,
     OPERATION_PANICKED, Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline,
@@ -114,5 +119,6 @@ pub use reading::{READ_STOPPED, ReadStage, Reading, ReadingMarks};
 pub use retention::{RetentionSweep, SweepIncomplete};
 pub use sample_clips::{ClipProbe, ClipStep};
 pub use speaker_memory::StoreSpeakerMemory;
+pub use speech_fallback::SpeechFallback;
 pub use steno_core::{MeetingEvent, MeetingOperation, PipelineStage, ProcessingProgress};
 pub use warm_up_mark::WarmUpMark;

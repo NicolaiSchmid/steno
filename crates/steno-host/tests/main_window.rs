@@ -2680,6 +2680,86 @@ fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
     assert_eq!(entry(&harness)["stage"], "decode");
 }
 
+/// A job that waits for the recording under way before it runs the speech
+/// engine in the app's process says so, under the `waiting` stage, until
+/// the run's next event. Rust only (A19).
+#[test]
+fn a_meeting_whose_job_waits_for_the_recording_says_so() {
+    let harness = Harness::builder()
+        .seed(|store, _| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x8B);
+            meeting.state = MeetingState::Processing;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+        })
+        .build();
+    let entry = |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::WaitingForRecording {
+            meeting_id: uuid(0x8B),
+        });
+    assert_eq!(entry(&harness)["stage"], "waiting");
+    assert_eq!(
+        entry(&harness)["title"],
+        "Waiting for the recording to finish"
+    );
+    harness.host.apply_meeting_event(&MeetingEvent::Progress {
+        meeting_id: uuid(0x8B),
+        progress: steno_core::ProcessingProgress {
+            stage: PipelineStage::Transcribe,
+            fraction: 0.4,
+            next_fraction: 0.6,
+            estimated_remaining_seconds: 60.0,
+            is_estimate_seeded: false,
+            lane: 1,
+            lane_count: 2,
+        },
+    });
+    assert_eq!(entry(&harness)["stage"], "transcribe");
+}
+
+/// While the speech sidecar stands in for the Neural Engine, which ended
+/// the app, a meeting waiting for models says why its models are missing;
+/// once the user turns the Neural Engine back on, it says what it said
+/// before. Rust only (A19).
+#[test]
+fn a_meeting_waiting_for_the_sidecars_models_says_the_neural_engine_is_off() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x8C);
+            meeting.state = MeetingState::Queued;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+            fakes
+                .speech_models
+                .speech_fallback
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .build();
+    let entry = |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::ModelsMissing {
+            meeting_id: uuid(0x8C),
+        });
+    assert_eq!(entry(&harness)["stage"], "modelsMissing");
+    assert_eq!(
+        entry(&harness)["title"],
+        "Download the speech models in Settings; Steno stopped using the Neural Engine after a crash"
+    );
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert_eq!(
+        entry(&harness)["title"],
+        "Download the speech models in Settings"
+    );
+}
+
 /// A run the store kept locked leaves the meeting queued, or `processing`
 /// when the store refused that write too; its progress entry then says
 /// what it waits for (stage `storeBusy`), until the next run's first

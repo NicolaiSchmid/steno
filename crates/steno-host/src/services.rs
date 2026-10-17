@@ -484,6 +484,22 @@ pub trait SpeechModels: Send + Sync {
     fn expected_bytes(&self, asset: ModelAsset) -> i64 {
         asset.approximate_bytes()
     }
+
+    /// Whether speech runs in the speech sidecar because the engine in the
+    /// app's process (`CoreML` on the Mac) ended the app, until the user
+    /// turns it back on ([`Self::end_speech_fallback`]). Its models are
+    /// then the ones the Parakeet row downloads, and a meeting that waits
+    /// for them says why. Never, by default. Rust only.
+    fn speech_fallback(&self) -> bool {
+        false
+    }
+
+    /// The user turned the engine in the app's process back on: the
+    /// fallback ends, and the pipeline's next build runs that engine
+    /// again. Nothing to do, by default. Rust only.
+    fn end_speech_fallback(&self) -> BoundaryResult<()> {
+        Ok(())
+    }
 }
 
 /// One line of the Acknowledgements dialog for a model: what it is and who
