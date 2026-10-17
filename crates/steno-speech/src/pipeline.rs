@@ -1548,6 +1548,30 @@ mod tests {
             vec![piece(25, 20.0), piece(3, 24.0)],
         ];
         assert_eq!(ids(&join(&spans, &decoded, 2.0, &vocab)), [6, 2, 3]);
+        // Only a token that starts before the window counts, the earliest
+        // any chunk kept: one at the window's start does not, nor one a
+        // recovery kept inside the window, though an earlier chunk's does.
+        let spans = [
+            span((0.0, 10.0), (0.0, 10.0), true),
+            span((10.0, 20.0), (10.0, 20.0), false),
+        ];
+        for (at, kept) in [(10.0, vec![6, 25, 2]), (10.5, vec![6, 25, 2])] {
+            let decoded = [vec![piece(6, at)], vec![piece(25, 10.0), piece(2, 14.0)]];
+            assert_eq!(ids(&join(&spans, &decoded, 2.0, &vocab)), kept, "{at}");
+        }
+        let spans = [
+            span((0.0, 5.0), (0.0, 5.0), true),
+            span((5.0, 10.0), (5.0, 10.0), false),
+            span((10.0, 20.0), (10.0, 20.0), true),
+            span((20.0, 30.0), (20.0, 30.0), false),
+        ];
+        let decoded = [
+            vec![piece(6, 2.0)],
+            vec![piece(2, 7.0)],
+            vec![piece(7, 20.5)],
+            vec![piece(25, 20.0), piece(3, 24.0)],
+        ];
+        assert_eq!(ids(&join(&spans, &decoded, 2.0, &vocab)), [6, 2, 7, 3]);
     }
 
     #[test]
