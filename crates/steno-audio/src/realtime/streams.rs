@@ -473,12 +473,18 @@ impl FollowerLane {
     fn pending_flags(&self) -> Option<usize> {
         let recorded = self.flags_recorded.load(Ordering::Acquire);
         // Pending is the count recorded against the count handed on, not a
-        // flag the hand-on clears. This closes a race: the follower's
-        // thread records a flag after this read and before `hand_on`
-        // stores what it handed on. A cleared flag would drop that one, and
-        // the padding of its outage with it, silently; `hand_on` stores
-        // only the count read here, so that flag stays pending for the
-        // next take.
+        // flag the hand-on clears. This closes a race with the follower's
+        // thread, which may record a flag anywhere between this read and
+        // `hand_on`'s store of what it handed on:
+        // - its count: `hand_on` stores only the count read here, so that
+        //   flag stays pending for the next take (a cleared flag would drop
+        //   it, and its outage's padding with it, silently);
+        // - the freshness and the snapshot: `hand_on` reads both before
+        //   that store. A flag recorded up to the store sees one pending,
+        //   so it can only make it fresh, an overcount at most; one after
+        //   it sees none and sets its own. With the store first, a flag in
+        //   between would see none and overwrite the freshness of the flag
+        //   being handed on, whose padding could then be dropped.
         (recorded != self.flags_handed.load(Ordering::Relaxed)).then_some(recorded)
     }
 
@@ -496,9 +502,10 @@ impl FollowerLane {
         let Some(recorded) = recorded else {
             return counted;
         };
-        self.flags_handed.store(recorded, Ordering::Release);
+        // Both read before the store (see `pending_flags`).
         let at_flag = self.flag_run.swap(usize::MAX, Ordering::Relaxed);
         let fresh = self.flag_fresh.load(Ordering::Relaxed);
+        self.flags_handed.store(recorded, Ordering::Release);
         let padded = if !fresh {
             // A queue past the target and the hold at the flag: the
             // follower came back long before it, so no padding is its loss
