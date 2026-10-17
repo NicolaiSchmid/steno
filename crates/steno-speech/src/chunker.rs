@@ -19,9 +19,7 @@
 //!
 //! [`partition`] splits the recording once into the [`Span`]s that own it,
 //! one per chunk and one per extra window, and gives each the bound its
-//! decode keeps words from ([`Span::reach`]): its own share of the
-//! recording and little more, so no rule has to decide afterwards which of
-//! two windows heard a word.
+//! decode keeps words from ([`Span::reach`]).
 //!
 //! The search and the cuts are ported from
 //! `spikes/onnx-speech/src/chunker.rs`; the long-pause rule is not. The
@@ -254,11 +252,6 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
 /// `.plans/2026-10-07-stable-promotion.md`).
 pub const MIN_GAP_SECONDS: f32 = 2.5;
 
-/// Two encoder frames: how far a gap's window keeps words past its owned
-/// span ([`Span::reach`]), and how close two copies of one piece either
-/// side of a seam start when the join takes them for one word.
-pub const SEAM_SAMPLES: usize = 2 * FRAME_SAMPLES;
-
 /// One stretch of the recording and the decode that owns it
 /// ([`partition`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,15 +263,14 @@ pub struct Span {
     /// gap. It holds `owned`, except the share of an undecoded gap the span
     /// owns, and is never longer than `max_seconds`.
     pub window: Range<usize>,
-    /// The samples whose words this span's decode keeps: a word with a
-    /// piece in them, from its start to the punctuation after its last
-    /// piece in them. For a gap's window, `owned` and [`SEAM_SAMPLES`]
-    /// either side, which the join's seam rule answers for. For a chunk,
-    /// what an accepted recovery keeps: the window and `overlap_seconds`
-    /// either side, together with `owned`, rounded out to whole encoder
-    /// frames; it holds `owned` and `window`. Both are clamped to the
-    /// recording. The plain decodes of a run of chunks go whole to their
-    /// merge, and read no reach.
+    /// The samples whose words this span's decode keeps. For a gap's
+    /// window, the window: it keeps its whole decode. For a chunk, the
+    /// range the merge before the partition kept from an accepted
+    /// recovery: the window and `overlap_seconds` either side, rounded out
+    /// to whole encoder frames and clamped to the recording; a word with a
+    /// piece in it is kept from its start to the punctuation after its
+    /// last piece in it. A chunk's plain decode goes whole to its run's
+    /// merge, and reads no reach.
     pub reach: Range<usize>,
     /// A chunk of the layout, which is decoded again with more audio around
     /// it when it looks empty; a gap's window is decoded as it is.
@@ -340,12 +332,11 @@ fn spans(audio: &[f32], chunks: &[Chunk], config: &ChunkerConfig) -> Vec<Span> {
         let next = windows.get(i + 1).map(|(next, _)| next.start);
         let end = next.map_or(total, |next| window.end.midpoint(next));
         let reach = if *chunk {
-            let from = window.start.saturating_sub(around).min(start);
-            let to = (window.end + around).max(end);
-            let to = (to / FRAME_SAMPLES + 1) * FRAME_SAMPLES;
-            from / FRAME_SAMPLES * FRAME_SAMPLES..to.min(total)
+            let from = window.start.saturating_sub(around) / FRAME_SAMPLES * FRAME_SAMPLES;
+            let to = ((window.end + around) / FRAME_SAMPLES + 1) * FRAME_SAMPLES;
+            from..to.min(total)
         } else {
-            start.saturating_sub(SEAM_SAMPLES)..(end + SEAM_SAMPLES).min(total)
+            window.clone()
         };
         spans.push(Span {
             owned: start..end,
@@ -900,62 +891,38 @@ mod tests {
         }
     }
 
-    /// Checks `span`'s reach (see `a_partition_owns_every_sample_once`) and
-    /// counts its sides that widen past the window and the overlap.
+    /// Checks `span`'s reach (see `a_partition_owns_every_sample_once`).
     fn check_reach(
         span: &Span,
-        spans: &[Span],
         config: &ChunkerConfig,
         total: usize,
         context: &dyn Fn() -> String,
-    ) -> usize {
-        let reach = &span.reach;
-        let owned = &span.owned;
+    ) {
+        let (reach, window) = (&span.reach, &span.window);
         if !span.chunk {
-            let seam =
-                owned.start.saturating_sub(SEAM_SAMPLES)..(owned.end + SEAM_SAMPLES).min(total);
-            assert_eq!(*reach, seam, "{}", context());
-            return 0;
+            assert_eq!(reach, window, "{}", context());
+            return;
         }
+        // The window ± the overlap, on the frame grid, with less than a
+        // frame more either side, and clamped to the recording.
         let overlap = sample_count(config.overlap_seconds);
-        let up = |x: usize| ((x / FRAME_SAMPLES + 1) * FRAME_SAMPLES).min(total);
-        let down = |x: usize| x / FRAME_SAMPLES * FRAME_SAMPLES;
-        let around = down(span.window.start.saturating_sub(overlap))..up(span.window.end + overlap);
-        for inner in [owned, &span.window, &around] {
-            assert!(
-                reach.start <= inner.start && inner.end <= reach.end,
-                "{reach:?} {inner:?} {}",
-                context()
-            );
-        }
+        let (from, to) = (window.start.saturating_sub(overlap), window.end + overlap);
         assert!(reach.start.is_multiple_of(FRAME_SAMPLES), "{}", context());
         assert!(
-            reach.end.is_multiple_of(FRAME_SAMPLES) || reach.end == total,
+            reach.start <= from && from < reach.start + FRAME_SAMPLES,
             "{}",
             context()
         );
-        // Past the window and the overlap, a reach widens only over its own
-        // owned span, to a frame, which no other window decodes.
-        let mut widened = 0;
-        for edge in [reach.start..around.start, around.end..reach.end] {
-            if edge.is_empty() {
-                continue;
-            }
-            widened += 1;
+        if reach.end == total {
+            assert!(total <= to + FRAME_SAMPLES, "{}", context());
+        } else {
+            assert!(reach.end.is_multiple_of(FRAME_SAMPLES), "{}", context());
             assert!(
-                down(owned.start) <= edge.start && edge.end <= up(owned.end),
-                "{edge:?} {}",
+                to < reach.end && reach.end <= to + FRAME_SAMPLES,
+                "{}",
                 context()
             );
-            for other in spans.iter().filter(|s| s.window != span.window) {
-                let shared = edge
-                    .end
-                    .min(other.window.end)
-                    .saturating_sub(edge.start.max(other.window.start));
-                assert!(shared < FRAME_SAMPLES, "{edge:?} {other:?} {}", context());
-            }
         }
-        widened
     }
 
     #[test]
@@ -965,13 +932,10 @@ mod tests {
         // empty and cover the recording; a window holds its owned range
         // except the audio no window decodes, and is never longer than the
         // clamp; the chunk spans are the layout's chunks. And the reach: a
-        // gap's window reaches two frames past its owned range either side,
-        // within the recording; a chunk's reach holds its owned range and
-        // its window ± the overlap, starts and ends on the frame grid (or
-        // at the recording's end), and past the window ± the overlap holds
-        // only its own owned span, to a frame, which no other window
-        // decodes. Random speech
-        // over the default settings, the CoreML engine's and odd ones,
+        // gap's window's is its window; a chunk's is its window ± the
+        // overlap, rounded out to the frame grid and clamped to the
+        // recording. Random speech over the default settings, the CoreML
+        // engine's and odd ones,
         // with the extra windows off and on and some gaps of digital
         // silence.
         let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
@@ -981,7 +945,7 @@ mod tests {
             seed ^= seed << 17;
             (seed % n as u64) as usize
         };
-        let (mut undecoded_shares, mut widened) = (0, 0);
+        let mut undecoded_shares = 0;
         for case in 0..600 {
             let total = s(1.0) + below(s(200.0));
             let mut speech = Vec::new();
@@ -1047,12 +1011,9 @@ mod tests {
                         assert!(!decoded(&edge), "{edge:?} {}", context());
                     }
                 }
-                widened += check_reach(span, &spans, &config, total, &context);
+                check_reach(span, &config, total, &context);
             }
         }
-        assert!(
-            undecoded_shares > 500 && widened > 500,
-            "{undecoded_shares} {widened}"
-        );
+        assert!(undecoded_shares > 500, "{undecoded_shares}");
     }
 }
