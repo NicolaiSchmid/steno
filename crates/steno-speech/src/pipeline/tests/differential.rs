@@ -5,7 +5,7 @@
 //! can change under it; it gives the same tokens (id and sample) as that
 //! commit on the jitter-free cases. It checks clause 5 of the ownership
 //! invariant (A16a in `.plans/2026-10-07-stable-promotion.md`): every word
-//! the old merge keeps, this one keeps.
+//! the old merge keeps, this one keeps, on the layouts and fakes it runs.
 
 use super::*;
 
@@ -232,8 +232,8 @@ fn ref_transcribe(t: &mut Transcriber<FrameTokenBackend>, samples: &[f32]) -> Ve
 
 /// Every token the final windows heard that their span keeps, taken from
 /// the window the transcript records ([`Transcript::windows`]) and decoded
-/// again: a plain chunk's whole window (`.0`), and the reach of a filtered
-/// decode, a gap's window or an accepted recovery (`.0` and `.1`). A plain
+/// again: a plain chunk's whole window (`.0`), and the reach of a gap's
+/// window (the window) or of an accepted recovery (`.0` and `.1`). A plain
 /// chunk's decode goes whole to its run's LCS merge, which A16a leaves as
 /// it was.
 fn ref_heard(
@@ -668,11 +668,32 @@ struct RefRun {
     filtered: Vec<Token>,
 }
 
-fn ref_run(case: &RefCase, config: &PipelineConfig, min_frames: usize, jitter: usize) -> RefRun {
+/// How the fake hears one case: the jitter in frames and the deaf edges
+/// (`FrameTokenBackend::jitter`, `FrameTokenBackend::deaf`).
+#[derive(Clone, Copy)]
+struct Hearing {
+    jitter: usize,
+    deaf: (usize, usize, usize),
+}
+
+/// The deaf edges the differential test runs, beside hearing every frame:
+/// a window's first or last 30 or 10 frames on every window, both edges on
+/// every second window, and 15 frames either side on every third.
+const DEAF: [(usize, usize, usize); 6] = [
+    (30, 0, 1),
+    (0, 30, 1),
+    (10, 0, 1),
+    (0, 10, 1),
+    (30, 30, 2),
+    (15, 15, 3),
+];
+
+fn ref_run(case: &RefCase, config: &PipelineConfig, min_frames: usize, hearing: Hearing) -> RefRun {
     let samples = &case.samples;
     let make = || {
         let mut t = quiet_transcriber(config.clone(), min_frames);
-        t.workers[0].jitter = jitter;
+        t.workers[0].jitter = hearing.jitter;
+        t.workers[0].deaf = hearing.deaf;
         if let Some(regions) = &case.regions {
             t.vad = Box::new(FixedVad(regions.clone()));
         }
@@ -691,8 +712,11 @@ fn ref_run(case: &RefCase, config: &PipelineConfig, min_frames: usize, jitter: u
 }
 
 /// Words the old merge keeps and the transcript loses (`.0`), pieces
-/// likewise (`.1`), and words its filtered decodes heard that it loses
-/// (`.2`).
+/// likewise (`.1`), and words a gap's window or an accepted recovery heard
+/// that it loses (`.2`). `.0` and `.1` are the loss gate. `.2` also fires
+/// on a word both merges drop, as a run's LCS can (between two recoveries,
+/// say), so it flags a case to look at, and the comparison with the old
+/// merge decides whether it is a loss.
 /// A word whose first piece repeats the last piece of the word before it,
 /// or that repeats that word, counts only where a final window heard it,
 /// and never in `.2`: the fake never gives one piece twice in a row, so a
@@ -747,12 +771,15 @@ struct Tally {
 /// layout, its two-sided layout around a gap with recoveries reaching
 /// into it, the collision layout and the general one, under the default
 /// settings, `CoreML`'s and two between, with the extra windows off and
-/// on, over the exact fake and one that moves tokens by `jitter` frames.
-/// Every word the old merge kept comes out, with every piece the old merge
-/// gave it: a duplicate is allowed, a loss never. And every word a
-/// filtered decode (a gap's window or an accepted recovery) heard in its
-/// reach comes out at least once (see `ref_losses` for a word that repeats
-/// the one before it).
+/// on, over the exact fake, one that moves tokens by `jitter` frames, and,
+/// on half the cases, one deaf at a window's edges (`DEAF`), as a model
+/// with little context there can be, so that two windows of a layout
+/// disagree about a word at every kind of seam. Every word the old merge
+/// kept comes out, with every piece the old merge gave it: a duplicate is
+/// allowed, a loss never. And, where the fake hears every frame, every
+/// word a gap's window or an accepted recovery heard in its reach comes out
+/// at least once (see `ref_losses` for that check and for a word that
+/// repeats the one before it).
 fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
     let mut rng = Rng(seed);
     let mut tally = Tally::default();
@@ -773,6 +800,11 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
             _ => ref_general_layout(&mut rng),
         };
         let jitter = if round % 3 == 1 { jitter } else { 0 };
+        let deaf = if round.is_multiple_of(2) {
+            (0, 0, 1)
+        } else {
+            DEAF[(round / 2) % DEAF.len()]
+        };
         let config = if kind == 3 && round.is_multiple_of(2) {
             PipelineConfig::default()
         } else {
@@ -784,13 +816,21 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
             _ => 130,
         };
         let slack = 2 + jitter;
-        let run = ref_run(&layout, &config, min_frames, jitter);
+        let run = ref_run(&layout, &config, min_frames, Hearing { jitter, deaf });
         tally.words += layout.words.len();
         tally.recovered += usize::from(run.new.stats.recoveries_accepted > 0);
         let old = ref_tally(&run.old, &layout.words, slack);
         let new = ref_tally(&run.new.tokens, &layout.words, slack);
         tally.doubled += old.iter().zip(&new).filter(|(m, a)| a.0 > m.0).count();
-        let (lost, pieces, unheard) = ref_losses(&layout, &run, slack);
+        let (lost, pieces, mut unheard) = ref_losses(&layout, &run, slack);
+        // Over the deaf fake one window of a run can hear a word its
+        // neighbour is deaf to, which the run's LCS drops in both merges
+        // alike, so the heard check runs only where the fake hears every
+        // frame; the comparison with the old merge is the gate on every
+        // case.
+        if deaf != (0, 0, 1) {
+            unheard.clear();
+        }
         let show = |tokens: &[Token]| {
             let pieces = tokens.iter().map(|t| format!("{}@{}", t.id, t.sample()));
             pieces.collect::<Vec<_>>().join(" ")
@@ -802,7 +842,7 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
         };
         assert!(
             lost.is_empty() && pieces.is_empty() && unheard.is_empty(),
-            "seed {seed:#x} case {case} jitter {jitter}: lost {:?}, pieces lost {:?}, heard and lost {:?}\n spans {:?}\n windows {:?}\n old {}\n new {}\n heard {}",
+            "seed {seed:#x} case {case} jitter {jitter} deaf {deaf:?}: lost {:?}, pieces lost {:?}, heard and lost {:?}\n spans {:?}\n windows {:?}\n old {}\n new {}\n heard {}",
             words(&lost),
             words(&pieces),
             words(&unheard),
@@ -824,7 +864,7 @@ fn every_word_the_old_merge_keeps_comes_out() {
     println!("{tally:?}");
     // Words checked (about 24,000 with this seed), cases with an accepted
     // recovery (about 800), and words that came out more often than from
-    // the old merge (about 1 in 100).
+    // the old merge (about 1 in 140).
     assert!(
         tally.words > 20_000 && tally.recovered > 600 && tally.doubled * 50 < tally.words,
         "{tally:?}"
@@ -832,7 +872,7 @@ fn every_word_the_old_merge_keeps_comes_out() {
 }
 
 /// Eight more seeds, 2,500 cases each, with the jitter at one, two and
-/// three frames: 60,000 cases.
+/// three frames: 60,000 cases, half of them over a deaf fake.
 #[test]
 #[ignore = "about 10 minutes in a release build; run it after a change to the partition or the merge"]
 fn every_word_the_old_merge_keeps_comes_out_over_more_seeds() {
@@ -853,9 +893,26 @@ fn texts(
     config: &PipelineConfig,
     jitter: usize,
 ) -> (Transcript, String) {
+    let hearing = Hearing {
+        jitter,
+        deaf: (0, 0, 1),
+    };
+    texts_over(samples, regions, config, 130, hearing)
+}
+
+/// `texts` over a fake that decodes a window under `min_frames` frames that
+/// holds loud sound to nothing and hears as `hearing` says.
+fn texts_over(
+    samples: &[f32],
+    regions: &[Range<usize>],
+    config: &PipelineConfig,
+    min_frames: usize,
+    hearing: Hearing,
+) -> (Transcript, String) {
     let make = || {
-        let mut t = quiet_transcriber(config.clone(), 130);
-        t.workers[0].jitter = jitter;
+        let mut t = quiet_transcriber(config.clone(), min_frames);
+        t.workers[0].jitter = hearing.jitter;
+        t.workers[0].deaf = hearing.deaf;
         t.vad = Box::new(FixedVad(regions.to_vec()));
         t
     };
@@ -1091,6 +1148,161 @@ fn a_word_across_the_seam_of_two_gap_windows_keeps_every_piece() {
             (new.text().as_str(), old.as_str()),
             ("w13s34s21.", "w13s34s21."),
             "{jitter}"
+        );
+    }
+}
+
+#[test]
+fn a_word_one_window_of_a_gap_is_deaf_to_comes_out() {
+    // A 30 s gap and no chunk, `CoreML`'s settings: windows of 15 s that
+    // share 2 s, their owned spans meeting in the middle. Every window is
+    // deaf for its first 30 frames, or its last, as a model with little
+    // context at a window's edge can be. A quiet word 4 or 8 frames past
+    // the seam of the first two (or before it, in the mirror) lies in the
+    // later window's owned span, deaf there, and only the earlier window
+    // hears it (or the other way round). A gap's windows merge as a run,
+    // as before the partition, so it comes out: the old merge's text.
+    let config = random_config(1, true);
+    let base = crafted(30.0, &[], &[]);
+    let spans = partition(&base, &[], &config.chunker);
+    assert!(
+        spans.len() > 2 && spans.iter().all(|s| !s.chunk),
+        "{spans:?}"
+    );
+    let seam = spans[1].owned.start / FRAME_SAMPLES;
+    for (deaf, sign) in [((30, 0, 1), 1), ((0, 30, 1), -1)] {
+        for offset in [4isize, 8] {
+            let mut samples = base.clone();
+            for (piece, at, frames) in [(4, -60, 5), (3, offset * sign, 2), (5, 60, 5)] {
+                let frame = seam.checked_add_signed(at).unwrap();
+                Placed {
+                    pieces: vec![piece],
+                    frame,
+                    frames,
+                }
+                .put(&mut samples);
+            }
+            let hearing = Hearing { jitter: 0, deaf };
+            let (new, old) = texts_over(&samples, &[], &config, 130, hearing);
+            assert_eq!(
+                (new.text().as_str(), old.as_str()),
+                ("w4 w3 w5", "w4 w3 w5"),
+                "{deaf:?} {offset}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_full_stop_past_the_seam_of_two_gap_windows_comes_out_as_before() {
+    // The gate's case 34 at its CI seed, shrunk: a gap and no chunk,
+    // `CoreML`'s settings, windows of 15 s that share 2 s. A word of four
+    // pieces, six frames each, from eight frames before the seam of the
+    // first two, its full stop ten frames past it. Both windows hear it
+    // whole ("w9 s29 ."); they merge as a run, so it comes out once and
+    // whole, as from the old merge, over the exact fake and the jittering
+    // one.
+    let config = random_config(1, true);
+    let mut samples = crafted(45.0, &[], &[]);
+    let spans = partition(&samples, &[], &config.chunker);
+    let seam = spans[1].owned.start;
+    let word = Placed {
+        pieces: vec![9, 29, 29, 41],
+        frame: seam / FRAME_SAMPLES - 8,
+        frames: 6,
+    };
+    assert!(word.start(0) > spans[1].window.start && word.start(3) < spans[0].window.end);
+    word.put(&mut samples);
+    for jitter in 0..=2 {
+        let (new, old) = texts(&samples, &[], &config, jitter);
+        assert_eq!(
+            (new.text().as_str(), old.as_str()),
+            ("w9s29.", "w9s29."),
+            "{jitter}"
+        );
+    }
+}
+
+#[test]
+fn a_recovered_word_whose_full_stop_lies_past_the_reach_comes_out_as_before() {
+    // The shape of the loss the gate found at its fourth extra seed, case
+    // 2019, the jitter at three frames, while a recovery's reach still
+    // widened over its own share: a recovered chunk keeps a word whose
+    // full stop lies past its reach, and the plain chunk after it heard
+    // that word and a second one with a full stop 0.7 s later. The
+    // recovery keeps the word without the full stop, where the trim before
+    // the partition cut, and the text is the old merge's. Settings with 8 s
+    // chunks, loud sound the fake decodes to nothing from 1 to 5.5 s with
+    // word 13 in it, plain words after; the word's full stop zero to two
+    // frames past the reach, over the exact fake and the jittering one.
+    let config = random_config(3, false);
+    let regions = vec![sample_count(1.0)..sample_count(20.0)];
+    let mut base = crafted(22.0, &[sample_count(1.0)..sample_count(5.5)], &[]);
+    for (piece, at) in [(13, 3.0), (14, 7.5), (16, 11.0), (17, 13.0), (19, 16.0)] {
+        ref_placed(vec![piece], at, 4).put(&mut base);
+    }
+    let (plain, _) = texts(&base, &regions, &config, 0);
+    assert_eq!(plain.stats.recoveries_accepted, 1);
+    let reach = plain.spans[0].reach.end / FRAME_SAMPLES;
+    for offset in 0..=2 {
+        let mut samples = base.clone();
+        let stop = reach + offset;
+        Placed {
+            pieces: vec![12, 41],
+            frame: stop - 4,
+            frames: 4,
+        }
+        .put(&mut samples);
+        Placed {
+            pieces: vec![18, 41],
+            frame: stop + 5,
+            frames: 4,
+        }
+        .put(&mut samples);
+        for jitter in 0..=3 {
+            let (new, old) = texts(&samples, &regions, &config, jitter);
+            assert_eq!(new.stats.recoveries_accepted, 1, "{offset} {jitter}");
+            assert_eq!(
+                (new.text().as_str(), old.as_str()),
+                (
+                    "w13 w14 w12. w18. w16 w17 w19",
+                    "w13 w14 w12. w18. w16 w17 w19"
+                ),
+                "offset {offset} jitter {jitter}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_recovery_that_begins_inside_a_skipped_pause_keeps_the_old_merges_text() {
+    // The default settings: a plain chunk with words 11 and 12, a pause of
+    // about 19 s no window decodes, and a chunk the fake decodes to
+    // nothing whose recovery 6 s either side wins (windows under 200
+    // frames decode to silence). That window begins inside the pause, on
+    // a continuation piece, a full stop or a word start. The recovery
+    // keeps its chunk ± the overlap, the range the old merge kept, so
+    // nothing from the pause glues onto word 12: the old merge's text.
+    let s = sample_count;
+    for piece in [25, 41, 3] {
+        let mut samples = vec![0.0f32; 45 * SAMPLE_RATE];
+        put(&mut samples, 11, 3.0, 6);
+        put(&mut samples, 12, 5.0, 6);
+        samples[s(26.0)..s(33.0)].fill(0.05);
+        put(&mut samples, 17, 29.0, 6);
+        samples[s(19.5)..s(20.0)].fill(piece as f32 / 1000.0);
+        let regions = vec![s(2.0)..s(6.0), s(26.0)..s(33.0)];
+        let hearing = Hearing {
+            jitter: 0,
+            deaf: (0, 0, 1),
+        };
+        let (new, old) = texts_over(&samples, &regions, &PipelineConfig::default(), 200, hearing);
+        assert_eq!(new.stats.recoveries_accepted, 1, "{piece}");
+        assert!(new.windows[1].start < s(20.0), "{:?}", new.windows);
+        assert_eq!(
+            (new.text().as_str(), old.as_str()),
+            ("w11 w12 w17", "w11 w12 w17"),
+            "{piece}"
         );
     }
 }
