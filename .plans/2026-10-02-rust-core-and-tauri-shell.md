@@ -2217,10 +2217,16 @@ it:
   unfilled otherwise, at the largest of the QPC's and the device position's
   readings, so the note says it. The packets and the seconds are logged at
   stop, with both clocks' ratios, at `warn` when the stream had
-  discontinuities and filled none. The engine is taken to keep the oldest
-  packets of a stall. Step 9 of the stable plan's Windows gate checks it on
-  hardware, at 48 and 44.1 kHz, on a hands-free headset and above 48 kHz,
-  and names the loopback.
+  discontinuities and filled none. At the stop each stream drains once
+  more; then the microphone and process loopback, which deliver
+  continuously, compare the performance counter with their last packet's
+  QPC, for a stall into the stop that left no flagged packet (an engine
+  that refused the newest packets), and the backend's stop hands that and
+  what the system lane's staging still holds to the sink. Endpoint
+  loopback idles, so it reads nothing there. Step 9 of the stable plan's
+  Windows gate checks it on hardware, at 48 and 44.1 kHz, on a hands-free
+  headset and above 48 kHz, names the loopback, and stalls just before the
+  stop on both loopbacks.
 - **A system-only capture skips silence.** With the `[System]` lane
   override the system stream is the master, and endpoint loopback
   delivers no packet while nothing plays, so the recording is shorter than
