@@ -2275,6 +2275,14 @@ fn the_stop_reads_the_counter_only_on_a_sane_qpc() {
             .is_none(),
         "a counter behind the last packet"
     );
+    assert_eq!(
+        clocks
+            .positions
+            .missed_until(now(&clocks, 0) + 7_200 * 10_000_000)
+            .unfilled,
+        MOST_READ_FRAMES as usize,
+        "capped at an hour"
+    );
     clocks.deliver(false, true);
     assert!(
         clocks.positions.missed_until(now(&clocks, 51)).is_none(),
@@ -2478,5 +2486,121 @@ fn a_first_move_after_left_out_pairs_is_left_out_too() {
     assert!(
         (960..=6 * 1_920).contains(&missed.unfilled),
         "a 960-frame idle read as {missed:?}"
+    );
+}
+
+/// The stop takes the padding of the run that holds the outage: the run
+/// before the re-prime when the lane primed on the engine's kept packets
+/// before the microphone's last pull and the flag came after it, the
+/// current one when the lane is still out. The follower's clocks read
+/// nothing, so only the padding counts.
+#[test]
+fn the_stop_takes_the_padding_of_the_outage_whether_or_not_the_lane_primed() {
+    // Primed again: the kept packets were pulled, the flag came after.
+    let mut call = Call::new();
+    for _ in 0..200 {
+        call.tick();
+    }
+    for _ in 0..50 {
+        call.master_packet();
+    }
+    for _ in 0..10 {
+        call.follower_packet();
+    }
+    for _ in 0..3 {
+        call.master_packet();
+    }
+    call.follower_flagged(Missed::default());
+    call.stop(Missed::default(), Missed::default());
+    let (filled, unfilled) = call.system();
+    assert!(
+        (48 * PERIOD..=50 * PERIOD).contains(&(filled + unfilled)),
+        "primed: filled {filled}, unfilled {unfilled}"
+    );
+
+    // Still out: an engine that kept two packets, the microphone's last
+    // pull before the follower's final drain. The lane lacks the 48
+    // packets the engine lost, all of them padded, none of its lag left
+    // to come off.
+    let mut call = Call::new();
+    for _ in 0..200 {
+        call.tick();
+    }
+    for _ in 0..50 {
+        call.master_packet();
+    }
+    for _ in 0..2 {
+        call.follower_packet();
+    }
+    call.follower_flagged(Missed::default());
+    call.stop(Missed::default(), Missed::default());
+    let (filled, unfilled) = call.system();
+    assert!(
+        (48 * PERIOD..=50 * PERIOD).contains(&(filled + unfilled)),
+        "still out: filled {filled}, unfilled {unfilled}"
+    );
+}
+
+/// Two unflagged idles a few packets apart, then a flag after the second:
+/// the master's pulls through the second idle pass the hold, so the first
+/// idle's padding is forgotten and only the second's counts.
+#[test]
+fn a_long_second_idle_forgets_the_first() {
+    let mut call = Call::new();
+    for _ in 0..200 {
+        call.tick();
+    }
+    for _ in 0..100 {
+        call.master_packet();
+    }
+    for _ in 0..5 {
+        call.tick();
+    }
+    for _ in 0..50 {
+        call.master_packet();
+    }
+    call.follower_flagged(Missed::default());
+    for _ in 0..20 {
+        call.tick();
+    }
+    let (filled, unfilled) = call.system();
+    assert!(
+        filled + unfilled <= 52 * PERIOD,
+        "filled {filled}, unfilled {unfilled}"
+    );
+}
+
+/// Positions that move from the start, stand still for a pair mid-stream
+/// and move again keep their measured ratio: only positions still from the
+/// start begin their sums afresh. On a unit no mix format explains
+/// (14 350 a second) the 0.5 s loss after the pause is still read.
+#[test]
+fn a_pause_of_the_positions_mid_stream_keeps_the_ratio() {
+    let mut clocks = Clocks::new(None, 143, 0);
+    clocks.clean(100);
+    clocks.per_packet = 0;
+    clocks.clean(1);
+    clocks.per_packet = 143;
+    clocks.clean(1);
+    let missed = clocks.lose(50);
+    assert!(
+        (24_000..=6 * 24_480).contains(&missed.unfilled),
+        "{missed:?}"
+    );
+}
+
+/// Only the second pair can replace the first: a short pair mid-stream
+/// (half an advance) stays one pair among many, so a loss after it reads
+/// within a few percent, not twice over.
+#[test]
+fn a_short_pair_mid_stream_replaces_nothing() {
+    let mut clocks = Clocks::new(None, 143, 0);
+    clocks.clean(100);
+    clocks.next.position -= 72;
+    clocks.clean(1);
+    let missed = clocks.lose(50);
+    assert!(
+        (24_000..=24_000 + 24_000 / 20).contains(&missed.unfilled),
+        "{missed:?}"
     );
 }

@@ -143,7 +143,7 @@ pub struct FollowerLane {
     since_prime: AtomicUsize,
     reprime_hold: usize,
     /// The padding of a discontinuity that came while the lane was out: the
-    /// held run ([`Self::held_run`]) at the master's first pull after it,
+    /// held run (`held_run`) at the master's first pull after it,
     /// `usize::MAX` before that pull or with none pending.
     flag_run: AtomicUsize,
     /// Producer: the follower's queue at its last flagged packet was within
@@ -548,18 +548,16 @@ impl FollowerLane {
         }
     }
 
-    /// The zeros of the current run, and of the run before the last
-    /// re-prime while the hold keeps it: an underrun between an outage's
-    /// re-prime and its flag (the engine's kept packets ran out before the
-    /// flagged one came) must not hide the outage's padding.
+    /// The zeros of the current run and of the run before the last
+    /// re-prime, which [`Self::take_missed`] clears once the hold passed:
+    /// an underrun between an outage's re-prime and its flag (the engine's
+    /// kept packets ran out before the flagged one came) must not hide the
+    /// outage's padding.
     #[inline(always)]
     fn held_run(&self) -> usize {
-        let run = self.run.load(Ordering::Relaxed);
-        if self.since_prime.load(Ordering::Relaxed) <= self.reprime_hold {
-            run.saturating_add(self.last_run.load(Ordering::Relaxed))
-        } else {
-            run
-        }
+        self.run
+            .load(Ordering::Relaxed)
+            .saturating_add(self.last_run.load(Ordering::Relaxed))
     }
 
     /// Records the queue a pull of `pulled` frames left (`rest`); slips it
