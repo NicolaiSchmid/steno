@@ -498,6 +498,24 @@ fn mix_format(client: &IAudioClient) -> Option<(usize, u32)> {
     }
 }
 
+/// The performance counter now, in `GetBuffer`'s QPC unit (100 ns); `None`
+/// when it cannot be read.
+fn qpc_now() -> Option<u64> {
+    let mut counter: i64 = 0;
+    let mut frequency: i64 = 0;
+    // SAFETY: both out-pointers are live locals for the calls to write.
+    let read = unsafe {
+        QueryPerformanceCounter(&raw mut counter).is_ok()
+            && QueryPerformanceFrequency(&raw mut frequency).is_ok()
+    };
+    let (Ok(counter), Ok(frequency)) = (u128::try_from(counter), u128::try_from(frequency)) else {
+        return None;
+    };
+    // `GetBuffer`'s QPC is the counter in 100 ns units.
+    let now = (counter * 10_000_000).checked_div(frequency)?;
+    u64::try_from(now).ok().filter(|_| read)
+}
+
 /// One initialised shared-mode capture stream: the client, its capture
 /// service, the event it signals.
 pub struct CaptureClient {
@@ -670,27 +688,25 @@ impl CaptureClient {
     /// when the counter cannot be read.
     #[must_use]
     pub fn missed_at_stop(&self) -> Missed {
-        let mut counter: i64 = 0;
-        let mut frequency: i64 = 0;
-        // SAFETY: both out-pointers are live locals for the calls to write.
-        let read = unsafe {
-            QueryPerformanceCounter(&raw mut counter).is_ok()
-                && QueryPerformanceFrequency(&raw mut frequency).is_ok()
-        };
-        let (Ok(counter), Ok(frequency)) = (u128::try_from(counter), u128::try_from(frequency))
-        else {
-            return Missed::default();
-        };
-        // `GetBuffer`'s QPC is the counter in 100 ns units.
-        let now = (counter * 10_000_000).checked_div(frequency);
-        match now.and_then(|now| u64::try_from(now).ok()) {
-            Some(now) if read => self.positions.missed_until(now),
-            _ => Missed::default(),
-        }
+        qpc_now().map_or_else(Missed::default, |now| self.positions.missed_until(now))
     }
 
-    /// Starts the stream.
-    pub fn start(&self) -> Result<(), ComError> {
+    /// What the engine lost before the stream's first packet, beyond its
+    /// start latency, for a stream started with `continuous`
+    /// ([`DevicePositions::missed_before_first`], which states the rule).
+    #[must_use]
+    pub fn missed_before_first(&self) -> Missed {
+        self.positions.missed_before_first(self.sizes)
+    }
+
+    /// Starts the stream. One that delivers `continuously` (the
+    /// microphone, process loopback) reads the performance counter just
+    /// before, for [`Self::missed_before_first`]; endpoint loopback may
+    /// start in an idle, so it reads none.
+    pub fn start(&mut self, continuously: bool) -> Result<(), ComError> {
+        if continuously && let Some(now) = qpc_now() {
+            self.positions.start(now);
+        }
         // SAFETY: plain call on the initialised client.
         check(unsafe { self.client.Start() }, "IAudioClient::Start")
     }

@@ -6,10 +6,21 @@
 //! and a call's first seconds are missing from the recording. The IO
 //! thread stores the first callback's host time once; the backend reads
 //! it off that thread when the capture stops and logs the offset at
-//! `info`. No Swift equivalent.
+//! `info`. A first callback later than [`FIRST_CALLBACK_ALLOWANCE`] is
+//! audio missed before it, which the stop of a recording's first start
+//! counts unfilled ([`FirstCallback::missed`]; A18, the design in
+//! [`realtime::missed`](super::missed)). No Swift equivalent.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+use super::missed::Missed;
+
+/// How late after the device's start a first callback may come without
+/// counting as audio missed: A10's bound on it from the call to `start`
+/// (`.plans/2026-10-07-stable-promotion.md`), which comes before the
+/// device's start, so a normal first callback is well inside it.
+pub const FIRST_CALLBACK_ALLOWANCE: Duration = Duration::from_millis(200);
 
 /// The first callback's host time; see the module doc.
 ///
@@ -67,6 +78,35 @@ impl FirstCallback {
         Some(Duration::from_nanos(to_nanos(
             first.saturating_sub(started),
         )))
+    }
+
+    /// What the capture missed before its first callback, in frames at
+    /// `sample_rate`: the [`Self::offset`] from `started` beyond
+    /// [`FIRST_CALLBACK_ALLOWANCE`], unfilled, since nothing was there to
+    /// fill; nothing when no callback came (the session's stall watchdog
+    /// restarts such a capture, and its gap holds that time) or it came
+    /// within the allowance.
+    ///
+    /// ```
+    /// use steno_audio::realtime::FirstCallback;
+    ///
+    /// let first = FirstCallback::new();
+    /// first.mark(1_000 + 700_000_000); // 0.7 s after the start, in ns
+    /// assert_eq!(first.missed(1_000, |ticks| ticks, 48_000.0).unfilled, 24_000);
+    /// ```
+    #[must_use]
+    pub fn missed(&self, started: u64, to_nanos: impl Fn(u64) -> u64, sample_rate: f64) -> Missed {
+        let late = self
+            .offset(started, to_nanos)
+            .map_or(Duration::ZERO, |offset| {
+                offset.saturating_sub(FIRST_CALLBACK_ALLOWANCE)
+            });
+        // Whole frames of a positive, finite product.
+        let frames = (late.as_secs_f64() * sample_rate.max(0.0)).round() as usize;
+        Missed {
+            fill: 0,
+            unfilled: frames,
+        }
     }
 }
 
@@ -129,6 +169,35 @@ mod tests {
         let early = FirstCallback::new();
         early.mark(started - 10);
         assert_eq!(early.offset(started, to_nanos), Some(Duration::ZERO));
+    }
+
+    /// Only the time past the allowance counts, unfilled, at the stream's
+    /// rate; none when the callback came inside it or never came.
+    #[test]
+    fn a_late_first_callback_counts_what_came_before_it_past_the_allowance() {
+        let to_nanos = |ticks: u64| ticks * 125 / 3;
+        let started = 1_000_000;
+        let first = FirstCallback::new();
+        assert!(
+            first.missed(started, to_nanos, 48_000.0).is_none(),
+            "none came"
+        );
+        // 0.5 s after the start: 0.3 s past the allowance.
+        first.mark(started + 12_000_000);
+        assert_eq!(
+            first.missed(started, to_nanos, 48_000.0),
+            Missed {
+                fill: 0,
+                unfilled: 14_400
+            }
+        );
+        assert_eq!(first.missed(started, to_nanos, 16_000.0).unfilled, 4_800);
+        let on_time = FirstCallback::new();
+        on_time.mark(started + 4_800_000); // 200 ms
+        assert!(on_time.missed(started, to_nanos, 48_000.0).is_none());
+        let early = FirstCallback::new();
+        early.mark(started - 10);
+        assert!(early.missed(started, to_nanos, 48_000.0).is_none());
     }
 
     #[test]

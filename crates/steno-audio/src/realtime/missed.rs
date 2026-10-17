@@ -69,6 +69,21 @@
 //! ([`count_at_stop`](super::count_at_stop)). A stop for a rebuild reads
 //! nothing: the session's gap covers that time.
 //!
+//! # Before the first callback
+//!
+//! A first callback that comes late shows no jump either: the clock starts
+//! at it. PipeWire's `start` returns only after the first cycle, so no
+//! audio is lost there. macOS compares the first callback's host time with
+//! the device's start ([`FirstCallback::missed`](super::FirstCallback::missed)),
+//! and on WASAPI a stream that delivers continuously compares its first
+//! packet's QPC with the performance counter just before its start
+//! ([`DevicePositions::missed_before_first`](crate::capture::split_streams::DevicePositions::missed_before_first)).
+//! Past the start's normal latency, that time counts unfilled at the stop,
+//! whatever the stop is for (a rebuild's gap starts at the last frame), and
+//! only for a recording's first start
+//! ([`LaneFrameSink::first_start`](super::LaneFrameSink::first_start)): a
+//! restart's gap runs to its first frame and holds that time already.
+//!
 //! # The bound
 //!
 //! The limit is one second at the stream's rate. That is half the session's

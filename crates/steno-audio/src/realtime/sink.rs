@@ -46,6 +46,8 @@ pub struct LaneFrameSink {
     /// Frames of every callback begun, refused ones included; written by
     /// the single producer, read by the session's watchdog.
     frames_offered: AtomicUsize,
+    /// A backend start succeeded on this sink ([`Self::first_start`]).
+    started: AtomicBool,
 }
 
 impl std::fmt::Debug for LaneFrameSink {
@@ -86,6 +88,7 @@ impl LaneFrameSink {
             device_change_handler: on_device_change,
             pending_frames: AtomicUsize::new(0),
             frames_offered: AtomicUsize::new(0),
+            started: AtomicBool::new(false),
         }
     }
 
@@ -228,6 +231,17 @@ impl LaneFrameSink {
         }
     }
 
+    /// Whether this is the first backend start to succeed on this sink, a
+    /// recording's own, and marks that one has: `false` for every
+    /// rebuild's restart after it. The backend asks once its start has
+    /// succeeded. Audio missed before a stream's first frame counts only
+    /// on the first (A18, [`count_before_first`](super::count_before_first)):
+    /// a restart's gap runs to its first frame and covers that time.
+    #[must_use]
+    pub fn first_start(&self) -> bool {
+        !self.started.swap(true, Ordering::AcqRel)
+    }
+
     /// Whether a device change was reported and not yet let through again:
     /// a backend stopped for the rebuild that follows reads no audio missed
     /// at its stop, since the session's gap covers that time.
@@ -343,6 +357,15 @@ mod tests {
             sink.filled_samples().is_empty() && sink.unfilled_samples().is_empty(),
             "cleared with the rings"
         );
+    }
+
+    #[test]
+    fn only_the_first_start_on_a_sink_is_the_first() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic]);
+        assert!(sink.first_start(), "the recording's start");
+        assert!(!sink.first_start(), "a rebuild's restart");
+        sink.clear();
+        assert!(!sink.first_start(), "a restart after a clear");
     }
 
     #[test]

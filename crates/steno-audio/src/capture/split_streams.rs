@@ -293,6 +293,16 @@ fn within(read: u64, frames: u64, percent: u64) -> bool {
 ///   the microphone's loss counts as above and the system stream's is
 ///   silent; endpoint loopback idles, so it is never read at the stop, and
 ///   its loss there is silent too. The Windows gate step checks both.
+/// - **Before the first packet.** No first packet's flag is read (every
+///   loopback stream flags it), so a loss before it (an engine that
+///   dropped its oldest packets before the thread's first drain, a capture
+///   that starts late) leaves no flag either. A stream that delivers
+///   continuously reads the QPC just before its start ([`Self::start`])
+///   against its first packet's, beyond its start latency, counted
+///   unfilled at the stop ([`Self::missed_before_first`]), on a sane QPC.
+///   Without one, the microphone's loss counts through the wall time as
+///   above and the system stream's is silent; endpoint loopback may start
+///   in an idle, so it reads no start, and its loss there is silent too.
 ///
 /// The device position's own readings stay in the count for one case: a
 /// microphone stream without a sane QPC whose losses add up to less than
@@ -331,6 +341,13 @@ pub struct DevicePositions {
     /// The last packet's frames and whether it had a timestamp error.
     last_frames: usize,
     last_timestamp_error: bool,
+    /// The QPC just before the stream started ([`Self::start`]), until a
+    /// packet with a QPC reads it, and the frames delivered before that
+    /// packet; then how far that packet came after the start, in 48 kHz
+    /// frames past those.
+    started: Option<u64>,
+    before_first: u64,
+    first_late: Option<u64>,
 }
 
 impl DevicePositions {
@@ -345,7 +362,19 @@ impl DevicePositions {
             qpc_matched: false,
             last_frames: 0,
             last_timestamp_error: false,
+            started: None,
+            before_first: 0,
+            first_late: None,
         }
+    }
+
+    /// The performance counter read just before the stream started, in the
+    /// QPC's 100 ns units, for [`Self::missed_before_first`]; only for a
+    /// stream that delivers continuously (see the type's doc).
+    pub fn start(&mut self, qpc: u64) {
+        self.started = Some(qpc);
+        self.before_first = 0;
+        self.first_late = None;
     }
 
     /// One packet: the frames missed before it, read only on a
@@ -358,6 +387,17 @@ impl DevicePositions {
         // the pair that spans it holds only part of an advance.
         let moved = self.positions.first_move(position);
         let qpc_now = (!packet.timestamp_error && packet.qpc != 0).then_some(packet.qpc);
+        if let Some(started) = self.started {
+            if let Some(now) = qpc_now {
+                self.started = None;
+                self.first_late = Some(
+                    QPC.read(now.saturating_sub(started))
+                        .saturating_sub(self.before_first),
+                );
+            } else {
+                self.before_first = self.before_first.saturating_add(packet.frames as u64);
+            }
+        }
         let qpc = qpc_now.and_then(|now| self.qpc.advance(now));
         let missed = if packet.discontinuity {
             self.count(position, qpc, last_frames)
@@ -485,9 +525,43 @@ impl DevicePositions {
         Missed::of_jump(gap, self.last_frames, 0)
     }
 
+    /// The frames missed before the first packet, for a stream started at
+    /// [`Self::start`]'s QPC with `sizes`: how far the first packet with a
+    /// QPC came after the start, past the frames delivered before it,
+    /// beyond the start latency (the stream's latency and one period),
+    /// counted unfilled by [`Missed::of_jump`]'s rule at a period's
+    /// resolution and capped at [`MOST_READ_FRAMES`]. Only on a sane QPC
+    /// ([`Self::qpc_sane`]); nothing otherwise, and nothing for a stream
+    /// given no start. Changes nothing.
+    ///
+    /// ```
+    /// use steno_audio::capture::split_streams::{DevicePositions, Packet, StreamSizes};
+    ///
+    /// let sizes = StreamSizes { buffer_frames: 4_800, period_frames: 480, latency_frames: 480 };
+    /// let mut positions = DevicePositions::new(Some(48_000));
+    /// positions.start(1_000_000_000);
+    /// // The first packet half a second after the start.
+    /// let mut packet = Packet { frames: 480, qpc: 1_005_000_000, ..Packet::default() };
+    /// for _ in 0..=200 {
+    ///     positions.packet(packet);
+    ///     packet.qpc += 100_000;
+    /// }
+    /// assert_eq!(positions.missed_before_first(sizes).unfilled, 24_000 - 960);
+    /// ```
+    #[must_use]
+    pub fn missed_before_first(&self, sizes: StreamSizes) -> Missed {
+        let Some(late) = self.first_late.filter(|_| self.qpc_sane() == Some(true)) else {
+            return Missed::default();
+        };
+        let latency = sizes.latency_frames.saturating_add(sizes.period_frames);
+        let gap = late.saturating_sub(latency as u64).min(MOST_READ_FRAMES);
+        Missed::of_jump(gap, sizes.period_frames, 0)
+    }
+
     /// Whether the QPC measured within 2 % of real time; `None` before
     /// [`QPC_CALIBRATION_FRAMES`] are measured.
-    fn qpc_sane(&self) -> Option<bool> {
+    #[must_use]
+    pub fn qpc_sane(&self) -> Option<bool> {
         (self.qpc.delivered >= QPC_CALIBRATION_FRAMES)
             .then(|| within(QPC.read(self.qpc.advanced), self.qpc.delivered, 2))
     }

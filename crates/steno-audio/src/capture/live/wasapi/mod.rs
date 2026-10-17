@@ -90,7 +90,13 @@
 //! there (the Windows gate step of the stable plan checks it on hardware).
 //! Once both threads are joined, the backend's stop hands those readings
 //! and what the system stream's staging still holds to the sink
-//! ([`count_at_stop`]).
+//! ([`count_at_stop`]). No packet flags a loss before a stream's first
+//! either (an engine that dropped its oldest packets before the thread's
+//! first drain), so a stream that delivers continuously reads the
+//! performance counter just before its start against its first packet
+//! ([`DevicePositions::missed_before_first`]), and the stop of a
+//! recording's first start hands that on too ([`count_before_first`]); a
+//! rebuild's restart is inside its gap.
 //! The count and the seconds are logged at stop, as are the follower's
 //! underrun, slip and trim counts. All of these logs are at `info`, below
 //! the shell's default filter: set `RUST_LOG=steno_audio=info` to see them.
@@ -117,6 +123,7 @@ use crate::capture::{
 use crate::detection::EndpointFlow;
 use crate::realtime::{
     FollowerLane, LaneFrameSink, Missed, PacketRouter, StreamBody, count_at_stop,
+    count_before_first,
 };
 
 /// How long `start` waits, in total, for the stream threads to open and
@@ -150,12 +157,22 @@ enum StreamEvent {
     Started(Result<(), CaptureError>),
 }
 
+/// What a stream thread's clocks read at its stop.
+#[derive(Debug, Default, Clone, Copy)]
+struct Ends {
+    /// Missed before its first packet, beyond its start latency
+    /// ([`CaptureClient::missed_before_first`]).
+    before_first: Missed,
+    /// Missed after its last packet ([`CaptureClient::missed_at_stop`]),
+    /// `None` when it was not read.
+    after_last: Option<Missed>,
+}
+
 /// One stream thread as `start` holds it.
 struct Launched {
     source: StreamSource,
-    /// Returns what the stream missed after its last packet
-    /// ([`CaptureClient::missed_at_stop`]), `None` when it was not read.
-    thread: Option<JoinHandle<Option<Missed>>>,
+    /// Returns what its clocks read at the stop.
+    thread: Option<JoinHandle<Ends>>,
     events: Receiver<StreamEvent>,
     /// Dropped to make a thread that waits for its body exit.
     body: Option<SyncSender<StreamBody>>,
@@ -376,6 +393,9 @@ struct Active {
     follower: Option<(Arc<FollowerLane>, usize)>,
     master: StreamSource,
     sink: Arc<LaneFrameSink>,
+    /// The recording's first start on the sink, not a rebuild's restart
+    /// ([`LaneFrameSink::first_start`]).
+    first_start: bool,
     watcher: Arc<Watcher>,
     watcher_thread: JoinHandle<()>,
 }
@@ -533,10 +553,10 @@ fn open(
 /// A stream thread: opens its stream, reports, waits for its body, starts,
 /// then drains packets into the body until `stop` is set or the stream
 /// fails. The open's lines are at `debug` when `starts_quietly`
-/// (`start_log`). Returns what the stream missed after its last packet, read
-/// at the stop on a stream that delivers continuously (the microphone,
-/// process loopback; not endpoint loopback, whose idle would read as a
-/// loss) and did not fail; `None` when it was not read.
+/// (`start_log`). Returns what its clocks read at the stop, on a stream
+/// that delivers continuously (the microphone, process loopback; not
+/// endpoint loopback, whose idle would read as a loss): what it missed
+/// before its first packet, and, unless it failed, after its last.
 fn run_stream(
     source: StreamSource,
     input_device_uid: Option<&str>,
@@ -545,24 +565,25 @@ fn run_stream(
     stop: &AtomicBool,
     watcher: &Watcher,
     starts_quietly: bool,
-) -> Option<Missed> {
+) -> Ends {
     let opened = start_log::quietly(starts_quietly, || open(source, input_device_uid));
     let (apartment, enumerator, mut client, info) = match opened {
         Ok(opened) => opened,
         Err(error) => {
             let _ = events.send(StreamEvent::Opened(Err(error)));
-            return None;
+            return Ends::default();
         }
     };
     let loopback = info.loopback;
+    let continuously = loopback != Some(LoopbackKind::Endpoint);
     let _ = events.send(StreamEvent::Opened(Ok(info)));
     // `start` drops the sender when it gives up.
     let Ok(mut body) = bodies.recv() else {
-        return None;
+        return Ends::default();
     };
-    if let Err(error) = client.start() {
+    if let Err(error) = client.start(continuously) {
         let _ = events.send(StreamEvent::Started(Err(error.into())));
-        return None;
+        return Ends::default();
     }
     let _ = events.send(StreamEvent::Started(Ok(())));
     let pro_audio = ProAudioThread::enter();
@@ -587,15 +608,25 @@ fn run_stream(
     // What the engine still holds at the stop, so a thread held up just
     // before it is read too, then the counter against the last packet for
     // what no packet flags.
-    let mut end = None;
+    let mut ends = Ends::default();
     if !failed {
         let _ = drain_into(&mut client, &mut body);
-        if loopback != Some(LoopbackKind::Endpoint) {
-            end = Some(client.missed_at_stop());
+        if continuously {
+            ends.after_last = Some(client.missed_at_stop());
         }
     }
     let _ = client.stop();
-    if let Some(end) = end.filter(|end| !end.is_none()) {
+    if continuously {
+        ends.before_first = client.missed_before_first();
+    }
+    if !ends.before_first.is_none() {
+        tracing::info!(
+            "{} stream: {:.3} s missed before its first packet",
+            source.as_str(),
+            ends.before_first.unfilled as f64 / SAMPLE_RATE
+        );
+    }
+    if let Some(end) = ends.after_last.filter(|end| !end.is_none()) {
         tracing::info!(
             "{} stream: {:.3} s missed after its last packet",
             source.as_str(),
@@ -616,7 +647,7 @@ fn run_stream(
     drop(client);
     drop(enumerator);
     drop(apartment);
-    end
+    ends
 }
 
 /// The stop's line about `source`'s clocks (`DevicePositions`'s
@@ -688,11 +719,11 @@ fn run_watcher(
 }
 
 /// Stops and joins the stream threads that answered
-/// ([`Launched::answered`]), and returns what each joined one missed after
-/// its last packet; the others are left to finish on their own. Such a
-/// thread never writes to the sink: it holds no body, or it is starting its
+/// ([`Launched::answered`]), and returns what each joined one's clocks read
+/// at its stop; the others are left to finish on their own. Such a thread
+/// never writes to the sink: it holds no body, or it is starting its
 /// stream and finds `stop` set before its first drain.
-fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) -> Vec<(StreamSource, Option<Missed>)> {
+fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) -> Vec<(StreamSource, Ends)> {
     stop.store(true, Ordering::Release);
     let mut ends = Vec::new();
     for mut launched in streams {
@@ -968,6 +999,7 @@ impl CaptureBackend for LiveCaptureBackend {
             streams,
             follower: follower.zip(follower_lane),
             master: plan.master,
+            first_start: sink.first_start(),
             sink,
             watcher,
             watcher_thread,
@@ -982,8 +1014,9 @@ impl CaptureBackend for LiveCaptureBackend {
     }
 
     /// Stops the capture threads (no frame arrives after it returns), hands
-    /// on what they missed at the end ([`count_at_stop`]), then stops the
-    /// watcher.
+    /// on what they missed at the end ([`count_at_stop`]) and, after the
+    /// recording's first start, before their first packets
+    /// ([`count_before_first`]), then stops the watcher.
     fn stop(&self) {
         let Some(mut active) = self.lock().take() else {
             return;
@@ -992,7 +1025,7 @@ impl CaptureBackend for LiveCaptureBackend {
         let end = |master: bool| {
             ends.iter()
                 .find(|(source, _)| (*source == active.master) == master)
-                .and_then(|(_, end)| *end)
+                .map_or_else(Ends::default, |(_, ends)| *ends)
         };
         count_at_stop(
             &active.sink,
@@ -1000,9 +1033,17 @@ impl CaptureBackend for LiveCaptureBackend {
                 .follower
                 .as_ref()
                 .map(|(lane, index)| (lane.as_ref(), *index)),
-            end(true).unwrap_or_default(),
-            end(false),
+            end(true).after_last.unwrap_or_default(),
+            end(false).after_last,
         );
+        if active.first_start {
+            count_before_first(
+                &active.sink,
+                active.follower.as_ref().map(|(_, index)| *index),
+                end(true).before_first,
+                end(false).before_first,
+            );
+        }
         if let Some((lane, _)) = &active.follower {
             tracing::info!(
                 "system stream staging: {} frames padded with zeros (underrun), {} skipped \

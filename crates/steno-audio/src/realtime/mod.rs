@@ -37,5 +37,5 @@ pub use relay::FrameRelay;
 pub use ring::LaneRingBuffer;
 pub use rings::LaneRings;
 pub use sink::LaneFrameSink;
-pub use streams::{FollowerLane, PacketRouter, StreamBody, count_at_stop};
+pub use streams::{FollowerLane, PacketRouter, StreamBody, count_at_stop, count_before_first};
 pub use wake::Wake;

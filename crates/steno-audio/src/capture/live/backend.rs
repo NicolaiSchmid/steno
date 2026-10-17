@@ -75,7 +75,10 @@
 //! [`realtime::missed`](crate::realtime::missed)). `io_proc` reads that
 //! sample time and writes what was missed as zeros before the callback's
 //! own frames; `stop()` reads `AudioDeviceGetCurrentTime` before the IOProc
-//! stops. A time stamp without a valid sample time resets the clock.
+//! stops. A time stamp without a valid sample time resets the clock. A
+//! first callback that came later than the start allows
+//! ([`FirstCallback::missed`]) counts the time before it unfilled at the
+//! stop of a recording's first start.
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -384,6 +387,11 @@ struct Active {
     /// The host time just before the device started, and the same moment
     /// on the monotonic clock: where the first callback is measured from.
     started: (u64, Instant),
+    /// The stream's rate, for what came before the first callback.
+    sample_rate: f64,
+    /// The recording's first start on the sink, not a rebuild's restart
+    /// ([`LaneFrameSink::first_start`]).
+    first_start: bool,
 }
 
 /// The macOS capture backend; see the module doc.
@@ -821,6 +829,8 @@ impl CaptureBackend for LiveCaptureBackend {
             watcher,
             watcher_thread: Some(watcher_thread),
             started,
+            sample_rate,
+            first_start: sink.first_start(),
         });
         Ok(CaptureStream {
             sample_rate,
@@ -857,6 +867,8 @@ impl CaptureBackend for LiveCaptureBackend {
             _tap: tap,
             _silent_output: silent_output,
             started: (host_started, started_at),
+            sample_rate,
+            first_start,
             ..
         } = active;
         let now = io_proc.current_time();
@@ -870,6 +882,17 @@ impl CaptureBackend for LiveCaptureBackend {
                 context.clock.get(),
                 context.input_lag.get(),
                 now.as_ref().and_then(sample_time),
+            ));
+        }
+        // What came before the first callback, past the start's allowance,
+        // after the recording's first start only: a restart's gap runs to
+        // its first frame. A rebuild's gap starts at the last frame, so this
+        // counts whatever the stop is for.
+        if first_start {
+            context.sink.write_missed(context.first_callback.missed(
+                host_started,
+                hal::host_time_to_nanos,
+                sample_rate,
             ));
         }
         start_log!(

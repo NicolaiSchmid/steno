@@ -25,7 +25,7 @@ use steno_audio::capture::split_streams::{
 use steno_audio::capture::{ChannelRef, DeviceChangeReason, SplitStreamPlan, StreamSource};
 use steno_audio::realtime::{
     FollowerLane, LaneFrameSink, LaneRingBuffer, MISSED_FILL_LIMIT, Missed, PacketRouter,
-    SliceView, StreamBody, count_at_stop, deliver_slices,
+    SliceView, StreamBody, count_at_stop, count_before_first, deliver_slices,
 };
 use steno_audio::{CaptureError, CaptureMode, SAMPLE_RATE};
 use steno_core::AudioLane;
@@ -2332,6 +2332,141 @@ fn the_stop_reads_a_stall_of_a_packet_and_a_half() {
     let stop = |packets_tenths: u64| last + (20 + packets_tenths) * QPC_PACKET / 10;
     assert_eq!(clocks.positions.missed_until(stop(15)), unfilled(720));
     assert!(clocks.positions.missed_until(stop(4)).is_none());
+}
+
+/// A continuous stream's sizes for the start's reading: 10 ms periods, a
+/// stream latency of 20 ms, so a first packet up to 30 ms after the start
+/// is on time.
+const START_SIZES: StreamSizes = StreamSizes {
+    buffer_frames: 4_800,
+    period_frames: 480,
+    latency_frames: 960,
+};
+
+/// A stream started at `start`'s QPC whose first packet comes
+/// `late_packets` packets of QPC after it, then two seconds of clean
+/// packets so the QPC is sane.
+fn started_late(start: bool, late_packets: u64) -> Clocks {
+    let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
+    if start {
+        clocks.positions.start(clocks.next.qpc);
+    }
+    clocks.skip(late_packets).clean(CALIBRATION_PACKETS);
+    clocks
+}
+
+/// A microphone or process-loopback stream whose first packet comes half a
+/// second after its start (an engine that dropped its oldest packets before
+/// the thread's first drain, no packet flagged) counts that half second
+/// unfilled at the stop, less the start latency: the stream's latency and
+/// one period.
+#[test]
+fn a_first_packet_half_a_second_late_counts_what_came_before_it() {
+    let clocks = started_late(true, 50);
+    assert_eq!(
+        clocks.positions.missed_before_first(START_SIZES),
+        unfilled(24_000 - 960 - 480)
+    );
+    let hour = started_late(true, 360_000 * 2);
+    assert_eq!(
+        hour.positions.missed_before_first(START_SIZES).unfilled,
+        MOST_READ_FRAMES as usize,
+        "capped at an hour"
+    );
+}
+
+/// A first packet within the start latency (the stream's latency and one
+/// period) counts nothing, nor one less than half a period past it.
+#[test]
+fn a_first_packet_inside_the_start_latency_counts_nothing() {
+    for late_packets in [0, 1, 3] {
+        assert!(
+            started_late(true, late_packets)
+                .positions
+                .missed_before_first(START_SIZES)
+                .is_none(),
+            "{late_packets} packets late"
+        );
+    }
+    let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
+    clocks.positions.start(clocks.next.qpc);
+    clocks.next.qpc += 3 * QPC_PACKET + QPC_PACKET / 2;
+    clocks.clean(CALIBRATION_PACKETS);
+    assert!(
+        clocks.positions.missed_before_first(START_SIZES).is_none(),
+        "half a period past the latency"
+    );
+}
+
+/// Endpoint loopback may start in an idle, so its thread gives its
+/// positions no start, and a first packet half a second late counts
+/// nothing; nor does one on a QPC that is not sane (still measuring, or
+/// none).
+#[test]
+fn a_stream_given_no_start_or_no_sane_qpc_counts_nothing_before_its_first_packet() {
+    assert!(
+        started_late(false, 50)
+            .positions
+            .missed_before_first(START_SIZES)
+            .is_none(),
+        "endpoint loopback"
+    );
+    let mut measuring = Clocks::new(Some(48_000), 480, QPC_PACKET);
+    measuring.positions.start(measuring.next.qpc);
+    measuring.skip(50).clean(10);
+    assert!(
+        measuring
+            .positions
+            .missed_before_first(START_SIZES)
+            .is_none(),
+        "still measuring"
+    );
+    let mut absent = Clocks::new(Some(48_000), 480, 0);
+    absent.positions.start(1 << 40);
+    absent.skip(50).clean(CALIBRATION_PACKETS);
+    assert!(
+        absent.positions.missed_before_first(START_SIZES).is_none(),
+        "no QPC"
+    );
+}
+
+/// A first packet with a timestamp error does not read the start: the
+/// next packet with a QPC does, less the frames delivered before it.
+#[test]
+fn the_first_packet_with_a_qpc_reads_the_start_past_the_frames_before_it() {
+    let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
+    clocks.positions.start(clocks.next.qpc);
+    clocks.skip(50);
+    clocks.deliver(false, true);
+    clocks.deliver(false, true);
+    clocks.clean(CALIBRATION_PACKETS);
+    assert_eq!(
+        clocks.positions.missed_before_first(START_SIZES),
+        unfilled(24_000 - 960 - 480)
+    );
+}
+
+/// The backend's stop hands each stream's loss before its first packet to
+/// the lanes that stream feeds, unfilled: the microphone's to its lane,
+/// the system stream's to the follower's; nothing for none.
+#[test]
+fn the_stop_counts_the_losses_before_the_first_packets_on_their_lanes() {
+    let call = Call::new();
+    count_before_first(&call.sink, Some(1), unfilled(4_800), unfilled(9_600));
+    assert_eq!(
+        call.sink.unfilled_samples(),
+        BTreeMap::from([(AudioLane::Mic, 4_800), (AudioLane::System, 9_600)])
+    );
+    assert!(call.sink.filled_samples().is_empty(), "nothing written");
+    let none = Call::new();
+    count_before_first(&none.sink, Some(1), Missed::default(), Missed::default());
+    assert!(none.sink.unfilled_samples().is_empty());
+    let system_only = LaneFrameSink::new(&[AudioLane::System]);
+    count_before_first(&system_only, None, unfilled(480), Missed::default());
+    assert_eq!(
+        system_only.unfilled_samples(),
+        BTreeMap::from([(AudioLane::System, 480)])
+    );
 }
 
 /// Two hours of 10 ms packets on both streams in a debug build (overflow
