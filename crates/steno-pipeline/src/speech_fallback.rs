@@ -111,19 +111,7 @@ impl SpeechFallback {
             // Forget the marks that are gone, so the list never grows, and
             // the file once it lists none.
             if writable && found != record.seen {
-                if found.is_empty() {
-                    if let Err(error) = remove_durably(&path) {
-                        tracing::warn!(%error, "the speech fallback's file could not be removed");
-                    }
-                } else {
-                    save(
-                        &path,
-                        &Record {
-                            on: false,
-                            seen: found.clone(),
-                        },
-                    );
-                }
+                save(&path, false, &found);
             }
             false
         } else {
@@ -133,13 +121,7 @@ impl SpeechFallback {
                  transcribed in the speech sidecar until it is turned back on in Settings"
             );
             if writable {
-                save(
-                    &path,
-                    &Record {
-                        on: true,
-                        seen: found.clone(),
-                    },
-                );
+                save(&path, true, &found);
             }
             true
         };
@@ -173,19 +155,9 @@ impl SpeechFallback {
             "the speech engine in this process is turned back on; the speech sidecar no longer \
              stands in for it"
         );
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
-        if state.found.is_empty() {
-            remove_durably(path)
-        } else {
-            write_json(
-                path,
-                &Record {
-                    on: false,
-                    seen: state.found.clone(),
-                },
-            )
+        match &self.path {
+            Some(path) => write(path, false, &state.found),
+            None => Ok(()),
         }
     }
 
@@ -194,11 +166,27 @@ impl SpeechFallback {
     }
 }
 
-/// Writes `record` to `path`, logging a failure at `warn`: the fallback
-/// then holds for this run only.
-fn save(path: &Path, record: &Record) {
-    if let Err(error) = write_json(path, record) {
-        tracing::warn!(%error, "the speech fallback could not be saved; it holds for this run only");
+/// Writes the record of `on` and `seen` to `path`, durably, or removes
+/// the file when it would say nothing (off, no mark seen).
+fn write(path: &Path, on: bool, seen: &BTreeSet<String>) -> std::io::Result<()> {
+    if on || !seen.is_empty() {
+        write_json(
+            path,
+            &Record {
+                on,
+                seen: seen.clone(),
+            },
+        )
+    } else {
+        remove_durably(path)
+    }
+}
+
+/// [`write`], logging a failure at `warn`: what this launch found then
+/// holds for this run only.
+fn save(path: &Path, on: bool, seen: &BTreeSet<String>) {
+    if let Err(error) = write(path, on, seen) {
+        tracing::warn!(%error, "the speech fallback's file could not be written; what this launch found holds for this run only");
     }
 }
 
