@@ -28,9 +28,11 @@
 //!   ([`crate::SpeechFallback`]), and no meeting loads the models in this
 //!   process until the user turns the engine back on.
 //! - **Held off**: the user's end of the fallback writes a mark of its own
-//!   (`WarmUpMark::hold_off`), so recordings skip the warm-up, at this
-//!   launch and the next, until a meeting's processing has loaded the
-//!   engine: that first load never runs beside a recording.
+//!   (`WarmUpMark::hold_off`, its id `held-<uuid>`), so recordings skip the
+//!   warm-up, at this launch and every later one, until a meeting's
+//!   processing has loaded the engine: that first load never runs beside a
+//!   recording. The launch that finds it says the warm-up is held off, not
+//!   that it ended with the app.
 //!
 //! A folder that cannot be written leaves the warm-up unguarded, as
 //! before: the failure is logged at `warn` and the warm-up runs. The
@@ -68,6 +70,9 @@ impl WarmUpMark {
     /// The mark's name in the support directory.
     pub const FILE_NAME: &'static str = "warm-up-in-progress";
 
+    /// The start of a held mark's id (`WarmUpMark::hold_off`).
+    const HELD_PREFIX: &'static str = "held-";
+
     /// A mark that writes nothing and never turns the warm-up off.
     #[must_use]
     pub fn in_memory() -> Self {
@@ -90,11 +95,19 @@ impl WarmUpMark {
                 .map_or_else(|_| "unreadable".to_owned(), |id| id.trim().to_owned())
         });
         let skipping = left_over.is_some();
-        if skipping {
-            tracing::warn!(
+        match &left_over {
+            Some(id) if id.starts_with(Self::HELD_PREFIX) => tracing::warn!(
+                mark = %id,
+                "the warm-up of the speech models is held off since the speech engine in this \
+                 process was turned back on; recordings skip it until a meeting's processing \
+                 loads the models"
+            ),
+            Some(id) => tracing::warn!(
+                mark = %id,
                 "the last warm-up of the speech models ended with the app; recordings skip it \
                  until a meeting's processing loads the models"
-            );
+            ),
+            None => {}
         }
         WarmUpMark {
             path: Some(path),
@@ -135,21 +148,20 @@ impl WarmUpMark {
         Some(WarmingUp(Arc::clone(self)))
     }
 
-    /// Holds the warm-up off until a meeting's processing loads the speech
-    /// engine, at this launch and the next: the mark is written durably
-    /// with a fresh id, which this returns. The user's end of the fallback
-    /// ([`crate::SpeechFallback::turn_off`]), so the engine's first load
-    /// after it never runs beside a recording. A mark that cannot be
-    /// written is logged at `warn`, and holds the warm-up off for this run
-    /// only.
-    pub(crate) fn hold_off(&self) -> String {
-        let id = uuid::Uuid::new_v4().to_string();
+    /// Holds the warm-up off, at this launch and every later one, until a
+    /// meeting's processing has loaded the engine: the mark is written
+    /// durably with a fresh id (`held-<uuid>`), which this returns. The
+    /// user's end of the fallback ([`crate::SpeechFallback::turn_off`]), so
+    /// the engine's first load after it never runs beside a recording. A
+    /// mark that cannot be written returns the error, and the fallback
+    /// stays on; this run's warm-up stays off all the same, which only
+    /// keeps it off until a load.
+    pub(crate) fn hold_off(&self) -> std::io::Result<String> {
+        let id = format!("{}{}", Self::HELD_PREFIX, uuid::Uuid::new_v4());
         let mut state = self.state();
         state.skipping = true;
-        if let Err(error) = self.write(&id) {
-            tracing::warn!(%error, "the warm-up mark could not be written; the warm-up is off for this run only");
-        }
-        id
+        self.write(&id)?;
+        Ok(id)
     }
 
     /// A meeting's processing loaded the speech engine: a mark left over
@@ -284,7 +296,8 @@ mod tests {
         let path = dir.path().join(WarmUpMark::FILE_NAME);
         let mark = Arc::new(WarmUpMark::at_launch(dir.path()));
         let running = mark.begin().unwrap();
-        let id = mark.hold_off();
+        let id = mark.hold_off().unwrap();
+        assert!(id.starts_with("held-"), "{id}");
         assert!(mark.skipping());
         assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), id);
         drop(running);
@@ -294,12 +307,46 @@ mod tests {
         let next = WarmUpMark::at_launch(dir.path());
         assert!(next.skipping(), "the next launch");
         assert_eq!(next.left_over(), Some(id.as_str()));
-        assert_ne!(mark.hold_off(), id, "a fresh id each time");
+        assert_ne!(mark.hold_off().unwrap(), id, "a fresh id each time");
 
         mark.speech_engine_loaded();
         assert!(!mark.skipping());
         assert!(!path.exists());
         drop(mark.begin().unwrap());
+    }
+
+    /// A launch that finds a held mark says the warm-up is held off, once,
+    /// not that a warm-up ended with the app.
+    #[test]
+    fn a_launch_over_a_held_mark_says_it_is_held_off() {
+        let log = crate::fixtures::CapturedLog::warnings();
+        let dir = tempfile::tempdir().unwrap();
+        let id = WarmUpMark::at_launch(dir.path()).hold_off().unwrap();
+        let next = WarmUpMark::at_launch(dir.path());
+        assert!(next.skipping());
+        let text = log.text();
+        let ours = |what: &str| {
+            text.lines()
+                .filter(|line| line.contains(&id) && line.contains(what))
+                .count()
+        };
+        assert_eq!(ours("is held off since"), 1, "{text}");
+        assert_eq!(ours("ended with the app"), 0, "{text}");
+    }
+
+    /// A load while a held-off warm-up still runs leaves that warm-up its
+    /// mark until it returns.
+    #[test]
+    fn a_load_while_a_held_warm_up_runs_keeps_its_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(WarmUpMark::FILE_NAME);
+        let mark = Arc::new(WarmUpMark::at_launch(dir.path()));
+        let running = mark.begin().unwrap();
+        mark.hold_off().unwrap();
+        mark.speech_engine_loaded();
+        assert!(path.exists(), "the running warm-up is still guarded");
+        drop(running);
+        assert!(!path.exists());
     }
 
     #[test]

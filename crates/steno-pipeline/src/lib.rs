@@ -16,7 +16,7 @@
 //! | [`reading`] | [`ReadingMarks`], every read of a recording marked in the support directory: a meeting whose read ended with the app is read once more, and quarantined ([`READ_STOPPED`]) the second time in a row until Process again |
 //! | [`live_recording`] | [`LiveRecording`], whether a recording is under way: a job runs no speech engine in the app's process meanwhile |
 //! | [`speech_fallback`] | [`SpeechFallback`], the speech sidecar in place of the engine in the app's process once that engine ended the app, until the user turns it back on |
-//! | [`warm_up_mark`] | [`WarmUpMark`], the recording's warm-up marked in the support directory, so one that ended with the app turns the warm-up off until a job loads the speech engine, as the user's end of the fallback holds it off |
+//! | [`warm_up_mark`] | [`WarmUpMark`], the recording's warm-up marked in the support directory, so one that ended with the app turns the warm-up off until a job loads the speech engine; the user's end of the fallback holds it off the same way |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
 //! | [`intake`] | The phone intake ([`RecordingIntake`], which notes its copies' folders and uploads ([`NotedUpload`]) in [`AdmissionFolders`]) and the Mac one ([`LocalRecordingIntake`]) |
 //! | [`lane_merger`] | The lanes into one ordered transcript |

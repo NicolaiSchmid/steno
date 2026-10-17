@@ -33,9 +33,9 @@
 //!
 //! A file that exists but cannot be read or parsed keeps the fallback on,
 //! logged at `warn`: an unparseable one is written again, on, with the
-//! marks this launch found; an unreadable one is left as it is. A file
-//! that cannot be written leaves the fallback to what this launch found,
-//! logged at `warn`. The `steno` command neither reads nor writes the
+//! marks this launch found; an unreadable one is left as it is. At launch,
+//! a file that cannot be written leaves the fallback to what the launch
+//! found, for this run only, logged at `warn`. The `steno` command neither reads nor writes the
 //! file: a command names its engine itself, and an abort there ends only
 //! the command, whose marks the app's next launch reads.
 
@@ -147,21 +147,21 @@ impl SpeechFallback {
     /// The user turned the engine in this process back on: the fallback is
     /// off from now on, the marks the launch found listed as seen. The
     /// warm-up is held off first (`WarmUpMark::hold_off`), its mark
-    /// listed as seen too, so neither this launch nor the next warms up
+    /// listed as seen too, so neither this launch nor a later one warms up
     /// until a meeting's processing has loaded the engine. Logged at
-    /// `warn`. Syncs the disk. A file that cannot be written leaves it on,
-    /// and the error is returned.
+    /// `warn`. Syncs the disk. A file or a warm-up mark that cannot be
+    /// written leaves it on, and the error is returned.
     ///
     /// # Errors
     ///
-    /// The file could not be written.
+    /// The file or the warm-up mark could not be written.
     pub fn turn_off(&self) -> std::io::Result<()> {
         let mut state = self.state();
         if !state.on {
             return Ok(());
         }
         let mut seen = state.found.clone();
-        seen.insert(warm_up_entry(&self.warm_up.hold_off()));
+        seen.insert(warm_up_entry(&self.warm_up.hold_off()?));
         if let Some(path) = &self.path {
             write(path, false, &seen)?;
         }
@@ -404,6 +404,30 @@ mod tests {
         assert!(fallback.is_on());
     }
 
+    /// A warm-up mark that cannot be written keeps it on, as its own file
+    /// does, so no later launch warms up beside a recording unheld.
+    #[test]
+    fn a_warm_up_mark_that_cannot_be_written_keeps_it_on() {
+        let support = tempfile::tempdir().unwrap();
+        transcription_mark_left(support.path());
+        let fallback = launch(support.path());
+        assert!(fallback.is_on());
+        // A folder in the mark's place: it cannot be replaced.
+        std::fs::create_dir_all(
+            support
+                .path()
+                .join(WarmUpMark::FILE_NAME)
+                .join("in-the-way"),
+        )
+        .unwrap();
+        assert!(
+            fallback.turn_off().is_err(),
+            "the hold-off's mark was not written"
+        );
+        assert!(fallback.is_on());
+        assert!(record(support.path()).unwrap().on, "the file still says on");
+    }
+
     /// A file that does not parse keeps it on, and is written again, on,
     /// with the marks the launch found.
     #[test]
@@ -431,6 +455,26 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         assert!(launch(support.path()).is_on());
         assert!(path.is_dir(), "left as it is");
+    }
+
+    /// A file the user cannot read (mode 000) keeps it on, and its bytes
+    /// stay as they are: the marks it lists are not lost. Not as root,
+    /// who reads it all the same.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_without_read_access_keeps_it_on_and_its_bytes() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let support = tempfile::tempdir().unwrap();
+        let path = support.path().join(SpeechFallback::FILE_NAME);
+        let body = b"{\"on\":false,\"seen\":[\"warm-up:an-old-mark\"]}";
+        std::fs::write(&path, body).unwrap();
+        if std::fs::metadata(&path).unwrap().uid() == 0 {
+            return;
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(launch(support.path()).is_on());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), body);
     }
 
     #[test]
