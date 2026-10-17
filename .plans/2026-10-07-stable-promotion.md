@@ -1804,12 +1804,14 @@ Each lands before `0.11.0-rc.1`.
     the frames delivered before it (`DevicePositions::missed_before_first`,
     on a sane QPC only): past the stream's latency and one period, the time
     counts unfilled, since an engine that dropped its oldest packets before
-    the thread's first drain flags no packet. Both count at the stop,
-    whatever the stop is for (a rebuild's gap starts at the last frame),
-    and only for a recording's first start (`LaneFrameSink::first_start`,
-    claimed once the start succeeded): a restart's gap runs to its first
-    frame and holds that time already. Endpoint loopback may start in an
-    idle, so it reads no start.
+    the thread's first drain flags no packet. Both count at the stop, only
+    for a recording's first start (`LaneFrameSink::first_start`, claimed
+    once the start succeeded): a restart's gap runs to its first frame and
+    holds that time already. They count whatever the stop is for, on a
+    counter of their own (`LaneFrameSink::count_before_first`), so a
+    rebuild's gap never takes them back; the rule is stated once in
+    `realtime::missed` ("Before the first callback"). Endpoint loopback
+    may start in an idle, so it reads no start.
   - **The bound.** One second is half the session's two-second rings, so
     the fill fits beside a processing thread up to a second behind (a fill
     the rings cannot take counts as dropped, as any refused callback), and
@@ -2082,7 +2084,11 @@ Each lands before `0.11.0-rc.1`.
     queue empty and a system flag follows at once (0.76 s of idle counted
     with a 50 ms loss in 1 of 20 000 calls). Audio the staging slipped in the microphone's
     catch-up just before the stop, padded after it, counts at the stop on
-    process loopback (it is gone all the same). Where both threads were
+    process loopback (it is gone all the same). The reading before the
+    first packet reads up to the stream's clock drift over (a few frames,
+    96 002 for 96 000 lost at 0.5 % drift): it reads the QPC's time
+    against frames on the device's own clock, rounded to a period (an
+    overcount). Where both threads were
     out the note takes the lane that lost most, so the system lane's loss
     beyond the microphone's in that time (up to the microphone engine's
     buffer) is not in it; that is the note's rule on every backend, and a
@@ -2096,9 +2102,13 @@ Each lands before `0.11.0-rc.1`.
       positions cannot read (positions that never move, or before its first
       packet) counts only past the drift allowance (0.1 % of the wall time),
       through the note's wall-time shortfall; on process loopback, a loss
-      before the first packet is silent. Each such stream logs a `warn` line
-      at its stop, and step 9 of the Windows gate fails any stream whose QPC
-      line is missing or not near 1.0000, so such hardware is found there;
+      before the first packet is silent. A stream under 2 s has no judged
+      QPC, so a first start torn down before 2 s counts nothing before its
+      first packet. Each stream whose QPC was judged not sane logs a `warn`
+      line at its stop, one under 2 s the same line at `info` ("not judged
+      (under 2 s)"), and step 9 of the Windows gate fails any stream whose
+      QPC line is missing or not near 1.0000, so such hardware is found
+      there;
     - the note takes the worst lane (above), on every backend: the general
       follow-up.
 
@@ -3853,7 +3863,9 @@ candidate:
    call for a minute while something plays, suspend the app's process for
    0.6 s as above, and stop the recording within a second of resuming it.
    Then once more without the suspension. Pass: after the suspended run
-   the note counts about 0.6 s, and the microphone's stream logs either a
+   the stop's `warn` line "the capture's thread missed ... s of audio"
+   reads about 0.6 s (the note stays silent for a second or less), and the
+   microphone's stream logs either a
    "packets after a glitch" line or a "missed after its last packet" line
    of about 0.6 s; the system stream does the same on process loopback. On
    endpoint loopback, write down whether the system stream logged either
@@ -3868,8 +3880,10 @@ candidate:
    suspend the app's process for 0.6 s within half a second (run
    `pssuspend steno-desktop` as the recording starts), then record a
    minute. Then once more without the suspension. Pass: after the
-   suspended run the note counts about 0.6 s, and the microphone's stream
-   logs a "missed before its first packet" or a "packets after a glitch"
+   suspended run the stop's `warn` line "the capture's thread missed ... s
+   of audio" reads about 0.6 s (the note stays silent for a second or less),
+   and the microphone's stream logs a "missed before its first packet" or
+   a "packets after a glitch"
    line of about 0.6 s (or 0.6 s less what its engine kept); the system
    stream does the same on process loopback. On endpoint loopback, write
    down whether the system stream logged either line: it reads no start,

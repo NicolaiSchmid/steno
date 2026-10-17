@@ -2220,7 +2220,8 @@ it:
   readings, so the note says it. The packets and the seconds are logged at
   stop, with both clocks' ratios, at `warn` when the stream had
   discontinuities and filled none, or when the microphone or process
-  loopback ran without a sane QPC. At the stop each stream drains once
+  loopback had its QPC judged not sane (at `info`, "not judged (under
+  2 s)", for a stream under 2 s). At the stop each stream drains once
   more; then the microphone and process loopback, which deliver
   continuously, compare the performance counter with their last packet's
   QPC, for a stall into the stop that left no flagged packet (an engine
@@ -2240,9 +2241,12 @@ it:
   (positions that never move, or before its first packet) counts only past
   the drift allowance (0.1 % of the wall time), through the note's
   wall-time shortfall; on process loopback, a loss before the first packet
-  is silent. Each such stream logs a `warn` line at its stop, and step 9
-  of the Windows gate fails any stream whose QPC line is missing or not
-  near 1.0000, so such hardware is found there.
+  is silent. A stream under 2 s has no judged QPC, so a first start torn
+  down before 2 s counts nothing before its first packet. Each stream
+  whose QPC was judged not sane logs a `warn` line at its stop, one under
+  2 s the same line at `info` ("not judged (under 2 s)"), and step 9 of
+  the Windows gate fails any stream whose QPC line is missing or not near
+  1.0000, so such hardware is found there.
 - **A system-only capture skips silence.** With the `[System]` lane
   override the system stream is the master, and endpoint loopback
   delivers no packet while nothing plays, so the recording is shorter than
