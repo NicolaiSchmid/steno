@@ -284,13 +284,13 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     (`steno_speech::chunker::MIN_GAP_SECONDS`) is decoded in extra windows that stay
     inside it, and the recording is split once into owned spans, one per chunk and one
     per window (`steno_speech::chunker::partition`, A16a of the stable plan, which
-    states the ownership invariant): each window keeps the words with a piece in its own
-    share or two frames past it, so no chunk word is changed, and an accepted recovery
-    keeps at least what it kept before (its chunk and the overlap either side, and its
-    own share of an undecoded gap). Where a gap's window meets a chunk or another window
-    of its gap, the copy of a word both sides kept with fewer pieces falls away only as
-    the same piece starting within two frames of the other, so a word said twice across
-    a seam stays unless it is two frames long or shorter, and so does a copy of a word sounding
+    states the ownership invariant). The consecutive chunks, and one gap's windows, each
+    keep the LCS merge between them, as before; a gap's window keeps its whole decode,
+    and an accepted recovery what it kept before (its chunk and the overlap either side).
+    Where a gap's windows meet a chunk, the copy of a word both sides kept with fewer
+    pieces falls away only as the same piece starting within two frames of the other, so
+    a chunk's copy can give way to the window's; a word said twice across such a seam
+    stays unless it is two frames long or shorter, and so does a copy of a word sounding
     across an edge when the two copies start further apart; a window of digital silence
     is left out. FLEURS and the corpus are
     unchanged (4.874 %, 8.46 %, no word added), quiet speech at -20 and -26 dB comes through as
