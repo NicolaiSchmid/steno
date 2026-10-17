@@ -1482,27 +1482,6 @@ mod tests {
         }
     }
 
-    /// The default settings, `CoreML`'s and two between.
-    fn random_config(case: usize, decode_gaps: bool) -> PipelineConfig {
-        let (target_seconds, search_seconds, long_pause_seconds, max_seconds) = [
-            (25.0, 4.0, 3.0, 60.0),
-            (25.0, 4.0, f32::INFINITY, 15.0),
-            (25.0, 4.0, 3.0, 15.0),
-            (8.0, 1.0, f32::INFINITY, 60.0),
-        ][case % 4];
-        PipelineConfig {
-            chunker: ChunkerConfig {
-                target_seconds,
-                search_seconds,
-                long_pause_seconds,
-                max_seconds,
-                decode_gaps,
-                ..ChunkerConfig::default()
-            },
-            ..PipelineConfig::default()
-        }
-    }
-
     /// A word placed in a test recording: its pieces from `frame` on,
     /// `frames` frames each.
     struct Placed {
@@ -1575,6 +1554,27 @@ mod tests {
                 frame += rng.below(35 * SAMPLE_RATE) / FRAME_SAMPLES;
             }
             words.push(word);
+        }
+    }
+
+    /// The default settings, `CoreML`'s and two between.
+    fn random_config(case: usize, decode_gaps: bool) -> PipelineConfig {
+        let (target_seconds, search_seconds, long_pause_seconds, max_seconds) = [
+            (25.0, 4.0, 3.0, 60.0),
+            (25.0, 4.0, f32::INFINITY, 15.0),
+            (25.0, 4.0, 3.0, 15.0),
+            (8.0, 1.0, f32::INFINITY, 60.0),
+        ][case % 4];
+        PipelineConfig {
+            chunker: ChunkerConfig {
+                target_seconds,
+                search_seconds,
+                long_pause_seconds,
+                max_seconds,
+                decode_gaps,
+                ..ChunkerConfig::default()
+            },
+            ..PipelineConfig::default()
         }
     }
 
