@@ -476,7 +476,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
-| A16a | The owned-span partition (Nicolai's decision 3, 2026-10-15): the recording split once into disjoint owned spans, each plain decode keeping the words that start in its own span and an accepted recovery at least what it kept before; CoreML replays identically on FLEURS, the corpus, the meeting and the crafted cases, ONNX stays byte-identical on FLEURS, and no word the old merge kept is lost on 900 random layouts with recovery on | audio (#310) |
+| A16a | The owned-span partition (Nicolai's decision 3, 2026-10-15): the recording split once into disjoint owned spans, each filtered decode keeping the words with a piece in its own reach and an accepted recovery at least what it kept before; CoreML replays identically on FLEURS, the corpus, the meeting and the crafted cases, ONNX stays byte-identical on FLEURS, and no word the old merge kept is lost on 1,500 random layouts with recovery on | audio (#310) |
 | A16b | The ONNX engine's extra windows on the partition: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after A16a |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured (it aborts on Linux, not on the Mac); every read of a recording marked durably, the in-process CoreML stage included; a recording whose read ended with the app read once more, and quarantined the second time in a row ("Steno stopped while reading this recording") with the file kept and Process again offered; the allocations bounded by a walk of the boxes, chunks and tables before symphonia opens a file, its reader the one the file's first bytes name (MP4, CAF or WAV) and opened where the walk began, any other kind of file refused plainly; kill tests for one kill and for two | audio (#298) |
 | A18 | A capture thread that misses cycles never loses audio silently: on PipeWire, Core Audio and WASAPI the missed frames are written as silence on every lane (past a second only counted), counted in the statistics and in the note about missing audio; PipeWire's data-loop thread without real-time scheduling is a warning | audio (#297) |
@@ -1552,7 +1552,8 @@ Each lands before `0.11.0-rc.1`.
   decision 3 (2026-10-15, after #263): the recording is split once into
   owned spans, each decode keeps the words that start in its own span, and
   recovery widens only the decoded window. Main refined it for recoveries on
-  2026-10-17 (the invariant below). Two PRs, both before `0.11.0-rc.1`.
+  2026-10-17, to one bound per span and one keep rule (the invariant
+  below). Two PRs, both before `0.11.0-rc.1`.
   - **A16a The owned-span partition** (#310).
     `steno_speech::chunker::partition` splits the recording into
     `Span { owned, window, reach, chunk }`: one span per chunk of the layout
@@ -1563,10 +1564,11 @@ Each lands before `0.11.0-rc.1`.
     middle of the overlap of two windows of one gap, and the middle of an
     undecoded gap (shorter than `MIN_GAP_SECONDS`, digital silence, or every
     gap while `decode_gaps` is off), whose halves the spans either side own.
-    A chunk's `reach` is its window and `overlap_seconds` either side,
-    widened over any audio beside it that no other window decodes and
-    rounded out to whole encoder frames; a gap's window reaches over its
-    owned span.
+    `reach` is the samples whose words the span's decode keeps: for a
+    chunk, its window and `overlap_seconds` either side, together with its
+    owned span, rounded out to whole encoder frames (what an accepted
+    recovery keeps); for a gap's window, its owned span and `SEAM_SAMPLES`
+    (two encoder frames) either side. Both are clamped to the recording.
   - **The ownership invariant.** Reviews check this instead of inventing
     layouts. Plain decodes are partitioned; recoveries are the named
     exception and keep at least what they kept before the partition.
@@ -1575,44 +1577,55 @@ Each lands before `0.11.0-rc.1`.
     2. `window ⊇ owned`, except the share of an undecoded gap a span owns,
        which no window decodes.
     3. `window.len() <= max_seconds`.
-    4. Each decode keeps only the words whose first piece starts in its own
-       owned span (`own`: pieces grouped into words at each word start, a
-       word kept whole when its first piece's `Token::sample` lies in the
-       span; a decode's leading continuation counts as a word of its own,
-       and a gap's window drops it when the span before kept any token, as
-       before the partition), with two named exceptions until after stable:
-       - the plain chunks of a run (the chunks between two extra windows) go
-         whole to their LCS merge; replacing that merge waits until after
-         stable and needs a D9 ruling (decision 3);
-       - an accepted recovery keeps the words with a piece in its chunk's
-         `reach`, so a word it shares with a neighbour comes out once or
-         twice, never zero times.
-       A gap's window also keeps the words that start within `SEAM_SAMPLES`
-       (two encoder frames) of its owned span, for the seam rule below.
+    4. Every filtered decode keeps the words with a piece in its span's
+       `reach` (`own`: pieces grouped into words at each word start, a word
+       kept from its start, wherever that lies, to the punctuation after its
+       last piece in the reach, where the trim before the partition cut; a
+       decode's leading continuation counts as a word of its own, and a
+       gap's window drops it when the span before kept any token, as before
+       the partition):
+       - a gap's window keeps the words with a piece within `SEAM_SAMPLES`
+         of its owned span, for the seam rule below;
+       - an accepted recovery keeps the words with a piece in its reach, so
+         a word it shares with a neighbour comes out once or twice, never
+         zero times;
+       - the plain chunks of a run (the chunks between two extra windows)
+         go whole to their LCS merge, until after stable: replacing that
+         merge needs a D9 ruling (decision 3).
     5. Every word the merge before the partition keeps, this one keeps: a
        duplicate is allowed, a loss never.
   - Which test checks which clause:
-    - clauses 1 to 3, and the reach (it holds the owned span and the window
-      ± the overlap, sits on the frame grid, and past that holds only audio
-      no other window decodes, to a frame; a gap's window reaches over its
-      owned span): `a_partition_owns_every_sample_once` (chunker), apart
-      from any merge rule; `owned_shares_meet_in_the_middle_of_an_overlap_or_an_undecoded_gap`
+    - clauses 1 to 3, and the reach of every span: a gap's window reaches
+      two frames past its owned span either side; a chunk's holds its owned
+      span and its window ± the overlap, sits on the frame grid, and past
+      the window ± the overlap holds only its own owned span, to a frame,
+      which no other window decodes: `a_partition_owns_every_sample_once`
+      (chunker), apart from any merge rule; `owned_shares_meet_in_the_middle_of_an_overlap_or_an_undecoded_gap`
       for one fixed layout;
-    - clause 4: `a_decode_keeps_the_words_that_start_in_its_span` (`own`),
+    - clause 4: `a_decode_keeps_the_words_with_a_piece_in_its_span` (`own`),
       and end to end without recovery
       `every_word_away_from_a_spans_edge_comes_out_once` (pipeline);
-    - clause 4's recovery exception and clause 5:
+    - clause 4's recovery bound and clause 5:
       `every_word_the_old_merge_keeps_comes_out` (pipeline's differential
       tests), against a frozen copy of the merge before the partition, over
-      900 random layouts with recovery on: the defaults, CoreML's settings
-      and two between, the extra windows on and off, an exact and a
-      jittering fake. No word or piece the old merge kept is lost, and every
-      word a final window heard inside its span's bound comes out (the
-      recovery's window read from `Transcript::windows`). Of 10,949 words,
-      84 (0.8 %) come out more often than from the old merge; 350 cases have
-      an accepted recovery. The ignored `..._over_more_seeds` runs eight
-      more seeds of 900 cases each: 0 lost over 87,910 more words, 834
-      (0.9 %) doubled.
+      1,500 random layouts with recovery on, five generators: the old
+      merge's random and two-sided layouts, the oracle's words, a collision
+      layout (quiet words in a skipped pause reusing a plain chunk's ids)
+      and a general one (any ids in the pauses, gaps of several windows
+      beside recoveries, full stops at seams, the first and last spans);
+      the defaults, CoreML's settings and two between, the extra windows on
+      and off, an exact and a jittering fake. No word or piece the old merge
+      kept is lost, and every word a filtered decode heard in its reach
+      comes out (the recovery's window read from `Transcript::windows`; a
+      plain run's LCS, unchanged, can drop a word in both merges alike). A
+      word that repeats the piece before it counts as lost only where a
+      final window heard it: the fake never gives one piece twice in a
+      row, which a model does. Of
+      23,980 words, 257 (1.1 %) come out more often than from the old
+      merge; 786 cases have an accepted recovery. The ignored
+      `..._over_more_seeds` runs eight more seeds of 2,500 cases each, with
+      the jitter at one, two and three frames (60,000 cases, 944,604 words,
+      29,955 cases with an accepted recovery): 0 lost, 0.9 % doubled.
     - The loss classes the differential test found in the first version of
       the partition are tests, each the old merge's text and this one's
       equal: a word only a recovery heard in a decoded or an undecoded
@@ -1627,19 +1640,30 @@ Each lands before `0.11.0-rc.1`.
       join: a word whose first piece lies before a recovery's reach and
       whose rest inside it; the lone later piece a gap's window begins with
       after a chunk that kept nothing; a word across the seam of two
-      windows of one gap that the later window heard more of.
+      windows of one gap that the later window heard more of. And three
+      from its collision and general layouts: a recovery that reached over
+      a whole skipped pause let the run's LCS take a quiet word there for a
+      plain neighbour's and drop the words between
+      (`a_recovery_across_an_undecoded_pause_keeps_its_plain_neighbours_words`,
+      both directions, the jitter at zero to two frames); a word across the
+      seam of two gap windows whose earlier window lost its tail
+      (`a_word_across_the_seam_of_two_gap_windows_keeps_every_piece`); and
+      a recovery's full stop past its reach that the run's LCS paired with
+      the next chunk's (the punctuation cut in `own`'s test).
   - Recovery: a chunk looks empty on its window, as before; the candidates
     are scored on the word starts whose encoder frame lies in the chunk's
-    window, as before; an accepted one keeps the words with a piece in the
-    chunk's reach, which holds every token `keep_chunk_and_overlap` kept.
-    `keep_chunk_and_overlap` is gone.
+    window, as before (`a_recovery_counts_a_word_on_its_chunks_first_frame`
+    and `..._last_frame`); an accepted one keeps the words with a piece in
+    the chunk's reach, which holds every token `keep_chunk_and_overlap`
+    kept. `keep_chunk_and_overlap` is gone.
   - The join concatenates the spans' words in order, with one measured rule
     for the residual, at every seam a gap's window has (with a chunk or
     with another window of its gap): the last word before the seam and the
     first after it, the same piece starting within `SEAM_SAMPLES` of each
     other, are one word heard twice, and the copy with fewer pieces falls
     away (on a tie the gap window's, or the later window's between two
-    windows of a gap). A gap's window that begins inside a word drops the
+    windows of a gap); copies more than two frames apart, whichever comes
+    first, both stay. A gap's window that begins inside a word drops the
     pieces that continue it when the span before kept any token. It
     replaces `Seam::fit`. `splice_gaps`, `Seam`, `keep_chunk_and_overlap`,
     `gap_windows` and the decode jobs are deleted.
@@ -1663,10 +1687,10 @@ Each lands before `0.11.0-rc.1`.
     FLEURS.
   - What changes where the gates do not reach: an accepted recovery keeps
     at least the chunk and 2 s either side, as before, and also the words
-    it heard in audio beside it that no other window decodes: without extra
-    windows (ONNX) up to the next chunk, across a skipped long pause. No
-    ONNX chunk of FLEURS is retried; A16b measures recoveries with
-    `decode_gaps` on, on the meeting's lanes, which trigger them.
+    it heard in its own share of an undecoded gap: without extra windows
+    (ONNX), up to the middle of a skipped long pause. No ONNX chunk of
+    FLEURS is retried; A16b measures recoveries with `decode_gaps` on, on
+    the meeting's lanes, which trigger them.
   - The punctuation split #263 left to A16 is moot: a decoded gap is its
     window's, and a word only the window heard stays. The case is a test
     (`a_punctuation_piece_from_a_later_recovery_loses_no_window_word`).
@@ -1683,13 +1707,17 @@ Each lands before `0.11.0-rc.1`.
     - an accepted recovery beside a decoded neighbour keeps its own copies
       of the words in their overlap: the run's LCS meets a chunk's copies
       and the seam rule a gap window's first or last word, and the rest come
-      out twice (the 0.8 % above).
-  - Where two windows of one gap meet, each keeps the words two frames past
-    the seam, so a word there comes out once unless the two windows time
-    it more than two frames apart (twice), and is lost only if the later
-    window times it more than four frames before the earlier one; a gap's
-    windows are of one length and differ by the frame grids' offset, under
-    a frame. `a_word_where_two_windows_of_a_gap_meet_comes_out_once` places
+      out twice (the 1.1 % above).
+  - Where two windows of one gap meet, each keeps the words with a piece
+    two frames past the seam, so a word there comes out once unless the two
+    windows time it more than two frames apart (twice), and is lost only
+    above 4 frames of disagreement (measured worst 3.4): the later window
+    would have to time it more than four frames before the earlier one.
+    Over 1,527 pairs of one word in two CoreML chunks' overlap, from the
+    gate sets' dumps, the later copy comes at most 3.4 frames before the
+    earlier; 26 pairs differ by more than two frames, a duplicate at a
+    seam. A gap's windows are of one length and differ by the frame grids'
+    offset, under a frame. `a_word_where_two_windows_of_a_gap_meet_comes_out_once` places
     a word up to three frames either side of the seam, on and off the frame
     grid, also in the mirror and over the jittering fake: once each time.
     `a_word_where_a_gaps_window_meets_a_recovered_chunk_comes_out` does the
