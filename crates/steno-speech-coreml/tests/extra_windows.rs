@@ -245,6 +245,19 @@ fn write_out(case: &Case) {
         .expect("empty baseline");
 }
 
+/// The extra windows over the gaps.
+fn extra_windows(transcript: &Transcript) -> impl Iterator<Item = &Range<usize>> {
+    transcript
+        .spans
+        .iter()
+        .filter(|s| !s.recover)
+        .map(|s| &s.window)
+}
+
+fn chunk_count(transcript: &Transcript) -> usize {
+    transcript.spans.iter().filter(|s| s.recover).count()
+}
+
 fn transcribe(case: &Case) -> Transcript {
     write_out(case);
     engine()
@@ -262,15 +275,13 @@ fn quiet_speech_the_chunks_leave_out_comes_through() {
     for (position, db, case) in quiet_cases(&dir) {
         let transcript = transcribe(&case);
         let words = words_inside(&transcript, &case.stretches[0], 0.0).len();
-        let decoded_by_gaps = transcript
-            .gap_windows
-            .iter()
+        let decoded_by_gaps = extra_windows(&transcript)
             .any(|g| g.start < case.stretches[0].end && case.stretches[0].start < g.end);
         println!(
             "{}: {words} words in the quiet stretch, {} chunks, {} extra windows{}",
             case.name,
-            transcript.chunks.len(),
-            transcript.gap_windows.len(),
+            chunk_count(&transcript),
+            extra_windows(&transcript).count(),
             if decoded_by_gaps {
                 ", some over it"
             } else {
@@ -302,14 +313,11 @@ fn silence_and_room_noise_the_chunks_leave_out_add_no_word() {
             // decodes the rest of the noise. Digital silence is left out.
             assert!(
                 !noise
-                    || transcript
-                        .gap_windows
-                        .iter()
+                    || extra_windows(&transcript)
                         .any(|g| g.start < stretch.end && stretch.start < g.end),
-                "{}: no extra window over {stretch:?}: chunks {:?}, windows {:?}",
+                "{}: no extra window over {stretch:?}: spans {:?}",
                 case.name,
-                transcript.chunks,
-                transcript.gap_windows
+                transcript.spans
             );
             let words = words_inside(&transcript, stretch, EDGE_SECONDS);
             assert!(
@@ -325,8 +333,8 @@ fn silence_and_room_noise_the_chunks_leave_out_add_no_word() {
             "{}: {} words, {} chunks, {} extra windows, none in the stretches",
             case.name,
             transcript.words.len(),
-            transcript.chunks.len(),
-            transcript.gap_windows.len()
+            chunk_count(&transcript),
+            extra_windows(&transcript).count()
         );
     }
 }
