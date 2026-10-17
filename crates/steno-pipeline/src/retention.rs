@@ -2,7 +2,7 @@
 //! Swift: `Sources/StenoCore/Storage/RetentionSweep.swift`.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -38,9 +38,11 @@ fn listed(failures: &[(PathBuf, std::io::Error)]) -> String {
 /// a re-run dropped, stays past the retention period until the meeting
 /// is deleted, as in Swift. The asset row keeps its URLs and loses
 /// `expires_at` once every file is gone, so a sweep runs once per expiry.
-/// A missing file is skipped; a file that cannot be removed leaves the
-/// stamp in place for the next sweep and never stops the sweep from
-/// reaching the other assets. Each asset is checked again in the write that
+/// A file known to be missing is skipped. One whose presence cannot be
+/// read (an I/O error, a folder the sweep cannot search) counts as there,
+/// so its removal fails and the stamp stays. A file that cannot be removed
+/// leaves the stamp in place for the next sweep and never stops the sweep
+/// from reaching the other assets. Each asset is checked again in the write that
 /// removes its files ([`Store::sweep_expired_asset`]), so a meeting queued
 /// since the sweep read the list keeps its audio.
 #[derive(Debug, Clone)]
@@ -74,7 +76,7 @@ impl RetentionSweep {
                     .filter_map(|url| file_url_path(url))
                     .collect();
                 let mut clean = true;
-                for path in files.into_iter().filter(|path| path.exists()) {
+                for path in files.into_iter().filter(|path| !known_gone(path)) {
                     match std::fs::remove_file(&path) {
                         Ok(()) => removed.push(path),
                         Err(error) => {
@@ -105,19 +107,27 @@ impl RetentionSweep {
         }
     }
 
-    /// Every asset whose master file is still on disk becomes keep forever
-    /// with `expires_at` cleared, in one write. Returns how many.
+    /// Every asset whose master file is still on disk, or may be (its
+    /// presence cannot be read), becomes keep forever with `expires_at`
+    /// cleared, in one write, so no later sweep removes it once it can be
+    /// read again. Returns how many.
     pub fn keep_all(&self) -> Result<usize, StoreError> {
         let ids: Vec<_> = self
             .store
             .assets()?
             .into_iter()
-            .filter(|asset| file_url_path(&asset.url).is_some_and(|path| path.exists()))
+            .filter(|asset| file_url_path(&asset.url).is_some_and(|path| !known_gone(&path)))
             .map(|asset| asset.id)
             .collect();
         self.store.keep_forever(&ids)?;
         Ok(ids.len())
     }
+}
+
+/// Whether `path` is known not to exist. An error reading its metadata
+/// (an I/O error, a folder that cannot be searched) is not knowing.
+fn known_gone(path: &Path) -> bool {
+    matches!(path.try_exists(), Ok(false))
 }
 
 #[cfg(test)]
@@ -262,6 +272,132 @@ mod tests {
             .map(|asset| asset.id)
             .collect();
         assert_eq!(due, [expired.id], "still due, for the next sweep");
+    }
+
+    /// A ready meeting whose one asset, its master in its own folder,
+    /// expired an hour before `now`. Returns the layout, the master and
+    /// the asset.
+    #[cfg(unix)]
+    fn expired_recording(
+        store: &Store,
+        dir: &Path,
+        now: DateTime<Utc>,
+    ) -> (RecordingLayout, PathBuf, AudioAsset) {
+        let mut meeting = sample_data::meeting();
+        meeting.state = MeetingState::Ready;
+        let layout = RecordingLayout::new(&dir.join("audio"), meeting.id);
+        layout.create_directories(true).unwrap();
+        let master = layout.master(AudioFormat::Wav16kInt16);
+        std::fs::write(&master, b"wav").unwrap();
+        let asset = AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: file_url(&master, false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: vec![AudioLane::Mixed],
+            sidecars_16k: BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepDays(1),
+            expires_at: Some(now - Duration::hours(1)),
+        };
+        store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        (layout, master, asset)
+    }
+
+    /// Makes a folder unsearchable (mode 000) and searchable again (755)
+    /// when dropped, so a failed assertion never leaves a folder the
+    /// temporary directory cannot remove.
+    #[cfg(unix)]
+    struct Unsearchable<'a>(&'a Path);
+
+    #[cfg(unix)]
+    impl<'a> Unsearchable<'a> {
+        fn new(folder: &'a Path) -> Self {
+            Self::set(folder, 0o000);
+            Unsearchable(folder)
+        }
+
+        fn set(folder: &Path, mode: u32) {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Unsearchable<'_> {
+        fn drop(&mut self) {
+            Self::set(self.0, 0o755);
+        }
+    }
+
+    /// One expired asset, no keeper, and the master's folder cannot be
+    /// searched, so whether the master is there cannot be read: it counts
+    /// as there, its removal fails, nothing is removed and the stamp stays.
+    /// Once the folder can be searched again, the next sweep removes the
+    /// master and clears the stamp. Skipped where the folder's mode does
+    /// not stop the read (as root).
+    #[cfg(unix)]
+    #[test]
+    fn a_master_in_a_folder_the_sweep_cannot_search_keeps_its_stamp_until_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let now = Utc::now();
+        let (layout, master, asset) = expired_recording(&store, dir.path(), now);
+        let sweep = RetentionSweep::new(store.clone());
+
+        let unsearchable = Unsearchable::new(&layout.directory);
+        if master.try_exists().is_ok() {
+            return;
+        }
+        let first = sweep.run(now);
+        drop(unsearchable);
+        let Err(SweepIncomplete::Files(failures)) = first else {
+            panic!("the sweep removed nothing and says so: {first:?}");
+        };
+        let failed: Vec<&PathBuf> = failures.iter().map(|(path, _)| path).collect();
+        assert_eq!(failed, [&master]);
+        assert!(master.exists(), "the master stays");
+        let due: Vec<Uuid> = store
+            .expired_assets(now)
+            .unwrap()
+            .iter()
+            .map(|asset| asset.id)
+            .collect();
+        assert_eq!(due, [asset.id], "the stamp stays, for the next sweep");
+
+        assert_eq!(sweep.run(now).unwrap(), std::slice::from_ref(&master));
+        assert!(!master.exists(), "the next sweep removes the master");
+        assert_eq!(
+            store.asset_by_id(asset.id).unwrap().unwrap().expires_at,
+            None
+        );
+    }
+
+    /// "Keep all" while the master's folder cannot be searched keeps that
+    /// recording too, so no sweep removes it once the folder can be
+    /// searched again. Skipped as root, like the test above.
+    #[cfg(unix)]
+    #[test]
+    fn keep_all_keeps_a_master_whose_folder_cannot_be_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let now = Utc::now();
+        let (layout, master, asset) = expired_recording(&store, dir.path(), now);
+        let sweep = RetentionSweep::new(store.clone());
+
+        let unsearchable = Unsearchable::new(&layout.directory);
+        if master.try_exists().is_ok() {
+            return;
+        }
+        let kept = sweep.keep_all();
+        drop(unsearchable);
+        assert_eq!(kept.unwrap(), 1);
+        let stored = store.asset_by_id(asset.id).unwrap().unwrap();
+        assert_eq!(stored.retention, AudioRetention::KeepForever);
+        assert_eq!(stored.expires_at, None);
+
+        assert_eq!(sweep.run(now).unwrap(), Vec::<PathBuf>::new());
+        assert!(master.exists(), "kept forever");
     }
 
     /// Two asset rows for one master, each with its own sidecar and
