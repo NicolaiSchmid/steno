@@ -548,8 +548,8 @@ after the port".
   no longer accepts its yank (#300).
 - zbus 6, once `tauri-plugin-opener` and `tauri-plugin-single-instance` move
   to it, and the workspace's own `zbus` with them; until then `deny.toml`
-  ignores RUSTSEC-2026-0370 to 0372 for zvariant, zbus_names and
-  zvariant_derive, which zbus 6 merged into itself.
+  ignores RUSTSEC-2026-0370 to 0372, which mark zvariant, zbus_names and
+  zvariant_derive unmaintained since zbus 6 merged them into itself.
 
 ## Work packages
 
