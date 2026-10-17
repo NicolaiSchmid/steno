@@ -998,6 +998,10 @@ pub struct CaptureRecorder {
     calendar: CalendarLookups,
     /// This recorder, for the watcher threads.
     this: Weak<CaptureRecorder>,
+    /// Runs in [`Self::notify`] between the read of the state and the
+    /// live flag's change: the tests' window for a race.
+    #[cfg(test)]
+    before_live: Mutex<Hook>,
 }
 
 impl CaptureRecorder {
@@ -1047,6 +1051,8 @@ impl CaptureRecorder {
             clock: Mutex::new(Arc::new(steno_audio::SystemClock::new())),
             calendar: CalendarLookups::new(Arc::new(NoCalendar)),
             this: this.clone(),
+            #[cfg(test)]
+            before_live: Mutex::new(None),
         })
     }
 
@@ -1324,13 +1330,27 @@ impl CaptureRecorder {
             .clone()
     }
 
-    /// Every change of the status ends here, with no lock held: the
-    /// pipelines learn whether a recording is under way (live from
-    /// `Starting` to `Idle`), so no job runs `CoreML` beside one
-    /// ([`steno_pipeline::live_recording`]).
+    /// Every change of the status ends here. The live flag is read and set
+    /// under the recorder's lock, so two notifies never apply out of
+    /// order: the pipelines learn whether a recording is under way (live
+    /// from `Starting` to `Idle`), so no job runs `CoreML` beside one
+    /// ([`steno_pipeline::live_recording`]). The flag's send neither
+    /// blocks nor takes the recorder's lock.
     fn notify(&self) {
-        let live = self.inner().status.state != RecordingState::Idle;
-        self.pipeline.live_recording().set(live);
+        {
+            let inner = self.inner();
+            let live = inner.status.state != RecordingState::Idle;
+            #[cfg(test)]
+            if let Some(hook) = self
+                .before_live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                hook();
+            }
+            self.pipeline.live_recording().set(live);
+        }
         self.changes.notify_all();
         if let Some(hook) = self.hook() {
             hook();
@@ -3455,6 +3475,48 @@ mod tests {
         stopping.join().unwrap();
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
         assert!(!live(), "idle");
+    }
+
+    /// A notify that read `Recording` cannot apply it after a stop that
+    /// ended meanwhile: the read and the flag's change are one step under
+    /// the recorder's lock, so the stop waits for it, and the flag ends
+    /// as the stop left it. Without the lock the stale notify would set
+    /// the flag live again after the stop, and every job would wait for a
+    /// recording that is over (A19).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_notify_that_read_a_recording_never_outlives_its_stop() {
+        let harness = harness(&[]);
+        start(&harness.recorder);
+        let (in_window, inside) = std::sync::mpsc::channel();
+        let (stop_returned, stop_seen) = std::sync::mpsc::channel::<()>();
+        let stop_seen = Mutex::new(stop_seen);
+        let armed = AtomicBool::new(true);
+        *harness.recorder.before_live.lock().unwrap() = Some(Arc::new(move || {
+            if armed.swap(false, Ordering::SeqCst) {
+                let _ = in_window.send(());
+                // The stop cannot finish while the lock is held: the wait
+                // only bounds the test.
+                let _ = stop_seen
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_millis(500));
+            }
+        }));
+        let stale = harness.recorder.clone();
+        let notifying = std::thread::spawn(move || stale.notify());
+        inside
+            .recv_timeout(PATIENCE)
+            .expect("the notify read the state");
+        let stopper = harness.recorder.clone();
+        let stopper_thread = std::thread::spawn(move || {
+            stop(&stopper);
+            let _ = stop_returned.send(());
+        });
+        notifying.join().unwrap();
+        stopper_thread.join().unwrap();
+        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
+        let live = harness.recorder.pipeline.live_recording().is_live();
+        assert!(!live, "the stale notify set the flag after the stop");
     }
 
     /// A Quit while a manual Stop is still saving waits for that save:
