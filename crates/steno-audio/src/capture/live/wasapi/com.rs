@@ -508,12 +508,13 @@ fn qpc_now() -> Option<u64> {
         QueryPerformanceCounter(&raw mut counter).is_ok()
             && QueryPerformanceFrequency(&raw mut frequency).is_ok()
     };
-    let (Ok(counter), Ok(frequency)) = (u128::try_from(counter), u128::try_from(frequency)) else {
+    if !read {
         return None;
-    };
+    }
+    let counter = u128::try_from(counter).ok()?;
+    let frequency = u128::try_from(frequency).ok()?;
     // `GetBuffer`'s QPC is the counter in 100 ns units.
-    let now = (counter * 10_000_000).checked_div(frequency)?;
-    u64::try_from(now).ok().filter(|_| read)
+    u64::try_from((counter * 10_000_000).checked_div(frequency)?).ok()
 }
 
 /// One initialised shared-mode capture stream: the client, its capture
