@@ -74,9 +74,10 @@
 //!   part on top (an overcount, never a loss). The follower's padding
 //!   counts up to the engine's buffer above what the engine dropped (the
 //!   packets it kept land late and slip), an overcount of up to 100 ms per
-//!   outage; an outage overlapping the master's own reads up to two
-//!   targets, and any queue an earlier outage's late packets left above
-//!   the target, under ([`FollowerLane::take_missed`]).
+//!   outage; an outage into the stop or overlapping the master's own
+//!   reads up to two targets under, and one within two slip windows of an
+//!   earlier outage whose late packets raised the queue also under by
+//!   that excess ([`FollowerLane::take_missed`]).
 //! - When the master's thread resumes first after such an outage, the
 //!   follower's kept packets land late, as after the follower's own
 //!   outage, until the queue slips back to the target within two slip
@@ -414,11 +415,12 @@ impl FollowerLane {
     /// them, while the master was out) takes no padding at all; one flag
     /// that finds the queue within them is enough. The padding reads the
     /// loss to within the lane's lag: up to two targets under when the
-    /// master's last pulls take the lag (an outage into the stop, or
-    /// overlapping the master's own), and overlapping the master's own also
-    /// under by the queue's excess over the target that an earlier
-    /// outage's late packets left, until it slips (two slip windows at
-    /// most): up to the engine's buffer less the target.
+    /// master's last pulls take the lag (an outage that ends within the lag
+    /// before the stop, its flag at the final drain, or one overlapping the
+    /// master's own); and any follower outage within two slip windows of
+    /// an earlier one whose late packets raised the queue above the target
+    /// reads also under by that excess, up to the engine's buffer less the
+    /// target.
     #[inline(always)]
     pub fn take_missed(&self) -> Missed {
         let recorded = self.pending_flags();
