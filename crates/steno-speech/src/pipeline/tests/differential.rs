@@ -895,14 +895,17 @@ fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> Losses {
         }
         None => false,
     };
+    // A piece as its placed word and id: the fake never gives one piece
+    // twice in a row, so of a word's two equal pieces either can come out.
+    let piece = |p: &RefPiece| p.0.map(|(w, i)| (w, case.words[w].pieces[i]));
     // Whether `word` holds `of` from its first piece on, each piece of
     // `of` in order, every other piece of `word` an extra one.
     let holds = |word: &[RefPiece], of: &[RefPiece]| {
-        let mut wanted = of.iter().map(|p| p.0).peekable();
-        word[0].0 == of[0].0
+        let mut wanted = of.iter().map(piece).peekable();
+        piece(&word[0]) == piece(&of[0])
             && word
                 .iter()
-                .all(|p| wanted.next_if_eq(&p.0).is_some() || extra(p, word[0].1))
+                .all(|p| wanted.next_if_eq(&piece(p)).is_some() || extra(p, word[0].1))
             && wanted.peek().is_none()
     };
     // Each of the old merge's words that begins at a word start, up to its
@@ -931,7 +934,7 @@ fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> Losses {
     out.glues = after
         .iter()
         .filter(|word| {
-            let same = |of: &Vec<RefPiece>| of.iter().map(|p| p.0).eq(word.iter().map(|p| p.0));
+            let same = |of: &Vec<RefPiece>| of.iter().map(piece).eq(word.iter().map(piece));
             !before.iter().any(same)
                 && words
                     .iter()
