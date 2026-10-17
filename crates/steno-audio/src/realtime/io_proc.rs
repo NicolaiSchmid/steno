@@ -53,7 +53,7 @@ fn samples(channel: &ChannelRef, buffers: &[BufferView], frames: usize) -> Optio
 /// becomes silence instead of costing the other lanes their audio. 0 when
 /// no source's buffer carries a frame.
 #[inline(always)]
-fn callback_frames(buffers: &[BufferView], sources: &[LaneSource]) -> usize {
+pub(crate) fn callback_frames(buffers: &[BufferView], sources: &[LaneSource]) -> usize {
     for source in sources {
         if let Some(buffer) = buffers.get(source.left.buffer)
             && buffer.channels > 0
@@ -72,7 +72,8 @@ fn callback_frames(buffers: &[BufferView], sources: &[LaneSource]) -> usize {
 /// a buffer the HAL delivered without data, or shaped unlike the layout the
 /// pointers were resolved for, becomes silence so the lanes stay aligned. A
 /// callback where no source's buffer carries a frame has no length to write
-/// or to count as a drop, and is skipped.
+/// or to count as a drop, and is skipped. Whether the callback was written:
+/// `false` when skipped, or refused (and counted as dropped) by full rings.
 ///
 /// # Safety
 ///
@@ -80,10 +81,14 @@ fn callback_frames(buffers: &[BufferView], sources: &[LaneSource]) -> usize {
 /// `f32` for the duration of the call, as the HAL guarantees inside the
 /// IOProc and the tests guarantee with owned vectors.
 #[inline(always)]
-pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &LaneFrameSink) {
+pub unsafe fn deliver(
+    buffers: &[BufferView],
+    sources: &[LaneSource],
+    sink: &LaneFrameSink,
+) -> bool {
     let frames = callback_frames(buffers, sources);
     if frames == 0 || !sink.begin_callback(frames) {
-        return;
+        return false;
     }
     for (lane, source) in sources.iter().enumerate() {
         match samples(&source.left, buffers, frames) {
@@ -105,6 +110,7 @@ pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &Lan
         }
     }
     sink.end_callback();
+    true
 }
 
 /// The most buffers of one list an IOProc of the macOS backend reads or
@@ -177,9 +183,13 @@ pub const MAX_SLICE_BUFFERS: usize = 4;
 /// shorter than `channels * frames` is treated as silent: its buffer keeps
 /// the length it claims and becomes zeros, so the lanes stay aligned and
 /// nothing reads past its end. Buffers beyond [`MAX_SLICE_BUFFERS`] are
-/// ignored.
+/// ignored. Whether the callback was written, as [`deliver`] answers.
 #[inline(always)]
-pub fn deliver_slices(buffers: &[SliceView<'_>], sources: &[LaneSource], sink: &LaneFrameSink) {
+pub fn deliver_slices(
+    buffers: &[SliceView<'_>],
+    sources: &[LaneSource],
+    sink: &LaneFrameSink,
+) -> bool {
     let count = buffers.len().min(MAX_SLICE_BUFFERS);
     let mut views = [BufferView {
         channels: 0,

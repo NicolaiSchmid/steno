@@ -55,13 +55,14 @@ use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE, S_OK};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
-    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
-    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, AUDIOCLIENT_ACTIVATION_PARAMS,
-    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, ActivateAudioInterfaceAsync, AudioSessionDisconnectReason,
-    AudioSessionState, AudioSessionStateActive, AudioSessionStateExpired, DEVICE_STATE,
-    DEVICE_STATE_ACTIVE, EDataFlow, ERole, IActivateAudioInterfaceAsyncOperation,
+    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+    AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    ActivateAudioInterfaceAsync, AudioSessionDisconnectReason, AudioSessionState,
+    AudioSessionStateActive, AudioSessionStateExpired, DEVICE_STATE, DEVICE_STATE_ACTIVE,
+    EDataFlow, ERole, IActivateAudioInterfaceAsyncOperation,
     IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
     IAudioCaptureClient, IAudioClient, IAudioSessionControl, IAudioSessionControl2,
     IAudioSessionEvents, IAudioSessionEvents_Impl, IAudioSessionManager2,
@@ -76,6 +77,7 @@ use windows::Win32::System::Com::{
     BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize, IAgileObject, IAgileObject_Impl, STGM_READ,
 };
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{
     AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, OpenProcess,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -87,9 +89,11 @@ use windows_core::implement;
 
 use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
-use crate::capture::split_streams::{BUFFER_DURATION, StreamSizes, stream_sizes};
+use crate::capture::split_streams::{
+    BUFFER_DURATION, DevicePositions, Packet, StreamSizes, stream_sizes,
+};
 use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
-use crate::realtime::SliceView;
+use crate::realtime::{Missed, SliceView};
 
 /// A failed COM or WASAPI call: which one, its `HRESULT`, the system's
 /// message for it.
@@ -396,18 +400,7 @@ impl Endpoint {
     /// The shared-mode mix format's channels and rate.
     #[must_use]
     pub fn mix_format(&self) -> Option<(usize, u32)> {
-        let client = self.audio_client().ok()?;
-        // SAFETY: on success the format is ours to free; it is read by
-        // value (the struct is packed, so unaligned) before the free.
-        unsafe {
-            let format = client.GetMixFormat().ok()?;
-            if format.is_null() {
-                return None;
-            }
-            let value = format.read_unaligned();
-            CoTaskMemFree(Some(format.cast_const().cast::<c_void>()));
-            Some((usize::from(value.nChannels), value.nSamplesPerSec))
-        }
+        mix_format(&self.audio_client().ok()?)
     }
 
     fn audio_client(&self) -> Result<IAudioClient, ComError> {
@@ -488,6 +481,42 @@ pub enum LoopbackKind {
     Endpoint,
 }
 
+/// `client`'s shared-mode mix format: its channels and rate; `None` when
+/// the client gives none (the process-loopback client may not implement
+/// it).
+fn mix_format(client: &IAudioClient) -> Option<(usize, u32)> {
+    // SAFETY: on success the format is ours to free; it is read by value
+    // (the struct is packed, so unaligned) before the free.
+    unsafe {
+        let format = client.GetMixFormat().ok()?;
+        if format.is_null() {
+            return None;
+        }
+        let value = format.read_unaligned();
+        CoTaskMemFree(Some(format.cast_const().cast::<c_void>()));
+        Some((usize::from(value.nChannels), value.nSamplesPerSec))
+    }
+}
+
+/// The performance counter now, in `GetBuffer`'s QPC unit (100 ns); `None`
+/// when it cannot be read.
+fn qpc_now() -> Option<u64> {
+    let mut counter: i64 = 0;
+    let mut frequency: i64 = 0;
+    // SAFETY: both out-pointers are live locals for the calls to write.
+    let read = unsafe {
+        QueryPerformanceCounter(&raw mut counter).is_ok()
+            && QueryPerformanceFrequency(&raw mut frequency).is_ok()
+    };
+    if !read {
+        return None;
+    }
+    let counter = u128::try_from(counter).ok()?;
+    let frequency = u128::try_from(frequency).ok()?;
+    // `GetBuffer`'s QPC is the counter in 100 ns units.
+    u64::try_from((counter * 10_000_000).checked_div(frequency)?).ok()
+}
+
 /// One initialised shared-mode capture stream: the client, its capture
 /// service, the event it signals.
 pub struct CaptureClient {
@@ -502,6 +531,11 @@ pub struct CaptureClient {
     /// No packet drained yet: loopback streams commonly flag their first
     /// packet as a discontinuity, which is not a late thread.
     first_packet: bool,
+    /// The packets' clocks, measured and read for what the engine lost.
+    positions: DevicePositions,
+    /// Frames the discontinuities lost, as the packets' clocks tell them,
+    /// filled or not (handed to the body).
+    missed_frames: usize,
 }
 
 impl CaptureClient {
@@ -549,6 +583,9 @@ impl CaptureClient {
         event_driven: bool,
     ) -> Result<Self, ComError> {
         let format = float_format(channels);
+        // Read before `Initialize`: the engine's rate, one of the units the
+        // device positions may count in.
+        let engine_rate = mix_format(&client).map(|(_, rate)| rate);
         let flags = if event_driven {
             flags | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
         } else {
@@ -612,6 +649,8 @@ impl CaptureClient {
             sizes: stream_sizes(buffer_frames, period, latency),
             discontinuities: 0,
             first_packet: true,
+            positions: DevicePositions::new(engine_rate),
+            missed_frames: 0,
         })
     }
 
@@ -630,8 +669,45 @@ impl CaptureClient {
         self.discontinuities
     }
 
-    /// Starts the stream.
-    pub fn start(&self) -> Result<(), ComError> {
+    /// Frames those discontinuities lost, as far as the packets' clocks
+    /// tell (see [`Self::drain`]).
+    #[must_use]
+    pub fn missed_frames(&self) -> usize {
+        self.missed_frames
+    }
+
+    /// The packets' clocks so far, for the stop's log.
+    #[must_use]
+    pub fn positions(&self) -> &DevicePositions {
+        &self.positions
+    }
+
+    /// What the thread missed after its last packet, for a stream that
+    /// delivers continuously, read once its final drain is done: the
+    /// performance counter now against the last packet's QPC
+    /// ([`DevicePositions::missed_until`], which states the rule). Nothing
+    /// when the counter cannot be read.
+    #[must_use]
+    pub fn missed_at_stop(&self) -> Missed {
+        qpc_now().map_or_else(Missed::default, |now| self.positions.missed_until(now))
+    }
+
+    /// The frames the engine lost before the stream's first packet, beyond
+    /// its start latency, for a stream started `continuously`
+    /// ([`DevicePositions::missed_before_first`], which states the rule).
+    #[must_use]
+    pub fn missed_before_first(&self) -> usize {
+        self.positions.missed_before_first(self.sizes)
+    }
+
+    /// Starts the stream. One that delivers `continuously` (the
+    /// microphone, process loopback) reads the performance counter just
+    /// before, for [`Self::missed_before_first`]; endpoint loopback may
+    /// start in an idle, so it reads none.
+    pub fn start(&mut self, continuously: bool) -> Result<(), ComError> {
+        if continuously && let Some(now) = qpc_now() {
+            self.positions.start(now);
+        }
         // SAFETY: plain call on the initialised client.
         check(unsafe { self.client.Start() }, "IAudioClient::Start")
     }
@@ -655,10 +731,18 @@ impl CaptureClient {
         let _ = unsafe { WaitForSingleObject(event.0, milliseconds) };
     }
 
-    /// Hands every queued packet to `handle`, then returns. The real-time
-    /// part: no allocation and no lock here on success (the `windows`
-    /// error values are built only on failure); `handle` must keep it so.
-    pub fn drain(&mut self, mut handle: impl FnMut(SliceView<'_>)) -> Result<(), ComError> {
+    /// Hands every queued packet to `handle`, then returns, with what the
+    /// engine lost right before it on a packet flagged
+    /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` (the first one aside, see
+    /// `first_packet`): `Some`, read from its device position and QPC by
+    /// [`DevicePositions`] (the rule is stated there), and `None` on any
+    /// other packet. The real-time part: no allocation and no lock here on
+    /// success (the `windows` error values are built only on failure);
+    /// `handle` must keep it so.
+    pub fn drain(
+        &mut self,
+        mut handle: impl FnMut(SliceView<'_>, Option<Missed>),
+    ) -> Result<(), ComError> {
         loop {
             // SAFETY: plain call on the started capture service.
             let next = check(
@@ -671,27 +755,41 @@ impl CaptureClient {
             let mut data: *mut u8 = std::ptr::null_mut();
             let mut frames: u32 = 0;
             let mut flags: u32 = 0;
+            let mut position: u64 = 0;
+            let mut qpc: u64 = 0;
             check(
-                // SAFETY: the three out-pointers are live locals; no device or
-                // QPC position is asked for.
+                // SAFETY: the five out-pointers are live locals.
                 unsafe {
                     self.capture.GetBuffer(
                         &raw mut data,
                         &raw mut frames,
                         &raw mut flags,
-                        None,
-                        None,
+                        Some(&raw mut position),
+                        Some(&raw mut qpc),
                     )
                 },
                 "IAudioCaptureClient::GetBuffer",
             )?;
             // The flag constants are small positive bit masks.
             let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
-            if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 && !self.first_packet {
+            let discontinuity =
+                flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 && !self.first_packet;
+            if discontinuity {
                 self.discontinuities += 1;
             }
             self.first_packet = false;
             let count = frames as usize;
+            let missed = self.positions.packet(Packet {
+                frames: count,
+                position,
+                qpc,
+                discontinuity,
+                timestamp_error: flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0,
+            });
+            self.missed_frames = self
+                .missed_frames
+                .saturating_add(missed.fill)
+                .saturating_add(missed.unfilled);
             // Alignment is checked before the slice is made.
             #[allow(clippy::cast_ptr_alignment)]
             let floats = data.cast::<f32>();
@@ -710,11 +808,14 @@ impl CaptureClient {
                     std::slice::from_raw_parts(floats.cast_const(), count * self.channels)
                 })
             };
-            handle(SliceView {
-                frames: count,
-                channels: self.channels,
-                samples,
-            });
+            handle(
+                SliceView {
+                    frames: count,
+                    channels: self.channels,
+                    samples,
+                },
+                discontinuity.then_some(missed),
+            );
             check(
                 // SAFETY: releases exactly the packet `GetBuffer` lent; the
                 // slice over it ended with the `handle` call.

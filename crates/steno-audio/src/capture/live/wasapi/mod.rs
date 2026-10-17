@@ -72,12 +72,37 @@
 //! timeout too, so a polled loopback stream works), checking an atomic
 //! stop flag. `start` starts the follower before the master, the sink's
 //! only producer, so a start that fails has written nothing. Data the
-//! engine itself lost (a packet flagged as a discontinuity, the first one
-//! aside) is counted and logged at stop, not added to the sink's drop
-//! count: WASAPI does not say how much was lost. The follower's underrun,
-//! slip and trim counts are logged at stop too. All of these logs are at
-//! `info`, below the shell's default filter: set
-//! `RUST_LOG=steno_audio=info` to see them.
+//! engine itself lost because a capture thread was late (a packet flagged
+//! as a discontinuity, the first one aside) is counted, and what the
+//! packet's clocks say was lost before it goes to the stream's body
+//! ([`StreamBody::write_missed`]; A18, the design in
+//! [`realtime::missed`](crate::realtime::missed)), filled or counted by
+//! the rule [`DevicePositions`] states. A stream that had discontinuities
+//! and filled none of them logs its clocks' ratios at `warn` at its stop,
+//! as does a microphone or process-loopback stream that ran without a sane
+//! QPC.
+//! At the stop each thread drains its stream once more, so a jump in what
+//! the engine still holds is read too. Then a stream that delivers
+//! continuously (the microphone, and process loopback, which delivers
+//! silence while nothing plays) reads the performance counter against its
+//! last packet ([`DevicePositions::missed_until`]): a thread held up just
+//! before the stop by an engine that kept its oldest packets leaves no
+//! flagged packet behind. Endpoint loopback delivers nothing while nothing
+//! plays, so it cannot tell such a loss from an idle and reads nothing
+//! there (the Windows gate step of the stable plan checks it on hardware).
+//! Once both threads are joined, the backend's stop hands those readings
+//! and what the system stream's staging still holds to the sink
+//! ([`count_at_stop`]). No packet flags a loss before a stream's first
+//! either (an engine that dropped its oldest packets before the thread's
+//! first drain), so a stream that delivers continuously reads the
+//! performance counter just before its start against its first packet
+//! ([`DevicePositions::missed_before_first`]), and the stop of a
+//! recording's first start hands that on too
+//! ([`LaneFrameSink::count_before_first`]; the rule is in
+//! [`realtime::missed`](crate::realtime::missed#before-the-first-callback)).
+//! The count and the seconds are logged at stop, as are the follower's
+//! underrun, slip and trim counts. All of these logs are at `info`, below
+//! the shell's default filter: set `RUST_LOG=steno_audio=info` to see them.
 
 pub(crate) mod com;
 
@@ -89,17 +114,19 @@ use std::time::{Duration, Instant};
 
 use steno_core::AudioLane;
 
-use self::com::{Apartment, CaptureClient, Enumerator, LoopbackKind, ProAudioThread};
+use self::com::{Apartment, CaptureClient, ComError, Enumerator, LoopbackKind, ProAudioThread};
 use super::{AudioDeviceInfo, chosen_or_default};
 use crate::SAMPLE_RATE;
-use crate::capture::split_streams::{StreamSizes, far_end_latencies};
+use crate::capture::split_streams::{DevicePositions, StreamSizes, far_end_latencies};
 use crate::capture::start_log::{self, start_log};
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     SplitStreamPlan, StreamSource,
 };
 use crate::detection::EndpointFlow;
-use crate::realtime::{FollowerLane, LaneFrameSink, PacketRouter, StreamBody};
+use crate::realtime::{
+    FollowerLane, LaneFrameSink, Missed, PacketRouter, StreamBody, count_at_stop,
+};
 
 /// How long `start` waits, in total, for the stream threads to open and
 /// start their streams (process loopback activation included) and for the
@@ -132,10 +159,22 @@ enum StreamEvent {
     Started(Result<(), CaptureError>),
 }
 
+/// What a stream thread's clocks read at its stop.
+#[derive(Debug, Default, Clone, Copy)]
+struct Ends {
+    /// Frames missed before its first packet, beyond its start latency
+    /// ([`CaptureClient::missed_before_first`]).
+    before_first: usize,
+    /// Missed after its last packet ([`CaptureClient::missed_at_stop`]),
+    /// `None` when it was not read.
+    after_last: Option<Missed>,
+}
+
 /// One stream thread as `start` holds it.
 struct Launched {
     source: StreamSource,
-    thread: Option<JoinHandle<()>>,
+    /// Returns what its clocks read at the stop.
+    thread: Option<JoinHandle<Ends>>,
     events: Receiver<StreamEvent>,
     /// Dropped to make a thread that waits for its body exit.
     body: Option<SyncSender<StreamBody>>,
@@ -351,8 +390,14 @@ impl DeviceProbe {
 struct Active {
     stop: Arc<AtomicBool>,
     streams: Vec<Launched>,
-    /// The system stream's staging, for its counts at `stop()`.
-    follower: Option<Arc<FollowerLane>>,
+    /// The system stream's staging and its lane in the sink, for its
+    /// counts at `stop()`.
+    follower: Option<(Arc<FollowerLane>, usize)>,
+    master: StreamSource,
+    sink: Arc<LaneFrameSink>,
+    /// The recording's first start on the sink, not a rebuild's restart
+    /// ([`LaneFrameSink::first_start`]).
+    first_start: bool,
     watcher: Arc<Watcher>,
     watcher_thread: JoinHandle<()>,
 }
@@ -510,7 +555,10 @@ fn open(
 /// A stream thread: opens its stream, reports, waits for its body, starts,
 /// then drains packets into the body until `stop` is set or the stream
 /// fails. The open's lines are at `debug` when `starts_quietly`
-/// (`start_log`).
+/// (`start_log`). Returns what its clocks read at the stop, on a stream
+/// that delivers continuously (the microphone, process loopback; not
+/// endpoint loopback, whose idle would read as a loss): what it missed
+/// before its first packet, and, unless it failed, after its last.
 fn run_stream(
     source: StreamSource,
     input_device_uid: Option<&str>,
@@ -519,35 +567,35 @@ fn run_stream(
     stop: &AtomicBool,
     watcher: &Watcher,
     starts_quietly: bool,
-) {
+) -> Ends {
     let opened = start_log::quietly(starts_quietly, || open(source, input_device_uid));
     let (apartment, enumerator, mut client, info) = match opened {
         Ok(opened) => opened,
         Err(error) => {
             let _ = events.send(StreamEvent::Opened(Err(error)));
-            return;
+            return Ends::default();
         }
     };
+    let loopback = info.loopback;
+    let continuously = delivers_continuously(loopback);
     let _ = events.send(StreamEvent::Opened(Ok(info)));
     // `start` drops the sender when it gives up.
     let Ok(mut body) = bodies.recv() else {
-        return;
+        return Ends::default();
     };
-    if let Err(error) = client.start() {
+    if let Err(error) = client.start(continuously) {
         let _ = events.send(StreamEvent::Started(Err(error.into())));
-        return;
+        return Ends::default();
     }
     let _ = events.send(StreamEvent::Started(Ok(())));
     let pro_audio = ProAudioThread::enter();
     if pro_audio.is_none() {
         tracing::info!("{} stream runs without MMCSS Pro Audio", source.as_str());
     }
+    let mut failed = false;
     while !stop.load(Ordering::Acquire) {
         client.wait(WAIT);
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-        if let Err(error) = client.drain(|packet| body.handle(packet)) {
+        if let Err(error) = drain_into(&mut client, &mut body) {
             let why = if error.is_device_invalidated() {
                 "its device went away or changed format"
             } else {
@@ -555,21 +603,124 @@ fn run_stream(
             };
             tracing::warn!("{} stream stopped, {why}: {error}", source.as_str());
             watcher.note_failure(source);
+            failed = true;
             break;
         }
     }
+    // What the engine still holds at the stop, so a thread held up just
+    // before it is read too, then the counter against the last packet for
+    // what no packet flags.
+    let mut ends = Ends::default();
+    if !failed {
+        let _ = drain_into(&mut client, &mut body);
+        if continuously {
+            ends.after_last = Some(client.missed_at_stop());
+        }
+    }
     let _ = client.stop();
+    if continuously {
+        ends.before_first = client.missed_before_first();
+    }
+    if ends.before_first > 0 {
+        tracing::info!(
+            "{} stream: {:.3} s missed before its first packet",
+            source.as_str(),
+            ends.before_first as f64 / SAMPLE_RATE
+        );
+    }
+    if let Some(end) = ends.after_last.filter(|end| !end.is_none()) {
+        tracing::info!(
+            "{} stream: {:.3} s missed after its last packet",
+            source.as_str(),
+            end.unfilled as f64 / SAMPLE_RATE
+        );
+    }
     let discontinuities = client.discontinuities();
     if discontinuities > 0 {
         tracing::info!(
-            "{} stream: {discontinuities} packets after a glitch (thread late)",
-            source.as_str()
+            "{} stream: {discontinuities} packets after a glitch (thread late), {:.3} s \
+             missed",
+            source.as_str(),
+            client.missed_frames() as f64 / SAMPLE_RATE
         );
     }
+    log_positions(source, loopback, client.positions(), discontinuities);
     drop(pro_audio);
     drop(client);
     drop(enumerator);
     drop(apartment);
+    ends
+}
+
+/// Whether a stream on `loopback` (`None` for the microphone) delivers
+/// continuously: every stream but endpoint loopback, which delivers
+/// nothing while nothing plays.
+fn delivers_continuously(loopback: Option<LoopbackKind>) -> bool {
+    loopback != Some(LoopbackKind::Endpoint)
+}
+
+/// The stop's line about `source`'s clocks (`DevicePositions`'s
+/// `Display`), on `loopback` for the system stream, read once the stream
+/// has stopped: at `warn` when the stream had `discontinuities` and their
+/// jumps were counted, not filled (no sane QPC), or when a stream that
+/// delivers continuously had its QPC judged not sane or ran 2 s or more
+/// with too few clean QPC pairs to judge it
+/// ([`DevicePositions::qpc_judged`]); at `info` otherwise, a QPC not
+/// judged on a stream under 2 s included, which the line says.
+fn log_positions(
+    source: StreamSource,
+    loopback: Option<LoopbackKind>,
+    positions: &DevicePositions,
+    discontinuities: u64,
+) {
+    let on = loopback.map_or_else(String::new, |kind| format!(" on {kind:?} loopback"));
+    let counted = if discontinuities > 0 && !positions.fills() {
+        format!(
+            "; what its {discontinuities} discontinuities lost was counted, not written as \
+             silence"
+        )
+    } else {
+        String::new()
+    };
+    // Without a sane QPC, the microphone counts what its positions cannot
+    // read only past the drift allowance, and process loopback counts no
+    // loss before its first packet: the stable plan's A18 names this limit,
+    // and this line shows a recording that ran with it.
+    let qpc_sane = if delivers_continuously(loopback) {
+        positions.qpc_judged()
+    } else {
+        Some(true)
+    };
+    let no_sane_qpc = match qpc_sane {
+        Some(true) => "",
+        Some(false) => {
+            "; it ran without a sane QPC, so a loss before its first packet or with its \
+             positions standing still may not be counted"
+        }
+        None => {
+            "; its QPC was not judged (under 2 s), so a loss before its first packet or with \
+             its positions standing still may not be counted"
+        }
+    };
+    if counted.is_empty() && qpc_sane != Some(false) {
+        tracing::info!("{} stream{on}: {positions}{no_sane_qpc}", source.as_str());
+    } else {
+        tracing::warn!(
+            "{} stream{on}: {positions}{counted}{no_sane_qpc}",
+            source.as_str()
+        );
+    }
+}
+
+/// Every packet the client holds into `body`, a flagged one after what was
+/// missed before it.
+fn drain_into(client: &mut CaptureClient, body: &mut StreamBody) -> Result<(), ComError> {
+    client.drain(|packet, missed| {
+        if let Some(missed) = missed {
+            body.write_missed(&packet, missed);
+        }
+        body.handle(packet);
+    })
 }
 
 /// The watcher thread: registers for endpoint notifications, takes the
@@ -608,19 +759,23 @@ fn run_watcher(
 }
 
 /// Stops and joins the stream threads that answered
-/// ([`Launched::answered`]); the others are left to finish on their own.
-/// Such a thread never writes to the sink: it holds no body, or it is
-/// starting its stream and finds `stop` set before its first drain.
-fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) {
+/// ([`Launched::answered`]), and returns what each joined one's clocks read
+/// at its stop; the others are left to finish on their own. Such a thread
+/// never writes to the sink: it holds no body, or it is starting its
+/// stream and finds `stop` set before its first drain.
+fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) -> Vec<(StreamSource, Ends)> {
     stop.store(true, Ordering::Release);
+    let mut ends = Vec::new();
     for mut launched in streams {
         launched.body.take();
         if let Some(thread) = launched.thread.take()
             && launched.answered
+            && let Ok(end) = thread.join()
         {
-            let _ = thread.join();
+            ends.push((launched.source, end));
         }
     }
+    ends
 }
 
 /// The next event from a stream thread before `deadline`.
@@ -668,7 +823,7 @@ fn spawn_streams(
                     &thread_stop,
                     &thread_watcher,
                     starts_quietly,
-                );
+                )
             });
         match spawned {
             Ok(thread) => streams.push(Launched {
@@ -836,10 +991,10 @@ impl CaptureBackend for LiveCaptureBackend {
         let master_buffer = info(plan.master).map_or(0, |i| i.sizes.buffer_frames);
         let follower = plan.follower.and_then(|source| {
             info(source).map(|i| {
-                Arc::new(FollowerLane::for_streams(
-                    i.sizes.period_frames,
-                    master_buffer,
-                ))
+                Arc::new(
+                    FollowerLane::for_streams_filling(i.sizes.period_frames, master_buffer)
+                        .with_reprime_hold(i.sizes.buffer_frames + i.sizes.period_frames),
+                )
             })
         });
         let streams = start_streams(&stop, streams, &plan, follower.as_ref(), &sink, deadline)?;
@@ -878,10 +1033,14 @@ impl CaptureBackend for LiveCaptureBackend {
         }
         let (input_latency_frames, output_latency_frames) =
             far_end_latencies(input_latency, output_latency, follower_delay);
+        let follower_lane = PacketRouter::follower_lane(&plan.layout.sources);
         *active = Some(Active {
             stop,
             streams,
-            follower,
+            follower: follower.zip(follower_lane),
+            master: plan.master,
+            first_start: sink.first_start(),
+            sink,
             watcher,
             watcher_thread,
         });
@@ -894,14 +1053,39 @@ impl CaptureBackend for LiveCaptureBackend {
         })
     }
 
-    /// Stops the capture threads (no frame arrives after it returns), then
-    /// the watcher.
+    /// Stops the capture threads (no frame arrives after it returns), hands
+    /// on what they missed at the end ([`count_at_stop`]) and, after the
+    /// recording's first start, before their first packets
+    /// ([`LaneFrameSink::count_before_first`]), then stops the watcher.
     fn stop(&self) {
         let Some(mut active) = self.lock().take() else {
             return;
         };
-        tear_down(&active.stop, std::mem::take(&mut active.streams));
-        if let Some(lane) = &active.follower {
+        let ends = tear_down(&active.stop, std::mem::take(&mut active.streams));
+        let end = |master: bool| {
+            ends.iter()
+                .find(|(source, _)| (*source == active.master) == master)
+                .map_or_else(Ends::default, |(_, ends)| *ends)
+        };
+        count_at_stop(
+            &active.sink,
+            active
+                .follower
+                .as_ref()
+                .map(|(lane, index)| (lane.as_ref(), *index)),
+            end(true).after_last.unwrap_or_default(),
+            end(false).after_last,
+        );
+        if active.first_start {
+            active.sink.count_before_first(
+                end(true).before_first,
+                active
+                    .follower
+                    .as_ref()
+                    .map(|(_, index)| (*index, end(false).before_first)),
+            );
+        }
+        if let Some((lane, _)) = &active.follower {
             tracing::info!(
                 "system stream staging: {} frames padded with zeros (underrun), {} skipped \
                  (slipped), {} from before the first pull trimmed",

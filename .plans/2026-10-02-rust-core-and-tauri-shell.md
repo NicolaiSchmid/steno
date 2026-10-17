@@ -2134,6 +2134,17 @@ parity item until a plan says otherwise:
   before the aggregate's IOProc, so with nothing playing the first callback comes within 100 ms
   of `start` returning and 200 ms of the call to `start` (`tests/live.rs`).
   No in-app playback while recording, enforced by `steno_audio::Playback`.
+- **Audio a capture thread missed is written as silence and counted**
+  (A18 of `.plans/2026-10-07-stable-promotion.md`, which has the design).
+  Swift's IOProc reads no time stamps, so a cycle its IO thread missed is
+  gone from the master without a count. Every Rust backend reads its
+  callback's position on its clock (`realtime::CycleClock`), writes what was
+  missed as zeros on every lane, counts a jump too long to fill, and reads
+  the clock once more at the stop; a first callback later than the start
+  allows (200 ms on macOS, the stream's latency and a period on WASAPI)
+  counts the time before it after a recording's first start; the counts are
+  `CaptureStatistics::filled_seconds` and `unfilled_seconds`, and the note
+  "About N seconds of the recording are missing" adds them.
 - **The files are synced while recording, the relay holds 20 s, and the
   warnings are joined** (stable plan rows P21 and P23,
   `.plans/2026-10-07-stable-promotion.md`). The writer thread syncs every
@@ -2199,11 +2210,45 @@ it:
   `RUST_LOG=steno_audio=info`; `tests/live_windows.rs` prints them). Measure
   the slip rate on a USB headset against built-in speakers; a plan decides
   whether to resample instead.
-- **Engine data loss is not a drop.** A packet the engine flags as a
-  discontinuity (the capture thread was late and the engine lost data) is
-  counted and logged at stop, never added to `CaptureStatistics`' drops:
-  WASAPI does not say how much was lost. A Windows recording's drop count
-  can under-report where the Mac's does not.
+- **Engine data loss is filled from the QPC** (A18). On a packet the
+  engine flags as a discontinuity (the capture thread was late and the
+  engine lost data), the first aside, the loss is read from the packet's
+  QPC and device position by the rule `split_streams::DevicePositions`
+  states: filled up to a second, as on the other backends (see the Audio
+  item above), only once the QPC measures within 2 % of real time; counted
+  unfilled otherwise, at the largest of the QPC's and the device position's
+  readings, so the note says it. The packets and the seconds are logged at
+  stop, with both clocks' ratios, at `warn` when the stream had
+  discontinuities and filled none, or when the microphone or process
+  loopback had its QPC judged not sane or ran 2 s or more with too few
+  clean QPC pairs to judge it (at `info`, "not judged (under 2 s)", for a
+  stream under 2 s). At the stop each stream drains once
+  more; then the microphone and process loopback, which deliver
+  continuously, compare the performance counter with their last packet's
+  QPC, for a stall into the stop that left no flagged packet (an engine
+  that refused the newest packets), and the backend's stop hands that and
+  what the system lane's staging still holds to the sink; on process
+  loopback that includes the padding still running at the stop, flagged
+  or not. The same two streams read the counter just before their start
+  against their first packet's QPC, for a loss before it that no packet
+  flags, beyond their latency and a period, after a recording's first
+  start. Endpoint loopback idles, so it reads nothing there or at the
+  start. Step 9 of the stable plan's Windows gate checks it on hardware,
+  at 48 and 44.1 kHz, on a hands-free headset and above 48 kHz, names the
+  loopback, and stalls just before the stop on both loopbacks. The stable
+  plan's A18 names one more limit of these readings, a stream without a
+  sane QPC (the microphone's frozen positions and process loopback's first
+  packet alike): on the microphone, a loss its positions cannot read
+  (positions that never move, or before its first packet) counts only past
+  the drift allowance (0.1 % of the wall time), through the note's
+  wall-time shortfall; on process loopback, a loss before the first packet
+  is silent. A stream under 2 s has no judged QPC, so a first start torn
+  down before 2 s counts nothing before its first packet. Each stream
+  whose QPC was judged not sane, or that ran 2 s or more with too few
+  clean QPC pairs to judge it, logs a `warn` line at its stop; one under
+  2 s logs the same line at `info` ("not judged (under 2 s)"). Step 9 of
+  the Windows gate fails any stream whose QPC line is missing or not near
+  1.0000, so such hardware is found there.
 - **A system-only capture skips silence.** With the `[System]` lane
   override the system stream is the master, and endpoint loopback
   delivers no packet while nothing plays, so the recording is shorter than
@@ -2367,6 +2412,24 @@ item to settle before the Linux release:
   mutex across `backend.start()`, so its callers, `state()` included, wait
   as long: expected 1 to 2 s for a Bluetooth sink, against the Mac's 200 ms
   at most.
+- **Missed graph cycles are filled, and real-time scheduling is checked**
+  (A18). A data-loop thread the scheduler holds up misses graph cycles
+  while the daemon runs the graph on time; `process` reads the stream's
+  `pw_time` ticks and `stop()` compares `CLOCK_MONOTONIC` with the last
+  cycle's (see the Audio item above). A graph rate or a quantum that
+  changes starts the count afresh; the 10 to 20 ms of wall time a quantum
+  change costs on the private daemon stay unfilled. The client context
+  loads `module-rt` from `client.conf`, which asks for real-time scheduling
+  of the data-loop thread (under `RLIMIT_RTPRIO`, or through RealtimeKit);
+  without it `start` logs once at `warn`. With only the test starved beside
+  a hog in the 1-CPU container (the "Only the test" row, host load about
+  40, of the A18 table in the stable plan), Steno missed 0.15 to 0.70 s in
+  10 s without real-time scheduling and 0 to 0.09 s with it (`--ulimit
+  rtprio=95`); with everything starved, up to 2.03 and 1.58 s. A
+  rebuild's restart, whose `start` returns after the first cycle, ends its
+  gap at the clock's reading before the start; the session counts the time
+  from there to the first frame (the connect and the link, 0.25 to 0.4 s
+  on a loaded host) as missed and not filled.
 - **Device changes read differently.** A lost connection or stream loses
   both lanes and reads as `OutputDeviceGone` (`InputDeviceGone` in
   person). A lost link (one removed from outside included) reads as the
@@ -3316,6 +3379,14 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   system lane is the whole default sink (Steno's own output included; leaving it out
   was weighed and not done, see the note).
   Where: the Linux items under "Audio". Found: #166, #176.
+- **First Linux release.** Whether Steno's PipeWire data-loop thread gets real-time
+  scheduling on each target: RealtimeKit installed and running (NixOS:
+  `security.rtkit.enable`), or an `RLIMIT_RTPRIO` for the user. Without it a busy
+  computer makes the capture miss cycles, which are filled with silence and counted
+  (A18), and `start` logs a `warn` line; check that the line does not appear on
+  Omarchy, NixOS and a GNOME distribution (the stalled recording in the stable plan's
+  Linux gates). Where: "Missed graph cycles are filled" in the Linux list under
+  "Audio". Found: A18.
 - **First Linux release.** The capture's latencies are unmeasured on real hardware:
   Nicolai runs "Measuring the latencies on real hardware" in the Linux list under
   "Audio" on a laptop with ALSA and with a Bluetooth headset. Found: #176.
@@ -3387,6 +3458,16 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `crates/steno-pipeline/src/files.rs`,
   `Sources/StenoCore/Storage/RecordingIntake.swift`, `crates/steno-llm`. Found: #167,
   #185, #213.
+- **Unowned.** One loss ledger per stream, in place of A18's counting: each stream
+  compares the frames its clock expected with the frames its thread delivered,
+  reconciled once at its stop, and the session merges the lost spans by union on the
+  recording's timeline, so nothing is subtracted and the note no longer takes only the
+  worst lane. Nicolai's decision makes it the first capture PR after the stable
+  release, landing with the capture seam and scripted fake of
+  `.plans/2026-10-15-recorder-actor.md` (its PR 1), under a new D9 ruling. Where:
+  `crates/steno-audio/src/capture/session.rs`, `crates/steno-audio/src/realtime/`,
+  A18 and "What follows" in `.plans/2026-10-07-stable-promotion.md`. Found: #291,
+  #297.
 - **Unowned.** A Pair that lands during the quit starts a listener after it:
   `App::shutdown` stops the listener, but `ListenerHandover::close` only keeps a
   waiting handover from receiving one, so a `start` waiting on the stop's lock binds

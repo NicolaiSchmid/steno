@@ -302,6 +302,14 @@ impl Record {
         println!("device changes: {}", result.statistics.device_changes);
         println!("gap filled: {:.2} s", result.statistics.gap_seconds);
         println!(
+            "missed cycles filled: {:.2} s",
+            result.statistics.filled_seconds
+        );
+        println!(
+            "missed cycles not filled: {:.2} s",
+            result.statistics.unfilled_seconds
+        );
+        println!(
             "ended on device loss: {}",
             result.statistics.ended_on_device_loss
         );

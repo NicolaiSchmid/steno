@@ -30,12 +30,29 @@
 //!
 //! The stream runs with `RT_PROCESS`, so its `process` callback runs on
 //! PipeWire's data-loop thread, which is the real-time path here:
-//! `process` dequeues the buffer, turns its chunk into a
-//! [`SliceView`](crate::realtime::SliceView) with [`interleaved_view`]
-//! and, while the gate is open, hands it to [`deliver_slices`], the safe
-//! form of the IOProc body the macOS backend uses. No allocation, no lock,
-//! no log (proven for the body in `tests/realtime.rs` and on the real
-//! data-loop thread in `tests/pipewire.rs`).
+//! `process` dequeues the buffer, turns its chunk into a [`SliceView`] with
+//! [`interleaved_view`] and, while the gate is open, hands it to
+//! [`deliver_slices`], the safe form of the IOProc body the macOS backend
+//! uses. No allocation, no lock, no log (proven for the body in
+//! `tests/realtime.rs` and on the real data-loop thread in
+//! `tests/pipewire.rs`).
+//!
+//! A data-loop thread the scheduler holds up misses graph cycles while the
+//! daemon runs the graph on time (A18; the design is in
+//! [`realtime::missed`](crate::realtime::missed)). `process` reads each
+//! cycle's `pw_time` ticks, converted from the graph's rate to the
+//! stream's 48 kHz, and writes what it missed as zeros before the cycle;
+//! `stop()` compares `CLOCK_MONOTONIC` with the last cycle's `pw_time`.
+//! `Stream::time` (`pw_stream_get_time`, pipewire-rs being built without
+//! its `v0_3_50` feature) copies the time `pw_stream` stored for the cycle
+//! (a sequence-locked copy, no system call). A quantum that changes resets
+//! the clock: at a new quantum the ticks jump by up to two of its cycles
+//! while the wall clock does not (1 792 frames at 256 to 1 024, 3 584 at
+//! 512 to 2 048, on the private daemon). The client context loads
+//! PipeWire's `module-rt` from `client.conf`, which asks for real-time
+//! scheduling of the data-loop thread (directly under `RLIMIT_RTPRIO`, or
+//! through RealtimeKit); [`LiveCaptureBackend`]'s `start` logs at `warn`
+//! when the thread runs without it.
 //!
 //! # Start
 //!
@@ -105,7 +122,7 @@ mod graph;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -126,7 +143,9 @@ use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     LaneSource,
 };
-use crate::realtime::{LaneFrameSink, deliver_slices, interleaved_view};
+use crate::realtime::{
+    CycleClock, LaneFrameSink, Missed, SliceView, deliver_slices, interleaved_view,
+};
 
 /// How long `start` lets PipeWire answer, link and run the first cycle.
 const START_TIMEOUT: Duration = Duration::from_secs(3);
@@ -181,6 +200,11 @@ struct Gate {
     open: AtomicBool,
     /// Deliveries inside.
     delivering: AtomicUsize,
+    /// The last cycle delivered: its `pw_time` (`CLOCK_MONOTONIC`
+    /// nanoseconds, 0 before the first) and its frames, written inside a
+    /// delivery, read once the gate closed ([`Gate::last_cycle`]).
+    last_cycle_at: AtomicU64,
+    last_cycle_frames: AtomicUsize,
     /// Reports inside.
     reporting: Mutex<usize>,
     /// Notified when a report leaves.
@@ -192,6 +216,8 @@ impl Gate {
         Self {
             open: AtomicBool::new(true),
             delivering: AtomicUsize::new(0),
+            last_cycle_at: AtomicU64::new(0),
+            last_cycle_frames: AtomicUsize::new(0),
             reporting: Mutex::new(0),
             report_left: Condvar::new(),
         }
@@ -208,6 +234,23 @@ impl Gate {
         }
         self.delivering.fetch_sub(1, Ordering::SeqCst);
         open
+    }
+
+    /// Inside a delivery: the cycle at `at` (`pw_time`'s `now`) delivered
+    /// `frames`. Real-time safe.
+    #[inline(always)]
+    fn mark_cycle(&self, at: i64, frames: usize) {
+        self.last_cycle_at
+            .store(u64::try_from(at).unwrap_or(0), Ordering::Relaxed);
+        self.last_cycle_frames.store(frames, Ordering::Relaxed);
+    }
+
+    /// The last cycle [`Self::mark_cycle`] saw, its time and its frames;
+    /// `None` before the first. Once [`Self::close`] returned no delivery
+    /// changes it.
+    fn last_cycle(&self) -> Option<(u64, usize)> {
+        let at = self.last_cycle_at.load(Ordering::SeqCst);
+        (at > 0).then(|| (at, self.last_cycle_frames.load(Ordering::SeqCst)))
     }
 
     /// Runs a report's `work` if the gate is open, counted inside while it
@@ -281,6 +324,8 @@ struct RealTime {
     channels: usize,
     /// Frames in the last cycle; `start` waits for the first.
     cycle_frames: Arc<AtomicUsize>,
+    /// Where the last cycle ended on the graph clock.
+    clock: CycleClock,
 }
 
 const _: () = {
@@ -288,11 +333,13 @@ const _: () = {
     sendable::<RealTime>();
 };
 
-/// The stream's `process` callback, on PipeWire's data-loop thread: one
-/// buffer through [`deliver_slices`] while the gate is open, then back to
-/// the stream. Nothing allocates, locks or logs; nothing can panic (the
-/// view and `deliver_slices` index only within bounds they checked or
-/// computed, `channels` is at least 1).
+/// The stream's `process` callback, on PipeWire's data-loop thread: the
+/// cycles missed since the last one ([`missed_before`]) and the buffer
+/// through [`deliver_cycle`] while the gate is open, which also marks the
+/// cycle for the stop, then the buffer back to the stream. Nothing
+/// allocates, locks or logs; nothing can panic (the view and
+/// `deliver_slices` index only within bounds they checked or computed,
+/// `channels` is at least 1).
 fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
@@ -307,11 +354,85 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     // the view borrows it.
     let memory = data.data();
     let view = interleaved_view(memory.as_deref(), offset, size, stride, rt.channels);
-    rt.gate
-        .deliver(|| deliver_slices(&[view], &rt.sources, &rt.sink));
+    let time = stream.time().ok();
+    let reading = time.as_ref().map(|time| (time.ticks(), time.rate()));
+    let missed = missed_before(&mut rt.clock, reading, view.frames);
+    rt.gate.deliver(|| {
+        deliver_cycle(view, missed, &rt.sources, &rt.sink);
+        if let Some(time) = &time {
+            rt.gate.mark_cycle(time.now(), view.frames);
+        }
+    });
     // Release: `start` returns on seeing it, and the frames
     // `deliver_slices` wrote are then in the rings.
     rt.cycle_frames.store(view.frames, Ordering::Release);
+}
+
+/// One cycle into the sink: what was missed before it
+/// ([`LaneFrameSink::write_missed`]), then its own frames. Real-time safe.
+#[inline(always)]
+fn deliver_cycle(
+    view: SliceView<'_>,
+    missed: Missed,
+    sources: &[LaneSource],
+    sink: &LaneFrameSink,
+) {
+    sink.write_missed(missed);
+    deliver_slices(&[view], sources, sink);
+}
+
+/// The frames missed before a cycle of `frames` whose stream time is
+/// `time`, its ticks and their rate (none when `pw_stream_get_time`
+/// failed): `clock` advanced to the ticks, at the graph clock's rate
+/// against the stream's [`SAMPLE_RATE`]. A time without a usable rate, a
+/// graph rate that changed and a cycle of another length (a quantum that
+/// changed, [`CycleClock::resized`]) start the clock afresh and report
+/// nothing. At a driver change `pw_stream` repeats the last cycle's ticks
+/// (its `base_pos`), which leaves the clock a cycle ahead: the next real
+/// jump after it is counted one cycle short. Real-time safe.
+#[inline(always)]
+fn missed_before(
+    clock: &mut CycleClock,
+    time: Option<(u64, spa::utils::Fraction)>,
+    frames: usize,
+) -> Missed {
+    let Some((ticks, rate)) = time.filter(|(_, rate)| rate.num > 0 && rate.denom > 0) else {
+        clock.reset();
+        return Missed::default();
+    };
+    // A tick is `num / denom` seconds, `SAMPLE_RATE * num / denom` frames.
+    clock.rescale(
+        (SAMPLE_RATE as u64) * u64::from(rate.num),
+        u64::from(rate.denom),
+    );
+    if clock.resized(frames) {
+        clock.reset();
+    }
+    clock.advance(ticks, frames)
+}
+
+/// What a stream missed after its last cycle, which started at `at`
+/// (`CLOCK_MONOTONIC` nanoseconds) and delivered `frames`, once it stops
+/// at `stopped` on the same clock: [`CycleClock::missed_until`] on a clock
+/// that counts nanoseconds.
+fn missed_at_stop(last_cycle: Option<(u64, usize)>, stopped: u64) -> Missed {
+    let Some((at, frames)) = last_cycle else {
+        return Missed::default();
+    };
+    let mut clock = CycleClock::new(SAMPLE_RATE);
+    clock.rescale(SAMPLE_RATE as u64, 1_000_000_000);
+    clock.advance(at, frames);
+    clock.missed_until(stopped)
+}
+
+/// `CLOCK_MONOTONIC` in nanoseconds, the clock of `pw_time`'s `now`.
+fn monotonic_nanos() -> u64 {
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    // Seconds since boot and nanoseconds within one: both small and
+    // positive.
+    (now.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(now.tv_nsec as u64)
 }
 
 /// For tests: `work` through a new open [`Gate`], as [`process`] puts a
@@ -960,6 +1081,7 @@ impl Capture {
                 sources: targets.layout.sources.clone(),
                 channels: targets.channels(),
                 cycle_frames: Arc::clone(&cycle_frames),
+                clock: CycleClock::new(SAMPLE_RATE),
             })
             .process(process)
             .register()
@@ -1113,6 +1235,7 @@ impl Capture {
             "the first cycle, {cycle} frames, came {} ms after linking",
             linked.elapsed().as_millis()
         );
+        warn_without_realtime();
         let clock = self.stream.time().ok().map(|time| time.rate());
         // Its own deadline: a first cycle late in the start's must not cut
         // the read short and leave the far-end delay at zero.
@@ -1351,12 +1474,68 @@ fn run(
 struct Active {
     quit: pw::channel::Sender<()>,
     gate: Arc<Gate>,
+    /// The sink the capture writes, for what `stop()` finds missed.
+    sink: Arc<LaneFrameSink>,
     /// Disconnected once the thread is done, its teardown included.
     ended: Receiver<()>,
     thread: JoinHandle<()>,
     /// The thread's kernel id, 0 until it runs or when `/proc` does not give
     /// it; the log of a hung teardown reads `/proc/self/task/<id>` with it.
     thread_id: Arc<AtomicU32>,
+}
+
+/// Whether PipeWire's data-loop threads in this process run with
+/// real-time scheduling, read from `/proc/self/task`: `Some(false)` when
+/// one runs without it, `None` when none was found or none could be read.
+fn data_loop_is_realtime() -> Option<bool> {
+    let mut realtime = None;
+    for task in std::fs::read_dir("/proc/self/task").ok()?.flatten() {
+        let path = task.path();
+        let named = std::fs::read_to_string(path.join("comm"))
+            .is_ok_and(|name| name.trim_end().starts_with("data-loop"));
+        if !named {
+            continue;
+        }
+        let Some(this) = std::fs::read_to_string(path.join("stat"))
+            .ok()
+            .and_then(|stat| runs_realtime(&stat))
+        else {
+            continue;
+        };
+        realtime = Some(realtime.unwrap_or(true) && this);
+    }
+    realtime
+}
+
+/// Whether the task whose `/proc/<pid>/task/<tid>/stat` line is `stat`
+/// runs with real-time scheduling (`SCHED_FIFO` or `SCHED_RR`); `None` for
+/// a line it cannot read. The name sits in parentheses and may hold any
+/// character, so the fields count from the last `)`: the policy is the
+/// line's 41st field, the 39th after the name.
+fn runs_realtime(stat: &str) -> Option<bool> {
+    let (_, after) = stat.rsplit_once(')')?;
+    let policy = after.split_whitespace().nth(38)?.parse::<u32>().ok()?;
+    Some(matches!(policy, 1 | 2))
+}
+
+/// Logs once per process, at `warn`, that PipeWire's data-loop thread runs
+/// without real-time scheduling: `module-rt` (from `client.conf`) got
+/// neither `RLIMIT_RTPRIO` nor RealtimeKit. A busy computer can then hold
+/// the thread up long enough to miss graph cycles, which the capture
+/// writes as silence, or past the fill limit only counts (see the module
+/// doc). `/proc` is read only until the line was logged. Rust only.
+fn warn_without_realtime() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.load(Ordering::Relaxed)
+        && data_loop_is_realtime() == Some(false)
+        && !WARNED.swap(true, Ordering::Relaxed)
+    {
+        tracing::warn!(
+            "PipeWire's data-loop thread runs without real-time scheduling (RealtimeKit \
+             missing or refused, no RLIMIT_RTPRIO): a busy computer can make the capture \
+             miss cycles, which are written as silence or counted"
+        );
+    }
 }
 
 /// The calling thread's kernel id, from `/proc/thread-self`; 0 when that
@@ -1494,6 +1673,7 @@ impl CaptureBackend for LiveCaptureBackend {
         let lanes = lanes.to_vec();
         let input_device_uid = input_device_uid.map(str::to_owned);
         let thread_gate = Arc::clone(&gate);
+        let thread_sink = Arc::clone(&sink);
         let thread_id = Arc::new(AtomicU32::new(0));
         let id_slot = Arc::clone(&thread_id);
         let connected = Arc::new(AtomicBool::new(false));
@@ -1510,7 +1690,7 @@ impl CaptureBackend for LiveCaptureBackend {
                     run(
                         &lanes,
                         input_device_uid.as_deref(),
-                        sink,
+                        thread_sink,
                         thread_gate,
                         &answer,
                         quit_receiver,
@@ -1529,6 +1709,7 @@ impl CaptureBackend for LiveCaptureBackend {
         let started = Active {
             quit,
             gate,
+            sink,
             ended,
             thread,
             thread_id,
@@ -1543,11 +1724,22 @@ impl CaptureBackend for LiveCaptureBackend {
     /// Returns within `STOP_TIMEOUT` (2 s) once it has the backend (a
     /// `start` in progress holds it), plus the microseconds of a delivery
     /// inside the gate; what it leaves behind then is in the module doc.
+    ///
+    /// What the data-loop thread missed after its last cycle, up to the
+    /// moment before the gate closes, is written once it has
+    /// (`missed_at_stop`); not for a stop the session makes to rebuild,
+    /// whose gap covers that time.
     fn stop(&self) {
         let Some(active) = self.lock().take() else {
             return;
         };
+        let stopped = monotonic_nanos();
+        let (gate, sink) = (Arc::clone(&active.gate), Arc::clone(&active.sink));
         Self::end(active, STOP_TIMEOUT);
+        // The gate is closed: no cycle writes the sink any more.
+        if !sink.device_change_reported() {
+            sink.write_missed(missed_at_stop(gate.last_cycle(), stopped));
+        }
     }
 
     /// Every cycle of the graph delivers, the sink's monitor included with
@@ -1584,6 +1776,163 @@ mod tests {
     use std::sync::mpsc::TrySendError;
 
     use super::*;
+
+    /// `process`'s reading of the stream time: ticks at the graph's rate
+    /// become the stream's 48 kHz frames, a graph that changes its rate
+    /// starts afresh, and a time that could not be read, or has no rate,
+    /// reports nothing and resets.
+    #[test]
+    fn a_cycle_reads_its_jump_from_the_ticks_at_the_graph_rate() {
+        let at = |denom| spa::utils::Fraction { num: 1, denom };
+        let mut clock = CycleClock::new(48_000.0);
+        let mut cycle = |ticks: u64, denom, frames| {
+            missed_before(&mut clock, Some((ticks, at(denom))), frames).fill
+        };
+        assert_eq!(cycle(1_000, 48_000, 480), 0, "the first cycle");
+        assert_eq!(cycle(1_480, 48_000, 480), 0);
+        assert_eq!(cycle(2_920, 48_000, 480), 960, "two cycles missed");
+        assert_eq!(
+            cycle(3_400, 44_100, 480),
+            0,
+            "a new graph rate starts afresh"
+        );
+        assert_eq!(cycle(3_841, 44_100, 480), 0);
+        assert_eq!(
+            cycle(4_723, 44_100, 480),
+            480,
+            "441 ticks at 44.1 kHz are 480 frames"
+        );
+        assert_eq!(missed_before(&mut clock, None, 480).fill, 0, "no time");
+        assert_eq!(
+            missed_before(&mut clock, Some((6_000, at(44_100))), 480).fill,
+            0,
+            "after no time the clock starts afresh"
+        );
+        assert_eq!(
+            missed_before(&mut clock, Some((7_000, at(0))), 480).fill,
+            0,
+            "no rate"
+        );
+        assert_eq!(
+            missed_before(&mut clock, Some((7_441, at(44_100))), 480).fill,
+            0
+        );
+        // The graph's quantum going from 256 to 1 024 frames, as measured on
+        // the private daemon: the clock jumps two new quanta, the wall clock
+        // one old and one new.
+        let mut clock = CycleClock::new(48_000.0);
+        let mut cycle =
+            |ticks: u64, frames| missed_before(&mut clock, Some((ticks, at(48_000))), frames).fill;
+        assert_eq!(cycle(0, 256), 0);
+        assert_eq!(cycle(256, 256), 0);
+        assert_eq!(cycle(2_304, 1_024), 0, "a new quantum starts afresh");
+        assert_eq!(cycle(3_328, 1_024), 0);
+        assert_eq!(cycle(5_376, 1_024), 1_024, "a missed cycle after it counts");
+    }
+
+    /// A cycle goes into the sink after the zeros of what was missed
+    /// before it, on every lane, and the unfilled frames are only counted.
+    #[test]
+    fn a_cycle_follows_the_zeros_of_what_it_missed() {
+        let lanes = [AudioLane::Mic, AudioLane::System];
+        let sink = LaneFrameSink::new(&lanes);
+        let sources = [
+            LaneSource {
+                lane: AudioLane::Mic,
+                left: crate::capture::ChannelRef::new(0, 0, 2),
+                right: None,
+            },
+            LaneSource {
+                lane: AudioLane::System,
+                left: crate::capture::ChannelRef::new(0, 1, 2),
+                right: None,
+            },
+        ];
+        let memory = [0.5f32; 8];
+        let view = SliceView {
+            channels: 2,
+            frames: 4,
+            samples: Some(&memory),
+        };
+        deliver_cycle(
+            view,
+            Missed {
+                fill: 3,
+                unfilled: 0,
+            },
+            &sources,
+            &sink,
+        );
+        deliver_cycle(
+            view,
+            Missed {
+                fill: 0,
+                unfilled: 50,
+            },
+            &sources,
+            &sink,
+        );
+        for lane in 0..2 {
+            let mut samples = [9.0f32; 11];
+            assert!(sink.ring(lane).read(&mut samples));
+            assert_eq!(
+                samples,
+                [0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+            );
+        }
+        assert_eq!(sink.filled_samples()[&AudioLane::System], 3);
+        assert_eq!(sink.unfilled_samples()[&AudioLane::Mic], 50);
+    }
+
+    /// At the stop, the time since the last cycle beyond that cycle and the
+    /// one in flight, at 48 kHz, is missed.
+    #[test]
+    fn the_stop_reads_what_passed_since_the_last_cycle() {
+        let at = 7_000_000_000;
+        assert!(missed_at_stop(None, at).is_none(), "no cycle yet");
+        let last = Some((at, 1_024));
+        assert!(
+            missed_at_stop(last, at + 40_000_000).is_none(),
+            "40 ms: the cycle and the one in flight"
+        );
+        assert_eq!(
+            missed_at_stop(last, at + 600_000_000).fill,
+            28_800 - 2_048,
+            "0.6 s stopped before the stop"
+        );
+        assert_eq!(
+            missed_at_stop(last, at + 2_500_000_000).unfilled,
+            120_000 - 2_048
+        );
+        assert!(
+            missed_at_stop(last, at - 1).is_none(),
+            "a cycle after the stop's reading"
+        );
+    }
+
+    /// The scheduling policy is read past a name that holds `) ` and
+    /// spaces: 0 (`SCHED_OTHER`) is not real-time, 1 and 2 are.
+    #[test]
+    fn the_scheduling_policy_is_read_past_any_name() {
+        let stat = |policy: u32| {
+            let after: Vec<String> = (3..=52)
+                .map(|field| {
+                    if field == 41 {
+                        policy.to_string()
+                    } else {
+                        field.to_string()
+                    }
+                })
+                .collect();
+            format!("4242 (data-loop) 1 (x) {}", after.join(" "))
+        };
+        assert_eq!(runs_realtime(&stat(0)), Some(false));
+        assert_eq!(runs_realtime(&stat(1)), Some(true));
+        assert_eq!(runs_realtime(&stat(2)), Some(true));
+        assert_eq!(runs_realtime(&stat(3)), Some(false), "SCHED_BATCH");
+        assert_eq!(runs_realtime("4242 (data-loop) S 1"), None, "cut short");
+        assert_eq!(runs_realtime("no name"), None);
+    }
 
     thread_local! {
         /// Run once by the thread's next [`Gate::report`], after it saw the
@@ -1975,6 +2324,7 @@ mod tests {
                 let active = Active {
                     quit,
                     gate,
+                    sink: Arc::new(LaneFrameSink::new(&[AudioLane::Mixed])),
                     ended,
                     thread,
                     thread_id: Arc::new(AtomicU32::new(0)),

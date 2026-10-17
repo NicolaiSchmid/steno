@@ -40,6 +40,17 @@
 //! `stall_after` sets): by default a producer whose `seconds` ran out is
 //! the end of a test's audio, not a stall.
 //!
+//! Missed cycles (A18, the design in [`realtime::missed`](crate::realtime::missed);
+//! Rust only): `miss_at` makes the first start's producer skip that many
+//! frames at that many seconds in, as a capture thread the scheduler held
+//! up: the tones run on and the skipped frames are never delivered (paced
+//! on the wall clock, the producer waits them out), and the next callback's
+//! position on the producer's clock sits past them. Each callback goes
+//! through a [`CycleClock`] as a live backend's does, and what it reports
+//! goes through [`LaneFrameSink::write_missed`] first, so filled frames
+//! count towards `seconds` and `frames_delivered`, and a jump past the
+//! fill limit is only counted.
+//!
 //! Held outages, behind the `test-support` feature (Rust only):
 //! `hold_outages` makes every device change, and the first start's
 //! stall, wait for its own `SyntheticCaptureBackend::release_outage`
@@ -48,7 +59,7 @@
 //! it however late the session's threads run. A restart's stall is not
 //! held: it is how the restarts fail.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -58,7 +69,7 @@ use steno_core::AudioLane;
 
 use super::fixtures::AudioFixtures;
 use crate::capture::{CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason};
-use crate::realtime::LaneFrameSink;
+use crate::realtime::{CycleClock, LaneFrameSink};
 
 /// A delayed, attenuated copy of another lane (the loudspeaker echo the mic
 /// hears in a call).
@@ -157,6 +168,9 @@ pub struct SyntheticOptions {
     /// Seconds into every restart after which its producer delivers
     /// nothing until `resume_delivery` or the stop.
     pub restarts_stall_after: Option<f64>,
+    /// Seconds into the first start, and frames its producer then misses,
+    /// in order. Rust only.
+    pub misses: Vec<(f64, usize)>,
     /// Every change and the first start's stall wait for a
     /// `release_outage` each, delivering on meanwhile.
     #[cfg(feature = "test-support")]
@@ -202,6 +216,7 @@ impl SyntheticOptions {
             stall_after: None,
             restarts_do_not_run: false,
             restarts_stall_after: None,
+            misses: Vec::new(),
             #[cfg(feature = "test-support")]
             hold_outages: false,
         }
@@ -304,6 +319,14 @@ impl SyntheticOptions {
     #[must_use]
     pub fn restarts_stall_after(mut self, seconds: f64) -> Self {
         self.restarts_stall_after = Some(seconds);
+        self
+    }
+
+    /// Miss `frames` this many seconds into the first start, after the
+    /// misses already asked for (see the module doc).
+    #[must_use]
+    pub fn miss_at(mut self, seconds: f64, frames: usize) -> Self {
+        self.misses.push((seconds, frames));
         self
     }
 
@@ -495,6 +518,16 @@ impl CaptureBackend for SyntheticCaptureBackend {
         } else {
             self.hold.clone()
         };
+        // Frames into the start, and how many to skip there; the first
+        // start's only.
+        let mut skips: VecDeque<(usize, usize)> = self
+            .options
+            .misses
+            .iter()
+            .filter(|_| !is_restart)
+            .map(|&(seconds, frames)| ((seconds * rate) as usize, frames))
+            .collect();
+        let mut clock = CycleClock::new(rate);
         let resumed = Arc::clone(&self.resumed);
         let changes_remaining = Arc::clone(&self.changes_remaining);
         let change_reason = self.options.change_reason;
@@ -527,6 +560,15 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         sink.report_device_change(change_reason);
                         break;
                     }
+                    if let Some(&(at, frames)) = skips.front()
+                        && delivered >= at
+                    {
+                        // Never delivered: the thread was not scheduled.
+                        skips.pop_front();
+                        generator.skip(frames);
+                        delivered += frames;
+                        continue;
+                    }
                     if stall_frame.is_some_and(|stall| delivered >= stall) && stall_hold.lets_go() {
                         stall_frame = None;
                         first_offered.finish();
@@ -547,6 +589,12 @@ impl CaptureBackend for SyntheticCaptureBackend {
                     if let Some(stall) = stall_frame.filter(|stall| *stall > delivered) {
                         frames = frames.min(stall - delivered);
                     }
+                    if let Some(&(at, _)) = skips.front().filter(|(at, _)| *at > delivered) {
+                        frames = frames.min(at - delivered);
+                    }
+                    // The producer's clock counts every frame of the start,
+                    // the missed ones included.
+                    let missed = clock.advance(delivered as u64, frames);
                     if real_time {
                         // Positive sample counts in seconds.
                         let due = started + Duration::from_secs_f64(delivered as f64 / rate);
@@ -555,11 +603,12 @@ impl CaptureBackend for SyntheticCaptureBackend {
                             std::thread::sleep(due - now);
                         }
                     } else {
-                        if !sink.rings().has_room(frames) {
+                        let room = frames + missed.fill;
+                        if !sink.rings().has_room(room) {
                             first_offered.finish();
                         }
                         let mut spins = 0;
-                        while !sink.rings().has_room(frames) && !stop.load(Ordering::Acquire) {
+                        while !sink.rings().has_room(room) && !stop.load(Ordering::Acquire) {
                             spins += 1;
                             std::thread::sleep(Duration::from_micros(if spins < 100 {
                                 200
@@ -569,6 +618,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         }
                     }
                     generator.fill(frames);
+                    sink.write_missed(missed);
                     if sink.begin_callback(frames) {
                         for lane in 0..lane_count {
                             sink.write_slice(lane, generator.buffer(lane));
@@ -735,6 +785,17 @@ impl Generator {
 
     fn buffer(&self, lane: usize) -> &[f32] {
         &self.buffers[lane]
+    }
+
+    /// Moves every lane on by `frames` without writing them: audio the
+    /// producer missed.
+    fn skip(&mut self, frames: usize) {
+        for state in &mut self.states {
+            state.phase = state
+                .phase
+                .wrapping_add((frames as u32).wrapping_mul(state.increment));
+        }
+        self.position += frames;
     }
 
     /// The fixtures' integer-phase sine, in `f32` as the lanes are.

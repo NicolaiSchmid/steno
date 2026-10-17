@@ -290,14 +290,21 @@ fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> CallR
     let elapsed = started.elapsed();
     let stopping = Instant::now();
     backend.stop();
+    // What the stop wrote for audio the IO thread missed after its last
+    // callback (A18 of `.plans/2026-10-07-stable-promotion.md`).
+    frames += sink.available_to_read();
     let seconds = frames as f64 / stream.sample_rate;
     println!(
         "{what}: first callback {first:?} after start returned ({:?} after it was called), \
          {callbacks} callbacks, {frames} frames ({seconds:.2} s at {} Hz) in {elapsed:?}, \
-         system peak {system_peak}, dropped {:?}; stopped in {:?}",
+         system peak {system_peak}, dropped {:?}, missed {:?}, unfilled {:?}, before the \
+         first {:?}; stopped in {:?}",
         first.map(|first| first + (started - starting)),
         stream.sample_rate,
         sink.dropped_samples(),
+        sink.filled_samples(),
+        sink.unfilled_samples(),
+        sink.before_first_samples(),
         stopping.elapsed()
     );
     CallRun {

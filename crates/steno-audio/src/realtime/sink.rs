@@ -13,12 +13,20 @@
 //! count the session's stall watchdog samples from its own thread (one
 //! relaxed store per callback, refused callbacks included: a device that
 //! delivers into full rings is not stalled). Rust only.
+//!
+//! Audio the backend's thread missed goes through
+//! [`LaneFrameSink::write_missed`]: zeros on every lane as one callback of
+//! their own or, past the fill limit, only counted, beside the drops; the
+//! design is in [`realtime::missed`](super::missed). Audio missed before
+//! a stream's first frame goes through [`LaneFrameSink::count_before_first`]
+//! and is kept apart from that count. Rust only.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use steno_core::AudioLane;
 
+use super::missed::Missed;
 use super::ring::LaneRingBuffer;
 use super::rings::LaneRings;
 use super::wake::Wake;
@@ -40,6 +48,11 @@ pub struct LaneFrameSink {
     /// Frames of every callback begun, refused ones included; written by
     /// the single producer, read by the session's watchdog.
     frames_offered: AtomicUsize,
+    /// A backend start succeeded on this sink ([`Self::first_start`]).
+    started: AtomicBool,
+    /// Per ring, frames missed before a stream's first frame
+    /// ([`Self::count_before_first`]).
+    before_first: Box<[AtomicUsize]>,
 }
 
 impl std::fmt::Debug for LaneFrameSink {
@@ -80,6 +93,8 @@ impl LaneFrameSink {
             device_change_handler: on_device_change,
             pending_frames: AtomicUsize::new(0),
             frames_offered: AtomicUsize::new(0),
+            started: AtomicBool::new(false),
+            before_first: lanes.iter().map(|_| AtomicUsize::new(0)).collect(),
         }
     }
 
@@ -168,6 +183,37 @@ impl LaneFrameSink {
         self.rings.commit();
     }
 
+    /// `frames` of zeros on every lane for audio the backend's thread
+    /// missed, as one callback of their own, counted as missed on every
+    /// lane; whether they were written. Refused, and counted as dropped
+    /// like any callback, when a ring has no room. The caller bounds
+    /// `frames` ([`Missed::fill`]).
+    #[inline(always)]
+    pub fn fill_missed(&self, frames: usize) -> bool {
+        if frames == 0 || !self.begin_callback(frames) {
+            return false;
+        }
+        for lane in 0..self.lanes.len() {
+            self.write_silence(lane);
+            self.ring(lane).record_filled(frames);
+        }
+        self.end_callback();
+        true
+    }
+
+    /// What a clock found missed before a callback, on every lane: the fill
+    /// through [`Self::fill_missed`], the unfilled frames counted. From the
+    /// producer, or from the backend's stop once no producer runs.
+    #[inline(always)]
+    pub fn write_missed(&self, missed: Missed) {
+        self.fill_missed(missed.fill);
+        if missed.unfilled > 0 {
+            for lane in 0..self.lanes.len() {
+                self.ring(lane).record_unfilled(missed.unfilled);
+            }
+        }
+    }
+
     // Backend (any thread)
 
     /// Frames of every callback begun so far, refused ones included; only
@@ -189,6 +235,40 @@ impl LaneFrameSink {
         {
             (self.device_change_handler)(reason);
         }
+    }
+
+    /// Whether this is the first backend start to succeed on this sink, a
+    /// recording's own, and marks that one has: `false` for every
+    /// rebuild's restart after it. The backend asks once its start has
+    /// succeeded. Audio missed before a stream's first frame counts only
+    /// on the first ([`Self::count_before_first`]).
+    #[must_use]
+    pub fn first_start(&self) -> bool {
+        !self.started.swap(true, Ordering::AcqRel)
+    }
+
+    /// What the backend's stop hands on for the audio each stream missed
+    /// before its first frame, unfilled: `master` frames on every lane but
+    /// the follower's, and on WASAPI the follower's own `(lane, frames)`.
+    /// Kept apart from [`Self::unfilled_samples`], so a rebuild's gap never
+    /// takes it back; the rule is in [`realtime::missed`](super::missed#before-the-first-callback).
+    /// Read by [`Self::before_first_samples`]. Rust only.
+    pub fn count_before_first(&self, master: usize, follower: Option<(usize, usize)>) {
+        for (lane, count) in self.before_first.iter().enumerate() {
+            let frames = match follower {
+                Some((index, frames)) if index == lane => frames,
+                _ => master,
+            };
+            count.fetch_add(frames, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether a device change was reported and not yet let through again:
+    /// a backend stopped for the rebuild that follows reads no audio missed
+    /// at its stop, since the session's gap covers that time.
+    #[must_use]
+    pub fn device_change_reported(&self) -> bool {
+        self.device_change_reported.load(Ordering::Acquire)
     }
 
     /// Lets the next `report_device_change` through again. The session
@@ -221,17 +301,142 @@ impl LaneFrameSink {
     /// Ring overruns per lane, in samples; lanes without drops are absent.
     #[must_use]
     pub fn dropped_samples(&self) -> BTreeMap<AudioLane, usize> {
+        self.by_lane(self.rings.dropped_samples())
+    }
+
+    /// Zeros written per lane in place of audio the backend's thread
+    /// missed, in samples at the rings' rate; lanes without are absent.
+    /// Counted across restarts until [`Self::clear`], as the overruns are.
+    #[must_use]
+    pub fn filled_samples(&self) -> BTreeMap<AudioLane, usize> {
+        self.by_lane(self.rings.filled_samples())
+    }
+
+    /// Samples per lane of audio the backend's thread missed and did not
+    /// write ([`Missed::unfilled`]); as [`Self::filled_samples`].
+    #[must_use]
+    pub fn unfilled_samples(&self) -> BTreeMap<AudioLane, usize> {
+        self.by_lane(self.rings.unfilled_samples())
+    }
+
+    /// Samples per lane missed before a stream's first frame
+    /// ([`Self::count_before_first`]); as [`Self::filled_samples`].
+    #[must_use]
+    pub fn before_first_samples(&self) -> BTreeMap<AudioLane, usize> {
+        self.by_lane(
+            self.before_first
+                .iter()
+                .map(|count| count.load(Ordering::Relaxed))
+                .collect(),
+        )
+    }
+
+    /// Per-ring `counts` by lane, the lanes without any left out.
+    fn by_lane(&self, counts: Vec<usize>) -> BTreeMap<AudioLane, usize> {
         self.lanes
             .iter()
-            .zip(self.rings.dropped_samples())
-            .filter(|(_, dropped)| *dropped > 0)
-            .map(|(lane, dropped)| (*lane, dropped))
+            .zip(counts)
+            .filter(|(_, count)| *count > 0)
+            .map(|(lane, count)| (*lane, count))
             .collect()
     }
 
-    /// Zeroes every ring so a restart never replays stale frames. Only
-    /// while no producer runs.
+    /// Zeroes every ring and its counts so a restart never replays stale
+    /// frames. Only while no producer runs.
     pub fn clear(&self) {
         self.rings.clear();
+        for count in &self.before_first {
+            count.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fill_writes_zeros_on_every_lane_and_counts_them_as_missed() {
+        let lanes = [AudioLane::Mic, AudioLane::System];
+        let sink = LaneFrameSink::with_handler(&lanes, 1_000.0, 1.0, Box::new(|_| {}));
+        assert!(sink.begin_callback(10));
+        sink.write_slice(0, &[1.0; 10]);
+        sink.write_slice(1, &[2.0; 10]);
+        sink.end_callback();
+        assert!(sink.fill_missed(6));
+        assert!(!sink.fill_missed(0), "nothing to fill");
+        assert_eq!(sink.available_to_read(), 16);
+        let (mut mic, mut system) = ([9.0f32; 16], [9.0f32; 16]);
+        assert!(sink.ring(0).read(&mut mic) && sink.ring(1).read(&mut system));
+        assert_eq!(&mic[10..], [0.0; 6]);
+        assert_eq!(&system[10..], [0.0; 6]);
+        assert_eq!(
+            sink.filled_samples(),
+            BTreeMap::from([(AudioLane::Mic, 6), (AudioLane::System, 6)])
+        );
+        assert_eq!(sink.frames_offered(), 16, "a fill is delivery");
+        assert!(sink.dropped_samples().is_empty());
+        sink.ring(1).record_filled(4);
+        assert_eq!(sink.filled_samples()[&AudioLane::System], 10);
+        sink.write_missed(Missed {
+            fill: 2,
+            unfilled: 9,
+        });
+        assert_eq!(sink.available_to_read(), 2, "the fill, not the unfilled");
+        assert_eq!(sink.filled_samples()[&AudioLane::Mic], 8);
+        assert_eq!(
+            sink.unfilled_samples(),
+            BTreeMap::from([(AudioLane::Mic, 9), (AudioLane::System, 9)])
+        );
+        sink.clear();
+        assert!(
+            sink.filled_samples().is_empty() && sink.unfilled_samples().is_empty(),
+            "cleared with the rings"
+        );
+    }
+
+    /// The loss before the first frames lands on the lanes each stream
+    /// feeds, apart from the running counts, and the clear zeroes it.
+    #[test]
+    fn the_loss_before_the_first_frames_is_counted_apart_on_each_streams_lanes() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+        sink.count_before_first(4_800, Some((1, 9_600)));
+        sink.count_before_first(0, Some((1, 0)));
+        assert_eq!(
+            sink.before_first_samples(),
+            BTreeMap::from([(AudioLane::Mic, 4_800), (AudioLane::System, 9_600)])
+        );
+        assert!(sink.unfilled_samples().is_empty() && sink.filled_samples().is_empty());
+        let mixed = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+        mixed.count_before_first(480, None);
+        assert_eq!(
+            mixed.before_first_samples(),
+            BTreeMap::from([(AudioLane::Mic, 480), (AudioLane::System, 480)])
+        );
+        sink.clear();
+        assert!(sink.before_first_samples().is_empty());
+    }
+
+    #[test]
+    fn only_the_first_start_on_a_sink_is_the_first() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic]);
+        assert!(sink.first_start(), "the recording's start");
+        assert!(!sink.first_start(), "a rebuild's restart");
+        sink.clear();
+        assert!(!sink.first_start(), "a restart after a clear");
+    }
+
+    #[test]
+    fn a_fill_the_rings_cannot_take_is_dropped_not_missed() {
+        let lanes = [AudioLane::Mixed];
+        // 1 000 samples of ring, rounded up to 1 024.
+        let sink = LaneFrameSink::with_handler(&lanes, 1_000.0, 1.0, Box::new(|_| {}));
+        assert!(!sink.fill_missed(1_025));
+        assert!(sink.filled_samples().is_empty());
+        assert_eq!(
+            sink.dropped_samples(),
+            BTreeMap::from([(AudioLane::Mixed, 1_025)])
+        );
+        assert_eq!(sink.available_to_read(), 0);
     }
 }

@@ -104,6 +104,7 @@ windows = { version = "0.62", features = [
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Performance",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
@@ -155,9 +156,10 @@ objc2-event-kit = { version = "0.3", default-features = false, features = ["std"
 # Without `unsafe`: on macOS the plain `fsync` the recording writer falls
 # back to when a file system refuses `F_FULLFSYNC` (a WebDAV share answers
 # ENOTTY), and on Linux and macOS the `statfs` the pipeline reads a folder's
-# file system with, and the macOS updater's `access(2)` on the bundle.
+# file system with, and the macOS updater's `access(2)` on the bundle; on
+# Linux the `CLOCK_MONOTONIC` the PipeWire capture's stop reads (`time`).
 # Already in the lock (`tempfile` uses it).
-rustix = { version = "1.1", features = ["fs"] }
+rustix = { version = "1.1", features = ["fs", "time"] }
 # Adapters: IANA time zones for the dates in the notes (Swift's `TimeZone`),
 # the machine's zone name, and the canonical decomposition `Slug` strips
 # diacritics with (the core's `Person::names_match` folds names with it too).

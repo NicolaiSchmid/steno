@@ -80,9 +80,10 @@
 //! sample before the first frame (within
 //! [`CaptureSession::STALL_CHECK_INTERVAL`]). A restart whose stream
 //! offered frames before its start returned ends its gap at the clock's
-//! reading before the start, so the master may run short by the time to
-//! the first frame (on PipeWire the connect, the link and the first
-//! cycle); no audio is lost.
+//! reading before the start. The time from there to the first frame (on
+//! PipeWire the connect, the link and the first cycle: the start's time
+//! less the frames it delivered) is audio the restart lost, and it counts
+//! as missed and not filled (below).
 //!
 //! A stream a rebuild resumed on that stalls again within 10 s, or before
 //! it delivered anything, continues that rebuild's streak: the next
@@ -165,6 +166,33 @@
 //! never waits for a stopper, so the wait cannot deadlock, and a finaliser
 //! that panics leaves `Failed` with no recording rather than `Stopping` for
 //! good.
+//!
+//! # Missed audio
+//!
+//! Audio the backend's own thread missed while its stream ran (cycles the
+//! scheduler did not give it) is no stall: the backend writes it as zeros
+//! or counts it, and the session folds those counts per lane at each
+//! stream's rate into [`CaptureStatistics::filled_seconds`] and
+//! [`CaptureStatistics::unfilled_seconds`], logged at `warn` after the
+//! stop. A18, the design in [`realtime::missed`](crate::realtime::missed);
+//! Rust only.
+//!
+//! A stall the watch thread reported whose thread wakes before the
+//! rebuild's stop counts its time as an unfilled jump, and the rebuild's
+//! gap, which runs from the last frame the watch thread saw, writes
+//! silence for that time too. Once the gap is written in full, under the
+//! lock with the recording still there (`resume`), the session takes back
+//! from that late count at most the gap's length per lane, so the time
+//! counts once. What a stream missed before its first frame is never part
+//! of it ([the rule](crate::realtime::missed#before-the-first-callback)).
+//! The time a restart's stream lost before its first frame, when frames
+//! came during its start, counts unfilled on every lane once the gap is
+//! written.
+//! A rebuild that ends before that (a stop during the
+//! restart, a write the stop cut short, restarts that ran out) keeps the
+//! whole late count, and what a gap capped at
+//! [`CaptureSession::MAXIMUM_GAP`] did not write stays unfilled: no missed
+//! audio leaves the counts, and so none leaves the note.
 //!
 //! # Threads
 //!
@@ -367,9 +395,9 @@ struct Active {
     /// listeners are live before the gap is written); `resume` starts the
     /// next rebuild from it instead of losing it.
     pending_change: Option<DeviceChangeReason>,
-    /// The ring overruns of the streams a rebuild has stopped, each counted
-    /// at its own rate.
-    ring_drops: RingDrops,
+    /// The ring overruns of the streams a rebuild has stopped, and what
+    /// their thread missed, each counted at its own rate.
+    ring_counts: RingCounts,
     /// The watch thread, over a backend that delivers continuously.
     watch: Option<Watch>,
     /// The recording's hold on [`Playback`], taken before the backend
@@ -424,25 +452,149 @@ impl Streak {
     }
 }
 
-/// Ring overruns in samples at [`SAMPLE_RATE`], per lane. The sink counts
-/// them at the device's rate and keeps counting across a rebuild, so each
-/// stream's share is rescaled at that stream's rate once it has stopped.
+/// Per-lane counts the sink keeps at the device's rate (ring overruns,
+/// missed audio), held in samples at [`SAMPLE_RATE`]. The sink keeps
+/// counting across a rebuild, so each stream's share is rescaled at that
+/// stream's rate once it has stopped.
 #[derive(Default)]
-struct RingDrops {
+struct LaneCounts {
     /// The sink's counts at the last fold.
     seen: BTreeMap<AudioLane, usize>,
     /// What every fold so far stands for at [`SAMPLE_RATE`].
     at_output_rate: BTreeMap<AudioLane, usize>,
 }
 
-impl RingDrops {
-    /// Adds the overruns in `counts` since the last fold, counted at `rate`.
-    fn fold(&mut self, counts: BTreeMap<AudioLane, usize>, rate: f64) {
+impl LaneCounts {
+    /// Adds what `counts` gained since the last fold, counted at `rate`;
+    /// returns what it added per lane, at [`SAMPLE_RATE`].
+    fn fold(
+        &mut self,
+        counts: BTreeMap<AudioLane, usize>,
+        rate: f64,
+    ) -> BTreeMap<AudioLane, usize> {
+        let mut added = BTreeMap::new();
         for (lane, count) in counts {
             let seen = self.seen.entry(lane).or_default();
-            *self.at_output_rate.entry(lane).or_default() +=
-                CaptureStream::rescaled(count.saturating_sub(*seen), rate, SAMPLE_RATE);
+            let samples = CaptureStream::rescaled(count.saturating_sub(*seen), rate, SAMPLE_RATE);
+            *self.at_output_rate.entry(lane).or_default() += samples;
             *seen = count;
+            added.insert(lane, samples);
+        }
+        added
+    }
+
+    /// The largest lane's count, in seconds.
+    fn most_seconds(&self) -> f64 {
+        self.at_output_rate.values().max().copied().unwrap_or(0) as f64 / SAMPLE_RATE
+    }
+}
+
+/// The sink's per-lane counts of one recording: its ring overruns, and
+/// the audio a capture thread missed, written as zeros or not
+/// ([`LaneFrameSink::write_missed`]), the unfilled with what a stream
+/// missed before its first frame
+/// ([`LaneFrameSink::count_before_first`]).
+#[derive(Default)]
+struct RingCounts {
+    dropped: LaneCounts,
+    filled: LaneCounts,
+    unfilled: LaneCounts,
+    /// The sink's counts before the first frames, folded into `unfilled`
+    /// but never into `unfilled_in_gap`: no gap covers that time.
+    before_first: LaneCounts,
+    /// What a stalled stream's thread counted unfilled after the last
+    /// frame the watch thread saw, per lane at [`SAMPLE_RATE`]: the time
+    /// the rebuild's gap writes as silence too, until the gap is written
+    /// ([`Self::gap_written`]).
+    unfilled_in_gap: BTreeMap<AudioLane, usize>,
+}
+
+impl RingCounts {
+    /// Adds what `sink` counted since the last fold, at the `rate` of the
+    /// stream that wrote it.
+    fn fold(&mut self, sink: &LaneFrameSink, rate: f64) {
+        self.dropped.fold(sink.dropped_samples(), rate);
+        self.filled.fold(sink.filled_samples(), rate);
+        self.unfilled.fold(sink.unfilled_samples(), rate);
+        for (lane, samples) in self.before_first.fold(sink.before_first_samples(), rate) {
+            *self.unfilled.at_output_rate.entry(lane).or_default() += samples;
+        }
+    }
+
+    /// [`Self::fold`] for a rebuild's stop: when the gap starts at the last
+    /// frame the watch thread saw, which the sink's unfilled counts then
+    /// read `before`, what the stream's thread counted unfilled after that
+    /// is kept apart for the gap ([`Self::gap_written`]).
+    fn fold_at_a_rebuild(
+        &mut self,
+        sink: &LaneFrameSink,
+        before: Option<BTreeMap<AudioLane, usize>>,
+        rate: f64,
+    ) {
+        self.unfilled_in_gap.clear();
+        if let Some(before) = before {
+            self.unfilled.fold(before, rate);
+            self.unfilled_in_gap = self.unfilled.fold(sink.unfilled_samples(), rate);
+        }
+        self.fold(sink, rate);
+    }
+
+    /// The rebuild's gap is written, `samples` per lane at
+    /// [`SAMPLE_RATE`]: of what the stalled thread counted unfilled in it,
+    /// at most that much is taken back, since the gap's silence now stands
+    /// for it (see the module doc).
+    fn gap_written(&mut self, samples: usize) {
+        for (lane, late) in std::mem::take(&mut self.unfilled_in_gap) {
+            if let Some(unfilled) = self.unfilled.at_output_rate.get_mut(&lane) {
+                *unfilled -= late.min(samples).min(*unfilled);
+            }
+        }
+    }
+
+    /// A restart lost `samples` per lane at [`SAMPLE_RATE`] before its
+    /// first frame, which no gap wrote (`Started::late`): counted unfilled
+    /// on every one of `lanes`, as the stalled thread's late count is.
+    fn restart_missed(&mut self, lanes: &[AudioLane], samples: usize) {
+        if samples > 0 {
+            for lane in lanes {
+                *self.unfilled.at_output_rate.entry(*lane).or_default() += samples;
+            }
+        }
+    }
+
+    /// The ring overruns per lane in whole 10 ms frames at [`SAMPLE_RATE`].
+    fn dropped_frames(&self) -> BTreeMap<AudioLane, usize> {
+        self.dropped
+            .at_output_rate
+            .iter()
+            .map(|(lane, samples)| (*lane, samples / FRAME_SIZE))
+            .collect()
+    }
+
+    /// Seconds of zeros written for missed audio on the lane that missed
+    /// most, for [`CaptureStatistics::filled_seconds`].
+    fn filled_seconds(&self) -> f64 {
+        self.filled.most_seconds()
+    }
+
+    /// Seconds of missed audio not written on the lane that lost most, for
+    /// [`CaptureStatistics::unfilled_seconds`].
+    fn unfilled_seconds(&self) -> f64 {
+        self.unfilled.most_seconds()
+    }
+
+    /// The `warn` line after the stop, when the capture's thread missed
+    /// anything: the seconds and every lane's samples, filled and not.
+    fn log_missed(&self) {
+        let (filled, unfilled) = (self.filled_seconds(), self.unfilled_seconds());
+        if filled > 0.0 || unfilled > 0.0 {
+            tracing::warn!(
+                filled = ?self.filled.at_output_rate,
+                unfilled = ?self.unfilled.at_output_rate,
+                "the capture's thread missed {:.3} s of audio: {filled:.3} s written as \
+                 silence, {unfilled:.3} s too long to fill and left out",
+                filled + unfilled
+            );
         }
     }
 }
@@ -513,6 +665,11 @@ struct Rebuild {
 struct Started {
     stream: CaptureStream,
     on_the_default: bool,
+    /// For a restart whose frames came during its start: the time from the
+    /// clock's reading before the start, where its gap ends, to the first
+    /// frame, which no frame and no gap covers (`try_start`). Zero
+    /// otherwise.
+    late: Duration,
 }
 
 enum Restart {
@@ -1093,18 +1250,21 @@ impl Core {
             .map(|stream| Started {
                 stream,
                 on_the_default: false,
+                late: Duration::ZERO,
             })
             .or_else(|error| {
                 self.start_on_the_default(&sink)
                     .map(|stream| Started {
                         stream,
                         on_the_default: true,
+                        late: Duration::ZERO,
                     })
                     .ok_or(error)
             });
         let Started {
             stream,
             on_the_default,
+            ..
         } = match started {
             Ok(started) => started,
             Err(error) => {
@@ -1219,7 +1379,7 @@ impl Core {
             system_peak_so_far: 0.0,
             rebuild: None,
             pending_change: None,
-            ring_drops: RingDrops::default(),
+            ring_counts: RingCounts::default(),
             watch,
             _recording_hold: hold.take(),
             streak: Streak::default(),
@@ -1383,14 +1543,12 @@ impl Core {
         let write_failure = writer_thread.take_error();
         let sync_failure = writer_thread.take_sync_error();
         let mut writer = writer_thread.take_writer().ok_or_else(writer_lost)?;
-        // Read before `clear()`, which zeroes the ring overrun counts. Whole
-        // frames still in the rings never reached the relay: a restarted
-        // backend delivered them after a stop overtook its rebuild, with no
-        // processing thread running yet. They count as dropped. The rings
-        // hold the device's rate; the counts are 48 kHz frames.
-        active
-            .ring_drops
-            .fold(active.sink.dropped_samples(), ring_rate);
+        // Read before `clear()`, which zeroes the rings' counts (overruns,
+        // missed audio). Whole frames still in the rings never reached the
+        // relay: a restarted backend delivered them after a stop overtook
+        // its rebuild, with no processing thread running yet. They count as
+        // dropped. The rings hold the device's rate; the counts are 48 kHz.
+        active.ring_counts.fold(&active.sink, ring_rate);
         let undrained =
             CaptureStream::rescaled(active.sink.available_to_read(), ring_rate, SAMPLE_RATE)
                 / FRAME_SIZE;
@@ -1413,10 +1571,7 @@ impl Core {
             )));
         }
         let lanes = self.configuration.lanes();
-        let mut dropped: BTreeMap<AudioLane, usize> = BTreeMap::new();
-        for (lane, samples) in &active.ring_drops.at_output_rate {
-            *dropped.entry(*lane).or_default() += samples / FRAME_SIZE;
-        }
+        let mut dropped = active.ring_counts.dropped_frames();
         if undrained > 0 {
             for lane in &lanes {
                 *dropped.entry(*lane).or_default() += undrained;
@@ -1435,7 +1590,10 @@ impl Core {
             ended_on_device_loss: active.ended_on_device_loss,
             device_changes: active.device_changes,
             gap_seconds: active.gap_seconds,
+            filled_seconds: active.ring_counts.filled_seconds(),
+            unfilled_seconds: active.ring_counts.unfilled_seconds(),
         };
+        active.ring_counts.log_missed();
         let asset = AudioAsset {
             id: Uuid::new_v4(),
             meeting_id: active.meeting_id,
@@ -1690,6 +1848,10 @@ impl Core {
         // `STALL_TIMEOUT`).
         let now = self.clock.now();
         let mut silent_from = now;
+        // The sink's unfilled counts when the gap starts at the last frame:
+        // what the stalled thread counts after it, the gap writes too
+        // (`RingCounts::fold_at_a_rebuild`).
+        let mut unfilled_at_last_frame = None;
         let (sink, relay, processing, plan, quiet) = {
             let mut inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
@@ -1702,6 +1864,7 @@ impl Core {
                 && watch.progress.count == active.sink.frames_offered()
             {
                 silent_from = silent_from.min(watch.progress.at);
+                unfilled_at_last_frame = Some(active.sink.unfilled_samples());
             }
             let plan = self.restart_plan(active, reason, now);
             if plan.continues == 0 {
@@ -1763,9 +1926,10 @@ impl Core {
             // rate; the restarted one's come at the next fold.
             if let Some(active) = inner.active.as_mut() {
                 active.system_peak_so_far = active.system_peak_so_far.max(peak);
+                let rate = active.stream.sample_rate;
                 active
-                    .ring_drops
-                    .fold(sink.dropped_samples(), active.stream.sample_rate);
+                    .ring_counts
+                    .fold_at_a_rebuild(&sink, unfilled_at_last_frame, rate);
                 // No processing thread writes the slot now; the level
                 // publisher hands this on, so a meter does not hold the old
                 // stream's last level through a stall or a long restart.
@@ -2015,14 +2179,14 @@ impl Core {
     /// last sample before the first frame (within `STALL_CHECK_INTERVAL`),
     /// not to the start's return. A start whose stream offered frames
     /// before it returned ends the gap at the clock's reading before the
-    /// start, so the master may run short of wall time by the time from
-    /// that reading to the first frame (on PipeWire the connect, the link
-    /// and the first cycle), never ahead; no audio is lost either way. A
-    /// stream that offered none `STALL_TIMEOUT` after its start is stopped
-    /// and fails with `DidNotRun`; a change its listeners reported
-    /// meanwhile is dropped with it, since the next start reads the devices
-    /// as they are, and the sink's latch opens again for that start's
-    /// listeners.
+    /// start, never ahead of wall time; the time from that reading to the
+    /// first frame (on PipeWire the connect, the link and the first cycle),
+    /// the start's time less the frames it delivered, is audio lost, and
+    /// it is counted (`Started::late`). A stream that offered none
+    /// `STALL_TIMEOUT` after its start is stopped and fails with
+    /// `DidNotRun`; a change its listeners reported meanwhile is dropped
+    /// with it, since the next start reads the devices as they are, and the
+    /// sink's latch opens again for that start's listeners.
     /// A stop during the wait answers `Started`: the stream is running and
     /// is the stop's to tear down, so the rebuild's next steps give up on
     /// it and `finish()` stops it. `Started`, or `Abandoned` when the
@@ -2037,7 +2201,7 @@ impl Core {
         generation: usize,
         cancel: &Cancel,
     ) -> Result<Restart, CaptureError> {
-        let (stream, mut at, returned, offered, quiet) = {
+        let (stream, mut at, late, returned, offered, quiet) = {
             let inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
                 return Ok(Restart::Abandoned);
@@ -2064,15 +2228,23 @@ impl Core {
             })?;
             // Frames that came while `start` ran (a PipeWire start reads
             // its latency after the first cycle) end the gap at the reading
-            // before it, where the return would hold that time twice: the
-            // master then runs short by the time to the first frame.
+            // before it, where the return would hold that time twice. The
+            // time from that reading to the first frame, the start's time
+            // less the frames it delivered, is audio the restart lost: it
+            // counts as missed and not filled (`resume`).
             let returned = self.clock.now();
-            let at = if sink.frames_offered() == offered {
-                returned
+            let delivered = sink.frames_offered().wrapping_sub(offered);
+            let (at, late) = if delivered == 0 {
+                (returned, Duration::ZERO)
             } else {
-                before
+                let covered = Duration::try_from_secs_f64(delivered as f64 / stream.sample_rate)
+                    .unwrap_or(Duration::MAX);
+                (
+                    before,
+                    returned.saturating_sub(before).saturating_sub(covered),
+                )
             };
-            (stream, at, returned, offered, quiet)
+            (stream, at, late, returned, offered, quiet)
         };
         while plan.awaits_delivery && sink.frames_offered() == offered {
             let now = self.clock.now();
@@ -2099,6 +2271,7 @@ impl Core {
             started: Started {
                 stream,
                 on_the_default,
+                late,
             },
             attempt,
             at,
@@ -2153,6 +2326,7 @@ impl Core {
         Started {
             stream,
             on_the_default,
+            late,
         }: Started,
         attempt: usize,
         gap_frames: usize,
@@ -2193,6 +2367,10 @@ impl Core {
         active.processing = Some(processing);
         active.device_changes += 1;
         active.gap_seconds += gap_seconds;
+        active.ring_counts.gap_written(gap_frames * FRAME_SIZE);
+        active
+            .ring_counts
+            .restart_missed(sink.lanes(), CaptureSession::gap_frames(late) * FRAME_SIZE);
         active.rebuild = None;
         active.streak.attempts = attempt;
         active.streak.gap_seconds += gap_seconds;
@@ -2460,6 +2638,84 @@ mod tests {
     use crate::capture::CaptureMode;
     use crate::testing::{HANG_GUARD, SyntheticCaptureBackend};
     use crate::writer::{LaneFrames, RecordingFiles};
+
+    /// What a capture thread missed counts on the lane that missed most,
+    /// each stream's share at that stream's rate, what it missed before
+    /// its first frame included: the WASAPI follower's lane can miss more
+    /// than the microphone's.
+    #[test]
+    fn missed_audio_counts_on_the_lane_that_missed_most_at_each_streams_rate() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+        sink.ring(0).record_filled(4_800);
+        sink.ring(1).record_filled(2_400);
+        sink.ring(1).record_unfilled(48_000);
+        sink.count_before_first(24_000, None);
+        let mut counts = RingCounts::default();
+        counts.fold(&sink, 24_000.0);
+        sink.ring(1).record_filled(7_200);
+        counts.fold(&sink, SAMPLE_RATE);
+        assert_eq!(
+            counts.filled_seconds(),
+            0.25,
+            "the system lane: 2 400 at 24 kHz and 7 200 at 48 kHz, above the microphone's 0.2 s"
+        );
+        assert_eq!(
+            counts.unfilled_seconds(),
+            3.0,
+            "the system lane: 48 000 at 24 kHz, and 24 000 at 24 kHz before its first frame"
+        );
+    }
+
+    /// A rebuild's gap takes back what the stalled thread counted unfilled
+    /// in it on every lane, at most the gap's length on each: with a 2.1 s
+    /// gap, the microphone's 2 s come back whole and 2.1 s of the system
+    /// lane's 2.5 s.
+    #[test]
+    fn a_rebuilds_gap_takes_back_the_late_count_on_every_lane() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+        let mut counts = RingCounts::default();
+        let before = sink.unfilled_samples();
+        sink.ring(0).record_unfilled(96_000);
+        sink.ring(1).record_unfilled(120_000);
+        counts.fold_at_a_rebuild(&sink, Some(before), SAMPLE_RATE);
+        counts.gap_written(100_800);
+        assert_eq!(
+            counts.unfilled.at_output_rate,
+            [(AudioLane::Mic, 0), (AudioLane::System, 19_200)].into()
+        );
+    }
+
+    /// What a stream missed before its first frame, counted at a rebuild's
+    /// stop after the last frame's snapshot, is no part of the gap's late
+    /// count: the gap takes back only the thread's own 1 s.
+    #[test]
+    fn a_rebuilds_gap_never_takes_back_the_loss_before_the_first_frame() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic]);
+        let mut counts = RingCounts::default();
+        let before = sink.unfilled_samples();
+        sink.ring(0).record_unfilled(48_000);
+        sink.count_before_first(72_000, None);
+        counts.fold_at_a_rebuild(&sink, Some(before), SAMPLE_RATE);
+        counts.gap_written(100_800);
+        assert_eq!(counts.unfilled_seconds(), 1.5);
+    }
+
+    /// What a rebuild kept apart for its gap is gone at the next rebuild's
+    /// fold when no gap took it back (a stop cut the gap short): a later
+    /// gap that starts at a device change, not at a last frame, takes
+    /// nothing back. Through the session a cut gap ends the recording, so
+    /// only this test reaches that order.
+    #[test]
+    fn a_late_count_no_gap_took_back_stays_counted_at_the_next_rebuild() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic]);
+        let mut counts = RingCounts::default();
+        let before = sink.unfilled_samples();
+        sink.ring(0).record_unfilled(48_000);
+        counts.fold_at_a_rebuild(&sink, Some(before), SAMPLE_RATE);
+        counts.fold_at_a_rebuild(&sink, None, SAMPLE_RATE);
+        counts.gap_written(48_000);
+        assert_eq!(counts.unfilled_seconds(), 1.0);
+    }
 
     /// The production writer, except that every write fails as a full disk
     /// does and `finish()` waits for `release`, which holds the writer

@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -39,7 +39,7 @@ use steno_audio::capture::{
     CaptureBackend, CaptureConfiguration, CaptureError, CaptureInput, CaptureMode, CaptureNotice,
     CaptureResult, CaptureSession, CaptureState, CaptureStream, DeviceChangeReason, LaneLevel,
 };
-use steno_audio::realtime::{FrameRelay, LaneFrameSink};
+use steno_audio::realtime::{FrameRelay, LaneFrameSink, Missed};
 use steno_audio::testing::synthetic::SyntheticOptions;
 use steno_audio::testing::{HANG_GUARD, ManualClock, SyntheticCaptureBackend, SyntheticLane};
 use steno_audio::writer::{
@@ -4283,11 +4283,14 @@ fn a_change_during_a_restart_that_delivers_nothing_costs_no_extra_rebuild() {
 
 /// The synthetic backend, whose restarts return `start_takes` on `clock`
 /// after their first callback, as a PipeWire start reads its latency after
-/// the first cycle.
+/// the first cycle; with `until_its_stall`, once a restart's producer has
+/// delivered up to its stall (`restarts_stall_after`), so the frames that
+/// came during the start are known.
 struct SlowRestart {
     inner: SyntheticCaptureBackend,
     clock: Arc<ManualClock>,
     start_takes: Duration,
+    until_its_stall: bool,
 }
 
 impl CaptureBackend for SlowRestart {
@@ -4299,6 +4302,9 @@ impl CaptureBackend for SlowRestart {
     ) -> Result<CaptureStream, CaptureError> {
         let stream = self.inner.start(lanes, input_device_uid, sink)?;
         if self.inner.starts() > 1 {
+            if self.until_its_stall {
+                self.inner.wait_until_finished();
+            }
             self.clock.advance(self.start_takes);
         }
         Ok(stream)
@@ -4325,6 +4331,7 @@ fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
         inner: SyntheticCaptureBackend::new(stalling(1.0, 0.5)),
         clock: clock.clone(),
         start_takes: Duration::from_millis(300),
+        until_its_stall: false,
     });
     let session = in_person_session(directory.path(), backend.clone(), clock.clone());
     let notices = session.notices();
@@ -4339,6 +4346,39 @@ fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
     let result = session.stop().unwrap();
     assert_eq!(result.statistics.gap_seconds, gap);
     assert_eq!(result.statistics.duration, 0.5 + gap + 1.0);
+}
+
+/// The time from the reading before a slow restart's start to its first
+/// frame is audio the restart lost: a start of 0.3 s that delivered 0.1 s
+/// counts 0.2 s missed and not filled, on every lane, beside the gap.
+#[test]
+fn a_slow_restart_counts_the_time_before_its_first_frame() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SlowRestart {
+        inner: SyntheticCaptureBackend::new(stalling(1.0, 0.5).restarts_stall_after(0.1)),
+        clock: clock.clone(),
+        start_takes: Duration::from_millis(300),
+        until_its_stall: true,
+    });
+    let session = in_person_session(directory.path(), backend.clone(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.inner.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    let gap = gap_seconds(CaptureSession::STALL_TIMEOUT + CaptureSession::STALL_CHECK_INTERVAL);
+    assert_eq!(next_resume(&notices).1, gap);
+    backend.inner.resume_delivery();
+    backend.inner.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.gap_seconds, gap);
+    assert_eq!(result.statistics.duration, 0.5 + gap + 1.0);
+    assert_eq!(result.statistics.filled_seconds, 0.0);
+    assert!(
+        (result.statistics.unfilled_seconds - 0.2).abs() < 1e-9,
+        "{} s",
+        result.statistics.unfilled_seconds
+    );
 }
 
 /// A stall whose restarts fail with an error that is not `DidNotRun` (a
@@ -5345,4 +5385,483 @@ fn a_held_stall_waits_for_its_release() {
     settle();
     assert_eq!(backend.frames_delivered(), stalled, "stalled");
     backend.stop();
+}
+
+/// The runs of at least `shortest` exact zeros in `samples`, as (start,
+/// length): a 440 Hz or 1 kHz tone at amplitude 0.5 touches zero at single
+/// samples only.
+fn zero_runs(samples: &[f32], shortest: usize) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    for (index, sample) in samples.iter().chain(std::iter::once(&1.0)).enumerate() {
+        match (*sample == 0.0, start) {
+            (true, None) => start = Some(index),
+            (false, Some(from)) => {
+                if index - from >= shortest {
+                    runs.push((from, index - from));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    runs
+}
+
+/// A log line's bytes, shared with the subscriber that writes them.
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Every line this test binary logged at `warn` and above so far, from
+/// any thread and any test: a subscriber of its own for one test misses
+/// lines whose call site another test's thread registered first.
+fn warnings() -> String {
+    static CAPTURED: OnceLock<Captured> = OnceLock::new();
+    let captured = CAPTURED.get_or_init(|| {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+        )
+        .expect("no other subscriber in this test binary");
+        captured
+    });
+    String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned()
+}
+
+/// A capture thread that misses cycles (A18 of
+/// `.plans/2026-10-07-stable-promotion.md`): the synthetic producer skips
+/// 100 ms one second in, which its clock reports and the sink fills with
+/// zeros on both lanes at the same frames, and 2.5 s two seconds in, past
+/// the fill limit and the session's stall timeout, which is counted and
+/// left out. The master holds the five seconds less the 2.5 s, both lanes
+/// alike; the frames written count as filled, the rest as unfilled, neither
+/// as dropped or as a gap, and the stop logs both at `warn`.
+#[test]
+fn missed_cycles_are_written_as_silence_on_every_lane_and_counted() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 5.0)
+            .miss_at(1.0, 4_800)
+            .miss_at(2.0, 120_000),
+    ));
+    let mut configuration = configuration(CaptureMode::Call, directory.path(), false);
+    configuration.echo_cancellation = false;
+    let session = CaptureSession::with_backend(
+        configuration,
+        backend.clone(),
+        None,
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    warnings();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    let warnings = warnings();
+    assert!(
+        warnings.contains(
+            "the capture's thread missed 2.600 s of audio: 0.100 s written as silence, \
+             2.500 s too long to fill and left out"
+        ),
+        "{warnings}"
+    );
+    let statistics = &result.statistics;
+    assert!(statistics.dropped_frames.is_empty(), "{statistics:?}");
+    assert_eq!(statistics.gap_seconds, 0.0);
+    assert_eq!(statistics.filled_seconds, 0.1, "the 100 ms filled");
+    assert_eq!(statistics.unfilled_seconds, 2.5, "the 2.5 s counted");
+    assert!(
+        (statistics.duration - 2.5).abs() < 0.02,
+        "five seconds less the jump past the limit: {}",
+        statistics.duration
+    );
+    let master = master_of(&result);
+    assert_eq!(master.channels.len(), 2);
+    assert_eq!(
+        master.channels[0].len(),
+        master.channels[1].len(),
+        "both lanes lost the same span"
+    );
+    for (lane, samples) in call().iter().zip(&master.channels) {
+        assert_eq!(
+            zero_runs(samples, 16),
+            [(48_000, 4_800)],
+            "{lane:?}: zeros exactly where the frames were filled"
+        );
+    }
+}
+
+/// What a stream's thread missed counts at that stream's rate when a
+/// rebuild moves the recording to another: 2 400 frames missed at 48 kHz
+/// are 50 ms, not the 100 ms they would be at the restarted 24 kHz.
+#[test]
+fn missed_cycles_before_a_rebuild_count_at_the_old_streams_rate() {
+    let directory = tempfile::tempdir().unwrap();
+    let hands_free = CaptureStream {
+        sample_rate: 24_000.0,
+        input_latency_frames: 240,
+        output_latency_frames: 4_800,
+        ..CaptureStream::SYNTHETIC
+    };
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 2.0)
+            .miss_at(0.5, 2_400)
+            .change_device_after(1.0)
+            .stream_after_restart(hands_free),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        Arc::new(ManualClock::new()),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        recv(&notices),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert!(matches!(
+        recv(&notices),
+        CaptureNotice::DeviceResumed { .. }
+    ));
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.device_changes, 1);
+    assert_eq!(result.statistics.filled_seconds, 0.05);
+}
+
+/// A stalled stream whose thread wakes once the watch thread reported the
+/// stall and counts the stall as a jump too long to fill before the
+/// rebuild's stop closes it: the synthetic backend, whose first `stop()`
+/// first counts `late` unfilled frames on the sink, as that thread's last
+/// callback does. The first start counts `early` unfilled frames, a jump
+/// from before the stall. With [`Self::stop_taking`], that first `stop()`
+/// moves the manual clock on first, as a stop that takes that long.
+struct WakesBeforeTheStop {
+    inner: Arc<SyntheticCaptureBackend>,
+    sink: Mutex<Option<Arc<LaneFrameSink>>>,
+    early: usize,
+    late: AtomicUsize,
+    stop_takes: Mutex<Option<(Arc<ManualClock>, Duration)>>,
+}
+
+impl WakesBeforeTheStop {
+    fn new(inner: &Arc<SyntheticCaptureBackend>, early: usize, late: usize) -> Self {
+        Self {
+            inner: Arc::clone(inner),
+            sink: Mutex::new(None),
+            early,
+            late: AtomicUsize::new(late),
+            stop_takes: Mutex::new(None),
+        }
+    }
+
+    fn stop_taking(self, clock: &Arc<ManualClock>, by: Duration) -> Self {
+        self.stop_takes
+            .lock()
+            .unwrap()
+            .replace((Arc::clone(clock), by));
+        self
+    }
+}
+
+impl CaptureBackend for WakesBeforeTheStop {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        let first = self
+            .sink
+            .lock()
+            .unwrap()
+            .replace(Arc::clone(&sink))
+            .is_none();
+        let stream = self.inner.start(lanes, uid, Arc::clone(&sink))?;
+        if first {
+            sink.write_missed(Missed {
+                fill: 0,
+                unfilled: self.early,
+            });
+        }
+        Ok(stream)
+    }
+    fn stop(&self) {
+        if let Some((clock, by)) = self.stop_takes.lock().unwrap().take() {
+            clock.advance(by);
+        }
+        let late = self.late.swap(0, Ordering::SeqCst);
+        if let Some(sink) = self.sink.lock().unwrap().as_ref() {
+            sink.write_missed(Missed {
+                fill: 0,
+                unfilled: late,
+            });
+        }
+        self.inner.stop();
+    }
+    fn delivers_continuously(&self, lanes: &[AudioLane]) -> bool {
+        self.inner.delivers_continuously(lanes)
+    }
+}
+
+/// A stall the watch thread reported, whose thread then wakes and counts
+/// it as an unfilled jump before the rebuild's stop (a process stopped
+/// for longer than `STALL_TIMEOUT`, A18 of
+/// `.plans/2026-10-07-stable-promotion.md`): the rebuild's gap, which
+/// writes silence from the last frame the watch thread saw, counts that
+/// time, and once it is written the late count is taken back, at most the
+/// gap's length of it, so the time counts once (the session's module doc,
+/// "Missed audio"). A jump counted before the stall still counts. The late
+/// count of 2 s is shorter than the 2.1 s gap, which also runs through the
+/// restart; one longer than its gap is tested past `MAXIMUM_GAP` below.
+#[test]
+fn a_stall_counted_by_its_thread_before_the_rebuilds_stop_counts_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let inner = Arc::new(SyntheticCaptureBackend::new(stalling(1.0, 0.5)));
+    let backend = Arc::new(WakesBeforeTheStop::new(&inner, 4_800, 96_000));
+    let session = in_person_session(directory.path(), backend, clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    inner.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    let gap_seconds =
+        gap_seconds(CaptureSession::STALL_TIMEOUT + CaptureSession::STALL_CHECK_INTERVAL);
+    assert_eq!(
+        recv(&notices),
+        CaptureNotice::DeviceResumed {
+            attempt: 1,
+            gap_seconds
+        }
+    );
+    inner.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.device_changes, 1);
+    assert_eq!(result.statistics.gap_seconds, gap_seconds);
+    assert_eq!(gap_seconds, 2.1);
+    assert_eq!(
+        result.statistics.unfilled_seconds, 0.1,
+        "the jump before the stall, not the stall again"
+    );
+}
+
+/// As above, but `stop()` comes while the restart waits for its first
+/// frame, so no gap is written: the late count stays whole, and the note
+/// says the 2.5 s are missing however long the recording ran.
+#[test]
+fn a_late_count_stays_counted_when_a_stop_abandons_the_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let inner = Arc::new(SyntheticCaptureBackend::new(
+        stalling(1.0, 0.5).restarts_stall_after(0.0),
+    ));
+    let backend = Arc::new(WakesBeforeTheStop::new(&inner, 0, 120_000));
+    let session = Arc::new(in_person_session(directory.path(), backend, clock.clone()));
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    inner.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    assert!(
+        clock.wait_for_sleepers(2),
+        "the restart waits for a first frame"
+    );
+    assert_eq!(inner.starts(), 2);
+    let stopping = Arc::clone(&session);
+    let result = within_deadline("the stop", move || stopping.stop()).unwrap();
+    let statistics = &result.statistics;
+    assert_eq!(statistics.device_changes, 0);
+    assert_eq!(statistics.gap_seconds, 0.0);
+    assert_eq!(statistics.filled_seconds, 0.0);
+    assert_eq!(statistics.unfilled_seconds, 2.5, "the late count, whole");
+}
+
+/// A stall whose rebuild's stop takes 12 s and whose thread counted 14 s
+/// unfilled before it: the gap is written for `MAXIMUM_GAP`, 10 s, and the
+/// 4 s it did not write stay unfilled.
+#[test]
+fn a_late_count_past_the_maximum_gap_keeps_what_the_gap_did_not_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let inner = Arc::new(SyntheticCaptureBackend::new(stalling(1.0, 0.5)));
+    let backend = Arc::new(
+        WakesBeforeTheStop::new(&inner, 0, 14 * 48_000)
+            .stop_taking(&clock, Duration::from_secs(12)),
+    );
+    let session = in_person_session(directory.path(), backend, clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    inner.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    assert_eq!(
+        recv(&notices),
+        CaptureNotice::DeviceResumed {
+            attempt: 1,
+            gap_seconds: gap_seconds(CaptureSession::MAXIMUM_GAP)
+        }
+    );
+    inner.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.gap_seconds, 10.0);
+    assert_eq!(result.statistics.unfilled_seconds, 4.0);
+}
+
+/// A device change reported while the stream delivers, whose rebuild's
+/// stop takes a second, and whose thread counted a 2.5 s unfilled jump
+/// before that stop: the gap starts at the change, not at a last frame,
+/// so the jump is from before it and stays counted beside the gap.
+#[test]
+fn a_late_count_before_a_device_changes_rebuild_stays_counted() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let inner = Arc::new(SyntheticCaptureBackend::new(
+        tones(&[AudioLane::Mixed], 1.0).change_device_after(0.5),
+    ));
+    let backend = Arc::new(
+        WakesBeforeTheStop::new(&inner, 0, 120_000).stop_taking(&clock, Duration::from_secs(1)),
+    );
+    let session = in_person_session(directory.path(), backend, clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        recv(&notices),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert_eq!(
+        recv(&notices),
+        CaptureNotice::DeviceResumed {
+            attempt: 1,
+            gap_seconds: 1.0
+        }
+    );
+    inner.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.gap_seconds, 1.0);
+    assert_eq!(
+        result.statistics.unfilled_seconds, 2.5,
+        "the jump before the change's gap"
+    );
+}
+
+/// A backend whose stop of the recording's first start hands on what its
+/// stream missed before its first frame (`before_first` frames), as the
+/// WASAPI and Core Audio backends' stops do, whatever that stop is for.
+struct MissesBeforeItsFirstFrame {
+    inner: Arc<SyntheticCaptureBackend>,
+    sink: Mutex<Option<Arc<LaneFrameSink>>>,
+    before_first: AtomicUsize,
+}
+
+impl MissesBeforeItsFirstFrame {
+    fn new(inner: &Arc<SyntheticCaptureBackend>, before_first: usize) -> Self {
+        Self {
+            inner: Arc::clone(inner),
+            sink: Mutex::new(None),
+            before_first: AtomicUsize::new(before_first),
+        }
+    }
+}
+
+impl CaptureBackend for MissesBeforeItsFirstFrame {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        self.sink.lock().unwrap().replace(Arc::clone(&sink));
+        self.inner.start(lanes, uid, sink)
+    }
+    fn stop(&self) {
+        let before_first = self.before_first.swap(0, Ordering::SeqCst);
+        if let Some(sink) = self.sink.lock().unwrap().as_ref() {
+            sink.count_before_first(before_first, None);
+        }
+        self.inner.stop();
+    }
+    fn delivers_continuously(&self, lanes: &[AudioLane]) -> bool {
+        self.inner.delivers_continuously(lanes)
+    }
+}
+
+/// A first frame 1.5 s late, counted at the first start's stop, then a
+/// stall whose rebuild is that stop: its gap runs from the last frame the
+/// watch thread saw to the restart, never over the time before the first
+/// frame, so the 1.5 s stays counted beside the 2.1 s gap (A18 of
+/// `.plans/2026-10-07-stable-promotion.md`; the rule in
+/// `realtime::missed`, "Before the first callback").
+#[test]
+fn a_loss_before_the_first_frame_survives_a_stall_rebuild_at_the_first_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let inner = Arc::new(SyntheticCaptureBackend::new(stalling(1.0, 0.5)));
+    let backend = Arc::new(MissesBeforeItsFirstFrame::new(&inner, 72_000));
+    let session = in_person_session(directory.path(), backend, clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    inner.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    assert!(matches!(
+        recv(&notices),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    inner.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.device_changes, 1);
+    assert_eq!(result.statistics.gap_seconds, 2.1);
+    assert_eq!(
+        result.statistics.unfilled_seconds, 1.5,
+        "the time before the first frame"
+    );
+}
+
+/// The same loss with the first stop a device change's rebuild while the
+/// stream delivers, and with the user's stop as the first stop: counted
+/// whole both times.
+#[test]
+fn a_loss_before_the_first_frame_counts_at_a_device_changes_rebuild_and_a_plain_stop() {
+    for change in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let clock = Arc::new(ManualClock::new());
+        let options = tones(&[AudioLane::Mixed], 1.0);
+        let options = if change {
+            options.change_device_after(0.5)
+        } else {
+            options
+        };
+        let inner = Arc::new(SyntheticCaptureBackend::new(options));
+        let backend = Arc::new(MissesBeforeItsFirstFrame::new(&inner, 72_000));
+        let session = in_person_session(directory.path(), backend, clock.clone());
+        let notices = session.notices();
+        session.start(Uuid::new_v4()).unwrap();
+        if change {
+            let _ = recv(&notices);
+            let _ = recv(&notices);
+        }
+        inner.wait_until_finished();
+        let result = session.stop().unwrap();
+        assert_eq!(result.statistics.device_changes, usize::from(change));
+        assert_eq!(result.statistics.unfilled_seconds, 1.5, "change {change}");
+    }
 }
