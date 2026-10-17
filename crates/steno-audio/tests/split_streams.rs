@@ -2685,6 +2685,39 @@ fn a_second_flag_while_the_master_is_out_keeps_the_first_flags_padding() {
     }
 }
 
+/// The follower out for 1 s, back with eight kept packets and a flag its
+/// clocks read nothing for, then a spurious flag three packets on: the
+/// outage's padding counts once. The first flag's snapshot takes the
+/// padding out of the runs, so the second finds none of it.
+#[test]
+fn a_spurious_flag_right_after_an_outage_counts_its_padding_once() {
+    let mut call = Call::new();
+    for _ in 0..200 {
+        call.tick();
+    }
+    for _ in 0..100 {
+        call.master_packet();
+    }
+    for _ in 0..8 {
+        call.follower_packet();
+    }
+    call.follower_flagged(Missed::default());
+    call.master_packet();
+    for _ in 0..3 {
+        call.tick();
+    }
+    call.follower_flagged(Missed::default());
+    for _ in 0..20 {
+        call.tick();
+    }
+    call.stop(Missed::default(), None);
+    let (filled, unfilled) = call.system();
+    assert!(
+        (100 * PERIOD - 2 * 960..=102 * PERIOD).contains(&(filled + unfilled)),
+        "filled {filled}, unfilled {unfilled}"
+    );
+}
+
 /// A process loopback follower (it delivers continuously) out when the
 /// stop comes, its loss flagged by no packet and its clocks reading
 /// nothing: the padding still running counts at the stop. Endpoint

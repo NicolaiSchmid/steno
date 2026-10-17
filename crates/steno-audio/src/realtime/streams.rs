@@ -143,7 +143,8 @@ pub struct FollowerLane {
     last_run: AtomicUsize,
     /// Producer: frames the follower pushed (wrapping); consumer: their
     /// count at the last re-prime, at the last pull, and at the last pull
-    /// that padded the run. While fewer than `reprime_hold` came since the
+    /// that padded the run while the lane was out (a run that ends within
+    /// one pull's shortfall needs no mark: no engine loss is that short). While fewer than `reprime_hold` came since the
     /// re-prime, `last_run` may still be a discontinuity's padding
     /// ([`Self::with_reprime_hold`]); a run the follower pushed more than
     /// that after, before the lane primed (the master was out), is
@@ -154,7 +155,8 @@ pub struct FollowerLane {
     pushed_at_pad: AtomicUsize,
     reprime_hold: usize,
     /// The padding of a discontinuity that came while the lane was out: the
-    /// held run (`held_run`) at the master's first pull after it,
+    /// held run (`held_run`) the master's first pull after it takes out of
+    /// the runs, and what each later flag's first pull takes too;
     /// `usize::MAX` before that pull or with none pending.
     flag_run: AtomicUsize,
     /// Producer: the follower's queue at the first flagged packet of the
@@ -400,12 +402,12 @@ impl FollowerLane {
     /// hold of audio between them count together when a flag follows the
     /// second, however long either was. A discontinuity that comes while
     /// the lane is out takes the padding up to the master's first pull
-    /// after it (a fresh snapshot after each later flag), with the run
-    /// before the last re-prime while the hold keeps it (the engine's kept
-    /// packets may run out before its flagged one comes), and not the
-    /// re-prime's wait after it, so an idle right after the flag is not
-    /// counted; what padded after the snapshot stays held for a later
-    /// flag. A discontinuity whose follower had queued more than the
+    /// after it (each later flag's first pull adds what padded since),
+    /// with the run before the last re-prime while the hold keeps it (the
+    /// engine's kept packets may run out before its flagged one comes),
+    /// and not the re-prime's wait after it, so an idle right after the
+    /// flag is not counted; what padded after the snapshot stays held for
+    /// a later flag. A discontinuity whose follower had queued more than the
     /// target and the hold at its first flag (it came back long before it,
     /// while the master was out) takes no padding at all; a second flag
     /// while one is pending does not change that. The padding reads the
@@ -445,18 +447,21 @@ impl FollowerLane {
     #[must_use]
     pub fn take_missed_at_stop(&self) -> Missed {
         let discontinuity = self.discontinuity.load(Ordering::Acquire);
-        if self.flags_snapped.load(Ordering::Relaxed) != self.flags_recorded.load(Ordering::Relaxed)
-        {
-            // A flag since the snapshot, with no pull after it: the whole
-            // held run is its padding.
-            self.flag_run.store(usize::MAX, Ordering::Relaxed);
-        }
         // Both runs, primed or not: an outage's padding sits in the last
         // run when the lane re-primed on the engine's kept packets and
         // then ran out again.
         let held = self.held_run();
         self.run.store(0, Ordering::Relaxed);
-        self.last_run.store(held, Ordering::Relaxed);
+        self.last_run.store(0, Ordering::Relaxed);
+        if self.flags_snapped.load(Ordering::Relaxed) != self.flags_recorded.load(Ordering::Relaxed)
+        {
+            // A flag with no pull after it: what the snapshots took and
+            // everything padded since are its padding.
+            let snapped = self.flag_run.swap(usize::MAX, Ordering::Relaxed);
+            let snapped = if snapped == usize::MAX { 0 } else { snapped };
+            self.last_run
+                .store(snapped.saturating_add(held), Ordering::Relaxed);
+        }
         self.hand_on(discontinuity, &self.last_run)
     }
 
@@ -475,22 +480,20 @@ impl FollowerLane {
         self.discontinuity.store(false, Ordering::Relaxed);
         let at_flag = self.flag_run.swap(usize::MAX, Ordering::Relaxed);
         let fresh = self.flag_fresh.load(Ordering::Relaxed);
-        let held = run.swap(0, Ordering::Relaxed);
-        if fresh && at_flag != usize::MAX {
-            // What padded after the snapshot stays for a later flag within
-            // the hold: a new outage, or the kept packets running out.
-            run.store(held.saturating_sub(at_flag), Ordering::Relaxed);
-        }
         let padded = if !fresh {
             // A queue past the target and the hold at the flag: the
-            // follower came back long before it, so no padding is its loss.
+            // follower came back long before it, so no padding is its loss
+            // (and the hold has forgotten the runs: the follower pushed
+            // more than it since the last re-prime).
             0
         } else if at_flag != usize::MAX {
             // The flag came while the lane was out: the padding up to it,
-            // before the re-prime's wait.
+            // before the re-prime's wait. What padded after the snapshot
+            // stays in `run` for a later flag within the hold: a new
+            // outage, or the kept packets running out.
             at_flag
         } else {
-            held
+            run.swap(0, Ordering::Relaxed)
         };
         let lost = counted.fill.saturating_add(counted.unfilled).max(padded);
         let fill = counted.fill.max(padded).min(lost);
@@ -555,16 +558,27 @@ impl FollowerLane {
         if !self.primed.load(Ordering::Relaxed) {
             let recorded = self.flags_recorded.load(Ordering::Relaxed);
             if self.discontinuity.load(Ordering::Acquire)
-                && (self.flag_run.load(Ordering::Relaxed) == usize::MAX
-                    || self.flags_snapped.load(Ordering::Relaxed) != recorded)
+                && self.flags_snapped.load(Ordering::Relaxed) != recorded
             {
                 self.flags_snapped.store(recorded, Ordering::Relaxed);
                 // The first pull since the follower flagged a loss while
                 // its lane was out (or flagged again since the last
                 // snapshot): the padding so far is that outage's, and what
                 // pads after it is the re-prime's wait or a new stretch
-                // without audio (an idle).
-                self.flag_run.store(self.held_run(), Ordering::Relaxed);
+                // without audio (an idle). The snapshot takes it out of the
+                // runs, which hold only what pads after it.
+                let held = self.held_run();
+                self.run.store(0, Ordering::Relaxed);
+                self.last_run.store(0, Ordering::Relaxed);
+                let snapped = self.flag_run.load(Ordering::Relaxed);
+                self.flag_run.store(
+                    if snapped == usize::MAX {
+                        held
+                    } else {
+                        snapped.saturating_add(held)
+                    },
+                    Ordering::Relaxed,
+                );
             }
             if available < self.target + wanted {
                 out.fill(0.0);
@@ -609,7 +623,6 @@ impl FollowerLane {
             self.underrun
                 .fetch_add(wanted - available, Ordering::Relaxed);
             self.run.fetch_add(wanted - available, Ordering::Relaxed);
-            self.pushed_at_pad.store(pushed, Ordering::Relaxed);
             self.primed.store(false, Ordering::Relaxed);
         }
         lost
