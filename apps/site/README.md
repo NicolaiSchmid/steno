@@ -37,7 +37,18 @@ runs any ignore step, and the Rust branches have no `apps/site`. On
 Cloudflare Pages or a plain web server, upload `out/`.
 
 URLs, install commands and the platforms (name, whether a build is released,
-the note under it) live in `src/lib/site.ts`. Change them there, nowhere else.
+the note under it) live in `src/lib/site.ts`. Change them there, nowhere
+else. A desktop is listed once its gate in
+`.plans/2026-10-07-stable-promotion.md` has passed: macOS by `macReleased`,
+Windows by `windowsReleased`, each Linux target (GNOME, Omarchy, NixOS) by
+its own `released` in `linuxTargets`. A listed desktop's download button
+opens the latest release. An unlisted desktop's reads "<name> build, not yet
+checked" and opens the releases page, and its note reads "In each release ·
+not yet checked". A listed Linux target adds its name to the Linux note and
+its install line to the closing section. A Rollback that takes `v0.11.0` out
+of "latest" sets every flag back to false ("A bad release" in
+`apps/desktop/README.md`). The root README's desktop badge names the same
+desktops; change it in the same commit when a desktop is added or removed.
 
 The facts on `/recording-law` (the country rows, cases, sources and the
 `reviewed` date) live in `src/lib/recording-law.ts`. Change them there, and

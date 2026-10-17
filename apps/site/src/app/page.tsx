@@ -7,7 +7,11 @@ import { HowItWorks } from "@/components/how-it-works";
 import { HowItsBuilt } from "@/components/how-its-built";
 import { OpenSource } from "@/components/open-source";
 import { Privacy } from "@/components/privacy";
-import { site } from "@/lib/site";
+import { platformIds, platforms, site } from "@/lib/site";
+
+const listed = platformIds
+	.filter((id) => platforms[id].released)
+	.map((id) => platforms[id].name);
 
 const jsonLd = {
 	"@context": "https://schema.org",
@@ -16,10 +20,13 @@ const jsonLd = {
 	description: site.description,
 	url: site.url,
 	applicationCategory: "BusinessApplication",
-	operatingSystem: "macOS",
+	// Undefined, and so left out of the JSON, while no desktop is listed.
+	operatingSystem: listed.join(", ") || undefined,
 	offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
 	license: "https://opensource.org/licenses/MIT",
-	downloadUrl: site.download,
+	// With no desktop listed, as after a `v0.11.0` rollback, `releases/latest`
+	// may answer 404, so the buttons and this point at the releases page.
+	downloadUrl: listed.length > 0 ? site.download : site.releases,
 	softwareHelp: site.repo,
 	author: {
 		"@type": "Person",

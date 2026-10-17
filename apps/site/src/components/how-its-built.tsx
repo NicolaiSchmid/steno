@@ -35,9 +35,9 @@ export function HowItsBuilt() {
 		<section className="border-border border-t py-16 sm:py-24" id="built">
 			<div className="mx-auto max-w-[1240px] px-5 sm:px-8">
 				<SectionHead eyebrow="How it's built" title="One core, every desktop.">
-					Steno is moving every desktop onto one Rust core and the same
-					interface. Only audio capture and the speech runtime change from
-					system to system, and capture uses each system's own audio API.
+					Steno is one Rust core and one interface on every desktop. Only audio
+					capture and the speech runtime change from system to system, and
+					capture uses each system's own audio API.
 				</SectionHead>
 				<ul className="grid gap-5 lg:grid-cols-3">
 					{platformIds.map((id) => {
@@ -83,10 +83,9 @@ export function HowItsBuilt() {
 					/>
 				</div>
 				<p className="mt-7 max-w-[720px] text-[15px] text-fg-muted leading-[1.6]">
-					The Mac download today is the original Swift app. The Rust version
-					replaces it once it does everything the Swift app does. It opens your
-					existing meetings and settings, so switching is a download, not a
-					migration.
+					Every desktop runs the same Rust app. On the Mac it replaced the
+					original Swift app as an ordinary update, with your meetings, settings
+					and paired phone where you left them.
 				</p>
 			</div>
 		</section>

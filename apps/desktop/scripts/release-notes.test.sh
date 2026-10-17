@@ -57,7 +57,7 @@ has 'the SHA256SUMS signature' 'gpg --verify SHA256SUMS.asc SHA256SUMS'
 has 'the .deb' 'gpg --verify steno-desktop_0.2.0_amd64.deb.asc steno-desktop_0.2.0_amd64.deb'
 has 'the AppImage' 'gpg --verify steno-desktop_0.2.0_amd64.AppImage.asc steno-desktop_0.2.0_amd64.AppImage'
 # shellcheck disable=SC2016 # the backticks are Markdown
-has 'what a good check prints' 'must report "Good signature" from the fingerprint above, and `sha256sum` must print OK for every file you downloaded'
+has 'what a good check prints' 'must report "Good signature" from the fingerprint above, and `sha256sum` must print OK for each build you downloaded'
 [[ "$(grep -c '^gpg --verify' <<< "$notes")" == 3 ]] || fail "the notes verify $(grep -c '^gpg --verify' <<< "$notes") files"
 [[ "$(grep -c '^```' <<< "$notes")" == 2 ]] || fail "the code block is not closed"
 
@@ -102,7 +102,8 @@ handoff=(
   'everything that plays on the default output'
   'WebKitGTK'"'"'s file descriptor leak'
   'GNOME shows no tray icon without the AppIndicator extension'
-  'one started outside `uwsm` runs in Hyprland'"'"'s own unit'
+  'On a uwsm session (Omarchy'"'"'s), start Steno from the app launcher or with `uwsm-app -- steno-desktop`.'
+  'If an `exec-once` line starts it instead, a logout while the session is still starting can cut a recording'"'"'s save short.'
 )
 for version in 0.11.0-rc.1 0.11.0-rc.12 0.11.0 0.11.1 0.12.0-rc.1 0.10.0; do
   text="$(notes_for "$version")"
