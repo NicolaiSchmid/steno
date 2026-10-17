@@ -56,6 +56,22 @@ fn receipt_from_row(row: &Row<'_>) -> rusqlite::Result<HandoverReceipt> {
     })
 }
 
+/// What an admission's commit wrote ([`Store::commit_admission_durably`],
+/// [`Store::adopt_upload_durably`]). Rust only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionCommit {
+    /// The meeting, its asset and the ledger row.
+    Wrote,
+    /// None of them: the ledger already held the bytes, as `meeting_id`.
+    Earlier {
+        meeting_id: Uuid,
+        /// The user deleted that meeting: it has no row, read in the same
+        /// transaction. Only the launch's adoption answers so; an
+        /// admission's commit answers only with a meeting that exists.
+        deleted: bool,
+    },
+}
+
 impl Store {
     /// Every paired phone, oldest pairing first.
     pub fn paired_devices(&self) -> Result<Vec<PairedDevice>> {
@@ -191,6 +207,30 @@ impl Store {
         meeting: &Meeting,
         asset: &AudioAsset,
     ) -> Result<Uuid> {
+        Ok(
+            match self.commit_admission_durably(receipt, meeting, asset)? {
+                AdmissionCommit::Wrote => meeting.id,
+                AdmissionCommit::Earlier { meeting_id, .. } => meeting_id,
+            },
+        )
+    }
+
+    /// [`Store::save_admission_durably`], saying whether it wrote `meeting`
+    /// or the ledger answered: the phone intake's, whose meeting can share
+    /// its id with the ledger's when it admits into the noted copy an
+    /// earlier admission left (`RecordingIntake`), which the launch may
+    /// have adopted meanwhile ([`Store::adopt_upload_durably`]). Fails with
+    /// [`StoreError::MeetingExists`], writing nothing, when the ledger does
+    /// not answer and `meeting` already has a row: the launch adopted that
+    /// copy without the ledger row (its read of the noted uploads failed),
+    /// and an upsert would give the one master a second asset row under
+    /// another retention. Rust only.
+    pub fn commit_admission_durably(
+        &self,
+        receipt: &HandoverReceipt,
+        meeting: &Meeting,
+        asset: &AudioAsset,
+    ) -> Result<AdmissionCommit> {
         self.write_durably(|transaction| {
             let stored = transaction
                 .query_row(
@@ -235,34 +275,92 @@ impl Store {
                     ..receipt.clone()
                 };
                 save_receipt(transaction, &completed)?;
-                return Ok(meeting_id);
+                return Ok(AdmissionCommit::Earlier {
+                    meeting_id,
+                    deleted: false,
+                });
+            }
+            if meetings::has_row(transaction, meeting.id)? {
+                return Err(StoreError::MeetingExists(meeting.id));
             }
             meetings::save(transaction, meeting)?;
             assets::save(transaction, asset)?;
             save_receipt(transaction, receipt)?;
-            transaction.execute(
-                "INSERT INTO handoverAdmission \
-                 (recordingID, byteCount, sha256, meetingID, admittedAt) \
-                 VALUES (?1, ?2, ?3, ?4, ?5) \
-                 ON CONFLICT (recordingID, byteCount, sha256) DO UPDATE \
-                 SET meetingID = excluded.meetingID, admittedAt = excluded.admittedAt \
-                 WHERE meetingID NOT IN (SELECT id FROM meeting)",
-                params![
-                    DbUuid(receipt.recording_id),
-                    receipt.byte_count,
-                    receipt.sha256,
-                    DbUuid(meeting.id),
-                    DbDate(receipt.updated_at),
-                ],
+            save_admission_row(
+                transaction,
+                receipt.recording_id,
+                receipt.byte_count,
+                &receipt.sha256,
+                meeting.id,
+                receipt.updated_at,
             )?;
-            Ok(meeting.id)
+            Ok(AdmissionCommit::Wrote)
+        })
+    }
+
+    /// The launch's adoption of the copy a phone admission left with no
+    /// meeting (a commit and its `failed` save that both gave up), when
+    /// the copy holds the upload it was noted for (`steno_services`'
+    /// recovery): `meeting` and `asset` inserted with the ledger row of the
+    /// recording `recording_id` of `byte_count` bytes hashing to `sha256`,
+    /// in one transaction, on the disk when it returns
+    /// ([`Store::write_durably`]). The phone's retry is then answered with
+    /// this meeting from that row, as any admission's. When the ledger
+    /// already holds those bytes, with a meeting or with one the user
+    /// deleted, nothing is written and the row's meeting id comes back,
+    /// with whether that meeting is gone, read in this transaction: the
+    /// phone's retry is answered from that row anyway. The caller removes
+    /// the copy when the meeting is gone: a ledger row is written in the
+    /// transaction that writes its meeting, so a row whose meeting is gone
+    /// means the user deleted those bytes. Fails with
+    /// [`StoreError::MeetingExists`], writing nothing, when `meeting` has
+    /// a row (the phone's retry admitted into the copy meanwhile). The
+    /// receipt is left as it is. Rust only: Swift had no recovery.
+    pub fn adopt_upload_durably(
+        &self,
+        meeting: &Meeting,
+        asset: &AudioAsset,
+        recording_id: Uuid,
+        byte_count: i64,
+        sha256: &[u8],
+    ) -> Result<AdmissionCommit> {
+        self.write_durably(|transaction| {
+            let earlier = transaction
+                .query_row(
+                    "SELECT meetingID FROM handoverAdmission \
+                     WHERE recordingID = ?1 AND byteCount = ?2 AND sha256 = ?3",
+                    params![DbUuid(recording_id), byte_count, sha256],
+                    |row| row.col::<DbUuid>("meetingID"),
+                )
+                .optional()?;
+            if let Some(meeting_id) = earlier {
+                return Ok(AdmissionCommit::Earlier {
+                    meeting_id,
+                    deleted: !meetings::has_row(transaction, meeting_id)?,
+                });
+            }
+            if meetings::has_row(transaction, meeting.id)? {
+                return Err(StoreError::MeetingExists(meeting.id));
+            }
+            meetings::save(transaction, meeting)?;
+            assets::save(transaction, asset)?;
+            save_admission_row(
+                transaction,
+                recording_id,
+                byte_count,
+                sha256,
+                meeting.id,
+                meeting.created_at,
+            )?;
+            Ok(AdmissionCommit::Wrote)
         })
     }
 
     /// The meeting the phone recording `recording_id` of `byte_count` bytes
     /// hashing to `sha256` was admitted as, from the admission ledger
     /// (`handoverAdmission`, schema v5). A row is written in the
-    /// admission's own transaction ([`Store::save_admission_durably`]) and
+    /// admission's own transaction ([`Store::save_admission_durably`]), or
+    /// in the launch's adoption ([`Store::adopt_upload_durably`]), and
     /// never deleted: not by a revoke, whose cascade takes the receipts,
     /// nor by a meeting delete, so the meeting may be gone. The handover
     /// answers a phone that announces those bytes again "delivered" from
@@ -307,6 +405,35 @@ const BACKFILL_ADMISSIONS: &str = "INSERT OR IGNORE INTO \"handoverAdmission\" \
      FROM \"handoverReceipt\" \
      WHERE \"state\" = 'complete' \
      AND \"meetingID\" IN (SELECT \"id\" FROM \"meeting\")";
+
+/// The ledger row of the recording `recording_id` of `byte_count` bytes
+/// hashing to `sha256`, as admitted as `meeting_id` at `at`. A row of a
+/// meeting that still exists stays; one whose meeting is gone moves.
+fn save_admission_row(
+    connection: &Connection,
+    recording_id: Uuid,
+    byte_count: i64,
+    sha256: &[u8],
+    meeting_id: Uuid,
+    at: DateTime<Utc>,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO handoverAdmission \
+         (recordingID, byteCount, sha256, meetingID, admittedAt) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT (recordingID, byteCount, sha256) DO UPDATE \
+         SET meetingID = excluded.meetingID, admittedAt = excluded.admittedAt \
+         WHERE meetingID NOT IN (SELECT id FROM meeting)",
+        params![
+            DbUuid(recording_id),
+            byte_count,
+            sha256,
+            DbUuid(meeting_id),
+            DbDate(at),
+        ],
+    )?;
+    Ok(())
+}
 
 fn save_receipt(connection: &Connection, receipt: &HandoverReceipt) -> Result<()> {
     let kind = receipt.state.kind();

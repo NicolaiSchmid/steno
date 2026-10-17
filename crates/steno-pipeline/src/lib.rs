@@ -16,7 +16,7 @@
 //! | [`reading`] | [`ReadingMarks`], every read of a recording marked in the support directory: a meeting whose read ended with the app is read once more, and quarantined ([`READ_STOPPED`]) the second time in a row until Process again |
 //! | [`warm_up_mark`] | [`WarmUpMark`], the recording's warm-up marked in the support directory, so one that ended with the app turns the warm-up off until a job loads the speech engine |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
-//! | [`intake`] | The phone intake ([`RecordingIntake`], which notes its copies' folders in [`AdmissionFolders`]) and the Mac one ([`LocalRecordingIntake`]) |
+//! | [`intake`] | The phone intake ([`RecordingIntake`], which notes its copies' folders and uploads ([`NotedUpload`]) in [`AdmissionFolders`]) and the Mac one ([`LocalRecordingIntake`]) |
 //! | [`lane_merger`] | The lanes into one ordered transcript |
 //! | [`speaker_memory`] | The store-backed cosine `SpeakerMemory` |
 //! | [`retention`] | [`RetentionSweep`] over expired assets |
@@ -101,8 +101,8 @@ pub use estimator::{ProcessingEstimator, StageRates, StageSample};
 pub use events::{EventReceiver, MeetingEventBus};
 pub use export_retries::ExportRetries;
 pub use intake::{
-    AdmissionFolders, Attendee, LocalRecordingIntake, LocalRecordingIntakeError, RecordingIntake,
-    RecordingResult,
+    AdmissionFolders, Attendee, LocalRecordingIntake, LocalRecordingIntakeError, NotedUpload,
+    RecordingIntake, RecordingResult,
 };
 pub use lane_merger::LaneMerger;
 pub use pipeline::{

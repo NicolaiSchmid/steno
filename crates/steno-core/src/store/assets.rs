@@ -58,20 +58,42 @@ pub(super) fn assets_of_meeting(
     )
 }
 
+/// When the asset `a` of the meeting `m` is due for the sweep: stamped,
+/// expired at `?1`, and its meeting not recording, queued or processing.
+const DUE: &str = "a.expiresAt IS NOT NULL AND a.expiresAt <= ?1 \
+                   AND m.state NOT IN ('recording', 'queued', 'processing')";
+
 /// The select of [`Store::expired_assets`], narrowed by `filter`: `?1` is
 /// the time.
 fn expired_sql(filter: &str) -> String {
     format!(
         "SELECT {} FROM audioAsset a JOIN meeting m ON m.id = a.meetingID \
-         WHERE a.expiresAt IS NOT NULL AND a.expiresAt <= ?1 \
-         AND m.state NOT IN ('recording', 'queued', 'processing'){filter} \
-         ORDER BY a.expiresAt, a.id",
+         WHERE {DUE}{filter} ORDER BY a.expiresAt, a.id",
         COLUMNS
             .split(", ")
             .map(|column| format!("a.{column}"))
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+/// The id of another asset row that names `asset`'s master and is not
+/// [`DUE`] at `now` itself, if any: it still needs that file.
+fn keeper_of_master(
+    connection: &Connection,
+    asset: &AudioAsset,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<Uuid>> {
+    Ok(connection
+        .query_row(
+            &format!(
+                "SELECT a.id FROM audioAsset a JOIN meeting m ON m.id = a.meetingID \
+                 WHERE a.url = ?2 AND a.id != ?3 AND NOT ({DUE}) ORDER BY a.id LIMIT 1"
+            ),
+            params![DbDate(now), asset.url, DbUuid(asset.id)],
+            |row| row.col::<DbUuid>("id"),
+        )
+        .optional()?)
 }
 
 /// What [`Store::sweep_expired_asset`] hands its `remove`, read in the
@@ -191,11 +213,22 @@ impl Store {
     /// as stored, removes the asset's files and the clips of
     /// [`ExpiredAsset::confirmed_with_clips`], and returns whether every one
     /// went; then those speakers lose `sampleClipURL` and the asset loses
-    /// `expiresAt`. Returns whether the asset was swept. The write lock is
-    /// held from the check through the removal, so a run that `enqueue` or
-    /// `reprocess` saves `queued` in a write of its own comes either before
-    /// the check, and the asset is skipped, or after the files are gone. The
-    /// store waits on the removal, a few files on the audio folder's disk.
+    /// `expiresAt`. Returns whether the asset was swept. An asset whose
+    /// master another asset row names and still needs (that row is not due
+    /// itself: kept forever, not stamped yet or not expired yet, or its
+    /// meeting recording, queued or processing) is not swept: `remove` is
+    /// not called, nothing changes, and the next sweep checks again, so the
+    /// master goes once every row naming it is due. A master known to be
+    /// gone needs no keeper: the asset is swept, so its other files go and
+    /// its stamp clears. One whose metadata cannot be read counts as there. Two rows name one master only after a fault, such as
+    /// (before [`Store::commit_admission_durably`] refused it) a phone
+    /// retry's commit into a copy the launch adopted without its ledger
+    /// row; the sweep still never deletes audio another row keeps. The
+    /// write lock is held from the check through the removal, so a run
+    /// that `enqueue` or `reprocess` saves `queued` in a write of its own
+    /// comes either before the check, and the asset is skipped, or after
+    /// the files are gone. The store waits on the removal, a few files on
+    /// the audio folder's disk.
     /// Rust only: Swift's sweep acts on the list it read first, and Swift
     /// has no `reprocess`.
     pub fn sweep_expired_asset(
@@ -215,6 +248,20 @@ impl Store {
             else {
                 return Ok(false);
             };
+            // Only a master known to be gone skips the keeper check: one
+            // whose metadata cannot be read (an I/O error, a folder it
+            // cannot search) may still be there.
+            let master_not_gone = crate::paths::file_url_path(&asset.url)
+                .is_some_and(|master| !matches!(master.try_exists(), Ok(false)));
+            if master_not_gone && let Some(keeper) = keeper_of_master(transaction, &asset, now)? {
+                tracing::info!(
+                    asset_id = %asset.id,
+                    meeting_id = %asset.meeting_id,
+                    %keeper,
+                    "an expired recording is kept: another asset row still needs its master"
+                );
+                return Ok(false);
+            }
             let expired = ExpiredAsset {
                 speakers: people::speakers_of_meeting(transaction, asset.meeting_id)?,
                 sample_clip_urls: people::sample_clip_urls(transaction)?,

@@ -107,7 +107,7 @@ fn save_participants(
 }
 
 /// Whether a row has the meeting id `id`.
-fn has_row(connection: &Connection, id: Uuid) -> Result<bool> {
+pub(super) fn has_row(connection: &Connection, id: Uuid) -> Result<bool> {
     Ok(connection
         .query_row("SELECT 1 FROM meeting WHERE id = ?1", [DbUuid(id)], |_| {
             Ok(())

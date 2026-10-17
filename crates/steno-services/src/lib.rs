@@ -17,8 +17,8 @@
 //! | [`permissions`] | The host's `Permissions` over the shell's: [`SystemPermissions`](permissions::SystemPermissions) adds the Mac's system audio probe and its remembered answer |
 //! | [`auto_stop`] | The auto-stop after a call ends, the recorder's policy: the 90-second grace ([`AUTO_STOP_GRACE`](auto_stop::AUTO_STOP_GRACE)), "Keep recording" and the `callEnded` end reason, fed with [`MicrophoneActivity`](auto_stop::MicrophoneActivity) |
 //! | [`detection`] | [`DetectionController`](detection::DetectionController): the meeting detector's events into one prompt at a time through the shell's [`PromptPanel`](detection::PromptPanel), and into the recorder's auto-stop while recording |
-//! | [`audio_folders`] | Where recordings were written, beside the database: each recording's and phone upload's folder, for crash recovery and the adoption of a master with no meeting, and the known folders |
-//! | [`recovery`] | Recovery of an interrupted recording from its master on disk, at launch and after a failed stop, the launch's adoption of a master no meeting names, and [`LiveRecordingCheck`](recovery::LiveRecordingCheck), when a master counts as still written |
+//! | [`audio_folders`] | Where recordings were written, beside the database: each recording's and phone upload's folder and the upload each phone copy holds, for crash recovery and the adoption of a master with no meeting, and the known folders |
+//! | [`recovery`] | Recovery of an interrupted recording from its master on disk, at launch and after a failed stop, the launch's adoption of a master no meeting names (a phone copy adopted with its upload's ledger row, and the copy of bytes whose meeting the user deleted removed), and [`LiveRecordingCheck`](recovery::LiveRecordingCheck), when a master counts as still written |
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels`, and [`SpeechEngines`](speech::SpeechEngines), the engines and the diarizer the pipelines share across reloads |
 //! | [`model_gate`] | The gates that keep a pipeline run from downloading a model, [`GatedSpeechEngine`](model_gate::GatedSpeechEngine) and [`GatedDiarizer`](model_gate::GatedDiarizer) over an [`InstalledCheck`](model_gate::InstalledCheck), and [`ResumingSpeechModels`](model_gate::ResumingSpeechModels): a refusal leaves the meeting queued until Settings or onboarding installs the models, or a reload or the launch finds them |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
@@ -93,6 +93,10 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(test)]
+mod admission_copy_tests;
+#[cfg(test)]
+mod admission_kill_tests;
 pub mod app;
 pub mod audio_folders;
 pub mod auto_stop;

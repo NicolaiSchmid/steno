@@ -1825,6 +1825,63 @@ The table above names each package and its owner. Their tests:
   in `rust-ci.yml`'s Linux hosted job ("Desktop stop under a locked store").
   P40 closes with #304. The feed's checks hold 100 ms, and check 20 allows
   one 2 s poll and 1 s.
+- **P40 follow-up: the copy an admission left is one meeting** (Nicolai's
+  ruling, 2026-10-16. Not a regression: main made the same second meeting
+  before this change, and no audio was lost either way). A
+  phone admission whose commit and `failed` save both give up under a lock
+  held past about 20 s leaves its noted copy; the next launch adopted it with
+  no ledger row, and the phone's retry admitted a second meeting. Decided:
+  the intake notes the upload the copy holds (recording id, size, SHA-256)
+  beside the copy's folder, in a file of its own
+  (`admission-uploads.json` in the support directory), so the record of
+  recording folders keeps the shape older builds read; Swift reads neither.
+  The launch adopts a copy that holds its noted upload whole with the
+  upload's ledger row, in one durable transaction
+  (`Store::adopt_upload_durably`), so the phone's retry is answered with that
+  meeting from the ledger; a retry before the launch, or while the lock is
+  still held, admits into the noted copy instead of copying again, and never
+  removes it. Bytes the ledger already holds are not adopted. When that
+  row's meeting was deleted, the launch removes the master of the noted
+  copy whose size and SHA-256 match it, durably, then its folder only if
+  that is empty, because the user deleted those bytes. This is the one
+  exception to keeping audio. While that meeting still exists (in any
+  state), the copy stays with its notes, neither adopted nor removed, and
+  each launch answers it the same way until a launch after that meeting's
+  delete removes it (Nicolai's ruling, 2026-10-17). Any doubt keeps the
+  copy and its note: one that cannot be read, one cut short or holding
+  other bytes. No delete can be undone, so a meeting the adoption's
+  transaction finds gone stays gone.
+  A note with no upload (an older build's), or a copy that holds other
+  bytes, is adopted as a recording with no meeting, without a ledger row.
+  A copy A17's reading marks hold (#298) is adopted failed and unread, and
+  not processed: a held copy that holds its upload whole (size and
+  SHA-256) gets the ledger row, so the phone's delete loses nothing: the
+  bytes are the phone's own, kept forever and offered to Process again;
+  one that does not, or cannot be read, gets none, and the phone keeps
+  retrying.
+  No upload stays noted without its folder's entry: a refused folder note
+  forgets its upload, and each launch forgets the uploads whose folder has
+  no entry.
+  Two defences keep one master to one asset row (Nicolai's ruling,
+  2026-10-17, after a read fault produced a kept-forever and a
+  delete-after-processing row for one master): the admission's commit
+  refuses a meeting id that already has a row and no ledger row
+  (`MeetingExists`), and the retention sweep never removes a master
+  another asset row still needs (kept forever, not due yet, or its meeting
+  busy), logging the ids at info; a master known to be gone needs no
+  keeper, so every row naming it loses its stamp, and one whose metadata
+  cannot be read counts as there. No schema change. Where:
+  `crates/steno-pipeline/src/intake.rs` (`NotedUpload`, `reusable_copy`),
+  `crates/steno-services/src/audio_folders.rs`,
+  `crates/steno-services/src/recovery.rs` (`adopt`),
+  `crates/steno-core/src/store/handover.rs`,
+  `crates/steno-core/src/store/assets.rs` (`keeper_of_master`); tests in
+  `crates/steno-services/src/admission_copy_tests.rs` (with a 20 ms busy
+  timeout through `Store::on_writer`),
+  `crates/steno-services/src/admission_kill_tests.rs` (a real kill at each
+  step of the admission and the adoption, and the retry racing the
+  launch), `crates/steno-core/tests/handover_store.rs`, `audio_folders.rs`
+  and `crates/steno-pipeline/src/retention.rs`.
 
 ### X: the Linux targets (D6)
 
