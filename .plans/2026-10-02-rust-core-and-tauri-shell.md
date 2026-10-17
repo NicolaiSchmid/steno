@@ -2140,7 +2140,9 @@ parity item until a plan says otherwise:
   gone from the master without a count. Every Rust backend reads its
   callback's position on its clock (`realtime::CycleClock`), writes what was
   missed as zeros on every lane, counts a jump too long to fill, and reads
-  the clock once more at the stop; the counts are
+  the clock once more at the stop; a first callback later than the start
+  allows (200 ms on macOS, the stream's latency and a period on WASAPI)
+  counts the time before it after a recording's first start; the counts are
   `CaptureStatistics::filled_seconds` and `unfilled_seconds`, and the note
   "About N seconds of the recording are missing" adds them.
 - **The files are synced while recording, the relay holds 20 s, and the
@@ -2224,7 +2226,10 @@ it:
   that refused the newest packets), and the backend's stop hands that and
   what the system lane's staging still holds to the sink; on process
   loopback that includes the padding still running at the stop, flagged
-  or not. Endpoint loopback idles, so it reads nothing there. Step 9 of the stable plan's
+  or not. The same two streams read the counter just before their start
+  against their first packet's QPC, for a loss before it that no packet
+  flags, beyond their latency and a period, after a recording's first
+  start. Endpoint loopback idles, so it reads nothing there or at the start. Step 9 of the stable plan's
   Windows gate checks it on hardware, at 48 and 44.1 kHz, on a hands-free
   headset and above 48 kHz, names the loopback, and stalls just before the
   stop on both loopbacks.

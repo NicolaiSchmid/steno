@@ -318,8 +318,7 @@ why and the alternative.
   the audio processing is stable and ideally the final version before we
   cutover to the tauri version."
   - **Reading:** no change to the audio and speech path is planned after the
-    cutover. A1 to A10, A12 to A18 and A20 land before `0.11.0-rc.1`, so the
-    cutover. A1 to A10, A12 to A17, A19 and A20 land before `0.11.0-rc.1`, so the
+    cutover. A1 to A10 and A12 to A20 land before `0.11.0-rc.1`, so the
     rehearsals run on the final pipeline. A fix found during the candidates
     becomes a new candidate and restarts the stability count (G2).
   - **The remaining differences, each made final.** Confirmed 2026-10-07.
@@ -1792,6 +1791,25 @@ Each lands before `0.11.0-rc.1`.
     whether or not a packet flagged it, a sane QPC or none; step 9 of the
     Windows gate stalls just before the stop on both loopbacks. A stop for a rebuild reads nothing; the gap
     covers that time.
+  - **Before the first callback.** A first callback that comes late shows
+    no jump either, since the clock starts at it. PipeWire's `start`
+    returns only after the first cycle, and the recording's clock starts
+    after it, so nothing is lost there. Core Audio compares the first
+    callback's host time with the device's start
+    (`realtime::FirstCallback::missed`): past `FIRST_CALLBACK_ALLOWANCE`,
+    200 ms (A10's bound from the call to `start`, which comes before the
+    device's start), the time counts unfilled. On WASAPI the microphone
+    and process loopback read the performance counter just before
+    `IAudioClient::Start` and compare it with their first packet's QPC, less
+    the frames delivered before it (`DevicePositions::missed_before_first`,
+    on a sane QPC only): past the stream's latency and one period, the time
+    counts unfilled, since an engine that dropped its oldest packets before
+    the thread's first drain flags no packet. Both count at the stop,
+    whatever the stop is for (a rebuild's gap starts at the last frame),
+    and only for a recording's first start (`LaneFrameSink::first_start`,
+    claimed once the start succeeded): a restart's gap runs to its first
+    frame and holds that time already. Endpoint loopback may start in an
+    idle, so it reads no start.
   - **The bound.** One second is half the session's two-second rings, so
     the fill fits beside a processing thread up to a second behind (a fill
     the rings cannot take counts as dropped, as any refused callback), and
@@ -1874,8 +1892,15 @@ Each lands before `0.11.0-rc.1`.
     while the microphone is out forgotten at the re-prime, two idles within
     the hold counted together, the stop's counter reading nothing after a
     last pair that did not match and reading a stall of a packet and a
-    half, and two hours of clocks that wrap;
-    the property test `tests/wasapi_loss_property.rs` (below); the
+    half, and two hours of clocks that wrap; a first packet half a second
+    after the start counted less the start latency, one inside it or half
+    a period past it counting nothing, no start (endpoint loopback), no QPC
+    or a QPC still measuring counting nothing, the first packet with a QPC
+    read past the frames before it, the stop putting each stream's loss
+    before its first packet on its own lanes, only a sink's first start
+    being its first, and Core Audio's first callback 0.5 s after the start
+    counting 0.3 s at 48 and 16 kHz and none inside the allowance or when
+    none came; the property test `tests/wasapi_loss_property.rs` (below); the
     allocation count of
     the fill and the unfilled jumps through the PipeWire gate and both
     WASAPI bodies. CI's live PipeWire tests stop their own process with `SIGSTOP`
@@ -1953,7 +1978,18 @@ Each lands before `0.11.0-rc.1`.
     stop dropping the snapshots, process loopback's padding at the stop
     needing a clock's reading, the QPC's last pair matched at 2 % or a
     quarter packet or once for good, and the stop's counter read after a
-    last pair that did not match or ignoring a stall under two packets.
+    last pair that did not match or ignoring a stall under two packets;
+    before the first packet, the start never read, the frames before the
+    first QPC not taken off, the latency or the period left out, any QPC
+    trusted, the lanes swapped, every start taken as the first, Core
+    Audio's allowance removed; a pending flag made fresh only when none
+    was pending, or always; a re-prime within the hold dropping the run
+    before it. Two mutants survive, both equivalent in every sequence a
+    single-threaded test can make: the hand-on marking every flag recorded
+    so far as handed, rather than those it read (the race it closes is
+    inside one call), and a re-prime that keeps the run before it however
+    long ago (the master's take after each pull clears that run once the
+    hold has passed, and a flag's snapshot takes it).
   - **The property test.** `crates/steno-audio/tests/wasapi_loss_property.rs`
     runs random packet streams through `DevicePositions`, the master's
     router and the recorder's note (1 000 streams in CI, fixed seed; 20 000
@@ -1990,10 +2026,22 @@ Each lands before `0.11.0-rc.1`.
     `WASAPI_STORM_UPPER=1`). It found silent shapes in the padding rule,
     closed by counting the hold in the system stream's frames, taking a
     fresh snapshot at each flag, taking both runs at the stop and leaving
-    the re-prime's wait out of the padding; it now fails only in a shape
-    **Left** names (the queue an earlier outage left above the target,
-    under an outage overlapping the microphone's), 1 in 450 000 on nine
-    seeds.
+    the re-prime's wait out of the padding. The calls and the short calls
+    also start threads late to their first drain (15 % of them), cut a
+    thread's drain part way by the other's (both resume together), and let
+    the system device's clock drift from the microphone's by up to 0.5 %.
+    Each continuous stream reads the counter at its start, so a loss
+    before its first packet is exempt only on endpoint loopback or without
+    a sane QPC, and is bounded from above too. That found two more silent
+    shapes, both closed: a flag left pending since before the microphone's
+    first pull (late to its first drain) kept a later outage's flag from
+    being fresh, and a lane that primed on part of the kept packets, ran
+    out while the system thread drained the rest and primed again dropped
+    the outage's padding. It now fails only in a shape **Left** names:
+    1 in 300 000 short calls on six new seeds (the queue an earlier outage
+    left above the target, 80 ms under), none of 20 000 calls or 100 000
+    single streams; with the upper bounds, 66 of 150 000 short calls and 1
+    of 20 000 calls go over, each an idle or unit shape **Left** names.
   - **Left.** WASAPI's fill is unit-tested and compiled in CI, not
     provoked on hardware (no Windows machine). The rule is stated once, in
     the doc of `split_streams::DevicePositions`. A flagged packet's loss is
@@ -2029,16 +2077,32 @@ Each lands before `0.11.0-rc.1`.
     system stream's frames, so an idle that ends within it before a flag
     counts with it, and two idles with less than the hold of audio between
     them count together at a flag after the second, however long either
-    was (an overcount). Audio the staging slipped in the microphone's
+    was (an overcount). So does an idle that ends while the microphone is
+    out into the stop, when the microphone's fill there pulls the system
+    queue empty and a system flag follows at once (0.76 s of idle counted
+    with a 50 ms loss in 1 of 20 000 calls). Audio the staging slipped in the microphone's
     catch-up just before the stop, padded after it, counts at the stop on
     process loopback (it is gone all the same). Where both threads were
     out the note takes the lane that lost most, so the system lane's loss
     beyond the microphone's in that time (up to the microphone engine's
     buffer) is not in it; that is the note's rule on every backend, and a
-    follow-up decides it. A loss before a stream's first packet is not
-    read (loopback flags its first packet), and a system-lane loss into the
-    stop with no flagged packet is silent on endpoint loopback (**At the
-    stop**). Step 9 of the Windows gate checks both on hardware. A process stopped
+    follow-up decides it. What stays silent, each named and gated:
+    - endpoint loopback, which idles: a system-lane loss into the stop with
+      no flagged packet (**At the stop**) and one before its first packet
+      (**Before the first callback**); step 9 of the Windows gate stalls
+      just before the stop and right after the start there;
+    - a stream with no sane QPC: a microphone whose positions never move
+      loses what stays under the drift allowance (the note's wall-time
+      shortfall counts the rest), and on process loopback a loss before
+      the first packet is silent; step 9 fails any stream with no QPC near
+      1.0000, so such hardware is found there;
+    - the note takes the worst lane (above), on every backend: the general
+      follow-up.
+
+    Core Audio's first callback counts past 200 ms after the device's
+    start, so up to that much is uncounted at a slow start; a capture
+    whose first callback never comes is restarted by the stall watchdog,
+    whose gap holds that time. A process stopped
     for over 2 s may still be rebuilt after its thread has delivered again
     (the watch thread wakes first), which costs a gap of 10 to 20 ms,
     counted. Nicolai's gate steps (step 6 of R5 on the Mac, the stalled
@@ -3795,6 +3859,20 @@ candidate:
    the stop there), which decides whether endpoint loopback needs a check
    of its own. After the run without the suspension no stream logs a
    "missed after its last packet" line.
+
+   Then the stall right after the start, once on each loopback, a new
+   recording each time: with something playing, start a call recording and
+   suspend the app's process for 0.6 s within half a second (run
+   `pssuspend steno-desktop` as the recording starts), then record a
+   minute. Then once more without the suspension. Pass: after the
+   suspended run the note counts about 0.6 s, and the microphone's stream
+   logs a "missed before its first packet" or a "packets after a glitch"
+   line of about 0.6 s (or 0.6 s less what its engine kept); the system
+   stream does the same on process loopback. On endpoint loopback, write
+   down whether the system stream logged either line: it reads no start,
+   so a loss before its first packet there is uncounted. After the run
+   without the suspension no stream logs a "missed before its first
+   packet" line.
 
 ## Order of operations and gates
 
