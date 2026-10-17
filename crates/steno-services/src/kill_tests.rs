@@ -659,6 +659,18 @@ impl steno_core::SpeechEngine for LoadUntilKilled {
     }
 }
 
+/// The child's app over `directory`, on a [`LoadUntilKilled`] engine in
+/// this process ([`app_warming_up`]).
+fn loading_until_killed(directory: &Path) -> crate::App {
+    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
+    let engine = Arc::new(LoadUntilKilled {
+        inner: steno_core::testing::FakeSpeechEngine::default(),
+        loading: directory.join("loading"),
+        mark: warm_up_mark(directory),
+    });
+    app_warming_up(directory, &store, synthetic_capture(), engine)
+}
+
 /// The warm-up's mark in the support directory of `directory`.
 fn warm_up_mark(directory: &Path) -> PathBuf {
     directory
@@ -683,13 +695,7 @@ fn child_warms_up_until_killed() {
         .build()
         .unwrap();
     let _entered = runtime.enter();
-    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
-    let engine = Arc::new(LoadUntilKilled {
-        inner: steno_core::testing::FakeSpeechEngine::default(),
-        loading: directory.join("loading"),
-        mark: warm_up_mark(&directory),
-    });
-    let app = app_warming_up(&directory, &store, synthetic_capture(), engine);
+    let app = loading_until_killed(&directory);
     app.recorder.start(CaptureMode::InPerson, None);
     assert_eq!(app.recorder.status().error, None);
     loop {
@@ -799,13 +805,7 @@ fn child_loads_the_engine_until_killed() {
         .build()
         .unwrap();
     let _entered = runtime.enter();
-    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
-    let engine = Arc::new(LoadUntilKilled {
-        inner: steno_core::testing::FakeSpeechEngine::default(),
-        loading: directory.join("loading"),
-        mark: warm_up_mark(&directory),
-    });
-    let app = app_warming_up(&directory, &store, synthetic_capture(), engine);
+    let app = loading_until_killed(&directory);
     let asset_id: uuid::Uuid = std::fs::read_to_string(directory.join("bad"))
         .unwrap()
         .parse()
@@ -827,6 +827,12 @@ struct Counting {
 impl Counting {
     fn calls(&self) -> usize {
         self.inner.preparations.count() + self.inner.transcriptions.count()
+    }
+
+    /// The calls made while a recording was under way.
+    fn beside_a_recording(&self) -> usize {
+        self.beside_a_recording
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn note(&self) {
@@ -890,11 +896,18 @@ async fn falling_back_after(
     sidecar: &Arc<Counting>,
 ) -> (Arc<Store>, crate::App) {
     let (store, app) = falling_back(dir, coreml, sidecar);
-    let host = Arc::new(app.host().unwrap());
-    app.launch(&host);
-    app.launch_finished().await;
+    (store, launched(app).await)
+}
+
+/// Records half a second on `app` and waits for the meeting's processing,
+/// which must succeed.
+async fn recorded_and_processed(app: &crate::App, store: &Store) {
+    let recorded = record(app, 0.5);
     app.pipeline.current().wait_until_idle().await;
-    (store, app)
+    assert_eq!(
+        store.meeting(recorded).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
 }
 
 /// A process killed in `CoreML`'s load during a meeting's processing (an
@@ -943,12 +956,7 @@ async fn a_coreml_load_killed_moves_the_meetings_to_the_speech_sidecar_until_the
     assert_eq!(coreml.calls(), 0, "nothing ran in the app's process");
     assert_eq!(sidecar.inner.transcriptions.count(), 2, "both lanes");
 
-    let recorded = record(&app, 0.5);
-    app.pipeline.current().wait_until_idle().await;
-    assert_eq!(
-        store.meeting(recorded).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
+    recorded_and_processed(&app, &store).await;
     assert_eq!(coreml.calls(), 0, "no warm-up and no load in the app");
     assert_eq!(sidecar.inner.transcriptions.count(), 3);
     drop(app);
@@ -959,17 +967,10 @@ async fn a_coreml_load_killed_moves_the_meetings_to_the_speech_sidecar_until_the
     app.services.speech_models.end_speech_fallback().unwrap();
     app.pipeline.reload().unwrap();
     assert!(!app.services.speech_models.speech_fallback());
-    let recorded = record(&app, 0.5);
-    app.pipeline.current().wait_until_idle().await;
-    assert_eq!(
-        store.meeting(recorded).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
+    recorded_and_processed(&app, &store).await;
     assert_eq!(coreml.inner.transcriptions.count(), 1, "CoreML again");
     assert_eq!(
-        coreml
-            .beside_a_recording
-            .load(std::sync::atomic::Ordering::SeqCst),
+        coreml.beside_a_recording(),
         1,
         "the recording's warm-up alone ran beside it"
     );
@@ -1005,50 +1006,27 @@ async fn a_warm_up_killed_moves_the_meetings_to_the_speech_sidecar_until_the_use
     let sidecar = Arc::new(Counting::default());
     let (store, app) = falling_back(dir.path(), &coreml, &sidecar);
     assert!(app.services.speech_models.speech_fallback());
-    let recorded = record(&app, 0.5);
-    app.pipeline.current().wait_until_idle().await;
-    assert_eq!(
-        store.meeting(recorded).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
+    recorded_and_processed(&app, &store).await;
     assert_eq!(coreml.calls(), 0, "nothing ran in the app's process");
     assert_eq!(sidecar.inner.transcriptions.count(), 1);
 
     app.services.speech_models.end_speech_fallback().unwrap();
     app.pipeline.reload().unwrap();
-    let recorded = record(&app, 0.5);
-    app.pipeline.current().wait_until_idle().await;
-    assert_eq!(
-        store.meeting(recorded).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
+    recorded_and_processed(&app, &store).await;
     assert_eq!(
         coreml.inner.preparations.count(),
         1,
         "the processing's load, not a warm-up"
     );
     assert_eq!(
-        coreml
-            .beside_a_recording
-            .load(std::sync::atomic::Ordering::SeqCst),
+        coreml.beside_a_recording(),
         0,
         "nothing ran in the app's process beside the recording"
     );
     assert!(!warm_up_mark(dir.path()).exists(), "the load cleared it");
 
-    let warmed = record(&app, 0.5);
-    app.pipeline.current().wait_until_idle().await;
-    assert_eq!(
-        store.meeting(warmed).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
-    assert_eq!(
-        coreml
-            .beside_a_recording
-            .load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "this recording's warm-up"
-    );
+    recorded_and_processed(&app, &store).await;
+    assert_eq!(coreml.beside_a_recording(), 1, "this recording's warm-up");
     drop(app);
     let (_, app) = falling_back(dir.path(), &coreml, &sidecar);
     assert!(!app.services.speech_models.speech_fallback());
@@ -1460,11 +1438,16 @@ fn killed_in_the_decode(dir: &Path, bad: &steno_core::AudioAsset, kills: usize) 
 async fn launched_after(dir: &Path) -> (Arc<Store>, crate::App) {
     let store = Arc::new(Store::open(dir.join("steno.sqlite")).unwrap());
     let app = app_over_fakes(dir, &store, synthetic_capture());
+    (store, launched(app).await)
+}
+
+/// `app` launched, its queued meetings processed.
+async fn launched(app: crate::App) -> crate::App {
     let host = Arc::new(app.host().unwrap());
     app.launch(&host);
     app.launch_finished().await;
     app.pipeline.current().wait_until_idle().await;
-    (store, app)
+    app
 }
 
 /// A process killed once while it reads a recording (a failed allocation
