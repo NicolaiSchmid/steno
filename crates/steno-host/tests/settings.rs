@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 
 use steno_host::services::{LoginItem as _, Preferences as _, SpeechModels as _};
@@ -679,6 +680,19 @@ fn errors_are_sentences_with_the_details_apart() {
     assert_eq!(recording["devices"], json!([]));
 }
 
+/// A harness whose speech sidecar stands in for the Neural Engine, which
+/// ended the app (A19).
+fn falling_back() -> Harness {
+    Harness::builder()
+        .seed(|_, fakes| {
+            fakes
+                .speech_models
+                .speech_fallback
+                .store(true, Ordering::SeqCst);
+        })
+        .build()
+}
+
 /// While the speech sidecar stands in for the Neural Engine, which ended
 /// the app, Transcription says so and offers it again; the action ends the
 /// fallback and rebuilds the pipeline, and the offer goes. Rust only
@@ -693,14 +707,7 @@ fn transcription_offers_the_neural_engine_again_after_the_fallback() {
             .is_none(),
         "left out while the Neural Engine is on"
     );
-    let harness = Harness::builder()
-        .seed(|_, fakes| {
-            fakes
-                .speech_models
-                .speech_fallback
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        })
-        .build();
+    let harness = falling_back();
     assert_eq!(
         harness.snapshot(BridgeTopic::SettingsTranscription)["neuralEngineOff"],
         true
@@ -715,7 +722,7 @@ fn transcription_offers_the_neural_engine_again_after_the_fallback() {
             .fakes
             .speech_models
             .speech_fallback
-            .load(std::sync::atomic::Ordering::SeqCst)
+            .load(Ordering::SeqCst)
     );
     assert_eq!(*harness.fakes.pipeline.reloads.lock().unwrap(), 1);
     let transcription = harness.snapshot(BridgeTopic::SettingsTranscription);
@@ -729,14 +736,7 @@ fn transcription_offers_the_neural_engine_again_after_the_fallback() {
 /// rebuild again. Rust only (A19).
 #[test]
 fn a_failed_rebuild_after_the_fallback_ended_keeps_the_offer() {
-    let harness = Harness::builder()
-        .seed(|_, fakes| {
-            fakes
-                .speech_models
-                .speech_fallback
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        })
-        .build();
+    let harness = falling_back();
     harness.fakes.pipeline.fail_calls(Some("the store is busy"));
     harness
         .host
@@ -784,16 +784,9 @@ fn a_failed_rebuild_after_the_fallback_ended_keeps_the_offer() {
 /// the offer, and the pipeline is not rebuilt. Rust only (A19).
 #[test]
 fn a_fallback_that_could_not_be_ended_stays_on() {
-    let harness = Harness::builder()
-        .seed(|_, fakes| {
-            fakes
-                .speech_models
-                .speech_fallback
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            *fakes.speech_models.end_fallback_failure.lock().unwrap() =
-                Some("read-only file system".to_owned());
-        })
-        .build();
+    let harness = falling_back();
+    let models = &harness.fakes.speech_models;
+    *models.end_fallback_failure.lock().unwrap() = Some("read-only file system".to_owned());
     harness
         .host
         .settings_transcription_use_neural_engine()
