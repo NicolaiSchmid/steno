@@ -613,14 +613,23 @@ impl FollowerLane {
             // A run the follower delivered past the hold after (an idle
             // that ended while the master was out) is no discontinuity's.
             let since_pad = pushed.wrapping_sub(self.pushed_at_pad.load(Ordering::Relaxed));
-            self.last_run.store(
-                if since_pad > self.reprime_hold {
-                    0
-                } else {
-                    run
-                },
-                Ordering::Relaxed,
-            );
+            let run = if since_pad > self.reprime_hold {
+                0
+            } else {
+                run
+            };
+            // A re-prime within the hold of the last one (the lane primed on
+            // part of the kept packets, ran out while the follower's thread
+            // drained the rest, and primed again) keeps the run before it:
+            // it may still be the outage's padding.
+            let since_prime = pushed.wrapping_sub(self.pushed_at_prime.load(Ordering::Relaxed));
+            let kept = if since_prime > self.reprime_hold {
+                0
+            } else {
+                self.last_run.load(Ordering::Relaxed)
+            };
+            self.last_run
+                .store(kept.saturating_add(run), Ordering::Relaxed);
             self.pushed_at_prime.store(pushed, Ordering::Relaxed);
             self.restart_window();
         }
