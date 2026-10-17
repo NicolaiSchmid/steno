@@ -3687,9 +3687,11 @@ mod tests {
                 .state
         }
 
-        /// Waits until the crash recovery ran, which ends the reread.
+        /// Waits until the crash recovery ran, which ends the reread. The
+        /// reread builds a real listener first, so the wait is the hang
+        /// guard's.
         async fn until_recovered(&self) {
-            tokio::time::timeout(PATIENCE, async {
+            tokio::time::timeout(HANG_GUARD, async {
                 while self.queued_state() == steno_core::MeetingState::Queued {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }

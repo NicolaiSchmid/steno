@@ -5,7 +5,7 @@
 //! phone, a recording it delivered, a store that keeps the last phone, a
 //! fingerprint record that refuses writes, the waits that fail a test
 //! instead of hanging it ([`PATIENCE`] for the tests' own fakes and gates,
-//! [`HANG_GUARD`] for real capture work),
+//! [`HANG_GUARD`] for real capture work and a real listener's build),
 //! [`warnings`], what a call logs at `warn` and above, and what the checks
 //! of `.plans/2026-10-12-store-off-the-workers.md` run under: a store held
 //! by another connection ([`HeldStore`]) and a host whose sink keeps the
@@ -37,17 +37,18 @@ use crate::recorder::MakeCaptureSession;
 /// How long a test waits for work driven by its own fakes, gates and
 /// manual clock before it fails. That work takes milliseconds, so this
 /// bound only turns a hang into a failure; for real capture work, the
-/// synthetic capture's first audio included, see [`HANG_GUARD`].
+/// synthetic capture's first audio included, and a real listener's
+/// build, see [`HANG_GUARD`].
 pub const PATIENCE: Duration = Duration::from_secs(5);
 
-/// How long a test waits for real work over the synthetic capture before
-/// it fails as hung: a start, a stop and save, a quit, a rebuild or
+/// How long a test waits for real work (over the synthetic capture, or a
+/// real handover listener's build) before it fails as hung: a start, a stop and save, a quit, a rebuild or
 /// restart, a recording that ends on its own, and the first audio once
 /// it records (a level, frames in the files), which passes the producer,
 /// the processing and the writer threads at wall-clock pace; and the
-/// build of a real handover listener (its identity read, its socket and
-/// its Bonjour daemon). A loaded runner stretches that work past
-/// [`PATIENCE`]. A gate that waits while
+/// build of a real handover listener (its identity read or minted and,
+/// with a phone paired, its TLS setup and its socket). A loaded runner
+/// stretches that work past [`PATIENCE`]. A gate that waits while
 /// such work runs, before the test can open it, takes this bound too,
 /// and so does a call that does the work only when the behaviour under
 /// test is broken (a refused start accepted after all), so the break
