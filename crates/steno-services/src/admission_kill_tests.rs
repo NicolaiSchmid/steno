@@ -105,21 +105,20 @@ fn hold_in_the_ledger_commit(store: &Store, directory: &Path) {
     });
 }
 
-/// The child's directory, gate and store, the probe set when asked.
-fn child_world() -> Option<(PathBuf, String, Arc<Store>, tokio::runtime::Runtime)> {
+/// The child's directory and store, the probe set when its gate asks.
+fn child_world() -> Option<(PathBuf, Arc<Store>, tokio::runtime::Runtime)> {
     let directory = PathBuf::from(std::env::var(DIRECTORY).ok()?);
     die_with_the_parent();
-    let gate = std::env::var(GATE).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
     let store = Arc::new(Store::open(database_in(&directory)).unwrap());
-    if gate == IN_LEDGER_COMMIT {
+    if std::env::var(GATE).unwrap() == IN_LEDGER_COMMIT {
         hold_in_the_ledger_commit(&store, &directory);
     }
-    Some((directory, gate, store, runtime))
+    Some((directory, store, runtime))
 }
 
 /// The child: the phone's `complete` through the app's intake, held at its
@@ -127,7 +126,7 @@ fn child_world() -> Option<(PathBuf, String, Arc<Store>, tokio::runtime::Runtime
 #[test]
 #[ignore = "the admission kill tests run it in a child process"]
 fn child_admits_until_killed() {
-    let Some((directory, _, store, runtime)) = child_world() else {
+    let Some((directory, store, runtime)) = child_world() else {
         return;
     };
     runtime.block_on(async {
@@ -157,7 +156,7 @@ fn child_admits_until_killed() {
 #[test]
 #[ignore = "the admission kill tests run it in a child process"]
 fn child_launches_until_killed() {
-    let Some((directory, _, store, runtime)) = child_world() else {
+    let Some((directory, store, runtime)) = child_world() else {
         return;
     };
     runtime.block_on(async {
@@ -231,31 +230,20 @@ fn killed_at(world: &World, name: &str, point: &str) {
     std::fs::remove_file(directory.join("gated")).unwrap();
 }
 
-fn noted(world: &World) -> (usize, usize) {
-    (
-        crate::audio_folders::recorded(&world.support())
-            .unwrap()
-            .len(),
-        crate::audio_folders::uploads(&world.support())
-            .unwrap()
-            .len(),
-    )
-}
-
 /// A fresh admission killed at `point`; then a relaunch and the retry.
 /// Returns the noted entries at the kill and after the retry.
 async fn fresh_admission_killed_at(point: &str) -> ((usize, usize), (usize, usize)) {
     let (world, app) = World::new();
     quit(app).await;
     killed_at(&world, "child_admits_until_killed", point);
-    let at_kill = noted(&world);
+    let at_kill = world.noted();
     let app = relaunch(&world).await;
     let retried = world.admit(&app).await.unwrap();
     world.assert_one_meeting(&app.store, retried);
     quit(app).await;
     let app = relaunch(&world).await;
     world.assert_one_meeting(&app.store, retried);
-    let after = noted(&world);
+    let after = world.noted();
     quit(app).await;
     eprintln!("{point}: noted at the kill {at_kill:?}, after {after:?}");
     (at_kill, after)
@@ -305,7 +293,7 @@ async fn adoption_killed_at(point: &str) -> ((usize, usize), (usize, usize)) {
     drop(hold);
     quit(app).await;
     killed_at(&world, "child_launches_until_killed", point);
-    let at_kill = noted(&world);
+    let at_kill = world.noted();
     let app = relaunch(&world).await;
     world.assert_one_meeting(&app.store, noted_id);
     assert_eq!(world.admit(&app).await.unwrap(), noted_id, "the retry");
@@ -313,7 +301,7 @@ async fn adoption_killed_at(point: &str) -> ((usize, usize), (usize, usize)) {
     quit(app).await;
     let app = relaunch(&world).await;
     world.assert_one_meeting(&app.store, noted_id);
-    let after = noted(&world);
+    let after = world.noted();
     quit(app).await;
     eprintln!("{point}: noted at the kill {at_kill:?}, after {after:?}");
     (at_kill, after)
@@ -393,19 +381,6 @@ async fn retry_held_after_the_reuse_check<T>(
     (outcome, app, between)
 }
 
-/// The asset rows, as (retention, url).
-fn asset_rows(store: &Store) -> Vec<(String, String)> {
-    store
-        .read(|connection| {
-            let mut statement = connection.prepare("SELECT retention, url FROM audioAsset")?;
-            let rows = statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .unwrap()
-}
-
 /// The retry passed its check that the noted copy has no meeting row,
 /// then the launch adopts the copy without the ledger row (its read of the
 /// noted uploads found none: the file moved away for it), then the retry
@@ -441,18 +416,11 @@ async fn a_retry_racing_a_plain_adoption_of_its_copy_writes_no_second_asset() {
             .await
             .unwrap();
     }
-    let ids: Vec<Uuid> = launched
-        .store
-        .all_meetings()
-        .unwrap()
-        .iter()
-        .map(|meeting| meeting.id)
-        .collect();
-    assert_eq!(ids, [noted_id], "one meeting");
-    let assets = asset_rows(&launched.store);
+    assert_eq!(World::meetings(&launched.store), [noted_id], "one meeting");
+    let assets = launched.store.assets().unwrap();
     assert_eq!(assets.len(), 1, "one asset row for the master: {assets:?}");
-    assert_eq!(assets[0].0, "keepForever");
-    let master = steno_core::paths::file_url_path(&assets[0].1).unwrap();
+    assert_eq!(assets[0].retention, steno_core::AudioRetention::KeepForever);
+    let master = steno_core::paths::file_url_path(&assets[0].url).unwrap();
     assert_eq!(
         std::fs::read(master).unwrap(),
         world.bytes,
@@ -491,7 +459,7 @@ async fn a_retry_that_loses_to_the_launchs_adoption_writes_nothing() {
             .unwrap();
     }
     world.assert_one_meeting(&launched.store, noted_id);
-    assert_eq!(asset_rows(&launched.store).len(), 1, "one asset");
+    assert_eq!(launched.store.assets().unwrap().len(), 1, "one asset");
     quit(launched).await;
     quit(app).await;
 }

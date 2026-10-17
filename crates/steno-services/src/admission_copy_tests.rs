@@ -352,7 +352,7 @@ impl World {
     }
 
     /// How many folders and uploads are noted.
-    fn noted(&self) -> (usize, usize) {
+    pub(super) fn noted(&self) -> (usize, usize) {
         (
             crate::audio_folders::recorded(&self.support())
                 .unwrap()
@@ -364,7 +364,7 @@ impl World {
     }
 
     /// The meeting ids in `store`.
-    fn meetings(store: &Store) -> Vec<Uuid> {
+    pub(super) fn meetings(store: &Store) -> Vec<Uuid> {
         store
             .all_meetings()
             .unwrap()
