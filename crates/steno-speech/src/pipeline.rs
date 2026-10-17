@@ -394,20 +394,24 @@ fn join(spans: &[Span], decoded: &[Vec<Token>], overlap_seconds: f64, vocab: &Vo
     out
 }
 
-/// The words of one decode with any piece in `range`, a span's reach:
-/// pieces are grouped into words at each word start, and a word is kept or
-/// dropped whole, wherever its other pieces lie, so an accepted recovery
-/// keeps every token the trim before the partition kept, and a word heard
+/// The words of one decode with any piece in `range`, a span's reach,
+/// each from its start, wherever that lies, to the punctuation after its
+/// last piece in `range` ([`Vocab::is_splice_safe`]): an accepted recovery
+/// so keeps what the trim before the partition kept, and a word heard
 /// across a seam reaches the join whole from both sides. A decode that
 /// begins inside a word gives the pieces that continue it as a word of
 /// their own; the join decides whether a gap's window keeps them.
 fn own(tokens: &[Token], range: &Range<usize>, vocab: &Vocab) -> Vec<Token> {
-    tokens
-        .chunk_by(|_, next| !starts_word(vocab.piece(next.id)))
-        .filter(|word| word.iter().any(|t| range.contains(&t.sample())))
-        .flatten()
-        .copied()
-        .collect()
+    let mut kept = Vec::with_capacity(tokens.len());
+    for word in tokens.chunk_by(|_, next| !starts_word(vocab.piece(next.id))) {
+        let Some(last) = word.iter().rposition(|t| range.contains(&t.sample())) else {
+            continue;
+        };
+        let rest = word[last + 1..].iter();
+        let end = last + 1 + rest.take_while(|t| !vocab.is_splice_safe(t.id)).count();
+        kept.extend_from_slice(&word[..end]);
+    }
+    kept
 }
 
 /// One span's decode: the tokens it keeps and the window they came from.
@@ -1362,6 +1366,13 @@ mod tests {
         // whole.
         let across = [piece(1, 9.84), piece(21, 10.0), piece(4, 12.0)];
         assert_eq!(ids(&own(&across, &owned, &vocab)), [1, 21, 4]);
+        // A full stop after the word's last piece in the span is cut, with
+        // the rest of the word after it, as the trim before the partition
+        // cut; inside the span it stays.
+        let stop = [piece(2, 19.9), piece(41, 20.0), piece(22, 20.08)];
+        assert_eq!(ids(&own(&stop, &owned, &vocab)), [2]);
+        let stop = [piece(2, 19.84), piece(41, 19.92), piece(22, 20.0)];
+        assert_eq!(ids(&own(&stop, &owned, &vocab)), [2, 41, 22]);
         // A decode that begins with a word's rest gives it as a word of its
         // own, kept when a piece of it lies in the span.
         let rest = [piece(21, 9.92), piece(31, 10.0), piece(5, 11.0)];

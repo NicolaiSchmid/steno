@@ -230,25 +230,31 @@ fn ref_transcribe(t: &mut Transcriber<FrameTokenBackend>, samples: &[f32]) -> Ve
     ref_splice_gaps(&merged, &gaps, &extra, overlap_seconds, &vocab)
 }
 
-/// Every token the final windows heard that the span keeps by its
-/// stated bound, taken from the window the transcript records
-/// ([`Transcript::windows`]) and decoded again: a plain chunk's whole
-/// window, and the reach of a gap's window or an accepted recovery.
+/// Every token the final windows heard that their span keeps, taken from
+/// the window the transcript records ([`Transcript::windows`]) and decoded
+/// again: a plain chunk's whole window (`.0`), and the reach of a filtered
+/// decode, a gap's window or an accepted recovery (`.0` and `.1`). A plain
+/// chunk's decode goes whole to its run's LCS merge, which A16a leaves as
+/// it was.
 fn ref_heard(
     t: &mut Transcriber<FrameTokenBackend>,
     samples: &[f32],
     tr: &Transcript,
-) -> Vec<Token> {
+) -> (Vec<Token>, Vec<Token>) {
     let mut stats = DecodeStats::default();
-    let mut heard = Vec::new();
+    let mut heard = (Vec::new(), Vec::new());
     for (span, window) in tr.spans.iter().zip(&tr.windows) {
-        let bound = if span.chunk && *window == span.window {
-            span.window.clone()
-        } else {
-            span.reach.clone()
-        };
+        let plain = span.chunk && *window == span.window;
+        let bound = if plain { &span.window } else { &span.reach };
         let tokens = t.decode_range(samples, window.clone(), &mut stats).unwrap();
-        heard.extend(tokens.into_iter().filter(|t| bound.contains(&t.sample())));
+        let kept: Vec<Token> = tokens
+            .into_iter()
+            .filter(|t| bound.contains(&t.sample()))
+            .collect();
+        if !plain {
+            heard.1.extend_from_slice(&kept);
+        }
+        heard.0.extend(kept);
     }
     heard
 }
@@ -677,12 +683,14 @@ fn ref_tally(tokens: &[Token], words: &[Placed], keep: &[bool], slack: usize) ->
     per
 }
 
-/// One differential run: the old merge's tokens, the transcript and what
-/// its final windows heard.
+/// One differential run: the old merge's tokens, the transcript, what its
+/// final windows heard and what its filtered decodes heard
+/// ([`ref_heard`]).
 struct RefRun {
     old: Vec<Token>,
     new: Transcript,
     heard: Vec<Token>,
+    filtered: Vec<Token>,
 }
 
 fn ref_run(
@@ -704,12 +712,23 @@ fn ref_run(
     let old = ref_transcribe(&mut make(), &samples);
     let mut t = make();
     let new = t.transcribe(&samples, None).unwrap();
-    let heard = ref_heard(&mut t, &samples, &new);
-    RefRun { old, new, heard }
+    let (heard, filtered) = ref_heard(&mut t, &samples, &new);
+    RefRun {
+        old,
+        new,
+        heard,
+        filtered,
+    }
 }
 
 /// Words the old merge keeps and the transcript loses (`.0`), pieces
-/// likewise (`.1`), and words its final windows heard that it loses (`.2`).
+/// likewise (`.1`), and words its filtered decodes heard that it loses
+/// (`.2`).
+/// A word whose first piece repeats the last piece of the word before it,
+/// or that repeats that word, counts only where a final window heard it,
+/// and never in `.2`: the fake never gives one piece twice in a row, so a
+/// window that heard the word before swallows it, which a model does not,
+/// and a run's LCS may take two words said alike for one.
 fn ref_losses(
     case: &RefCase,
     keep: &[bool],
@@ -719,14 +738,29 @@ fn ref_losses(
     let old = ref_tally(&run.old, &case.words, keep, slack);
     let new = ref_tally(&run.new.tokens, &case.words, keep, slack);
     let heard = ref_tally(&run.heard, &case.words, keep, slack);
+    let filtered = ref_tally(&run.filtered, &case.words, keep, slack);
+    let repeats = |w: usize| {
+        let word = &case.words[w];
+        let before = (0..case.words.len())
+            .filter(|&o| keep[o] && case.words[o].start(0) < word.start(0))
+            .max_by_key(|&o| case.words[o].start(0));
+        before.is_some_and(|o| {
+            let pieces = &case.words[o].pieces;
+            *pieces == word.pieces || pieces.last() == word.pieces.first()
+        })
+    };
     let mut out = (Vec::new(), Vec::new(), Vec::new());
     for w in (0..case.words.len()).filter(|&w| keep[w]) {
+        let repeats = repeats(w);
+        if repeats && heard[w].0 == 0 {
+            continue;
+        }
         if old[w].0 > 0 && new[w].0 == 0 {
             out.0.push(w);
         } else if old[w].1 & !new[w].1 != 0 {
             out.1.push(w);
         }
-        if heard[w].0 > 0 && new[w].0 == 0 {
+        if filtered[w].0 > 0 && new[w].0 == 0 && !repeats {
             out.2.push(w);
         }
     }
@@ -751,10 +785,10 @@ struct Tally {
 /// settings, `CoreML`'s and two between, with the extra windows off and
 /// on, over the exact fake and one that moves tokens by `jitter` frames.
 /// Every word the old merge kept comes out, with every piece the old merge
-/// gave it: a duplicate is allowed, a loss never. And every word a final
-/// window heard inside the bound its span keeps comes out at least once,
-/// except one that repeats the piece before it, which the fake hears as
-/// one and a run's LCS may take for one.
+/// gave it: a duplicate is allowed, a loss never. And every word a
+/// filtered decode (a gap's window or an accepted recovery) heard in its
+/// reach comes out at least once (see `ref_losses` for a word that repeats
+/// the one before it).
 fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
     let mut rng = Rng(seed);
     let mut tally = Tally::default();
@@ -790,11 +824,6 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
         let new = ref_tally(&run.new.tokens, &layout.words, &all, slack);
         tally.doubled += old.iter().zip(&new).filter(|(m, a)| a.0 > m.0).count();
         let (lost, pieces, unheard) = ref_losses(&layout, &all, &run, slack);
-        let repeated = |w: usize| {
-            let (before, word) = (&layout.words[w.saturating_sub(1)], &layout.words[w]);
-            w > 0 && (before.pieces == word.pieces || before.pieces.last() == word.pieces.first())
-        };
-        let unheard: Vec<usize> = unheard.into_iter().filter(|&w| !repeated(w)).collect();
         let show = |tokens: &[Token]| {
             let pieces = tokens.iter().map(|t| format!("{}@{}", t.id, t.sample()));
             pieces.collect::<Vec<_>>().join(" ")
