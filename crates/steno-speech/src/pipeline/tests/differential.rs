@@ -5,7 +5,8 @@
 //! can change under it; it gives the same tokens (id and sample) as that
 //! commit on the jitter-free cases. It checks clause 5 of the ownership
 //! invariant (A16a in `.plans/2026-10-07-stable-promotion.md`): every word
-//! the old merge keeps, this one keeps, on the layouts and fakes it runs.
+//! the old merge keeps, this one keeps, with its pieces and its boundaries,
+//! on the layouts and fakes it runs ([`ref_losses`]).
 
 use super::*;
 
@@ -638,24 +639,106 @@ fn ref_general_layout(rng: &mut Rng) -> RefCase {
     }
 }
 
-/// Per word, how often its first piece came out and which pieces did;
-/// each token goes to the nearest piece of that id within `slack`
-/// frames.
-fn ref_tally(tokens: &[Token], words: &[Placed], slack: usize) -> Vec<(usize, u8)> {
-    let mut per = vec![(0, 0u8); words.len()];
-    for token in tokens {
-        let near = words
-            .iter()
-            .enumerate()
-            .flat_map(|(w, word)| (0..word.pieces.len()).map(move |i| (w, i, word)))
-            .filter(|&(_, i, word)| word.piece_of(token, slack) == Some(i))
-            .min_by_key(|&(_, i, word)| word.start(i).abs_diff(token.sample()));
-        if let Some((w, i, _)) = near {
-            per[w].0 += usize::from(i == 0);
-            per[w].1 |= 1 << i;
+/// The general layout and quiet words of any id within 2.4 s of every
+/// owned boundary and window edge of its partition under `config`, a third
+/// of them orphans: a word whose start the recording cuts off (it begins
+/// with a continuation) or a lone full stop.
+fn ref_seam_layout(rng: &mut Rng, config: &PipelineConfig) -> RefCase {
+    let mut case = ref_general_layout(rng);
+    let total = case.samples.len();
+    let regions = case.regions.as_deref().unwrap_or_default();
+    let spans = partition(&case.samples, regions, &config.chunker);
+    let mut edges: Vec<usize> = spans
+        .iter()
+        .flat_map(|s| [s.owned.start, s.window.start, s.window.end])
+        .filter(|&x| x > 0 && x < total)
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let mut words = std::mem::take(&mut case.words);
+    for edge in edges {
+        for _ in 0..3 {
+            let Some(frame) =
+                (edge / FRAME_SAMPLES).checked_add_signed(rng.below(61) as isize - 30)
+            else {
+                continue;
+            };
+            let id = 1 + rng.below(20) as u32;
+            let mut pieces = vec![id];
+            for _ in 0..rng.below(3) {
+                pieces.push(20 + id);
+            }
+            if rng.below(4) == 0 {
+                pieces.push(41);
+            }
+            if rng.below(3) == 0 {
+                pieces[0] = if rng.below(3) == 0 { 41 } else { 20 + id };
+            }
+            let word = Placed {
+                pieces,
+                frame,
+                frames: 2 + rng.below(5),
+            };
+            let margin = 4 * FRAME_SAMPLES;
+            let clear = words.iter().all(|o: &Placed| {
+                o.start(0) >= word.span().end + margin || word.start(0) >= o.span().end + margin
+            });
+            if clear && word.span().end + FRAME_SAMPLES <= total {
+                words.push(word);
+            }
         }
     }
+    for word in &words {
+        word.put(&mut case.samples);
+    }
+    words.sort_by_key(|w| w.frame);
+    case.words = words;
+    case
+}
+
+/// The placed word and piece `token` is: the nearest piece of its id
+/// within `slack` frames.
+fn ref_place(token: &Token, words: &[Placed], slack: usize) -> Option<(usize, usize)> {
+    words
+        .iter()
+        .enumerate()
+        .flat_map(|(w, word)| (0..word.pieces.len()).map(move |i| (w, i, word)))
+        .filter(|&(_, i, word)| word.piece_of(token, slack) == Some(i))
+        .min_by_key(|&(_, i, word)| word.start(i).abs_diff(token.sample()))
+        .map(|(w, i, _)| (w, i))
+}
+
+/// Per word, how often its first piece came out and which pieces did,
+/// each token at its place ([`ref_place`]).
+fn ref_tally(tokens: &[Token], words: &[Placed], slack: usize) -> Vec<(usize, u8)> {
+    let mut per = vec![(0, 0u8); words.len()];
+    for (w, i) in tokens.iter().filter_map(|t| ref_place(t, words, slack)) {
+        per[w].0 += usize::from(i == 0);
+        per[w].1 |= 1 << i;
+    }
     per
+}
+
+/// A token of a merge's text: its place ([`ref_place`]) and where it
+/// starts.
+type RefPiece = (Option<(usize, usize)>, usize);
+
+/// The words a merge's tokens make in its text, grouped as the transcript
+/// groups them: each from a word start up to the next, a continuation or a
+/// full stop joining the word before it.
+fn ref_joins(
+    tokens: &[Token],
+    words: &[Placed],
+    vocab: &Vocab,
+    slack: usize,
+) -> Vec<Vec<RefPiece>> {
+    tokens
+        .chunk_by(|_, next| !ref_starts_word(vocab, next))
+        .map(|word| {
+            let place = |t: &Token| (ref_place(t, words, slack), t.sample());
+            word.iter().map(place).collect()
+        })
+        .collect()
 }
 
 /// One differential run: the old merge's tokens, the transcript, what its
@@ -711,18 +794,54 @@ fn ref_run(case: &RefCase, config: &PipelineConfig, min_frames: usize, hearing: 
     }
 }
 
-/// Words the old merge keeps and the transcript loses (`.0`), pieces
-/// likewise (`.1`), and words a gap's window or an accepted recovery heard
-/// that it loses (`.2`). `.0` and `.1` are the loss gate. `.2` also fires
-/// on a word both merges drop, as a run's LCS can (between two recoveries,
-/// say), so it flags a case to look at, and the comparison with the old
-/// merge decides whether it is a loss.
+/// What one case lost against the old merge, by placed word. `lost`,
+/// `pieces` and `glued` are the gate; `unheard` flags a case to look at.
+#[derive(Debug, Default)]
+struct Losses {
+    /// Words the old merge keeps and the transcript loses.
+    lost: Vec<usize>,
+    /// Words the transcript keeps without a piece the old merge gave them.
+    pieces: Vec<usize>,
+    /// Words of the old merge's text that the transcript's text holds
+    /// nowhere with their pieces and their boundaries.
+    glued: Vec<usize>,
+    /// Words a gap's window or an accepted recovery heard in its reach
+    /// that the transcript loses.
+    unheard: Vec<usize>,
+    /// Words of the transcript's text that hold a word of the old merge's
+    /// with more pieces, all of them pieces the old merge did not keep
+    /// there: allowed, and counted.
+    glues: usize,
+}
+
+/// Where `run` loses against the old merge ([`Losses`]). `unheard` also
+/// fires on a word both merges drop, as a run's LCS can (between two
+/// recoveries, say), so it flags a case to look at, and the comparison
+/// with the old merge decides whether it is a loss.
+///
+/// The boundaries: every word of the old merge's text (its tokens from a
+/// word start to the next) comes out in the transcript's text with the
+/// same pieces at the same places, at least once, as a word of its own or
+/// as the start of a longer word. A longer word passes only if each of its
+/// extra pieces is one the old merge did not keep there: a copy of a piece
+/// the old merge kept as part of another of its words (which then has to
+/// come out on its own), or a piece of a word the old merge dropped with no
+/// chunk's owned span between it and the word it joins. A word that grows
+/// across a chunk, such as the rest of a word a chunk missed glued onto a
+/// word before that chunk, fails; so do two of the old merge's words
+/// joined, and a full stop moved onto another word.
+///
+/// An orphan never counts in `unheard`: after a chunk's token both merges
+/// drop the pieces a window begins with that continue a word.
+///
 /// A word whose first piece repeats the last piece of the word before it,
 /// or that repeats that word, counts only where a final window heard it,
-/// and never in `.2`: the fake never gives one piece twice in a row, so a
-/// window that heard the word before swallows it, which a model does not,
-/// and a run's LCS may take two words said alike for one.
-fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+/// never in `unheard`, and not in the boundaries: the fake never gives one
+/// piece twice in a row, so a window that heard the word before swallows
+/// it, which a model does not, and a run's LCS may take two words said
+/// alike for one.
+fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> Losses {
+    let vocab = vocab();
     let old = ref_tally(&run.old, &case.words, slack);
     let new = ref_tally(&run.new.tokens, &case.words, slack);
     let heard = ref_tally(&run.heard, &case.words, slack);
@@ -737,21 +856,88 @@ fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> (Vec<usize>, Vec<us
             *pieces == word.pieces || pieces.last() == word.pieces.first()
         })
     };
-    let mut out = (Vec::new(), Vec::new(), Vec::new());
+    let mut out = Losses::default();
     for w in 0..case.words.len() {
         let repeats = repeats(w);
         if repeats && heard[w].0 == 0 {
             continue;
         }
         if old[w].0 > 0 && new[w].0 == 0 {
-            out.0.push(w);
+            out.lost.push(w);
         } else if old[w].1 & !new[w].1 != 0 {
-            out.1.push(w);
+            out.pieces.push(w);
         }
-        if reached[w].0 > 0 && new[w].0 == 0 && !repeats {
-            out.2.push(w);
+        let orphan = !starts_word(vocab.piece(case.words[w].pieces[0]));
+        if reached[w].0 > 0 && new[w].0 == 0 && !repeats && !orphan {
+            out.unheard.push(w);
         }
     }
+    let before = ref_joins(&run.old, &case.words, &vocab, slack);
+    let after = ref_joins(&run.new.tokens, &case.words, &vocab, slack);
+    let kept: std::collections::HashSet<(usize, usize)> =
+        before.iter().flatten().filter_map(|p| p.0).collect();
+    let chunks: Vec<&Range<usize>> = run
+        .new
+        .spans
+        .iter()
+        .filter(|s| s.chunk)
+        .map(|s| &s.owned)
+        .collect();
+    // Whether a word whose first piece starts at `head` may hold this piece
+    // beyond a word of the old merge's.
+    let extra = |&(place, at): &RefPiece, head: usize| match place {
+        Some(place) if kept.contains(&place) => true,
+        Some(_) => {
+            let between = at.min(head)..at.max(head);
+            !chunks
+                .iter()
+                .any(|c| between.start <= c.start && c.end <= between.end)
+        }
+        None => false,
+    };
+    // Whether `word` holds `of` from its first piece on, each piece of
+    // `of` in order, every other piece of `word` an extra one.
+    let holds = |word: &[RefPiece], of: &[RefPiece]| {
+        let mut wanted = of.iter().map(|p| p.0).peekable();
+        word[0].0 == of[0].0
+            && word
+                .iter()
+                .all(|p| wanted.next_if_eq(&p.0).is_some() || extra(p, word[0].1))
+            && wanted.peek().is_none()
+    };
+    // Each of the old merge's words that begins at a word start, up to its
+    // first piece of another placed word: what the old merge glued on
+    // after it is not asked for, and the pieces its text begins with that
+    // continue a word may join a word before them.
+    let words: Vec<(usize, &[RefPiece])> = before
+        .iter()
+        .filter_map(|word| {
+            let (w, i) = word[0].0?;
+            if !starts_word(vocab.piece(case.words[w].pieces[i])) {
+                return None;
+            }
+            let own = 1 + word[1..]
+                .iter()
+                .take_while(|p| p.0.is_some_and(|(o, _)| o == w))
+                .count();
+            Some((w, &word[..own]))
+        })
+        .collect();
+    for &(w, of) in &words {
+        if !repeats(w) && !after.iter().any(|word| holds(word, of)) {
+            out.glued.push(w);
+        }
+    }
+    out.glues = after
+        .iter()
+        .filter(|word| {
+            let same = |of: &Vec<RefPiece>| of.iter().map(|p| p.0).eq(word.iter().map(|p| p.0));
+            !before.iter().any(same)
+                && words
+                    .iter()
+                    .any(|&(_, of)| of.len() < word.len() && holds(word, of))
+        })
+        .count();
     out
 }
 
@@ -764,19 +950,24 @@ struct Tally {
     recovered: usize,
     /// Words that came out more often than from the old merge.
     doubled: usize,
+    /// Longer words the boundaries allow ([`Losses::glues`]).
+    glues: usize,
 }
 
 /// `cases` random layouts from `seed`, with recovery on: the first
 /// generator's words of one to three pieces, the old merge's random
 /// layout, its two-sided layout around a gap with recoveries reaching
-/// into it, the collision layout and the general one, under the default
+/// into it, the collision layout and the general one, on a third of its
+/// cases with orphans at every seam ([`ref_seam_layout`]), under the default
 /// settings, `CoreML`'s and two between, with the extra windows off and
 /// on, over the exact fake, one that moves tokens by `jitter` frames, and,
 /// on half the cases, one deaf at a window's edges (`DEAF`), as a model
 /// with little context there can be, so that two windows of a layout
 /// disagree about a word at every kind of seam. Every word the old merge
-/// kept comes out, with every piece the old merge gave it: a duplicate is
-/// allowed, a loss never. And, where the fake hears every frame, every
+/// kept comes out, with every piece the old merge gave it and its
+/// boundaries ([`ref_losses`]): a duplicate is allowed, a loss never, and a
+/// longer word only with pieces the old merge did not keep there (counted
+/// in [`Tally::glues`]). And, where the fake hears every frame, every
 /// word a gap's window or an accepted recovery heard in its reach comes out
 /// at least once (see `ref_losses` for that check and for a word that
 /// repeats the one before it).
@@ -785,6 +976,11 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
     let mut tally = Tally::default();
     for case in 0..cases {
         let (kind, round) = (case % 5, case / 5);
+        let config = if kind == 3 && round.is_multiple_of(2) {
+            PipelineConfig::default()
+        } else {
+            random_config(round, (round / 4) % 4 != 0)
+        };
         let layout = match kind {
             0 => {
                 let (samples, words) = placed_words(&mut rng, case);
@@ -797,6 +993,7 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
             1 => ref_random_layout(&mut rng, round),
             2 => ref_two_sided_layout(&mut rng),
             3 => ref_collision_layout(&mut rng),
+            _ if round % 3 == 2 => ref_seam_layout(&mut rng, &config),
             _ => ref_general_layout(&mut rng),
         };
         let jitter = if round % 3 == 1 { jitter } else { 0 };
@@ -804,11 +1001,6 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
             (0, 0, 1)
         } else {
             DEAF[(round / 2) % DEAF.len()]
-        };
-        let config = if kind == 3 && round.is_multiple_of(2) {
-            PipelineConfig::default()
-        } else {
-            random_config(round, (round / 4) % 4 != 0)
         };
         let min_frames = match kind {
             0 if round.is_multiple_of(2) => 0,
@@ -822,14 +1014,15 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
         let old = ref_tally(&run.old, &layout.words, slack);
         let new = ref_tally(&run.new.tokens, &layout.words, slack);
         tally.doubled += old.iter().zip(&new).filter(|(m, a)| a.0 > m.0).count();
-        let (lost, pieces, mut unheard) = ref_losses(&layout, &run, slack);
+        let mut losses = ref_losses(&layout, &run, slack);
+        tally.glues += losses.glues;
         // Over the deaf fake one window of a run can hear a word its
         // neighbour is deaf to, which the run's LCS drops in both merges
         // alike, so the heard check runs only where the fake hears every
         // frame; the comparison with the old merge is the gate on every
         // case.
         if deaf != (0, 0, 1) {
-            unheard.clear();
+            losses.unheard.clear();
         }
         let show = |tokens: &[Token]| {
             let pieces = tokens.iter().map(|t| format!("{}@{}", t.id, t.sample()));
@@ -840,12 +1033,20 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
                 .map(|&w| (&layout.words[w].pieces, layout.words[w].start(0)))
                 .collect::<Vec<_>>()
         };
+        let Losses {
+            lost,
+            pieces,
+            glued,
+            unheard,
+            ..
+        } = &losses;
         assert!(
-            lost.is_empty() && pieces.is_empty() && unheard.is_empty(),
-            "seed {seed:#x} case {case} jitter {jitter} deaf {deaf:?}: lost {:?}, pieces lost {:?}, heard and lost {:?}\n spans {:?}\n windows {:?}\n old {}\n new {}\n heard {}",
-            words(&lost),
-            words(&pieces),
-            words(&unheard),
+            lost.is_empty() && pieces.is_empty() && glued.is_empty() && unheard.is_empty(),
+            "seed {seed:#x} case {case} jitter {jitter} deaf {deaf:?}: lost {:?}, pieces lost {:?}, glued {:?}, heard and lost {:?}\n spans {:?}\n windows {:?}\n old {}\n new {}\n heard {}",
+            words(lost),
+            words(pieces),
+            words(glued),
+            words(unheard),
             run.new.spans,
             run.new.windows,
             show(&run.old),
