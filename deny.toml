@@ -73,7 +73,7 @@ ignore = [
   # zvariant, zbus_names and zvariant_derive are unmaintained, not
   # vulnerable: zbus 6 merged them into itself. Tauri's Linux plugins
   # (tauri-plugin-opener, tauri-plugin-single-instance) still need zbus 5,
-  # so there is nothing to move to yet; revisit when they move to zbus 6.
+  # so there is nothing to move to yet; revisit when they do.
   { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained, merged into zbus 6; Tauri's Linux plugins still need zbus 5" },
   { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained, merged into zbus 6; Tauri's Linux plugins still need zbus 5" },
   { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained, merged into zbus 6; Tauri's Linux plugins still need zbus 5" },
