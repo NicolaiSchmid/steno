@@ -58,14 +58,17 @@ pub(super) fn assets_of_meeting(
     )
 }
 
+/// When the asset `a` of the meeting `m` is due for the sweep: stamped,
+/// expired at `?1`, and its meeting not recording, queued or processing.
+const DUE: &str = "a.expiresAt IS NOT NULL AND a.expiresAt <= ?1 \
+                   AND m.state NOT IN ('recording', 'queued', 'processing')";
+
 /// The select of [`Store::expired_assets`], narrowed by `filter`: `?1` is
 /// the time.
 fn expired_sql(filter: &str) -> String {
     format!(
         "SELECT {} FROM audioAsset a JOIN meeting m ON m.id = a.meetingID \
-         WHERE a.expiresAt IS NOT NULL AND a.expiresAt <= ?1 \
-         AND m.state NOT IN ('recording', 'queued', 'processing'){filter} \
-         ORDER BY a.expiresAt, a.id",
+         WHERE {DUE}{filter} ORDER BY a.expiresAt, a.id",
         COLUMNS
             .split(", ")
             .map(|column| format!("a.{column}"))
@@ -74,8 +77,8 @@ fn expired_sql(filter: &str) -> String {
     )
 }
 
-/// The id of another asset row that names `asset`'s master and is not due
-/// at `now` itself ([`expired_sql`]), if any: it still needs that file.
+/// The id of another asset row that names `asset`'s master and is not
+/// [`DUE`] at `now` itself, if any: it still needs that file.
 fn keeper_of_master(
     connection: &Connection,
     asset: &AudioAsset,
@@ -83,12 +86,11 @@ fn keeper_of_master(
 ) -> Result<Option<Uuid>> {
     Ok(connection
         .query_row(
-            "SELECT o.id FROM audioAsset o JOIN meeting m ON m.id = o.meetingID \
-             WHERE o.url = ?1 AND o.id != ?2 \
-             AND NOT (o.expiresAt IS NOT NULL AND o.expiresAt <= ?3 \
-             AND m.state NOT IN ('recording', 'queued', 'processing')) \
-             ORDER BY o.id LIMIT 1",
-            params![asset.url, DbUuid(asset.id), DbDate(now)],
+            &format!(
+                "SELECT a.id FROM audioAsset a JOIN meeting m ON m.id = a.meetingID \
+                 WHERE a.url = ?2 AND a.id != ?3 AND NOT ({DUE}) ORDER BY a.id LIMIT 1"
+            ),
+            params![DbDate(now), asset.url, DbUuid(asset.id)],
             |row| row.col::<DbUuid>("id"),
         )
         .optional()?)
