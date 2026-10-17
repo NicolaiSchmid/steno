@@ -2736,6 +2736,41 @@ fn the_stop_takes_the_padding_of_the_outage_whether_or_not_the_lane_primed() {
     );
 }
 
+/// Both threads resume together after the follower's 0.5 s outage: the
+/// lane primes on part of the engine's kept packets, runs out while the
+/// follower's thread drains the rest, and primes again within the hold.
+/// The flag after them counts the outage's padding once, with the short
+/// run between the two primes: not the first run twice.
+#[test]
+fn a_second_reprime_within_the_hold_counts_the_outage_once() {
+    let mut call = Call::new();
+    for _ in 0..200 {
+        call.tick();
+    }
+    for _ in 0..50 {
+        call.master_packet();
+    }
+    for _ in 0..3 {
+        call.follower_packet();
+    }
+    for _ in 0..5 {
+        call.master_packet();
+    }
+    for _ in 0..4 {
+        call.follower_packet();
+    }
+    for _ in 0..4 {
+        call.master_packet();
+    }
+    call.follower_flagged(Missed::default());
+    call.master_packet();
+    let (filled, unfilled) = call.system();
+    assert!(
+        (48 * PERIOD..=52 * PERIOD).contains(&(filled + unfilled)),
+        "filled {filled}, unfilled {unfilled}"
+    );
+}
+
 /// Two unflagged idles, then a flag after the second. The hold is counted
 /// in the follower's frames, so a second idle however long does not use it
 /// up: with 5 packets of audio between them (under the hold of 11) both
