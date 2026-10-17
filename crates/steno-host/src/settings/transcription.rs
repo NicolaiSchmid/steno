@@ -51,8 +51,9 @@ pub struct SpeechSettingsViewModel {
     pub speech_fallback: bool,
     /// The fallback ended, but the pipeline's rebuild on the Neural Engine
     /// failed: this run still transcribes in the speech sidecar, so the
-    /// section keeps the offer ([`Self::speech_fallback`]) until a rebuild
-    /// succeeds. Rust only.
+    /// section keeps the offer ([`Self::speech_fallback`]) until a reload
+    /// succeeds, from "Use again" or another section
+    /// ([`Self::pipeline_rebuilt`]). Rust only.
     rebuild_pending: bool,
     pub errors: SectionError,
 }
@@ -200,11 +201,23 @@ impl SpeechSettingsViewModel {
         .map_err(BoxError::from)
         .and_then(|_| services.pipeline.reload());
         match outcome {
-            Ok(()) => self.errors.clear(),
-            Err(error) => self
-                .errors
-                .fail("The language model could not be changed.", error),
+            Ok(()) => {
+                self.errors.clear();
+                self.pipeline_rebuilt(services);
+            }
+            Err(error) => {
+                self.errors
+                    .fail("The language model could not be changed.", error);
+                self.refresh_states(services);
+            }
         }
+    }
+
+    /// Another section rebuilt the pipeline (a Summaries save, an engine
+    /// change): a rebuild that "Use again" left pending is done, so the
+    /// offer goes and the progress title follows it. Rust only.
+    pub fn pipeline_rebuilt(&mut self, services: &Services) {
+        self.rebuild_pending = false;
         self.refresh_states(services);
     }
 
@@ -276,9 +289,10 @@ impl SpeechSettingsViewModel {
     /// ([`SpeechModels::end_speech_fallback`]) and the pipeline is built
     /// again, on the Neural Engine; the rows then show its model. An end
     /// that fails keeps the fallback and the pipeline as they are. An end
-    /// that succeeds with a rebuild that fails keeps the row, so a second
-    /// press tries the rebuild again (the end is then a no-op). Either way
-    /// the section says why. Rust only.
+    /// that succeeds with a rebuild that fails keeps the row until a reload
+    /// succeeds: a second press tries the rebuild again (the end is then a
+    /// no-op), and so does a save in another section. Either way the
+    /// section says why. Rust only.
     pub fn use_neural_engine(&mut self, services: &Services) {
         let ended = services.speech_models.end_speech_fallback();
         match ended.map(|()| services.pipeline.reload()) {

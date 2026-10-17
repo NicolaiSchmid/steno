@@ -3030,3 +3030,36 @@ fn the_host_reads_on_a_reader_of_its_own() {
         "a second host while the first lives"
     );
 }
+
+/// A failed rebuild after "Use again" leaves this run on the speech
+/// sidecar, so a meeting waiting for its models keeps saying why.
+#[test]
+fn a_failed_rebuild_keeps_the_neural_engine_off_title() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x8C);
+            meeting.state = MeetingState::Queued;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+            fakes
+                .speech_models
+                .speech_fallback
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .build();
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::ModelsMissing {
+            meeting_id: uuid(0x8C),
+        });
+    harness.fakes.pipeline.fail_calls(Some("the store is busy"));
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Progress)["entries"][0]["title"],
+        "Neural Engine off after a crash: download the speech models in Settings"
+    );
+}

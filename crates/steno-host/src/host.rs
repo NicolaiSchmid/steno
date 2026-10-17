@@ -1391,10 +1391,35 @@ impl Host {
     /// changed from another window's point of view (`reload_sections`: a
     /// store change, an onboarding save) the Settings sections load again,
     /// as Swift's did when its window opened. The subtitles follow either
-    /// way.
+    /// way, and so does the speech fallback ([`Self::follow_speech_fallback`]).
     fn follow_settings(&self, inner: &mut Inner, reload_sections: bool) {
         self.follow_stored_settings(inner, reload_sections);
+        self.follow_speech_fallback(inner);
         self.follow_key_and_subtitles(inner);
+    }
+
+    /// A Summaries save that rebuilt the pipeline ends a rebuild "Use
+    /// again" left pending ([`SpeechSettingsViewModel::pipeline_rebuilt`]),
+    /// and a meeting waiting for its models says the Neural Engine is off
+    /// exactly while the Transcription section does. The import's one-off
+    /// reload at its key gate does not pass here; the next launch reads
+    /// the fallback's file either way. Rust only.
+    fn follow_speech_fallback(&self, inner: &mut Inner) {
+        let settings = inner.llm.take_pipeline_rebuilt();
+        let onboarding = inner.onboarding.llm.take_pipeline_rebuilt();
+        if settings || onboarding {
+            let offered = inner.speech.speech_fallback;
+            inner.speech.pipeline_rebuilt(&self.shared.services);
+            if inner.speech.speech_fallback != offered {
+                for topic in MODEL_TOPICS {
+                    inner.publisher.schedule(topic);
+                }
+            }
+        }
+        if inner.progress.speech_fallback != inner.speech.speech_fallback {
+            inner.progress.speech_fallback = inner.speech.speech_fallback;
+            inner.publisher.schedule(BridgeTopic::Progress);
+        }
     }
 
     /// [`Self::follow_settings`]'s read of the stored settings, and the
@@ -2547,13 +2572,10 @@ impl BridgeHost for Host {
 
     /// The rows change to the Neural Engine's model, and a meeting waiting
     /// for the speech sidecar's models stops saying the Neural Engine is
-    /// off. After a failed rebuild both stay as they are.
+    /// off (`follow_speech_fallback`). After a failed rebuild both
+    /// stay as they are until a reload succeeds.
     fn settings_transcription_use_neural_engine(&self) -> Outcome<()> {
-        self.models_command(|inner| {
-            inner.speech.use_neural_engine(&self.shared.services);
-            inner.progress.speech_fallback = inner.speech.speech_fallback;
-            inner.publisher.schedule(BridgeTopic::Progress);
-        });
+        self.models_command(|inner| inner.speech.use_neural_engine(&self.shared.services));
         Ok(())
     }
 

@@ -21,7 +21,7 @@ use steno_bridge::{
 };
 use steno_core::paths::file_url;
 use steno_core::protocols::{BoundaryResult, SecretKey, SecretStore};
-use steno_core::{AudioRetention, LlmProvider};
+use steno_core::{AudioRetention, LlmProvider, MeetingEvent, MeetingState};
 use steno_host::host::{LOGIN_ITEM_REGISTERED_KEY, MAIN_APP_REGISTERED_KEY, first_launch_key};
 use steno_host::services::{CodexModel, LoginItemStatus, UpdateOutcome};
 use steno_host::settings::{KeyRead, LlmSettingsViewModel};
@@ -2844,4 +2844,69 @@ fn phones_pair_list_and_revoke_devices() {
     let phone = harness.snapshot(BridgeTopic::SettingsPhone);
     assert_eq!(phone["error"], "Pairing could not start.");
     assert_eq!(phone["errorDetails"], "port in use");
+}
+
+/// A failed rebuild after "Use again", then a reload that succeeds from
+/// another section (a Summaries save): the pipeline is on the Neural Engine
+/// again, so the offer goes, and a meeting waiting for its models no longer
+/// says the Neural Engine is off (A19).
+#[test]
+fn a_later_successful_reload_ends_a_failed_rebuilds_offer() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x8D);
+            meeting.state = MeetingState::Queued;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+            fakes
+                .speech_models
+                .speech_fallback
+                .store(true, Ordering::SeqCst);
+        })
+        .build();
+    let title =
+        |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0]["title"].clone();
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::ModelsMissing {
+            meeting_id: uuid(0x8D),
+        });
+    harness.fakes.pipeline.fail_calls(Some("the store is busy"));
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsTranscription)["neuralEngineOff"],
+        true
+    );
+    assert_eq!(
+        title(&harness),
+        "Neural Engine off after a crash: download the speech models in Settings"
+    );
+    harness.fakes.pipeline.fail_calls(None);
+    harness
+        .host
+        .settings_summaries_update(update(
+            Some("a-model"),
+            Some("http://localhost:1/v1"),
+            None,
+            None,
+        ))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(
+        *harness.fakes.pipeline.reloads.lock().unwrap(),
+        2,
+        "the save rebuilt the pipeline"
+    );
+    assert!(
+        harness
+            .snapshot(BridgeTopic::SettingsTranscription)
+            .get("neuralEngineOff")
+            .is_none(),
+        "the pipeline is on the Neural Engine again"
+    );
+    assert_eq!(title(&harness), "Download the speech models in Settings");
 }
