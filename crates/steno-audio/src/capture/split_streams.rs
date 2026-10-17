@@ -341,6 +341,8 @@ pub struct DevicePositions {
     /// The last packet's frames and whether it had a timestamp error.
     last_frames: usize,
     last_timestamp_error: bool,
+    /// Every packet's frames, clean or not, for [`Self::qpc_judged`].
+    frames: u64,
     /// Where the start's reading stands ([`Self::start`]).
     start: Start,
 }
@@ -371,6 +373,7 @@ impl DevicePositions {
             qpc_matched: false,
             last_frames: 0,
             last_timestamp_error: false,
+            frames: 0,
             start: Start::None,
         }
     }
@@ -386,6 +389,7 @@ impl DevicePositions {
     /// discontinuity (see the type's doc).
     pub fn packet(&mut self, packet: Packet) -> Missed {
         let last_frames = std::mem::replace(&mut self.last_frames, packet.frames);
+        self.frames = self.frames.saturating_add(packet.frames as u64);
         let position = self.positions.advance(packet.position);
         // Positions that stood still until now (process loopback that
         // starts in silence) measure from the pair after their first move:
@@ -567,6 +571,18 @@ impl DevicePositions {
     pub fn qpc_sane(&self) -> Option<bool> {
         (self.qpc.delivered >= QPC_CALIBRATION_FRAMES)
             .then(|| within(QPC.read(self.qpc.advanced), self.qpc.delivered, 2))
+    }
+
+    /// The stop's verdict on the QPC: [`Self::qpc_sane`], but `Some(false)`
+    /// for a stream that delivered [`QPC_CALIBRATION_FRAMES`] or more with
+    /// too few clean QPC pairs to judge it (a QPC absent, always flagged
+    /// with a timestamp error, or never matching its frames). `None` only
+    /// for a stream under 2 s by its frames. The counting reads
+    /// [`Self::qpc_sane`]; this is for the stop's line.
+    #[must_use]
+    pub fn qpc_judged(&self) -> Option<bool> {
+        self.qpc_sane()
+            .or((self.frames >= QPC_CALIBRATION_FRAMES).then_some(false))
     }
 
     /// The rate the client's mix format names, if it gave one.

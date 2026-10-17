@@ -2430,6 +2430,54 @@ fn a_stream_given_no_start_or_no_sane_qpc_counts_nothing_before_its_first_packet
     );
 }
 
+/// An hour of 10 ms packets on a QPC that gives no clean pairs (absent,
+/// always flagged with a timestamp error, or running at twice the time)
+/// is never judged sane, but the stop's verdict calls it not sane once
+/// 2 s of frames came: the stop line warns. A stream under 2 s by its
+/// frames stays not judged (the line at `info`), and a good QPC is sane.
+/// The counting's own verdict does not change.
+#[test]
+fn a_stream_of_2_s_or_more_without_clean_qpc_pairs_is_judged_not_sane() {
+    let run = |packets: u64, qpc: &dyn Fn(u64) -> u64, timestamp_error: bool| {
+        let mut positions = DevicePositions::new(Some(48_000));
+        for i in 0..packets {
+            positions.packet(Packet {
+                frames: 480,
+                position: i * 480,
+                qpc: qpc(i),
+                discontinuity: false,
+                timestamp_error,
+            });
+        }
+        positions
+    };
+    let hour = 360_000;
+    let ticking = |i: u64| (1 << 40) + i * QPC_PACKET;
+    let absent = run(hour, &|_| 0, false);
+    let errors = run(hour, &ticking, true);
+    let twice = run(hour, &|i| (1 << 40) + i * 2 * QPC_PACKET, false);
+    for (name, positions) in [("absent", absent), ("errors", errors), ("twice", twice)] {
+        assert_eq!(positions.qpc_sane(), None, "{name}: the counting's verdict");
+        assert_eq!(positions.qpc_judged(), Some(false), "{name}");
+    }
+    let calibration = QPC_CALIBRATION_FRAMES / 480;
+    assert_eq!(
+        run(calibration - 1, &|_| 0, false).qpc_judged(),
+        None,
+        "under 2 s"
+    );
+    assert_eq!(
+        run(calibration, &|_| 0, false).qpc_judged(),
+        Some(false),
+        "2 s"
+    );
+    assert_eq!(
+        run(hour, &ticking, false).qpc_judged(),
+        Some(true),
+        "a good QPC"
+    );
+}
+
 /// A first packet with a timestamp error does not read the start: the
 /// next packet with a QPC does, less the frames delivered before it.
 #[test]

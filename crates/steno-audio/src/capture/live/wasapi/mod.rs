@@ -663,9 +663,10 @@ fn delivers_continuously(loopback: Option<LoopbackKind>) -> bool {
 /// `Display`), on `loopback` for the system stream, read once the stream
 /// has stopped: at `warn` when the stream had `discontinuities` and their
 /// jumps were counted, not filled (no sane QPC), or when a stream that
-/// delivers continuously had its QPC judged not sane; at `info`
-/// otherwise, a QPC not judged yet (a stream under 2 s) included, which
-/// the line says.
+/// delivers continuously had its QPC judged not sane or ran 2 s or more
+/// with too few clean QPC pairs to judge it
+/// ([`DevicePositions::qpc_judged`]); at `info` otherwise, a QPC not
+/// judged on a stream under 2 s included, which the line says.
 fn log_positions(
     source: StreamSource,
     loopback: Option<LoopbackKind>,
@@ -686,7 +687,7 @@ fn log_positions(
     // loss before its first packet: the stable plan's A18 names this limit,
     // and this line shows a recording that ran with it.
     let qpc_sane = if delivers_continuously(loopback) {
-        positions.qpc_sane()
+        positions.qpc_judged()
     } else {
         Some(true)
     };
