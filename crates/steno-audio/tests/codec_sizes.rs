@@ -520,8 +520,10 @@ fn pcm_wav() -> Vec<u8> {
 /// A WAV whose odd `LIST` before `data` holds `list`, followed by the
 /// chunk the walk reads next. That chunk holds, `shift` bytes in, where
 /// symphonia reads after padding the list twice, a `LIST` of `outer`
-/// bytes with an `INAM` of `value` bytes; the bytes before `outer`'s
-/// top `shift` bytes give the walk's chunk its size, which fits.
+/// bytes with an `INAM` of `value` bytes. The walk reads that chunk's
+/// size from the 4 bytes at its offset 4, which include the low
+/// `4 - shift` bytes of `outer`, so only `outer`'s top `shift` bytes are
+/// free, and the size stays small.
 fn misread_wav(list: &[u8], shift: usize, outer: u32, value: u32) -> Vec<u8> {
     assert_eq!(list.len() % 2, 1, "an odd list");
     let mut planted = vec![b'X'; shift];
@@ -605,6 +607,8 @@ const ADDRESS_SPACE_KIB: u64 = 2_097_152;
 /// core file), so an abort fails the child and this test with it, and
 /// returns the child's stderr; elsewhere (no such limit on the Mac or
 /// Windows), and in the child itself, in this process, returning `None`.
+/// The child must report that it ran one test, so a `name` that matches
+/// none fails instead of passing empty.
 fn limited(name: &str, body: impl FnOnce()) -> Option<String> {
     const CHILD: &str = "STENO_SIZES_LIMITED";
     if !cfg!(target_os = "linux") || std::env::var_os(CHILD).is_some() {
@@ -627,6 +631,11 @@ fn limited(name: &str, body: impl FnOnce()) -> Option<String> {
         "{name} ended {} under {ADDRESS_SPACE_KIB} KiB:\n{}",
         output.status,
         stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n")
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(" 1 passed;"),
+        "the child ran no test named {name}:\n{stdout}"
     );
     Some(stderr)
 }
@@ -1337,8 +1346,8 @@ fn a_wav_is_walked_up_to_its_audio() {
 /// is let through), and a `LIST` of odd size, which symphonia pads twice
 /// and so fails on even when it is padded as the format says; the crate's
 /// own reader, which `steno process` checks a file with, refuses it too.
-/// An even `LIST` with an odd value at its end reads, and so does an odd
-/// one after the audio.
+/// An even `LIST` with an odd value at its end reads, and so do an odd
+/// one after the audio and an odd `JUNK` before it.
 #[test]
 fn a_wav_chunk_symphonia_reads_out_of_step_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -1396,7 +1405,17 @@ fn a_wav_chunk_symphonia_reads_out_of_step_is_refused() {
         let read = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
         assert_eq!(read.samples.len(), 1_600, "{name}");
     }
-    for bytes in [even, after, pcm_wav()] {
+    // The rule is the `LIST`'s alone: an odd chunk of another kind before
+    // the audio reads in the crate's reader too.
+    let junk = wav(
+        None,
+        &[
+            (b"fmt ", pcm16_format(), None),
+            (b"JUNK", vec![0; 3], None),
+            (b"data", ramp16(), None),
+        ],
+    );
+    for bytes in [even, after, junk, pcm_wav()] {
         assert_eq!(WavFile::read_bytes(&bytes).unwrap().frame_count(), 1_600);
     }
 }
