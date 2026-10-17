@@ -80,9 +80,10 @@
 //! sample before the first frame (within
 //! [`CaptureSession::STALL_CHECK_INTERVAL`]). A restart whose stream
 //! offered frames before its start returned ends its gap at the clock's
-//! reading before the start, so the master may run short by the time to
-//! the first frame (on PipeWire the connect, the link and the first
-//! cycle); no audio is lost.
+//! reading before the start. The time from there to the first frame (on
+//! PipeWire the connect, the link and the first cycle: the start's time
+//! less the frames it delivered) is audio the restart lost, and it counts
+//! as missed and not filled (below).
 //!
 //! A stream a rebuild resumed on that stalls again within 10 s, or before
 //! it delivered anything, continues that rebuild's streak: the next
@@ -184,6 +185,9 @@
 //! from that late count at most the gap's length per lane, so the time
 //! counts once. What a stream missed before its first frame is never part
 //! of it ([the rule](crate::realtime::missed#before-the-first-callback)).
+//! The time a restart's stream lost before its first frame, when frames
+//! came during its start, counts unfilled on every lane once the gap is
+//! written.
 //! A rebuild that ends before that (a stop during the
 //! restart, a write the stop cut short, restarts that ran out) keeps the
 //! whole late count, and what a gap capped at
@@ -547,6 +551,17 @@ impl RingCounts {
         }
     }
 
+    /// A restart lost `samples` per lane at [`SAMPLE_RATE`] before its
+    /// first frame, which no gap wrote (`Started::late`): counted unfilled
+    /// on every one of `lanes`, as the stalled thread's late count is.
+    fn restart_missed(&mut self, lanes: &[AudioLane], samples: usize) {
+        if samples > 0 {
+            for lane in lanes {
+                *self.unfilled.at_output_rate.entry(*lane).or_default() += samples;
+            }
+        }
+    }
+
     /// The ring overruns per lane in whole 10 ms frames at [`SAMPLE_RATE`].
     fn dropped_frames(&self) -> BTreeMap<AudioLane, usize> {
         self.dropped
@@ -650,6 +665,11 @@ struct Rebuild {
 struct Started {
     stream: CaptureStream,
     on_the_default: bool,
+    /// For a restart whose frames came during its start: the time from the
+    /// clock's reading before the start, where its gap ends, to the first
+    /// frame, which no frame and no gap covers (`try_start`). Zero
+    /// otherwise.
+    late: Duration,
 }
 
 enum Restart {
@@ -1230,18 +1250,21 @@ impl Core {
             .map(|stream| Started {
                 stream,
                 on_the_default: false,
+                late: Duration::ZERO,
             })
             .or_else(|error| {
                 self.start_on_the_default(&sink)
                     .map(|stream| Started {
                         stream,
                         on_the_default: true,
+                        late: Duration::ZERO,
                     })
                     .ok_or(error)
             });
         let Started {
             stream,
             on_the_default,
+            ..
         } = match started {
             Ok(started) => started,
             Err(error) => {
@@ -2156,14 +2179,14 @@ impl Core {
     /// last sample before the first frame (within `STALL_CHECK_INTERVAL`),
     /// not to the start's return. A start whose stream offered frames
     /// before it returned ends the gap at the clock's reading before the
-    /// start, so the master may run short of wall time by the time from
-    /// that reading to the first frame (on PipeWire the connect, the link
-    /// and the first cycle), never ahead; no audio is lost either way. A
-    /// stream that offered none `STALL_TIMEOUT` after its start is stopped
-    /// and fails with `DidNotRun`; a change its listeners reported
-    /// meanwhile is dropped with it, since the next start reads the devices
-    /// as they are, and the sink's latch opens again for that start's
-    /// listeners.
+    /// start, never ahead of wall time; the time from that reading to the
+    /// first frame (on PipeWire the connect, the link and the first cycle),
+    /// the start's time less the frames it delivered, is audio lost, and
+    /// it is counted (`Started::late`). A stream that offered none
+    /// `STALL_TIMEOUT` after its start is stopped and fails with
+    /// `DidNotRun`; a change its listeners reported meanwhile is dropped
+    /// with it, since the next start reads the devices as they are, and the
+    /// sink's latch opens again for that start's listeners.
     /// A stop during the wait answers `Started`: the stream is running and
     /// is the stop's to tear down, so the rebuild's next steps give up on
     /// it and `finish()` stops it. `Started`, or `Abandoned` when the
@@ -2178,7 +2201,7 @@ impl Core {
         generation: usize,
         cancel: &Cancel,
     ) -> Result<Restart, CaptureError> {
-        let (stream, mut at, returned, offered, quiet) = {
+        let (stream, mut at, late, returned, offered, quiet) = {
             let inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
                 return Ok(Restart::Abandoned);
@@ -2205,15 +2228,23 @@ impl Core {
             })?;
             // Frames that came while `start` ran (a PipeWire start reads
             // its latency after the first cycle) end the gap at the reading
-            // before it, where the return would hold that time twice: the
-            // master then runs short by the time to the first frame.
+            // before it, where the return would hold that time twice. The
+            // time from that reading to the first frame, the start's time
+            // less the frames it delivered, is audio the restart lost: it
+            // counts as missed and not filled (`resume`).
             let returned = self.clock.now();
-            let at = if sink.frames_offered() == offered {
-                returned
+            let delivered = sink.frames_offered().wrapping_sub(offered);
+            let (at, late) = if delivered == 0 {
+                (returned, Duration::ZERO)
             } else {
-                before
+                let covered = Duration::try_from_secs_f64(delivered as f64 / stream.sample_rate)
+                    .unwrap_or(Duration::MAX);
+                (
+                    before,
+                    returned.saturating_sub(before).saturating_sub(covered),
+                )
             };
-            (stream, at, returned, offered, quiet)
+            (stream, at, late, returned, offered, quiet)
         };
         while plan.awaits_delivery && sink.frames_offered() == offered {
             let now = self.clock.now();
@@ -2240,6 +2271,7 @@ impl Core {
             started: Started {
                 stream,
                 on_the_default,
+                late,
             },
             attempt,
             at,
@@ -2294,6 +2326,7 @@ impl Core {
         Started {
             stream,
             on_the_default,
+            late,
         }: Started,
         attempt: usize,
         gap_frames: usize,
@@ -2335,6 +2368,9 @@ impl Core {
         active.device_changes += 1;
         active.gap_seconds += gap_seconds;
         active.ring_counts.gap_written(gap_frames * FRAME_SIZE);
+        active
+            .ring_counts
+            .restart_missed(sink.lanes(), CaptureSession::gap_frames(late) * FRAME_SIZE);
         active.rebuild = None;
         active.streak.attempts = attempt;
         active.streak.gap_seconds += gap_seconds;

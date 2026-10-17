@@ -4283,11 +4283,14 @@ fn a_change_during_a_restart_that_delivers_nothing_costs_no_extra_rebuild() {
 
 /// The synthetic backend, whose restarts return `start_takes` on `clock`
 /// after their first callback, as a PipeWire start reads its latency after
-/// the first cycle.
+/// the first cycle; with `until_its_stall`, once a restart's producer has
+/// delivered up to its stall (`restarts_stall_after`), so the frames that
+/// came during the start are known.
 struct SlowRestart {
     inner: SyntheticCaptureBackend,
     clock: Arc<ManualClock>,
     start_takes: Duration,
+    until_its_stall: bool,
 }
 
 impl CaptureBackend for SlowRestart {
@@ -4299,6 +4302,9 @@ impl CaptureBackend for SlowRestart {
     ) -> Result<CaptureStream, CaptureError> {
         let stream = self.inner.start(lanes, input_device_uid, sink)?;
         if self.inner.starts() > 1 {
+            if self.until_its_stall {
+                self.inner.wait_until_finished();
+            }
             self.clock.advance(self.start_takes);
         }
         Ok(stream)
@@ -4325,6 +4331,7 @@ fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
         inner: SyntheticCaptureBackend::new(stalling(1.0, 0.5)),
         clock: clock.clone(),
         start_takes: Duration::from_millis(300),
+        until_its_stall: false,
     });
     let session = in_person_session(directory.path(), backend.clone(), clock.clone());
     let notices = session.notices();
@@ -4339,6 +4346,39 @@ fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
     let result = session.stop().unwrap();
     assert_eq!(result.statistics.gap_seconds, gap);
     assert_eq!(result.statistics.duration, 0.5 + gap + 1.0);
+}
+
+/// The time from the reading before a slow restart's start to its first
+/// frame is audio the restart lost: a start of 0.3 s that delivered 0.1 s
+/// counts 0.2 s missed and not filled, on every lane, beside the gap.
+#[test]
+fn a_slow_restart_counts_the_time_before_its_first_frame() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SlowRestart {
+        inner: SyntheticCaptureBackend::new(stalling(1.0, 0.5).restarts_stall_after(0.1)),
+        clock: clock.clone(),
+        start_takes: Duration::from_millis(300),
+        until_its_stall: true,
+    });
+    let session = in_person_session(directory.path(), backend.clone(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.inner.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    let gap = gap_seconds(CaptureSession::STALL_TIMEOUT + CaptureSession::STALL_CHECK_INTERVAL);
+    assert_eq!(next_resume(&notices).1, gap);
+    backend.inner.resume_delivery();
+    backend.inner.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.gap_seconds, gap);
+    assert_eq!(result.statistics.duration, 0.5 + gap + 1.0);
+    assert_eq!(result.statistics.filled_seconds, 0.0);
+    assert!(
+        (result.statistics.unfilled_seconds - 0.2).abs() < 1e-9,
+        "{} s",
+        result.statistics.unfilled_seconds
+    );
 }
 
 /// A stall whose restarts fail with an error that is not `DidNotRun` (a

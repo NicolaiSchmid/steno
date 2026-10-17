@@ -82,7 +82,8 @@
 //! ([`LaneFrameSink::count_before_first`](super::LaneFrameSink::count_before_first)),
 //! only for a recording's first start
 //! ([`LaneFrameSink::first_start`](super::LaneFrameSink::first_start)): a
-//! restart's gap runs to its first frame and holds that time already.
+//! restart's gap runs to its first frame, or the session counts the time
+//! from the start to it, so that time counts already.
 //! It counts whatever the stop is for, and apart from what the thread
 //! missed while it ran. A rebuild's gap can start at the stream's last
 //! frame (a stall, a device that went away), and the session takes back

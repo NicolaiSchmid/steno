@@ -1386,7 +1386,9 @@ fn a_recording_stopped_three_times_fills_and_counts_what_it_missed() {
 /// stamps) then sits that much early against the wall clock; the test
 /// prints it. Should the watchdog report the stall first, the rebuild's gap
 /// counts it instead, whether or not the capture's thread then delivers
-/// its late cycle before the rebuild's stop: once either way.
+/// its late cycle before the rebuild's stop: once either way, and the
+/// restart's time to its first frame counts unfilled, so the master and
+/// the unfilled audio stay on wall time in both.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_recording_stopped_too_long_to_fill_counts_what_it_missed() {
