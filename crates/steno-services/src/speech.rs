@@ -179,10 +179,7 @@ impl SpeechSetup {
     /// end of the fallback takes effect at the reload that follows it.
     #[must_use]
     pub fn runtime(&self, engine_id: &str) -> SpeechRuntime {
-        unless_falling_back(
-            engine_runtime(engine_id, &self.speech_settings),
-            &self.fallback,
-        )
+        unless_falling_back(engine_id, &self.speech_settings, &self.fallback)
     }
 
     /// The ONNX store: the models directory's `onnx/` folder, with the
@@ -206,15 +203,17 @@ pub(crate) fn engine_runtime(engine_id: &str, speech_settings: &SpeechSettings) 
     }
 }
 
-/// `runtime`, or the speech sidecar while `fallback` is on.
+/// [`SpeechSetup::runtime`]: [`engine_runtime`], or the speech sidecar
+/// while `fallback` is on; the model service's too.
 pub(crate) fn unless_falling_back(
-    runtime: SpeechRuntime,
+    engine_id: &str,
+    speech_settings: &SpeechSettings,
     fallback: &SpeechFallback,
 ) -> SpeechRuntime {
     if fallback.is_on() {
         SpeechRuntime::OnnxSidecar
     } else {
-        runtime
+        engine_runtime(engine_id, speech_settings)
     }
 }
 
@@ -646,10 +645,7 @@ impl ModelStoreSpeechModels {
 
     /// Where `engine_id` runs ([`SpeechSetup::runtime`]).
     fn runtime(&self, engine_id: &str) -> SpeechRuntime {
-        unless_falling_back(
-            engine_runtime(engine_id, &self.speech_settings),
-            &self.fallback,
-        )
+        unless_falling_back(engine_id, &self.speech_settings, &self.fallback)
     }
 
     /// Whether Parakeet v3 is the `CoreML` model.

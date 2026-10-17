@@ -471,10 +471,11 @@ pub fn app_falling_back(
     let make: MakeDependencies = {
         let store = store.clone();
         Arc::new(move || {
-            let runtime = crate::speech::unless_falling_back(
-                SpeechRuntime::CoreMlInProcess,
-                &engines.setup().fallback,
-            );
+            let runtime = if engines.setup().fallback.is_on() {
+                SpeechRuntime::OnnxSidecar
+            } else {
+                SpeechRuntime::CoreMlInProcess
+            };
             Ok(BuiltPipeline {
                 dependencies: fake_dependencies(&store, "parakeet-v3")
                     .with_speech_engine(engines.engine(runtime))

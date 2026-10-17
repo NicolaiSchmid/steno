@@ -4890,4 +4890,42 @@ mod tests {
         );
         owner.abort();
     }
+
+    /// The app's build turns the fallback on over a transcription's mark a
+    /// crash left, and its end through the app's model service holds this
+    /// run's warm-up off, on the warm-up mark the pipelines share (A19).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_build_turns_the_fallback_on_and_its_end_holds_this_runs_warm_up_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        std::fs::create_dir_all(&support).unwrap();
+        {
+            let store = steno_core::Store::in_memory().unwrap();
+            let marks = Arc::new(ReadingMarks::at_launch(&support, &store, Utc::now()));
+            let audio = support.join("master.caf");
+            std::fs::write(&audio, b"audio").unwrap();
+            std::mem::forget(marks.reading(
+                uuid::Uuid::new_v4(),
+                None,
+                &audio,
+                steno_pipeline::ReadStage::Transcribe,
+            ));
+        }
+        let app = build(options_under(&support)).unwrap();
+        let skipping = |app: &App| {
+            app.pipeline
+                .current()
+                .dependencies()
+                .warm_up_mark
+                .skipping()
+        };
+        assert!(
+            app.services.speech_models.speech_fallback(),
+            "the mark turned it on"
+        );
+        assert!(!skipping(&app), "no warm-up mark was left");
+        app.services.speech_models.end_speech_fallback().unwrap();
+        assert!(skipping(&app), "this run's warm-up is held off");
+        drop(app);
+    }
 }
