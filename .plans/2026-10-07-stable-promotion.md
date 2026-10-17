@@ -2039,11 +2039,14 @@ Each lands before `0.11.0-rc.1`.
     first pull (late to its first drain) kept a later outage's flag from
     being fresh, and a lane that primed on part of the kept packets, ran
     out while the system thread drained the rest and primed again dropped
-    the outage's padding. It now fails only in a shape **Left** names:
-    1 in 300 000 short calls on six new seeds (the queue an earlier outage
-    left above the target, 80 ms under), none of 20 000 calls or 100 000
-    single streams; with the upper bounds, 66 of 150 000 short calls and 1
-    of 20 000 calls go over, each an idle or unit shape **Left** names.
+    the outage's padding. It now fails only in a shape **Left** names, the
+    queue an earlier outage left above the target: 2 in 300 000 short
+    calls on six new seeds (60 ms under where outages overlap the
+    microphone's, 20 ms under on an outage that ended two packets before
+    the stop) and 1 in 300 000 on six earlier ones (80 ms under), none of
+    100 000 single streams; with the upper bounds, 57 of 150 000 short
+    calls and 4 of 20 000 calls go over, each an idle or unit shape
+    **Left** names.
   - **Left.** WASAPI's fill is unit-tested and compiled in CI, not
     provoked on hardware (no Windows machine). The rule is stated once, in
     the doc of `split_streams::DevicePositions`. A flagged packet's loss is
