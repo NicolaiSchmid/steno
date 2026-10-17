@@ -2748,7 +2748,7 @@ fn a_meeting_waiting_for_the_sidecars_models_says_the_neural_engine_is_off() {
     assert_eq!(entry(&harness)["stage"], "modelsMissing");
     assert_eq!(
         entry(&harness)["title"],
-        "Download the speech models in Settings; Steno stopped using the Neural Engine after a crash"
+        "Neural Engine off after a crash: download the speech models in Settings"
     );
     harness
         .host

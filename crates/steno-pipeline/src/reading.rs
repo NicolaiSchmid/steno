@@ -24,8 +24,9 @@
 //!   engine and each transcription; such a mark left over also turns the
 //!   speech sidecar on in the engine's place
 //!   ([`SpeechFallback`](crate::SpeechFallback)). Process again and the
-//!   CLI's `process` and `reprocess` run the same stages. The speech sidecar and the
-//!   diarizer run in a child, whose abort ends only the child.
+//!   CLI's `process` and `reprocess` run the same stages. The speech
+//!   sidecar and the diarizer run in a child, whose abort ends only the
+//!   child.
 //! - **An orderly exit** ([`ReadingMarks::exiting`], from
 //!   [`ProcessingPipeline::quit`]) removes the marks of the reads still
 //!   running, and those of a meeting Process again released, and writes no

@@ -255,7 +255,7 @@ pub struct TranscriptionSettingsSnapshot {
     pub shows_engine_picker: bool,
     pub assets: Vec<TranscriptionAsset>,
     pub all_installed: bool,
-    /// The Neural Engine ended the app while it transcribed, so the speech
+    /// Steno closed while it was using the Neural Engine, so the speech
     /// sidecar transcribes instead until the user turns the Neural Engine
     /// back on ([`BridgeMethod::SettingsTranscriptionUseNeuralEngine`](crate::BridgeMethod::SettingsTranscriptionUseNeuralEngine)).
     /// Left out when false. Rust only.

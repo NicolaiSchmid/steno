@@ -587,7 +587,7 @@ export const transcriptionSettingsSnapshot = z
 				.strict(),
 		),
 		allInstalled: z.boolean(),
-		/** Rust host only: the Neural Engine ended the app while it transcribed, so the processor transcribes until the user turns it back on. */
+		/** Rust host only: Steno closed while it was using the Neural Engine, so the processor transcribes until the user turns it back on. */
 		neuralEngineOff: z.boolean().optional(),
 		...errorFields,
 	})

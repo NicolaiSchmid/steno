@@ -41,7 +41,7 @@ pub enum Parked {
     StoreBusy,
     /// The job waits for the recording under way before it runs the speech
     /// engine in the app's process ([`MeetingEvent::WaitingForRecording`]).
-    Recording,
+    ForRecording,
 }
 
 impl Parked {
@@ -55,18 +55,19 @@ impl Parked {
             }
             Parked::ModelsMissing => ProgressEntry::MODELS_MISSING_TITLE,
             Parked::StoreBusy => ProgressEntry::STORE_BUSY_TITLE,
-            Parked::Recording => ProgressEntry::RECORDING_TITLE,
+            Parked::ForRecording => ProgressEntry::WAITING_FOR_RECORDING_TITLE,
         }
     }
 
     /// The entry's bridge stage. A job waiting for the recording keeps
-    /// `waiting`: the page says it starts when the current meeting
-    /// finishes, which the recording is.
+    /// `waiting`, with no new stage: the card says "Waiting for the
+    /// recording to finish", while the meeting list's row, which reads
+    /// the stage, says "Waiting to process" as for any queued job.
     pub(crate) const fn stage(self) -> &'static str {
         match self {
             Parked::ModelsMissing => ProgressEntry::MODELS_MISSING_STAGE,
             Parked::StoreBusy => ProgressEntry::STORE_BUSY_STAGE,
-            Parked::Recording => ProgressEntry::WAITING_STAGE,
+            Parked::ForRecording => ProgressEntry::WAITING_STAGE,
         }
     }
 }
@@ -91,11 +92,12 @@ impl ProgressEntry {
     /// [`Self::MODELS_MISSING_TITLE`] while the speech sidecar stands in
     /// for the Neural Engine, which ended the app: its models are the ones
     /// to download, and this says why. Rust only.
-    pub const FALLBACK_MODELS_MISSING_TITLE: &'static str = "Download the speech models in Settings; Steno stopped using the Neural Engine after a crash";
+    pub const FALLBACK_MODELS_MISSING_TITLE: &'static str =
+        "Neural Engine off after a crash: download the speech models in Settings";
 
     /// The title of a meeting whose job waits for the recording under way
     /// before it runs the speech engine in the app's process. Rust only.
-    pub const RECORDING_TITLE: &'static str = "Waiting for the recording to finish";
+    pub const WAITING_FOR_RECORDING_TITLE: &'static str = "Waiting for the recording to finish";
 
     /// The title of a meeting whose run met the store locked by another
     /// process (the other app, another program).
@@ -116,7 +118,8 @@ impl ProgressEntry {
     /// refusal for a missing model ([`Self::FALLBACK_MODELS_MISSING_TITLE`]
     /// with `speech_fallback`, [`ProcessingProgressModel::speech_fallback`]),
     /// [`Self::STORE_BUSY_TITLE`] after one by a busy store and
-    /// [`Self::RECORDING_TITLE`] while the job waits for a recording.
+    /// [`Self::WAITING_FOR_RECORDING_TITLE`] while the job waits for a
+    /// recording.
     #[must_use]
     pub fn title(&self, speech_fallback: bool) -> String {
         if let Some(parked) = self.parked {
@@ -207,7 +210,7 @@ impl ProcessingProgressModel {
                 self.park(*meeting_id, Parked::StoreBusy, now);
             }
             MeetingEvent::WaitingForRecording { meeting_id } => {
-                self.park(*meeting_id, Parked::Recording, now);
+                self.park(*meeting_id, Parked::ForRecording, now);
             }
             MeetingEvent::SpeakersNeedReview { .. }
             | MeetingEvent::RetentionApplied { .. }

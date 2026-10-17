@@ -1407,9 +1407,10 @@ impl ProcessingPipeline {
     /// the meeting says so ([`MeetingEvent::WaitingForRecording`]) and the
     /// job waits, holding its turn, so the jobs behind it wait too. The
     /// call that follows (`stage`: the load, or a lane's transcription)
-    /// runs under the turn. A quit during the wait ends the job as any
-    /// failure after the quit does: the meeting stays for the next launch.
-    /// `None` for an engine whose abort ends only its child.
+    /// runs under the turn. A quit during the wait stops the recording,
+    /// which ends the wait; the job then sees the quit and ends as any job
+    /// after a quit does: the meeting stays for the next launch. `None` for
+    /// an engine whose abort ends only its child.
     async fn in_process_turn(
         &self,
         meeting_id: Uuid,

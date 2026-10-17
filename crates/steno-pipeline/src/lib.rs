@@ -7,19 +7,19 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue` and `enqueue_saved`, `reprocess` (refused with a [`ReprocessError`]), `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `resume_unfinished` and `redeliver_unfinished` for the launch, the in-flight set ([`InFlight`]) a reload shares, with the [`JobHold`] an update's install takes, `warm_up`, `warm_up_while_recording` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, [`PipelineFailure`] and its [`FailureKind`], a run refused for missing models or by a busy store and [`ModelWaits`] with `resume_waiting` and `resume_waiting_for_store` for them, `apply_retention`, the stages |
+//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue` and `enqueue_saved`, `reprocess` (refused with a [`ReprocessError`]), `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `resume_unfinished` and `redeliver_unfinished` for the launch, the in-flight set ([`InFlight`]) a reload shares, with the [`JobHold`] an update's install takes, `warm_up`, `warm_up_while_recording` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, [`PipelineFailure`] and its [`FailureKind`], a run refused for missing models or by a busy store and [`ModelWaits`] with `resume_waiting` and `resume_waiting_for_store` for them, the in-process turn a job takes while no recording is live ([`LiveRecording`]), `apply_retention`, the stages |
 //! | [`damaged_audio`] | [`DamagedAudio`], what of each meeting's recording the decoder replaced by silence (the parts and their seconds), in `damaged-audio.json` |
 //! | [`export_retries`] | [`ExportRetries`], the launch re-exports in a row per meeting that did not deliver every row, in `export-retries.json` |
 //! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
 //! | [`run`] | One run's progress state with the monotonic clamp |
 //! | [`crash_loop`] | Launch recovery's guard against a crash loop: the runs that ended with the app, counted in the meeting's folder |
 //! | [`reading`] | [`ReadingMarks`], every read of a recording marked in the support directory: a meeting whose read ended with the app is read once more, and quarantined ([`READ_STOPPED`]) the second time in a row until Process again |
+//! | [`live_recording`] | [`LiveRecording`], whether a recording is under way: a job runs no speech engine in the app's process meanwhile |
 //! | [`speech_fallback`] | [`SpeechFallback`], the speech sidecar in place of the engine in the app's process once that engine ended the app, until the user turns it back on |
-//! | [`warm_up_mark`] | [`WarmUpMark`], the recording's warm-up marked in the support directory, so one that ended with the app turns the warm-up off until a job loads the speech engine |
+//! | [`warm_up_mark`] | [`WarmUpMark`], the recording's warm-up marked in the support directory, so one that ended with the app turns the warm-up off until a job loads the speech engine, as the user's end of the fallback holds it off |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
 //! | [`intake`] | The phone intake ([`RecordingIntake`], which notes its copies' folders and uploads ([`NotedUpload`]) in [`AdmissionFolders`]) and the Mac one ([`LocalRecordingIntake`]) |
 //! | [`lane_merger`] | The lanes into one ordered transcript |
-//! | [`live_recording`] | [`LiveRecording`], whether a recording is under way: a job runs no speech engine in the app's process meanwhile |
 //! | [`speaker_memory`] | The store-backed cosine `SpeakerMemory` |
 //! | [`retention`] | [`RetentionSweep`] over expired assets |
 //! | [`sample_clips`] | The speakers' sample clips written under each run's own names, named by the merge, and the files of the meeting's speakers that no row names swept after it |

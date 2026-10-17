@@ -151,7 +151,7 @@ export function TranscriptionSection() {
 							</Button>
 						}
 						data-testid="neural-engine-off"
-						description="Steno stopped using the Neural Engine after it crashed while transcribing. Meetings are transcribed on the processor instead, which is slower."
+						description="Steno closed unexpectedly while it was using the Neural Engine, so it now transcribes on the processor, which is slower. Download the model below if it is missing. Use the Neural Engine again if Steno was force quit or the Mac lost power."
 						label="Turned off after a crash"
 					/>
 				</FormCard>

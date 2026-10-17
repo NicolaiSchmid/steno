@@ -43,8 +43,10 @@ describe("TranscriptionSection", () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=neural-engine-off");
 		renderWithBridge(<TranscriptionSection />, harness);
-		expect(screen.getByTestId("neural-engine-off")).toHaveTextContent(
-			"Turned off after a crash",
+		const row = screen.getByTestId("neural-engine-off");
+		expect(row).toHaveTextContent("Turned off after a crash");
+		expect(row).toHaveTextContent(
+			"Steno closed unexpectedly while it was using the Neural Engine, so it now transcribes on the processor, which is slower. Download the model below if it is missing. Use the Neural Engine again if Steno was force quit or the Mac lost power.",
 		);
 		await user.click(screen.getByTestId("use-neural-engine"));
 		expect(
