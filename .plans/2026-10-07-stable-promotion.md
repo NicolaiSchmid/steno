@@ -477,7 +477,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
 | A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured (it aborts on Linux, not on the Mac); every read of a recording marked durably, the in-process CoreML stage included; a recording whose read ended with the app read once more, and quarantined the second time in a row ("Steno stopped while reading this recording") with the file kept and Process again offered; the allocations bounded by a walk of the boxes, chunks and tables before symphonia opens a file, its reader the one the file's first bytes name (MP4, CAF or WAV) and opened where the walk began, any other kind of file refused plainly; kill tests for one kill and for two | audio (#298) |
-| A19 | No in-process speech beside a live recording, and the speech sidecar after a CoreML abort: a job waits to load or run CoreML while a recording starts, runs or stops ("Waiting for the recording to finish"); a warm-up mark or a CoreML reading mark left by a crash turns the speech sidecar on in CoreML's place, durably, until the user turns the Neural Engine back on in Settings ("Use again"), the meeting waiting for the sidecar's models with "Steno stopped using the Neural Engine after a crash"; kill tests for a load killed in a job and in a warm-up | audio |
+| A19 | No in-process speech beside a live recording, and the speech sidecar after a CoreML abort: a job waits to load or run CoreML while a recording starts, runs or stops ("Waiting for the recording to finish"); a warm-up mark or a CoreML reading mark left by a crash turns the speech sidecar on in CoreML's place, durably, until the user turns the Neural Engine back on in Settings ("Use again"), the meeting waiting for the sidecar's models with "Neural Engine off after a crash: download the speech models in Settings"; kill tests for a load killed in a job and in a warm-up | audio |
 | A20 | The level meter never freezes behind a sync of the files: the levels go out from a thread of their own (`steno-levels`, woken by each publish into `LevelSlot`) instead of from the writer thread, whose periodic `sync_data` (P21; `FlushFileBuffers` on Windows) froze the meter and the `recording` snapshot for as long as it took, 1.0 to 1.3 s on a hosted runner; the sync, its cadence and the files are unchanged | audio |
 
 **Per Linux target, blocking that target's listing (D6):**
@@ -1714,7 +1714,9 @@ Each lands before `0.11.0-rc.1`.
     the next call waits. A15's warm-up while recording stays, behind its
     mark. The jobs now take the turn before they mark the read, so A17's
     false alarm of one meeting's abort counted against another waiting for
-    its turn is gone; one waiting behind a recording's warm-up remains.
+    its turn is gone. A job whose load or transcription waits behind a
+    recording's warm-up (`OneCallAtATime`) can still be counted for that
+    warm-up's abort.
   - The fallback (`steno_pipeline::SpeechFallback`,
     `speech-fallback.json` in the support directory): the launch reads A15's
     warm-up mark and A17's marks of the CoreML stage (`ReadStage::Transcribe`,
@@ -1724,8 +1726,10 @@ Each lands before `0.11.0-rc.1`.
     repeated abort ends only the child and the meeting stays retryable; the
     Parakeet row of Settings and onboarding is then the sidecar's fp32
     model, and a meeting whose models are missing waits for them there
-    ("Download the speech models in Settings; Steno stopped using the
-    Neural Engine after a crash"). The sidecar is bundled on the Mac as
+    ("Neural Engine off after a crash: download the speech models in
+    Settings"). A file that exists but cannot be read or parsed keeps the
+    fallback on, logged at `warn`: an unparseable one is written again, on,
+    with the marks found; an unreadable one is left as it is. The sidecar is bundled on the Mac as
     everywhere (`tauri.release.conf.json`'s `externalBin`, staged by
     `stage-sidecar.sh` in `desktop-release.yml` for every platform,
     checked beside the app binary by `check-bundle.sh`); the diarizer runs
@@ -1738,9 +1742,13 @@ Each lands before `0.11.0-rc.1`.
     CoreML back on only to crash again. The file keeps the marks it has
     seen, so the same marks (a warm-up mark stays until a meeting loads
     CoreML; a quarantined meeting keeps its marks) do not turn it on again;
-    a new one does. The warm-up stays off after the user's action until a
-    meeting has loaded CoreML, so that first load never runs beside a
-    recording; a load in the sidecar no longer clears the warm-up mark.
+    a new one does. After the user's action, recordings skip the warm-up
+    until a meeting's processing has loaded CoreML, whichever mark turned
+    the fallback on, so that first load never runs beside a recording
+    (`WarmUpMark::hold_off`, a mark of its own listed as seen); a load in
+    the sidecar no longer clears the warm-up mark. A file that cannot be
+    written keeps the fallback on: Settings says "The Neural Engine could
+    not be turned back on." and the pipeline is not rebuilt.
   - False alarms: a force quit, a power loss or a crash elsewhere while
     CoreML loads or transcribes leaves the same marks and turns the
     fallback on too. The cost is the sidecar's models to download and its
@@ -1748,18 +1756,26 @@ Each lands before `0.11.0-rc.1`.
     `steno` command neither reads nor writes the file.
   - Tests: the pipeline's jobs over an engine in the process wait at the
     load and between lanes while a recording is live, and so does a job
-    queued behind another's turn; a job in a child does not wait; a quit
-    during the wait leaves the meeting queued; the recorder is live from
-    `Starting` through `Stopping`; the fallback's file over every kind of
-    mark, the user's action and the marks it forgets; the waiting and
-    fallback titles in the host and the Settings action; kill tests: a
+    queued behind another's turn; a job that queued for the turn before a
+    recording started checks again at its turn, on an engine that runs one
+    call at a time; a job in a child does not wait; a quit during the wait
+    leaves the meeting queued; the recorder is live from `Starting`
+    through `Stopping`, and a notify that read a recording never sets the
+    flag after the stop that ended it; a reload shares the recorder's state
+    with the retired build and the new one; the fallback's file over every
+    kind of mark, the user's action, the marks it forgets, a file that does
+    not parse, cannot be read or cannot be written; the warm-up held off
+    until a load; the model service's wrapper passes the fallback through;
+    the waiting and fallback titles in the host and the Settings action,
+    which keeps the fallback on when it cannot be ended; kill tests: a
     child killed in a job's CoreML load, after which the next launch
     processes that meeting in the sidecar, a recording loads nothing in the
     app's process beside it or after it, the next launch keeps the
-    sidecar, and the user's "Use again" puts the next meeting on CoreML and
-    a later launch keeps it there; and a child killed in the warm-up's
-    load, after which the same holds and, after "Use again", the first
-    CoreML load is the job's, not a warm-up beside the recording.
+    sidecar, and the user's "Use again" puts the next meeting on CoreML
+    with no warm-up beside its recording, the recording after it warms up
+    again, and a later launch keeps CoreML; and a child killed in the
+    warm-up's load, after which the same holds and, after "Use again", the
+    first CoreML load is the job's, not a warm-up beside the recording.
   - Gate: A19's check in G2 (**Nicolai**, on the Mac), a forced fallback.
   - Owner: audio. Lands before `0.11.0-rc.1` (D9).
 - **A20 The level meter never freezes behind a sync of the files.** Found
@@ -3383,8 +3399,9 @@ candidate:
      Steno quit, `touch ~/Library/Application\ Support/Steno/warm-up-in-progress`
      (the mark a warm-up that ended with the app leaves), then start the
      app's binary from Terminal (`Contents/MacOS/steno-desktop` in the
-     bundle), which logs to it. Pass when the launch logs that the speech
-     engine in this process ended the app, Settings, Transcription shows
+     bundle), which prints its log there. Pass when the launch prints "the
+     speech engine in this process ended the app; from now on meetings are
+     transcribed in the speech sidecar…", Settings, Transcription shows
      "Turned off after a crash", and a recorded meeting is ready (after the
      speech models row's download if the sidecar's models are missing);
      then, after "Use again", the next meeting is ready, and the launch
