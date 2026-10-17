@@ -1816,23 +1816,34 @@ async fn a_job_queued_behind_another_waits_for_the_recording_too() {
 }
 
 /// A speech engine that runs one call at a time, as `OneCallAtATime` does
-/// on the Mac, and whose first transcription waits for `gate`; it counts
-/// the calls made while a recording is under way.
+/// on the Mac, over a [`GatedEngine`] whose first transcription waits; it
+/// counts the calls made while a recording is under way.
 struct OneCallAtATime {
-    inner: FakeSpeechEngine,
+    inner: GatedEngine,
     live: LiveRecording,
     calls: tokio::sync::Mutex<()>,
-    entered: std::sync::atomic::AtomicBool,
-    gate: tokio::sync::Notify,
     beside: std::sync::atomic::AtomicUsize,
 }
 
 impl OneCallAtATime {
-    fn note(&self) {
+    fn new(live: &LiveRecording) -> Self {
+        OneCallAtATime {
+            inner: GatedEngine::new(Gate::FirstTranscription),
+            live: live.clone(),
+            calls: tokio::sync::Mutex::new(()),
+            beside: 0.into(),
+        }
+    }
+
+    /// Takes the one call's turn and counts the call if a recording is
+    /// under way.
+    async fn call(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        let one = self.calls.lock().await;
         if self.live.is_live() {
             self.beside
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        one
     }
 }
 
@@ -1847,8 +1858,7 @@ impl steno_core::SpeechEngine for OneCallAtATime {
     }
 
     async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
-        let _one = self.calls.lock().await;
-        self.note();
+        let _one = self.call().await;
         steno_core::SpeechEngine::prepare(&self.inner).await
     }
 
@@ -1857,12 +1867,7 @@ impl steno_core::SpeechEngine for OneCallAtATime {
         audio: &steno_core::AudioBuffer16k,
         hint: Option<&steno_core::LanguageTag>,
     ) -> steno_core::protocols::BoundaryResult<Vec<steno_core::RawSegment>> {
-        let _one = self.calls.lock().await;
-        if self.entered.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            self.note();
-        } else {
-            self.gate.notified().await;
-        }
+        let _one = self.call().await;
         steno_core::SpeechEngine::transcribe(&self.inner, audio, hint).await
     }
 
@@ -1879,29 +1884,16 @@ impl steno_core::SpeechEngine for OneCallAtATime {
 async fn a_job_that_queued_before_the_recording_checks_again_at_its_turn() {
     let world = world(false, None, AudioRetention::KeepForever);
     let live = LiveRecording::default();
-    let engine = Arc::new(OneCallAtATime {
-        inner: FakeSpeechEngine::default(),
-        live: live.clone(),
-        calls: tokio::sync::Mutex::new(()),
-        entered: std::sync::atomic::AtomicBool::new(false),
-        gate: tokio::sync::Notify::new(),
-        beside: std::sync::atomic::AtomicUsize::new(0),
-    });
+    let engine = Arc::new(OneCallAtATime::new(&live));
     let pipeline = in_process_beside(&world, engine.clone(), &live);
     let mut receiver = world.events.subscribe();
     let first = enqueue_call(&world, &pipeline);
     let second = enqueue_call(&world, &pipeline);
-    tokio::time::timeout(PATIENCE, async {
-        while !engine.entered.load(std::sync::atomic::Ordering::SeqCst) {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("a transcription began");
+    engine.inner.wait_until_entered().await;
     // The other job reaches the turn, which the gated call holds.
     a_moment().await;
     live.set(true);
-    engine.gate.notify_one();
+    engine.inner.open.notify_one();
     waiting_for_recording(&mut receiver, &[first, second]).await;
     a_moment().await;
     assert_eq!(
