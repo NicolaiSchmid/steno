@@ -233,8 +233,7 @@ fn ref_transcribe(t: &mut Transcriber<FrameTokenBackend>, samples: &[f32]) -> Ve
 /// Every token the final windows heard that the span keeps by its
 /// stated bound, taken from the window the transcript records
 /// ([`Transcript::windows`]) and decoded again: a plain chunk's whole
-/// window, an accepted recovery's reach, a gap window's owned span and
-/// [`SEAM_SAMPLES`] either side.
+/// window, and the reach of a gap's window or an accepted recovery.
 fn ref_heard(
     t: &mut Transcriber<FrameTokenBackend>,
     samples: &[f32],
@@ -243,12 +242,10 @@ fn ref_heard(
     let mut stats = DecodeStats::default();
     let mut heard = Vec::new();
     for (span, window) in tr.spans.iter().zip(&tr.windows) {
-        let bound = if !span.chunk {
-            span.owned.start.saturating_sub(SEAM_SAMPLES)..span.owned.end + SEAM_SAMPLES
-        } else if *window != span.window {
-            span.reach.clone()
-        } else {
+        let bound = if span.chunk && *window == span.window {
             span.window.clone()
+        } else {
+            span.reach.clone()
         };
         let tokens = t.decode_range(samples, window.clone(), &mut stats).unwrap();
         heard.extend(tokens.into_iter().filter(|t| bound.contains(&t.sample())));
@@ -461,6 +458,204 @@ fn ref_two_sided_layout(rng: &mut Rng) -> RefCase {
     RefCase::from_samples(samples, words, Some(regions), noisy)
 }
 
+/// Two chunks around a pause no window decodes, one plain and dense with
+/// words to its edge, the other loud sound the fake decodes to nothing,
+/// with one word, which a recovery hears; and quiet words in the pause
+/// near the plain chunk that reuse its ids, which a recovery's LCS with
+/// the plain chunk can take for the plain chunk's own words.
+fn ref_collision_layout(rng: &mut Rng) -> RefCase {
+    let backward = rng.below(2) == 0;
+    let gap = ref_tenths(rng, 3.1, 100);
+    let plain = ref_tenths(rng, 6.0, 60);
+    let recovered = ref_tenths(rng, 4.0, 40);
+    let (a_len, b_len) = if backward {
+        (plain, recovered)
+    } else {
+        (recovered, plain)
+    };
+    let (a, a_end) = (1.0, 1.0 + a_len);
+    let (b, b_end) = (a_end + gap, a_end + gap + b_len);
+    let mut samples = vec![0.0f32; sample_count(b_end + 1.0)];
+    let regions = vec![
+        sample_count(a)..sample_count(a_end),
+        sample_count(b)..sample_count(b_end),
+    ];
+    let loud = regions[usize::from(backward)].clone();
+    samples[loud.clone()].fill(0.05);
+    let mut words = vec![Placed {
+        pieces: vec![if backward { 17 } else { 18 }],
+        frame: loud.start.midpoint(loud.end) / FRAME_SAMPLES,
+        frames: 5,
+    }];
+    let (from, to) = if backward { (a, a_end) } else { (b, b_end) };
+    let mut at = from + 0.3;
+    while at < to - 0.3 {
+        let frames = 3 + rng.below(3);
+        let word = ref_placed(vec![11 + rng.below(6) as u32], at, frames);
+        if word.span().end + FRAME_SAMPLES > sample_count(to) {
+            break;
+        }
+        at += frames as f32 * 0.08 + 0.08 + ref_tenths(rng, 0.0, 3);
+        words.push(word);
+    }
+    let (lo, hi) = (sample_count(a_end + 0.3), sample_count(b - 0.3));
+    for _ in 0..=rng.below(3) {
+        let off = ref_tenths(rng, 0.35, 12);
+        let frames = 2 + rng.below(3);
+        let at = if backward {
+            a_end + off
+        } else {
+            b - off - frames as f32 * 0.08
+        };
+        let word = ref_placed(vec![11 + rng.below(6) as u32], at, frames);
+        let margin = 2 * FRAME_SAMPLES;
+        let clear = words.iter().all(|o: &Placed| {
+            o.start(0) >= word.span().end + margin || word.start(0) >= o.span().end + margin
+        });
+        if clear && lo < word.start(0) && word.span().end < hi {
+            words.push(word);
+        }
+    }
+    for word in &words {
+        word.put(&mut samples);
+    }
+    words.sort_by_key(|w| w.frame);
+    RefCase::from_samples(samples, words, Some(regions), false)
+}
+
+/// The general layout's regions in seconds, whether each is the loud
+/// sound the fake decodes to nothing, and the recording's length.
+fn ref_general_regions(rng: &mut Rng) -> (Vec<(f32, f32, bool)>, f32) {
+    let count = 1 + rng.below(4);
+    let mut t = if rng.below(3) == 0 {
+        0.0
+    } else {
+        ref_tenths(rng, 0.2, 60)
+    };
+    let mut regions = Vec::new();
+    for i in 0..count {
+        let empty = rng.below(2) == 0;
+        let length = if empty {
+            ref_tenths(rng, 3.0, 70)
+        } else {
+            ref_tenths(rng, 1.5, 200)
+        };
+        regions.push((t, t + length, empty));
+        t += length;
+        if i + 1 < count {
+            t += match rng.below(4) {
+                0 => ref_tenths(rng, 0.3, 25),
+                1 => ref_tenths(rng, 2.5, 60),
+                2 => ref_tenths(rng, 8.0, 120),
+                _ => ref_tenths(rng, 20.0, 260),
+            };
+        }
+    }
+    let tail = if rng.below(3) == 0 {
+        0.0
+    } else {
+        ref_tenths(rng, 0.2, 200)
+    };
+    (regions, t + tail)
+}
+
+/// One to four speech regions, each plain (words of any length to its
+/// edges) or loud sound the fake decodes to nothing with a few words in
+/// it, pauses of 0.3 to 46 s between them, so some gaps take several
+/// windows, and a lead-in and a tail of up to 20 s, the first region now
+/// and then at the recording's start and the last at its end; quiet words
+/// of any id in the pauses, so the chunks' ids too, dense near the
+/// regions' edges; a quarter of the words ending in a full stop; and now
+/// and then a word on the recording's first frames or its last.
+fn ref_general_layout(rng: &mut Rng) -> RefCase {
+    let (regions, total) = ref_general_regions(rng);
+    let end = sample_count(total);
+    let noisy = rng.below(3) != 0;
+    let mut samples = vec![0.0f32; end];
+    if noisy {
+        for (i, x) in samples.iter_mut().enumerate() {
+            *x = if i % 2 == 0 { 3e-5 } else { -3e-5 };
+        }
+    }
+    let mut words: Vec<Placed> = Vec::new();
+    let try_put = |words: &mut Vec<Placed>, word: Placed, until: usize| {
+        let margin = 4 * FRAME_SAMPLES;
+        let clear = words.iter().all(|o: &Placed| {
+            o.start(0) >= word.span().end + margin || word.start(0) >= o.span().end + margin
+        });
+        if clear && word.span().end <= until && word.span().end + FRAME_SAMPLES <= end {
+            words.push(word);
+        }
+    };
+    let word = |rng: &mut Rng, first: u32, seconds: f32| {
+        let id = first + rng.below((21 - first) as usize) as u32;
+        let mut pieces = vec![id];
+        for _ in 0..rng.below(3) {
+            pieces.push(20 + id);
+        }
+        if rng.below(4) == 0 {
+            pieces.push(41);
+        }
+        ref_placed(pieces, seconds.max(0.0), 2 + rng.below(5))
+    };
+    for &(from, to, empty) in &regions {
+        let region = sample_count(from)..sample_count(to);
+        if empty {
+            samples[region.clone()].fill(0.05);
+            for _ in 0..=rng.below(4) {
+                let room = ((to - from - 0.6) * 10.0).max(1.0) as usize;
+                let at = from + ref_tenths(rng, 0.2, room);
+                try_put(&mut words, word(rng, 11, at), region.end);
+            }
+        } else {
+            let mut at = from + ref_tenths(rng, 0.0, 4);
+            while at < to {
+                let next = word(rng, 11, at);
+                at += next.span().len() as f32 / SAMPLE_RATE as f32 + ref_tenths(rng, 0.1, 10);
+                try_put(&mut words, next, region.end);
+            }
+        }
+    }
+    let mut pauses = Vec::new();
+    let mut cursor = 0.0f32;
+    for &(from, to, _) in &regions {
+        if from > cursor {
+            pauses.push((cursor, from));
+        }
+        cursor = to;
+    }
+    if total > cursor {
+        pauses.push((cursor, total));
+    }
+    for (from, to) in pauses {
+        let length = to - from;
+        for _ in 0..=(length / 1.5) as usize {
+            let at = match rng.below(4) {
+                0 => from + ref_tenths(rng, 0.0, 25),
+                1 => to - ref_tenths(rng, 0.3, 25),
+                _ => from + ref_tenths(rng, 0.0, (length * 10.0) as usize),
+            };
+            if at >= from && at < to {
+                try_put(&mut words, word(rng, 1, at), sample_count(to));
+            }
+        }
+    }
+    if rng.below(4) == 0 {
+        try_put(&mut words, word(rng, 1, 0.0), end);
+    }
+    if rng.below(4) == 0 {
+        try_put(&mut words, word(rng, 1, total - 0.5), end);
+    }
+    for word in &words {
+        word.put(&mut samples);
+    }
+    words.sort_by_key(|w| w.frame);
+    let regions = regions
+        .iter()
+        .map(|&(from, to, _)| sample_count(from)..sample_count(to));
+    RefCase::from_samples(samples, words, Some(regions.collect()), noisy)
+}
+
 /// Per word, how often its first piece came out and which pieces did;
 /// each token goes to the nearest piece of that id within `slack`
 /// frames.
@@ -495,7 +690,7 @@ fn ref_run(
     keep: &[bool],
     config: &PipelineConfig,
     min_frames: usize,
-    jitter: bool,
+    jitter: usize,
 ) -> RefRun {
     let samples = case.samples(keep);
     let make = || {
@@ -551,34 +746,42 @@ struct Tally {
 
 /// `cases` random layouts from `seed`, with recovery on: the first
 /// generator's words of one to three pieces, the old merge's random
-/// layout, and its two-sided layout around a gap with recoveries reaching
-/// into it, under the default settings, `CoreML`'s and two between, with
-/// the extra windows off and on, over the exact fake and a jittering one.
+/// layout, its two-sided layout around a gap with recoveries reaching
+/// into it, the collision layout and the general one, under the default
+/// settings, `CoreML`'s and two between, with the extra windows off and
+/// on, over the exact fake and one that moves tokens by `jitter` frames.
 /// Every word the old merge kept comes out, with every piece the old merge
 /// gave it: a duplicate is allowed, a loss never. And every word a final
 /// window heard inside the bound its span keeps comes out at least once,
-/// except the second of a word said twice in a row, which a run's LCS may
-/// take for one.
-fn differential(seed: u64, cases: usize) -> Tally {
+/// except one that repeats the piece before it, which the fake hears as
+/// one and a run's LCS may take for one.
+fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
     let mut rng = Rng(seed);
     let mut tally = Tally::default();
     for case in 0..cases {
-        let layout = match case % 3 {
+        let (kind, round) = (case % 5, case / 5);
+        let layout = match kind {
             0 => {
                 let (samples, words) = placed_words(&mut rng, case);
-                RefCase::from_samples(samples, words, None, case.is_multiple_of(2))
+                RefCase::from_samples(samples, words, None, round.is_multiple_of(2))
             }
-            1 => ref_random_layout(&mut rng, case),
-            _ => ref_two_sided_layout(&mut rng),
+            1 => ref_random_layout(&mut rng, round),
+            2 => ref_two_sided_layout(&mut rng),
+            3 => ref_collision_layout(&mut rng),
+            _ => ref_general_layout(&mut rng),
         };
-        let jitter = (case / 3) % 3 == 1;
-        let config = random_config(case / 3, (case / 12) % 4 != 0);
-        let min_frames = if case % 3 == 0 && (case / 3) % 2 == 0 {
-            0
+        let jitter = if round % 3 == 1 { jitter } else { 0 };
+        let config = if kind == 3 && round.is_multiple_of(2) {
+            PipelineConfig::default()
         } else {
-            130
+            random_config(round, (round / 4) % 4 != 0)
         };
-        let slack = 2 + usize::from(jitter);
+        let min_frames = match kind {
+            0 if round.is_multiple_of(2) => 0,
+            4 if round % 7 == 3 => 0,
+            _ => 130,
+        };
+        let slack = 2 + jitter;
         let all = vec![true; layout.words.len()];
         let run = ref_run(&layout, &all, &config, min_frames, jitter);
         tally.words += all.len();
@@ -587,7 +790,10 @@ fn differential(seed: u64, cases: usize) -> Tally {
         let new = ref_tally(&run.new.tokens, &layout.words, &all, slack);
         tally.doubled += old.iter().zip(&new).filter(|(m, a)| a.0 > m.0).count();
         let (lost, pieces, unheard) = ref_losses(&layout, &all, &run, slack);
-        let repeated = |w: usize| w > 0 && layout.words[w - 1].pieces == layout.words[w].pieces;
+        let repeated = |w: usize| {
+            let (before, word) = (&layout.words[w.saturating_sub(1)], &layout.words[w]);
+            w > 0 && (before.pieces == word.pieces || before.pieces.last() == word.pieces.first())
+        };
         let unheard: Vec<usize> = unheard.into_iter().filter(|&w| !repeated(w)).collect();
         let show = |tokens: &[Token]| {
             let pieces = tokens.iter().map(|t| format!("{}@{}", t.id, t.sample()));
@@ -600,7 +806,7 @@ fn differential(seed: u64, cases: usize) -> Tally {
         };
         assert!(
             lost.is_empty() && pieces.is_empty() && unheard.is_empty(),
-            "seed {seed:#x} case {case}: lost {:?}, pieces lost {:?}, heard and lost {:?}\n spans {:?}\n windows {:?}\n old {}\n new {}\n heard {}",
+            "seed {seed:#x} case {case} jitter {jitter}: lost {:?}, pieces lost {:?}, heard and lost {:?}\n spans {:?}\n windows {:?}\n old {}\n new {}\n heard {}",
             words(&lost),
             words(&pieces),
             words(&unheard),
@@ -614,28 +820,31 @@ fn differential(seed: u64, cases: usize) -> Tally {
     tally
 }
 
-/// Clause 5 of the ownership invariant over 900 cases of one seed;
-/// `every_word_the_old_merge_keeps_comes_out_over_more_seeds` runs eight
-/// more.
+/// Clause 5 of the ownership invariant over 1,500 cases of one seed;
+/// `every_word_the_old_merge_keeps_comes_out_over_more_seeds` runs more.
 #[test]
 fn every_word_the_old_merge_keeps_comes_out() {
-    let tally = differential(0x0a16_a310_c1e5_7001, 900);
+    let tally = differential(0x0a16_a310_c1e5_7001, 1500, 1);
     println!("{tally:?}");
-    // Words checked (about 10,000 with this seed), cases with an accepted
-    // recovery (about 300), and words that came out more often than from
+    // Words checked (about 24,000 with this seed), cases with an accepted
+    // recovery (about 800), and words that came out more often than from
     // the old merge (about 1 in 100).
     assert!(
-        tally.words > 9_000 && tally.recovered > 250 && tally.doubled * 50 < tally.words,
+        tally.words > 20_000 && tally.recovered > 600 && tally.doubled * 50 < tally.words,
         "{tally:?}"
     );
 }
 
+/// Eight more seeds, 2,500 cases each, with the jitter at one, two and
+/// three frames: 60,000 cases.
 #[test]
-#[ignore = "about 3 minutes in a debug build; run it after a change to the partition or the merge"]
+#[ignore = "about 10 minutes in a release build; run it after a change to the partition or the merge"]
 fn every_word_the_old_merge_keeps_comes_out_over_more_seeds() {
-    for seed in 1..=8u64 {
-        let tally = differential(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15), 900);
-        println!("seed {seed}: {tally:?}");
+    for jitter in 1..=3 {
+        for seed in 1..=8u64 {
+            let tally = differential(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15), 2500, jitter);
+            println!("jitter {jitter} seed {seed}: {tally:?}");
+        }
     }
 }
 
@@ -646,7 +855,7 @@ fn texts(
     samples: &[f32],
     regions: &[Range<usize>],
     config: &PipelineConfig,
-    jitter: bool,
+    jitter: usize,
 ) -> (Transcript, String) {
     let make = || {
         let mut t = quiet_transcriber(config.clone(), 130);
@@ -693,7 +902,7 @@ fn two_chunks_and_a_quiet_word(pauses: bool) -> (Transcript, String) {
             samples[frame * FRAME_SAMPLES..(frame + 5) * FRAME_SAMPLES].fill(3e-5);
         }
     }
-    texts(&samples, &regions, &random_config(1, true), false)
+    texts(&samples, &regions, &random_config(1, true), 0)
 }
 
 #[test]
@@ -731,7 +940,7 @@ fn a_recovery_counts_a_word_a_frame_early_at_its_windows_edge() {
     // its window still count it, and the recovery keeps it.
     let regions = vec![22_400..225_599, 318_400..416_000];
     let samples = crafted(26.0, &regions, &[(15, 98, 5), (12, 255, 5)]);
-    let (new, old) = texts(&samples, &regions, &random_config(3, false), true);
+    let (new, old) = texts(&samples, &regions, &random_config(3, false), 1);
     assert!(new.stats.recoveries_accepted > 0);
     assert_eq!((new.text().as_str(), old.as_str()), ("w15 w12", "w15 w12"));
 }
@@ -749,7 +958,7 @@ fn a_recovered_chunk_keeps_the_rest_of_a_word_a_gaps_window_began() {
         frames: 7,
     };
     word.put(&mut samples);
-    let (new, old) = texts(&samples, &regions, &random_config(1, true), false);
+    let (new, old) = texts(&samples, &regions, &random_config(1, true), 0);
     assert_eq!(new.stats.recoveries_accepted, 1);
     assert!(!new.spans[0].chunk && new.spans[0].window.end < word.start(1));
     assert_eq!(
@@ -788,7 +997,7 @@ fn a_recovery_keeps_a_word_in_its_plain_neighbours_half_of_an_undecoded_gap() {
         }
         put(&mut samples, quiet.0, quiet.1, 6);
         put(&mut samples, quiet.2, quiet.3, 6);
-        let (new, old) = texts(&samples, &regions, &PipelineConfig::default(), false);
+        let (new, old) = texts(&samples, &regions, &PipelineConfig::default(), 0);
         assert_eq!(new.stats.recoveries_accepted, 1, "{backward}");
         let expected = if backward {
             "w11 w12 w13 w14 w15 w16 w3 w17"
@@ -799,6 +1008,93 @@ fn a_recovery_keeps_a_word_in_its_plain_neighbours_half_of_an_undecoded_gap() {
             (new.text().as_str(), old.as_str()),
             (expected, expected),
             "{backward}"
+        );
+    }
+}
+
+#[test]
+fn a_recovery_across_an_undecoded_pause_keeps_its_plain_neighbours_words() {
+    // B1 of the capped reach, the default settings: a plain chunk dense
+    // with words to its edge, a 3 s pause no window decodes, and a chunk
+    // the fake decodes to nothing, which a recovery hears. A quiet word in
+    // the pause repeats the id of one of the plain chunk's last (backward)
+    // or first (forward) words. The recovery keeps the words of its own
+    // share of the pause and no further, so the run's LCS cannot take the
+    // quiet word for the plain chunk's and drop the plain words between:
+    // the text is the old merge's, over the exact fake and with the
+    // tokens moved one and two frames.
+    let s = sample_count;
+    let at = |frame: usize| frame as f32 * 0.08;
+    for backward in [true, false] {
+        let mut samples = vec![0.0f32; 25 * SAMPLE_RATE];
+        let (regions, expected) = if backward {
+            samples[s(16.0)..s(23.0)].fill(0.05);
+            for (i, t) in [3.0, 5.0, 7.0, 9.0, 11.0].into_iter().enumerate() {
+                put(&mut samples, 11 + i as u32, t, 6);
+            }
+            put(&mut samples, 4, at(167), 2);
+            put(&mut samples, 16, at(170), 3);
+            put(&mut samples, 4, at(179), 2);
+            put(&mut samples, 17, 19.0, 6);
+            (
+                vec![s(2.0)..s(14.0), s(17.2)..s(23.0)],
+                "w11 w12 w13 w14 w15 w4 w16 w17",
+            )
+        } else {
+            samples[s(2.0)..s(8.0)].fill(0.05);
+            put(&mut samples, 17, 4.0, 6);
+            put(&mut samples, 3, at(132), 2);
+            put(&mut samples, 11, at(137), 5);
+            put(&mut samples, 3, at(143), 5);
+            for (i, t) in [13.0, 15.0, 17.0, 19.0, 21.0].into_iter().enumerate() {
+                put(&mut samples, 12 + i as u32, t, 6);
+            }
+            (
+                vec![s(2.0)..s(8.0), s(11.2)..s(24.0)],
+                "w17 w11 w3 w12 w13 w14 w15 w16",
+            )
+        };
+        for jitter in 0..=2 {
+            let (new, old) = texts(&samples, &regions, &PipelineConfig::default(), jitter);
+            assert_eq!(new.stats.recoveries_accepted, 1, "{backward} {jitter}");
+            assert_eq!(
+                (new.text().as_str(), old.as_str()),
+                (expected, expected),
+                "backward {backward} jitter {jitter}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_word_across_the_seam_of_two_gap_windows_keeps_every_piece() {
+    // A 30 s gap and no chunk, `CoreML`'s settings: windows of at most
+    // 15 s that share 2 s. A four-piece word from five frames before the
+    // seam of the first two: the earlier window ends inside it and hears three
+    // pieces, the later one all four. Both keep the word, since a piece of
+    // it lies in each one's reach, and the seam keeps the copy with more
+    // pieces: the word comes out once and whole, as from the old merge.
+    let config = random_config(1, true);
+    let mut samples = crafted(30.0, &[], &[]);
+    let spans = partition(&samples, &[], &config.chunker);
+    assert!(
+        spans.len() > 2 && spans.iter().all(|s| !s.chunk),
+        "{spans:?}"
+    );
+    let seam = spans[1].owned.start;
+    let word = Placed {
+        pieces: vec![13, 34, 21, 41],
+        frame: seam / FRAME_SAMPLES - 5,
+        frames: 6,
+    };
+    assert!(word.start(3) >= spans[0].window.end && spans[0].window.end > word.start(2));
+    word.put(&mut samples);
+    for jitter in 0..=2 {
+        let (new, old) = texts(&samples, &[], &config, jitter);
+        assert_eq!(
+            (new.text().as_str(), old.as_str()),
+            ("w13s34s21.", "w13s34s21."),
+            "{jitter}"
         );
     }
 }
