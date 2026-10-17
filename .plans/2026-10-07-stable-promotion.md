@@ -470,7 +470,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
 | A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured; a durable working marker, and quarantine at launch ("Steno stopped while reading this recording") with the file kept and Process again offered; kill tests; the allocations bounded only if a real trigger exists | audio, after #263 |
-| A20 | The level meter never freezes behind a sync of the files: the levels go out from a thread of their own (`steno-levels`), woken by each publish into `LevelSlot`, instead of from the writer thread, whose periodic `sync_data` (P21; `FlushFileBuffers` on Windows) froze the meter and the `recording` snapshot for as long as it took, 1.0 to 1.3 s on a hosted runner; the sync, its cadence and the files are unchanged | audio |
+| A20 | The level meter never freezes behind a sync of the files: the levels go out from a thread of their own (`steno-levels`, woken by each publish into `LevelSlot`) instead of from the writer thread, whose periodic `sync_data` (P21; `FlushFileBuffers` on Windows) froze the meter and the `recording` snapshot for as long as it took, 1.0 to 1.3 s on a hosted runner; the sync, its cadence and the files are unchanged | audio |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -1579,7 +1579,8 @@ Each lands before `0.11.0-rc.1`.
   1.3 s on a hosted runner, seconds on a slow or external disk. The audio
   was safe (the relay's 20 s of headroom); only the UI froze.
   - The fix (Nicolai, 2026-10-17): the levels go out from a thread of
-    their own, `steno_audio::capture::LevelPublisher`, which the
+    their own, the crate-private `LevelPublisher`
+    (`crates/steno-audio/src/capture/level_publisher.rs`), which the
     session starts and stops with the recording. Each publish into
     `LevelSlot` wakes it (one more lock-free signal on the processing
     thread, none on the audio callback), and it wakes at least every

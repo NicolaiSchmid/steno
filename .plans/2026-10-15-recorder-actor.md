@@ -400,15 +400,17 @@ These bound every PR in this plan; a diff inside them sends the PR back.
   change.
 - **The lock-free rings** between the callback and `steno-process`.
 - **The relay** (`FrameRelay`) from `steno-process` to the writer.
-- **The writer.** `steno-writer`'s writes, syncs, drain and error reporting. PR 3
-  changes only where its level store goes, from the session mutex to an atomic.
+- **The writer.** `steno-writer`'s writes, syncs, drain and error reporting.
+  PR 3 changes only how the level publisher (`steno-levels`) hands the levels
+  on: through the session mutex today, without it after PR 3.
 - **The teardown order** in `CaptureSession::finish()`:
   1. No watch or rebuild step runs once the teardown begins (today:
      `steno-watch` and `steno-rebuild` are cancelled and joined).
   2. The rebuild's unaccounted gap and its peak are kept, before the
      processing, the writer and `clear()` run.
   3. `backend.stop()`, which never runs beside `backend.start()`.
-  4. The processing thread stops, which drains the rings.
+  4. The processing thread stops, which drains the rings; then the level
+     publisher stops, handing on the slot's last change.
   5. The writer stops, which drains the relay.
   6. The ring drops and the frames still in the rings are counted, then the
      rings are cleared.
@@ -604,8 +606,7 @@ Proposed ruling, for Nicolai to confirm, change or refuse:
 
 > After the stable release, the capture session's control plane may change in one
 > PR (this plan's PR 3), on four conditions: the data plane is untouched (the
-> callbacks, the rings, the relay, the writer apart from where it stores levels,
-> `finish()`'s order); every P22 behaviour holds as written; it is not merged
+> callbacks, the rings, the relay, the writer, `finish()`'s order); every P22 behaviour holds as written; it is not merged
 > before the 14-day rollback window of `0.11.0` has closed; and it ships first in
 > a candidate of the next minor release (`0.12.0`), which passes R5's soak and
 > G2's stability count (D12) as written there before a stable tag carries it. A
