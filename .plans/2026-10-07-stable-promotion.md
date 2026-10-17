@@ -1743,7 +1743,11 @@ Each lands before `0.11.0-rc.1`.
     time less the frames it delivered (0.25 to 0.4 s on a loaded host, 30
     to 70 ms on an idle one), was silent, hidden by the drift allowance in
     a long recording. The session now counts it unfilled on every lane, in
-    the same count and the same `warn` line as the stall.
+    the same count and the same `warn` line as the stall. A restart whose
+    frames came only during the wait for its first frame (WASAPI, Core
+    Audio) keeps its gap, which runs to the last sample of the frames
+    offered that read none, so that time is counted to within
+    `STALL_CHECK_INTERVAL` (100 ms).
   - **Writing it.** A jump of at most `MISSED_FILL_LIMIT` (one second at
     the stream's rate) is written as zeros on every lane before the
     callback's own frames (`LaneFrameSink::write_missed`), on the
