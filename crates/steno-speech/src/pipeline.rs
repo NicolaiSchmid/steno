@@ -341,9 +341,10 @@ fn join(spans: &[Span], decoded: &[Vec<Token>], overlap_seconds: f64, vocab: &Vo
             out.extend(merge_all(tokens, overlap_seconds, vocab));
         } else {
             let mut window = &tokens[0][..];
-            let after_chunk = at > 0 && spans[at - 1].recover;
-            let chunk_last = out.iter().rev().find(|t| starts_word(t));
-            if let (true, Some(last), Some(first)) = (after_chunk, chunk_last, window.first())
+            if at > 0
+                && spans[at - 1].recover
+                && let Some(last) = out.iter().rev().find(|t| starts_word(t))
+                && let Some(first) = window.first()
                 && first.id == last.id
                 && first.sample().abs_diff(last.sample()) <= 2 * FRAME_SAMPLES
             {
