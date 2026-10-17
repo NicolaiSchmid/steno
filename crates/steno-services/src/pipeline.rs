@@ -11,8 +11,9 @@ use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, MeetingStateKind};
 use steno_host::services::{Pipeline, ProcessAgainRefusal};
 use steno_pipeline::{
-    ExportRetries, InFlight, ModelWaits, Operation, PipelineDependencies, PipelineFailure,
-    ProcessingPipeline, QuitLatch, ReprocessError, RetentionSweep, SweepIncomplete,
+    ExportRetries, InFlight, LiveRecording, ModelWaits, Operation, PipelineDependencies,
+    PipelineFailure, ProcessingPipeline, QuitLatch, ReprocessError, RetentionSweep,
+    SweepIncomplete,
 };
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
@@ -95,12 +96,14 @@ struct Current {
 }
 
 impl Current {
-    /// The pipeline over `built`, sharing `latch`, `in_flight` and `waits`.
+    /// The pipeline over `built`, sharing `latch`, `in_flight`, `waits`
+    /// and `live`.
     fn new(
         built: BuiltPipeline,
         latch: &QuitLatch,
         in_flight: &InFlight,
         waits: &ModelWaits,
+        live: &LiveRecording,
     ) -> Self {
         Current {
             pipeline: ProcessingPipeline::new(
@@ -108,7 +111,8 @@ impl Current {
                     .dependencies
                     .with_quit_latch(latch.clone())
                     .with_in_flight(in_flight.clone())
-                    .with_model_waits(waits.clone()),
+                    .with_model_waits(waits.clone())
+                    .with_live_recording(live.clone()),
             ),
             engine: built.engine,
         }
@@ -126,7 +130,8 @@ impl Current {
 /// holds, and one [`ModelWaits`], so
 /// [`resume_waiting`](Self::resume_waiting) starts the meetings any of
 /// them left waiting for models, on the current one (the rules are on
-/// [`ModelWaits`]). The meetings any of them left waiting for the store are
+/// [`ModelWaits`]), and one [`LiveRecording`], so a retired one's job waits
+/// for a recording too. The meetings any of them left waiting for the store are
 /// tried again on the current one by a task of its own ([`StoreRetry`]),
 /// which ends when this value is dropped. Held by `App`, the recorder, the
 /// phone intake and [`HostPipeline`].
@@ -138,6 +143,9 @@ pub struct CurrentPipeline {
     quit_latch: QuitLatch,
     in_flight: InFlight,
     model_waits: ModelWaits,
+    /// The recorder's state, which every build waits on before it runs an
+    /// engine in this process ([`live_recording`](Self::live_recording)).
+    live_recording: LiveRecording,
     /// Whether a resume starts the waiting meetings
     /// ([`resuming_when`](Self::resuming_when)).
     models_installed: ModelsInstalled,
@@ -163,11 +171,13 @@ impl CurrentPipeline {
         let quit_latch = QuitLatch::default();
         let in_flight = InFlight::default();
         let model_waits = ModelWaits::default();
+        let live_recording = LiveRecording::default();
         let current = Arc::new(Mutex::new(Current::new(
             built,
             &quit_latch,
             &in_flight,
             &model_waits,
+            &live_recording,
         )));
         let store_retry = runtime.spawn(retry_the_store(
             Arc::downgrade(&current),
@@ -181,6 +191,7 @@ impl CurrentPipeline {
             quit_latch,
             in_flight,
             model_waits,
+            live_recording,
             models_installed: Arc::new(|_| true),
             store_retry,
         }
@@ -286,6 +297,15 @@ impl CurrentPipeline {
         &self.in_flight
     }
 
+    /// Whether a recording is under way, as every pipeline it builds sees
+    /// it: the recorder sets it at each change of its state, and a job
+    /// runs no speech engine in this process while it is live
+    /// ([`steno_pipeline::live_recording`]).
+    #[must_use]
+    pub fn live_recording(&self) -> &LiveRecording {
+        &self.live_recording
+    }
+
     /// Replaces the pipeline with one built from the stored settings and
     /// the secret store's API key. A failed build keeps the current
     /// pipeline and its engine. The app's builds keep the speech engine,
@@ -301,6 +321,7 @@ impl CurrentPipeline {
             &self.quit_latch,
             &self.in_flight,
             &self.model_waits,
+            &self.live_recording,
         );
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
         self.runtime
@@ -1668,6 +1689,31 @@ mod tests {
                 runtime: SpeechRuntime::OnnxSidecar,
             },
         }
+    }
+
+    /// A reload shares the recorder's state with the build it retires and
+    /// with the new one, so a job of either waits for a recording before
+    /// it runs an engine in this process (A19).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_build_sees_the_recording_a_reload_too() {
+        let (_dir, store) = temp_store();
+        let make: MakeDependencies = {
+            let store = store.clone();
+            Arc::new(move || Ok(on_the_sidecar(fake_dependencies(&store, "fake-engine"))))
+        };
+        let current =
+            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+        let retired = current.current();
+        current.reload().unwrap();
+        current.live_recording().set(true);
+        assert!(
+            retired.dependencies().live_recording.is_live(),
+            "the retired build"
+        );
+        assert!(
+            current.current().dependencies().live_recording.is_live(),
+            "the reloaded build"
+        );
     }
 
     /// A `CurrentPipeline` whose every pipeline, reloads included, shares

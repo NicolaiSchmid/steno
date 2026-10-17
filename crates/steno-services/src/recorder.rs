@@ -998,6 +998,10 @@ pub struct CaptureRecorder {
     calendar: CalendarLookups,
     /// This recorder, for the watcher threads.
     this: Weak<CaptureRecorder>,
+    /// Runs in [`Self::notify`] between the read of the state and the
+    /// live flag's change, where a test checks the lock is held.
+    #[cfg(test)]
+    before_live: Mutex<Hook>,
 }
 
 impl CaptureRecorder {
@@ -1047,6 +1051,8 @@ impl CaptureRecorder {
             clock: Mutex::new(Arc::new(steno_audio::SystemClock::new())),
             calendar: CalendarLookups::new(Arc::new(NoCalendar)),
             this: this.clone(),
+            #[cfg(test)]
+            before_live: Mutex::new(None),
         })
     }
 
@@ -1324,7 +1330,27 @@ impl CaptureRecorder {
             .clone()
     }
 
+    /// Every change of the status ends here. The live flag is read and set
+    /// under the recorder's lock, so two notifies never apply out of
+    /// order: the pipelines learn whether a recording is under way (live
+    /// from `Starting` to `Idle`), so no job runs `CoreML` beside one
+    /// ([`steno_pipeline::live_recording`]). The flag's send neither
+    /// blocks nor takes the recorder's lock.
     fn notify(&self) {
+        {
+            let inner = self.inner();
+            let live = inner.status.state != RecordingState::Idle;
+            #[cfg(test)]
+            if let Some(hook) = self
+                .before_live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                hook();
+            }
+            self.pipeline.live_recording().set(live);
+        }
         self.changes.notify_all();
         if let Some(hook) = self.hook() {
             hook();
@@ -3415,6 +3441,68 @@ mod tests {
             steno_core::MeetingStateKind::Recording
         );
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
+    }
+
+    /// Every pipeline sees a recording as under way from its start to the
+    /// end of its stop, and as over once the recorder is idle again, so no
+    /// job runs `CoreML` beside it (A19 of
+    /// `.plans/2026-10-07-stable-promotion.md`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_pipelines_see_a_recording_from_its_start_to_the_end_of_its_stop() {
+        let harness = harness(&[]);
+        let live = || {
+            harness
+                .recorder
+                .pipeline
+                .current()
+                .dependencies()
+                .live_recording
+                .is_live()
+        };
+        assert!(!live());
+        let start_seen = held_in(&harness.recorder, RecordingState::Starting);
+        let starter = harness.recorder.clone();
+        let starting = std::thread::spawn(move || start(&starter));
+        start_seen.recv_timeout(PATIENCE).expect("the start began");
+        assert!(live(), "starting");
+        starting.join().unwrap();
+        assert!(live(), "recording");
+        let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
+        let stopper = harness.recorder.clone();
+        let stopping = std::thread::spawn(move || stop(&stopper));
+        stop_seen.recv_timeout(PATIENCE).expect("the stop began");
+        assert!(live(), "stopping");
+        stopping.join().unwrap();
+        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
+        assert!(!live(), "idle");
+    }
+
+    /// The live flag changes under the recorder's lock at every change of
+    /// a recording, from its start to the end of its stop, so two notifies
+    /// on different threads never apply out of order: a stale one could
+    /// otherwise set the flag live after a stop, and every job would wait
+    /// for a recording that is over, or idle during a start, and a job
+    /// would run `CoreML` beside it (A19).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_live_flag_changes_under_the_recorders_lock() {
+        let harness = harness(&[]);
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::downgrade(&harness.recorder);
+        *harness.recorder.before_live.lock().unwrap() = Some(Arc::new({
+            let held = held.clone();
+            move || {
+                if let Some(recorder) = recorder.upgrade() {
+                    // Held by this thread: the flag's change follows under it.
+                    let locked = recorder.inner.try_lock().is_err();
+                    held.lock().unwrap().push(locked);
+                }
+            }
+        }));
+        start(&harness.recorder);
+        stop(&harness.recorder);
+        let held = held.lock().unwrap();
+        assert!(held.len() >= 4, "a start and a stop notify: {held:?}");
+        assert!(held.iter().all(|locked| *locked), "{held:?}");
     }
 
     /// A Quit while a manual Stop is still saving waits for that save:

@@ -41,8 +41,8 @@ use steno_host::services::{FileSystem, LeftRecording, Recorder};
 
 use crate::recorder::MakeCaptureSession;
 use crate::testing::{
-    an_hour_later, app_decoding, app_over_fakes, app_warming_up, synthetic_capture,
-    synthetic_capture_through,
+    an_hour_later, app_decoding, app_falling_back, app_over_fakes, app_warming_up,
+    synthetic_capture, synthetic_capture_through,
 };
 
 /// The directory the child records under; unset outside a child.
@@ -659,6 +659,18 @@ impl steno_core::SpeechEngine for LoadUntilKilled {
     }
 }
 
+/// The child's app over `directory`, on a [`LoadUntilKilled`] engine in
+/// this process ([`app_warming_up`]).
+fn loading_until_killed(directory: &Path) -> crate::App {
+    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
+    let engine = Arc::new(LoadUntilKilled {
+        inner: steno_core::testing::FakeSpeechEngine::default(),
+        loading: directory.join("loading"),
+        mark: warm_up_mark(directory),
+    });
+    app_warming_up(directory, &store, synthetic_capture(), engine)
+}
+
 /// The warm-up's mark in the support directory of `directory`.
 fn warm_up_mark(directory: &Path) -> PathBuf {
     directory
@@ -683,13 +695,7 @@ fn child_warms_up_until_killed() {
         .build()
         .unwrap();
     let _entered = runtime.enter();
-    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
-    let engine = Arc::new(LoadUntilKilled {
-        inner: steno_core::testing::FakeSpeechEngine::default(),
-        loading: directory.join("loading"),
-        mark: warm_up_mark(&directory),
-    });
-    let app = app_warming_up(&directory, &store, synthetic_capture(), engine);
+    let app = loading_until_killed(&directory);
     app.recorder.start(CaptureMode::InPerson, None);
     assert_eq!(app.recorder.status().error, None);
     loop {
@@ -719,7 +725,9 @@ fn record(app: &crate::App, seconds: f64) -> uuid::Uuid {
 /// warm-up: a recording then loads nothing while it runs, records and is
 /// saved, and its processing loads the engine, which clears the mark, so
 /// the recording after it warms up again. A15 of
-/// `.plans/2026-10-07-stable-promotion.md`.
+/// `.plans/2026-10-07-stable-promotion.md`. The app here has no fallback,
+/// to show the mark alone; the app's own launch also turns the speech
+/// sidecar on in `CoreML`'s place (A19, the test after this one).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_warm_up_killed_turns_the_warm_up_off_until_a_meeting_loads_the_models() {
     let dir = tempfile::tempdir().unwrap();
@@ -777,6 +785,258 @@ async fn a_warm_up_killed_turns_the_warm_up_off_until_a_meeting_loads_the_models
         "this recording's warm-up and its processing's load"
     );
     assert!(!warm_up_mark(dir.path()).exists());
+}
+
+/// The child: processes the asset in `bad` under its directory on a
+/// speech engine in this process, as `CoreML` is on the Mac, whose load
+/// never returns, and is killed in it, as an abort in `CoreML` that no
+/// `@catch` stops ends the app. Passes at once outside a child.
+#[test]
+#[ignore = "the kill tests run it in a child process"]
+fn child_loads_the_engine_until_killed() {
+    let Ok(directory) = std::env::var(DIRECTORY) else {
+        return;
+    };
+    die_with_the_parent();
+    let directory = PathBuf::from(directory);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let app = loading_until_killed(&directory);
+    let asset_id: uuid::Uuid = std::fs::read_to_string(directory.join("bad"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let _ = runtime.block_on(app.pipeline.current().process(asset_id));
+    unreachable!("the load never returns");
+}
+
+/// A speech engine that counts its calls, and says whether a recording
+/// was under way at each, as the pipelines see it.
+#[derive(Default)]
+struct Counting {
+    inner: steno_core::testing::FakeSpeechEngine,
+    /// The pipelines' view of the recorder of the app the engine runs in.
+    live: std::sync::Mutex<Option<steno_pipeline::LiveRecording>>,
+    beside_a_recording: std::sync::atomic::AtomicUsize,
+}
+
+impl Counting {
+    fn calls(&self) -> usize {
+        self.inner.preparations.count() + self.inner.transcriptions.count()
+    }
+
+    /// The calls made while a recording was under way.
+    fn beside_a_recording(&self) -> usize {
+        self.beside_a_recording
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn note(&self) {
+        if self
+            .live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(steno_pipeline::LiveRecording::is_live)
+        {
+            self.beside_a_recording
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+#[steno_core::async_trait]
+impl steno_core::SpeechEngine for Counting {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
+        self.inner.supported_languages()
+    }
+
+    async fn prepare(&self) -> steno_core::BoundaryResult<()> {
+        self.note();
+        self.inner.prepare().await
+    }
+
+    async fn transcribe(
+        &self,
+        audio: &steno_core::AudioBuffer16k,
+        hint: Option<&steno_core::LanguageTag>,
+    ) -> steno_core::BoundaryResult<Vec<steno_core::RawSegment>> {
+        self.note();
+        self.inner.transcribe(audio, hint).await
+    }
+}
+
+/// The app after `dir`'s child over two counting engines, `CoreML`'s and
+/// the sidecar's ([`app_falling_back`]).
+fn falling_back(
+    dir: &Path,
+    coreml: &Arc<Counting>,
+    sidecar: &Arc<Counting>,
+) -> (Arc<Store>, crate::App) {
+    let store = Arc::new(Store::open(dir.join("steno.sqlite")).unwrap());
+    let app = app_falling_back(dir, &store, coreml.clone(), sidecar.clone());
+    for engine in [coreml, sidecar] {
+        *engine.live.lock().unwrap() = Some(app.pipeline.live_recording().clone());
+    }
+    (store, app)
+}
+
+/// [`falling_back`], launched, its queued meetings processed.
+async fn falling_back_after(
+    dir: &Path,
+    coreml: &Arc<Counting>,
+    sidecar: &Arc<Counting>,
+) -> (Arc<Store>, crate::App) {
+    let (store, app) = falling_back(dir, coreml, sidecar);
+    (store, launched(app).await)
+}
+
+/// Records half a second on `app` and waits for the meeting's processing,
+/// which must succeed.
+async fn recorded_and_processed(app: &crate::App, store: &Store) {
+    let recorded = record(app, 0.5);
+    app.pipeline.current().wait_until_idle().await;
+    assert_eq!(
+        store.meeting(recorded).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
+}
+
+/// A process killed in `CoreML`'s load during a meeting's processing (an
+/// abort no `@catch` stops ends it the same way) turns the speech sidecar
+/// on in `CoreML`'s place: the next launch processes that meeting in the
+/// sidecar, the recordings after it load nothing in the app's process,
+/// while they run or after, and the next launch keeps the
+/// sidecar. Only the user turns `CoreML` back on: then the next meeting
+/// runs on it, with no warm-up beside its recording, the recording after
+/// it warms up again, and a launch after that does not turn the sidecar
+/// on again for the same marks. A19 of `.plans/2026-10-07-stable-promotion.md`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_coreml_load_killed_moves_the_meetings_to_the_speech_sidecar_until_the_user_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bad, bad_asset) = {
+        let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+        queued_call(&store, dir.path())
+    };
+    std::fs::write(dir.path().join("bad"), bad_asset.id.to_string()).unwrap();
+    let mut child = spawn_test(
+        "kill_tests::child_loads_the_engine_until_killed",
+        dir.path(),
+        Gate::Open.name(),
+    );
+    let loading = dir.path().join("loading");
+    kill_when(&mut child, dir.path(), "the job's load", || {
+        std::fs::read(&loading).is_ok_and(|said| !said.is_empty())
+    });
+    let marks = dir
+        .path()
+        .join("support")
+        .join(steno_pipeline::ReadingMarks::FOLDER);
+    assert_eq!(
+        std::fs::read_dir(&marks).unwrap().count(),
+        1,
+        "the load's mark outlived the kill"
+    );
+
+    let coreml = Arc::new(Counting::default());
+    let sidecar = Arc::new(Counting::default());
+    let (store, app) = falling_back_after(dir.path(), &coreml, &sidecar).await;
+    assert!(app.services.speech_models.speech_fallback());
+    assert_eq!(
+        store.meeting(bad.id).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
+    assert_eq!(coreml.calls(), 0, "nothing ran in the app's process");
+    assert_eq!(sidecar.inner.transcriptions.count(), 2, "both lanes");
+
+    recorded_and_processed(&app, &store).await;
+    assert_eq!(coreml.calls(), 0, "no warm-up and no load in the app");
+    assert_eq!(sidecar.inner.transcriptions.count(), 3);
+    drop(app);
+
+    let (_, app) = falling_back_after(dir.path(), &coreml, &sidecar).await;
+    assert!(app.services.speech_models.speech_fallback(), "it stays on");
+
+    app.services.speech_models.end_speech_fallback().unwrap();
+    app.pipeline.reload().unwrap();
+    assert!(!app.services.speech_models.speech_fallback());
+    recorded_and_processed(&app, &store).await;
+    assert_eq!(coreml.inner.transcriptions.count(), 1, "CoreML again");
+    assert_eq!(
+        coreml.beside_a_recording(),
+        0,
+        "no warm-up beside the recording until a job has loaded CoreML"
+    );
+    recorded_and_processed(&app, &store).await;
+    assert_eq!(
+        coreml.beside_a_recording(),
+        1,
+        "the job's load brought the warm-up back"
+    );
+    drop(app);
+
+    let (_, app) = falling_back_after(dir.path(), &coreml, &sidecar).await;
+    assert!(
+        !app.services.speech_models.speech_fallback(),
+        "the marks it saw do not turn it on again"
+    );
+}
+
+/// A warm-up killed in its load turns the speech sidecar on too: the
+/// recordings after it load nothing in the app's process. Once the user
+/// turns `CoreML` back on, the warm-up stays off until a meeting's
+/// processing has loaded it, so that first load never runs beside a
+/// recording; the recording after it warms up again. A19 of
+/// `.plans/2026-10-07-stable-promotion.md`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_warm_up_killed_moves_the_meetings_to_the_speech_sidecar_until_the_user_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = spawn_test(
+        "kill_tests::child_warms_up_until_killed",
+        dir.path(),
+        Gate::Open.name(),
+    );
+    let loading = dir.path().join("loading");
+    kill_when(&mut child, dir.path(), "the warm-up's load", || {
+        std::fs::read(&loading).is_ok_and(|said| !said.is_empty())
+    });
+
+    let coreml = Arc::new(Counting::default());
+    let sidecar = Arc::new(Counting::default());
+    let (store, app) = falling_back(dir.path(), &coreml, &sidecar);
+    assert!(app.services.speech_models.speech_fallback());
+    recorded_and_processed(&app, &store).await;
+    assert_eq!(coreml.calls(), 0, "nothing ran in the app's process");
+    assert_eq!(sidecar.inner.transcriptions.count(), 1);
+
+    app.services.speech_models.end_speech_fallback().unwrap();
+    app.pipeline.reload().unwrap();
+    recorded_and_processed(&app, &store).await;
+    assert_eq!(
+        coreml.inner.preparations.count(),
+        1,
+        "the processing's load, not a warm-up"
+    );
+    assert_eq!(
+        coreml.beside_a_recording(),
+        0,
+        "nothing ran in the app's process beside the recording"
+    );
+    assert!(!warm_up_mark(dir.path()).exists(), "the load cleared it");
+
+    recorded_and_processed(&app, &store).await;
+    assert_eq!(coreml.beside_a_recording(), 1, "this recording's warm-up");
+    drop(app);
+    let (_, app) = falling_back(dir.path(), &coreml, &sidecar);
+    assert!(!app.services.speech_models.speech_fallback());
 }
 
 /// Where the child's delete waits to be killed: each between two of the
@@ -1185,11 +1445,16 @@ fn killed_in_the_decode(dir: &Path, bad: &steno_core::AudioAsset, kills: usize) 
 async fn launched_after(dir: &Path) -> (Arc<Store>, crate::App) {
     let store = Arc::new(Store::open(dir.join("steno.sqlite")).unwrap());
     let app = app_over_fakes(dir, &store, synthetic_capture());
+    (store, launched(app).await)
+}
+
+/// `app` launched, its queued meetings processed.
+async fn launched(app: crate::App) -> crate::App {
     let host = Arc::new(app.host().unwrap());
     app.launch(&host);
     app.launch_finished().await;
     app.pipeline.current().wait_until_idle().await;
-    (store, app)
+    app
 }
 
 /// A process killed once while it reads a recording (a failed allocation

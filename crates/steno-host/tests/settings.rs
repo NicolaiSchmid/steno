@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 
 use steno_host::services::{LoginItem as _, Preferences as _, SpeechModels as _};
@@ -20,7 +21,7 @@ use steno_bridge::{
 };
 use steno_core::paths::file_url;
 use steno_core::protocols::{BoundaryResult, SecretKey, SecretStore};
-use steno_core::{AudioRetention, LlmProvider};
+use steno_core::{AudioRetention, LlmProvider, MeetingEvent, MeetingState};
 use steno_host::host::{LOGIN_ITEM_REGISTERED_KEY, MAIN_APP_REGISTERED_KEY, first_launch_key};
 use steno_host::services::{CodexModel, LoginItemStatus, UpdateOutcome};
 use steno_host::settings::{KeyRead, LlmSettingsViewModel};
@@ -677,6 +678,126 @@ fn errors_are_sentences_with_the_details_apart() {
     assert_eq!(recording["error"], "Microphones could not be listed.");
     assert_eq!(recording["errorDetails"], "Core Audio said no");
     assert_eq!(recording["devices"], json!([]));
+}
+
+/// A harness whose speech sidecar stands in for the Neural Engine, which
+/// ended the app (A19).
+fn falling_back() -> Harness {
+    Harness::builder()
+        .seed(|_, fakes| {
+            fakes
+                .speech_models
+                .speech_fallback
+                .store(true, Ordering::SeqCst);
+        })
+        .build()
+}
+
+/// While the speech sidecar stands in for the Neural Engine, which ended
+/// the app, Transcription says so and offers it again; the action ends the
+/// fallback and rebuilds the pipeline, and the offer goes. Rust only
+/// (A19).
+#[test]
+fn transcription_offers_the_neural_engine_again_after_the_fallback() {
+    assert!(
+        Harness::builder()
+            .build()
+            .snapshot(BridgeTopic::SettingsTranscription)
+            .get("neuralEngineOff")
+            .is_none(),
+        "left out while the Neural Engine is on"
+    );
+    let harness = falling_back();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsTranscription)["neuralEngineOff"],
+        true
+    );
+
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert!(
+        !harness
+            .fakes
+            .speech_models
+            .speech_fallback
+            .load(Ordering::SeqCst)
+    );
+    assert_eq!(*harness.fakes.pipeline.reloads.lock().unwrap(), 1);
+    let transcription = harness.snapshot(BridgeTopic::SettingsTranscription);
+    assert!(transcription.get("neuralEngineOff").is_none());
+    assert!(transcription.get("error").is_none());
+}
+
+/// The fallback ends but the pipeline's rebuild fails: this run still
+/// transcribes in the speech sidecar, so Transcription keeps the offer and
+/// says why, also after the rows refresh, and a second press tries the
+/// rebuild again. Rust only (A19).
+#[test]
+fn a_failed_rebuild_after_the_fallback_ended_keeps_the_offer() {
+    let harness = falling_back();
+    harness.fakes.pipeline.fail_calls(Some("the store is busy"));
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert_eq!(*harness.fakes.pipeline.reloads.lock().unwrap(), 1);
+    let transcription = harness.snapshot(BridgeTopic::SettingsTranscription);
+    assert_eq!(
+        transcription["error"],
+        "The Neural Engine could not be turned back on yet. Try again, or quit and reopen Steno."
+    );
+    assert_eq!(
+        transcription["neuralEngineOff"], true,
+        "the offer stays while this run's pipeline is still on the sidecar"
+    );
+    // A refresh of the rows (here a remove's) keeps it too.
+    harness
+        .host
+        .settings_transcription_remove(AssetIdParams {
+            asset_id: "offlineDiarizer".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsTranscription)["neuralEngineOff"],
+        true
+    );
+
+    harness.fakes.pipeline.fail_calls(None);
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert_eq!(
+        *harness.fakes.pipeline.reloads.lock().unwrap(),
+        2,
+        "the second press rebuilds"
+    );
+    let transcription = harness.snapshot(BridgeTopic::SettingsTranscription);
+    assert!(transcription.get("neuralEngineOff").is_none());
+    assert!(transcription.get("error").is_none());
+}
+
+/// A fallback that could not be ended (its file not written) stays on:
+/// Transcription says the Neural Engine could not be turned back on, keeps
+/// the offer, and the pipeline is not rebuilt. Rust only (A19).
+#[test]
+fn a_fallback_that_could_not_be_ended_stays_on() {
+    let harness = falling_back();
+    let models = &harness.fakes.speech_models;
+    *models.end_fallback_failure.lock().unwrap() = Some("read-only file system".to_owned());
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert_eq!(*harness.fakes.pipeline.reloads.lock().unwrap(), 0);
+    let transcription = harness.snapshot(BridgeTopic::SettingsTranscription);
+    assert_eq!(transcription["neuralEngineOff"], true);
+    assert_eq!(
+        transcription["error"],
+        "The Neural Engine could not be turned back on."
+    );
 }
 
 /// Swift: `testSpeechEngineChangeReloadsThePipeline`, `testSpeechDownloadStreamsProgressToInstalled`.
@@ -2723,4 +2844,69 @@ fn phones_pair_list_and_revoke_devices() {
     let phone = harness.snapshot(BridgeTopic::SettingsPhone);
     assert_eq!(phone["error"], "Pairing could not start.");
     assert_eq!(phone["errorDetails"], "port in use");
+}
+
+/// A failed rebuild after "Use again", then a reload that succeeds from
+/// another section (a Summaries save): the pipeline is on the Neural Engine
+/// again, so the offer goes, and a meeting waiting for its models no longer
+/// says the Neural Engine is off (A19).
+#[test]
+fn a_later_successful_reload_ends_a_failed_rebuilds_offer() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x8D);
+            meeting.state = MeetingState::Queued;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+            fakes
+                .speech_models
+                .speech_fallback
+                .store(true, Ordering::SeqCst);
+        })
+        .build();
+    let title =
+        |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0]["title"].clone();
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::ModelsMissing {
+            meeting_id: uuid(0x8D),
+        });
+    harness.fakes.pipeline.fail_calls(Some("the store is busy"));
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsTranscription)["neuralEngineOff"],
+        true
+    );
+    assert_eq!(
+        title(&harness),
+        "Neural Engine off after a crash: download the speech models in Settings"
+    );
+    harness.fakes.pipeline.fail_calls(None);
+    harness
+        .host
+        .settings_summaries_update(update(
+            Some("a-model"),
+            Some("http://localhost:1/v1"),
+            None,
+            None,
+        ))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(
+        *harness.fakes.pipeline.reloads.lock().unwrap(),
+        2,
+        "the save rebuilt the pipeline"
+    );
+    assert!(
+        harness
+            .snapshot(BridgeTopic::SettingsTranscription)
+            .get("neuralEngineOff")
+            .is_none(),
+        "the pipeline is on the Neural Engine again"
+    );
+    assert_eq!(title(&harness), "Download the speech models in Settings");
 }

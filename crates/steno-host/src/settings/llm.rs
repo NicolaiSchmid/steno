@@ -265,6 +265,9 @@ pub struct LlmSettingsViewModel {
     /// and not yet begun; the host takes it with [`Self::begin_pending_probe`]
     /// and runs it outside its lock.
     probe_pending: bool,
+    /// A save rebuilt the pipeline since the host last took it
+    /// ([`Self::take_pipeline_rebuilt`]). Rust only.
+    pipeline_rebuilt: bool,
 }
 
 impl LlmSettingsViewModel {
@@ -294,6 +297,7 @@ impl LlmSettingsViewModel {
             key_store: None,
             key_unreadable: None,
             probe_pending: false,
+            pipeline_rebuilt: false,
         }
     }
 
@@ -675,6 +679,7 @@ impl LlmSettingsViewModel {
             Ok(settings) => {
                 self.is_configured = llm_configured(&settings);
                 self.stored = Some(draft);
+                self.pipeline_rebuilt = true;
                 self.errors.clear();
                 if write_key {
                     self.key_version = next_key_version();
@@ -734,6 +739,14 @@ impl LlmSettingsViewModel {
         }
         services.pipeline.reload()?;
         Ok(settings)
+    }
+
+    /// Whether a save rebuilt the pipeline since the last call; the host
+    /// hands it to the Transcription section
+    /// ([`SpeechSettingsViewModel::pipeline_rebuilt`](crate::settings::SpeechSettingsViewModel::pipeline_rebuilt)).
+    /// Rust only.
+    pub fn take_pipeline_rebuilt(&mut self) -> bool {
+        std::mem::take(&mut self.pipeline_rebuilt)
     }
 
     /// Asks for a probe; the host begins it once the command's lock is

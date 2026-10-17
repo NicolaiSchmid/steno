@@ -135,6 +135,27 @@ export function TranscriptionSection() {
 					/>
 				</FormCard>
 			) : null}
+			{transcription.neuralEngineOff ? (
+				<FormCard title="Neural Engine">
+					<FormRow
+						control={
+							<Button
+								data-testid="use-neural-engine"
+								onClick={() =>
+									send(client, "settings.transcription.useNeuralEngine")
+								}
+								size="sm"
+								variant="outline"
+							>
+								Use again
+							</Button>
+						}
+						data-testid="neural-engine-off"
+						description="Steno closed unexpectedly while it was using the Neural Engine, so it now transcribes on the processor, which is slower. Download the model below if it is missing. Use the Neural Engine again if Steno was force quit or the Mac lost power."
+						label="Turned off after a crash"
+					/>
+				</FormCard>
+			) : null}
 			<FormCard
 				footer={
 					transcription.allInstalled

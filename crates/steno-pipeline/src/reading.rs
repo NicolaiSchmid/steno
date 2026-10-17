@@ -21,9 +21,12 @@
 //!   persist stage's mixdown, recovery's read of an adopted recording's
 //!   declared length (`steno-services`); and, where the speech engine runs
 //!   in the app's process (`CoreML` on the Mac), the job's load of the
-//!   engine and each transcription. Process again and the CLI's `process`
-//!   and `reprocess` run the same stages. The speech sidecar and the
-//!   diarizer run in a child, whose abort ends only the child.
+//!   engine and each transcription; such a mark left over also turns the
+//!   speech sidecar on in the engine's place
+//!   ([`SpeechFallback`](crate::SpeechFallback)). Process again and the
+//!   CLI's `process` and `reprocess` run the same stages. The speech
+//!   sidecar and the diarizer run in a child, whose abort ends only the
+//!   child.
 //! - **An orderly exit** ([`ReadingMarks::exiting`], from
 //!   [`ProcessingPipeline::quit`]) removes the marks of the reads still
 //!   running, and those of a meeting Process again released, and writes no
@@ -63,10 +66,12 @@
 //! recording is read fail that one meeting with Process again offered, and
 //! nothing is lost. Two more cases count a crash against a recording that
 //! did not cause it:
-//! - a `CoreML` abort in another meeting's transcription while this one
-//!   waits for its turn at the engine (`OneCallAtATime` in
+//! - a `CoreML` abort in a recording's warm-up while this meeting's load
+//!   or transcription waits for the engine behind it (`OneCallAtATime` in
 //!   `steno-services`, which the pipeline cannot see): the Transcribe mark
-//!   spans the wait;
+//!   spans that wait. The jobs take their turn at the engine before they
+//!   mark ([`crate::live_recording`]), so one job's abort no longer counts
+//!   against another waiting for its turn;
 //! - a crash in a resumed meeting's read while the launch reads an
 //!   orphan's length beside it: the adoption runs last, on a blocking
 //!   task, so a folder that is slow to answer delays no resume
@@ -74,7 +79,7 @@
 //!   orphan is listed failed and unread, its file kept.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -159,6 +164,10 @@ struct Found {
     /// The meetings on their second attempt, with the marks of the
     /// first, which go once a run reads through.
     retrying: HashMap<Uuid, Retry>,
+    /// The names of the marks kept of an in-process speech engine's load
+    /// or transcription ([`ReadStage::Transcribe`]), for the fallback
+    /// ([`crate::SpeechFallback`]).
+    speech: BTreeSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -220,6 +229,13 @@ impl ReadingMarks {
         let mut found = Found::default();
         for (meeting_id, left) in marks {
             let (files, left): (Vec<PathBuf>, Vec<Mark>) = left.into_iter().unzip();
+            let speech: Vec<String> = files
+                .iter()
+                .zip(&left)
+                .filter(|(_, mark)| mark.stage == ReadStage::Transcribe)
+                .filter_map(|(file, _)| file.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect();
             let second = left.iter().any(|mark| mark.attempt > 0);
             let stages: Vec<ReadStage> = left.iter().map(|mark| mark.stage).collect();
             let asset_id = left.iter().find_map(|mark| mark.asset_id);
@@ -248,6 +264,7 @@ impl ReadingMarks {
                 }
                 Ok(_) => {
                     tracing::warn!(%meeting_id, ?asset_id, ?stages, ?started, "Steno stopped while reading this recording; it is read once more");
+                    found.speech.extend(speech);
                     found.retrying.insert(
                         meeting_id,
                         Retry {
@@ -261,11 +278,22 @@ impl ReadingMarks {
                     tracing::warn!(%meeting_id, %error, "a meeting whose read ended with the app could not be read; it stays held");
                 }
             }
+            found.speech.extend(speech);
             found.held.insert(meeting_id, files);
         }
         let marks = Self::with_syncs(Some(folder), syncs);
         *marks.found() = found;
         marks
+    }
+
+    /// The names of the marks the launch kept of an in-process speech
+    /// engine's load or transcription ([`ReadStage::Transcribe`]): each is
+    /// one that ended with the app, which turns the fallback on
+    /// ([`crate::SpeechFallback`]). The marks beside a finished meeting,
+    /// which the launch removed, are not among them.
+    #[must_use]
+    pub fn speech_marks_left(&self) -> BTreeSet<String> {
+        self.found().speech.clone()
     }
 
     /// Whether the launch quarantined `meeting_id` and nothing released it.

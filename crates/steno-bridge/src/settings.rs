@@ -255,6 +255,12 @@ pub struct TranscriptionSettingsSnapshot {
     pub shows_engine_picker: bool,
     pub assets: Vec<TranscriptionAsset>,
     pub all_installed: bool,
+    /// Steno closed while it was using the Neural Engine, so the speech
+    /// sidecar transcribes instead until the user turns the Neural Engine
+    /// back on ([`BridgeMethod::SettingsTranscriptionUseNeuralEngine`](crate::BridgeMethod::SettingsTranscriptionUseNeuralEngine)).
+    /// Left out when false. Rust only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub neural_engine_off: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -81,6 +81,10 @@ string_enum! {
         SettingsTranscriptionSetEngine = "settings.transcription.setEngine",
         SettingsTranscriptionDownload = "settings.transcription.download",
         SettingsTranscriptionRemove = "settings.transcription.remove",
+        /// The Neural Engine again, after the speech sidecar stood in for
+        /// it ([`TranscriptionSettingsSnapshot::neural_engine_off`](crate::settings::TranscriptionSettingsSnapshot::neural_engine_off)).
+        /// Rust only.
+        SettingsTranscriptionUseNeuralEngine = "settings.transcription.useNeuralEngine",
         SettingsSummariesSelectPreset = "settings.summaries.selectPreset",
         SettingsSummariesUpdate = "settings.summaries.update",
         SettingsSummariesSave = "settings.summaries.save",

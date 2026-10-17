@@ -26,7 +26,7 @@ use crate::labels::{
 };
 use crate::main_window::detail::{MeetingDetailViewModel, RecordingStatus};
 use crate::main_window::list::MeetingListViewModel;
-use crate::main_window::progress::ProcessingProgressModel;
+use crate::main_window::progress::{ProcessingProgressModel, ProgressEntry};
 use crate::services::RecorderStatus;
 use crate::setup::{ExportStatus, SetupBannerMessage, SummaryStatus, copy, engine_notice};
 use crate::summary_markdown::detail_sections;
@@ -172,11 +172,12 @@ pub fn progress_snapshot(model: &ProcessingProgressModel) -> ProgressSnapshot {
                 meeting_id: entry.meeting_id,
                 stage: match entry.parked {
                     Some(parked) => parked.stage().to_owned(),
-                    None => entry
-                        .stage()
-                        .map_or_else(|| "waiting".to_owned(), |stage| stage.as_str().to_owned()),
+                    None => entry.stage().map_or_else(
+                        || ProgressEntry::WAITING_STAGE.to_owned(),
+                        |stage| stage.as_str().to_owned(),
+                    ),
                 },
-                title: entry.title(),
+                title: entry.title(model.speech_fallback),
                 fraction: entry.fraction(),
                 estimated_remaining_seconds: entry.estimated_remaining_seconds(),
             })

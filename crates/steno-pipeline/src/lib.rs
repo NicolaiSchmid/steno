@@ -7,14 +7,16 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue` and `enqueue_saved`, `reprocess` (refused with a [`ReprocessError`]), `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `resume_unfinished` and `redeliver_unfinished` for the launch, the in-flight set ([`InFlight`]) a reload shares, with the [`JobHold`] an update's install takes, `warm_up`, `warm_up_while_recording` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, [`PipelineFailure`] and its [`FailureKind`], a run refused for missing models or by a busy store and [`ModelWaits`] with `resume_waiting` and `resume_waiting_for_store` for them, `apply_retention`, the stages |
+//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue` and `enqueue_saved`, `reprocess` (refused with a [`ReprocessError`]), `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `resume_unfinished` and `redeliver_unfinished` for the launch, the in-flight set ([`InFlight`]) a reload shares, with the [`JobHold`] an update's install takes, `warm_up`, `warm_up_while_recording` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, [`PipelineFailure`] and its [`FailureKind`], a run refused for missing models or by a busy store and [`ModelWaits`] with `resume_waiting` and `resume_waiting_for_store` for them, the in-process turn a job takes while no recording is live ([`LiveRecording`]), `apply_retention`, the stages |
 //! | [`damaged_audio`] | [`DamagedAudio`], what of each meeting's recording the decoder replaced by silence (the parts and their seconds), in `damaged-audio.json` |
 //! | [`export_retries`] | [`ExportRetries`], the launch re-exports in a row per meeting that did not deliver every row, in `export-retries.json` |
 //! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
 //! | [`run`] | One run's progress state with the monotonic clamp |
 //! | [`crash_loop`] | Launch recovery's guard against a crash loop: the runs that ended with the app, counted in the meeting's folder |
 //! | [`reading`] | [`ReadingMarks`], every read of a recording marked in the support directory: a meeting whose read ended with the app is read once more, and quarantined ([`READ_STOPPED`]) the second time in a row until Process again |
-//! | [`warm_up_mark`] | [`WarmUpMark`], the recording's warm-up marked in the support directory, so one that ended with the app turns the warm-up off until a job loads the speech engine |
+//! | [`live_recording`] | [`LiveRecording`], whether a recording is under way: a job runs no speech engine in the app's process meanwhile |
+//! | [`speech_fallback`] | [`SpeechFallback`], the speech sidecar in place of the engine in the app's process once that engine ended the app, until the user turns it back on |
+//! | [`warm_up_mark`] | [`WarmUpMark`], the recording's warm-up marked in the support directory, so one that ended with the app turns the warm-up off until a job loads the speech engine; the user's end of the fallback holds it off the same way |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
 //! | [`intake`] | The phone intake ([`RecordingIntake`], which notes its copies' folders and uploads ([`NotedUpload`]) in [`AdmissionFolders`]) and the Mac one ([`LocalRecordingIntake`]) |
 //! | [`lane_merger`] | The lanes into one ordered transcript |
@@ -88,12 +90,14 @@ pub mod files;
 pub mod fixtures;
 pub mod intake;
 pub mod lane_merger;
+pub mod live_recording;
 pub mod pipeline;
 pub mod reading;
 pub mod retention;
 pub mod run;
 pub mod sample_clips;
 pub mod speaker_memory;
+pub mod speech_fallback;
 pub mod warm_up_mark;
 
 pub use damaged_audio::DamagedAudio;
@@ -105,6 +109,7 @@ pub use intake::{
     RecordingIntake, RecordingResult,
 };
 pub use lane_merger::LaneMerger;
+pub use live_recording::LiveRecording;
 pub use pipeline::{
     BACKGROUND_RUN_LOG, FailureKind, InFlight, JobHold, ModelWaits, MonotonicClock, Now,
     OPERATION_PANICKED, Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline,
@@ -114,5 +119,6 @@ pub use reading::{READ_STOPPED, ReadStage, Reading, ReadingMarks};
 pub use retention::{RetentionSweep, SweepIncomplete};
 pub use sample_clips::{ClipProbe, ClipStep};
 pub use speaker_memory::StoreSpeakerMemory;
+pub use speech_fallback::SpeechFallback;
 pub use steno_core::{MeetingEvent, MeetingOperation, PipelineStage, ProcessingProgress};
 pub use warm_up_mark::WarmUpMark;

@@ -284,6 +284,7 @@ pub fn transcription(
             })
             .collect(),
         all_installed: speech.all_installed(),
+        neural_engine_off: speech.speech_fallback,
         error: speech.errors.error.clone(),
         error_details: speech.errors.details.clone(),
     }

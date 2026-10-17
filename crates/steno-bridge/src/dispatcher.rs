@@ -217,6 +217,7 @@ bridge_host! {
     SettingsTranscriptionSetEngine => fn settings_transcription_set_engine(params: SetStringParams) -> ();
     SettingsTranscriptionDownload => fn settings_transcription_download(params: AssetIdParams) -> ();
     SettingsTranscriptionRemove => fn settings_transcription_remove(params: AssetIdParams) -> ();
+    SettingsTranscriptionUseNeuralEngine => fn settings_transcription_use_neural_engine() -> ();
     SettingsSummariesSelectPreset => fn settings_summaries_select_preset(params: SetStringParams) -> ();
     SettingsSummariesUpdate => fn settings_summaries_update(params: SummariesUpdateParams) -> ();
     SettingsSummariesSave => fn settings_summaries_save() -> ();
