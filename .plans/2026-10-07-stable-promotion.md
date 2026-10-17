@@ -1941,7 +1941,19 @@ Each lands before `0.11.0-rc.1`.
     advance, seen again after a pause, or its pair kept; the first pair
     never replaced or replaced by any short pair; a fill without a
     matched last QPC pair; the stop's counter read without a sane QPC,
-    past only the last packet, filled, or uncapped.
+    past only the last packet, filled, or uncapped; the hold counted in
+    anything but the system stream's frames (its pushes not counted, or
+    the count not restarted at a re-prime), a pending discontinuity's
+    freshness overwritten by a second flag, the flags not counted, a stale
+    snapshot kept at the stop, the stop taking one run by whether the lane
+    primed, the re-prime's wait counted, the target taken off, a run
+    delivered past the hold kept at the re-prime or its mark never set, the
+    snapshot not taking the padding out of the runs, overwriting an
+    earlier one, taken at the first flag only, or its remainder cleared, the
+    stop dropping the snapshots, process loopback's padding at the stop
+    needing a clock's reading, the QPC's last pair matched at 2 % or a
+    quarter packet or once for good, and the stop's counter read after a
+    last pair that did not match or ignoring a stall under two packets.
   - **The property test.** `crates/steno-audio/tests/wasapi_loss_property.rs`
     runs random packet streams through `DevicePositions`, the master's
     router and the recorder's note (1 000 streams in CI, fixed seed; 20 000
