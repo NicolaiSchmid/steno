@@ -1660,14 +1660,34 @@ async fn a_job_whose_diarizer_does_not_load_keeps_its_transcript() {
 }
 
 /// Waits until `receiver` sees [`MeetingEvent::WaitingForRecording`] for
-/// `meeting`.
+/// `meeting`, failing after [`PATIENCE`].
 async fn waiting_for_recording(receiver: &mut steno_pipeline::EventReceiver, meeting: Uuid) {
-    loop {
-        match receiver.recv().await.unwrap() {
-            MeetingEvent::WaitingForRecording { meeting_id } if meeting_id == meeting => return,
-            _ => {}
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            match receiver.recv().await.unwrap() {
+                MeetingEvent::WaitingForRecording { meeting_id } if meeting_id == meeting => {
+                    return;
+                }
+                _ => {}
+            }
         }
-    }
+    })
+    .await
+    .expect("the meeting said it waits for the recording");
+}
+
+/// A pipeline over the world's dependencies that runs `engine` in this
+/// process and sees `live` as the recorder's state.
+fn in_process_beside(
+    world: &World,
+    engine: Arc<dyn steno_core::SpeechEngine>,
+    live: &LiveRecording,
+) -> ProcessingPipeline {
+    ProcessingPipeline::new(
+        with_engine(world, engine)
+            .with_speech_in_process(true)
+            .with_live_recording(live.clone()),
+    )
 }
 
 /// A short while for a job that is not supposed to move.
@@ -1684,10 +1704,7 @@ async fn a_job_waits_for_the_recording_before_the_engine_in_this_process_loads()
     let live = LiveRecording::default();
     live.set(true);
     let engine = Arc::new(FakeSpeechEngine::default());
-    let dependencies = with_engine(&world, engine.clone())
-        .with_speech_in_process(true)
-        .with_live_recording(live.clone());
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let pipeline = in_process_beside(&world, engine.clone(), &live);
     let mut receiver = world.events.subscribe();
     let meeting = enqueue_call(&world, &pipeline);
     waiting_for_recording(&mut receiver, meeting).await;
@@ -1757,10 +1774,7 @@ async fn a_recording_that_starts_mid_job_holds_the_next_lane() {
     let world = world(false, None, AudioRetention::KeepForever);
     let live = LiveRecording::default();
     let engine = Arc::new(StartsARecording::new(&live));
-    let dependencies = with_engine(&world, engine.clone())
-        .with_speech_in_process(true)
-        .with_live_recording(live.clone());
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let pipeline = in_process_beside(&world, engine.clone(), &live);
     let mut receiver = world.events.subscribe();
     let meeting = enqueue_call(&world, &pipeline);
     waiting_for_recording(&mut receiver, meeting).await;
@@ -1785,10 +1799,7 @@ async fn a_job_queued_behind_another_waits_for_the_recording_too() {
     let world = world(false, None, AudioRetention::KeepForever);
     let live = LiveRecording::default();
     let engine = Arc::new(StartsARecording::new(&live));
-    let dependencies = with_engine(&world, engine.clone())
-        .with_speech_in_process(true)
-        .with_live_recording(live.clone());
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let pipeline = in_process_beside(&world, engine.clone(), &live);
     let first = enqueue_call(&world, &pipeline);
     let second = enqueue_call(&world, &pipeline);
     a_moment().await;
@@ -1829,10 +1840,7 @@ async fn a_quit_while_a_job_waits_for_the_recording_leaves_the_meeting_queued() 
     let live = LiveRecording::default();
     live.set(true);
     let engine = Arc::new(FakeSpeechEngine::default());
-    let dependencies = with_engine(&world, engine.clone())
-        .with_speech_in_process(true)
-        .with_live_recording(live.clone());
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let pipeline = in_process_beside(&world, engine.clone(), &live);
     let mut receiver = world.events.subscribe();
     let meeting = enqueue_call(&world, &pipeline);
     waiting_for_recording(&mut receiver, meeting).await;
