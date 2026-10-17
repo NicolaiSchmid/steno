@@ -999,7 +999,7 @@ pub struct CaptureRecorder {
     /// This recorder, for the watcher threads.
     this: Weak<CaptureRecorder>,
     /// Runs in [`Self::notify`] between the read of the state and the
-    /// live flag's change: the tests' window for a race.
+    /// live flag's change, where a test checks the lock is held.
     #[cfg(test)]
     before_live: Mutex<Hook>,
 }
@@ -3477,46 +3477,32 @@ mod tests {
         assert!(!live(), "idle");
     }
 
-    /// A notify that read `Recording` cannot apply it after a stop that
-    /// ended meanwhile: the read and the flag's change are one step under
-    /// the recorder's lock, so the stop waits for it, and the flag ends
-    /// as the stop left it. Without the lock the stale notify would set
-    /// the flag live again after the stop, and every job would wait for a
-    /// recording that is over (A19).
+    /// The live flag changes under the recorder's lock at every change of
+    /// a recording, from its start to the end of its stop, so two notifies
+    /// on different threads never apply out of order: a stale one could
+    /// otherwise set the flag live after a stop, and every job would wait
+    /// for a recording that is over, or idle during a start, and a job
+    /// would run `CoreML` beside it (A19).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_notify_that_read_a_recording_never_outlives_its_stop() {
+    async fn the_live_flag_changes_under_the_recorders_lock() {
         let harness = harness(&[]);
-        start(&harness.recorder);
-        let (in_window, inside) = std::sync::mpsc::channel();
-        let (stop_returned, stop_seen) = std::sync::mpsc::channel::<()>();
-        let stop_seen = Mutex::new(stop_seen);
-        let armed = AtomicBool::new(true);
-        *harness.recorder.before_live.lock().unwrap() = Some(Arc::new(move || {
-            if armed.swap(false, Ordering::SeqCst) {
-                let _ = in_window.send(());
-                // The stop cannot finish while the lock is held: the wait
-                // only bounds the test.
-                let _ = stop_seen
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_millis(500));
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::downgrade(&harness.recorder);
+        *harness.recorder.before_live.lock().unwrap() = Some(Arc::new({
+            let held = held.clone();
+            move || {
+                if let Some(recorder) = recorder.upgrade() {
+                    // Held by this thread: the flag's change follows under it.
+                    let locked = recorder.inner.try_lock().is_err();
+                    held.lock().unwrap().push(locked);
+                }
             }
         }));
-        let stale = harness.recorder.clone();
-        let notifying = std::thread::spawn(move || stale.notify());
-        inside
-            .recv_timeout(PATIENCE)
-            .expect("the notify read the state");
-        let stopper = harness.recorder.clone();
-        let stopper_thread = std::thread::spawn(move || {
-            stop(&stopper);
-            let _ = stop_returned.send(());
-        });
-        notifying.join().unwrap();
-        stopper_thread.join().unwrap();
-        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
-        let live = harness.recorder.pipeline.live_recording().is_live();
-        assert!(!live, "the stale notify set the flag after the stop");
+        start(&harness.recorder);
+        stop(&harness.recorder);
+        let held = held.lock().unwrap();
+        assert!(held.len() >= 4, "a start and a stop notify: {held:?}");
+        assert!(held.iter().all(|locked| *locked), "{held:?}");
     }
 
     /// A Quit while a manual Stop is still saving waits for that save:
