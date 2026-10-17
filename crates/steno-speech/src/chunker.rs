@@ -935,9 +935,8 @@ mod tests {
         // gap's window's is its window; a chunk's is its window ± the
         // overlap, rounded out to the frame grid and clamped to the
         // recording. Random speech over the default settings, the CoreML
-        // engine's and odd ones,
-        // with the extra windows off and on and some gaps of digital
-        // silence.
+        // engine's and odd ones, with the extra windows off and on and some
+        // gaps of digital silence.
         let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
         let mut below = |n: usize| {
             seed ^= seed << 13;
