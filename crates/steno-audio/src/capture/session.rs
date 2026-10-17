@@ -2604,14 +2604,16 @@ mod tests {
     use crate::writer::{LaneFrames, RecordingFiles};
 
     /// What a capture thread missed counts on the lane that missed most,
-    /// each stream's share at that stream's rate: the WASAPI follower's lane
-    /// can miss more than the microphone's.
+    /// each stream's share at that stream's rate, what it missed before
+    /// its first frame included: the WASAPI follower's lane can miss more
+    /// than the microphone's.
     #[test]
     fn missed_audio_counts_on_the_lane_that_missed_most_at_each_streams_rate() {
         let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
         sink.ring(0).record_filled(4_800);
         sink.ring(1).record_filled(2_400);
         sink.ring(1).record_unfilled(48_000);
+        sink.count_before_first(24_000, None);
         let mut counts = RingCounts::default();
         counts.fold(&sink, 24_000.0);
         sink.ring(1).record_filled(7_200);
@@ -2621,7 +2623,11 @@ mod tests {
             0.25,
             "the system lane: 2 400 at 24 kHz and 7 200 at 48 kHz, above the microphone's 0.2 s"
         );
-        assert_eq!(counts.unfilled_seconds(), 2.0, "48 000 at 24 kHz");
+        assert_eq!(
+            counts.unfilled_seconds(),
+            3.0,
+            "the system lane: 48 000 at 24 kHz, and 24 000 at 24 kHz before its first frame"
+        );
     }
 
     /// A rebuild's gap takes back what the stalled thread counted unfilled
