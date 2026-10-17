@@ -1841,23 +1841,29 @@ The table above names each package and its owner. Their tests:
   meeting from the ledger; a retry before the launch, or while the lock is
   still held, admits into the noted copy instead of copying again, and never
   removes it. Bytes the ledger already holds are not adopted. When that
-  row's meeting was deleted, the launch removes the noted copy whose size
-  and SHA-256 match it, because the user deleted those bytes. This is the
-  one exception to keeping audio. When the meeting still exists, the copy
-  stays and only its note goes. Any doubt keeps the copy and its note: one
-  that cannot be read, one cut short or holding other bytes. No delete can
-  be undone, so a meeting the adoption's transaction finds gone stays gone.
+  row's meeting was deleted, the launch removes the master of the noted
+  copy whose size and SHA-256 match it, durably, then its folder only if
+  that is empty, because the user deleted those bytes. This is the one
+  exception to keeping audio. While that meeting still exists (in any
+  state), the copy stays with its notes, neither adopted nor removed, and
+  each launch answers it the same way until a launch after that meeting's
+  delete removes it (Nicolai's ruling, 2026-10-17). Any doubt keeps the
+  copy and its note: one that cannot be read, one cut short or holding
+  other bytes. No delete can be undone, so a meeting the adoption's
+  transaction finds gone stays gone.
   A note with no upload (an older build's), or a copy that holds other
   bytes, is adopted as a recording with no meeting, without a ledger row.
-  The record of uploads never grows: a refused folder note forgets its
-  upload, and each launch forgets the uploads whose folder has no entry.
+  No upload stays noted without its folder's entry: a refused folder note
+  forgets its upload, and each launch forgets the uploads whose folder has
+  no entry.
   Two defences keep one master to one asset row (Nicolai's ruling,
   2026-10-17, after a read fault produced a kept-forever and a
   delete-after-processing row for one master): the admission's commit
   refuses a meeting id that already has a row and no ledger row
   (`MeetingExists`), and the retention sweep never removes a master
   another asset row still needs (kept forever, not due yet, or its meeting
-  busy), logging the ids at info. No schema change. Where:
+  busy), logging the ids at info; a master already gone needs no keeper,
+  so every row naming it loses its stamp. No schema change. Where:
   `crates/steno-pipeline/src/intake.rs` (`NotedUpload`, `reusable_copy`),
   `crates/steno-services/src/audio_folders.rs`,
   `crates/steno-services/src/recovery.rs` (`adopt`),
