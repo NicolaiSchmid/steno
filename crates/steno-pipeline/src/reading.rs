@@ -77,6 +77,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Utc};
@@ -137,6 +138,9 @@ pub struct ReadingMarks {
     /// removal of one happens under this lock, so the exit, which takes
     /// it, removes every one and no write follows.
     open: Mutex<Open>,
+    /// Set by the exit, before it takes `found` or `open`: no read is
+    /// marked any more.
+    exit_begun: AtomicBool,
 }
 
 impl std::fmt::Debug for ReadingMarks {
@@ -169,8 +173,6 @@ struct Retry {
 
 #[derive(Debug, Default)]
 struct Open {
-    /// Set by the exit: no read is marked any more.
-    exiting: bool,
     files: HashSet<PathBuf>,
 }
 
@@ -190,6 +192,7 @@ impl ReadingMarks {
             syncs,
             found: Mutex::default(),
             open: Mutex::default(),
+            exit_begun: AtomicBool::new(false),
         }
     }
 
@@ -275,11 +278,12 @@ impl ReadingMarks {
     /// reads the recording once more, as a second attempt. Its marks stay
     /// on disk until that run reads through, so a crash before it reads
     /// quarantines it again; an orderly exit removes them
-    /// ([`exiting`](Self::exiting)). Writes nothing unless the exit has
-    /// begun: then the exit may have taken the released marks before these
-    /// joined them, and the run will not read, so this removes them, and
-    /// syncs the disk on the caller's thread, as Process again's store
-    /// writes do.
+    /// ([`exiting`](Self::exiting)).
+    ///
+    /// Writes nothing unless the exit has begun. Then the exit may already
+    /// have taken the released marks, and the run will not read, so this
+    /// removes them itself, syncing the disk on the caller's thread as
+    /// Process again's store writes do.
     pub fn release(&self, meeting_id: Uuid) {
         {
             let mut found = self.found();
@@ -297,7 +301,7 @@ impl ReadingMarks {
         }
         // After the insert, as `exiting` sets the flag before it takes the
         // released marks: one of the two takes these, never both.
-        if !self.open().exiting {
+        if !self.exit_begun.load(Ordering::SeqCst) {
             return;
         }
         let files = self
@@ -306,11 +310,11 @@ impl ReadingMarks {
             .get_mut(&meeting_id)
             .map(|retry| std::mem::take(&mut retry.files))
             .unwrap_or_default();
-        for file in files {
-            if let Err(error) = remove_durably_with(&*self.syncs, &file) {
-                tracing::warn!(%meeting_id, %error, "a reading mark could not be removed at the exit");
-            }
-        }
+        self.remove_all(
+            meeting_id,
+            files,
+            "a reading mark could not be removed at the exit",
+        );
     }
 
     /// A run of `meeting_id` ended with every read it began returned: the
@@ -321,9 +325,19 @@ impl ReadingMarks {
             Entry::Occupied(retry) if retry.get().read => retry.remove().files,
             _ => return,
         };
+        self.remove_all(
+            meeting_id,
+            files,
+            "a reading mark of an earlier attempt could not be removed",
+        );
+    }
+
+    /// Removes `files`, the marks of `meeting_id`, logging a failure at
+    /// `warn` as `what`.
+    fn remove_all(&self, meeting_id: Uuid, files: Vec<PathBuf>, what: &str) {
         for file in files {
             if let Err(error) = remove_durably_with(&*self.syncs, &file) {
-                tracing::warn!(%meeting_id, %error, "a reading mark of an earlier attempt could not be removed");
+                tracing::warn!(%meeting_id, %error, "{what}");
             }
         }
     }
@@ -356,8 +370,10 @@ impl ReadingMarks {
                 retry.read = true;
                 1
             });
+        // Read under `open`: the exit sets the flag before it takes the
+        // lock, so a mark listed here is one the exit removes.
         let mut open = self.open();
-        if open.exiting {
+        if self.exit_begun.load(Ordering::SeqCst) {
             return reading;
         }
         let mark = Mark {
@@ -412,7 +428,7 @@ impl ReadingMarks {
     pub fn exiting(&self) {
         // Set before the released marks are taken, so a `release` that
         // comes after the take sees it and removes its own.
-        self.open().exiting = true;
+        self.exit_begun.store(true, Ordering::SeqCst);
         let released: Vec<PathBuf> = self
             .found()
             .retrying
