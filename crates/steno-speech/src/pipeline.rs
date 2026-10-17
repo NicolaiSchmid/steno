@@ -1391,6 +1391,26 @@ mod tests {
     }
 
     #[test]
+    fn a_gaps_window_keeps_the_words_two_frames_past_its_owned_span() {
+        // A window from 8 to 22 s that owns 10 to 20 s (frames 125 to 250):
+        // words on frames 121, 123, 251 and 252, two frames past each end
+        // and more. The ones within two frames are kept, the others not.
+        let mut t = transcriber(PipelineConfig::default(), 0);
+        let mut samples = vec![0.0f32; 24 * SAMPLE_RATE];
+        for (piece, frame) in [(3, 121), (2, 123), (4, 251), (5, 252)] {
+            overlay(&mut samples, &audio(24.0, frame, &[piece]));
+        }
+        let gap = span((10.0, 20.0), (8.0, 22.0), false);
+        let decoded = t
+            .chunk_decoder(0)
+            .decode_span(&samples, &gap, &[], &mut DecodeStats::default())
+            .unwrap();
+        let kept: Vec<_> = decoded.tokens.iter().map(|t| (t.id, t.frame)).collect();
+        assert_eq!(kept, [(2, 123), (4, 251)]);
+        assert_eq!(decoded.window, gap.window);
+    }
+
+    #[test]
     fn a_word_kept_either_side_of_a_gaps_seam_comes_out_once() {
         // A chunk to 10 s, the gap's window from 10 to 20 s, a chunk after.
         let vocab = vocab();
@@ -1466,15 +1486,6 @@ mod tests {
         let rest = [piece(27, 20.0), piece(14, 21.0)];
         let ids: Vec<u32> = joined(&chunk, &whole, &rest).iter().map(|t| t.0).collect();
         assert_eq!(ids, [6, 2, 7, 27, 27, 14]);
-        // A window that begins with the rest of a word: the chunk before
-        // heard its start, and the rest falls away, unless the chunk kept
-        // nothing.
-        let rest = [piece(25, 10.0), piece(2, 14.0)];
-        let next = [piece(14, 21.0)];
-        let ids: Vec<u32> = joined(&chunk, &rest, &next).iter().map(|t| t.0).collect();
-        assert_eq!(ids, [6, 2, 14]);
-        let ids: Vec<u32> = joined(&[], &rest, &next).iter().map(|t| t.0).collect();
-        assert_eq!(ids, [25, 2, 14]);
         // Between two windows of one gap the later window's copy falls
         // away, and three frames apart both stay.
         let split = [
@@ -1504,6 +1515,40 @@ mod tests {
         let tokens = join(&split, &decoded, 2.0, &vocab);
         let got: Vec<_> = tokens.iter().map(|t| (t.id, t.frame)).collect();
         assert_eq!(got, [(6, at(9.0)), (8, at(21.0)), (28, at(21.08))]);
+    }
+
+    #[test]
+    fn a_window_that_begins_inside_a_word_keeps_the_rest_only_after_a_span_that_kept_nothing() {
+        // A chunk to 10 s, the gap's window from 10 to 20 s, a chunk after.
+        // The window begins with the rest of a word: the chunk before heard
+        // its start, and the rest falls away, unless the chunk kept
+        // nothing.
+        let vocab = vocab();
+        let spans = [
+            span((0.0, 10.0), (0.0, 10.0), true),
+            span((10.0, 20.0), (10.0, 20.0), false),
+            span((20.0, 30.0), (20.0, 30.0), true),
+        ];
+        let joined = |chunk: &[Token], window: &[Token]| {
+            let decoded = [chunk.to_vec(), window.to_vec(), vec![piece(14, 21.0)]];
+            ids(&join(&spans, &decoded, 2.0, &vocab))
+        };
+        let rest = [piece(25, 10.0), piece(2, 14.0)];
+        assert_eq!(joined(&[piece(6, 9.92)], &rest), [6, 2, 14]);
+        assert_eq!(joined(&[], &rest), [25, 2, 14]);
+        // Only the span right before counts: here the chunk before the
+        // second window kept nothing, though the first window did.
+        let spans = [
+            span((0.0, 10.0), (0.0, 10.0), false),
+            span((10.0, 20.0), (10.0, 20.0), true),
+            span((20.0, 30.0), (20.0, 30.0), false),
+        ];
+        let decoded = [
+            vec![piece(2, 5.0)],
+            Vec::new(),
+            vec![piece(25, 20.0), piece(3, 24.0)],
+        ];
+        assert_eq!(ids(&join(&spans, &decoded, 2.0, &vocab)), [2, 25, 3]);
     }
 
     #[test]
