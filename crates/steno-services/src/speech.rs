@@ -203,8 +203,9 @@ pub(crate) fn engine_runtime(engine_id: &str, speech_settings: &SpeechSettings) 
     }
 }
 
-/// [`SpeechSetup::runtime`]: [`engine_runtime`], or the speech sidecar
-/// while `fallback` is on; the model service's too.
+/// Where `engine_id` runs: in the speech sidecar while `fallback` is on,
+/// else as [`engine_runtime`] says. The one rule behind
+/// [`SpeechSetup::runtime`] and the model service's rows.
 fn unless_falling_back(
     engine_id: &str,
     speech_settings: &SpeechSettings,

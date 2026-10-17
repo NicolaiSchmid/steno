@@ -484,4 +484,15 @@ mod tests {
         assert!(!fallback.is_on());
         fallback.turn_off().unwrap();
     }
+
+    /// An old build's mark (`1`) and an empty one (G2's `touch`) turn it on
+    /// like any other warm-up mark.
+    #[test]
+    fn an_empty_or_old_warm_up_mark_turns_it_on() {
+        for body in [&b""[..], b"1"] {
+            let support = tempfile::tempdir().unwrap();
+            std::fs::write(support.path().join(WarmUpMark::FILE_NAME), body).unwrap();
+            assert!(launch(support.path()).is_on(), "{body:?}");
+        }
+    }
 }

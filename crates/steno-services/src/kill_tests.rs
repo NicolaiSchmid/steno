@@ -913,8 +913,8 @@ async fn recorded_and_processed(app: &crate::App, store: &Store) {
 /// A process killed in `CoreML`'s load during a meeting's processing (an
 /// abort no `@catch` stops ends it the same way) turns the speech sidecar
 /// on in `CoreML`'s place: the next launch processes that meeting in the
-/// sidecar, the recordings after it load nothing in the app's process
-/// neither while they run nor after, and the next launch keeps the
+/// sidecar, the recordings after it load nothing in the app's process,
+/// while they run or after, and the next launch keeps the
 /// sidecar. Only the user turns `CoreML` back on: then the next meeting
 /// runs on it, with no warm-up beside its recording, the recording after
 /// it warms up again, and a launch after that does not turn the sidecar

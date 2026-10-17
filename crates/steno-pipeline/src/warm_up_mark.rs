@@ -98,9 +98,8 @@ impl WarmUpMark {
         match &left_over {
             Some(id) if id.starts_with(Self::HELD_PREFIX) => tracing::warn!(
                 mark = %id,
-                "the warm-up of the speech models is held off since the speech engine in this \
-                 process was turned back on; recordings skip it until a meeting's processing \
-                 loads the models"
+                "the warm-up of the speech models is held off; recordings skip it until a \
+                 meeting's processing loads the models"
             ),
             Some(id) => tracing::warn!(
                 mark = %id,
@@ -120,7 +119,9 @@ impl WarmUpMark {
     }
 
     /// The id of the mark the launch found left over: a warm-up that ended
-    /// with the app. Earlier builds wrote `1` in every mark.
+    /// with the app, or `held-<uuid>` for one the user's end of the
+    /// fallback held off. Earlier builds wrote `1` in every mark; an empty
+    /// mark gives an empty id.
     #[must_use]
     pub fn left_over(&self) -> Option<&str> {
         self.left_over.as_deref()
@@ -330,7 +331,7 @@ mod tests {
                 .filter(|line| line.contains(&id) && line.contains(what))
                 .count()
         };
-        assert_eq!(ours("is held off since"), 1, "{text}");
+        assert_eq!(ours("is held off;"), 1, "{text}");
         assert_eq!(ours("ended with the app"), 0, "{text}");
     }
 
