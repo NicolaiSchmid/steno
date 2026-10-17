@@ -1752,8 +1752,9 @@ Each lands before `0.11.0-rc.1`.
     warm-up mark. A file or a warm-up mark that cannot be written keeps
     the fallback on: Settings says "The Neural Engine could not be turned
     back on." and the pipeline is not rebuilt. A rebuild that fails after
-    the file is written keeps the row and the title, and "Use again"
-    tries the rebuild again; the next launch runs CoreML either way.
+    the file is written keeps the row and the title until a reload
+    succeeds ("Use again" again, or a save in another section); the next
+    launch runs CoreML either way.
   - False alarms: a force quit, a power loss or a crash elsewhere while
     CoreML loads or transcribes leaves the same marks and turns the
     fallback on too. The cost is the sidecar's models to download and its
@@ -1764,27 +1765,27 @@ Each lands before `0.11.0-rc.1`.
     queued behind another's turn; a job that queued for the turn before a
     recording started checks again at its turn, on an engine that runs one
     call at a time; a job in a child does not wait; a quit during the wait
-    leaves the meeting queued; the recorder is live from `Starting`
-    through `Stopping`, and a notify that read a recording never sets the
-    flag after the stop that ended it; a reload shares the recorder's state
-    with the retired build and the new one; the fallback's file over every
-    kind of mark, the user's action, the marks it forgets, a file that does
-    not parse, cannot be read (its bytes kept) or cannot be written, and a
-    warm-up mark that cannot be written; the warm-up held off until a
-    load, a running warm-up's mark kept through a load, and the launch's
-    line for a held mark; the app's build turns the fallback on from a
-    mark and its end holds the warm-up off; the model service's wrapper
-    passes the fallback through; the waiting and fallback titles in the
-    host and the Settings action, which keeps the fallback on when it
-    cannot be ended and the offer when the rebuild fails; kill tests: a
-    child killed in a job's CoreML load, after which the next launch
-    processes that meeting in the sidecar, a recording loads nothing in the
-    app's process beside it or after it, the next launch keeps the
-    sidecar, and the user's "Use again" puts the next meeting on CoreML
-    with no warm-up beside its recording, the recording after it warms up
-    again, and a later launch keeps CoreML; and a child killed in the
-    warm-up's load, after which the same holds and, after "Use again", the
-    first CoreML load is the job's, not a warm-up beside the recording.
+    leaves the meeting queued; the recorder is live from `Starting` through
+    `Stopping`, and a notify that read a recording never sets the flag after
+    the stop that ended it; a reload shares the recorder's state with the
+    retired build and the new one; the fallback's file over every kind of
+    mark, the user's action, the marks it forgets, a file that does not
+    parse, cannot be read (its bytes kept) or cannot be written, and a
+    warm-up mark that cannot be written; the warm-up held off until a load,
+    a running warm-up's mark kept through a load, and the launch's line for
+    a held mark; the app's build turns the fallback on from a mark and its
+    end holds the warm-up off; the model service's wrapper passes the
+    fallback through; the waiting and fallback titles in the host and the
+    Settings action, which keeps the fallback on when it cannot be ended and
+    the offer when the rebuild fails, until a later reload succeeds; kill
+    tests: a child killed in a job's CoreML load, after which the next
+    launch processes that meeting in the sidecar, a recording loads nothing
+    in the app's process beside it or after it, the next launch keeps the
+    sidecar, and the user's "Use again" puts the next meeting on CoreML with
+    no warm-up beside its recording, the recording after it warms up again,
+    and a later launch keeps CoreML; and a child killed in the warm-up's
+    load, after which the same holds and, after "Use again", the first
+    CoreML load is the job's, not a warm-up beside the recording.
   - Gate: A19's check in G2 (**Nicolai**, on the Mac), a forced fallback.
   - Owner: audio. Lands before `0.11.0-rc.1` (D9).
 - **A20 The level meter never freezes behind a sync of the files.** Found

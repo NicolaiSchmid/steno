@@ -37,7 +37,8 @@ the list, `recording` makes `recording.live` the recording, `failed` selects
 the failed meeting, `processing` adds and selects a meeting in the progress
 entry. `?tab=` picks the detail tab. For Settings: `settings-error` (an error
 with its details, a login item awaiting approval, an update available),
-`download-failed`, `summaries-connected`, `summaries-failed`, `codex-consent`,
+`download-failed`, `neural-engine-off` (the Neural Engine turned off after a
+crash; the Rust host only), `summaries-connected`, `summaries-failed`, `codex-consent`,
 `codex` (from `settings.summaries.codex`), `export-on`, `pairing` (from
 `settings.iphone.pairing`), `phone-unavailable` and `phone-waiting` (from
 `settings.iphone.waiting`: Try again and Pair again). For onboarding:
