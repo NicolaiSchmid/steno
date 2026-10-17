@@ -272,49 +272,12 @@ fn ref_tenths(rng: &mut Rng, from: f32, count: usize) -> f32 {
     from + rng.below(count.max(1)) as f32 / 10.0
 }
 
-/// A differential case: the background (without the words), the
-/// words, and fixed speech regions or the detector's.
+/// A differential case: the samples, the words placed in them, and fixed
+/// speech regions or the detector's.
 struct RefCase {
-    base: Vec<f32>,
+    samples: Vec<f32>,
     words: Vec<Placed>,
     regions: Option<Vec<Range<usize>>>,
-}
-
-impl RefCase {
-    fn samples(&self, keep: &[bool]) -> Vec<f32> {
-        let mut samples = self.base.clone();
-        for (word, &k) in self.words.iter().zip(keep) {
-            if k {
-                word.put(&mut samples);
-            }
-        }
-        samples
-    }
-
-    /// Takes the words out of finished samples, back to the background.
-    fn from_samples(
-        mut samples: Vec<f32>,
-        words: Vec<Placed>,
-        regions: Option<Vec<Range<usize>>>,
-        noisy: bool,
-    ) -> Self {
-        for word in &words {
-            for i in word.span() {
-                samples[i] = if !noisy {
-                    0.0
-                } else if i % 2 == 0 {
-                    3e-5
-                } else {
-                    -3e-5
-                };
-            }
-        }
-        RefCase {
-            base: samples,
-            words,
-            regions,
-        }
-    }
 }
 
 /// The old merge's tests' random layout: the 20 words, loud and quiet, one or two
@@ -322,9 +285,8 @@ impl RefCase {
 /// fake decodes to nothing.
 fn ref_random_layout(rng: &mut Rng, case: usize) -> RefCase {
     let total = (20 + rng.below(50)) * SAMPLE_RATE;
-    let noisy = case.is_multiple_of(2);
     let mut samples = vec![0.0f32; total];
-    if noisy {
+    if case.is_multiple_of(2) {
         for (i, x) in samples.iter_mut().enumerate() {
             *x = if i % 2 == 0 { 3e-5 } else { -3e-5 };
         }
@@ -363,7 +325,11 @@ fn ref_random_layout(rng: &mut Rng, case: usize) -> RefCase {
         let pause = if rng.below(3) == 0 { 12 } else { 3 };
         frame += rng.below(pause * SAMPLE_RATE) / FRAME_SAMPLES;
     }
-    RefCase::from_samples(samples, words, None, noisy)
+    RefCase {
+        samples,
+        words,
+        regions: None,
+    }
 }
 
 /// The old merge's tests' two-sided layout: chunk A, a gap of 2.6 to 20 s, chunk B,
@@ -393,8 +359,7 @@ fn ref_two_sided_layout(rng: &mut Rng) -> RefCase {
     let b = a_end + gap;
     let total = b + lengths(rng, mode_b);
     let mut samples = vec![0.0f32; sample_count(total)];
-    let noisy = rng.below(2) == 0;
-    if noisy {
+    if rng.below(2) == 0 {
         for (i, x) in samples.iter_mut().enumerate() {
             *x = if i % 2 == 0 { 3e-5 } else { -3e-5 };
         }
@@ -461,7 +426,11 @@ fn ref_two_sided_layout(rng: &mut Rng) -> RefCase {
     for word in &words {
         word.put(&mut samples);
     }
-    RefCase::from_samples(samples, words, Some(regions), noisy)
+    RefCase {
+        samples,
+        words,
+        regions: Some(regions),
+    }
 }
 
 /// Two chunks around a pause no window decodes, one plain and dense with
@@ -526,7 +495,11 @@ fn ref_collision_layout(rng: &mut Rng) -> RefCase {
         word.put(&mut samples);
     }
     words.sort_by_key(|w| w.frame);
-    RefCase::from_samples(samples, words, Some(regions), false)
+    RefCase {
+        samples,
+        words,
+        regions: Some(regions),
+    }
 }
 
 /// The general layout's regions in seconds, whether each is the loud
@@ -576,9 +549,8 @@ fn ref_general_regions(rng: &mut Rng) -> (Vec<(f32, f32, bool)>, f32) {
 fn ref_general_layout(rng: &mut Rng) -> RefCase {
     let (regions, total) = ref_general_regions(rng);
     let end = sample_count(total);
-    let noisy = rng.below(3) != 0;
     let mut samples = vec![0.0f32; end];
-    if noisy {
+    if rng.below(3) != 0 {
         for (i, x) in samples.iter_mut().enumerate() {
             *x = if i % 2 == 0 { 3e-5 } else { -3e-5 };
         }
@@ -659,19 +631,22 @@ fn ref_general_layout(rng: &mut Rng) -> RefCase {
     let regions = regions
         .iter()
         .map(|&(from, to, _)| sample_count(from)..sample_count(to));
-    RefCase::from_samples(samples, words, Some(regions.collect()), noisy)
+    RefCase {
+        samples,
+        words,
+        regions: Some(regions.collect()),
+    }
 }
 
 /// Per word, how often its first piece came out and which pieces did;
 /// each token goes to the nearest piece of that id within `slack`
 /// frames.
-fn ref_tally(tokens: &[Token], words: &[Placed], keep: &[bool], slack: usize) -> Vec<(usize, u8)> {
+fn ref_tally(tokens: &[Token], words: &[Placed], slack: usize) -> Vec<(usize, u8)> {
     let mut per = vec![(0, 0u8); words.len()];
     for token in tokens {
         let near = words
             .iter()
             .enumerate()
-            .filter(|&(w, _)| keep[w])
             .flat_map(|(w, word)| (0..word.pieces.len()).map(move |i| (w, i, word)))
             .filter(|&(_, i, word)| word.piece_of(token, slack) == Some(i))
             .min_by_key(|&(_, i, word)| word.start(i).abs_diff(token.sample()));
@@ -693,14 +668,8 @@ struct RefRun {
     filtered: Vec<Token>,
 }
 
-fn ref_run(
-    case: &RefCase,
-    keep: &[bool],
-    config: &PipelineConfig,
-    min_frames: usize,
-    jitter: usize,
-) -> RefRun {
-    let samples = case.samples(keep);
+fn ref_run(case: &RefCase, config: &PipelineConfig, min_frames: usize, jitter: usize) -> RefRun {
+    let samples = &case.samples;
     let make = || {
         let mut t = quiet_transcriber(config.clone(), min_frames);
         t.workers[0].jitter = jitter;
@@ -709,10 +678,10 @@ fn ref_run(
         }
         t
     };
-    let old = ref_transcribe(&mut make(), &samples);
+    let old = ref_transcribe(&mut make(), samples);
     let mut t = make();
-    let new = t.transcribe(&samples, None).unwrap();
-    let (heard, filtered) = ref_heard(&mut t, &samples, &new);
+    let new = t.transcribe(samples, None).unwrap();
+    let (heard, filtered) = ref_heard(&mut t, samples, &new);
     RefRun {
         old,
         new,
@@ -729,20 +698,15 @@ fn ref_run(
 /// and never in `.2`: the fake never gives one piece twice in a row, so a
 /// window that heard the word before swallows it, which a model does not,
 /// and a run's LCS may take two words said alike for one.
-fn ref_losses(
-    case: &RefCase,
-    keep: &[bool],
-    run: &RefRun,
-    slack: usize,
-) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
-    let old = ref_tally(&run.old, &case.words, keep, slack);
-    let new = ref_tally(&run.new.tokens, &case.words, keep, slack);
-    let heard = ref_tally(&run.heard, &case.words, keep, slack);
-    let filtered = ref_tally(&run.filtered, &case.words, keep, slack);
+fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+    let old = ref_tally(&run.old, &case.words, slack);
+    let new = ref_tally(&run.new.tokens, &case.words, slack);
+    let heard = ref_tally(&run.heard, &case.words, slack);
+    let filtered = ref_tally(&run.filtered, &case.words, slack);
     let repeats = |w: usize| {
         let word = &case.words[w];
         let before = (0..case.words.len())
-            .filter(|&o| keep[o] && case.words[o].start(0) < word.start(0))
+            .filter(|&o| case.words[o].start(0) < word.start(0))
             .max_by_key(|&o| case.words[o].start(0));
         before.is_some_and(|o| {
             let pieces = &case.words[o].pieces;
@@ -750,7 +714,7 @@ fn ref_losses(
         })
     };
     let mut out = (Vec::new(), Vec::new(), Vec::new());
-    for w in (0..case.words.len()).filter(|&w| keep[w]) {
+    for w in 0..case.words.len() {
         let repeats = repeats(w);
         if repeats && heard[w].0 == 0 {
             continue;
@@ -797,7 +761,11 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
         let layout = match kind {
             0 => {
                 let (samples, words) = placed_words(&mut rng, case);
-                RefCase::from_samples(samples, words, None, round.is_multiple_of(2))
+                RefCase {
+                    samples,
+                    words,
+                    regions: None,
+                }
             }
             1 => ref_random_layout(&mut rng, round),
             2 => ref_two_sided_layout(&mut rng),
@@ -816,14 +784,13 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
             _ => 130,
         };
         let slack = 2 + jitter;
-        let all = vec![true; layout.words.len()];
-        let run = ref_run(&layout, &all, &config, min_frames, jitter);
-        tally.words += all.len();
+        let run = ref_run(&layout, &config, min_frames, jitter);
+        tally.words += layout.words.len();
         tally.recovered += usize::from(run.new.stats.recoveries_accepted > 0);
-        let old = ref_tally(&run.old, &layout.words, &all, slack);
-        let new = ref_tally(&run.new.tokens, &layout.words, &all, slack);
+        let old = ref_tally(&run.old, &layout.words, slack);
+        let new = ref_tally(&run.new.tokens, &layout.words, slack);
         tally.doubled += old.iter().zip(&new).filter(|(m, a)| a.0 > m.0).count();
-        let (lost, pieces, unheard) = ref_losses(&layout, &all, &run, slack);
+        let (lost, pieces, unheard) = ref_losses(&layout, &run, slack);
         let show = |tokens: &[Token]| {
             let pieces = tokens.iter().map(|t| format!("{}@{}", t.id, t.sample()));
             pieces.collect::<Vec<_>>().join(" ")
