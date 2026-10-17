@@ -1507,3 +1507,139 @@ fn a_recovery_that_begins_inside_a_skipped_pause_keeps_the_old_merges_text() {
         );
     }
 }
+
+#[test]
+fn a_gaps_run_after_a_chunk_that_kept_nothing_drops_the_rest_of_a_word_it_begins_in() {
+    // `CoreML`'s settings: a chunk with word 11, a long gap with quiet word
+    // 2, a chunk the fake decodes to nothing, and the gap after it, whose
+    // first window begins on the rest of a word that chunk missed (a
+    // continuation piece or a full stop, at the window's first frame or
+    // its second), then word 3. The first chunk kept a token before that
+    // window, so the rest falls away, as from the old merge, and does not
+    // glue onto word 2 across the empty chunk ("w2s25", "w2.").
+    let config = random_config(1, true);
+    let s = sample_count;
+    let regions = vec![s(1.0)..s(4.0), s(20.0)..s(23.0)];
+    let base = crafted(40.0, &regions, &[]);
+    let spans = partition(&base, &regions, &config.chunker);
+    let empty = &spans.iter().filter(|s| s.chunk).nth(1).unwrap().window;
+    for (piece, lead) in [(25, 0), (25, 1), (41, 0)] {
+        let mut samples = base.clone();
+        ref_placed(vec![11], 2.0, 4).put(&mut samples);
+        ref_placed(vec![2], 10.0, 4).put(&mut samples);
+        Placed {
+            pieces: vec![piece],
+            frame: empty.end.div_ceil(FRAME_SAMPLES) + lead,
+            frames: 3,
+        }
+        .put(&mut samples);
+        ref_placed(vec![3], 30.0, 4).put(&mut samples);
+        for jitter in 0..=1 {
+            let hearing = Hearing {
+                jitter,
+                deaf: (0, 0, 1),
+            };
+            let (new, old) = texts_over(&samples, &regions, &config, 0, hearing);
+            assert_eq!(
+                (new.text().as_str(), old.as_str()),
+                ("w11 w2 w3", "w11 w2 w3"),
+                "piece {piece} lead {lead} jitter {jitter}"
+            );
+            assert!(new.words[1].end < 11.0, "{:?}", new.words);
+        }
+    }
+}
+
+#[test]
+fn a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_the_word_before_it() {
+    // A known limit, text only: `CoreML`'s settings, 20 s, loud sound the
+    // fake decodes to nothing from 3 to 6.5 s with word 13 in it, which a
+    // recovery hears; before it a word whose rest is a continuation, a
+    // full stop or both, then word 14. The fake is deaf for a window's
+    // first frames, so the gap's window and the recovery both miss that
+    // word's start and hear its rest. The recovery keeps the rest, which
+    // lies in its reach, and its tokens step back into the gap's window, so
+    // the rest follows the gap's last word, word 14, a second time: a
+    // copy glued on, never a loss. The old merge kept it once.
+    let config = random_config(1, true);
+    let regions = vec![sample_count(3.0)..sample_count(6.5)];
+    let cases: [(&[u32], usize, &str, &str); 4] = [
+        (&[25], 4, "s25 w14s25 w14 w13", "s25 w14 w13"),
+        (&[41], 4, ". w14. w14 w13", ". w14 w13"),
+        (&[25, 41], 4, "s25. w14s25. w14 w13", "s25. w14 w13"),
+        (&[25], 6, "s25 w14s25 w14 w13", "s25 w14 w13"),
+    ];
+    for (rest, lead, text, before) in cases {
+        let mut samples = crafted(20.0, &regions, &[]);
+        Placed {
+            pieces: [&[5], rest].concat(),
+            frame: lead,
+            frames: 6,
+        }
+        .put(&mut samples);
+        let after = lead + 6 * (1 + rest.len()) + 4;
+        Placed {
+            pieces: vec![14],
+            frame: after,
+            frames: 5,
+        }
+        .put(&mut samples);
+        ref_placed(vec![13], 4.5, 5).put(&mut samples);
+        for jitter in 0..=1 {
+            let hearing = Hearing {
+                jitter,
+                deaf: (lead + 8, 0, 1),
+            };
+            let (new, old) = texts_over(&samples, &regions, &config, 130, hearing);
+            assert_eq!(new.stats.recoveries_accepted, 1, "{rest:?} {lead} {jitter}");
+            assert_eq!(
+                (new.text().as_str(), old.as_str()),
+                (text, before),
+                "{rest:?} {lead} {jitter}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_recovery_that_begins_at_an_orphan_can_glue_it_onto_the_word_before_it() {
+    // A known limit, text only, from the orphan layout (seed
+    // 0x120f372fe94f82d, case 1411): settings with 15 s chunks and a
+    // 3 s long pause, 11.2 s, loud sound from 3.8 s to the end that the
+    // fake decodes to nothing, so the chunk's recovery from the
+    // recording's start wins. The recording begins with a full stop and a
+    // continuation (".s40") whose word it cuts off, then word 18 before
+    // the chunk. The gap's window keeps ".s40 w18s38", the recovery
+    // begins at the same orphan and keeps it, as it lies in its reach, and
+    // its tokens step back into the gap's window: ".s40" follows word 18,
+    // and word 18 comes out again. A copy glued on, never a loss.
+    let config = random_config(2, true);
+    let regions = vec![60_800..179_200];
+    let mut samples = crafted(11.2, &regions, &[]);
+    for (pieces, frame, frames) in [
+        (vec![41, 40], 21, 3),
+        (vec![18, 38, 38], 33, 2),
+        (vec![41, 25, 25, 41], 49, 6),
+        (vec![13], 81, 3),
+        (vec![18, 38, 38, 41], 113, 6),
+    ] {
+        Placed {
+            pieces,
+            frame,
+            frames,
+        }
+        .put(&mut samples);
+    }
+    for jitter in 0..=1 {
+        let (new, old) = texts(&samples, &regions, &config, jitter);
+        assert_eq!(new.stats.recoveries_accepted, 1, "{jitter}");
+        assert_eq!(
+            (new.text().as_str(), old.as_str()),
+            (
+                ".s40 w18s38.s40 w18s38.s25. w13 w18s38.",
+                ".s40 w18s38.s25. w13 w18s38."
+            ),
+            "{jitter}"
+        );
+    }
+}
