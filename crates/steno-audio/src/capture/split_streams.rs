@@ -177,6 +177,12 @@ struct Counter {
     last: Option<u64>,
     advanced: u64,
     delivered: u64,
+    /// The pairs in the sums.
+    pairs: u64,
+    /// The last advance read, whatever the packets' flags, and whether any
+    /// was above zero (device positions only).
+    last_advance: Option<u64>,
+    moved: bool,
 }
 
 impl Counter {
@@ -191,6 +197,39 @@ impl Counter {
     fn pair(&mut self, advance: u64, frames: usize) {
         self.advanced = self.advanced.saturating_add(advance);
         self.delivered = self.delivered.saturating_add(frames as u64);
+        self.pairs = self.pairs.saturating_add(1);
+    }
+
+    /// Whether positions that stood still from the start moved for the
+    /// first time by `advance`, the advance before it none; they then start
+    /// their sums afresh ([`DevicePositions::packet`]).
+    fn first_move(&mut self, advance: Option<u64>) -> bool {
+        let moving = advance.is_some_and(|advance| advance > 0);
+        let first = moving && !self.moved && self.last_advance == Some(0);
+        self.moved |= moving;
+        self.last_advance = advance;
+        if first {
+            self.advanced = 0;
+            self.delivered = 0;
+            self.pairs = 0;
+        }
+        first
+    }
+
+    /// A clean pair of device positions, as [`Self::pair`], except that a
+    /// second pair that advanced less than two thirds of what the first
+    /// explains replaces it: nothing but the rate bounds the first pair (no
+    /// ratio is measured yet), so an idle no packet flagged can pass in it.
+    fn pair_positions(&mut self, advance: u64, frames: usize) {
+        if self.pairs == 1
+            && 3 * u128::from(advance) * u128::from(self.delivered)
+                < 2 * u128::from(self.advanced) * frames as u128
+        {
+            self.advanced = 0;
+            self.delivered = 0;
+            self.pairs = 0;
+        }
+        self.pair(advance, frames);
     }
 
     /// The frames delivered per tick so far; `None` before the clock moved.
@@ -225,8 +264,9 @@ fn within(read: u64, frames: u64, percent: u64) -> bool {
 /// - **Filled only on a sane QPC.** The QPC is measured over the clean
 ///   pairs of packets (no discontinuity, no timestamp error on either, an
 ///   advance at most half a packet past the frames between them). Once
-///   [`QPC_CALIBRATION_FRAMES`] are measured within 2 % of real time, a
-///   flagged packet's QPC past the last packet's end is the loss: up to
+///   [`QPC_CALIBRATION_FRAMES`] are measured within 2 % of real time, and
+///   while the last clean pair matched its frames within 2 %, a flagged
+///   packet's QPC past the last packet's end is the loss: up to
 ///   [`MISSED_FILL_LIMIT`] filled, past it unfilled ([`Missed::of_jump`]).
 /// - **Counted otherwise.** Without a sane QPC (none, one off by more than
 ///   2 %, still measuring, or a timestamp error on this packet or the last),
@@ -244,7 +284,14 @@ fn within(read: u64, frames: u64, percent: u64) -> bool {
 ///   note counts that loss as wall time the recording lacks, past the
 ///   clocks' drift allowance (0.1 %); on the system stream (the follower)
 ///   the zeros the master pads its lane with count it
-///   ([`FollowerLane::record_missed`]).
+///   ([`FollowerLane::take_missed`]).
+/// - **At the stop.** A thread held up into the stop by an engine that
+///   kept its oldest packets leaves no flagged packet. A stream that
+///   delivers continuously reads the performance counter against its last
+///   packet there ([`Self::missed_until`]), on a sane QPC. Without one,
+///   the microphone's loss counts as above and the system stream's is
+///   silent; endpoint loopback idles, so it is never read at the stop, and
+///   its loss there is silent too. The Windows gate step checks both.
 ///
 /// The device position's own readings stay in the count for one case: a
 /// microphone stream without a sane QPC whose losses add up to less than
@@ -303,17 +350,22 @@ impl DevicePositions {
     pub fn packet(&mut self, packet: Packet) -> Missed {
         let last_frames = std::mem::replace(&mut self.last_frames, packet.frames);
         let position = self.positions.advance(packet.position);
+        // Positions that stood still until now (process loopback that
+        // starts in silence) measure from the pair after their first move:
+        // the pair that spans it holds only part of an advance.
+        let moved = self.positions.first_move(position);
         let qpc_now = (!packet.timestamp_error && packet.qpc != 0).then_some(packet.qpc);
         let qpc = qpc_now.and_then(|now| self.qpc.advance(now));
         let missed = if packet.discontinuity {
             self.count(position, qpc, last_frames)
         } else {
             if let Some(advance) = position
+                && !moved
                 && !packet.timestamp_error
                 && !self.last_timestamp_error
                 && advance <= self.most_advance(last_frames)
             {
-                self.positions.pair(advance, last_frames);
+                self.positions.pair_positions(advance, last_frames);
             }
             if let Some(advance) = qpc {
                 let read = QPC.read(advance);
@@ -385,10 +437,48 @@ impl DevicePositions {
         by_rate.min(by_measure)
     }
 
-    /// Whether a jump is filled: the QPC is sane (see the type's doc).
+    /// Whether a jump is filled: the QPC is sane, measured within 2 % of
+    /// real time and its last clean pair matched (see the type's doc).
     #[must_use]
     pub fn fills(&self) -> bool {
-        self.qpc_sane() == Some(true)
+        self.qpc_matched && self.qpc_sane() == Some(true)
+    }
+
+    /// The frames missed after the last packet, for a stream stopped while
+    /// the performance counter reads `now` (in the QPC's 100 ns units): how
+    /// far `now` passed the end of the last packet, less one packet of its
+    /// length (the one in flight at the stop), counted unfilled by
+    /// [`Missed::of_jump`]'s rule and capped at [`MOST_READ_FRAMES`]. Only
+    /// on a sane QPC ([`Self::fills`]) and a last packet that had one;
+    /// nothing otherwise. Only for a stream that delivers continuously:
+    /// endpoint loopback delivers nothing while nothing plays, so its idle
+    /// would read as a loss. Changes nothing.
+    ///
+    /// ```
+    /// use steno_audio::capture::split_streams::{DevicePositions, Packet};
+    ///
+    /// let mut positions = DevicePositions::new(Some(48_000));
+    /// let mut packet = Packet { frames: 480, qpc: 1_000_000_000, ..Packet::default() };
+    /// for _ in 0..=200 {
+    ///     positions.packet(packet);
+    ///     packet.qpc += 100_000;
+    /// }
+    /// // The stop half a second after the last packet's in-flight successor.
+    /// let last = packet.qpc - 100_000;
+    /// assert!(positions.missed_until(last + 200_000).is_none());
+    /// assert_eq!(positions.missed_until(last + 5_200_000).unfilled, 24_000);
+    /// ```
+    #[must_use]
+    pub fn missed_until(&self, now: u64) -> Missed {
+        let Some(advance) = self.qpc.advance(now).filter(|_| self.fills()) else {
+            return Missed::default();
+        };
+        let in_flight = 2 * self.last_frames as u64;
+        let gap = QPC
+            .read(advance)
+            .saturating_sub(in_flight)
+            .min(MOST_READ_FRAMES);
+        Missed::of_jump(gap, self.last_frames, 0)
     }
 
     /// Whether the QPC measured within 2 % of real time; `None` before
