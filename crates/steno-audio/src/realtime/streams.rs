@@ -144,11 +144,11 @@ pub struct FollowerLane {
     /// Producer: frames the follower pushed (wrapping); consumer: their
     /// count at the last re-prime, at the last pull, and at the last pull
     /// that padded the run while the lane was out (a run that ends within
-    /// one pull's shortfall needs no mark: no engine loss is that short). While fewer than `reprime_hold` came since the
-    /// re-prime, `last_run` may still be a discontinuity's padding
-    /// ([`Self::with_reprime_hold`]); a run the follower pushed more than
-    /// that after, before the lane primed (the master was out), is
-    /// forgotten at the re-prime.
+    /// one pull's shortfall needs no mark: no engine loss is that short).
+    /// While fewer than `reprime_hold` came since the re-prime, `last_run`
+    /// may still be a discontinuity's padding ([`Self::with_reprime_hold`]);
+    /// a run the follower pushed more than that after, before the lane
+    /// primed (the master was out), is forgotten at the re-prime.
     pushed: AtomicUsize,
     pushed_at_prime: AtomicUsize,
     pushed_at_pull: AtomicUsize,
@@ -164,8 +164,9 @@ pub struct FollowerLane {
     /// back right before the flag.
     flag_fresh: AtomicBool,
     /// Producer: flagged packets recorded (wrapping); consumer: their count
-    /// when `flag_run` was taken. A flag since then makes the snapshot
-    /// stale: the next pull while the lane is out takes a fresh one.
+    /// when `flag_run` was last added to. A flag since then makes the
+    /// snapshot stale: the next pull while the lane is out adds what padded
+    /// since, and the stop takes it all.
     flags_recorded: AtomicUsize,
     flags_snapped: AtomicUsize,
 }
