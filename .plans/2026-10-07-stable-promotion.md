@@ -534,8 +534,8 @@ after the port".
   cleanup paths.
 - The updater's zip: done, no zip in the build. `tauri-plugin-updater`
   is built without its `zip` feature, which unpacks only formats Steno does
-  not ship (a zipped Windows update, a `.tar.gz` AppImage), so zip 4.6.1 and
-  its advisories RUSTSEC-2026-0367 to 0369 left `Cargo.lock`, and `deny.toml`
+  not ship (a zipped Windows update, a `.tar.gz` AppImage), so zip 4.6.1,
+  and with it RUSTSEC-2026-0367 to 0369, left `Cargo.lock`, and `deny.toml`
   no longer accepts its yank (#300).
 
 ## Work packages
