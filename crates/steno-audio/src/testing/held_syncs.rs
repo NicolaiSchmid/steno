@@ -5,7 +5,7 @@
 //! level stream, A20 of `.plans/2026-10-07-stable-promotion.md`). Rust
 //! only: Swift synced at the close alone.
 
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use steno_core::AudioLane;
@@ -37,7 +37,7 @@ struct State {
 }
 
 impl Gate {
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+    fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

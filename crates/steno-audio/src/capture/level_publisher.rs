@@ -15,10 +15,10 @@
 //!
 //! The thread waits on the slot's [`Wake`](crate::realtime::Wake), and at
 //! least every [`LevelPublisher::POLL`] in case a wake landed just before
-//! it parked, so a level reaches the handler at most that much late. `stop` raises a
-//! flag, wakes the thread and joins it; the thread hands on a last change
-//! before it ends, so the meter's final level is the slot's. The drop
-//! stops it too.
+//! it parked, so a level reaches the handler at most that much late.
+//! `stop` raises a flag, wakes the thread and joins it; the thread hands
+//! on a last change before it ends, so the meter's final level is the
+//! slot's. The drop stops it too.
 //!
 //! [`SYNC_INTERVAL_FRAMES`]: crate::writer::writer_thread::SYNC_INTERVAL_FRAMES
 
