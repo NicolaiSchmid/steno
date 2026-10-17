@@ -10,8 +10,8 @@
 //!
 //! | File | What it holds | Written by | Read by |
 //! |------|---------------|------------|---------|
-//! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written: a recording's from its start until its start fails (nothing was recorded), it is deleted (forgotten before its rows go, and recorded again when the delete is refused, its commit fails or a panic unwinds it) or a launch finds its row durable and no longer `recording`; a phone upload's from before its copy until its admission commits durably or its copy is gone (`AdmissionRecord`); one with no row until a launch adopts its master (from then on as any row's) or finds that its folder holds none (no master, a CAF short of one whole frame, or a header with no audio) | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first, and adopts only a recording with no meeting that this record names ([`crate::recovery`]) |
-//! | `UPLOADS_FILE` | The upload each phone admission's copy holds (recording id, size, SHA-256), by meeting id, from before the copy until its entry in `RECORDED_FILE` is forgotten, the folder's note fails (the admission is refused), or a launch finds the upload with no entry in `RECORDED_FILE` (a crash between the two notes). A file of its own, so an older build reads `RECORDED_FILE` as before and adopts the copy as a recording with no meeting | `note_upload`, `forget`, `forget_uploads_without_folders` | `uploads`: the launch adopts the noted copy that holds its upload with the upload's ledger row, and removes it when the ledger holds those bytes as a meeting the user deleted, since the ledger row commits with its meeting and so names bytes the user deleted ([`crate::recovery`]); the phone's retry admits into the noted copy (`AdmissionRecord`). An entry missing or unreadable is an adoption as a recording with no meeting, without a ledger row |
+//! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written: a recording's from its start until its start fails (nothing was recorded), it is deleted (forgotten before its rows go, and recorded again when the delete is refused, its commit fails or a panic unwinds it) or a launch finds its row durable and no longer `recording`; a phone upload's from before its copy until its admission commits durably or its copy is gone (`AdmissionRecord`); one with no row until a launch adopts its master (from then on as any row's), finds that its folder holds none (no master, a CAF short of one whole frame, or a header with no audio), or finds a phone copy's bytes in the ledger as this very meeting or as a meeting the user deleted (once the copy's master is removed); while the ledger holds them as another meeting that exists, the copy keeps its entry until a launch after that meeting's delete removes the copy | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first, and adopts only a recording with no meeting that this record names ([`crate::recovery`]) |
+//! | `UPLOADS_FILE` | The upload each phone admission's copy holds (recording id, size, SHA-256), by meeting id, from before the copy until its entry in `RECORDED_FILE` is forgotten (while the ledger holds its bytes as another meeting that exists, until a launch after that meeting's delete removes the copy), the folder's note fails (the admission is refused), or a launch finds the upload with no entry in `RECORDED_FILE` (a crash between the two notes). A file of its own, so an older build reads `RECORDED_FILE` as before and adopts the copy as a recording with no meeting | `note_upload`, `forget`, `forget_uploads_without_folders` | `uploads`: the launch adopts the noted copy that holds its upload with the upload's ledger row, keeps it noted while the ledger holds those bytes as another meeting that exists, and removes it once the ledger holds them as a meeting the user deleted, since the ledger row commits with its meeting and so names bytes the user deleted ([`crate::recovery`]); the phone's retry admits into the noted copy (`AdmissionRecord`). An entry missing or unreadable is an adoption as a recording with no meeting, without a ledger row |
 //! | `KNOWN_FILE` | Every audio folder a recording was written to or the setting left, oldest first | `remember` | `known`: crash recovery looks in these folders after the two that decide a meeting ([`crate::recovery`]) |
 //!
 //! A reader returns the error of a file that cannot be read or does not
@@ -119,14 +119,14 @@ fn forget_uploads(
 }
 
 /// Drops the uploads in `seen` (the launch's read of `UPLOADS_FILE`) whose
-/// folder `RECORDED_FILE` does not name when they go: a crash between the
+/// folder `RECORDED_FILE` does not name at the drop: a crash between the
 /// upload's note and the folder's, or a `forget` whose second write
 /// failed. The folders are read under the lock every note takes, so an
 /// admission that noted its folder since is kept. One that noted its
 /// upload before `seen` was read and has not noted its folder yet loses
 /// only the upload, and its copy is adopted as a recording with no
-/// meeting. Once per launch ([`crate::recovery`]), so the record never
-/// grows.
+/// meeting. Once per launch ([`crate::recovery`]), so no upload stays
+/// noted without its folder's entry.
 pub(crate) fn forget_uploads_without_folders(
     support_directory: &Path,
     seen: &BTreeMap<Uuid, NotedUpload>,

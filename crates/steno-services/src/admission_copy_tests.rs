@@ -6,8 +6,8 @@
 //! admission left is one meeting"). The copy is noted with the upload it holds
 //! ([`crate::audio_folders::uploads`]): the launch adopts it with the
 //! upload's ledger row, and a retry before the launch admits into it. A
-//! note an older build wrote names no upload and keeps the adoption it
-//! had. The writer's busy timeout is 20 ms in place of five seconds
+//! copy an older build noted names no upload and is adopted as a
+//! recording with no meeting, without a ledger row. The writer's busy timeout is 20 ms in place of five seconds
 //! (`Store::on_writer`), so an admission gives up within a second rather
 //! than after a hold of more than 20 s. Rust only.
 
@@ -135,16 +135,7 @@ impl World {
 
     /// The meeting folders in the audio folder that hold the upload.
     pub(super) fn copies(&self) -> Vec<Uuid> {
-        let audio = self.dir.path().join("audio");
-        let Ok(entries) = std::fs::read_dir(&audio) else {
-            return Vec::new();
-        };
-        let mut copies: Vec<Uuid> = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| Uuid::parse_str(entry.file_name().to_str()?).ok())
-            .collect();
-        copies.sort();
-        copies
+        meeting_folders_in(&self.dir.path().join("audio"))
     }
 
     /// Exactly one meeting, `meeting_id`, with one ledger row for the
@@ -187,6 +178,19 @@ impl World {
         );
         assert_eq!(self.copies(), [meeting_id], "no second copy");
     }
+}
+
+/// The meeting folders (named by a UUID) in `folder`, sorted.
+fn meeting_folders_in(folder: &std::path::Path) -> Vec<Uuid> {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<Uuid> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| Uuid::parse_str(entry.file_name().to_str()?).ok())
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// The app over the same directory again, launched as the product
@@ -266,7 +270,7 @@ async fn a_retry_admits_into_the_copy_an_admission_that_gave_up_left() {
 /// phone's retry admits the recording again, as a second meeting. Nothing
 /// is lost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_copy_noted_without_its_upload_is_adopted_as_before() {
+async fn a_copy_noted_without_its_upload_is_adopted_with_no_ledger_row() {
     let (world, app) = World::new();
     let (noted, hold) = world.gave_up(&app).await;
     drop(hold);
@@ -336,7 +340,7 @@ impl World {
         meeting.id
     }
 
-    /// The noted copy of `meeting_id`'s master.
+    /// The master of `meeting_id`'s noted copy.
     fn master_of(&self, meeting_id: Uuid) -> PathBuf {
         steno_core::RecordingLayout::new(&self.dir.path().join("audio"), meeting_id)
             .master(self.metadata.format)
@@ -410,7 +414,7 @@ async fn the_noted_copy_of_bytes_whose_meeting_the_user_deleted_is_removed() {
 }
 
 /// The ledger holds the noted copy's bytes as a meeting that still
-/// exists: the copy is not adopted and not removed; only its notes go.
+/// exists: the copy is neither adopted nor removed, and keeps its entries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_noted_copy_of_bytes_whose_meeting_exists_is_kept() {
     let (world, app) = World::new();
@@ -423,7 +427,111 @@ async fn the_noted_copy_of_bytes_whose_meeting_exists_is_kept() {
     assert_eq!(world.copies(), [noted], "the copy is kept");
     assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), world.bytes);
     assert_eq!(World::meetings(&app.store), [existing]);
+    assert_eq!(world.noted(), (1, 1), "with its entries");
+    quit(app).await;
+}
+
+/// The meeting that holds the noted copy's bytes exists in a state other
+/// than ready (its processing failed, so its own master may not be
+/// readable): the copy is kept with its entries, neither adopted nor
+/// removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_copy_of_bytes_whose_meeting_failed_is_kept() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    let existing = world.ledger_holds_the_upload_as_another_meeting(&app.store, false);
+    app.store
+        .set_state(
+            existing,
+            steno_core::MeetingState::Failed {
+                reason: "transcription".to_owned(),
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    assert_eq!(world.copies(), [noted], "the copy is kept");
+    assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), world.bytes);
+    assert_eq!(World::meetings(&app.store), [existing]);
+    assert_eq!(world.noted(), (1, 1), "with its entries");
+    quit(app).await;
+}
+
+/// While the meeting that holds the noted copy's bytes exists, the copy
+/// keeps its entries, and neither the retry nor a launch makes it a second
+/// meeting or a second copy. Once the user deletes that meeting through
+/// the host, the next launch removes the copy and forgets its entries; the
+/// ledger row stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_copy_goes_once_the_user_deletes_the_meeting_holding_its_bytes() {
+    use steno_bridge::BridgeHost as _;
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    let other = world.ledger_holds_the_upload_as_another_meeting(&app.store, false);
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    assert_eq!(world.copies(), [noted], "the copy is kept");
+    assert_eq!(World::meetings(&app.store), [other], "not adopted");
+    assert_eq!(world.noted(), (1, 1), "with its entries");
+    assert_eq!(
+        world.admit(&app).await.unwrap(),
+        other,
+        "the retry gets that meeting"
+    );
+    assert_eq!(World::meetings(&app.store), [other], "no second meeting");
+    assert_eq!(world.copies(), [noted], "no second copy");
+    assert_eq!(world.noted(), (1, 1));
+    quit(app).await;
+
+    // A launch whose host confirms the delete, as the user does.
+    let store = Arc::new(Store::open(world.database()).unwrap());
+    let mut app = app_over_fakes(world.dir.path(), &store, synthetic_capture());
+    app.live_recording_check = an_hour_later();
+    let host = Arc::new(
+        app.host()
+            .unwrap()
+            .with_dialogs(Box::new(|_| true), Box::new(|_| None)),
+    );
+    app.launch(&host);
+    tokio::time::timeout(HANG_GUARD, app.launch_finished())
+        .await
+        .expect("the launch work within the guard");
+    assert_eq!(World::meetings(&app.store), [other], "no second meeting");
+    assert_eq!(world.copies(), [noted]);
+    assert_eq!(world.noted(), (1, 1));
+    let reply = host
+        .meetings_delete(steno_bridge::MeetingIdParams { meeting_id: other })
+        .unwrap();
+    assert!(reply.confirmed);
+    assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new(), "deleted");
+    assert_eq!(
+        world.copies(),
+        [noted],
+        "the delete leaves the copy to the launch"
+    );
+    drop(host);
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    assert_eq!(world.copies(), Vec::<Uuid>::new(), "the copy goes");
+    assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
     assert_eq!(world.noted(), (0, 0));
+    assert_eq!(
+        app.store
+            .admitted_meeting(
+                world.metadata.recording_id,
+                world.metadata.byte_count,
+                &world.metadata.sha256
+            )
+            .unwrap(),
+        Some(other),
+        "the ledger row stays"
+    );
     quit(app).await;
 }
 
