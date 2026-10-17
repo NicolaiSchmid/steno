@@ -1555,9 +1555,10 @@ mod tests {
             span((0.0, 10.0), (0.0, 10.0), true),
             span((10.0, 20.0), (10.0, 20.0), false),
         ];
-        for (at, kept) in [(10.0, vec![6, 25, 2]), (10.5, vec![6, 25, 2])] {
+        for at in [10.0, 10.5] {
             let decoded = [vec![piece(6, at)], vec![piece(25, 10.0), piece(2, 14.0)]];
-            assert_eq!(ids(&join(&spans, &decoded, 2.0, &vocab)), kept, "{at}");
+            let kept = ids(&join(&spans, &decoded, 2.0, &vocab));
+            assert_eq!(kept, [6, 25, 2], "{at}");
         }
         let spans = [
             span((0.0, 5.0), (0.0, 5.0), true),
