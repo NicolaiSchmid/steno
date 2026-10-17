@@ -497,8 +497,9 @@ fn every_open_backfills_the_ledger_from_admitted_receipts() {
 /// the upload's ledger row in one transaction and leaves the receipt as it
 /// is. Bytes the ledger already holds, with a meeting or with one the user
 /// deleted, write nothing and give the row's meeting and whether it is
-/// gone, and a meeting id with a row is refused. The intake's commit into the same meeting id
-/// afterwards is answered by the ledger, not written again. Rust only.
+/// gone, and a meeting id with a row is refused. The intake's commit into
+/// the same meeting id afterwards is answered by the ledger, not written
+/// again. Rust only.
 #[test]
 fn an_adopted_copy_is_written_with_its_ledger_row_unless_the_ledger_holds_its_bytes() {
     let store = Store::in_memory().unwrap();
