@@ -132,8 +132,6 @@ pub struct FollowerLane {
     /// yet handed to the sink's counts ([`Self::take_missed`]).
     missed_fill: AtomicUsize,
     missed_unfilled: AtomicUsize,
-    /// The follower's thread reported a discontinuity not yet handed on.
-    discontinuity: AtomicBool,
     /// Zeros padded since the lane last primed (those before it first
     /// primed included) while the follower pushed nothing, and those of the
     /// runs before the last re-prime that the hold still keeps. A pull
@@ -159,16 +157,19 @@ pub struct FollowerLane {
     /// the runs, and what each later flag's first pull takes too;
     /// `usize::MAX` before that pull or with none pending.
     flag_run: AtomicUsize,
-    /// Producer: the follower's queue at the first flagged packet of the
-    /// pending discontinuity was within the target and the hold, so it came
-    /// back right before the flag.
+    /// Producer: the follower's queue at a flagged packet of the pending
+    /// discontinuity was within the target and the hold, so it came back
+    /// right before that flag.
     flag_fresh: AtomicBool,
     /// Producer: flagged packets recorded (wrapping); consumer: their count
-    /// when `flag_run` was last added to. A flag since then makes the
-    /// snapshot stale: the next pull while the lane is out adds what padded
-    /// since, and the stop takes it all.
+    /// when `flag_run` was last added to, and when they were last handed on.
+    /// A flag since the snapshot makes it stale: the next pull while the
+    /// lane is out adds what padded since, and the stop takes it all. A
+    /// flag since the hand-on is a discontinuity still pending: one
+    /// recorded while the master hands the last one on stays pending.
     flags_recorded: AtomicUsize,
     flags_snapped: AtomicUsize,
+    flags_handed: AtomicUsize,
 }
 
 impl FollowerLane {
@@ -203,7 +204,6 @@ impl FollowerLane {
             reported_overflow: AtomicUsize::new(0),
             missed_fill: AtomicUsize::new(0),
             missed_unfilled: AtomicUsize::new(0),
-            discontinuity: AtomicBool::new(false),
             run: AtomicUsize::new(0),
             last_run: AtomicUsize::new(0),
             pushed: AtomicUsize::new(0),
@@ -215,6 +215,7 @@ impl FollowerLane {
             flag_fresh: AtomicBool::new(false),
             flags_recorded: AtomicUsize::new(0),
             flags_snapped: AtomicUsize::new(0),
+            flags_handed: AtomicUsize::new(0),
         }
     }
 
@@ -374,17 +375,17 @@ impl FollowerLane {
     pub fn record_missed(&self, missed: Missed) {
         saturating_add(&self.missed_fill, missed.fill);
         saturating_add(&self.missed_unfilled, missed.unfilled);
-        // A discontinuity still pending keeps its own freshness: a second
-        // flag while the master is out must not drop the first's padding.
-        if !self.discontinuity.load(Ordering::Acquire) {
-            let queued = self.ring.available_to_read();
-            self.flag_fresh.store(
-                queued <= self.target.saturating_add(self.reprime_hold),
-                Ordering::Relaxed,
-            );
+        // A later flag while one is pending can only make it fresh: a
+        // second flag while the master is out must not drop the first's
+        // padding, and a stale flag still pending (the lane never primed
+        // since) must not drop a new outage's.
+        let recorded = self.flags_recorded.load(Ordering::Relaxed);
+        let fresh = self.ring.available_to_read() <= self.target.saturating_add(self.reprime_hold);
+        if fresh || self.flags_handed.load(Ordering::Acquire) == recorded {
+            self.flag_fresh.store(fresh, Ordering::Relaxed);
         }
-        self.flags_recorded.fetch_add(1, Ordering::Relaxed);
-        self.discontinuity.store(true, Ordering::Release);
+        self.flags_recorded
+            .store(recorded.wrapping_add(1), Ordering::Release);
     }
 
     /// Consumer (master thread). What the follower lost since the last
@@ -409,9 +410,9 @@ impl FollowerLane {
     /// and not the re-prime's wait after it, so an idle right after the
     /// flag is not counted; what padded after the snapshot stays held for
     /// a later flag. A discontinuity whose follower had queued more than the
-    /// target and the hold at its first flag (it came back long before it,
-    /// while the master was out) takes no padding at all; a second flag
-    /// while one is pending does not change that. The padding reads the
+    /// target and the hold at each of its flags (it came back long before
+    /// them, while the master was out) takes no padding at all; one flag
+    /// that finds the queue within them is enough. The padding reads the
     /// loss to within the lane's lag: up to two targets under when the
     /// master's last pulls take the lag (an outage into the stop, or
     /// overlapping the master's own), and overlapping the master's own also
@@ -420,13 +421,13 @@ impl FollowerLane {
     /// most): up to the engine's buffer less the target.
     #[inline(always)]
     pub fn take_missed(&self) -> Missed {
-        let discontinuity = self.discontinuity.load(Ordering::Acquire);
-        if discontinuity && !self.primed.load(Ordering::Relaxed) {
+        let recorded = self.pending_flags();
+        if recorded.is_some() && !self.primed.load(Ordering::Relaxed) {
             // The follower is back but the lane has not primed on its
             // audio yet: its padding is still running.
             return Missed::default();
         }
-        if !discontinuity
+        if recorded.is_none()
             && self
                 .pushed
                 .load(Ordering::Relaxed)
@@ -435,7 +436,7 @@ impl FollowerLane {
         {
             self.last_run.store(0, Ordering::Relaxed);
         }
-        self.hand_on(discontinuity, &self.last_run)
+        self.hand_on(recorded, &self.last_run)
     }
 
     /// The backend's stop, once both capture threads are joined: what the
@@ -447,7 +448,7 @@ impl FollowerLane {
     /// them too. After it, nothing is held.
     #[must_use]
     pub fn take_missed_at_stop(&self) -> Missed {
-        let discontinuity = self.discontinuity.load(Ordering::Acquire);
+        let recorded = self.pending_flags();
         // Both runs, primed or not: an outage's padding sits in the last
         // run when the lane re-primed on the engine's kept packets and
         // then ran out again.
@@ -463,22 +464,32 @@ impl FollowerLane {
             self.last_run
                 .store(snapped.saturating_add(held), Ordering::Relaxed);
         }
-        self.hand_on(discontinuity, &self.last_run)
+        self.hand_on(recorded, &self.last_run)
     }
 
-    /// What [`Self::record_missed`] counted, and after a `discontinuity`
-    /// the larger of that and the zeros in `run`, filled; the zeros capped
-    /// by the run at the flag (see [`Self::take_missed`]).
+    /// Consumer: the count of flagged packets recorded when one is still
+    /// pending (recorded since the last hand-on), `None` otherwise.
     #[inline(always)]
-    fn hand_on(&self, discontinuity: bool, run: &AtomicUsize) -> Missed {
+    fn pending_flags(&self) -> Option<usize> {
+        let recorded = self.flags_recorded.load(Ordering::Acquire);
+        (recorded != self.flags_handed.load(Ordering::Relaxed)).then_some(recorded)
+    }
+
+    /// What [`Self::record_missed`] counted, and after the discontinuities
+    /// up to the `recorded`th flag the larger of that and the zeros in
+    /// `run`, filled; the zeros capped by the run at the flag (see
+    /// [`Self::take_missed`]). A flag recorded after `recorded` was read
+    /// stays pending for the next call.
+    #[inline(always)]
+    fn hand_on(&self, recorded: Option<usize>, run: &AtomicUsize) -> Missed {
         let counted = Missed {
             fill: self.missed_fill.swap(0, Ordering::Relaxed),
             unfilled: self.missed_unfilled.swap(0, Ordering::Relaxed),
         };
-        if !discontinuity {
+        let Some(recorded) = recorded else {
             return counted;
-        }
-        self.discontinuity.store(false, Ordering::Relaxed);
+        };
+        self.flags_handed.store(recorded, Ordering::Release);
         let at_flag = self.flag_run.swap(usize::MAX, Ordering::Relaxed);
         let fresh = self.flag_fresh.load(Ordering::Relaxed);
         let padded = if !fresh {
@@ -557,8 +568,7 @@ impl FollowerLane {
             available -= trimmed;
         }
         if !self.primed.load(Ordering::Relaxed) {
-            let recorded = self.flags_recorded.load(Ordering::Relaxed);
-            if self.discontinuity.load(Ordering::Acquire)
+            if let Some(recorded) = self.pending_flags()
                 && self.flags_snapped.load(Ordering::Relaxed) != recorded
             {
                 self.flags_snapped.store(recorded, Ordering::Relaxed);
