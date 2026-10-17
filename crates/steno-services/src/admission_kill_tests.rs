@@ -249,7 +249,7 @@ async fn fresh_admission_killed_at(point: &str) -> ((usize, usize), (usize, usiz
     (at_kill, after)
 }
 
-/// (a) Killed after the upload's note, before the folder's: no copy, the
+/// Killed after the upload's note, before the folder's: no copy, the
 /// retry copies afresh, and the next launch forgets the upload with no
 /// folder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -260,7 +260,7 @@ async fn a_kill_after_the_upload_note_is_one_meeting() {
     assert_eq!(after.1, 0, "no upload left noted");
 }
 
-/// (b1) Killed after the folder's note, before the copy.
+/// Killed after the folder's note, before the copy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_after_the_folder_note_is_one_meeting() {
     let (at_kill, after) = fresh_admission_killed_at("after-folder-note").await;
@@ -268,7 +268,7 @@ async fn a_kill_after_the_folder_note_is_one_meeting() {
     assert_eq!(after, (0, 0));
 }
 
-/// (b2) Killed inside the admission's commit, the copy whole: the launch
+/// Killed inside the admission's commit, the copy whole: the launch
 /// adopts it with the ledger row and the retry is answered with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_inside_the_admissions_commit_is_one_meeting() {
@@ -277,7 +277,7 @@ async fn a_kill_inside_the_admissions_commit_is_one_meeting() {
     assert_eq!(after, (0, 0));
 }
 
-/// (e) Killed after the admission's commit, before its settle.
+/// Killed after the admission's commit, before its settle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_after_the_admissions_commit_is_one_meeting() {
     let (at_kill, after) = fresh_admission_killed_at("before-settled").await;
@@ -307,7 +307,7 @@ async fn adoption_killed_at(point: &str) -> ((usize, usize), (usize, usize)) {
     (at_kill, after)
 }
 
-/// (c) Killed inside the adoption's transaction, before COMMIT.
+/// Killed inside the adoption's transaction, before COMMIT.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_inside_the_adoptions_commit_is_one_meeting() {
     let (at_kill, after) = adoption_killed_at(IN_LEDGER_COMMIT).await;
@@ -315,7 +315,7 @@ async fn a_kill_inside_the_adoptions_commit_is_one_meeting() {
     assert_eq!(after, (0, 0));
 }
 
-/// (d) Killed between the adoption's commit and the forget.
+/// Killed after the adoption's commit, before the enqueue.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_after_the_adoptions_commit_is_one_meeting() {
     let (at_kill, after) = adoption_killed_at("after-adoption-commit").await;
@@ -356,7 +356,7 @@ async fn retry_held_after_the_reuse_check<T>(
     let go = Arc::new(std::sync::Barrier::new(2));
     {
         let (checked, go) = (checked.clone(), go.clone());
-        steno_pipeline::intake::seams::hold_after_the_reuse_check(move |meeting_id| {
+        steno_pipeline::intake::seams::on_the_reuse_check(move |meeting_id| {
             if meeting_id == noted_id {
                 checked.wait();
                 go.wait();
@@ -477,11 +477,11 @@ fn an_unparsable_uploads_record_is_set_aside() {
         support_directory: support.clone(),
     };
     let upload = steno_pipeline::NotedUpload {
-        recording_id: uuid::Uuid::new_v4(),
+        recording_id: Uuid::new_v4(),
         byte_count: 3,
         sha256: vec![7; 32],
     };
-    let meeting_id = uuid::Uuid::new_v4();
+    let meeting_id = Uuid::new_v4();
     steno_pipeline::AdmissionFolders::copying(
         &folders,
         meeting_id,

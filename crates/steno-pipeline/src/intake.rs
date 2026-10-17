@@ -515,7 +515,8 @@ fn reusable_copy(
 
 /// The phone intake's test seam: the services' race tests hold a retry
 /// between its check that the noted copy has no meeting row and its
-/// commit, and let the launch run there. Test builds only.
+/// commit, and let the launch run there. Behind the `testing` feature,
+/// which only dev-dependencies enable.
 #[cfg(feature = "testing")]
 pub mod seams {
     use std::sync::{Arc, Mutex};
@@ -530,7 +531,7 @@ pub mod seams {
     /// found that it has no meeting row, before the retry reads the copy.
     /// Every hook stays for the process, so each test's ignores the ids of
     /// the others.
-    pub fn hold_after_the_reuse_check(hook: impl Fn(Uuid) + Send + Sync + 'static) {
+    pub fn on_the_reuse_check(hook: impl Fn(Uuid) + Send + Sync + 'static) {
         AFTER_THE_REUSE_CHECK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
