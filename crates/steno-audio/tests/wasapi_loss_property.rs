@@ -1164,6 +1164,10 @@ struct EngineStream {
     /// many, and (the microphone's) the most it may count.
     flagged_gap: usize,
     flags: usize,
+    /// The flagged packets of a loss that ran into the stop or overlapped
+    /// the microphone's own outage: the master's last pulls may take the
+    /// lane's lag there, so the padding reads up to two targets short.
+    lag_flags: usize,
     /// The last idle's frames, and the packets produced since it ended.
     last_idle: usize,
     since_idle: usize,
@@ -1197,6 +1201,7 @@ impl EngineStream {
             delivered: 0,
             flagged_gap: 0,
             flags: 0,
+            lag_flags: 0,
             last_idle: 0,
             since_idle: usize::MAX,
             last_error: false,
@@ -1301,8 +1306,14 @@ impl EngineStream {
 }
 
 /// Runs a call: the first invariant broken, described.
-#[allow(clippy::too_many_lines)]
 pub fn run_call(case: &CallCase) -> Result<(), String> {
+    run_call_with(case, true)
+}
+
+/// [`run_call`], the upper bounds (invariant 9 and the microphone's
+/// `OVER`) only with `upper`.
+#[allow(clippy::too_many_lines)]
+pub fn run_call_with(case: &CallCase, upper: bool) -> Result<(), String> {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = Arc::new(LaneFrameSink::new(&lanes));
@@ -1349,6 +1360,7 @@ pub fn run_call(case: &CallCase) -> Result<(), String> {
         list.iter().any(|&(who, at)| who.is(stream) && at == tick)
     };
     let drain = |stream: usize,
+                 tick: usize,
                  streams: &mut [EngineStream; 2],
                  master: &mut StreamBody,
                  staging: &mut StreamBody,
@@ -1383,7 +1395,18 @@ pub fn run_call(case: &CallCase) -> Result<(), String> {
                 // right after it) is idle the padding counts too.
                 s.flagged_gap += produced.near_idle;
                 s.flags += 1;
-                if stream == MIC && counted > OVER * (produced.gap + PERIOD + resolution(&s.clocks))
+                // The loss before the flagged packet, the engine's buffer
+                // and a re-prime: a microphone outage there, or the stop,
+                // lets the master's last pulls take the lag.
+                let from = produced
+                    .tick
+                    .saturating_sub(produced.gap / PERIOD + case.keep + 3);
+                if produced.lost > 0 && (tick == case.ticks || (from..=tick).any(|t| out(MIC, t))) {
+                    s.lag_flags += 1;
+                }
+                if upper
+                    && stream == MIC
+                    && counted > OVER * (produced.gap + PERIOD + resolution(&s.clocks))
                 {
                     return Err(format!(
                         "mic: counted {counted} above OVER x {} at tick {}",
@@ -1432,7 +1455,9 @@ pub fn run_call(case: &CallCase) -> Result<(), String> {
             let s = &mut streams[SYSTEM];
             s.pending.gap += PERIOD;
             s.pending.flag |= flagged;
-            if s.since_idle != 0 {
+            // Idles that follow each other within the lane's hold count
+            // together: the padding runs through them.
+            if s.since_idle != 0 && !(1..=2 * case.keep + 3).contains(&s.since_idle) {
                 s.last_idle = 0;
             }
             s.last_idle += PERIOD;
@@ -1466,6 +1491,7 @@ pub fn run_call(case: &CallCase) -> Result<(), String> {
             if stop || !out(stream, tick) {
                 drain(
                     stream,
+                    tick,
                     &mut streams,
                     &mut master,
                     &mut staging,
@@ -1478,6 +1504,7 @@ pub fn run_call(case: &CallCase) -> Result<(), String> {
                 produce(&mut streams, stream, tick);
                 drain(
                     stream,
+                    tick,
                     &mut streams,
                     &mut master,
                     &mut staging,
@@ -1497,11 +1524,7 @@ pub fn run_call(case: &CallCase) -> Result<(), String> {
         + 1_000_000_000_000;
     let continuous = case.idles.is_empty();
     let mic_end = streams[MIC].positions.missed_until(now);
-    let system_end = if continuous {
-        streams[SYSTEM].positions.missed_until(now)
-    } else {
-        Missed::default()
-    };
+    let system_end = continuous.then(|| streams[SYSTEM].positions.missed_until(now));
     count_at_stop(&sink, Some((&follower, SYSTEM)), mic_end, system_end);
     let get = |counts: std::collections::BTreeMap<AudioLane, usize>, lane| {
         counts.get(&lane).copied().unwrap_or(0)
@@ -1533,9 +1556,16 @@ pub fn run_call(case: &CallCase) -> Result<(), String> {
     };
     // 7: the system lane counts what its engine lost.
     let system_counted = filled[SYSTEM] + unfilled[SYSTEM];
-    // The padding reads a loss to within the lane's lag, two targets.
-    let system_slack =
-        PERIOD + system.lost / 100 + system.flags * (resolution(&system.clocks) + 4 * PERIOD);
+    // The padding reads a loss to within the lane's lag, two targets, where
+    // the master's last pulls take it (`lag_flags`, and an outage still
+    // pending at the stop); elsewhere the padding counts the outage less
+    // one target and the engine drops at least its buffer of packets, so
+    // it reads over.
+    let lag_flags = system.lag_flags + usize::from(system.pending.lost > 0);
+    let system_slack = PERIOD
+        + system.lost / 100
+        + system.flags * resolution(&system.clocks)
+        + lag_flags * 4 * PERIOD;
     let system_lost = system.lost - unflagged(system, continuous) - system.lost_first;
     // Both threads out (a stopped process, or two outages that overlap): a
     // master that cannot fill counts the time unfilled on its own lane
@@ -1565,7 +1595,7 @@ pub fn run_call(case: &CallCase) -> Result<(), String> {
     }
     // 9: the stop's reading on the microphone is its loss no packet flagged,
     // less the packet in flight, at most.
-    if mic_end.unfilled > mic.pending.lost {
+    if upper && mic_end.unfilled > mic.pending.lost {
         return Err(format!(
             "mic: the stop read {} above the {} no packet flagged",
             mic_end.unfilled, mic.pending.lost
@@ -1573,11 +1603,11 @@ pub fn run_call(case: &CallCase) -> Result<(), String> {
     }
     // 9: the system lane's upper bound, on a unit it can explain; the loss
     // no packet flagged at the stop counts as one more flag.
-    if !matches!(system.clocks.unit, Unit::Rate(_)) {
+    if upper && !matches!(system.clocks.unit, Unit::Rate(_)) {
         // What no packet flagged at the stop is lost all the same, so
         // counting it is no overcount, whoever counts it.
         let end_gap = system.pending.lost;
-        let end_flags = usize::from(end_gap > 0 || !system_end.is_none());
+        let end_flags = usize::from(end_gap > 0 || continuous);
         // An idle that touches an outage of the system thread, or ends
         // less than a re-prime (three packets) and the lane's hold (the
         // engine's buffer and a period of master pulls) before it: the
@@ -1592,10 +1622,19 @@ pub fn run_call(case: &CallCase) -> Result<(), String> {
             .map(|&(from, len, _)| len.min(case.ticks.saturating_sub(from)))
             .sum::<usize>()
             * PERIOD;
+        // A continuous follower's padding at the stop counts unflagged, so
+        // the audio its lane slipped in the master's last burst, padded
+        // after it, counts too: dropped audio all the same.
+        let slipped_at_stop = if continuous {
+            follower.slipped_frames()
+        } else {
+            0
+        };
         let most = OVER * (system.flagged_gap + idle_out + end_gap)
             + (system.flags + end_flags)
                 * (case.keep * PERIOD + 2 * PERIOD + OVER * (PERIOD + resolution(&system.clocks)))
             + skipped
+            + slipped_at_stop
             + PERIOD;
         if system_counted > most {
             return Err(format!(
@@ -1708,6 +1747,331 @@ fn a_call_counts_both_lanes_losses_within_bounds_up_to_the_stop() {
     );
     for (_, n, line) in &classes {
         eprintln!("  [{n} cases] {line}");
+    }
+    assert!(
+        classes.is_empty(),
+        "{} classes of failure:\n{}",
+        classes.len(),
+        classes
+            .iter()
+            .map(|(_, n, line)| format!("[{n} cases] {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+// --- the multi-flag generator ---------------------------------------------
+
+/// Which stream's events an episode makes.
+fn storm_who(rng: &mut Rng) -> Who {
+    match rng.below(100) {
+        0..40 => Who::Mic,
+        40..85 => Who::System,
+        _ => Who::Both,
+    }
+}
+
+/// An outage length around the lane's thresholds: within the engine's
+/// buffer (no loss, no flag), just past it, past the target and the hold
+/// of queue a follower builds while the master is out, long.
+fn storm_len(rng: &mut Rng, keep: usize) -> usize {
+    match rng.below(100) {
+        0..15 => 1 + rng.below(keep as u64) as usize,
+        15..40 => keep + 1 + rng.below(4) as usize,
+        40..75 => keep + 5 + rng.below(30) as usize,
+        75..92 => 40 + rng.below(110) as usize,
+        _ => 150 + rng.below(250) as usize,
+    }
+}
+
+/// A call made of N episodes (outages of either thread or both, spurious
+/// flags, idles flagged or not, timestamp errors), each placed relative to
+/// the one before (inside it, at its end, or a little after), so flags
+/// arrive in any order around outages and re-primes: a flag while the
+/// master is out, a second flag while the first is pending, a spurious
+/// flag right after a real one, an idle that ends inside an outage. Short
+/// calls, the stop often right after the last episode. The system stream's
+/// clocks read nothing half the time, so a loss only the padding counts is
+/// common.
+fn generate_storm(rng: &mut Rng) -> CallCase {
+    let mut mic = generate_clocks(rng, true);
+    let mut system = generate_clocks(rng, false);
+    if rng.chance(500) {
+        system.unit = Unit::Stuck;
+        system.qpc = Qpc::Absent;
+    }
+    if rng.chance(300) {
+        mic.qpc = Qpc::Absent;
+    }
+    let keep = rng.pick(&[10, 10, 12, 20]);
+    let mut outages = Vec::new();
+    let mut idles = Vec::new();
+    let mut spurious = Vec::new();
+    let mut timestamp_errors = Vec::new();
+    let episodes = 1 + rng.below(8) as usize;
+    // The previous episode's start and end.
+    let (mut from, mut to) = (20 + rng.below(80) as usize, 0usize);
+    to = to.max(from);
+    for _ in 0..episodes {
+        let at = match rng.below(100) {
+            // Inside the previous episode.
+            0..30 => from + rng.below((to - from + 1) as u64) as usize,
+            // At its end, give or take a few packets.
+            30..65 => (to + rng.below(6) as usize).saturating_sub(2),
+            // Within the target and the hold after it.
+            65..85 => to + 2 + rng.below((keep + 4) as u64) as usize,
+            _ => to + rng.below(200) as usize,
+        };
+        let end = match rng.below(100) {
+            0..45 => {
+                let len = storm_len(rng, keep);
+                outages.push((storm_who(rng), at, len));
+                at + len
+            }
+            45..75 => {
+                let who = if rng.chance(800) {
+                    Who::System
+                } else {
+                    storm_who(rng)
+                };
+                spurious.push((who, at));
+                at
+            }
+            75..90 => {
+                let len = 1 + rng.pick(&[1, 2, 3, 10, 30, 100]) as usize;
+                idles.push((at, len, rng.chance(500)));
+                at + len
+            }
+            _ => {
+                timestamp_errors.push((storm_who(rng), at));
+                at
+            }
+        };
+        from = at;
+        to = end.max(at);
+    }
+    let ticks = match rng.below(100) {
+        // The stop inside or right after the last episode.
+        0..35 => (from + 1).max(to.saturating_sub(rng.below(5) as usize)) + rng.below(4) as usize,
+        35..60 => to + rng.below((keep + 6) as u64) as usize,
+        _ => to + 20 + rng.below(300) as usize,
+    }
+    .max(from + 1)
+    .max(30);
+    CallCase {
+        mic,
+        system,
+        keep,
+        drop_oldest: rng.chance(500),
+        ticks,
+        outages,
+        idles,
+        spurious,
+        timestamp_errors,
+        master_first: rng.chance(500),
+        extra_packet: !stop_without_a_flag() || rng.chance(500),
+        start: rng.below(1 << 40),
+    }
+}
+
+/// `shrink_call`, then smaller numbers: a shorter call, shorter and
+/// earlier outages and idles, earlier flags, a 48 kHz engine, start 0.
+/// Every step only lowers a number or drops a feature, so it ends.
+fn shrink_storm(case: &CallCase, failure: &str) -> (CallCase, String) {
+    let same = |message: &str| call_class(message) == call_class(failure);
+    let mut best = shrink_call(case, failure);
+    loop {
+        let c = &best.0;
+        let mut candidates: Vec<CallCase> = Vec::new();
+        for cut in [c.ticks / 2, 50, 10, 3, 1] {
+            if cut > 0 && c.ticks > cut + 10 {
+                let mut d = c.clone();
+                d.ticks -= cut;
+                candidates.push(d);
+            }
+        }
+        for i in 0..c.outages.len() {
+            let (who, from, len) = c.outages[i];
+            for (f, l) in [
+                (from, len / 2),
+                (from, len.saturating_sub(1)),
+                (from.saturating_sub(10), len),
+                (from.saturating_sub(1), len),
+            ] {
+                if l > 0 && (f, l) != (from, len) {
+                    let mut d = c.clone();
+                    d.outages[i] = (who, f, l);
+                    candidates.push(d);
+                }
+            }
+            if who == Who::Both {
+                for w in [Who::Mic, Who::System] {
+                    let mut d = c.clone();
+                    d.outages[i].0 = w;
+                    candidates.push(d);
+                }
+            }
+        }
+        for i in 0..c.idles.len() {
+            let (from, len, flagged) = c.idles[i];
+            for (f, l, g) in [
+                (from, len / 2, flagged),
+                (from, len.saturating_sub(1), flagged),
+                (from.saturating_sub(1), len, flagged),
+                (from, len, false),
+            ] {
+                if l > 0 && (f, l, g) != (from, len, flagged) {
+                    let mut d = c.clone();
+                    d.idles[i] = (f, l, g);
+                    candidates.push(d);
+                }
+            }
+        }
+        for i in 0..c.spurious.len() {
+            let (who, at) = c.spurious[i];
+            for a in [at.saturating_sub(10), at.saturating_sub(1)] {
+                if a != at {
+                    let mut d = c.clone();
+                    d.spurious[i] = (who, a);
+                    candidates.push(d);
+                }
+            }
+            if who == Who::Both {
+                for w in [Who::Mic, Who::System] {
+                    let mut d = c.clone();
+                    d.spurious[i].0 = w;
+                    candidates.push(d);
+                }
+            }
+        }
+        for field in 0..6 {
+            let mut d = c.clone();
+            match field {
+                0 => d.mic.engine_rate = None,
+                1 => d.system.engine_rate = None,
+                2 => d.start = 0,
+                3 => d.keep = d.keep.min(10),
+                4 => d.mic.unit = Unit::Frames,
+                _ => d.mic.qpc = Qpc::Absent,
+            }
+            candidates.push(d);
+        }
+        let mut changed = false;
+        for candidate in candidates {
+            if candidate == best.0 {
+                continue;
+            }
+            if let Err(message) = run_call_with(&candidate, storm_upper())
+                && same(&message)
+            {
+                best = (candidate, message);
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            return best;
+        }
+    }
+}
+
+/// The shape of a shrunk call, to tell classes apart within one invariant.
+fn storm_shape(case: &CallCase) -> String {
+    let mut parts: Vec<(usize, String)> = Vec::new();
+    for &(who, from, len) in &case.outages {
+        parts.push((from, format!("out {who:?} {len}")));
+    }
+    for &(from, len, flagged) in &case.idles {
+        parts.push((
+            from,
+            format!("idle {len}{}", if flagged { " flagged" } else { "" }),
+        ));
+    }
+    for &(who, at) in &case.spurious {
+        parts.push((at, format!("spurious {who:?}")));
+    }
+    for &(who, at) in &case.timestamp_errors {
+        parts.push((at, format!("ts {who:?}")));
+    }
+    parts.sort();
+    parts
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether the multi-flag test checks the upper bounds too
+/// (`WASAPI_STORM_UPPER=1`); by default it checks that no loss is silent.
+fn storm_upper() -> bool {
+    std::env::var("WASAPI_STORM_UPPER").is_ok_and(|v| v != "0")
+}
+
+/// Under 30 s in a debug build on CI together with the other property
+/// tests; `WASAPI_STORM_CASES` overrides it.
+const STORM_CASES: usize = 2_000;
+
+/// The call test over multi-flag sequences: invariants 7 to 10 on every
+/// call [`generate_storm`] makes. `WASAPI_STORM_SHAPES=n` shrinks up to n
+/// failures each and prints every distinct shape, not one per invariant.
+#[test]
+fn a_call_with_many_flags_counts_both_lanes_losses_within_bounds() {
+    let (_, seed) = settings();
+    let cases = std::env::var("WASAPI_STORM_CASES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(STORM_CASES);
+    let shapes: usize = std::env::var("WASAPI_STORM_SHAPES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let mut rng = Rng(seed ^ 0x5707);
+    let mut classes: Vec<(String, usize, String)> = Vec::new();
+    let mut failed = 0;
+    let mut shrunk = 0;
+    for index in 0..cases {
+        let case = generate_storm(&mut rng);
+        if let Ok(only) = std::env::var("WASAPI_STORM_ONLY") {
+            if only.parse::<usize>().ok() != Some(index) {
+                continue;
+            }
+            eprintln!("case {index}: {case:?}");
+        }
+        let Err(message) = run_call_with(&case, storm_upper()) else {
+            continue;
+        };
+        failed += 1;
+        if std::env::var_os("WASAPI_STORM_LIST").is_some() {
+            eprintln!("fail {index} {}", call_class(&message));
+        }
+        let mut key = call_class(&message);
+        if shapes > 0 {
+            if shrunk >= shapes {
+                continue;
+            }
+            shrunk += 1;
+            let (small, small_message) = shrink_storm(&case, &message);
+            key = format!("{} | {}", call_class(&small_message), storm_shape(&small));
+            if let Some(class) = classes.iter_mut().find(|(k, _, _)| *k == key) {
+                class.1 += 1;
+                continue;
+            }
+            classes.push((key, 1, format!("{small_message}\n    {small:?}")));
+            continue;
+        }
+        if let Some(class) = classes.iter_mut().find(|(k, _, _)| *k == key) {
+            class.1 += 1;
+            continue;
+        }
+        let (small, small_message) = shrink_storm(&case, &message);
+        classes.push((key, 1, format!("{small_message}\n    {small:?}")));
+    }
+    eprintln!(
+        "storm: seed {seed:#x}, {cases} cases, {failed} failed, {} classes",
+        classes.len()
+    );
+    for (key, n, line) in &classes {
+        eprintln!("  [{n} cases] {key}\n    {line}");
     }
     assert!(
         classes.is_empty(),
