@@ -280,24 +280,23 @@ impl SpeechSettingsViewModel {
     /// press tries the rebuild again (the end is then a no-op). Either way
     /// the section says why. Rust only.
     pub fn use_neural_engine(&mut self, services: &Services) {
-        match services.speech_models.end_speech_fallback() {
+        let ended = services.speech_models.end_speech_fallback();
+        match ended.map(|()| services.pipeline.reload()) {
             Err(error) => self
                 .errors
                 .fail("The Neural Engine could not be turned back on.", error),
-            Ok(()) => match services.pipeline.reload() {
-                Ok(()) => {
-                    self.rebuild_pending = false;
-                    self.errors.clear();
-                }
-                Err(error) => {
-                    self.rebuild_pending = true;
-                    self.errors.fail(
-                        "The Neural Engine could not be turned back on yet. Try again, or quit \
-                         and reopen Steno.",
-                        error,
-                    );
-                }
-            },
+            Ok(Err(error)) => {
+                self.rebuild_pending = true;
+                self.errors.fail(
+                    "The Neural Engine could not be turned back on yet. Try again, or quit and \
+                     reopen Steno.",
+                    error,
+                );
+            }
+            Ok(Ok(())) => {
+                self.rebuild_pending = false;
+                self.errors.clear();
+            }
         }
         self.refresh_states(services);
     }
