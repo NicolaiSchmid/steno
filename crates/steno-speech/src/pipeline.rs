@@ -239,10 +239,9 @@ impl<B: SpeechBackend> Transcriber<B> {
         original: Vec<Token>,
         stats: &mut DecodeStats,
     ) -> Result<Vec<Token>, SpeechError> {
-        let decoded = self
-            .chunk_decoder(0)
-            .recover(samples, span, original, stats)?;
-        Ok(decoded.tokens)
+        self.chunk_decoder(0)
+            .recover(samples, span, original, stats)
+            .map(|decoded| decoded.tokens)
     }
 
     /// Every span's tokens, in order: on the one backend in turn, or on
@@ -1327,6 +1326,11 @@ mod tests {
         tokens.iter().map(|t| t.id).collect()
     }
 
+    /// The tokens as `(id, frame)`.
+    fn timed(tokens: &[Token]) -> Vec<(u32, usize)> {
+        tokens.iter().map(|t| (t.id, t.frame)).collect()
+    }
+
     /// The span owning `owned` seconds and decoding `window`; a chunk
     /// reaches over both, a gap's window two frames past its owned span
     /// (the join reads no reach).
@@ -1397,8 +1401,7 @@ mod tests {
             .chunk_decoder(0)
             .decode_span(&samples, &gap, &[], &mut DecodeStats::default())
             .unwrap();
-        let kept: Vec<_> = decoded.tokens.iter().map(|t| (t.id, t.frame)).collect();
-        assert_eq!(kept, [(2, 123), (4, 251)]);
+        assert_eq!(timed(&decoded.tokens), [(2, 123), (4, 251)]);
         assert_eq!(decoded.window, gap.window);
     }
 
@@ -1413,8 +1416,7 @@ mod tests {
         ];
         let joined = |chunk: &[Token], window: &[Token], next: &[Token]| {
             let decoded = [chunk.to_vec(), window.to_vec(), next.to_vec()];
-            let tokens = join(&spans, &decoded, 2.0, &vocab);
-            tokens.iter().map(|t| (t.id, t.frame)).collect::<Vec<_>>()
+            join(&spans, &decoded, 2.0, &vocab)
         };
         let at = |seconds: f32| sample_count(seconds) / FRAME_SAMPLES;
         let next = [piece(14, 21.0)];
@@ -1423,7 +1425,7 @@ mod tests {
         let chunk = [piece(13, 9.84), piece(23, 9.92)];
         let again = [piece(13, 10.0), piece(23, 10.08), piece(2, 14.0)];
         assert_eq!(
-            joined(&chunk, &again, &next),
+            timed(&joined(&chunk, &again, &next)),
             [
                 (13, at(9.84)),
                 (23, at(9.92)),
@@ -1434,7 +1436,7 @@ mod tests {
         // The copy with more pieces heard more of the word and stays.
         let cut = [piece(13, 9.84)];
         assert_eq!(
-            joined(&cut, &again, &next),
+            timed(&joined(&cut, &again, &next)),
             [
                 (13, at(10.0)),
                 (23, at(10.08)),
@@ -1447,20 +1449,22 @@ mod tests {
         for apart in [0.24, 0.4] {
             let chunk = [piece(5, 10.0 - apart)];
             let said = [piece(5, 10.0), piece(2, 14.0)];
-            let ids: Vec<u32> = joined(&chunk, &said, &next).iter().map(|t| t.0).collect();
-            assert_eq!(ids, [5, 5, 2, 14], "{apart} s apart");
+            assert_eq!(
+                ids(&joined(&chunk, &said, &next)),
+                [5, 5, 2, 14],
+                "{apart} s apart"
+            );
         }
         let chunk = [piece(6, 9.92)];
         let said = [piece(5, 10.0), piece(2, 14.0)];
-        let ids: Vec<u32> = joined(&chunk, &said, &next).iter().map(|t| t.0).collect();
-        assert_eq!(ids, [6, 5, 2, 14]);
+        assert_eq!(ids(&joined(&chunk, &said, &next)), [6, 5, 2, 14]);
         // A word the window heard across its end and the chunk again at
         // its start: the window's copy falls away, the chunk's whole word
         // stays, and three frames apart both do.
         let late = [piece(2, 14.0), piece(7, 19.92)];
         let next = [piece(7, 20.0), piece(27, 20.08), piece(14, 21.0)];
         assert_eq!(
-            joined(&chunk, &late, &next),
+            timed(&joined(&chunk, &late, &next)),
             [
                 (6, at(9.92)),
                 (2, at(14.0)),
@@ -1470,26 +1474,23 @@ mod tests {
             ]
         );
         let late = [piece(2, 14.0), piece(7, 19.76)];
-        let ids: Vec<u32> = joined(&chunk, &late, &next).iter().map(|t| t.0).collect();
-        assert_eq!(ids, [6, 2, 7, 7, 27, 14]);
+        assert_eq!(ids(&joined(&chunk, &late, &next)), [6, 2, 7, 7, 27, 14]);
         // Two copies of one piece each: the window's falls away; and one
         // of two pieces against three, with every piece of it.
         let late = [piece(2, 14.0), piece(7, 19.92)];
         let alone = [piece(7, 20.0), piece(14, 21.0)];
         assert_eq!(
-            joined(&chunk, &late, &alone),
+            timed(&joined(&chunk, &late, &alone)),
             [(6, at(9.92)), (2, at(14.0)), (7, at(20.0)), (14, at(21.0))]
         );
         let late = [piece(2, 14.0), piece(7, 19.84), piece(27, 19.92)];
         let longer = [piece(7, 20.0), piece(27, 20.08), piece(37, 20.16)];
-        let ids: Vec<u32> = joined(&chunk, &late, &longer).iter().map(|t| t.0).collect();
-        assert_eq!(ids, [6, 2, 7, 27, 37]);
+        assert_eq!(ids(&joined(&chunk, &late, &longer)), [6, 2, 7, 27, 37]);
         // The known limit: a chunk that begins with the rest of a word the
         // window heard whole gives that piece twice.
         let whole = [piece(2, 14.0), piece(7, 19.84), piece(27, 19.92)];
         let rest = [piece(27, 20.0), piece(14, 21.0)];
-        let ids: Vec<u32> = joined(&chunk, &whole, &rest).iter().map(|t| t.0).collect();
-        assert_eq!(ids, [6, 2, 7, 27, 27, 14]);
+        assert_eq!(ids(&joined(&chunk, &whole, &rest)), [6, 2, 7, 27, 27, 14]);
         // Between two windows of one gap the later window's copy falls
         // away, and three frames apart both stay.
         let split = [
@@ -1506,9 +1507,11 @@ mod tests {
                 vec![piece(8, earlier)],
                 vec![piece(8, 21.0)],
             ];
-            let tokens = join(&split, &decoded, 2.0, &vocab);
-            let got: Vec<_> = tokens.iter().map(|t| (t.id, t.frame)).collect();
-            assert_eq!(got, kept, "{earlier}");
+            assert_eq!(
+                timed(&join(&split, &decoded, 2.0, &vocab)),
+                kept,
+                "{earlier}"
+            );
         }
         // Unless the earlier window heard less of the word.
         let decoded = [
@@ -1516,9 +1519,10 @@ mod tests {
             vec![piece(8, 20.92)],
             vec![piece(8, 21.0), piece(28, 21.08)],
         ];
-        let tokens = join(&split, &decoded, 2.0, &vocab);
-        let got: Vec<_> = tokens.iter().map(|t| (t.id, t.frame)).collect();
-        assert_eq!(got, [(6, at(9.0)), (8, at(21.0)), (28, at(21.08))]);
+        assert_eq!(
+            timed(&join(&split, &decoded, 2.0, &vocab)),
+            [(6, at(9.0)), (8, at(21.0)), (28, at(21.08))]
+        );
     }
 
     #[test]
