@@ -259,9 +259,7 @@ impl LaneFrameSink {
                 Some((index, frames)) if index == lane => frames,
                 _ => master,
             };
-            if frames > 0 {
-                count.fetch_add(frames, Ordering::Relaxed);
-            }
+            count.fetch_add(frames, Ordering::Relaxed);
         }
     }
 

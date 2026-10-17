@@ -533,9 +533,9 @@ impl DevicePositions {
     /// QPC came after the start, past the frames delivered before it,
     /// beyond the start latency (the stream's latency and one period), in
     /// frames by [`Missed::of_jump`]'s rule at a period's resolution, all
-    /// of them unfilled, and capped at [`MOST_READ_FRAMES`]. Only on a sane QPC
-    /// ([`Self::qpc_sane`]); nothing otherwise, and nothing for a stream
-    /// given no start. Changes nothing.
+    /// of them unfilled, and capped at [`MOST_READ_FRAMES`]. Only on a
+    /// sane QPC ([`Self::qpc_sane`]); nothing otherwise, and nothing for a
+    /// stream given no start. Changes nothing.
     ///
     /// ```
     /// use steno_audio::capture::split_streams::{DevicePositions, Packet, StreamSizes};
@@ -553,12 +553,9 @@ impl DevicePositions {
     /// ```
     #[must_use]
     pub fn missed_before_first(&self, sizes: StreamSizes) -> usize {
-        let Start::Read(late) = self.start else {
+        let (Start::Read(late), Some(true)) = (self.start, self.qpc_sane()) else {
             return 0;
         };
-        if self.qpc_sane() != Some(true) {
-            return 0;
-        }
         let latency = sizes.latency_frames.saturating_add(sizes.period_frames);
         let gap = late.saturating_sub(latency as u64).min(MOST_READ_FRAMES);
         Missed::of_jump(gap, sizes.period_frames, 0).unfilled

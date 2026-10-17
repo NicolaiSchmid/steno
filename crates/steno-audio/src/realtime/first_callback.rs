@@ -81,9 +81,9 @@ impl FirstCallback {
     /// The frames the capture missed before its first callback, at
     /// `sample_rate`: the [`Self::offset`] from `started` beyond
     /// [`FIRST_CALLBACK_ALLOWANCE`], all of them unfilled, since nothing
-    /// was there to fill; nothing when no callback came (the session's stall watchdog
-    /// restarts such a capture, and its gap holds that time) or it came
-    /// within the allowance.
+    /// was there to fill; nothing when no callback came (the session's
+    /// stall watchdog restarts such a capture, and its gap holds that
+    /// time) or it came within the allowance.
     ///
     /// ```
     /// use steno_audio::realtime::FirstCallback;
