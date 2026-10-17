@@ -2219,7 +2219,8 @@ it:
   unfilled otherwise, at the largest of the QPC's and the device position's
   readings, so the note says it. The packets and the seconds are logged at
   stop, with both clocks' ratios, at `warn` when the stream had
-  discontinuities and filled none. At the stop each stream drains once
+  discontinuities and filled none, or when the microphone or process
+  loopback ran without a sane QPC. At the stop each stream drains once
   more; then the microphone and process loopback, which deliver
   continuously, compare the performance counter with their last packet's
   QPC, for a stall into the stop that left no flagged packet (an engine
@@ -2229,10 +2230,19 @@ it:
   or not. The same two streams read the counter just before their start
   against their first packet's QPC, for a loss before it that no packet
   flags, beyond their latency and a period, after a recording's first
-  start. Endpoint loopback idles, so it reads nothing there or at the start. Step 9 of the stable plan's
-  Windows gate checks it on hardware, at 48 and 44.1 kHz, on a hands-free
-  headset and above 48 kHz, names the loopback, and stalls just before the
-  stop on both loopbacks.
+  start. Endpoint loopback idles, so it reads nothing there or at the
+  start. Step 9 of the stable plan's Windows gate checks it on hardware,
+  at 48 and 44.1 kHz, on a hands-free headset and above 48 kHz, names the
+  loopback, and stalls just before the stop on both loopbacks. The stable
+  plan's A18 names one more limit of these readings, a stream without a
+  sane QPC (the microphone's frozen positions and process loopback's first
+  packet alike): on the microphone, a loss its positions cannot read
+  (positions that never move, or before its first packet) counts only past
+  the drift allowance (0.1 % of the wall time), through the note's
+  wall-time shortfall; on process loopback, a loss before the first packet
+  is silent. Each such stream logs a `warn` line at its stop, and step 9
+  of the Windows gate fails any stream whose QPC line is missing or not
+  near 1.0000, so such hardware is found there.
 - **A system-only capture skips silence.** With the `[System]` lane
   override the system stream is the master, and endpoint loopback
   delivers no packet while nothing plays, so the recording is shorter than

@@ -472,6 +472,13 @@ impl FollowerLane {
     #[inline(always)]
     fn pending_flags(&self) -> Option<usize> {
         let recorded = self.flags_recorded.load(Ordering::Acquire);
+        // Pending is the count recorded against the count handed on, not a
+        // flag the hand-on clears. This closes a race: the follower's
+        // thread records a flag after this read and before `hand_on`
+        // stores what it handed on. A cleared flag would drop that one, and
+        // the padding of its outage with it, silently; `hand_on` stores
+        // only the count read here, so that flag stays pending for the
+        // next take.
         (recorded != self.flags_handed.load(Ordering::Relaxed)).then_some(recorded)
     }
 

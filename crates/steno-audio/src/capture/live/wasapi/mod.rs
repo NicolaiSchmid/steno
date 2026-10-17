@@ -78,7 +78,9 @@
 //! ([`StreamBody::write_missed`]; A18, the design in
 //! [`realtime::missed`](crate::realtime::missed)), filled or counted by
 //! the rule [`DevicePositions`] states. A stream that had discontinuities
-//! and filled none of them logs its clocks' ratios at `warn` at its stop.
+//! and filled none of them logs its clocks' ratios at `warn` at its stop,
+//! as does a microphone or process-loopback stream that ran without a sane
+//! QPC.
 //! At the stop each thread drains its stream once more, so a jump in what
 //! the engine still holds is read too. Then a stream that delivers
 //! continuously (the microphone, and process loopback, which delivers
@@ -651,9 +653,10 @@ fn run_stream(
 }
 
 /// The stop's line about `source`'s clocks (`DevicePositions`'s
-/// `Display`), on `loopback` for the system stream: at `warn` when the
-/// stream had `discontinuities` and their jumps were counted, not filled
-/// (no sane QPC), at `info` otherwise.
+/// `Display`), on `loopback` for the system stream, read once the stream
+/// has stopped: at `warn` when the stream had `discontinuities` and their
+/// jumps were counted, not filled (no sane QPC), or when a stream that
+/// delivers continuously ran without a sane QPC; at `info` otherwise.
 fn log_positions(
     source: StreamSource,
     loopback: Option<LoopbackKind>,
@@ -661,14 +664,32 @@ fn log_positions(
     discontinuities: u64,
 ) {
     let on = loopback.map_or_else(String::new, |kind| format!(" on {kind:?} loopback"));
-    if discontinuities > 0 && !positions.fills() {
+    let counted = if discontinuities > 0 && !positions.fills() {
+        format!(
+            "; what its {discontinuities} discontinuities lost was counted, not written as \
+             silence"
+        )
+    } else {
+        String::new()
+    };
+    // Without a sane QPC, the microphone counts what its positions cannot
+    // read only past the drift allowance, and process loopback counts no
+    // loss before its first packet: the stable plan's A18 names this limit,
+    // and this line shows a recording that ran with it.
+    let continuously = loopback != Some(LoopbackKind::Endpoint);
+    let no_sane_qpc = if continuously && positions.qpc_sane() != Some(true) {
+        "; it ran without a sane QPC, so a loss before its first packet or with its positions \
+         standing still may not be counted"
+    } else {
+        ""
+    };
+    if counted.is_empty() && no_sane_qpc.is_empty() {
+        tracing::info!("{} stream{on}: {positions}", source.as_str());
+    } else {
         tracing::warn!(
-            "{} stream{on}: {positions}; what its {discontinuities} discontinuities lost was \
-             counted, not written as silence",
+            "{} stream{on}: {positions}{counted}{no_sane_qpc}",
             source.as_str()
         );
-    } else {
-        tracing::info!("{} stream{on}: {positions}", source.as_str());
     }
 }
 

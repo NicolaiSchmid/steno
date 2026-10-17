@@ -2091,11 +2091,14 @@ Each lands before `0.11.0-rc.1`.
       no flagged packet (**At the stop**) and one before its first packet
       (**Before the first callback**); step 9 of the Windows gate stalls
       just before the stop and right after the start there;
-    - a stream with no sane QPC: a microphone whose positions never move
-      loses what stays under the drift allowance (the note's wall-time
-      shortfall counts the rest), and on process loopback a loss before
-      the first packet is silent; step 9 fails any stream with no QPC near
-      1.0000, so such hardware is found there;
+    - a stream without a sane QPC (the microphone's frozen positions and
+      process loopback's first packet alike): on the microphone, a loss its
+      positions cannot read (positions that never move, or before its first
+      packet) counts only past the drift allowance (0.1 % of the wall time),
+      through the note's wall-time shortfall; on process loopback, a loss
+      before the first packet is silent. Each such stream logs a `warn` line
+      at its stop, and step 9 of the Windows gate fails any stream whose QPC
+      line is missing or not near 1.0000, so such hardware is found there;
     - the note takes the worst lane (above), on every backend: the general
       follow-up.
 
