@@ -263,21 +263,22 @@ pub const SEAM_SAMPLES: usize = 2 * FRAME_SAMPLES;
 /// ([`partition`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
-    /// The samples whose words this span's decode keeps. The owned ranges
-    /// of a partition are sorted, disjoint and cover the recording.
+    /// The share of the recording this span owns. The owned ranges of a
+    /// partition are sorted, disjoint and cover the recording.
     pub owned: Range<usize>,
     /// The samples decoded: a chunk of the [`layout`], or a window over a
     /// gap. It holds `owned`, except the share of an undecoded gap the span
     /// owns, and is never longer than `max_seconds`.
     pub window: Range<usize>,
-    /// The samples whose words this span's decode keeps, a word with any
-    /// piece in them whole. For a gap's window, `owned` and
-    /// [`SEAM_SAMPLES`] either side, which the join's seam rule answers
-    /// for. For a chunk, what an accepted recovery keeps: the window and
-    /// `overlap_seconds` either side, together with `owned`, rounded out
-    /// to whole encoder frames; it holds `owned` and `window`. Both are
-    /// clamped to the recording. The plain decodes of a run of chunks go
-    /// whole to their merge, and read no reach.
+    /// The samples whose words this span's decode keeps: a word with a
+    /// piece in them, from its start to the punctuation after its last
+    /// piece in them. For a gap's window, `owned` and [`SEAM_SAMPLES`]
+    /// either side, which the join's seam rule answers for. For a chunk,
+    /// what an accepted recovery keeps: the window and `overlap_seconds`
+    /// either side, together with `owned`, rounded out to whole encoder
+    /// frames; it holds `owned` and `window`. Both are clamped to the
+    /// recording. The plain decodes of a run of chunks go whole to their
+    /// merge, and read no reach.
     pub reach: Range<usize>,
     /// A chunk of the layout, which is decoded again with more audio around
     /// it when it looks empty; a gap's window is decoded as it is.
