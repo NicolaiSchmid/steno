@@ -17,7 +17,18 @@
 //!    0.1 % drift allowance) counts at least everything lost;
 //! 3. no zeros are written without a sane QPC;
 //! 4. no packet fills more than was lost or idle before it;
-//! 5. the sink's counts and the lane's length are what was reported.
+//! 5. the sink's counts and the lane's length are what was reported;
+//! 6. on a unit the stream can explain (48 kHz frames, the mix format's,
+//!    positions that never move), a flagged packet counts at most `OVER`
+//!    (6) times what was lost or idle before it and its last packet, the
+//!    clocks' resolution included.
+//!
+//! Some streams' positions stand still for their first packets and then
+//! move (process loopback that starts in silence).
+//!
+//! A second test runs a call through both streams' counting, the
+//! follower's `FollowerLane` and the stop (invariants 7 to 10, see
+//! `run_call`).
 //!
 //! A loss nothing can read (positions that never move, or a unit neither
 //! 48 kHz nor the mix format explains before its first clean pair, with no
@@ -30,9 +41,11 @@
 //! there is no sane QPC and they add up to less than the drift allowance,
 //! which is why the positions stay in the count.
 //!
-//! Fixed seed, bounded case count; `WASAPI_PROPERTY_CASES` and
-//! `WASAPI_PROPERTY_SEED` override them. A failure is shrunk to a minimal
-//! case before it is reported.
+//! Fixed seed, bounded case count; `WASAPI_PROPERTY_CASES`,
+//! `WASAPI_CALL_CASES` and `WASAPI_PROPERTY_SEED` override them, and
+//! `WASAPI_STOP_WITHOUT_A_FLAG=0` leaves out the losses at the stop that no
+//! packet flags. A failure is shrunk to a minimal case before it is
+//! reported.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -141,6 +154,9 @@ pub struct Case {
     pub start: u64,
     /// The engine's packet in 48 kHz frames; losses are whole packets.
     pub period: usize,
+    /// Packets each client's device positions stand still for before they
+    /// move (process loopback starting in silence); 0 for most streams.
+    pub still: usize,
     pub events: Vec<Event>,
 }
 
@@ -192,6 +208,11 @@ fn generate(rng: &mut Rng) -> Case {
         _ => Qpc::Random,
     };
     let period = rng.pick(&[480, 480, 480, 144, 960, 1_056]);
+    let still = if rng.chance(150) {
+        rng.pick(&[1, 2, 5, 50, 100, 300]) as usize
+    } else {
+        0
+    };
     // A quarter of the streams run longer and lose a few packets once or
     // twice, as a recording with one stall does: what they lose stays
     // under the recorder's drift allowance, so only a count reads it.
@@ -240,6 +261,7 @@ fn generate(rng: &mut Rng) -> Case {
         qpc,
         start: rng.below(1 << 40),
         period,
+        still,
         events,
     }
 }
@@ -314,6 +336,13 @@ pub struct Failure {
 /// clock (`CLOCK_DRIFT` in `steno-services`' recorder): 0.1 %.
 const CLOCK_DRIFT: f64 = 0.001;
 
+/// The most a count may exceed the loss and idle it reads, for a unit the
+/// stream can explain (invariant 6): the largest of the readings is the
+/// right unit's or one off by the ratio of 48 kHz and the mix format's
+/// rate, at most 48 / 8 = 6 (8 kHz mix format, 48 kHz positions) or
+/// 192 / 48 = 4 (192 kHz positions read at one a frame).
+const OVER: usize = 6;
+
 /// Runs `case` through a counter of type `C` and the master's router on a
 /// system-only capture: the first invariant broken, if any.
 pub fn run<C: Counter>(case: &Case) -> Result<(), Failure> {
@@ -339,6 +368,10 @@ pub fn run_with<C: Counter>(case: &Case, with_router: bool) -> Result<(), Failur
     // Clean pairs of packets with no idle between them, since the client
     // started: what a measured ratio and a matched QPC come from.
     let mut clean_pairs = 0usize;
+    // Clean pairs over which the positions moved: what a measured ratio of
+    // a unit neither 48 kHz nor the mix format explains comes from.
+    let mut moving_pairs = 0usize;
+    let mut was_moving = false;
     let mut jitter = Rng(case.start ^ 0xA5A5);
     let (mut delivered, mut written_fill, mut lane) = (0usize, 0usize, 0usize);
     let (mut reported_fill, mut reported_unfilled) = (0usize, 0usize);
@@ -367,6 +400,8 @@ pub fn run_with<C: Counter>(case: &Case, with_router: bool) -> Result<(), Failur
                 counter = C::new(case.engine_rate);
                 (first_packet, flag, lost, idle) = (true, false, 0, 0);
                 clean_pairs = 0;
+                moving_pairs = 0;
+                was_moving = false;
                 client_start = t;
                 previous_timestamp_error = false;
             }
@@ -377,6 +412,11 @@ pub fn run_with<C: Counter>(case: &Case, with_router: bool) -> Result<(), Failur
                 spurious,
             } => {
                 let since = t - client_start;
+                // Positions that stand still for the client's first `still`
+                // packets, then count from where they stood.
+                let still_frames = (case.still * case.period) as u64;
+                let moving = since > still_frames;
+                let since = since.saturating_sub(still_frames);
                 let position = match unit {
                     Some(rate) => {
                         (u128::from(since) * u128::from(rate) / u128::from(ENGINE)) as u64
@@ -446,8 +486,13 @@ pub fn run_with<C: Counter>(case: &Case, with_router: bool) -> Result<(), Failur
                     && clean_pairs > 0
                     && !timestamp_error
                     && !previous_timestamp_error;
-                let unreadable =
-                    !qpc_readable && (case.unit == Unit::Stuck || !explained && clean_pairs == 0);
+                // Positions that stood still at the last packet (or still
+                // do) read too little of a loss they started moving in.
+                let unreadable = !qpc_readable
+                    && (case.unit == Unit::Stuck
+                        || !moving
+                        || !was_moving
+                        || !explained && moving_pairs == 0);
                 let unreadable = unreadable && !EXEMPT_NOTHING.with(std::cell::Cell::get);
                 if C::PER_PACKET && counted + slack < pending && !unreadable {
                     return Err(failure("counted below the loss"));
@@ -457,6 +502,16 @@ pub fn run_with<C: Counter>(case: &Case, with_router: bool) -> Result<(), Failur
                 }
                 if missed.fill > pending + idle + slack {
                     return Err(failure("filled above the loss and idle"));
+                }
+                // Invariant 6, the upper bound: on a unit the stream can
+                // explain, a flagged packet counts at most OVER times what
+                // was lost or idle before it and the last packet (a
+                // reading scales the whole advance, the last packet's frames
+                // included, before they come off), plus the clocks'
+                // resolution.
+                let bounded = !matches!(case.unit, Unit::Rate(_));
+                if bounded && counted > OVER * (pending + idle + case.period + resolution) {
+                    return Err(failure("counted above OVER x (loss + idle)"));
                 }
                 total_lost += pending;
                 if pending > 0 {
@@ -493,7 +548,11 @@ pub fn run_with<C: Counter>(case: &Case, with_router: bool) -> Result<(), Failur
                     && idle == 0
                 {
                     clean_pairs += 1;
+                    if was_moving {
+                        moving_pairs += 1;
+                    }
                 }
+                was_moving = moving;
                 (flag, lost, idle) = (false, 0, 0);
                 previous_timestamp_error = timestamp_error;
             }
@@ -651,11 +710,24 @@ pub fn shrink<C: Counter>(case: &Case, failure: &Failure) -> (Case, Failure) {
             }
         }
         // Simplify the stream.
-        for (unit, qpc, rate, start) in [
-            (Unit::Frames, best.qpc, best.engine_rate, best.start),
-            (best.unit, Qpc::Absent, best.engine_rate, best.start),
-            (best.unit, best.qpc, Some(48_000), best.start),
-            (best.unit, best.qpc, best.engine_rate, 0),
+        for (unit, qpc, rate, start, still) in [
+            (
+                Unit::Frames,
+                best.qpc,
+                best.engine_rate,
+                best.start,
+                best.still,
+            ),
+            (
+                best.unit,
+                Qpc::Absent,
+                best.engine_rate,
+                best.start,
+                best.still,
+            ),
+            (best.unit, best.qpc, Some(48_000), best.start, best.still),
+            (best.unit, best.qpc, best.engine_rate, 0, best.still),
+            (best.unit, best.qpc, best.engine_rate, best.start, 0),
         ] {
             let candidate = Case {
                 unit,
@@ -663,6 +735,7 @@ pub fn shrink<C: Counter>(case: &Case, failure: &Failure) -> (Case, Failure) {
                 engine_rate: rate,
                 start,
                 period: best.period,
+                still,
                 events: best.events.clone(),
             };
             if candidate != best
@@ -681,8 +754,8 @@ pub fn shrink<C: Counter>(case: &Case, failure: &Failure) -> (Case, Failure) {
 /// The events as a short line, runs of the same packet as `N x`.
 pub fn describe(case: &Case) -> String {
     let mut out = format!(
-        "engine {:?}, unit {:?}, qpc {:?}, period {}, start {}: ",
-        case.engine_rate, case.unit, case.qpc, case.period, case.start
+        "engine {:?}, unit {:?}, qpc {:?}, period {}, still {}, start {}: ",
+        case.engine_rate, case.unit, case.qpc, case.period, case.still, case.start
     );
     let word = |event: &Event| match *event {
         Event::Packet {
@@ -874,4 +947,776 @@ fn explore_everything() {
 
 thread_local! {
     static EXEMPT_NOTHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// --- a call: the microphone master and the system follower ---------------
+//
+// The same counting in both of a call's streams, as `run_stream` drives
+// them: the microphone's thread the master (its `PacketRouter` pulls the
+// system lane from the `FollowerLane`), the system stream's the follower
+// (`StreamBody::write_missed` records what its clocks read, `handle`
+// stages the packet). Each stream's engine keeps `keep` packets while its
+// thread is out and loses the rest, the oldest or the newest; the thread
+// then drains what was kept. Threads go out alone or together (a stopped
+// process), the system stream idles (endpoint loopback, nothing playing),
+// and an outage may run into the stop, where each thread drains once more
+// in either order, a stream that delivers continuously reads the
+// performance counter against its last packet, and the backend's stop
+// hands those readings and what the follower still holds to the sink
+// (`count_at_stop`). The system stream is process loopback, which delivers
+// continuously, when it never idles, and endpoint loopback otherwise; a loss
+// no packet flags at the stop of a stream the counter cannot read
+// (endpoint loopback, no sane QPC) is exempt from 7 and 8, the documented
+// limit the Windows gate step checks. Invariants, per lane:
+//
+// 7. the system lane counts (filled plus unfilled) at least what the
+//    system stream's engine lost, whatever its clocks read, the stop
+//    included;
+// 8. the microphone lane's note (filled, plus the larger of unfilled and
+//    the shortfall to wall time beyond the drift allowance) counts at least
+//    what its engine lost;
+// 9. upper bounds: each lane counts at most OVER times the loss and idle
+//    right before its flagged packets, plus per flagged packet the engine's
+//    buffer and two packets (the follower's padding counts the kept packets
+//    that land late), plus on the system lane what the master's unfilled
+//    jumps dropped from it; the microphone's no more than OVER times its
+//    loss at each flagged packet (its clocks are ones it can explain);
+// 10. both lanes hold the same length, the microphone's delivered frames
+//     and its fills.
+
+use std::collections::VecDeque;
+
+use steno_audio::realtime::{FollowerLane, count_at_stop};
+
+/// Whether the engine may lose packets at the end of an outage that runs
+/// into the stop and produce none after them before the final drain, so
+/// no packet carries the discontinuity (an engine that refuses the newest
+/// packets on an overrun). Off, every such loss is followed by a flagged
+/// packet.
+const STOP_WITHOUT_A_FLAG: bool = true;
+
+fn stop_without_a_flag() -> bool {
+    std::env::var("WASAPI_STOP_WITHOUT_A_FLAG").map_or(STOP_WITHOUT_A_FLAG, |v| v != "0")
+}
+const CALL_CASES: usize = 300;
+const PERIOD: usize = 480;
+const MIC: usize = 0;
+const SYSTEM: usize = 1;
+
+/// One stream's clocks in a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clocks {
+    pub engine_rate: Option<u32>,
+    pub unit: Unit,
+    pub still: usize,
+    pub qpc: Qpc,
+}
+
+impl Clocks {
+    fn unit_rate(&self) -> Option<u64> {
+        Case {
+            engine_rate: self.engine_rate,
+            unit: self.unit,
+            qpc: self.qpc,
+            start: 0,
+            period: PERIOD,
+            still: 0,
+            events: Vec::new(),
+        }
+        .unit_rate()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Who {
+    Mic,
+    System,
+    Both,
+}
+
+impl Who {
+    fn is(self, stream: usize) -> bool {
+        matches!(
+            (self, stream),
+            (Who::Both, _) | (Who::Mic, MIC) | (Who::System, SYSTEM)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallCase {
+    pub mic: Clocks,
+    pub system: Clocks,
+    /// The engine's buffer in packets: what it keeps while a thread is out.
+    pub keep: usize,
+    /// On an overrun the engine drops its oldest packet (else it refuses
+    /// the newest).
+    pub drop_oldest: bool,
+    pub ticks: usize,
+    /// Thread outages: who, from which tick, for how many.
+    pub outages: Vec<(Who, usize, usize)>,
+    /// The system stream idles: from, for, and whether the packet after is
+    /// flagged.
+    pub idles: Vec<(usize, usize, bool)>,
+    pub spurious: Vec<(Who, usize)>,
+    pub timestamp_errors: Vec<(Who, usize)>,
+    /// At the stop, the master's final drain runs before the follower's.
+    pub master_first: bool,
+    /// The engines produce one more packet before the final drains.
+    pub extra_packet: bool,
+    pub start: u64,
+}
+
+fn generate_clocks(rng: &mut Rng, master: bool) -> Clocks {
+    let case = generate(rng);
+    let mut unit = case.unit;
+    if master && matches!(unit, Unit::Rate(_) | Unit::Stuck) {
+        // The microphone's loss is checked per lane, so its positions are
+        // in a unit it can explain (the single-stream test covers the rest).
+        unit = Unit::Frames;
+    }
+    Clocks {
+        engine_rate: case.engine_rate,
+        unit,
+        still: if master { 0 } else { case.still },
+        qpc: case.qpc,
+    }
+}
+
+fn generate_call(rng: &mut Rng) -> CallCase {
+    let mic = generate_clocks(rng, true);
+    let system = generate_clocks(rng, false);
+    let keep = rng.pick(&[10, 10, 12, 20]);
+    let ticks = 300 + rng.below(2_700) as usize;
+    let who = |rng: &mut Rng| match rng.below(100) {
+        0..35 => Who::Mic,
+        35..70 => Who::System,
+        _ => Who::Both,
+    };
+    let mut outages = Vec::new();
+    for _ in 0..rng.below(4) {
+        let len = match rng.below(10) {
+            0..5 => 1 + rng.below(keep as u64 + 5),
+            5..9 => 1 + rng.below(150),
+            _ => 1 + rng.below(300),
+        } as usize;
+        let from = if rng.chance(300) {
+            ticks.saturating_sub(len)
+        } else {
+            rng.below(ticks as u64) as usize
+        };
+        outages.push((who(rng), from, len));
+    }
+    let mut idles = Vec::new();
+    for _ in 0..rng.below(3) {
+        idles.push((
+            rng.below(ticks as u64) as usize,
+            1 + rng.below(1_000) as usize,
+            rng.chance(500),
+        ));
+    }
+    let mut spurious = Vec::new();
+    for _ in 0..rng.below(3) {
+        spurious.push((who(rng), rng.below(ticks as u64) as usize));
+    }
+    let mut timestamp_errors = Vec::new();
+    for _ in 0..rng.below(4) {
+        timestamp_errors.push((who(rng), rng.below(ticks as u64) as usize));
+    }
+    CallCase {
+        mic,
+        system,
+        keep,
+        drop_oldest: rng.chance(500),
+        ticks,
+        outages,
+        idles,
+        spurious,
+        timestamp_errors,
+        master_first: rng.chance(500),
+        extra_packet: !stop_without_a_flag() || rng.chance(500),
+        start: rng.below(1 << 40),
+    }
+}
+
+/// A packet the engine holds for a thread.
+#[derive(Debug, Clone, Copy)]
+struct Produced {
+    tick: usize,
+    flag: bool,
+    timestamp_error: bool,
+    /// Frames lost or idle right before it.
+    gap: usize,
+    lost: usize,
+    /// An idle that ended a few packets before it, not in `gap`.
+    near_idle: usize,
+}
+
+struct EngineStream {
+    clocks: Clocks,
+    positions: DevicePositions,
+    buffer: VecDeque<Produced>,
+    pending: Produced,
+    lost: usize,
+    first: bool,
+    delivered: usize,
+    /// Over every flagged packet: the loss and idle right before it, how
+    /// many, and (the microphone's) the most it may count.
+    flagged_gap: usize,
+    flags: usize,
+    /// The last idle's frames, and the packets produced since it ended.
+    last_idle: usize,
+    since_idle: usize,
+    /// The last packet drained had a timestamp error: no QPC to read the
+    /// stop against.
+    last_error: bool,
+    /// What `lost` lost while both threads were out, together or in
+    /// outages that overlap.
+    lost_both: usize,
+    /// What was lost before the stream's first packet, whose flag is not
+    /// read (loopback flags its first packet).
+    lost_first: usize,
+}
+
+impl EngineStream {
+    fn new(clocks: Clocks) -> Self {
+        Self {
+            clocks,
+            positions: DevicePositions::new(clocks.engine_rate),
+            buffer: VecDeque::new(),
+            pending: Produced {
+                tick: 0,
+                flag: false,
+                timestamp_error: false,
+                gap: 0,
+                lost: 0,
+                near_idle: 0,
+            },
+            lost: 0,
+            first: true,
+            delivered: 0,
+            flagged_gap: 0,
+            flags: 0,
+            last_idle: 0,
+            since_idle: usize::MAX,
+            last_error: false,
+            lost_both: 0,
+            lost_first: 0,
+        }
+    }
+
+    /// The engine's packet for `tick`, into what it keeps for the thread.
+    fn produce(&mut self, tick: usize, keep: usize, drop_oldest: bool, flag: bool, error: bool) {
+        let packet = Produced {
+            tick,
+            flag: self.pending.flag || flag,
+            timestamp_error: error,
+            gap: self.pending.gap,
+            lost: self.pending.lost,
+            // The follower's lane takes the padding before a re-prime as a
+            // discontinuity's loss for its hold, the engine's buffer and a
+            // period (`run_call`'s lane), so an idle that ended that
+            // recently is counted with a flag too.
+            near_idle: if (1..=keep + 2 + keep + 1).contains(&self.since_idle) {
+                self.last_idle
+            } else {
+                0
+            },
+        };
+        self.since_idle = self.since_idle.saturating_add(1);
+        if self.buffer.len() < keep {
+            self.buffer.push_back(packet);
+            self.pending = Produced {
+                tick,
+                flag: false,
+                timestamp_error: false,
+                gap: 0,
+                lost: 0,
+                near_idle: 0,
+            };
+            return;
+        }
+        self.lost += PERIOD;
+        if drop_oldest {
+            let old = self.buffer.pop_front().unwrap();
+            if let Some(front) = self.buffer.front_mut() {
+                front.flag = true;
+                front.gap += old.gap + PERIOD;
+                front.lost += old.lost + PERIOD;
+                self.buffer.push_back(packet);
+                self.pending = Produced {
+                    tick,
+                    flag: false,
+                    timestamp_error: false,
+                    gap: 0,
+                    lost: 0,
+                    near_idle: 0,
+                };
+            } else {
+                // A buffer of one: the new packet follows the lost one.
+                self.buffer.push_back(Produced {
+                    flag: true,
+                    gap: packet.gap + old.gap + PERIOD,
+                    lost: packet.lost + old.lost + PERIOD,
+                    ..packet
+                });
+                self.pending = Produced {
+                    tick,
+                    flag: false,
+                    timestamp_error: false,
+                    gap: 0,
+                    lost: 0,
+                    near_idle: 0,
+                };
+            }
+        } else {
+            // Refused: the next packet it takes follows the loss.
+            self.pending.flag = true;
+            self.pending.gap += PERIOD;
+            self.pending.lost += PERIOD;
+        }
+    }
+
+    /// The device's clocks at `tick`'s packet.
+    fn clocks_at(&self, tick: usize, start: u64, error: bool, jitter: &mut Rng) -> (u64, u64) {
+        let since = (tick * PERIOD).saturating_sub(self.clocks.still * PERIOD) as u64;
+        let position = self.clocks.unit_rate().map_or(0, |rate| {
+            (u128::from(since) * u128::from(rate) / u128::from(ENGINE)) as u64
+        });
+        let t = start + (tick * PERIOD) as u64;
+        let time = (u128::from(t) * u128::from(QPC_PER_SECOND) / u128::from(ENGINE)) as u64;
+        let qpc = if error {
+            jitter.next() >> 8
+        } else {
+            match self.clocks.qpc {
+                Qpc::Present => (time + 1_000_000_000_000).saturating_add(jitter.below(60)),
+                Qpc::Absent => 0,
+                Qpc::Stuck => 1_000_000_000_000,
+                Qpc::Double => 2 * time + 1_000_000_000_000,
+                Qpc::Random => jitter.next() >> 8,
+            }
+        };
+        (position, qpc)
+    }
+}
+
+/// Runs a call: the first invariant broken, described.
+#[allow(clippy::too_many_lines)]
+pub fn run_call(case: &CallCase) -> Result<(), String> {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let plan = SplitStreamPlan::new(&lanes).unwrap();
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    // As the backend builds it: the master's buffer and the hold of the
+    // follower's buffer and period, both the engine's `keep` packets.
+    let follower = Arc::new(
+        FollowerLane::for_streams_filling(PERIOD, case.keep * PERIOD)
+            .with_reprime_hold((case.keep + 1) * PERIOD),
+    );
+    let mut master = StreamBody::Master {
+        router: PacketRouter::new(
+            plan.layout.sources.clone(),
+            Some(Arc::clone(&follower)),
+            4_800,
+        ),
+        sink: Arc::clone(&sink),
+    };
+    let mut staging = StreamBody::follower(Arc::clone(&follower), 4_800);
+    let mut streams = [EngineStream::new(case.mic), EngineStream::new(case.system)];
+    let mic_samples = vec![0.5f32; PERIOD];
+    let tap_samples = vec![0.25f32; 2 * PERIOD];
+    let mut jitter = Rng(case.start ^ 0x5A5A);
+    let mut order = Rng(case.start ^ 0xC3C3);
+    let mut lane_len = [0usize; 2];
+    let mut skipped = 0usize;
+    let resolution = |clocks: &Clocks| {
+        clocks.unit_rate().map_or(2, |rate| {
+            2 * ENGINE.div_ceil(rate.clamp(1, ENGINE)) as usize + 4
+        })
+    };
+    let out = |stream: usize, tick: usize| {
+        case.outages
+            .iter()
+            .any(|&(who, from, len)| who.is(stream) && (from..from + len).contains(&tick))
+    };
+    let idle = |tick: usize| {
+        case.idles
+            .iter()
+            .find(|&&(from, len, _)| (from..from + len).contains(&tick))
+            .map(|&(from, len, flagged)| (tick + 1 == from + len) && flagged)
+    };
+    let both_out = |tick: usize| out(MIC, tick) && out(SYSTEM, tick);
+    let has = |list: &[(Who, usize)], stream: usize, tick: usize| {
+        list.iter().any(|&(who, at)| who.is(stream) && at == tick)
+    };
+    let drain = |stream: usize,
+                 streams: &mut [EngineStream; 2],
+                 master: &mut StreamBody,
+                 staging: &mut StreamBody,
+                 lane_len: &mut [usize; 2],
+                 skipped: &mut usize,
+                 jitter: &mut Rng|
+     -> Result<(), String> {
+        let s = &mut streams[stream];
+        while let Some(produced) = s.buffer.pop_front() {
+            let discontinuity = produced.flag && !s.first;
+            if s.first {
+                s.lost_first = produced.lost;
+            }
+            s.first = false;
+            let (position, qpc) =
+                s.clocks_at(produced.tick, case.start, produced.timestamp_error, jitter);
+            s.last_error = produced.timestamp_error;
+            let missed = s.positions.packet(Packet {
+                frames: PERIOD,
+                position,
+                qpc,
+                discontinuity,
+                timestamp_error: produced.timestamp_error,
+            });
+            if missed.fill > 0 && !s.positions.fills() {
+                return Err(format!("stream {stream}: zeros written without a sane QPC"));
+            }
+            let counted = missed.fill.saturating_add(missed.unfilled);
+            if discontinuity {
+                s.flagged_gap += produced.gap;
+                // An idle that ended a few packets before (a spurious flag
+                // right after it) is idle the padding counts too.
+                s.flagged_gap += produced.near_idle;
+                s.flags += 1;
+                if stream == MIC && counted > OVER * (produced.gap + PERIOD + resolution(&s.clocks))
+                {
+                    return Err(format!(
+                        "mic: counted {counted} above OVER x {} at tick {}",
+                        produced.gap, produced.tick
+                    ));
+                }
+            }
+            if stream == MIC {
+                let view = SliceView {
+                    frames: PERIOD,
+                    channels: 1,
+                    samples: Some(&mic_samples),
+                };
+                if discontinuity {
+                    let before = sink.unfilled_samples().get(&AudioLane::System).copied();
+                    master.write_missed(&view, missed);
+                    let after = sink.unfilled_samples().get(&AudioLane::System).copied();
+                    *skipped += after.unwrap_or(0) - before.unwrap_or(0);
+                }
+                master.handle(view);
+                for (lane, len) in lane_len.iter_mut().enumerate() {
+                    let ring = sink.ring(lane);
+                    *len += ring.discard(ring.available_to_read());
+                }
+            } else {
+                let view = SliceView {
+                    frames: PERIOD,
+                    channels: 2,
+                    samples: Some(&tap_samples),
+                };
+                if discontinuity {
+                    staging.write_missed(&view, missed);
+                }
+                staging.handle(view);
+            }
+            s.delivered += PERIOD;
+        }
+        Ok(())
+    };
+    let produce = |streams: &mut [EngineStream; 2], stream: usize, tick: usize| {
+        let flag = has(&case.spurious, stream, tick);
+        let error = has(&case.timestamp_errors, stream, tick);
+        if stream == SYSTEM
+            && let Some(flagged) = idle(tick)
+        {
+            let s = &mut streams[SYSTEM];
+            s.pending.gap += PERIOD;
+            s.pending.flag |= flagged;
+            if s.since_idle != 0 {
+                s.last_idle = 0;
+            }
+            s.last_idle += PERIOD;
+            s.since_idle = 0;
+            return;
+        }
+        let before = streams[stream].lost;
+        streams[stream].produce(tick, case.keep, case.drop_oldest, flag, error);
+        if both_out(tick) {
+            streams[stream].lost_both += streams[stream].lost - before;
+        }
+    };
+    for tick in 0..=case.ticks {
+        let stop = tick == case.ticks;
+        if !stop {
+            for stream in [MIC, SYSTEM] {
+                produce(&mut streams, stream, tick);
+            }
+        }
+        let first = if stop {
+            if case.master_first { MIC } else { SYSTEM }
+        } else if order.chance(500) {
+            MIC
+        } else {
+            SYSTEM
+        };
+        for stream in [first, 1 - first] {
+            // At the stop every thread drains once more, an outage then
+            // over, and the engine may produce one more packet while it
+            // does (the one after a loss, flagged).
+            if stop || !out(stream, tick) {
+                drain(
+                    stream,
+                    &mut streams,
+                    &mut master,
+                    &mut staging,
+                    &mut lane_len,
+                    &mut skipped,
+                    &mut jitter,
+                )?;
+            }
+            if stop && case.extra_packet {
+                produce(&mut streams, stream, tick);
+                drain(
+                    stream,
+                    &mut streams,
+                    &mut master,
+                    &mut staging,
+                    &mut lane_len,
+                    &mut skipped,
+                    &mut jitter,
+                )?;
+            }
+        }
+    }
+    // The stop: the counter now, at wall time, against each continuous
+    // stream's last packet (a QPC that is not `Present` is not sane, so it
+    // reads nothing), then the backend's stop.
+    let wall_frames = ((case.ticks + usize::from(case.extra_packet)) * PERIOD) as u64;
+    let now = (u128::from(case.start + wall_frames) * u128::from(QPC_PER_SECOND)
+        / u128::from(ENGINE)) as u64
+        + 1_000_000_000_000;
+    let continuous = case.idles.is_empty();
+    let mic_end = streams[MIC].positions.missed_until(now);
+    let system_end = if continuous {
+        streams[SYSTEM].positions.missed_until(now)
+    } else {
+        Missed::default()
+    };
+    count_at_stop(&sink, Some((&follower, SYSTEM)), mic_end, system_end);
+    let get = |counts: std::collections::BTreeMap<AudioLane, usize>, lane| {
+        counts.get(&lane).copied().unwrap_or(0)
+    };
+    let filled = [
+        get(sink.filled_samples(), AudioLane::Mic),
+        get(sink.filled_samples(), AudioLane::System),
+    ];
+    let unfilled = [
+        get(sink.unfilled_samples(), AudioLane::Mic),
+        get(sink.unfilled_samples(), AudioLane::System),
+    ];
+    let [mic, system] = &streams;
+    // 10: one length, the microphone's frames and fills.
+    if lane_len[MIC] != lane_len[SYSTEM] || lane_len[MIC] != mic.delivered + filled[MIC] {
+        return Err(format!(
+            "lanes {lane_len:?}, mic delivered {} filled {}",
+            mic.delivered, filled[MIC]
+        ));
+    }
+    // What no packet flagged at the stop, and whether the stop's counter
+    // reading could see it.
+    let unflagged = |stream: &EngineStream, read: bool| {
+        if read && stream.positions.fills() && !stream.last_error {
+            0
+        } else {
+            stream.pending.lost
+        }
+    };
+    // 7: the system lane counts what its engine lost.
+    let system_counted = filled[SYSTEM] + unfilled[SYSTEM];
+    // The padding reads a loss to within the lane's lag, two targets.
+    let system_slack =
+        PERIOD + system.lost / 100 + system.flags * (resolution(&system.clocks) + 4 * PERIOD);
+    let system_lost = system.lost - unflagged(system, continuous) - system.lost_first;
+    // Both threads out (a stopped process, or two outages that overlap): a
+    // master that cannot fill counts the time unfilled on its own lane
+    // only, and the session's note
+    // takes the lane that lost most, so the microphone's count stands for
+    // the system lane's loss of that time.
+    let wall = ((case.ticks + usize::from(case.extra_packet)) * PERIOD) as f64;
+    let short = wall - lane_len[MIC] as f64 - wall * CLOCK_DRIFT;
+    let mic_note = filled[MIC] as f64 + (unfilled[MIC] as f64).max(short);
+    let covered = system_counted + system.lost_both.min(mic_note.max(0.0) as usize);
+    if covered + system_slack < system_lost {
+        return Err(format!(
+            "system lane counted {system_counted} (filled {}, unfilled {}) below its engine's \
+             loss {}",
+            filled[SYSTEM], unfilled[SYSTEM], system.lost
+        ));
+    }
+    // 8: the microphone's note counts what its engine lost.
+    let mic_slack = PERIOD + mic.lost / 100 + mic.flags * resolution(&mic.clocks);
+    let mic_lost = mic.lost - unflagged(mic, true) - mic.lost_first;
+    if mic_note + (mic_slack as f64) < mic_lost as f64 {
+        return Err(format!(
+            "mic note {mic_note:.0} (filled {}, unfilled {}, short {short:.0}) below its \
+             engine's loss {}",
+            filled[MIC], unfilled[MIC], mic.lost
+        ));
+    }
+    // 9: the stop's reading on the microphone is its loss no packet flagged,
+    // less the packet in flight, at most.
+    if mic_end.unfilled > mic.pending.lost {
+        return Err(format!(
+            "mic: the stop read {} above the {} no packet flagged",
+            mic_end.unfilled, mic.pending.lost
+        ));
+    }
+    // 9: the system lane's upper bound, on a unit it can explain; the loss
+    // no packet flagged at the stop counts as one more flag.
+    if !matches!(system.clocks.unit, Unit::Rate(_)) {
+        // What no packet flagged at the stop is lost all the same, so
+        // counting it is no overcount, whoever counts it.
+        let end_gap = system.pending.lost;
+        let end_flags = usize::from(end_gap > 0 || !system_end.is_none());
+        // An idle that touches an outage of the system thread, or ends
+        // less than a re-prime (three packets) and the lane's hold (the
+        // engine's buffer and a period of master pulls) before it: the
+        // padding runs through both and cannot tell the idle from the loss.
+        let idle_out = case
+            .idles
+            .iter()
+            .filter(|&&(from, len, _)| {
+                (from..=from + len + 3 + case.keep + 1)
+                    .any(|tick| out(SYSTEM, tick) || out(SYSTEM, tick.saturating_sub(1)))
+            })
+            .map(|&(from, len, _)| len.min(case.ticks.saturating_sub(from)))
+            .sum::<usize>()
+            * PERIOD;
+        let most = OVER * (system.flagged_gap + idle_out + end_gap)
+            + (system.flags + end_flags)
+                * (case.keep * PERIOD + 2 * PERIOD + OVER * (PERIOD + resolution(&system.clocks)))
+            + skipped
+            + PERIOD;
+        if system_counted > most {
+            return Err(format!(
+                "system lane counted {system_counted} (filled {}, unfilled {}) above {most}: \
+                 OVER x {} lost or idle before {} flagged packets, {skipped} skipped",
+                filled[SYSTEM], unfilled[SYSTEM], system.flagged_gap, system.flags
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A failure's class: the lane (its message's first word) and the bound.
+fn call_class(message: &str) -> String {
+    let lane = message.split([' ', ':']).next().unwrap_or("");
+    let kind = if message.contains("below") {
+        "below"
+    } else if message.contains("above") {
+        "above"
+    } else {
+        "other"
+    };
+    format!("{lane} {kind}")
+}
+
+/// The smallest call found that still fails with the same invariant (its
+/// message's first word or two).
+fn shrink_call(case: &CallCase, failure: &str) -> (CallCase, String) {
+    let same = |message: &str| call_class(message) == call_class(failure);
+    let mut best = (case.clone(), failure.to_owned());
+    loop {
+        let mut changed = false;
+        let mut candidates: Vec<CallCase> = Vec::new();
+        let c = &best.0;
+        for i in 0..c.outages.len() {
+            let mut d = c.clone();
+            d.outages.remove(i);
+            candidates.push(d);
+        }
+        for i in 0..c.idles.len() {
+            let mut d = c.clone();
+            d.idles.remove(i);
+            candidates.push(d);
+        }
+        for i in 0..c.spurious.len() {
+            let mut d = c.clone();
+            d.spurious.remove(i);
+            candidates.push(d);
+        }
+        for i in 0..c.timestamp_errors.len() {
+            let mut d = c.clone();
+            d.timestamp_errors.remove(i);
+            candidates.push(d);
+        }
+        for (field, value) in [(0, 0), (1, 0), (2, 0)] {
+            let mut d = c.clone();
+            match field {
+                0 => d.system.still = value,
+                1 => d.system.qpc = Qpc::Absent,
+                _ => d.mic.qpc = Qpc::Absent,
+            }
+            candidates.push(d);
+        }
+        for candidate in candidates {
+            if candidate == best.0 {
+                continue;
+            }
+            if let Err(message) = run_call(&candidate)
+                && same(&message)
+            {
+                best = (candidate, message);
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            return best;
+        }
+    }
+}
+
+/// The call test: invariants 7 to 10 on every call.
+#[test]
+fn a_call_counts_both_lanes_losses_within_bounds_up_to_the_stop() {
+    let (_, seed) = settings();
+    let cases = std::env::var("WASAPI_CALL_CASES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(CALL_CASES);
+    let mut rng = Rng(seed ^ 0xCA11);
+    let mut classes: Vec<(String, usize, String)> = Vec::new();
+    let mut failed = 0;
+    for _ in 0..cases {
+        let case = generate_call(&mut rng);
+        let Err(message) = run_call(&case) else {
+            continue;
+        };
+        failed += 1;
+        let key = call_class(&message);
+        if let Some(class) = classes.iter_mut().find(|(k, _, _)| *k == key) {
+            class.1 += 1;
+            continue;
+        }
+        let (small, small_message) = shrink_call(&case, &message);
+        classes.push((key, 1, format!("{small_message}\n    {small:?}")));
+    }
+    eprintln!(
+        "call: seed {seed:#x}, {cases} cases, {failed} failed, {} classes",
+        classes.len()
+    );
+    for (_, n, line) in &classes {
+        eprintln!("  [{n} cases] {line}");
+    }
+    assert!(
+        classes.is_empty(),
+        "{} classes of failure:\n{}",
+        classes.len(),
+        classes
+            .iter()
+            .map(|(_, n, line)| format!("[{n} cases] {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }

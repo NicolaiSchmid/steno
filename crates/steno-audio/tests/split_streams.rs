@@ -22,10 +22,10 @@ use steno_audio::capture::split_streams::{
     DevicePositions, MAX_BUFFER_FRAMES, MOST_READ_FRAMES, Packet, QPC_CALIBRATION_FRAMES,
     StreamSizes, far_end_latencies, frames_from_hundred_nanoseconds, stream_sizes,
 };
-use steno_audio::capture::{ChannelRef, SplitStreamPlan, StreamSource};
+use steno_audio::capture::{ChannelRef, DeviceChangeReason, SplitStreamPlan, StreamSource};
 use steno_audio::realtime::{
     FollowerLane, LaneFrameSink, LaneRingBuffer, MISSED_FILL_LIMIT, Missed, PacketRouter,
-    SliceView, StreamBody, deliver_slices,
+    SliceView, StreamBody, count_at_stop, deliver_slices,
 };
 use steno_audio::{CaptureError, CaptureMode, SAMPLE_RATE};
 use steno_core::AudioLane;
@@ -1944,4 +1944,539 @@ fn a_stall_of_the_follower_alone_stages_no_zeros() {
         assert_eq!(lag, 960, "{outage:?}");
         assert!(period <= 50 + out + 100, "{outage:?}");
     }
+}
+
+// --- the stop, and padding that is no loss --------------------------------
+
+/// A call's two bodies over one sink, as the WASAPI backend builds them,
+/// 10 ms packets each.
+struct Call {
+    sink: Arc<LaneFrameSink>,
+    follower: Arc<FollowerLane>,
+    master: StreamBody,
+    staging: StreamBody,
+    mic: Vec<f32>,
+    tap: Vec<f32>,
+}
+
+impl Call {
+    fn new() -> Self {
+        let plan = SplitStreamPlan::new(&[AudioLane::Mic, AudioLane::System]).unwrap();
+        let sink = Arc::new(LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]));
+        let follower = Arc::new(FollowerLane::for_streams_filling(PERIOD, 4_800));
+        let master = master_body(&plan, &follower, 4_800, &sink);
+        let staging = StreamBody::follower(Arc::clone(&follower), 4_800);
+        Self {
+            sink,
+            follower,
+            master,
+            staging,
+            mic: vec![0.5; PERIOD],
+            tap: vec![0.25; 2 * PERIOD],
+        }
+    }
+
+    fn master_packet(&mut self) {
+        self.master.handle(packet(&self.mic, 1));
+        for lane in 0..2 {
+            self.sink.ring(lane).drain_all();
+        }
+    }
+
+    fn follower_packet(&mut self) {
+        self.staging.handle(packet(&self.tap, 2));
+    }
+
+    /// The follower's flagged packet, after what its clocks read.
+    fn follower_flagged(&mut self, missed: Missed) {
+        self.staging.write_missed(&packet(&self.tap, 2), missed);
+        self.follower_packet();
+    }
+
+    fn tick(&mut self) {
+        self.follower_packet();
+        self.master_packet();
+    }
+
+    /// The backend's stop once both threads are joined, the streams' end
+    /// readings `master_end` and `follower_end`.
+    fn stop(&self, master_end: Missed, follower_end: Missed) {
+        count_at_stop(
+            &self.sink,
+            Some((&self.follower, 1)),
+            master_end,
+            follower_end,
+        );
+    }
+
+    /// The system lane's (filled, unfilled).
+    fn system(&self) -> (usize, usize) {
+        let get = |counts: BTreeMap<AudioLane, usize>| {
+            counts.get(&AudioLane::System).copied().unwrap_or(0)
+        };
+        (
+            get(self.sink.filled_samples()),
+            get(self.sink.unfilled_samples()),
+        )
+    }
+}
+
+/// The system stream's thread out for the last 0.5 s before the stop; its
+/// engine kept 10 packets and lost 40 (19 200 frames), which its final
+/// drain reads from the flagged packet after the kept ones. However the
+/// two final drains fall, the backend's stop counts that loss on the system
+/// lane: the master's last pull may come before the follower's flagged
+/// packet, or the lane may never prime again.
+#[test]
+fn a_follower_out_at_the_stop_is_counted_at_the_backends_stop() {
+    for (master_first, master_packets_after) in [(true, 0), (false, 0), (false, 1), (false, 2)] {
+        let mut call = Call::new();
+        for _ in 0..200 {
+            call.tick();
+        }
+        for _ in 0..50 {
+            call.master_packet();
+        }
+        let follower_drain = |call: &mut Call| {
+            for _ in 0..10 {
+                call.follower_packet();
+            }
+            call.follower_flagged(filled(19_200));
+        };
+        follower_drain(&mut call);
+        if !master_first {
+            for _ in 0..master_packets_after {
+                call.master_packet();
+            }
+        }
+        call.stop(Missed::default(), Missed::default());
+        let (filled, unfilled) = call.system();
+        let context = format!("master first {master_first}, {master_packets_after} after");
+        assert!(
+            (19_200..=19_200 + 4_800).contains(&(filled + unfilled)),
+            "{context}: filled {filled}, unfilled {unfilled}"
+        );
+        call.stop(Missed::default(), Missed::default());
+        assert_eq!(call.system(), (filled, unfilled), "{context}: held once");
+    }
+}
+
+/// An engine that refused the newest packets while the system thread was
+/// out into the stop flags none: the final drain hands over only the kept
+/// packets. The stop's counter reading of a stream that delivers
+/// continuously (process loopback) counts it, and the padding past it.
+#[test]
+fn a_follower_loss_no_packet_flags_is_counted_from_the_stops_reading() {
+    let mut call = Call::new();
+    for _ in 0..200 {
+        call.tick();
+    }
+    for _ in 0..50 {
+        call.master_packet();
+    }
+    for _ in 0..10 {
+        call.follower_packet();
+    }
+    call.stop(Missed::default(), unfilled(19_200));
+    let (filled, unfilled) = call.system();
+    assert!(
+        (19_200..=19_200 + 4_800).contains(&(filled + unfilled)),
+        "filled {filled}, unfilled {unfilled}"
+    );
+}
+
+/// The stop's readings are left out when the session stops to rebuild (its
+/// gap covers that time); what the follower's lane holds from its flagged
+/// packets is not. The master's reading counts on its own lane alone.
+#[test]
+fn the_stops_readings_count_on_their_own_lanes_and_not_at_a_rebuild() {
+    let mut call = Call::new();
+    for _ in 0..200 {
+        call.tick();
+    }
+    call.stop(unfilled(9_600), Missed::default());
+    assert_eq!(
+        call.sink.unfilled_samples(),
+        BTreeMap::from([(AudioLane::Mic, 9_600)])
+    );
+
+    let mut call = Call::new();
+    for _ in 0..200 {
+        call.tick();
+    }
+    call.follower_flagged(unfilled(4_800));
+    call.sink
+        .report_device_change(DeviceChangeReason::OutputDeviceGone);
+    call.stop(unfilled(9_600), unfilled(48_000));
+    assert_eq!(
+        call.sink.unfilled_samples(),
+        BTreeMap::from([(AudioLane::System, 4_800)]),
+        "only the flagged packet's count"
+    );
+}
+
+/// An unflagged 10 s idle of the follower (endpoint loopback, nothing
+/// playing) re-primes like any underrun. A flagged packet a second later,
+/// spurious or after a 10 ms loss, counts only its own loss: the idle's
+/// padding was forgotten once the hold passed.
+#[test]
+fn padding_older_than_the_hold_is_no_discontinuitys_loss() {
+    for missed in [Missed::default(), filled(480)] {
+        let mut call = Call::new();
+        for _ in 0..100 {
+            call.tick();
+        }
+        for _ in 0..1_000 {
+            call.master_packet();
+        }
+        for _ in 0..100 {
+            call.tick();
+        }
+        call.follower_flagged(missed);
+        for _ in 0..10 {
+            call.tick();
+        }
+        let (filled, unfilled) = call.system();
+        assert_eq!(filled + unfilled, missed.fill, "{missed:?}");
+    }
+}
+
+/// An engine that refused the newest packets while the system thread was
+/// out hands over its 10 kept packets unflagged, the lane re-primes on
+/// them, and only the packet a period later carries the discontinuity.
+/// The follower's clocks read nothing (positions that never move, no
+/// QPC), so the padding alone counts the 40 lost packets, inside the hold.
+#[test]
+fn a_flag_after_the_kept_packets_counts_the_padding_within_the_hold() {
+    for follower_first in [true, false] {
+        let mut call = Call::new();
+        for _ in 0..200 {
+            call.tick();
+        }
+        for _ in 0..50 {
+            call.master_packet();
+        }
+        if follower_first {
+            for _ in 0..10 {
+                call.follower_packet();
+            }
+            call.master_packet();
+        } else {
+            call.master_packet();
+            for _ in 0..10 {
+                call.follower_packet();
+            }
+        }
+        call.follower_flagged(Missed::default());
+        call.master_packet();
+        for _ in 0..20 {
+            call.tick();
+        }
+        let (filled, unfilled) = call.system();
+        assert!(
+            (19_200 - 960..=19_200 + 4_800).contains(&(filled + unfilled)),
+            "follower first {follower_first}: filled {filled}, unfilled {unfilled}"
+        );
+    }
+}
+
+/// Positions that stand still for the first packets (process loopback that
+/// starts in silence) and then move measure from the pair after the move,
+/// so a 0.5 s loss with no QPC counts what was lost, whatever the mix
+/// format, rather than a hundred times it.
+#[test]
+fn positions_that_stood_still_measure_from_after_their_first_move() {
+    for engine_rate in [None, Some(48_000), Some(16_000)] {
+        for still in [0, 1, 5, 100, 300] {
+            let mut clocks = Clocks::new(engine_rate, 480, 0);
+            clocks.per_packet = 0;
+            clocks.clean(still);
+            clocks.per_packet = 480;
+            clocks.clean(100);
+            let missed = clocks.lose(50);
+            let lost = 24_000;
+            let most = if engine_rate == Some(16_000) { 3 } else { 1 } * (lost + 480);
+            assert!(
+                (lost..=most).contains(&missed.unfilled),
+                "{engine_rate:?}, still {still}: {missed:?}"
+            );
+        }
+    }
+}
+
+/// A unit neither 48 kHz nor the mix format explains, whose first pair
+/// spans an idle no packet flagged (it passes the rate bound, since no
+/// ratio is measured yet): the second pair replaces it, so a 10 ms loss
+/// after it is still counted.
+#[test]
+fn a_first_pair_over_an_idle_is_replaced_by_the_next() {
+    // 14 350 position units a second against the stream's 48 kHz.
+    let mut positions = DevicePositions::new(None);
+    let packet = |positions: &mut DevicePositions, frames: u64, flagged: bool| {
+        positions.packet(Packet {
+            frames: 480,
+            position: 1_000 + frames * 14_350 / 48_000,
+            discontinuity: flagged,
+            ..Packet::default()
+        })
+    };
+    assert!(packet(&mut positions, 0, false).is_none());
+    assert!(
+        packet(&mut positions, 960, false).is_none(),
+        "after the idle"
+    );
+    assert!(packet(&mut positions, 1_440, false).is_none());
+    let missed = packet(&mut positions, 2_400, true);
+    assert!(missed.unfilled >= 480, "{missed:?}");
+}
+
+/// A flagged packet is filled only while the QPC's last clean pair matched
+/// its frames: one that read 30 % long leaves it counted.
+#[test]
+fn a_qpc_whose_last_pair_did_not_match_fills_nothing() {
+    let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
+    clocks.clean(CALIBRATION_PACKETS);
+    assert!(clocks.positions.fills());
+    clocks.next.qpc += 30_000;
+    clocks.clean(1);
+    assert!(!clocks.positions.fills());
+    assert_counted(clocks.lose(50), 24_000, "counted from the positions");
+    clocks.clean(1);
+    assert!(clocks.positions.fills(), "a matching pair again");
+    assert_eq!(clocks.lose(50), filled(24_000));
+}
+
+/// The stop's counter reading: what passed the last packet's end beyond the
+/// one in flight, unfilled, only on a sane QPC and a last packet that had
+/// one.
+#[test]
+fn the_stop_reads_the_counter_only_on_a_sane_qpc() {
+    let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
+    clocks.clean(10);
+    let now = |clocks: &Clocks, packets: u64| clocks.next.qpc + packets * QPC_PACKET;
+    assert!(
+        clocks.positions.missed_until(now(&clocks, 50)).is_none(),
+        "still measuring"
+    );
+    clocks.clean(CALIBRATION_PACKETS);
+    assert!(clocks.positions.missed_until(now(&clocks, 0)).is_none());
+    assert!(
+        clocks.positions.missed_until(now(&clocks, 1)).is_none(),
+        "the packet in flight"
+    );
+    assert_eq!(
+        clocks.positions.missed_until(now(&clocks, 51)),
+        unfilled(24_000)
+    );
+    assert!(
+        clocks
+            .positions
+            .missed_until(now(&clocks, 0) - 10 * QPC_PACKET)
+            .is_none(),
+        "a counter behind the last packet"
+    );
+    clocks.deliver(false, true);
+    assert!(
+        clocks.positions.missed_until(now(&clocks, 51)).is_none(),
+        "the last packet's QPC not to be trusted"
+    );
+    let mut stuck = Clocks::new(None, 0, 0);
+    stuck.clean(CALIBRATION_PACKETS);
+    assert!(stuck.positions.missed_until(1 << 50).is_none(), "no QPC");
+}
+
+/// Two hours of 10 ms packets on both streams in a debug build (overflow
+/// checks on), positions and QPC that start near the top of their range
+/// and wrap, a 0.5 s loss on each stream every ten minutes: nothing
+/// panics, and every loss counts on both lanes.
+#[test]
+fn two_hours_of_wrapping_clocks_count_every_loss() {
+    let mut call = Call::new();
+    let mut mic_positions = DevicePositions::new(Some(48_000));
+    let mut system_positions = DevicePositions::new(None);
+    let ticks = 2 * 3_600 * 100;
+    let start_position = u64::MAX - 1_000_000;
+    let start_qpc = u64::MAX - 50_000_000;
+    let (mut mic_read, mut system_read) = (0, 0);
+    let (mut tick, mut losses) = (0usize, 0usize);
+    while tick < ticks {
+        let lose = tick > 0 && tick.is_multiple_of(60_000);
+        if lose {
+            tick += 50;
+            losses += 1;
+        }
+        let at = (tick * PERIOD) as u64;
+        let flagged = Packet {
+            frames: PERIOD,
+            position: start_position.wrapping_add(at),
+            qpc: start_qpc.wrapping_add(at * 10_000_000 / 48_000),
+            discontinuity: lose,
+            timestamp_error: false,
+        };
+        let system = system_positions.packet(flagged);
+        if lose {
+            system_read += system.fill + system.unfilled;
+            call.follower_flagged(system);
+        } else {
+            call.follower_packet();
+        }
+        let mic = mic_positions.packet(flagged);
+        if lose {
+            mic_read += mic.fill + mic.unfilled;
+            call.master.write_missed(&packet(&call.mic, 1), mic);
+        }
+        call.master_packet();
+        tick += 1;
+    }
+    let lost = losses * 50 * PERIOD;
+    assert_eq!((mic_read, system_read), (lost, lost));
+    assert_eq!(
+        call.sink.filled_samples(),
+        BTreeMap::from([(AudioLane::Mic, lost), (AudioLane::System, lost)])
+    );
+}
+
+/// A flagged packet long after the follower came back from an unflagged
+/// idle, while the master was out (its queue then far past the hold), is
+/// no part of that idle: the idle's padding is not counted.
+#[test]
+fn a_flag_long_after_the_follower_came_back_takes_no_padding() {
+    let mut call = Call::new();
+    for _ in 0..100 {
+        call.tick();
+    }
+    for _ in 0..50 {
+        call.master_packet();
+    }
+    for _ in 0..60 {
+        call.follower_packet();
+    }
+    call.follower_flagged(Missed::default());
+    for _ in 0..10 {
+        call.follower_packet();
+        call.master_packet();
+    }
+    call.stop(Missed::default(), Missed::default());
+    assert_eq!(call.system(), (0, 0));
+}
+
+/// A follower out for 27 packets flags its loss on one packet, then idles
+/// for 6 s before the lane primes again: the flag takes the outage's
+/// padding, not the idle's.
+#[test]
+fn a_pending_flag_does_not_take_the_idle_after_it() {
+    let mut call = Call::new();
+    for _ in 0..100 {
+        call.tick();
+    }
+    for _ in 0..27 {
+        call.master_packet();
+    }
+    call.follower_flagged(Missed::default());
+    call.master_packet();
+    for _ in 0..600 {
+        call.master_packet();
+    }
+    for _ in 0..20 {
+        call.tick();
+    }
+    let (filled, unfilled) = call.system();
+    assert!(
+        (27 * PERIOD - 960..=(27 + 12) * PERIOD).contains(&(filled + unfilled)),
+        "filled {filled}, unfilled {unfilled}"
+    );
+}
+
+/// The follower out for 0.6 s, then both threads: on resume the master
+/// drains its kept packets, the follower's kept ones run out before its
+/// flagged packet comes, and the lane underruns once more. That underrun
+/// does not hide the outage's padding.
+#[test]
+fn an_underrun_before_the_flag_keeps_the_outages_padding() {
+    for follower_first in [true, false] {
+        let mut call = Call::new();
+        for _ in 0..200 {
+            call.tick();
+        }
+        for _ in 0..63 {
+            call.master_packet();
+        }
+        // Both out; then the resume tick.
+        if follower_first {
+            for _ in 0..10 {
+                call.follower_packet();
+            }
+        }
+        for _ in 0..10 {
+            call.master_packet();
+        }
+        if !follower_first {
+            for _ in 0..10 {
+                call.follower_packet();
+            }
+        }
+        // The next tick: the master's packet before the follower's flag.
+        call.master_packet();
+        call.follower_flagged(Missed::default());
+        for _ in 0..20 {
+            call.tick();
+        }
+        let (filled, unfilled) = call.system();
+        assert!(
+            filled + unfilled >= 61 * PERIOD - 960,
+            "follower first {follower_first}: filled {filled}, unfilled {unfilled}"
+        );
+    }
+}
+
+/// A follower out from its second packet, before the lane first primed:
+/// the padding of that outage counts at its flag.
+#[test]
+fn a_follower_out_before_the_first_prime_counts_its_padding() {
+    let mut call = Call::new();
+    for _ in 0..2 {
+        call.tick();
+    }
+    for _ in 0..96 {
+        call.master_packet();
+    }
+    for _ in 0..10 {
+        call.follower_packet();
+    }
+    call.follower_flagged(Missed::default());
+    for _ in 0..20 {
+        call.tick();
+    }
+    let (filled, unfilled) = call.system();
+    assert!(
+        filled + unfilled >= 86 * PERIOD,
+        "filled {filled}, unfilled {unfilled}"
+    );
+}
+
+/// Positions that stand still while the pairs around them are left out
+/// (timestamp errors) still measure from the pair after their first move:
+/// the pair that spans it read 59 of a packet's 960 frames, and would read
+/// an idle 32 times over.
+#[test]
+fn a_first_move_after_left_out_pairs_is_left_out_too() {
+    let mut positions = DevicePositions::new(Some(48_000));
+    let mut packet = |frames: usize, position: u64, timestamp_error: bool, flagged: bool| {
+        positions.packet(Packet {
+            frames,
+            position,
+            discontinuity: flagged,
+            timestamp_error,
+            ..Packet::default()
+        })
+    };
+    packet(59, 1_000, false, false);
+    packet(960, 1_000, true, false);
+    packet(960, 1_000, false, false);
+    packet(960, 1_059, false, false);
+    let missed = packet(960, 1_059 + 1_920, false, true);
+    assert!(
+        (960..=6 * 1_920).contains(&missed.unfilled),
+        "a 960-frame idle read as {missed:?}"
+    );
 }
