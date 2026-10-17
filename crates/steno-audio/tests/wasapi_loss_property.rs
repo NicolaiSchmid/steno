@@ -2084,3 +2084,145 @@ fn a_call_with_many_flags_counts_both_lanes_losses_within_bounds() {
             .join("\n")
     );
 }
+
+/// Calls the multi-flag generator shrank, each a shape of the padding rule
+/// that once lost a system-lane loss silently or counted an idle as one
+/// (the system stream's clocks read nothing in all of them): a flagged
+/// short idle, then an unflagged idle, then an outage whose padding comes
+/// after the first flag's snapshot; two outages, the second into the stop
+/// after the lane re-primed on the first's kept packets; a short outage
+/// that leaves the queue above the target, then one whose padding the
+/// target taken off made short; a long outage of the system thread that
+/// the microphone's own outage overlaps, then a second one, whose padding
+/// the first flag's snapshot must not swallow (twice); a 6.9 s idle that
+/// ends while the microphone is out into the stop (checked against the
+/// upper bounds too).
+#[test]
+fn the_calls_the_generator_shrank_count_within_bounds() {
+    let clocks = |unit, qpc| Clocks {
+        engine_rate: None,
+        unit,
+        still: 0,
+        qpc,
+    };
+    let call = |outages: Vec<(Who, usize, usize)>,
+                idles: Vec<(usize, usize, bool)>,
+                keep,
+                ticks,
+                master_first,
+                extra_packet,
+                start| CallCase {
+        mic: clocks(Unit::Frames, Qpc::Absent),
+        system: clocks(Unit::Stuck, Qpc::Absent),
+        keep,
+        drop_oldest: false,
+        ticks,
+        outages,
+        idles,
+        spurious: Vec::new(),
+        timestamp_errors: Vec::new(),
+        master_first,
+        extra_packet,
+        start,
+    };
+    let idle_into_a_mic_outage = CallCase {
+        mic: Clocks {
+            engine_rate: Some(192_000),
+            unit: Unit::Engine,
+            still: 0,
+            qpc: Qpc::Absent,
+        },
+        system: Clocks {
+            engine_rate: Some(44_100),
+            unit: Unit::Frames,
+            still: 0,
+            qpc: Qpc::Absent,
+        },
+        keep: 12,
+        drop_oldest: false,
+        ticks: 1_427,
+        outages: vec![(Who::Mic, 1_284, 143), (Who::System, 1_357, 70)],
+        idles: vec![(617, 691, false)],
+        spurious: Vec::new(),
+        timestamp_errors: Vec::new(),
+        master_first: true,
+        extra_packet: true,
+        start: 333_836_868_986,
+    };
+    let cases = [
+        (
+            call(
+                vec![(Who::System, 59, 12)],
+                vec![(23, 3, true), (27, 31, false)],
+                10,
+                73,
+                false,
+                true,
+                824_264_437_451,
+            ),
+            false,
+        ),
+        (
+            call(
+                vec![(Who::System, 24, 25), (Who::System, 50, 10)],
+                Vec::new(),
+                10,
+                60,
+                true,
+                true,
+                0,
+            ),
+            false,
+        ),
+        (
+            call(
+                vec![(Who::System, 44, 8), (Who::System, 96, 22)],
+                Vec::new(),
+                10,
+                120,
+                false,
+                false,
+                569_416_241_567,
+            ),
+            false,
+        ),
+        (
+            call(
+                vec![
+                    (Who::System, 54, 38),
+                    (Who::Both, 92, 61),
+                    (Who::System, 155, 33),
+                ],
+                Vec::new(),
+                10,
+                189,
+                true,
+                true,
+                1_026_962_746_256,
+            ),
+            false,
+        ),
+        (
+            call(
+                vec![
+                    (Who::System, 54, 40),
+                    (Who::Both, 94, 274),
+                    (Who::System, 371, 17),
+                ],
+                Vec::new(),
+                10,
+                390,
+                false,
+                false,
+                359_292_229_702,
+            ),
+            false,
+        ),
+        (idle_into_a_mic_outage, true),
+    ];
+    for (index, (case, upper)) in cases.iter().enumerate() {
+        if let Err(message) = run_call_with(case, *upper) {
+            panic!("call {index}: {message}\n    {case:?}");
+        }
+    }
+}
