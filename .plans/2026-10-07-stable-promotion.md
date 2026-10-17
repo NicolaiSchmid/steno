@@ -546,10 +546,10 @@ after the port".
   not ship (a zipped Windows update, a `.tar.gz` AppImage), so zip 4.6.1,
   and with it RUSTSEC-2026-0367 to 0369, left `Cargo.lock`, and `deny.toml`
   no longer accepts its yank (#300).
-- zbus 6, for the workspace's own `zbus` too, once `tauri-plugin-opener` and
-  `tauri-plugin-single-instance` move to it; until then `deny.toml` ignores
-  RUSTSEC-2026-0370 to 0372 for zvariant, zbus_names and zvariant_derive,
-  which zbus 6 merged into itself.
+- zbus 6, once `tauri-plugin-opener` and `tauri-plugin-single-instance` move
+  to it, and the workspace's own `zbus` with them; until then `deny.toml`
+  ignores RUSTSEC-2026-0370 to 0372 for zvariant, zbus_names and
+  zvariant_derive, which zbus 6 merged into itself.
 
 ## Work packages
 
