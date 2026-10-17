@@ -2292,7 +2292,12 @@ fn a_call_with_many_flags_counts_both_lanes_losses_within_bounds() {
 /// pull (it came while the microphone was late to its first drain, with
 /// the queue past the hold), then a real outage whose flag found the queue
 /// empty; two re-primes in one burst of kept packets (the lane primed on
-/// part of them, ran out while the follower's thread drained the rest).
+/// part of them, ran out while the follower's thread drained the rest;
+/// checked against the upper bounds too, so the run kept is counted
+/// once); both threads out from the start, then a 3.5 s outage of the
+/// system thread, then both out into the stop with the drains cut part
+/// way (the hold must run its whole length after the re-prime; checked
+/// against the upper bounds too).
 #[test]
 fn the_calls_the_generator_shrank_count_within_bounds() {
     let clocks = |unit, qpc| Clocks {
@@ -2374,6 +2379,23 @@ fn the_calls_the_generator_shrank_count_within_bounds() {
             150_404_545_173,
         )
     };
+    let a_long_outage_then_both_into_the_stop = CallCase {
+        partial_drains: 100,
+        ..call(
+            vec![
+                (Who::Both, 0, 40),
+                (Who::System, 459, 347),
+                (Who::Both, 807, 8),
+                (Who::System, 806, 1),
+            ],
+            Vec::new(),
+            12,
+            816,
+            true,
+            true,
+            585_657_934_205,
+        )
+    };
     let cases = [
         (
             call(
@@ -2445,7 +2467,8 @@ fn the_calls_the_generator_shrank_count_within_bounds() {
         ),
         (idle_into_a_mic_outage, true),
         (stale_flag_then_an_outage, false),
-        (two_reprimes_in_a_burst, false),
+        (two_reprimes_in_a_burst, true),
+        (a_long_outage_then_both_into_the_stop, true),
     ];
     for (index, (case, upper)) in cases.iter().enumerate() {
         if let Err(message) = run_call_with(case, *upper) {
