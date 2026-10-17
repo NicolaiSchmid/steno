@@ -1853,6 +1853,12 @@ The table above names each package and its owner. Their tests:
   transaction finds gone stays gone.
   A note with no upload (an older build's), or a copy that holds other
   bytes, is adopted as a recording with no meeting, without a ledger row.
+  A copy A17's reading marks hold (#298) is adopted failed and unread, and
+  not processed: a held copy that holds its upload whole (size and
+  SHA-256) gets the ledger row, so the phone's delete loses nothing: the
+  bytes are the phone's own, kept forever and offered to Process again;
+  one that does not, or cannot be read, gets none, and the phone keeps
+  retrying.
   No upload stays noted without its folder's entry: a refused folder note
   forgets its upload, and each launch forgets the uploads whose folder has
   no entry.
@@ -1862,8 +1868,9 @@ The table above names each package and its owner. Their tests:
   refuses a meeting id that already has a row and no ledger row
   (`MeetingExists`), and the retention sweep never removes a master
   another asset row still needs (kept forever, not due yet, or its meeting
-  busy), logging the ids at info; a master already gone needs no keeper,
-  so every row naming it loses its stamp. No schema change. Where:
+  busy), logging the ids at info; a master known to be gone needs no
+  keeper, so every row naming it loses its stamp, and one whose metadata
+  cannot be read counts as there. No schema change. Where:
   `crates/steno-pipeline/src/intake.rs` (`NotedUpload`, `reusable_copy`),
   `crates/steno-services/src/audio_folders.rs`,
   `crates/steno-services/src/recovery.rs` (`adopt`),
