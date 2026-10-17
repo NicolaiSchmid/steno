@@ -44,8 +44,10 @@ pub const PATIENCE: Duration = Duration::from_secs(5);
 /// it fails as hung: a start, a stop and save, a quit, a rebuild or
 /// restart, a recording that ends on its own, and the first audio once
 /// it records (a level, frames in the files), which passes the producer,
-/// the processing and the writer threads at wall-clock pace. A loaded
-/// runner stretches that work past [`PATIENCE`]. A gate that waits while
+/// the processing and the writer threads at wall-clock pace; and the
+/// build of a real handover listener (its identity read, its socket and
+/// its Bonjour daemon). A loaded runner stretches that work past
+/// [`PATIENCE`]. A gate that waits while
 /// such work runs, before the test can open it, takes this bound too,
 /// and so does a call that does the work only when the behaviour under
 /// test is broken (a refused start accepted after all), so the break
