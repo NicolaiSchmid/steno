@@ -40,8 +40,10 @@ fn listed(failures: &[(PathBuf, std::io::Error)]) -> String {
 /// `expires_at` once every file is gone, so a sweep runs once per expiry.
 /// A file known to be missing is skipped. One whose presence cannot be
 /// read (an I/O error, a folder the sweep cannot search) counts as there,
-/// so its removal fails and the stamp stays. A file that cannot be removed
-/// leaves the stamp in place for the next sweep and never stops the sweep
+/// so its removal fails and the stamp stays (`known_gone`). That rule is
+/// Rust only: Swift's sweep and "Keep all" ask `fileExists`, which reads
+/// such a file as gone. A file that cannot be removed leaves the stamp in
+/// place for the next sweep and never stops the sweep
 /// from reaching the other assets. Each asset is checked again in the write that
 /// removes its files ([`Store::sweep_expired_asset`]), so a meeting queued
 /// since the sweep read the list keeps its audio.
@@ -125,7 +127,11 @@ impl RetentionSweep {
 }
 
 /// Whether `path` is known not to exist. An error reading its metadata
-/// (an I/O error, a folder that cannot be searched) is not knowing.
+/// (an I/O error, a folder that cannot be searched) is not knowing. So is
+/// an error that does prove absence (`ENOTDIR`, a path component that is a
+/// file; `ELOOP`): the stamp stays, and each sweep tries again and warns.
+/// That is rare and bounded (a sweep runs at launch and after a run stamps a
+/// meeting's retention), and accepted.
 fn known_gone(path: &Path) -> bool {
     matches!(path.try_exists(), Ok(false))
 }
@@ -313,20 +319,21 @@ mod tests {
     #[cfg(unix)]
     impl<'a> Unsearchable<'a> {
         fn new(folder: &'a Path) -> Self {
-            Self::set(folder, 0o000);
+            Self::set(folder, 0o000).unwrap();
             Unsearchable(folder)
         }
 
-        fn set(folder: &Path, mode: u32) {
+        fn set(folder: &Path, mode: u32) -> std::io::Result<()> {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(mode)).unwrap();
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(mode))
         }
     }
 
     #[cfg(unix)]
     impl Drop for Unsearchable<'_> {
         fn drop(&mut self) {
-            Self::set(self.0, 0o755);
+            // A panic here while a test already panics would abort.
+            let _ = Self::set(self.0, 0o755);
         }
     }
 

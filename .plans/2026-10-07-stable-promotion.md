@@ -1884,6 +1884,21 @@ The table above names each package and its owner. Their tests:
   step of the admission and the adoption, and the retry racing the
   launch), `crates/steno-core/tests/handover_store.rs`, `audio_folders.rs`
   and `crates/steno-pipeline/src/retention.rs`.
+- **P40 follow-up: leftover speaker clips can outlive the retention stamp**
+  (open; a privacy item, as the clips are voice snippets; found in #313's
+  review). The retention sweep removes the clip files no speaker row names
+  through `sweep` in `crates/steno-pipeline/src/sample_clips.rs`, and that
+  pass never sets `clean = false`: a `read_dir` error reads as an empty
+  folder, and a clip that cannot be removed is only logged. So the master
+  goes, the stamp clears, and those clips, each a few seconds of one
+  speaker's voice, stay until the meeting is deleted. It is narrow: it needs
+  clips a run left behind (one that ended before its own sweep), and then
+  either a speakers folder that alone cannot be searched or a leftover clip
+  that resists removal while the named files go. Planned fix: `sweep`
+  reports its failures, a `read_dir` error other than `NotFound` counts as
+  one, and `RetentionSweep::run` ANDs the result into `clean`, so the stamp
+  stays for the next sweep. No schema change. Where: `sample_clips.rs`
+  (`sweep`) and `crates/steno-pipeline/src/retention.rs`.
 
 ### X: the Linux targets (D6)
 
@@ -3388,7 +3403,10 @@ But rc.2 cannot tell, so it shows the phones as paired while they cannot send.
 **The Swift app's retention sweep** does not check an asset again before it
 removes its files, a race #228 closed in Rust only. It stays moot after a
 rollback: the race needs a meeting processed again, and the Swift app refuses
-"Process again" (P9).
+"Process again" (P9). A Swift build in the window also treats a master it cannot
+look at (in a folder it cannot search) as gone again, as before #313, so its
+"Keep all" leaves that asset's stamp on and a later sweep can delete audio the
+user chose to keep.
 
 ## Changes to other plans in this plan's PR
 
