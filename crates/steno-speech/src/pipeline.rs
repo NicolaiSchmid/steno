@@ -344,16 +344,16 @@ impl Drop for StopOnPanic<'_> {
 /// edge as a word of its own, a recovery keeps words past its chunk, and
 /// two windows of one gap time a word on their own frame grids and each
 /// keep the words with a piece up to [`SEAM_SAMPLES`] past their owned
-/// span, whole. So when the last word before the seam and the first after
-/// it are the same piece and start within `SEAM_SAMPLES` of each other,
-/// one copy falls away: the one with fewer pieces, which heard less of the
-/// word, and on a tie the gap window's, or the later one's between two
-/// windows of a gap. A word said again starts later than that, unless it
-/// is two frames long or shorter: such a word said twice back to back
-/// across a seam comes out once. And a gap's window that begins inside a
-/// word drops the pieces that continue it when the run or window before
-/// kept any token, as the merge before the partition did: that span heard
-/// the word's start, or missed the word.
+/// span ([`Span::reach`]). So when the last word before the seam and the
+/// first after it are the same piece and start within `SEAM_SAMPLES` of
+/// each other, one copy falls away: the one with fewer pieces, which heard
+/// less of the word, and on a tie the gap window's, or the later one's
+/// between two windows of a gap. A word said again starts later than that,
+/// unless it is two frames long or shorter: such a word said twice back to
+/// back across a seam comes out once. And a gap's window that begins
+/// inside a word drops the pieces that continue it when the run or window
+/// before kept any token, as the merge before the partition did: that span
+/// heard the word's start, or missed the word.
 fn join(spans: &[Span], decoded: &[Vec<Token>], overlap_seconds: f64, vocab: &Vocab) -> Vec<Token> {
     let starts_word = |t: &Token| starts_word(vocab.piece(t.id));
     let mut out: Vec<Token> = Vec::with_capacity(decoded.iter().map(Vec::len).sum());
