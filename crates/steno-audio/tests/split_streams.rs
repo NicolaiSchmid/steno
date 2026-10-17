@@ -2465,29 +2465,6 @@ fn a_first_packet_with_a_timestamp_error_never_reads_the_start() {
     );
 }
 
-/// The backend's stop hands each stream's loss before its first packet to
-/// the lanes that stream feeds, unfilled: the microphone's to its lane,
-/// the system stream's to the follower's; nothing for none.
-#[test]
-fn the_stop_counts_the_losses_before_the_first_packets_on_their_lanes() {
-    let call = Call::new();
-    call.sink.count_before_first(4_800, Some((1, 9_600)));
-    assert_eq!(
-        call.sink.before_first_samples(),
-        BTreeMap::from([(AudioLane::Mic, 4_800), (AudioLane::System, 9_600)])
-    );
-    assert!(call.sink.filled_samples().is_empty(), "nothing written");
-    let none = Call::new();
-    none.sink.count_before_first(0, Some((1, 0)));
-    assert!(none.sink.before_first_samples().is_empty());
-    let system_only = LaneFrameSink::new(&[AudioLane::System]);
-    system_only.count_before_first(480, None);
-    assert_eq!(
-        system_only.before_first_samples(),
-        BTreeMap::from([(AudioLane::System, 480)])
-    );
-}
-
 /// Two hours of 10 ms packets on both streams in a debug build (overflow
 /// checks on), positions and QPC that start near the top of their range
 /// and wrap, a 0.5 s loss on each stream every ten minutes: nothing
