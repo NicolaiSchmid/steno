@@ -535,6 +535,110 @@ async fn a_kept_copy_goes_once_the_user_deletes_the_meeting_holding_its_bytes() 
     quit(app).await;
 }
 
+/// The removed copy's folder also holds a file Steno did not write: the
+/// launch removes the copy's master and keeps that file and its folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrelated_file_in_a_removed_copys_folder_is_kept() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    let unrelated = world.master_of(noted).with_file_name("notes.txt");
+    std::fs::write(&unrelated, b"the user's own file").unwrap();
+    world.ledger_holds_the_upload_as_another_meeting(&app.store, true);
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    assert!(!world.master_of(noted).exists(), "the deleted audio goes");
+    assert_eq!(
+        std::fs::read(&unrelated).unwrap(),
+        b"the user's own file",
+        "a file Steno did not write stays"
+    );
+    assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
+    assert_eq!(
+        world.noted(),
+        (0, 0),
+        "its master is gone, so are its entries"
+    );
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    assert_eq!(
+        World::meetings(&app.store),
+        Vec::<Uuid>::new(),
+        "not adopted later"
+    );
+    assert!(unrelated.exists());
+    quit(app).await;
+}
+
+/// The copy sits in an audio folder the user chose, beside a file of the
+/// user's and a meeting folder another install wrote, and the ledger
+/// holds its bytes as a meeting the user deleted: only the copy's own
+/// folder goes, also when the setting changed after the copy
+/// (`change_setting_after`).
+async fn removes_a_copy_in_a_chosen_audio_folder_alone(change_setting_after: bool) {
+    let (world, app) = World::new();
+    let chosen = world.dir.path().join("Chosen Audio");
+    std::fs::create_dir_all(&chosen).unwrap();
+    let mut settings = app.store.settings().unwrap();
+    settings.audio_folder = steno_core::paths::file_url(&chosen, true);
+    app.store.save_settings(&settings).unwrap();
+    let hold = WriteLockHold::new(&world.database());
+    app.store
+        .on_writer(|connection| connection.busy_timeout(Duration::from_millis(20)))
+        .unwrap();
+    world.admit(&app).await.unwrap_err();
+    drop(hold);
+    let [noted] = meeting_folders_in(&chosen)[..] else {
+        panic!("one copy in the chosen folder");
+    };
+    assert_eq!(
+        world.copies(),
+        Vec::<Uuid>::new(),
+        "none in the default folder"
+    );
+    let copy = steno_core::RecordingLayout::new(&chosen, noted);
+    assert!(copy.master(world.metadata.format).exists());
+    let users = chosen.join("keep.txt");
+    std::fs::write(&users, b"user").unwrap();
+    let foreign_id = Uuid::new_v4();
+    let foreign = steno_core::RecordingLayout::new(&chosen, foreign_id);
+    std::fs::create_dir_all(&foreign.directory).unwrap();
+    std::fs::write(foreign.master(world.metadata.format), &world.bytes).unwrap();
+    if change_setting_after {
+        let elsewhere = world.dir.path().join("Later Audio");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        settings.audio_folder = steno_core::paths::file_url(&elsewhere, true);
+        app.store.save_settings(&settings).unwrap();
+    }
+    world.ledger_holds_the_upload_as_another_meeting(&app.store, true);
+    quit(app).await;
+
+    let app = relaunch(&world).await;
+    assert!(!copy.directory.exists(), "the copy's folder goes");
+    assert!(users.exists(), "the chosen folder and the user's file stay");
+    assert_eq!(
+        meeting_folders_in(&chosen),
+        [foreign_id],
+        "another install's meeting folder stays"
+    );
+    assert!(foreign.master(world.metadata.format).exists());
+    assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
+    assert_eq!(world.noted(), (0, 0));
+    quit(app).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_copy_in_a_chosen_audio_folder_goes_alone() {
+    removes_a_copy_in_a_chosen_audio_folder_alone(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_copy_in_a_chosen_audio_folder_goes_alone_after_the_setting_changed() {
+    removes_a_copy_in_a_chosen_audio_folder_alone(true).await;
+}
+
 /// The noted copy holds other bytes of the same size, and the ledger
 /// holds the upload as a meeting the user deleted: the copy is not the
 /// upload, so it is kept and adopted as a recording with no meeting,

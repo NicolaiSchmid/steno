@@ -1024,10 +1024,10 @@ fn adopted(
 /// meeting is gone means the user deleted these exact bytes, and the
 /// phone is answered "delivered" from that row. No delete can be undone:
 /// the host records a delete's entry again only when its rows did not go,
-/// so a meeting the transaction finds gone stays gone. The copy's folder
-/// goes as a delete removes a meeting's folder ([`remove_copy`]), its
-/// master first and durably, and its entries only once it is gone; a
-/// removal that fails keeps them for the next launch. Any doubt keeps the copy: one that cannot be read
+/// so a meeting the transaction finds gone stays gone. The copy's master
+/// goes durably, then its folder if empty ([`remove_copy`]), and its
+/// entries only once the master is gone; a removal that fails keeps them
+/// for the next launch. Any doubt keeps the copy: one that cannot be read
 /// keeps its entries for the next launch, and a copy noted with no upload
 /// (an older build's), cut short or holding other bytes is adopted as any
 /// recording with no meeting. Noted uploads whose folder has no entry (a
@@ -1312,16 +1312,25 @@ fn held_by(upload: &NotedUpload, orphan: &Orphan) -> std::io::Result<bool> {
 pub(crate) static UNREADABLE_COPIES: std::sync::Mutex<Vec<Uuid>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Removes `orphan`'s meeting folder, as a delete removes a meeting's
-/// folder, its master first and durably, so a power loss cannot bring the
-/// audio back once its entries are forgotten. A folder already gone
-/// counts as removed.
+/// Removes `orphan`'s master durably, so a power loss cannot bring the
+/// audio back once its entries are forgotten, then its meeting folder if
+/// that is empty. Fails only when the master was not removed. A folder
+/// that holds other files (the user's, say) stays with them, and so does
+/// one that cannot be removed: its master is gone, so its entries go all
+/// the same and no launch adopts it again. Never removes more than the
+/// master and an empty folder.
 fn remove_copy(orphan: &Orphan) -> std::io::Result<()> {
     crate::files::remove_durably(&orphan.master)?;
-    match std::fs::remove_dir_all(&orphan.layout.directory) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        outcome => outcome,
+    match std::fs::remove_dir(&orphan.layout.directory) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            let meeting_id = orphan.meeting_id;
+            tracing::warn!(%meeting_id, "the folder of a removed phone copy stays: it holds other files or could not be removed");
+            // The error can name the user's folder: debug alone.
+            tracing::debug!(%meeting_id, %error, "the folder of a removed phone copy not removed");
+        }
+        _ => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]
