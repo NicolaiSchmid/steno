@@ -437,7 +437,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P19 | The mic lane when the input device goes away: the mic falls back to the default input mid-recording on every platform (Core Audio, PipeWire and WASAPI in #222), also when the chosen device is connected but does not open, and the recording returns to it once it is back and opens. One that does not open (at the start, or while it settles on its way back) is asked for again at the next rebuild, when a default device moves or a device in use goes. On Linux it is also asked by a probe on a PipeWire stream and connection of its own (#244): 5 s after the session fell back, then twice as long after each probe, up to 80 s. The probe touches nothing that records, and the session switches only once the chosen source delivered there. A Bluetooth source is not probed: linking its input switches the headset to its hands-free profile under the output the system lane records. The Mac and Windows backends do not probe, for the same reason and because neither is run on hardware here | audio (#222, the probe #244) |
 | P20 | A recording that fills the disk: a free-space check before and during recording, with a warning. Every platform refuses a start and stops the recording, saved, above a 512 MiB floor. On the Mac the reading is the larger of `statvfs` and `NSURLVolumeAvailableCapacityForImportantUsageKey` through `steno-macos`, which counts APFS's purgeable space and reads 0 on volumes CacheDelete does not manage (external drives, disk images), held to `statvfs` plus 384 MiB, so the warning and its minutes count to the first floor; a failed read leaves `statvfs`. A `statvfs` below 128 MiB stops and refuses whatever the purgeable space, since CacheDelete purges asynchronously. A save that still meets a full disk leaves the meeting `recording` for P3 (#233) and P17 to recover at the next launch with room | capture and recovery (`wp-cap-*`, #230; the Mac's floor #285) |
 | P21 | The unsynced tail of a recording: periodic `sync_data` on the master | capture and recovery (`wp-cap-*`) |
-| P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`). #244: the session reports a stream that delivered nothing for 2 s and rebuilds it, its gap filled from the last frame, on every platform except a Windows capture of the system lane alone (endpoint loopback is silent while nothing plays), a stream that delivers nothing from its start included: a Mac call capture runs from its start on its silent output (A10, #251), and one whose silent output did not start, which delivers only while another app plays, is restarted on the backoff below until something plays; playback that begins during a wait between two restarts is lost until the next start (up to 4 s plus one start, once per change from quiet to playback). Its restarts keep a chosen microphone: the output's clock stalls it, so neither a restart that delivered nothing nor a stall soon after a resume gives the microphone up for the default. A restart of `coreaudiod`, and a lost connection to the PipeWire daemon (killed or restarted), are reported as the audio service restarting. Restarts that fail on a graph that does not run, that start but deliver nothing within 2 s, or that follow a stall or a service restart go on until one runs, with no limit, backing off 250 ms, 500 ms, 1 s, 2 s, then every 4 s: once the devices are back, the 4 s cap costs the starts in flight (one deadline per device tried: 3.5 s each on Linux, 7.5 s for a thread that does not answer, a chosen microphone and then the default; up to 10 s on Windows), the wait and the first frame, filled with silence up to the 10 s `MAXIMUM_GAP`; past it the master falls short of wall time and the note after the stop counts it. A restart whose stream delivered before its start returned ends its gap at the clock reading before the start, so the master may run short by the start's connect time; no audio is lost. A stream that resumes and stalls again within 10 s, or before it delivered anything, continues the same restarts' count and backoff, and the log says so when the first restart fails and then about once a minute, across the resumes, the lines each start and stop would log (the Mac's silent output and first callback lines included) at `debug` meanwhile. A stream whose stall comes 10 s or more after each resume begins new restarts each time: its stall logs at `debug` while an earlier warning line stands unanswered, and it never brings the warning up when none stands; the note after the stop counts what it lost. The warning "No audio from <device>. Still trying." names the microphone only when its stall began the rebuild and its clock drives the capture (in person, and on Windows), else "No audio is arriving. Still trying." (a Mac call with nothing playing gets this one); it stands until the stream has delivered for 10 s, so it does not go and come back with each resume, and a note after the stop says when about a second or more is missing, clock drift left out. While the capture recovers, from a device change until it is back, the call auto-stop waits, for one grace at most, and it then arms afresh (S2), since a restart of the audio service also empties the call detector's process list | capture and recovery (`wp-cap-*`, #244) |
+| P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`). #244: the session reports a stream that delivered nothing for 2 s and rebuilds it, its gap filled from the last frame, on every platform except a Windows capture of the system lane alone (endpoint loopback is silent while nothing plays), a stream that delivers nothing from its start included: a Mac call capture runs from its start on its silent output (A10, #251), and one whose silent output did not start, which delivers only while another app plays, is restarted on the backoff below until something plays; playback that begins during a wait between two restarts is lost until the next start (up to 4 s plus one start, once per change from quiet to playback). Its restarts keep a chosen microphone: the output's clock stalls it, so neither a restart that delivered nothing nor a stall soon after a resume gives the microphone up for the default. A restart of `coreaudiod`, and a lost connection to the PipeWire daemon (killed or restarted), are reported as the audio service restarting. Restarts that fail on a graph that does not run, that start but deliver nothing within 2 s, or that follow a stall or a service restart go on until one runs, with no limit, backing off 250 ms, 500 ms, 1 s, 2 s, then every 4 s: once the devices are back, the 4 s cap costs the starts in flight (one deadline per device tried: 3.5 s each on Linux, 7.5 s for a thread that does not answer, a chosen microphone and then the default; up to 10 s on Windows), the wait and the first frame, filled with silence up to the 10 s `MAXIMUM_GAP`; past it the master falls short of wall time and the note after the stop counts it. A restart whose stream delivered before its start returned ends its gap at the clock reading before the start; the time from there to its first frame (the start's connect time) is audio lost, counted as missed and not filled (A18). A stream that resumes and stalls again within 10 s, or before it delivered anything, continues the same restarts' count and backoff, and the log says so when the first restart fails and then about once a minute, across the resumes, the lines each start and stop would log (the Mac's silent output and first callback lines included) at `debug` meanwhile. A stream whose stall comes 10 s or more after each resume begins new restarts each time: its stall logs at `debug` while an earlier warning line stands unanswered, and it never brings the warning up when none stands; the note after the stop counts what it lost. The warning "No audio from <device>. Still trying." names the microphone only when its stall began the rebuild and its clock drives the capture (in person, and on Windows), else "No audio is arriving. Still trying." (a Mac call with nothing playing gets this one); it stands until the stream has delivered for 10 s, so it does not go and come back with each resume, and a note after the stop says when about a second or more is missing, clock drift left out. While the capture recovers, from a device change until it is back, the call auto-stop waits, for one grace at most, and it then arms afresh (S2), since a restart of the audio service also empties the call detector's process list | capture and recovery (`wp-cap-*`, #244) |
 | P23 | Audio the relay dropped: a warning at stop and a log line; no stored count, since a column would need a migration | capture and recovery (`wp-cap-*`) |
 | P24 | A transcript cut short by a sidecar shorter than its master: the sidecar's duration is checked against the master's | audio (#228) |
 | P25 | A recording or a processing run stopped by an update: updates wait while either runs. Every install holds the app's install gate (`IdleGate`), which gives its hold only while no recording starts, runs or is saved, no processing job, summary re-run or re-export runs or is claimed, and the app is not shutting down. Recording always wins: while an installer that returns runs (a `.deb`'s password prompt may wait for good), Record works, a job claimed meanwhile (a phone recording's) waits `queued` for a minute at most, and the relaunch waits for a recording or a job started meanwhile, telling the user so; the hold refuses Record only through the shutdown and the relaunch, and on Windows from the install, which ends the app. An installer that asks an administrator (a `.deb`, an `.rpm`, a macOS bundle the user cannot write, and the MSI, whose consent prompt comes after the app has ended, so Steno is down until the prompt is answered) runs only right after a yes given while the app is idle; a yes given while busy, or one whose download took over 30 s, asks once more when it is idle. On Windows the app runs neither installer itself: it writes the verified installer, shuts down and leaves a hidden `cmd.exe` that starts it, waits and starts the version that ran again when it did not install (`msiexec` not 0, 1641 or 3010; the NSIS setup not 0), so a declined consent prompt, a failed MSI or an aborted setup leaves Steno down for seconds. If the `cmd.exe` cannot start, ends before it runs (a policy that turns off the command prompt ends it at once) or says nothing for 10 seconds, Steno restarts at once and the error goes to the log. Steno lets go of its single-instance lock just before it ends, so an old version started again at once (`msiexec` exits at once while another install runs) comes up rather than handing over to the ending Steno. An install that fails while Steno quits restarts nothing. A summary re-run or re-export claimed in those seconds is not kept, and the user asks again. The user's yes while busy asks whether to install after it ends, "Install After It Ends" (the default) or "Not Now", and waits; a recording started during the download is waited for, never stopped, and a newer version found meanwhile keeps the yes. Automatic downloads wait for an idle app and no install under way; the flag is read again after the download, turning it off frees the kept package, and the schedule never runs an installer that asks an administrator, which it announces instead (#270). Not part of the gate, by design: the launch's recovery of interrupted recordings, which survives a relaunch as it survives a kill (P3), and a phone upload before its intake claims the run, which the phone keeps until `complete` (P2) | Linux desktop (#270, every platform) |
@@ -553,6 +553,11 @@ after the port".
   to it, and the workspace's own `zbus` with them; until then `deny.toml`
   ignores RUSTSEC-2026-0370 to 0372, which mark zvariant, zbus_names and
   zvariant_derive unmaintained since zbus 6 merged them into itself.
+- One loss ledger per stream (after A18): each stream compares the frames its
+  clock expected with the frames its thread delivered, reconciled once at its
+  stop, and the session merges the lost spans by union, so nothing is
+  subtracted. It is the first capture PR after stable, with the recorder actor
+  plan's capture seam and fake, and it needs a new D9 ruling.
 
 ## Work packages
 
@@ -1732,7 +1737,13 @@ Each lands before `0.11.0-rc.1`.
     time as silence too. The session counts it once by the rule under
     "Missed audio" in the module doc of
     `crates/steno-audio/src/capture/session.rs`, and none of it leaves the
-    note.
+    note. A rebuild's restart whose frames came during its start (PipeWire's
+    returns after the first cycle) ends its gap at the clock's reading
+    before the start; the time from there to its first frame, the start's
+    time less the frames it delivered (0.25 to 0.4 s on a loaded host, 30
+    to 70 ms on an idle one), was silent, hidden by the drift allowance in
+    a long recording. The session now counts it unfilled on every lane, in
+    the same count and the same `warn` line as the stall.
   - **Writing it.** A jump of at most `MISSED_FILL_LIMIT` (one second at
     the stream's rate) is written as zeros on every lane before the
     callback's own frames (`LaneFrameSink::write_missed`), on the
@@ -1806,8 +1817,9 @@ Each lands before `0.11.0-rc.1`.
     counts unfilled, since an engine that dropped its oldest packets before
     the thread's first drain flags no packet. Both count at the stop, only
     for a recording's first start (`LaneFrameSink::first_start`, claimed
-    once the start succeeded): a restart's gap runs to its first frame and
-    holds that time already. They count whatever the stop is for, on a
+    once the start succeeded): a restart's gap runs to its first frame, or
+    the session counts the time from the start to it (**Finding it**), so
+    that time counts already. They count whatever the stop is for, on a
     counter of their own (`LaneFrameSink::count_before_first`), so a
     rebuild's gap never takes them back; the rule is stated once in
     `realtime::missed` ("Before the first callback"). Endpoint loopback
@@ -2040,12 +2052,14 @@ Each lands before `0.11.0-rc.1`.
     being fresh, and a lane that primed on part of the kept packets, ran
     out while the system thread drained the rest and primed again dropped
     the outage's padding. It now fails only in a shape **Left** names, the
-    queue an earlier outage left above the target: 2 in 300 000 short
-    calls on six new seeds (60 ms under where outages overlap the
-    microphone's, 20 ms under on an outage that ended two packets before
-    the stop) and 1 in 300 000 on six earlier ones (80 ms under), none of
-    100 000 single streams; with the upper bounds, 57 of 150 000 short
-    calls and 4 of 20 000 calls go over, each an idle or unit shape
+    queue an earlier outage left above the target: 1 in 500 000 short
+    calls on ten new seeds (100 ms under where outages overlap the
+    microphone's, inside the 120 ms **Left** states; the generator's bound
+    allows two targets only, so a new seed can still print it), none of
+    100 000 single streams. A sweep of 13 776 variants found the other
+    shape at 20 ms under at most: a second outage within two slip windows
+    of one the engine's buffer held. With the upper bounds, 52 of 150 000
+    short calls and 3 of 20 000 calls go over, each an idle or unit shape
     **Left** names.
   - **Left.** WASAPI's fill is unit-tested and compiled in CI, not
     provoked on hardware (no Windows machine). The rule is stated once, in
@@ -2071,10 +2085,13 @@ Each lands before `0.11.0-rc.1`.
     reads the system lane's loss to within the lane's lag: up to the
     engine's buffer over (its kept packets land late); up to two targets
     (40 ms) under when the microphone's last pulls take the lag (an outage
-    into the stop, or overlapping the microphone's own), and overlapping
-    the microphone's own also under by the queue an earlier outage's late
-    packets left above the target until it slips (up to the engine's
-    buffer, 100 ms, an outage). Each flag that comes while the lane is out
+    that ends within the lag before the stop, its flag at the final drain,
+    or one overlapping the microphone's own); and any follower outage
+    within two slip windows of an earlier one whose late packets raised
+    the queue above the target reads also under by that excess, up to the
+    engine's buffer less the target (80 ms): 120 ms at most where both
+    apply (100 ms measured, where outages overlap the microphone's). Each
+    flag that comes while the lane is out
     takes the padding so far out of the runs at the microphone's next
     pull, so a later flag counts only what padded after it. The hold that
     keeps an outage's padding for
@@ -2087,8 +2104,8 @@ Each lands before `0.11.0-rc.1`.
     queue empty and a system flag follows at once (0.76 s of idle counted
     with a 50 ms loss in 1 of 20 000 calls). Audio the staging slipped in the microphone's
     catch-up just before the stop, padded after it, counts at the stop on
-    process loopback (it is gone all the same). The reading before the
-    first packet reads up to the stream's clock drift over (a few frames,
+    process loopback (it is gone all the same). The count before the
+    first packet can read up to the stream's clock drift over (a few frames,
     96 002 for 96 000 lost at 0.5 % drift): it reads the QPC's time
     against frames on the device's own clock, rounded to a period (an
     overcount). Where both threads were
@@ -2107,11 +2124,12 @@ Each lands before `0.11.0-rc.1`.
       through the note's wall-time shortfall; on process loopback, a loss
       before the first packet is silent. A stream under 2 s has no judged
       QPC, so a first start torn down before 2 s counts nothing before its
-      first packet. Each stream whose QPC was judged not sane logs a `warn`
-      line at its stop, one under 2 s the same line at `info` ("not judged
-      (under 2 s)"), and step 9 of the Windows gate fails any stream whose
-      QPC line is missing or not near 1.0000, so such hardware is found
-      there;
+      first packet. Each stream whose QPC was judged not sane, or that ran
+      2 s or more with too few clean QPC pairs to judge it, logs a `warn`
+      line at its stop; one under 2 s logs the same line at `info` ("not
+      judged (under 2 s)"). Step 9 of the Windows gate fails any stream
+      whose QPC line is missing or not near 1.0000, so such hardware is
+      found there;
     - the note takes the worst lane (above), on every backend: the general
       follow-up.
 
@@ -2123,7 +2141,16 @@ Each lands before `0.11.0-rc.1`.
     (the watch thread wakes first), which costs a gap of 10 to 20 ms,
     counted. Nicolai's gate steps (step 6 of R5 on the Mac, the stalled
     recording in the Linux gates, step 9 of the Windows gate) stop the
-    app's process as the tests do. Owner: audio. It blocks stable (D3).
+    app's process as the tests do.
+
+    After stable, one ledger per stream replaces this counting: it compares
+    the frames the stream's clock expected with the frames its thread
+    delivered, reconciled once at the stream's stop, and the session merges
+    the lost spans by union on the recording's timeline, so nothing is
+    subtracted (the union also settles the worst-lane follow-up). It is the
+    first capture PR after stable, and it lands with the capture seam and
+    scripted fake of `.plans/2026-10-15-recorder-actor.md` (its PR 1), under
+    a new D9 ruling (What follows). Owner: audio. It blocks stable (D3).
 - **A19 No in-process speech beside a live recording, and the speech
   sidecar after a CoreML abort.** Found by #296's code review: an abort in
   CoreML's load that no `@catch` stops (a failed allocation, an IOSurface
@@ -3868,9 +3895,8 @@ candidate:
    Then once more without the suspension. Pass: after the suspended run
    the stop's `warn` line "the capture's thread missed ... s of audio"
    reads about 0.6 s (the note stays silent for a second or less), and the
-   microphone's stream logs either a
-   "packets after a glitch" line or a "missed after its last packet" line
-   of about 0.6 s; the system stream does the same on process loopback. On
+   microphone's stream logs either a "packets after a glitch" line or a
+   "missed after its last packet" line of about 0.6 s; the system stream does the same on process loopback. On
    endpoint loopback, write down whether the system stream logged either
    line: when it logs neither, its engine refused the newest packets and
    that loss on the system lane went uncounted (the lane reads no clock at
@@ -3884,10 +3910,10 @@ candidate:
    `pssuspend steno-desktop` as the recording starts), then record a
    minute. Then once more without the suspension. Pass: after the
    suspended run the stop's `warn` line "the capture's thread missed ... s
-   of audio" reads about 0.6 s (the note stays silent for a second or less),
-   and the microphone's stream logs a "missed before its first packet" or
-   a "packets after a glitch"
-   line of about 0.6 s (or 0.6 s less what its engine kept); the system
+   of audio" reads about 0.6 s (the note stays silent for a second or
+   less), and the microphone's stream logs a "missed before its first
+   packet" or a "packets after a glitch" line of about 0.6 s (or 0.6 s
+   less what its engine kept); the system
    stream does the same on process loopback. On endpoint loopback, write
    down whether the system stream logged either line: it reads no start,
    so a loss before its first packet there is uncounted. After the run

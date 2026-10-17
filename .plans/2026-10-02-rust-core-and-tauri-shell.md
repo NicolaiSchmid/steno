@@ -2220,8 +2220,9 @@ it:
   readings, so the note says it. The packets and the seconds are logged at
   stop, with both clocks' ratios, at `warn` when the stream had
   discontinuities and filled none, or when the microphone or process
-  loopback had its QPC judged not sane (at `info`, "not judged (under
-  2 s)", for a stream under 2 s). At the stop each stream drains once
+  loopback had its QPC judged not sane or ran 2 s or more with too few
+  clean QPC pairs to judge it (at `info`, "not judged (under 2 s)", for a
+  stream under 2 s). At the stop each stream drains once
   more; then the microphone and process loopback, which deliver
   continuously, compare the performance counter with their last packet's
   QPC, for a stall into the stop that left no flagged packet (an engine
@@ -2243,8 +2244,9 @@ it:
   wall-time shortfall; on process loopback, a loss before the first packet
   is silent. A stream under 2 s has no judged QPC, so a first start torn
   down before 2 s counts nothing before its first packet. Each stream
-  whose QPC was judged not sane logs a `warn` line at its stop, one under
-  2 s the same line at `info` ("not judged (under 2 s)"), and step 9 of
+  whose QPC was judged not sane, or that ran 2 s or more with too few
+  clean QPC pairs to judge it, logs a `warn` line at its stop; one under
+  2 s logs the same line at `info` ("not judged (under 2 s)"). Step 9 of
   the Windows gate fails any stream whose QPC line is missing or not near
   1.0000, so such hardware is found there.
 - **A system-only capture skips silence.** With the `[System]` lane
@@ -2423,7 +2425,11 @@ item to settle before the Linux release:
   a hog in the 1-CPU container (the "Only the test" row, host load about
   40, of the A18 table in the stable plan), Steno missed 0.15 to 0.70 s in
   10 s without real-time scheduling and 0 to 0.09 s with it (`--ulimit
-  rtprio=95`); with everything starved, up to 2.03 and 1.58 s.
+  rtprio=95`); with everything starved, up to 2.03 and 1.58 s. A
+  rebuild's restart, whose `start` returns after the first cycle, ends its
+  gap at the clock's reading before the start; the session counts the time
+  from there to the first frame (the connect and the link, 0.25 to 0.4 s
+  on a loaded host) as missed and not filled.
 - **Device changes read differently.** A lost connection or stream loses
   both lanes and reads as `OutputDeviceGone` (`InputDeviceGone` in
   person). A lost link (one removed from outside included) reads as the
@@ -3452,6 +3458,16 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `crates/steno-pipeline/src/files.rs`,
   `Sources/StenoCore/Storage/RecordingIntake.swift`, `crates/steno-llm`. Found: #167,
   #185, #213.
+- **Unowned.** One loss ledger per stream, in place of A18's counting: each stream
+  compares the frames its clock expected with the frames its thread delivered,
+  reconciled once at its stop, and the session merges the lost spans by union on the
+  recording's timeline, so nothing is subtracted and the note no longer takes only the
+  worst lane. Nicolai's decision makes it the first capture PR after the stable
+  release, landing with the capture seam and scripted fake of
+  `.plans/2026-10-15-recorder-actor.md` (its PR 1), under a new D9 ruling. Where:
+  `crates/steno-audio/src/capture/session.rs`, `crates/steno-audio/src/realtime/`,
+  A18 and "What follows" in `.plans/2026-10-07-stable-promotion.md`. Found: #291,
+  #297.
 - **Unowned.** A Pair that lands during the quit starts a listener after it:
   `App::shutdown` stops the listener, but `ListenerHandover::close` only keeps a
   waiting handover from receiving one, so a `start` waiting on the stop's lock binds
