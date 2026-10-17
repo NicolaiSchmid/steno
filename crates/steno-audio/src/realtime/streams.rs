@@ -57,7 +57,10 @@
 //! frames for that time, and its kept packets do not slip that audio first
 //! ([`FollowerLane::for_streams_filling`]); the follower writes nothing,
 //! since the master's pulls already pad its lane with zeros while it is
-//! out, and those zeros count as its fill ([`FollowerLane::take_missed`]).
+//! out, and those zeros count as its fill ([`FollowerLane::take_missed`]);
+//! a follower still out at the stop, or whose flagged packet comes after
+//! the master's last pull, counts at the backend's stop
+//! ([`count_at_stop`]).
 //! A master's jump too long to fill drops
 //! the follower's audio for that time with it
 //! ([`FollowerLane::skip_unfilled`]), and the lanes keep their lag. Three
@@ -129,10 +132,23 @@ pub struct FollowerLane {
     missed_unfilled: AtomicUsize,
     /// The follower's thread reported a discontinuity not yet handed on.
     discontinuity: AtomicBool,
-    /// Zeros padded since the lane last primed (none before it first
-    /// primed), and those of the run before the last re-prime.
+    /// Zeros padded since the lane last primed (those before it first
+    /// primed included), and those of the runs before the last re-prime
+    /// that the hold still keeps.
     run: AtomicUsize,
     last_run: AtomicUsize,
+    /// Master frames pulled since the last re-prime, counted up to just
+    /// past `reprime_hold`: how long `last_run` may still be a
+    /// discontinuity's padding ([`Self::with_reprime_hold`]).
+    since_prime: AtomicUsize,
+    reprime_hold: usize,
+    /// The padding of a discontinuity that came while the lane was out: the
+    /// held run ([`Self::held_run`]) at the master's first pull after it,
+    /// `usize::MAX` before that pull or with none pending.
+    flag_run: AtomicUsize,
+    /// Producer: the follower's queue at its last flagged packet was within
+    /// the target and the hold, so it came back right before the flag.
+    flag_fresh: AtomicBool,
 }
 
 impl FollowerLane {
@@ -170,6 +186,10 @@ impl FollowerLane {
             discontinuity: AtomicBool::new(false),
             run: AtomicUsize::new(0),
             last_run: AtomicUsize::new(0),
+            since_prime: AtomicUsize::new(0),
+            reprime_hold: capacity,
+            flag_run: AtomicUsize::new(usize::MAX),
+            flag_fresh: AtomicBool::new(false),
         }
     }
 
@@ -192,6 +212,7 @@ impl FollowerLane {
         let period = period.max(1);
         Self::new(2 * period, 3 * period, Self::SLIP_WINDOW, Self::CAPACITY)
             .with_max_lateness(master_buffer)
+            .with_reprime_hold(master_buffer.saturating_add(period))
     }
 
     /// [`Self::for_streams`] behind a master that writes what its thread
@@ -204,7 +225,8 @@ impl FollowerLane {
     #[must_use]
     pub fn for_streams_filling(period: usize, master_buffer: usize) -> Self {
         let fill_limit = (MISSED_FILL_LIMIT.as_secs_f64() * SAMPLE_RATE) as usize;
-        Self::for_streams(period, master_buffer.saturating_add(fill_limit))
+        Self::for_streams(period, master_buffer)
+            .with_max_lateness(master_buffer.saturating_add(fill_limit))
     }
 
     /// The most the master can run late, in frames; a queue more than this
@@ -213,6 +235,21 @@ impl FollowerLane {
     #[must_use]
     pub fn with_max_lateness(mut self, frames: usize) -> Self {
         self.ceiling = self.high_water.saturating_add(frames);
+        self
+    }
+
+    /// How many frames of master pulls after a re-prime a discontinuity
+    /// still counts the padding before it as its loss
+    /// ([`Self::take_missed`]): the follower's buffer and one period, since
+    /// an engine that refused the newest packets during an outage hands
+    /// over the ones it kept unflagged and flags only the packet after
+    /// them. Past it, that padding was a drift underrun or an idle no
+    /// packet flagged, and is forgotten. [`Self::for_streams`] takes the
+    /// master's buffer and period for it (both streams ask for the same
+    /// buffer); [`Self::new`] the capacity.
+    #[must_use]
+    pub fn with_reprime_hold(mut self, frames: usize) -> Self {
+        self.reprime_hold = frames;
         self
     }
 
@@ -308,6 +345,11 @@ impl FollowerLane {
     pub fn record_missed(&self, missed: Missed) {
         saturating_add(&self.missed_fill, missed.fill);
         saturating_add(&self.missed_unfilled, missed.unfilled);
+        let queued = self.ring.available_to_read();
+        self.flag_fresh.store(
+            queued <= self.target.saturating_add(self.reprime_hold),
+            Ordering::Relaxed,
+        );
         self.discontinuity.store(true, Ordering::Release);
     }
 
@@ -318,10 +360,21 @@ impl FollowerLane {
     /// loss), count as filled: the loss is the larger of that and what
     /// [`Self::record_missed`] counted, so it counts once, and whatever
     /// the follower's clocks read, positions that never move included. A
-    /// drift underrun (no discontinuity) stays in
-    /// [`Self::underrun_frames`]; one right before a discontinuity whose
-    /// own outage padded nothing counts with it, an overcount of one
-    /// underrun.
+    /// drift underrun or an idle no packet flagged (no discontinuity)
+    /// stays in [`Self::underrun_frames`]; one whose re-prime came less
+    /// than the hold ([`Self::with_reprime_hold`]) before a discontinuity
+    /// whose own outage padded nothing counts with it, an overcount of
+    /// that underrun. A discontinuity that comes while the lane is out
+    /// takes the padding up to the master's first pull after it, with the
+    /// run before the last re-prime while the hold keeps it (the engine's
+    /// kept packets may run out before its flagged one comes), and not the
+    /// re-prime's wait after it, so an idle right after the flag is not
+    /// counted. A discontinuity whose follower had queued more than the
+    /// target and the hold at the flag (it came back long before it, while
+    /// the master was out) takes no padding at all. The padding reads the
+    /// loss to within the lane's lag: up to two targets under when the
+    /// master's last pulls take the lag (an outage into the stop, or
+    /// overlapping the master's own).
     #[inline(always)]
     pub fn take_missed(&self) -> Missed {
         let discontinuity = self.discontinuity.load(Ordering::Acquire);
@@ -330,6 +383,36 @@ impl FollowerLane {
             // audio yet: its padding is still running.
             return Missed::default();
         }
+        if !discontinuity && self.since_prime.load(Ordering::Relaxed) > self.reprime_hold {
+            self.last_run.store(0, Ordering::Relaxed);
+        }
+        self.hand_on(discontinuity, &self.last_run, self.target)
+    }
+
+    /// The backend's stop, once both capture threads are joined: what the
+    /// lane still holds, as [`Self::take_missed`] but without waiting for
+    /// a re-prime, and with the target left in: the lane ends here, so the
+    /// lag it kept before the outage, which the master's last pulls may have
+    /// taken, is no delay to come off (an overcount of up to the target
+    /// otherwise). A follower still out at the stop counts the zeros padded
+    /// since it went out; one that primed again, those before the re-prime.
+    /// After it, nothing is held.
+    #[must_use]
+    pub fn take_missed_at_stop(&self) -> Missed {
+        let discontinuity = self.discontinuity.load(Ordering::Acquire);
+        let run = if self.primed.load(Ordering::Relaxed) {
+            &self.last_run
+        } else {
+            &self.run
+        };
+        self.hand_on(discontinuity, run, 0)
+    }
+
+    /// What [`Self::record_missed`] counted, and after a `discontinuity`
+    /// the larger of that and the zeros in `run` past `delay`, filled; the
+    /// zeros capped by the run at the flag (see [`Self::take_missed`]).
+    #[inline(always)]
+    fn hand_on(&self, discontinuity: bool, run: &AtomicUsize, delay: usize) -> Missed {
         let counted = Missed {
             fill: self.missed_fill.swap(0, Ordering::Relaxed),
             unfilled: self.missed_unfilled.swap(0, Ordering::Relaxed),
@@ -338,10 +421,19 @@ impl FollowerLane {
             return counted;
         }
         self.discontinuity.store(false, Ordering::Relaxed);
-        let padded = self
-            .last_run
-            .swap(0, Ordering::Relaxed)
-            .saturating_sub(self.target);
+        let at_flag = self.flag_run.swap(usize::MAX, Ordering::Relaxed);
+        let run = run.swap(0, Ordering::Relaxed);
+        let padded = if !self.flag_fresh.load(Ordering::Relaxed) {
+            // A queue past the target and the hold at the flag: the
+            // follower came back long before it, so no padding is its loss.
+            0
+        } else if at_flag != usize::MAX {
+            // The flag came while the lane was out: the padding up to it,
+            // before the re-prime's wait.
+            at_flag
+        } else {
+            run.saturating_sub(delay)
+        };
         let lost = counted.fill.saturating_add(counted.unfilled).max(padded);
         let fill = counted.fill.max(padded).min(lost);
         Missed {
@@ -399,21 +491,37 @@ impl FollowerLane {
             available -= trimmed;
         }
         if !self.primed.load(Ordering::Relaxed) {
+            if self.discontinuity.load(Ordering::Acquire)
+                && self.flag_run.load(Ordering::Relaxed) == usize::MAX
+            {
+                // The first pull since the follower flagged a loss while
+                // its lane was out: the padding so far is that outage's,
+                // and what pads after it is the re-prime's wait or a new
+                // stretch without audio (an idle).
+                self.flag_run.store(self.held_run(), Ordering::Relaxed);
+            }
             if available < self.target + wanted {
                 out.fill(0.0);
                 // Only an underrun unprimes a lane that primed, and it
                 // counts at least one frame: these zeros are its re-prime.
                 if self.underrun.load(Ordering::Relaxed) > 0 {
                     self.underrun.fetch_add(wanted, Ordering::Relaxed);
-                    self.run.fetch_add(wanted, Ordering::Relaxed);
                 }
+                // The run counts the zeros before the first prime too, so
+                // a follower out from its first packets counts its padding;
+                // with no discontinuity after it they are forgotten as any
+                // re-prime's.
+                self.run.fetch_add(wanted, Ordering::Relaxed);
+                self.count_since_prime(wanted);
                 return lost;
             }
             self.primed.store(true, Ordering::Relaxed);
             self.last_run
                 .store(self.run.swap(0, Ordering::Relaxed), Ordering::Relaxed);
+            self.since_prime.store(0, Ordering::Relaxed);
             self.restart_window();
         }
+        self.count_since_prime(wanted);
         if available >= wanted {
             self.ring.read(out);
             lost += self.judge_window(available - wanted, wanted);
@@ -427,6 +535,31 @@ impl FollowerLane {
             self.primed.store(false, Ordering::Relaxed);
         }
         lost
+    }
+
+    /// Counts `pulled` master frames since the last re-prime, up to just
+    /// past the hold.
+    #[inline(always)]
+    fn count_since_prime(&self, pulled: usize) {
+        let since = self.since_prime.load(Ordering::Relaxed);
+        if since <= self.reprime_hold {
+            self.since_prime
+                .store(since.saturating_add(pulled), Ordering::Relaxed);
+        }
+    }
+
+    /// The zeros of the current run, and of the run before the last
+    /// re-prime while the hold keeps it: an underrun between an outage's
+    /// re-prime and its flag (the engine's kept packets ran out before the
+    /// flagged one came) must not hide the outage's padding.
+    #[inline(always)]
+    fn held_run(&self) -> usize {
+        let run = self.run.load(Ordering::Relaxed);
+        if self.since_prime.load(Ordering::Relaxed) <= self.reprime_hold {
+            run.saturating_add(self.last_run.load(Ordering::Relaxed))
+        } else {
+            run
+        }
     }
 
     /// Records the queue a pull of `pulled` frames left (`rest`); slips it
@@ -494,15 +627,20 @@ impl PacketRouter {
         follower: Option<Arc<FollowerLane>>,
         max_frames: usize,
     ) -> Self {
-        let follower = follower.and_then(|follower| {
-            let lane = sources.iter().position(|s| s.left.buffer == 1)?;
-            Some((follower, lane))
-        });
+        let follower =
+            follower.and_then(|follower| Some((follower, Self::follower_lane(&sources)?)));
         Self {
             sources,
             follower,
             scratch: vec![0.0; max_frames.max(1)].into_boxed_slice(),
         }
+    }
+
+    /// The lane of `sources` the follower's staging feeds: the one reading
+    /// buffer 1.
+    #[must_use]
+    pub fn follower_lane(sources: &[LaneSource]) -> Option<usize> {
+        sources.iter().position(|s| s.left.buffer == 1)
     }
 
     /// One master packet into the sink; the frames the sink took (none
@@ -654,6 +792,43 @@ impl StreamBody {
         match self {
             StreamBody::Master { router, sink } => router.write_missed(next, missed, sink),
             StreamBody::Follower { lane, .. } => lane.record_missed(missed),
+        }
+    }
+}
+
+/// What the backend's stop hands to `sink` once both capture threads are
+/// joined, so no loss at the end of a recording is silent: what each
+/// stream's clocks read was missed after its last packet (`master_end` and
+/// `follower_end`), unfilled, on the lanes that stream feeds, unless the
+/// session stops for a rebuild, whose gap covers that time; then what the
+/// follower's lane (`follower`, with its lane in the sink) still holds
+/// ([`FollowerLane::take_missed_at_stop`]), the follower's end included.
+pub fn count_at_stop(
+    sink: &LaneFrameSink,
+    follower: Option<(&FollowerLane, usize)>,
+    master_end: Missed,
+    follower_end: Missed,
+) {
+    let follower_index = follower.map(|(_, index)| index);
+    if !sink.device_change_reported() {
+        if master_end.unfilled > 0 {
+            for lane in (0..sink.lanes().len()).filter(|lane| Some(*lane) != follower_index) {
+                sink.ring(lane).record_unfilled(master_end.unfilled);
+            }
+        }
+        if let Some((lane, _)) = follower
+            && !follower_end.is_none()
+        {
+            lane.record_missed(follower_end);
+        }
+    }
+    if let Some((lane, index)) = follower {
+        let held = lane.take_missed_at_stop();
+        if held.fill > 0 {
+            sink.ring(index).record_filled(held.fill);
+        }
+        if held.unfilled > 0 {
+            sink.ring(index).record_unfilled(held.unfilled);
         }
     }
 }

@@ -77,6 +77,7 @@ use windows::Win32::System::Com::{
     BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize, IAgileObject, IAgileObject_Impl, STGM_READ,
 };
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{
     AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, OpenProcess,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -660,6 +661,32 @@ impl CaptureClient {
     #[must_use]
     pub fn positions(&self) -> &DevicePositions {
         &self.positions
+    }
+
+    /// What the thread missed after its last packet, for a stream that
+    /// delivers continuously, read once its final drain is done: the
+    /// performance counter now against the last packet's QPC
+    /// ([`DevicePositions::missed_until`], which states the rule). Nothing
+    /// when the counter cannot be read.
+    #[must_use]
+    pub fn missed_at_stop(&self) -> Missed {
+        let mut counter: i64 = 0;
+        let mut frequency: i64 = 0;
+        // SAFETY: both out-pointers are live locals for the calls to write.
+        let read = unsafe {
+            QueryPerformanceCounter(&raw mut counter).is_ok()
+                && QueryPerformanceFrequency(&raw mut frequency).is_ok()
+        };
+        let (Ok(counter), Ok(frequency)) = (u128::try_from(counter), u128::try_from(frequency))
+        else {
+            return Missed::default();
+        };
+        // `GetBuffer`'s QPC is the counter in 100 ns units.
+        let now = (counter * 10_000_000).checked_div(frequency);
+        match now.and_then(|now| u64::try_from(now).ok()) {
+            Some(now) if read => self.positions.missed_until(now),
+            _ => Missed::default(),
+        }
     }
 
     /// Starts the stream.

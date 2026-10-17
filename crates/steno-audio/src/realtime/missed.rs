@@ -60,9 +60,14 @@
 //! PipeWire compares `CLOCK_MONOTONIC` with the last cycle's `pw_time`,
 //! macOS reads `AudioDeviceGetCurrentTime`. The stop writes what it finds
 //! once the callbacks have ended, while the session's writer is still open.
-//! WASAPI reads no clock at the stop: one last drain hands over what the
-//! engine still holds, and its flagged packets are read as before. A stop for a rebuild reads nothing: the session's gap covers that
-//! time.
+//! WASAPI drains each stream once more, its flagged packets read as any;
+//! then a stream that delivers continuously compares the performance
+//! counter with its last packet's QPC
+//! ([`DevicePositions::missed_until`](crate::capture::split_streams::DevicePositions::missed_until)),
+//! and the backend's stop hands that, and what the system stream's staging
+//! still holds, to the sink once both threads are joined
+//! ([`count_at_stop`](super::count_at_stop)). A stop for a rebuild reads
+//! nothing: the session's gap covers that time.
 //!
 //! # The bound
 //!
