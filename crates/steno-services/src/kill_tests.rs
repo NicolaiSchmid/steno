@@ -914,10 +914,11 @@ async fn recorded_and_processed(app: &crate::App, store: &Store) {
 /// abort no `@catch` stops ends it the same way) turns the speech sidecar
 /// on in `CoreML`'s place: the next launch processes that meeting in the
 /// sidecar, the recordings after it load nothing in the app's process
-/// while they run nor after, and the next launch keeps the sidecar. Only
-/// the user turns `CoreML` back on: then the next meeting runs on it, and
-/// a launch after that does not turn the sidecar on again for the same
-/// marks. A19 of `.plans/2026-10-07-stable-promotion.md`.
+/// neither while they run nor after, and the next launch keeps the
+/// sidecar. Only the user turns `CoreML` back on: then the next meeting
+/// runs on it, with no warm-up beside its recording, the recording after
+/// it warms up again, and a launch after that does not turn the sidecar
+/// on again for the same marks. A19 of `.plans/2026-10-07-stable-promotion.md`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_coreml_load_killed_moves_the_meetings_to_the_speech_sidecar_until_the_user_says() {
     let dir = tempfile::tempdir().unwrap();
@@ -971,8 +972,14 @@ async fn a_coreml_load_killed_moves_the_meetings_to_the_speech_sidecar_until_the
     assert_eq!(coreml.inner.transcriptions.count(), 1, "CoreML again");
     assert_eq!(
         coreml.beside_a_recording(),
+        0,
+        "no warm-up beside the recording until a job has loaded CoreML"
+    );
+    recorded_and_processed(&app, &store).await;
+    assert_eq!(
+        coreml.beside_a_recording(),
         1,
-        "the recording's warm-up alone ran beside it"
+        "the job's load brought the warm-up back"
     );
     drop(app);
 

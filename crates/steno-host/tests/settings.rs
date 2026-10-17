@@ -723,6 +723,34 @@ fn transcription_offers_the_neural_engine_again_after_the_fallback() {
     assert!(transcription.get("error").is_none());
 }
 
+/// A fallback that could not be ended (its file not written) stays on:
+/// Transcription says the Neural Engine could not be turned back on, keeps
+/// the offer, and the pipeline is not rebuilt. Rust only (A19).
+#[test]
+fn a_fallback_that_could_not_be_ended_stays_on() {
+    let harness = Harness::builder()
+        .seed(|_, fakes| {
+            fakes
+                .speech_models
+                .speech_fallback
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            *fakes.speech_models.end_fallback_failure.lock().unwrap() =
+                Some("read-only file system".to_owned());
+        })
+        .build();
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert_eq!(*harness.fakes.pipeline.reloads.lock().unwrap(), 0);
+    let transcription = harness.snapshot(BridgeTopic::SettingsTranscription);
+    assert_eq!(transcription["neuralEngineOff"], true);
+    assert_eq!(
+        transcription["error"],
+        "The Neural Engine could not be turned back on."
+    );
+}
+
 /// Swift: `testSpeechEngineChangeReloadsThePipeline`, `testSpeechDownloadStreamsProgressToInstalled`.
 #[test]
 fn transcription_switches_engines_and_downloads_assets() {

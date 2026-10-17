@@ -604,6 +604,9 @@ pub struct FakeSpeechModels {
     /// What [`SpeechModels::speech_fallback`] answers; ended by
     /// [`SpeechModels::end_speech_fallback`].
     pub speech_fallback: std::sync::atomic::AtomicBool,
+    /// While set, [`SpeechModels::end_speech_fallback`] fails with it and
+    /// the fallback stays on, as an unwritable file leaves it.
+    pub end_fallback_failure: Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for FakeSpeechModels {
@@ -627,6 +630,7 @@ impl Default for FakeSpeechModels {
             download_failure: Mutex::new(None),
             on_download: Mutex::new(None),
             speech_fallback: std::sync::atomic::AtomicBool::new(false),
+            end_fallback_failure: Mutex::new(None),
         }
     }
 }
@@ -697,6 +701,9 @@ impl SpeechModels for FakeSpeechModels {
     }
 
     fn end_speech_fallback(&self) -> BoundaryResult<()> {
+        if let Some(failure) = lock(&self.end_fallback_failure).clone() {
+            return Err(failure.into());
+        }
         self.speech_fallback
             .store(false, std::sync::atomic::Ordering::SeqCst);
         Ok(())

@@ -778,7 +778,7 @@ pub fn build_with_import(
     };
     let fallback = Arc::new(SpeechFallback::at_launch(
         &paths.support_directory,
-        &support.warm_up_mark,
+        support.warm_up_mark.clone(),
         &support.reading_marks,
     ));
     let engines = Arc::new(SpeechEngines::new(

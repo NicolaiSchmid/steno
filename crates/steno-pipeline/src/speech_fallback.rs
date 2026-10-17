@@ -26,22 +26,26 @@
 //!   Settings), logged at `warn`. The marks seen so far stay listed, so a
 //!   warm-up mark left over (which stays until a meeting loads the engine)
 //!   or a quarantined meeting's marks do not turn it on again at the next
-//!   launch; a new mark does. A recording's warm-up stays off until a
-//!   meeting's processing has loaded the engine, so the first load after
-//!   it never runs beside a recording.
+//!   launch; a new mark does. Turning it off also turns a recording's
+//!   warm-up off ([`WarmUpMark::hold_off`]) until a meeting's processing
+//!   loads the engine, whichever mark turned the fallback on, so the first
+//!   load after it never runs beside a recording.
 //!
-//! A file that cannot be read or written leaves the fallback to what this
-//! launch found, logged at `warn`. The `steno` command neither reads nor
-//! writes the file: a command names its engine itself, and an abort there
-//! ends only the command, whose marks the app's next launch reads.
+//! A file that exists but cannot be read or parsed keeps the fallback on,
+//! logged at `warn`: an unparseable one is written again, on, with the
+//! marks this launch found; an unreadable one is left as it is. A file
+//! that cannot be written leaves the fallback to what this launch found,
+//! logged at `warn`. The `steno` command neither reads nor writes the
+//! file: a command names its engine itself, and an abort there ends only
+//! the command, whose marks the app's next launch reads.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use crate::files::{read_json, remove_durably, write_json};
+use crate::files::{remove_durably, write_json};
 use crate::reading::ReadingMarks;
 use crate::warm_up_mark::WarmUpMark;
 
@@ -58,6 +62,9 @@ use crate::warm_up_mark::WarmUpMark;
 pub struct SpeechFallback {
     /// `None` in memory: nothing is written.
     path: Option<PathBuf>,
+    /// The launch's warm-up mark, which turning the fallback off holds
+    /// off ([`WarmUpMark::hold_off`]).
+    warm_up: Arc<WarmUpMark>,
     state: Mutex<State>,
 }
 
@@ -87,6 +94,7 @@ impl SpeechFallback {
     pub fn in_memory() -> Self {
         SpeechFallback {
             path: None,
+            warm_up: Arc::new(WarmUpMark::in_memory()),
             state: Mutex::default(),
         }
     }
@@ -94,39 +102,33 @@ impl SpeechFallback {
     /// The launch check in `support_directory` (see the module doc), after
     /// the launch read `warm_up` and `marks`: on when the file says so, or
     /// when either left a mark the file has not seen, which is then written
-    /// down. Call it once per launch, before a pipeline is built.
+    /// down, or when the file cannot be read or parsed. Call it once per
+    /// launch, before a pipeline is built, with the warm-up mark the
+    /// pipelines share.
     #[must_use]
-    pub fn at_launch(support_directory: &Path, warm_up: &WarmUpMark, marks: &ReadingMarks) -> Self {
+    pub fn at_launch(
+        support_directory: &Path,
+        warm_up: Arc<WarmUpMark>,
+        marks: &ReadingMarks,
+    ) -> Self {
         let path = support_directory.join(Self::FILE_NAME);
         let mut found = marks.speech_marks_left();
-        found.extend(warm_up.left_over().map(|id| format!("warm-up:{id}")));
-        let (record, writable) = read_json::<Record>(&path);
-        let on = if record.on {
-            tracing::warn!(
-                "the speech engine in this process is off since it ended the app; meetings are \
-                 transcribed in the speech sidecar until it is turned back on in Settings"
-            );
-            true
-        } else if found.is_subset(&record.seen) {
-            // Forget the marks that are gone, so the list never grows, and
-            // the file once it lists none.
-            if writable && found != record.seen {
-                save(&path, false, &found);
+        found.extend(warm_up.left_over().map(warm_up_entry));
+        let on = match read(&path) {
+            Ok(record) => on_after(&path, &record, &found),
+            Err(Unread::Unreadable(error)) => {
+                tracing::warn!(%error, "the speech fallback's file could not be read; meetings are transcribed in the speech sidecar until the speech engine in this process is turned back on in Settings");
+                true
             }
-            false
-        } else {
-            tracing::warn!(
-                marks = found.difference(&record.seen).count(),
-                "the speech engine in this process ended the app; from now on meetings are \
-                 transcribed in the speech sidecar until it is turned back on in Settings"
-            );
-            if writable {
+            Err(Unread::Unparseable(error)) => {
+                tracing::warn!(%error, "the speech fallback's file did not parse; meetings are transcribed in the speech sidecar until the speech engine in this process is turned back on in Settings");
                 save(&path, true, &found);
+                true
             }
-            true
         };
         SpeechFallback {
             path: Some(path),
+            warm_up,
             state: Mutex::new(State { on, found }),
         }
     }
@@ -138,9 +140,12 @@ impl SpeechFallback {
     }
 
     /// The user turned the engine in this process back on: the fallback is
-    /// off from now on, the marks the launch found listed as seen. Logged
-    /// at `warn`. Syncs the disk. A file that cannot be written leaves it
-    /// off for this run only, and the error is returned.
+    /// off from now on, the marks the launch found listed as seen. The
+    /// warm-up is held off first ([`WarmUpMark::hold_off`]), its mark
+    /// listed as seen too, so neither this launch nor the next warms up
+    /// until a meeting's processing has loaded the engine. Logged at
+    /// `warn`. Syncs the disk. A file that cannot be written leaves it on,
+    /// and the error is returned.
     ///
     /// # Errors
     ///
@@ -150,20 +155,72 @@ impl SpeechFallback {
         if !state.on {
             return Ok(());
         }
+        let mut seen = state.found.clone();
+        seen.insert(warm_up_entry(&self.warm_up.hold_off()));
+        if let Some(path) = &self.path {
+            write(path, false, &seen)?;
+        }
         state.on = false;
         tracing::warn!(
             "the speech engine in this process is turned back on; the speech sidecar no longer \
              stands in for it"
         );
-        match &self.path {
-            Some(path) => write(path, false, &state.found),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// How the record in the file was not read.
+enum Unread {
+    /// The file is there and could not be read.
+    Unreadable(std::io::Error),
+    /// The file was read and is not a record.
+    Unparseable(serde_json::Error),
+}
+
+/// The record in `path`; the default (off, nothing seen) when there is no
+/// file.
+fn read(path: &Path) -> Result<Record, Unread> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(Unread::Unparseable),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Record::default()),
+        Err(error) => Err(Unread::Unreadable(error)),
+    }
+}
+
+/// Whether the fallback is on after a launch found `found` beside the
+/// file's `record` at `path`, which is written again when that changes it.
+fn on_after(path: &Path, record: &Record, found: &BTreeSet<String>) -> bool {
+    if record.on {
+        tracing::warn!(
+            "the speech engine in this process is off since it ended the app; meetings are \
+             transcribed in the speech sidecar until it is turned back on in Settings"
+        );
+        true
+    } else if found.is_subset(&record.seen) {
+        // Forget the marks that are gone, so the list never grows, and the
+        // file once it lists none.
+        if *found != record.seen {
+            save(path, false, found);
+        }
+        false
+    } else {
+        tracing::warn!(
+            marks = found.difference(&record.seen).count(),
+            "the speech engine in this process ended the app; from now on meetings are \
+             transcribed in the speech sidecar until it is turned back on in Settings"
+        );
+        save(path, true, found);
+        true
+    }
+}
+
+/// The entry in `seen` for the warm-up mark with `id`.
+fn warm_up_entry(id: &str) -> String {
+    format!("warm-up:{id}")
 }
 
 /// Writes the record of `on` and `seen` to `path`, durably, or removes
@@ -200,10 +257,31 @@ mod tests {
 
     /// A launch over `support` with a store that has no meetings.
     fn launch(support: &Path) -> SpeechFallback {
+        launched(support).1
+    }
+
+    /// [`launch`], with the warm-up mark it read.
+    fn launched(support: &Path) -> (Arc<WarmUpMark>, SpeechFallback) {
         let store = Store::in_memory().unwrap();
-        let warm_up = WarmUpMark::at_launch(support);
+        let warm_up = Arc::new(WarmUpMark::at_launch(support));
         let marks = ReadingMarks::at_launch(support, &store, chrono::Utc::now());
-        SpeechFallback::at_launch(support, &warm_up, &marks)
+        let fallback = SpeechFallback::at_launch(support, warm_up.clone(), &marks);
+        (warm_up, fallback)
+    }
+
+    /// Leaves a mark of the engine's transcription in `support`, as a
+    /// process that ended in it does.
+    fn transcription_mark_left(support: &Path) {
+        let store = Store::in_memory().unwrap();
+        let marks = Arc::new(ReadingMarks::at_launch(support, &store, chrono::Utc::now()));
+        let path = support.join("master.caf");
+        std::fs::write(&path, b"audio").unwrap();
+        std::mem::forget(marks.reading(
+            uuid::Uuid::new_v4(),
+            None,
+            &path,
+            crate::ReadStage::Transcribe,
+        ));
     }
 
     fn record(support: &Path) -> Option<Record> {
@@ -282,10 +360,90 @@ mod tests {
         let support = tempfile::tempdir().unwrap();
         std::mem::forget(Arc::new(WarmUpMark::at_launch(support.path())).begin());
         launch(support.path()).turn_off().unwrap();
-        assert_eq!(record(support.path()).unwrap().seen.len(), 1);
+        assert_eq!(
+            record(support.path()).unwrap().seen.len(),
+            2,
+            "the mark found and the one that holds the warm-up off"
+        );
+        assert!(!launch(support.path()).is_on());
+        assert_eq!(
+            record(support.path()).unwrap().seen.len(),
+            1,
+            "the found mark was replaced"
+        );
         WarmUpMark::at_launch(support.path()).speech_engine_loaded();
         assert!(!launch(support.path()).is_on());
         assert_eq!(record(support.path()), None);
+    }
+
+    /// Turning it off holds the warm-up off, whichever mark turned it on,
+    /// here a transcription's: neither this launch nor the next warms up,
+    /// and the next stays off, until a meeting's processing loads the
+    /// engine; the warm-up then comes back.
+    #[test]
+    fn turning_it_off_holds_the_warm_up_off_until_a_load() {
+        let support = tempfile::tempdir().unwrap();
+        transcription_mark_left(support.path());
+        let (warm_up, fallback) = launched(support.path());
+        assert!(fallback.is_on());
+        assert!(!warm_up.skipping(), "no warm-up mark was left");
+
+        fallback.turn_off().unwrap();
+        assert!(!fallback.is_on());
+        assert!(warm_up.skipping(), "this launch");
+        let (warm_up, next) = launched(support.path());
+        assert!(!next.is_on(), "the held mark is one it has seen");
+        assert!(warm_up.skipping(), "the next launch");
+
+        warm_up.speech_engine_loaded();
+        let (warm_up, after) = launched(support.path());
+        assert!(!after.is_on());
+        assert!(!warm_up.skipping(), "the load cleared it");
+    }
+
+    /// A file that cannot be written keeps it on, and says so.
+    #[test]
+    fn a_file_that_cannot_be_written_keeps_it_on() {
+        let support = tempfile::tempdir().unwrap();
+        transcription_mark_left(support.path());
+        let fallback = launch(support.path());
+        assert!(fallback.is_on());
+        // A folder in the file's place: neither replaced nor removed, on
+        // every platform and for every user.
+        let path = support.path().join(SpeechFallback::FILE_NAME);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir_all(path.join("in-the-way")).unwrap();
+        assert!(fallback.turn_off().is_err());
+        assert!(fallback.is_on());
+    }
+
+    /// A file that does not parse keeps it on, and is written again, on,
+    /// with the marks the launch found.
+    #[test]
+    fn a_file_that_does_not_parse_keeps_it_on() {
+        let support = tempfile::tempdir().unwrap();
+        let path = support.path().join(SpeechFallback::FILE_NAME);
+        std::fs::write(&path, b"{\"on\": fa").unwrap();
+        assert!(launch(support.path()).is_on());
+        assert_eq!(
+            record(support.path()),
+            Some(Record {
+                on: true,
+                seen: BTreeSet::new(),
+            })
+        );
+        assert!(launch(support.path()).is_on(), "the next launch too");
+    }
+
+    /// A file that cannot be read keeps it on, and is not written.
+    #[test]
+    fn a_file_that_cannot_be_read_keeps_it_on() {
+        let support = tempfile::tempdir().unwrap();
+        let path = support.path().join(SpeechFallback::FILE_NAME);
+        // A folder in the file's place reads as an error on every platform.
+        std::fs::create_dir(&path).unwrap();
+        assert!(launch(support.path()).is_on());
+        assert!(path.is_dir(), "left as it is");
     }
 
     #[test]

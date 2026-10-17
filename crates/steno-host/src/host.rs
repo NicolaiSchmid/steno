@@ -2551,7 +2551,7 @@ impl BridgeHost for Host {
     fn settings_transcription_use_neural_engine(&self) -> Outcome<()> {
         self.models_command(|inner| {
             inner.speech.use_neural_engine(&self.shared.services);
-            inner.progress.speech_fallback = inner.speech.neural_engine_off;
+            inner.progress.speech_fallback = inner.speech.speech_fallback;
             inner.publisher.schedule(BridgeTopic::Progress);
         });
         Ok(())

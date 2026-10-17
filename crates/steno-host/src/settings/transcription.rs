@@ -48,7 +48,7 @@ pub struct SpeechSettingsViewModel {
     /// The speech sidecar stands in for the Neural Engine, which ended the
     /// app ([`SpeechModels::speech_fallback`]); the section offers to use
     /// it again. Rust only.
-    pub neural_engine_off: bool,
+    pub speech_fallback: bool,
     pub errors: SectionError,
 }
 
@@ -59,7 +59,7 @@ impl SpeechSettingsViewModel {
             engine_id: SpeechEngineId::ParakeetV3,
             asset_states: BTreeMap::new(),
             downloads: BTreeSet::new(),
-            neural_engine_off: false,
+            speech_fallback: false,
             errors: SectionError::default(),
         }
     }
@@ -103,7 +103,7 @@ impl SpeechSettingsViewModel {
     }
 
     pub fn refresh_states(&mut self, services: &Services) {
-        self.neural_engine_off = services.speech_models.speech_fallback();
+        self.speech_fallback = services.speech_models.speech_fallback();
         for asset in ModelAsset::ALL {
             if matches!(
                 self.asset_states.get(asset),
@@ -268,7 +268,9 @@ impl SpeechSettingsViewModel {
 
     /// The user turned the Neural Engine back on: the fallback ends
     /// ([`SpeechModels::end_speech_fallback`]) and the pipeline is built
-    /// again, on the Neural Engine; the rows then show its model. Rust
+    /// again, on the Neural Engine; the rows then show its model. An end
+    /// that fails keeps the fallback and the pipeline as they are, and the
+    /// section says the Neural Engine could not be turned back on. Rust
     /// only.
     pub fn use_neural_engine(&mut self, services: &Services) {
         let outcome = services

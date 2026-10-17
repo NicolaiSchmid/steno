@@ -451,7 +451,7 @@ pub fn app_falling_back(
     ));
     let fallback = Arc::new(steno_pipeline::SpeechFallback::at_launch(
         &support,
-        &warm_up_mark,
+        warm_up_mark.clone(),
         &reading_marks,
     ));
     let setup = crate::speech::testing::setup(
