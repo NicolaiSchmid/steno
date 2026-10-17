@@ -941,6 +941,17 @@ still has to draw the window side. `[ ]` is not ported yet.
   `after_a_failed_reload_the_warm_up_follows_the_engine_the_pipeline_kept`). Rust
   only: Swift loaded the engine during every recording; with Parakeet in the
   sidecar, the job after a recording starts the child cold.
+- A job loads and runs no speech engine in the app's process (`CoreML` on the Mac)
+  while a recording starts, runs or stops: it waits, "Waiting for the recording to
+  finish", and goes on once the recorder is idle (`steno_pipeline::live_recording`,
+  A19 of `.plans/2026-10-07-stable-promotion.md`); the speech sidecar's jobs do not
+  wait. A `CoreML` abort on record (A15's warm-up mark, A17's marks of the `CoreML`
+  stage) puts Parakeet in the speech sidecar from the next launch on, durably, until
+  the user turns the Neural Engine back on in Settings (`steno_pipeline::SpeechFallback`);
+  `SpeechSetup::runtime`, the Settings rows and the warm-up's choice follow it, and
+  "Use again" takes effect at the reload it asks for, the one exception to the setup
+  read once at launch. Rust only: Swift ran `CoreML` beside a recording and had no
+  second engine.
 - Closed (#266, A3 of `.plans/2026-10-07-stable-promotion.md`): the ONNX diarizer (pyannote
   segmentation and the WeSpeaker embeddings) runs in the speech sidecar's child on
   every platform, the Mac included, so a crash in ONNX Runtime while it diarizes ends
