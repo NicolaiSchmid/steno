@@ -159,13 +159,7 @@ impl World {
             .unwrap();
         assert_eq!(ledger, 1, "one ledger row");
         assert_eq!(
-            store
-                .admitted_meeting(
-                    self.metadata.recording_id,
-                    self.metadata.byte_count,
-                    &self.metadata.sha256,
-                )
-                .unwrap(),
+            self.ledger_row(store),
             Some(meeting_id),
             "the ledger answers the phone with it"
         );
@@ -279,17 +273,7 @@ async fn a_copy_noted_without_its_upload_is_adopted_with_no_ledger_row() {
 
     let app = relaunch(&world).await;
     assert!(app.store.meeting(noted).unwrap().is_some(), "adopted");
-    assert_eq!(
-        app.store
-            .admitted_meeting(
-                world.metadata.recording_id,
-                world.metadata.byte_count,
-                &world.metadata.sha256
-            )
-            .unwrap(),
-        None,
-        "with no ledger row"
-    );
+    assert_eq!(world.ledger_row(&app.store), None, "with no ledger row");
 
     let retried = world.admit(&app).await.unwrap();
     assert_ne!(retried, noted, "admitted again");
@@ -355,6 +339,37 @@ impl World {
         bytes
     }
 
+    /// The read of `meeting_id`'s length ended with the app at two
+    /// launches in a row (`steno_pipeline::ReadingMarks`), so the next
+    /// launch holds its copy (A17). Call with the app quit.
+    fn length_read_ended_twice(&self, meeting_id: Uuid) {
+        let store = Store::open(self.database()).unwrap();
+        for _ in 0..2 {
+            let killed = Arc::new(steno_pipeline::ReadingMarks::at_launch(
+                &self.support(),
+                &store,
+                chrono::Utc::now(),
+            ));
+            std::mem::forget(killed.reading(
+                meeting_id,
+                None,
+                &self.master_of(meeting_id),
+                steno_pipeline::ReadStage::Duration,
+            ));
+        }
+    }
+
+    /// The meeting the ledger answers the upload with, if any.
+    fn ledger_row(&self, store: &Store) -> Option<Uuid> {
+        store
+            .admitted_meeting(
+                self.metadata.recording_id,
+                self.metadata.byte_count,
+                &self.metadata.sha256,
+            )
+            .unwrap()
+    }
+
     /// How many folders and uploads are noted.
     pub(super) fn noted(&self) -> (usize, usize) {
         (
@@ -389,21 +404,7 @@ async fn a_noted_copy_whose_length_read_ended_with_the_app_is_adopted_failed_wit
     let (noted, hold) = world.gave_up(&app).await;
     drop(hold);
     quit(app).await;
-    let store = Store::open(world.database()).unwrap();
-    for _ in 0..2 {
-        let killed = Arc::new(steno_pipeline::ReadingMarks::at_launch(
-            &world.support(),
-            &store,
-            chrono::Utc::now(),
-        ));
-        std::mem::forget(killed.reading(
-            noted,
-            None,
-            &world.master_of(noted),
-            steno_pipeline::ReadStage::Duration,
-        ));
-    }
-    drop(store);
+    world.length_read_ended_twice(noted);
 
     let app = relaunch(&world).await;
     world.assert_one_meeting(&app.store, noted);
@@ -419,6 +420,59 @@ async fn a_noted_copy_whose_length_read_ended_with_the_app_is_adopted_failed_wit
 
     assert_eq!(world.admit(&app).await.unwrap(), noted, "the retry");
     world.assert_one_meeting(&app.store, noted);
+    quit(app).await;
+}
+
+/// The noted copy the launch holds (its length read ended with the app
+/// twice) holds other bytes of the same size: it is adopted failed with
+/// [`steno_pipeline::READ_STOPPED`] but gets no ledger row, since Steno
+/// does not hold the phone's upload, so the phone's retry admits the
+/// upload afresh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_copy_holding_other_bytes_is_adopted_failed_with_no_ledger_row() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    world.corrupt(noted);
+    quit(app).await;
+    world.length_read_ended_twice(noted);
+
+    let app = relaunch(&world).await;
+    let meeting = app.store.meeting(noted).unwrap().expect("adopted");
+    assert_eq!(
+        meeting.state,
+        steno_core::MeetingState::Failed {
+            reason: steno_pipeline::READ_STOPPED.to_owned()
+        }
+    );
+    assert_eq!(
+        world.ledger_row(&app.store),
+        None,
+        "no ledger row: the phone keeps retrying"
+    );
+    let retried = world.admit(&app).await.unwrap();
+    assert_ne!(retried, noted, "the phone's bytes admitted afresh");
+    quit(app).await;
+}
+
+/// The noted copy the launch holds cannot be read: it is neither adopted
+/// nor given a ledger row, and keeps its notes for the next launch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_copy_that_cannot_be_read_is_kept_with_no_ledger_row() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    quit(app).await;
+    world.length_read_ended_twice(noted);
+    crate::recovery::UNREADABLE_COPIES
+        .lock()
+        .unwrap()
+        .push(noted);
+
+    let app = relaunch(&world).await;
+    assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
+    assert_eq!(world.noted(), (1, 1), "kept for the next launch");
+    assert_eq!(world.ledger_row(&app.store), None);
     quit(app).await;
 }
 
@@ -444,13 +498,7 @@ async fn the_noted_copy_of_bytes_whose_meeting_the_user_deleted_is_removed() {
     assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
     assert_eq!(world.noted(), (0, 0));
     assert_eq!(
-        app.store
-            .admitted_meeting(
-                world.metadata.recording_id,
-                world.metadata.byte_count,
-                &world.metadata.sha256
-            )
-            .unwrap(),
+        world.ledger_row(&app.store),
         Some(deleted),
         "the ledger row stays"
     );
@@ -566,13 +614,7 @@ async fn a_kept_copy_goes_once_the_user_deletes_the_meeting_holding_its_bytes() 
     assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
     assert_eq!(world.noted(), (0, 0));
     assert_eq!(
-        app.store
-            .admitted_meeting(
-                world.metadata.recording_id,
-                world.metadata.byte_count,
-                &world.metadata.sha256
-            )
-            .unwrap(),
+        world.ledger_row(&app.store),
         Some(other),
         "the ledger row stays"
     );
@@ -749,16 +791,7 @@ async fn a_retry_does_not_admit_into_a_noted_copy_holding_other_bytes() {
     let mut both = vec![noted, retried];
     both.sort();
     assert_eq!(meetings, both, "the noted copy is adopted too");
-    assert_eq!(
-        app.store
-            .admitted_meeting(
-                world.metadata.recording_id,
-                world.metadata.byte_count,
-                &world.metadata.sha256
-            )
-            .unwrap(),
-        Some(retried)
-    );
+    assert_eq!(world.ledger_row(&app.store), Some(retried));
     assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), other_bytes);
     assert_eq!(
         std::fs::read(world.master_of(retried)).unwrap(),
