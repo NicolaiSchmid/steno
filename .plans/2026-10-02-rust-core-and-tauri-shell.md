@@ -2222,8 +2222,9 @@ it:
   continuously, compare the performance counter with their last packet's
   QPC, for a stall into the stop that left no flagged packet (an engine
   that refused the newest packets), and the backend's stop hands that and
-  what the system lane's staging still holds to the sink. Endpoint
-  loopback idles, so it reads nothing there. Step 9 of the stable plan's
+  what the system lane's staging still holds to the sink; on process
+  loopback that includes the padding still running at the stop, flagged
+  or not. Endpoint loopback idles, so it reads nothing there. Step 9 of the stable plan's
   Windows gate checks it on hardware, at 48 and 44.1 kHz, on a hands-free
   headset and above 48 kHz, names the loopback, and stalls just before the
   stop on both loopbacks.

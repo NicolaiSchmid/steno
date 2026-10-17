@@ -1787,9 +1787,10 @@ Each lands before `0.11.0-rc.1`.
     to the sink (`realtime::count_at_stop`). Endpoint loopback delivers
     nothing while nothing plays, so it cannot tell such a loss from an idle
     and reads nothing at the stop: without a flagged packet a system-lane
-    loss there is silent, as is the system stream's on process loopback
-    without a sane QPC; step 9 of the Windows gate stalls just before the
-    stop on both loopbacks. A stop for a rebuild reads nothing; the gap
+    loss there is silent. Process loopback delivers continuously, so the
+    padding still running on its lane at the stop counts as its loss
+    whether or not a packet flagged it, a sane QPC or none; step 9 of the
+    Windows gate stalls just before the stop on both loopbacks. A stop for a rebuild reads nothing; the gap
     covers that time.
   - **The bound.** One second is half the session's two-second rings, so
     the fill fits beside a processing thread up to a second behind (a fill
@@ -1867,7 +1868,13 @@ Each lands before `0.11.0-rc.1`.
     hold passed, the padding of an outage whose flag comes after the kept
     packets counted within it, positions that stand still and then move,
     a first pair over an idle replaced, a QPC whose last pair did not match
-    filling nothing, and two hours of clocks that wrap;
+    filling nothing while a jittery one still fills, a second flag while
+    the microphone is out keeping the first's padding, a process-loopback
+    system thread out at the stop counted with no flag, an idle that ends
+    while the microphone is out forgotten at the re-prime, two idles within
+    the hold counted together, the stop's counter reading nothing after a
+    last pair that did not match and reading a stall of a packet and a
+    half, and two hours of clocks that wrap;
     the property test `tests/wasapi_loss_property.rs` (below); the
     allocation count of
     the fill and the unfilled jumps through the PipeWire gate and both
@@ -1960,7 +1967,21 @@ Each lands before `0.11.0-rc.1`.
     4 000 calls on 20 seeds before the push). Each lane counts at least
     what its engine lost and at most six times the loss and idle before its
     flagged packets plus the engine's buffer and two packets a flag, and
-    both lanes keep one length.
+    both lanes keep one length. The system lane's lower bound allows two
+    targets under only for a loss into the stop or overlapping the
+    microphone's outage. A third test runs short calls of one to eight
+    episodes, each placed inside, at the end of or just after the one
+    before: outages of either thread or both around the engine's buffer
+    and the lane's hold, spurious flags, idles flagged or not, timestamp
+    errors, the stop often right after the last (2 000 calls in CI;
+    150 000 on six seeds before the push, upper bounds too with
+    `WASAPI_STORM_UPPER=1`). It found silent shapes in the padding rule,
+    closed by counting the hold in the system stream's frames, taking a
+    fresh snapshot at each flag, taking both runs at the stop and leaving
+    the re-prime's wait out of the padding; it now fails only in a shape
+    **Left** names (the queue an earlier outage left above the target,
+    under an outage overlapping the microphone's), 1 in 450 000 on nine
+    seeds.
   - **Left.** WASAPI's fill is unit-tested and compiled in CI, not
     provoked on hardware (no Windows machine). The rule is stated once, in
     the doc of `split_streams::DevicePositions`. A flagged packet's loss is
@@ -1980,16 +2001,32 @@ Each lands before `0.11.0-rc.1`.
     count (the property test above). Positions that never move with no
     sane QPC read nothing; on the microphone the note's wall-time shortfall
     counts that loss past the drift allowance, on the system stream the
-    padding counts it. The padding reads the system lane's loss to within
-    the lane's lag: up to the engine's buffer and two targets over (its kept
-    packets land late), up to two targets under when the microphone's last
-    pulls take the lag (an outage into the stop, or overlapping the
-    microphone's own); an idle that ends within the lane's hold before a
-    system-thread outage counts with it. A loss before a stream's first
-    packet is not read (loopback flags its first packet), and a
-    system-lane loss into the stop with no flagged packet is silent on
-    endpoint loopback, or without a sane QPC (**At the stop**).
-    Step 9 of the Windows gate checks both on hardware. A process stopped
+    padding counts it. The padding is the zeros written while the system
+    stream delivered nothing, not the re-prime's wait once it is back. It
+    reads the system lane's loss to within the lane's lag: up to the
+    engine's buffer over (its kept packets land late); up to two targets
+    (40 ms) under when the microphone's last pulls take the lag (an outage
+    into the stop, or overlapping the microphone's own), and overlapping
+    the microphone's own also under by the queue an earlier outage's late
+    packets left above the target until it slips (up to the engine's
+    buffer, 100 ms, an outage). Each flag that comes while the lane is out
+    takes the padding so far out of the runs at the microphone's next
+    pull, so a later flag counts only what padded after it. The hold that
+    keeps an outage's padding for
+    a flag that comes after the engine's kept packets is counted in the
+    system stream's frames, so an idle that ends within it before a flag
+    counts with it, and two idles with less than the hold of audio between
+    them count together at a flag after the second, however long either
+    was (an overcount). Audio the staging slipped in the microphone's
+    catch-up just before the stop, padded after it, counts at the stop on
+    process loopback (it is gone all the same). Where both threads were
+    out the note takes the lane that lost most, so the system lane's loss
+    beyond the microphone's in that time (up to the microphone engine's
+    buffer) is not in it; that is the note's rule on every backend, and a
+    follow-up decides it. A loss before a stream's first packet is not
+    read (loopback flags its first packet), and a system-lane loss into the
+    stop with no flagged packet is silent on endpoint loopback (**At the
+    stop**). Step 9 of the Windows gate checks both on hardware. A process stopped
     for over 2 s may still be rebuilt after its thread has delivered again
     (the watch thread wakes first), which costs a gap of 10 to 20 ms,
     counted. Nicolai's gate steps (step 6 of R5 on the Mac, the stalled
@@ -3700,9 +3737,9 @@ candidate:
    - Every line shows its QPC, near 1.0000 a frame (within 2 %): a line
      that says "QPC no reading", or a QPC ratio further off, fails the step,
      so a QPC missing on real hardware shows up here.
-   - Each says "jumps filled". A line that says "jumps counted, not
-     filled" at `warn` fails the step, unless it is the system stream on
-     process loopback: then that stream counts only, by design. Write down
+   - Each says "jumps filled", the system stream on process loopback
+     included: its QPC is sane even where its positions stand still. A line
+     that says "jumps counted, not filled" at `warn` fails the step. Write down
      each line's device-position ratio too (1.0000, or the engine's rate
      over 48 000: 0.9188 at 44.1 kHz, 0.3333 at 16 kHz, 2.0000 at 96 kHz).
    - A line that says "0.0000 a frame" fails the step only when the same
@@ -3729,8 +3766,7 @@ candidate:
    "Endpoint loopback", and do it once on process loopback too. Pass: the
    stop shows no "packets after a glitch" line and no note about missing
    audio, and the system stream's "device positions advanced" line passes
-   as above (the idle left out of both measurements; on process loopback
-   "jumps counted, not filled" passes as there). Write down which loopback
+   as above (the idle left out of both measurements). Write down which loopback
    each run used; with no endpoint loopback machine, say so beside the
    step.
 
