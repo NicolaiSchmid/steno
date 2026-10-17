@@ -1112,31 +1112,26 @@ pub(crate) fn adopt_orphans(
         }
         let reading = &pipeline.dependencies().reading_marks;
         let now = (pipeline.dependencies().now)();
+        let rows = adopted(orphan, &settings, zone, now, reading);
+        let held = matches!(rows, Ok((_, _, true)));
         let saved =
-            adopted(orphan, &settings, zone, now, reading).and_then(|(meeting, asset, held)| {
-                let upload = uploads.get(&meeting_id);
-                adopt(store, pipeline, orphan, upload, &meeting, &asset, held)
-                    .map(|committed| (committed, held))
-            });
+            rows.and_then(|rows| adopt(store, pipeline, orphan, uploads.get(&meeting_id), &rows));
         // Warn names the meeting; an error, which can name its folder,
         // goes to debug.
         match saved {
             // Listed and failed, so not among the adopted: their note
             // says they are being processed.
-            Ok((AdmissionCommit::Wrote, true)) => {
+            Ok(AdmissionCommit::Wrote) if held => {
                 tracing::warn!(%meeting_id, "a recording with no meeting was listed, failed and unread");
             }
-            Ok((AdmissionCommit::Wrote, false)) => {
+            Ok(AdmissionCommit::Wrote) => {
                 tracing::warn!(%meeting_id, "a recording with no meeting was recovered");
                 adopted_ids.push(meeting_id);
             }
-            Ok((
-                AdmissionCommit::Earlier {
-                    meeting_id: admitted,
-                    deleted,
-                },
-                _,
-            )) => match answered_by_the_ledger(orphan, admitted, deleted) {
+            Ok(AdmissionCommit::Earlier {
+                meeting_id: admitted,
+                deleted,
+            }) => match answered_by_the_ledger(orphan, admitted, deleted) {
                 LedgerAnswer::Forget => gone.push(meeting_id),
                 LedgerAnswer::Keep => {}
                 LedgerAnswer::Retry => unrecovered.push(meeting_id),
@@ -1247,17 +1242,16 @@ fn answered_by_the_ledger(orphan: &Orphan, admitted: Uuid, deleted: bool) -> Led
 /// ([`Store::adopt_upload_durably`]), which writes nothing when the ledger
 /// already held it. Otherwise as any recording with no meeting
 /// ([`save_adopted`]), whose [`AdmissionCommit::Wrote`] here means the
-/// meeting and its asset, with no ledger row. A copy that cannot be read now is
-/// [`RecoveryError::Unreachable`], kept for the next launch.
+/// meeting and its asset, with no ledger row. A copy that cannot be read
+/// now is [`RecoveryError::Unreachable`], kept for the next launch.
 fn adopt(
     store: &Store,
     pipeline: &steno_pipeline::ProcessingPipeline,
     orphan: &Orphan,
     upload: Option<&NotedUpload>,
-    meeting: &Meeting,
-    asset: &AudioAsset,
-    held: bool,
+    (meeting, asset, held): &(Meeting, AudioAsset, bool),
 ) -> Result<AdmissionCommit, RecoveryError> {
+    let held = *held;
     let upload = match upload {
         Some(upload) if meeting.source == MeetingSource::Phone => held_by(upload, orphan)
             .map_err(|error| {

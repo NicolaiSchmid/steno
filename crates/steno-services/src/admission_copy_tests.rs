@@ -378,6 +378,50 @@ impl World {
     }
 }
 
+/// The read of the noted copy's length ended with the app at two launches
+/// in a row (`steno_pipeline::ReadingMarks`): the next launch adopts it
+/// with the upload's ledger row, failed with
+/// [`steno_pipeline::READ_STOPPED`] and unread, and does not process it;
+/// the phone's retry is answered with that meeting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_noted_copy_whose_length_read_ended_with_the_app_is_adopted_failed_with_its_ledger_row() {
+    let (world, app) = World::new();
+    let (noted, hold) = world.gave_up(&app).await;
+    drop(hold);
+    quit(app).await;
+    let store = Store::open(world.database()).unwrap();
+    for _ in 0..2 {
+        let killed = Arc::new(steno_pipeline::ReadingMarks::at_launch(
+            &world.support(),
+            &store,
+            chrono::Utc::now(),
+        ));
+        std::mem::forget(killed.reading(
+            noted,
+            None,
+            &world.master_of(noted),
+            steno_pipeline::ReadStage::Duration,
+        ));
+    }
+    drop(store);
+
+    let app = relaunch(&world).await;
+    world.assert_one_meeting(&app.store, noted);
+    let failed = steno_core::MeetingState::Failed {
+        reason: steno_pipeline::READ_STOPPED.to_owned(),
+    };
+    tokio::time::timeout(HANG_GUARD, app.pipeline.current().wait_until_idle())
+        .await
+        .expect("the runs end within the guard");
+    let meeting = app.store.meeting(noted).unwrap().unwrap();
+    assert_eq!(meeting.state, failed, "not processed");
+    assert_eq!(meeting.duration, 0.0, "its length was not read");
+
+    assert_eq!(world.admit(&app).await.unwrap(), noted, "the retry");
+    world.assert_one_meeting(&app.store, noted);
+    quit(app).await;
+}
+
 /// The ledger holds the noted copy's bytes as a meeting the user deleted:
 /// the launch removes the copy's folder, since the user deleted that
 /// audio, and forgets its notes. The ledger row stays, so the phone is
