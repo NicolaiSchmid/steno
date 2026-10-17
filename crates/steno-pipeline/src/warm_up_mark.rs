@@ -28,7 +28,7 @@
 //!   ([`crate::SpeechFallback`]), and no meeting loads the models in this
 //!   process until the user turns the engine back on.
 //! - **Held off**: the user's end of the fallback writes a mark of its own
-//!   ([`WarmUpMark::hold_off`]), so recordings skip the warm-up, at this
+//!   (`WarmUpMark::hold_off`), so recordings skip the warm-up, at this
 //!   launch and the next, until a meeting's processing has loaded the
 //!   engine: that first load never runs beside a recording.
 //!
@@ -187,7 +187,7 @@ impl WarmUpMark {
 
 /// A warm-up in progress; dropping it ends it, which the app lived
 /// through, so the last one running removes the mark, unless the warm-up
-/// was held off meanwhile ([`WarmUpMark::hold_off`]), whose mark stays.
+/// was held off meanwhile (`WarmUpMark::hold_off`), whose mark stays.
 pub(crate) struct WarmingUp(Arc<WarmUpMark>);
 
 impl Drop for WarmingUp {

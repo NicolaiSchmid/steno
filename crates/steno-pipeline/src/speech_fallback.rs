@@ -27,7 +27,7 @@
 //!   warm-up mark left over (which stays until a meeting loads the engine)
 //!   or a quarantined meeting's marks do not turn it on again at the next
 //!   launch; a new mark does. Turning it off also turns a recording's
-//!   warm-up off ([`WarmUpMark::hold_off`]) until a meeting's processing
+//!   warm-up off (`WarmUpMark::hold_off`) until a meeting's processing
 //!   loads the engine, whichever mark turned the fallback on, so the first
 //!   load after it never runs beside a recording.
 //!
@@ -63,7 +63,7 @@ pub struct SpeechFallback {
     /// `None` in memory: nothing is written.
     path: Option<PathBuf>,
     /// The launch's warm-up mark, which turning the fallback off holds
-    /// off ([`WarmUpMark::hold_off`]).
+    /// off (`WarmUpMark::hold_off`).
     warm_up: Arc<WarmUpMark>,
     state: Mutex<State>,
 }
@@ -141,7 +141,7 @@ impl SpeechFallback {
 
     /// The user turned the engine in this process back on: the fallback is
     /// off from now on, the marks the launch found listed as seen. The
-    /// warm-up is held off first ([`WarmUpMark::hold_off`]), its mark
+    /// warm-up is held off first (`WarmUpMark::hold_off`), its mark
     /// listed as seen too, so neither this launch nor the next warms up
     /// until a meeting's processing has loaded the engine. Logged at
     /// `warn`. Syncs the disk. A file that cannot be written leaves it on,
