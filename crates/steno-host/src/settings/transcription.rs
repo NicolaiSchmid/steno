@@ -49,6 +49,11 @@ pub struct SpeechSettingsViewModel {
     /// app ([`SpeechModels::speech_fallback`]); the section offers to use
     /// it again. Rust only.
     pub speech_fallback: bool,
+    /// The fallback ended, but the pipeline's rebuild on the Neural Engine
+    /// failed: this run still transcribes in the speech sidecar, so the
+    /// section keeps the offer ([`Self::speech_fallback`]) until a rebuild
+    /// succeeds. Rust only.
+    rebuild_pending: bool,
     pub errors: SectionError,
 }
 
@@ -60,6 +65,7 @@ impl SpeechSettingsViewModel {
             asset_states: BTreeMap::new(),
             downloads: BTreeSet::new(),
             speech_fallback: false,
+            rebuild_pending: false,
             errors: SectionError::default(),
         }
     }
@@ -103,7 +109,7 @@ impl SpeechSettingsViewModel {
     }
 
     pub fn refresh_states(&mut self, services: &Services) {
-        self.speech_fallback = services.speech_models.speech_fallback();
+        self.speech_fallback = self.rebuild_pending || services.speech_models.speech_fallback();
         for asset in ModelAsset::ALL {
             if matches!(
                 self.asset_states.get(asset),
@@ -269,19 +275,29 @@ impl SpeechSettingsViewModel {
     /// The user turned the Neural Engine back on: the fallback ends
     /// ([`SpeechModels::end_speech_fallback`]) and the pipeline is built
     /// again, on the Neural Engine; the rows then show its model. An end
-    /// that fails keeps the fallback and the pipeline as they are, and the
-    /// section says the Neural Engine could not be turned back on. Rust
-    /// only.
+    /// that fails keeps the fallback and the pipeline as they are. An end
+    /// that succeeds with a rebuild that fails keeps the row, so a second
+    /// press tries the rebuild again (the end is then a no-op). Either way
+    /// the section says why. Rust only.
     pub fn use_neural_engine(&mut self, services: &Services) {
-        let outcome = services
-            .speech_models
-            .end_speech_fallback()
-            .and_then(|()| services.pipeline.reload());
-        match outcome {
-            Ok(()) => self.errors.clear(),
+        match services.speech_models.end_speech_fallback() {
             Err(error) => self
                 .errors
                 .fail("The Neural Engine could not be turned back on.", error),
+            Ok(()) => match services.pipeline.reload() {
+                Ok(()) => {
+                    self.rebuild_pending = false;
+                    self.errors.clear();
+                }
+                Err(error) => {
+                    self.rebuild_pending = true;
+                    self.errors.fail(
+                        "The Neural Engine could not be turned back on yet. Try again, or quit \
+                         and reopen Steno.",
+                        error,
+                    );
+                }
+            },
         }
         self.refresh_states(services);
     }

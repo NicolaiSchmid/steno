@@ -2547,7 +2547,7 @@ impl BridgeHost for Host {
 
     /// The rows change to the Neural Engine's model, and a meeting waiting
     /// for the speech sidecar's models stops saying the Neural Engine is
-    /// off.
+    /// off. After a failed rebuild both stay as they are.
     fn settings_transcription_use_neural_engine(&self) -> Outcome<()> {
         self.models_command(|inner| {
             inner.speech.use_neural_engine(&self.shared.services);

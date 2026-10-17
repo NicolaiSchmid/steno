@@ -723,6 +723,62 @@ fn transcription_offers_the_neural_engine_again_after_the_fallback() {
     assert!(transcription.get("error").is_none());
 }
 
+/// The fallback ends but the pipeline's rebuild fails: this run still
+/// transcribes in the speech sidecar, so Transcription keeps the offer and
+/// says why, also after the rows refresh, and a second press tries the
+/// rebuild again. Rust only (A19).
+#[test]
+fn a_failed_rebuild_after_the_fallback_ended_keeps_the_offer() {
+    let harness = Harness::builder()
+        .seed(|_, fakes| {
+            fakes
+                .speech_models
+                .speech_fallback
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .build();
+    harness.fakes.pipeline.fail_calls(Some("the store is busy"));
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert_eq!(*harness.fakes.pipeline.reloads.lock().unwrap(), 1);
+    let transcription = harness.snapshot(BridgeTopic::SettingsTranscription);
+    assert_eq!(
+        transcription["error"],
+        "The Neural Engine could not be turned back on yet. Try again, or quit and reopen Steno."
+    );
+    assert_eq!(
+        transcription["neuralEngineOff"], true,
+        "the offer stays while this run's pipeline is still on the sidecar"
+    );
+    // A refresh of the rows (here a remove's) keeps it too.
+    harness
+        .host
+        .settings_transcription_remove(AssetIdParams {
+            asset_id: "offlineDiarizer".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsTranscription)["neuralEngineOff"],
+        true
+    );
+
+    harness.fakes.pipeline.fail_calls(None);
+    harness
+        .host
+        .settings_transcription_use_neural_engine()
+        .unwrap();
+    assert_eq!(
+        *harness.fakes.pipeline.reloads.lock().unwrap(),
+        2,
+        "the second press rebuilds"
+    );
+    let transcription = harness.snapshot(BridgeTopic::SettingsTranscription);
+    assert!(transcription.get("neuralEngineOff").is_none());
+    assert!(transcription.get("error").is_none());
+}
+
 /// A fallback that could not be ended (its file not written) stays on:
 /// Transcription says the Neural Engine could not be turned back on, keeps
 /// the offer, and the pipeline is not rebuilt. Rust only (A19).
