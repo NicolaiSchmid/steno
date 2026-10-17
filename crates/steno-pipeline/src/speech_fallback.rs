@@ -114,15 +114,20 @@ impl SpeechFallback {
         let path = support_directory.join(Self::FILE_NAME);
         let mut found = marks.speech_marks_left();
         found.extend(warm_up.left_over().map(warm_up_entry));
-        let on = match read(&path) {
-            Ok(record) => on_after(&path, &record, &found),
-            Err(Unread::Unreadable(error)) => {
-                tracing::warn!(%error, "the speech fallback's file could not be read; meetings are transcribed in the speech sidecar until the speech engine in this process is turned back on in Settings");
-                true
+        let on = match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(record) => on_after(&path, &record, &found),
+                Err(error) => {
+                    tracing::warn!(%error, "the speech fallback's file did not parse; meetings are transcribed in the speech sidecar until the speech engine in this process is turned back on in Settings");
+                    save(&path, true, &found);
+                    true
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                on_after(&path, &Record::default(), &found)
             }
-            Err(Unread::Unparseable(error)) => {
-                tracing::warn!(%error, "the speech fallback's file did not parse; meetings are transcribed in the speech sidecar until the speech engine in this process is turned back on in Settings");
-                save(&path, true, &found);
+            Err(error) => {
+                tracing::warn!(%error, "the speech fallback's file could not be read; meetings are transcribed in the speech sidecar until the speech engine in this process is turned back on in Settings");
                 true
             }
         };
@@ -170,24 +175,6 @@ impl SpeechFallback {
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-/// How the record in the file was not read.
-enum Unread {
-    /// The file is there and could not be read.
-    Unreadable(std::io::Error),
-    /// The file was read and is not a record.
-    Unparseable(serde_json::Error),
-}
-
-/// The record in `path`; the default (off, nothing seen) when there is no
-/// file.
-fn read(path: &Path) -> Result<Record, Unread> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(Unread::Unparseable),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Record::default()),
-        Err(error) => Err(Unread::Unreadable(error)),
     }
 }
 
