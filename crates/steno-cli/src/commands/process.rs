@@ -150,12 +150,13 @@ impl Process {
             None => file_url_path(&settings.audio_folder)
                 .ok_or_else(|| Failure::runtime("the audio folder setting is not a file URL"))?,
         };
+        // The header alone: a two-hour lane is not read whole for its length.
+        // Before the folder, so a refused WAV leaves none behind.
+        let duration = steno_audio::WavFile::read_duration(input)
+            .map_err(|e| Failure::runtime(format!("{}: {e}", input.display())))?;
         let meeting_id = Uuid::new_v4();
         let layout = RecordingLayout::new(&root, meeting_id);
         layout.create_directories(false).map_err(Failure::runtime)?;
-        // The header alone: a two-hour lane is not read whole for its length.
-        let duration = steno_audio::WavFile::read_duration(input)
-            .map_err(|e| Failure::runtime(format!("{}: {e}", input.display())))?;
 
         let asset = if let (Source::MacCall, Some(system_lane)) = (self.source, &self.system_lane) {
             let mic = layout.sidecar(AudioLane::Mic);
