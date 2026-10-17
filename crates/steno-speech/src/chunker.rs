@@ -695,13 +695,11 @@ mod tests {
     /// The windows of the spans over `chunks` that are not chunks.
     fn gap_windows(audio: &[f32], chunks: &[Chunk], config: &ChunkerConfig) -> Vec<Range<usize>> {
         let spans = spans(audio, chunks, config);
-        let chunk_windows: Vec<Range<usize>> = spans
-            .iter()
-            .filter(|span| span.recover)
-            .map(|span| span.window.clone())
-            .collect();
-        let ranges: Vec<Range<usize>> = chunks.iter().map(|c| c.range.clone()).collect();
-        assert_eq!(chunk_windows, ranges, "the chunks are decoded as laid out");
+        let chunk_windows = spans.iter().filter(|s| s.recover).map(|s| &s.window);
+        assert!(
+            chunk_windows.eq(chunks.iter().map(|c| &c.range)),
+            "the chunks are decoded as laid out: {spans:?}"
+        );
         spans
             .into_iter()
             .filter(|span| !span.recover)
@@ -919,16 +917,9 @@ mod tests {
             let spans = partition(&samples, &speech, &config);
             let context = || format!("case {case}: {config:?} {spans:?}");
             let chunks = layout(&samples, &speech, &config);
-            let chunk_windows: Vec<&Range<usize>> = spans
-                .iter()
-                .filter(|s| s.recover)
-                .map(|s| &s.window)
-                .collect();
+            let chunk_windows = spans.iter().filter(|s| s.recover).map(|s| &s.window);
             assert!(
-                chunk_windows
-                    .iter()
-                    .copied()
-                    .eq(chunks.iter().map(|c| &c.range)),
+                chunk_windows.eq(chunks.iter().map(|c| &c.range)),
                 "{}",
                 context()
             );
