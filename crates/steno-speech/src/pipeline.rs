@@ -2206,6 +2206,25 @@ mod tests {
             kept.iter().map(|t| (t.id, t.sample())).collect::<Vec<_>>(),
             [(5, 9 * SAMPLE_RATE)]
         );
+        // A chunk that ends on the grid, at 8.96 s: the frame from its end
+        // counts too, as before the partition.
+        let mut stats = DecodeStats::default();
+        let chunk = Span {
+            window: 13 * FRAME_SAMPLES..112 * FRAME_SAMPLES,
+            ..chunk_span()
+        };
+        let mut samples = vec![0.0f32; 14 * SAMPLE_RATE];
+        let end = chunk.window.end;
+        samples[end..end + 2 * FRAME_SAMPLES].fill(0.005);
+        let kept = t.recover(&samples, &chunk, Vec::new(), &mut stats);
+        assert_eq!(stats.recoveries_accepted, 1);
+        assert_eq!(
+            kept.unwrap()
+                .iter()
+                .map(|t| (t.id, t.sample()))
+                .collect::<Vec<_>>(),
+            [(5, end)]
+        );
     }
 
     #[test]
