@@ -34,7 +34,7 @@
 
 use std::ops::Range;
 
-use crate::backend::{SAMPLE_RATE, sample_count};
+use crate::backend::{FRAME_SAMPLES, SAMPLE_RATE, sample_count};
 
 /// How a chunk's end was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,33 +264,38 @@ pub struct Span {
     /// gap. It holds `owned`, except the share of an undecoded gap the span
     /// owns, and is never longer than `max_seconds`.
     pub window: Range<usize>,
-    /// A chunk, decoded again with more audio around it when it looks
-    /// empty; a gap's window is decoded as it is.
-    pub recover: bool,
+    /// The samples whose words a chunk keeps when it is decoded again with
+    /// more audio and that decode is accepted: the window and
+    /// `overlap_seconds` either side, widened over any audio beside it that
+    /// no other window decodes, and rounded out to whole encoder frames. It
+    /// holds `owned` and `window`. For a gap's window it is `owned`.
+    pub reach: Range<usize>,
+    /// A chunk of the layout, which is decoded again with more audio around
+    /// it when it looks empty; a gap's window is decoded as it is.
+    pub chunk: bool,
 }
 
 /// The recording split once into the spans that own it, in order: one per
 /// chunk of the [`layout`] and, when [`ChunkerConfig::decode_gaps`] is on,
-/// one per extra window over a gap (see the module doc). A gap of at least
-/// [`MIN_GAP_SECONDS`] is decoded in windows that stay inside it: no window
-/// reaches into a chunk. A gap longer than `max_seconds` is split into
-/// windows of equal length that share `overlap_seconds` with each other. A
-/// gap shorter than 2.5 s is not decoded, even where it is the uncovered
-/// edge of a longer pause. Nor is a window of digital silence, where every
-/// sample is exactly zero, which holds no sound to decode; on the
-/// calibration corpus two windows in three were. No threshold applies: a
-/// window with any sample that is not zero is decoded. The capture writes
-/// its lanes as 16-bit samples, which rounds anything under half a step
-/// (about -96 dBFS) to zero, so a window of a recorded lane is digital
-/// silence only when nothing in it reaches that floor, and the decoder
-/// would get the same zeros without the skip.
+/// one per extra window over a gap. Two neighbouring windows share their
+/// owned boundary at the middle of the audio between their edges: the
+/// middle of their overlap, the edge a chunk and a gap's window share, or
+/// the middle of an undecoded gap, whose halves the windows either side
+/// own. The first span owns from the recording's start and the last to its
+/// end; without a window there is no span.
 ///
-/// Two neighbouring windows share their owned boundary at the middle of
-/// the audio between their edges: the middle of their overlap, the edge a
-/// chunk and a gap's window share, or the middle of an undecoded gap, whose
-/// halves the windows either side own. The first span owns from the
-/// recording's start and the last to its end; without a window there is no
-/// span.
+/// The extra windows (see the module doc) cover each gap of at least
+/// [`MIN_GAP_SECONDS`] and stay inside it: no window reaches into a chunk.
+/// A gap longer than `max_seconds` is split into windows of equal length
+/// that share `overlap_seconds` with each other. A shorter gap is not
+/// decoded, even where it is the uncovered edge of a longer pause. Nor is a
+/// window of digital silence, where every sample is exactly zero, which
+/// holds no sound to decode; on the calibration corpus two windows in three
+/// were. No threshold applies: a window with any sample that is not zero
+/// is decoded. The capture writes its lanes as 16-bit samples, which rounds
+/// anything under half a step (about -96 dBFS) to zero, so a window of a
+/// recorded lane is digital silence only when nothing in it reaches that
+/// floor, and the decoder would get the same zeros without the skip.
 #[must_use]
 pub fn partition(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) -> Vec<Span> {
     spans(audio, &layout(audio, speech, config), config)
@@ -317,16 +322,27 @@ fn spans(audio: &[f32], chunks: &[Chunk], config: &ChunkerConfig) -> Vec<Span> {
             covered = covered.max(chunk.range.end);
         }
     }
+    // The overlap as the merge reads it, unclamped.
+    let around = sample_count(config.overlap_seconds);
     let mut start = 0;
     let mut spans = Vec::with_capacity(windows.len());
-    for (i, (window, recover)) in windows.iter().enumerate() {
-        let end = windows
-            .get(i + 1)
-            .map_or(total, |(next, _)| window.end.midpoint(next.start));
+    for (i, (window, chunk)) in windows.iter().enumerate() {
+        let next = windows.get(i + 1).map(|(next, _)| next.start);
+        let end = next.map_or(total, |next| window.end.midpoint(next));
+        let reach = if *chunk {
+            let before = i.checked_sub(1).map_or(0, |i| windows[i].0.end);
+            let from = window.start.saturating_sub(around).min(before);
+            let to = (window.end + around).max(next.unwrap_or(total));
+            let to = (to / FRAME_SAMPLES + 1) * FRAME_SAMPLES;
+            from / FRAME_SAMPLES * FRAME_SAMPLES..to.min(total)
+        } else {
+            start..end
+        };
         spans.push(Span {
             owned: start..end,
             window: window.clone(),
-            recover: *recover,
+            reach,
+            chunk: *chunk,
         });
         start = end;
     }
@@ -695,14 +711,14 @@ mod tests {
     /// The windows of the spans over `chunks` that are not chunks.
     fn gap_windows(audio: &[f32], chunks: &[Chunk], config: &ChunkerConfig) -> Vec<Range<usize>> {
         let spans = spans(audio, chunks, config);
-        let chunk_windows = spans.iter().filter(|s| s.recover).map(|s| &s.window);
+        let chunk_windows = spans.iter().filter(|s| s.chunk).map(|s| &s.window);
         assert!(
             chunk_windows.eq(chunks.iter().map(|c| &c.range)),
             "the chunks are decoded as laid out: {spans:?}"
         );
         spans
             .into_iter()
-            .filter(|span| !span.recover)
+            .filter(|span| !span.chunk)
             .map(|span| span.window)
             .collect()
     }
@@ -720,7 +736,7 @@ mod tests {
         let owned = |config: &ChunkerConfig| -> Vec<(Range<usize>, Range<usize>, bool)> {
             spans(&sound(s(40.0)), &chunks, config)
                 .into_iter()
-                .map(|span| (span.owned, span.window, span.recover))
+                .map(|span| (span.owned, span.window, span.chunk))
                 .collect()
         };
         assert_eq!(
@@ -875,15 +891,68 @@ mod tests {
         }
     }
 
+    /// Checks `span`'s reach (see `a_partition_owns_every_sample_once`) and
+    /// counts its sides that widen past the window and the overlap.
+    fn check_reach(
+        span: &Span,
+        spans: &[Span],
+        config: &ChunkerConfig,
+        total: usize,
+        context: &dyn Fn() -> String,
+    ) -> usize {
+        let reach = &span.reach;
+        if !span.chunk {
+            assert_eq!(*reach, span.owned, "{}", context());
+            return 0;
+        }
+        let overlap = sample_count(config.overlap_seconds);
+        let from = span.window.start.saturating_sub(overlap) / FRAME_SAMPLES * FRAME_SAMPLES;
+        let to = ((span.window.end + overlap) / FRAME_SAMPLES + 1) * FRAME_SAMPLES;
+        let around = from..to.min(total);
+        for inner in [&span.owned, &span.window, &around] {
+            assert!(
+                reach.start <= inner.start && inner.end <= reach.end,
+                "{reach:?} {inner:?} {}",
+                context()
+            );
+        }
+        assert!(reach.start.is_multiple_of(FRAME_SAMPLES), "{}", context());
+        assert!(
+            reach.end.is_multiple_of(FRAME_SAMPLES) || reach.end == total,
+            "{}",
+            context()
+        );
+        let mut widened = 0;
+        for edge in [reach.start..around.start, around.end..reach.end] {
+            if edge.is_empty() {
+                continue;
+            }
+            widened += 1;
+            for other in spans.iter().filter(|s| s.window != span.window) {
+                let shared = edge
+                    .end
+                    .min(other.window.end)
+                    .saturating_sub(edge.start.max(other.window.start));
+                assert!(shared < FRAME_SAMPLES, "{edge:?} {other:?} {}", context());
+            }
+        }
+        widened
+    }
+
     #[test]
     fn a_partition_owns_every_sample_once() {
-        // The ownership invariant, whatever the merge does with it: the
-        // owned ranges are sorted, disjoint, never empty and cover the
-        // recording; a window holds its owned range except the audio no
-        // window decodes, and is never longer than the clamp; the chunk
-        // spans are the layout's chunks. Random speech over the default
-        // settings, the CoreML engine's and odd ones, with the extra
-        // windows off and on and some gaps of digital silence.
+        // Clauses 1 to 3 of the ownership invariant, whatever the merge
+        // does with them: the owned ranges are sorted, disjoint, never
+        // empty and cover the recording; a window holds its owned range
+        // except the audio no window decodes, and is never longer than the
+        // clamp; the chunk spans are the layout's chunks. And the reach: a
+        // gap's window reaches over its owned range; a chunk's reach holds
+        // its owned range and its window ± the overlap, starts and ends on
+        // the frame grid (or at the recording's end), and past that holds
+        // only audio no other window decodes, to a frame. Random speech
+        // over the default settings, the CoreML engine's and odd ones,
+        // with the extra windows off and on and some gaps of digital
+        // silence.
         let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
         let mut below = |n: usize| {
             seed ^= seed << 13;
@@ -891,7 +960,7 @@ mod tests {
             seed ^= seed << 17;
             (seed % n as u64) as usize
         };
-        let mut undecoded_shares = 0;
+        let (mut undecoded_shares, mut widened) = (0, 0);
         for case in 0..600 {
             let total = s(1.0) + below(s(200.0));
             let mut speech = Vec::new();
@@ -917,7 +986,7 @@ mod tests {
             let spans = partition(&samples, &speech, &config);
             let context = || format!("case {case}: {config:?} {spans:?}");
             let chunks = layout(&samples, &speech, &config);
-            let chunk_windows = spans.iter().filter(|s| s.recover).map(|s| &s.window);
+            let chunk_windows = spans.iter().filter(|s| s.chunk).map(|s| &s.window);
             assert!(
                 chunk_windows.eq(chunks.iter().map(|c| &c.range)),
                 "{}",
@@ -957,8 +1026,12 @@ mod tests {
                         assert!(!decoded(&edge), "{edge:?} {}", context());
                     }
                 }
+                widened += check_reach(span, &spans, &config, total, &context);
             }
         }
-        assert!(undecoded_shares > 500, "{undecoded_shares}");
+        assert!(
+            undecoded_shares > 500 && widened > 500,
+            "{undecoded_shares} {widened}"
+        );
     }
 }

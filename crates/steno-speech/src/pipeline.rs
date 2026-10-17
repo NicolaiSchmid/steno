@@ -9,10 +9,15 @@
 //!
 //! Each decode keeps the words whose first piece starts in its span's owned
 //! share of the recording (`own`), so the join needs no rule to tell
-//! which of two windows heard a word. One exception stays until after
+//! which of two windows heard a word. Two exceptions stay until after
 //! stable: the chunks of a run, the chunks between two extra windows, keep
 //! the LCS merge between them (`merge_all`), so their plain decodes go to
-//! it whole.
+//! it whole; and an accepted recovery keeps the words with a piece in its
+//! chunk's reach ([`Span::reach`]: the chunk and the overlap either side,
+//! and any audio beside it no other window decodes), as much as before the
+//! partition or more, so a word it shares with a neighbour can come out
+//! twice but is never lost. Where a gap's window meets another span, one
+//! rule drops a word both sides kept (`join`).
 //! Generic over [`SpeechBackend`]: the ONNX and the `CoreML` engines run
 //! it, and a fake backend drives it in tests.
 //! Swift: `Sources/StenoSpeech/Engines/ParakeetEngine.swift` and
@@ -35,8 +40,8 @@ use crate::vocab::{Vocab, starts_word};
 
 /// When a chunk with speech decodes to (almost) nothing, the window is
 /// decoded again with more audio around it (decision 1: extend, do not
-/// shift) and the candidate with the most words starting in the chunk's
-/// owned span wins, which keeps only those words (`own`).
+/// shift) and the candidate with the most words starting in the chunk wins,
+/// and keeps the words with a piece in the chunk's reach ([`Span::reach`]).
 /// Decision 1 extends by 5 to 12 s; the defaults try 6, 12 and 18 s in
 /// total, at most 6 s before and 12 s after the chunk, the 5 s earlier
 /// start and 12 s later end that spike D's probe table
@@ -77,9 +82,12 @@ pub struct Transcript {
     pub segments: Vec<RawSegment>,
     pub words: Vec<TimedWord>,
     pub tokens: Vec<Token>,
-    /// The partition ([`partition`]): the chunks (`recover`) and the extra
-    /// windows over the gaps, in order.
+    /// The partition ([`partition`]): the chunks and the extra windows over
+    /// the gaps, in order.
     pub spans: Vec<Span>,
+    /// Per span, the window its words came from: the span's own, or the
+    /// wider one of an accepted recovery.
+    pub windows: Vec<Range<usize>>,
     pub speech: Vec<Range<usize>>,
     pub stats: DecodeStats,
 }
@@ -176,7 +184,11 @@ impl<B: SpeechBackend> Transcriber<B> {
         let speech = self.vad.speech_regions(samples)?;
         let spans = partition(samples, &speech, &self.config.chunker);
         let mut stats = DecodeStats::default();
-        let decoded = self.decode_spans(samples, &spans, &speech, &mut stats)?;
+        let (decoded, windows): (Vec<_>, Vec<_>) = self
+            .decode_spans(samples, &spans, &speech, &mut stats)?
+            .into_iter()
+            .map(|d| (d.tokens, d.window))
+            .unzip();
         let overlap = f64::from(self.config.chunker.overlap_seconds);
         let tokens = join(&spans, &decoded, overlap, &self.vocab);
         let words = TokenAggregator.words(&timed_pieces(&tokens, &self.vocab));
@@ -188,6 +200,7 @@ impl<B: SpeechBackend> Transcriber<B> {
             words,
             tokens,
             spans,
+            windows,
             speech,
             stats,
         })
@@ -227,8 +240,10 @@ impl<B: SpeechBackend> Transcriber<B> {
         original: Vec<Token>,
         stats: &mut DecodeStats,
     ) -> Result<Vec<Token>, SpeechError> {
-        self.chunk_decoder(0)
-            .recover(samples, span, original, stats)
+        let decoded = self
+            .chunk_decoder(0)
+            .recover(samples, span, original, stats)?;
+        Ok(decoded.tokens)
     }
 
     /// Every span's tokens, in order: on the one backend in turn, or on
@@ -241,7 +256,7 @@ impl<B: SpeechBackend> Transcriber<B> {
         spans: &[Span],
         speech: &[Range<usize>],
         stats: &mut DecodeStats,
-    ) -> Result<Vec<Vec<Token>>, SpeechError> {
+    ) -> Result<Vec<Decoded>, SpeechError> {
         if self.workers.len() == 1 || spans.len() <= 1 {
             let mut decoder = self.chunk_decoder(0);
             return spans
@@ -252,7 +267,7 @@ impl<B: SpeechBackend> Transcriber<B> {
         let (vocab, config) = (&self.vocab, &self.config);
         let next = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
-        let mut slots: Vec<Option<Result<Vec<Token>, SpeechError>>> =
+        let mut slots: Vec<Option<Result<Decoded, SpeechError>>> =
             spans.iter().map(|_| None).collect();
         std::thread::scope(|scope| {
             let handles: Vec<_> = self
@@ -322,60 +337,100 @@ impl Drop for StopOnPanic<'_> {
     }
 }
 
+/// Two encoder frames: how far a gap's window keeps words past its owned
+/// span, and how close two copies of one piece either side of a seam start
+/// when the join takes them for one word.
+const SEAM_SAMPLES: usize = 2 * FRAME_SAMPLES;
+
 /// The spans' tokens joined in order: the chunks of a run, the chunks
 /// between two extra windows, merge with each other (`merge_all`), as they
-/// did before the partition, and the rest is concatenated. Where an extra
-/// window follows a chunk, its first word is the chunk's last word heard
-/// again when it is the same piece and starts within two encoder frames of
-/// it, and falls away: the exact window can hear the rest of a word that
-/// sounds across its start as a word of its own. A word said again starts
-/// later than that, unless it is two frames long or shorter: such a word
-/// said twice back to back across the edge comes out once.
+/// did before the partition, and the rest is concatenated. Where a gap's
+/// window meets a chunk or another gap's window, both sides can keep one
+/// word: an exact window hears the part of a word that sounds across its
+/// edge as a word of its own, a recovery keeps words past its chunk, and
+/// two windows of one gap time a word on their own frame grids and each
+/// keep words up to [`SEAM_SAMPLES`] past their owned span. So when the
+/// last word before the seam and the first after it are the same piece and
+/// start within `SEAM_SAMPLES` of each other, one copy falls away: the one
+/// with fewer pieces, which heard less of the word, and on a tie the gap
+/// window's, or the later one's between two windows of a gap. A word said
+/// again starts later than that, unless it is two frames long or shorter:
+/// such a word said twice back to back across a seam comes out once. And a
+/// gap's window that begins inside a word drops the pieces that continue
+/// it when the run or window before kept any token, as the merge before the
+/// partition did: that span heard the word's start, or missed the word.
 fn join(spans: &[Span], decoded: &[Vec<Token>], overlap_seconds: f64, vocab: &Vocab) -> Vec<Token> {
     let starts_word = |t: &Token| starts_word(vocab.piece(t.id));
     let mut out: Vec<Token> = Vec::with_capacity(decoded.iter().map(Vec::len).sum());
-    let mut at = 0;
-    for run in spans.chunk_by(|a, b| a.recover && b.recover) {
+    let (mut at, mut before) = (0, 0);
+    for run in spans.chunk_by(|a, b| a.chunk && b.chunk) {
         let tokens = &decoded[at..at + run.len()];
-        if run[0].recover {
-            out.extend(merge_all(tokens, overlap_seconds, vocab));
+        let mut next = if run[0].chunk {
+            merge_all(tokens, overlap_seconds, vocab)
         } else {
-            let mut window = &tokens[0][..];
-            if at > 0
-                && spans[at - 1].recover
-                && let Some(last) = out.iter().rev().find(|t| starts_word(t))
-                && let Some(first) = window.first()
-                && first.id == last.id
-                && first.sample().abs_diff(last.sample()) <= 2 * FRAME_SAMPLES
-            {
-                let word = 1 + window[1..].iter().take_while(|t| !starts_word(t)).count();
-                window = &window[word..];
+            let mut window = tokens[0].clone();
+            if out.len() > before {
+                let rest = window.iter().take_while(|t| !starts_word(t)).count();
+                window.drain(..rest);
             }
-            out.extend_from_slice(window);
+            window
+        };
+        // The last word of the run or window before.
+        if let Some(last) = out[before..]
+            .iter()
+            .rposition(starts_word)
+            .map(|i| before + i)
+            && let Some(first) = next.first()
+            && first.id == out[last].id
+            && first.sample().abs_diff(out[last].sample()) <= SEAM_SAMPLES
+        {
+            let earlier = out.len() - last;
+            let later = 1 + next[1..].iter().take_while(|t| !starts_word(t)).count();
+            if later > earlier || (later == earlier && run[0].chunk) {
+                out.truncate(last);
+            } else {
+                next.drain(..later);
+            }
         }
+        before = out.len();
+        out.extend(next);
         at += run.len();
     }
     out
 }
 
-/// The words of one decode that start in `owned`: pieces are grouped into
-/// words at each word start, and a word is kept whole when its first piece
-/// starts in `owned`, wherever its other pieces lie. A word cut by the
-/// window's start, so that the decode begins with pieces that continue it,
-/// is the span before's, which heard its start, and is dropped; at the
-/// recording's start there is no span before, and it is kept.
-fn own(tokens: &[Token], owned: &Range<usize>, vocab: &Vocab) -> Vec<Token> {
-    let mut keep = owned.start == 0;
-    let mut out = Vec::with_capacity(tokens.len());
-    for token in tokens {
-        if starts_word(vocab.piece(token.id)) {
-            keep = owned.contains(&token.sample());
-        }
-        if keep {
-            out.push(*token);
-        }
-    }
-    out
+/// Which words of one decode a span keeps ([`own`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    /// The words whose first piece starts in the range: a gap's window.
+    Starts,
+    /// The words with any piece in the range: an accepted recovery, which
+    /// so keeps every token the trim before the partition kept.
+    Touches,
+}
+
+/// The words of one decode that `keep` takes from `range`: pieces are
+/// grouped into words at each word start, and a word is kept or dropped
+/// whole, wherever its other pieces lie. A decode that begins inside a
+/// word gives the pieces that continue it as a word of their own; the join
+/// decides whether a gap's window keeps them.
+fn own(tokens: &[Token], range: &Range<usize>, keep: Keep, vocab: &Vocab) -> Vec<Token> {
+    let inside = |t: &Token| range.contains(&t.sample());
+    tokens
+        .chunk_by(|_, next| !starts_word(vocab.piece(next.id)))
+        .filter(|word| match keep {
+            Keep::Starts => inside(&word[0]),
+            Keep::Touches => word.iter().any(inside),
+        })
+        .flatten()
+        .copied()
+        .collect()
+}
+
+/// One span's decode: the tokens it keeps and the window they came from.
+struct Decoded {
+    tokens: Vec<Token>,
+    window: Range<usize>,
 }
 
 /// One backend's view of a transcription: decodes a chunk and, when it
@@ -388,22 +443,27 @@ struct ChunkDecoder<'a, B: ?Sized> {
 
 impl<B: SpeechBackend + ?Sized> ChunkDecoder<'_, B> {
     /// The span's tokens: an extra window's words that start in its owned
-    /// span; a chunk's, recovered when the first decode looks empty.
+    /// span or within [`SEAM_SAMPLES`] of it; a chunk's, recovered when the
+    /// first decode looks empty.
     fn decode_span(
         &mut self,
         samples: &[f32],
         span: &Span,
         speech: &[Range<usize>],
         stats: &mut DecodeStats,
-    ) -> Result<Vec<Token>, SpeechError> {
+    ) -> Result<Decoded, SpeechError> {
         let tokens = self.decode_range(samples, span.window.clone(), stats)?;
-        if !span.recover {
-            return Ok(own(&tokens, &span.owned, self.vocab));
+        let window = span.window.clone();
+        if !span.chunk {
+            let owned = &span.owned;
+            let keep = owned.start.saturating_sub(SEAM_SAMPLES)..owned.end + SEAM_SAMPLES;
+            let tokens = own(&tokens, &keep, Keep::Starts, self.vocab);
+            return Ok(Decoded { tokens, window });
         }
-        if self.looks_empty(&tokens, speech, &span.window) {
+        if self.looks_empty(&tokens, speech, &window) {
             return self.recover(samples, span, tokens, stats);
         }
-        Ok(tokens)
+        Ok(Decoded { tokens, window })
     }
 
     /// Decodes one window of the recording; token frames are absolute and
@@ -426,13 +486,14 @@ impl<B: SpeechBackend + ?Sized> ChunkDecoder<'_, B> {
         )
     }
 
-    /// Word starts among `tokens` inside `range`, so a recovery candidate
-    /// decoded over a wider window is scored on the chunk's owned span and
-    /// not on the neighbour's speech it also heard.
+    /// Word starts among `tokens` whose frame lies inside `range`, so a
+    /// recovery candidate decoded over a wider window is scored on the
+    /// chunk's own audio and not on the neighbour's speech it also heard.
     fn words_inside(&self, tokens: &[Token], range: &Range<usize>) -> usize {
+        let frames = range.start / FRAME_SAMPLES..=range.end / FRAME_SAMPLES;
         tokens
             .iter()
-            .filter(|t| range.contains(&t.sample()) && starts_word(self.vocab.piece(t.id)))
+            .filter(|t| frames.contains(&t.frame) && starts_word(self.vocab.piece(t.id)))
             .count()
     }
 
@@ -444,20 +505,22 @@ impl<B: SpeechBackend + ?Sized> ChunkDecoder<'_, B> {
     }
 
     /// Decodes the chunk again over wider windows, which only the window
-    /// changes: a candidate is scored on the span's owned audio, and an
-    /// accepted one keeps only the words that start there ([`own`]).
+    /// changes: a candidate is scored on the words that start in the
+    /// chunk's window, as the chunk's own decode is (`looks_empty`), and an
+    /// accepted one keeps the words with a piece in the span's reach
+    /// ([`Span::reach`]).
     fn recover(
         &mut self,
         samples: &[f32],
         span: &Span,
         original: Vec<Token>,
         stats: &mut DecodeStats,
-    ) -> Result<Vec<Token>, SpeechError> {
+    ) -> Result<Decoded, SpeechError> {
         let config = self.config;
         let max = sample_count(config.chunker.max_seconds);
         let range = &span.window;
-        let original_words = self.words_inside(&original, &span.owned);
-        let (mut best, mut best_words) = (original, original_words);
+        let original_words = self.words_inside(&original, range);
+        let mut best = (original, original_words, range.clone());
         for &(before, after) in &config.recovery.extensions_seconds {
             let start = range.start.saturating_sub(sample_count(before));
             let end = (range.end + sample_count(after)).min(samples.len());
@@ -466,17 +529,17 @@ impl<B: SpeechBackend + ?Sized> ChunkDecoder<'_, B> {
             }
             stats.recoveries_tried += 1;
             let candidate = self.decode_range(samples, start..end, stats)?;
-            let words = self.words_inside(&candidate, &span.owned);
-            if words > best_words {
-                best = candidate;
-                best_words = words;
+            let words = self.words_inside(&candidate, range);
+            if words > best.1 {
+                best = (candidate, words, start..end);
             }
         }
-        if best_words > original_words {
+        let (mut tokens, words, window) = best;
+        if words > original_words {
             stats.recoveries_accepted += 1;
-            return Ok(own(&best, &span.owned, self.vocab));
+            tokens = own(&tokens, &span.reach, Keep::Touches, self.vocab);
         }
-        Ok(best)
+        Ok(Decoded { tokens, window })
     }
 }
 
@@ -570,6 +633,14 @@ mod fake {
             let data = (0..frames)
                 .map(|f| {
                     let frame = &samples[f * FRAME_SAMPLES..(f + 1) * FRAME_SAMPLES];
+                    // Most frames hold one piece or silence: the quick way.
+                    let first = frame[0];
+                    if frame.iter().all(|&x| x == first) {
+                        return (first * 1000.0).round();
+                    }
+                    if frame.iter().all(|&x| x.abs() < 0.0005) {
+                        return 0.0;
+                    }
                     // A frame holds a few values; on a tie the larger wins.
                     let mut counts: Vec<(i64, usize)> = Vec::new();
                     for x in frame {
@@ -1073,7 +1144,7 @@ mod tests {
 
     /// The windows of the chunks (`true`) or of the extra windows.
     fn windows(transcript: &Transcript, chunks: bool) -> Vec<Range<usize>> {
-        let spans = transcript.spans.iter().filter(|s| s.recover == chunks);
+        let spans = transcript.spans.iter().filter(|s| s.chunk == chunks);
         spans.map(|s| s.window.clone()).collect()
     }
 
@@ -1087,9 +1158,9 @@ mod tests {
     /// One chunk of loud sound the fake decodes to nothing (0.05 is past
     /// the blank), from 2 to 10 s, with word 11 at 4 s and quiet word 2 at
     /// 11 s. Windows under 130 frames decode to silence, so the 8.5 s
-    /// chunk looks empty and its 6 s extension is accepted. Without the
-    /// extra windows the chunk owns the tail, and its recovery keeps word
-    /// 2; with them the tail's window owns it.
+    /// chunk looks empty and its 6 s extension is accepted. The recovery
+    /// keeps word 2, which lies in the chunk's reach; with the extra
+    /// windows the tail's window keeps it too, and its copy falls away.
     fn recovered_last_chunk(seconds: usize) -> Vec<f32> {
         let mut samples = vec![0.0f32; seconds * SAMPLE_RATE];
         samples[2 * SAMPLE_RATE..10 * SAMPLE_RATE].fill(0.05);
@@ -1108,7 +1179,8 @@ mod tests {
             .unwrap();
         assert_eq!(chunked.stats.recoveries_accepted, 1);
         // The 6 s extension reaches to 16.25 s and keeps every word it
-        // heard in the chunk's owned span, the whole tail.
+        // heard in the chunk's reach, the whole tail, which no other window
+        // decodes.
         assert_eq!(chunked.text(), "w11 w2 w3");
         let t = quiet_transcriber(gaps_on(60.0), 130).transcribe(&samples, None);
         let transcript = t.unwrap();
@@ -1154,9 +1226,11 @@ mod tests {
         // after it hears quiet words 2 and 3 at 11 and 15 s. Chunk B, the
         // last (25.75 s to the end), has no audio after it, so its 6 s
         // extension either side is accepted and hears quiet words 5 and 4
-        // at 20 and 24.5 s. Without the extra windows the two chunks own
-        // the gap, half each (to 18 s), and keep what their recoveries
-        // heard there; with them the gap's window owns it.
+        // at 20 and 24.5 s. Without the extra windows each chunk's reach
+        // covers the whole gap, which no window decodes, and keeps what its
+        // recovery heard there; with them the gap's window owns the gap,
+        // the recoveries reach 2 s into it, and the window's copies of
+        // words 2 and 4 fall away at the seams.
         let mut samples = recovered_last_chunk(34);
         samples[26 * SAMPLE_RATE..].fill(0.05);
         for (piece, seconds) in [(3, 15.0), (5, 20.0), (4, 24.5), (12, 30.0)] {
@@ -1181,6 +1255,77 @@ mod tests {
         assert_eq!(transcript.text(), "w11 w2 w3 w5 w4 w12");
     }
 
+    #[test]
+    fn a_word_where_a_gaps_window_meets_a_recovered_chunk_comes_out() {
+        // Loud sound the fake decodes to nothing over 8 s, with word 11 in
+        // it, and a gap's window beside it: after it, so the chunk's 6 s
+        // extension after it is accepted, or before it, in the mirror, at
+        // the recording's end, so the extension before it is. Quiet word 3,
+        // three frames long, from five frames inside the chunk to four
+        // frames into the gap, on and off the frame grid, over the exact
+        // fake and the jittering one. The recovery keeps the word and the
+        // gap's window may too: it comes out once, or twice where the two
+        // copies start more than two frames apart, which the exact window
+        // gives when it hears the end of a word that starts before it as a
+        // word of its own, and the jitter when it moves the two windows'
+        // words apart. It never goes missing.
+        let mut twice = 0;
+        for mirror in [false, true] {
+            for jitter in [false, true] {
+                let (total, loud) = if mirror {
+                    (30.0, 21.75..29.75)
+                } else {
+                    (30.0, 2.0..10.0)
+                };
+                // Faint noise, so the gap's window is not digital silence.
+                let mut samples: Vec<f32> = (0..sample_count(total))
+                    .map(|i| if i % 2 == 0 { 3e-5 } else { -3e-5 })
+                    .collect();
+                samples[sample_count(loud.start)..sample_count(loud.end)].fill(0.05);
+                put(&mut samples, 11, loud.start + 2.0, 6);
+                let transcriber = || {
+                    let mut t = quiet_transcriber(gaps_on(60.0), 130);
+                    t.workers[0].jitter = jitter;
+                    t
+                };
+                let plain = transcriber().transcribe(&samples, None).unwrap();
+                let chunk = plain.spans.iter().position(|s| s.chunk).unwrap();
+                let gap = if mirror { chunk - 1 } else { chunk + 1 };
+                assert!(!plain.spans[gap].chunk, "{:?}", plain.spans);
+                let seam = plain.spans[gap]
+                    .owned
+                    .start
+                    .max(plain.spans[chunk].owned.start);
+                for offset in -5..=4isize {
+                    for phase in [0, FRAME_SAMPLES / 2] {
+                        let mut samples = samples.clone();
+                        let at = (seam / FRAME_SAMPLES).checked_add_signed(offset).unwrap();
+                        let from = at * FRAME_SAMPLES + phase;
+                        samples[from..from + 3 * FRAME_SAMPLES].fill(0.003);
+                        let transcript = transcriber().transcribe(&samples, None).unwrap();
+                        assert_eq!(transcript.stats.recoveries_accepted, 1);
+                        let copies: Vec<usize> = transcript
+                            .tokens
+                            .iter()
+                            .filter(|t| t.id == 3)
+                            .map(Token::sample)
+                            .collect();
+                        let case = format!("mirror {mirror} jitter {jitter} {offset} {phase}");
+                        assert!(
+                            copies.len() == 1
+                                || (copies.len() == 2 && copies[1] - copies[0] > SEAM_SAMPLES),
+                            "{case}: {copies:?} {}",
+                            transcript.text()
+                        );
+                        twice += copies.len() - 1;
+                    }
+                }
+            }
+        }
+        // 14 of the 80 with this layout.
+        assert!(twice > 0 && twice < 20, "{twice}");
+    }
+
     /// A token of `id` on the frame at `seconds`.
     fn piece(id: u32, seconds: f32) -> Token {
         Token {
@@ -1196,13 +1341,21 @@ mod tests {
         tokens.iter().map(|t| t.id).collect()
     }
 
-    /// The span owning `from..to` seconds and decoding `window`.
-    fn span(owned: (f32, f32), window: (f32, f32), recover: bool) -> Span {
+    /// The span owning `owned` seconds and decoding `window`; a chunk
+    /// reaches over both (the join reads no reach).
+    fn span(owned: (f32, f32), window: (f32, f32), chunk: bool) -> Span {
         let samples = |(a, b): (f32, f32)| sample_count(a)..sample_count(b);
+        let (owned, window) = (samples(owned), samples(window));
+        let reach = if chunk {
+            owned.start.min(window.start)..owned.end.max(window.end)
+        } else {
+            owned.clone()
+        };
         Span {
-            owned: samples(owned),
-            window: samples(window),
-            recover,
+            owned,
+            window,
+            reach,
+            chunk,
         }
     }
 
@@ -1220,19 +1373,25 @@ mod tests {
             piece(22, 20.2),
             piece(3, 20.0),
         ];
-        assert_eq!(ids(&own(&tokens, &owned, &vocab)), [4, 2, 22]);
-        // A decode that begins inside its span with a word's rest: the
-        // span before heard the word's start.
+        assert_eq!(ids(&own(&tokens, &owned, Keep::Starts, &vocab)), [4, 2, 22]);
+        // A decode that begins with a word's rest gives it as a word of its
+        // own, kept when it starts in the span.
         let rest = [piece(21, 10.0), piece(31, 10.08), piece(5, 11.0)];
-        assert_eq!(ids(&own(&rest, &owned, &vocab)), [5]);
-        // At the recording's start there is no span before.
-        let first = 0..sample_count(20.0);
-        assert_eq!(ids(&own(&rest, &first, &vocab)), [21, 31, 5]);
-        assert!(own(&[], &owned, &vocab).is_empty());
+        assert_eq!(ids(&own(&rest, &owned, Keep::Starts, &vocab)), [21, 31, 5]);
+        let later = sample_count(10.04)..sample_count(20.0);
+        assert_eq!(ids(&own(&rest, &later, Keep::Starts, &vocab)), [5]);
+        // An accepted recovery keeps a word with any piece in its reach.
+        let across = [piece(1, 9.84), piece(21, 10.0), piece(4, 12.0)];
+        assert_eq!(ids(&own(&across, &owned, Keep::Starts, &vocab)), [4]);
+        assert_eq!(
+            ids(&own(&across, &owned, Keep::Touches, &vocab)),
+            [1, 21, 4]
+        );
+        assert!(own(&[], &owned, Keep::Touches, &vocab).is_empty());
     }
 
     #[test]
-    fn a_gaps_first_word_falls_away_only_where_it_repeats_the_chunks_last() {
+    fn a_word_kept_either_side_of_a_gaps_seam_comes_out_once() {
         // A chunk to 10 s, the gap's window from 10 to 20 s, a chunk after.
         let vocab = vocab();
         let spans = [
@@ -1242,38 +1401,109 @@ mod tests {
         ];
         let joined = |chunk: &[Token], window: &[Token], next: &[Token]| {
             let decoded = [chunk.to_vec(), window.to_vec(), next.to_vec()];
-            ids(&join(&spans, &decoded, 2.0, &vocab))
+            let tokens = join(&spans, &decoded, 2.0, &vocab);
+            tokens.iter().map(|t| (t.id, t.frame)).collect::<Vec<_>>()
         };
+        let at = |seconds: f32| sample_count(seconds) / FRAME_SAMPLES;
         let next = [piece(14, 21.0)];
         // The same piece within two frames of the chunk's last word, with
-        // its rest, is that word heard again.
+        // its rest, is that word heard again, and the window's falls away.
         let chunk = [piece(13, 9.84), piece(23, 9.92)];
         let again = [piece(13, 10.0), piece(23, 10.08), piece(2, 14.0)];
-        assert_eq!(joined(&chunk, &again, &next), [13, 23, 2, 14]);
-        // 0.4 s apart it is a word said again; another piece is another
-        // word.
-        let chunk = [piece(5, 9.6)];
-        let said = [piece(5, 10.0), piece(2, 14.0)];
-        assert_eq!(joined(&chunk, &said, &next), [5, 5, 2, 14]);
+        assert_eq!(
+            joined(&chunk, &again, &next),
+            [
+                (13, at(9.84)),
+                (23, at(9.92)),
+                (2, at(14.0)),
+                (14, at(21.0))
+            ]
+        );
+        // The copy with more pieces heard more of the word and stays.
+        let cut = [piece(13, 9.84)];
+        assert_eq!(
+            joined(&cut, &again, &next),
+            [
+                (13, at(10.0)),
+                (23, at(10.08)),
+                (2, at(14.0)),
+                (14, at(21.0))
+            ]
+        );
+        // Three frames apart, or 0.4 s, it is a word said again; another
+        // piece is another word.
+        for apart in [0.24, 0.4] {
+            let chunk = [piece(5, 10.0 - apart)];
+            let said = [piece(5, 10.0), piece(2, 14.0)];
+            let ids: Vec<u32> = joined(&chunk, &said, &next).iter().map(|t| t.0).collect();
+            assert_eq!(ids, [5, 5, 2, 14], "{apart} s apart");
+        }
         let chunk = [piece(6, 9.92)];
-        assert_eq!(joined(&chunk, &said, &next), [6, 5, 2, 14]);
-        // Before the next chunk nothing falls away: a word the window heard
-        // across its end and the chunk again at its start comes out twice.
+        let said = [piece(5, 10.0), piece(2, 14.0)];
+        let ids: Vec<u32> = joined(&chunk, &said, &next).iter().map(|t| t.0).collect();
+        assert_eq!(ids, [6, 5, 2, 14]);
+        // A word the window heard across its end and the chunk again at
+        // its start: the window's copy falls away, the chunk's whole word
+        // stays, and three frames apart both do.
         let late = [piece(2, 14.0), piece(7, 19.92)];
-        let next = [piece(7, 20.0), piece(14, 21.0)];
-        assert_eq!(joined(&chunk, &late, &next), [6, 2, 7, 7, 14]);
-        // Between two windows of one gap nothing falls away either.
+        let next = [piece(7, 20.0), piece(27, 20.08), piece(14, 21.0)];
+        assert_eq!(
+            joined(&chunk, &late, &next),
+            [
+                (6, at(9.92)),
+                (2, at(14.0)),
+                (7, at(20.0)),
+                (27, at(20.08)),
+                (14, at(21.0))
+            ]
+        );
+        let late = [piece(2, 14.0), piece(7, 19.76)];
+        let ids: Vec<u32> = joined(&chunk, &late, &next).iter().map(|t| t.0).collect();
+        assert_eq!(ids, [6, 2, 7, 7, 27, 14]);
+        // The known limit: a chunk that begins with the rest of a word the
+        // window heard whole gives that piece twice.
+        let whole = [piece(2, 14.0), piece(7, 19.84), piece(27, 19.92)];
+        let rest = [piece(27, 20.0), piece(14, 21.0)];
+        let ids: Vec<u32> = joined(&chunk, &whole, &rest).iter().map(|t| t.0).collect();
+        assert_eq!(ids, [6, 2, 7, 27, 27, 14]);
+        // A window that begins with the rest of a word: the chunk before
+        // heard its start, and the rest falls away, unless the chunk kept
+        // nothing.
+        let rest = [piece(25, 10.0), piece(2, 14.0)];
+        let next = [piece(14, 21.0)];
+        let ids: Vec<u32> = joined(&chunk, &rest, &next).iter().map(|t| t.0).collect();
+        assert_eq!(ids, [6, 2, 14]);
+        let ids: Vec<u32> = joined(&[], &rest, &next).iter().map(|t| t.0).collect();
+        assert_eq!(ids, [25, 2, 14]);
+        // Between two windows of one gap the later window's copy falls
+        // away, and three frames apart both stay.
         let split = [
             span((0.0, 10.0), (0.0, 10.0), true),
             span((10.0, 21.0), (10.0, 22.0), false),
             span((21.0, 32.0), (20.0, 32.0), false),
         ];
+        for (earlier, kept) in [
+            (20.92, vec![(6, at(9.0)), (8, at(20.92))]),
+            (20.76, vec![(6, at(9.0)), (8, at(20.76)), (8, at(21.0))]),
+        ] {
+            let decoded = [
+                vec![piece(6, 9.0)],
+                vec![piece(8, earlier)],
+                vec![piece(8, 21.0)],
+            ];
+            let tokens = join(&split, &decoded, 2.0, &vocab);
+            let got: Vec<_> = tokens.iter().map(|t| (t.id, t.frame)).collect();
+            assert_eq!(got, kept, "{earlier}");
+        }
+        // Unless the earlier window heard less of the word.
         let decoded = [
             vec![piece(6, 9.0)],
             vec![piece(8, 20.92)],
-            vec![piece(8, 21.0)],
+            vec![piece(8, 21.0), piece(28, 21.08)],
         ];
-        assert_eq!(ids(&join(&split, &decoded, 2.0, &vocab)), [6, 8, 8]);
+        let tokens = join(&split, &decoded, 2.0, &vocab);
+        let got: Vec<_> = tokens.iter().map(|t| (t.id, t.frame)).collect();
+        assert_eq!(got, [(6, at(9.0)), (8, at(21.0)), (28, at(21.08))]);
     }
 
     #[test]
@@ -1302,10 +1532,12 @@ mod tests {
     #[test]
     fn a_punctuation_piece_from_a_later_recovery_loses_no_window_word() {
         // The loss #263 left to A16: a gap from 10 to 20 s, recoveries of
-        // both neighbours reaching into it, the later one's kept tokens
-        // starting with a full stop at 18 s, and a word only the window
-        // heard, w2 at 14 s. The window owns the gap: the recoveries keep
-        // nothing there, and w2 stays.
+        // both neighbours reaching 2 s into it, the later one's kept
+        // tokens starting with a full stop at 18 s, and a word only the
+        // window heard, w2 at 14 s. The window owns the gap, and w2 stays.
+        // The earlier recovery's copy of w13 is the window's first word and
+        // the window's falls away; the later recovery's ". w5" and the
+        // window's both come out, a duplicate.
         let vocab = vocab();
         let spans = [
             span((0.0, 10.0), (0.0, 10.0), true),
@@ -1314,19 +1546,20 @@ mod tests {
         ];
         let earlier = [piece(11, 4.0), piece(13, 10.4)];
         let later = [piece(41, 18.0), piece(5, 18.4), piece(12, 22.0)];
-        let earlier = own(&earlier, &spans[0].owned, &vocab);
-        let later = own(&later, &spans[2].owned, &vocab);
+        let reach = |(a, b): (f32, f32)| sample_count(a)..sample_count(b);
+        let earlier = own(&earlier, &reach((0.0, 12.0)), Keep::Touches, &vocab);
+        let later = own(&later, &reach((18.0, 30.0)), Keep::Touches, &vocab);
         let window = [
             piece(13, 10.4),
             piece(2, 14.0),
             piece(41, 18.0),
             piece(5, 18.4),
         ];
-        let window = own(&window, &spans[1].owned, &vocab);
+        let window = own(&window, &spans[1].owned, Keep::Starts, &vocab);
         let decoded = [earlier, window, later];
         assert_eq!(
             ids(&join(&spans, &decoded, 2.0, &vocab)),
-            [11, 13, 2, 41, 5, 12]
+            [11, 13, 2, 41, 5, 41, 5, 12]
         );
     }
 
@@ -1612,7 +1845,7 @@ mod tests {
             let gap_ends: Vec<usize> = transcript
                 .spans
                 .windows(2)
-                .filter(|p| !p[0].recover && p[1].recover && p[0].window.end == p[1].window.start)
+                .filter(|p| !p[0].chunk && p[1].chunk && p[0].window.end == p[1].window.start)
                 .map(|p| p[1].window.start)
                 .collect();
             let context = || {
@@ -1695,49 +1928,76 @@ mod tests {
         );
     }
 
+    /// How often quiet word 3 came out.
+    fn threes(transcript: &Transcript) -> usize {
+        transcript.tokens.iter().filter(|t| t.id == 3).count()
+    }
+
     #[test]
-    fn a_word_where_two_windows_of_a_gap_meet_comes_out_once_unless_it_starts_on_the_seam() {
+    fn a_word_where_two_windows_of_a_gap_meet_comes_out_once() {
         // Speech at 1 to 3 s and 40 to 42 s under the `CoreML` settings:
-        // the 28 s gap after the first chunk is decoded in two windows that
-        // share 2 s, and their owned spans meet at 25.75 s. A quiet word
-        // placed up to two frames either side of that, on and off the
-        // frame grid, comes out once. The known limit: the two windows time
-        // a word on their own frame grids, up to half a frame apart, so one
-        // that starts within half a frame of the seam can fall on the far
-        // side of it in both, and is lost (or, the other way round, kept
-        // twice), as here 30 ms before it.
-        let regions = vec![
-            sample_count(1.0)..sample_count(3.0),
-            sample_count(40.0)..sample_count(42.0),
-        ];
-        // Faint noise, so no window is digital silence.
-        let mut samples: Vec<f32> = (0..45 * SAMPLE_RATE)
-            .map(|i| if i % 2 == 0 { 3e-5 } else { -3e-5 })
-            .collect();
-        put(&mut samples, 11, 1.5, 6);
-        put(&mut samples, 12, 40.5, 6);
-        let transcriber = || {
-            let mut t = quiet_transcriber(random_config(1, true), 0);
-            t.vad = Box::new(FixedVad(regions.clone()));
-            t
-        };
-        let spans = transcriber().transcribe(&samples, None).unwrap().spans;
-        let gaps: Vec<&Span> = spans.iter().filter(|s| !s.recover).collect();
-        assert!(gaps.len() >= 2, "{spans:?}");
-        assert!(gaps[0].window.end > gaps[1].window.start, "{spans:?}");
-        let seam = gaps[1].owned.start;
-        assert_eq!(seam, sample_count(25.75));
-        for offset in -2..=2 {
-            for phase in [0, FRAME_SAMPLES / 2] {
-                let mut samples = samples.clone();
-                let at = (seam / FRAME_SAMPLES).checked_add_signed(offset).unwrap();
-                let from = at * FRAME_SAMPLES + phase;
-                samples[from..from + 4 * FRAME_SAMPLES].fill(0.003);
-                let transcript = transcriber().transcribe(&samples, None).unwrap();
-                assert_eq!(transcript.spans, spans);
-                let lost = (offset, phase) == (0, FRAME_SAMPLES / 2);
-                let text = if lost { "w11 w12" } else { "w11 w3 w12" };
-                assert_eq!(transcript.text(), text, "{offset} {phase}");
+        // the gap after the first chunk is decoded in two windows that
+        // share 2 s, and their owned spans meet at 25.75 s. The windows time
+        // a word on their own frame grids, up to half a frame apart, and
+        // each keeps the words up to two frames past the seam, so a quiet
+        // word up to three frames either side of it, on and off the frame
+        // grid, comes out once: one window keeps it, or both do and the
+        // later's copy falls away. The same in the mirror, the recording
+        // played backwards, and over the jittering fake, which moves both
+        // windows' words alike here: a gap's windows are of one length.
+        let total = 45 * SAMPLE_RATE;
+        for mirror in [false, true] {
+            let flip = |r: Range<usize>| {
+                if mirror {
+                    total - r.end..total - r.start
+                } else {
+                    r
+                }
+            };
+            let mut regions: Vec<Range<usize>> = [1.0..3.0, 40.0..42.0]
+                .into_iter()
+                .map(|r| flip(sample_count(r.start)..sample_count(r.end)))
+                .collect();
+            regions.sort_by_key(|r| r.start);
+            // Faint noise, so no window is digital silence.
+            let mut samples: Vec<f32> = (0..total)
+                .map(|i| if i % 2 == 0 { 3e-5 } else { -3e-5 })
+                .collect();
+            for (piece, region) in [11, 12].into_iter().zip(&regions) {
+                let at = region.start + SAMPLE_RATE / 2;
+                samples[at..at + 6 * FRAME_SAMPLES].fill(piece as f32 / 1000.0);
+            }
+            for jitter in [false, true] {
+                let transcriber = || {
+                    let mut t = quiet_transcriber(random_config(1, true), 0);
+                    t.vad = Box::new(FixedVad(regions.clone()));
+                    t.workers[0].jitter = jitter;
+                    t
+                };
+                let spans = transcriber().transcribe(&samples, None).unwrap().spans;
+                let gaps: Vec<&Span> = spans
+                    .iter()
+                    .filter(|s| !s.chunk && s.window.len() > 10 * SAMPLE_RATE)
+                    .collect();
+                assert_eq!(gaps.len(), 2, "{spans:?}");
+                assert!(gaps[0].window.end > gaps[1].window.start, "{spans:?}");
+                let seam = gaps[1].owned.start;
+                if !mirror {
+                    assert_eq!(seam, sample_count(25.75));
+                }
+                for offset in -3..=3 {
+                    for phase in [0, FRAME_SAMPLES / 2] {
+                        let mut samples = samples.clone();
+                        let at = (seam / FRAME_SAMPLES).checked_add_signed(offset).unwrap();
+                        let from = at * FRAME_SAMPLES + phase;
+                        samples[from..from + 4 * FRAME_SAMPLES].fill(0.003);
+                        let transcript = transcriber().transcribe(&samples, None).unwrap();
+                        assert_eq!(transcript.spans, spans);
+                        let text = transcript.text();
+                        let case = format!("mirror {mirror} jitter {jitter} {offset} {phase}");
+                        assert_eq!(threes(&transcript), 1, "{case}: {text}");
+                    }
+                }
             }
         }
     }
@@ -1788,9 +2048,13 @@ mod tests {
         );
     }
 
-    /// A chunk from 1 to 9 s that owns the recording up to 9.75 s.
+    /// A chunk from 1 to 9 s that owns the recording up to 9.75 s and
+    /// reaches 1.5 s past its end.
     fn chunk_span() -> Span {
-        span((0.0, 9.75), (1.0, 9.0), true)
+        Span {
+            reach: 0..sample_count(10.5),
+            ..span((0.0, 9.75), (1.0, 9.0), true)
+        }
     }
 
     /// Recovers the 1 to 9 s chunk of the empty-chunk fixture, with a
@@ -1813,9 +2077,9 @@ mod tests {
     }
 
     #[test]
-    fn an_accepted_recovery_keeps_only_the_words_that_start_in_its_span() {
+    fn an_accepted_recovery_keeps_only_the_words_in_its_reach() {
         // The 1 to 15 s window decodes both words; the one at 10.8 s lies
-        // past the chunk's owned span and belongs to the next chunk.
+        // past the chunk's reach and belongs to the next chunk.
         let (tokens, t) = recover_with(&[(0.0, 6.0)]);
         assert_eq!(t.render(&tokens), "w5s25");
     }
@@ -1836,8 +2100,8 @@ mod tests {
     }
 
     #[test]
-    fn a_recovery_keeps_a_word_it_owns_whole_past_its_span() {
-        // The chunk owns up to 10.6 s and "w7 s27" starts at 10.52 s. The
+    fn a_recovery_keeps_a_word_whole_past_its_reach() {
+        // The chunk reaches to 10.6 s and "w7 s27" starts at 10.56 s. The
         // recovery keeps the whole word, so the merge with the next window,
         // which heard all of it, keeps it whole.
         let (mut config, mut samples) = empty_chunk_fixture(50);
@@ -1846,7 +2110,10 @@ mod tests {
         overlay(&mut samples, &audio(18.0, 132, &[7, 27]));
         let mut t = transcriber(config, 110);
         let mut stats = DecodeStats::default();
-        let chunk = span((0.0, 10.6), (1.0, 9.0), true);
+        let chunk = Span {
+            reach: 0..sample_count(10.6),
+            ..span((0.0, 10.6), (1.0, 9.0), true)
+        };
         let left = t.recover(&samples, &chunk, Vec::new(), &mut stats).unwrap();
         assert_eq!(stats.recoveries_accepted, 1);
         assert_eq!(t.render(&left), "w5s25 w7s27");
@@ -1945,4 +2212,6 @@ mod tests {
             "{checked} {frame0_clamped} {on_grid}"
         );
     }
+
+    mod differential;
 }

@@ -250,12 +250,12 @@ fn extra_windows(transcript: &Transcript) -> impl Iterator<Item = &Range<usize>>
     transcript
         .spans
         .iter()
-        .filter(|s| !s.recover)
+        .filter(|s| !s.chunk)
         .map(|s| &s.window)
 }
 
 fn chunk_count(transcript: &Transcript) -> usize {
-    transcript.spans.iter().filter(|s| s.recover).count()
+    transcript.spans.iter().filter(|s| s.chunk).count()
 }
 
 fn transcribe(case: &Case) -> Transcript {

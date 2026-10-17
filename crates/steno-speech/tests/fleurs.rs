@@ -106,7 +106,7 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
             score.substitutions,
             score.deletions,
             score.insertions,
-            transcript.spans.iter().filter(|s| s.recover).count(),
+            transcript.spans.iter().filter(|s| s.chunk).count(),
             transcript.stats.recoveries_accepted,
             transcript.stats.recoveries_tried,
             audio_seconds / wall
