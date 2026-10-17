@@ -476,7 +476,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
-| A16a | The owned-span partition (Nicolai's decision 3, 2026-10-15): the recording split once into disjoint owned spans, each decode keeping the words that start in its own span; CoreML replays identically on FLEURS, the corpus, the meeting and the crafted cases, and ONNX stays byte-identical on FLEURS | audio (`fix/a16a-owned-spans`) |
+| A16a | The owned-span partition (Nicolai's decision 3, 2026-10-15): the recording split once into disjoint owned spans, each decode keeping the words that start in its own span; CoreML replays identically on FLEURS, the corpus, the meeting and the crafted cases, and ONNX stays byte-identical on FLEURS | audio (#310) |
 | A16b | The ONNX engine's extra windows on the partition: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after A16a |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured (it aborts on Linux, not on the Mac); every read of a recording marked durably, the in-process CoreML stage included; a recording whose read ended with the app read once more, and quarantined the second time in a row ("Steno stopped while reading this recording") with the file kept and Process again offered; the allocations bounded by a walk of the boxes, chunks and tables before symphonia opens a file, its reader the one the file's first bytes name (MP4, CAF or WAV) and opened where the walk began, any other kind of file refused plainly; kill tests for one kill and for two | audio (#298) |
 | A18 | A capture thread that misses cycles never loses audio silently: on PipeWire, Core Audio and WASAPI the missed frames are written as silence on every lane (past a second only counted), counted in the statistics and in the note about missing audio; PipeWire's data-loop thread without real-time scheduling is a warning | audio (#297) |
@@ -1553,7 +1553,7 @@ Each lands before `0.11.0-rc.1`.
   recording is split once into owned spans, each decode keeps the words that
   start in its own span, and recovery widens only the decoded window. Two
   PRs, both before `0.11.0-rc.1`.
-  - **A16a The owned-span partition** (`fix/a16a-owned-spans`).
+  - **A16a The owned-span partition** (#310).
     `steno_speech::chunker::partition` splits the recording into
     `Span { owned, window, recover }`: one span per chunk of the layout
     (`recover`; its window is the chunk, so the decode is unchanged) and one
