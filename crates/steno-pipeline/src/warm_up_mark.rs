@@ -154,8 +154,8 @@ impl WarmUpMark {
     /// user's end of the fallback ([`crate::SpeechFallback::turn_off`]), so
     /// the engine's first load after it never runs beside a recording. A
     /// mark that cannot be written returns the error, and the fallback
-    /// stays on; this run's warm-up stays off all the same, which only
-    /// keeps it off until a load.
+    /// stays on; the warm-up is off for this run all the same, until a
+    /// load.
     pub(crate) fn hold_off(&self) -> std::io::Result<String> {
         let id = format!("{}{}", Self::HELD_PREFIX, uuid::Uuid::new_v4());
         let mut state = self.state();

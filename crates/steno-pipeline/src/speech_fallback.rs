@@ -35,9 +35,10 @@
 //! logged at `warn`: an unparseable one is written again, on, with the
 //! marks this launch found; an unreadable one is left as it is. At launch,
 //! a file that cannot be written leaves the fallback to what the launch
-//! found, for this run only, logged at `warn`. The `steno` command neither reads nor writes the
-//! file: a command names its engine itself, and an abort there ends only
-//! the command, whose marks the app's next launch reads.
+//! found, for this run only, logged at `warn`. The `steno` command neither
+//! reads nor writes the file: a command names its engine itself, and an
+//! abort there ends only the command, whose marks the app's next launch
+//! reads.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
