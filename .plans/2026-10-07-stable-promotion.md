@@ -476,7 +476,8 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
-| A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
+| A16a | The owned-span partition (Nicolai's decision 3, 2026-10-15): the recording split once into disjoint owned spans, each decode keeping the words that start in its own span; CoreML replays identically on FLEURS, the corpus, the meeting and the crafted cases, and ONNX stays byte-identical on FLEURS | audio (`fix/a16a-owned-spans`) |
+| A16b | The ONNX engine's extra windows on the partition: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after A16a |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured (it aborts on Linux, not on the Mac); every read of a recording marked durably, the in-process CoreML stage included; a recording whose read ended with the app read once more, and quarantined the second time in a row ("Steno stopped while reading this recording") with the file kept and Process again offered; the allocations bounded by a walk of the boxes, chunks and tables before symphonia opens a file, its reader the one the file's first bytes name (MP4, CAF or WAV) and opened where the walk began, any other kind of file refused plainly; kill tests for one kill and for two | audio (#298) |
 | A18 | A capture thread that misses cycles never loses audio silently: on PipeWire, Core Audio and WASAPI the missed frames are written as silence on every lane (past a second only counted), counted in the statistics and in the note about missing audio; PipeWire's data-loop thread without real-time scheduling is a warning | audio (#297) |
 | A19 | No in-process speech beside a live recording, and the speech sidecar after a CoreML abort: a job waits to load or run CoreML while a recording starts, runs or stops ("Waiting for the recording to finish"); a warm-up mark or a CoreML reading mark left by a crash turns the speech sidecar on in CoreML's place, durably, until the user turns the Neural Engine back on in Settings ("Use again"), the meeting waiting for the sidecar's models with "Neural Engine off after a crash: download the speech models in Settings"; kill tests for a load killed in a job and in a warm-up | audio |
@@ -1004,9 +1005,8 @@ Each lands before `0.11.0-rc.1`.
   microphone lane alone). Known limits: a gap shorter than 2.5 s is not
   decoded, even where it is the uncovered edge of a longer pause, because
   windows that short insert words; and a word that a chunk and a window
-  both hear, across a gap's edge or beside the words a recovery kept inside
-  the gap, comes out twice when the two copies start more than two encoder
-  frames apart, because the merge cannot tell such a copy from the word
+  both hear across a gap's edge can come out twice (A16a below has the
+  cases as built), because the join cannot tell such a copy from the word
   said again.
   Measured with A13 (#279) in: FLEURS German `cat/` through CoreML 4.87 % mean
   WER, from 5.46 % (the ONNX engine 4.88 %). The parity test against the Swift
@@ -1548,31 +1548,90 @@ Each lands before `0.11.0-rc.1`.
     build reads the mark, and a load whose diarizer then fails clears it
     too.
   - Owner: audio. It blocks stable (D3).
-- **A16 Extra windows for the ONNX engine.** A2's design (#263) on the ONNX
-  engine: every gap of 2.5 s or more (`MIN_GAP_SECONDS`) decoded in extra
-  windows, the long-pause skip kept for the cuts. After #263 merges.
-  - Gates, against ONNX's own numbers: FLEURS German `cat/` at or below
+- **A16 Owned spans, then extra windows for the ONNX engine.** Nicolai's
+  decision 3 (2026-10-15, after the speech-merge review of #263): the
+  recording is split once into owned spans, each decode keeps the words that
+  start in its own span, and recovery widens only the decoded window. Two
+  PRs, both before `0.11.0-rc.1`.
+  - **A16a The owned-span partition** (`fix/a16a-owned-spans`).
+    `steno_speech::chunker::partition` splits the recording into
+    `Span { owned, window, recover }`: one span per chunk of the layout
+    (`recover`; its window is the chunk, so the decode is unchanged) and one
+    per extra window over a gap (the windows as before). Two neighbouring
+    spans meet at the middle of the audio between their windows: the middle
+    of two chunks' overlap, the edge a chunk and a gap's window share, the
+    middle of the overlap of two windows of one gap, and the middle of an
+    undecoded gap (shorter than `MIN_GAP_SECONDS`, digital silence, or every
+    gap while `decode_gaps` is off), whose halves the spans either side own.
+  - **The ownership invariant.** Reviews check this instead of inventing
+    layouts:
+    - the owned spans are sorted, disjoint and cover `0..total`; with
+      nothing to decode there is no span;
+    - `window ⊇ owned`, except the share of an undecoded gap a span owns,
+      which no window decodes;
+    - `window.len() <= max_seconds`;
+    - each decode keeps only the words whose first piece starts in its own
+      owned span (`own`: pieces grouped into words at each word start, a
+      word kept whole when its first piece's `Token::sample` lies in the
+      span, a leading continuation dropped except at the recording's start,
+      where no span before heard its word). One exception until after
+      stable: the chunks of a run (the chunks between two extra windows)
+      keep the LCS merge between them, so their plain decodes go to it
+      whole. Replacing that merge waits until after stable and needs a D9
+      ruling (decision 3).
+    - `a_partition_owns_every_sample_once` (chunker) checks the invariant
+      apart from any merge rule.
+  - Recovery: a chunk looks empty on its window, as before; the candidates
+    are scored on the span's owned audio, and the winner passes through
+    `own`. `keep_chunk_and_overlap` is gone.
+  - The join concatenates the spans' words in order, with one measured rule
+    for the residual: a gap's first word falls away when it is the chunk's
+    last word heard again (the same piece, starting within two encoder
+    frames). It replaces `Seam::fit`. `splice_gaps`, `Seam`,
+    `keep_chunk_and_overlap`, `gap_windows` and the decode jobs are deleted.
+  - Gates, met: CoreML replays identically. One CoreML run per set at main
+    (0dd22ccaf) with a measurement-only dump of every decode (the window,
+    and the tokens with frame and phase), then both merges replayed on
+    atlas from the dumps, without models: FLEURS German `cat/`, the corpus,
+    the 15-minute meeting's two lanes and the crafted -20/-26 dB, silence and
+    noise cases come out identical, text and tokens, from the same windows
+    (451, 366, 190 and 43). So FLEURS stays at 4.874 % (S/D/I 245/37/39), the
+    corpus at 8.46 %, no word is added, the crafted cases keep 14, 12, 19 and
+    14 words, silence and noise add none, and the cost is unchanged. On
+    those sets the join's rule fired 0 times and `own` dropped no token: no
+    gap window of FLEURS or the corpus holds a token. Confirmed by a live
+    Forge run at the PR head. ONNX at its shipped settings (`decode_gaps`
+    off) is byte-identical to main on FLEURS.
+  - What changes where the gates do not reach: without extra windows (ONNX)
+    an accepted recovery keeps every word it heard in its chunk's owned
+    span, which reaches to the middle of a skipped long pause, where it kept
+    2 s past the chunk before. No ONNX chunk of FLEURS is retried.
+  - The punctuation split #263 left to A16 is moot: a decoded gap is its
+    window's, and a recovery keeps nothing there. The case is a test
+    (`a_punctuation_piece_from_a_later_recovery_loses_no_window_word`).
+  - Known limits:
+    - a word sounding across the end of a gap's window into a chunk comes
+      out twice when the chunk hears its rest as a word of its own;
+    - a word sounding across a chunk's end into a gap comes out twice when
+      the two copies start more than two frames apart; the 2-frame stutter
+      of #263 stays: a word two frames long or shorter, said twice back to
+      back across that edge, comes out once;
+    - new: where two windows of one gap meet (gaps over 15 s, CoreML), a
+      word that starts within about half a frame of the seam can come out
+      twice or not at all, because each window times it on its own frame
+      grid; the LCS between a gap's windows matched the two copies. No gate
+      set has a token within two frames of such a seam (6 seams on the
+      corpus, 1 in the meeting); the test
+      `a_word_where_two_windows_of_a_gap_meet_comes_out_once_unless_it_starts_on_the_seam`
+      pins it.
+  - **A16b Extra windows for the ONNX engine** (after A16a merges).
+    `decode_gaps` on for the ONNX engine, the long-pause skip kept for the
+    cuts. Gates, against ONNX's own numbers: FLEURS German `cat/` at or below
     4.882 % mean WER; the corpus not worse; no word added where the Swift
     transcripts have none, and none from silence or room noise; at most
     +15 % runtime. If it misses them, the measured lead/tail switch instead
     (the lead-in and the tail only, the long-pause skip kept; measured at
     FLEURS 4.865 % and corpus 9.794 %, no runtime cost).
-  - Known loss to carry, or to make moot by redesigning the gap merge:
-    `splice_gaps` splits a gap's chunk tokens into sides at the first
-    word start past the earlier recovery's keep frame, while
-    `keep_chunk_and_overlap` lets a later recovery's tokens begin at any
-    splice-safe piece, punctuation included. A later recovery whose kept
-    tokens begin with a punctuation piece past that frame puts the piece on
-    the earlier side, whose cover then drops every window-only word
-    between the two recoveries. Direct call: a gap from 10 to 20 s, 2 s of
-    overlap, chunk tokens `w11` at 4 s, `w13` at 10.4 s, `.` at 18.0 s,
-    `w5` at 18.4 s and `w12` at 22 s, and a window word `w2` at 14 s,
-    which is lost. It needs accepted recoveries on both sides of one gap,
-    which CoreML's settings cannot produce (their 15 s clamp leaves room
-    for a recovery to reach into a gap from one side only), so it
-    reaches only the ONNX engine, where the windows are still off. The
-    fix is one token: split at `vocab.is_splice_safe(t.id)` instead of
-    `seam.starts_word(t)`, with the case above as a test.
   - Owner: audio.
 - **A17 No crash loop from a file that aborts the process.** Found by A14's
   testing (#280): symphonia sizes some allocations straight from file
