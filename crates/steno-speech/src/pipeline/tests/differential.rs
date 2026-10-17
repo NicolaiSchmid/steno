@@ -1065,7 +1065,7 @@ fn every_word_the_old_merge_keeps_comes_out() {
     println!("{tally:?}");
     // Words checked (about 24,000 with this seed), cases with an accepted
     // recovery (about 800), and words that came out more often than from
-    // the old merge (about 1 in 140).
+    // the old merge (about 1 in 150); `glues` is about 25.
     assert!(
         tally.words > 20_000 && tally.recovered > 600 && tally.doubled * 50 < tally.words,
         "{tally:?}"
