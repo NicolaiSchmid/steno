@@ -659,13 +659,13 @@ fn ref_tally(tokens: &[Token], words: &[Placed], slack: usize) -> Vec<(usize, u8
 }
 
 /// One differential run: the old merge's tokens, the transcript, what its
-/// final windows heard and what its filtered decodes heard
-/// ([`ref_heard`]).
+/// final windows heard, and what its gap windows and accepted recoveries
+/// heard in their reach ([`ref_heard`]).
 struct RefRun {
     old: Vec<Token>,
     new: Transcript,
     heard: Vec<Token>,
-    filtered: Vec<Token>,
+    reached: Vec<Token>,
 }
 
 /// How the fake hears one case: the jitter in frames and the deaf edges
@@ -702,12 +702,12 @@ fn ref_run(case: &RefCase, config: &PipelineConfig, min_frames: usize, hearing: 
     let old = ref_transcribe(&mut make(), samples);
     let mut t = make();
     let new = t.transcribe(samples, None).unwrap();
-    let (heard, filtered) = ref_heard(&mut t, samples, &new);
+    let (heard, reached) = ref_heard(&mut t, samples, &new);
     RefRun {
         old,
         new,
         heard,
-        filtered,
+        reached,
     }
 }
 
@@ -726,7 +726,7 @@ fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> (Vec<usize>, Vec<us
     let old = ref_tally(&run.old, &case.words, slack);
     let new = ref_tally(&run.new.tokens, &case.words, slack);
     let heard = ref_tally(&run.heard, &case.words, slack);
-    let filtered = ref_tally(&run.filtered, &case.words, slack);
+    let reached = ref_tally(&run.reached, &case.words, slack);
     let repeats = |w: usize| {
         let word = &case.words[w];
         let before = (0..case.words.len())
@@ -748,7 +748,7 @@ fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> (Vec<usize>, Vec<us
         } else if old[w].1 & !new[w].1 != 0 {
             out.1.push(w);
         }
-        if filtered[w].0 > 0 && new[w].0 == 0 && !repeats {
+        if reached[w].0 > 0 && new[w].0 == 0 && !repeats {
             out.2.push(w);
         }
     }
