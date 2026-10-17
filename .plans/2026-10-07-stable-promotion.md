@@ -1921,7 +1921,20 @@ Each lands before `0.11.0-rc.1`.
     dropped after a timestamp error; the gap without the last packet; the
     follower's padding ignored, without the target, summed, not held for
     the re-prime, not cleared, not run; its flag not set; a wrapping
-    counter; the half-packet rule strict; a ratio without rounding.
+    counter; the half-packet rule strict; a ratio without rounding; at the
+    stop, the staging's count not handed on, the run before the re-prime
+    or the current one always taken, the target taken off, the readings
+    kept at a rebuild, dropped, or put on every lane; the hold never or
+    always clearing, without its period, not restarted at a re-prime or
+    not counting the pulls while the lane is out; the flag's padding never
+    taken, taken from the current run alone or without the run before the
+    re-prime, taken whatever the queue at the flag, never, or without the
+    target, ignored or less the target; the zeros before the first prime
+    left out; the first move of the positions never seen, seen at any
+    advance, seen again after a pause, or its pair kept; the first pair
+    never replaced or replaced by any short pair; a fill without a
+    matched last QPC pair; the stop's counter read without a sane QPC,
+    past only the last packet, filled, or uncapped.
   - **The property test.** `crates/steno-audio/tests/wasapi_loss_property.rs`
     runs random packet streams through `DevicePositions`, the master's
     router and the recorder's note (1 000 streams in CI, fixed seed; 20 000
