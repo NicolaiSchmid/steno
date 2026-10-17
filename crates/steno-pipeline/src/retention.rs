@@ -138,7 +138,7 @@ mod tests {
     /// Two asset rows for one master, one kept forever and one expired
     /// after processing (a fault's leftover): the sweep removes nothing,
     /// leaves both rows as they are, and removes the master once the other
-    /// row is due too.
+    /// row is due too, and then both rows lose `expiresAt`.
     #[test]
     fn the_sweep_keeps_a_master_another_asset_row_still_needs() {
         let dir = tempfile::tempdir().unwrap();
@@ -190,6 +190,77 @@ mod tests {
             .unwrap();
         RetentionSweep::new(store.clone()).run(now).unwrap();
         assert!(!master.exists(), "both rows due: the master goes");
+        assert!(
+            rows().iter().all(|asset| asset.expires_at.is_none()),
+            "both rows lose their stamp"
+        );
+    }
+
+    /// Two asset rows for one master, each with its own sidecar and
+    /// mixdown, one kept for a day and one expired: the first sweep keeps
+    /// the master. Once the keeper falls due too, the next sweep removes
+    /// the master once and every row's sidecar and mixdown, and both rows
+    /// lose `expiresAt`, so no row is left due once its master went.
+    #[test]
+    fn two_rows_on_one_master_both_lose_their_stamp_once_the_master_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let now = Utc::now();
+        let mut meeting = sample_data::meeting();
+        meeting.state = MeetingState::Ready;
+        let layout = RecordingLayout::new(&dir.path().join("audio"), meeting.id);
+        layout.create_directories(true).unwrap();
+        let master = layout.master(AudioFormat::Wav16kInt16);
+        std::fs::write(&master, b"wav").unwrap();
+        let row = |name: &str, expires_at| {
+            let sidecar = layout.directory.join(format!("{name}-mic.wav"));
+            let mixdown = layout.directory.join(format!("{name}-mixdown.m4a"));
+            std::fs::write(&sidecar, b"wav").unwrap();
+            std::fs::write(&mixdown, b"m4a").unwrap();
+            let asset = AudioAsset {
+                id: Uuid::new_v4(),
+                meeting_id: meeting.id,
+                url: file_url(&master, false),
+                format: AudioFormat::Wav16kInt16,
+                lanes: vec![AudioLane::Mixed],
+                sidecars_16k: BTreeMap::from([(AudioLane::Mic, file_url(&sidecar, false))]),
+                mixdown_url: Some(file_url(&mixdown, false)),
+                retention: AudioRetention::KeepDays(1),
+                expires_at: Some(expires_at),
+            };
+            (asset, [sidecar, mixdown])
+        };
+        let (keeper, keeper_files) = row("keeper", now + Duration::hours(1));
+        let (expired, expired_files) = row("expired", now - Duration::hours(1));
+        store.save_meeting_with_asset(&meeting, &keeper).unwrap();
+        store.save_asset(&expired).unwrap();
+
+        let removed = RetentionSweep::new(store.clone()).run(now).unwrap();
+        assert_eq!(removed, Vec::<PathBuf>::new());
+        assert!(master.exists(), "the keeper is not due yet");
+
+        let later = now + Duration::hours(2);
+        let removed = RetentionSweep::new(store.clone()).run(later).unwrap();
+        assert!(!master.exists(), "both due: the master goes");
+        assert_eq!(
+            removed.iter().filter(|path| **path == master).count(),
+            1,
+            "removed once: {removed:?}"
+        );
+        for file in keeper_files.iter().chain(&expired_files) {
+            assert!(!file.exists(), "{} goes", file.display());
+        }
+        let stamps: Vec<_> = store
+            .assets()
+            .unwrap()
+            .iter()
+            .map(|asset| asset.expires_at)
+            .collect();
+        assert_eq!(stamps, [None, None], "both rows stay, unstamped");
+        assert_eq!(
+            store.expired_assets(later).unwrap(),
+            Vec::<AudioAsset>::new()
+        );
     }
 
     #[test]

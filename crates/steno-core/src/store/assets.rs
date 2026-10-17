@@ -218,15 +218,17 @@ impl Store {
     /// itself: kept forever, not stamped yet or not expired yet, or its
     /// meeting recording, queued or processing) is not swept: `remove` is
     /// not called, nothing changes, and the next sweep checks again, so the
-    /// master goes once every row naming it is due. Two rows name one master
-    /// only after a fault, such as a phone retry's commit into a copy the
-    /// launch adopted without its ledger row, which
-    /// [`Store::commit_admission_durably`] refuses; the sweep still never
-    /// deletes audio another row keeps. The write lock is
-    /// held from the check through the removal, so a run that `enqueue` or
-    /// `reprocess` saves `queued` in a write of its own comes either before
-    /// the check, and the asset is skipped, or after the files are gone. The
-    /// store waits on the removal, a few files on the audio folder's disk.
+    /// master goes once every row naming it is due. A master already gone
+    /// needs no keeper: the asset is swept, so its other files go and its
+    /// stamp clears. Two rows name one master only after a fault, such as
+    /// (before [`Store::commit_admission_durably`] refused it) a phone
+    /// retry's commit into a copy the launch adopted without its ledger
+    /// row; the sweep still never deletes audio another row keeps. The
+    /// write lock is held from the check through the removal, so a run
+    /// that `enqueue` or `reprocess` saves `queued` in a write of its own
+    /// comes either before the check, and the asset is skipped, or after
+    /// the files are gone. The store waits on the removal, a few files on
+    /// the audio folder's disk.
     /// Rust only: Swift's sweep acts on the list it read first, and Swift
     /// has no `reprocess`.
     pub fn sweep_expired_asset(
@@ -246,7 +248,9 @@ impl Store {
             else {
                 return Ok(false);
             };
-            if let Some(keeper) = keeper_of_master(transaction, &asset, now)? {
+            let master_on_disk =
+                crate::paths::file_url_path(&asset.url).is_some_and(|master| master.exists());
+            if master_on_disk && let Some(keeper) = keeper_of_master(transaction, &asset, now)? {
                 tracing::info!(
                     asset_id = %asset.id,
                     meeting_id = %asset.meeting_id,
