@@ -577,7 +577,7 @@ fn run_stream(
         }
     };
     let loopback = info.loopback;
-    let continuously = loopback != Some(LoopbackKind::Endpoint);
+    let continuously = delivers_continuously(loopback);
     let _ = events.send(StreamEvent::Opened(Ok(info)));
     // `start` drops the sender when it gives up.
     let Ok(mut body) = bodies.recv() else {
@@ -652,11 +652,20 @@ fn run_stream(
     ends
 }
 
+/// Whether a stream on `loopback` (`None` for the microphone) delivers
+/// continuously: every stream but endpoint loopback, which delivers
+/// nothing while nothing plays.
+fn delivers_continuously(loopback: Option<LoopbackKind>) -> bool {
+    loopback != Some(LoopbackKind::Endpoint)
+}
+
 /// The stop's line about `source`'s clocks (`DevicePositions`'s
 /// `Display`), on `loopback` for the system stream, read once the stream
 /// has stopped: at `warn` when the stream had `discontinuities` and their
 /// jumps were counted, not filled (no sane QPC), or when a stream that
-/// delivers continuously ran without a sane QPC; at `info` otherwise.
+/// delivers continuously had its QPC judged not sane; at `info`
+/// otherwise, a QPC not judged yet (a stream under 2 s) included, which
+/// the line says.
 fn log_positions(
     source: StreamSource,
     loopback: Option<LoopbackKind>,
@@ -676,15 +685,24 @@ fn log_positions(
     // read only past the drift allowance, and process loopback counts no
     // loss before its first packet: the stable plan's A18 names this limit,
     // and this line shows a recording that ran with it.
-    let continuously = loopback != Some(LoopbackKind::Endpoint);
-    let no_sane_qpc = if continuously && positions.qpc_sane() != Some(true) {
-        "; it ran without a sane QPC, so a loss before its first packet or with its positions \
-         standing still may not be counted"
+    let qpc_sane = if delivers_continuously(loopback) {
+        positions.qpc_sane()
     } else {
-        ""
+        Some(true)
     };
-    if counted.is_empty() && no_sane_qpc.is_empty() {
-        tracing::info!("{} stream{on}: {positions}", source.as_str());
+    let no_sane_qpc = match qpc_sane {
+        Some(true) => "",
+        Some(false) => {
+            "; it ran without a sane QPC, so a loss before its first packet or with its \
+             positions standing still may not be counted"
+        }
+        None => {
+            "; its QPC was not judged (under 2 s), so a loss before its first packet or with \
+             its positions standing still may not be counted"
+        }
+    };
+    if counted.is_empty() && qpc_sane != Some(false) {
+        tracing::info!("{} stream{on}: {positions}{no_sane_qpc}", source.as_str());
     } else {
         tracing::warn!(
             "{} stream{on}: {positions}{counted}{no_sane_qpc}",
