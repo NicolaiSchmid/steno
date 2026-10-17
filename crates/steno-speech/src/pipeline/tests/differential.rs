@@ -656,6 +656,7 @@ fn ref_seam_layout(rng: &mut Rng, config: &PipelineConfig) -> RefCase {
     edges.sort_unstable();
     edges.dedup();
     let mut words = std::mem::take(&mut case.words);
+    let margin = 4 * FRAME_SAMPLES;
     for edge in edges {
         for _ in 0..3 {
             let Some(frame) =
@@ -679,7 +680,6 @@ fn ref_seam_layout(rng: &mut Rng, config: &PipelineConfig) -> RefCase {
                 frame,
                 frames: 2 + rng.below(5),
             };
-            let margin = 4 * FRAME_SAMPLES;
             let clear = words.iter().all(|o: &Placed| {
                 o.start(0) >= word.span().end + margin || word.start(0) >= o.span().end + margin
             });
@@ -732,12 +732,10 @@ fn ref_joins(
     vocab: &Vocab,
     slack: usize,
 ) -> Vec<Vec<RefPiece>> {
+    let place = |t: &Token| (ref_place(t, words, slack), t.sample());
     tokens
         .chunk_by(|_, next| !ref_starts_word(vocab, next))
-        .map(|word| {
-            let place = |t: &Token| (ref_place(t, words, slack), t.sample());
-            word.iter().map(place).collect()
-        })
+        .map(|word| word.iter().map(place).collect())
         .collect()
 }
 
@@ -795,7 +793,8 @@ fn ref_run(case: &RefCase, config: &PipelineConfig, min_frames: usize, hearing: 
 }
 
 /// What one case lost against the old merge, by placed word. `lost`,
-/// `pieces` and `glued` are the gate; `unheard` flags a case to look at.
+/// `pieces` and `glued` are the gate; `unheard` flags a case to look at;
+/// `glues` and `doubled` are counted.
 #[derive(Debug, Default)]
 struct Losses {
     /// Words the old merge keeps and the transcript loses.
@@ -812,6 +811,8 @@ struct Losses {
     /// with more pieces, all of them pieces the old merge did not keep
     /// there: allowed, and counted.
     glues: usize,
+    /// Words that came out more often than from the old merge.
+    doubled: usize,
 }
 
 /// Where `run` loses against the old merge ([`Losses`]). `unheard` also
@@ -856,7 +857,10 @@ fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> Losses {
             *pieces == word.pieces || pieces.last() == word.pieces.first()
         })
     };
-    let mut out = Losses::default();
+    let mut out = Losses {
+        doubled: old.iter().zip(&new).filter(|(m, a)| a.0 > m.0).count(),
+        ..Losses::default()
+    };
     for w in 0..case.words.len() {
         let repeats = repeats(w);
         if repeats && heard[w].0 == 0 {
@@ -876,24 +880,13 @@ fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> Losses {
     let after = ref_joins(&run.new.tokens, &case.words, &vocab, slack);
     let kept: std::collections::HashSet<(usize, usize)> =
         before.iter().flatten().filter_map(|p| p.0).collect();
-    let chunks: Vec<&Range<usize>> = run
-        .new
-        .spans
-        .iter()
-        .filter(|s| s.chunk)
-        .map(|s| &s.owned)
-        .collect();
     // Whether a word whose first piece starts at `head` may hold this piece
     // beyond a word of the old merge's.
-    let extra = |&(place, at): &RefPiece, head: usize| match place {
-        Some(place) if kept.contains(&place) => true,
-        Some(_) => {
-            let between = at.min(head)..at.max(head);
-            !chunks
-                .iter()
-                .any(|c| between.start <= c.start && c.end <= between.end)
-        }
-        None => false,
+    let extra = |&(place, at): &RefPiece, head: usize| {
+        let between = at.min(head)..at.max(head);
+        let chunk_between =
+            |s: &Span| s.chunk && between.start <= s.owned.start && s.owned.end <= between.end;
+        place.is_some_and(|p| kept.contains(&p) || !run.new.spans.iter().any(chunk_between))
     };
     // A piece as its placed word and id: the fake never gives one piece
     // twice in a row, so of a word's two equal pieces either can come out.
@@ -1014,10 +1007,8 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
         let run = ref_run(&layout, &config, min_frames, Hearing { jitter, deaf });
         tally.words += layout.words.len();
         tally.recovered += usize::from(run.new.stats.recoveries_accepted > 0);
-        let old = ref_tally(&run.old, &layout.words, slack);
-        let new = ref_tally(&run.new.tokens, &layout.words, slack);
-        tally.doubled += old.iter().zip(&new).filter(|(m, a)| a.0 > m.0).count();
         let mut losses = ref_losses(&layout, &run, slack);
+        tally.doubled += losses.doubled;
         tally.glues += losses.glues;
         // Over the deaf fake one window of a run can hear a word its
         // neighbour is deaf to, which the run's LCS drops in both merges
