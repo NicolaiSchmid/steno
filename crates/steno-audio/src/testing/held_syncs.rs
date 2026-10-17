@@ -1,0 +1,113 @@
+//! Held syncs, behind the `test-support` feature: a session's writer
+//! whose periodic sync of the files blocks, as a `FlushFileBuffers` or an
+//! `fsync` on a slow disk does, until the test lets it go, so a test can
+//! prove what keeps going while the writer thread is stuck in one (the
+//! level stream, A20 of `.plans/2026-10-07-stable-promotion.md`). Rust
+//! only: Swift syncs only at the close.
+
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
+
+use steno_core::AudioLane;
+
+use crate::capture::{CaptureError, RecordingWriterFactory};
+use crate::writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
+
+/// Holds every periodic sync of the writers its
+/// [`writer_factory`](Self::writer_factory) opens, until
+/// [`release`](Self::release); the writes and the close's own sync are not
+/// held. Release it before the session stops or drops, which waits for
+/// the writer thread.
+#[derive(Debug, Default)]
+pub struct HeldSyncs {
+    gate: Arc<Gate>,
+}
+
+#[derive(Debug, Default)]
+struct Gate {
+    state: Mutex<State>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    released: bool,
+    /// Whether a sync has begun, held or let through.
+    began: bool,
+}
+
+impl Gate {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl HeldSyncs {
+    /// [`RecordingWriter::new`], its periodic syncs held; for
+    /// [`CaptureSession::with_writer_factory`](crate::CaptureSession::with_writer_factory).
+    #[must_use]
+    pub fn writer_factory(&self) -> RecordingWriterFactory {
+        let gate = Arc::clone(&self.gate);
+        Arc::new(move |layout, lanes: &[AudioLane], keep_raw| {
+            Ok(Box::new(HeldWriter {
+                writer: RecordingWriter::new(layout, lanes, keep_raw)?,
+                gate: Arc::clone(&gate),
+            }) as Box<dyn RecordingWriting>)
+        })
+    }
+
+    /// Blocks until a sync begins, for up to `patience`; whether one did.
+    /// Before a [`release`](Self::release), that sync is held.
+    #[must_use]
+    pub fn wait_for_a_held_sync(&self, patience: Duration) -> bool {
+        let (state, _) = self
+            .gate
+            .changed
+            .wait_timeout_while(self.gate.lock(), patience, |state| !state.began)
+            .unwrap_or_else(PoisonError::into_inner);
+        state.began
+    }
+
+    /// Lets the held syncs go, and every later one through.
+    pub fn release(&self) {
+        self.gate.lock().released = true;
+        self.gate.changed.notify_all();
+    }
+}
+
+/// The production writer with its periodic sync behind the gate.
+struct HeldWriter {
+    writer: RecordingWriter,
+    gate: Arc<Gate>,
+}
+
+impl RecordingWriting for HeldWriter {
+    fn files(&self) -> RecordingFiles {
+        self.writer.files()
+    }
+
+    fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+        self.writer.write(frames)
+    }
+
+    fn sync(&mut self) -> std::io::Result<()> {
+        let mut state = self.gate.lock();
+        state.began = true;
+        self.gate.changed.notify_all();
+        drop(
+            self.gate
+                .changed
+                .wait_while(state, |state| !state.released)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        self.writer.sync()
+    }
+
+    fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+        self.writer.finish()
+    }
+
+    fn created_directory(&self) -> bool {
+        self.writer.created_directory()
+    }
+}

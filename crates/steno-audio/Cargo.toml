@@ -10,10 +10,11 @@ publish.workspace = true
 links = "speexdsp"
 
 [features]
-# The synthetic backend's held outages (`SyntheticOptions::hold_outages`):
-# a device change or stall that waits until the test releases it. Only the
-# tests turn it on, through `[dev-dependencies]` (here and in
-# `steno-services`), so no build of the shell or the CLI carries it.
+# What a test holds until it releases it: the synthetic backend's held
+# outages (`SyntheticOptions::hold_outages`, a device change or stall) and
+# a writer's held syncs (`testing::HeldSyncs`). Only the tests turn it on,
+# through `[dev-dependencies]` (here and in `steno-services`), so no build
+# of the shell or the CLI carries it.
 test-support = []
 
 [dependencies]
@@ -45,7 +46,8 @@ serde_json.workspace = true
 cc.workspace = true
 
 [dev-dependencies]
-# The integration tests hold an outage (`hold_outages`).
+# The integration tests hold an outage (`hold_outages`) or a sync
+# (`HeldSyncs`).
 steno-audio = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
 tokio.workspace = true

@@ -7,20 +7,25 @@
 //! Not feature-gated, unlike `steno-core`'s `testing`: the synthetic
 //! backend is the production path's test double on Linux CI and the
 //! shell's capture source where no HAL exists, and nothing here pulls in
-//! a dependency the crate does not already have. Only the synthetic
-//! backend's held outages are, behind `test-support`: a test releases
-//! them, and no build of the shell or the CLI carries them.
+//! a dependency the crate does not already have. Only what a test holds
+//! and releases is, behind `test-support`: the synthetic backend's held
+//! outages and a writer's held syncs (`HeldSyncs`); no build of the
+//! shell or the CLI carries them.
 
 use std::time::Duration;
 
 pub mod fake_activity;
 pub mod fixtures;
+#[cfg(feature = "test-support")]
+pub mod held_syncs;
 pub mod manual_clock;
 pub mod rt;
 pub mod synthetic;
 
 pub use fake_activity::FakeProcessAudioActivity;
 pub use fixtures::{AudioFixtures, SplitMix64};
+#[cfg(feature = "test-support")]
+pub use held_syncs::HeldSyncs;
 pub use manual_clock::ManualClock;
 pub use synthetic::{SyntheticCaptureBackend, SyntheticEcho, SyntheticLane};
 

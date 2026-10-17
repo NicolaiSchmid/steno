@@ -1,8 +1,10 @@
-//! The serial writer: drains [`FrameRelay`] on its own thread, hands each
-//! frame to the [`RecordingWriting`] implementation, and republishes the
-//! processing thread's levels whenever their generation changed (so the
-//! 10 Hz level stream costs the processing thread nothing).
-//! Swift: `Sources/StenoAudio/Writer/WriterThread.swift`.
+//! The serial writer: drains [`FrameRelay`] on its own thread and hands
+//! each frame to the [`RecordingWriting`] implementation.
+//! Swift: `Sources/StenoAudio/Writer/WriterThread.swift`, which also
+//! republishes the levels; in Rust the session's level publisher
+//! (`capture::level_publisher`) does, on a thread of its own, so a slow
+//! sync here does not freeze the meter (A20 of
+//! `.plans/2026-10-07-stable-promotion.md`).
 //!
 //! Every [`SYNC_INTERVAL_FRAMES`] frames the thread
 //! [`sync`](RecordingWriting::sync)s the files, the master and the
@@ -32,11 +34,9 @@ use steno_core::AudioLane;
 use super::io_error;
 use super::recording_writer::{LaneFrames, RecordingWriting};
 use crate::FRAMES_PER_SECOND;
-use crate::capture::{CaptureError, LaneLevels};
-use crate::realtime::{FrameRelay, LevelSlot};
+use crate::capture::CaptureError;
+use crate::realtime::FrameRelay;
 
-/// Runs on the writer thread with the levels it republishes.
-pub type LevelsHandler = Box<dyn Fn(LaneLevels) + Send>;
 /// Runs on the writer thread once, with the first write error.
 pub type ErrorHandler = Box<dyn Fn(CaptureError) + Send>;
 
@@ -46,7 +46,8 @@ const MAX_LANES: usize = AudioLane::ALL.len();
 /// Frames written between two syncs of the files: 5 s of 10 ms frames,
 /// counted in audio rather than wall time, so gap silence counts and a
 /// test needs no clock. A slow sync is covered by the relay's 20 s
-/// ([`CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES`]).
+/// ([`CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES`]), and holds up no
+/// level: those go out from the level publisher's thread.
 ///
 /// [`CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES`]: crate::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES
 pub const SYNC_INTERVAL_FRAMES: usize = 5 * FRAMES_PER_SECOND;
@@ -54,11 +55,9 @@ pub const SYNC_INTERVAL_FRAMES: usize = 5 * FRAMES_PER_SECOND;
 struct Worker {
     relay: Arc<FrameRelay>,
     writer: Box<dyn RecordingWriting>,
-    levels: Arc<LevelSlot>,
     buffers: Vec<Vec<f32>>,
     lane_count: usize,
     has_raw_mic: bool,
-    on_levels: LevelsHandler,
     on_error: ErrorHandler,
     failed: Arc<AtomicBool>,
     /// The write error, kept for whoever closes the files.
@@ -66,7 +65,6 @@ struct Worker {
     /// The first failed sync's error, kept apart from `error` so it never
     /// stands in for what ended the recording.
     sync_error: Option<CaptureError>,
-    last_generation: usize,
     /// Frames written since the last sync.
     unsynced_frames: usize,
 }
@@ -125,15 +123,6 @@ impl Worker {
             self.sync_error = Some(io_error(&self.writer.files().master, &error));
         }
     }
-
-    fn publish_levels_if_changed(&mut self) {
-        let generation = self.levels.current_generation();
-        if generation == self.last_generation {
-            return;
-        }
-        self.last_generation = generation;
-        (self.on_levels)(self.levels.levels());
-    }
 }
 
 /// The writer thread's handle; see the module doc.
@@ -151,10 +140,8 @@ impl WriterThread {
     pub fn new(
         relay: Arc<FrameRelay>,
         writer: Box<dyn RecordingWriting>,
-        levels: Arc<LevelSlot>,
         lane_count: usize,
         has_raw_mic: bool,
-        on_levels: LevelsHandler,
         on_error: ErrorHandler,
     ) -> Self {
         assert!(
@@ -165,18 +152,15 @@ impl WriterThread {
         let worker = Worker {
             relay: Arc::clone(&relay),
             writer,
-            levels,
             buffers: (0..relay.channels())
                 .map(|_| vec![0.0; relay.frame_size()])
                 .collect(),
             lane_count,
             has_raw_mic,
-            on_levels,
             on_error,
             failed: Arc::clone(&failed),
             error: None,
             sync_error: None,
-            last_generation: 0,
             unsynced_frames: 0,
         };
         Self {
@@ -207,10 +191,8 @@ impl WriterThread {
                 while !stop.load(Ordering::Acquire) {
                     worker.relay.wake().wait(Duration::from_millis(50));
                     worker.drain();
-                    worker.publish_levels_if_changed();
                 }
                 worker.drain();
-                worker.publish_levels_if_changed();
                 worker
             })
             .expect("spawn writer thread");
@@ -349,10 +331,8 @@ mod tests {
                 seen: Arc::clone(&seen),
                 fail_syncs,
             }),
-            Arc::new(LevelSlot::new(false)),
             1,
             false,
-            Box::new(|_| {}),
             Box::new({
                 let reported = Arc::clone(&reported);
                 move |error| reported.lock().unwrap().push(error)

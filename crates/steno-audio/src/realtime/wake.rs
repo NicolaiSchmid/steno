@@ -1,8 +1,8 @@
-//! The consumer wake-up behind the rings: a counting signal the producer
-//! raises without a lock and the consumer waits on with a timeout. Swift
-//! uses a `DispatchSemaphore`; this is the same shape over a futex-free
-//! `Mutex<u32>` and `Condvar`, taken only on the consumer side and in
-//! `signal` when a waiter is actually parked.
+//! The consumer wake-up behind the rings and the level slot: a counting
+//! signal the producer raises without a lock and the consumer waits on
+//! with a timeout. Swift uses a `DispatchSemaphore`; this is the same
+//! shape over a futex-free `Mutex<u32>` and `Condvar`, taken only on the
+//! consumer side and in `signal` when a waiter is actually parked.
 //!
 //! The producer path (`signal`) is an atomic increment plus, when the
 //! consumer is parked, one `notify_one`. `notify_one` is the one call on
@@ -16,8 +16,9 @@
 //! other; `Release`/`Acquire` alone would let both miss. What remains is
 //! a `notify_one` that lands after the consumer's re-check and before its
 //! `wait_timeout`, since the producer takes no lock: that wake waits out
-//! the timeout (20 ms on the processing thread, 50 ms on the writer), and
-//! the rings hold the frames meanwhile. That same bounded cost is all a
+//! the timeout (20 ms on the processing thread, 50 ms on the writer, 100 ms
+//! on the level publisher), and the rings hold the frames meanwhile (the
+//! level slot its latest levels). That same bounded cost is all a
 //! weaker ordering would add, so no test tells `SeqCst` from `Relaxed`
 //! here; `tests/ring.rs` pins the wake itself (a parked consumer is woken
 //! by `signal`, not by its timeout).

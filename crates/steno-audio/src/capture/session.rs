@@ -23,7 +23,8 @@
 //! are now (backing off on the clock between tries, as often as below),
 //! fills the gap with silence through the relay so the master stays on
 //! wall time, starts a processing thread built for the new latencies, and
-//! keeps the sink, the relay, the writer thread, the writer and the files.
+//! keeps the sink, the relay, the level slot and its publisher, the writer
+//! thread, the writer and the files.
 //! The state stays `Recording`; `notices` carries `DeviceChanged` and
 //! `DeviceResumed`, and `StillRestarting` and `Delivering` (below). From the
 //! old stream's stop until the restarted one delivers, the levels read
@@ -169,9 +170,10 @@
 //!
 //! Swift's actor becomes one mutex over the session state. The rule that
 //! keeps it deadlock-free: **no thread is joined while the mutex is held**
-//! (one bounded exception on Linux, below). The backend's producer, the
-//! processing thread and the writer thread all call back into the session
-//! (device changes, levels, write errors) and take the mutex to do so;
+//! (one bounded exception on Linux, below). The backend's producer,
+//! `steno-wfail` (for the writer thread) and the level publisher call
+//! back into the session (device changes, write errors, levels) and take
+//! the mutex to do so;
 //! teardown therefore moves the recording out of the state under the
 //! lock, releases it, and only then stops the threads.
 //! The watch thread takes the mutex for each sample and reports through
@@ -248,6 +250,7 @@ use super::configuration::{
     CaptureConfiguration, CaptureError, CaptureNotice, CaptureResult, CaptureState,
     CaptureStatistics, DeviceChangeReason, LaneLevel, LaneLevels,
 };
+use super::level_publisher::LevelPublisher;
 use super::start_log::{self, start_log};
 use crate::aec::SpeexEchoCanceller;
 use crate::clock::{Cancel, Clock, SystemClock};
@@ -344,6 +347,12 @@ struct Active {
     processing: Option<ProcessingThread>,
     writer_thread: Option<WriterThread>,
     levels: Arc<LevelSlot>,
+    /// Hands the slot's levels to the subscribers from a thread of its own,
+    /// so a slow sync on the writer thread never freezes the meter (A20 of
+    /// `.plans/2026-10-07-stable-promotion.md`). It runs for the whole
+    /// recording, across rebuilds, since the slot is shared; `finish()`
+    /// stops it after the processing thread (`Core::stop_processing`).
+    level_publisher: LevelPublisher,
     ended_on_device_loss: bool,
     /// Rebuilds that succeeded.
     device_changes: usize,
@@ -1129,14 +1138,8 @@ impl Core {
         let mut writer_thread = WriterThread::new(
             Arc::clone(&relay),
             writer,
-            Arc::clone(&levels),
             lanes.len(),
             keep_raw,
-            Box::new(move |levels| {
-                if let Some(core) = on_levels.upgrade() {
-                    core.publish(levels);
-                }
-            }),
             Box::new(move |error| {
                 // The writer thread reports this; finalising joins that
                 // thread, so it runs on its own, as Swift's `Task` did.
@@ -1161,7 +1164,6 @@ impl Core {
             }),
         );
         writer_thread.start();
-        processing.start();
 
         let watch = self.backend.delivers_continuously(&lanes).then(|| {
             let probes = self.backend.probes_inputs();
@@ -1190,6 +1192,18 @@ impl Core {
             }
             watch
         });
+        // Last but for the processing thread's start: until it runs nothing
+        // publishes into the slot, so a panic there drops the publisher,
+        // which then joins at once even with the mutex held.
+        let level_publisher = LevelPublisher::start(
+            Arc::clone(&levels),
+            Box::new(move |levels| {
+                if let Some(core) = on_levels.upgrade() {
+                    core.publish(levels);
+                }
+            }),
+        );
+        processing.start();
         inner.active = Some(Active {
             meeting_id,
             stream,
@@ -1198,6 +1212,7 @@ impl Core {
             processing: Some(processing),
             writer_thread: Some(writer_thread),
             levels,
+            level_publisher,
             ended_on_device_loss: false,
             device_changes: 0,
             gap_seconds: 0.0,
@@ -1298,18 +1313,33 @@ impl Core {
         finished
     }
 
-    /// Rebuild abandoned and joined, backend off, rings drained, relay
-    /// drained, files closed, asset built. The asset is built even when
-    /// a write or closing the files failed (its paths are fixed at start
-    /// and the duration is what the master holds); the failure comes back
-    /// in [`CaptureResult::failure`]: a failed write or close, else the
-    /// device loss that ended the recording, else a sync that failed while
-    /// recording. `WriterFailed` with no asset when there is nothing to
-    /// hand out: the writer thread died and took the writer with it, or
-    /// the master is gone from disk (its folder deleted while recording; an
-    /// unlinked file still writes and closes without an error). The caller
-    /// has set the state to `Stopping`; the threads are stopped with the
-    /// lock released (see the module doc).
+    /// Stops, for `finish()` and with the backend already stopped, the
+    /// processing thread (its canceller kept for the next recording) and
+    /// then the level publisher, so the slot's last change goes out.
+    /// Returns the recording's loudest system-lane sample.
+    fn stop_processing(&self, active: &mut Active) -> f32 {
+        let mut system_peak = active.system_peak_so_far;
+        if let Some(mut processing) = active.processing.take() {
+            processing.stop();
+            system_peak = system_peak.max(processing.system_peak());
+            self.lock().echo_canceller = processing.take_echo_canceller();
+        }
+        active.level_publisher.stop();
+        system_peak
+    }
+
+    /// Rebuild abandoned and joined, backend off, rings drained, the last
+    /// level handed on, relay drained, files closed, asset built. The asset
+    /// is built even when a write or closing the files failed (its paths
+    /// are fixed at start and the duration is what the master holds); the
+    /// failure comes back in [`CaptureResult::failure`]: a failed write or
+    /// close, else the device loss that ended the recording, else a sync
+    /// that failed while recording. `WriterFailed` with no asset when there
+    /// is nothing to hand out: the writer thread died and took the writer
+    /// with it, or the master is gone from disk (its folder deleted while
+    /// recording; an unlinked file still writes and closes without an
+    /// error). The caller has set the state to `Stopping`; the threads are
+    /// stopped with the lock released (see the module doc).
     fn finish(&self) -> Result<CaptureResult, CaptureError> {
         let mut active = self
             .lock()
@@ -1341,12 +1371,7 @@ impl Core {
             active.system_peak_so_far = active.system_peak_so_far.max(peak);
         }
         self.backend.stop();
-        let mut system_peak = active.system_peak_so_far;
-        if let Some(mut processing) = active.processing.take() {
-            processing.stop();
-            system_peak = system_peak.max(processing.system_peak());
-            self.lock().echo_canceller = processing.take_echo_canceller();
-        }
+        let system_peak = self.stop_processing(&mut active);
         let writer_lost =
             || CaptureError::WriterFailed("the writer thread ended without its files".into());
         let mut writer_thread = active.writer_thread.take().ok_or_else(writer_lost)?;
@@ -1741,8 +1766,8 @@ impl Core {
                 active
                     .ring_drops
                     .fold(sink.dropped_samples(), active.stream.sample_rate);
-                // No processing thread writes the slot now; the writer
-                // republishes this, so a meter does not hold the old
+                // No processing thread writes the slot now; the level
+                // publisher hands this on, so a meter does not hold the old
                 // stream's last level through a stall or a long restart.
                 active
                     .levels

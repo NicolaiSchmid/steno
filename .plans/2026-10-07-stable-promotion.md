@@ -311,7 +311,7 @@ why and the alternative.
   the audio processing is stable and ideally the final version before we
   cutover to the tauri version."
   - **Reading:** no change to the audio and speech path is planned after the
-    cutover. A1 to A10 and A12 to A17 land before `0.11.0-rc.1`, so the
+    cutover. A1 to A10, A12 to A17 and A20 land before `0.11.0-rc.1`, so the
     rehearsals run on the final pipeline. A fix found during the candidates
     becomes a new candidate and restarts the stability count (G2).
   - **The remaining differences, each made final.** Confirmed 2026-10-07.
@@ -470,6 +470,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
 | A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured; a durable working marker, and quarantine at launch ("Steno stopped while reading this recording") with the file kept and Process again offered; kill tests; the allocations bounded only if a real trigger exists | audio, after #263 |
+| A20 | The level meter never freezes behind a sync of the files: the levels go out from a thread of their own (`steno-levels`, woken by each publish into `LevelSlot`) instead of from the writer thread, whose periodic `sync_data` (P21; `FlushFileBuffers` on Windows) froze the meter and the `recording` snapshot for as long as it took, 1.0 to 1.3 s on a hosted runner; the sync, its cadence and the files are unchanged | audio |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -1569,6 +1570,33 @@ Each lands before `0.11.0-rc.1`.
     offered; kill tests (a child killed or aborted with the marker written);
     the allocations bounded only if the measurement finds a real trigger.
   - Owner: audio. It blocks stable (D3).
+- **A20 The level meter never freezes behind a sync of the files.** Found
+  by P40's check 1 (`locked_store_tests`), which failed on Windows with no
+  level update for 1.03 s: the writer thread published the levels between
+  its writes, and the same thread runs the periodic `sync_data` of P21
+  every 5 s of audio (`FlushFileBuffers` on Windows), so the meter, and the
+  `recording` snapshot it pokes, froze for as long as a sync took: 1.0 to
+  1.3 s on a hosted runner, seconds on a slow or external disk. The audio
+  was safe (the relay's 20 s of headroom); only the UI froze.
+  - The fix (Nicolai, 2026-10-17): the levels go out from a thread of
+    their own, the crate-private `LevelPublisher`
+    (`crates/steno-audio/src/capture/level_publisher.rs`), which the
+    session starts and stops with the recording. Each publish into
+    `LevelSlot` wakes it (one more lock-free signal on the processing
+    thread, none on the audio callback), and it wakes at least every
+    100 ms in case a wake is lost; it takes no lock the writer holds, hands
+    on a last change before it ends, and ends at the stop and at the drop.
+    The writer's sync, its cadence and the files are unchanged, and so are
+    the levels and their 10 Hz cadence. Swift's writer thread still
+    publishes them (`Sources/StenoAudio/Writer/WriterThread.swift`) but
+    syncs only at the close, so it has no such stall.
+  - Gates: `tests/levels.rs` holds the writer's first sync through
+    `testing::HeldSyncs` (behind `test-support`) and requires a level, the
+    live tone's, at the consumer at least every 200 ms (the 100 ms cadence
+    plus 100 ms of lateness) for a second of the hold, then a recording with
+    nothing dropped; publishing from the writer again fails it with no
+    level in the whole hold. P40's check 1 passes on all three platforms.
+  - Owner: audio. Lands before `0.11.0-rc.1` (D9).
 
 ### P: no data lost (D3)
 
