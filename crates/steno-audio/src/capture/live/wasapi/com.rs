@@ -692,7 +692,7 @@ impl CaptureClient {
     }
 
     /// What the engine lost before the stream's first packet, beyond its
-    /// start latency, for a stream started with `continuous`
+    /// start latency, for a stream started `continuously`
     /// ([`DevicePositions::missed_before_first`], which states the rule).
     #[must_use]
     pub fn missed_before_first(&self) -> Missed {
