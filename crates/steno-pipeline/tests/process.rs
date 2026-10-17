@@ -1660,20 +1660,19 @@ async fn a_job_whose_diarizer_does_not_load_keeps_its_transcript() {
 }
 
 /// Waits until `receiver` sees [`MeetingEvent::WaitingForRecording`] for
-/// `meeting`, failing after [`PATIENCE`].
-async fn waiting_for_recording(receiver: &mut steno_pipeline::EventReceiver, meeting: Uuid) {
+/// each of `meetings`, failing after [`PATIENCE`].
+async fn waiting_for_recording(receiver: &mut steno_pipeline::EventReceiver, meetings: &[Uuid]) {
+    let mut left: BTreeSet<Uuid> = meetings.iter().copied().collect();
     tokio::time::timeout(PATIENCE, async {
-        loop {
-            match receiver.recv().await.unwrap() {
-                MeetingEvent::WaitingForRecording { meeting_id } if meeting_id == meeting => {
-                    return;
-                }
-                _ => {}
+        while !left.is_empty() {
+            if let MeetingEvent::WaitingForRecording { meeting_id } = receiver.recv().await.unwrap()
+            {
+                left.remove(&meeting_id);
             }
         }
     })
     .await
-    .expect("the meeting said it waits for the recording");
+    .expect("each meeting said it waits for the recording");
 }
 
 /// A pipeline over the world's dependencies that runs `engine` in this
@@ -1707,7 +1706,7 @@ async fn a_job_waits_for_the_recording_before_the_engine_in_this_process_loads()
     let pipeline = in_process_beside(&world, engine.clone(), &live);
     let mut receiver = world.events.subscribe();
     let meeting = enqueue_call(&world, &pipeline);
-    waiting_for_recording(&mut receiver, meeting).await;
+    waiting_for_recording(&mut receiver, &[meeting]).await;
     a_moment().await;
     assert_eq!(engine.preparations.count(), 0, "no load beside a recording");
     assert_eq!(engine.transcriptions.count(), 0);
@@ -1777,7 +1776,7 @@ async fn a_recording_that_starts_mid_job_holds_the_next_lane() {
     let pipeline = in_process_beside(&world, engine.clone(), &live);
     let mut receiver = world.events.subscribe();
     let meeting = enqueue_call(&world, &pipeline);
-    waiting_for_recording(&mut receiver, meeting).await;
+    waiting_for_recording(&mut receiver, &[meeting]).await;
     a_moment().await;
     assert_eq!(
         engine.inner.transcriptions.count(),
@@ -1816,6 +1815,106 @@ async fn a_job_queued_behind_another_waits_for_the_recording_too() {
     assert_eq!(engine.inner.transcriptions.count(), 4);
 }
 
+/// A speech engine that runs one call at a time, as `OneCallAtATime` does
+/// on the Mac, and whose first transcription waits for `gate`; it counts
+/// the calls made while a recording is under way.
+struct OneCallAtATime {
+    inner: FakeSpeechEngine,
+    live: LiveRecording,
+    calls: tokio::sync::Mutex<()>,
+    entered: std::sync::atomic::AtomicBool,
+    gate: tokio::sync::Notify,
+    beside: std::sync::atomic::AtomicUsize,
+}
+
+impl OneCallAtATime {
+    fn note(&self) {
+        if self.live.is_live() {
+            self.beside
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+#[async_trait]
+impl steno_core::SpeechEngine for OneCallAtATime {
+    fn id(&self) -> &str {
+        steno_core::SpeechEngine::id(&self.inner)
+    }
+
+    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
+        steno_core::SpeechEngine::supported_languages(&self.inner)
+    }
+
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        let _one = self.calls.lock().await;
+        self.note();
+        steno_core::SpeechEngine::prepare(&self.inner).await
+    }
+
+    async fn transcribe(
+        &self,
+        audio: &steno_core::AudioBuffer16k,
+        hint: Option<&steno_core::LanguageTag>,
+    ) -> steno_core::protocols::BoundaryResult<Vec<steno_core::RawSegment>> {
+        let _one = self.calls.lock().await;
+        if self.entered.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.note();
+        } else {
+            self.gate.notified().await;
+        }
+        steno_core::SpeechEngine::transcribe(&self.inner, audio, hint).await
+    }
+
+    async fn release(&self) -> steno_core::protocols::BoundaryResult<()> {
+        steno_core::SpeechEngine::release(&self.inner).await
+    }
+}
+
+/// A job that queued for the turn while no recording was under way checks
+/// again once it has the turn: a recording that started meanwhile holds
+/// it, and nothing runs beside the recording, even on an engine that
+/// queues the calls inside it (A19).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_that_queued_before_the_recording_checks_again_at_its_turn() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let live = LiveRecording::default();
+    let engine = Arc::new(OneCallAtATime {
+        inner: FakeSpeechEngine::default(),
+        live: live.clone(),
+        calls: tokio::sync::Mutex::new(()),
+        entered: std::sync::atomic::AtomicBool::new(false),
+        gate: tokio::sync::Notify::new(),
+        beside: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let pipeline = in_process_beside(&world, engine.clone(), &live);
+    let mut receiver = world.events.subscribe();
+    let first = enqueue_call(&world, &pipeline);
+    let second = enqueue_call(&world, &pipeline);
+    tokio::time::timeout(PATIENCE, async {
+        while !engine.entered.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a transcription began");
+    // The other job reaches the turn, which the gated call holds.
+    a_moment().await;
+    live.set(true);
+    engine.gate.notify_one();
+    waiting_for_recording(&mut receiver, &[first, second]).await;
+    a_moment().await;
+    assert_eq!(
+        engine.beside.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing ran beside the recording"
+    );
+    live.set(false);
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, first), MeetingState::Ready);
+    assert_eq!(meeting_state(&world, second), MeetingState::Ready);
+}
+
 /// An engine whose abort ends only its child (the speech sidecar) does not
 /// wait for a recording.
 #[tokio::test(flavor = "multi_thread")]
@@ -1843,7 +1942,7 @@ async fn a_quit_while_a_job_waits_for_the_recording_leaves_the_meeting_queued() 
     let pipeline = in_process_beside(&world, engine.clone(), &live);
     let mut receiver = world.events.subscribe();
     let meeting = enqueue_call(&world, &pipeline);
-    waiting_for_recording(&mut receiver, meeting).await;
+    waiting_for_recording(&mut receiver, &[meeting]).await;
     pipeline.quit();
     live.set(false);
     pipeline.wait_until_idle().await;

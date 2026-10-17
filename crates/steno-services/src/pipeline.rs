@@ -1691,6 +1691,31 @@ mod tests {
         }
     }
 
+    /// A reload shares the recorder's state with the build it retires and
+    /// with the new one, so a job of either waits for a recording before
+    /// it runs an engine in this process (A19).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_build_sees_the_recording_a_reload_too() {
+        let (_dir, store) = temp_store();
+        let make: MakeDependencies = {
+            let store = store.clone();
+            Arc::new(move || Ok(on_the_sidecar(fake_dependencies(&store, "fake-engine"))))
+        };
+        let current =
+            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+        let retired = current.current();
+        current.reload().unwrap();
+        current.live_recording().set(true);
+        assert!(
+            retired.dependencies().live_recording.is_live(),
+            "the retired build"
+        );
+        assert!(
+            current.current().dependencies().live_recording.is_live(),
+            "the reloaded build"
+        );
+    }
+
     /// A `CurrentPipeline` whose every pipeline, reloads included, shares
     /// `engine` behind one gate that refuses until the returned flag is set,
     /// and one event bus; its reloads resume only once the flag is set, as
