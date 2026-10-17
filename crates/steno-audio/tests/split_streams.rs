@@ -1999,8 +1999,9 @@ impl Call {
     }
 
     /// The backend's stop once both threads are joined, the streams' end
-    /// readings `master_end` and `follower_end`.
-    fn stop(&self, master_end: Missed, follower_end: Missed) {
+    /// readings `master_end` and `follower_end` (`None`: endpoint loopback,
+    /// not read).
+    fn stop(&self, master_end: Missed, follower_end: Option<Missed>) {
         count_at_stop(
             &self.sink,
             Some((&self.follower, 1)),
@@ -2049,14 +2050,14 @@ fn a_follower_out_at_the_stop_is_counted_at_the_backends_stop() {
                 call.master_packet();
             }
         }
-        call.stop(Missed::default(), Missed::default());
+        call.stop(Missed::default(), None);
         let (filled, unfilled) = call.system();
         let context = format!("master first {master_first}, {master_packets_after} after");
         assert!(
             (19_200..=19_200 + 4_800).contains(&(filled + unfilled)),
             "{context}: filled {filled}, unfilled {unfilled}"
         );
-        call.stop(Missed::default(), Missed::default());
+        call.stop(Missed::default(), None);
         assert_eq!(call.system(), (filled, unfilled), "{context}: held once");
     }
 }
@@ -2077,7 +2078,7 @@ fn a_follower_loss_no_packet_flags_is_counted_from_the_stops_reading() {
     for _ in 0..10 {
         call.follower_packet();
     }
-    call.stop(Missed::default(), unfilled(19_200));
+    call.stop(Missed::default(), Some(unfilled(19_200)));
     let (filled, unfilled) = call.system();
     assert!(
         (19_200..=19_200 + 4_800).contains(&(filled + unfilled)),
@@ -2094,7 +2095,7 @@ fn the_stops_readings_count_on_their_own_lanes_and_not_at_a_rebuild() {
     for _ in 0..200 {
         call.tick();
     }
-    call.stop(unfilled(9_600), Missed::default());
+    call.stop(unfilled(9_600), None);
     assert_eq!(
         call.sink.unfilled_samples(),
         BTreeMap::from([(AudioLane::Mic, 9_600)])
@@ -2107,7 +2108,7 @@ fn the_stops_readings_count_on_their_own_lanes_and_not_at_a_rebuild() {
     call.follower_flagged(unfilled(4_800));
     call.sink
         .report_device_change(DeviceChangeReason::OutputDeviceGone);
-    call.stop(unfilled(9_600), unfilled(48_000));
+    call.stop(unfilled(9_600), Some(unfilled(48_000)));
     assert_eq!(
         call.sink.unfilled_samples(),
         BTreeMap::from([(AudioLane::System, 4_800)]),
@@ -2231,13 +2232,18 @@ fn a_first_pair_over_an_idle_is_replaced_by_the_next() {
 }
 
 /// A flagged packet is filled only while the QPC's last clean pair matched
-/// its frames: one that read 30 % long leaves it counted.
+/// its frames to within half a packet: one that read 60 % short leaves it
+/// counted, one that read 30 % long (scheduling jitter) does not.
 #[test]
 fn a_qpc_whose_last_pair_did_not_match_fills_nothing() {
     let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
     clocks.clean(CALIBRATION_PACKETS);
     assert!(clocks.positions.fills());
     clocks.next.qpc += 30_000;
+    clocks.clean(1);
+    assert!(clocks.positions.fills(), "a jittery pair");
+    clocks.clean(1);
+    clocks.next.qpc -= 60_000;
     clocks.clean(1);
     assert!(!clocks.positions.fills());
     assert_counted(clocks.lose(50), 24_000, "counted from the positions");
@@ -2291,6 +2297,41 @@ fn the_stop_reads_the_counter_only_on_a_sane_qpc() {
     let mut stuck = Clocks::new(None, 0, 0);
     stuck.clean(CALIBRATION_PACKETS);
     assert!(stuck.positions.missed_until(1 << 50).is_none(), "no QPC");
+}
+
+/// The stop reads the counter only while the last clean pair matched, as
+/// a jump is filled only then: after a pair that read 60 % short, a stop
+/// half a second on reads nothing, and after a matching pair again it
+/// reads the half second.
+#[test]
+fn the_stop_reads_nothing_after_a_last_pair_that_did_not_match() {
+    let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
+    clocks.clean(CALIBRATION_PACKETS);
+    let now = |clocks: &Clocks, packets: u64| clocks.next.qpc + packets * QPC_PACKET;
+    clocks.next.qpc -= 60_000;
+    clocks.clean(1);
+    assert!(
+        clocks.positions.missed_until(now(&clocks, 51)).is_none(),
+        "a last pair 60 % short"
+    );
+    clocks.clean(1);
+    assert_eq!(
+        clocks.positions.missed_until(now(&clocks, 51)),
+        unfilled(24_000)
+    );
+}
+
+/// A stall of one and a half packets past the one in flight at the stop is
+/// read, and one of under half a packet is not: the stop reads at a jump's
+/// resolution, half the last packet.
+#[test]
+fn the_stop_reads_a_stall_of_a_packet_and_a_half() {
+    let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
+    clocks.clean(CALIBRATION_PACKETS);
+    let last = clocks.next.qpc - QPC_PACKET;
+    let stop = |packets_tenths: u64| last + (20 + packets_tenths) * QPC_PACKET / 10;
+    assert_eq!(clocks.positions.missed_until(stop(15)), unfilled(720));
+    assert!(clocks.positions.missed_until(stop(4)).is_none());
 }
 
 /// Two hours of 10 ms packets on both streams in a debug build (overflow
@@ -2364,7 +2405,7 @@ fn a_flag_long_after_the_follower_came_back_takes_no_padding() {
         call.follower_packet();
         call.master_packet();
     }
-    call.stop(Missed::default(), Missed::default());
+    call.stop(Missed::default(), None);
     assert_eq!(call.system(), (0, 0));
 }
 
@@ -2511,7 +2552,7 @@ fn the_stop_takes_the_padding_of_the_outage_whether_or_not_the_lane_primed() {
         call.master_packet();
     }
     call.follower_flagged(Missed::default());
-    call.stop(Missed::default(), Missed::default());
+    call.stop(Missed::default(), None);
     let (filled, unfilled) = call.system();
     assert!(
         (48 * PERIOD..=50 * PERIOD).contains(&(filled + unfilled)),
@@ -2533,7 +2574,7 @@ fn the_stop_takes_the_padding_of_the_outage_whether_or_not_the_lane_primed() {
         call.follower_packet();
     }
     call.follower_flagged(Missed::default());
-    call.stop(Missed::default(), Missed::default());
+    call.stop(Missed::default(), None);
     let (filled, unfilled) = call.system();
     assert!(
         (48 * PERIOD..=50 * PERIOD).contains(&(filled + unfilled)),
@@ -2541,33 +2582,135 @@ fn the_stop_takes_the_padding_of_the_outage_whether_or_not_the_lane_primed() {
     );
 }
 
-/// Two unflagged idles a few packets apart, then a flag after the second:
-/// the master's pulls through the second idle pass the hold, so the first
-/// idle's padding is forgotten and only the second's counts.
+/// Two unflagged idles, then a flag after the second. The hold is counted
+/// in the follower's frames, so a second idle however long does not use it
+/// up: with 5 packets of audio between them (under the hold of 11) both
+/// idles' padding counts at the flag, an overcount of the first idle, at
+/// most both idles; with 20 packets between, only the second's counts.
 #[test]
-fn a_long_second_idle_forgets_the_first() {
+fn a_second_idle_within_the_hold_counts_the_first_too() {
+    for (between, most) in [(5, 152 * PERIOD), (20, 52 * PERIOD)] {
+        let mut call = Call::new();
+        for _ in 0..200 {
+            call.tick();
+        }
+        for _ in 0..100 {
+            call.master_packet();
+        }
+        for _ in 0..between {
+            call.tick();
+        }
+        for _ in 0..50 {
+            call.master_packet();
+        }
+        call.follower_flagged(Missed::default());
+        for _ in 0..20 {
+            call.tick();
+        }
+        let (filled, unfilled) = call.system();
+        assert!(
+            filled + unfilled <= most,
+            "{between} between: filled {filled}, unfilled {unfilled}"
+        );
+    }
+}
+
+/// An unflagged 6 s idle of the follower that ends while the master is
+/// out: the follower queues 30 packets, more than the hold, before the
+/// master's next pull primes the lane, so a flag right after (at the stop)
+/// takes nothing of the idle's padding.
+#[test]
+fn an_idle_that_ends_while_the_master_is_out_is_forgotten_at_the_reprime() {
     let mut call = Call::new();
     for _ in 0..200 {
         call.tick();
     }
-    for _ in 0..100 {
+    for _ in 0..600 {
         call.master_packet();
     }
-    for _ in 0..5 {
-        call.tick();
+    for _ in 0..30 {
+        call.follower_packet();
     }
-    for _ in 0..50 {
+    for _ in 0..30 {
         call.master_packet();
     }
     call.follower_flagged(Missed::default());
-    for _ in 0..20 {
-        call.tick();
-    }
+    call.stop(Missed::default(), None);
     let (filled, unfilled) = call.system();
     assert!(
-        filled + unfilled <= 52 * PERIOD,
+        filled + unfilled <= 4 * PERIOD,
         "filled {filled}, unfilled {unfilled}"
     );
+}
+
+/// The follower out for 1 s while the master pulls, back with a flag its
+/// clocks read nothing for, one master pull, then the master out while the
+/// follower queues 30 packets and flags a second loss: the second flag
+/// keeps the first's padding, whether the stop comes right after it or 50
+/// packets on. One flag counts the same.
+#[test]
+fn a_second_flag_while_the_master_is_out_keeps_the_first_flags_padding() {
+    for (second_flag, at_stop) in [(true, true), (true, false), (false, false)] {
+        let mut call = Call::new();
+        for _ in 0..200 {
+            call.tick();
+        }
+        let before = call.follower.underrun_frames();
+        for _ in 0..100 {
+            call.master_packet();
+        }
+        let padded = call.follower.underrun_frames() - before;
+        call.follower_flagged(Missed::default());
+        call.master_packet();
+        for _ in 0..30 {
+            call.follower_packet();
+        }
+        if second_flag {
+            call.follower_flagged(Missed::default());
+        } else {
+            call.follower_packet();
+        }
+        if !at_stop {
+            for _ in 0..50 {
+                call.tick();
+            }
+        }
+        call.stop(Missed::default(), None);
+        let (filled, unfilled) = call.system();
+        assert!(
+            filled + unfilled + 2 * 960 >= padded,
+            "second flag {second_flag}, at the stop {at_stop}: {padded} padded, filled \
+             {filled}, unfilled {unfilled}"
+        );
+    }
+}
+
+/// A process loopback follower (it delivers continuously) out when the
+/// stop comes, its loss flagged by no packet and its clocks reading
+/// nothing: the padding still running counts at the stop. Endpoint
+/// loopback idles, so its padding at the stop counts only after a flag
+/// (the documented limit).
+#[test]
+fn a_continuous_follower_out_at_the_stop_counts_its_padding_unflagged() {
+    for continuous in [true, false] {
+        let mut call = Call::new();
+        for _ in 0..200 {
+            call.tick();
+        }
+        for _ in 0..50 {
+            call.master_packet();
+        }
+        call.stop(Missed::default(), continuous.then(Missed::default));
+        let (filled, unfilled) = call.system();
+        if continuous {
+            assert!(
+                (48 * PERIOD..=50 * PERIOD).contains(&(filled + unfilled)),
+                "filled {filled}, unfilled {unfilled}"
+            );
+        } else {
+            assert_eq!((filled, unfilled), (0, 0));
+        }
+    }
 }
 
 /// Positions that move from the start, stand still for a pair mid-stream

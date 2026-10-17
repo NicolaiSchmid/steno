@@ -265,18 +265,19 @@ fn within(read: u64, frames: u64, percent: u64) -> bool {
 ///   pairs of packets (no discontinuity, no timestamp error on either, an
 ///   advance at most half a packet past the frames between them). Once
 ///   [`QPC_CALIBRATION_FRAMES`] are measured within 2 % of real time, and
-///   while the last clean pair matched its frames within 2 %, a flagged
-///   packet's QPC past the last packet's end is the loss: up to
-///   [`MISSED_FILL_LIMIT`] filled, past it unfilled ([`Missed::of_jump`]).
+///   while the last clean pair matched its frames to within half a packet
+///   (one jittery pair does not switch it off), a flagged packet's QPC
+///   past the last packet's end is the loss: up to [`MISSED_FILL_LIMIT`]
+///   filled, past it unfilled ([`Missed::of_jump`]).
 /// - **Counted otherwise.** Without a sane QPC (none, one off by more than
 ///   2 %, still measuring, or a timestamp error on this packet or the last),
 ///   a flagged packet counts the largest of its readings past the last
 ///   packet's end, unfilled: the device position at one a frame, at the mix
 ///   format's rate against 48 kHz and at the ratio measured so far, and the
-///   QPC while the last clean pair's matched its frames within 2 %. A
-///   reading in the right unit is the loss, so the largest is the loss or
-///   more: an overcount in the note, never wrong silence. Each reading is
-///   capped at [`MOST_READ_FRAMES`].
+///   QPC while the last clean pair's matched its frames to within half a
+///   packet. A reading in the right unit is the loss, so the largest is
+///   the loss or more: an overcount in the note, never wrong silence. Each
+///   reading is capped at [`MOST_READ_FRAMES`].
 /// - **What no reading sees.** Positions that never move with no sane QPC
 ///   read nothing; a position behind the last packet's or a unit that
 ///   neither 48 kHz nor the mix format explains, before its first clean
@@ -323,7 +324,9 @@ pub struct DevicePositions {
     positions: Counter,
     qpc: Counter,
     /// The last clean pair's QPC advance (one inside the bound) matched its
-    /// frames within 2 %.
+    /// frames to within half a packet: the resolution the jumps are read
+    /// at ([`Missed::of_jump`]), so scheduling jitter on one pair leaves it
+    /// on, and a counter that stalls or crawls turns it off.
     qpc_matched: bool,
     /// The last packet's frames and whether it had a timestamp error.
     last_frames: usize,
@@ -370,7 +373,7 @@ impl DevicePositions {
             if let Some(advance) = qpc {
                 let read = QPC.read(advance);
                 if read <= last_frames as u64 + last_frames as u64 / 2 {
-                    self.qpc_matched = within(read, last_frames as u64, 2);
+                    self.qpc_matched = read.abs_diff(last_frames as u64) <= last_frames as u64 / 2;
                     self.qpc.pair(advance, last_frames);
                 }
             }
@@ -438,7 +441,8 @@ impl DevicePositions {
     }
 
     /// Whether a jump is filled: the QPC is sane, measured within 2 % of
-    /// real time and its last clean pair matched (see the type's doc).
+    /// real time, and its last clean pair matched to within half a packet
+    /// (see the type's doc).
     #[must_use]
     pub fn fills(&self) -> bool {
         self.qpc_matched && self.qpc_sane() == Some(true)

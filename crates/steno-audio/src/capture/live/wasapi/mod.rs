@@ -154,8 +154,8 @@ enum StreamEvent {
 struct Launched {
     source: StreamSource,
     /// Returns what the stream missed after its last packet
-    /// ([`CaptureClient::missed_at_stop`]).
-    thread: Option<JoinHandle<Missed>>,
+    /// ([`CaptureClient::missed_at_stop`]), `None` when it was not read.
+    thread: Option<JoinHandle<Option<Missed>>>,
     events: Receiver<StreamEvent>,
     /// Dropped to make a thread that waits for its body exit.
     body: Option<SyncSender<StreamBody>>,
@@ -536,7 +536,7 @@ fn open(
 /// (`start_log`). Returns what the stream missed after its last packet, read
 /// at the stop on a stream that delivers continuously (the microphone,
 /// process loopback; not endpoint loopback, whose idle would read as a
-/// loss) and did not fail.
+/// loss) and did not fail; `None` when it was not read.
 fn run_stream(
     source: StreamSource,
     input_device_uid: Option<&str>,
@@ -545,24 +545,24 @@ fn run_stream(
     stop: &AtomicBool,
     watcher: &Watcher,
     starts_quietly: bool,
-) -> Missed {
+) -> Option<Missed> {
     let opened = start_log::quietly(starts_quietly, || open(source, input_device_uid));
     let (apartment, enumerator, mut client, info) = match opened {
         Ok(opened) => opened,
         Err(error) => {
             let _ = events.send(StreamEvent::Opened(Err(error)));
-            return Missed::default();
+            return None;
         }
     };
     let loopback = info.loopback;
     let _ = events.send(StreamEvent::Opened(Ok(info)));
     // `start` drops the sender when it gives up.
     let Ok(mut body) = bodies.recv() else {
-        return Missed::default();
+        return None;
     };
     if let Err(error) = client.start() {
         let _ = events.send(StreamEvent::Started(Err(error.into())));
-        return Missed::default();
+        return None;
     }
     let _ = events.send(StreamEvent::Started(Ok(())));
     let pro_audio = ProAudioThread::enter();
@@ -587,15 +587,15 @@ fn run_stream(
     // What the engine still holds at the stop, so a thread held up just
     // before it is read too, then the counter against the last packet for
     // what no packet flags.
-    let mut end = Missed::default();
+    let mut end = None;
     if !failed {
         let _ = drain_into(&mut client, &mut body);
         if loopback != Some(LoopbackKind::Endpoint) {
-            end = client.missed_at_stop();
+            end = Some(client.missed_at_stop());
         }
     }
     let _ = client.stop();
-    if !end.is_none() {
+    if let Some(end) = end.filter(|end| !end.is_none()) {
         tracing::info!(
             "{} stream: {:.3} s missed after its last packet",
             source.as_str(),
@@ -692,7 +692,7 @@ fn run_watcher(
 /// its last packet; the others are left to finish on their own. Such a
 /// thread never writes to the sink: it holds no body, or it is starting its
 /// stream and finds `stop` set before its first drain.
-fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) -> Vec<(StreamSource, Missed)> {
+fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) -> Vec<(StreamSource, Option<Missed>)> {
     stop.store(true, Ordering::Release);
     let mut ends = Vec::new();
     for mut launched in streams {
@@ -992,7 +992,7 @@ impl CaptureBackend for LiveCaptureBackend {
         let end = |master: bool| {
             ends.iter()
                 .find(|(source, _)| (*source == active.master) == master)
-                .map_or_else(Missed::default, |(_, end)| *end)
+                .and_then(|(_, end)| *end)
         };
         count_at_stop(
             &active.sink,
@@ -1000,7 +1000,7 @@ impl CaptureBackend for LiveCaptureBackend {
                 .follower
                 .as_ref()
                 .map(|(lane, index)| (lane.as_ref(), *index)),
-            end(true),
+            end(true).unwrap_or_default(),
             end(false),
         );
         if let Some((lane, _)) = &active.follower {
