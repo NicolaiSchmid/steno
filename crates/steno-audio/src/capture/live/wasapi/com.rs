@@ -692,11 +692,11 @@ impl CaptureClient {
         qpc_now().map_or_else(Missed::default, |now| self.positions.missed_until(now))
     }
 
-    /// What the engine lost before the stream's first packet, beyond its
-    /// start latency, for a stream started `continuously`
+    /// The frames the engine lost before the stream's first packet, beyond
+    /// its start latency, for a stream started `continuously`
     /// ([`DevicePositions::missed_before_first`], which states the rule).
     #[must_use]
-    pub fn missed_before_first(&self) -> Missed {
+    pub fn missed_before_first(&self) -> usize {
         self.positions.missed_before_first(self.sizes)
     }
 

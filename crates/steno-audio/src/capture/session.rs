@@ -182,7 +182,9 @@
 //! silence for that time too. Once the gap is written in full, under the
 //! lock with the recording still there (`resume`), the session takes back
 //! from that late count at most the gap's length per lane, so the time
-//! counts once. A rebuild that ends before that (a stop during the
+//! counts once. What a stream missed before its first frame is never part
+//! of it ([the rule](crate::realtime::missed#before-the-first-callback)).
+//! A rebuild that ends before that (a stop during the
 //! restart, a write the stop cut short, restarts that ran out) keeps the
 //! whole late count, and what a gap capped at
 //! [`CaptureSession::MAXIMUM_GAP`] did not write stays unfilled: no missed
@@ -485,12 +487,17 @@ impl LaneCounts {
 
 /// The sink's per-lane counts of one recording: its ring overruns, and
 /// the audio a capture thread missed, written as zeros or not
-/// ([`LaneFrameSink::write_missed`]).
+/// ([`LaneFrameSink::write_missed`]), the unfilled with what a stream
+/// missed before its first frame
+/// ([`LaneFrameSink::count_before_first`]).
 #[derive(Default)]
 struct RingCounts {
     dropped: LaneCounts,
     filled: LaneCounts,
     unfilled: LaneCounts,
+    /// The sink's counts before the first frames, folded into `unfilled`
+    /// but never into `unfilled_in_gap`: no gap covers that time.
+    before_first: LaneCounts,
     /// What a stalled stream's thread counted unfilled after the last
     /// frame the watch thread saw, per lane at [`SAMPLE_RATE`]: the time
     /// the rebuild's gap writes as silence too, until the gap is written
@@ -505,6 +512,9 @@ impl RingCounts {
         self.dropped.fold(sink.dropped_samples(), rate);
         self.filled.fold(sink.filled_samples(), rate);
         self.unfilled.fold(sink.unfilled_samples(), rate);
+        for (lane, samples) in self.before_first.fold(sink.before_first_samples(), rate) {
+            *self.unfilled.at_output_rate.entry(lane).or_default() += samples;
+        }
     }
 
     /// [`Self::fold`] for a rebuild's stop: when the gap starts at the last
@@ -2631,6 +2641,21 @@ mod tests {
             counts.unfilled.at_output_rate,
             [(AudioLane::Mic, 0), (AudioLane::System, 19_200)].into()
         );
+    }
+
+    /// What a stream missed before its first frame, counted at a rebuild's
+    /// stop after the last frame's snapshot, is no part of the gap's late
+    /// count: the gap takes back only the thread's own 1 s.
+    #[test]
+    fn a_rebuilds_gap_never_takes_back_the_loss_before_the_first_frame() {
+        let sink = LaneFrameSink::new(&[AudioLane::Mic]);
+        let mut counts = RingCounts::default();
+        let before = sink.unfilled_samples();
+        sink.ring(0).record_unfilled(48_000);
+        sink.count_before_first(72_000, None);
+        counts.fold_at_a_rebuild(&sink, Some(before), SAMPLE_RATE);
+        counts.gap_written(100_800);
+        assert_eq!(counts.unfilled_seconds(), 1.5);
     }
 
     /// What a rebuild kept apart for its gap is gone at the next rebuild's

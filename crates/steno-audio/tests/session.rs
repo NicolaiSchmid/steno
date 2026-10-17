@@ -5723,3 +5723,105 @@ fn a_late_count_before_a_device_changes_rebuild_stays_counted() {
         "the jump before the change's gap"
     );
 }
+
+/// A backend whose stop of the recording's first start hands on what its
+/// stream missed before its first frame (`before_first` frames), as the
+/// WASAPI and Core Audio backends' stops do, whatever that stop is for.
+struct MissesBeforeItsFirstFrame {
+    inner: Arc<SyntheticCaptureBackend>,
+    sink: Mutex<Option<Arc<LaneFrameSink>>>,
+    before_first: AtomicUsize,
+}
+
+impl MissesBeforeItsFirstFrame {
+    fn new(inner: &Arc<SyntheticCaptureBackend>, before_first: usize) -> Self {
+        Self {
+            inner: Arc::clone(inner),
+            sink: Mutex::new(None),
+            before_first: AtomicUsize::new(before_first),
+        }
+    }
+}
+
+impl CaptureBackend for MissesBeforeItsFirstFrame {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        self.sink.lock().unwrap().replace(Arc::clone(&sink));
+        self.inner.start(lanes, uid, sink)
+    }
+    fn stop(&self) {
+        let before_first = self.before_first.swap(0, Ordering::SeqCst);
+        if let Some(sink) = self.sink.lock().unwrap().as_ref() {
+            sink.count_before_first(before_first, None);
+        }
+        self.inner.stop();
+    }
+    fn delivers_continuously(&self, lanes: &[AudioLane]) -> bool {
+        self.inner.delivers_continuously(lanes)
+    }
+}
+
+/// A first frame 1.5 s late, counted at the first start's stop, then a
+/// stall whose rebuild is that stop: its gap runs from the last frame the
+/// watch thread saw to the restart, never over the time before the first
+/// frame, so the 1.5 s stays counted beside the 2.1 s gap (A18 of
+/// `.plans/2026-10-07-stable-promotion.md`; the rule in
+/// `realtime::missed`, "Before the first callback").
+#[test]
+fn a_loss_before_the_first_frame_survives_a_stall_rebuild_at_the_first_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let inner = Arc::new(SyntheticCaptureBackend::new(stalling(1.0, 0.5)));
+    let backend = Arc::new(MissesBeforeItsFirstFrame::new(&inner, 72_000));
+    let session = in_person_session(directory.path(), backend, clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    inner.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    assert!(matches!(
+        recv(&notices),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    inner.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.device_changes, 1);
+    assert_eq!(result.statistics.gap_seconds, 2.1);
+    assert_eq!(
+        result.statistics.unfilled_seconds, 1.5,
+        "the time before the first frame"
+    );
+}
+
+/// The same loss with the first stop a device change's rebuild while the
+/// stream delivers, and with the user's stop as the first stop: counted
+/// whole both times.
+#[test]
+fn a_loss_before_the_first_frame_counts_at_a_device_changes_rebuild_and_a_plain_stop() {
+    for change in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let clock = Arc::new(ManualClock::new());
+        let options = tones(&[AudioLane::Mixed], 1.0);
+        let options = if change {
+            options.change_device_after(0.5)
+        } else {
+            options
+        };
+        let inner = Arc::new(SyntheticCaptureBackend::new(options));
+        let backend = Arc::new(MissesBeforeItsFirstFrame::new(&inner, 72_000));
+        let session = in_person_session(directory.path(), backend, clock.clone());
+        let notices = session.notices();
+        session.start(Uuid::new_v4()).unwrap();
+        if change {
+            let _ = recv(&notices);
+            let _ = recv(&notices);
+        }
+        inner.wait_until_finished();
+        let result = session.stop().unwrap();
+        assert_eq!(result.statistics.device_changes, usize::from(change));
+        assert_eq!(result.statistics.unfilled_seconds, 1.5, "change {change}");
+    }
+}

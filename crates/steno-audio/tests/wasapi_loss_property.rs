@@ -991,7 +991,7 @@ thread_local! {
 use std::collections::VecDeque;
 
 use steno_audio::capture::split_streams::StreamSizes;
-use steno_audio::realtime::{FollowerLane, count_at_stop, count_before_first};
+use steno_audio::realtime::{FollowerLane, count_at_stop};
 
 /// Whether the engine may lose packets at the end of an outage that runs
 /// into the stop and produce none after them before the final drain, so
@@ -1642,7 +1642,7 @@ pub fn run_call_with(case: &CallCase, upper: bool) -> Result<(), String> {
     };
     let mic_first = streams[MIC].positions.missed_before_first(sizes);
     let system_first = streams[SYSTEM].positions.missed_before_first(sizes);
-    count_before_first(&sink, Some(SYSTEM), mic_first, system_first);
+    sink.count_before_first(mic_first, Some((SYSTEM, system_first)));
     let get = |counts: std::collections::BTreeMap<AudioLane, usize>, lane| {
         counts.get(&lane).copied().unwrap_or(0)
     };
@@ -1650,10 +1650,10 @@ pub fn run_call_with(case: &CallCase, upper: bool) -> Result<(), String> {
         get(sink.filled_samples(), AudioLane::Mic),
         get(sink.filled_samples(), AudioLane::System),
     ];
-    let unfilled = [
-        get(sink.unfilled_samples(), AudioLane::Mic),
-        get(sink.unfilled_samples(), AudioLane::System),
-    ];
+    // Unfilled as the session folds it: with the loss before the first
+    // packets.
+    let unfilled = [AudioLane::Mic, AudioLane::System]
+        .map(|lane| get(sink.unfilled_samples(), lane) + get(sink.before_first_samples(), lane));
     let [mic, system] = &streams;
     // 10: one length, the microphone's frames and fills.
     if lane_len[MIC] != lane_len[SYSTEM] || lane_len[MIC] != mic.delivered + filled[MIC] {
@@ -1731,10 +1731,10 @@ pub fn run_call_with(case: &CallCase, upper: bool) -> Result<(), String> {
         ));
     }
     for (name, first, stream) in [("mic", mic_first, mic), ("system", system_first, system)] {
-        if upper && first.unfilled > stream.lost_first {
+        if upper && first > stream.lost_first {
             return Err(format!(
-                "{name}: the start read {} above the {} lost before the first packet",
-                first.unfilled, stream.lost_first
+                "{name}: the start read {first} above the {} lost before the first packet",
+                stream.lost_first
             ));
         }
     }

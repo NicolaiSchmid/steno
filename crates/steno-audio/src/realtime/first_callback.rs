@@ -14,8 +14,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use super::missed::Missed;
-
 /// How late after the device's start a first callback may come without
 /// counting as audio missed: A10's bound on it from the call to `start`
 /// (`.plans/2026-10-07-stable-promotion.md`), which comes before the
@@ -80,10 +78,10 @@ impl FirstCallback {
         )))
     }
 
-    /// What the capture missed before its first callback, in frames at
+    /// The frames the capture missed before its first callback, at
     /// `sample_rate`: the [`Self::offset`] from `started` beyond
-    /// [`FIRST_CALLBACK_ALLOWANCE`], unfilled, since nothing was there to
-    /// fill; nothing when no callback came (the session's stall watchdog
+    /// [`FIRST_CALLBACK_ALLOWANCE`], all of them unfilled, since nothing
+    /// was there to fill; nothing when no callback came (the session's stall watchdog
     /// restarts such a capture, and its gap holds that time) or it came
     /// within the allowance.
     ///
@@ -92,21 +90,17 @@ impl FirstCallback {
     ///
     /// let first = FirstCallback::new();
     /// first.mark(1_000 + 700_000_000); // 0.7 s after the start, in ns
-    /// assert_eq!(first.missed(1_000, |ticks| ticks, 48_000.0).unfilled, 24_000);
+    /// assert_eq!(first.missed(1_000, |ticks| ticks, 48_000.0), 24_000);
     /// ```
     #[must_use]
-    pub fn missed(&self, started: u64, to_nanos: impl Fn(u64) -> u64, sample_rate: f64) -> Missed {
+    pub fn missed(&self, started: u64, to_nanos: impl Fn(u64) -> u64, sample_rate: f64) -> usize {
         let late = self
             .offset(started, to_nanos)
             .map_or(Duration::ZERO, |offset| {
                 offset.saturating_sub(FIRST_CALLBACK_ALLOWANCE)
             });
         // Whole frames of a positive, finite product.
-        let frames = (late.as_secs_f64() * sample_rate.max(0.0)).round() as usize;
-        Missed {
-            fill: 0,
-            unfilled: frames,
-        }
+        (late.as_secs_f64() * sample_rate.max(0.0)).round() as usize
     }
 }
 
@@ -178,26 +172,17 @@ mod tests {
         let to_nanos = |ticks: u64| ticks * 125 / 3;
         let started = 1_000_000;
         let first = FirstCallback::new();
-        assert!(
-            first.missed(started, to_nanos, 48_000.0).is_none(),
-            "none came"
-        );
+        assert_eq!(first.missed(started, to_nanos, 48_000.0), 0, "none came");
         // 0.5 s after the start: 0.3 s past the allowance.
         first.mark(started + 12_000_000);
-        assert_eq!(
-            first.missed(started, to_nanos, 48_000.0),
-            Missed {
-                fill: 0,
-                unfilled: 14_400
-            }
-        );
-        assert_eq!(first.missed(started, to_nanos, 16_000.0).unfilled, 4_800);
+        assert_eq!(first.missed(started, to_nanos, 48_000.0), 14_400);
+        assert_eq!(first.missed(started, to_nanos, 16_000.0), 4_800);
         let on_time = FirstCallback::new();
         on_time.mark(started + 4_800_000); // 200 ms
-        assert!(on_time.missed(started, to_nanos, 48_000.0).is_none());
+        assert_eq!(on_time.missed(started, to_nanos, 48_000.0), 0);
         let early = FirstCallback::new();
         early.mark(started - 10);
-        assert!(early.missed(started, to_nanos, 48_000.0).is_none());
+        assert_eq!(early.missed(started, to_nanos, 48_000.0), 0);
     }
 
     #[test]

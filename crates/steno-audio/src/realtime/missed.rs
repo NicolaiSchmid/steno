@@ -78,11 +78,18 @@
 //! and on WASAPI a stream that delivers continuously compares its first
 //! packet's QPC with the performance counter just before its start
 //! ([`DevicePositions::missed_before_first`](crate::capture::split_streams::DevicePositions::missed_before_first)).
-//! Past the start's normal latency, that time counts unfilled at the stop,
-//! whatever the stop is for (a rebuild's gap starts at the last frame), and
+//! Past the start's normal latency, that time counts unfilled at the stop
+//! ([`LaneFrameSink::count_before_first`](super::LaneFrameSink::count_before_first)),
 //! only for a recording's first start
 //! ([`LaneFrameSink::first_start`](super::LaneFrameSink::first_start)): a
 //! restart's gap runs to its first frame and holds that time already.
+//! It counts whatever the stop is for, and apart from what the thread
+//! missed while it ran. A rebuild's gap can start at the stream's last
+//! frame (a stall, a device that went away), and the session takes back
+//! from what the thread counted unfilled after that frame up to the gap's
+//! length ([the session's rule](crate::capture::session#missed-audio)).
+//! The time before the first frame lies outside every such gap, so the
+//! session keeps it whole.
 //!
 //! # The bound
 //!

@@ -885,15 +885,15 @@ impl CaptureBackend for LiveCaptureBackend {
             ));
         }
         // What came before the first callback, past the start's allowance,
-        // after the recording's first start only: a restart's gap runs to
-        // its first frame. A rebuild's gap starts at the last frame, so this
-        // counts whatever the stop is for.
+        // after the recording's first start only, whatever the stop is for
+        // (the rule: `realtime::missed`, "Before the first callback").
         if first_start {
-            context.sink.write_missed(context.first_callback.missed(
-                host_started,
-                hal::host_time_to_nanos,
-                sample_rate,
-            ));
+            context.sink.count_before_first(
+                context
+                    .first_callback
+                    .missed(host_started, hal::host_time_to_nanos, sample_rate),
+                None,
+            );
         }
         start_log!(
             info,

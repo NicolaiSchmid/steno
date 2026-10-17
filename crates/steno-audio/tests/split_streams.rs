@@ -25,7 +25,7 @@ use steno_audio::capture::split_streams::{
 use steno_audio::capture::{ChannelRef, DeviceChangeReason, SplitStreamPlan, StreamSource};
 use steno_audio::realtime::{
     FollowerLane, LaneFrameSink, LaneRingBuffer, MISSED_FILL_LIMIT, Missed, PacketRouter,
-    SliceView, StreamBody, count_at_stop, count_before_first, deliver_slices,
+    SliceView, StreamBody, count_at_stop, deliver_slices,
 };
 use steno_audio::{CaptureError, CaptureMode, SAMPLE_RATE};
 use steno_core::AudioLane;
@@ -2365,11 +2365,11 @@ fn a_first_packet_half_a_second_late_counts_what_came_before_it() {
     let clocks = started_late(true, 50);
     assert_eq!(
         clocks.positions.missed_before_first(START_SIZES),
-        unfilled(24_000 - 960 - 480)
+        24_000 - 960 - 480
     );
     let hour = started_late(true, 360_000 * 2);
     assert_eq!(
-        hour.positions.missed_before_first(START_SIZES).unfilled,
+        hour.positions.missed_before_first(START_SIZES),
         MOST_READ_FRAMES as usize,
         "capped at an hour"
     );
@@ -2380,11 +2380,11 @@ fn a_first_packet_half_a_second_late_counts_what_came_before_it() {
 #[test]
 fn a_first_packet_inside_the_start_latency_counts_nothing() {
     for late_packets in [0, 1, 3] {
-        assert!(
+        assert_eq!(
             started_late(true, late_packets)
                 .positions
-                .missed_before_first(START_SIZES)
-                .is_none(),
+                .missed_before_first(START_SIZES),
+            0,
             "{late_packets} packets late"
         );
     }
@@ -2392,8 +2392,9 @@ fn a_first_packet_inside_the_start_latency_counts_nothing() {
     clocks.positions.start(clocks.next.qpc);
     clocks.next.qpc += 3 * QPC_PACKET + QPC_PACKET / 2;
     clocks.clean(CALIBRATION_PACKETS);
-    assert!(
-        clocks.positions.missed_before_first(START_SIZES).is_none(),
+    assert_eq!(
+        clocks.positions.missed_before_first(START_SIZES),
+        0,
         "half a period past the latency"
     );
 }
@@ -2404,28 +2405,27 @@ fn a_first_packet_inside_the_start_latency_counts_nothing() {
 /// none).
 #[test]
 fn a_stream_given_no_start_or_no_sane_qpc_counts_nothing_before_its_first_packet() {
-    assert!(
+    assert_eq!(
         started_late(false, 50)
             .positions
-            .missed_before_first(START_SIZES)
-            .is_none(),
+            .missed_before_first(START_SIZES),
+        0,
         "endpoint loopback"
     );
     let mut measuring = Clocks::new(Some(48_000), 480, QPC_PACKET);
     measuring.positions.start(measuring.next.qpc);
     measuring.skip(50).clean(10);
-    assert!(
-        measuring
-            .positions
-            .missed_before_first(START_SIZES)
-            .is_none(),
+    assert_eq!(
+        measuring.positions.missed_before_first(START_SIZES),
+        0,
         "still measuring"
     );
     let mut absent = Clocks::new(Some(48_000), 480, 0);
     absent.positions.start(1 << 40);
     absent.skip(50).clean(CALIBRATION_PACKETS);
-    assert!(
-        absent.positions.missed_before_first(START_SIZES).is_none(),
+    assert_eq!(
+        absent.positions.missed_before_first(START_SIZES),
+        0,
         "no QPC"
     );
 }
@@ -2442,7 +2442,26 @@ fn the_first_packet_with_a_qpc_reads_the_start_past_the_frames_before_it() {
     clocks.clean(CALIBRATION_PACKETS);
     assert_eq!(
         clocks.positions.missed_before_first(START_SIZES),
-        unfilled(24_000 - 960 - 480)
+        24_000 - 960 - 480
+    );
+}
+
+/// A first packet with a timestamp error does not read the start even
+/// when its QPC is wrong (a second early, before the start): the first
+/// clean packet does, less the frames delivered before it.
+#[test]
+fn a_first_packet_with_a_timestamp_error_never_reads_the_start() {
+    let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
+    clocks.positions.start(clocks.next.qpc);
+    clocks.skip(50);
+    let on_time = clocks.next.qpc;
+    clocks.next.qpc -= 10_000_000;
+    clocks.deliver(false, true);
+    clocks.next.qpc = on_time + QPC_PACKET;
+    clocks.clean(CALIBRATION_PACKETS);
+    assert_eq!(
+        clocks.positions.missed_before_first(START_SIZES),
+        24_000 - 960 - 480
     );
 }
 
@@ -2452,19 +2471,19 @@ fn the_first_packet_with_a_qpc_reads_the_start_past_the_frames_before_it() {
 #[test]
 fn the_stop_counts_the_losses_before_the_first_packets_on_their_lanes() {
     let call = Call::new();
-    count_before_first(&call.sink, Some(1), unfilled(4_800), unfilled(9_600));
+    call.sink.count_before_first(4_800, Some((1, 9_600)));
     assert_eq!(
-        call.sink.unfilled_samples(),
+        call.sink.before_first_samples(),
         BTreeMap::from([(AudioLane::Mic, 4_800), (AudioLane::System, 9_600)])
     );
     assert!(call.sink.filled_samples().is_empty(), "nothing written");
     let none = Call::new();
-    count_before_first(&none.sink, Some(1), Missed::default(), Missed::default());
-    assert!(none.sink.unfilled_samples().is_empty());
+    none.sink.count_before_first(0, Some((1, 0)));
+    assert!(none.sink.before_first_samples().is_empty());
     let system_only = LaneFrameSink::new(&[AudioLane::System]);
-    count_before_first(&system_only, None, unfilled(480), Missed::default());
+    system_only.count_before_first(480, None);
     assert_eq!(
-        system_only.unfilled_samples(),
+        system_only.before_first_samples(),
         BTreeMap::from([(AudioLane::System, 480)])
     );
 }

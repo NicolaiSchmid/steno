@@ -942,30 +942,3 @@ pub fn count_at_stop(
         }
     }
 }
-
-/// What the backend's stop hands to `sink` for the audio each stream missed
-/// before its first packet, beyond its start latency (`master` and
-/// `follower`, the follower's lane at `follower_index` in the sink):
-/// unfilled, on the lanes that stream feeds, whatever the stop is for,
-/// since a rebuild's gap starts at the last frame and never covers it. The
-/// backend calls it only for a recording's first start
-/// ([`LaneFrameSink::first_start`]): a restart's own start is inside its
-/// gap, which runs to its first frame.
-pub fn count_before_first(
-    sink: &LaneFrameSink,
-    follower_index: Option<usize>,
-    master: Missed,
-    follower: Missed,
-) {
-    let frames = |missed: Missed| missed.fill.saturating_add(missed.unfilled);
-    for lane in 0..sink.lanes().len() {
-        let missed = if Some(lane) == follower_index {
-            frames(follower)
-        } else {
-            frames(master)
-        };
-        if missed > 0 {
-            sink.ring(lane).record_unfilled(missed);
-        }
-    }
-}

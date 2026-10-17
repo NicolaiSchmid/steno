@@ -97,8 +97,9 @@
 //! first drain), so a stream that delivers continuously reads the
 //! performance counter just before its start against its first packet
 //! ([`DevicePositions::missed_before_first`]), and the stop of a
-//! recording's first start hands that on too ([`count_before_first`]); a
-//! rebuild's restart is inside its gap.
+//! recording's first start hands that on too
+//! ([`LaneFrameSink::count_before_first`]; the rule is in
+//! [`realtime::missed`](crate::realtime::missed#before-the-first-callback)).
 //! The count and the seconds are logged at stop, as are the follower's
 //! underrun, slip and trim counts. All of these logs are at `info`, below
 //! the shell's default filter: set `RUST_LOG=steno_audio=info` to see them.
@@ -125,7 +126,6 @@ use crate::capture::{
 use crate::detection::EndpointFlow;
 use crate::realtime::{
     FollowerLane, LaneFrameSink, Missed, PacketRouter, StreamBody, count_at_stop,
-    count_before_first,
 };
 
 /// How long `start` waits, in total, for the stream threads to open and
@@ -162,9 +162,9 @@ enum StreamEvent {
 /// What a stream thread's clocks read at its stop.
 #[derive(Debug, Default, Clone, Copy)]
 struct Ends {
-    /// Missed before its first packet, beyond its start latency
+    /// Frames missed before its first packet, beyond its start latency
     /// ([`CaptureClient::missed_before_first`]).
-    before_first: Missed,
+    before_first: usize,
     /// Missed after its last packet ([`CaptureClient::missed_at_stop`]),
     /// `None` when it was not read.
     after_last: Option<Missed>,
@@ -621,11 +621,11 @@ fn run_stream(
     if continuously {
         ends.before_first = client.missed_before_first();
     }
-    if !ends.before_first.is_none() {
+    if ends.before_first > 0 {
         tracing::info!(
             "{} stream: {:.3} s missed before its first packet",
             source.as_str(),
-            ends.before_first.unfilled as f64 / SAMPLE_RATE
+            ends.before_first as f64 / SAMPLE_RATE
         );
     }
     if let Some(end) = ends.after_last.filter(|end| !end.is_none()) {
@@ -1037,7 +1037,7 @@ impl CaptureBackend for LiveCaptureBackend {
     /// Stops the capture threads (no frame arrives after it returns), hands
     /// on what they missed at the end ([`count_at_stop`]) and, after the
     /// recording's first start, before their first packets
-    /// ([`count_before_first`]), then stops the watcher.
+    /// ([`LaneFrameSink::count_before_first`]), then stops the watcher.
     fn stop(&self) {
         let Some(mut active) = self.lock().take() else {
             return;
@@ -1058,11 +1058,12 @@ impl CaptureBackend for LiveCaptureBackend {
             end(false).after_last,
         );
         if active.first_start {
-            count_before_first(
-                &active.sink,
-                active.follower.as_ref().map(|(_, index)| *index),
+            active.sink.count_before_first(
                 end(true).before_first,
-                end(false).before_first,
+                active
+                    .follower
+                    .as_ref()
+                    .map(|(_, index)| (*index, end(false).before_first)),
             );
         }
         if let Some((lane, _)) = &active.follower {
