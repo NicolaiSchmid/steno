@@ -196,6 +196,74 @@ mod tests {
         );
     }
 
+    /// Two asset rows for one master, one kept forever and one expired,
+    /// and the master's folder cannot be searched, so whether the master
+    /// is there cannot be read: it counts as there, the keeper check runs,
+    /// and the expired row is not swept. Skipped where the folder's mode
+    /// does not stop the read (as root).
+    #[cfg(unix)]
+    #[test]
+    fn a_master_whose_metadata_cannot_be_read_keeps_its_keeper_check() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+        let now = Utc::now();
+        let mut meeting = sample_data::meeting();
+        meeting.state = MeetingState::Ready;
+        let layout = RecordingLayout::new(&dir.path().join("audio"), meeting.id);
+        layout.create_directories(true).unwrap();
+        let master = layout.master(AudioFormat::Wav16kInt16);
+        std::fs::write(&master, b"wav").unwrap();
+        let kept = AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: file_url(&master, false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: vec![AudioLane::Mixed],
+            sidecars_16k: BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepForever,
+            expires_at: None,
+        };
+        let expired = AudioAsset {
+            id: Uuid::new_v4(),
+            retention: AudioRetention::DeleteAfterProcessing,
+            expires_at: Some(now - Duration::hours(1)),
+            ..kept.clone()
+        };
+        store.save_meeting_with_asset(&meeting, &kept).unwrap();
+        store.save_asset(&expired).unwrap();
+        let mode = |mode| {
+            std::fs::set_permissions(&layout.directory, std::fs::Permissions::from_mode(mode))
+                .unwrap();
+        };
+
+        mode(0o000);
+        let unreadable = master.try_exists().is_err();
+        let mut removed = false;
+        let swept = unreadable.then(|| {
+            store.sweep_expired_asset(expired.id, now, |_| {
+                removed = true;
+                true
+            })
+        });
+        mode(0o755);
+        let Some(swept) = swept else {
+            return;
+        };
+        assert!(!swept.unwrap(), "not swept");
+        assert!(!removed, "the removal is not called");
+        assert!(master.exists());
+        let due: Vec<Uuid> = store
+            .expired_assets(now)
+            .unwrap()
+            .iter()
+            .map(|asset| asset.id)
+            .collect();
+        assert_eq!(due, [expired.id], "still due, for the next sweep");
+    }
+
     /// Two asset rows for one master, each with its own sidecar and
     /// mixdown, one kept for a day and one expired: the first sweep keeps
     /// the master. Once the keeper falls due too, the next sweep removes

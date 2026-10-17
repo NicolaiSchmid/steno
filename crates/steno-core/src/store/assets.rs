@@ -218,9 +218,9 @@ impl Store {
     /// itself: kept forever, not stamped yet or not expired yet, or its
     /// meeting recording, queued or processing) is not swept: `remove` is
     /// not called, nothing changes, and the next sweep checks again, so the
-    /// master goes once every row naming it is due. A master already gone
-    /// needs no keeper: the asset is swept, so its other files go and its
-    /// stamp clears. Two rows name one master only after a fault, such as
+    /// master goes once every row naming it is due. A master known to be
+    /// gone needs no keeper: the asset is swept, so its other files go and
+    /// its stamp clears. One whose metadata cannot be read counts as there. Two rows name one master only after a fault, such as
     /// (before [`Store::commit_admission_durably`] refused it) a phone
     /// retry's commit into a copy the launch adopted without its ledger
     /// row; the sweep still never deletes audio another row keeps. The
@@ -248,9 +248,12 @@ impl Store {
             else {
                 return Ok(false);
             };
-            let master_on_disk =
-                crate::paths::file_url_path(&asset.url).is_some_and(|master| master.exists());
-            if master_on_disk && let Some(keeper) = keeper_of_master(transaction, &asset, now)? {
+            // Only a master known to be gone skips the keeper check: one
+            // whose metadata cannot be read (an I/O error, a folder it
+            // cannot search) may still be there.
+            let master_not_gone = crate::paths::file_url_path(&asset.url)
+                .is_some_and(|master| !matches!(master.try_exists(), Ok(false)));
+            if master_not_gone && let Some(keeper) = keeper_of_master(transaction, &asset, now)? {
                 tracing::info!(
                     asset_id = %asset.id,
                     meeting_id = %asset.meeting_id,
