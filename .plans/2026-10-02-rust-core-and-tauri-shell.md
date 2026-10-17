@@ -226,7 +226,8 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   no long-pause skip, and extra windows over the audio the chunks leave out; the detector
   and the workers are set where the engine builds its `Transcriber`, not in
   `pipeline_config`). One decode loop
-  (`decode_window`), one merge (`merge_all`), one chunker (`layout`), one segmentation.
+  (`decode_window`), one merge (`merge_all`), one partition (`partition` over `layout`),
+  one segmentation.
   Numbers are mean WER on FLEURS German `cat/` through the CoreML backend on Forge (load
   2 to 18), from `scripts/coreml-parity-forge.sh`, the variants through
   `scripts/coreml-parity-variants.py` (`scripts/coreml-parity-forge.sh c6cc64a98 HEAD
@@ -281,19 +282,18 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     speech the detector finds), after the last (0.25 s after the last speech) and the
     rest of a pause a chunk's start moves past: the gaps. Each gap of 2.5 s or more
     (`steno_speech::chunker::MIN_GAP_SECONDS`) is decoded in extra windows that stay
-    inside it (`gap_windows`), and their words go in between the chunks' without
-    changing one (`splice_gaps`; chunk words a recovery kept inside a gap cover it,
-    those before the first word that starts more than 2 s past the gap's start and
-    those from it on, each from the first of them to the last; a later recovery whose
-    words begin with punctuation past that point counts for the earlier side, and the
-    window words between the two are lost, an ONNX-only case noted in A16 of the stable
-    plan; at a seam a window's word falls away only as the chunk's next or last word
-    heard again, the same piece starting within two frames of it, or as the chunk's
-    first piece heard less than a second before it, so a word said twice across a
-    gap's edge stays unless it is two frames long or shorter, and so does the window's
-    copy of a word sounding across the edge when the two copies start further apart);
-    a window of digital silence is left out. FLEURS and the corpus are unchanged
-    (4.874 %, 8.46 %, no word added), quiet speech at -20 and -26 dB comes through as
+    inside it, and the recording is split once into owned spans, one per chunk and one
+    per window (`steno_speech::chunker::partition`, A16a of the stable plan, which
+    states the ownership invariant). The consecutive chunks, and one gap's windows, each
+    keep the LCS merge between them, as before; a gap's window keeps its whole decode,
+    and an accepted recovery what it kept before (its chunk and the overlap either side).
+    Where a gap's windows meet a chunk, the copy of a word both sides kept with fewer
+    pieces falls away only as the same piece starting within two frames of the other, so
+    a chunk's copy can give way to the window's; a word said twice across such a seam
+    stays unless it is two frames long or shorter, and so does a copy of a word sounding
+    across an edge when the two copies start further apart; a window of digital silence
+    is left out. FLEURS and the corpus are
+    unchanged (4.874 %, 8.46 %, no word added), quiet speech at -20 and -26 dB comes through as
     the lead-in, a 9.1 s gap and the tail (14, 19 and 14 words, main's level), and the
     cost is +13 % on FLEURS, +9 % on the corpus and +10 % on a 15-minute meeting's two
     lanes (+21 % on its microphone lane alone). Known limit: a gap shorter than 2.5 s is not decoded,

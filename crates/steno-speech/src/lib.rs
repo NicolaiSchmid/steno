@@ -16,14 +16,16 @@
 //!   energy detectors: a fixed threshold for tests, one that follows the
 //!   recording's level for the `CoreML` engine.
 //! - [`chunker`]: the longest-pause layout with the 60 s memory clamp, or
-//!   the models' fixed 15 s window (`CoreML`), and the extra windows over
-//!   the audio the layout leaves out.
+//!   the models' fixed 15 s window (`CoreML`), the extra windows over the
+//!   audio the layout leaves out, and [`partition`](chunker::partition),
+//!   the recording split once into owned spans.
 //! - [`merge`]: the time-tolerant LCS merge of overlapping windows.
 //! - [`segmentation`]: pieces to words to [`RawSegment`](steno_core::RawSegment)s.
 //! - [`language`]: the per-segment language tagger.
 //! - [`pipeline`]: [`Transcriber`], which runs the above in order, decodes
-//!   chunks (and the extra windows) on one backend or several in parallel
-//!   and retries empty chunks with a wider window.
+//!   each span (a chunk or an extra window) on one backend or several in
+//!   parallel, retries empty chunks with a wider window, and joins the
+//!   spans' tokens by runs.
 //! - [`onnx`]: the ONNX Runtime backend over our fp32 export, with the
 //!   encoder on `DirectML` on Windows when the settings ask and the probe
 //!   passes ([`EncoderProvider`]).
