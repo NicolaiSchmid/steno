@@ -438,7 +438,7 @@ impl CaptureSpike {
 /// `mic.raw.caf`, so the onsets can be compared.
 #[derive(Debug, Args)]
 pub struct Onsets {
-    /// Audio files: CAF, WAV, m4a or mp3.
+    /// Audio files: CAF, WAV or m4a.
     #[arg(required = true)]
     pub files: Vec<PathBuf>,
     /// Look from this many seconds into each file.

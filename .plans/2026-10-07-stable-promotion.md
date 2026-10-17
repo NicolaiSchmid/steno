@@ -256,6 +256,13 @@ why and the alternative.
   follows (What follows). The blocking list holds the paths found in the plans
   and by the data-loss audit of the Rust app's code. Alternative: the earlier gate, which also
   blocked core flows and silent failures but not every unlikely loss.
+  - A crash loop counts as data loss (A17): an app that stops at every
+    launch records nothing. A recording whose read ends with the app is read
+    once more at the next launch; the second time in a row it is
+    quarantined, failed with its file kept and Process again offered, never
+    read again automatically. One power loss, force quit or update restart
+    mid-read costs nothing; two in a row on the same recording are the
+    accepted false alarm (one click, nothing lost).
 - **D4 The login item stays `SMAppService.mainApp` on macOS.** Confirmed. It is
   the Mac's own login item, the one the Swift app uses, and it keeps the General
   section's `requiresApproval` copy. The shell registers, reads and removes it
@@ -469,7 +476,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
 | A16 | The ONNX engine's extra windows, A2's design: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after #263 |
-| A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured; a durable working marker, and quarantine at launch ("Steno stopped while reading this recording") with the file kept and Process again offered; kill tests; the allocations bounded only if a real trigger exists | audio, after #263 |
+| A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured (it aborts on Linux, not on the Mac); every read of a recording marked durably, the in-process CoreML stage included; a recording whose read ended with the app read once more, and quarantined the second time in a row ("Steno stopped while reading this recording") with the file kept and Process again offered; the allocations bounded by a walk of the boxes, chunks and tables before symphonia opens a file, its reader the one the file's first bytes name (MP4, CAF or WAV) and opened where the walk began, any other kind of file refused plainly; kill tests for one kill and for two | audio (#298) |
 | A20 | The level meter never freezes behind a sync of the files: the levels go out from a thread of their own (`steno-levels`, woken by each publish into `LevelSlot`) instead of from the writer thread, whose periodic `sync_data` (P21; `FlushFileBuffers` on Windows) froze the meter and the `recording` snapshot for as long as it took, 1.0 to 1.3 s on a hosted runner; the sync, its cadence and the files are unchanged | audio |
 
 **Per Linux target, blocking that target's listing (D6):**
@@ -1569,6 +1576,118 @@ Each lands before `0.11.0-rc.1`.
     kept and never touched again automatically, and Process again is
     offered; kill tests (a child killed or aborted with the marker written);
     the allocations bounded only if the measurement finds a real trigger.
+  - Measured (#298), one process per entry point
+    (recovery's declared length, the decode, the mixdown, the pipeline's
+    asset decode) over files with one field patched: on Linux, in a 1-CPU
+    container on a host with 50 GB and 25 GB of swap, a 1 TiB `data` atom
+    in an m4a's `ilst` or a 1 TiB CAF `kuki` aborts all four, and a CAF
+    `pakt` of 2^32 packets aborts the declared length; with the address
+    space held to 8 GiB (a machine that cannot back the allocation) every
+    m4a's sample tables abort too (`stco` or `stsz` at 2^32 - 1 entries,
+    16 GiB; `stts`, 32 GiB; `stsc`, 64 GiB). On the Mac none aborts: the
+    reservation succeeds lazily and the read ends at the file's end with an
+    error. Windows, which does not overcommit, is expected to behave like
+    the limited Linux run (not measured). Every m4a carries the tables; the
+    Swift app's mixdowns carry an `ilst` (the gapless tag). Steno's own
+    readers size nothing from a field: the salvage's `CafHeader` and the
+    priming reader.
+  - Fixed (#298), the breaker: `steno_pipeline::ReadingMarks`. Before each
+    read of a recording in the app's process (each lane's decode for the
+    transcript and the diarizer, the mixdown, recovery's declared length of
+    an adopted recording) and, where the speech engine runs in the app
+    (CoreML on the Mac), around the job's load of the engine and each
+    transcription, a mark naming the meeting, the asset, the file, the stage
+    and the attempt is written durably to `reading/` in the support
+    directory, and removed when the read returns; the pipeline writes and
+    removes it off the async workers. The app's orderly quit removes the
+    open ones and those of a meeting Process again released, and marks no
+    more; a run that finishes after the quit began still reads through, a
+    Process again that races the quit removes its released marks itself, and
+    the exit signal's quit runs on the blocking pool while the signal loop
+    goes on receiving, so a second SIGTERM still ends the app at once. The
+    launch reads the folder beside A15's warm-up mark (`SupportFiles`), and
+    the breaker counts: a meeting's first read that ended with the app costs
+    nothing (logged at `warn`; the meeting is processed again, its reads
+    marked as a second attempt); the second in a row quarantines it: it
+    fails with "Steno stopped while reading this recording; the recording is
+    kept.", loses a retention stamp, and is logged once; its marks stay as
+    the quarantine, so the launch resume, the resumes after an install or a
+    busy store, and the adoption skip it, and an orphan whose length read
+    stopped twice is listed failed and unread. A run whose reads all
+    returned starts the count again; a single read does not, so an earlier
+    read that returns never hides a later one that ends the app. Process
+    again (and `steno process --meeting`, `steno reprocess`) releases a
+    quarantined meeting into a second attempt. Marks beside a meeting a run
+    finished (ready, or failed for another reason) count for nothing and are
+    removed. The CLI's writing commands, which hold the database lock, mark
+    their reads and run the same launch check. A15's warm-up mark stays
+    one-shot. Kill tests: a child SIGKILLed in a decode (an abort ends the
+    process at the same point, nothing runs after) leaves its mark; after
+    one kill the next launch processes that meeting with the others; after
+    two in a row it quarantines it, keeps its files byte for byte, processes
+    the other queued meeting, and Process again makes it ready. False alarms
+    left: a CoreML abort in one meeting's transcription also counts against
+    a meeting waiting for its turn at the engine (the Transcribe mark spans
+    the wait), and a crash in a resumed meeting's read against an orphan
+    whose length the launch reads beside it (the adoption runs last, so a
+    slow folder delays no resume).
+  - Fixed (#298), the allocations bounded (part c: the pre-check, not a
+    child): before symphonia opens a file, `steno_audio::codec::sizes` finds
+    which reader opens it and walks what that reader reads, from byte 0,
+    with no probe. An MP4 file (well-formed top-level boxes from byte 0, one
+    an `ftyp`; a `free` or `wide` box may come first) opens symphonia's MP4
+    reader at byte 0, a CAF file its CAF reader and a WAV file (`RIFF`, and
+    `WAVE` at byte 8) its WAV reader; any other file (an MP3, an ADTS
+    stream, an m4a behind junk or an ID3 tag, which symphonia 0.5.5 did not
+    read either) fails before symphonia reads a byte, with "Steno cannot
+    read this kind of file; the recording is kept." No path in Steno takes
+    another kind of file (the paths checked are listed in `codec::sizes`),
+    and a movie hidden in a leading box never reaches the MP4 reader
+    (symphonia's own probe scans the first MiB for any reader's marker and
+    reads from there). The walk follows boxes only where symphonia reads
+    them, each rule naming the isomp4 source it mirrors, and refuses, as an
+    unsupported file (the meeting fails retryably, the file is kept), a box
+    or chunk larger than the file or its parent or shorter than its header,
+    a sample table (`stts`, `stsc`, `stsz`, `stco`, `co64`, `trun`) counting
+    more entries than its box holds, a sample larger than the file (in
+    `stsz`, `trun`, or a `tfhd` or `trex` default), a box symphonia
+    subtracts a fixed header from that is shorter (`hdlr` in `mdia`, `meta`,
+    an `ilst` item's `data`, `mean`, `name`), a CAF packet table counting
+    more packets than its entries can describe or giving a packet larger
+    than the file, a CAF description giving packets larger than the file or
+    uncompressed frames above 4 KiB, a WAV chunk before the audio larger
+    than the file (a `LIST` with its `INFO` values included; what follows
+    the audio is never read), a WAV `LIST` of odd size before the audio
+    (symphonia pads it twice and reads every later header out of step, where
+    an `INFO` value may declare 4 GiB; the crate's own WAV reader, which
+    `steno process` checks a file with, refuses it too), and a WAV `fmt `
+    that symphonia would read short. A CAF `data` left open (-1) is walked
+    on into its audio, as symphonia reads on for chunks there. A final
+    top-level box that runs past the file is let through unless symphonia
+    parses it (`ftyp`, `moov`, `sidx`, `meta`, `moof`): the walk refuses
+    nothing symphonia 0.5.5 reads (which fails on any such box itself), but
+    for the MP3 and ADTS streams Steno never makes. Every path that opens a
+    file with symphonia (the declared length, the decode, the mixdown, the
+    pipeline) goes through the one opening that runs the walk, and symphonia
+    reads no further than the length the walk measured; the salvage of a
+    file without a `moov` reads its packets with its own bounded reader and
+    symphonia's AAC decoder only. Not bounded, and small by their encoding:
+    an `esds` descriptor (at most 256 MiB), a FLAC metadata block (16 MiB),
+    the ALAC and Opus headers, a WAV packet (at most 1 152 blocks of a
+    16-bit alignment, 75 MiB); a CAF channel layout reserves nothing; a
+    bounded count still reserves up to 32 times the file (32 bytes a `pakt`
+    packet). Gate: every measured or crafted case is refused, every fixture
+    and every healthy variant symphonia reads still reads (the bare MP3
+    fixture is refused plainly), and a fuzz that sets the size and count
+    fields of the MP4, CAF and WAV fixtures' boxes, chunks, tables and
+    packet sizes to boundary and random values, and in one case of eight
+    plants the header symphonia would misread after an odd WAV `LIST`,
+    aborts nothing; CI runs 400 cases on every platform. On Linux the
+    measured cases and the fuzz run in a child held to 2 GiB of address
+    space, so an allocation above about 2 GB fails loudly: healthy files
+    peak far below it (138 MB for the 12-minute Swift-era recording), and a
+    decode's five-hour reservation (1.15 GB) keeps the limit above 1.2 GiB.
+    The breaker stays, for anything the walk does not model.
   - Owner: audio. It blocks stable (D3).
 - **A20 The level meter never freezes behind a sync of the files.** Found
   by P40's check 1 (`locked_store_tests`), which failed on Windows with no

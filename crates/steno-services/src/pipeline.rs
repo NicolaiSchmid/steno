@@ -265,9 +265,11 @@ impl CurrentPipeline {
 
     /// Quits every pipeline this one built or builds from now on, the
     /// current one, the retired ones still finishing and a reload's
-    /// replacement: see [`ProcessingPipeline::quit`].
+    /// replacement, which share its latch and its reading marks: see
+    /// [`ProcessingPipeline::quit`], whose mark removals sync the disk, so
+    /// an async caller runs this on the blocking pool and waits for it.
     pub fn quit(&self) {
-        self.quit_latch.set();
+        self.current().quit();
     }
 
     /// Whether [`quit`](Self::quit) ran: the app is shutting down.

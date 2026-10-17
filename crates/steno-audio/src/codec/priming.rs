@@ -153,24 +153,34 @@ impl Priming {
 
 /// One box: its type and where its body lies in the file.
 #[derive(Debug, Clone, Copy)]
-struct Mp4Box {
-    kind: [u8; 4],
+pub(super) struct Mp4Box {
+    pub(super) kind: [u8; 4],
     /// The body's first byte.
-    start: u64,
+    pub(super) start: u64,
     /// One past the body's last byte.
-    end: u64,
+    pub(super) end: u64,
+}
+
+/// Why [`Boxes::next_sized`] stopped short of a box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BoxError {
+    /// Its header could not be read.
+    Unreadable,
+    /// It runs past the end of what holds it, or is shorter than its own
+    /// header: its type, its offset and the size it declares.
+    Oversized { kind: [u8; 4], at: u64, size: u64 },
 }
 
 /// The boxes between two offsets, in order; a box that runs past `end` or
 /// cannot be read ends the walk.
-struct Boxes<'a> {
+pub(super) struct Boxes<'a> {
     file: &'a mut File,
     at: u64,
     end: u64,
 }
 
 impl<'a> Boxes<'a> {
-    fn new(file: &'a mut File, start: u64, end: u64) -> Self {
+    pub(super) fn new(file: &'a mut File, start: u64, end: u64) -> Self {
         Self {
             file,
             at: start,
@@ -179,34 +189,51 @@ impl<'a> Boxes<'a> {
     }
 
     fn next(&mut self) -> Option<Mp4Box> {
-        if self.at.checked_add(8)? > self.end {
-            return None;
+        self.next_sized().ok().flatten()
+    }
+
+    /// The next box; `Ok(None)` once no header fits before `end`, and why
+    /// not for a box that does not fit or cannot be read.
+    pub(super) fn next_sized(&mut self) -> Result<Option<Mp4Box>, BoxError> {
+        if self
+            .at
+            .checked_add(8)
+            .is_none_or(|header| header > self.end)
+        {
+            return Ok(None);
         }
         let mut header = [0u8; 8];
-        read_at(self.file, self.at, &mut header)?;
-        let size = u64::from(u32::from_be_bytes(field(&header, 0)?));
-        let kind = field(&header, 4)?;
+        read_at(self.file, self.at, &mut header).ok_or(BoxError::Unreadable)?;
+        let size = u64::from(u32::from_be_bytes(
+            field(&header, 0).ok_or(BoxError::Unreadable)?,
+        ));
+        let kind = field(&header, 4).ok_or(BoxError::Unreadable)?;
         let (body, size) = match size {
             // To the end of the enclosing box (or file).
             0 => (self.at + 8, self.end - self.at),
             // A 64-bit size follows the type.
             1 => {
                 let mut large = [0u8; 8];
-                read_at(self.file, self.at + 8, &mut large)?;
+                read_at(self.file, self.at + 8, &mut large).ok_or(BoxError::Unreadable)?;
                 (self.at + 16, u64::from_be_bytes(large))
             }
             size => (self.at + 8, size),
         };
-        let end = self.at.checked_add(size)?;
+        let oversized = BoxError::Oversized {
+            kind,
+            at: self.at,
+            size,
+        };
+        let end = self.at.checked_add(size).ok_or(oversized)?;
         if end > self.end || body > end {
-            return None;
+            return Err(oversized);
         }
         self.at = end;
-        Some(Mp4Box {
+        Ok(Some(Mp4Box {
             kind,
             start: body,
             end,
-        })
+        }))
     }
 }
 
@@ -226,7 +253,7 @@ fn child(file: &mut File, parent: Mp4Box, kind: [u8; 4]) -> Option<Mp4Box> {
 }
 
 /// Reads `buffer.len()` bytes at `offset`.
-fn read_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Option<()> {
+pub(super) fn read_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Option<()> {
     file.seek(SeekFrom::Start(offset)).ok()?;
     file.read_exact(buffer).ok()
 }

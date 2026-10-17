@@ -57,6 +57,7 @@ use crate::events::MeetingEventBus;
 use crate::export_retries::ExportRetries;
 use crate::intake::RecordingResult;
 use crate::lane_merger::{ClusterSpeaker, LaneMerger};
+use crate::reading::{READ_STOPPED, ReadStage, ReadingMarks};
 use crate::run::ProcessingRun;
 use crate::sample_clips::{self, ClipProbe, ClipStep};
 use crate::warm_up_mark::WarmUpMark;
@@ -848,6 +849,15 @@ pub struct PipelineDependencies {
     /// app attaches the one its launch read with
     /// [`with_warm_up_mark`](Self::with_warm_up_mark).
     pub warm_up_mark: Arc<WarmUpMark>,
+    /// Every read of a recording, marked: in memory from [`new`](Self::new);
+    /// the app and the CLI attach the support directory's, which their
+    /// launch read, with [`with_reading_marks`](Self::with_reading_marks).
+    pub reading_marks: Arc<ReadingMarks>,
+    /// Whether the speech engine runs in this process (`CoreML` on the
+    /// Mac), so its load and each transcription are marked as reads too:
+    /// an abort inside it ends the app. `false` from [`new`](Self::new); the
+    /// speech sidecar's abort ends only its child.
+    pub speech_in_process: bool,
 }
 
 impl PipelineDependencies {
@@ -880,6 +890,8 @@ impl PipelineDependencies {
             clip_probe: None,
             model_waits: ModelWaits::default(),
             warm_up_mark: Arc::new(WarmUpMark::in_memory()),
+            reading_marks: Arc::new(ReadingMarks::in_memory()),
+            speech_in_process: false,
         }
     }
 
@@ -963,6 +975,22 @@ impl PipelineDependencies {
     #[must_use]
     pub fn with_warm_up_mark(mut self, mark: Arc<WarmUpMark>) -> Self {
         self.warm_up_mark = mark;
+        self
+    }
+
+    /// Marks every read of a recording in `marks` instead of the ones in
+    /// memory from [`new`](Self::new), and skips the meetings they hold.
+    #[must_use]
+    pub fn with_reading_marks(mut self, marks: Arc<ReadingMarks>) -> Self {
+        self.reading_marks = marks;
+        self
+    }
+
+    /// Marks the speech engine's load and each transcription as reads,
+    /// for an engine that runs in this process.
+    #[must_use]
+    pub fn with_speech_in_process(mut self, in_process: bool) -> Self {
+        self.speech_in_process = in_process;
         self
     }
 }
@@ -1301,13 +1329,55 @@ impl ProcessingPipeline {
 
     /// Sets the pipeline's [`QuitLatch`] for the app's exit, which quits
     /// every pipeline sharing it; `enqueue` still saves the meeting
-    /// `queued` with its asset.
+    /// `queued` with its asset. Then removes the reading marks the exit
+    /// leaves ([`ReadingMarks::exiting`]), which syncs the disk: an async
+    /// caller runs it with `spawn_blocking(..).await`, so the exit waits
+    /// for the removals off the workers.
     pub fn quit(&self) {
         self.inner.dependencies.quit_latch.set();
+        // The exit, not a recording, ends the reads still running.
+        self.inner.dependencies.reading_marks.exiting();
     }
 
     fn quitting(&self) -> bool {
         self.inner.dependencies.quit_latch.is_set()
+    }
+
+    /// `read` of `asset`'s recording, marked in `stage` while it runs
+    /// ([`ReadingMarks::marked`], off the workers); unmarked without one.
+    async fn marked<T>(
+        &self,
+        asset: &AudioAsset,
+        stage: Option<ReadStage>,
+        read: impl Future<Output = T>,
+    ) -> T {
+        let Some(stage) = stage else {
+            return read.await;
+        };
+        let master = file_url_path(&asset.url).unwrap_or_default();
+        self.inner
+            .dependencies
+            .reading_marks
+            .marked(asset.meeting_id, Some(asset.id), master, stage, read)
+            .await
+    }
+
+    /// A run of `meeting_id` ended with the app alive, every read it began
+    /// returned: the count of reads that ended with the app starts again
+    /// ([`ReadingMarks::read_through`]), off the workers.
+    async fn read_through(&self, meeting_id: Uuid) {
+        let marks = Arc::clone(&self.inner.dependencies.reading_marks);
+        let _ = off_the_workers(move || marks.read_through(meeting_id)).await;
+    }
+
+    /// The stage the speech engine's load and transcriptions are marked
+    /// in: for an engine in this process, whose abort ends the app; none
+    /// for one whose abort ends only its child.
+    fn speech_stage(&self) -> Option<ReadStage> {
+        self.inner
+            .dependencies
+            .speech_in_process
+            .then_some(ReadStage::Transcribe)
     }
 
     /// Writes `Meeting(queued)` plus the asset in one transaction and starts
@@ -1498,6 +1568,8 @@ impl ProcessingPipeline {
             return Err(ReprocessError::AudioGone(meeting_id));
         }
         asset.expires_at = None;
+        // A quarantined recording is read once more, on the user's word.
+        self.inner.dependencies.reading_marks.release(meeting_id);
         self.enqueue_claimed(meeting_id, &asset, claim, |store, now, asset| {
             store.save_meeting_with_asset(&queued(&meeting, now), asset)
         })
@@ -1528,7 +1600,9 @@ impl ProcessingPipeline {
     /// [`TOO_MANY_CRASHED_RUNS`]; its audio is kept, and a retention
     /// stamp an earlier run left is cleared so the sweep keeps it too. A
     /// meeting with any such run waits, then runs alone, so its crashes
-    /// are charged to it, not to the meetings waiting behind it. Returns
+    /// are charged to it, not to the meetings waiting behind it. A meeting
+    /// the launch quarantined for a read that ended with the app
+    /// ([`ReadingMarks`]) is not started, here or in any resume. Returns
     /// the meetings whose processing was started, those that wait last:
     /// none once the pipeline [quits](Self::quit). It counts as a resume
     /// of the meetings waiting for models ([`ModelWaits`]): a run in
@@ -1697,6 +1771,17 @@ impl ProcessingPipeline {
             // marked failed under its run.
             if self.in_flight_set().meetings.contains(&meeting.id) {
                 busy.push(meeting.id);
+                continue;
+            }
+            // Quarantined by the launch: left for the user, failed again in
+            // case the launch's write was refused.
+            if self.inner.dependencies.reading_marks.holds(meeting.id) {
+                let failed = MeetingState::Failed {
+                    reason: READ_STOPPED.to_owned(),
+                };
+                if let Err(error) = self.store().set_state(meeting.id, failed, self.now()) {
+                    tracing::debug!(meeting_id = %meeting.id, %error, "a quarantined meeting stays as it is");
+                }
                 continue;
             }
             let Some(mut asset) =
@@ -2229,6 +2314,10 @@ impl ProcessingPipeline {
                     Box::pin(self.process_until_persist(&asset, meeting)),
                 )
                 .await;
+                // Ok: every stage ran, so every read returned, quit or not.
+                if until_persist.is_ok() || !self.quitting() {
+                    self.read_through(meeting_id).await;
+                }
                 let persisted = match until_persist {
                     Ok(asset) => asset,
                     Err(failure) if self.quitting() => return Err(failure),
@@ -2379,7 +2468,8 @@ impl ProcessingPipeline {
     ) -> Result<AudioAsset> {
         let claim = self.speech_engine().claim();
         let transcribed: Result<_> = async {
-            self.warm_up_for_job(meeting.id).await?;
+            self.marked(asset, self.speech_stage(), self.warm_up_for_job(meeting.id))
+                .await?;
             let (meeting_id, now) = (meeting.id, self.now());
             let settings = attributing(
                 PipelineStage::Decode,
@@ -3078,27 +3168,23 @@ impl ProcessingPipeline {
         for (index, lane) in ordered_lanes(&asset.lanes).into_iter().enumerate() {
             // Release the previous lane before decoding the next.
             drop(last.take());
+            let decode = self.marked(asset, Some(ReadStage::Decode), decoder.decode(asset, lane));
             let buffer = if index == 0 {
-                self.run(
-                    PipelineStage::Decode,
-                    0,
-                    meeting_id,
-                    decoder.decode(asset, lane),
-                )
-                .await?
+                self.run(PipelineStage::Decode, 0, meeting_id, decode)
+                    .await?
             } else {
-                attributing(PipelineStage::Decode, decoder.decode(asset, lane).await)?
+                attributing(PipelineStage::Decode, decode.await)?
             };
             damage = damage.max(buffer.damage);
             seconds = seconds.max(buffer.duration());
             let lane_hint = hint.clone();
+            let transcription = self.marked(
+                asset,
+                self.speech_stage(),
+                engine.transcribe(&buffer, lane_hint.as_ref()),
+            );
             let segments = self
-                .run(
-                    PipelineStage::Transcribe,
-                    index,
-                    meeting_id,
-                    engine.transcribe(&buffer, lane_hint.as_ref()),
-                )
+                .run(PipelineStage::Transcribe, index, meeting_id, transcription)
                 .await?;
             hint = elect_language(&segments).or(hint);
             lanes.insert(lane, segments);
@@ -3164,7 +3250,11 @@ impl ProcessingPipeline {
             };
             let buffer = match handed {
                 Some(handed_lane) if handed_lane.lane == lane => handed_lane.buffer,
-                _ => attributing(PipelineStage::Diarize, decoder.decode(asset, lane).await)?,
+                _ => attributing(
+                    PipelineStage::Diarize,
+                    self.marked(asset, Some(ReadStage::Decode), decoder.decode(asset, lane))
+                        .await,
+                )?,
             };
             let result = attributing(PipelineStage::Diarize, diarizer.diarize(&buffer).await)?;
             if lane == AudioLane::Mic && result.clusters.len() < 2 {
@@ -3515,7 +3605,9 @@ impl ProcessingPipeline {
                 })?;
                 attributing(PipelineStage::Persist, layout.create_directories(false))?;
                 let path = layout.mixdown(decoder.mixdown_format());
-                attributing(PipelineStage::Persist, decoder.mixdown(asset, &path).await)?;
+                let mixed = decoder.mixdown(asset, &path);
+                let mixed = self.marked(asset, Some(ReadStage::Mixdown), mixed).await;
+                attributing(PipelineStage::Persist, mixed)?;
                 mixdown = Some(file_url(&path, false));
             }
             let (meeting_id, fallback) = (meeting.id, asset.clone());
@@ -3836,7 +3928,7 @@ pub fn ensure_me_participant(
 /// the async workers, and returns what it returned. A panic in `work`
 /// resumes here; a task the runtime cancelled before it ran (the runtime
 /// shutting down) is an error.
-async fn off_the_workers<T: Send + 'static>(
+pub(crate) async fn off_the_workers<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> std::io::Result<T> {
     tokio::task::spawn_blocking(work)

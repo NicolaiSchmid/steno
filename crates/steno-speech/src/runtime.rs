@@ -31,6 +31,15 @@ pub enum SpeechRuntime {
     OnnxSidecar,
 }
 
+impl SpeechRuntime {
+    /// Whether the engine runs in the app's process, so an abort inside it
+    /// ends the app (the sidecar's ends only its child).
+    #[must_use]
+    pub fn runs_in_process(self) -> bool {
+        self == Self::CoreMlInProcess
+    }
+}
+
 /// The speech settings, which `steno-services` reads from `speech.json`
 /// in the support directory (not the database's `setting` table, which
 /// the Swift app rewrites whole). Absent keys take their defaults, so an

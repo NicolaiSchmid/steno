@@ -270,8 +270,13 @@ fn only_the_recorders_layout_is_salvaged() {
     variants.push(("only the reserve", bytes[..PACKETS_AT].to_vec()));
     for (name, variant) in variants {
         let path = written(directory.path(), &format!("{name}.m4a"), &variant);
+        // A file with no `ftyp` is no MP4 to symphonia either: refused
+        // plainly before it reads a byte.
         assert!(
-            matches!(decode(&path), Err(CodecError::UnsupportedFormat(_))),
+            matches!(
+                decode(&path),
+                Err(CodecError::UnsupportedFormat(_) | CodecError::UnknownFormat)
+            ),
             "{name}: {:?}",
             decode(&path).map(|d| d.samples.len())
         );
@@ -616,7 +621,7 @@ fn a_packet_the_decoder_refuses_becomes_silence_in_a_salvage() {
     assert!(decoded.damage.salvaged);
 }
 
-/// A file that makes symphonia's probe panic fails as one it refuses, with
+/// A file that makes symphonia's demuxer panic fails as one it refuses, with
 /// the file kept: symphonia 0.5.5's MP4 reader adds a box's size to its
 /// offset unchecked, so a `free` box whose 64-bit size is 2^64 - 1 after
 /// the `ftyp` overflows in a debug build (and is an error in a release
@@ -625,7 +630,7 @@ fn a_packet_the_decoder_refuses_becomes_silence_in_a_salvage() {
 /// crash-log hook installed, the caught panics write no crash log and the
 /// one already in the folder stays.
 #[test]
-fn a_file_the_probe_panics_on_fails_and_is_kept() {
+fn a_file_the_demuxer_panics_on_fails_and_is_kept() {
     thread_local! {
         static PANICS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
@@ -660,9 +665,9 @@ fn a_file_the_probe_panics_on_fails_and_is_kept() {
     }
     // The default hook again, for the assertions below and the other tests.
     drop(std::panic::take_hook());
-    // A release build's probe returns an error for these sizes instead.
+    // A release build's demuxer returns an error for these sizes instead.
     if cfg!(debug_assertions) {
-        assert_eq!(PANICS.with(std::cell::Cell::get), 2, "the probe panicked");
+        assert_eq!(PANICS.with(std::cell::Cell::get), 2, "the demuxer panicked");
     }
     let logs: Vec<_> = std::fs::read_dir(support.path())
         .unwrap()

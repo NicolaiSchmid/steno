@@ -2420,6 +2420,7 @@ fn built_over(
                 &paths.support_directory,
             )),
             warm_up_mark: Arc::new(steno_pipeline::WarmUpMark::in_memory()),
+            reading_marks: Arc::new(steno_pipeline::ReadingMarks::in_memory()),
         },
     )
     .unwrap()

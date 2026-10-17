@@ -13,6 +13,7 @@
 //! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
 //! | [`run`] | One run's progress state with the monotonic clamp |
 //! | [`crash_loop`] | Launch recovery's guard against a crash loop: the runs that ended with the app, counted in the meeting's folder |
+//! | [`reading`] | [`ReadingMarks`], every read of a recording marked in the support directory: a meeting whose read ended with the app is read once more, and quarantined ([`READ_STOPPED`]) the second time in a row until Process again |
 //! | [`warm_up_mark`] | [`WarmUpMark`], the recording's warm-up marked in the support directory, so one that ended with the app turns the warm-up off until a job loads the speech engine |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
 //! | [`intake`] | The phone intake ([`RecordingIntake`], which notes its copies' folders in [`AdmissionFolders`]) and the Mac one ([`LocalRecordingIntake`]) |
@@ -88,6 +89,7 @@ pub mod fixtures;
 pub mod intake;
 pub mod lane_merger;
 pub mod pipeline;
+pub mod reading;
 pub mod retention;
 pub mod run;
 pub mod sample_clips;
@@ -108,6 +110,7 @@ pub use pipeline::{
     OPERATION_PANICKED, Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline,
     QuitLatch, ReprocessError, SharedSpeechEngine, SystemClock, WeakSpeechEngine,
 };
+pub use reading::{READ_STOPPED, ReadStage, Reading, ReadingMarks};
 pub use retention::{RetentionSweep, SweepIncomplete};
 pub use sample_clips::{ClipProbe, ClipStep};
 pub use speaker_memory::StoreSpeakerMemory;

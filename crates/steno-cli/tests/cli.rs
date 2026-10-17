@@ -473,6 +473,36 @@ fn a_run_whose_meeting_ends_failed_exits_two_and_says_why() {
     assert_eq!(process.stdout, "", "no meeting id on a failed run");
 }
 
+/// A WAV the command refuses up front leaves the input as it was and no
+/// meeting folder behind.
+#[test]
+fn a_refused_wav_leaves_no_meeting_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let audio = home.join("audio");
+    let not_audio = home.join("input.wav");
+    std::fs::write(&not_audio, b"not a wav").unwrap();
+    let process = steno(
+        &[
+            "process",
+            not_audio.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--audio-folder",
+            audio.to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(process.status, 2, "{}", process.stderr);
+    assert!(process.stderr.contains("input.wav: "), "{}", process.stderr);
+    assert_eq!(std::fs::read(&not_audio).unwrap(), b"not a wav");
+    let left: Vec<_> = std::fs::read_dir(&audio)
+        .map(|entries| entries.map(|entry| entry.unwrap().path()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+}
+
 /// A command that writes refuses while another process (the app) holds the
 /// database's lock, and runs once it is released; one that only reads runs
 /// beside it.

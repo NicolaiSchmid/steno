@@ -18,8 +18,9 @@
 //!   loads the models in its processing, after the recording.
 //! - **Clearing it**: only a speech engine that loaded in a meeting's
 //!   processing: the mark goes and the next recording warms up again. A
-//!   load that takes the app down there leaves the mark, and the meeting
-//!   to the pipeline's crash-loop guard ([`crate::crash_loop`]).
+//!   load that takes the app down there leaves the mark, and its meeting
+//!   is counted by the reading marks ([`crate::reading`]): read once
+//!   more, and quarantined the second time in a row.
 //!
 //! A folder that cannot be written leaves the warm-up unguarded, as
 //! before: the failure is logged at `warn` and the warm-up runs. The

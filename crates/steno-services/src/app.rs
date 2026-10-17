@@ -23,8 +23,8 @@ use steno_host::services::{
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
-    DamagedAudio, ExportRetries, MeetingEventBus, PipelineDependencies, RecordingIntake,
-    RetentionSweep, WarmUpMark,
+    DamagedAudio, ExportRetries, MeetingEventBus, PipelineDependencies, ReadingMarks,
+    RecordingIntake, RetentionSweep, WarmUpMark,
 };
 
 use crate::block_on;
@@ -368,7 +368,9 @@ pub fn pipeline_dependencies(
     )
     .with_speech_engine(speech_engine)
     .with_damaged_audio(support.damaged_audio.clone())
-    .with_warm_up_mark(support.warm_up_mark.clone());
+    .with_warm_up_mark(support.warm_up_mark.clone())
+    .with_reading_marks(support.reading_marks.clone())
+    .with_speech_in_process(engine_runtime.runs_in_process());
     let dependencies = match passes {
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
         None => dependencies,
@@ -391,6 +393,9 @@ pub struct SupportFiles {
     pub damaged_audio: Arc<DamagedAudio>,
     /// The recordings' warm-up mark, read once by the launch.
     pub warm_up_mark: Arc<WarmUpMark>,
+    /// The reads of a recording, marked; the meetings the launch
+    /// quarantined for one that ended with the app.
+    pub reading_marks: Arc<ReadingMarks>,
 }
 
 impl SupportFiles {
@@ -400,6 +405,7 @@ impl SupportFiles {
         SupportFiles {
             damaged_audio: Arc::new(DamagedAudio::in_memory()),
             warm_up_mark: Arc::new(WarmUpMark::in_memory()),
+            reading_marks: Arc::new(ReadingMarks::in_memory()),
         }
     }
 }
@@ -758,11 +764,18 @@ pub fn build_with_import(
     // meeting's entry goes at launch.
     let damaged_audio = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
     damaged_audio.retain(|meeting_id| store.meeting(meeting_id).map_or(true, |m| m.is_some()));
-    // The launch check of the recordings' warm-up: a mark left over from a
-    // warm-up that ended with the app turns it off ([`WarmUpMark`]).
+    // The launch check, before anything reads a recording: a mark left over
+    // from a warm-up that ended with the app turns the warm-up off
+    // ([`WarmUpMark`]), and a mark a read left quarantines its meeting
+    // ([`ReadingMarks`]).
     let support = SupportFiles {
         damaged_audio,
         warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
+        reading_marks: Arc::new(ReadingMarks::at_launch(
+            &paths.support_directory,
+            &store,
+            chrono::Utc::now(),
+        )),
     };
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
@@ -1887,6 +1900,50 @@ mod tests {
         let app = build(options).unwrap();
         let disk = app.recorder.disk();
         assert_eq!(disk.database_folder.as_deref(), database.parent());
+    }
+
+    /// The build runs the reading marks' launch check before anything
+    /// reads a recording: a meeting whose read ended with the app twice in
+    /// a row is failed and held by the pipeline the build makes (A17 of
+    /// `.plans/2026-10-07-stable-promotion.md`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_build_quarantines_a_meeting_whose_reads_ended_with_the_app_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let app = build(options_under(&support)).unwrap();
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = steno_core::MeetingState::Processing;
+        app.store.save_meeting(&meeting).unwrap();
+        let store = app.store.clone();
+        drop(app);
+        let master = support.join("recording.m4a");
+        for _ in 0..2 {
+            let killed = Arc::new(ReadingMarks::at_launch(
+                &support,
+                &store,
+                chrono::Utc::now(),
+            ));
+            std::mem::forget(killed.reading(
+                meeting.id,
+                None,
+                &master,
+                steno_pipeline::ReadStage::Decode,
+            ));
+        }
+        let app = build(options_under(&support)).unwrap();
+        assert!(
+            app.pipeline
+                .current()
+                .dependencies()
+                .reading_marks
+                .holds(meeting.id)
+        );
+        assert_eq!(
+            app.store.meeting(meeting.id).unwrap().unwrap().state,
+            steno_core::MeetingState::Failed {
+                reason: steno_pipeline::READ_STOPPED.to_owned()
+            }
+        );
     }
 
     /// The build drops the damage marks of meetings that are gone and
@@ -4017,6 +4074,7 @@ mod tests {
         let support = SupportFiles {
             damaged_audio: Arc::new(DamagedAudio::in_directory(&paths.support_directory)),
             warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
+            reading_marks: Arc::new(ReadingMarks::in_memory()),
         };
         let make = make_dependencies(
             &store,

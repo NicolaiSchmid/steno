@@ -77,6 +77,24 @@ impl DatabaseOptions {
         )))
     }
 
+    /// The reads of a recording marked beside the database, as the app
+    /// marks them ([`steno_pipeline::ReadingMarks`]), read as a launch
+    /// reads them: a mark a crash left quarantines its meeting in
+    /// `store`, which only `process --meeting` (Process again) runs again.
+    /// The command holds the database's lock, so the app is not running.
+    pub fn reading_marks(
+        &self,
+        store: &Store,
+    ) -> Result<Arc<steno_pipeline::ReadingMarks>, Failure> {
+        let path = self.path()?;
+        let directory = path.parent().unwrap_or_else(|| Path::new(""));
+        Ok(Arc::new(steno_pipeline::ReadingMarks::at_launch(
+            directory,
+            store,
+            chrono::Utc::now(),
+        )))
+    }
+
     /// Opens the database for a command that writes, holding its lock
     /// (`steno_core::DatabaseLock`) until the process ends; refused while
     /// the app or another steno command holds it, so the two never process
@@ -337,6 +355,9 @@ pub fn dependencies(
     llm: Option<steno_services::llm::Passes>,
     events: MeetingEventBus,
 ) -> Result<PipelineDependencies, Failure> {
+    // Where the engine runs, so its load and transcriptions are marked as
+    // reads when that is this process.
+    let mut in_process = false;
     let (speech_engine, diarizer, memory): (
         Arc<dyn steno_core::SpeechEngine>,
         Arc<dyn steno_core::Diarizer>,
@@ -349,6 +370,7 @@ pub fn dependencies(
             });
             // One sidecar engine for both, so they share its child.
             let sidecar = Arc::new(steno_services::speech::sidecar_engine(&speech));
+            in_process = speech.runtime(engine).runs_in_process();
             (
                 // The flag names the engine for this run, as the Swift CLI's
                 // `makeSpeechEngine(engine, ...)` did; the stored id does not.
@@ -375,7 +397,8 @@ pub fn dependencies(
         dispatcher,
         store,
         events,
-    );
+    )
+    .with_speech_in_process(in_process);
     Ok(match llm {
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
         None => dependencies,
