@@ -285,12 +285,14 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     inside it, and the recording is split once into owned spans, one per chunk and one
     per window (`steno_speech::chunker::partition`, A16a of the stable plan, which
     states the ownership invariant): each window keeps the words that start in its own
-    share, so no chunk word is changed, and a recovery keeps nothing inside a decoded
-    gap. At a chunk's end a window's first word falls away only as the chunk's last
-    word heard again, the same piece starting within two frames of it, so a word said
-    twice across that edge stays unless it is two frames long or shorter, and so does
-    the window's copy of a word sounding across an edge when the two copies start
-    further apart; a window of digital silence is left out. FLEURS and the corpus are
+    share, so no chunk word is changed, and an accepted recovery keeps at least what it
+    kept before (its chunk and the overlap either side, and the audio beside it that no
+    window decodes). Where a gap's window meets a chunk or another window of its gap,
+    the window's copy of a word both sides kept falls away only as the same piece
+    starting within two frames of the other, so a word said twice across a seam stays
+    unless it is two frames long or shorter, and so does a copy of a word sounding
+    across an edge when the two copies start further apart; a window of digital silence
+    is left out. FLEURS and the corpus are
     unchanged (4.874 %, 8.46 %, no word added), quiet speech at -20 and -26 dB comes through as
     the lead-in, a 9.1 s gap and the tail (14, 19 and 14 words, main's level), and the
     cost is +13 % on FLEURS, +9 % on the corpus and +10 % on a 15-minute meeting's two
