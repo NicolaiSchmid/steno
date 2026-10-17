@@ -1854,11 +1854,13 @@ The table above names each package and its owner. Their tests:
   A note with no upload (an older build's), or a copy that holds other
   bytes, is adopted as a recording with no meeting, without a ledger row.
   A copy A17's reading marks hold (#298) is adopted failed and unread, and
-  not processed: a held copy that holds its upload whole (size and
-  SHA-256) gets the ledger row, so the phone's delete loses nothing: the
-  bytes are the phone's own, kept forever and offered to Process again;
-  one that does not, or cannot be read, gets none, and the phone keeps
-  retrying.
+  not processed, unless it cannot be read: a held copy that holds its
+  upload whole (size and SHA-256) gets the ledger row, so the phone's
+  delete loses nothing: the bytes are the phone's own, kept forever and
+  offered to Process again; one that does not is adopted failed with no
+  ledger row, so the retry admits the upload afresh; one that cannot be
+  read is not adopted and keeps its notes for the next launch. Either
+  way, with no ledger row, the phone keeps retrying.
   No upload stays noted without its folder's entry: a refused folder note
   forgets its upload, and each launch forgets the uploads whose folder has
   no entry.
