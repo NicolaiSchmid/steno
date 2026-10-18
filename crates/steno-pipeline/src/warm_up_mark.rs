@@ -327,7 +327,8 @@ mod tests {
         assert!(next.skipping());
         let text = log.text();
         assert_eq!(lines_of(&text, &id, "is held off;"), 1, "{text}");
-        // Looser than the count above, so no wording of the line slips past.
+        // No semicolon, unlike the left-over test's count, so no rewording
+        // of that line slips past.
         assert_eq!(lines_of(&text, &id, "ended with the app"), 0, "{text}");
     }
 
