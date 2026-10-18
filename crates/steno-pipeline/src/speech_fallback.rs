@@ -396,20 +396,7 @@ mod tests {
     #[test]
     fn a_reading_mark_that_cannot_be_read_turns_it_on_once() {
         let support = tempfile::tempdir().unwrap();
-        let store = Store::in_memory().unwrap();
-        let marks = Arc::new(ReadingMarks::at_launch(
-            support.path(),
-            &store,
-            chrono::Utc::now(),
-        ));
-        let path = support.path().join("master.caf");
-        std::fs::write(&path, b"audio").unwrap();
-        std::mem::forget(marks.reading(
-            uuid::Uuid::new_v4(),
-            None,
-            &path,
-            crate::ReadStage::Decode,
-        ));
+        transcription_mark_left(support.path());
         let folder = support.path().join(ReadingMarks::FOLDER);
         let file = std::fs::read_dir(&folder)
             .unwrap()
