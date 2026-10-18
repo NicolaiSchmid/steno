@@ -1,5 +1,4 @@
 //! The Obsidian vault folder destination.
-//! Swift: `Sources/StenoAdapters/Obsidian/ObsidianFolderDestination.swift`.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -39,13 +38,11 @@ pub enum ObsidianError {
     WriteFailed { path: String, underlying: String },
 }
 
-/// The start of the name of the file [`ObsidianFolderDestination::validate_vault`]
-/// probes the vault with; eight lowercase hex digits follow. The Swift app
-/// named its probe the same way.
+/// The start of the vault probe's file name; eight lowercase hex digits
+/// follow.
 const PROBE_PREFIX: &str = ".steno-probe-";
 
-/// Whether `name` is exactly a probe's: [`PROBE_PREFIX`] and eight
-/// lowercase hex digits.
+/// Whether `name` is exactly a probe's name.
 fn is_probe_name(name: &str) -> bool {
     name.strip_prefix(PROBE_PREFIX).is_some_and(|hex| {
         hex.len() == 8
@@ -55,8 +52,7 @@ fn is_probe_name(name: &str) -> bool {
     })
 }
 
-/// Whether a probe's remove left it gone: an entry already gone (another
-/// check in this process removed it) counts as removed.
+/// Whether a probe's remove left it gone; already gone counts.
 fn removed(result: std::io::Result<()>) -> bool {
     match result {
         Ok(()) => true,
@@ -64,31 +60,24 @@ fn removed(result: std::io::Result<()>) -> bool {
     }
 }
 
-/// A point inside [`ObsidianFolderDestination::deliver_meeting`] that a
-/// test can stop a delivery at, so a race with a second delivery (or with
-/// another process, played by the test) runs in a chosen order instead of
-/// by luck. Exported with the `testing` feature only; production code never
-/// installs a hook.
+/// A point inside [`ObsidianFolderDestination::deliver_meeting`] where a
+/// test can stop a delivery to order a race. Exported with the `testing`
+/// feature only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(feature = "testing"), allow(dead_code))]
 pub enum DeliveryStep<'a> {
-    /// Another delivery in this process holds the vault; this one waits for
-    /// it before touching anything.
+    /// Another delivery in this process holds the vault.
     WaitingForVault,
-    /// A delivery is about to claim this meeting folder by creating it: a
-    /// first delivery, a redelivery whose pinned folder is gone, or one
-    /// whose pinned folder is no longer this meeting's.
+    /// A delivery is about to claim this meeting folder by creating it.
     ClaimingFolder(&'a str),
-    /// The meeting folder is in place and its files are about to be
-    /// written.
+    /// The meeting folder is in place; its files are about to be written.
     WritingFolder(&'a str),
-    /// The person page at this path has been read (or found missing) and
-    /// is about to be written with this meeting's line merged in.
+    /// The person page at this path was read and is about to be written.
     WritingPersonPage(&'a str),
 }
 
 /// The hook a test installs with
-/// [`ObsidianFolderDestination::with_step_hook`] (feature `testing`).
+/// [`ObsidianFolderDestination::with_step_hook`].
 #[cfg(feature = "testing")]
 #[derive(Clone)]
 struct StepHook(Arc<dyn Fn(DeliveryStep<'_>) + Send + Sync>);
@@ -100,8 +89,7 @@ impl std::fmt::Debug for StepHook {
     }
 }
 
-/// The folder's basename, which every note in it is named after. Swift's
-/// `lastPathComponent`: a pinned `Meetings/x/` still names `x`.
+/// The folder's basename, which every note in it is named after.
 fn folder_slug(folder: &str) -> String {
     Path::new(folder).file_name().map_or_else(
         || folder.to_owned(),
@@ -109,15 +97,12 @@ fn folder_slug(folder: &str) -> String {
     )
 }
 
-/// The last component of the vault-relative `path`.
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or_default()
 }
 
-/// The receipt's warning for the notes this delivery kept, each as `(name,
-/// copy name)` ([`ObsidianFolderDestination::write_note`]): for one, a
-/// sentence naming both files; for several, one naming the notes only.
-/// `None` when it kept none.
+/// The receipt's warning for the notes this delivery kept, each as
+/// `(name, copy name)`; `None` when it kept none.
 fn kept_warning(kept: &[(String, String)]) -> Option<String> {
     match kept {
         [] => None,
@@ -141,13 +126,9 @@ fn is_audio(name: &str) -> bool {
     name == "audio" || name.starts_with("audio.")
 }
 
-/// The lock every delivery into the vault at `vault_path` holds from start
-/// to end, one per vault in the process, so two deliveries merge a shared
-/// person page, claim meeting folders and sweep temp files one after the
-/// other. Keyed by the canonical path (the configured one when it cannot be
-/// resolved), so two spellings of one vault share a lock. Another process
-/// on the vault is not covered; only the folder claim holds across
-/// processes.
+/// The lock every delivery into the vault at `vault_path` holds, one per
+/// canonical vault path in the process. Other processes are not covered;
+/// only the folder claim holds across processes.
 fn vault_lock(vault_path: &str) -> Arc<Mutex<()>> {
     static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = LazyLock::new(Mutex::default);
     let key = fs::canonicalize(vault_path).unwrap_or_else(|_| PathBuf::from(vault_path));
@@ -155,49 +136,35 @@ fn vault_lock(vault_path: &str) -> Arc<Mutex<()>> {
     Arc::clone(locks.entry(key).or_default())
 }
 
-/// The Obsidian vault folder destination: `Meetings/<date>-<slug>/` with the
-/// folder note, transcript, tasks, `transcript.vtt`, `meeting.json`, the
-/// optional audio copy, and one managed block per person page. A person page
-/// the previous receipt lists but this delivery no longer renders (a speaker
-/// reassigned to somebody else, a renamed person) loses this meeting's line
-/// and keeps everything else. The policy (which receipt applies, what may be
-/// written, what the receipt says) is [`DeliveryLedger`]'s; this type
-/// renders, asks the ledger and writes through [`LocalFolderSink`]. Nothing
-/// is deleted but the writer's own temp files and a meeting folder this
-/// delivery created and left empty. Deliveries into one vault run one at a
-/// time in a process (`vault_lock`).
+/// The Obsidian vault folder destination: `Meetings/<date>-<slug>/` with
+/// the notes, `transcript.vtt`, `meeting.json`, the optional audio copy,
+/// and one managed block per person page. Policy is [`DeliveryLedger`]'s;
+/// this type renders and writes through [`LocalFolderSink`]. Nothing is
+/// deleted but its own temp files and an empty folder it created.
 #[derive(Debug, Clone)]
 pub struct ObsidianFolderDestination {
-    /// [`ObsidianFolderDestination::DESTINATION_ID`] for the app's stored
-    /// settings. A one-off run into another vault (`steno deliver --vault`)
-    /// passes its own id so its `Delivery` row and receipt never replace the
-    /// stored destination's.
+    /// [`ObsidianFolderDestination::DESTINATION_ID`] for the stored
+    /// settings; a one-off `steno deliver --vault` passes its own id.
     id: String,
     settings: ObsidianSettings,
-    /// Time zone of the folder date and every date in the notes. The
-    /// machine's zone in the app; tests pin it.
+    /// Time zone of the folder date and every date in the notes.
     time_zone: Tz,
     /// The platform the folder note names a call by
-    /// ([`RenderOptions::platform`]): the one the app runs on, which
-    /// recorded every call it stores; tests pin it.
+    /// ([`RenderOptions::platform`]).
     platform: Platform,
     sink: LocalFolderSink,
     /// The tests' [`DeliveryStep`] hook; `None` outside them.
     #[cfg(feature = "testing")]
     steps: Option<StepHook>,
-    /// The wall clock that dates a copy written beside an edited note;
-    /// tests pin it.
+    /// The wall clock that dates a copy written beside an edited note.
     now: fn() -> DateTime<Utc>,
 }
 
 impl ObsidianFolderDestination {
     pub const DESTINATION_ID: &'static str = "obsidian-folder";
 
-    /// The receipt's warning when the audio copy is on, the file it copies
-    /// is gone (the retention sweep removes it with the master) and the
-    /// meeting folder holds no audio file: the notes are delivered without
-    /// it. Swift fails with `audioUnavailable` instead (parity note in the
-    /// plan).
+    /// The receipt's warning when the audio copy is on but its source is
+    /// gone and the folder holds no audio: the notes go without it.
     pub const NO_AUDIO_WARNING: &'static str =
         "The audio was already removed, so the export has no audio file";
 
@@ -243,24 +210,22 @@ impl ObsidianFolderDestination {
         }
     }
 
-    /// The same destination dating the copies it writes beside edited
-    /// notes with `now`: the tests pin the clock.
+    /// The same destination dating copies beside edited notes with `now`.
     #[must_use]
     pub fn with_now(mut self, now: fn() -> DateTime<Utc>) -> Self {
         self.now = now;
         self
     }
 
-    /// The same destination naming its calls after `platform`: the golden
-    /// tests render every platform's note on every OS.
+    /// The same destination naming its calls after `platform`.
     #[must_use]
     pub fn with_platform(mut self, platform: Platform) -> Self {
         self.platform = platform;
         self
     }
 
-    /// The same destination calling `hook` at every [`DeliveryStep`] it
-    /// reaches; the hook may block to hold the delivery there.
+    /// The same destination calling `hook` at every [`DeliveryStep`]; the
+    /// hook may block.
     #[cfg(feature = "testing")]
     #[must_use]
     pub fn with_step_hook(
@@ -271,8 +236,7 @@ impl ObsidianFolderDestination {
         self
     }
 
-    /// Calls the tests' hook; without the `testing` feature every step
-    /// passes straight through.
+    /// Calls the tests' hook; a no-op without the `testing` feature.
     #[cfg_attr(not(feature = "testing"), allow(clippy::unused_self, unused_variables))]
     fn reached(&self, step: DeliveryStep<'_>) {
         #[cfg(feature = "testing")]
@@ -296,28 +260,18 @@ impl ObsidianFolderDestination {
         self.platform
     }
 
-    /// The vault is a writable directory and the people folder is a plain
-    /// relative path (no `..`, no `.`). A missing `.obsidian/` is not an
-    /// error: the folder may be a vault Obsidian has not opened yet.
+    /// The vault is a writable directory and the people folder a plain
+    /// relative path. A missing `.obsidian/` is not an error.
     ///
-    /// The write is probed with a hidden, empty file of a new name
-    /// (`.steno-probe-` and eight hex digits) at the vault's root, created
-    /// only if no entry has that name and removed at once, so nothing in
-    /// the vault changes, and a vault that syncs never sees a stray file:
-    /// - a probe a crash left behind (an empty regular file of exactly that
-    ///   name pattern) is removed first; a link, a folder, a special file
-    ///   or a file with content of that name is the user's and stays;
-    /// - with no leftover in the way, the vault is writable once the create
-    ///   worked: a remove that then fails leaves the empty probe for the
-    ///   next check, not an error;
-    /// - one leftover that cannot be removed may be another user's (a
-    ///   shared folder where only a file's creator may delete it) or held
-    ///   open: the check still creates and removes a fresh probe, and only
-    ///   when that remove fails too (a root that refuses deletes) is the
-    ///   vault not writable;
-    /// - two or more that cannot be removed make the vault not writable
-    ///   without a new probe, so a root that refuses deletes holds two
-    ///   leftovers at most.
+    /// The write is probed with a hidden empty file of a new name at the
+    /// root, created only if nothing has that name and removed at once:
+    /// - an empty regular probe a crash left behind is removed first;
+    ///   anything else of that name is the user's and stays;
+    /// - a probe whose remove fails after the create is left for the next
+    ///   check, not an error;
+    /// - with one leftover that cannot be removed, a fresh probe decides;
+    /// - with two or more, the vault is not writable, so leftovers stay at
+    ///   two at most.
     pub fn validate_vault(&self) -> Result<(), ObsidianError> {
         self.validate_vault_with(
             &format!("{PROBE_PREFIX}{}", AtomicFileWriter::random_hex()),
@@ -325,9 +279,8 @@ impl ObsidianFolderDestination {
         )
     }
 
-    /// [`Self::validate_vault`] with the probe's name and the remove (of
-    /// the probe and of the leftovers) passed in, so a test can plant a
-    /// file at the name or make the remove fail.
+    /// [`Self::validate_vault`] with the probe's name and the remove passed
+    /// in, for tests.
     fn validate_vault_with(
         &self,
         probe: &str,
@@ -345,21 +298,16 @@ impl ObsidianFolderDestination {
             .create_new(true)
             .open(&path)
             .map_err(|_| not_writable())?;
-        // Another check in this process may have removed it as a leftover
-        // already, which counts as removed.
+        // Another check may have removed it already, which counts.
         if !removed(remove(&path)) && stayed == 1 {
             return Err(not_writable());
         }
         Ok(())
     }
 
-    /// Removes the probes an earlier check left at the vault's root (a
-    /// crash between create and remove): empty regular files whose name is
-    /// exactly [`PROBE_PREFIX`] and eight lowercase hex digits, read with
-    /// `symlink_metadata`, so a link of that name is never followed.
-    /// Returns how many stay because their remove failed (one already gone,
-    /// removed by another check, counts as removed). A root that cannot be
-    /// listed is left alone.
+    /// Removes earlier probe leftovers at the vault's root (empty regular
+    /// files of the probe pattern, links never followed) and returns how
+    /// many stay because their remove failed.
     fn remove_probe_leftovers(&self, remove: impl Fn(&Path) -> std::io::Result<()>) -> usize {
         let Ok(entries) = fs::read_dir(self.sink.root()) else {
             return 0;
@@ -376,21 +324,17 @@ impl ObsidianFolderDestination {
             .count()
     }
 
-    /// [`Destination::deliver`] without the boundary error wrapper and on
-    /// the calling thread, where the tests call it. Blocks while another
-    /// delivery into the same vault runs in this process (`vault_lock`). A
-    /// delivery that kept a note the user edited (`write_note`) or
-    /// went without the audio it should copy ([`Self::NO_AUDIO_WARNING`])
-    /// succeeds and says so in the receipt's `warnings`.
+    /// [`Destination::deliver`] on the calling thread, without the boundary
+    /// error. Blocks while another delivery into the vault runs. Kept edited
+    /// notes and missing audio succeed with a receipt warning.
     pub fn deliver_meeting(
         &self,
         meeting: &MeetingExport,
         previous: Option<&DeliveryReceipt>,
     ) -> Result<DeliveryReceipt, ObsidianError> {
         let lock = vault_lock(&self.settings.vault_path);
-        // `try_lock` first only so a test hook sees that this delivery
-        // waits. A delivery that panicked leaves nothing behind the lock to
-        // repair, so a poisoned lock is taken as it is.
+        // `try_lock` first only so a test hook sees the wait. A poisoned
+        // lock guards nothing to repair, so it is taken as it is.
         let _vault = match lock.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
@@ -406,22 +350,17 @@ impl ObsidianFolderDestination {
         let (folder, created) = self.folder_for(meeting, &mut ledger)?;
         let written = self.write_meeting(meeting, &folder, &mut ledger);
         if written.is_err() && created {
-            // Only an empty folder is removed, so the next attempt claims
-            // the same name instead of reading it as no longer this
-            // meeting's; one that holds a file stays.
+            // Only an empty folder goes, so the next attempt claims the same
+            // name.
             let _ = fs::remove_dir(self.sink.path(&folder));
         }
         written?;
         Ok(ledger.receipt(&folder, ArtifactRenderer::VERSION))
     }
 
-    /// The meeting folder of this delivery, and whether this delivery
-    /// created it. Without a pinned folder it claims one
-    /// ([`Self::claim_folder`]). A pinned folder that is gone is claimed
-    /// again by creating it (`symlink_metadata`, so a dangling link counts
-    /// as there). One that is there, or that something else created first,
-    /// is kept when [`Self::keeps_pin`] says so; otherwise the delivery
-    /// claims a folder as a first one does and moves its receipt there.
+    /// The meeting folder and whether this delivery created it. Without a
+    /// pin it claims one; a gone pin is recreated; an existing one is kept
+    /// when [`Self::keeps_pin`] says so, else a new folder is claimed.
     fn folder_for(
         &self,
         meeting: &MeetingExport,
@@ -441,8 +380,8 @@ impl ObsidianFolderDestination {
         Ok((claimed, created))
     }
 
-    /// Writes the meeting's files into `folder`, its person pages and its
-    /// audio copy; what it could not do goes into the receipt's warnings.
+    /// Writes the meeting's files, person pages and audio copy; failures go
+    /// into the receipt's warnings.
     fn write_meeting(
         &self,
         meeting: &MeetingExport,
@@ -490,12 +429,9 @@ impl ObsidianFolderDestination {
         Ok(())
     }
 
-    /// Writes every rendered page into `people_folder`: whole when the page
-    /// is new, else with this meeting's line merged into its managed block;
-    /// then drops the line from the previous receipt's pages this delivery
-    /// did not render. File names are written as the model holds them, NFC
-    /// (`Anna Müller.md`); Foundation writes them NFD on APFS, which treats
-    /// the two as one file, and the Swift and Rust receipts both store NFC.
+    /// Writes every rendered page into `people_folder`, whole or merged
+    /// into its managed block, then drops this meeting's line from stale
+    /// pages. File names stay NFC, as the receipts store them.
     fn write_person_pages(
         &self,
         people_folder: &str,
@@ -513,9 +449,7 @@ impl ObsidianFolderDestination {
             let existing = self.reading(&path, || self.sink.read(&path))?;
             self.reached(DeliveryStep::WritingPersonPage(&path));
             if let Some(existing) = existing {
-                // A page that is not UTF-8 text cannot be merged without
-                // changing bytes outside the block, so it is left as it
-                // is and reported.
+                // A non-UTF-8 page cannot be merged safely; left and reported.
                 let Ok(text) = String::from_utf8(existing) else {
                     return Err(ObsidianError::ReadFailed {
                         path: self.absolute(&path),
@@ -530,11 +464,9 @@ impl ObsidianFolderDestination {
         self.remove_meeting_line(&rendered, meeting_id, ledger)
     }
 
-    /// Copies the mixdown into the meeting folder, or for a phone recording
-    /// (`M4aAac`) without one its AAC file. When that file is gone, an
-    /// audio file already in the folder is the audio, and a receipt entry
-    /// for one that is gone is dropped. `Ok(false)` when there is no audio;
-    /// a file that cannot be checked is [`ObsidianError::ReadFailed`].
+    /// Copies the mixdown, or a phone recording's AAC file, into the folder.
+    /// An audio file already there stands in for a gone source. `Ok(false)`
+    /// when there is no audio.
     fn copy_audio(
         &self,
         meeting: &MeetingExport,
@@ -582,14 +514,10 @@ impl ObsidianFolderDestination {
         Ok(true)
     }
 
-    /// [`write_owned`](Self::write_owned) for a note the user may edit in
-    /// the vault (every rendered file but the audio copy). A note the user
-    /// edited ([`Self::is_edited`]) is left as it is: the new render goes
-    /// beside it ([`Self::copy_path`]), and the receipt keeps the note's
-    /// entry when Steno may write there ([`DeliveryLedger::keep`]), so the
-    /// next delivery sees the edit too. Returns the copy it wrote, which the
-    /// receipt's warning names with the note and how to get Steno's version
-    /// (`kept_warning`). Rust only: Swift overwrites the note.
+    /// [`write_owned`](Self::write_owned) for a note the user may edit. An
+    /// edited note ([`Self::is_edited`]) stays; the render goes beside it
+    /// ([`Self::copy_path`]) and the receipt keeps the note's entry.
+    /// Returns the copy it wrote.
     fn write_note(
         &self,
         ledger: &mut DeliveryLedger,
@@ -607,16 +535,10 @@ impl ObsidianFolderDestination {
         Ok(Some(copy))
     }
 
-    /// Whether what is at `path` is the user's to keep: a directory (or a
-    /// link to one), or a file whose bytes are neither this render nor bytes
-    /// Steno wrote there or to a copy beside it ([`DeliveryLedger::wrote`]).
-    /// Without a receipt that lists them (none applies, or it does not list
-    /// the path) any other bytes count as edited, so an unedited note of an
-    /// earlier render gets a copy too. A file that already holds this render
-    /// is not edited: a delivery that failed or was not saved after writing
-    /// heals on the next one. Neither is a note the user moved a copy over,
-    /// also once the render changes. A path with nothing at it is not
-    /// edited.
+    /// Whether what is at `path` is the user's to keep: a directory, or a
+    /// file holding neither this render nor bytes Steno wrote there or to a
+    /// copy ([`DeliveryLedger::wrote`]). Without a listing receipt any other
+    /// bytes count as edited. A missing path is not edited.
     fn is_edited(
         &self,
         ledger: &DeliveryLedger,
@@ -632,15 +554,10 @@ impl ObsidianFolderDestination {
         Ok(on_disk != data && !ledger.wrote(path, &sha256(&on_disk)))
     }
 
-    /// Where the new render `data` of the edited note at `path` goes: the
-    /// newest copy an earlier delivery wrote beside it
-    /// ([`DeliveryLedger::listed_copies`]) that is there and not edited
-    /// ([`Self::may_reuse`]); else a new one dated today in the
-    /// destination's time zone, numbered from 2 within the day while
-    /// anything (a dangling link too) holds the name, unless what holds it
-    /// is a file with this render already (a delivery that failed after
-    /// writing it). A listed copy the user deleted leaves the receipt, so it
-    /// is not written again under its old date.
+    /// Where the new render of an edited note goes: the newest unedited
+    /// listed copy ([`DeliveryLedger::listed_copies`]), else a new copy
+    /// dated today, numbered from 2 while the name is taken by anything
+    /// but this same render.
     fn copy_path(
         &self,
         ledger: &mut DeliveryLedger,
@@ -668,8 +585,7 @@ impl ObsidianFolderDestination {
         Ok(candidate)
     }
 
-    /// Whether the copy at `copy` may take the new render `data`: a file
-    /// (not a dangling link) is there, and it is not edited.
+    /// Whether `copy` is an unedited file that may take the render `data`.
     fn may_reuse(
         &self,
         ledger: &DeliveryLedger,
@@ -693,18 +609,11 @@ impl ObsidianFolderDestination {
         Ok(())
     }
 
-    /// Drops this meeting's line from every managed-block page of the
-    /// previous receipt that this delivery did not render, so a person who
-    /// left the meeting no longer lists it. A page that is gone from disk is
-    /// skipped and a page that is not UTF-8 text is left as it is; neither
-    /// fails the delivery, since there is nothing of ours to correct in the
-    /// first case and no safe way to in the second. An unchanged page is not
-    /// rewritten. A listed page that is the same file as a rendered one
-    /// ([`LocalFolderSink::same_file`]) is not stale: on a case-insensitive
-    /// vault a person renamed from `anna` to `Anna` renders `Anna.md`, which
-    /// is the receipt's `anna.md`, and removing the line there would drop
-    /// it from the page just written. The path stays in the receipt either
-    /// way, as every file the app wrote does.
+    /// Drops this meeting's line from the previous receipt's managed-block
+    /// pages this delivery did not render. Gone and non-UTF-8 pages are
+    /// skipped, unchanged pages not rewritten, and a page that is the same
+    /// file as a rendered one ([`LocalFolderSink::same_file`], a case-only
+    /// rename) is not stale.
     fn remove_meeting_line(
         &self,
         rendered: &HashSet<String>,
@@ -732,12 +641,10 @@ impl ObsidianFolderDestination {
         Ok(())
     }
 
-    /// The folder of a delivery without one: the scope's path with the
-    /// ledger's collision rule ([`DeliveryLedger::claim_folder`]), each
-    /// candidate claimed by creating it under `Meetings/` (created as
-    /// needed), and whether this delivery created it (a candidate holding
-    /// this meeting's `meeting.json` is reused). A candidate whose
-    /// `meeting.json` cannot be read counts as taken.
+    /// Claims a new folder with the ledger's collision rule
+    /// ([`DeliveryLedger::claim_folder`]), creating each candidate; one
+    /// holding this meeting's `meeting.json` is reused, an unreadable one
+    /// is taken. Returns whether this delivery created it.
     fn claim_folder(&self, meeting: &MeetingExport) -> Result<(String, bool), ObsidianError> {
         let base = MeetingFolder::path(&meeting.meeting, self.time_zone);
         self.writing(MeetingFolder::ROOT, || {
@@ -756,9 +663,8 @@ impl ObsidianFolderDestination {
         Ok((folder, created))
     }
 
-    /// Creates the gone pinned `folder` again, its parent first: `Ok(true)`
-    /// when this delivery created it, `Ok(false)` when something took the
-    /// name first.
+    /// Creates the gone pinned `folder` and its parent; `Ok(false)` when
+    /// something took the name first.
     fn recreate(&self, folder: &str) -> Result<bool, ObsidianError> {
         if let Some(parent) = Path::new(folder).parent() {
             let parent = parent.to_string_lossy();
@@ -767,9 +673,7 @@ impl ObsidianFolderDestination {
         self.create(folder)
     }
 
-    /// Claims `folder` by creating it, its parent already there: `Ok(true)`
-    /// when this delivery created it, `Ok(false)` when anything was at the
-    /// path.
+    /// Claims `folder` by creating it; `Ok(false)` when anything is there.
     fn create(&self, folder: &str) -> Result<bool, ObsidianError> {
         self.reached(DeliveryStep::ClaimingFolder(folder));
         match self.sink.create_new_directory(folder) {
@@ -778,16 +682,10 @@ impl ObsidianFolderDestination {
         }
     }
 
-    /// Whether a pinned folder that is there is still this meeting's: a
-    /// directory whose `meeting.json` names this meeting, or, with
-    /// `meeting.json` missing, one where the `transcript.vtt` header, the
-    /// folder note's `steno_id` or a copy of `meeting.json` the receipt
-    /// lists ([`DeliveryLedger::listed_copies`]) names it, so a user who
-    /// deleted the edited files Steno kept gets Steno's back in place. The
-    /// user moved or deleted this meeting's folder, and a meeting with the
-    /// same date and title may have claimed the name since; a folder that
-    /// is not this meeting's is never written, so the cost is a duplicate
-    /// folder. A `meeting.json`, note or copy that cannot be read is
+    /// Whether an existing pinned folder is still this meeting's: its
+    /// `meeting.json`, or without one the `transcript.vtt` header, the
+    /// note's `steno_id` or a listed copy of `meeting.json`, names it. A
+    /// folder that is not is never written. Unreadable files are
     /// [`ObsidianError::ReadFailed`].
     fn keeps_pin(
         &self,
@@ -813,10 +711,8 @@ impl ObsidianFolderDestination {
         Ok(false)
     }
 
-    /// Whether `transcript.vtt` (its `WEBVTT - Steno <id>` header) or the
-    /// folder note (its `steno_id` frontmatter line) in `folder` names `id`.
-    /// A note that is missing or not UTF-8 text names no meeting; one that
-    /// cannot be read is [`ObsidianError::ReadFailed`].
+    /// Whether `transcript.vtt`'s header or the folder note's `steno_id`
+    /// names `id`. Unreadable files are [`ObsidianError::ReadFailed`].
     fn a_note_carries(&self, folder: &str, id: Uuid) -> Result<bool, ObsidianError> {
         let read = |name: &str| -> Result<Option<String>, ObsidianError> {
             let path = format!("{folder}/{name}");
@@ -846,16 +742,14 @@ impl ObsidianFolderDestination {
         }))
     }
 
-    /// The meeting whose `meeting.json` is in `folder`: `None` when the
-    /// file is missing or names no meeting. Any other read error is
-    /// [`ObsidianError::ReadFailed`], so a file another program holds open
-    /// fails the delivery instead of passing for another meeting's.
+    /// The meeting `folder`'s `meeting.json` names; `None` when missing.
+    /// Other read errors are [`ObsidianError::ReadFailed`], so a locked
+    /// file never passes for another meeting's.
     fn meeting_of(&self, folder: &str) -> Result<Option<Uuid>, ObsidianError> {
         self.meeting_in(&format!("{folder}/{}", MeetingFolder::JSON))
     }
 
-    /// The meeting the `meeting.json` (or copy of it) at `path` names,
-    /// [`Self::meeting_of`]'s rule.
+    /// The meeting the `meeting.json` (or copy) at `path` names.
     fn meeting_in(&self, path: &str) -> Result<Option<Uuid>, ObsidianError> {
         let Some(data) = self.reading(path, || self.sink.read(path))? else {
             return Ok(None);
@@ -864,8 +758,7 @@ impl ObsidianFolderDestination {
         Ok(probe.and_then(|probe| probe.pointer("/meeting/id")?.as_str()?.parse().ok()))
     }
 
-    /// Whether an `audio` or `audio.<ext>` file is in the meeting folder on
-    /// disk.
+    /// Whether an `audio` or `audio.<ext>` file is in the folder.
     fn audio_is_in_the_vault(&self, folder: &str) -> bool {
         self.sink
             .file_names(folder)
@@ -873,11 +766,9 @@ impl ObsidianFolderDestination {
             .any(|name| is_audio(name))
     }
 
-    /// The vault exists and the people folder, if any, passes
-    /// [`DeliveryLedger::is_plain_relative`] plus three checks on top: no `.`
-    /// or empty component (the ledger's rule folds those away), no `\`, no
-    /// surrounding whitespace. Swift's `checkVault` accepts `./People`
-    /// (parity list in the plan).
+    /// The vault exists and the people folder passes
+    /// [`DeliveryLedger::is_plain_relative`] with no `.` or empty
+    /// component, no `\`, and no surrounding whitespace.
     pub(crate) fn check_vault(&self) -> Result<(), ObsidianError> {
         if !self.sink.is_directory("") {
             return Err(ObsidianError::VaultMissing(
@@ -911,8 +802,7 @@ impl ObsidianFolderDestination {
         })
     }
 
-    /// A `WriteFailure` names the same absolute target the sink resolves
-    /// `path` to, so one mapping serves it and the plain `io::Error`s.
+    /// A `WriteFailure` names the absolute target the sink resolves.
     fn writing<T, E: std::fmt::Display>(
         &self,
         path: &str,
@@ -924,8 +814,7 @@ impl ObsidianFolderDestination {
         })
     }
 
-    /// `path` as the message names it: vault-relative paths become absolute,
-    /// absolute ones (the mixdown) stay.
+    /// `path` as messages name it: vault-relative paths become absolute.
     fn absolute(&self, path: &str) -> String {
         if Path::new(path).is_absolute() {
             path.to_owned()
@@ -946,11 +835,8 @@ impl Destination for ObsidianFolderDestination {
     }
 
     /// [`ObsidianFolderDestination::deliver_meeting`] on tokio's blocking
-    /// pool: it waits on the vault lock and does blocking file I/O (the
-    /// `fsync`ed writes, the audio copy), which would otherwise park a
-    /// runtime worker. A panic inside it is raised again here, so the
-    /// pipeline's `catch_unwind` still sees it. A task the runtime
-    /// cancelled at shutdown comes back as an error.
+    /// pool. A panic inside is raised again here; a task cancelled at
+    /// shutdown is an error.
     async fn deliver(
         &self,
         meeting: &MeetingExport,
@@ -999,9 +885,8 @@ mod tests {
         names
     }
 
-    /// A probe whose remove fails still proves the vault writable, and the
-    /// empty file it leaves goes at the next check, so the vault ends as
-    /// it was.
+    /// A probe whose remove fails still proves the vault writable and goes
+    /// at the next check.
     #[test]
     fn a_probe_that_cannot_be_removed_passes_and_goes_at_the_next_check() {
         let directory = tempfile::tempdir().unwrap();
@@ -1025,10 +910,8 @@ mod tests {
         Err(std::io::Error::from(ErrorKind::PermissionDenied))
     }
 
-    /// A root that refuses deletes passes the first check, whose probe
-    /// stays; the next check's fresh probe cannot be removed either, so it
-    /// refuses; from then on the check refuses without a probe, so the
-    /// vault holds two leftovers at most, and both go once a remove works.
+    /// A root refusing deletes passes once, then refuses, and holds two
+    /// leftovers at most, both gone once a remove works.
     #[test]
     fn a_root_that_refuses_deletes_is_refused_and_holds_two_leftovers_at_most() {
         let directory = tempfile::tempdir().unwrap();
@@ -1066,10 +949,8 @@ mod tests {
         );
     }
 
-    /// One leftover the check cannot remove (another user's, in a shared
-    /// folder where only a file's creator may delete it, or one held open)
-    /// does not refuse a vault whose fresh probe goes: the check passes,
-    /// and the vault holds that leftover and nothing new.
+    /// One unremovable leftover does not refuse a vault whose fresh probe
+    /// goes.
     #[test]
     fn a_leftover_only_another_user_can_remove_does_not_refuse_the_vault() {
         let directory = tempfile::tempdir().unwrap();
@@ -1096,8 +977,8 @@ mod tests {
         );
     }
 
-    /// An entry of the user's at the probe's very name refuses the check
-    /// and stays as it was: the probe is created only where nothing is.
+    /// An entry of the user's at the probe's name refuses the check and
+    /// stays.
     #[test]
     fn an_entry_at_the_probe_name_refuses_and_stays() {
         let directory = tempfile::tempdir().unwrap();

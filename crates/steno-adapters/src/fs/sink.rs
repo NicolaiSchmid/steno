@@ -1,15 +1,12 @@
 //! The local file system under one folder.
-//! Swift: `Sources/StenoAdapters/FileSystem/LocalFolderSink.swift`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{AtomicFileWriter, WriteFailure};
 
-/// The local file system under one folder, addressed by paths relative to
-/// its root and written with [`AtomicFileWriter`]. The destination's one
-/// seam to disk; a `WebDAV` sink would be the second implementation, at which
-/// point a trait is extracted per the two-implementations rule.
+/// The local file system under one folder, addressed by relative paths and
+/// written with [`AtomicFileWriter`]: the destination's one seam to disk.
 #[derive(Debug, Clone)]
 pub struct LocalFolderSink {
     root: PathBuf,
@@ -41,8 +38,7 @@ impl LocalFolderSink {
         self.path(relative).exists()
     }
 
-    /// Whether anything is at `relative`, a final symlink not followed: a
-    /// dangling link is there, where [`Self::exists`] says it is not.
+    /// Whether anything is at `relative`, a dangling link included.
     #[must_use]
     pub fn entry_exists(&self, relative: &str) -> bool {
         fs::symlink_metadata(self.path(relative)).is_ok()
@@ -53,8 +49,7 @@ impl LocalFolderSink {
         self.path(relative).is_dir()
     }
 
-    /// The names in a directory; empty when it does not exist or cannot be
-    /// listed.
+    /// The names in a directory; empty when it cannot be listed.
     #[must_use]
     pub fn file_names(&self, relative: &str) -> Vec<String> {
         fs::read_dir(self.path(relative))
@@ -67,8 +62,7 @@ impl LocalFolderSink {
             .unwrap_or_default()
     }
 
-    /// `None` when there is no such file; one read, so a file that appears
-    /// or vanishes between a probe and the read cannot be misreported.
+    /// `None` when there is no such file; one read, so no probe races.
     pub fn read(&self, relative: &str) -> std::io::Result<Option<Vec<u8>>> {
         match fs::read(self.path(relative)) {
             Ok(data) => Ok(Some(data)),
@@ -81,44 +75,29 @@ impl LocalFolderSink {
         AtomicFileWriter::write(data, &self.path(relative))
     }
 
-    /// Creates the folder and every missing parent; an existing folder is
-    /// no error.
+    /// Creates the folder and its missing parents.
     pub fn create_directory(&self, relative: &str) -> std::io::Result<()> {
         fs::create_dir_all(self.path(relative))
     }
 
-    /// Creates the folder, whose parent must exist, and fails with
-    /// `AlreadyExists` when anything is already at that path. The one step
-    /// that claims a folder: of two writers creating the same path, in this
-    /// process or another, exactly one succeeds.
-    /// Swift: none; the Swift destination's first write creates the folder.
+    /// Creates the folder, whose parent must exist, failing with
+    /// `AlreadyExists` when anything is there: of two writers, in any
+    /// process, exactly one succeeds.
     pub fn create_new_directory(&self, relative: &str) -> std::io::Result<()> {
         fs::create_dir(self.path(relative))
     }
 
-    /// Whether `left` and `right` are one file under two spellings, as
-    /// `anna.md` and `Anna.md` are on a case-insensitive folder (APFS and
-    /// NTFS by default); false when either is missing. A symlink counts as
-    /// its target. On Unix by device and inode; on Windows by the final
-    /// path name of each (`fs::canonicalize`, which gives the name as
-    /// stored, also in a case-sensitive directory). Only when Windows
-    /// cannot resolve a path for another reason are the two compared
-    /// NFC-normalised and lowercased, close to NTFS's default but not
-    /// exact (NTFS upcases `ı` to `I` and `ſ` to `S`; lowercasing keeps
-    /// them apart).
-    /// Swift: none; `removeMeetingLine` compares the paths as written
-    /// (parity note in the plan).
+    /// Whether `left` and `right` are one file under two spellings, as on a
+    /// case-insensitive disk; false when either is missing. Symlinks count
+    /// as their target. Unix compares device and inode; Windows the stored
+    /// final path names, falling back to NFC-lowercased paths.
     #[must_use]
     pub fn same_file(&self, left: &str, right: &str) -> bool {
         same_entry(&self.path(left), &self.path(right))
     }
 
-    /// Whether `other` names this sink's root under another spelling: a
-    /// symlink to it, or another case on a case-insensitive file system
-    /// ([`Self::same_file`]'s rule). False when either is missing, so a
-    /// receipt whose root is gone falls back to the lexical
-    /// [`DeliveryLedger::same_root`](crate::runtime::DeliveryLedger::same_root).
-    /// Swift: none; Swift compares the standardized paths only.
+    /// Whether `other` names this sink's root under another spelling
+    /// ([`Self::same_file`]'s rule); false when either is missing.
     #[must_use]
     pub fn is_root(&self, other: &str) -> bool {
         same_entry(&self.root, Path::new(other))
@@ -145,7 +124,6 @@ fn same_entry(left: &Path, right: &Path) -> bool {
         };
         match (fs::canonicalize(left), fs::canonicalize(right)) {
             (Ok(left), Ok(right)) => left == right,
-            // Either path missing gives false, whatever the other gave.
             (Err(error), _) | (_, Err(error)) if error.kind() == ErrorKind::NotFound => false,
             _ => folded(left) == folded(right),
         }
@@ -156,8 +134,7 @@ fn same_entry(left: &Path, right: &Path) -> bool {
 mod tests {
     use super::*;
 
-    /// A vault folder `Vault` in a fresh temporary directory, with a
-    /// sibling `Other`, and its sink.
+    /// A vault `Vault` with a sibling `Other` in a temporary directory.
     fn vault() -> (tempfile::TempDir, PathBuf, LocalFolderSink) {
         let directory = tempfile::Builder::new()
             .prefix("steno-adapters-sink-")
@@ -181,8 +158,7 @@ mod tests {
         );
     }
 
-    /// Runs where the disk is case-insensitive (macOS and Windows CI); a
-    /// case-sensitive disk has no `VAULT` and returns early.
+    /// Returns early on a case-sensitive disk.
     #[test]
     fn the_root_in_another_case_on_a_case_insensitive_disk_is_the_root() {
         let (directory, _root, sink) = vault();
@@ -193,8 +169,8 @@ mod tests {
         assert!(sink.is_root(&shouted.to_string_lossy()));
     }
 
-    /// procfs and sysfs both have inode 1 at their roots, on two devices:
-    /// the device is compared too.
+    /// procfs and sysfs both have inode 1 at their roots, so the device is
+    /// compared too.
     #[cfg(target_os = "linux")]
     #[test]
     fn roots_of_two_file_systems_with_one_inode_are_not_one_root() {

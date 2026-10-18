@@ -1,23 +1,12 @@
-//! The region of a person page that Steno owns, as text; the Obsidian
-//! destination writes it.
-//! Swift: `Sources/StenoAdapters/Obsidian/ManagedBlock.swift`.
+//! The region of a person page that Steno owns.
 
 use uuid::Uuid;
 
-/// One line per meeting between two HTML comments, newest first, each line
-/// ending in a `%%steno:<uuid>%%` comment that identifies its meeting.
-/// [`ManagedBlock::merge`] replaces or inserts a meeting's line,
-/// [`ManagedBlock::remove`] drops it again when the person left the meeting
-/// (a speaker reassigned to somebody else).
-///
-/// Only lines that carry a `%%steno:` marker are managed: they are the
-/// ones re-sorted and replaced. Every other non-blank line inside the
-/// block keeps its bytes and its place, and bytes outside the markers are
-/// copied unchanged. The block is the first start marker and the first end
-/// marker after it; a page without an end marker after the start (the user
-/// deleted it), or with the end before the start, has no block: `merge`
-/// appends a fresh one and `remove` changes nothing. A second start marker
-/// inside the block is an ordinary line.
+/// One line per meeting between two HTML comments, newest first, each
+/// ending in a `%%steno:<uuid>%%` marker. Only marked lines are managed;
+/// other lines and bytes outside the markers keep their bytes. The block is
+/// the first start marker and the first end marker after it; without one,
+/// `merge` appends a fresh block and `remove` changes nothing.
 ///
 /// ```
 /// use steno_adapters::rendering::ManagedBlock;
@@ -39,8 +28,7 @@ impl ManagedBlock {
     pub const START: &'static str = "<!-- steno:meetings:start -->";
     pub const END: &'static str = "<!-- steno:meetings:end -->";
 
-    /// `%%steno:0d6f…%%`, Obsidian's comment syntax so the id never shows;
-    /// the id in `Uuid`'s lowercase `Display` form.
+    /// `%%steno:<uuid>%%`, Obsidian's comment syntax so the id never shows.
     #[must_use]
     pub fn marker(meeting_id: Uuid) -> String {
         format!("%%steno:{meeting_id}%%")
@@ -60,20 +48,17 @@ impl ManagedBlock {
         text
     }
 
-    /// The byte range of the block body: after the start marker, before the
-    /// end marker that follows it.
+    /// The byte range of the block body.
     fn body_range(existing: &str) -> Option<(usize, usize)> {
         let start = existing.find(Self::START)? + Self::START.len();
         let end = start + existing[start..].find(Self::END)?;
         Some((start, end))
     }
 
-    /// `existing` with `line` replacing the line that carries this meeting's
-    /// marker (or inserted when there is none) and the marker lines re-sorted
-    /// newest first where the first of them stood; the block appended when
-    /// there is none. Lines without a marker keep their bytes and their
-    /// place (a CRLF page keeps its `\r`s); blank lines inside the block are
-    /// dropped.
+    /// `existing` with `line` replacing or inserted for this meeting's
+    /// marker, the marked lines re-sorted newest first; a block appended if
+    /// none. Unmarked lines keep their bytes and place; blank lines inside
+    /// are dropped.
     #[must_use]
     pub fn merge(line: &str, meeting_id: Uuid, existing: &str) -> String {
         let Some((start, end)) = Self::body_range(existing) else {
@@ -116,15 +101,12 @@ impl ManagedBlock {
         )
     }
 
-    /// Whether a line is one of ours: it carries a `%%steno:` marker.
     fn is_managed(line: &str) -> bool {
         line.contains("%%steno:")
     }
 
-    /// `existing` without the line that carries this meeting's marker. Every
-    /// other line of the block keeps its bytes and order, an emptied block
-    /// keeps its markers, and `existing` comes back unchanged when it has no
-    /// block or the block has no line for this meeting.
+    /// `existing` without this meeting's line; unchanged when there is no
+    /// block or no such line. An emptied block keeps its markers.
     #[must_use]
     pub fn remove(meeting_id: Uuid, existing: &str) -> String {
         let Some((start, end)) = Self::body_range(existing) else {
@@ -143,8 +125,7 @@ impl ManagedBlock {
         format!("{}{kept}{}", &existing[..start], &existing[end..])
     }
 
-    /// By the leading `- YYYY-MM-DD` descending, then by text so equal dates
-    /// keep a stable order; lines without a date sort last.
+    /// By leading `- YYYY-MM-DD` descending, then text; undated lines last.
     #[must_use]
     pub fn sorted_newest_first(mut lines: Vec<String>) -> Vec<String> {
         lines.sort_by(|left, right| {
@@ -155,8 +136,7 @@ impl ManagedBlock {
         lines
     }
 
-    /// `"2026-09-24"` from `- 2026-09-24 …`; `None` when fewer than ten
-    /// characters follow the bullet or they do not fit `DDDD-DD-DD`.
+    /// The `YYYY-MM-DD` after the bullet, if it fits the pattern.
     fn date_of(line: &str) -> Option<&str> {
         let candidate = line.trim_start_matches(['-', ' ', '*']).get(..10)?;
         let well_formed = candidate

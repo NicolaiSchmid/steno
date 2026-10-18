@@ -1,5 +1,4 @@
 //! Writes a file so a reader never sees a half-written one.
-//! Swift: `Sources/StenoAdapters/FileSystem/AtomicFileWriter.swift`.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -8,9 +7,8 @@ use std::path::{Path, PathBuf};
 use steno_core::busy_file;
 use thiserror::Error;
 
-/// A write that did not complete. `path` is the target the caller asked
-/// for, never the temporary file; `underlying` names the step (`open`,
-/// `write`, `fsync`, `rename`) and the OS error.
+/// A write that did not complete. `path` is the caller's target, never the
+/// temp file; `underlying` names the step and the OS error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{underlying}")]
 pub struct WriteFailure {
@@ -19,15 +17,10 @@ pub struct WriteFailure {
 }
 
 /// Writes a file so a reader never sees a half-written one: the bytes go to
-/// `.steno-tmp-<8 hex>-<name>` in the target directory, are `fsync`ed, and
-/// a rename replaces the target in one step; on Unix the directory is
-/// `fsync`ed after the rename so the new name survives a crash too, and on
-/// Windows the renamed file is flushed instead. On Windows the rename and
-/// the reopen for that flush are tried again while another handle holds
-/// the file for a moment (`steno_core::busy_file`, which the durable writes
-/// in `steno_pipeline::files` share). A failure before the rename removes
-/// the temp file and leaves the target as it was; on Windows a failed
-/// flush after the rename is an error with the new file in place.
+/// `.steno-tmp-<8 hex>-<name>` beside the target, are `fsync`ed and renamed
+/// over it; then the directory (Unix) or the renamed file (Windows) is
+/// synced. Windows retries while another handle briefly holds the file. A
+/// failure before the rename leaves the target as it was.
 pub struct AtomicFileWriter;
 
 impl AtomicFileWriter {
@@ -47,10 +40,8 @@ impl AtomicFileWriter {
         Self::make_rename_durable(target)
     }
 
-    /// `fsync` the directory after the rename so the directory entry is on
-    /// disk, not only the bytes. Best effort: the data is already durable
-    /// and the file is in place, so a directory that cannot be synced
-    /// (some network file systems) is not a failed write.
+    /// `fsync` the directory after the rename. Best effort: the data is
+    /// already durable, and some network file systems cannot sync it.
     #[cfg(unix)]
     #[allow(clippy::unnecessary_wraps)]
     fn make_rename_durable(target: &Path) -> Result<(), WriteFailure> {
@@ -66,15 +57,9 @@ impl AtomicFileWriter {
         Ok(())
     }
 
-    /// Windows' folder flush does not cover a rename on every drive, so the
-    /// renamed file is flushed: on NTFS that commits the journal that holds
-    /// the rename, and on FAT32 it flushes the file's folders with it
-    /// (`steno_pipeline::files` says more). Unlike the Unix sync this is a
-    /// failed write when it fails: with "delete after processing" the
-    /// vault's copy of the mixdown is the only audio left once the sweep has
-    /// run, so the export must not count as done before it is on the disk.
-    /// The file is reopened for the flush, tried again while a sync or
-    /// antivirus client holds the new file (`busy_file::retried`).
+    /// Flushes the renamed file, since Windows' folder flush does not cover
+    /// a rename on every drive. A failure fails the write: the vault's
+    /// mixdown may be the only audio left after the sweep.
     #[cfg(not(unix))]
     fn make_rename_durable(target: &Path) -> Result<(), WriteFailure> {
         busy_file::retried(|| OpenOptions::new().write(true).open(target))
@@ -83,8 +68,7 @@ impl AtomicFileWriter {
             .map_err(|error| Self::failure(target, "fsync", &error))
     }
 
-    /// Removes every `.steno-tmp-*` left in `directory` by an earlier crash.
-    /// Nothing else is ever removed.
+    /// Removes every `.steno-tmp-*` an earlier crash left in `directory`.
     pub fn remove_stale_temporaries(directory: &Path) {
         let Ok(entries) = fs::read_dir(directory) else {
             return;
@@ -100,13 +84,11 @@ impl AtomicFileWriter {
         }
     }
 
-    /// The longest file name the file systems we write to accept, in bytes.
+    /// The longest file name, in bytes, the target file systems accept.
     const MAX_NAME_BYTES: usize = 255;
 
     /// `<dir>/.steno-tmp-<8 hex>-<name>` beside `target`, the name cut on a
-    /// character boundary so the whole temp name fits in
-    /// 255 bytes (`MAX_NAME_BYTES`); a target name near the limit
-    /// otherwise failed with "file name too long" before the first byte.
+    /// character boundary to fit `MAX_NAME_BYTES`.
     #[must_use]
     pub fn temporary_path(target: &Path) -> PathBuf {
         let name = target
@@ -123,14 +105,12 @@ impl AtomicFileWriter {
         parent.join(format!("{prefix}{}", &name[..cut]))
     }
 
-    /// Eight lowercase hex digits.
     #[must_use]
     pub fn random_hex() -> String {
         uuid::Uuid::new_v4().simple().to_string()[..8].to_owned()
     }
 
-    /// Open, write every byte, `fsync`; failures name the target the caller
-    /// asked for, not the temp file.
+    /// Open, write, `fsync`; failures name the caller's target.
     fn write_bytes(data: &[u8], temporary: &Path, target: &Path) -> Result<(), WriteFailure> {
         let failure = |step: &str, error: std::io::Error| Self::failure(target, step, &error);
         let mut options = OpenOptions::new();
@@ -148,7 +128,6 @@ impl AtomicFileWriter {
         file.sync_all().map_err(|error| failure("fsync", error))
     }
 
-    /// The failure of `step` (`open`, `write`, `fsync`, `rename`) on `target`.
     fn failure(target: &Path, step: &str, error: &std::io::Error) -> WriteFailure {
         WriteFailure {
             path: target.to_string_lossy().into_owned(),

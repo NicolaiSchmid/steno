@@ -1,5 +1,4 @@
 //! The `DeliveryDispatcher`.
-//! Swift: `Sources/StenoAdapters/Runtime/DeliveryCoordinator.swift`.
 
 use std::sync::Arc;
 
@@ -16,16 +15,10 @@ use crate::obsidian::ObsidianFolderDestination;
 pub type DestinationFactory = dyn Fn(&Settings) -> Vec<Arc<dyn Destination>> + Send + Sync;
 
 /// Exports the meeting once, then runs every configured destination in
-/// order with one [`Delivery`] row per (meeting, destination), handing each
-/// its stored receipt as `previous`. Never fails; a failed export or
-/// destination is a `Failed` row and the next destination still runs. There
-/// is no separate re-export path: the pipeline's redeliver calls
-/// [`DeliveryDispatcher::deliver_all`] again. The Obsidian destination
-/// runs its file I/O on tokio's blocking pool, and `deliver_all` its store
-/// calls (`Store::reading`, `Store::writing`), so it needs a tokio runtime
-/// and never holds a worker while the store waits.
-/// [`DeliveryDispatcher::mark_pending`] is synchronous and calls the store
-/// on the calling thread: the pipeline calls it from the blocking pool.
+/// order with one [`Delivery`] row each, handing it its stored receipt.
+/// Never fails: a failure is a `Failed` row. Needs a tokio runtime, as file
+/// I/O and store calls run on the blocking pool;
+/// [`DeliveryDispatcher::mark_pending`] is synchronous.
 pub struct DeliveryCoordinator {
     store: Arc<Store>,
     destinations: Box<DestinationFactory>,
@@ -63,8 +56,7 @@ impl DeliveryCoordinator {
         Self::with_destinations(store, Box::new(Self::destinations_for), Box::new(Utc::now))
     }
 
-    /// A coordinator with its own destination list and clock; tests pin
-    /// both.
+    /// A coordinator with its own destination list and clock.
     #[must_use]
     pub fn with_destinations(
         store: Arc<Store>,
@@ -78,10 +70,8 @@ impl DeliveryCoordinator {
         }
     }
 
-    /// Every destination the settings configure, in delivery order. Today
-    /// the Obsidian folder when `settings.obsidian` is set, in the machine's
-    /// time zone; a second destination adds one line here and one typed
-    /// optional to [`Settings`].
+    /// Every destination the settings configure, in delivery order: today
+    /// the Obsidian folder, in the machine's time zone.
     #[must_use]
     pub fn destinations_for(settings: &Settings) -> Vec<Arc<dyn Destination>> {
         settings
@@ -96,9 +86,8 @@ impl DeliveryCoordinator {
             .collect()
     }
 
-    /// Fails every stored row with `reason`: settings that do not load
-    /// cannot say where to deliver, and silence would leave the meeting
-    /// `ready` with stale rows and no trace of the failure.
+    /// Fails every stored row with `reason`, so unloadable settings leave
+    /// a trace.
     async fn fail_all(&self, existing: Vec<Delivery>, reason: &str) -> Vec<Delivery> {
         let failed: Vec<Delivery> = existing
             .into_iter()
@@ -121,8 +110,7 @@ impl DeliveryCoordinator {
         failed
     }
 
-    /// Saves `delivery`, through the store's facade; a failed save is
-    /// dropped, as every delivery write here is.
+    /// Saves `delivery`; a failed save is dropped.
     async fn save(&self, delivery: &Delivery) {
         let delivery = delivery.clone();
         let _ = self
@@ -134,10 +122,8 @@ impl DeliveryCoordinator {
 
 #[async_trait]
 impl DeliveryDispatcher for DeliveryCoordinator {
-    /// A `Pending` row for each configured destination, keeping a stored
-    /// row's receipt and last attempt. Settings or rows that do not load
-    /// write nothing, so no row loses its receipt: `deliver_all` fails the
-    /// rows then.
+    /// A `Pending` row per configured destination, keeping stored receipts.
+    /// On a load error nothing is written; `deliver_all` fails the rows.
     fn mark_pending(&self, meeting_id: Uuid) {
         let Ok(settings) = self.store.settings() else {
             return;
@@ -181,10 +167,8 @@ impl DeliveryDispatcher for DeliveryCoordinator {
             }
         };
         let targets = (self.destinations)(&settings);
-        // A row that still says an export is outstanding for a destination
-        // that is no longer configured would defer the audio's expiry
-        // forever. Those rows go; a `Delivered` row keeps its receipt for a
-        // re-added destination to update in place.
+        // Unfinished rows of destinations no longer configured would defer
+        // the audio's expiry forever, so they go; `Delivered` rows stay.
         let stale: Vec<Uuid> = existing
             .iter()
             .filter(|delivery| {
@@ -243,12 +227,8 @@ impl DeliveryDispatcher for DeliveryCoordinator {
     }
 }
 
-/// The machine's IANA time zone. Swift: `TimeZone.current`. When the name
-/// cannot be read or the zone tables do not know it, the destination runs
-/// in UTC: the folder dates and the times in the notes shift to UTC and
-/// nothing is logged, since the crate has no logger. The shell is to call
-/// this and show the zone in Settings, which is where a UTC fallback
-/// becomes visible.
+/// The machine's IANA time zone, or UTC when it cannot be read or is
+/// unknown. The shell shows the zone in Settings, where a fallback shows.
 #[must_use]
 pub fn local_time_zone() -> Tz {
     iana_time_zone::get_timezone()

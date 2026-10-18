@@ -1,4 +1,4 @@
-//! `DeliveryCoordinatorTests`.
+//! The delivery coordinator.
 
 mod common;
 
@@ -222,10 +222,8 @@ async fn no_obsidian_settings_means_no_destinations_and_no_rows() {
     );
 }
 
-/// A row still outstanding for a destination that is no longer configured
-/// would defer the audio's expiry forever and promise an export that never
-/// runs; it is dropped. A delivered row keeps its receipt for a re-added
-/// destination to update in place.
+/// An outstanding row of a destination no longer configured is dropped; a
+/// delivered row keeps its receipt.
 #[tokio::test]
 async fn rows_of_a_removed_destination_are_dropped_unless_delivered() {
     let store = store();
@@ -388,8 +386,7 @@ async fn the_stored_receipt_round_trips_into_the_real_destination() {
         .unwrap();
     assert_eq!(stored, receipt, "the receipt survives the JSON column");
 
-    // The user drops a note in; the second run through the stored receipt
-    // changes nothing Steno wrote and leaves the note alone.
+    // A user's note dropped in stays; the second run changes nothing.
     let notes = directory.path().join(&receipt.folder).join("notes.md");
     std::fs::write(&notes, b"mine\n").unwrap();
     let second = coordinator.deliver_all(meeting_id()).await;
@@ -403,10 +400,8 @@ async fn the_stored_receipt_round_trips_into_the_real_destination() {
     assert_eq!(store.deliveries(meeting_id()).unwrap().len(), 1);
 }
 
-/// Marking the export pending writes a `Pending` row per configured
-/// destination before the meeting is ready, keeping a stored receipt, so
-/// the launch finds the export owed if the app ends before `deliver_all`;
-/// with no destination configured it writes none.
+/// Marking pending writes a `Pending` row per configured destination,
+/// keeping a stored receipt; none without destinations.
 #[tokio::test]
 async fn marking_an_export_pending_leaves_a_row_per_destination_and_keeps_the_receipt() {
     let store = store();
@@ -441,9 +436,8 @@ async fn marking_an_export_pending_leaves_a_row_per_destination_and_keeps_the_re
     );
 }
 
-/// A stored row that does not read back (a receipt that is not JSON) is
-/// left as it is: marking the export pending writes no row without the
-/// receipt, which would make `deliver_all` write a new note.
+/// A stored row that does not read back is left as it is, so its receipt
+/// is never lost.
 #[tokio::test]
 async fn marking_an_export_pending_writes_nothing_when_the_rows_do_not_load() {
     let store = store();

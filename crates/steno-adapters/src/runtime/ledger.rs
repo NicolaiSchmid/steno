@@ -1,5 +1,4 @@
 //! The delivery policy with no I/O in it.
-//! Swift: `Sources/StenoAdapters/Runtime/DeliveryLedger.swift`.
 
 use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
@@ -9,35 +8,27 @@ use steno_core::content_hash::sha256;
 use steno_core::{DeliveredFile, DeliveryReceipt, FileOwnership};
 use uuid::Uuid;
 
-/// Which receipt applies to this root, whether a path may be opened for
-/// writing, what has been written, and the receipt that results. A
-/// destination renders, asks the ledger and calls its sink; the rules live
-/// here once, so a second destination reuses them untouched and the "files
-/// the app never wrote are never opened for writing" rule cannot drift
-/// between destinations.
+/// Which receipt applies to this root, which paths may be opened for
+/// writing, what was written, and the resulting receipt. The rules live
+/// here once, so files the app never wrote are never opened for writing by
+/// any destination.
 #[derive(Debug, Clone)]
 pub struct DeliveryLedger {
-    /// The destination root this delivery writes to (the vault path).
+    /// The destination root (the vault path).
     root: String,
-    /// The receipt that applies to `root`: `None` on a first delivery, which
-    /// is also what a receipt from another root becomes, or one whose folder
-    /// or file paths would leave the root. A moved vault, a scratch run or a
-    /// tampered receipt does not pin a folder or protect a file here.
+    /// The receipt that applies to `root`: `None` on a first delivery, and
+    /// for a receipt from another root or with paths that leave it.
     previous: Option<DeliveryReceipt>,
-    /// The folder a redelivery claimed in place of its pinned one
-    /// ([`DeliveryLedger::move_folder`]), written as on a first delivery.
+    /// The folder a redelivery claimed in place of its pinned one.
     claimed: Option<String>,
     files: BTreeMap<String, DeliveredFile>,
     warnings: Vec<String>,
 }
 
 impl DeliveryLedger {
-    /// The ledger for `root`; `previous` applies only when it is from this
-    /// root and stays inside it. Its root is this one when it is another
-    /// spelling of it ([`Self::same_root`]) or when `is_root` says the file
-    /// system resolves it to this one (a symlink, another case on a
-    /// case-insensitive disk), the destination's I/O answer
-    /// ([`LocalFolderSink::is_root`](crate::fs::LocalFolderSink::is_root)).
+    /// The ledger for `root`; `previous` applies only when its root is
+    /// this one, lexically ([`Self::same_root`]) or by `is_root`, and it
+    /// stays inside.
     #[must_use]
     pub fn new(
         previous: Option<&DeliveryReceipt>,
@@ -48,9 +39,8 @@ impl DeliveryLedger {
             .filter(|receipt| Self::same_root(&receipt.root, root) || is_root(&receipt.root))
             .filter(|receipt| Self::stays_inside_root(receipt))
             .cloned();
-        // Files from the previous receipt stay listed unless rewritten or
-        // forgotten ([`DeliveryLedger::forget`]), so an opted-out audio copy
-        // or a disabled people folder keeps its entry.
+        // Previous files stay listed unless rewritten or forgotten, so an
+        // opted-out audio copy keeps its entry.
         let files: BTreeMap<String, DeliveredFile> = previous
             .iter()
             .flat_map(|receipt| receipt.files.iter())
@@ -83,22 +73,19 @@ impl DeliveryLedger {
             .map(|receipt| receipt.folder.as_str())
     }
 
-    /// The files written so far plus those carried over, by path.
+    /// The files written so far plus those carried over.
     #[must_use]
     pub fn files(&self) -> &BTreeMap<String, DeliveredFile> {
         &self.files
     }
 
-    /// The files of the previous receipt, when one applies.
     fn previous_files(&self) -> impl Iterator<Item = &DeliveredFile> {
         self.previous.iter().flat_map(|receipt| &receipt.files)
     }
 
     /// Whether an owned path may be opened for writing: always on a first
-    /// delivery and for a path directly in the folder a redelivery claimed
-    /// ([`DeliveryLedger::move_folder`]); otherwise only when the receipt
-    /// lists it as owned or nothing is there yet. A file the app never wrote
-    /// is never opened for writing.
+    /// delivery and directly in a claimed folder; otherwise only when the
+    /// receipt lists it as owned or nothing is there yet.
     #[must_use]
     pub fn may_write(&self, path: &str, exists: bool) -> bool {
         self.is_first_delivery()
@@ -110,22 +97,16 @@ impl DeliveryLedger {
             || self.delivered_hash(path).is_some()
     }
 
-    /// Moves the receipt from `from`, the pinned folder that is no longer
-    /// this meeting's, to `to`, the folder this delivery claimed in its
-    /// place. Every listed file under `from` leaves the receipt, since this
-    /// delivery no longer writes there, and [`DeliveryLedger::may_write`]
-    /// allows any path directly in `to`, as on a first delivery: the claim
-    /// gave a new folder or one holding this meeting's `meeting.json`.
-    /// Swift: none; Swift writes into the pinned folder whatever it holds.
+    /// Moves the receipt from the pinned folder `from`, no longer this
+    /// meeting's, to the claimed `to`: files under `from` leave the
+    /// receipt and any path directly in `to` may be written.
     pub fn move_folder(&mut self, from: &str, to: &str) {
         let prefix = format!("{}/", from.trim_end_matches('/'));
         self.files.retain(|path, _| !path.starts_with(&prefix));
         self.claimed = Some(to.to_owned());
     }
 
-    /// Drops `path` from the receipt: a file of ours that is gone from
-    /// disk and that this delivery did not write again.
-    /// Swift: none.
+    /// Drops `path`, a file of ours gone from disk and not rewritten.
     pub fn forget(&mut self, path: &str) {
         self.files.remove(path);
     }
@@ -141,9 +122,7 @@ impl DeliveryLedger {
         );
     }
 
-    /// The managed-block pages of the previous receipt that this delivery
-    /// did not render (`rendered` holds the paths it did): the pages a
-    /// person who left the meeting is still listed on.
+    /// The previous receipt's managed-block pages not in `rendered`.
     #[must_use]
     pub fn stale_managed_pages(&self, rendered: &HashSet<String>) -> Vec<String> {
         self.previous_files()
@@ -153,8 +132,8 @@ impl DeliveryLedger {
             .collect()
     }
 
-    /// Whether a listed file sits directly in `folder` with a name that
-    /// satisfies `name`.
+    /// Whether a listed file sits directly in `folder` with a name
+    /// satisfying `name`.
     #[must_use]
     pub fn lists(&self, folder: &str, name: impl Fn(&str) -> bool) -> bool {
         self.files
@@ -169,9 +148,8 @@ impl DeliveryLedger {
             .filter(|name| !name.contains('/'))
     }
 
-    /// The receipt of this delivery: every file by path, with the renderer
-    /// version the destination rendered with and the warnings it gave
-    /// ([`Self::warn`]).
+    /// The receipt of this delivery, with the renderer version and the
+    /// warnings given ([`Self::warn`]).
     #[must_use]
     pub fn receipt(&self, folder: &str, renderer_version: i64) -> DeliveryReceipt {
         DeliveryReceipt {
@@ -183,8 +161,7 @@ impl DeliveryLedger {
         }
     }
 
-    /// The hash an owned file at `path` had when the previous delivery
-    /// wrote it; `None` on a first delivery or for a path it did not own.
+    /// The hash the previous delivery wrote to the owned file at `path`.
     #[must_use]
     pub fn delivered_hash(&self, path: &str) -> Option<&[u8]> {
         self.previous_files()
@@ -192,14 +169,11 @@ impl DeliveryLedger {
             .map(|file| file.sha256.as_slice())
     }
 
-    /// Keeps the receipt's entry for `path`, a file the user edited that
-    /// this delivery left alone, when Steno may write there
-    /// ([`Self::may_write`]): the hash Steno last wrote there when the
-    /// receipt carries one, else this render's. Never the user's bytes, so
-    /// the next delivery still sees the edit, and kept so the path stays
-    /// Steno's to write once the user takes Steno's version. No entry for a
-    /// file Steno never wrote (a receipt applies and does not list it): a
-    /// rolled-back Swift app writes any path the receipt lists.
+    /// Keeps the entry for `path`, an edited file left alone, when Steno
+    /// may write there: with the hash Steno last wrote, else this render's,
+    /// never the user's, so the next delivery still sees the edit. No entry
+    /// for a file Steno never wrote: a rolled-back Swift app writes any
+    /// path the receipt lists.
     pub fn keep(&mut self, path: &str, data: &[u8]) {
         if !self.may_write(path, true) {
             return;
@@ -213,10 +187,8 @@ impl DeliveryLedger {
             });
     }
 
-    /// Whether `hash` is what the previous delivery wrote to an owned file
-    /// at `path` or to a copy beside it ([`Self::copy_stamp`]): bytes on
-    /// disk with that hash are Steno's, also after the user moved a copy
-    /// over the note.
+    /// Whether `hash` is what the previous delivery wrote to `path` or a
+    /// copy beside it ([`Self::copy_stamp`]).
     #[must_use]
     pub fn wrote(&self, path: &str, hash: &[u8]) -> bool {
         self.previous_files().any(|file| {
@@ -227,9 +199,7 @@ impl DeliveryLedger {
         })
     }
 
-    /// The copies an earlier delivery wrote beside `path` because the note
-    /// there had been edited, as the previous receipt lists them, newest
-    /// first: by date, then number ([`Self::copy_stamp`]).
+    /// The listed copies beside `path`, newest first by date and number.
     #[must_use]
     pub fn listed_copies(&self, path: &str) -> Vec<String> {
         let mut copies: Vec<_> = self
@@ -244,9 +214,8 @@ impl DeliveryLedger {
             .collect()
     }
 
-    /// The path of a copy beside `path`: `<stem> (Steno <date>).<extension>`
-    /// for the first of the day, `<stem> (Steno <date> <number>).<extension>`
-    /// from 2 on.
+    /// The path of a copy beside `path`: `<stem> (Steno <date>).<ext>`,
+    /// with ` <number>` after the date from 2 on.
     #[must_use]
     pub fn copy_beside_path(path: &str, date: &str, number: u32) -> String {
         let (stem, extension) = split_extension(path);
@@ -257,9 +226,8 @@ impl DeliveryLedger {
         }
     }
 
-    /// The date and number of `copy` when it is a copy beside `path`
-    /// ([`Self::copy_beside_path`]), 1 for the unnumbered one. The dates are
-    /// ISO, so they order as strings.
+    /// The date and number (1 when unnumbered) of `copy` when it is a copy
+    /// beside `path`. ISO dates order as strings.
     #[must_use]
     pub fn copy_stamp<'a>(path: &str, copy: &'a str) -> Option<(&'a str, u32)> {
         let (stem, extension) = split_extension(path);
@@ -274,21 +242,19 @@ impl DeliveryLedger {
         }
     }
 
-    /// Adds `warning` to the receipt this delivery returns.
     pub fn warn(&mut self, warning: String) {
         self.warnings.push(warning);
     }
 
-    /// Two spellings of one root: trailing slashes, `.` and `..` components
-    /// and repeated separators are not a different root. Lexical only, as
-    /// Foundation's `standardizedFileURL` is; symlinks are not resolved.
+    /// Two spellings of one root, compared lexically; symlinks are not
+    /// resolved.
     #[must_use]
     pub fn same_root(left: &str, right: &str) -> bool {
         Self::standardized(left) == Self::standardized(right)
     }
 
-    /// `..` pops a plain component, vanishes against the root (`/..` is
-    /// `/`) and otherwise stays, so `../vault` is not `vault`.
+    /// `..` pops a plain component, vanishes against the root and
+    /// otherwise stays.
     fn standardized(path: &str) -> PathBuf {
         let mut result = PathBuf::new();
         for component in Path::new(path).components() {
@@ -307,10 +273,8 @@ impl DeliveryLedger {
         result
     }
 
-    /// The receipt's folder and every file path are plain relative paths
-    /// ([`DeliveryLedger::is_plain_relative`]). A stored path that fails it
-    /// would be joined with the root blindly, so such a receipt applies to
-    /// nothing.
+    /// Whether the receipt's folder and file paths are all plain relative
+    /// paths; a receipt failing it applies to nothing.
     fn stays_inside_root(receipt: &DeliveryReceipt) -> bool {
         Self::is_plain_relative(&receipt.folder)
             && receipt
@@ -319,21 +283,16 @@ impl DeliveryLedger {
                 .all(|file| Self::is_plain_relative(&file.relative_path))
     }
 
-    /// Non-empty, only named components: no `..`, no root, no drive, no
-    /// leading `.` (`Path::components` drops an interior one). The one rule
-    /// for a receipt's paths and for the people folder, so a folder the
-    /// destination accepts never yields a receipt the ledger refuses.
+    /// Non-empty, only named components: no `..`, root, drive or leading
+    /// `.`. The one rule for receipt paths and the people folder.
     pub(crate) fn is_plain_relative(path: &str) -> bool {
         let mut components = Path::new(path).components().peekable();
         components.peek().is_some()
             && components.all(|component| matches!(component, Component::Normal(_)))
     }
 
-    /// [`DeliveryLedger::claim_folder`] with a lookup for the claim: a
-    /// candidate that does not exist counts as claimed, and nothing is
-    /// created. No delivery calls it; the tests pin the collision rule
-    /// through it.
-    /// Swift: `DeliveryLedger.resolveFolder`.
+    /// [`DeliveryLedger::claim_folder`] with a lookup: a missing candidate
+    /// counts as claimed and nothing is created. For tests.
     #[must_use]
     pub fn resolve_folder(
         base: &str,
@@ -350,19 +309,11 @@ impl DeliveryLedger {
         folder
     }
 
-    /// The folder of a delivery without one (a first delivery, or a
-    /// redelivery whose pinned folder is no longer this meeting's): `base`,
-    /// with `-2`, `-3`, … appended while the candidate is taken, that is,
-    /// already there and holding another meeting's `meeting.json` (or
-    /// none); a candidate holding `meeting_id` is a crashed or failed
-    /// attempt and is reused. `claim` creates the candidate and says whether
-    /// it was new (`Ok(true)`, the folder is this delivery's) or something
-    /// was already at the path (`Ok(false)`, which `meeting_of` then
-    /// decides). Creating is the claim, so two first deliveries with the
-    /// same slug, in one process or two, never share a folder. A failed
-    /// `claim` ends the search with its error.
-    /// Swift: none; `resolveFolder` looks up and the first write creates
-    /// the folder.
+    /// The folder of a delivery without one: `base`, then `-2`, `-3`, …
+    /// while the candidate holds another meeting's `meeting.json` (or
+    /// none); one holding `meeting_id` is reused. `claim` creates the
+    /// candidate, `Ok(true)` when new, so two deliveries never share a
+    /// folder. A failed `claim` ends the search.
     pub fn claim_folder<E>(
         base: &str,
         meeting_id: Uuid,
@@ -382,8 +333,7 @@ impl DeliveryLedger {
     }
 }
 
-/// `path` split before the extension of its last component: `("a/b", ".md")`
-/// for `a/b.md`, `("a/b", "")` without one.
+/// `path` split before its last component's extension.
 fn split_extension(path: &str) -> (&str, &str) {
     let name_start = path.rfind('/').map_or(0, |slash| slash + 1);
     match path[name_start..].rfind('.') {
@@ -392,11 +342,8 @@ fn split_extension(path: &str) -> (&str, &str) {
     }
 }
 
-/// `root` joined with `folder`: the meeting folder to reveal in the file
-/// manager. A folder that is not a plain relative path (a tampered or
-/// foreign receipt) is not joined; the root is returned instead, and
-/// nothing tells the host the fallback happened.
-/// Swift: `DeliveryReceipt.folderURL`.
+/// `root` joined with `folder`, the meeting folder to reveal. A folder
+/// that is not plain relative yields the root instead.
 #[must_use]
 pub fn receipt_folder_path(receipt: &DeliveryReceipt) -> PathBuf {
     let root = Path::new(&receipt.root);

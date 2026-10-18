@@ -1,14 +1,11 @@
 //! `WebVTT` per the W3C spec.
-//! Swift: `Sources/StenoAdapters/Rendering/WebVTTRenderer.swift`.
 
 use steno_core::MeetingExport;
 
 use super::{ArtifactRenderer, Names, RenderOptions, Timecode, date_text, markdown_text};
 
-/// `hh:mm:ss.ttt` timestamps, one cue per segment in start order,
-/// `<v Name>text` voice spans, `NOTE` block with title and date. Payload
-/// text escapes `& < >` and drops line breaks and `-->`; voice annotations
-/// drop `& >` and line breaks.
+/// One cue per segment in start order with `<v Name>` voice spans and a
+/// `NOTE` block; payload and annotations escaped so they cannot break cues.
 pub(crate) struct WebVttRenderer<'a> {
     pub export: &'a MeetingExport,
 }

@@ -1,5 +1,4 @@
 //! A YAML frontmatter block built from typed values.
-//! Swift: `Sources/StenoAdapters/Rendering/Frontmatter.swift`.
 
 use std::fmt::Write as _;
 
@@ -22,13 +21,9 @@ pub enum FrontmatterValue {
     List(Vec<String>),
 }
 
-/// A YAML frontmatter block built from typed values, never from string
-/// interpolation. Every string is double-quoted with `\\`, `\"` and control
-/// characters escaped, so titles with colons, quotes, `#` or a leading `-`
-/// are safe and a tag of `2026`, `true` or `null` stays a string; dates,
-/// numbers and booleans are the plain scalars Obsidian types as Date, Date &
-/// time, Number and Checkbox. The emitter knows no consumer: tag grammar
-/// belongs to the renderer that builds the list.
+/// A YAML frontmatter block built from typed values, never interpolation.
+/// Strings are always double-quoted and escaped, so any title is safe and
+/// a tag of `2026` stays a string; dates, numbers and booleans are plain.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frontmatter {
     /// Insertion order is output order.
@@ -87,10 +82,8 @@ impl Frontmatter {
         text
     }
 
-    /// A YAML double-quoted scalar: `\` and `"` escaped; C0 and C1 controls,
-    /// DEL, the line and paragraph separators and the byte order mark as
-    /// `\n`, `\t`, `\r` or `\uXXXX` (YAML forbids them unescaped); everything
-    /// else, including non-ASCII, verbatim.
+    /// A YAML double-quoted scalar: `\` and `"` escaped, characters YAML
+    /// forbids unescaped as `\n`, `\t`, `\r` or `\uXXXX`, the rest verbatim.
     #[must_use]
     pub fn quoted(string: &str) -> String {
         let mut result = String::from("\"");

@@ -1,4 +1,4 @@
-//! `AtomicFileWriterTests`.
+//! The atomic file writer.
 
 mod common;
 
@@ -110,9 +110,7 @@ fn a_target_name_of_255_bytes_is_written() {
 
 #[test]
 fn a_failed_rename_removes_the_temporary_and_leaves_the_target_alone() {
-    // The target is a directory, so the bytes reach the temp file and fsync,
-    // and the rename fails; this path needs no permission bits, so it bites
-    // as root too.
+    // A directory target fails the rename after fsync, also as root.
     let directory = temp_dir("atomic-rename");
     let target = directory.path().join("note.md");
     fs::create_dir_all(&target).unwrap();
@@ -142,9 +140,8 @@ fn a_missing_parent_directory_fails_naming_the_target() {
     assert_eq!(list(directory.path()), Vec::<String>::new());
 }
 
-/// On Windows a target another handle holds without sharing its deletion
-/// (a sync or antivirus client) refuses the rename past its retries: the
-/// write fails, the target keeps its bytes and no temporary is left.
+/// On Windows a target held without delete sharing refuses the rename past
+/// its retries; the target keeps its bytes and no temporary is left.
 #[cfg(windows)]
 #[test]
 fn a_target_held_past_the_retries_fails_and_keeps_its_bytes() {

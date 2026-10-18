@@ -1,27 +1,23 @@
 //! Names derived from titles and display names that are safe as folder and
 //! file names in a vault.
-//! Swift: `Sources/StenoAdapters/Naming/Slug.swift`.
 
 use unicode_normalization::UnicodeNormalization as _;
 use unicode_normalization::char::is_combining_mark;
 
 use crate::rendering::markdown_text;
 
-/// Pure and locale-independent: `de_DE` and `en_US` processes produce the
-/// same bytes. One rule depends on the platform: on Windows
-/// [`Slug::file_name`] keeps a person's page off the reserved device names
-/// ([`Slug::file_name_reserving`]).
+/// Pure and locale-independent; only [`Slug::file_name`] depends on the
+/// platform (Windows device names).
 pub struct Slug;
 
 impl Slug {
     pub const DEFAULT_MAX_LENGTH: usize = 60;
 
     /// `"Produktstrategie: \"90/10\" & Roadmap für Q4"` becomes
-    /// `"produktstrategie-90-10-roadmap-fuer-q4"`: lowercased, `ä ö ü ß`
-    /// transliterated to `ae oe ue ss`, other diacritics stripped, every run
-    /// outside `[a-z0-9]` collapsed to one hyphen, hyphens trimmed, cut to
-    /// [`Slug::DEFAULT_MAX_LENGTH`] at the last hyphen, `"meeting"` when
-    /// nothing is left.
+    /// `"produktstrategie-90-10-roadmap-fuer-q4"`: German umlauts
+    /// transliterated, other diacritics stripped, runs outside `[a-z0-9]`
+    /// to one hyphen, cut to [`Slug::DEFAULT_MAX_LENGTH`], `"meeting"` when
+    /// empty.
     #[must_use]
     pub fn title(text: &str) -> String {
         Self::title_with_max_length(text, Self::DEFAULT_MAX_LENGTH)
@@ -45,25 +41,18 @@ impl Slug {
     }
 
     /// A display name as a note file name: strips `/ \ : * ? " < > | # ^ [ ]`
-    /// and control characters, collapses whitespace, trims spaces and dots.
-    /// `"Unnamed"` when nothing is left. On Windows a reserved device name
-    /// gets a `_` ([`Slug::file_name_reserving`]); elsewhere `Con` stays
-    /// `Con`, so the page the Swift app already wrote on the Mac keeps its
-    /// name.
+    /// and controls, collapses whitespace, trims spaces and dots; `"Unnamed"`
+    /// when empty. On Windows reserved device names get a `_`; elsewhere
+    /// `Con` stays, so Mac pages keep their names.
     #[must_use]
     pub fn file_name(text: &str) -> String {
         Self::file_name_reserving(text, cfg!(windows))
     }
 
-    /// [`Slug::file_name`] with the platform made explicit: when
-    /// `device_names_reserved` (Windows), a name whose stem (up to the first
-    /// `.`, trailing spaces dropped as Windows drops them) is a reserved
-    /// device name gets a `_` after the stem: `Con` becomes `Con_`, `nul.tar`
-    /// `nul_.tar`. The list is Microsoft's "Naming Files, Paths, and
-    /// Namespaces", plus `CONIN$` and `CONOUT$`; the page's `.md` does not
-    /// change the check.
-    /// Swift: none; the Swift app runs on the Mac, where the names are
-    /// allowed.
+    /// [`Slug::file_name`] with the platform explicit: when
+    /// `device_names_reserved`, a stem (up to the first `.`, trailing
+    /// spaces dropped) that is a reserved device name gets a `_`: `Con` to
+    /// `Con_`, `nul.tar` to `nul_.tar`.
     #[must_use]
     pub fn file_name_reserving(text: &str, device_names_reserved: bool) -> String {
         let name = Self::sanitized_file_name(text);
@@ -102,7 +91,6 @@ impl Slug {
         )
     }
 
-    /// [`Slug::file_name`] before the device-name rule.
     fn sanitized_file_name(text: &str) -> String {
         let kept: String = text
             .chars()
@@ -128,8 +116,7 @@ impl Slug {
         character.is_ascii_lowercase() || character.is_ascii_digit()
     }
 
-    /// `ä ö ü ß` to `ae oe ue ss`, matched after canonical composition so
-    /// decomposed forms (`a` + U+0308) fold the same way as precomposed ones.
+    /// `ä ö ü ß` to `ae oe ue ss`, after canonical composition.
     pub(crate) fn transliterate_german(text: &str) -> String {
         text.nfc()
             .map(|character| {
@@ -145,17 +132,15 @@ impl Slug {
             .collect()
     }
 
-    /// Canonical decomposition, then every combining mark dropped: `é` to
-    /// `e`, `ñ` to `n`. Unicode data only, no locale.
+    /// Canonical decomposition with every combining mark dropped.
     pub(crate) fn strip_diacritics(text: &str) -> String {
         text.nfd()
             .filter(|character| !is_combining_mark(*character))
             .collect()
     }
 
-    /// Cuts at the last hyphen inside the first `max_length` characters
-    /// unless the cut already falls on a word boundary; trims hyphens either
-    /// way. The slug is ASCII, so characters are bytes.
+    /// Cuts at the last hyphen within `max_length` unless the cut falls on
+    /// a word boundary; trims hyphens. The slug is ASCII.
     pub(crate) fn truncate(slug: &str, max_length: usize) -> String {
         if slug.len() <= max_length {
             return slug.to_owned();
