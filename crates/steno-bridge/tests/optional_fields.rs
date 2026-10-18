@@ -23,63 +23,163 @@ fn uuid(last: u8) -> Uuid {
     Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, last])
 }
 
-#[test]
-fn app_snapshot_deep_link_fields() {
-    let mut app: AppSnapshot = fixture("app");
-    let before = encoded(&app);
-    assert!(before.get("requestedMeetingID").is_none());
-    assert!(before.get("requestedSettingsSection").is_none());
+/// `name`'s fixture leaves each pointer unset; after `set` each reads its value.
+fn sets<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
+    name: &str,
+    set: impl FnOnce(&mut T),
+    expected: &[(&str, Value)],
+) {
+    let mut value: T = fixture(name);
+    let before = encoded(&value);
+    set(&mut value);
+    let after = encoded(&value);
+    for (pointer, wanted) in expected {
+        assert!(
+            before.pointer(pointer).is_none(),
+            "{name}: {pointer} is set"
+        );
+        assert_eq!(after.pointer(pointer), Some(wanted), "{name}: {pointer}");
+    }
+}
 
-    app.requested_meeting_id = Some(uuid(0x2a));
-    app.requested_settings_section = Some(SettingsSection::Phone);
-    let json = encoded(&app);
-    assert_eq!(
-        json["requestedMeetingID"],
-        "00000000-0000-0000-0000-00000000002A"
+#[test]
+#[allow(clippy::too_many_lines)]
+fn optional_snapshot_fields_appear_only_when_set() {
+    sets(
+        "app",
+        |app: &mut AppSnapshot| {
+            app.requested_meeting_id = Some(uuid(0x2a));
+            app.requested_settings_section = Some(SettingsSection::Phone);
+        },
+        &[
+            (
+                "/requestedMeetingID",
+                json!("00000000-0000-0000-0000-00000000002A"),
+            ),
+            ("/requestedSettingsSection", json!("iphone")),
+        ],
     );
-    assert_eq!(json["requestedSettingsSection"], "iphone");
-}
-
-#[test]
-fn recording_snapshot_warning_and_error() {
-    let mut recording: RecordingSnapshot = fixture("recording.live");
-    let before = encoded(&recording);
-    assert!(before.get("warning").is_none());
-    assert!(before.get("error").is_none());
-
-    recording.warning = Some("The microphone went quiet.".into());
-    recording.error = Some("System audio stopped.".into());
-    let json = encoded(&recording);
-    assert_eq!(json["warning"], "The microphone went quiet.");
-    assert_eq!(json["error"], "System audio stopped.");
-}
-
-#[test]
-fn meetings_list_snapshot_tag_filter_and_error() {
-    let mut list: MeetingsListSnapshot = fixture("meetings.list");
-    let before = encoded(&list);
-    assert!(before.get("tagFilter").is_none());
-    assert!(before.get("error").is_none());
-
-    list.tag_filter = Some("hiring".into());
-    list.error = Some("The database is locked.".into());
-    let json = encoded(&list);
-    assert_eq!(json["tagFilter"], "hiring");
-    assert_eq!(json["error"], "The database is locked.");
-}
-
-#[test]
-fn meeting_detail_snapshot_end_reason_and_error() {
-    let mut detail: MeetingDetailSnapshot = fixture("meeting.detail");
-    let before = encoded(&detail);
-    assert!(before.get("endReason").is_none());
-    assert!(before.get("error").is_none());
-
-    detail.end_reason = Some("Stopped after 20 minutes of silence.".into());
-    detail.error = Some("The notes could not be saved.".into());
-    let json = encoded(&detail);
-    assert_eq!(json["endReason"], "Stopped after 20 minutes of silence.");
-    assert_eq!(json["error"], "The notes could not be saved.");
+    sets(
+        "recording.live",
+        |recording: &mut RecordingSnapshot| {
+            recording.warning = Some("The microphone went quiet.".into());
+            recording.error = Some("System audio stopped.".into());
+        },
+        &[
+            ("/warning", json!("The microphone went quiet.")),
+            ("/error", json!("System audio stopped.")),
+        ],
+    );
+    sets(
+        "meetings.list",
+        |list: &mut MeetingsListSnapshot| {
+            list.tag_filter = Some("hiring".into());
+            list.error = Some("The database is locked.".into());
+        },
+        &[
+            ("/tagFilter", json!("hiring")),
+            ("/error", json!("The database is locked.")),
+        ],
+    );
+    sets(
+        "meeting.detail",
+        |detail: &mut MeetingDetailSnapshot| {
+            detail.end_reason = Some("Stopped after 20 minutes of silence.".into());
+            detail.error = Some("The notes could not be saved.".into());
+        },
+        &[
+            ("/endReason", json!("Stopped after 20 minutes of silence.")),
+            ("/error", json!("The notes could not be saved.")),
+        ],
+    );
+    sets(
+        "onboarding.handoff",
+        |onboarding: &mut OnboardingSnapshot| {
+            let row = onboarding.speech_models.as_mut().unwrap();
+            row.download_fraction = Some(0.5);
+            row.failure = Some("The network connection was lost.".into());
+        },
+        &[
+            ("/speechModels/downloadFraction", json!(0.5)),
+            (
+                "/speechModels/failure",
+                json!("The network connection was lost."),
+            ),
+        ],
+    );
+    sets(
+        "settings.general",
+        |general: &mut GeneralSettingsSnapshot| {
+            general.error_details = Some("SMAppService returned 1".into());
+            general.login_item_note = Some("Your system opens Steno.".into());
+            general.updates.managed_note = Some("Updates come from your package manager.".into());
+        },
+        &[
+            ("/errorDetails", json!("SMAppService returned 1")),
+            ("/loginItemNote", json!("Your system opens Steno.")),
+            (
+                "/updates/managedNote",
+                json!("Updates come from your package manager."),
+            ),
+        ],
+    );
+    sets(
+        "settings.recording",
+        |recording: &mut RecordingSettingsSnapshot| {
+            recording.input_device_uid = Some("BuiltInMicrophoneDevice".into());
+            recording.error_details = Some("CoreAudio -10851".into());
+        },
+        &[
+            ("/inputDeviceUID", json!("BuiltInMicrophoneDevice")),
+            ("/errorDetails", json!("CoreAudio -10851")),
+        ],
+    );
+    sets(
+        "settings.transcription",
+        |transcription: &mut TranscriptionSettingsSnapshot| {
+            transcription.error_details = Some("The model store is read only.".into());
+        },
+        &[("/errorDetails", json!("The model store is read only."))],
+    );
+    sets(
+        "settings.summaries",
+        |summaries: &mut SummariesSettingsSnapshot| {
+            summaries.validation_message = Some("Enter a model name.".into());
+            summaries.error_details = Some("401 Unauthorized".into());
+        },
+        &[
+            ("/validationMessage", json!("Enter a model name.")),
+            ("/errorDetails", json!("401 Unauthorized")),
+        ],
+    );
+    sets(
+        "settings.export",
+        |export: &mut ExportSettingsSnapshot| {
+            export.vault_path = Some("/Users/nicolai/Notes".into());
+            export.vault_name = Some("Notes".into());
+            export.validation_message = Some("The people folder must be inside the vault.".into());
+            export.error_details = Some("EACCES: permission denied".into());
+        },
+        &[
+            ("/vaultPath", json!("/Users/nicolai/Notes")),
+            ("/vaultName", json!("Notes")),
+            (
+                "/validationMessage",
+                json!("The people folder must be inside the vault."),
+            ),
+            ("/errorDetails", json!("EACCES: permission denied")),
+        ],
+    );
+    sets(
+        "settings.iphone",
+        |phone: &mut PhoneSettingsSnapshot| {
+            phone.error_details = Some("Bonjour registration failed (-72000)".into());
+        },
+        &[(
+            "/errorDetails",
+            json!("Bonjour registration failed (-72000)"),
+        )],
+    );
 }
 
 #[test]
@@ -131,51 +231,6 @@ fn onboarding_vault_error_details() {
 }
 
 #[test]
-fn onboarding_speech_models_fraction_and_failure() {
-    let mut onboarding: OnboardingSnapshot = fixture("onboarding.handoff");
-    let row = onboarding.speech_models.as_mut().unwrap();
-    let before = encoded(&*row);
-    assert!(before.get("downloadFraction").is_none());
-    assert!(before.get("failure").is_none());
-
-    row.download_fraction = Some(0.5);
-    row.failure = Some("The network connection was lost.".into());
-    let json = encoded(&*row);
-    assert_eq!(json["downloadFraction"], 0.5);
-    assert_eq!(json["failure"], "The network connection was lost.");
-}
-
-#[test]
-fn general_settings_snapshot_error_details() {
-    let mut general: GeneralSettingsSnapshot = fixture("settings.general");
-    assert!(encoded(&general).get("errorDetails").is_none());
-
-    general.error = Some("Could not read login item state.".into());
-    general.error_details = Some("SMAppService returned 1".into());
-    let json = encoded(&general);
-    assert_eq!(json["error"], "Could not read login item state.");
-    assert_eq!(json["errorDetails"], "SMAppService returned 1");
-}
-
-/// The packaged-install lines are absent unless set.
-#[test]
-fn general_settings_snapshot_managed_notes() {
-    let mut general: GeneralSettingsSnapshot = fixture("settings.general");
-    let before = encoded(&general);
-    assert!(before.get("loginItemNote").is_none());
-    assert!(before["updates"].get("managedNote").is_none());
-
-    general.login_item_note = Some("Your system opens Steno.".into());
-    general.updates.managed_note = Some("Updates come from your package manager.".into());
-    let json = encoded(&general);
-    assert_eq!(json["loginItemNote"], "Your system opens Steno.");
-    assert_eq!(
-        json["updates"]["managedNote"],
-        "Updates come from your package manager."
-    );
-}
-
-#[test]
 fn general_updates_last_check_and_detail() {
     let updates = GeneralUpdates {
         can_check: true,
@@ -196,32 +251,6 @@ fn general_updates_last_check_and_detail() {
             "outcome": "failed",
             "detail": "The update server did not answer.",
         })
-    );
-}
-
-#[test]
-fn recording_settings_snapshot_input_device_and_error_details() {
-    let mut recording: RecordingSettingsSnapshot = fixture("settings.recording");
-    let before = encoded(&recording);
-    assert!(before.get("inputDeviceUID").is_none());
-    assert!(before.get("errorDetails").is_none());
-
-    recording.input_device_uid = Some("BuiltInMicrophoneDevice".into());
-    recording.error_details = Some("CoreAudio -10851".into());
-    let json = encoded(&recording);
-    assert_eq!(json["inputDeviceUID"], "BuiltInMicrophoneDevice");
-    assert_eq!(json["errorDetails"], "CoreAudio -10851");
-}
-
-#[test]
-fn transcription_settings_snapshot_error_details() {
-    let mut transcription: TranscriptionSettingsSnapshot = fixture("settings.transcription");
-    assert!(encoded(&transcription).get("errorDetails").is_none());
-
-    transcription.error_details = Some("The model store is read only.".into());
-    assert_eq!(
-        encoded(&transcription)["errorDetails"],
-        "The model store is read only."
     );
 }
 
@@ -250,20 +279,6 @@ fn transcription_asset_failure() {
 }
 
 #[test]
-fn summaries_settings_snapshot_validation_message_and_error_details() {
-    let mut summaries: SummariesSettingsSnapshot = fixture("settings.summaries");
-    let before = encoded(&summaries);
-    assert!(before.get("validationMessage").is_none());
-    assert!(before.get("errorDetails").is_none());
-
-    summaries.validation_message = Some("Enter a model name.".into());
-    summaries.error_details = Some("401 Unauthorized".into());
-    let json = encoded(&summaries);
-    assert_eq!(json["validationMessage"], "Enter a model name.");
-    assert_eq!(json["errorDetails"], "401 Unauthorized");
-}
-
-#[test]
 fn summaries_codex_models_error() {
     let codex = SummariesCodex {
         confirmed: true,
@@ -285,45 +300,6 @@ fn summaries_codex_models_error() {
             "isLoadingModels": false,
             "modelsError": "The model list could not be loaded.",
         })
-    );
-}
-
-#[test]
-fn export_settings_snapshot_vault_validation_and_error_details() {
-    let mut export: ExportSettingsSnapshot = fixture("settings.export");
-    let before = encoded(&export);
-    for key in [
-        "vaultPath",
-        "vaultName",
-        "validationMessage",
-        "errorDetails",
-    ] {
-        assert!(before.get(key).is_none(), "{key} is set in the fixture");
-    }
-
-    export.vault_path = Some("/Users/nicolai/Notes".into());
-    export.vault_name = Some("Notes".into());
-    export.validation_message = Some("The people folder must be inside the vault.".into());
-    export.error_details = Some("EACCES: permission denied".into());
-    let json = encoded(&export);
-    assert_eq!(json["vaultPath"], "/Users/nicolai/Notes");
-    assert_eq!(json["vaultName"], "Notes");
-    assert_eq!(
-        json["validationMessage"],
-        "The people folder must be inside the vault."
-    );
-    assert_eq!(json["errorDetails"], "EACCES: permission denied");
-}
-
-#[test]
-fn phone_settings_snapshot_error_details() {
-    let mut phone: PhoneSettingsSnapshot = fixture("settings.iphone");
-    assert!(encoded(&phone).get("errorDetails").is_none());
-
-    phone.error_details = Some("Bonjour registration failed (-72000)".into());
-    assert_eq!(
-        encoded(&phone)["errorDetails"],
-        "Bonjour registration failed (-72000)"
     );
 }
 

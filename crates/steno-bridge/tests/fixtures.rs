@@ -308,132 +308,114 @@ fn platform_tsx_reads_the_calendar_where_the_platform_lists_it() {
 /// The `z.enum` lists nested in a snapshot or params schema, against the
 /// Rust enum the matching field uses; a new case on either side fails here.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn contract_ts_nested_enums_match() {
-    let nested = |anchors: &[&str]| contract_ts_strings(anchors);
-    assert_eq!(
-        nested(&["export const recordingSnapshot = z", "state: z.enum(["]),
-        raw(RecordingState::ALL)
-    );
     let detail = "export const meetingDetailSnapshot = z";
-    assert_eq!(
-        nested(&[detail, "retention: z", "kind: z.enum(["]),
-        raw(DetailRetentionKind::ALL)
-    );
-    assert_eq!(
-        nested(&[detail, "speakers: z.array(", "assignment: z.enum(["]),
-        raw(SpeakerAssignmentKind::ALL)
-    );
-    assert_eq!(
-        nested(&[detail, "summaryStatus: z", "kind: z.enum(["]),
-        raw(DetailSummaryStatusKind::ALL)
-    );
-    assert_eq!(
-        nested(&[detail, "tasks: z.array(", "priority: z.enum(["]),
-        raw(TaskPriority::ALL)
-    );
-    assert_eq!(
-        nested(&[detail, "export: z", "status: z.enum(["]),
-        raw(DetailExportStatus::ALL)
-    );
-    assert_eq!(
-        nested(&["export const acknowledgement = z", "group: z.enum(["]),
-        raw(GeneralAcknowledgementGroup::ALL)
-    );
     let general = "export const generalSettingsSnapshot = z";
-    assert_eq!(
-        nested(&[general, "loginItem: z.enum(["]),
-        raw(GeneralLoginItem::ALL)
-    );
-    assert_eq!(
-        nested(&[general, "updates: z", "outcome: z.enum(["]),
-        raw(GeneralUpdatesOutcome::ALL)
-    );
-    assert_eq!(
-        nested(&[
-            "export const recordingSettingsSnapshot = z",
-            "folderUsage: z.enum(["
-        ]),
-        raw(RecordingFolderUsage::ALL)
-    );
-    assert_eq!(
-        nested(&[
-            "export const transcriptionSettingsSnapshot = z",
-            "assets: z.array(",
-            "state: z.enum(["
-        ]),
-        raw(TranscriptionAssetState::ALL)
-    );
-    assert_eq!(
-        nested(&[
-            "export const summariesSettingsSnapshot = z",
-            "codex: z",
-            "signIn: z.enum(["
-        ]),
-        raw(SummariesCodexSignIn::ALL)
-    );
-    assert_eq!(
-        nested(&[
-            "export const summariesSettingsSnapshot = z",
-            "keyStore: z.enum(["
-        ]),
-        raw(SummariesKeyStore::ALL)
-    );
-    assert_eq!(
-        nested(&[
-            "export const phoneSettingsSnapshot = z",
-            "listener: z",
-            "state: z.enum(["
-        ]),
-        raw(PhoneListenerState::ALL)
-    );
-    assert_eq!(
-        nested(&[
-            "export const phoneSettingsSnapshot = z",
-            "waiting: z",
-            "reason: z.enum(["
-        ]),
-        raw(PhoneWaitingReason::ALL)
-    );
-}
-
-/// As [`contract_ts_nested_enums_match`], for onboarding and the speaker
-/// options.
-#[test]
-fn contract_ts_nested_onboarding_enums_match() {
-    let nested = |anchors: &[&str]| contract_ts_strings(anchors);
+    let summaries = "export const summariesSettingsSnapshot = z";
+    let phone = "export const phoneSettingsSnapshot = z";
     let onboarding = "export const onboardingSnapshot = z";
-    assert_eq!(
-        nested(&[onboarding, "page: z.enum(["]),
-        raw(OnboardingPage::ALL)
-    );
-    assert_eq!(
-        nested(&[onboarding, "setup: z.array(", "kind: z.enum(["]),
-        raw(OnboardingSetupStepKind::ALL)
-    );
-    assert_eq!(
-        nested(&[onboarding, "setup: z.array(", "state: z.enum(["]),
-        raw(OnboardingSetupStepState::ALL)
-    );
-    assert_eq!(
-        nested(&[onboarding, "swiftImport: z", "state: z.enum(["]),
-        raw(OnboardingImportState::ALL)
-    );
-    assert_eq!(
-        nested(&[onboarding, "vaultAccess: z", "state: z.enum(["]),
-        raw(OnboardingVaultAccessState::ALL)
-    );
-    assert_eq!(
-        nested(&[onboarding, "speechModels: z", "state: z.enum(["]),
-        raw(TranscriptionAssetState::ALL)
-    );
-    assert_eq!(
-        nested(&["export const speakerOption = z", "kind: z.enum(["]),
-        raw(SpeakerOptionKind::ALL)
-    );
-    assert_eq!(
-        nested(&["export const setupStepParams = z", "step: z.enum(["]),
-        raw(OnboardingSetupStepKind::ALL)
-    );
+    let cases: &[(&[&str], Vec<String>)] = &[
+        (
+            &["export const recordingSnapshot = z", "state: z.enum(["],
+            raw(RecordingState::ALL),
+        ),
+        (
+            &[detail, "retention: z", "kind: z.enum(["],
+            raw(DetailRetentionKind::ALL),
+        ),
+        (
+            &[detail, "speakers: z.array(", "assignment: z.enum(["],
+            raw(SpeakerAssignmentKind::ALL),
+        ),
+        (
+            &[detail, "summaryStatus: z", "kind: z.enum(["],
+            raw(DetailSummaryStatusKind::ALL),
+        ),
+        (
+            &[detail, "tasks: z.array(", "priority: z.enum(["],
+            raw(TaskPriority::ALL),
+        ),
+        (
+            &[detail, "export: z", "status: z.enum(["],
+            raw(DetailExportStatus::ALL),
+        ),
+        (
+            &["export const acknowledgement = z", "group: z.enum(["],
+            raw(GeneralAcknowledgementGroup::ALL),
+        ),
+        (
+            &[general, "loginItem: z.enum(["],
+            raw(GeneralLoginItem::ALL),
+        ),
+        (
+            &[general, "updates: z", "outcome: z.enum(["],
+            raw(GeneralUpdatesOutcome::ALL),
+        ),
+        (
+            &[
+                "export const recordingSettingsSnapshot = z",
+                "folderUsage: z.enum([",
+            ],
+            raw(RecordingFolderUsage::ALL),
+        ),
+        (
+            &[
+                "export const transcriptionSettingsSnapshot = z",
+                "assets: z.array(",
+                "state: z.enum([",
+            ],
+            raw(TranscriptionAssetState::ALL),
+        ),
+        (
+            &[summaries, "codex: z", "signIn: z.enum(["],
+            raw(SummariesCodexSignIn::ALL),
+        ),
+        (
+            &[summaries, "keyStore: z.enum(["],
+            raw(SummariesKeyStore::ALL),
+        ),
+        (
+            &[phone, "listener: z", "state: z.enum(["],
+            raw(PhoneListenerState::ALL),
+        ),
+        (
+            &[phone, "waiting: z", "reason: z.enum(["],
+            raw(PhoneWaitingReason::ALL),
+        ),
+        (&[onboarding, "page: z.enum(["], raw(OnboardingPage::ALL)),
+        (
+            &[onboarding, "setup: z.array(", "kind: z.enum(["],
+            raw(OnboardingSetupStepKind::ALL),
+        ),
+        (
+            &[onboarding, "setup: z.array(", "state: z.enum(["],
+            raw(OnboardingSetupStepState::ALL),
+        ),
+        (
+            &[onboarding, "swiftImport: z", "state: z.enum(["],
+            raw(OnboardingImportState::ALL),
+        ),
+        (
+            &[onboarding, "vaultAccess: z", "state: z.enum(["],
+            raw(OnboardingVaultAccessState::ALL),
+        ),
+        (
+            &[onboarding, "speechModels: z", "state: z.enum(["],
+            raw(TranscriptionAssetState::ALL),
+        ),
+        (
+            &["export const speakerOption = z", "kind: z.enum(["],
+            raw(SpeakerOptionKind::ALL),
+        ),
+        (
+            &["export const setupStepParams = z", "step: z.enum(["],
+            raw(OnboardingSetupStepKind::ALL),
+        ),
+    ];
+    for (anchors, cases) in cases {
+        assert_eq!(&contract_ts_strings(anchors), cases, "{anchors:?}");
+    }
 }
 
 #[test]

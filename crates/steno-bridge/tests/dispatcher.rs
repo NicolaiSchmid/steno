@@ -82,15 +82,92 @@ fn call<H: BridgeHost>(dispatcher: &Dispatcher<H>, body: &Value) -> Value {
     serde_json::from_str(&dispatcher.dispatch_json(&body.to_string())).unwrap()
 }
 
+/// Each request's reply and what the host was asked: no params, typed
+/// results with their optionals omitted, decoded params, host errors with
+/// their code, and requests refused before the host sees them.
 #[test]
-fn routes_a_method_without_params_and_replies_with_the_id_only() {
-    let (host, dispatcher) = dispatcher();
-    let reply = call(
-        &dispatcher,
-        &json!({"id": "req-1", "method": "page.ready", "params": null}),
+fn every_request_gets_its_reply() {
+    let speaker = "00000000-0000-0000-0000-000000000017";
+    let nil = Uuid::nil().to_string();
+    for (body, reply, calls) in [
+        (
+            json!({"id": "req-1", "method": "page.ready", "params": null}),
+            json!({"id": "req-1"}),
+            vec!["page.ready".to_owned()],
+        ),
+        (
+            json!({"id": "req-2", "method": "settings.export.chooseVault", "params": null}),
+            json!({"id": "req-2", "result": {"path": "/Users/nicolai/Notes"}}),
+            vec!["settings.export.chooseVault".to_owned()],
+        ),
+        (
+            json!({"id": "req-3", "method": "speakers.options",
+                   "params": {"speakerID": speaker, "query": "an"}}),
+            json!({"id": "req-3", "result": {"options": [{"kind": "create", "label": "Add \u{201c}an\u{201d}"}]}}),
+            vec!["speakers.options an".to_owned()],
+        ),
+        (
+            json!({"id": "r", "method": "meetings.select",
+                   "params": {"meetingID": "00000000-0000-0000-0000-00000000000c"}}),
+            json!({"id": "r"}),
+            vec!["meetings.select 00000000-0000-0000-0000-00000000000C".to_owned()],
+        ),
+        (
+            json!({"id": "r", "method": "meetings.select", "params": {"meetingID": nil}}),
+            json!({"id": "r", "error": {"code": "notFound", "message": "No meeting with that id."}}),
+            vec![format!("meetings.select {nil}")],
+        ),
+        (
+            json!({"id": "r2", "method": "ui.confirmDestructive",
+                   "params": {"title": "Delete?", "message": "Gone.", "confirmTitle": "Delete"}}),
+            json!({"id": "r2", "error": {"code": "cancelled", "message": "The user cancelled."}}),
+            vec!["ui.confirmDestructive Delete?".to_owned()],
+        ),
+        (
+            json!({"id": "r", "method": "meetings.explode", "params": null}),
+            json!({"id": "r", "error": {"code": "unknownMethod", "message": "Unknown method 'meetings.explode'."}}),
+            vec![],
+        ),
+        (
+            json!({"id": "r", "method": "recording.stop"}),
+            json!({"id": "r", "error": {"code": "unknownMethod", "message": "The host does not answer recording.stop."}}),
+            vec![],
+        ),
+        (
+            json!([1, 2]),
+            json!({"id": "", "error": {"code": "invalidParams", "message": "The message is not an object."}}),
+            vec![],
+        ),
+        (
+            json!({"id": "r", "params": {}}),
+            json!({"id": "r", "error": {"code": "invalidParams", "message": "The message is not a bridge request."}}),
+            vec![],
+        ),
+        (
+            json!({"id": 7, "method": "page.ready"}),
+            json!({"id": "", "error": {"code": "invalidParams", "message": "The message is not a bridge request."}}),
+            vec![],
+        ),
+    ] {
+        let (host, dispatcher) = dispatcher();
+        assert_eq!(call(&dispatcher, &body), reply, "{body}");
+        assert_eq!(host.calls(), calls, "{body}");
+    }
+    let (_, dispatcher) = dispatcher();
+    let garbage: Value = serde_json::from_str(&dispatcher.dispatch_json("{not json")).unwrap();
+    assert_eq!(
+        garbage,
+        json!({"id": "", "error": {"code": "invalidParams", "message": "The message is not JSON."}})
     );
-    assert_eq!(reply, json!({"id": "req-1"}));
-    assert_eq!(host.calls(), ["page.ready"]);
+    // A host behind an `Arc<dyn BridgeHost>` is a host too.
+    let erased: Arc<dyn BridgeHost> = Arc::new(SpyHost::default());
+    assert_eq!(
+        call(
+            &Dispatcher::new(erased),
+            &json!({"id": "r", "method": "page.ready"})
+        ),
+        json!({"id": "r"})
+    );
 }
 
 /// "Process again" takes no params, and its request envelope prints back
@@ -107,103 +184,6 @@ fn process_again_routes_without_params() {
         json!({"id": "req-9"})
     );
     assert_eq!(host.calls(), ["meeting.processAgain"]);
-}
-
-#[test]
-fn a_typed_reply_without_params_lands_in_result() {
-    let (host, dispatcher) = dispatcher();
-    let reply = call(
-        &dispatcher,
-        &json!({"id": "req-2", "method": "settings.export.chooseVault", "params": null}),
-    );
-    assert_eq!(
-        reply,
-        json!({"id": "req-2", "result": {"path": "/Users/nicolai/Notes"}})
-    );
-    assert_eq!(host.calls(), ["settings.export.chooseVault"]);
-}
-
-#[test]
-fn a_typed_reply_with_params_lands_in_result_with_its_optionals_omitted() {
-    let (host, dispatcher) = dispatcher();
-    let reply = call(
-        &dispatcher,
-        &json!({"id": "req-3", "method": "speakers.options",
-               "params": {"speakerID": "00000000-0000-0000-0000-000000000017", "query": "an"}}),
-    );
-    assert_eq!(
-        reply,
-        json!({"id": "req-3", "result": {"options": [{"kind": "create", "label": "Add \u{201c}an\u{201d}"}]}})
-    );
-    assert_eq!(host.calls(), ["speakers.options an"]);
-}
-
-#[test]
-fn decodes_params_as_the_contract_type() {
-    let (host, dispatcher) = dispatcher();
-    let id = "00000000-0000-0000-0000-00000000000c";
-    let reply = call(
-        &dispatcher,
-        &json!({"id": "r", "method": "meetings.select", "params": {"meetingID": id}}),
-    );
-    assert_eq!(reply, json!({"id": "r"}));
-    assert_eq!(
-        host.calls(),
-        ["meetings.select 00000000-0000-0000-0000-00000000000C"]
-    );
-}
-
-#[test]
-fn a_host_error_becomes_the_error_envelope_with_its_code() {
-    let (_, dispatcher) = dispatcher();
-    let nil = Uuid::nil().to_string();
-    let reply = call(
-        &dispatcher,
-        &json!({"id": "r", "method": "meetings.select", "params": {"meetingID": nil}}),
-    );
-    assert_eq!(
-        reply,
-        json!({"id": "r", "error": {"code": "notFound", "message": "No meeting with that id."}})
-    );
-}
-
-#[test]
-fn a_cancelled_dialog_is_the_cancelled_code_not_a_result() {
-    let (host, dispatcher) = dispatcher();
-    let reply = call(
-        &dispatcher,
-        &json!({"id": "r2", "method": "ui.confirmDestructive",
-               "params": {"title": "Delete?", "message": "Gone.", "confirmTitle": "Delete"}}),
-    );
-    assert_eq!(
-        reply,
-        json!({"id": "r2", "error": {"code": "cancelled", "message": "The user cancelled."}})
-    );
-    assert_eq!(host.calls(), ["ui.confirmDestructive Delete?"]);
-}
-
-#[test]
-fn unknown_method_is_rejected_before_the_host_sees_it() {
-    let (host, dispatcher) = dispatcher();
-    let reply = call(
-        &dispatcher,
-        &json!({"id": "r", "method": "meetings.explode", "params": null}),
-    );
-    assert_eq!(
-        reply,
-        json!({"id": "r", "error": {"code": "unknownMethod", "message": "Unknown method 'meetings.explode'."}})
-    );
-    assert!(host.calls().is_empty(), "the host saw an unknown method");
-}
-
-#[test]
-fn a_method_the_host_does_not_answer_is_unknown_method() {
-    let (_, dispatcher) = dispatcher();
-    let reply = call(&dispatcher, &json!({"id": "r", "method": "recording.stop"}));
-    assert_eq!(
-        reply,
-        json!({"id": "r", "error": {"code": "unknownMethod", "message": "The host does not answer recording.stop."}})
-    );
 }
 
 #[test]
@@ -233,26 +213,6 @@ fn missing_or_bad_params_are_invalid_params() {
         host.calls().is_empty(),
         "the host was called with bad params"
     );
-}
-
-#[test]
-fn a_body_that_is_not_a_request_still_gets_a_reply() {
-    let (_, dispatcher) = dispatcher();
-    assert_eq!(
-        call(&dispatcher, &json!([1, 2])),
-        json!({"id": "", "error": {"code": "invalidParams", "message": "The message is not an object."}})
-    );
-    assert_eq!(
-        call(&dispatcher, &json!({"id": "r", "params": {}})),
-        json!({"id": "r", "error": {"code": "invalidParams", "message": "The message is not a bridge request."}})
-    );
-    assert_eq!(
-        call(&dispatcher, &json!({"id": 7, "method": "page.ready"})),
-        json!({"id": "", "error": {"code": "invalidParams", "message": "The message is not a bridge request."}})
-    );
-    let garbage: Value = serde_json::from_str(&dispatcher.dispatch_json("{not json")).unwrap();
-    assert_eq!(garbage["error"]["code"], "invalidParams");
-    assert_eq!(garbage["error"]["message"], "The message is not JSON.");
 }
 
 /// The Tauri command's path: a method and its params, no envelope; the
@@ -289,29 +249,6 @@ fn replies_are_compact_with_sorted_keys() {
     assert_eq!(
         dispatcher.dispatch_json(&body),
         r#"{"error":{"code":"notFound","message":"No meeting with that id."},"id":"r"}"#
-    );
-}
-
-/// The shell shares one host between the dispatcher and its publisher: a
-/// host behind an `Arc`, sized or as a trait object, is a host.
-#[test]
-fn a_shared_host_behind_an_arc_answers_like_the_host_itself() {
-    let host = Arc::new(SpyHost::default());
-    let dispatcher = Dispatcher::new(Arc::clone(&host));
-    assert_eq!(
-        call(&dispatcher, &json!({"id": "r", "method": "page.ready"})),
-        json!({"id": "r"})
-    );
-    assert_eq!(host.calls(), ["page.ready"]);
-
-    let erased: Arc<dyn BridgeHost> = host;
-    let dispatcher = Dispatcher::new(erased);
-    assert_eq!(
-        call(
-            &dispatcher,
-            &json!({"id": "r2", "method": "recording.stop"})
-        ),
-        json!({"id": "r2", "error": {"code": "unknownMethod", "message": "The host does not answer recording.stop."}})
     );
 }
 
