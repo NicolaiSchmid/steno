@@ -1,6 +1,5 @@
 //! The value types around a capture: mode, configuration, errors, states,
 //! levels, notices and statistics.
-//! Swift: `Sources/StenoAudio/Capture/CaptureConfiguration.swift`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,8 +8,8 @@ use chrono::{DateTime, Utc};
 use steno_core::{AudioAsset, AudioLane};
 
 steno_core::string_enum! {
-    /// How a meeting is captured; the raw values are Swift's `CaptureMode`
-    /// cases as `Settings` and the bridge spell them.
+    /// How a meeting is captured; the raw values are how `Settings` and the
+    /// bridge spell them.
     pub enum CaptureMode {
         /// Two lanes, `Mic` ("me") and `System` ("them"), with echo
         /// cancellation; the pipeline diarizes the mic lane instead when
@@ -23,7 +22,6 @@ steno_core::string_enum! {
 }
 
 impl CaptureMode {
-    /// The lanes a session in this mode records, in master channel order.
     #[must_use]
     pub fn lanes(self) -> Vec<AudioLane> {
         match self {
@@ -33,29 +31,24 @@ impl CaptureMode {
     }
 }
 
-/// What a session records and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureConfiguration {
-    /// Call or in person: decides the lanes and the echo cancellation.
     pub mode: CaptureMode,
     /// `None`: the default input device.
     pub input_device_uid: Option<String>,
-    /// Default true in `Call`; ignored in `InPerson`.
+    /// Ignored in `InPerson`.
     pub echo_cancellation: bool,
     /// Debug: writes `mic.raw.caf` (the microphone before echo cancellation)
     /// next to the master.
     pub keep_raw_mic_lane: bool,
-    /// The audio folder; the per-meeting folder
-    /// (`RecordingLayout::new(audio_folder, meeting_id)`) is created inside.
+    /// The audio folder; the per-meeting folder is created inside.
     pub output_directory: PathBuf,
-    /// Developer tools only: record these lanes instead of the mode's
-    /// (`[System]` for the Continuity spike). The app never sets it.
+    /// Developer tools only: record these lanes instead of the mode's. The
+    /// app never sets it.
     pub lane_override: Option<Vec<AudioLane>>,
 }
 
 impl CaptureConfiguration {
-    /// The defaults: default input device, echo cancellation on, no raw
-    /// microphone lane, no lane override.
     #[must_use]
     pub fn new(mode: CaptureMode, output_directory: impl Into<PathBuf>) -> Self {
         Self {
@@ -68,7 +61,6 @@ impl CaptureConfiguration {
         }
     }
 
-    /// The lanes a session records, in master channel order.
     #[must_use]
     pub fn lanes(&self) -> Vec<AudioLane> {
         self.lane_override
@@ -89,8 +81,6 @@ impl CaptureConfiguration {
 /// Everything a capture can fail with; `Display` is the user-facing text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum CaptureError {
-    /// A Core Audio call failed: which one, and its `OSStatus` (rendered as
-    /// the four-character code when it is one).
     #[error("{operation} failed: {}", four_char_code(*status))]
     CoreAudio {
         /// The HAL function or property.
@@ -98,74 +88,53 @@ pub enum CaptureError {
         /// The `OSStatus` it returned.
         status: i32,
     },
-    /// No input device resolves: none plugged in, or the stored UID is gone.
     #[error("the input device is not available")]
     InputDeviceUnavailable,
-    /// No default system output device.
     #[error("the output device is not available")]
     OutputDeviceUnavailable,
-    /// The aggregate's input streams did not match the expected lanes.
     #[error("unexpected input stream layout: {0}")]
     UnexpectedStreamLayout(String),
-    /// The aggregate runs at a rate the processing thread cannot convert
-    /// to [`SAMPLE_RATE`](crate::SAMPLE_RATE) (outside
-    /// [`RateConverter::supports`](crate::realtime::RateConverter::supports),
-    /// or 0 for an aggregate that is gone). The rate is carried as whole
-    /// hertz.
+    /// The aggregate runs at a rate the processing thread cannot convert to
+    /// [`SAMPLE_RATE`](crate::SAMPLE_RATE), or 0 for an aggregate that is
+    /// gone.
     #[error("the audio devices run at {actual} Hz, which Steno cannot record")]
     UnsupportedSampleRate {
         /// The rate the devices run at, whole hertz.
         actual: u32,
     },
-    /// The tap never rose above [`LaneLevel::SILENT_PEAK_LINEAR`] during
-    /// the whole session.
     #[error("the system lane stayed silent")]
     SystemAudioSilent,
     /// A device changed or disappeared and the backend could not be
-    /// restarted within `CaptureSession::RESTART_ATTEMPTS`.
+    /// restarted.
     #[error("an audio device disappeared")]
     DeviceLost,
-    /// A file write failed (its description); the recording is finalised as
-    /// far as it got.
+    /// A file write failed; the recording is finalised as far as it got.
     #[error("writing the recording failed: {0}")]
     WriterFailed(String),
-    /// The meeting's folder already exists: a start with the id of a
-    /// meeting that has one, which never writes over its files. Rust only.
+    /// The meeting's folder already exists; its files are never written
+    /// over.
     #[error("the folder {} already exists, so nothing was recorded", .0.display())]
     RecordingExists(PathBuf),
-    /// A backend error that is none of the above (its description).
     #[error("capture backend failed: {0}")]
     BackendFailed(String),
     /// The graph did not run: the devices were linked but delivered no
-    /// audio before the start's deadline (its description). On Linux,
-    /// PipeWire ran no first cycle, as for a source whose owner stalls, a
-    /// Bluetooth headset still switching profile, or a sink whose monitor
-    /// does not run yet; which node held the graph up is not known. Also
-    /// a daemon that stopped answering the start, or a start thread that
-    /// did not answer, while the connection held (a node whose owner
-    /// stopped before the session manager configured it holds both up).
-    /// The session gives it too, on every platform, for a rebuild's
-    /// restart whose stream offered no frame within
-    /// `CaptureSession::STALL_TIMEOUT` over a watched backend. The session
-    /// answers it on a chosen microphone by trying the default input at
-    /// once, except where a stall cannot be the microphone's
-    /// (`CaptureBackend::stall_may_be_the_microphone`: a Mac call capture
-    /// keeps the chosen one), and a rebuild's restarts that keep failing
-    /// with it go on, backing off up to
-    /// `CaptureSession::RESTART_BACKOFF_LONGEST`, until one runs. Rust
-    /// only; reads as [`Self::BackendFailed`].
+    /// audio before the start's deadline (on Linux, PipeWire ran no first
+    /// cycle), or a rebuild's restart offered no frame within
+    /// `CaptureSession::STALL_TIMEOUT`. The session answers it on a chosen
+    /// microphone by trying the default input, unless
+    /// `CaptureBackend::stall_may_be_the_microphone` says otherwise, and
+    /// keeps restarting with backoff until one runs. Reads as
+    /// [`Self::BackendFailed`].
     #[error("capture backend failed: {0}")]
     DidNotRun(String),
-    /// `start` while not idle, `stop` while not recording.
     #[error("{0}")]
     InvalidState(String),
 }
 
 /// Renders an `OSStatus` as its four-character code when it is one
-/// (`'!obj'`, `'who?'`), else as the number.
+/// (`'!obj'`), else as the number.
 #[must_use]
 pub(crate) fn four_char_code(status: i32) -> String {
-    // The bit pattern is what the four characters are packed in.
     let bytes = (status as u32).to_be_bytes();
     if bytes.iter().all(|b| (0x20..0x7f).contains(b)) {
         format!("'{}'", String::from_utf8_lossy(&bytes))
@@ -174,52 +143,38 @@ pub(crate) fn four_char_code(status: i32) -> String {
     }
 }
 
-/// What `stop()` returns: the finished master with its sidecars (retention
-/// `KeepForever` until the caller sets it from `Settings`), the session's
-/// statistics, and what cut the recording short.
+/// What `stop()` returns: the finished master with its sidecars, the
+/// session's statistics, and what cut the recording short.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureResult {
-    /// The master with its sidecars.
     pub asset: AudioAsset,
-    /// Duration, drops, silence and device changes.
     pub statistics: CaptureStatistics,
-    /// What ended the recording early or failed its close, the recording
-    /// up to it kept: a device that stayed lost, a write or a close that
-    /// failed (a full disk). `None` when it ended as asked and closed
-    /// cleanly. Rust only: Swift's `stop()` threw the close's failure away.
+    /// What ended the recording early or failed its close (a device that
+    /// stayed lost, a full disk), the recording up to it kept; `None` when
+    /// it ended as asked and closed cleanly.
     pub failure: Option<CaptureError>,
 }
 
 /// The session's state machine; see the `session` module doc.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CaptureState {
-    /// Nothing is recording.
     Idle,
-    /// `start` is bringing the backend up.
     Starting,
-    /// Frames are flowing.
     Recording {
         /// When the backend began delivering, wall time.
         started_at: DateTime<Utc>,
     },
-    /// `stop` is tearing down.
     Stopping,
-    /// `recording` is `None` when the start produced nothing, the
-    /// finalised partial recording when a device stayed lost or the writer
-    /// failed mid-meeting, and the whole recording when a close failed or,
-    /// with nothing else ending the recording, a sync failed while
-    /// recording; `stop()` returns the same value or fails when it is
-    /// `None`.
+    /// `recording` is `None` when the start produced nothing, else the
+    /// finalised recording as far as it got; `stop()` returns the same
+    /// value or fails when it is `None`.
     Failed {
-        /// What ended the recording.
         error: CaptureError,
-        /// The finalised partial recording, when there is one.
         recording: Option<Box<CaptureResult>>,
     },
 }
 
 impl CaptureState {
-    /// The failure, when in `Failed`.
     #[must_use]
     pub fn failure(&self) -> Option<&CaptureError> {
         match self {
@@ -228,7 +183,6 @@ impl CaptureState {
         }
     }
 
-    /// `idle`, `starting`, `recording`, `stopping` or `failed`.
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
@@ -244,150 +198,106 @@ impl CaptureState {
 /// RMS and peak of one lane over the last metering window, in dBFS.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LaneLevel {
-    /// RMS over the window, dBFS.
     pub rms: f32,
-    /// Peak over the window, dBFS.
     pub peak: f32,
 }
 
 impl LaneLevel {
-    /// Digital silence: the floor every meter reports for zeros.
     pub const SILENCE: LaneLevel = LaneLevel {
         rms: -160.0,
         peak: -160.0,
     };
 
-    /// -80 dBFS, linear: a lane whose peak never exceeds it is "silent" for
-    /// [`CaptureStatistics::system_lane_silent`] and the permission probe.
+    /// -80 dBFS, linear: a lane whose peak never exceeds it is "silent".
     pub const SILENT_PEAK_LINEAR: f32 = 1e-4;
 }
 
 /// Published at 10 Hz; `system` is `None` in `InPerson`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LaneLevels {
-    /// The microphone, or the room lane in person.
     pub mic: LaneLevel,
-    /// The tap; `None` in person.
     pub system: Option<LaneLevel>,
 }
 
 /// What the backend's listener found different after a notification burst
-/// settled. The synthetic backend reports `DefaultInputChanged` unless told
-/// otherwise.
+/// settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceChangeReason {
-    /// The default output device moved; the system lane follows it once
-    /// the session rebuilt the capture.
     DefaultOutputChanged,
     /// The input the capture would record now moved: the default input,
-    /// or a chosen microphone that came back while the default was
-    /// recorded in its place.
+    /// or a chosen microphone that came back.
     DefaultInputChanged,
-    /// The output device the capture started on is gone.
     OutputDeviceGone,
-    /// The input device the capture started on is gone.
     InputDeviceGone,
-    /// The aggregate no longer runs at the rate the capture started at
-    /// (a Bluetooth headset entering or leaving the hands-free profile).
-    /// macOS only: PipeWire's adapter and the WASAPI engine resample, so the
-    /// Linux and Windows backends never report it.
+    /// The aggregate no longer runs at the rate the capture started at (a
+    /// Bluetooth headset switching profile). macOS only: PipeWire and
+    /// WASAPI resample.
     SampleRateChanged,
-    /// The capture stopped delivering: no frame reached the sink for
-    /// longer than `CaptureSession::STALL_TIMEOUT` from its start or its
-    /// last frame (a device whose driver or owner hangs, a graph that
-    /// stopped running, a Mac call capture whose silent output did not
-    /// start). The session's watchdog reports it, over a watched backend
-    /// (`CaptureBackend::delivers_continuously`), and its rebuild's
-    /// restarts go on until one runs, whatever they fail with. Rust only.
+    /// No frame reached the sink for longer than
+    /// `CaptureSession::STALL_TIMEOUT`, over a watched backend
+    /// (`CaptureBackend::delivers_continuously`); the rebuild's restarts go
+    /// on until one runs.
     DeliveryStalled,
-    /// The audio service restarted or went away: `coreaudiod` on macOS,
-    /// taking the capture's aggregate device with it, or on Linux the
-    /// connection to the PipeWire daemon lost (a daemon killed or
-    /// restarted). The rebuild's restarts go on until one runs, so the
-    /// recording resumes once the service is back. Not on Windows. Rust
-    /// only.
+    /// The audio service restarted or went away (`coreaudiod`, or the
+    /// PipeWire daemon). The rebuild's restarts go on until one runs. Not
+    /// on Windows.
     AudioServiceRestarted,
-    /// The chosen microphone, which did not open and which the session
-    /// replaced with the default input, delivered to a probe on a stream
-    /// of its own (`CaptureSession::CHOSEN_INPUT_RECHECK`), so the rebuild
-    /// returns to it. Linux only (`CaptureBackend::probes_inputs`). Rust
-    /// only.
+    /// The chosen microphone, replaced with the default input because it
+    /// did not open, delivered to a probe, so the rebuild returns to it.
+    /// Linux only.
     ChosenInputRecheck,
 }
 
 /// What `CaptureSession::notices` carries while the state stays
-/// `Recording`: the rebuild beginning, its restarts going on past
-/// `CaptureSession::RESTART_ATTEMPTS`, the new backend running, and audio
-/// arriving again after those restarts. Device loss is not a notice;
-/// `states` carries `Failed(DeviceLost)`.
+/// `Recording`. Device loss is not a notice; `states` carries
+/// `Failed(DeviceLost)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CaptureNotice {
-    /// A change was reported; the rebuild begins.
     DeviceChanged(DeviceChangeReason),
-    /// The first `attempt` restarts (`RESTART_ATTEMPTS`) failed in a way
-    /// that may pass (a graph that does not run, a restarted stream that
-    /// delivered nothing within `CaptureSession::STALL_TIMEOUT`, any
-    /// failure after a stall or a restart of the audio service), so the
-    /// session goes on restarting until one runs or the stop; nothing is
-    /// recorded meanwhile, and the warning stands until `Delivering`. The
-    /// restarts count across a streak of rebuilds, each resuming on a
-    /// stream that delivers a moment and stalls again soon, and the warning
-    /// stands through their resumes. Sent once until `Delivering`, then
-    /// again when the restarts go on once more; the stream is still the one
-    /// that stopped. Not sent for a stream whose stall comes 10 s or more
-    /// after each resume: every such stall begins a new streak, which
-    /// resumes on its first restart, and only the recorder's note after the
-    /// stop counts the silence their gaps took. Rust only.
+    /// The first `RESTART_ATTEMPTS` restarts failed in a way that may pass,
+    /// so the session goes on restarting until one runs or the stop;
+    /// nothing is recorded meanwhile. The restarts count across a streak of
+    /// rebuilds whose streams stall again soon after resuming. Sent once
+    /// until `Delivering`, then again when the restarts go on once more.
+    /// Not sent for a stream whose stall comes 10 s or more after each
+    /// resume: each such stall begins a new streak.
     StillRestarting {
-        /// The restarts so far.
         attempt: usize,
     },
     /// `attempt` is the restart that succeeded, counted from the first of
-    /// its streak (1 when the first did); `gap_seconds` the silence written
-    /// for this gap. A stream that resumes may stall again soon, so this
-    /// does not end the warning; `Delivering` does.
+    /// its streak; `gap_seconds` the silence written for this gap. Does not
+    /// end the warning; `Delivering` does.
     DeviceResumed {
-        /// Restarts it took.
         attempt: usize,
-        /// Silence written for the gap, seconds.
         gap_seconds: f64,
     },
-    /// Audio is back after `StillRestarting`: the stream a rebuild resumed
-    /// on has delivered for 10 s (with that `DeviceResumed` over a backend
-    /// that is not watched), so the warning ends. Rust only.
+    /// Audio is back after `StillRestarting`: the resumed stream has
+    /// delivered for 10 s, so the warning ends.
     Delivering,
 }
 
 /// What `stop()` reports beside the asset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureStatistics {
-    /// Seconds of audio written to the master.
     pub duration: f64,
     /// Frames lost per lane: ring overruns, a stalled writer's full relay,
-    /// whole frames a stop left undrained in the rings and, on Windows,
-    /// clock-drift slips; should be empty.
+    /// frames a stop left undrained and, on Windows, clock-drift slips.
     pub dropped_frames: BTreeMap<AudioLane, usize>,
     /// True when the tap never exceeded [`LaneLevel::SILENT_PEAK_LINEAR`].
     pub system_lane_silent: bool,
-    /// True when a device change could not be survived (every restart
-    /// failed) and the session finalised the recording early.
+    /// A device change could not be survived and the session finalised the
+    /// recording early.
     pub ended_on_device_loss: bool,
-    /// Device changes the recording survived by rebuilding in place.
     pub device_changes: usize,
     /// Seconds of silence written to keep the master on wall time across
-    /// those rebuilds, and across one a stop overtook while it wrote the
-    /// gap (that one is not in `device_changes`).
+    /// those rebuilds (and one a stop overtook).
     pub gap_seconds: f64,
     /// Seconds of silence written in place of audio the capture's thread
     /// missed ([`Missed::fill`](crate::realtime::Missed::fill)), on the
-    /// lane that missed most; part of `duration`, as the gaps are. 0 when
-    /// the capture's thread runs on time. A18, the design in
-    /// [`realtime::missed`](crate::realtime::missed); Rust only.
+    /// lane that missed most; part of `duration`.
     pub filled_seconds: f64,
-    /// Seconds of audio the capture's thread missed in jumps too long to
-    /// fill ([`Missed::unfilled`](crate::realtime::Missed::unfilled)), on
-    /// the lane that lost most: not in `duration`, which falls short of
-    /// wall time by them. 0 when the capture's thread runs on time. Rust
-    /// only.
+    /// Seconds the capture's thread missed in jumps too long to fill
+    /// ([`Missed::unfilled`](crate::realtime::Missed::unfilled)): not in
+    /// `duration`, which falls short of wall time by them.
     pub unfilled_seconds: f64,
 }

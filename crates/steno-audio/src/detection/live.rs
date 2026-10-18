@@ -1,18 +1,7 @@
-//! The live [process-activity source](super::ProcessAudioActivitySource).
-//! On macOS the HAL's process objects with their PID, bundle id and
-//! `IsRunningInput` flag, and listeners on
-//! `kAudioDevicePropertyDeviceIsRunningSomewhere` for every input device.
-//! Swift: `LiveProcessAudioActivity` in
-//! `Sources/StenoAudio/Detection/ProcessAudioActivity.swift`.
-//!
-//! On Windows the audio sessions of every active endpoint, mapped by
-//! [`processes_from_sessions`](super::processes_from_sessions), with
-//! endpoint and session notifications (WP10a, not run on hardware; see
-//! `capture::live::wasapi`). No Swift counterpart.
-//!
-//! On Linux the PipeWire registry's stream nodes, their links and clients,
-//! watched by one PipeWire thread per source (`super::pipewire`). On other
-//! targets the type exists so callers compile and reports no processes.
+//! The live [process-activity source](super::ProcessAudioActivitySource):
+//! the HAL's process objects and input-device listeners on macOS, the audio
+//! sessions of every active endpoint on Windows, and the PipeWire registry
+//! on Linux. On other targets it reports no processes.
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 use std::sync::mpsc::Receiver;
@@ -34,7 +23,6 @@ pub struct LiveProcessAudioActivity;
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 impl LiveProcessAudioActivity {
-    /// The stub.
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -91,9 +79,8 @@ mod wasapi {
     }
 
     /// The session-backed source. Each `changes()` call runs one thread
-    /// that holds the COM registrations for as long as the source lives,
-    /// or, once its receiver is dropped, until the next notification: a
-    /// detector started many times holds that many threads until then.
+    /// holding the COM registrations until the source drops or, once its
+    /// receiver is gone, the next notification.
     #[derive(Default)]
     pub struct LiveProcessAudioActivity {
         registrations: Mutex<Vec<Registration>>,
@@ -107,7 +94,6 @@ mod wasapi {
     }
 
     impl LiveProcessAudioActivity {
-        /// No notifications registered until `changes()`.
         #[must_use]
         pub fn new() -> Self {
             Self::default()
@@ -117,10 +103,8 @@ mod wasapi {
     /// What the notification callbacks tell the notification thread.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Notice {
-        /// A session's state changed.
         Changed,
-        /// Sessions may have appeared (one was created, or a device
-        /// changed): register for every session's state again.
+        /// Sessions may have appeared: register for every session again.
         Reregister,
     }
 
@@ -131,9 +115,8 @@ mod wasapi {
         })
     }
 
-    /// The per-endpoint and per-session registrations on every active
-    /// capture endpoint, made afresh after every session creation and
-    /// every endpoint change.
+    /// The registrations on every active capture endpoint, made afresh
+    /// whenever sessions or endpoints change.
     struct SessionWatch {
         _sessions: Vec<SessionRegistration>,
         _managers: Vec<SessionManagerRegistration>,
@@ -172,9 +155,8 @@ mod wasapi {
         }
     }
 
-    /// The notification thread: registers, forwards every notice to the
-    /// detector, re-registers the session events when sessions appear or
-    /// devices change, until stopped or the detector's receiver is gone.
+    /// The notification thread: forwards every notice to the detector and
+    /// re-registers when sessions appear, until stopped or unheard.
     fn run_notifications(changes: &Sender<()>, stop: &AtomicBool) {
         let Ok(apartment) = Apartment::enter() else {
             return;
@@ -193,7 +175,6 @@ mod wasapi {
             match notices.recv_timeout(Duration::from_millis(250)) {
                 Ok(notice) => {
                     if notice == Notice::Reregister {
-                        // Unregister before registering again.
                         drop(sessions.take());
                         sessions = Some(SessionWatch::register(&enumerator, &sender));
                     }
@@ -276,7 +257,7 @@ mod macos {
         registrations: Mutex<Vec<Registration>>,
     }
 
-    /// Kept only for its drop: the listeners unregister with it.
+    /// Kept for its drop, which unregisters the listeners.
     struct Registration {
         _fixed: Vec<PropertyListener>,
         _devices: Vec<PropertyListener>,
@@ -364,10 +345,8 @@ mod macos {
 
         fn changes(&self) -> Receiver<()> {
             let (sender, receiver) = channel();
-            // Input devices come and go: the device-list listener fires a
-            // change, and `snapshot()` reads the processes afresh; the
-            // per-device running listeners are rebuilt lazily on the next
-            // `changes()` call rather than from inside a listener callback.
+            // The per-device running listeners are rebuilt on the next
+            // `changes()` call, not from inside a listener callback.
             let fixed: Vec<PropertyListener> = [
                 kAudioHardwarePropertyProcessObjectList,
                 kAudioHardwarePropertyDevices,

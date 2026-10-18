@@ -1,20 +1,8 @@
-//! The real-time promise, checked rather than grepped: the IOProc body
-//! (`LaneFrameSink` producer calls through `deliver`), the PipeWire
-//! `process` body (`interleaved_view` over one interleaved buffer, then
-//! `deliver_slices` through the capture's gate on Linux), the WASAPI
-//! capture threads' two stream bodies (`FollowerLane` and
-//! `PacketRouter`), the fill of audio a capture thread missed (`CycleClock`
-//! and `write_missed`, A18 of `.plans/2026-10-07-stable-promotion.md`), the
-//! macOS IOProc's first-callback mark, the processing loop with the real
-//! Speex canceller, its far-end delay line, metering, the raw-mic copy and
-//! the relay hand-off run one second of audio on the test's thread under
-//! the counting allocator and allocate nothing, as does the macOS call
-//! capture's silent output IOProc body (`silence_output`).
-//! `tests/pipewire.rs` counts the real data-loop thread against a PipeWire
-//! daemon on Linux.
-//! Swift: `Tests/StenoAudioTests/RealTimeAllocationTests.swift` (Darwin's
-//! `malloc_logger` hook); here the crate's own `#[global_allocator]`, so it
-//! runs on every OS. Plan invariant 5.
+//! The real-time promise, checked rather than grepped: every body on the
+//! real-time path (the IOProc's `deliver`, PipeWire's gate and view, the
+//! WASAPI stream bodies, the missed-audio fill, the processing loop with
+//! Speex, the silent output) runs on this thread under the crate's
+//! counting allocator and allocates nothing.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -76,8 +64,7 @@ impl Material {
     }
 
     /// What the IOProc does per callback, for every callback of the
-    /// material: the HAL's two buffers (mono mic, interleaved stereo tap)
-    /// through `deliver` with the resolved layout.
+    /// material, through `deliver` with the resolved layout.
     fn deliver(&self, sink: &LaneFrameSink, sources: &[LaneSource]) {
         let mut offset = 0;
         while offset < self.frames {
@@ -161,8 +148,7 @@ fn producer_processing_and_relay_allocate_nothing_after_warm_up() {
     let mut thread =
         ProcessingThread::new(Arc::clone(&sink), Arc::clone(&relay), configuration, None);
 
-    // Warm-up outside the count: ten frames let Speex touch any lazily
-    // initialised state once (the plan's "after the first second").
+    // Warm-up outside the count: Speex touches its lazy state once.
     let warm_up = Material::new(0.1);
     warm_up.deliver(&sink, &layout.sources);
     thread.drain_on_caller();
@@ -192,9 +178,7 @@ fn producer_processing_and_relay_allocate_nothing_after_warm_up() {
     );
 }
 
-/// The macOS IOProc marks its first callback's host time on every call
-/// (stable plan A9): an atomic load, and a store the first time; no
-/// allocation.
+/// The macOS IOProc's first-callback mark allocates nothing.
 #[test]
 fn the_first_callback_mark_allocates_nothing() {
     let first = FirstCallback::new();
@@ -207,16 +191,12 @@ fn the_first_callback_mark_allocates_nothing() {
     assert_eq!(first.host_time(), Some(1_000));
 }
 
-/// A headset in the hands-free profile: the rings carry 24 kHz and the
-/// loop converts every lane to 48 kHz before the canceller, still without
-/// allocating. At 22.05 kHz a frame's worth of device samples is not a
-/// whole number (220.5), so the reads leave a part of one behind.
+/// At 24 and 22.05 kHz the loop converts every lane to 48 kHz before the
+/// canceller without allocating, leaving partial frames behind.
 #[test]
 fn the_converting_processing_loop_allocates_nothing_after_warm_up() {
-    // The material's samples, read at the device's rate: 4 800 and then
-    // 52 800 in all. Half a window is held back, so at 24 kHz they convert
-    // to 2 * (4 800 - 32) and 2 * (52 800 - 32) outputs, 19 and then 219
-    // whole frames; at 22.05 kHz to 10 380 and 114 870, 21 and 239.
+    // Half a window is held back, so 4 800 and then 52 800 device samples
+    // convert to 19 and 219 whole frames at 24 kHz, 21 and 239 at 22.05.
     for (rate, warm_frames, frames) in [(24_000.0, 19, 219), (22_050.0, 21, 239)] {
         let lanes = [AudioLane::Mic, AudioLane::System];
         let layout =
@@ -256,8 +236,7 @@ fn the_converting_processing_loop_allocates_nothing_after_warm_up() {
     }
 }
 
-/// A converting thread with no lanes builds and drains nothing instead of
-/// indexing a converter that is not there.
+/// A converting thread with no lanes builds and drains nothing.
 #[test]
 fn a_converting_processing_thread_without_lanes_does_nothing() {
     let sink = Arc::new(LaneFrameSink::new(&[]));
@@ -270,8 +249,7 @@ fn a_converting_processing_thread_without_lanes_does_nothing() {
     assert_eq!(relay.available_frames(), 0);
 }
 
-/// `work` through the PipeWire capture's gate, as `process` delivers a
-/// cycle; the backend and its gate are Linux only.
+/// `work` through the PipeWire capture's gate, as `process` delivers it.
 fn through_the_gate(work: impl FnOnce()) {
     #[cfg(target_os = "linux")]
     assert!(steno_audio::capture::live::pipewire::through_an_open_gate(
@@ -290,8 +268,8 @@ fn as_bytes(samples: &[f32]) -> &[u8] {
 
 #[test]
 fn the_pipewire_process_body_allocates_nothing() {
-    // What `capture::live::pipewire` resolves for a call: one buffer of
-    // three interleaved channels, the microphone and the monitor's two.
+    // A call: one buffer of three channels, the microphone and the
+    // monitor's two.
     const CHANNELS: usize = 3;
     const CYCLE: usize = 1_024;
     let lanes = [AudioLane::Mic, AudioLane::System];
@@ -359,9 +337,8 @@ fn the_pipewire_process_body_allocates_nothing() {
     }
 }
 
-/// On Linux the counter names a thread by the kernel's id, the one
-/// `/proc/self/task` lists, so `tests/pipewire.rs` can count PipeWire's
-/// data-loop thread by it.
+/// On Linux the counter names a thread by its kernel id, as
+/// `/proc/self/task` lists it.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_counting_allocator_names_threads_as_the_kernel_does() {
@@ -398,16 +375,10 @@ fn the_sidecar_resampler_allocates_nothing_after_init() {
     );
 }
 
-/// The WASAPI capture threads' per-packet bodies (WP10a), driven with
-/// synthetic packets, no audio device: the follower folding stereo loopback
-/// packets into its staging ring, the master routing mono microphone
-/// packets plus the staged frames into the sink. A second and a half at
-/// WASAPI's 10 ms period, with a silent loopback packet, a gap that
-/// underruns and re-primes, and a follower burst that stays queued and
-/// slips once a whole window has stayed above the high-water mark, all on
-/// this thread under the counting allocator: nothing allocates. On the
-/// Windows runner this is the backend's real-time proof, since the runner
-/// has no device to drive the COM loop with.
+/// The WASAPI threads' per-packet bodies over synthetic packets (a silent
+/// packet, an underrun and re-prime, a burst that slips) allocate nothing.
+/// On the Windows runner, which has no device, this is the backend's
+/// real-time proof.
 #[test]
 fn the_two_stream_bodies_allocate_nothing() {
     const PERIOD: usize = 480;
@@ -431,11 +402,8 @@ fn the_two_stream_bodies_allocate_nothing() {
         let offset = period * PERIOD;
         let mic = &material.mic[offset..offset + PERIOD];
         let tap = &material.tap[2 * offset..2 * (offset + PERIOD)];
-        // Periods 40 to 44 deliver no loopback packets (an underrun and a
-        // re-prime); period 60 delivers a burst of six, which stays queued
-        // and slips at the end of the second window after the re-prime,
-        // the first that holds only the raised queue; period 30 is flagged
-        // silent.
+        // Periods 40 to 44 deliver no loopback (underrun, re-prime); period
+        // 60 a burst of six that slips later; period 30 is flagged silent.
         let loopback_packets = match period {
             40..45 => 0,
             60 => 6,
@@ -491,13 +459,9 @@ fn the_two_stream_bodies_allocate_nothing() {
     );
 }
 
-/// The fill of audio a capture thread missed (A18 of
-/// `.plans/2026-10-07-stable-promotion.md`): the clock that reads
-/// each cycle's position and the zeros it reports, through the sink as the
-/// PipeWire and macOS callbacks write them and through both two-stream
-/// bodies as the WASAPI threads do, allocate nothing. Every tenth cycle is
-/// missed; the rings end up holding every frame of the timeline, the
-/// missed ones as zeros counted per lane.
+/// The missed-audio fill (the cycle clock and the zeros through the sink
+/// and both two-stream bodies) allocates nothing; the rings end up with
+/// every frame of the timeline, the missed ones as zeros.
 #[test]
 fn the_missed_cycle_fill_allocates_nothing() {
     const CYCLE: usize = 480;
@@ -547,8 +511,7 @@ fn the_missed_cycle_fill_allocates_nothing() {
     );
     assert!(sink.dropped_samples().is_empty());
 
-    // The two-stream bodies: the master misses 4 periods and the
-    // follower 2, each told before its next packet, then each a jump past
+    // The master misses 4 periods and the follower 2, then each a jump past
     // the fill limit.
     let filled = |fill| Missed { fill, unfilled: 0 };
     let unfilled = |unfilled| Missed { fill: 0, unfilled };
@@ -605,11 +568,8 @@ fn the_missed_cycle_fill_allocates_nothing() {
         54 * CYCLE,
         "50 periods and the 4 missed"
     );
-    // The master's fill pulled 4 periods with 2 queued: the follower lane
-    // padded 2 periods and re-primed on the target. The follower's next
-    // discontinuity comes more than the hold (the master's buffer and a
-    // period of pulls) after that re-prime, so those zeros are no part of
-    // its loss.
+    // The follower lane padded 2 periods and re-primed; its next
+    // discontinuity comes past the hold, so those zeros are not its loss.
     assert_eq!(
         sink.filled_samples(),
         BTreeMap::from([(AudioLane::Mic, 4 * CYCLE), (AudioLane::System, 2 * CYCLE)]),
@@ -625,10 +585,8 @@ fn the_missed_cycle_fill_allocates_nothing() {
     );
 }
 
-/// The body of the call capture's silent output IOProc zeroes every output
-/// buffer it is handed, the last one included, goes on past a buffer
-/// without data and one of size 0, writes nothing past a buffer's size,
-/// and allocates nothing.
+/// The silent output IOProc zeroes every buffer it is handed within its
+/// size, skips null and empty ones, and allocates nothing.
 #[cfg(target_os = "macos")]
 #[test]
 fn the_silent_output_allocates_nothing() {

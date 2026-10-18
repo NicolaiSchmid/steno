@@ -1,8 +1,6 @@
 //! The input picker's device list on Linux: the sources the capture can
 //! record, read from the PipeWire registry over one short connection per
-//! call. No Swift counterpart (the Swift app is macOS-only); the macOS
-//! counterpart is `capture::live::devices::AudioDevices`, the Windows one
-//! `capture::live::wasapi::AudioDevices`.
+//! call.
 
 use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
@@ -11,39 +9,26 @@ use super::{Connection, START_TIMEOUT};
 use crate::capture::CaptureError;
 use crate::capture::live::AudioDeviceInfo;
 
-/// How long [`AudioDevices::inputs`] waits for its thread: the
-/// connection's own deadline, [`START_TIMEOUT`], and a margin for a thread
-/// that is slow to get scheduled.
+/// How long [`AudioDevices::inputs`] waits for its thread:
+/// [`START_TIMEOUT`] and a scheduling margin.
 const LIST_TIMEOUT: Duration = START_TIMEOUT.saturating_add(Duration::from_secs(1));
 
-/// The PipeWire registry's sources, read fresh on every call. The names
-/// match the other platforms' `AudioDevices` for the call they share,
-/// `inputs`; errors are [`CaptureError`].
+/// The PipeWire registry's sources, read fresh on every call; the same
+/// interface as the other platforms' `AudioDevices`.
 pub struct AudioDevices;
 
 impl AudioDevices {
-    /// Every source the microphone lane can record, as the capture's UID
-    /// lookup accepts it: `Audio/Source` nodes, virtual sources (recorded
-    /// through their monitor output) and duplex devices, by global id. `uid`
-    /// is the `node.name` `Settings` stores, `name` the `node.description`
-    /// (else `node.nick`, else the UID). The rate is 0 (the adapter
-    /// resamples whatever the graph runs at) and the transport is the
-    /// `media.class`; `is_running_somewhere` is not read, and no device is
-    /// marked `is_default_input`.
+    /// Every source the microphone lane can record (sources, virtual
+    /// sources and duplex devices). `uid` is the `node.name`, `name` the
+    /// `node.description` (else `node.nick`, else the UID); the rate is 0
+    /// and the transport the `media.class`.
     ///
-    /// The default is left out on purpose: reading it means binding the
-    /// `default` metadata, and a bind dropped before the session manager
-    /// answered its ping stops the metadata's events for every client of
-    /// the daemon on PipeWire before 1.6.9 (see "A default move can go
-    /// unreported" in the plan's Linux list). That includes a capture
-    /// recording the default source as the fallback. Settings does not
-    /// show the default.
+    /// The default is left out on purpose: binding the `default` metadata
+    /// before the session manager answered its ping stops its events for
+    /// every client on PipeWire before 1.6.9, a recording capture included.
     ///
-    /// PipeWire's objects are single-threaded, so the connection lives on a
-    /// thread of its own for the call: it connects, waits one roundtrip
-    /// (the globals), and closes. An error when PipeWire is not running or
-    /// does not answer within `START_TIMEOUT` (3 s); a thread that has not
-    /// answered by then ends by its own deadline.
+    /// The connection lives on a thread of its own for the call. An error
+    /// when PipeWire does not answer within `START_TIMEOUT`.
     pub fn inputs() -> Result<Vec<AudioDeviceInfo>, CaptureError> {
         let (answer, answered) = sync_channel(1);
         std::thread::Builder::new()

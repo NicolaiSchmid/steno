@@ -1,6 +1,4 @@
 //! The ring and the two `LaneRings` shapes built on it.
-//! Swift: `Tests/StenoAudioTests/LaneRingBufferTests.swift`,
-//! `LaneFrameSinkTests.swift`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -87,9 +85,8 @@ fn full_ring_refuses_the_whole_block_and_counts_it() {
     assert!(ring.read(&mut six));
 }
 
-/// The ring holds exactly `capacity` samples: full is full (one more zero
-/// is refused and counted), empty is empty (a one-sample read is refused),
-/// and the wrap point moves every round.
+/// The ring holds exactly `capacity` samples, refuses past full and empty,
+/// and wraps correctly.
 #[test]
 fn a_ring_holds_exactly_its_capacity_and_empties_again() {
     let ring = LaneRingBuffer::new(8);
@@ -129,13 +126,10 @@ fn clear_zeroes_storage_and_resets_indices() {
     assert_eq!(out, [0.0; 4]);
 }
 
-/// One producer and one consumer on a 4 096-sample ring for about 200 ms,
-/// with block sizes that cycle through 1..=1024 on both sides and every
-/// sample carrying its sequence number. Every sample the consumer sees is
-/// the next one or a jump the size of a refused block, and samples read
-/// plus samples dropped equal samples produced. Under ThreadSanitizer
-/// (CI's `tsan` job) this is also what catches a weakened ordering on the
-/// indices.
+/// One producer and one consumer for about 200 ms with varying block sizes:
+/// every sample is the next one or skips a refused block, and read plus
+/// dropped equals produced. Under ThreadSanitizer this also catches a
+/// weakened ordering on the indices.
 #[test]
 fn concurrent_producer_and_consumer_account_for_every_sample() {
     let ring = Arc::new(LaneRingBuffer::new(4096));
@@ -147,9 +141,7 @@ fn concurrent_producer_and_consumer_account_for_every_sample() {
         let ring = Arc::clone(&ring);
         let done = Arc::clone(&producer_done);
         std::thread::spawn(move || {
-            // From the thread's own start: a loaded host may schedule it
-            // late, and a deadline taken before the spawn could pass
-            // before it writes anything.
+            // From the thread's own start: a loaded host may schedule it late.
             let deadline = Instant::now() + Duration::from_millis(200);
             let mut buffer = vec![0.0f32; 1024];
             let mut next: u32 = 0;
@@ -355,11 +347,8 @@ fn the_relay_refuses_and_counts_a_frame_on_every_channel() {
 }
 
 /// A consumer parked in `Wake::wait` is woken by `signal`, not by its
-/// timeout: two hundred hand-offs, each after the consumer has had a
-/// millisecond to park, with a 200 ms timeout. The lock-free `signal` can
-/// still land between the consumer's re-check and its wait (the module doc
-/// accepts that cost), so a handful of slow waits is allowed; a `signal`
-/// that never wakes the parked consumer makes every one slow.
+/// timeout. A lost wake-up between re-check and wait is accepted, so a
+/// handful of slow waits is allowed.
 #[test]
 fn a_parked_consumer_is_woken_by_the_signal_not_the_timeout() {
     let wake = Arc::new(steno_audio::realtime::Wake::new());

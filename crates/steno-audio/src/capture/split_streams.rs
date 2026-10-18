@@ -1,17 +1,8 @@
 //! Which capture stream feeds which lane when the microphone and the system
-//! audio arrive as two streams (WASAPI, WP10a), with the latency arithmetic
-//! for them. It also decides which of the engine's answers about a stream
-//! are trusted ([`stream_sizes`]). Pure, so it is tested on every OS; the
-//! Windows backend (`capture::live::wasapi`) builds on it. No Swift
-//! counterpart (one IOProc there).
-//!
-//! The plan describes the two streams in [`StreamLayout`]'s terms, so the
-//! master thread delivers through the same
-//! [`deliver_slices`](crate::realtime::deliver_slices) as the IOProc and
-//! the PipeWire backend: buffer 0 is the master stream's packet, buffer 1 the
+//! audio arrive as two streams (WASAPI), the latency arithmetic for them,
+//! and which of the engine's answers are trusted. Pure, so it is tested on
+//! every OS; buffer 0 is the master stream's packet, buffer 1 the
 //! follower's mono staging copy ([`FollowerLane`]).
-//! The microphone stream is mono (the engine downmixes on request), the
-//! system stream stereo and folded to the mono system lane.
 
 use std::ops::RangeInclusive;
 
@@ -22,7 +13,6 @@ use super::layout::StreamLayout;
 use crate::SAMPLE_RATE;
 use crate::realtime::{FollowerLane, MISSED_FILL_LIMIT, Missed, Ratio};
 
-/// One of the two capture streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StreamSource {
     /// The microphone: the default capture endpoint or the selected one.
@@ -42,7 +32,6 @@ impl StreamSource {
         }
     }
 
-    /// `mic` or `system`, for thread names and logs.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -52,16 +41,13 @@ impl StreamSource {
     }
 }
 
-/// The streams a capture opens for its lanes, and where each lane reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitStreamPlan {
-    /// Buffer 0 is the master's packet, buffer 1 the follower's copy.
     pub layout: StreamLayout,
     /// The stream whose thread produces into the sink: the microphone when
     /// a lane needs it, else the system stream.
     pub master: StreamSource,
-    /// The system stream as the follower: both the microphone and the
-    /// system lane are recorded.
+    /// The system stream as the follower, when both lanes are recorded.
     pub follower: Option<StreamSource>,
 }
 
@@ -90,8 +76,7 @@ impl SplitStreamPlan {
         let needs_system = lanes.contains(&AudioLane::System);
         let (layout, master, follower) = if needs_mic {
             let mic = StreamSource::Microphone.channels();
-            // The follower's staging copy is one mono buffer after the
-            // microphone's, in the place of a tap.
+            // The follower's mono staging copy sits in the place of a tap.
             let tap: &[usize] = if needs_system { &[1] } else { &[] };
             let aggregate: Vec<usize> = std::iter::once(mic).chain(tap.iter().copied()).collect();
             let layout = StreamLayout::resolve(lanes, &aggregate, &[vec![mic]], tap, Some(0))?;
@@ -112,7 +97,6 @@ impl SplitStreamPlan {
         })
     }
 
-    /// The streams to open, master first.
     #[must_use]
     pub fn streams(&self) -> Vec<StreamSource> {
         std::iter::once(self.master).chain(self.follower).collect()
@@ -130,14 +114,11 @@ pub fn frames_from_hundred_nanoseconds(duration: i64, sample_rate: f64) -> usize
 }
 
 /// How many delivered frames of clean packets [`DevicePositions`] measures
-/// a stream's QPC over before it fills by it: two seconds of the stream's
-/// 48 kHz frames.
+/// a stream's QPC over before it fills by it: two seconds.
 pub const QPC_CALIBRATION_FRAMES: u64 = 2 * SAMPLE_RATE as u64;
 
-/// The most any one reading of [`DevicePositions`] counts: an hour of
-/// 48 kHz frames. A reading past it on a stream that kept delivering is a
-/// garbage position or QPC; a real one (a computer that slept) is also wall
-/// time the master lacks, which the recorder's note counts anyway.
+/// The most any one reading of [`DevicePositions`] counts: an hour. A
+/// larger reading on a stream that kept delivering is garbage.
 pub const MOST_READ_FRAMES: u64 = 3_600 * SAMPLE_RATE as u64;
 
 /// The QPC's 100 ns units in the stream's 48 kHz frames.
@@ -146,8 +127,7 @@ const QPC: Ratio = Ratio {
     ticks: 10_000_000,
 };
 
-/// The longest jump [`DevicePositions`] fills, in 48 kHz frames
-/// ([`MISSED_FILL_LIMIT`]).
+/// The longest jump [`DevicePositions`] fills ([`MISSED_FILL_LIMIT`]).
 const FILL_LIMIT: usize = SAMPLE_RATE as usize * MISSED_FILL_LIMIT.as_secs() as usize;
 
 /// One packet as `IAudioCaptureClient::GetBuffer` hands it over.
@@ -161,39 +141,34 @@ pub struct Packet {
     /// The performance counter at its first frame, in 100 ns units; 0 when
     /// the engine gave none.
     pub qpc: u64,
-    /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`, the stream's first packet
-    /// aside: the engine lost audio before it.
+    /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`: the engine lost audio
+    /// before it.
     pub discontinuity: bool,
-    /// `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`: the time the position was
-    /// taken at, the QPC, is not to be trusted.
+    /// `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`: the QPC is not to be trusted.
     pub timestamp_error: bool,
 }
 
-/// One clock read at every packet: its last reading, and how far it
-/// advanced over clean pairs of packets against the frames delivered
-/// across them.
+/// One clock read at every packet: its last reading, and its advance over
+/// clean pairs of packets against the frames delivered across them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Counter {
     last: Option<u64>,
     advanced: u64,
     delivered: u64,
-    /// The pairs in the sums.
     pairs: u64,
-    /// The last advance read, whatever the packets' flags, and whether any
-    /// was above zero (device positions only).
+    /// The last advance read, and whether any was above zero.
     last_advance: Option<u64>,
     moved: bool,
 }
 
 impl Counter {
-    /// How far `now` is past the last reading; `None` without one, and for
-    /// one behind it (a step back wraps past half the range).
+    /// How far `now` is past the last reading; `None` without one or for one
+    /// behind it.
     fn advance(&self, now: u64) -> Option<u64> {
         let advance = now.wrapping_sub(self.last?);
         (advance <= u64::MAX / 2).then_some(advance)
     }
 
-    /// A clean pair: the clock advanced `advance` over `frames` delivered.
     fn pair(&mut self, advance: u64, frames: usize) {
         self.advanced = self.advanced.saturating_add(advance);
         self.delivered = self.delivered.saturating_add(frames as u64);
@@ -201,8 +176,7 @@ impl Counter {
     }
 
     /// Whether positions that stood still from the start moved for the
-    /// first time by `advance`, the advance before it none; they then start
-    /// their sums afresh ([`DevicePositions::packet`]).
+    /// first time by `advance`; their sums then start afresh.
     fn first_move(&mut self, advance: Option<u64>) -> bool {
         let moving = advance.is_some_and(|advance| advance > 0);
         let first = moving && !self.moved && self.last_advance == Some(0);
@@ -216,10 +190,9 @@ impl Counter {
         first
     }
 
-    /// A clean pair of device positions, as [`Self::pair`], except that a
-    /// second pair that advanced less than two thirds of what the first
-    /// explains replaces it: nothing but the rate bounds the first pair (no
-    /// ratio is measured yet), so an idle no packet flagged can pass in it.
+    /// [`Self::pair`] for device positions, except that a second pair that
+    /// advanced under two thirds of what the first explains replaces it:
+    /// only the rate bounds the first pair, so an idle can pass in it.
     fn pair_positions(&mut self, advance: u64, frames: usize) {
         if self.pairs == 1
             && 3 * u128::from(advance) * u128::from(self.delivered)
@@ -233,9 +206,8 @@ impl Counter {
     }
 
     /// The frames delivered per tick so far; `None` before the clock moved.
-    /// The ticks are counted one short: a position read to the whole tick
-    /// at each end puts the sums up to one tick off, so a ratio measured
-    /// over a few packets reads a loss over, never under.
+    /// Ticks are counted one short, so a ratio over few packets reads a
+    /// loss over, never under.
     fn measured(&self) -> Option<Ratio> {
         (self.advanced > 0).then_some(Ratio {
             frames: self.delivered,
@@ -244,71 +216,36 @@ impl Counter {
     }
 }
 
-/// Whether `read` is within `percent` % of `frames`.
 fn within(read: u64, frames: u64, percent: u64) -> bool {
     u128::from(read.abs_diff(frames)) * 100 <= u128::from(frames) * u128::from(percent)
 }
 
-/// What a WASAPI stream's thread missed (A18, the design in
-/// [`realtime::missed`](crate::realtime::missed)), read from the clocks
-/// `GetBuffer` gives with each packet ([`Packet`]). This is the one place
-/// the rule is stated; the backend, the plans and the gate link here.
+/// What a WASAPI stream's thread missed, read from the clocks `GetBuffer`
+/// gives with each packet ([`Packet`]): the device position, in a unit
+/// Microsoft leaves open (and frozen on some process loopback), and the
+/// QPC, which counts 100 ns. This is the one place the rule is stated.
 ///
-/// Two clocks come with a packet. The device position counts in a unit
-/// Microsoft leaves open under `AUTOCONVERTPCM` (the 48 kHz frames the
-/// stream asked for, or the engine's at the mix format's rate, `None` when
-/// the client gives no mix format, as process loopback may), and on CI's
-/// process loopback it never moves. The QPC counts 100 ns whatever the
-/// device. So:
+/// - **Filled only on a sane QPC:** measured over clean pairs of packets
+///   within 2 % of real time for [`QPC_CALIBRATION_FRAMES`], with the last
+///   clean pair within half a packet. A flagged packet's QPC past the last
+///   packet's end is then the loss: up to [`MISSED_FILL_LIMIT`] filled,
+///   past it unfilled ([`Missed::of_jump`]).
+/// - **Counted otherwise:** a flagged packet counts the largest of its
+///   readings past the last packet's end, unfilled (the position at one a
+///   frame, at the mix format's rate and at the measured ratio, and the QPC
+///   while its last clean pair matched): an overcount in the note, never
+///   wrong silence. Each reading is capped at [`MOST_READ_FRAMES`].
+/// - **What no reading sees:** frozen positions without a sane QPC read
+///   nothing. On the microphone the recorder's note counts it as wall time
+///   the recording lacks; on the system stream the master's padding zeros
+///   count it ([`FollowerLane::take_missed`]).
+/// - **At the stop and before the first packet:** a stream that delivers
+///   continuously reads the QPC against its last packet
+///   ([`Self::missed_until`]) and its start against its first packet
+///   ([`Self::missed_before_first`]), on a sane QPC. Endpoint loopback
+///   idles, so it reads neither.
 ///
-/// - **Filled only on a sane QPC.** The QPC is measured over the clean
-///   pairs of packets (no discontinuity, no timestamp error on either, an
-///   advance at most half a packet past the frames between them). Once
-///   [`QPC_CALIBRATION_FRAMES`] are measured within 2 % of real time, and
-///   while the last clean pair matched its frames to within half a packet
-///   (one jittery pair does not switch it off), a flagged packet's QPC
-///   past the last packet's end is the loss: up to [`MISSED_FILL_LIMIT`]
-///   filled, past it unfilled ([`Missed::of_jump`]).
-/// - **Counted otherwise.** Without a sane QPC (none, one off by more than
-///   2 %, still measuring, or a timestamp error on this packet or the last),
-///   a flagged packet counts the largest of its readings past the last
-///   packet's end, unfilled: the device position at one a frame, at the mix
-///   format's rate against 48 kHz and at the ratio measured so far, and the
-///   QPC while the last clean pair's matched its frames to within half a
-///   packet. A reading in the right unit is the loss, so the largest is
-///   the loss or more: an overcount in the note, never wrong silence. Each
-///   reading is capped at [`MOST_READ_FRAMES`].
-/// - **What no reading sees.** Positions that never move with no sane QPC
-///   read nothing; a position behind the last packet's or a unit that
-///   neither 48 kHz nor the mix format explains, before its first clean
-///   pair, reads too little. On the microphone (the master) the recorder's
-///   note counts that loss as wall time the recording lacks, past the
-///   clocks' drift allowance (0.1 %); on the system stream (the follower)
-///   the zeros the master pads its lane with count it
-///   ([`FollowerLane::take_missed`]).
-/// - **At the stop.** A thread held up into the stop by an engine that
-///   kept its oldest packets leaves no flagged packet. A stream that
-///   delivers continuously reads the performance counter against its last
-///   packet there ([`Self::missed_until`]), on a sane QPC. Without one,
-///   the microphone's loss counts as above and the system stream's is
-///   silent; endpoint loopback idles, so it is never read at the stop, and
-///   its loss there is silent too. The Windows gate step checks both.
-/// - **Before the first packet.** No first packet's flag is read (every
-///   loopback stream flags it), so a loss before it (an engine that
-///   dropped its oldest packets before the thread's first drain, a capture
-///   that starts late) leaves no flag either. A stream that delivers
-///   continuously reads the QPC just before its start ([`Self::start`])
-///   against its first packet's, beyond its start latency, counted
-///   unfilled at the stop ([`Self::missed_before_first`]), on a sane QPC.
-///   Without one, the microphone's loss counts through the wall time as
-///   above and the system stream's is silent; endpoint loopback may start
-///   in an idle, so it reads no start, and its loss there is silent too.
-///
-/// The device position's own readings stay in the count for one case: a
-/// microphone stream without a sane QPC whose losses add up to less than
-/// that drift allowance (3.6 s in an hour), which only they count. The
-/// sums run on to the stop, which logs them. Real-time safe: integer
-/// arithmetic on plain fields.
+/// Real-time safe: integer arithmetic on plain fields.
 ///
 /// ```
 /// use steno_audio::capture::split_streams::{DevicePositions, Packet};
@@ -333,22 +270,18 @@ pub struct DevicePositions {
     engine_rate: Option<u32>,
     positions: Counter,
     qpc: Counter,
-    /// The last clean pair's QPC advance (one inside the bound) matched its
-    /// frames to within half a packet: the resolution the jumps are read
-    /// at ([`Missed::of_jump`]), so scheduling jitter on one pair leaves it
-    /// on, and a counter that stalls or crawls turns it off.
+    /// The last clean pair's QPC advance matched its frames to within half
+    /// a packet, so jitter on one pair leaves it on and a stalled counter
+    /// turns it off.
     qpc_matched: bool,
     /// The last packet's frames and whether it had a timestamp error.
     last_frames: usize,
     last_timestamp_error: bool,
-    /// Every packet's frames, clean or not, for [`Self::qpc_judged`].
     frames: u64,
-    /// Where the start's reading stands ([`Self::start`]).
     start: Start,
 }
 
-/// [`DevicePositions`]' reading of its start, for
-/// [`DevicePositions::missed_before_first`].
+/// [`DevicePositions`]' reading of its start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Start {
     /// No start given.
@@ -356,13 +289,12 @@ enum Start {
     /// The QPC just before the stream started, and the frames delivered
     /// before a packet with a QPC came.
     Waiting { qpc: u64, frames: u64 },
-    /// How far the first packet with a QPC came after the start, in 48 kHz
-    /// frames past those delivered before it.
+    /// How far the first packet with a QPC came after the start, in frames
+    /// past those delivered before it.
     Read(u64),
 }
 
 impl DevicePositions {
-    /// The positions of a stream on an engine at `engine_rate`.
     #[must_use]
     pub fn new(engine_rate: Option<u32>) -> Self {
         Self {
@@ -378,22 +310,21 @@ impl DevicePositions {
         }
     }
 
-    /// The performance counter read just before the stream started, in the
-    /// QPC's 100 ns units, for [`Self::missed_before_first`]; only for a
-    /// stream that delivers continuously (see the type's doc).
+    /// The QPC read just before the stream started, for
+    /// [`Self::missed_before_first`]; only for a stream that delivers
+    /// continuously.
     pub fn start(&mut self, qpc: u64) {
         self.start = Start::Waiting { qpc, frames: 0 };
     }
 
     /// One packet: the frames missed before it, read only on a
-    /// discontinuity (see the type's doc).
+    /// discontinuity.
     pub fn packet(&mut self, packet: Packet) -> Missed {
         let last_frames = std::mem::replace(&mut self.last_frames, packet.frames);
         self.frames = self.frames.saturating_add(packet.frames as u64);
         let position = self.positions.advance(packet.position);
-        // Positions that stood still until now (process loopback that
-        // starts in silence) measure from the pair after their first move:
-        // the pair that spans it holds only part of an advance.
+        // Positions that stood still until now measure from the pair after
+        // their first move.
         let moved = self.positions.first_move(position);
         let qpc_now = (!packet.timestamp_error && packet.qpc != 0).then_some(packet.qpc);
         if let Start::Waiting { qpc, frames } = self.start {
@@ -432,9 +363,8 @@ impl DevicePositions {
         missed
     }
 
-    /// A flagged packet's loss: past where the last packet of `last_frames`
-    /// ended, by its device position's advance `position` and its QPC's
-    /// `qpc` (see the type's doc).
+    /// A flagged packet's loss past where the last packet ended, by its
+    /// position advance and its QPC advance.
     fn count(&self, position: Option<u64>, qpc: Option<u64>, last_frames: usize) -> Missed {
         let gap = |read: u64| {
             read.saturating_sub(last_frames as u64)
@@ -464,11 +394,8 @@ impl DevicePositions {
 
     /// The most a clean packet of `frames` may advance the positions and
     /// still enter the sums: half a packet more than either unit explains,
-    /// `(max(1, engine rate / 48 kHz) + 0.5) x frames`, and once the
-    /// positions moved, at most 1.5 times what the ratio measured so far
-    /// explains. A larger advance on a packet not flagged (endpoint loopback
-    /// delivers nothing while nothing plays, and may not flag the packet
-    /// after that) would skew the ratio, so it is left out.
+    /// and once they moved, at most 1.5 times the measured ratio. Endpoint
+    /// loopback may skip silence without a flag, which would skew the ratio.
     fn most_advance(&self, frames: usize) -> u64 {
         let per_frame = u64::from(self.engine_rate.unwrap_or(0).max(SAMPLE_RATE as u32));
         let by_rate = Ratio {
@@ -487,23 +414,17 @@ impl DevicePositions {
         by_rate.min(by_measure)
     }
 
-    /// Whether a jump is filled: the QPC is sane, measured within 2 % of
-    /// real time, and its last clean pair matched to within half a packet
-    /// (see the type's doc).
+    /// Whether a jump is filled: the QPC is sane and its last clean pair
+    /// matched.
     #[must_use]
     pub fn fills(&self) -> bool {
         self.qpc_matched && self.qpc_sane() == Some(true)
     }
 
-    /// The frames missed after the last packet, for a stream stopped while
-    /// the performance counter reads `now` (in the QPC's 100 ns units): how
-    /// far `now` passed the end of the last packet, less one packet of its
-    /// length (the one in flight at the stop), counted unfilled by
-    /// [`Missed::of_jump`]'s rule and capped at [`MOST_READ_FRAMES`]. Only
-    /// on a sane QPC ([`Self::fills`]) and a last packet that had one;
-    /// nothing otherwise. Only for a stream that delivers continuously:
-    /// endpoint loopback delivers nothing while nothing plays, so its idle
-    /// would read as a loss. Changes nothing.
+    /// The frames missed after the last packet, for a stream stopped at QPC
+    /// `now`: how far `now` passed the last packet's end, less the packet in
+    /// flight, unfilled and capped at [`MOST_READ_FRAMES`]. Only on a sane
+    /// QPC ([`Self::fills`]) and for a stream that delivers continuously.
     ///
     /// ```
     /// use steno_audio::capture::split_streams::{DevicePositions, Packet};
@@ -532,14 +453,11 @@ impl DevicePositions {
         Missed::of_jump(gap, self.last_frames, 0)
     }
 
-    /// The frames missed before the first packet, for a stream started at
-    /// [`Self::start`]'s QPC with `sizes`: how far the first packet with a
-    /// QPC came after the start, past the frames delivered before it,
-    /// beyond the start latency (the stream's latency and one period), in
-    /// frames by [`Missed::of_jump`]'s rule at a period's resolution, all
-    /// of them unfilled, and capped at [`MOST_READ_FRAMES`]. Only on a
-    /// sane QPC ([`Self::qpc_sane`]); nothing otherwise, and nothing for a
-    /// stream given no start. Changes nothing.
+    /// The frames missed before the first packet: how far the first packet
+    /// with a QPC came after [`Self::start`], past the frames before it,
+    /// beyond the start latency (the stream's latency and one period), all
+    /// unfilled and capped at [`MOST_READ_FRAMES`]. Only on a sane QPC
+    /// ([`Self::qpc_sane`]).
     ///
     /// ```
     /// use steno_audio::capture::split_streams::{DevicePositions, Packet, StreamSizes};
@@ -574,11 +492,8 @@ impl DevicePositions {
     }
 
     /// The stop's verdict on the QPC: [`Self::qpc_sane`], but `Some(false)`
-    /// for a stream that delivered [`QPC_CALIBRATION_FRAMES`] or more with
-    /// too few clean QPC pairs to judge it (a QPC absent, always flagged
-    /// with a timestamp error, or never matching its frames). `None` only
-    /// for a stream under 2 s by its frames. The counting reads
-    /// [`Self::qpc_sane`]; this is for the stop's line.
+    /// for a stream that delivered [`QPC_CALIBRATION_FRAMES`] with too few
+    /// clean QPC pairs to judge. For the stop's log line.
     #[must_use]
     pub fn qpc_judged(&self) -> Option<bool> {
         self.qpc_sane()
@@ -591,16 +506,16 @@ impl DevicePositions {
         self.engine_rate
     }
 
-    /// How far the positions advanced per delivered frame across the clean
-    /// packets so far; `None` before two of them.
+    /// The positions' advance per delivered frame over clean packets;
+    /// `None` before two.
     #[must_use]
     pub fn ratio(&self) -> Option<f64> {
         (self.positions.delivered > 0)
             .then(|| self.positions.advanced as f64 / self.positions.delivered as f64)
     }
 
-    /// How far the QPC advanced, in 48 kHz frames, per delivered frame
-    /// across the clean packets so far; `None` before two of them.
+    /// The QPC's advance in 48 kHz frames per delivered frame over clean
+    /// packets; `None` before two.
     #[must_use]
     pub fn qpc_ratio(&self) -> Option<f64> {
         (self.qpc.delivered > 0)
@@ -608,10 +523,8 @@ impl DevicePositions {
     }
 }
 
-/// The stop's account of the clocks: how far the positions and the QPC
-/// advanced against the frames delivered, the engine's rate, and whether
-/// jumps were filled. A position ratio of 0.0000 is positions that never
-/// moved.
+/// The stop's account of the clocks. A position ratio of 0.0000 is
+/// positions that never moved.
 ///
 /// ```
 /// use steno_audio::capture::split_streams::{DevicePositions, Packet};
@@ -657,13 +570,10 @@ impl std::fmt::Display for DevicePositions {
     }
 }
 
-/// The input and output latencies a two-stream capture reports, in frames.
-/// The session delays the system lane by their sum before echo
-/// cancellation; the follower's staging already delays it by
-/// `follower_delay` on the master's clock, so that much comes off the sum
-/// (from the output side first). Overstating the delay would put the far
-/// end after its echo, which the canceller cannot follow; understating it
-/// stays inside the 200 ms tail.
+/// The input and output latencies a two-stream capture reports, in frames,
+/// less the `follower_delay` the follower's staging already adds (from the
+/// output side first). Overstating the delay would put the far end after
+/// its echo, which the canceller cannot follow.
 #[must_use]
 pub fn far_end_latencies(input: usize, output: usize, follower_delay: usize) -> (usize, usize) {
     let output_left = output.saturating_sub(follower_delay);
@@ -671,28 +581,22 @@ pub fn far_end_latencies(input: usize, output: usize, follower_delay: usize) -> 
     (input.saturating_sub(rest), output_left)
 }
 
-/// The shared-mode buffer a stream asks for, as a `REFERENCE_TIME` (100 ns
-/// units): 100 ms, so a capture thread that is late by several periods
-/// loses nothing. Microsoft's `Initialize` page asks event-driven
-/// shared-mode clients for 0 here, while its own loopback sample passes a
-/// duration; the engine treats it as a minimum either way, and the buffer
-/// it chose is read back ([`stream_sizes`]).
+/// The shared-mode buffer a stream asks for (100 ns units): 100 ms, so a
+/// thread late by several periods loses nothing. The engine treats it as a
+/// minimum; the buffer it chose is read back ([`stream_sizes`]).
 pub const BUFFER_DURATION: i64 = 1_000_000;
 
-/// The device periods trusted (`REFERENCE_TIME`, 100 ns units): 1 ms up to
-/// the buffer asked for.
+/// The device periods trusted (100 ns units): 1 ms up to the buffer.
 pub const TRUSTED_PERIODS: RangeInclusive<i64> = 10_000..=BUFFER_DURATION;
 
-/// The period taken when the engine's is not trusted (`REFERENCE_TIME`,
-/// 100 ns units): 10 ms, the usual one.
+/// The period taken when the engine's is not trusted (100 ns units): 10 ms.
 pub const DEFAULT_PERIOD: i64 = 100_000;
 
-/// The stream latencies trusted (`REFERENCE_TIME`, 100 ns units): up to
-/// 200 ms.
+/// The stream latencies trusted (100 ns units): up to 200 ms.
 pub const TRUSTED_LATENCIES: RangeInclusive<i64> = 0..=2_000_000;
 
-/// The largest buffer trusted, in frames: one second, so the follower's
-/// staging holds what it queues while the master runs a whole buffer late.
+/// The largest buffer trusted, in frames: one second, what the follower's
+/// staging holds.
 pub const MAX_BUFFER_FRAMES: usize = FollowerLane::CAPACITY;
 
 /// What a capture stream runs with, in frames at 48 kHz.
@@ -706,23 +610,16 @@ pub struct StreamSizes {
     pub latency_frames: usize,
 }
 
-/// The sizes a stream runs with, from what its engine answered (`period`
-/// and `latency` as `REFERENCE_TIME`, in 100 ns units):
-/// `buffer_frames` from `GetBufferSize`, `period` from `GetDevicePeriod`
-/// (a polled stream passes its poll interval), `latency` from
-/// `GetStreamLatency`, `None` where the call failed. The process-loopback
-/// client is reported to answer `GetBufferSize` with 0 or a huge value and
-/// no error, and may implement neither of the others, so no answer is
-/// taken on trust:
+/// The sizes a stream runs with, from its engine's answers (`period` and
+/// `latency` in 100 ns units, `None` where the call failed). Process
+/// loopback may answer nonsense without an error, so nothing is trusted:
 ///
-/// - a period outside [`TRUSTED_PERIODS`] is [`DEFAULT_PERIOD`] (the period
-///   sizes the follower's jitter buffer);
-/// - a latency outside [`TRUSTED_LATENCIES`] is 0, like an unknown one:
-///   understating the far-end delay stays inside the echo canceller's
-///   tail, overstating it does not ([`far_end_latencies`]);
-/// - the buffer, which sizes the capture threads' scratch, is clamped to
-///   between one period and [`MAX_BUFFER_FRAMES`] (a larger packet is
-///   split, never refused).
+/// - a period outside [`TRUSTED_PERIODS`] is [`DEFAULT_PERIOD`];
+/// - a latency outside [`TRUSTED_LATENCIES`] is 0: understating the
+///   far-end delay stays inside the echo canceller's tail
+///   ([`far_end_latencies`]);
+/// - the buffer is clamped between one period and [`MAX_BUFFER_FRAMES`]
+///   (a larger packet is split).
 ///
 /// ```
 /// use steno_audio::capture::split_streams::{StreamSizes, stream_sizes};

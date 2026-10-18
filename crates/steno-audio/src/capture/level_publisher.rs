@@ -1,27 +1,8 @@
 //! The level publisher: a thread of its own that hands the processing
 //! thread's levels on whenever their generation in [`LevelSlot`] changed,
-//! woken by each publish into the slot (by default 10 Hz, every 100 ms of
-//! audio).
-//! Swift: `publishLevelsIfChanged` in `Sources/StenoAudio/Writer/WriterThread.swift`.
-//!
-//! Rust only: Swift's writer thread does that between its writes, and the
-//! Rust writer did too until A20 of
-//! `.plans/2026-10-07-stable-promotion.md`. The Rust writer syncs the files
-//! every 5 s of audio ([`SYNC_INTERVAL_FRAMES`]), and a sync can take
-//! seconds (`FlushFileBuffers` on Windows, a slow or external disk);
-//! while the writer published them, the meter, and the session's level
-//! stream with it, froze for that long. Here a sync holds up nothing but
-//! the files: the publisher takes no lock the writer holds, and the levels
-//! mean what they meant, at the same cadence.
-//!
-//! The thread waits on the slot's [`Wake`](crate::realtime::Wake), and at
-//! least every [`LevelPublisher::POLL`] in case a wake landed just before
-//! it parked, so a level reaches the handler at most that much late.
-//! `stop` raises a flag, wakes the thread and joins it; the thread hands
-//! on a last change before it ends, so the meter's final level is the
-//! slot's. The drop stops it too.
-//!
-//! [`SYNC_INTERVAL_FRAMES`]: crate::writer::writer_thread::SYNC_INTERVAL_FRAMES
+//! so a slow file sync on the writer thread never freezes the meter. It
+//! waits on the slot's wake, and polls every [`LevelPublisher::POLL`] in
+//! case a wake was lost.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,7 +15,7 @@ use crate::realtime::LevelSlot;
 /// Runs on the publisher's thread with each change of the levels.
 pub type LevelsHandler = Box<dyn Fn(LaneLevels) + Send>;
 
-/// The publisher's handle; see the module doc.
+/// The publisher's handle; `stop` hands on a last change and joins it.
 pub struct LevelPublisher {
     slot: Arc<LevelSlot>,
     stop_requested: Arc<AtomicBool>,
@@ -46,9 +27,8 @@ impl LevelPublisher {
     /// lost: the default level interval, 100 ms.
     pub const POLL: Duration = Duration::from_millis(100);
 
-    /// Spawns the thread over `slot`; it calls `on_levels` with the slot's
-    /// levels each time their generation changes, counting from the
-    /// generation at this call.
+    /// Spawns the thread over `slot`; it calls `on_levels` each time the
+    /// levels' generation changes from the one at this call.
     #[must_use]
     pub fn start(slot: Arc<LevelSlot>, on_levels: LevelsHandler) -> Self {
         let stop_requested = Arc::new(AtomicBool::new(false));
@@ -116,7 +96,7 @@ mod tests {
     }
 
     /// Each publish into the slot reaches the handler, once, and nothing
-    /// else does: not the slot's state before the start, not a repeat.
+    /// else does.
     #[test]
     fn every_publish_reaches_the_handler_once() {
         let slot = Arc::new(LevelSlot::new(false));
@@ -135,8 +115,8 @@ mod tests {
         assert!(levels.try_recv().is_err(), "a level went out twice");
     }
 
-    /// A change the thread had not handed on yet when `stop` came goes out
-    /// before the thread ends, so the meter's last level is the slot's.
+    /// A change not yet handed on when `stop` came goes out before the
+    /// thread ends.
     #[test]
     fn the_stop_hands_on_the_last_change() {
         let slot = Arc::new(LevelSlot::new(true));

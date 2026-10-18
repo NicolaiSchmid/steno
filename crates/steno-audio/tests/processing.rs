@@ -1,7 +1,5 @@
 //! Synthetic backend to sink rings to processing thread to relay, without
 //! a session or files, and the synthetic backend on a bare sink.
-//! Swift: `Tests/StenoAudioTests/ProcessingThreadTests.swift`,
-//! `SyntheticCaptureBackendTests.swift`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -106,10 +104,8 @@ fn tones_flow_through_to_the_relay_without_drops() {
     assert!((system_peak - 0.5).abs() < 0.01);
 }
 
-/// The session replaces the processing thread after a device change but
-/// keeps the writer thread, which reads the slot it was given at start: a
-/// replacement built with the first thread's slot publishes into that same
-/// slot, generation counting on from where the first left off.
+/// A replacement processing thread built with the first one's level slot
+/// publishes into it, generation counting on.
 #[test]
 fn a_replacement_thread_publishes_into_the_shared_level_slot() {
     let lanes = [AudioLane::Mic, AudioLane::System];
@@ -260,9 +256,8 @@ fn a_stalled_writer_is_counted_not_waited_for() {
     assert_eq!(relay.available_frames(), headroom);
 }
 
-/// Records every near-end and far-end frame it is given and negates the
-/// near-end into the output, so the relay shows which channel the
-/// canceller wrote and which it left alone.
+/// Records every frame it is given and negates the near-end into the
+/// output, so the relay shows which channel the canceller wrote.
 #[derive(Default)]
 struct SpyLog {
     near_end: Vec<f32>,
@@ -286,9 +281,8 @@ impl EchoCanceller for SpyEchoCanceller {
     }
 }
 
-/// AEC routing: the canceller's near-end is the mic lane, its far-end the
-/// system lane of the same frame, its output the written mic channel; the
-/// system lane and the raw mic copy are untouched.
+/// The canceller gets the mic lane as near end and the system lane as far
+/// end, and writes the mic channel; the rest is untouched.
 #[test]
 fn the_canceller_sees_the_mic_as_near_end_and_the_same_frames_system_as_far_end() {
     let lanes = [AudioLane::Mic, AudioLane::System];
@@ -428,9 +422,8 @@ fn synthetic_echo_is_a_delayed_copy() {
     assert!(max_error < 1e-4);
 }
 
-/// The synthetic backend on a bare sink: the device change fires once per
-/// instance, every `start` delivers its own `seconds`, and a restart
-/// reports `stream_after_restart`.
+/// The synthetic backend fires its device change once, delivers `seconds`
+/// per start, and reports `stream_after_restart` on a restart.
 #[test]
 fn a_change_fires_once_per_instance_and_every_start_delivers_its_seconds() {
     let reports = Arc::new(AtomicUsize::new(0));

@@ -1,15 +1,8 @@
 //! The streaming decoder against the whole-file decoder it replaced
-//! (`tests/whole_file/`, kept verbatim): every lane, every mixdown and
-//! every error must come out bit for bit the same. The inputs cover what
-//! the decoder meets: the recording writer's two-lane 48 kHz CAF with its
-//! sidecars, an unfinished master, CAF (Float32) and WAV (16-bit and
-//! float) at 8, 16, 22.05, 44.1, 48 and 96 kHz, mono and stereo, lengths around the FIR's
-//! 480-sample frame and the decoder's 32 768-frame block, an empty file,
-//! the phone's AAC fixtures and an MP3 in an MP4 (each AAC less its encoder
-//! priming, which the streaming decoder drops and the whole-file one kept;
-//! a bare MP3 is no kind of file Steno reads), and sidecars
-//! that are missing, empty, unfinished or the wrong shape. With `STENO_FLEURS_DIR` set the FLEURS
-//! recordings are compared too.
+//! (`tests/whole_file/`): every lane, mixdown and error must come out bit
+//! for bit the same, over CAF, WAV, AAC and MP4 inputs at every rate and
+//! length the decoder meets, and every kind of sidecar. With
+//! `STENO_FLEURS_DIR` set the FLEURS recordings are compared too.
 
 #![allow(
     clippy::cast_precision_loss,
@@ -34,8 +27,7 @@ use steno_core::{
 };
 use uuid::Uuid;
 
-/// A deterministic test signal: a tone under noise, peaking past full
-/// scale now and then so the clamps are exercised.
+/// A deterministic tone under noise, peaking past full scale now and then.
 fn signal(seed: u64, count: usize, rate: f64) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
     (0..count)
@@ -51,9 +43,8 @@ fn signal(seed: u64, count: usize, rate: f64) -> Vec<f32> {
         .collect()
 }
 
-/// `channels` as an interleaved CAF at `rate` through the crate's writer;
-/// `finish` false leaves the data size at -1, `tail` appends that many
-/// stray bytes after the last whole frame (a frame cut by a crash).
+/// `channels` as an interleaved CAF; `finish` false leaves the data size at
+/// -1, `tail` appends that many stray bytes.
 fn write_caf(path: &Path, rate: f64, channels: &[Vec<f32>], finish: bool, tail: usize) {
     let frames = channels[0].len();
     let mut writer = CafStreamWriter::create(path, rate, channels.len()).unwrap();
@@ -135,8 +126,7 @@ fn bits(samples: &[f32]) -> Vec<u32> {
     samples.iter().map(|s| s.to_bits()).collect()
 }
 
-/// Panics unless `streamed` and `reference` are the same samples to the
-/// bit, or the same error.
+/// Panics unless both are the same samples to the bit, or the same error.
 fn assert_same(
     what: &str,
     streamed: Result<Vec<f32>, CodecError>,
@@ -165,9 +155,8 @@ fn assert_same(
     }
 }
 
-/// Every lane through `decode`, every channel through `decode_path` and
-/// `read_channel` (one past the last too), and the mixdown, against the
-/// whole-file decoder.
+/// Every lane, every channel (one past the last too) and the mixdown,
+/// against the whole-file decoder.
 async fn assert_file_matches(what: &str, asset: &AudioAsset, scratch: &Path) {
     assert_decodes_like(what, asset, asset, scratch).await;
 }
@@ -238,7 +227,7 @@ async fn assert_decodes_like(
     }
 }
 
-/// The scratch directory: under the target dir, not the system temp dir.
+/// A scratch directory under the target dir.
 fn scratch() -> tempfile::TempDir {
     tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
 }
@@ -333,8 +322,7 @@ async fn wav_masters_decode_through_symphonia_as_before() {
         )
         .await;
     }
-    // Not audio: the whole-file decoder's probe fails on it, and the
-    // streaming one refuses it before symphonia reads a byte (A17).
+    // Not audio: both decoders refuse it.
     let garbage = directory.path().join("garbage.wav");
     std::fs::write(&garbage, [0x41u8; 4_000]).unwrap();
     assert!(whole_file::read_channel(&garbage, 0, AudioLane::Mixed).is_err());
@@ -357,13 +345,8 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// An MP3 in an MP4 container whose edit list declares 1 105 samples
-/// (which only an AAC track's trim would act on) decodes as before. Each AAC decodes as before less exactly its encoder
-/// priming: the 1 024 samples ffmpeg's edit list declares, or Apple's
-/// 2 112 for the file in the phone recorder's layout, which declares
-/// none. The reference is the whole-file decode of the m4a with those
-/// samples dropped from every channel, written as a float WAV at the
-/// m4a's rate, which the whole-file decoder reads back bit for bit.
+/// An MP3 in an MP4 decodes as before; each AAC decodes as before less
+/// exactly its encoder priming (ffmpeg's 1 024 or Apple's 2 112).
 #[tokio::test]
 async fn the_phones_aac_and_an_mp3_in_mp4_decode_as_before() {
     let directory = scratch();
@@ -408,13 +391,8 @@ async fn the_phones_aac_and_an_mp3_in_mp4_decode_as_before() {
     }
 }
 
-/// A phone file whose container is cut short (its `moov` after the
-/// `mdat`, as ffmpeg and the recorder write it: cut mid-audio, mid-index
-/// and one byte short) fails as it did before damaged packets became
-/// silence, in every path: the container cannot be read, which is not a
-/// packet to replace. The error names the cut `moov` where the size check
-/// (`codec::sizes`) finds it before symphonia does, which the whole-file
-/// decoder, symphonia alone, reports as the end of the stream.
+/// A phone file whose container is cut short fails in every path; the
+/// error names the cut `moov` where `codec::sizes` finds it first.
 #[tokio::test]
 async fn a_truncated_container_fails_as_before() {
     let directory = scratch();
@@ -440,11 +418,8 @@ async fn a_truncated_container_fails_as_before() {
     }
 }
 
-/// The recording writer's own call, with every kind of sidecar the
-/// decoder can find: finished, float, missing, unfinished (zero sizes),
-/// empty, stereo and at the wrong rate; all but the first two fall back to
-/// the master. (A sidecar whose length disagrees with the master's is the
-/// one case the two decoders part on, on purpose: `tests/codec.rs`.)
+/// The recording writer's own call with every kind of sidecar; all but a
+/// finished or float one fall back to the master.
 #[tokio::test]
 async fn sidecars_and_the_writers_master_decode_as_before() {
     let directory = scratch();
@@ -520,9 +495,7 @@ async fn sidecars_and_the_writers_master_decode_as_before() {
     }
 }
 
-/// The FLEURS recordings (16 kHz mono 16-bit WAV, real speech) through
-/// `decode_path` and the sidecar reader, when `STENO_FLEURS_DIR` points at
-/// them; skipped otherwise.
+/// The FLEURS recordings, when `STENO_FLEURS_DIR` points at them.
 #[tokio::test]
 async fn the_fleurs_recordings_decode_as_before() {
     let Some(root) = std::env::var_os("STENO_FLEURS_DIR") else {
@@ -567,8 +540,7 @@ fn walk(directory: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// `AudioFixtures`' tone is the writer tests' signal; it decodes the same
-/// way too (a smooth signal, where the noise above is not).
+/// `AudioFixtures`' smooth tone decodes the same way too.
 #[tokio::test]
 async fn a_pure_tone_decodes_as_before() {
     let directory = scratch();
@@ -588,10 +560,8 @@ async fn a_pure_tone_decodes_as_before() {
     .await;
 }
 
-/// The resampler fed in pieces of every size, from one sample to more
-/// than a block, at every rate the decoder handles: the same samples as
-/// one pass over the whole lane, and `settled` never promises a sample the
-/// finished lane drops.
+/// The resampler fed in pieces of every size gives the same samples as one
+/// pass, and `settled` never promises a sample the finished lane drops.
 #[test]
 fn the_lane_resampler_is_cut_proof() {
     let mut cut = 0x2545_f491_4f6c_dd1du64;

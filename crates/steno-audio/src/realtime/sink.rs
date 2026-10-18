@@ -1,25 +1,8 @@
 //! The ring writer handed to the backend: [`LaneRings`] with lane names, a
-//! wake per callback and the device-change signal.
-//! Swift: `Sources/StenoAudio/RealTime/LaneFrameSink.swift`.
-//!
-//! Runs on the HAL's IOProc thread (or the synthetic backend's producer
-//! thread). Producer protocol (real-time safe, one producer at a time):
-//! `begin_callback(frames)` reserves the whole callback on every ring (or
-//! counts it as dropped for every lane and returns `false`), then one
-//! `write`/`write_mixed`/`write_silence` per lane, then `end_callback()`.
-//! Nothing in that path allocates or locks.
-//!
-//! `begin_callback` also advances [`LaneFrameSink::frames_offered`], the
-//! count the session's stall watchdog samples from its own thread (one
-//! relaxed store per callback, refused callbacks included: a device that
-//! delivers into full rings is not stalled). Rust only.
-//!
-//! Audio the backend's thread missed goes through
-//! [`LaneFrameSink::write_missed`]: zeros on every lane as one callback of
-//! their own or, past the fill limit, only counted, beside the drops; the
-//! design is in [`realtime::missed`](super::missed). Audio missed before
-//! a stream's first frame goes through [`LaneFrameSink::count_before_first`]
-//! and is kept apart from that count. Rust only.
+//! wake per callback and the device-change signal. One producer at a time:
+//! `begin_callback` reserves the whole callback on every ring (or counts a
+//! drop), one write per lane, then `end_callback`; nothing in that path
+//! allocates or locks.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -36,7 +19,7 @@ use crate::capture::DeviceChangeReason;
 /// Runs on the backend's listener thread with what changed.
 pub type DeviceChangeHandler = Box<dyn Fn(DeviceChangeReason) + Send + Sync>;
 
-/// The producer's view of the rings; see the module doc.
+/// The producer's view of the rings.
 pub struct LaneFrameSink {
     lanes: Vec<AudioLane>,
     rings: LaneRings,
@@ -45,13 +28,11 @@ pub struct LaneFrameSink {
     /// Producer-only scratch for the callback in flight. An atomic only so
     /// the sink is `Sync`; the single producer is the one writer.
     pending_frames: AtomicUsize,
-    /// Frames of every callback begun, refused ones included; written by
-    /// the single producer, read by the session's watchdog.
+    /// Frames of every callback begun, refused ones included, for the
+    /// session's stall watchdog.
     frames_offered: AtomicUsize,
     /// A backend start succeeded on this sink ([`Self::first_start`]).
     started: AtomicBool,
-    /// Per ring, frames missed before a stream's first frame
-    /// ([`Self::count_before_first`]).
     before_first: Box<[AtomicUsize]>,
 }
 
@@ -71,12 +52,10 @@ impl LaneFrameSink {
         Self::with_handler(lanes, SAMPLE_RATE, 2.0, Box::new(|_| {}))
     }
 
-    /// `ring_seconds` of headroom per lane absorbs a stalled consumer;
-    /// `on_device_change` runs on the backend's listener thread. It must
-    /// not stop or start the backend that reports to it, nor drop the last
-    /// owner of that backend: the backend's `stop()` may wait for the
-    /// report in flight, so it would wait on itself (on Linux for 2 s,
-    /// then `stop()` leaves the report behind).
+    /// `ring_seconds` of headroom per lane absorbs a stalled consumer.
+    /// `on_device_change` runs on the backend's listener thread and must
+    /// not stop, start or drop the backend reporting to it: its `stop()`
+    /// may wait for the report in flight, so it would wait on itself.
     #[must_use]
     pub fn with_handler(
         lanes: &[AudioLane],
@@ -98,13 +77,11 @@ impl LaneFrameSink {
         }
     }
 
-    /// The lanes, in ring order.
     #[must_use]
     pub fn lanes(&self) -> &[AudioLane] {
         &self.lanes
     }
 
-    /// The rings underneath.
     #[must_use]
     pub fn rings(&self) -> &LaneRings {
         &self.rings
@@ -183,11 +160,9 @@ impl LaneFrameSink {
         self.rings.commit();
     }
 
-    /// `frames` of zeros on every lane for audio the backend's thread
-    /// missed, as one callback of their own, counted as missed on every
-    /// lane; whether they were written. Refused, and counted as dropped
-    /// like any callback, when a ring has no room. The caller bounds
-    /// `frames` ([`Missed::fill`]).
+    /// `frames` of zeros on every lane for missed audio, as one callback of
+    /// their own; whether they were written (refused and counted as dropped
+    /// when a ring is full). The caller bounds `frames`.
     #[inline(always)]
     pub fn fill_missed(&self, frames: usize) -> bool {
         if frames == 0 || !self.begin_callback(frames) {
@@ -201,9 +176,9 @@ impl LaneFrameSink {
         true
     }
 
-    /// What a clock found missed before a callback, on every lane: the fill
-    /// through [`Self::fill_missed`], the unfilled frames counted. From the
-    /// producer, or from the backend's stop once no producer runs.
+    /// What a clock found missed before a callback: the fill through
+    /// [`Self::fill_missed`], the unfilled counted. From the producer, or
+    /// the backend's stop once no producer runs.
     #[inline(always)]
     pub fn write_missed(&self, missed: Missed) {
         self.fill_missed(missed.fill);
@@ -216,16 +191,14 @@ impl LaneFrameSink {
 
     // Backend (any thread)
 
-    /// Frames of every callback begun so far, refused ones included; only
-    /// whether it moved means anything. What the session's stall watchdog
-    /// samples. Rust only.
+    /// Frames of every callback begun, refused ones included; only whether
+    /// it moved means anything.
     #[must_use]
     pub fn frames_offered(&self) -> usize {
         self.frames_offered.load(Ordering::Relaxed)
     }
 
-    /// The backend's listener calls this once it has resolved what changed;
-    /// the first call runs the handler, later calls are ignored until
+    /// The first call runs the handler; later calls are ignored until
     /// [`Self::rearm_device_change`].
     pub fn report_device_change(&self, reason: DeviceChangeReason) {
         if self
@@ -237,22 +210,19 @@ impl LaneFrameSink {
         }
     }
 
-    /// Whether this is the first backend start to succeed on this sink, a
-    /// recording's own, and marks that one has: `false` for every
-    /// rebuild's restart after it. The backend asks once its start has
-    /// succeeded. Audio missed before a stream's first frame counts only
-    /// on the first ([`Self::count_before_first`]).
+    /// Whether this is the first backend start to succeed on this sink,
+    /// marking that one has; `false` for every rebuild's restart. Missed
+    /// audio before the first frame counts only on the first.
     #[must_use]
     pub fn first_start(&self) -> bool {
         !self.started.swap(true, Ordering::AcqRel)
     }
 
-    /// What the backend's stop hands on for the audio each stream missed
-    /// before its first frame, unfilled: `master` frames on every lane but
-    /// the follower's, and on WASAPI the follower's own `(lane, frames)`.
-    /// Kept apart from [`Self::unfilled_samples`], so a rebuild's gap never
-    /// takes it back; the rule is in [`realtime::missed`](super::missed#before-the-first-callback).
-    /// Read by [`Self::before_first_samples`]. Rust only.
+    /// Counts the audio each stream missed before its first frame,
+    /// unfilled: `master` frames on every lane but the follower's, and the
+    /// follower's own `(lane, frames)`. Kept apart from
+    /// [`Self::unfilled_samples`], so a rebuild's gap never takes it back
+    /// (see [`realtime::missed`](super::missed)).
     pub fn count_before_first(&self, master: usize, follower: Option<(usize, usize)>) {
         for (lane, count) in self.before_first.iter().enumerate() {
             let frames = match follower {
@@ -263,17 +233,15 @@ impl LaneFrameSink {
         }
     }
 
-    /// Whether a device change was reported and not yet let through again:
-    /// a backend stopped for the rebuild that follows reads no audio missed
-    /// at its stop, since the session's gap covers that time.
+    /// Whether a device change was reported and not let through again: a
+    /// backend stopped for the rebuild reads no missed audio at its stop.
     #[must_use]
     pub fn device_change_reported(&self) -> bool {
         self.device_change_reported.load(Ordering::Acquire)
     }
 
-    /// Lets the next `report_device_change` through again. The session
-    /// calls it once the old backend is stopped and before the restart,
-    /// never a producer.
+    /// Lets the next `report_device_change` through. Called by the session
+    /// between the old backend's stop and the restart, never a producer.
     pub fn rearm_device_change(&self) {
         self.device_change_reported.store(false, Ordering::Release);
     }
@@ -286,7 +254,6 @@ impl LaneFrameSink {
         self.rings.wake()
     }
 
-    /// Ring `lane`.
     #[must_use]
     pub fn ring(&self, lane: usize) -> &LaneRingBuffer {
         self.rings.ring(lane)
@@ -304,23 +271,23 @@ impl LaneFrameSink {
         self.by_lane(self.rings.dropped_samples())
     }
 
-    /// Zeros written per lane in place of audio the backend's thread
-    /// missed, in samples at the rings' rate; lanes without are absent.
-    /// Counted across restarts until [`Self::clear`], as the overruns are.
+    /// Zeros written per lane for missed audio, in samples at the rings'
+    /// rate, across restarts until [`Self::clear`]; lanes without are
+    /// absent.
     #[must_use]
     pub fn filled_samples(&self) -> BTreeMap<AudioLane, usize> {
         self.by_lane(self.rings.filled_samples())
     }
 
-    /// Samples per lane of audio the backend's thread missed and did not
-    /// write ([`Missed::unfilled`]); as [`Self::filled_samples`].
+    /// Samples per lane of missed audio not written; as
+    /// [`Self::filled_samples`].
     #[must_use]
     pub fn unfilled_samples(&self) -> BTreeMap<AudioLane, usize> {
         self.by_lane(self.rings.unfilled_samples())
     }
 
-    /// Samples per lane missed before a stream's first frame
-    /// ([`Self::count_before_first`]); as [`Self::filled_samples`].
+    /// Samples per lane missed before a stream's first frame; as
+    /// [`Self::filled_samples`].
     #[must_use]
     pub fn before_first_samples(&self) -> BTreeMap<AudioLane, usize> {
         self.by_lane(
@@ -331,7 +298,6 @@ impl LaneFrameSink {
         )
     }
 
-    /// Per-ring `counts` by lane, the lanes without any left out.
     fn by_lane(&self, counts: Vec<usize>) -> BTreeMap<AudioLane, usize> {
         self.lanes
             .iter()
@@ -396,7 +362,7 @@ mod tests {
     }
 
     /// The loss before the first frames lands on the lanes each stream
-    /// feeds, apart from the running counts, and the clear zeroes it.
+    /// feeds, apart from the running counts.
     #[test]
     fn the_loss_before_the_first_frames_is_counted_apart_on_each_streams_lanes() {
         let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);

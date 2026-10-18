@@ -1,14 +1,8 @@
-//! How loud a backend's `start` and `stop` log. While a rebuild's
-//! restarts go on (one streak, see `CaptureSession`) the session logs one
-//! line when the first of them fails and about one a minute after, with
-//! the count, and the lines a start or a stop would log on every try go to
-//! `debug` instead: a fallback, the start's timing, a start given up, the
-//! Mac's silent output (where it runs, or that it did not start) and the
-//! first callback's line its `stop` logs. The session runs each try, and
-//! the stop of a stream that delivered nothing, inside [`quietly`], and
-//! the backends log those lines through [`start_log!`]. A backend that
-//! starts on a thread of its own reads [`is_quiet`] before the spawn and
-//! runs its start there inside [`quietly`] too. Rust only.
+//! How loud a backend's `start` and `stop` log. While a rebuild's restarts
+//! go on, the session runs each try inside [`quietly`], and the lines
+//! backends log through [`start_log!`] go to `debug`. A backend that starts
+//! on its own thread reads [`is_quiet`] before the spawn and runs its start
+//! there inside [`quietly`] too.
 
 use std::cell::Cell;
 
@@ -16,8 +10,8 @@ thread_local! {
     static QUIET: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Runs `start` with the starts' own lines at `debug` when `quiet`, and
-/// as loud as before after it, a panic included.
+/// Runs `start` with the starts' own lines at `debug` when `quiet`, and as
+/// loud as before after it, a panic included.
 pub(crate) fn quietly<T>(quiet: bool, start: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {

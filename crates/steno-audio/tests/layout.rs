@@ -1,8 +1,5 @@
 //! The stream layout, the IOProc body on buffer lists built by hand, the
 //! device snapshot comparison and the nominal-rate settle.
-//! Swift: `Tests/StenoAudioTests/StreamLayoutTests.swift`,
-//! `IOProcRunnerTests.swift`, `DeviceSnapshotTests.swift`,
-//! `DeviceSetupTests.swift`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -337,15 +334,11 @@ fn a_buffer_without_data_becomes_silence() {
     assert_eq!(read(&sink, 1, 4), vec![0.0; 4]);
 }
 
-/// The layout was resolved for the first channel of a stereo microphone
-/// and an interleaved stereo tap. A live buffer list shaped differently
-/// must never be read through those pointers: a tap that arrives mono (the
-/// stride no longer matches), a microphone channel beyond the buffer's
-/// channels, and a buffer shorter than the callback's frames, by half or by
-/// a single frame, each become silence, and the lanes stay aligned on the
-/// frames the first buffer carried. Where a wrong read would stay inside
-/// the vector, the vector is longer than its reported size, so a guard that
-/// lets it through shows up as audio instead of an out-of-bounds read.
+/// A live buffer list shaped differently from the resolved layout (a tap
+/// that arrives mono, a microphone channel beyond the buffer, a buffer
+/// short of the callback's frames) becomes silence and keeps the lanes
+/// aligned. Each vector is longer than its reported size, so a guard that
+/// lets a wrong read through shows up as audio.
 #[test]
 fn a_buffer_shaped_unlike_the_layout_becomes_silence() {
     let layout = StreamLayout::resolve(
@@ -461,9 +454,8 @@ fn a_buffer_shaped_unlike_the_layout_becomes_silence() {
     assert_eq!(read(&sink, 1, 4), vec![15.0, 35.0, 55.0, 75.0]);
 }
 
-/// The microphone's buffer arrives with no channels, with no bytes, or not
-/// at all: the callback's length comes from the tap's buffer, the microphone lane is
-/// silence and the tap's audio still lands.
+/// The microphone's buffer arrives with no channels, no bytes, or not at
+/// all: the microphone lane is silence and the tap's audio still lands.
 #[test]
 fn an_unusable_first_buffer_costs_only_its_own_lane() {
     let layout = StreamLayout::resolve(
@@ -603,9 +595,7 @@ fn identical_devices_are_no_change_and_a_moved_default_is_reported() {
     );
 }
 
-/// The re-check on the fallback sees only another microphone: a bad read
-/// of the outputs or the rate is left to their own notifications, and a
-/// microphone that did not resolve is no other one.
+/// The re-check on the fallback sees only another microphone.
 #[test]
 fn the_input_difference_is_another_microphone_alone() {
     let base = baseline();

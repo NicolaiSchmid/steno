@@ -1,11 +1,7 @@
-//! The decoder as it was before it streamed, kept verbatim as the
-//! reference `tests/codec_streaming.rs` compares the streaming decoder
-//! against: the whole file read into memory, every channel de-interleaved
-//! at the source rate, then resampled in one pass. Its own copies of the
-//! CAF and WAV readers and of the windowed sinc, so a change to the
-//! crate's readers or resamplers cannot move the reference with them; the
-//! 3:1 FIR is the writer's (`Resampler48kTo16k`), which the streaming
-//! decoder shares.
+//! The whole-file decoder, kept verbatim as the reference for
+//! `tests/codec_streaming.rs`. It has its own copies of the CAF and WAV
+//! readers and the windowed sinc, so a change to the crate's cannot move
+//! the reference with them.
 
 #![allow(dead_code)]
 

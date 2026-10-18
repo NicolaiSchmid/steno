@@ -1,9 +1,7 @@
-//! The streaming converter from a device's rate to 48 kHz
-//! (`.plans/2026-10-05-device-sample-rate.md`): chunking changes nothing,
-//! it agrees with the offline sinc resampler at whole and fractional
-//! phases, a tone keeps its level and frequency from every rate a Mac
-//! device runs at and leaves no spur, and the timing holds.
-//! Swift: `Tests/StenoAudioTests/RateConverterTests.swift`.
+//! The streaming converter from a device's rate to 48 kHz: chunking
+//! changes nothing, it agrees with the offline sinc resampler, a tone keeps
+//! its level and frequency from every Mac device rate with no spur, and the
+//! timing holds.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -101,9 +99,8 @@ fn the_stream_matches_the_offline_sinc_resampler() {
     }
 }
 
-/// What a 1 kHz tone leaves once the sine fitted to it is removed, in dB
-/// against the tone: the converter's spurs and images, and nothing of the
-/// tone's own level.
+/// What a 1 kHz tone leaves once the fitted sine is removed, in dB against
+/// the tone: the converter's spurs and images.
 #[test]
 fn a_tone_from_44_1_khz_leaves_no_spur() {
     let rate = 44_100.0;

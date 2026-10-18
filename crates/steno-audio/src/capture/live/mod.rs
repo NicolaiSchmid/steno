@@ -1,19 +1,8 @@
 //! The live capture backend, one per platform behind the one name
-//! `LiveCaptureBackend`, each a [`CaptureBackend`](super::CaptureBackend):
-//! on macOS a CoreAudio process tap plus the microphone in a private
-//! aggregate device with one IOProc (`backend`); on Linux one PipeWire
-//! capture stream linked to the microphone and the default sink's monitor
-//! (`pipewire`, WP5b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`);
-//! on Windows WASAPI process loopback and the capture endpoint as two
-//! streams on their own threads (`wasapi`, WP10a, not run on hardware;
-//! see its module doc). All three coalesce device changes and report them for
-//! the session's rebuild, and record the default input in place of a chosen
-//! one that is missing until it is back. Other targets get the stub, failing
-//! at `start`. Beside each backend, `AudioDevices` lists the platform's
-//! inputs for the picker: the HAL's devices (`devices`), the PipeWire
-//! sources (`pipewire::AudioDevices`), the active WASAPI endpoints
-//! (`wasapi::AudioDevices`).
-//! Swift: `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`.
+//! `LiveCaptureBackend`: a CoreAudio process tap and aggregate device on
+//! macOS (`backend`), one PipeWire stream on Linux (`pipewire`), WASAPI on
+//! Windows (`wasapi`), and a stub that fails at `start` elsewhere. Beside
+//! each, `AudioDevices` lists the platform's inputs for the picker.
 
 #[cfg(target_os = "macos")]
 pub mod backend;
@@ -45,24 +34,17 @@ pub use wasapi::{AudioDevices, LiveCaptureBackend};
 pub use stub::LiveCaptureBackend;
 
 /// One device as the app's input picker (and `steno dev audio-devices`)
-/// sees it. `uid` is the stable identifier
-/// `Settings.input_device_uid` stores. Filled in by Core Audio on macOS, by
-/// WASAPI on Windows and from the PipeWire registry on Linux (inputs only).
+/// sees it. `uid` is the stable identifier `Settings.input_device_uid`
+/// stores.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioDeviceInfo {
-    /// The `AudioObjectID`, valid until the device goes away; on Windows
-    /// the index in the enumeration (WASAPI has no numeric ids), on Linux
-    /// the node's global id.
+    /// The `AudioObjectID`; on Windows the index in the enumeration, on
+    /// Linux the node's global id.
     pub id: u32,
-    /// The stable UID `Settings` stores.
     pub uid: String,
-    /// The device's name.
     pub name: String,
-    /// Input channels across its streams.
     pub input_channels: usize,
-    /// Output channels across its streams.
     pub output_channels: usize,
-    /// Hertz.
     pub nominal_sample_rate: f64,
     /// Built-in, USB, Bluetooth, aggregate, virtual and so on, as text.
     pub transport_type: String,
@@ -79,13 +61,11 @@ pub struct AudioDeviceInfo {
 }
 
 impl AudioDeviceInfo {
-    /// Has input channels.
     #[must_use]
     pub fn is_input(&self) -> bool {
         self.input_channels > 0
     }
 
-    /// Has output channels.
     #[must_use]
     pub fn is_output(&self) -> bool {
         self.output_channels > 0
@@ -93,15 +73,8 @@ impl AudioDeviceInfo {
 }
 
 /// The microphone a capture asked for `uid` records now: what `chosen`
-/// finds for `uid` while it is `usable`, else what `default` finds while
-/// it is `usable`, with `true` beside it when it is the default recorded
-/// in place of a chosen one (the fallback, [`CaptureInput::is_fallback`]);
-/// `None` when neither is usable. The Mac and Windows backends pick with
-/// it at `start` and in every snapshot, so a chosen device coming back
-/// reads as a change; PipeWire picks in its graph
-/// (`Graph::followed_source`).
-///
-/// [`CaptureInput::is_fallback`]: crate::capture::CaptureInput::is_fallback
+/// finds while it is `usable`, else what `default` finds, with `true`
+/// beside it when that is the fallback; `None` when neither is usable.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn chosen_or_default<D>(
     uid: Option<&str>,
@@ -132,7 +105,6 @@ mod stub {
     pub struct LiveCaptureBackend;
 
     impl LiveCaptureBackend {
-        /// The stub; `start` fails.
         #[must_use]
         pub fn new() -> Self {
             Self

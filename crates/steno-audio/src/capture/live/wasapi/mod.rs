@@ -1,108 +1,8 @@
 //! The live capture backend on Windows: WASAPI in shared mode, one capture
-//! thread per stream, endpoint notifications and the rebuild report. WP10a
-//! of `.plans/2026-10-02-rust-core-and-tauri-shell.md`; the macOS
-//! counterpart is `capture::live::backend`. No Swift counterpart.
-//!
-//! **Not run on hardware.** No Windows machine with audio devices has run
-//! it: this backend is written against Microsoft's documentation and its
-//! samples, compiled, linted and tested on the `windows-latest` CI runner.
-//! The runner has no audio endpoint, so no microphone stream ever opens
-//! there; process loopback does run and delivers silence, and
-//! `tests/live_windows.rs` checks that system-lane capture starts,
-//! delivers, stops and restarts. Its `--ignored` tests are the checks a
-//! Windows machine must run before this ships (the plan's parity list).
-//!
-//! # Streams
-//!
-//! - **System lane:** process loopback (`ActivateAudioInterfaceAsync` on
-//!   `VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK`,
-//!   `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) excluding Steno's own
-//!   process tree (Microsoft's API page names build 20438, its sample
-//!   build 20348; reported to work from Windows 10 2004, unverified).
-//!   Where that activation fails for any reason, its timeout included,
-//!   loopback of the default render endpoint, which records Steno's own
-//!   output too; the switch is only logged.
-//! - **Microphone:** the chosen capture endpoint by id, or the default
-//!   (`eCapture`, `eConsole`), shared mode, event-driven. A chosen
-//!   endpoint that is not active records the default instead, and the
-//!   watcher reports the chosen one coming back, so the rebuild returns
-//!   to it (the macOS backend does the same; Swift, macOS-only, fails the
-//!   start there).
-//!
-//! Both are asked for 48 kHz 32-bit float (`AUTOCONVERTPCM`, so the engine
-//! resamples from the device's mix format): mono for the microphone,
-//! stereo for the system audio, folded to mono. The streams run on two
-//! clocks and arrive on two threads; [`SplitStreamPlan`] picks the master
-//! (the sink's only producer) and [`StreamBody`] is what each thread runs
-//! per packet, with the all-or-nothing reservation across lanes and the
-//! drop accounting of the IOProc path (see `realtime::streams`).
-//!
-//! When the system stream is the only one (a `[System]` lane override),
-//! it is the master, and the timeline advances only as it delivers. Endpoint
-//! loopback delivers no packet while nothing plays, so such a recording is
-//! shorter than the time it ran, its silences left out; nothing pads them.
-//!
-//! # Device changes
-//!
-//! An `IMMNotificationClient` (default-device changes, devices added,
-//! removed or changing state) wakes a watcher thread, which coalesces a
-//! burst for [`LiveCaptureBackend::COALESCE_DELAY`] as the macOS backend
-//! does, resolves the devices again and compares them with what the capture
-//! started on ([`DeviceSnapshot::difference`]); a capture on the fallback
-//! also resolves them every [`LiveCaptureBackend::FALLBACK_RECHECK`]
-//! without a notification and looks only for another microphone
-//! ([`DeviceSnapshot::input_difference`]). A capture thread whose stream
-//! fails (`AUDCLNT_E_DEVICE_INVALIDATED` after a format change or an
-//! unplug) stops and tells the watcher, which reports the lost device when
-//! nothing else differs. The sink gets one [`DeviceChangeReason`] and the
-//! session rebuilds by calling `stop()` and `start` again.
-//!
-//! # Threads and COM
-//!
-//! Every thread that touches COM holds its own multithreaded apartment and
-//! creates, uses and releases its interfaces itself (`com`'s invariants):
-//! the capture threads open their streams, the watcher registers the
-//! notifications. `start` only exchanges plain values with them over
-//! channels, so it works from any thread, a UI thread in a single-threaded
-//! apartment included.
-//!
-//! The per-packet path is `com::CaptureClient::drain` calling
-//! [`StreamBody::handle`]: no allocation, no lock. Between packets the
-//! thread waits on the stream's event with a timeout (and drains on the
-//! timeout too, so a polled loopback stream works), checking an atomic
-//! stop flag. `start` starts the follower before the master, the sink's
-//! only producer, so a start that fails has written nothing. Data the
-//! engine itself lost because a capture thread was late (a packet flagged
-//! as a discontinuity, the first one aside) is counted, and what the
-//! packet's clocks say was lost before it goes to the stream's body
-//! ([`StreamBody::write_missed`]; A18, the design in
-//! [`realtime::missed`](crate::realtime::missed)), filled or counted by
-//! the rule [`DevicePositions`] states. A stream that had discontinuities
-//! and filled none of them logs its clocks' ratios at `warn` at its stop,
-//! as does a microphone or process-loopback stream that ran without a sane
-//! QPC.
-//! At the stop each thread drains its stream once more, so a jump in what
-//! the engine still holds is read too. Then a stream that delivers
-//! continuously (the microphone, and process loopback, which delivers
-//! silence while nothing plays) reads the performance counter against its
-//! last packet ([`DevicePositions::missed_until`]): a thread held up just
-//! before the stop by an engine that kept its oldest packets leaves no
-//! flagged packet behind. Endpoint loopback delivers nothing while nothing
-//! plays, so it cannot tell such a loss from an idle and reads nothing
-//! there (the Windows gate step of the stable plan checks it on hardware).
-//! Once both threads are joined, the backend's stop hands those readings
-//! and what the system stream's staging still holds to the sink
-//! ([`count_at_stop`]). No packet flags a loss before a stream's first
-//! either (an engine that dropped its oldest packets before the thread's
-//! first drain), so a stream that delivers continuously reads the
-//! performance counter just before its start against its first packet
-//! ([`DevicePositions::missed_before_first`]), and the stop of a
-//! recording's first start hands that on too
-//! ([`LaneFrameSink::count_before_first`]; the rule is in
-//! [`realtime::missed`](crate::realtime::missed#before-the-first-callback)).
-//! The count and the seconds are logged at stop, as are the follower's
-//! underrun, slip and trim counts. All of these logs are at `info`, below
-//! the shell's default filter: set `RUST_LOG=steno_audio=info` to see them.
+//! thread per stream (process loopback, falling back to endpoint loopback,
+//! and the microphone), endpoint notifications and the rebuild report.
+//! Not run on hardware: tested only on a CI runner without audio devices;
+//! `tests/live_windows.rs`' `--ignored` tests must run on a real machine.
 
 pub(crate) mod com;
 
@@ -129,51 +29,40 @@ use crate::realtime::{
 };
 
 /// How long `start` waits, in total, for the stream threads to open and
-/// start their streams (process loopback activation included) and for the
-/// watcher to register, before it gives up on a stream; a watcher that
-/// misses it is logged, not a failure. One deadline for every wait, so a
-/// hanging COM call holds the session's lock this long at most.
+/// start their streams and for the watcher to register. One deadline for
+/// every wait, so a hanging COM call holds the session's lock this long at
+/// most.
 const START_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long the asynchronous process-loopback activation may take.
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest a capture thread waits for the engine's event; also how
 /// late `stop()` may notice the stop flag.
 const WAIT: Duration = Duration::from_millis(50);
 
-/// What one stream thread found when it opened its stream.
 #[derive(Debug, Clone)]
 struct StreamInfo {
     sizes: StreamSizes,
-    /// The endpoint the stream runs on: the microphone's, or for the
-    /// system stream the default render endpoint at start.
+    /// The endpoint the stream runs on.
     endpoint_id: Option<String>,
     loopback: Option<LoopbackKind>,
-    /// The microphone stream's endpoint, as [`CaptureStream::input`] names
-    /// it; `None` for the system stream.
+    /// The microphone stream's endpoint; `None` for the system stream.
     input: Option<CaptureInput>,
 }
 
-/// A stream thread's reports to `start`.
 enum StreamEvent {
     Opened(Result<StreamInfo, CaptureError>),
     Started(Result<(), CaptureError>),
 }
 
-/// What a stream thread's clocks read at its stop.
 #[derive(Debug, Default, Clone, Copy)]
 struct Ends {
-    /// Frames missed before its first packet, beyond its start latency
-    /// ([`CaptureClient::missed_before_first`]).
+    /// Frames missed before its first packet, beyond its start latency.
     before_first: usize,
-    /// Missed after its last packet ([`CaptureClient::missed_at_stop`]),
-    /// `None` when it was not read.
+    /// Missed after its last packet, `None` when it was not read.
     after_last: Option<Missed>,
 }
 
-/// One stream thread as `start` holds it.
 struct Launched {
     source: StreamSource,
-    /// Returns what its clocks read at the stop.
     thread: Option<JoinHandle<Ends>>,
     events: Receiver<StreamEvent>,
     /// Dropped to make a thread that waits for its body exit.
@@ -188,9 +77,7 @@ struct Launched {
 /// watcher thread.
 #[derive(Default)]
 struct WatchState {
-    /// The last notification's arrival, `None` once judged.
     pending: Option<Instant>,
-    /// A stream that stopped on an error, not yet judged.
     failed: Option<StreamSource>,
     stop: bool,
     /// The watcher thread is past its start-up COM calls and in its loop,
@@ -218,17 +105,14 @@ impl Watcher {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// From a notification callback: something may have changed. Microsoft
-    /// asks `IMMNotificationClient` callbacks never to wait on a
-    /// synchronization object; this lock is held only for a store and the
-    /// watcher's own short sections, never across a WASAPI call, so the
+    /// From a notification callback. This lock is held only for a store and
+    /// the watcher's own short sections, never across a WASAPI call, so the
     /// wait is bounded and cannot deadlock with the audio service.
     fn note(&self) {
         self.lock().pending = Some(Instant::now());
         self.condvar.notify_all();
     }
 
-    /// From a capture thread leaving on an error (not the per-packet path).
     fn note_failure(&self, source: StreamSource) {
         let mut state = self.lock();
         state.failed.get_or_insert(source);
@@ -252,11 +136,9 @@ impl Watcher {
         }
     }
 
-    /// The watcher thread's loop once registered: marks it ready, answers
-    /// `start` through `ready`, then hands every settled burst to `judge`
-    /// as a [`Judged::Notification`], outside the lock, until stopped. With
-    /// `recheck`, `judge` also gets a [`Judged::Recheck`] each time that
-    /// long passes without a notification.
+    /// The watcher thread's loop once registered: marks it ready, then
+    /// hands every settled burst to `judge` outside the lock until stopped;
+    /// with `recheck`, also each time that long passes quietly.
     fn watch(
         &self,
         ready: &SyncSender<()>,
@@ -309,7 +191,6 @@ impl Watcher {
     }
 }
 
-/// What the watcher resolves after a notification, fixed at `start`.
 #[derive(Debug, Clone)]
 struct DeviceProbe {
     needs_mic: bool,
@@ -339,16 +220,11 @@ impl DeviceProbe {
     }
 
     /// The devices as they are now, in [`DeviceSnapshot`]'s terms: the
-    /// default render endpoint (`eConsole`, the one both loopbacks follow),
-    /// the microphone as [`chosen_or_default_input`] picks it (so the chosen
-    /// one coming back reads as a change, as on the Mac), whether the
-    /// endpoints the capture started on are still active.
-    /// `default_output_uid` stays empty: no stream opens the
-    /// `eCommunications` default, so its changes cost no rebuild. Fields
-    /// for a stream the capture does not open stay empty too, so they never
-    /// differ. The engine converts to 48 kHz, so the rate is always
-    /// [`SAMPLE_RATE`]; a device format change invalidates the stream
-    /// instead, which the capture thread reports as the device gone.
+    /// default render endpoint, the microphone as
+    /// [`chosen_or_default_input`] picks it, whether the endpoints the
+    /// capture started on are still active. `default_output_uid` stays
+    /// empty: no stream opens the `eCommunications` default. The engine
+    /// converts to 48 kHz, so the rate is always [`SAMPLE_RATE`].
     fn resolve(&self, enumerator: &Enumerator) -> DeviceSnapshot {
         let input_uid = if self.needs_mic {
             chosen_or_default_input(enumerator, self.input_device_uid.as_deref())
@@ -371,9 +247,8 @@ impl DeviceProbe {
         }
     }
 
-    /// The snapshot the capture started on: as resolved now, with the
-    /// endpoints the streams actually opened on, so a default that moved
-    /// between the open and this read still counts as a change.
+    /// The snapshot the capture started on, with the endpoints the streams
+    /// actually opened on, so a default that moved meanwhile still counts.
     fn baseline(&self, enumerator: &Enumerator) -> DeviceSnapshot {
         let mut snapshot = self.resolve(enumerator);
         if self.needs_mic {
@@ -386,26 +261,19 @@ impl DeviceProbe {
     }
 }
 
-/// What one started capture holds.
 struct Active {
     stop: Arc<AtomicBool>,
     streams: Vec<Launched>,
-    /// The system stream's staging and its lane in the sink, for its
-    /// counts at `stop()`.
     follower: Option<(Arc<FollowerLane>, usize)>,
     master: StreamSource,
     sink: Arc<LaneFrameSink>,
-    /// The recording's first start on the sink, not a rebuild's restart
-    /// ([`LaneFrameSink::first_start`]).
     first_start: bool,
     watcher: Arc<Watcher>,
     watcher_thread: JoinHandle<()>,
 }
 
-/// The WASAPI backend; see the module doc. Restartable: `stop()` joins the
-/// stream threads and the watcher, unless the watcher is still in its
-/// start-up COM calls (left to finish on its own), and `start` opens the
-/// streams afresh.
+/// The WASAPI backend. Restartable: `stop()` joins the stream threads and
+/// the watcher, unless the watcher is still in its start-up COM calls.
 pub struct LiveCaptureBackend {
     active: Mutex<Option<Active>>,
 }
@@ -424,26 +292,20 @@ impl std::fmt::Debug for LiveCaptureBackend {
 
 impl LiveCaptureBackend {
     /// How long a burst of notifications settles before the devices are
-    /// resolved once; the macOS backend's value.
+    /// resolved once.
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
     /// How often a capture that records the fallback resolves the devices
-    /// without a notification, so a chosen endpoint that becomes active
-    /// unannounced (or before the watcher registered) is found; the macOS
-    /// backend's value. Rust only: Swift has no fallback.
+    /// without a notification.
     pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
 
-    /// The watcher's re-check interval: [`Self::FALLBACK_RECHECK`] for a
-    /// capture on the fallback, none otherwise.
     fn recheck_for(is_fallback: bool) -> Option<Duration> {
         is_fallback.then_some(Self::FALLBACK_RECHECK)
     }
 
     /// What a judgement reports of the endpoints `resolved` now against
-    /// `baseline` (`None` for either when the enumerator could not be
-    /// read): after a notification their first difference, else the
-    /// failed stream's device gone; on a re-check only another microphone
-    /// ([`DeviceSnapshot::input_difference`]).
+    /// `baseline`: after a notification their first difference, else the
+    /// failed stream's device gone; on a re-check only another microphone.
     fn judgement(
         judged: Judged,
         resolved: Option<&DeviceSnapshot>,
@@ -465,7 +327,6 @@ impl LiveCaptureBackend {
         }
     }
 
-    /// No capture running.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -478,9 +339,8 @@ impl LiveCaptureBackend {
     }
 }
 
-/// The capture endpoint a capture asked for `uid` records now
-/// ([`chosen_or_default`]): the chosen one while it is active, else the
-/// active default.
+/// The capture endpoint a capture asked for `uid` records now: the chosen
+/// one while it is active, else the active default.
 fn chosen_or_default_input(
     enumerator: &Enumerator,
     uid: Option<&str>,
@@ -554,11 +414,8 @@ fn open(
 
 /// A stream thread: opens its stream, reports, waits for its body, starts,
 /// then drains packets into the body until `stop` is set or the stream
-/// fails. The open's lines are at `debug` when `starts_quietly`
-/// (`start_log`). Returns what its clocks read at the stop, on a stream
-/// that delivers continuously (the microphone, process loopback; not
-/// endpoint loopback, whose idle would read as a loss): what it missed
-/// before its first packet, and, unless it failed, after its last.
+/// fails. Returns what its clocks read at the stop, on a stream that
+/// delivers continuously.
 fn run_stream(
     source: StreamSource,
     input_device_uid: Option<&str>,
@@ -607,9 +464,8 @@ fn run_stream(
             break;
         }
     }
-    // What the engine still holds at the stop, so a thread held up just
-    // before it is read too, then the counter against the last packet for
-    // what no packet flags.
+    // What the engine still holds at the stop, then the counter against the
+    // last packet for what no packet flags.
     let mut ends = Ends::default();
     if !failed {
         let _ = drain_into(&mut client, &mut body);
@@ -659,14 +515,10 @@ fn delivers_continuously(loopback: Option<LoopbackKind>) -> bool {
     loopback != Some(LoopbackKind::Endpoint)
 }
 
-/// The stop's line about `source`'s clocks (`DevicePositions`'s
-/// `Display`), on `loopback` for the system stream, read once the stream
-/// has stopped: at `warn` when the stream had `discontinuities` and their
-/// jumps were counted, not filled (no sane QPC), or when a stream that
-/// delivers continuously had its QPC judged not sane or ran 2 s or more
-/// with too few clean QPC pairs to judge it
-/// ([`DevicePositions::qpc_judged`]); at `info` otherwise, a QPC not
-/// judged on a stream under 2 s included, which the line says.
+/// The stop's line about `source`'s clocks: at `warn` when the stream had
+/// `discontinuities` it could not fill (no sane QPC), or when a continuous
+/// stream had its QPC judged not sane or ran 2 s or more without enough
+/// clean QPC pairs to judge it; at `info` otherwise.
 fn log_positions(
     source: StreamSource,
     loopback: Option<LoopbackKind>,
@@ -684,8 +536,7 @@ fn log_positions(
     };
     // Without a sane QPC, the microphone counts what its positions cannot
     // read only past the drift allowance, and process loopback counts no
-    // loss before its first packet: the stable plan's A18 names this limit,
-    // and this line shows a recording that ran with it.
+    // loss before its first packet.
     let qpc_sane = if delivers_continuously(loopback) {
         positions.qpc_judged()
     } else {
@@ -724,7 +575,7 @@ fn drain_into(client: &mut CaptureClient, body: &mut StreamBody) -> Result<(), C
 }
 
 /// The watcher thread: registers for endpoint notifications, takes the
-/// baseline, then judges every settled burst (see the module doc).
+/// baseline, then judges every settled burst.
 fn run_watcher(
     watcher: &Arc<Watcher>,
     probe: &DeviceProbe,
@@ -758,11 +609,9 @@ fn run_watcher(
     drop(apartment);
 }
 
-/// Stops and joins the stream threads that answered
-/// ([`Launched::answered`]), and returns what each joined one's clocks read
-/// at its stop; the others are left to finish on their own. Such a thread
-/// never writes to the sink: it holds no body, or it is starting its
-/// stream and finds `stop` set before its first drain.
+/// Stops and joins the stream threads that answered, and returns what
+/// each one's clocks read at its stop; the others are left to finish on
+/// their own and never write to the sink.
 fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) -> Vec<(StreamSource, Ends)> {
     stop.store(true, Ordering::Release);
     let mut ends = Vec::new();
@@ -778,7 +627,6 @@ fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) -> Vec<(StreamSource, En
     ends
 }
 
-/// The next event from a stream thread before `deadline`.
 fn next_event(launched: &Launched, deadline: Instant) -> Result<StreamEvent, CaptureError> {
     let limit = deadline.saturating_duration_since(Instant::now());
     launched.events.recv_timeout(limit).map_err(|error| {
@@ -854,10 +702,8 @@ fn expect_event(
     deadline: Instant,
 ) -> Result<(), CaptureError> {
     let event = next_event(launched, deadline);
-    // Only this answer counts: a thread that gave it then waits on
-    // `start`'s channel or runs its capture loop, and either way it sees
-    // `stop`. One that missed the deadline may sit in a COM call (the open
-    // or `Start`).
+    // Only this answer counts: a thread that missed the deadline may sit
+    // in a COM call.
     launched.answered = event.is_ok();
     match event {
         Ok(StreamEvent::Opened(Ok(info))) if opening => {
@@ -891,9 +737,8 @@ fn open_streams(
 }
 
 /// Hands each opened stream its per-packet body and waits for it to
-/// start, the follower before the master: the master routes into the
-/// sink, its only producer, so a start that fails has written nothing.
-/// Tears everything down on the first failure.
+/// start, the follower before the master (the sink's only producer), so a
+/// start that fails has written nothing.
 fn start_streams(
     stop: &AtomicBool,
     mut streams: Vec<Launched>,
@@ -930,11 +775,9 @@ fn start_streams(
     Ok(streams)
 }
 
-/// Starts the watcher thread and waits for it to register. A capture
-/// without device notifications still records, so a slow answer is
-/// logged, not fatal: such a watcher may sit in a COM call, which
-/// `stop()` must not wait on, and once it comes alive it watches as an
-/// on-time one does ([`Watcher::stop_and_join`]).
+/// Starts the watcher thread and waits for it to register. A slow answer
+/// is logged, not fatal: such a watcher may sit in a COM call, which
+/// `stop()` must not wait on.
 fn spawn_watcher(
     watcher: &Arc<Watcher>,
     probe: DeviceProbe,
@@ -956,12 +799,9 @@ fn spawn_watcher(
 }
 
 impl CaptureBackend for LiveCaptureBackend {
-    /// Opens the streams the lanes need on their own threads, hands each
-    /// its per-packet body, starts them, then the watcher. Returns the
-    /// 48 kHz stream with the latencies the session's far-end delay is
-    /// built from: the microphone's and the system stream's
-    /// `GetStreamLatency`, less what the follower's staging already delays
-    /// the system lane by ([`far_end_latencies`]).
+    /// Opens the streams the lanes need on their own threads, starts them,
+    /// then the watcher. Returns the 48 kHz stream with the latencies the
+    /// far-end delay is built from ([`far_end_latencies`]).
     fn start(
         &self,
         lanes: &[AudioLane],
@@ -1054,9 +894,7 @@ impl CaptureBackend for LiveCaptureBackend {
     }
 
     /// Stops the capture threads (no frame arrives after it returns), hands
-    /// on what they missed at the end ([`count_at_stop`]) and, after the
-    /// recording's first start, before their first packets
-    /// ([`LaneFrameSink::count_before_first`]), then stops the watcher.
+    /// on what they missed, then stops the watcher.
     fn stop(&self) {
         let Some(mut active) = self.lock().take() else {
             return;
@@ -1098,10 +936,9 @@ impl CaptureBackend for LiveCaptureBackend {
     }
 
     /// The microphone, the master whenever a lane needs it, delivers
-    /// continuously; the system stream alone (a lane override) does not,
-    /// since endpoint loopback delivers no packet while nothing plays. The
-    /// recorder's `microphone_is_the_master` (steno-services) states the
-    /// same rule for its warnings; a change here goes there too. Rust only.
+    /// continuously; the system stream alone does not. The recorder's
+    /// `microphone_is_the_master` (steno-services) states the same rule; a
+    /// change here goes there too.
     fn delivers_continuously(&self, lanes: &[AudioLane]) -> bool {
         SplitStreamPlan::new(lanes).is_ok_and(|plan| plan.master == StreamSource::Microphone)
     }
@@ -1115,21 +952,15 @@ impl Drop for LiveCaptureBackend {
 }
 
 /// The WASAPI endpoints for the input picker, under the macOS
-/// `capture::live::devices::AudioDevices` names for the calls both have
-/// (`all`, `inputs`, `device`, `default_input`, `default_system_output`;
-/// Swift: `Sources/StenoAudio/Capture/AudioDevices.swift`); errors are
-/// [`CaptureError`]. Every call joins COM on the calling thread for its
-/// duration.
+/// `AudioDevices` names. Every call joins COM on the calling thread for
+/// its duration.
 pub struct AudioDevices;
 
 impl AudioDevices {
-    /// Every active endpoint, capture endpoints first, in the order the
-    /// enumerator lists them. `id` is the index in that list (WASAPI has
-    /// no numeric ids); `uid` is the endpoint id `Settings` stores; the
-    /// channel count and rate are the shared-mode mix format's. Windows has
-    /// one render default that matters here, `eConsole`, which both
-    /// loopbacks follow and [`DeviceSnapshot::output_uid`] tracks, so it is
-    /// both the default output and the default system output.
+    /// Every active endpoint, capture endpoints first. `id` is the index in
+    /// that list (WASAPI has no numeric ids); `uid` is the endpoint id
+    /// `Settings` stores. The `eConsole` render default is both the default
+    /// output and the default system output.
     pub fn all() -> Result<Vec<AudioDeviceInfo>, CaptureError> {
         let apartment = Apartment::enter()?;
         let enumerator = Enumerator::new()?;
@@ -1166,7 +997,6 @@ impl AudioDevices {
         Ok(devices)
     }
 
-    /// The capture endpoints.
     pub fn inputs() -> Result<Vec<AudioDeviceInfo>, CaptureError> {
         Ok(Self::all()?
             .into_iter()
@@ -1179,7 +1009,6 @@ impl AudioDevices {
         Ok(Self::all()?.into_iter().find(|d| d.uid == uid))
     }
 
-    /// The default capture endpoint (`eConsole`).
     pub fn default_input() -> Result<AudioDeviceInfo, CaptureError> {
         Self::all()?
             .into_iter()
@@ -1205,10 +1034,8 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
 
-    /// The session watches a capture whose master is the microphone, the
-    /// call's and the room's; a capture of the system lane alone, whose
-    /// endpoint loopback delivers nothing while nothing plays, is not
-    /// watched.
+    /// The session watches a capture whose master is the microphone; a
+    /// capture of the system lane alone is not watched.
     #[test]
     fn only_a_capture_with_a_microphone_master_delivers_continuously() {
         let backend = LiveCaptureBackend::new();
@@ -1227,9 +1054,8 @@ mod tests {
         }
     }
 
-    /// A watcher that is judging a burst when `stop()` comes (a late one
-    /// that came alive behaves the same) is joined: its report lands
-    /// before `stop()` returns, never after.
+    /// A watcher that is judging a burst when `stop()` comes is joined: its
+    /// report lands before `stop()` returns, never after.
     #[test]
     fn a_watcher_stopped_while_it_judges_is_joined_before_stop_returns() {
         let watcher = Arc::new(Watcher::default());
@@ -1273,8 +1099,7 @@ mod tests {
     }
 
     /// A capture on the fallback judges the endpoints again with no
-    /// notification, as a re-check; one on the endpoint it asked for waits
-    /// for a notification.
+    /// notification; one on the endpoint it asked for waits for one.
     #[test]
     fn only_a_capture_on_the_fallback_rechecks_without_a_notification() {
         for recheck in [Some(Duration::from_millis(50)), None] {
@@ -1308,8 +1133,7 @@ mod tests {
     }
 
     /// A watcher still in its start-up calls when `stop()` comes is not
-    /// waited for; once they return it exits without judging the burst
-    /// that is pending.
+    /// waited for, and exits without judging.
     #[test]
     fn a_watcher_stopped_before_its_loop_is_not_joined_and_judges_nothing() {
         let watcher = Arc::new(Watcher::default());
@@ -1348,10 +1172,7 @@ mod tests {
     }
 
     /// A notification reports the first difference, else the failed
-    /// stream's device gone; a re-check only another microphone, so a bad
-    /// read of the outputs or a microphone that did not resolve costs no
-    /// rebuild, and an unreadable enumerator reports nothing but a failed
-    /// stream.
+    /// stream's device gone; a re-check only another microphone.
     #[test]
     fn a_recheck_reports_another_microphone_alone() {
         let baseline = DeviceSnapshot {

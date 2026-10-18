@@ -1,14 +1,8 @@
-//! The real-time path: the rings the IOProc writes, the callback views
-//! and `deliver_slices` the live backends share (`io_proc`), the
-//! two-stream bodies of the Windows backend (`streams`), the processing
-//! thread that drains the rings in 10 ms frames (converting a device that
-//! does not run at 48 kHz on the way), the relay to the writer thread,
-//! the first callback's time (`first_callback`) and the clock that tells
-//! the backends how much audio their thread missed (`missed`).
-//! Nothing here allocates or locks once constructed, except
-//! [`first_callback_line`], the log line `stop()` formats off the audio
-//! thread beside the mark it reads.
-//! Swift: `Sources/StenoAudio/RealTime/`.
+//! The real-time path: the rings the callbacks write, the processing thread
+//! that drains them in 10 ms frames, the relay to the writer thread, and the
+//! clocks that count missed audio. Nothing here allocates or locks once
+//! constructed, except [`first_callback_line`], formatted off the audio
+//! thread.
 
 pub mod first_callback;
 pub mod io_proc;

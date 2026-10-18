@@ -1,17 +1,8 @@
 //! Audio sessions to process activity: the mapping under the Windows
-//! [`LiveProcessAudioActivity`](super::LiveProcessAudioActivity) (WP10a),
-//! pure so it is tested on every OS over synthetic sessions. No Swift
-//! counterpart; the Core Audio HAL reports per-process input and output
-//! flags directly.
-//!
-//! WASAPI has no per-process "is running input" flag. It has audio sessions
-//! per endpoint (`IAudioSessionManager2` and `IAudioSessionEnumerator`), each
-//! with a process id and a state. A process counts as running input when
-//! one of its sessions on a capture endpoint is active, as running output
-//! when one on a render endpoint is. The system-sounds session and pid 0
-//! are skipped, expired sessions too (their stream is gone). The "bundle
-//! id" on Windows is the executable's file name (`Teams.exe`), the closest
-//! stable app identifier the session API leads to.
+//! [`LiveProcessAudioActivity`](super::LiveProcessAudioActivity), pure so
+//! it is tested on every OS. A process runs input while one of its
+//! sessions on a capture endpoint is active, output while one on a render
+//! endpoint is; the "bundle id" is the executable's file name.
 
 use std::collections::BTreeMap;
 
@@ -21,20 +12,15 @@ use super::activity::ProcessAudioActivity;
 /// session records and what the capture backend opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EndpointFlow {
-    /// A capture endpoint (a microphone).
     Capture,
-    /// A render endpoint (speakers, headphones).
     Render,
 }
 
 /// `AudioSessionState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionState {
-    /// The session has no running stream.
     Inactive,
-    /// At least one stream of the session is running.
     Active,
-    /// The session's streams are gone.
     Expired,
 }
 
@@ -43,13 +29,11 @@ pub enum SessionState {
 pub struct AudioSessionRecord {
     /// `IAudioSessionControl2::GetProcessId`.
     pub pid: u32,
-    /// The endpoint's data flow.
     pub flow: EndpointFlow,
     /// `IAudioSessionControl::GetState`.
     pub state: SessionState,
     /// `IAudioSessionControl2::IsSystemSoundsSession`.
     pub system_sounds: bool,
-    /// The process's image path, when it could be queried.
     pub image_path: Option<String>,
 }
 

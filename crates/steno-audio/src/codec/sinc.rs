@@ -1,30 +1,12 @@
 //! Arbitrary-ratio resampling through a Kaiser-windowed sinc with a
-//! polyphase table: the pure-Rust stand-in for `AVAudioConverter` at
-//! maximum quality on rates the exact 3:1 path does not cover (the phone's
-//! 44.1 kHz). No Swift equivalent.
-//!
-//! For every output sample the input position `n * ratio` is split into an
-//! integer index and a fraction; the fraction selects two adjacent
-//! sub-filters of the table (`PHASES` per input sample) which are linearly
-//! interpolated. 64 taps per phase at the output rate's Nyquist (cutoff
-//! 0.45 of the lower rate), beta 9. Measured from 44.1 kHz in
-//! `tests/codec.rs`: within 0.3 dB to 6 kHz, -1.3 dB at 6.5 kHz, 12 kHz
-//! aliases below -50 dB (the design stopband is about -69 dB); plenty for
-//! speech. A sweep (`tests/resampler_sweep.rs`) keeps every alias that
-//! lands below 7 kHz under -60 dB; the transition band folds 8 to 9 kHz
-//! into 7 to 8 kHz at -21 to -58 dB. The exact 3:1 FIR the 48 kHz path
-//! uses is the flat one.
-//!
-//! [`SincStream`] runs the same filter over a signal that arrives in
-//! pieces; [`SincResampler::resample`] is one piece. The table also serves
-//! the processing thread's [`RateConverter`], which converts a device that
-//! will not run at 48 kHz; its module doc says why it is a second filter.
-//!
-//! [`RateConverter`]: crate::realtime::RateConverter
+//! polyphase table, for rates the exact 3:1 path does not cover (the
+//! phone's 44.1 kHz): 64 taps, 128 phases linearly interpolated, cutoff
+//! 0.45 of the lower rate, beta 9. From 44.1 kHz it is within 0.3 dB to
+//! 6 kHz with aliases below -50 dB.
 
 use crate::writer::Resampler48kTo16k;
 
-/// One resampler for one pair of rates; see the module doc.
+/// One resampler for one pair of rates.
 #[derive(Debug, Clone)]
 pub struct SincResampler {
     ratio: f64,
@@ -36,9 +18,7 @@ pub struct SincResampler {
 }
 
 impl SincResampler {
-    /// Sub-filters per input sample.
     pub const PHASES: usize = 128;
-    /// Coefficients per sub-filter.
     pub const TAPS: usize = 64;
 
     /// `input_rate` to `output_rate`, both in hertz.
@@ -91,9 +71,8 @@ impl SincResampler {
         table
     }
 
-    /// The whole signal; the output has `ceil(len / ratio)` samples, which
-    /// the caller trims to the exact expected length. The same samples as
-    /// [`SincStream`] fed `input` in any number of pieces.
+    /// The whole signal; the output has `ceil(len / ratio)` samples, the
+    /// same as [`SincStream`] fed `input` in any number of pieces.
     #[must_use]
     pub fn resample(&self, input: &[f32]) -> Vec<f32> {
         let mut stream = SincStream::new(self.clone());
@@ -137,21 +116,16 @@ impl SincResampler {
     }
 }
 
-/// [`SincResampler`] over a signal that arrives in pieces: an output
-/// sample is computed once every input sample its taps read has arrived,
-/// and the input before the earliest tap still needed is let go, so the
-/// state is the taps' span plus one piece. The output is the whole-signal
+/// [`SincResampler`] over a signal that arrives in pieces, holding only
+/// the taps' span plus one piece. The output is the whole-signal
 /// [`SincResampler::resample`]'s, sample for sample, however the input is
 /// cut.
 #[derive(Debug, Clone)]
 pub struct SincStream {
     resampler: SincResampler,
-    /// Input samples from input sample `base` on.
     window: Vec<f32>,
     base: usize,
-    /// Input samples pushed so far.
     received: usize,
-    /// The next output sample.
     next: usize,
 }
 
@@ -159,7 +133,6 @@ impl SincStream {
     /// Input samples taken into the window between computing outputs.
     const PIECE: usize = 4_096;
 
-    /// A stream through `resampler`.
     #[must_use]
     pub fn new(resampler: SincResampler) -> Self {
         Self {

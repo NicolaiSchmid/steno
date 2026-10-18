@@ -1,18 +1,10 @@
-//! The devices a capture runs on, as resolved at one moment.
-//! Swift: `DeviceSnapshot` in `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`.
-//!
-//! The default system output's UID (the aggregate's clock master), the
-//! default output's UID (where the call plays, which the tap mirrors), the
-//! microphone's UID (`None` when no microphone lane is recorded, or none
-//! resolves), whether the two devices the capture started on are still
-//! alive, and the aggregate's rate. Pure, so the comparison the live
-//! backend makes after a notification burst is unit-tested without a HAL.
-//! The Linux and Windows backends fill the same fields with PipeWire's and
-//! WASAPI's terms; each field says how.
+//! The devices a capture runs on, as resolved at one moment: pure, so the
+//! comparison the live backends make after a notification burst is
+//! unit-tested without a HAL.
 
 use super::configuration::DeviceChangeReason;
 
-/// The devices a capture runs on at one moment; see the module doc.
+/// The devices a capture runs on at one moment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceSnapshot {
     /// The default system output: the aggregate's clock master. On Linux
@@ -29,22 +21,14 @@ pub struct DeviceSnapshot {
     /// lane. On Linux the source node's name; on Windows the capture
     /// endpoint's id.
     pub input_uid: Option<String>,
-    /// The output device the capture started on still answers
-    /// `DeviceIsAlive`. On Linux, its node and linked ports still carry
-    /// the `object.serial` they had at start, and the connection, stream
-    /// and links have not failed; on Windows, it is still
-    /// `DEVICE_STATE_ACTIVE`.
+    /// The output device the capture started on is still alive (on Linux
+    /// its node and ports keep their `object.serial`; on Windows it is
+    /// still `DEVICE_STATE_ACTIVE`).
     pub output_alive: bool,
-    /// The input device the capture started on still answers
-    /// `DeviceIsAlive`. On Linux, its node and linked ports still carry
-    /// the `object.serial` they had at start, and the connection, stream
-    /// and links have not failed; on Windows, it is still
-    /// `DEVICE_STATE_ACTIVE`.
+    /// The input device the capture started on is still alive, as above.
     pub input_alive: bool,
-    /// The aggregate's nominal rate, 48 kHz or whatever the clock master
-    /// kept; 0 once it is gone. On Linux and Windows always 48 kHz:
-    /// PipeWire's adapter or the WASAPI engine resamples (on Windows a
-    /// format change invalidates the stream instead).
+    /// The aggregate's nominal rate; 0 once it is gone. Always 48 kHz on
+    /// Linux and Windows, which resample.
     pub sample_rate: f64,
 }
 
@@ -75,12 +59,9 @@ impl DeviceSnapshot {
         None
     }
 
-    /// [`Self::difference`] in the microphone alone: what the Mac's and
-    /// WASAPI's re-check on the fallback reports. The other fields have
-    /// notifications of their own, and one bad read of them (an empty
-    /// default output, a rate of 0) would cost a rebuild every re-check;
-    /// so would a microphone that did not resolve, which is no difference
-    /// here. Rust only: Swift has no fallback.
+    /// [`Self::difference`] in the microphone alone, for the re-check on
+    /// the fallback: the other fields have notifications of their own, and
+    /// a bad read of them would cost a rebuild every re-check.
     #[must_use]
     pub fn input_difference(&self, baseline: &DeviceSnapshot) -> Option<DeviceChangeReason> {
         (self.input_uid.is_some() && self.input_uid != baseline.input_uid)

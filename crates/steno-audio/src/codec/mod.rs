@@ -1,104 +1,8 @@
-//! The program's [`AudioDecoder`] for real recordings, in pure Rust.
-//! Swift: `Sources/StenoAudio/Codec/AVFoundationAudioCodec.swift`.
-//!
-//! `decode` returns the lane's 16 kHz sidecar when it is present, complete
-//! and as long as the master, else reads the master (the crate's own CAF
-//! reader for the writer's masters, `symphonia` for CAF, WAV and m4a/AAC)
-//! and resamples channel n (lane n of the master) to 16 kHz mono: the
-//! exact 3:1 FIR for 48 kHz material, a windowed-sinc polyphase resampler
-//! ([`sinc::SincResampler`]) for every other rate (the phone records
-//! 44.1 kHz).
-//!
-//! The file streams through, as the AVFoundation codec's 32 768-frame
-//! chunks did: a block of 32 768 frames at a time from a CAF, a packet at
-//! a time through symphonia, a block at a time from a sidecar, each
-//! resampled as it arrives ([`LaneResampler`]). A decode holds the 16 kHz
-//! lane and a working set under a megabyte, never the lane at the source
-//! rate or the file's bytes; a mixdown writes as it goes and holds neither.
-//! The samples are those one pass over the whole file gives, bit for bit:
-//! `tests/codec_streaming.rs` holds the decoder against its whole-file
-//! form, `tests/codec_memory.rs` bounds the working set. A stream whose
-//! rate or channel count changes mid-file keeps what came before: each
-//! shape's samples are resampled at their own rate and appended, so the
-//! lane keeps all of the file, as Swift's one decode did.
-//!
-//! `decode` takes the sidecar only when it is the master's length at
-//! 16 kHz, and falls back to it when the master then fails.
-//!
-//! Where symphonia cannot follow AVFoundation, documented here and in the
-//! plan's parity list:
-//!
-//! - **No AAC encoder in pure Rust.** `mixdown` writes a 16 kHz mono Int16
-//!   WAV (`audio.wav`) and `mixdown_format()` says `Wav16kInt16`, so the
-//!   persist stage names the file right. The Swift codec writes AAC 64 kbps.
-//! - **AAC-LC only.** HE-AAC files (unlikely from the iOS recorder, which
-//!   uses `AVAudioRecorder` with `kAudioFormatMPEG4AAC`) decode as LC and
-//!   sound wrong. Not seen in practice.
-//! - **Encoder priming.** AVFoundation trimmed the encoder's priming
-//!   samples; symphonia 0.5 does not for MP4, whose edit list it parses
-//!   and ignores. For AAC in MP4 the decoder finds the priming itself
-//!   ([`priming`]: the edit list, else iTunes' gapless tag, else the
-//!   2 112 samples AVFoundation assumes, but only in the layout of the
-//!   phone's `AVAudioRecorder`, whose files need it; any other undeclared
-//!   file keeps every sample) and drops exactly that many frames from
-//!   the start, by the packets' timestamps, so the lane starts on the
-//!   first sample the encoder was given (1 024 samples at 44.1 kHz, 23 ms,
-//!   for an ffmpeg encode; 2 112, 48 ms, for Apple's; `tests/codec.rs`).
-//!   Every other input decodes as before, bit for bit. The padding after
-//!   the last sample stays (under a packet of silence), as the
-//!   exact-length rule counts what was decoded.
-//! - **A damaged packet.** AVFoundation conceals a packet its decoder
-//!   cannot read; symphonia returns an error, or now and then panics,
-//!   which stopped the whole decode. The decoder replaces such a packet by
-//!   silence of its length (its duration in the container's timing, 1 024
-//!   frames for AAC; the last decoded packet's length when the container
-//!   gives none; at most 8 192 frames), so the audio after it keeps its
-//!   time. It logs the first ten (index, timestamp and the error, never the
-//!   content) and one line with the total; a panic is caught as
-//!   [`crash_log::expected`], so it writes no crash log. It counts the
-//!   ones whose silence outlasts the priming trim, with the silence's
-//!   length: [`AudioBuffer16k::damage`], which the meeting's detail shows. Damaged packets before the first one that decodes wait
-//!   for it, as symphonia's MP4 reader declares no channel count for AAC
-//!   and their silence needs one; the priming trim cuts them by timestamp
-//!   like any packet. After each damaged packet the decoder is a fresh
-//!   one: a reset kept the channel layout a corrupt first packet had set,
-//!   which failed every packet after it, and a panic may leave its state
-//!   half written. The first packet after a damaged one therefore starts
-//!   from an empty overlap, so its frames differ from a clean decode's;
-//!   the later ones equal it bit for bit, except in the bands the encoder
-//!   filled with noise, whose generator started over (within 2 * 10^-3 on
-//!   the mono test tone, 5 * 10^-3 on the stereo one, `tests/codec.rs`). A
-//!   file with more damaged packets than clean ones fails
-//!   ([`MAX_DAMAGED_SHARE`]), so a corrupt file never becomes a meeting of
-//!   silence. A panic in symphonia's demuxer is caught the same way and
-//!   fails the file as the demuxer's error does: its MP4 reader panics on a
-//!   box size near 2^64 in a debug build, and on a metadata `mean` or
-//!   `name` box too short for its version and flags in a release build
-//!   too, where the length wraps and the read asks for about 2^64 bytes.
-//! - **A recording without an index.** The phone's `AVAudioRecorder`
-//!   writes the `moov` only when it stops, so a recorder killed
-//!   mid-recording (a crash, a jetsam kill, a force-quit) leaves raw AAC
-//!   packets that symphonia and AVFoundation both refuse ("missing moov
-//!   atom"), and the Swift app loses the recording. Such a file, in the
-//!   recorder's layout only, is read packet by packet from the packets' own
-//!   bits with the phone's fixed settings, less [`priming::APPLE_PRIMING`],
-//!   up to where it was cut off or could not be read ([`salvage`]); a
-//!   damaged packet in it becomes silence as above. The decode says so
-//!   ([`AudioDamage::salvaged`]), so the meeting's detail warns and the
-//!   retention rule keeps the recording. Any other file without a `moov`
-//!   fails as before.
-//! - **CAF**: PCM only (what the writer produces); a CAF holding AAC fails.
-//! - An unfinished master (data chunk size -1) decodes to its last whole
-//!   frame through the crate's own CAF reader (the chunk walk
-//!   [`CafFile`](crate::writer::CafFile) uses) before symphonia is
-//!   tried, as the Swift test demands.
-//! - **Sizes symphonia allocates from**: before its demuxer opens an MP4,
-//!   CAF or WAV file, the boxes or chunks and the sample tables are walked
-//!   (`sizes`), and a size the file cannot hold fails the decode as an
-//!   unsupported file, since symphonia would reserve it and a failed
-//!   allocation aborts the process. The reader is the one the file's first
-//!   bytes name, with no probe; any other kind of file, an MP3 included,
-//!   fails with [`CodecError::UnknownFormat`]. Rust only.
+//! The program's [`AudioDecoder`] for real recordings, in pure Rust:
+//! `decode` returns the lane's 16 kHz sidecar when it matches the master,
+//! else streams the master (the crate's CAF reader, `symphonia` for CAF,
+//! WAV and m4a/AAC) and resamples one channel to 16 kHz mono. AAC priming
+//! is trimmed, damaged packets become silence, and `mixdown` writes WAV.
 
 pub mod priming;
 pub mod resample;
@@ -130,64 +34,44 @@ use crate::writer::{WavFile, WavStreamWriter};
 /// Why a decode or mixdown failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CodecError {
-    /// The asset's `lanes` do not list it.
     #[error("the asset has no {} lane", .0.as_str())]
     LaneNotInAsset(AudioLane),
-    /// The lane's channel index is beyond the file's channels.
     #[error("lane {} is channel {channel} but the file has {channels}", lane.as_str())]
     ChannelMissing {
-        /// The lane asked for.
         lane: AudioLane,
-        /// Its channel in the master.
         channel: usize,
-        /// Channels the file has.
         channels: usize,
     },
-    /// Symphonia could not demux or decode the container or codec.
     #[error("unsupported audio format: {0}")]
     UnsupportedFormat(String),
-    /// Not a kind of file Steno reads: not an MP4, CAF or WAV file from its
-    /// first byte. Refused before symphonia reads a byte; one sentence, as
-    /// a meeting's list shows only the first.
+    /// Not an MP4, CAF or WAV file from its first byte; refused before
+    /// symphonia reads a byte.
     #[error("Steno cannot read this kind of file; the recording is kept.")]
     UnknownFormat,
-    /// Decoding stopped mid-file.
     #[error("audio conversion failed: {0}")]
     ConversionFailed(String),
-    /// A read or write failed: the path and the error.
     #[error("{0}")]
     Io(String),
 }
 
-/// Decoded PCM at the source rate: one channel's samples.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedChannel {
-    /// Hertz.
     pub sample_rate: u32,
     /// Channels the file has; this is one of them.
     pub channels: usize,
-    /// The channel's samples at `sample_rate`.
     pub samples: Vec<f32>,
-    /// The packets that could not be decoded, each replaced by silence of
-    /// its length: [`AudioBuffer16k::damage`].
     pub damage: AudioDamage,
 }
 
-/// The share of a file's packets that may be damaged: a file in which more
-/// than half of the packets cannot be decoded fails with
-/// [`CodecError::ConversionFailed`] rather than decode to more silence than
-/// sound. Such a file is not a recording with a few bad packets but one
-/// this decoder cannot read (a codec it decodes wrongly, a payload
-/// overwritten wholesale): a meeting made mostly of silence would be of no
-/// use, and a failed one keeps its recording and offers Process again.
+/// The share of a file's packets that may be damaged: more fails with
+/// [`CodecError::ConversionFailed`] rather than decode to a meeting of
+/// silence; a failed one keeps its recording and offers Process again.
 pub const MAX_DAMAGED_SHARE: f64 = 0.5;
 
-/// The decoder, stateless; see the module doc.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SymphoniaAudioCodec;
 
 impl SymphoniaAudioCodec {
-    /// There is no state.
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -226,8 +110,7 @@ impl SymphoniaAudioCodec {
     }
 
     /// One channel at the source rate, whole: for the tests and the bench
-    /// tools; the pipeline's [`decode_path`](Self::decode_path) never holds
-    /// it.
+    /// tools.
     pub fn read_channel(
         path: &Path,
         channel: usize,
@@ -257,15 +140,10 @@ impl SymphoniaAudioCodec {
         })
     }
 
-    /// Seconds in the file at `path` as its container declares them (an
-    /// m4a's track header, a WAV's data chunk), read without decoding it;
-    /// `None` when the container does not say. Without the AAC priming the
-    /// decode drops, so it matches the decode up to the encoder's padding
-    /// at the end (under a packet), and capped at five hours, as
-    /// `reserved_frames` caps a declared length, so a corrupt header cannot
-    /// move a start absurdly far back. For a recording that has no stored
-    /// duration, such as one the launch adopts from the audio folder. Rust
-    /// only.
+    /// Seconds in the file at `path` as its container declares them, read
+    /// without decoding it; `None` when the container does not say. Capped
+    /// at five hours, so a corrupt header cannot move a start absurdly far
+    /// back. For a recording that has no stored duration.
     pub fn declared_duration(path: &Path) -> Result<Option<f64>, CodecError> {
         let frames = SymphoniaFrames::open(path)?;
         let primed = frames.priming.map_or(0, |trim| trim.frames);
@@ -278,8 +156,8 @@ impl SymphoniaAudioCodec {
     }
 
     /// `samples` at `rate` to 16 kHz in one pass: exact length `round(len *
-    /// 16000 / rate)`, trimmed or zero-padded so the 16 kHz lane lasts
-    /// exactly as long as the master and segment counts stay stable.
+    /// 16000 / rate)`, so the 16 kHz lane lasts exactly as long as the
+    /// master.
     ///
     /// # Panics
     ///
@@ -300,7 +178,6 @@ impl SymphoniaAudioCodec {
         Self::mix(Frames::open(source)?, destination)
     }
 
-    /// `mixdown_path` from an open source.
     fn mix(mut frames: Frames, destination: &Path) -> Result<(), CodecError> {
         create_parent(destination)?;
         let mut mixdown = Mixdown::new(destination);
@@ -310,8 +187,7 @@ impl SymphoniaAudioCodec {
         if result.is_err()
             && let Some(writer) = mixdown.writer.take()
         {
-            // Closed first, which Windows needs to remove it; best effort,
-            // the error says what went wrong.
+            // Closed first, which Windows needs to remove it.
             drop(writer);
             let _ = std::fs::remove_file(destination);
         }
@@ -329,17 +205,13 @@ fn frames_at_16k(frames: usize, rate: u32) -> usize {
 /// `frames` a container declares at `rate`, capped at five hours: a
 /// corrupt header must not claim more.
 fn capped(frames: u64, rate: u32) -> u64 {
-    /// Five hours, in seconds.
     const MAX_DECLARED_SECONDS: u64 = 5 * 3_600;
     frames.min(MAX_DECLARED_SECONDS * u64::from(rate))
 }
 
-/// The frames to reserve for a stream: its length, but a length the
-/// container declares is capped at five hours at the stream's rate (a
-/// corrupt header must not reserve gigabytes, and a failed allocation
-/// aborts the app), so the 16 kHz reservation stays under five hours at
-/// 16 kHz whatever the rate. A length measured from the file is not
-/// capped.
+/// The frames to reserve for a stream: its length, but a declared length
+/// is capped at five hours (a corrupt header must not reserve gigabytes,
+/// and a failed allocation aborts the app). A measured length is not.
 fn reserved_frames(spec: Spec) -> usize {
     match spec.length {
         Length::Measured(frames) => frames,
@@ -349,8 +221,6 @@ fn reserved_frames(spec: Spec) -> usize {
     }
 }
 
-/// A stream's shape: hertz, interleaved channels, and its length in
-/// frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Spec {
     rate: u32,
@@ -358,22 +228,19 @@ struct Spec {
     length: Length,
 }
 
-/// How a stream's frame count is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Length {
     /// From the file's size: the crate's CAF reader.
     Measured(usize),
-    /// From the container's header, if it says (symphonia): not trusted.
+    /// From the container's header, if it says: not trusted.
     Declared(Option<u64>),
 }
 
 impl Spec {
-    /// Whether the stream has samples to take: a channel and a rate.
     fn audible(self) -> bool {
         self.channels > 0 && self.rate > 0
     }
 
-    /// `ChannelMissing` when the stream has no channel `channel`.
     fn check_channel(self, channel: usize, lane: AudioLane) -> Result<(), CodecError> {
         if channel < self.channels {
             return Ok(());
@@ -392,7 +259,6 @@ enum Event<'a> {
     /// The stream begins, or goes on with a new shape: what was taken so
     /// far is finished at the old one.
     Start(Spec),
-    /// Interleaved frames.
     Frames(Spec, &'a [f32]),
 }
 
@@ -405,7 +271,6 @@ enum Frames {
 }
 
 impl Frames {
-    /// Frames per read from a CAF: the AVFoundation codec's chunk.
     const CAF_BLOCK: usize = 32_768;
 
     fn open(path: &Path) -> Result<Self, CodecError> {
@@ -423,16 +288,14 @@ impl Frames {
     }
 
     /// Runs `each` over the whole file and returns the stream's last
-    /// shape. A change of shape mid-stream is a new `Start`: resampling
-    /// earlier samples at a later rate would be noise, so each shape's
-    /// samples are taken at their own.
+    /// shape. A change of shape mid-stream is a new `Start`: each shape's
+    /// samples are resampled at their own rate.
     fn stream(
         &mut self,
         mut each: impl FnMut(Event<'_>) -> Result<(), CodecError>,
     ) -> Result<Spec, CodecError> {
         match self {
             Self::Caf { reader, block } => {
-                // The rate is a whole number of hertz for any recording.
                 let spec = Spec {
                     rate: reader.sample_rate() as u32,
                     channels: reader.channel_count(),
@@ -455,8 +318,7 @@ impl Frames {
         }
     }
 
-    /// What [`stream`](Self::stream) replaced by silence; the crate's CAF
-    /// reader reads PCM, which has none.
+    /// What [`stream`](Self::stream) replaced by silence.
     fn damage(&self) -> AudioDamage {
         match self {
             Self::Caf { .. } => AudioDamage::default(),
@@ -476,18 +338,14 @@ struct SymphoniaFrames {
     source: Source,
     decoder: Box<dyn Decoder>,
     /// The track's codec parameters, which a fresh decoder is made from
-    /// after a damaged packet; their rate (when declared) and time base
-    /// give a damaged packet's length.
+    /// after a damaged packet.
     params: CodecParameters,
     track_id: u32,
-    /// The track's frame count, as its header declares it.
     frames: Option<u64>,
-    /// The encoder priming to drop: AAC in MP4 only.
     priming: Option<Trim>,
     /// The frames of the last packet that decoded, the length of a damaged
     /// packet whose container gives none.
     last_frames: Option<usize>,
-    /// The track's packets so far, and the damaged ones among them.
     damage: Damage,
 }
 
@@ -497,28 +355,19 @@ struct SymphoniaFrames {
 struct Damage {
     packets: u64,
     damaged: u64,
-    /// The damaged packets some of whose silence the priming trim left:
-    /// the parts of the recording lost. A damaged packet inside the
-    /// priming costs no audio, so only the threshold counts it.
+    /// The damaged packets some of whose silence the priming trim left.
     parts: u64,
-    /// Seconds of silence emitted for the damaged packets, after the
-    /// priming trim.
     seconds: f64,
 }
 
 impl Damage {
-    /// More of the packets damaged than [`MAX_DAMAGED_SHARE`] allows.
     fn too_much(self) -> bool {
-        // Exact for any packet count a file can hold.
         #[allow(clippy::cast_precision_loss)]
         let share = self.damaged as f64 / self.packets.max(1) as f64;
         share > MAX_DAMAGED_SHARE
     }
 }
 
-/// What [`SymphoniaFrames::stream`] keeps between packets: the shape
-/// handed on last, the zeros the silence is cut from, and the damaged
-/// packets held before the first one that decodes.
 #[derive(Default)]
 struct Stream {
     spec: Option<Spec>,
@@ -528,12 +377,9 @@ struct Stream {
 
 /// Damaged packets before the first one that decoded, held until that
 /// packet gives the stream's shape: symphonia's MP4 reader declares no
-/// channel count for AAC, so their silence has no shape before it. They
-/// run from the track's start without a gap, so one timestamp and a frame
-/// count place them all.
+/// channel count for AAC.
 #[derive(Debug, Clone, Copy)]
 struct Leading {
-    /// The first one's timestamp.
     ts: u64,
     /// Their frames at the declared rate (else at the decoded one).
     frames: usize,
@@ -543,10 +389,8 @@ struct Leading {
 /// packet against them.
 #[derive(Debug, Clone, Copy)]
 struct Trim {
-    /// Frames at `rate` to drop from the start.
     frames: u64,
     rate: u32,
-    /// The packets' timestamp unit.
     time_base: TimeBase,
 }
 
@@ -589,18 +433,12 @@ impl Trim {
     }
 }
 
-/// The damaged packets logged one by one; the rest are only counted, in
-/// the one line at the end of the stream.
 const LOGGED_DAMAGED_PACKETS: u64 = 10;
 
 /// The most frames of silence one damaged packet becomes, so a corrupt
-/// duration cannot grow the lane: eight times AAC's 1 024 frames, and
-/// seven times the 1 152 of MP3 and of the PCM packets symphonia's WAV
-/// and CAF readers cut.
+/// duration cannot grow the lane.
 const MAX_PACKET_FRAMES: usize = 8_192;
 
-/// A damaged packet's frames when its container gives no duration or the
-/// stream no rate, and no packet decoded yet: one AAC frame.
 const FALLBACK_PACKET_FRAMES: usize = 1_024;
 
 /// A packet's length in frames at `rate` from its duration `duration` in
@@ -617,8 +455,6 @@ fn packet_frames(duration: u64, time_base: Option<TimeBase>, rate: u32, fallback
     usize::try_from(frames).map_or(MAX_PACKET_FRAMES, |frames| frames.min(MAX_PACKET_FRAMES))
 }
 
-/// Hands `samples` to `each` as frames of `shape`, after a `Start` when
-/// the shape is new; a stream without a channel or a rate takes none.
 fn emit(
     each: &mut impl FnMut(Event<'_>) -> Result<(), CodecError>,
     spec: &mut Option<Spec>,
@@ -659,20 +495,15 @@ fn emit_silence(
             break;
         }
     }
-    // Frame counts and rates are far below 2^52.
     #[allow(clippy::cast_precision_loss)]
     let seconds = frames as f64 / f64::from(shape.rate.max(1));
     Ok(seconds)
 }
 
-/// `packet` through `decoder`, a panic inside it caught as a failure, or
-/// why it did not decode: symphonia's error, or the panic's message. The
+/// `packet` through `decoder`, a panic inside it caught as a failure. The
 /// caller replaces the decoder after any failure, so the state a panic
-/// left half-written is never used again; the decoder holds no state
-/// shared with anything else (symphonia's AAC tables are immutable
-/// statics, built from constants whatever the packet holds). The panic is
-/// [`crash_log::expected`]: the caller logs it with the packet at `warn`,
-/// so the app's panic hooks write no crash log for it and prune none.
+/// left half-written is never used again. The panic is
+/// [`crash_log::expected`], so the app's panic hooks write no crash log.
 fn decode_packet<'d>(
     decoder: &'d mut Box<dyn Decoder>,
     packet: &Packet,
@@ -693,17 +524,12 @@ fn decode_packet<'d>(
     }
 }
 
-/// Where a file's packets come from.
 enum Source {
-    /// Symphonia's demuxer.
     Format(Box<dyn FormatReader>),
-    /// A phone recording without a `moov`, read packet by packet from its
-    /// bits ([`salvage`]).
     Salvaged(Box<SalvagedPackets>),
 }
 
 impl Source {
-    /// The next packet; `None` at the end of the stream.
     fn next_packet(&mut self, path: &Path) -> Result<Option<Packet>, CodecError> {
         match self {
             Self::Format(format) => match format.next_packet() {
@@ -723,8 +549,7 @@ impl Source {
 
 impl SymphoniaFrames {
     /// Symphonia's demuxer over the file at `path`; a phone recording that
-    /// it cannot read for want of a `moov` is salvaged ([`salvage`]), and
-    /// any other file it cannot read fails as before.
+    /// it cannot read for want of a `moov` is salvaged ([`salvage`]).
     fn open(path: &Path) -> Result<Self, CodecError> {
         match Self::demux(path) {
             Ok(frames) => Ok(frames),
@@ -744,8 +569,7 @@ impl SymphoniaFrames {
     }
 
     /// The salvage's packets with the phone's settings, less
-    /// [`APPLE_PRIMING`]: the file is in `AVAudioRecorder`'s layout, as
-    /// [`priming`] requires for the trim, but has no box that says more.
+    /// [`APPLE_PRIMING`].
     fn salvaged(path: &Path, packets: SalvagedPackets) -> Result<Self, CodecError> {
         let params = SalvagedPackets::codec_params();
         Ok(Self {
@@ -767,19 +591,12 @@ impl SymphoniaFrames {
 
     fn demux(path: &Path) -> Result<Self, CodecError> {
         // Before symphonia sees a byte: a size it would allocate that the
-        // file cannot hold aborts the process ([`sizes`]). The reader opens
-        // the file where the walk started.
+        // file cannot hold aborts the process.
         let (start, file) = sizes::check(path)?;
         let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
-        // A panic in the demuxer is caught as its failure, as
-        // `decode_packet` catches the decoder's: symphonia 0.5.5's MP4
-        // reader adds a box's size to its offset unchecked, which panics in
-        // a debug build on a 64-bit size near 2^64, and subtracts the 4
-        // bytes of version and flags from a `mean` or `name` box's length
-        // unchecked, which in a release build wraps into a capacity overflow
-        // (ilst.rs:536). The size check above refuses both now; the catch
-        // stays for whatever it does not model. Nothing the demuxer built
-        // outlives it.
+        // A panic in the demuxer (symphonia 0.5.5's MP4 reader has
+        // unchecked box arithmetic) is caught as its failure. The size check
+        // above refuses the known cases; the catch is for the rest.
         let format = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crash_log::expected(|| demuxer(start, stream))
         }))
@@ -811,9 +628,8 @@ impl SymphoniaFrames {
     }
 
     /// Packet by packet. A packet that does not decode becomes silence of
-    /// its length (see the module doc); a file with no decodable audio, or
-    /// with more damaged packets than [`MAX_DAMAGED_SHARE`] allows, is an
-    /// error.
+    /// its length; a file with no decodable audio, or with more damaged
+    /// packets than [`MAX_DAMAGED_SHARE`] allows, is an error.
     fn stream(
         &mut self,
         mut each: impl FnMut(Event<'_>) -> Result<(), CodecError>,
@@ -903,8 +719,6 @@ impl SymphoniaFrames {
         let frames = samples.len() / shape.channels.max(1);
         self.last_frames = Some(frames);
         if let Some(run) = stream.leading.take() {
-            // In the shape this packet gives, at the rate their frames
-            // were counted at.
             let held = Spec {
                 rate: self
                     .params
@@ -931,9 +745,9 @@ impl SymphoniaFrames {
         )
     }
 
-    /// A packet that did not decode, the `index`th of the track: a fresh
-    /// decoder, the packet logged and counted, and its silence emitted, or
-    /// held in `leading` while no packet has given the stream's shape.
+    /// A packet that did not decode: a fresh decoder, the packet logged and
+    /// counted, and its silence emitted, or held while no packet has given
+    /// the stream's shape.
     fn replace_damaged(
         &mut self,
         stream: &mut Stream,
@@ -942,11 +756,9 @@ impl SymphoniaFrames {
         failure: &str,
         each: &mut impl FnMut(Event<'_>) -> Result<(), CodecError>,
     ) -> Result<(), CodecError> {
-        // A fresh decoder, not a reset. A reset keeps the channel layout
-        // the failed packet may have set (symphonia's AAC decoder fixes it
-        // at its first packet before checking it), so one corrupt first
-        // packet would fail every packet after it; and a panic may have
-        // left any state half written.
+        // A fresh decoder, not a reset: a reset keeps the channel layout
+        // a corrupt first packet set, and a panic may have left state half
+        // written.
         self.decoder = make_decoder(&self.params)?;
         self.damage.damaged += 1;
         if self.damage.damaged <= LOGGED_DAMAGED_PACKETS {
@@ -962,7 +774,6 @@ impl SymphoniaFrames {
             None => {
                 let rate = self.params.sample_rate.unwrap_or(0);
                 let frames = packet_frames(packet.dur(), self.params.time_base, rate, fallback);
-                // Placed by its own timestamp, as the held run is.
                 if self.primed(packet.ts(), frames) < frames {
                     self.damage.parts += 1;
                 }
@@ -993,7 +804,6 @@ impl SymphoniaFrames {
         Ok(())
     }
 
-    /// How many of the `frames` of a packet at `ts` the priming trim drops.
     fn primed(&self, ts: u64, frames: usize) -> usize {
         self.priming
             .map_or(0, |trim| trim.frames_before(ts, frames))
@@ -1001,8 +811,7 @@ impl SymphoniaFrames {
 }
 
 /// Symphonia's reader for a file the size walk found to be `start`, at
-/// byte 0, where the walk started: no probe, which would scan for a marker
-/// the walk did not see.
+/// byte 0: no probe, which would scan for a marker the walk did not see.
 fn demuxer(
     start: sizes::Start,
     mut stream: MediaSourceStream,
@@ -1024,8 +833,7 @@ fn demuxer(
 }
 
 /// The salvage's packets of the file at `path`, when it is a phone
-/// recording without a `moov`; a read that fails is logged, and the file
-/// then fails with symphonia's error, as any other file it cannot read.
+/// recording without a `moov`.
 fn salvage(path: &Path) -> Option<SalvagedPackets> {
     SalvagedPackets::open(path).unwrap_or_else(|error| {
         tracing::warn!(path = %path.display(), %error, "the recording could not be read for a salvage");
@@ -1033,15 +841,12 @@ fn salvage(path: &Path) -> Option<SalvagedPackets> {
     })
 }
 
-/// A decoder for `params`.
 fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>, CodecError> {
     symphonia::default::get_codecs()
         .make(params, &DecoderOptions::default())
         .map_err(|e| CodecError::UnsupportedFormat(e.to_string()))
 }
 
-/// One channel's decode between blocks: the 16 kHz lane so far and the
-/// current shape's resampler.
 struct LaneDecode {
     channel: usize,
     output: Vec<f32>,
@@ -1060,8 +865,6 @@ impl LaneDecode {
     fn take(&mut self, event: Event<'_>) {
         match event {
             Event::Start(spec) => match self.resampler.replace(LaneResampler::new(spec.rate)) {
-                // A new shape: what came before stays, resampled at its
-                // own rate.
                 Some(earlier) => earlier.finish(&mut self.output),
                 None => self
                     .output
@@ -1092,9 +895,7 @@ struct Mixdown<'a> {
     destination: &'a Path,
     writer: Option<WavStreamWriter>,
     resampler: Option<LaneResampler>,
-    /// 16 kHz samples not yet written.
     pending: Vec<f32>,
-    /// 16 kHz samples written since the current shape started.
     written: usize,
     ints: Vec<i16>,
 }
@@ -1114,8 +915,6 @@ impl<'a> Mixdown<'a> {
     fn take(&mut self, event: Event<'_>) -> Result<(), CodecError> {
         match event {
             Event::Start(spec) => {
-                // A new shape: what came before is finished and written at
-                // its own rate, and the file goes on.
                 self.finish_shape()?;
                 if self.writer.is_none() {
                     self.writer = Some(
@@ -1131,7 +930,6 @@ impl<'a> Mixdown<'a> {
                 let Some(resampler) = self.resampler.as_mut() else {
                     return Ok(());
                 };
-                // Channel counts are tiny.
                 let scale = 1.0 / spec.channels as f32;
                 let mono = samples
                     .chunks_exact(spec.channels)
@@ -1143,13 +941,11 @@ impl<'a> Mixdown<'a> {
         }
     }
 
-    /// Writes the first `count` pending samples.
     fn write(&mut self, count: usize) -> Result<(), CodecError> {
         let Some(writer) = self.writer.as_mut() else {
             return Ok(());
         };
         self.ints.clear();
-        // Clamped first, so the cast is exact.
         self.ints.extend(
             self.pending
                 .drain(..count)
@@ -1161,7 +957,6 @@ impl<'a> Mixdown<'a> {
             .map_err(|e| CodecError::Io(e.to_string()))
     }
 
-    /// Flushes the current shape's resampler into the file.
     fn finish_shape(&mut self) -> Result<(), CodecError> {
         if let Some(resampler) = self.resampler.take() {
             resampler.finish(&mut self.pending);
@@ -1182,8 +977,7 @@ impl<'a> Mixdown<'a> {
 #[async_trait]
 impl AudioDecoder for SymphoniaAudioCodec {
     /// The sidecar when it agrees with the master, else the master; a
-    /// master that then fails (an I/O error mid-file, a channel it lacks)
-    /// falls back to the sidecar after all, which beats no transcript.
+    /// master that then fails falls back to the sidecar after all.
     async fn decode(&self, asset: &AudioAsset, lane: AudioLane) -> BoundaryResult<AudioBuffer16k> {
         if let Some(samples) = sidecar(asset, lane) {
             return Ok(AudioBuffer16k::new(samples));
@@ -1211,8 +1005,7 @@ impl AudioDecoder for SymphoniaAudioCodec {
         Ok(AudioBuffer16k::new(samples))
     }
 
-    /// `Wav16kInt16`: there is no AAC encoder in pure Rust (see the module
-    /// doc); the Swift codec says `M4aAac`.
+    /// `Wav16kInt16`: there is no AAC encoder in pure Rust.
     fn mixdown_format(&self) -> AudioFormat {
         AudioFormat::Wav16kInt16
     }
@@ -1232,20 +1025,15 @@ impl AudioDecoder for SymphoniaAudioCodec {
 }
 
 /// The lane's 16 kHz sidecar, when it reads, is not empty and is the
-/// master's length at 16 kHz: the writer writes the master and the
-/// sidecars a frame at a time, so a finished sidecar holds the master's
-/// frames resampled. One that disagrees is not trusted, and the master,
-/// the copy that is never shorter, is decoded instead: the sidecar's
-/// 32-bit size fields wrap after 37.3 hours, and a sidecar that missed a
-/// frame the master kept (a full disk) would lose it. A master whose
-/// length cannot be read cheaply (not the writer's CAF) leaves the
-/// sidecar trusted.
+/// master's length at 16 kHz. One that disagrees is not trusted (its
+/// 32-bit sizes wrap after 37.3 hours, a full disk may cost it a frame),
+/// and the master is decoded instead. A master whose length cannot be
+/// read cheaply leaves the sidecar trusted.
 fn sidecar(asset: &AudioAsset, lane: AudioLane) -> Option<Vec<f32>> {
     let samples = sidecar_samples(asset, lane)?;
     if let Some(master) = file_url_path(&asset.url)
         && let Ok(reader) = CafReader::open(&master)
     {
-        // The rate is a whole number of hertz for any recording.
         let rate = reader.sample_rate() as u32;
         let expected = length_at_16k(reader.frame_count(), rate);
         if rate > 0 && samples.len() != expected {
@@ -1261,8 +1049,6 @@ fn sidecar(asset: &AudioAsset, lane: AudioLane) -> Option<Vec<f32>> {
     Some(samples)
 }
 
-/// The lane's 16 kHz sidecar when it reads and is not empty, whatever its
-/// length.
 fn sidecar_samples(asset: &AudioAsset, lane: AudioLane) -> Option<Vec<f32>> {
     let path = file_url_path(asset.sidecars_16k.get(&lane)?)?;
     WavFile::read_16k_mono(&path)
@@ -1270,13 +1056,11 @@ fn sidecar_samples(asset: &AudioAsset, lane: AudioLane) -> Option<Vec<f32>> {
         .filter(|samples| !samples.is_empty())
 }
 
-/// The asset's master as a path; the URL must be a file URL.
 fn master_path(asset: &AudioAsset) -> Result<PathBuf, CodecError> {
     file_url_path(&asset.url)
         .ok_or_else(|| CodecError::Io(format!("not a file URL: {}", asset.url)))
 }
 
-/// Creates the folder `path` goes in, if needed.
 fn create_parent(path: &Path) -> Result<(), CodecError> {
     match path.parent() {
         Some(parent) => std::fs::create_dir_all(parent).map_err(|e| io_error(parent, &e)),
@@ -1301,11 +1085,8 @@ mod tests {
         }
     }
 
-    /// A damaged packet's length: its duration through the time base at
-    /// the stream's rate; the last decoded packet's frames (else one AAC
-    /// frame) when the container gives no duration or the stream no rate,
-    /// so the audio after it keeps its time; at most 8 192 frames, so a
-    /// corrupt duration cannot grow the lane by more.
+    /// A damaged packet's length: its duration at the stream's rate, else
+    /// the last decoded packet's (else one AAC frame), capped.
     #[test]
     fn a_damaged_packets_length_has_a_fallback_and_a_cap() {
         let samples = Some(TimeBase::new(1, 44_100));
@@ -1330,10 +1111,8 @@ mod tests {
         );
     }
 
-    /// Silence is handed on at most [`MAX_PACKET_FRAMES`] at a time, so a
-    /// long held run never needs more zeros than that: a run of three
-    /// blocks and a few frames, in stereo, comes out as four pieces, after
-    /// one `Start`, with every frame and the seconds they last.
+    /// Silence is handed on at most [`MAX_PACKET_FRAMES`] at a time, every
+    /// frame and its seconds accounted for.
     #[test]
     fn silence_goes_out_in_capped_blocks() {
         let shape = spec(44_100, 2);
@@ -1378,9 +1157,8 @@ mod tests {
         assert!(!damage(0).too_much());
     }
 
-    /// A length the container declares reserves at most five hours at
-    /// 16 kHz, whatever the rate; a length measured from the file
-    /// reserves all of it.
+    /// A declared length reserves at most five hours at 16 kHz; a measured
+    /// one reserves all of it.
     #[test]
     fn a_declared_length_reserves_at_most_five_hours() {
         let five_hours = 5 * 3_600 * 16_000;
@@ -1402,9 +1180,7 @@ mod tests {
     }
 
     /// A rate and channel count that change mid-stream keep what came
-    /// before: each shape's samples are resampled at their own rate and
-    /// appended, in the lane and in the mixdown, as one decode of the
-    /// whole file in Swift kept them all.
+    /// before, in the lane and in the mixdown.
     #[test]
     fn a_shape_change_mid_stream_appends_to_the_lane() {
         let first: Vec<f32> = (0..4_800).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
@@ -1444,9 +1220,7 @@ mod tests {
         assert_eq!(written, rounded);
     }
 
-    /// A mixdown that fails mid-stream removes what it wrote: the master is
-    /// cut short under the open reader, after its first block, as a disk
-    /// error mid-file would stop it.
+    /// A mixdown that fails mid-stream removes what it wrote.
     #[test]
     fn a_mixdown_that_fails_mid_stream_removes_its_file() {
         let directory = tempfile::tempdir().unwrap();

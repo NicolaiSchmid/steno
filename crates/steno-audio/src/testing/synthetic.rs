@@ -1,63 +1,8 @@
-//! A [`CaptureBackend`] without the HAL.
-//! Swift: `Sources/StenoAudio/Testing/SyntheticCaptureBackend.swift`.
-//!
-//! Deterministic sines per lane (integer phase accumulators, identical on
-//! every machine), delivered from a producer thread through the same
-//! [`LaneFrameSink`] protocol the IOProc uses, in callbacks of
-//! `callback_frames`. By default it runs as fast as the rings accept (a
-//! 30 s recording takes milliseconds); `real_time` paces it at wall-clock
-//! speed for the CLI. `start` returns once the producer has offered its
-//! first callback to the sink (or stalled, reported a change or ended
-//! first), as the PipeWire backend returns after its first cycle, so the
-//! session's wait for a restarted stream's first frame finds it at once.
-//!
-//! Device changes, so the session's rebuild runs on CI exactly as in
-//! production: `change_device_after` reports `DefaultInputChanged` (or
-//! `change_reason`) after exactly that many seconds of one `start` and
-//! ends the producer thread, like a microphone that moved; it fires `changes` times per backend
-//! instance (one by default), not once per `start`, or the rebuilt backend
-//! would report again and loop. `restarts_that_fail` makes that many
-//! `start` calls after the first fail with `InputDeviceUnavailable`, the
-//! device still absent; `restart_panics` makes the first restart panic,
-//! for the session's guard around its rebuild, and
-//! `start_panics_once_running` the first start once its producer runs,
-//! for the guard around the session's start; `stream` is what the first
-//! start reports and `stream_after_restart` what every restart reports
-//! (new latencies, a new rate, the fallback microphone), `SYNTHETIC` when
-//! `None`. A start delivers at the rate of the stream it reports, as a
-//! device the Mac cannot move to 48 kHz; the tones keep their frequencies
-//! at any rate. `seconds` counts per `start`, so a restarted backend
-//! delivers again, and `frames_delivered` sums over starts (in each
-//! start's rate).
-//!
-//! Stalls, for the session's watchdog (Rust only): `stall_after` makes the
-//! first start's producer deliver that many seconds and then nothing, as a
-//! device whose driver hangs, until [`SyntheticCaptureBackend::resume_delivery`]
-//! or the stop, and `restarts_stall_after` every restart's;
-//! `restarts_do_not_run` makes the failing restarts fail with
-//! [`CaptureError::DidNotRun`], as a graph that stays stalled. The
-//! session watches the backend only with `delivers_continuously` (which
-//! `stall_after` sets): by default a producer whose `seconds` ran out is
-//! the end of a test's audio, not a stall.
-//!
-//! Missed cycles (A18, the design in [`realtime::missed`](crate::realtime::missed);
-//! Rust only): `miss_at` makes the first start's producer skip that many
-//! frames at that many seconds in, as a capture thread the scheduler held
-//! up: the tones run on and the skipped frames are never delivered (paced
-//! on the wall clock, the producer waits them out), and the next callback's
-//! position on the producer's clock sits past them. Each callback goes
-//! through a [`CycleClock`] as a live backend's does, and what it reports
-//! goes through [`LaneFrameSink::write_missed`] first, so filled frames
-//! count towards `seconds` and `frames_delivered`, and a jump past the
-//! fill limit is only counted.
-//!
-//! Held outages, behind the `test-support` feature (Rust only):
-//! `hold_outages` makes every device change, and the first start's
-//! stall, wait for its own `SyntheticCaptureBackend::release_outage`
-//! (one that came first lets it go at its time), the producer delivering
-//! on meanwhile, so a test that waits for audio before the outage sees
-//! it however late the session's threads run. A restart's stall is not
-//! held: it is how the restarts fail.
+//! A [`CaptureBackend`] without the HAL: deterministic integer-phase sines
+//! per lane from a producer thread through the [`LaneFrameSink`], as fast
+//! as the rings accept or paced in real time. Its options inject device
+//! changes, failing or panicking restarts, stalls, missed cycles and, with
+//! `test-support`, held outages, so the session's rebuild runs on CI.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -75,7 +20,6 @@ use crate::realtime::{CycleClock, LaneFrameSink};
 /// hears in a call).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SyntheticEcho {
-    /// The lane echoed.
     pub of: AudioLane,
     /// Seconds behind it.
     pub delay: f64,
@@ -130,10 +74,8 @@ impl SyntheticLane {
     }
 }
 
-/// The knobs of [`SyntheticCaptureBackend::new`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyntheticOptions {
-    /// What each lane carries.
     pub signals: BTreeMap<AudioLane, SyntheticLane>,
     /// How long one `start` delivers before the producer ends.
     pub seconds: f64,
@@ -143,9 +85,10 @@ pub struct SyntheticOptions {
     pub real_time: bool,
     /// Seconds into a start at which a device change is reported.
     pub change_device_after: Option<f64>,
-    /// How many starts report one.
+    /// How many starts report one (per backend, not per `start`, or the
+    /// rebuilt backend would loop).
     pub changes: usize,
-    /// What a change reports: `DefaultInputChanged` unless set. Rust only.
+    /// What a change reports: `DefaultInputChanged` unless set.
     pub change_reason: DeviceChangeReason,
     /// How many restarts after a change fail before one succeeds.
     pub restarts_that_fail: usize,
@@ -169,7 +112,7 @@ pub struct SyntheticOptions {
     /// nothing until `resume_delivery` or the stop.
     pub restarts_stall_after: Option<f64>,
     /// Seconds into the first start, and frames its producer then misses,
-    /// in order. Rust only.
+    /// in order.
     pub misses: Vec<(f64, usize)>,
     /// Every change and the first start's stall wait for a
     /// `release_outage` each, delivering on meanwhile.
@@ -222,7 +165,6 @@ impl SyntheticOptions {
         }
     }
 
-    /// Frames per callback.
     #[must_use]
     pub fn callback_frames(mut self, frames: usize) -> Self {
         self.callback_frames = frames;
@@ -243,8 +185,7 @@ impl SyntheticOptions {
         self
     }
 
-    /// What a change reports, `DefaultInputChanged` by default: an
-    /// `AudioServiceRestarted`, say. Rust only.
+    /// What a change reports, `DefaultInputChanged` by default.
     #[must_use]
     pub fn change_reason(mut self, reason: DeviceChangeReason) -> Self {
         self.change_reason = reason;
@@ -286,7 +227,6 @@ impl SyntheticOptions {
         self
     }
 
-    /// Pace on the wall clock.
     #[must_use]
     pub fn real_time(mut self, real_time: bool) -> Self {
         self.real_time = real_time;
@@ -323,7 +263,7 @@ impl SyntheticOptions {
     }
 
     /// Miss `frames` this many seconds into the first start, after the
-    /// misses already asked for (see the module doc).
+    /// misses already asked for.
     #[must_use]
     pub fn miss_at(mut self, seconds: f64, frames: usize) -> Self {
         self.misses.push((seconds, frames));
@@ -331,9 +271,8 @@ impl SyntheticOptions {
     }
 
     /// Hold every change and the first start's stall until
-    /// `release_outage` lets it go. Each release lets one outage go: the
-    /// first one whose frame the producer reached, and the change when it
-    /// reached both, so a held change goes before a held first-start stall.
+    /// `release_outage`; each release lets one go, a held change before a
+    /// held first-start stall.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn hold_outages(mut self) -> Self {
@@ -342,12 +281,12 @@ impl SyntheticOptions {
     }
 }
 
-/// The test double for the live backend; see the module doc.
+/// The test double for the live backend.
 pub struct SyntheticCaptureBackend {
     options: SyntheticOptions,
     state: Mutex<State>,
-    /// Spent by the producer thread when a change fires, as in Swift, so a
-    /// start stopped before its change keeps the change for the next one.
+    /// Spent by the producer when a change fires, so a start stopped before
+    /// its change keeps it for the next.
     changes_remaining: Arc<AtomicUsize>,
     stop_requested: Arc<AtomicBool>,
     frames_delivered: Arc<AtomicUsize>,
@@ -397,7 +336,6 @@ impl SyntheticCaptureBackend {
         Self::new(SyntheticOptions::tones(lanes, tones, seconds))
     }
 
-    /// The options it was built with.
     #[must_use]
     pub fn options(&self) -> &SyntheticOptions {
         &self.options
@@ -416,9 +354,8 @@ impl SyntheticCaptureBackend {
         self.lock().start_count
     }
 
-    /// Blocks until the producer thread of the latest `start` has delivered
-    /// `seconds` of audio, reported a device change, stalled or been
-    /// stopped. Tests wait on this instead of wall time.
+    /// Blocks until the latest `start`'s producer delivered `seconds`,
+    /// reported a change, stalled or was stopped.
     pub fn wait_until_finished(&self) {
         self.completion.wait();
     }
@@ -430,8 +367,7 @@ impl SyntheticCaptureBackend {
         self.resumed.store(true, Ordering::Release);
     }
 
-    /// Lets the next outage `hold_outages` holds go: at once when the
-    /// producer is past its frame, at that frame when it is not there yet.
+    /// Lets the next held outage go, at once or at its frame.
     #[cfg(feature = "test-support")]
     pub fn release_outage(&self) {
         self.hold.release();
@@ -443,8 +379,8 @@ impl SyntheticCaptureBackend {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// What a start reports, and the rate it delivers at: `stream` or, on a
-    /// restart, `stream_after_restart`; `SYNTHETIC` when unset.
+    /// What a start reports, and the rate it delivers at; `SYNTHETIC` when
+    /// unset.
     fn stream_for(&self, is_restart: bool) -> CaptureStream {
         if is_restart {
             &self.options.stream_after_restart
@@ -457,7 +393,6 @@ impl SyntheticCaptureBackend {
 }
 
 impl CaptureBackend for SyntheticCaptureBackend {
-    // One producer loop with its knobs side by side.
     #[allow(clippy::too_many_lines)]
     fn start(
         &self,
@@ -496,7 +431,6 @@ impl CaptureBackend for SyntheticCaptureBackend {
             self.options.callback_frames,
             rate,
         );
-        // Whole frames of positive durations.
         let total_frames = (self.options.seconds * rate) as usize;
         let change_frame = if self.changes_remaining.load(Ordering::Relaxed) > 0 {
             self.options
@@ -518,8 +452,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
         } else {
             self.hold.clone()
         };
-        // Frames into the start, and how many to skip there; the first
-        // start's only.
+        // Frames into the first start, and how many to skip there.
         let mut skips: VecDeque<(usize, usize)> = self
             .options
             .misses
@@ -536,9 +469,8 @@ impl CaptureBackend for SyntheticCaptureBackend {
         let stop = Arc::clone(&self.stop_requested);
         let delivered_counter = Arc::clone(&self.frames_delivered);
         let completion = Arc::clone(&self.completion);
-        // Raised once the producer offered its first callback, or will
-        // offer none for now, so `start` returns with the sink's count
-        // moved, as the live backends do once their first callback ran.
+        // Raised once the producer offered its first callback, or will offer
+        // none, so `start` returns as the live backends do.
         let first = Arc::new(Completion::default());
         let first_offered = Arc::clone(&first);
         let lane_count = lanes.len();
@@ -579,9 +511,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
                         continue;
                     }
                     // The callback before a change or a stall is clipped to
-                    // it, so it lands on the exact frame and a test can
-                    // count what each start delivered; one held past it
-                    // goes on in whole callbacks.
+                    // land on the exact frame.
                     let mut frames = callback_frames.min(total_frames - delivered);
                     if let Some(change) = change_frame.filter(|change| *change > delivered) {
                         frames = frames.min(change - delivered);
@@ -592,8 +522,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
                     if let Some(&(at, _)) = skips.front().filter(|(at, _)| *at > delivered) {
                         frames = frames.min(at - delivered);
                     }
-                    // The producer's clock counts every frame of the start,
-                    // the missed ones included.
+                    // The producer's clock counts the missed frames too.
                     let missed = clock.advance(delivered as u64, frames);
                     if real_time {
                         // Positive sample counts in seconds.
@@ -654,9 +583,8 @@ impl CaptureBackend for SyntheticCaptureBackend {
     }
 }
 
-/// Whether an outage may begin (`SyntheticOptions::hold_outages`):
-/// always, unless the outages are held, and then once a release is left
-/// for it. Without the `test-support` feature nothing is held.
+/// Whether an outage may begin: always, unless held, and then once a
+/// release is left for it.
 #[derive(Debug, Clone, Default)]
 struct OutageHold {
     /// The releases no outage spent yet; `None` when not held.
@@ -732,8 +660,8 @@ impl Completion {
 /// Per-lane phase accumulators and preallocated output buffers.
 struct Generator {
     states: Vec<LaneState>,
-    /// Every lane's phase at the start of the current fill, so an echo of a
-    /// lane already advanced in this fill still reads the right phase.
+    /// Every lane's phase at the start of the current fill, so an echo reads
+    /// the right phase.
     start_phases: Vec<u32>,
     buffers: Vec<Vec<f32>>,
     position: usize,
@@ -763,7 +691,7 @@ impl Generator {
                 let echo_lane = signal
                     .echo
                     .and_then(|echo| lanes.iter().position(|l| *l == echo.of));
-                // Positive, rounded as Swift rounds.
+                // Positive, rounded to nearest.
                 LaneState {
                     increment: AudioFixtures::phase_increment_at(signal.frequency, rate),
                     phase: 0,
@@ -787,8 +715,7 @@ impl Generator {
         &self.buffers[lane]
     }
 
-    /// Moves every lane on by `frames` without writing them: audio the
-    /// producer missed.
+    /// Moves every lane on by `frames` without writing them.
     fn skip(&mut self, frames: usize) {
         for state in &mut self.states {
             state.phase = state
@@ -804,8 +731,8 @@ impl Generator {
         AudioFixtures::sine(phase) as f32
     }
 
-    /// Writes `frames` samples per lane. Echo terms are the source lane's
-    /// sine at a phase offset, silent until the delay has elapsed.
+    /// Writes `frames` samples per lane; echoes are silent until their
+    /// delay has elapsed.
     fn fill(&mut self, frames: usize) {
         for (lane, state) in self.states.iter().enumerate() {
             self.start_phases[lane] = state.phase;

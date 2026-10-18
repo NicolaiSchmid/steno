@@ -1,10 +1,7 @@
 //! A capture's restarts as one streak, over a device the test drives by
 //! hand on a manual clock: how often they try, what they log, when the
-//! warning comes and goes, and that a capture that comes back loses
-//! nothing. Each test reads the lines the binary logs, so the tests here
-//! run one at a time. The waits for the session's threads take
-//! [`HANG_GUARD`], which only turns a hang into a failure: every claim
-//! here is about the manual clock, never wall time. Rust only.
+//! warning comes and goes, and that nothing is lost. The tests read the
+//! binary's log, so they run one at a time.
 
 // Test arithmetic: frame counts cast freely, and gap seconds compare
 // exactly on purpose.
@@ -42,21 +39,16 @@ const STEP: Duration = CaptureSession::STALL_CHECK_INTERVAL;
 const STALLED_AGAIN: Duration = Duration::from_secs(10);
 
 /// Stands in for a watched device on the Mac: every start hands the sink
-/// over and delivers nothing until the test pushes a callback (`push`); a
-/// stopped device takes none. It logs a line at each start and stop, at
-/// `debug` inside the session's quiet restarts, as the live backends do
-/// (the Mac's silent output and first callback lines), and answers
-/// whether a stall may be the microphone's as the Mac does. Each start's
-/// reading of the manual clock and microphone are kept.
+/// over and delivers nothing until the test pushes a callback (`push`). It
+/// logs at each start and stop as the live backends do, quietly inside the
+/// session's quiet restarts.
 struct Pushed {
     clock: Arc<ManualClock>,
     /// The sink and the lane count while started, `None` once stopped,
     /// under one lock with `push`, so no frame lands after `stop`.
     running: Mutex<Option<(Arc<LaneFrameSink>, usize)>>,
     starts: Mutex<Vec<Duration>>,
-    /// The microphone each start was given, `None` for the default.
     inputs: Mutex<Vec<Option<String>>>,
-    /// Frames the sink took, over every start.
     accepted: Mutex<usize>,
     /// Callbacks pushed while stopped: audio that played and that no
     /// capture took.
@@ -93,7 +85,6 @@ impl Pushed {
         }
     }
 
-    /// Samples the rings hold, while started.
     fn backlog(&self) -> usize {
         self.running
             .lock()
@@ -192,9 +183,7 @@ impl Log {
         })
     }
 
-    /// The capture's lines at `level` so far that contain `text`: every
-    /// line the binary logs, the session's, the rest of the crate's and
-    /// the device's.
+    /// The capture's lines at `level` so far that contain `text`.
     fn count(&self, level: &str, text: &str) -> usize {
         String::from_utf8_lossy(&self.0.lock().unwrap())
             .lines()
@@ -234,9 +223,7 @@ fn one_at_a_time() -> (MutexGuard<'static, ()>, &'static Log) {
 }
 
 /// A recording in `mode`, started over a `Pushed` device on a manual
-/// clock, with 160 s of relay: the writer runs on wall time, so a relay
-/// that filled would hold the rebuild in its waits for room while the test
-/// moves the clock on. The directory holds the recording's files.
+/// clock, with 160 s of relay, so a full relay never holds the rebuild.
 fn record(mode: CaptureMode) -> (TempDir, CaptureSession, Drive) {
     record_on(mode, None)
 }
@@ -258,8 +245,7 @@ fn record_on(mode: CaptureMode, input: Option<&str>) -> (TempDir, CaptureSession
 }
 
 /// The test's side of a recording: moves the clock a `STEP` at a time once
-/// every thread that sleeps on it does (the watch thread, and a rebuild's
-/// while one runs, as the notices tell), so every step is the same on any
+/// every thread that sleeps on it does, so every step is the same on any
 /// host, and keeps each notice with the clock reading it came at.
 struct Drive {
     clock: Arc<ManualClock>,
@@ -280,7 +266,6 @@ impl Drive {
         }
     }
 
-    /// Takes the notices that came; `true` when any did.
     fn take_notices(&mut self) -> bool {
         let mut any = false;
         while let Ok(notice) = self.notices.try_recv() {
@@ -296,8 +281,7 @@ impl Drive {
     }
 
     /// Waits until the watch thread sleeps, and the rebuild's thread too
-    /// while one runs. A notice sent before a thread slept is taken before
-    /// the count is trusted.
+    /// while one runs.
     fn settle(&mut self) {
         let deadline = Instant::now() + HANG_GUARD;
         loop {
@@ -312,8 +296,7 @@ impl Drive {
     }
 
     /// `steps` steps, the device delivering one callback in each with
-    /// `delivering`. Outside a rebuild a callback waits for the processing
-    /// thread to read the one before, so no ring overruns on a slow host.
+    /// `delivering`.
     fn run(&mut self, steps: usize, delivering: bool) {
         for _ in 0..steps {
             self.settle();
@@ -356,8 +339,6 @@ impl Drive {
         self.seen.iter().filter(|(_, notice)| what(notice)).count()
     }
 
-    /// Steps until the clock reads `until`, the device delivering one
-    /// callback a step with `delivering`.
     fn run_to(&mut self, until: Duration, delivering: bool) {
         while self.clock.now() < until {
             self.run(1, delivering);
@@ -388,14 +369,12 @@ fn master_frames(result: &CaptureResult) -> usize {
 }
 
 /// The device's `info` lines before its restarts go quiet: the
-/// recording's start, and the stop and the start of the streak's first
-/// restart. A stop or a start that logged at every restart shows here.
+/// recording's start, and the stop and start of the streak's first
+/// restart.
 const LOUD_DEVICE_LINES: usize = 4;
 
-/// Every line the capture logged over a recording that has run `until`:
-/// the session's `warn` lines for the stall and the streak's first failure,
-/// then about one a minute, and the device's `info` lines before the
-/// restarts went quiet (`LOUD_DEVICE_LINES`).
+/// Every line the capture logged over a recording that has run `until`
+/// comes about once a minute.
 fn assert_about_once_a_minute(log: &Log, until: Duration) {
     let warns = log.count("WARN", "");
     let infos = log.count("INFO", "");
@@ -424,14 +403,10 @@ fn assert_nothing_lost(result: &CaptureResult, backend: &Pushed) {
     );
 }
 
-/// A device that resumes, delivers a moment and stalls again within 10 s,
-/// over and over: its restarts are one streak across the rebuilds, counted
-/// on and backed off as restarts that fail are, up to
-/// `RESTART_BACKOFF_LONGEST`. Over two minutes the log says so about once a
-/// minute, `StillRestarting` comes once and the warning stands through the
-/// resumes, with no `Delivering` between them. Once the device delivers
-/// for 10 s, `Delivering` comes once, with one `info` line, and the master
-/// holds every frame it delivered.
+/// A device that resumes and stalls again within 10 s, over and over: its
+/// restarts are one streak, backed off, logged about once a minute, with
+/// one `StillRestarting` and no `Delivering` until it delivers for 10 s;
+/// the master holds every frame.
 #[test]
 fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
     let (_one, log) = one_at_a_time();
@@ -439,8 +414,6 @@ fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
     drive.run(5, true);
     let end = Duration::from_secs(120);
     while drive.clock.now() < end {
-        // Stalls, then a restart delivers at its first sample, and
-        // delivers 0.8 s more after the resume.
         drive.run_until(steps_in(Duration::from_secs(10)), false, |notice| {
             *notice == CaptureNotice::DeviceChanged(DeviceChangeReason::DeliveryStalled)
         });
@@ -461,8 +434,7 @@ fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
         (1..=resumes.len()).collect::<Vec<_>>(),
         "one streak, counted on across the rebuilds"
     );
-    // Each restart waits the backoff after the restarts before it, from
-    // the stall's report, to the step.
+    // Each restart waits the backoff from the stall's report.
     let starts = drive.backend.starts();
     let stalls: Vec<Duration> = drive
         .seen
@@ -502,8 +474,6 @@ fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
     assert_about_once_a_minute(log, drive.clock.now());
     assert_eq!(log.count("INFO", "delivers again"), 0);
 
-    // The device delivers for good: the warning ends once it has for
-    // `STALLED_AGAIN`, and only then.
     drive.run_until(steps_in(Duration::from_secs(10)), false, |notice| {
         matches!(notice, CaptureNotice::DeviceChanged(_))
     });
@@ -522,18 +492,11 @@ fn a_device_that_flaps_backs_off_logs_once_a_minute_and_warns_once() {
     assert_nothing_lost(&result, &drive.backend);
 }
 
-/// A Mac call capture whose silent output did not start (A10 of
-/// `.plans/2026-10-07-stable-promotion.md` logs that, once a streak): it
-/// delivers nothing until another app plays, from its start on. Held to
-/// deliver as every capture is, it is restarted on the backoff, about
-/// every 6 s (a 2 s wait for a frame, then 4 s), with about one log line a
-/// minute, the device's included, and one `StillRestarting`; no audio
-/// exists to lose meanwhile. Playback that begins while it waits between
-/// two restarts is lost until the next start: up to `RESTART_BACKOFF_LONGEST`
-/// here, and one start more on a live device (its wait for a first frame).
-/// That restart delivers, the silence before it fills up to `MAXIMUM_GAP`,
-/// and the master holds every frame from then on; the warning ends once it
-/// has delivered for 10 s.
+/// A Mac call capture whose silent output did not start delivers nothing
+/// until another app plays: it is restarted on the backoff with about one
+/// log line a minute and one `StillRestarting`. The restart after playback
+/// begins delivers, the silence before it fills, and the warning ends once
+/// it has delivered for 10 s.
 #[test]
 fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_records_from_the_next_start() {
     let (_one, log) = one_at_a_time();
@@ -573,8 +536,6 @@ fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_records_from_
     );
     assert_about_once_a_minute(log, drive.clock.now());
 
-    // Something plays from here on, beginning while the capture waits
-    // between two restarts: the next restart delivers.
     while drive.backend.is_running() {
         drive.run(1, false);
     }
@@ -602,11 +563,8 @@ fn a_call_capture_with_nothing_playing_restarts_on_the_backoff_and_records_from_
     assert_nothing_lost(&result, &drive.backend);
 }
 
-/// A warning that stands when a new streak begins (a device change after
-/// restarts that went past `RESTART_ATTEMPTS` and resumed) stands into it,
-/// and ends once the stream that change resumed on has delivered for 10 s,
-/// with one `Delivering` and nothing after it, and one `info` line that
-/// answers the restarts' `warn` lines.
+/// A warning that stands when a new streak begins stands into it, and ends
+/// once the stream that change resumed on has delivered for 10 s.
 #[test]
 fn a_warning_that_stands_into_a_new_streak_ends_once_its_stream_delivers() {
     let (_one, log) = one_at_a_time();
@@ -639,15 +597,9 @@ fn a_warning_that_stands_into_a_new_streak_ends_once_its_stream_delivers() {
     assert_nothing_lost(&result, &drive.backend);
 }
 
-/// A Mac call capture on a microphone chosen in Settings, with nothing
-/// playing: it runs on the output's clock, so its restarts that deliver
-/// nothing say nothing of the microphone, and every one stays on the
-/// chosen one. Wherever in a restart's cycle playback begins, the capture
-/// resumes on that microphone, not on the default input in its place, so
-/// the recorder, which reads the fallback from the resumed stream, never
-/// says the chosen microphone is not available. Playback that stops again
-/// soon after (a stall within 10 s of the resume) keeps it too, and
-/// nothing is lost.
+/// A Mac call capture on a chosen microphone, with nothing playing: its
+/// restarts say nothing of the microphone, so every one stays on it, and
+/// the capture resumes on it wherever playback begins. Nothing is lost.
 #[test]
 fn a_call_capture_keeps_its_chosen_microphone_through_restarts_with_nothing_playing() {
     // One restart's cycle at the longest backoff, in half seconds.
@@ -668,8 +620,6 @@ fn a_call_capture_keeps_its_chosen_microphone_through_restarts_with_nothing_play
         };
         drive.run_until(steps_in(Duration::from_secs(10)), true, is_resumed);
         on_the_chosen(&session, "resumed");
-        // The playback stops a moment, and its stall comes within 10 s of
-        // the resume.
         drive.run(steps_in(Duration::from_secs(3)), true);
         drive.run_until(steps_in(Duration::from_secs(5)), false, |notice| {
             matches!(notice, CaptureNotice::DeviceChanged(_))
@@ -690,13 +640,10 @@ fn a_call_capture_keeps_its_chosen_microphone_through_restarts_with_nothing_play
     }
 }
 
-/// A stream that delivers for 9 s and stalls, over and over, after
-/// restarts that brought the warning up: each stall comes more than 10 s
-/// after the resume, so each begins a new streak, which resumes on its
-/// first restart. The warning stands through them (no `Delivering`, since
-/// no 10 s of audio came), and while the restarts' `warn` line stands
-/// unanswered the stalls log at `debug`: no `warn` line over two minutes.
-/// Once the stream delivers for 10 s, one `info` line answers it.
+/// A stream that delivers for 9 s and stalls, over and over: each stall
+/// begins a new streak, the warning stands through them, and the stalls
+/// log at `debug` while the restarts' `warn` line stands unanswered. Once
+/// the stream delivers for 10 s, one `info` line answers it.
 #[test]
 fn a_stream_that_stalls_after_each_few_seconds_logs_no_warn_per_stall() {
     let (_one, log) = one_at_a_time();

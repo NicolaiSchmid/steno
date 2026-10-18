@@ -1,6 +1,5 @@
 //! RMS, ERLE, Goertzel and convolution helpers shared by the echo canceller
 //! tests, the live AEC path test and `aec-bench`.
-//! Swift: `Sources/StenoAudio/AEC/EchoMetrics.swift`.
 
 use std::ops::Range;
 
@@ -8,7 +7,7 @@ use steno_core::EchoCanceller;
 
 use crate::realtime::LevelMeter;
 
-/// Namespace for the measurement helpers; no state.
+/// Namespace for the measurement helpers.
 pub struct EchoMetrics;
 
 impl EchoMetrics {
@@ -30,9 +29,7 @@ impl EchoMetrics {
     }
 
     /// Echo return loss enhancement over `range`: how much quieter the
-    /// processed signal is than the unprocessed near-end, in dB. Positive is
-    /// better; with nothing but echo on the near-end it measures
-    /// cancellation.
+    /// processed signal is than the near-end, in dB. Positive is better.
     #[must_use]
     pub fn erle(near_end: &[f32], processed: &[f32], range: Range<usize>) -> f32 {
         let end = range.end.min(near_end.len()).min(processed.len());
@@ -67,9 +64,8 @@ impl EchoMetrics {
     }
 
     /// Direct-form convolution of `signal` with `impulse_response`,
-    /// truncated to `signal.len()`, optionally delayed by `delay` samples
-    /// (zeros first). Zero taps are skipped, so a sparse room costs one
-    /// multiply per reflection per sample.
+    /// truncated to `signal.len()`, after `delay` zeros. Zero taps are
+    /// skipped.
     #[must_use]
     pub fn convolve(signal: &[f32], impulse_response: &[f32], delay: usize) -> Vec<f32> {
         let mut output = vec![0.0f32; signal.len()];

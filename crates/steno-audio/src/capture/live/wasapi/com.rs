@@ -1,11 +1,7 @@
 //! The COM and WASAPI calls behind the Windows capture backend and the
-//! audio-session enumeration: the Windows backend's only `unsafe` (the
-//! crate-wide list is in the crate doc). Written against Microsoft's
-//! documentation and tested on the `windows-latest` CI runner, which has
-//! no audio endpoint; no Windows machine with audio devices has run it
-//! (see the module doc of `capture::live::wasapi`). WP10a of
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`; the macOS counterpart
-//! is `capture::live::hal`. No Swift counterpart.
+//! audio-session enumeration: the Windows backend's only `unsafe`. Tested
+//! on a CI runner without an audio endpoint; no Windows machine with audio
+//! devices has run it.
 //!
 //! # Invariants every `unsafe` block here relies on
 //!
@@ -100,11 +96,8 @@ use crate::realtime::{Missed, SliceView};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{operation} failed: {code:#010x} ({message})")]
 pub struct ComError {
-    /// The interface method or function.
     pub operation: &'static str,
-    /// The `HRESULT`'s bits.
     pub code: u32,
-    /// The system's text for it.
     pub message: String,
 }
 
@@ -112,13 +105,11 @@ impl ComError {
     fn new(operation: &'static str, error: &windows::core::Error) -> Self {
         Self {
             operation,
-            // The HRESULT's bit pattern, printed in hex.
             code: error.code().0 as u32,
             message: error.message(),
         }
     }
 
-    /// A failure with no `HRESULT` behind it (code 0).
     fn other(operation: &'static str, message: impl Into<String>) -> Self {
         Self {
             operation,
@@ -141,7 +132,6 @@ impl From<ComError> for CaptureError {
     }
 }
 
-/// `result` with the failing operation's name.
 fn check<T>(result: windows::core::Result<T>, operation: &'static str) -> Result<T, ComError> {
     result.map_err(|error| ComError::new(operation, &error))
 }
@@ -157,7 +147,6 @@ pub struct Apartment {
 }
 
 impl Apartment {
-    /// Joins the multithreaded apartment.
     pub fn enter() -> Result<Self, ComError> {
         // SAFETY: no pointer is passed (the reserved argument is null);
         // the call affects only the calling thread, and a success is
@@ -212,8 +201,6 @@ fn data_flow(flow: EndpointFlow) -> EDataFlow {
     }
 }
 
-/// `IMMDeviceEnumerator`: the default endpoints, endpoints by id and by
-/// flow, and the endpoint notifications.
 pub struct Enumerator(IMMDeviceEnumerator);
 
 impl Enumerator {
@@ -227,15 +214,13 @@ impl Enumerator {
     }
 
     /// The default endpoint for `flow` in the `eConsole` role, the one
-    /// most audio plays on and records from. (`eCommunications`, the call
-    /// apps' default, is not followed: no stream here opens it.)
+    /// most audio plays on and records from.
     pub fn default_endpoint(&self, flow: EndpointFlow) -> Result<Endpoint, ComError> {
         // SAFETY: plain values in, a counted interface out.
         let device = unsafe { self.0.GetDefaultAudioEndpoint(data_flow(flow), eConsole) };
         check(device, "IMMDeviceEnumerator::GetDefaultAudioEndpoint").map(Endpoint)
     }
 
-    /// The endpoint with this id (`IMMDevice::GetId`).
     pub fn endpoint(&self, id: &str) -> Result<Endpoint, ComError> {
         let id = HSTRING::from(id);
         // SAFETY: `id` is a NUL-terminated wide string alive for the call.
@@ -243,7 +228,6 @@ impl Enumerator {
         check(device, "IMMDeviceEnumerator::GetDevice").map(Endpoint)
     }
 
-    /// Every active endpoint for `flow`.
     pub fn active_endpoints(&self, flow: EndpointFlow) -> Result<Vec<Endpoint>, ComError> {
         // SAFETY: plain values in, a counted collection out.
         let collection = check(
@@ -264,12 +248,10 @@ impl Enumerator {
             .collect())
     }
 
-    /// Calls `on_event` for every endpoint notification (a default
-    /// changed, a device added, removed or changing state) until the
-    /// registration is dropped. Which device and role is not passed on:
-    /// the caller resolves the devices again. `on_event` runs on a
-    /// thread of the audio service and must neither block nor call into
-    /// WASAPI.
+    /// Calls `on_event` for every endpoint notification until the
+    /// registration is dropped; the caller resolves the devices again.
+    /// `on_event` runs on a thread of the audio service and must neither
+    /// block nor call into WASAPI.
     pub fn register(
         &self,
         on_event: Box<dyn Fn() + Send + Sync>,
@@ -335,7 +317,6 @@ impl IMMNotificationClient_Impl for EndpointNotifications_Impl {
     }
 }
 
-/// Unregisters the endpoint notifications on drop.
 pub struct EndpointRegistration {
     enumerator: IMMDeviceEnumerator,
     client: IMMNotificationClient,
@@ -353,7 +334,6 @@ impl Drop for EndpointRegistration {
     }
 }
 
-/// `IMMDevice`: one endpoint.
 pub struct Endpoint(IMMDevice);
 
 impl Endpoint {
@@ -368,7 +348,6 @@ impl Endpoint {
             .ok_or_else(|| ComError::other("IMMDevice::GetId", "empty endpoint id"))
     }
 
-    /// `DEVICE_STATE_ACTIVE`: present, enabled, not unplugged.
     #[must_use]
     pub fn is_active(&self) -> bool {
         // SAFETY: a plain call on the live device.
@@ -397,7 +376,6 @@ impl Endpoint {
         }
     }
 
-    /// The shared-mode mix format's channels and rate.
     #[must_use]
     pub fn mix_format(&self) -> Option<(usize, u32)> {
         mix_format(&self.audio_client().ok()?)
@@ -411,7 +389,6 @@ impl Endpoint {
         )
     }
 
-    /// The endpoint's session manager.
     pub fn session_manager(&self) -> Result<SessionManager, ComError> {
         check(
             // SAFETY: activation of a documented interface with no parameters.
@@ -422,9 +399,7 @@ impl Endpoint {
     }
 }
 
-/// 32-bit float, interleaved, 48 kHz, `channels` channels.
 fn float_format(channels: usize) -> WAVEFORMATEX {
-    // At most two channels are ever asked for.
     let channels = channels as u16;
     let block_align = channels * 4;
     let rate = SAMPLE_RATE as u32;
@@ -441,7 +416,6 @@ fn float_format(channels: usize) -> WAVEFORMATEX {
 
 /// How often a polled stream (no event) is drained: 50 ms, half its buffer.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(50);
-/// [`POLL_INTERVAL`] as a `REFERENCE_TIME`.
 const POLL_INTERVAL_HUNDRED_NANOSECONDS: i64 = (POLL_INTERVAL.as_nanos() / 100) as i64;
 
 /// A Win32 auto-reset event the engine signals per period.
@@ -468,13 +442,10 @@ impl Drop for Event {
     }
 }
 
-/// Which loopback a system stream ended up on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopbackKind {
-    /// Process loopback excluding Steno's own process tree. Microsoft's
-    /// API page names build 20438 and its ApplicationLoopback sample build
-    /// 20348; it is reported to work from Windows 10 2004 (build 19041).
-    /// Unverified here; the endpoint fallback covers either.
+    /// Process loopback excluding Steno's own process tree (Windows 10
+    /// 2004 and later, unverified here; the endpoint fallback covers it).
     Process,
     /// Loopback of the default render endpoint, Steno's own output
     /// included.
@@ -482,8 +453,7 @@ pub enum LoopbackKind {
 }
 
 /// `client`'s shared-mode mix format: its channels and rate; `None` when
-/// the client gives none (the process-loopback client may not implement
-/// it).
+/// the client gives none.
 fn mix_format(client: &IAudioClient) -> Option<(usize, u32)> {
     // SAFETY: on success the format is ours to free; it is read by value
     // (the struct is packed, so unaligned) before the free.
@@ -517,8 +487,6 @@ fn qpc_now() -> Option<u64> {
     u64::try_from((counter * 10_000_000).checked_div(frequency)?).ok()
 }
 
-/// One initialised shared-mode capture stream: the client, its capture
-/// service, the event it signals.
 pub struct CaptureClient {
     capture: IAudioCaptureClient,
     client: IAudioClient,
@@ -531,10 +499,8 @@ pub struct CaptureClient {
     /// No packet drained yet: loopback streams commonly flag their first
     /// packet as a discontinuity, which is not a late thread.
     first_packet: bool,
-    /// The packets' clocks, measured and read for what the engine lost.
     positions: DevicePositions,
-    /// Frames the discontinuities lost, as the packets' clocks tell them,
-    /// filled or not (handed to the body).
+    /// Frames the discontinuities lost, as the packets' clocks tell them.
     missed_frames: usize,
 }
 
@@ -547,8 +513,7 @@ impl CaptureClient {
     }
 
     /// Loopback of the render `endpoint`. Event-driven where the engine
-    /// supports it for loopback (Windows 10 1703 and later), polled
-    /// otherwise.
+    /// supports it for loopback, polled otherwise.
     pub fn endpoint_loopback(endpoint: &Endpoint, channels: usize) -> Result<Self, ComError> {
         let flags = AUDCLNT_STREAMFLAGS_LOOPBACK
             | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
@@ -583,8 +548,8 @@ impl CaptureClient {
         event_driven: bool,
     ) -> Result<Self, ComError> {
         let format = float_format(channels);
-        // Read before `Initialize`: the engine's rate, one of the units the
-        // device positions may count in.
+        // Read before `Initialize`: one of the units the device positions
+        // may count in.
         let engine_rate = mix_format(&client).map(|(_, rate)| rate);
         let flags = if event_driven {
             flags | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
@@ -654,8 +619,6 @@ impl CaptureClient {
         })
     }
 
-    /// The buffer, period and latency the stream runs with: what the
-    /// engine answered, where [`stream_sizes`] trusts it.
     #[must_use]
     pub fn sizes(&self) -> StreamSizes {
         self.sizes
@@ -669,41 +632,33 @@ impl CaptureClient {
         self.discontinuities
     }
 
-    /// Frames those discontinuities lost, as far as the packets' clocks
-    /// tell (see [`Self::drain`]).
     #[must_use]
     pub fn missed_frames(&self) -> usize {
         self.missed_frames
     }
 
-    /// The packets' clocks so far, for the stop's log.
     #[must_use]
     pub fn positions(&self) -> &DevicePositions {
         &self.positions
     }
 
     /// What the thread missed after its last packet, for a stream that
-    /// delivers continuously, read once its final drain is done: the
-    /// performance counter now against the last packet's QPC
-    /// ([`DevicePositions::missed_until`], which states the rule). Nothing
-    /// when the counter cannot be read.
+    /// delivers continuously, read once its final drain is done
+    /// ([`DevicePositions::missed_until`]).
     #[must_use]
     pub fn missed_at_stop(&self) -> Missed {
         qpc_now().map_or_else(Missed::default, |now| self.positions.missed_until(now))
     }
 
     /// The frames the engine lost before the stream's first packet, beyond
-    /// its start latency, for a stream started `continuously`
-    /// ([`DevicePositions::missed_before_first`], which states the rule).
+    /// its start latency ([`DevicePositions::missed_before_first`]).
     #[must_use]
     pub fn missed_before_first(&self) -> usize {
         self.positions.missed_before_first(self.sizes)
     }
 
-    /// Starts the stream. One that delivers `continuously` (the
-    /// microphone, process loopback) reads the performance counter just
-    /// before, for [`Self::missed_before_first`]; endpoint loopback may
-    /// start in an idle, so it reads none.
+    /// Starts the stream. One that delivers `continuously` reads the
+    /// performance counter just before, for [`Self::missed_before_first`].
     pub fn start(&mut self, continuously: bool) -> Result<(), ComError> {
         if continuously && let Some(now) = qpc_now() {
             self.positions.start(now);
@@ -712,15 +667,13 @@ impl CaptureClient {
         check(unsafe { self.client.Start() }, "IAudioClient::Start")
     }
 
-    /// Stops the stream; the engine stops signalling the event.
     pub fn stop(&self) -> Result<(), ComError> {
         // SAFETY: plain call on the initialised client.
         check(unsafe { self.client.Stop() }, "IAudioClient::Stop")
     }
 
     /// Waits for the engine's signal, at most `timeout` (a polled stream
-    /// sleeps [`POLL_INTERVAL`] instead). The caller drains either way, so
-    /// a timeout is not reported.
+    /// sleeps [`POLL_INTERVAL`] instead); a timeout is not reported.
     pub fn wait(&self, timeout: Duration) {
         let Some(event) = &self.event else {
             std::thread::sleep(POLL_INTERVAL);
@@ -731,14 +684,10 @@ impl CaptureClient {
         let _ = unsafe { WaitForSingleObject(event.0, milliseconds) };
     }
 
-    /// Hands every queued packet to `handle`, then returns, with what the
-    /// engine lost right before it on a packet flagged
-    /// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` (the first one aside, see
-    /// `first_packet`): `Some`, read from its device position and QPC by
-    /// [`DevicePositions`] (the rule is stated there), and `None` on any
-    /// other packet. The real-time part: no allocation and no lock here on
-    /// success (the `windows` error values are built only on failure);
-    /// `handle` must keep it so.
+    /// Hands every queued packet to `handle`, with what the engine lost
+    /// before it on a packet flagged as a discontinuity (the first one
+    /// aside), read by [`DevicePositions`]. Real-time: no allocation and no
+    /// lock on success; `handle` must keep it so.
     pub fn drain(
         &mut self,
         mut handle: impl FnMut(SliceView<'_>, Option<Missed>),
@@ -770,7 +719,6 @@ impl CaptureClient {
                 },
                 "IAudioCaptureClient::GetBuffer",
             )?;
-            // The flag constants are small positive bit masks.
             let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
             let discontinuity =
                 flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 && !self.first_packet;
@@ -874,7 +822,6 @@ impl ActivationParams {
         Self(blob)
     }
 
-    /// The variant to pass, valid while `self` lives.
     fn variant(&self) -> *const PROPVARIANT {
         // SAFETY: a place projection on the live allocation, no read;
         // `ManuallyDrop` is `repr(transparent)`.
@@ -890,8 +837,6 @@ impl Drop for ActivationParams {
     }
 }
 
-/// `windows-implement` already answers `IAgileObject` for every
-/// `#[implement]` type; it is listed here as well because
 /// `ActivateAudioInterfaceAsync` requires an agile handler.
 #[implement(IActivateAudioInterfaceCompletionHandler, IAgileObject)]
 struct ActivationHandler {
@@ -912,8 +857,6 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
 
 impl IAgileObject_Impl for ActivationHandler_Impl {}
 
-/// `ActivateAudioInterfaceAsync` on the process-loopback virtual device
-/// with `PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE`.
 fn activate_process_loopback(
     excluded_pid: u32,
     timeout: Duration,
@@ -975,7 +918,6 @@ pub struct ProAudioThread {
 }
 
 impl ProAudioThread {
-    /// Joins the "Pro Audio" task.
     #[must_use]
     pub fn enter() -> Option<Self> {
         let mut index: u32 = 0;
@@ -997,7 +939,6 @@ impl Drop for ProAudioThread {
     }
 }
 
-/// `IAudioSessionManager2` of one endpoint.
 pub struct SessionManager(IAudioSessionManager2);
 
 impl SessionManager {
@@ -1021,8 +962,6 @@ impl SessionManager {
             .collect())
     }
 
-    /// Calls `on_created` whenever a session is created on the endpoint,
-    /// until the registration is dropped.
     pub fn register_created(
         &self,
         on_created: Box<dyn Fn() + Send + Sync>,
@@ -1052,7 +991,6 @@ impl IAudioSessionNotification_Impl for SessionCreated_Impl {
     }
 }
 
-/// Unregisters the session-created notification on drop.
 pub struct SessionManagerRegistration {
     manager: IAudioSessionManager2,
     notification: IAudioSessionNotification,
@@ -1068,7 +1006,6 @@ impl Drop for SessionManagerRegistration {
     }
 }
 
-/// `IAudioSessionControl`: one session.
 pub struct Session(IAudioSessionControl);
 
 impl Session {
@@ -1098,8 +1035,6 @@ impl Session {
         })
     }
 
-    /// Calls `on_state` whenever the session's state changes or it
-    /// disconnects, until the registration is dropped.
     pub fn register_events(
         &self,
         on_state: Box<dyn Fn() + Send + Sync>,
@@ -1190,7 +1125,6 @@ impl IAudioSessionEvents_Impl for SessionEvents_Impl {
     }
 }
 
-/// Unregisters the session events on drop.
 pub struct SessionRegistration {
     session: IAudioSessionControl,
     events: IAudioSessionEvents,

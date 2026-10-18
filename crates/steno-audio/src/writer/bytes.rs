@@ -1,15 +1,12 @@
-//! Random access to a file's bytes, so the CAF and WAV readers walk their
-//! chunk headers the same way over a slice in memory and over a file on
-//! disk, and the streaming readers fetch their samples a block at a time.
-//! No Swift counterpart (the Swift readers load the file whole).
+//! Random access to a file's bytes, so the CAF and WAV readers walk chunk
+//! headers the same way over memory and over a file on disk.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-/// Bytes read by offset; see the module doc. A file's errors name it.
+/// Bytes read by offset. A file's errors name it.
 pub(crate) trait ReadAt {
-    /// The bytes there are.
     fn len(&self) -> usize;
 
     /// Fills `buffer` from `offset`; `offset + buffer.len()` is at most
@@ -28,12 +25,10 @@ impl ReadAt for &[u8] {
     }
 }
 
-/// A file read through a small window, so a walk over many small chunk
-/// headers costs a read per window rather than one per header; a read of
-/// a window or more goes to the file directly.
+/// A file read through a small window, so walking many small chunk headers
+/// costs a read per window; larger reads go to the file directly.
 pub(crate) struct WindowedFile {
     file: File,
-    /// Named in every error.
     path: PathBuf,
     len: usize,
     window: Vec<u8>,
@@ -93,7 +88,6 @@ impl ReadAt for WindowedFile {
     }
 }
 
-/// `error` with `path` in front of its message.
 fn named(path: &Path, error: &std::io::Error) -> std::io::Error {
     std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }

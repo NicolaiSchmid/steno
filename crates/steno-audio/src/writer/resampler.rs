@@ -1,13 +1,8 @@
 //! 48 kHz to 16 kHz by exact 3:1 decimation through a Kaiser-windowed sinc
-//! low-pass (192 taps, cutoff 7.3 kHz, stopband from about 8 kHz).
-//! Swift: `Sources/StenoAudio/Writer/Resampler48kTo16k.swift`.
-//!
-//! Deterministic on every machine, every buffer allocated in `new`, so it
-//! runs on the writer thread without allocation and its output is
-//! byte-identical between CI and a Mac. One instance per lane; it keeps the
-//! filter history between calls.
+//! low-pass (192 taps, cutoff 7.3 kHz). Deterministic and allocation-free
+//! after `new`; one instance per lane keeps the filter history.
 
-/// The 3:1 decimator; see the module doc.
+/// The 3:1 decimator.
 #[derive(Debug, Clone)]
 pub struct Resampler48kTo16k {
     frame_size: usize,
@@ -17,9 +12,7 @@ pub struct Resampler48kTo16k {
 }
 
 impl Resampler48kTo16k {
-    /// 48 kHz to 16 kHz.
     pub const FACTOR: usize = 3;
-    /// Filter length.
     pub const TAPS: usize = 192;
 
     /// `frame_size` must be a multiple of 3.
@@ -37,21 +30,18 @@ impl Resampler48kTo16k {
         }
     }
 
-    /// Input samples per `process`.
     #[must_use]
     pub fn frame_size(&self) -> usize {
         self.frame_size
     }
 
-    /// Output samples per call: `frame_size / 3`.
     #[must_use]
     pub fn output_frame_size(&self) -> usize {
         self.output_frame_size
     }
 
-    /// Consumes exactly `frame_size` input samples and produces
-    /// `output_frame_size` Int16 samples (the sidecar format) in `output`,
-    /// clamped to full scale.
+    /// Consumes exactly `frame_size` samples into `output_frame_size`
+    /// sidecar `i16` samples, clamped to full scale.
     pub fn process(&mut self, input: &[f32], output: &mut [i16]) {
         let taps = Self::TAPS;
         let offset = taps - 1;
@@ -71,7 +61,6 @@ impl Resampler48kTo16k {
             .copy_within(self.frame_size..self.frame_size + offset, 0);
     }
 
-    /// Zeroes the history (a new recording).
     pub fn reset(&mut self) {
         self.history.fill(0.0);
     }

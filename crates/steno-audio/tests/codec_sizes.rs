@@ -1,15 +1,8 @@
 //! The sizes symphonia allocates from, checked before its demuxer opens a
-//! file (`codec::sizes`, A17 of `.plans/2026-10-07-stable-promotion.md`).
-//! Every case measured or crafted to abort the process on Linux is refused
-//! as an ordinary error, and a file that is no MP4, CAF or WAV from its
-//! first byte is refused before symphonia reads it; every fixture, and
-//! every healthy variant a writer makes that symphonia reads, still reads;
-//! and a fuzz pass that sets the size and count fields of the fixtures'
-//! boxes, chunks and tables to random and boundary values aborts nothing.
-//! On Linux the cases and the fuzz run in a child of this binary whose
-//! address space is held to 2 GiB ([`ADDRESS_SPACE_KIB`]), a machine that
-//! cannot back the allocations the measurement found. Without the check,
-//! the first cases below abort this test binary.
+//! file (`codec::sizes`): every case crafted to abort the process is
+//! refused as an ordinary error, every healthy file still reads, and a fuzz
+//! pass over the fixtures' size fields aborts nothing. On Linux they run in
+//! a child held to 2 GiB of address space ([`ADDRESS_SPACE_KIB`]).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -81,10 +74,9 @@ fn holds_boxes(bytes: &[u8], mut at: usize, end: usize) -> bool {
     true
 }
 
-/// Every box of `bytes`, depth first: below any box whose body (from 0, 4
-/// or 8 bytes in, or after an audio sample entry's fields of 28, 44 or 64
-/// bytes) is a run of well-formed boxes, so the fuzz reaches more than the
-/// walk follows.
+/// Every box of `bytes`, depth first, also below any box whose body is a
+/// run of well-formed boxes, so the fuzz reaches more than the walk
+/// follows.
 fn boxes(bytes: &[u8]) -> Vec<Found> {
     fn walk(bytes: &[u8], mut at: usize, end: usize, path: &[[u8; 4]], out: &mut Vec<Found>) {
         while let Some((kind, header, size)) = header_at(bytes, at, end) {
@@ -134,9 +126,8 @@ fn set32(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_be_bytes());
 }
 
-/// `bytes` with `range` replaced by `new`: the boxes in `holders`, which hold
-/// the range, take the difference in size, and so do the chunk offsets past
-/// it, as a writer that moved the media data would write them.
+/// `bytes` with `range` replaced by `new`: the boxes in `holders` and the
+/// chunk offsets past it take the difference in size.
 fn splice(bytes: &[u8], range: std::ops::Range<usize>, new: &[u8], holders: &[Found]) -> Vec<u8> {
     let delta = i64::try_from(new.len()).unwrap() - i64::try_from(range.len()).unwrap();
     let moved = |value: u64| {
@@ -153,7 +144,6 @@ fn splice(bytes: &[u8], range: std::ops::Range<usize>, new: &[u8], holders: &[Fo
         set32(&mut out, parent.at, u32::try_from(size).unwrap());
     }
     out.splice(range.clone(), new.iter().copied());
-    // The movie's tables, not one the fuzz's walk finds in a `free` box.
     for table in boxes(&out)
         .into_iter()
         .filter(|table| table.path[0] == *b"moov")
@@ -326,8 +316,8 @@ fn desc(format: [u8; 4], flags: u32, bytes: u32, frames: u32, bits: u32) -> Vec<
     out
 }
 
-/// 16-bit PCM, which symphonia's CAF reader (not the crate's Float32
-/// reader) reads: 0.1 s of a ramp.
+/// 16-bit PCM, which symphonia's CAF reader (not the crate's) reads: 0.1 s
+/// of a ramp.
 fn pcm_caf() -> Vec<u8> {
     let mut data = vec![0u8; 4];
     for index in 0..1_600u16 {
@@ -339,8 +329,7 @@ fn pcm_caf() -> Vec<u8> {
     ])
 }
 
-/// Big-endian Float32 PCM, which symphonia's CAF reader reads too (the
-/// crate's own reads only the little-endian Float32 Steno writes): 0.1 s
+/// Big-endian Float32 PCM, which symphonia's CAF reader reads too: 0.1 s
 /// of a ramp.
 fn float_caf() -> Vec<u8> {
     let mut data = vec![0u8; 4];
@@ -353,9 +342,8 @@ fn float_caf() -> Vec<u8> {
     ])
 }
 
-/// An AAC CAF in shape (its packets are noise): a magic cookie and a
-/// packet table, as `AVFoundation` writes AAC in CAF: one-byte sizes, or
-/// with `two_varints`, each packet's size and its frames (varying both).
+/// An AAC CAF in shape (its packets are noise) with a magic cookie and a
+/// packet table: one-byte sizes, or with `two_varints` size and frames.
 fn aac_caf_with(two_varints: bool) -> Vec<u8> {
     let packets = 20u8;
     let mut pakt = i64::from(packets).to_be_bytes().to_vec();
@@ -400,8 +388,7 @@ fn one_packet_caf(frames: u32, entry: &[u8], open: bool) -> Vec<u8> {
 }
 
 /// A CAF of `format` whose `data` is left open (-1): its edit count, then
-/// `tail` where the audio would be, which symphonia reads on for chunks
-/// (`chunks.rs:203-205`).
+/// `tail` where the audio would be, which symphonia reads on for chunks.
 fn open_data_then(format: &str, tail: &[u8]) -> Vec<u8> {
     let (description, cookie) = match format {
         "s16le" => (desc(*b"lpcm", 2, 2, 1, 16), false),
@@ -519,11 +506,9 @@ fn pcm_wav() -> Vec<u8> {
 
 /// A WAV whose odd `LIST` before `data` holds `list`, followed by the
 /// chunk the walk reads next. That chunk holds, `shift` bytes in, where
-/// symphonia reads after padding the list twice, a `LIST` of `outer`
-/// bytes with an `INAM` of `value` bytes. The walk reads that chunk's
-/// size from the 4 bytes at its offset 4, which include the low
-/// `4 - shift` bytes of `outer`, so only `outer`'s top `shift` bytes are
-/// free, and the size stays small.
+/// symphonia reads after padding the list twice, a `LIST` of `outer` bytes
+/// with an `INAM` of `value` bytes; only `outer`'s top `shift` bytes are
+/// free, so the walk's size stays small.
 fn misread_wav(list: &[u8], shift: usize, outer: u32, value: u32) -> Vec<u8> {
     assert_eq!(list.len() % 2, 1, "an odd list");
     let mut planted = vec![b'X'; shift];
@@ -593,22 +578,15 @@ fn coded_formats() -> Vec<CodedFormat> {
 }
 
 /// The address space, in KiB, the measured cases and the fuzz run in on
-/// Linux: 2 GiB, so an allocation above about 2 GB fails, and aborts,
-/// instead of being reserved lazily. Every healthy file reads well within
-/// it: the 12-minute Swift-era recording peaks at 138 MB as it decodes,
-/// every fixture under 7 MB. Its floor is a decode's reservation for a
-/// `data` chunk declared past the file, capped at five hours at 16 kHz
-/// (1.15 GB, `reserved_frames` in `codec`), so the limit stays above
-/// 1.2 GiB.
+/// Linux: 2 GiB, so a large allocation fails instead of being reserved
+/// lazily. It must stay above a decode's capped five-hour reservation
+/// (1.15 GB).
 const ADDRESS_SPACE_KIB: u64 = 2_097_152;
 
 /// Runs `body` held to [`ADDRESS_SPACE_KIB`]: on Linux in a child of this
-/// binary that runs the test `name` alone under `ulimit -v` (and writes no
-/// core file), so an abort fails the child and this test with it, and
-/// returns the child's stderr; elsewhere (no such limit on the Mac or
-/// Windows), and in the child itself, in this process, returning `None`.
-/// The child must report that it ran one test, so a `name` that matches
-/// none fails instead of passing empty.
+/// binary that runs the test `name` alone under `ulimit -v`, returning the
+/// child's stderr; elsewhere, and in the child itself, in this process,
+/// returning `None`. The child must report that it ran one test.
 fn limited(name: &str, body: impl FnOnce()) -> Option<String> {
     const CHILD: &str = "STENO_SIZES_LIMITED";
     if !cfg!(target_os = "linux") || std::env::var_os(CHILD).is_some() {
@@ -702,8 +680,7 @@ fn not_refused(path: &Path) {
 }
 
 /// The phone's file with the 1 TiB tag and with an `stco` counting
-/// 2^32 - 1 entries: the two cases measured to abort, as the prefixes and
-/// wrappers below carry them.
+/// 2^32 - 1 entries: the two cases measured to abort.
 fn measured_bad() -> [(&'static str, Vec<u8>); 2] {
     let phone = std::fs::read(fixture(PHONE)).unwrap();
     let stco = find(&phone, *b"stco");
@@ -715,18 +692,10 @@ fn measured_bad() -> [(&'static str, Vec<u8>); 2] {
     ]
 }
 
-/// The cases measured or crafted to abort on Linux, each refused before
-/// symphonia allocates: a 1 TiB and a 64 GiB `ilst` `data` atom, in
-/// `moov/udta` and in a top-level `meta`, the sample tables counting
-/// 2^32 - 1 entries, a sample larger than the file, the CAF magic cookie
-/// of 1 TiB, packet tables of 2^32 and 2^40 packets or with a packet of
-/// 2^40 or 2^50 bytes, packets or uncompressed frames of 2^28 and 2^31
-/// bytes, the same cookie and packet tables in the audio of an open
-/// `data` chunk, where symphonia reads on for chunks, a WAV `LIST` whose
-/// `INFO` value declares 4 GiB in a file of 3 KiB, and a WAV `LIST` of odd
-/// size before `data`, after which symphonia reads a header the walk never
-/// saw, 1 or 2 bytes on, with an `INFO` value of 4 GiB. Held to
-/// [`ADDRESS_SPACE_KIB`] on Linux.
+/// The cases measured or crafted to abort on Linux (huge tags, sample
+/// tables, cookies, packet tables and frames in MP4 and CAF, WAV lists
+/// declaring 4 GiB, an odd `LIST` before `data`), each refused before
+/// symphonia allocates. Held to [`ADDRESS_SPACE_KIB`] on Linux.
 #[test]
 fn every_size_measured_to_abort_is_refused() {
     limited(
@@ -800,13 +769,10 @@ fn measured_cases_are_refused() {
         }
     }
     // Packets of a constant size larger than the file, and uncompressed
-    // frames of such a size (symphonia reads 1 152 of them at once), with
-    // the audio closed, open (-1) or declared past the file's end.
+    // frames of such a size, with the audio closed, open or past the end.
     let samples = [0u8; 484].to_vec();
     for exponent in [28, 31] {
         let bytes = 1u32 << exponent;
-        // Big-endian Float32 and 16-bit PCM; the crate's own reader takes
-        // little-endian Float32, and reads no packet size.
         for (flags, bits) in [(1, 32), (2, 16)] {
             for declared in [None, Some(-1), Some(1 << 50)] {
                 cases.push((
@@ -834,8 +800,6 @@ fn measured_cases_are_refused() {
         ]),
         "gives packets of",
     ));
-    // Within the file, but 8 KiB frames: 9 MiB a read, of a file that
-    // could hold none.
     cases.push((
         "wide-frames.caf".into(),
         caf(&[
@@ -900,9 +864,8 @@ fn measured_cases_are_refused() {
         ),
         "the `LIST` chunk",
     ));
-    // An odd `LIST` before `data`, which symphonia pads twice: an `INFO`
-    // form and one byte (1 byte on), and an `INFO` value that ends the
-    // list on its odd byte (2 bytes on).
+    // An odd `LIST` before `data`, which symphonia pads twice: 1 byte on
+    // and 2 bytes on.
     let one_value = [b"INFOINAM".as_slice(), &1u32.to_le_bytes(), b"A"].concat();
     for (name, list, shift, outer, value) in [
         (
@@ -926,8 +889,6 @@ fn measured_cases_are_refused() {
         let error = refused(&path);
         assert!(error.contains(says), "{name}: {error}");
     }
-    // Little-endian Float32 is the crate's own reader's, which reads the
-    // audio as audio; symphonia still reads the declared length.
     for tail in [
         chunk_in_the_audio(*b"kuki", 1 << 40, &[0; 64]),
         chunk_in_the_audio(*b"pakt", 25, &table),
@@ -942,11 +903,9 @@ fn measured_cases_are_refused() {
     }
 }
 
-/// Symphonia's own probe scans the first MiB for an `ftyp` and reads from
-/// there, past junk or an ID3 tag, or into a `free` box. The walk starts at
-/// byte 0, and so does the MP4 reader; a file that does not start with
-/// well-formed boxes is refused before symphonia reads it, and a movie
-/// hidden in a leading box is never read.
+/// The walk starts at byte 0, as the MP4 reader does: a file that does not
+/// start with well-formed boxes is refused, and a movie hidden in a leading
+/// box is never read.
 #[test]
 fn a_movie_the_walk_did_not_see_is_never_read() {
     let dir = tempfile::tempdir().unwrap();
@@ -963,8 +922,6 @@ fn a_movie_the_walk_did_not_see_is_never_read() {
             let path = write(dir.path(), &format!("in-a-box-{label}.m4a"), &alone);
             refused(&path);
         }
-        // A fake movie in a leading box, then a healthy file: the reader
-        // seeks past the box, and reads the healthy one.
         for kind in [*b"free", *b"skip", *b"wide"] {
             let led = led_by(&phone, &atom(kind, &hidden));
             let path = write(dir.path(), &format!("hidden-{label}.m4a"), &led);
@@ -996,10 +953,9 @@ fn prefixes() -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
-/// Steno reads MP4, CAF and WAV files, from their first byte, and nothing
-/// else: a phone file behind a prefix, which symphonia 0.5.5's probe did
-/// not read either, an MP3, and an empty file all fail with the one plain
-/// sentence, before symphonia reads a byte, the file kept.
+/// Steno reads MP4, CAF and WAV files from their first byte and nothing
+/// else: a prefixed phone file, an MP3 and an empty file fail with the one
+/// plain sentence, the file kept.
 #[test]
 fn a_file_that_is_no_mp4_caf_or_wav_from_its_first_byte_is_refused_plainly() {
     let dir = tempfile::tempdir().unwrap();
@@ -1050,9 +1006,8 @@ fn a_box_or_chunk_that_does_not_fit_is_refused() {
     assert!(error.contains("the `chan` chunk"), "{error}");
 }
 
-/// Each fixed header symphonia subtracts from a box's length unchecked,
-/// where it reads the box: `hdlr` in `mdia`, `meta` at the top level and
-/// in `moov/udta`, and an `ilst` item's `mean`, `name` and `data`.
+/// Each fixed header symphonia subtracts from a box's length unchecked is
+/// checked where it reads the box.
 #[test]
 fn a_box_shorter_than_the_header_symphonia_takes_off_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -1087,10 +1042,9 @@ fn a_box_shorter_than_the_header_symphonia_takes_off_is_refused() {
     }
 }
 
-/// The sample sizes a fragmented file gives, in a run (`trun`), as a
-/// fragment's default (`tfhd`) or a track's (`trex`), and a constant
-/// `stsz` size: each larger than the file is refused, one as large is not.
-/// Each table counting one entry more than it holds is refused.
+/// The sample sizes a fragmented file or `stsz` gives: each larger than the
+/// file is refused, one as large is not; a table counting one entry more
+/// than it holds is refused.
 #[test]
 fn every_sample_size_and_offset_table_is_checked() {
     let dir = tempfile::tempdir().unwrap();
@@ -1178,11 +1132,8 @@ fn every_sample_size_and_offset_table_is_checked() {
     }
 }
 
-/// A size is read where the flags put it, past the fields they add: a
-/// fragment's base data offset (0x1) before its default size (0x10); a
-/// run's first sample's flags (0x4) before its sizes (0x200), and each
-/// sample's duration (0x100) before its size. Each larger than the file
-/// is refused.
+/// A size is read where the flags put it, past the fields they add; each
+/// larger than the file is refused.
 #[test]
 fn a_size_past_the_fields_its_flags_add_is_checked() {
     let dir = tempfile::tempdir().unwrap();
@@ -1217,11 +1168,8 @@ fn a_size_past_the_fields_its_flags_add_is_checked() {
 }
 
 /// Media data cut off by the file's end is no allocation, so the check
-/// lets it through: a finished file whose `mdat` is cut short, a CAF whose
-/// `data` runs past it. A CAF whose `data` is left open (-1) has its audio
-/// read for chunks, as symphonia reads it (`chunks.rs:203-205`): samples
-/// are no chunks, and symphonia 0.5.5 fails such a file either way ("no
-/// decodable audio"); the crate's own reader takes Steno's own masters.
+/// lets it through; a CAF whose `data` is left open has its audio read for
+/// chunks, as symphonia reads it.
 #[test]
 fn media_data_cut_off_still_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -1234,8 +1182,6 @@ fn media_data_cut_off_still_reads() {
         u32::try_from(mdat.end - mdat.at + 4_096).unwrap(),
     );
     let pcm = pcm_caf();
-    // The `data` chunk's header: its body is the edit count and 1 600
-    // samples of two bytes.
     let data = pcm.len() - 3_204 - 12;
     let mut open = pcm.clone();
     open[data + 4..data + 12].copy_from_slice(&(-1i64).to_be_bytes());
@@ -1248,12 +1194,10 @@ fn media_data_cut_off_still_reads() {
     assert!(SymphoniaAudioCodec::declared_duration(&open).is_err());
 }
 
-/// A WAV's chunks are walked up to its audio, where symphonia's reader
-/// stops: one before the audio that runs past the file is refused, and so
-/// is a `fmt ` symphonia would read short (an extensible format of more
-/// than 40 bytes); a list after the audio, whatever it declares, an odd
-/// chunk padded to an even byte, audio cut off by the file's end, and the
-/// sizes ffmpeg writes to a pipe (2^32 - 1) all read.
+/// A WAV's chunks are walked up to its audio: one before it running past
+/// the file is refused, and so is a `fmt ` symphonia would read short;
+/// what follows the audio, odd padding, cut-off audio and ffmpeg's piped
+/// sizes all read.
 #[test]
 fn a_wav_is_walked_up_to_its_audio() {
     let dir = tempfile::tempdir().unwrap();
@@ -1340,14 +1284,9 @@ fn a_wav_is_walked_up_to_its_audio() {
     );
 }
 
-/// A WAV chunk before the audio after which symphonia would read the next
-/// header where the walk never looked is refused: a `fmt ` whose ADPCM,
-/// A-law or µ-law extra size disagrees with the chunk (each sized right
-/// is let through), and a `LIST` of odd size, which symphonia pads twice
-/// and so fails on even when it is padded as the format says; the crate's
-/// own reader, which `steno process` checks a file with, refuses it too.
-/// An even `LIST` with an odd value at its end reads, and so do an odd
-/// one after the audio and an odd `JUNK` before it.
+/// A WAV chunk after which symphonia would read the next header where the
+/// walk never looked is refused: a `fmt ` whose extra size disagrees, and
+/// an odd `LIST` before the audio. Odd chunks elsewhere read.
 #[test]
 fn a_wav_chunk_symphonia_reads_out_of_step_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -1405,8 +1344,6 @@ fn a_wav_chunk_symphonia_reads_out_of_step_is_refused() {
         let read = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
         assert_eq!(read.samples.len(), 1_600, "{name}");
     }
-    // The rule is the `LIST`'s alone: an odd chunk of another kind before
-    // the audio reads in the crate's reader too.
     let junk = wav(
         None,
         &[
@@ -1421,9 +1358,7 @@ fn a_wav_chunk_symphonia_reads_out_of_step_is_refused() {
 }
 
 /// A final top-level box that runs past the file's end is let through when
-/// symphonia only seeks past it, and refused when it parses it. Symphonia
-/// 0.5.5 itself fails on either ("end of stream", as it reads up to where
-/// the box would end), so the walk turns no readable file away.
+/// symphonia only seeks past it, and refused when it parses it.
 #[test]
 fn a_final_box_cut_off_is_refused_only_where_symphonia_parses_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -1448,13 +1383,7 @@ fn a_final_box_cut_off_is_refused_only_where_symphonia_parses_it() {
 }
 
 /// The healthy variants a writer makes that symphonia reads, which the
-/// walk would read wrongly with a rule out of place: `QuickTime`'s `meta`
-/// (no version and flags) in `moov` or a track, a one-letter track or
-/// movie name in `udta`, an item symphonia skips with a short `data`, a
-/// `free`, `skip` or `wide` box before `ftyp`, the chunk offsets in
-/// `co64`; and bytes in places symphonia does not read: a track's `udta`
-/// that holds no boxes, a short `hdlr` in a `meta`, a short top-level
-/// `data` box.
+/// walk would read wrongly with a rule out of place.
 fn healthy_variants() -> Vec<(String, Vec<u8>)> {
     let phone = std::fs::read(fixture(PHONE)).unwrap();
     let name = atom(*b"udta", &atom(*b"name", b"A"));
@@ -1518,10 +1447,9 @@ fn healthy_variants() -> Vec<(String, Vec<u8>)> {
     out
 }
 
-/// Every fixture still reads as before: the check reads, never changes, so
-/// a file it lets through takes the same path as without it. So do the
-/// healthy variants, the CAFs symphonia reads, and the phone file's audio
-/// comes out the same from every variant that keeps its layout.
+/// Every fixture and healthy variant still reads as before, and the phone
+/// file's audio comes out the same from every variant that keeps its
+/// layout.
 #[test]
 fn every_fixture_still_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -1572,9 +1500,7 @@ struct Field {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Coding {
-    /// MP4 and CAF.
     BigEndian,
-    /// WAV.
     LittleEndian,
     /// A CAF variable-length integer, written in exactly `width` bytes of
     /// seven bits.
@@ -1760,11 +1686,8 @@ fn value(random: &mut Random, width: usize, length: u64) -> u64 {
     picks[random.below(picks.len())] & max
 }
 
-/// The fixtures the fuzz mutates: every MP4 file (the phone recorder's,
-/// killed and not, Apple's encoder with its `ilst`, ffmpeg's with an edit
-/// list, a fragmented one, PCM in a `QuickTime` movie), the healthy variants,
-/// the CAFs symphonia reads, two with chunks in the audio of an open `data`,
-/// and the WAVs, with lists before and after their audio.
+/// The fixtures the fuzz mutates: every MP4 fixture, the healthy variants,
+/// the CAFs symphonia reads and the WAVs.
 fn fuzz_fixtures() -> Vec<(String, Vec<u8>)> {
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(fixture(""))
         .unwrap()
@@ -1799,8 +1722,8 @@ fn fuzz_fixtures() -> Vec<(String, Vec<u8>)> {
 }
 
 /// Runs `cases` mutations from `seed`, each through the declared length and
-/// the decode; a panic is as good as an error here (the pipeline catches
-/// it), an abort ends the process and fails the parent.
+/// the decode; a panic is as good as an error here, an abort fails the
+/// parent.
 fn fuzz(cases: u64, seed: u64) {
     let dir = tempfile::tempdir().unwrap();
     let fixtures: Vec<(String, Vec<u8>, Vec<Field>)> = fuzz_fixtures()
@@ -1850,10 +1773,7 @@ fn fuzz(cases: u64, seed: u64) {
     }
 }
 
-/// A WAV of [`misread_wav`]'s class at random, with what was planted: an
-/// odd `LIST` (a form and an odd number of bytes, 1 byte on, or an `INFO`
-/// value of odd length that ends it, 2 bytes on), then the header
-/// symphonia would read, a `LIST` and an `INFO` value of 2 GiB or more.
+/// A WAV of [`misread_wav`]'s class at random, with what was planted.
 fn misread(random: &mut Random) -> (Vec<u8>, (usize, u32, u32)) {
     let (list, shift) = if random.below(2) == 0 {
         let form: &[u8; 4] = [b"INFO", b"adtl"][random.below(2)];
@@ -1894,9 +1814,7 @@ fn fuzz_settings() -> (u64, u64) {
 }
 
 /// No size or count field of the fixtures, set to a boundary or a random
-/// value, aborts a read, and neither does a WAV whose odd `LIST` would
-/// send symphonia to a header the walk never read (one case in eight).
-/// Held to [`ADDRESS_SPACE_KIB`] on Linux.
+/// value, aborts a read. Held to [`ADDRESS_SPACE_KIB`] on Linux.
 #[test]
 fn random_sizes_and_counts_abort_nothing() {
     let (cases, seed) = fuzz_settings();

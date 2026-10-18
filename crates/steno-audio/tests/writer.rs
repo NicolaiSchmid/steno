@@ -1,7 +1,5 @@
 //! The recording writer, the CAF and WAV streams, the sidecar resampler
 //! and the level meter.
-//! Swift: `Tests/StenoAudioTests/RecordingWriterTests.swift`,
-//! `Resampler48kTo16kTests.swift`, `LevelMeterTests.swift`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -99,9 +97,8 @@ fn two_lanes_round_trip_sample_accurately_with_sidecars() {
     );
 }
 
-/// The writer makes the meeting's folder and its parents, and refuses one
-/// that exists, empty or holding a recording, leaving its files as they
-/// were.
+/// The writer makes the meeting's folder and refuses one that exists,
+/// leaving its files as they were.
 #[test]
 fn the_writer_creates_the_meeting_folder_and_refuses_one_that_exists() {
     let directory = tempfile::tempdir().unwrap();
@@ -142,10 +139,8 @@ fn the_writer_creates_the_meeting_folder_and_refuses_one_that_exists() {
     assert_eq!(std::fs::read_dir(&empty.directory).unwrap().count(), 0);
 }
 
-/// A file the writer cannot create (here the master, whose path is longer
-/// than the system takes while its folder's is not) removes the folder the
-/// writer made and keeps its parents, so a retry with the meeting's id is
-/// not refused as an existing folder.
+/// A file the writer cannot create (a path too long) removes the folder it
+/// made, so a retry is not refused.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_writer_whose_files_cannot_be_created_removes_the_folder_it_made() {
@@ -157,9 +152,7 @@ fn a_writer_whose_files_cannot_be_created_removes_the_folder_it_made() {
     };
     let directory = tempfile::tempdir().unwrap();
     let meeting_id = Uuid::new_v4();
-    // The audio folder's length that puts the meeting folder's path a few
-    // bytes short of the longest, so that of `recording.caf` in it is too
-    // long.
+    // A meeting folder a few bytes short of the longest path.
     let audio_length = longest - 4 - "/".len() - meeting_id.to_string().len();
     let mut audio = directory.path().to_path_buf();
     while audio.as_os_str().len() + 1 < audio_length {
@@ -302,10 +295,8 @@ fn a_truncated_master_reads_whole_frames_only() {
     assert_eq!(partial.channels[1].last(), Some(&957.0));
 }
 
-/// The sidecar is the master's lane at a third of the rate: an onset at
-/// 1.0 s on the mic lane lands at 16 000 samples in `mic.wav` plus the
-/// resampler's 32-sample group delay, exact zeros before it, and nothing at
-/// all in `system.wav`.
+/// An onset at 1.0 s on the mic lane lands at 16 000 samples in `mic.wav`
+/// plus the 32-sample group delay, and nothing in `system.wav`.
 #[test]
 fn sidecars_align_with_the_master_and_their_lane() {
     let directory = tempfile::tempdir().unwrap();
@@ -338,10 +329,8 @@ fn sidecars_align_with_the_master_and_their_lane() {
     );
 }
 
-/// The RIFF size field counts everything after itself (36 header bytes plus
-/// the samples) and the `data` size the samples alone; both are checked
-/// byte for byte, as is the file length, since the reader tolerates an
-/// overstated RIFF size and would not notice one.
+/// The RIFF and `data` sizes are checked byte for byte, since the reader
+/// tolerates an overstated RIFF size.
 #[test]
 fn wav_header_sizes_match_the_samples_written() {
     let directory = tempfile::tempdir().unwrap();
@@ -361,10 +350,9 @@ fn wav_header_sizes_match_the_samples_written() {
     assert_eq!(field(24), 16_000, "sample rate");
 }
 
-/// A sidecar whose writer never reached `finish()` keeps its zero-size
-/// header with the samples after it, so the RIFF parser rejects it as
-/// malformed; the decoder relies on exactly that to rebuild the lane from
-/// the master. Finishing repairs it.
+/// An unfinished sidecar keeps its zero-size header, which the RIFF parser
+/// rejects so the decoder rebuilds the lane from the master. Finishing
+/// repairs it.
 #[test]
 fn an_unfinished_sidecar_is_rejected_until_finished() {
     let directory = tempfile::tempdir().unwrap();
@@ -399,9 +387,8 @@ fn caf_reader_rejects_garbage() {
     ));
 }
 
-/// The header reader sees what the writer wrote without the samples: an
-/// unfinished master (size -1) counts every whole frame to the end of the
-/// file, a finished one the frames its size names, even with bytes after.
+/// The header reader counts every whole frame of an unfinished master, and
+/// the frames its size names in a finished one.
 #[test]
 fn the_caf_header_counts_the_frames_of_an_unfinished_and_a_finished_master() {
     let directory = tempfile::tempdir().unwrap();
@@ -432,8 +419,7 @@ fn the_caf_header_counts_the_frames_of_an_unfinished_and_a_finished_master() {
     assert_eq!(finished.frame_count, 960, "the patched size, not the file");
 }
 
-/// A kill inside a write leaves part of a frame: the header reader counts
-/// whole frames, as `CafFile` reads them; a header alone is no frame.
+/// The header reader counts whole frames only.
 #[test]
 fn the_caf_header_counts_whole_frames_only() {
     let directory = tempfile::tempdir().unwrap();
@@ -480,9 +466,8 @@ fn the_caf_header_rejects_garbage_and_a_truncated_header() {
     ));
 }
 
-/// A sidecar left unfinished by a kill is finished from its length, whole
-/// samples only, and then reads back; a finished one is left as it was,
-/// and a file that is not a sidecar is not touched.
+/// An unfinished sidecar is finished from its length; a finished one or a
+/// non-sidecar is left as it was.
 #[test]
 fn an_unfinished_sidecar_is_recovered_from_its_length() {
     let directory = tempfile::tempdir().unwrap();

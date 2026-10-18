@@ -1,121 +1,8 @@
 //! The live backend on Linux: one PipeWire capture stream that Steno links
 //! itself to the microphone and to the default sink's monitor, so every
-//! graph cycle delivers all lanes in one interleaved buffer, aligned on the
-//! graph clock as the macOS aggregate aligns them on its clock master.
-//! WP5b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`. No Swift
-//! counterpart (the Swift app is macOS-only); the macOS counterpart is
-//! `capture::live::backend`.
-//!
-//! # Threads
-//!
-//! PipeWire's objects are single-threaded, so every capture gets its own
-//! `steno-pipewire` thread owning the main loop, the context, the core,
-//! the registry, the stream and the links. `start` spawns it and waits for
-//! its answer (the [`CaptureStream`] or the error) through a rendezvous:
-//! a thread that answers after `start` gave up finds nobody to take it
-//! and tears down without watching, so no device-change report begins
-//! before `start` took the answer. `stop()` closes the capture's `Gate` to
-//! the sink, sends a quit through a `pipewire::channel` and joins the
-//! thread, all within `STOP_TIMEOUT` (2 s) once it has the backend: a
-//! device-change report still in the sink's handler then (with the thread
-//! it runs on), or a thread that has not ended (with where it waits), is
-//! logged and left behind, and `stop()` returns. Only a cycle's delivery
-//! already inside the gate is waited for without a bound (microseconds;
-//! see `Gate`). So once `stop()` returned no frame reaches the sink, and
-//! no report but one the gate let in before it closed, which reaches the
-//! session late. Logs go through the subscriber the binary installed,
-//! synchronously unless it buffers them: a log write that blocks (stderr
-//! on a stalled disk) can hold the thread past `STOP_TIMEOUT`, and then
-//! holds `stop()` too, in its own log of the hang.
-//!
-//! The stream runs with `RT_PROCESS`, so its `process` callback runs on
-//! PipeWire's data-loop thread, which is the real-time path here:
-//! `process` dequeues the buffer, turns its chunk into a [`SliceView`] with
-//! [`interleaved_view`] and, while the gate is open, hands it to
-//! [`deliver_slices`], the safe form of the IOProc body the macOS backend
-//! uses. No allocation, no lock, no log (proven for the body in
-//! `tests/realtime.rs` and on the real data-loop thread in
-//! `tests/pipewire.rs`).
-//!
-//! A data-loop thread the scheduler holds up misses graph cycles while the
-//! daemon runs the graph on time (A18; the design is in
-//! [`realtime::missed`](crate::realtime::missed)). `process` reads each
-//! cycle's `pw_time` ticks, converted from the graph's rate to the
-//! stream's 48 kHz, and writes what it missed as zeros before the cycle;
-//! `stop()` compares `CLOCK_MONOTONIC` with the last cycle's `pw_time`.
-//! `Stream::time` (`pw_stream_get_time`, pipewire-rs being built without
-//! its `v0_3_50` feature) copies the time `pw_stream` stored for the cycle
-//! (a sequence-locked copy, no system call). A quantum that changes resets
-//! the clock: at a new quantum the ticks jump by up to two of its cycles
-//! while the wall clock does not (1 792 frames at 256 to 1 024, 3 584 at
-//! 512 to 2 048, on the private daemon). The client context loads
-//! PipeWire's `module-rt` from `client.conf`, which asks for real-time
-//! scheduling of the data-loop thread (directly under `RLIMIT_RTPRIO`, or
-//! through RealtimeKit); [`LiveCaptureBackend`]'s `start` logs at `warn`
-//! when the thread runs without it.
-//!
-//! # Start
-//!
-//! Two roundtrips bring the registry's nodes and ports and the `default`
-//! metadata (`graph` keeps them). The targets resolve from it: the input
-//! node (by UID, its `node.name`, or the default source) and the default
-//! sink. A UID that names no source the capture can record (one saved on
-//! a Mac, a microphone unplugged since it was chosen) records the default
-//! source (the fallback), with a warning, and the capture then follows the
-//! default as one without a UID does, until the chosen source, or one of
-//! its ports, is announced again: that is a change too, so the rebuild's
-//! restart records the chosen source again. The stream asks for 48 kHz
-//! `f32` with one `AUXn` channel per linked port; PipeWire's adapter
-//! resamples whatever the graph runs at, so the rate is always
-//! [`SAMPLE_RATE`] and never a mismatch. The stream is connected without
-//! `AUTOCONNECT`, so the session manager leaves it alone, and once its
-//! ports exist Steno creates one link per channel through the server's
-//! `link-factory` (not lingering: the links die with the connection).
-//! `start` returns once the first cycle arrived; a graph that does not run
-//! within `START_TIMEOUT` (3 s) is an error rather than a silent recording
-//! ([`CaptureError::DidNotRun`]), and so is a link that failed. The
-//! latencies come from the `SPA_PARAM_Latency` of the microphone port
-//! (capture side) and of the sink's first playback port (playback side),
-//! in frames of the first cycle's length.
-//!
-//! # Device changes
-//!
-//! The `default.audio.sink` and `default.audio.source` metadata changing
-//! or going away, a node the capture's snapshot reads going away (a
-//! linked device, the default sink, the source the microphone follows) or
-//! a port of one, or the connection, the stream or a link failing (a link
-//! removed from outside included) mark a change; another app's stream
-//! ending does not. [`LiveCaptureBackend::COALESCE_DELAY`] after the last
-//! change, and at most `COALESCE_LIMIT` (2 s) after the first, the graph
-//! is compared with the devices the targets resolved to
-//! ([`DeviceSnapshot::difference`]), and a difference goes to the sink as
-//! a [`DeviceChangeReason`], from this thread, never during `start`. A
-//! change during `start` is judged once the capture runs. The session then
-//! rebuilds through `stop()` and `start`, as on the Mac. The capture never
-//! follows a default on its own.
-//!
-//! A lost connection to the daemon (a daemon killed or restarted, or the
-//! capture's client closed from outside) reads as
-//! [`DeviceChangeReason::AudioServiceRestarted`], whatever the graph
-//! reads, so the session restarts until a start runs and the recording
-//! resumes there (Rust only, like the Mac's `coreaudiod` restart).
-//! A lost stream reads as the output gone (the input for an in-person
-//! capture). A lost link reads as the device of the lane it
-//! serves gone: a monitor link as the output gone, the microphone's link
-//! as the input gone, so a microphone that vanishes during a call (the
-//! server removes Steno's link to it) reads as the input gone. The sample
-//! rate never changes: the adapter resamples.
-//!
-//! The system lane is the whole default sink, Steno's own output included,
-//! as on the Mac, where the tap includes Steno's process (A10 of
-//! `.plans/2026-10-07-stable-promotion.md`); no in-app playback while
-//! recording, enforced by [`Playback`](crate::playback::Playback). Linking
-//! each app's stream instead of the monitor was weighed and not done: it
-//! is a linking policy of its own, and an app's audio that reaches the
-//! sink through a filter is mixed already (see "The system lane is the
-//! whole default sink" in the plan's Linux list). Linking the sink's
-//! monitor keeps the sink running, so cycles arrive with nothing playing,
-//! as they do on the Mac through its silent output.
+//! graph cycle delivers all lanes in one interleaved buffer on the graph
+//! clock. Each capture owns a `steno-pipewire` thread; the stream's
+//! `process` callback runs on the real-time data-loop thread.
 
 mod devices;
 mod graph;
@@ -149,65 +36,45 @@ use crate::realtime::{
 
 /// How long `start` lets PipeWire answer, link and run the first cycle.
 const START_TIMEOUT: Duration = Duration::from_secs(3);
-/// How long `start` waits for the device latencies after the first cycle,
-/// on top of [`START_TIMEOUT`].
+/// How long `start` waits for the device latencies after the first cycle.
 const LATENCY_TIMEOUT: Duration = Duration::from_millis(500);
-/// The longest single wait on the loop while starting, so the deadline is
-/// checked often.
+/// The longest single wait on the loop while starting.
 pub(crate) const PUMP_SLICE: Duration = Duration::from_millis(20);
 /// The wait on the loop while nothing is pending.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
-/// The longest a stream of changes defers its judgement: changes that keep
-/// coming less than [`LiveCaptureBackend::COALESCE_DELAY`] apart are
-/// judged this long after the first of them, and the changes after that
-/// judgement start a new stream.
+/// The longest a stream of changes defers its judgement: changes less than
+/// [`LiveCaptureBackend::COALESCE_DELAY`] apart are judged this long after
+/// the first of them.
 const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 
-/// How long `stop()` waits, once it has the backend, for a report to leave
-/// the gate and the PipeWire thread to tear down, a few milliseconds
-/// normally; past it the report or the thread is left behind.
+/// How long `stop()` waits for a report to leave the gate and the PipeWire
+/// thread to tear down; past it they are left behind.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The capture stream's `node.name`.
 pub(crate) const STREAM_NODE_NAME: &str = "steno-capture";
 
 /// The capture's way into the sink, closed for good by `stop()`, or by a
-/// `start` that failed, before it waits for the thread. Two kinds of pass
-/// go through it, counted apart because they are waited for differently:
+/// failed `start`, before it waits for the thread. Two kinds of pass:
 ///
-/// - A cycle's [`deliver_slices`], on the data-loop thread. Lock-free: an
-///   increment, a load and a decrement, all `SeqCst`, so either the pass
-///   sees the gate closed or [`Gate::close`] sees it inside. `close` waits
-///   for it without a bound: it writes the rings, and a delivery still
-///   writing once `close` returned would write them beside the next
-///   backend's data-loop thread, two producers on single-producer rings.
-///   The body takes microseconds: bounded loops over one buffer, no lock,
-///   and no call that blocks (the consumer's wake is a futex wake at
-///   most), so only the scheduler can stretch the wait.
+/// - A cycle's [`deliver_slices`], on the data-loop thread. Lock-free and
+///   `SeqCst`, so either the pass sees the gate closed or [`Gate::close`]
+///   sees it inside. `close` waits for it without a bound: a delivery still
+///   writing after `close` would be a second producer on single-producer
+///   rings beside the next backend's. The body takes microseconds.
 /// - A device-change report, on the PipeWire thread. Counted under a mutex
-///   and waited for on a condition variable, until the deadline `close` is
-///   given. It runs the sink's handler, which may block (the session's
-///   takes the session mutex), and a late one costs at most a spurious
-///   rebuild of the same recording: the session ignores a report unless
-///   it is still recording the recording the report's capture served, and
-///   keeps one that comes during a rebuild for the next.
-///
-/// Once `close` returned, no cycle reaches the sink, and a report only if
-/// the gate let it in before it closed and `close` gave up waiting for it.
+///   and waited for until `close`'s deadline; a late one costs at most a
+///   spurious rebuild, which the session ignores or defers.
 #[derive(Debug)]
 struct Gate {
     open: AtomicBool,
-    /// Deliveries inside.
     delivering: AtomicUsize,
     /// The last cycle delivered: its `pw_time` (`CLOCK_MONOTONIC`
-    /// nanoseconds, 0 before the first) and its frames, written inside a
-    /// delivery, read once the gate closed ([`Gate::last_cycle`]).
+    /// nanoseconds, 0 before the first) and its frames.
     last_cycle_at: AtomicU64,
     last_cycle_frames: AtomicUsize,
-    /// Reports inside.
     reporting: Mutex<usize>,
-    /// Notified when a report leaves.
     report_left: Condvar,
 }
 
@@ -223,8 +90,8 @@ impl Gate {
         }
     }
 
-    /// Runs a cycle's `work` if the gate is open, counted inside while it
-    /// does; whether it ran. Real-time safe.
+    /// Runs a cycle's `work` if the gate is open; whether it ran. Real-time
+    /// safe.
     #[inline(always)]
     fn deliver(&self, work: impl FnOnce()) -> bool {
         self.delivering.fetch_add(1, Ordering::SeqCst);
@@ -236,8 +103,8 @@ impl Gate {
         open
     }
 
-    /// Inside a delivery: the cycle at `at` (`pw_time`'s `now`) delivered
-    /// `frames`. Real-time safe.
+    /// Inside a delivery: the cycle at `at` delivered `frames`. Real-time
+    /// safe.
     #[inline(always)]
     fn mark_cycle(&self, at: i64, frames: usize) {
         self.last_cycle_at
@@ -245,21 +112,18 @@ impl Gate {
         self.last_cycle_frames.store(frames, Ordering::Relaxed);
     }
 
-    /// The last cycle [`Self::mark_cycle`] saw, its time and its frames;
-    /// `None` before the first. Once [`Self::close`] returned no delivery
-    /// changes it.
+    /// The last cycle [`Self::mark_cycle`] saw; `None` before the first.
     fn last_cycle(&self) -> Option<(u64, usize)> {
         let at = self.last_cycle_at.load(Ordering::SeqCst);
         (at > 0).then(|| (at, self.last_cycle_frames.load(Ordering::SeqCst)))
     }
 
-    /// Runs a report's `work` if the gate is open, counted inside while it
-    /// does; whether it ran. Locks: not for the data-loop thread.
+    /// Runs a report's `work` if the gate is open; whether it ran. Locks:
+    /// not for the data-loop thread.
     fn report(&self, work: impl FnOnce()) -> bool {
         {
             let mut inside = self.reporting();
-            // Under the lock: a `close` that took it first stored `false`
-            // before, so this load sees it.
+            // Under the lock, so a `close` that took it first is seen.
             if !self.open.load(Ordering::SeqCst) {
                 return false;
             }
@@ -280,14 +144,8 @@ impl Gate {
 
     /// Closes the gate, waits for the deliveries inside to leave, then for
     /// the reports inside until `deadline`; whether none is left inside.
-    ///
-    /// The session never holds its mutex across `backend.stop()`; it does
-    /// across `backend.start()`, whose failure path closes the gate, but
-    /// no report can begin before `start` took the thread's stream
-    /// ([`hand_over`]), and a failed `start` took none, so the session's
-    /// own handler never waits on the caller of `close`. A handler that
-    /// does (one that stops this backend, or drops the last owner of it)
-    /// holds `close` until the deadline.
+    /// No report can begin before `start` handed over its stream, so the
+    /// session's handler never waits on a failing `start`'s `close`.
     fn close(&self, deadline: Instant) -> bool {
         self.open.store(false, Ordering::SeqCst);
         while self.delivering.load(Ordering::SeqCst) != 0 {
@@ -302,8 +160,8 @@ impl Gate {
     }
 }
 
-/// Counts a report out of its [`Gate`] when dropped, so a handler that
-/// panics leaves too and holds no `close` to its deadline.
+/// Counts a report out of its [`Gate`] when dropped, so a panicking handler
+/// leaves too.
 struct ReportLeaves<'a>(&'a Gate);
 
 impl Drop for ReportLeaves<'_> {
@@ -313,18 +171,15 @@ impl Drop for ReportLeaves<'_> {
     }
 }
 
-/// What the data-loop thread owns: moved into the stream listener at
-/// registration, read only by [`process`]. It crosses to PipeWire's
-/// data-loop thread, which `pipewire` does not check, so it must be `Send`
-/// (asserted below).
+/// What the data-loop thread owns, read only by [`process`]. It crosses to
+/// PipeWire's data-loop thread, which `pipewire` does not check, so it must
+/// be `Send` (asserted below).
 struct RealTime {
     sink: Arc<LaneFrameSink>,
     gate: Arc<Gate>,
     sources: Vec<LaneSource>,
     channels: usize,
-    /// Frames in the last cycle; `start` waits for the first.
     cycle_frames: Arc<AtomicUsize>,
-    /// Where the last cycle ended on the graph clock.
     clock: CycleClock,
 }
 
@@ -334,12 +189,9 @@ const _: () = {
 };
 
 /// The stream's `process` callback, on PipeWire's data-loop thread: the
-/// cycles missed since the last one ([`missed_before`]) and the buffer
-/// through [`deliver_cycle`] while the gate is open, which also marks the
-/// cycle for the stop, then the buffer back to the stream. Nothing
-/// allocates, locks or logs; nothing can panic (the view and
-/// `deliver_slices` index only within bounds they checked or computed,
-/// `channels` is at least 1).
+/// cycles missed since the last one, then the buffer through
+/// [`deliver_cycle`] while the gate is open. Nothing allocates, locks, logs
+/// or can panic.
 fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
@@ -349,9 +201,8 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     };
     let chunk = data.chunk();
     let (offset, size, stride) = (chunk.offset(), chunk.size(), chunk.stride());
-    // The buffer's memory, mapped by `MAP_BUFFERS` and valid while the
-    // buffer stays dequeued, until `buffer` drops at the end of this call;
-    // the view borrows it.
+    // Mapped by `MAP_BUFFERS`, valid while the buffer stays dequeued; the
+    // view borrows it.
     let memory = data.data();
     let view = interleaved_view(memory.as_deref(), offset, size, stride, rt.channels);
     let time = stream.time().ok();
@@ -363,13 +214,12 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
             rt.gate.mark_cycle(time.now(), view.frames);
         }
     });
-    // Release: `start` returns on seeing it, and the frames
-    // `deliver_slices` wrote are then in the rings.
+    // Release: `start` returns on seeing it, the frames already in the rings.
     rt.cycle_frames.store(view.frames, Ordering::Release);
 }
 
-/// One cycle into the sink: what was missed before it
-/// ([`LaneFrameSink::write_missed`]), then its own frames. Real-time safe.
+/// One cycle into the sink: what was missed before it, then its own frames.
+/// Real-time safe.
 #[inline(always)]
 fn deliver_cycle(
     view: SliceView<'_>,
@@ -381,15 +231,11 @@ fn deliver_cycle(
     deliver_slices(&[view], sources, sink);
 }
 
-/// The frames missed before a cycle of `frames` whose stream time is
-/// `time`, its ticks and their rate (none when `pw_stream_get_time`
-/// failed): `clock` advanced to the ticks, at the graph clock's rate
-/// against the stream's [`SAMPLE_RATE`]. A time without a usable rate, a
-/// graph rate that changed and a cycle of another length (a quantum that
-/// changed, [`CycleClock::resized`]) start the clock afresh and report
-/// nothing. At a driver change `pw_stream` repeats the last cycle's ticks
-/// (its `base_pos`), which leaves the clock a cycle ahead: the next real
-/// jump after it is counted one cycle short. Real-time safe.
+/// The frames missed before a cycle of `frames` with stream time `time`
+/// (none when `pw_stream_get_time` failed). A missing rate, a changed graph
+/// rate or a changed quantum restart the clock and report nothing. At a
+/// driver change `pw_stream` repeats the last ticks, so the next real jump
+/// is counted one cycle short. Real-time safe.
 #[inline(always)]
 fn missed_before(
     clock: &mut CycleClock,
@@ -411,10 +257,8 @@ fn missed_before(
     clock.advance(ticks, frames)
 }
 
-/// What a stream missed after its last cycle, which started at `at`
-/// (`CLOCK_MONOTONIC` nanoseconds) and delivered `frames`, once it stops
-/// at `stopped` on the same clock: [`CycleClock::missed_until`] on a clock
-/// that counts nanoseconds.
+/// What a stream missed after its last cycle, once it stops at `stopped`
+/// (`CLOCK_MONOTONIC` nanoseconds).
 fn missed_at_stop(last_cycle: Option<(u64, usize)>, stopped: u64) -> Missed {
     let Some((at, frames)) = last_cycle else {
         return Missed::default();
@@ -435,9 +279,8 @@ fn monotonic_nanos() -> u64 {
         .saturating_add(now.tv_nsec as u64)
 }
 
-/// For tests: `work` through a new open [`Gate`], as [`process`] puts a
-/// cycle through its capture's; whether it ran. For the allocation count
-/// in `tests/realtime.rs`, which cannot reach the gate.
+/// For tests: `work` through a new open [`Gate`], as [`process`] does, for
+/// the allocation count in `tests/realtime.rs`.
 #[doc(hidden)]
 #[must_use]
 pub fn through_an_open_gate(work: impl FnOnce()) -> bool {
@@ -445,9 +288,8 @@ pub fn through_an_open_gate(work: impl FnOnce()) -> bool {
 }
 
 /// The capture and playback latencies in frames at [`SAMPLE_RATE`], for a
-/// first cycle of `cycle` frames on a graph whose clock ticks `clock` (the
-/// stream's `1/48000` at 48 kHz; none or a zero denominator reads as 48
-/// kHz).
+/// first cycle of `cycle` frames on a graph clock of `clock` (none or a
+/// zero denominator reads as 48 kHz).
 fn latency_frames(
     (input, output): (Latency, Latency),
     cycle: usize,
@@ -457,19 +299,16 @@ fn latency_frames(
     (input.frames(cycle, rate), output.frames(cycle, rate))
 }
 
-/// A `pipewire` error as text naming what failed.
 pub(crate) fn failure(what: &'static str) -> impl FnOnce(pw::Error) -> String {
     move |error| format!("{what}: {error}")
 }
 
-/// A `pipewire` error as a backend failure naming what failed.
 fn failed(what: &'static str) -> impl FnOnce(pw::Error) -> CaptureError {
     move |error| CaptureError::BackendFailed(failure(what)(error))
 }
 
-/// A new connection to the daemon: its loop, context, core and registry,
-/// for the caller's listeners; the error names the step that failed. The
-/// capture, the device list and the meeting detection open theirs here.
+/// A new connection to the daemon: loop, context, core and registry; the
+/// error names the step that failed.
 pub(crate) fn connect() -> Result<
     (
         pw::main_loop::MainLoopRc,
@@ -493,23 +332,18 @@ pub(crate) fn connect() -> Result<
     Ok((main_loop, context, core, registry))
 }
 
-/// What the PipeWire callbacks share on the PipeWire thread.
 #[derive(Default)]
 struct Shared {
     graph: RefCell<Graph>,
-    /// Whether the connection binds the `default` metadata: a capture does,
-    /// the device list does not (see `AudioDevices::inputs`).
+    /// Whether the connection binds the `default` metadata.
     reads_defaults: bool,
-    /// The `default` metadata once bound: its global id, its listener,
-    /// then the proxy, so the listener drops first.
+    /// The `default` metadata once bound: its id, its listener, then the
+    /// proxy, so the listener drops first.
     metadata: RefCell<Option<(u32, pw::metadata::MetadataListener, pw::metadata::Metadata)>>,
-    /// The last `done` of a core roundtrip.
     done: Cell<Option<spa::utils::result::AsyncSeq>>,
-    /// What the failures so far lost.
     lost: Cell<Lost>,
-    /// The connection to the daemon itself failed (a daemon killed or
-    /// restarted): judged as [`DeviceChangeReason::AudioServiceRestarted`]
-    /// whatever the graph reads.
+    /// The connection to the daemon failed: judged as
+    /// [`DeviceChangeReason::AudioServiceRestarted`].
     disconnected: Cell<bool>,
     /// The first and the last change since the graph was last judged.
     pending: Cell<Option<(Instant, Instant)>>,
@@ -522,34 +356,29 @@ impl Shared {
         self.pending.set(Some((first, now)));
     }
 
-    /// When the pending changes are judged ([`judged_at`]); `None` while
-    /// nothing is pending.
+    /// When the pending changes are judged; `None` while nothing is pending.
     fn due(&self) -> Option<Instant> {
         self.pending
             .get()
             .map(|(first, last)| judged_at(first, last))
     }
 
-    /// `what` failed for good (logged with PipeWire's `message`): the
-    /// capture lost `lost`.
+    /// `what` failed for good: the capture lost `lost`.
     fn fail(&self, what: &str, message: &str, lost: Lost) {
         tracing::warn!("{what} failed: {message}");
         self.lost.set(self.lost.get().union(lost));
         self.changed();
     }
 
-    /// The connection to the daemon failed for good (PipeWire's
-    /// `message`): the capture loses both lanes, and the change is the
-    /// daemon's, not a device's.
+    /// The connection to the daemon failed for good: both lanes are lost,
+    /// and the change is the daemon's.
     fn lost_the_connection(&self, message: &str) {
         self.disconnected.set(true);
         self.fail("the connection to PipeWire", message, Lost::ALL);
     }
 
-    /// What a judgement of the pending changes reports: the audio service
-    /// restarting once the connection to the daemon failed (the session
-    /// then restarts until the daemon is back), else the first difference
-    /// of the graph's `snapshot` from `baseline`.
+    /// The judgement of the pending changes: the audio service restarting
+    /// after a lost connection, else the first difference from `baseline`.
     fn judgement(
         &self,
         snapshot: impl FnOnce() -> DeviceSnapshot,
@@ -562,8 +391,7 @@ impl Shared {
         }
     }
 
-    /// The capture stream's new state: in its error state it loses both
-    /// lanes.
+    /// The stream's new state; its error state loses both lanes.
     fn stream_state(&self, state: &pw::stream::StreamState) {
         if let pw::stream::StreamState::Error(message) = state {
             self.fail("the PipeWire capture stream", message, Lost::ALL);
@@ -571,7 +399,7 @@ impl Shared {
     }
 
     /// A registry global: nodes and ports into the graph, the `default`
-    /// metadata bound once with a listener for its properties.
+    /// metadata bound once.
     fn announce(
         self: &Rc<Self>,
         registry: &pw::registry::RegistryWeak,
@@ -621,10 +449,9 @@ impl Shared {
         }
     }
 
-    /// A node or a port global into the graph, its properties read
-    /// through `props`. The chosen source, or one of its ports, announced
-    /// again is a change: a capture recording the fallback then returns to
-    /// it. Other types are not kept.
+    /// A node or port global into the graph. The chosen source, or one of
+    /// its ports, announced again is a change, so a capture on the fallback
+    /// returns to it.
     fn add_object<'a>(&self, kind: &ObjectType, id: u32, props: impl Fn(&str) -> Option<&'a str>) {
         let chosen = match kind {
             ObjectType::Node => self.graph.borrow_mut().add_node(id, props),
@@ -637,19 +464,17 @@ impl Shared {
         }
     }
 
-    /// From now on the graph serves the capture that resolved `targets`
-    /// for `uid`, the UID asked for (not the source recorded in its
-    /// place, so that source's return is a change): returns the baseline
-    /// its later snapshots are compared with ([`Graph::track`]).
+    /// From now on the graph serves the capture that resolved `targets` for
+    /// `uid`, the UID asked for; returns the baseline later snapshots are
+    /// compared with.
     fn track(&self, targets: &Targets, uid: Option<&str>) -> DeviceSnapshot {
         let mut graph = self.graph.borrow_mut();
         graph.track(targets, uid);
         graph.snapshot(targets, uid, Lost::NONE)
     }
 
-    /// A registry global went away: a node or a port out of the graph, or
-    /// the bound `default` metadata, whose defaults go with it until it is
-    /// announced again (WirePlumber restarting).
+    /// A registry global went away: a node, a port, or the `default`
+    /// metadata, whose defaults go with it until it is announced again.
     fn forget(&self, id: u32) {
         let metadata = self
             .metadata
@@ -669,10 +494,9 @@ impl Shared {
 }
 
 /// One connection to the PipeWire daemon and the registry view over it.
-/// Fields drop in declaration order: the listeners before the proxies they
-/// listen on, `shared` (and the metadata proxy in it) after the listeners
-/// whose closures hold it, the proxies before the core, the core before
-/// the context and the loop.
+/// Fields drop in declaration order: listeners before the proxies they
+/// listen on, `shared` after the listeners whose closures hold it, proxies
+/// before the core, the core before the context and the loop.
 struct Connection {
     _registry_listener: pw::registry::Listener,
     _core_listener: pw::core::Listener,
@@ -685,16 +509,13 @@ struct Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        // A teardown step marker: in a `Capture` this runs after the
-        // stream and the links are destroyed, before the connection's own
-        // fields go.
+        // Runs after a capture's stream and links are destroyed.
         tracing::debug!("closing the PipeWire connection");
     }
 }
 
 impl Connection {
-    /// A connection and its registry view; `reads_defaults` binds the
-    /// `default` metadata too.
+    /// A connection; `reads_defaults` binds the `default` metadata too.
     fn open(reads_defaults: bool) -> Result<Self, CaptureError> {
         let (main_loop, context, core, registry) =
             connect().map_err(CaptureError::BackendFailed)?;
@@ -746,9 +567,8 @@ impl Connection {
         })
     }
 
-    /// A connection that binds the `default` metadata, once the daemon
-    /// has answered with the globals (the first roundtrip, which binds the
-    /// metadata) and the metadata's properties (the second).
+    /// A connection that binds the `default` metadata, once the daemon has
+    /// answered with the globals and the metadata's properties.
     fn read(deadline: Instant) -> Result<Self, CaptureError> {
         let connection = Self::open(true)?;
         connection.roundtrip(deadline)?;
@@ -776,8 +596,7 @@ impl Connection {
     /// Waits until the daemon has answered everything sent before. No
     /// answer by the deadline, the connection intact, is
     /// [`CaptureError::DidNotRun`]: the daemon waits on something in the
-    /// graph, as on a node whose owner stopped before the session manager
-    /// configured it.
+    /// graph.
     fn roundtrip(&self, deadline: Instant) -> Result<(), CaptureError> {
         let pending = self.core.sync(0).map_err(failed("a PipeWire roundtrip"))?;
         if self.pump_until(deadline, || self.shared.done.get() == Some(pending)) {
@@ -787,15 +606,11 @@ impl Connection {
         }
     }
 
-    /// The error for a start step that did not finish: the connection's
-    /// loss, or the deadline.
     fn stalled(&self, step: &str) -> CaptureError {
         self.stalled_as(step, CaptureError::BackendFailed)
     }
 
-    /// [`Self::stalled`] with the deadline's error made by `timed_out`: a
-    /// roundtrip's, the stream's ports' and the first cycle's, with the
-    /// connection and the links intact, are [`CaptureError::DidNotRun`].
+    /// [`Self::stalled`] with the deadline's error made by `timed_out`.
     fn stalled_as(&self, step: &str, timed_out: fn(String) -> CaptureError) -> CaptureError {
         if self.shared.lost.get().any() {
             CaptureError::BackendFailed(
@@ -811,8 +626,8 @@ impl Connection {
 }
 
 /// The capture stream's format: 48 kHz native-endian `f32`, `channels`
-/// interleaved channels at positions `AUX0`, `AUX1`, …, so the adapter
-/// neither remixes nor reorders.
+/// interleaved at `AUX0`, `AUX1`, …, so the adapter neither remixes nor
+/// reorders.
 fn format_pod(channels: usize) -> Result<Vec<u8>, CaptureError> {
     let mut info = spa::param::audio::AudioInfoRaw::new();
     info.set_format(if cfg!(target_endian = "little") {
@@ -841,9 +656,8 @@ fn format_pod(channels: usize) -> Result<Vec<u8>, CaptureError> {
     .map_err(|error| CaptureError::BackendFailed(format!("the capture format: {error:?}")))
 }
 
-/// The lower bounds of a `SPA_PARAM_Latency` object for `direction`
-/// (`SPA_DIRECTION_INPUT` or `_OUTPUT`); `None` for the other direction or
-/// a pod that is not one.
+/// The lower bounds of a `SPA_PARAM_Latency` object for `direction`;
+/// `None` for the other direction or another pod.
 fn parse_latency(pod: &spa::pod::Pod, direction: u32) -> Option<Latency> {
     let object = pod.as_object().ok()?;
     let prop = |key: u32| {
@@ -869,12 +683,9 @@ fn parse_latency(pod: &spa::pod::Pod, direction: u32) -> Option<Latency> {
 }
 
 /// One started capture on its PipeWire thread. `Drop` disconnects the
-/// stream (PipeWire removes its node from the data loop before that
-/// returns, so no `process` runs after it); the fields then drop in
-/// declaration order: the listeners removed while the stream still exists,
-/// the stream destroyed, the links destroyed, then the connection. The
-/// order is what keeps it sound: a stream destroyed before its listeners,
-/// or links destroyed after the connection, would be a use after free.
+/// stream (no `process` runs after that returns); the fields then drop in
+/// declaration order: listeners while the stream exists, the stream, the
+/// links, then the connection. Another order would be a use after free.
 struct Capture {
     _rt_listener: pw::stream::StreamListener<RealTime>,
     _state_listener: pw::stream::StreamListener<()>,
@@ -885,18 +696,15 @@ struct Capture {
     input_device_uid: Option<String>,
     sink: Arc<LaneFrameSink>,
     gate: Arc<Gate>,
-    /// Frames in the stream's last cycle, written by [`process`].
     cycle_frames: Arc<AtomicUsize>,
-    /// What `start` answers.
     info: CaptureStream,
-    /// The devices the targets resolved to, taken in `new`, before the loop
-    /// runs again after `resolve`.
+    /// The devices the targets resolved to, taken before the loop runs
+    /// again.
     baseline: DeviceSnapshot,
 }
 
 /// One of Steno's links and the listeners that mark its lane lost when it
-/// fails: an error on its proxy, the server putting it in its error state,
-/// or the server removing it. Fields drop in order, the listeners first.
+/// fails or is removed. The listeners drop first.
 struct WatchedLink {
     _info: pw::link::LinkListener,
     _error: pw::proxy::ProxyListener,
@@ -905,9 +713,8 @@ struct WatchedLink {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        // No `process` runs once this returned, so the rt listener's user
-        // data can go next. `pw_stream_disconnect` returns 0 whatever
-        // happens; the log is for a version that does not.
+        // No `process` runs once this returned. `pw_stream_disconnect`
+        // returns 0 whatever happens; the log is for a version that does not.
         if let Err(error) = self.stream.disconnect() {
             tracing::warn!("disconnecting the PipeWire capture stream failed: {error}");
         }
@@ -916,11 +723,9 @@ impl Drop for Capture {
 }
 
 impl Capture {
-    /// Everything `start` does, on the PipeWire thread; see the module doc.
-    /// Once `new` returned, an early return tears down through `Drop`.
-    /// `answered` is raised once the daemon has answered the first
-    /// roundtrips, so a `start` that hears nothing after that knows the
-    /// connection held ([`await_answer`]).
+    /// Everything `start` does, on the PipeWire thread; once `new`
+    /// returned, an early return tears down through `Drop`. `answered` is
+    /// raised once the daemon answered the first roundtrips.
     fn open(
         lanes: &[AudioLane],
         input_device_uid: Option<&str>,
@@ -946,30 +751,15 @@ impl Capture {
         Ok(capture)
     }
 
-    /// Whether the source `uid` names runs now, asked on a connection and
-    /// a stream of its own, so the capture that records is not touched: the
-    /// microphone lane alone linked to that source into a sink nobody
-    /// reads, until its first cycle or `START_TIMEOUT`, then torn down.
-    /// `false` when `uid` names no source the capture can record (the
-    /// default would stand in), when anything on the way fails, or when no
-    /// cycle came. A Bluetooth source is not linked and answers `false`:
-    /// WirePlumber switches a headset whose input a stream links from its
-    /// A2DP profile to the hands-free one, which moves the output the
-    /// system lane records. Runs on the calling thread, which owns every
-    /// PipeWire object it makes; not the real-time path. Rust only.
+    /// Whether the source `uid` names runs now, asked on a connection and a
+    /// stream of its own (its lane linked into a sink nobody reads) so the
+    /// recording is not touched. `false` when `uid` names no recordable
+    /// source, anything fails, or no cycle came by `START_TIMEOUT`. A
+    /// Bluetooth source answers `false` unlinked: linking its input switches
+    /// the headset to the hands-free profile, moving the system lane.
     ///
-    /// The recording stays untouched as long as the probe's stream and the
-    /// chosen source share no driver with the recording's nodes: a source
-    /// whose owner stopped never finishes negotiating the probe's link, so
-    /// it joins no driver at all, which is the case the probe exists for. A
-    /// source that negotiated and then hung in its data thread would be
-    /// scheduled under the driver it follows, which can be the one the
-    /// recording runs on, and hold that graph up as long as it hangs; the
-    /// watchdog then rebuilds the recording as for any stall. Not seen on
-    /// the private daemon. Making the probe a driver of its own
-    /// (`PW_STREAM_FLAG_DRIVER`) is no fix: the stream would have to
-    /// trigger its own cycles and would then answer for its clock, not the
-    /// source's.
+    /// A source that negotiated and then hung could hold up the driver the
+    /// recording runs on; the watchdog then rebuilds as for any stall.
     fn probe(uid: &str) -> bool {
         let lanes = [AudioLane::Mixed];
         let deadline = Instant::now() + START_TIMEOUT;
@@ -1015,8 +805,7 @@ impl Capture {
     }
 
     /// [`Self::open`] up to the links, on a connection that has read the
-    /// graph: the targets for `lanes` and `input_device_uid`, the stream
-    /// and its links, before any cycle ran.
+    /// graph, before any cycle ran.
     fn linked_on(
         connection: Connection,
         lanes: &[AudioLane],
@@ -1048,8 +837,7 @@ impl Capture {
 
     /// The capture stream for `targets` with its two listeners, not yet
     /// connected. `input_device_uid` is the UID asked for, which the
-    /// snapshot keeps following ([`Graph::snapshot`]), and `input` the
-    /// microphone it resolved to.
+    /// snapshot keeps following; `input` the microphone it resolved to.
     fn new(
         connection: Connection,
         targets: Targets,
@@ -1071,9 +859,9 @@ impl Capture {
         let stream = pw::stream::StreamRc::new(connection.core.clone(), STREAM_NODE_NAME, props)
             .map_err(failed("the PipeWire capture stream"))?;
         let cycle_frames = Arc::new(AtomicUsize::new(0));
-        // Two listeners: `process` runs on the data-loop thread with its
-        // own user data; `state_changed` runs on this thread. One listener
-        // would hand both the same `&mut` user data from two threads.
+        // Two listeners: `process` on the data-loop thread with its own
+        // user data, `state_changed` on this one. One listener would share
+        // `&mut` user data across two threads.
         let rt_listener = stream
             .add_local_listener_with_user_data(RealTime {
                 sink: Arc::clone(&sink),
@@ -1101,7 +889,6 @@ impl Capture {
             stream,
             links: Vec::new(),
             connection,
-            // `measure` fills in the latencies.
             info: CaptureStream {
                 sample_rate: SAMPLE_RATE,
                 input_latency_frames: 0,
@@ -1118,8 +905,7 @@ impl Capture {
         })
     }
 
-    /// Connects the stream, waits for its ports, and links one port of the
-    /// targets to each.
+    /// Connects the stream, waits for its ports, and links each.
     fn link(&mut self, deadline: Instant) -> Result<(), CaptureError> {
         let channels = self.targets.channels();
         let format = format_pod(channels)?;
@@ -1179,13 +965,9 @@ impl Capture {
         Ok(())
     }
 
-    /// `link` with the listeners that mark the lane it serves (`lost`) lost
-    /// when it fails or the server removes it (a patchbay, a device end
-    /// gone). Steno's own teardown never fires them: they drop before the
-    /// link, and the loop does not run in between.
+    /// `link` with listeners that mark the lane `lost` when it fails or is
+    /// removed. Steno's own teardown never fires them: they drop first.
     fn watch_link(shared: &Rc<Shared>, link: pw::link::Link, lost: Lost) -> WatchedLink {
-        // One closure for all three ways a link fails, so they mark the same
-        // lane.
         let fail = {
             let shared = Rc::downgrade(shared);
             move |message: &str| {
@@ -1221,9 +1003,8 @@ impl Capture {
         }
     }
 
-    /// Waits for the first cycle, then reads the latencies in its length.
-    /// A link that failed meanwhile fails the start, even when the other
-    /// links run.
+    /// Waits for the first cycle, then reads the latencies. A failed link
+    /// fails the start.
     fn measure(&mut self, deadline: Instant) -> Result<(), CaptureError> {
         let connection = &self.connection;
         let linked = Instant::now();
@@ -1237,8 +1018,8 @@ impl Capture {
         );
         warn_without_realtime();
         let clock = self.stream.time().ok().map(|time| time.rate());
-        // Its own deadline: a first cycle late in the start's must not cut
-        // the read short and leave the far-end delay at zero.
+        // Its own deadline, so a late first cycle cannot leave the far-end
+        // delay at zero.
         let latencies = self.latencies(Instant::now() + LATENCY_TIMEOUT);
         if connection.shared.lost.get().any() {
             return Err(connection.stalled("run the capture"));
@@ -1251,9 +1032,7 @@ impl Capture {
     }
 
     /// The microphone port's capture latency and the sink's playback
-    /// latency, from their `SPA_PARAM_Latency`; zero where a port has none
-    /// or the daemon does not answer (logged, not fatal: the Speex tail
-    /// absorbs what is missing).
+    /// latency; zero where missing (logged; the Speex tail absorbs it).
     fn latencies(&self, deadline: Instant) -> (Latency, Latency) {
         let connection = &self.connection;
         let requests = [
@@ -1267,7 +1046,6 @@ impl Capture {
             ),
         ];
         let found = [Rc::new(Cell::new(None)), Rc::new(Cell::new(None))];
-        // Listener before proxy in each pair, so the listener drops first.
         let mut bound = Vec::new();
         for ((port, direction), slot) in requests.into_iter().zip(&found) {
             let Some(id) = port else { continue };
@@ -1313,7 +1091,7 @@ impl Capture {
     }
 
     /// The loop after `start` answered: changes are coalesced and judged
-    /// until the quit arrives.
+    /// until the quit.
     fn watch(&self, quit: pw::channel::Receiver<()>) {
         let quitting = Rc::new(Cell::new(false));
         let main_loop = self.connection.main_loop.loop_();
@@ -1321,8 +1099,6 @@ impl Capture {
             let quitting = Rc::clone(&quitting);
             move |()| quitting.set(true)
         });
-        // A change while starting stays pending and is judged against the
-        // resolve-time baseline like any other.
         let shared = &self.connection.shared;
         while !quitting.get() {
             let wait = match shared.due() {
@@ -1338,17 +1114,15 @@ impl Capture {
                 }
             };
             if main_loop.iterate(pw::loop_::Timeout::Finite(wait)) < 0 {
-                // A failing loop (the daemon gone) returns at once; do not
-                // spin while the session reacts to the report.
+                // A failing loop returns at once; do not spin.
                 std::thread::sleep(PUMP_SLICE);
             }
         }
     }
 
-    /// Compares the graph with the baseline and reports the first
-    /// difference to the sink while the gate is open; a lost connection to
-    /// the daemon is reported as the audio service restarting, whatever the
-    /// graph reads.
+    /// Reports the first difference from the baseline to the sink while the
+    /// gate is open; a lost connection reads as the audio service
+    /// restarting.
     fn judge(&self) {
         let shared = &self.connection.shared;
         let reason = shared.judgement(
@@ -1375,37 +1149,28 @@ fn judged_at(first: Instant, last: Instant) -> Instant {
     (last + LiveCaptureBackend::COALESCE_DELAY).min(first + COALESCE_LIMIT)
 }
 
-/// Reports `reason` to `sink` through `gate`: not at all once it closed.
-/// The log comes after the pass, so a log write that blocks never keeps
-/// [`Gate::close`] waiting.
+/// Reports `reason` to `sink` through `gate`. The log comes after the pass,
+/// so a blocking log write never holds [`Gate::close`].
 fn report(gate: &Gate, sink: &LaneFrameSink, reason: DeviceChangeReason) {
     if gate.report(|| sink.report_device_change(reason)) {
         tracing::info!("PipeWire graph change reported {reason:?}");
     }
 }
 
-/// What `start` waits for: the stream the thread opened, or why it did not.
 type Answer = Result<CaptureStream, CaptureError>;
 
 /// The channel the thread answers `start` through: a rendezvous, so a send
-/// completes only into a `start` still waiting in [`await_answer`]. With a
-/// buffer, an answer sent right after `start` gave up would land in it,
-/// and the thread would go on to watch: a report could then begin while
-/// `start` closes the gate with the session mutex held, and its handler,
-/// waiting for that mutex, would hold [`Gate::close`] to its deadline and
-/// reach the session late.
+/// completes only into a `start` still waiting. With a buffer, a late
+/// answer would let the thread go on to watch, and a report could hold
+/// [`Gate::close`] while `start` holds the session mutex.
 fn answer_channel() -> (SyncSender<Answer>, Receiver<Answer>) {
     sync_channel(0)
 }
 
-/// `start`'s wait for the thread's answer, at most `limit`. The receiver
-/// drops on return, so a thread that answers later fails its send and
-/// tears down without watching ([`hand_over`]). A thread that does not
-/// answer although the daemon answered its roundtrips (`connected`) is
-/// held up by the graph, as when a node's owner stopped before the session
-/// manager set up its ports: [`CaptureError::DidNotRun`], which the
-/// session retries until the graph runs. Otherwise the connection itself
-/// did not come up: `BackendFailed`.
+/// `start`'s wait for the thread's answer, at most `limit`; a later answer
+/// fails its send. No answer although the daemon answered (`connected`) is
+/// [`CaptureError::DidNotRun`], held up by the graph; otherwise
+/// `BackendFailed`.
 fn await_answer(answered: Receiver<Answer>, limit: Duration, connected: &AtomicBool) -> Answer {
     let answer = answered.recv_timeout(limit);
     drop(answered);
@@ -1419,10 +1184,9 @@ fn await_answer(answered: Receiver<Answer>, limit: Duration, connected: &AtomicB
     })
 }
 
-/// Answers `start` with what opening gave and returns the capture to
-/// watch, once `start` took its stream. `None` when opening failed, or
-/// when `start` gave up waiting: the capture then drops here, unwatched,
-/// so no report can begin for a `start` that did not take the answer.
+/// Answers `start` and returns the capture to watch once `start` took its
+/// stream; `None` when opening failed or `start` gave up, dropping the
+/// capture unwatched.
 fn hand_over<C>(
     answer: &SyncSender<Answer>,
     opened: Result<C, CaptureError>,
@@ -1448,8 +1212,7 @@ fn hand_over<C>(
 }
 
 /// The `steno-pipewire` thread: start, answer, watch until the quit, tear
-/// down (by dropping the capture) before the thread ends. Runs inside the
-/// caller's [`start_log::quietly`]; the watch logs at its own levels.
+/// down.
 fn run(
     lanes: &[AudioLane],
     input_device_uid: Option<&str>,
@@ -1463,30 +1226,25 @@ fn run(
     let Some(capture) = hand_over(answer, opened, |capture| capture.info.clone()) else {
         return;
     };
-    // Its lines are about changes, not about this start.
     start_log::quietly(false, || capture.watch(quit));
     tracing::debug!("the PipeWire capture got its quit; tearing down");
     drop(capture);
     tracing::debug!("the PipeWire capture is torn down");
 }
 
-/// One started capture as `start` keeps it.
 struct Active {
     quit: pw::channel::Sender<()>,
     gate: Arc<Gate>,
-    /// The sink the capture writes, for what `stop()` finds missed.
     sink: Arc<LaneFrameSink>,
-    /// Disconnected once the thread is done, its teardown included.
     ended: Receiver<()>,
     thread: JoinHandle<()>,
-    /// The thread's kernel id, 0 until it runs or when `/proc` does not give
-    /// it; the log of a hung teardown reads `/proc/self/task/<id>` with it.
+    /// The thread's kernel id, 0 when unknown, for the log of a hung
+    /// teardown.
     thread_id: Arc<AtomicU32>,
 }
 
-/// Whether PipeWire's data-loop threads in this process run with
-/// real-time scheduling, read from `/proc/self/task`: `Some(false)` when
-/// one runs without it, `None` when none was found or none could be read.
+/// Whether PipeWire's data-loop threads here run real-time: `Some(false)`
+/// when one does not, `None` when none could be read.
 fn data_loop_is_realtime() -> Option<bool> {
     let mut realtime = None;
     for task in std::fs::read_dir("/proc/self/task").ok()?.flatten() {
@@ -1507,23 +1265,18 @@ fn data_loop_is_realtime() -> Option<bool> {
     realtime
 }
 
-/// Whether the task whose `/proc/<pid>/task/<tid>/stat` line is `stat`
-/// runs with real-time scheduling (`SCHED_FIFO` or `SCHED_RR`); `None` for
-/// a line it cannot read. The name sits in parentheses and may hold any
-/// character, so the fields count from the last `)`: the policy is the
-/// line's 41st field, the 39th after the name.
+/// Whether the task with this `/proc/.../stat` line runs `SCHED_FIFO` or
+/// `SCHED_RR`. The name may hold any character, so fields count from the
+/// last `)`: the policy is the 39th after it.
 fn runs_realtime(stat: &str) -> Option<bool> {
     let (_, after) = stat.rsplit_once(')')?;
     let policy = after.split_whitespace().nth(38)?.parse::<u32>().ok()?;
     Some(matches!(policy, 1 | 2))
 }
 
-/// Logs once per process, at `warn`, that PipeWire's data-loop thread runs
-/// without real-time scheduling: `module-rt` (from `client.conf`) got
-/// neither `RLIMIT_RTPRIO` nor RealtimeKit. A busy computer can then hold
-/// the thread up long enough to miss graph cycles, which the capture
-/// writes as silence, or past the fill limit only counts (see the module
-/// doc). `/proc` is read only until the line was logged. Rust only.
+/// Logs once per process, at `warn`, that the data-loop thread runs without
+/// real-time scheduling (`module-rt` got neither `RLIMIT_RTPRIO` nor
+/// RealtimeKit), so a busy computer may miss cycles.
 fn warn_without_realtime() {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.load(Ordering::Relaxed)
@@ -1538,8 +1291,6 @@ fn warn_without_realtime() {
     }
 }
 
-/// The calling thread's kernel id, from `/proc/thread-self`; 0 when that
-/// is unreadable.
 fn kernel_thread_id() -> u32 {
     std::fs::read_link("/proc/thread-self")
         .ok()
@@ -1547,8 +1298,7 @@ fn kernel_thread_id() -> u32 {
         .unwrap_or(0)
 }
 
-/// Where thread `id` of this process waits, for the log of a teardown
-/// that hung: its system call and kernel wait channel from `/proc`.
+/// Where thread `id` waits, from `/proc`, for the log of a hung teardown.
 fn where_it_waits(id: u32) -> String {
     if id == 0 {
         return "its kernel id is unknown".into();
@@ -1566,10 +1316,8 @@ fn where_it_waits(id: u32) -> String {
     )
 }
 
-/// The PipeWire backend; see the module doc. Restartable: `stop()` closes
-/// the gate and joins the capture thread within 2 s (a report or a thread
-/// still busy then is logged and left behind), and `start` connects
-/// afresh.
+/// The PipeWire backend. Restartable: `stop()` closes the gate and joins
+/// the capture thread within 2 s, and `start` connects afresh.
 pub struct LiveCaptureBackend {
     active: Mutex<Option<Active>>,
 }
@@ -1587,11 +1335,9 @@ impl std::fmt::Debug for LiveCaptureBackend {
 }
 
 impl LiveCaptureBackend {
-    /// How long a burst of graph changes settles before it is judged, as
-    /// on the Mac. A Bluetooth profile switch removes and adds nodes and
-    /// moves both defaults within it. Unlike the Mac, a burst that never
-    /// settles is judged 2 s after its first change, and what follows
-    /// starts a new burst.
+    /// How long a burst of graph changes settles before it is judged (a
+    /// Bluetooth profile switch). A burst that never settles is judged 2 s
+    /// after its first change.
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
     #[must_use]
@@ -1606,16 +1352,9 @@ impl LiveCaptureBackend {
     }
 
     /// Closes the gate, asks the thread to quit and joins it, within
-    /// `limit` of the call (only a delivery inside the gate is waited for
-    /// past it, see [`Gate`]): the stream, the links and the connection
-    /// are gone when this returns, unless a report in the sink's handler
-    /// (with the thread it runs on) or the thread (with where it waits)
-    /// outlasts `limit`; it is then logged and left behind the closed
-    /// gate. A report that leaves just before the deadline leaves the join
-    /// almost no time, so the thread is logged as left behind and ends
-    /// unjoined a moment later: the bound stays `limit` rather than
-    /// growing a margin for a report that already held `end` for almost
-    /// all of it.
+    /// `limit` (only a delivery inside the gate is waited for past it): a
+    /// report or a thread that outlasts `limit` is logged and left behind
+    /// the closed gate.
     fn end(active: Active, limit: Duration) {
         let deadline = Instant::now() + limit;
         let reports_left = active.gate.close(deadline);
@@ -1653,9 +1392,8 @@ impl LiveCaptureBackend {
 }
 
 impl CaptureBackend for LiveCaptureBackend {
-    /// Returns the stream it opened once the first cycle arrived: always
-    /// 48 kHz (the adapter resamples), both device latencies, and the
-    /// layout of the one interleaved buffer.
+    /// Returns the stream once the first cycle arrived: always 48 kHz,
+    /// both device latencies, one interleaved buffer.
     fn start(
         &self,
         lanes: &[AudioLane],
@@ -1678,13 +1416,11 @@ impl CaptureBackend for LiveCaptureBackend {
         let id_slot = Arc::clone(&thread_id);
         let connected = Arc::new(AtomicBool::new(false));
         let thread_connected = Arc::clone(&connected);
-        // The thread's start lines are as loud as this one's.
         let starts_quietly = start_log::is_quiet();
         let thread = std::thread::Builder::new()
             .name("steno-pipewire".into())
             .spawn(move || {
                 id_slot.store(kernel_thread_id(), Ordering::Relaxed);
-                // Dropped last, when the teardown is done.
                 let _ending = ending;
                 start_log::quietly(starts_quietly, || {
                     run(
@@ -1699,8 +1435,7 @@ impl CaptureBackend for LiveCaptureBackend {
                 });
             })
             .map_err(|e| CaptureError::BackendFailed(format!("the PipeWire thread: {e}")))?;
-        // The thread answers by its own deadlines; the margin covers a
-        // thread that is slow to get scheduled.
+        // The margin covers a thread slow to get scheduled.
         let outcome = await_answer(
             answered,
             START_TIMEOUT + LATENCY_TIMEOUT + Duration::from_secs(2),
@@ -1721,14 +1456,10 @@ impl CaptureBackend for LiveCaptureBackend {
         outcome
     }
 
-    /// Returns within `STOP_TIMEOUT` (2 s) once it has the backend (a
-    /// `start` in progress holds it), plus the microseconds of a delivery
-    /// inside the gate; what it leaves behind then is in the module doc.
-    ///
-    /// What the data-loop thread missed after its last cycle, up to the
-    /// moment before the gate closes, is written once it has
-    /// (`missed_at_stop`); not for a stop the session makes to rebuild,
-    /// whose gap covers that time.
+    /// Returns within `STOP_TIMEOUT` once it has the backend, plus a
+    /// delivery inside the gate. What the data-loop thread missed after its
+    /// last cycle is written, except at a rebuild's stop, whose gap covers
+    /// it.
     fn stop(&self) {
         let Some(active) = self.lock().take() else {
             return;
@@ -1742,21 +1473,18 @@ impl CaptureBackend for LiveCaptureBackend {
         }
     }
 
-    /// Every cycle of the graph delivers, the sink's monitor included with
-    /// nothing playing (see the module doc); a graph that stops running (a
-    /// source whose owner stalls) is the session's watchdog to catch.
+    /// Every cycle delivers, the monitor included with nothing playing; a
+    /// graph that stops is the session's watchdog to catch.
     fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
         true
     }
 
-    /// A second stream on a connection of its own can ask a source
-    /// without touching the capture that records.
     fn probes_inputs(&self) -> bool {
         true
     }
 
-    /// The chosen source's first cycle on a stream of its own, within
-    /// `START_TIMEOUT` (3 s); see `Capture::probe`.
+    /// The chosen source's first cycle on a stream of its own; see
+    /// `Capture::probe`.
     fn probe_input(&self, uid: &str) -> bool {
         let runs = Capture::probe(uid);
         tracing::info!("the input device {uid} runs on its own: {runs}");
@@ -1777,10 +1505,8 @@ mod tests {
 
     use super::*;
 
-    /// `process`'s reading of the stream time: ticks at the graph's rate
-    /// become the stream's 48 kHz frames, a graph that changes its rate
-    /// starts afresh, and a time that could not be read, or has no rate,
-    /// reports nothing and resets.
+    /// Stream ticks at the graph's rate become 48 kHz frames; a rate change
+    /// or an unreadable time starts afresh and reports nothing.
     #[test]
     fn a_cycle_reads_its_jump_from_the_ticks_at_the_graph_rate() {
         let at = |denom| spa::utils::Fraction { num: 1, denom };
@@ -1817,9 +1543,8 @@ mod tests {
             missed_before(&mut clock, Some((7_441, at(44_100))), 480).fill,
             0
         );
-        // The graph's quantum going from 256 to 1 024 frames, as measured on
-        // the private daemon: the clock jumps two new quanta, the wall clock
-        // one old and one new.
+        // A quantum going from 256 to 1 024 frames, as measured: the clock
+        // jumps two new quanta, the wall clock one old and one new.
         let mut clock = CycleClock::new(48_000.0);
         let mut cycle =
             |ticks: u64, frames| missed_before(&mut clock, Some((ticks, at(48_000))), frames).fill;
@@ -1830,8 +1555,8 @@ mod tests {
         assert_eq!(cycle(5_376, 1_024), 1_024, "a missed cycle after it counts");
     }
 
-    /// A cycle goes into the sink after the zeros of what was missed
-    /// before it, on every lane, and the unfilled frames are only counted.
+    /// A cycle follows the zeros of what was missed before it; the
+    /// unfilled frames are only counted.
     #[test]
     fn a_cycle_follows_the_zeros_of_what_it_missed() {
         let lanes = [AudioLane::Mic, AudioLane::System];
@@ -1885,7 +1610,7 @@ mod tests {
     }
 
     /// At the stop, the time since the last cycle beyond that cycle and the
-    /// one in flight, at 48 kHz, is missed.
+    /// one in flight is missed.
     #[test]
     fn the_stop_reads_what_passed_since_the_last_cycle() {
         let at = 7_000_000_000;
@@ -1910,8 +1635,7 @@ mod tests {
         );
     }
 
-    /// The scheduling policy is read past a name that holds `) ` and
-    /// spaces: 0 (`SCHED_OTHER`) is not real-time, 1 and 2 are.
+    /// The scheduling policy is read past a name holding `) `.
     #[test]
     fn the_scheduling_policy_is_read_past_any_name() {
         let stat = |policy: u32| {
@@ -1985,7 +1709,6 @@ mod tests {
         .into_inner()
     }
 
-    /// A stream as `start` answers it, for the answer channel's tests.
     fn stream() -> CaptureStream {
         CaptureStream {
             sample_rate: SAMPLE_RATE,
@@ -1996,10 +1719,8 @@ mod tests {
         }
     }
 
-    /// A capture that records the default source in place of a missing
-    /// chosen one: the chosen node announced, or one of its ports, is a
-    /// pending change (so the rebuild returns to it); another app's node
-    /// or the default source's ports are not.
+    /// On the fallback, the chosen node or one of its ports announced is a
+    /// pending change; another app's node or the default's ports are not.
     #[test]
     fn the_chosen_source_announced_again_is_a_change() {
         fn props<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<&'a str> {
@@ -2034,9 +1755,8 @@ mod tests {
         assert!(shared.due().is_some(), "and its port");
     }
 
-    /// A lost connection to the daemon is the audio service restarting,
-    /// whatever the graph reads, so the session restarts until the daemon
-    /// is back; other failures are judged from the graph.
+    /// A lost connection is the audio service restarting, whatever the
+    /// graph reads.
     #[test]
     fn a_lost_connection_is_the_audio_service_restarting() {
         let baseline = DeviceSnapshot {
@@ -2111,8 +1831,7 @@ mod tests {
     }
 
     /// A pass of kind `pass` through `gate` on its own thread, held inside
-    /// until the returned sender sends; returns once it is inside. The
-    /// thread's result is whether the pass ran.
+    /// until the returned sender sends; the result is whether it ran.
     fn hold_inside(gate: &Arc<Gate>, pass: Pass) -> (SyncSender<()>, JoinHandle<bool>) {
         let (entered, inside) = sync_channel(0);
         let (release, released) = sync_channel::<()>(0);
@@ -2133,8 +1852,7 @@ mod tests {
         (release, thread)
     }
 
-    /// `gate.close(deadline)` on its own thread; returns once the gate is
-    /// closed, with the receiver its result arrives on.
+    /// `gate.close(deadline)` on its own thread, its result on the receiver.
     fn close_on_a_thread(gate: &Arc<Gate>, deadline: Instant) -> (Receiver<bool>, JoinHandle<()>) {
         let (returned, closed) = sync_channel(1);
         let thread = std::thread::spawn({
@@ -2304,8 +2022,8 @@ mod tests {
         assert_eq!(reports.load(Ordering::SeqCst), 1);
     }
 
-    /// `end(.., limit)` on its own thread, for a capture thread that runs
-    /// `body` and then ends; the receiver gets how long `end` took.
+    /// `end(.., limit)` on its own thread for a capture thread that runs
+    /// `body`; the receiver gets how long `end` took.
     fn end_on_a_thread(
         gate: &Arc<Gate>,
         limit: Duration,
@@ -2388,7 +2106,7 @@ mod tests {
         const LIMIT: Duration = Duration::from_secs(1);
         let gate = Arc::new(Gate::new());
         // A report that leaves halfway through the limit, and a thread that
-        // does not end before the test lets go.
+        // ends only when released.
         let (release, passer) = hold_inside(&gate, Pass::Report);
         let (unstick, stuck) = sync_channel::<()>(0);
         let (took, stopper) = end_on_a_thread(&gate, LIMIT, move || {
@@ -2430,9 +2148,8 @@ mod tests {
         );
     }
 
-    /// A thread that does not answer in time is given up on, its receiver
-    /// dropped: as a graph that does not run when the daemon had answered
-    /// it, else as a backend failure.
+    /// A thread that does not answer in time is given up on: `DidNotRun`
+    /// when the daemon had answered, else a backend failure.
     #[test]
     fn a_start_that_gave_up_drops_its_receiver() {
         let (answer, answered) = answer_channel();

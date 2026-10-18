@@ -1,9 +1,4 @@
 //! A scripted [`ProcessAudioActivitySource`] for the detector tests.
-//! Swift: `Sources/StenoAudio/Testing/FakeProcessAudioActivity.swift`.
-//!
-//! `set` replaces the snapshot and fires a change, `set_silently` replaces
-//! it without one (the poll must notice), `set_failure` makes `snapshot()`
-//! fail.
 
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -26,7 +21,6 @@ struct Inner {
 }
 
 impl FakeProcessAudioActivity {
-    /// Starts with `initial`.
     #[must_use]
     pub fn new(initial: Vec<ProcessAudioActivity>) -> Self {
         Self {

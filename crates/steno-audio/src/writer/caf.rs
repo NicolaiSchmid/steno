@@ -1,13 +1,8 @@
-//! A crash-tolerant CAF writer and the reader for what it writes.
-//! Swift: `Sources/StenoAudio/Writer/CAFFile.swift`.
-//!
-//! Float32 little-endian PCM: `caff` header, `desc` chunk, then a `data`
-//! chunk whose size is -1 ("to the end of the file", the streaming form
-//! Core Audio's own writers use) while recording. Every `write` appends
-//! whole frames, so a process killed mid-recording leaves a file any CAF
-//! reader opens up to the last frame written; `finish()` patches the real
-//! size in. Big-endian chunk headers, as the CAF specification requires;
-//! no AudioToolbox, so the writer and its tests run on every OS.
+//! A crash-tolerant CAF writer and the reader for what it writes: Float32
+//! little-endian PCM whose `data` chunk size stays -1 ("to the end of the
+//! file") while recording, so a process killed mid-recording leaves a file
+//! any CAF reader opens up to the last whole frame; `finish()` patches the
+//! real size in.
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
@@ -18,8 +13,7 @@ use super::durable::{self, FullSyncs};
 use super::io_error;
 use crate::capture::CaptureError;
 
-/// Streams Float32 PCM into a CAF whose data size stays -1 until `finish`;
-/// see the module doc.
+/// Streams Float32 PCM into a CAF whose data size stays -1 until `finish`.
 pub struct CafStreamWriter {
     path: PathBuf,
     sample_rate: f64,
@@ -53,7 +47,6 @@ impl CafStreamWriter {
     pub const EDIT_COUNT_SIZE: usize = 4;
     /// `kCAFLinearPCMFormatFlagIsFloat | kCAFLinearPCMFormatFlagIsLittleEndian`.
     pub const FLOAT_LITTLE_ENDIAN_FLAGS: u32 = 0b11;
-    /// Float32.
     pub const BYTES_PER_SAMPLE: usize = 4;
     /// Everything before the first sample: 68 bytes.
     pub const HEADER_SIZE: usize = Self::FILE_HEADER_SIZE
@@ -83,20 +76,17 @@ impl CafStreamWriter {
         })
     }
 
-    /// The writer, its syncs made through `syncs`.
     #[cfg(test)]
     fn syncing_through(mut self, syncs: FullSyncs) -> Self {
         self.syncs = syncs;
         self
     }
 
-    /// Where it writes.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Frames written so far.
     #[must_use]
     pub fn frames_written(&self) -> usize {
         self.frames_written
@@ -131,12 +121,8 @@ impl CafStreamWriter {
     }
 
     /// Makes every frame written so far durable with `File::sync_data`
-    /// (the samples and the file size, not the timestamps): `fdatasync` on
-    /// Linux, `F_FULLFSYNC` on the Mac, which also flushes the drive's
-    /// cache (5 to 14 ms per 5 s of audio on an internal SSD), and
-    /// `FlushFileBuffers` on Windows; on the Mac a plain `fsync` when the
-    /// filesystem refuses `F_FULLFSYNC` (the `durable` module). Nothing after
-    /// `finish`. Rust only: Swift synced at the close alone.
+    /// (`F_FULLFSYNC` on the Mac, falling back to `fsync`, through the
+    /// `durable` module). Nothing after `finish`.
     pub fn sync(&mut self) -> std::io::Result<()> {
         self.file
             .as_ref()
@@ -160,7 +146,6 @@ impl CafStreamWriter {
         Ok(())
     }
 
-    /// Seconds written so far.
     #[must_use]
     pub fn duration(&self) -> f64 {
         // Exact in f64 for any recording.
@@ -193,7 +178,6 @@ impl CafStreamWriter {
     }
 }
 
-/// Why a CAF could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CafReadError {
     /// Not a CAF, or a chunk runs past the end.
@@ -202,47 +186,36 @@ pub enum CafReadError {
     /// Not Float32 little-endian PCM.
     #[error("unsupported CAF format: {0}")]
     UnsupportedFormat(String),
-    /// A read failed: the path and the error.
     #[error("{0}")]
     Io(String),
 }
 
-/// Reads the CAF files the writer produces (Float32 little-endian PCM, any
-/// channel count, data size -1 accepted) into de-interleaved channels, the
-/// whole file at once: for the tests and the bench tools. The pipeline's
-/// decoder, [`SymphoniaAudioCodec`](crate::codec::SymphoniaAudioCodec),
-/// reads a master through the same chunk walk a block at a time, and crash
-/// recovery reads the headers alone ([`CafHeader`]).
+/// Reads the CAF files the writer produces into de-interleaved channels,
+/// the whole file at once: for the tests and the bench tools.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CafFile {
-    /// Hertz.
     pub sample_rate: f64,
-    /// De-interleaved channels.
     pub channels: Vec<Vec<f32>>,
 }
 
 impl CafFile {
-    /// Frames per channel.
     #[must_use]
     pub fn frame_count(&self) -> usize {
         self.channels.first().map_or(0, Vec::len)
     }
 
-    /// Seconds.
     #[must_use]
     pub fn duration(&self) -> f64 {
         let frames = self.frame_count() as f64;
         frames / self.sample_rate
     }
 
-    /// Reads the whole file.
     pub fn read(path: &Path) -> Result<Self, CafReadError> {
         let data = std::fs::read(path)
             .map_err(|e| CafReadError::Io(format!("{}: {e}", path.display())))?;
         Self::read_bytes(&data)
     }
 
-    /// Parses `data` as a CAF.
     pub fn read_bytes(mut data: &[u8]) -> Result<Self, CafReadError> {
         let layout = CafLayout::read(&mut data)?;
         let channel_count = layout.channels;
@@ -267,11 +240,9 @@ struct CafLayout {
     sample_rate: f64,
     /// At least one: a CAF that names none is malformed.
     channels: usize,
-    /// The file offset of the first sample.
     start: usize,
     /// Whole frames from `start`: up to the `data` chunk's size, or to the
-    /// end of the file while that size is -1. A frame cut short by a kill
-    /// or a full disk does not count.
+    /// end of the file while that size is -1.
     frames: usize,
 }
 
@@ -373,7 +344,6 @@ impl CafLayout {
 pub(crate) struct CafReader {
     file: WindowedFile,
     layout: CafLayout,
-    /// Frames read so far.
     position: usize,
     bytes: Vec<u8>,
 }
@@ -391,17 +361,14 @@ impl CafReader {
         })
     }
 
-    /// Hertz.
     pub(crate) fn sample_rate(&self) -> f64 {
         self.layout.sample_rate
     }
 
-    /// Interleaved channels, at least one.
     pub(crate) fn channel_count(&self) -> usize {
         self.layout.channels
     }
 
-    /// Whole frames in the file.
     pub(crate) fn frame_count(&self) -> usize {
         self.layout.frames
     }
@@ -434,20 +401,12 @@ impl CafReader {
 }
 
 /// What a CAF's chunk headers say, read without its samples: the format
-/// and how many whole frames the file holds. Crash recovery rebuilds a
-/// recording from it, and reading the master itself would mean 1.4 GB an
-/// hour. The same chunk walk as [`CafFile`] and the decoder; only the
-/// chunk headers and the `desc` body are read. Rust only: Swift had no
-/// recovery.
+/// and how many whole frames the file holds, for crash recovery.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CafHeader {
-    /// Hertz.
     pub sample_rate: f64,
-    /// Interleaved channels, at least one.
     pub channel_count: usize,
-    /// Whole frames on disk: up to the `data` chunk's size, or to the end
-    /// of the file while that size is -1. A frame cut short by a kill or a
-    /// full disk does not count.
+    /// Whole frames on disk; a frame cut short by a kill does not count.
     pub frame_count: u64,
 }
 
@@ -477,7 +436,6 @@ impl CafHeader {
         CafLayout::read(&mut data).map(Self::from)
     }
 
-    /// Seconds in the whole frames.
     #[must_use]
     pub fn duration(&self) -> f64 {
         // Exact in f64 for any recording.
@@ -510,11 +468,8 @@ mod tests {
 
     use super::*;
 
-    /// Every `sync` is one full sync of the data, through `durable`'s
-    /// fallback, and `finish` one of everything (P21 of
-    /// `.plans/2026-10-07-stable-promotion.md`: a frame synced is on the
-    /// disk, not in the page cache a kill keeps); nothing syncs after
-    /// `finish`.
+    /// Every `sync` is one full sync of the data and `finish` one of
+    /// everything; nothing syncs after `finish`.
     #[test]
     fn each_sync_is_one_full_sync_and_the_finish_one_more() {
         static PERIODIC: AtomicUsize = AtomicUsize::new(0);

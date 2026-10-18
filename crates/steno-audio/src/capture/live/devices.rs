@@ -1,5 +1,4 @@
 //! Device enumeration, UID lookup and default-device reads over the HAL.
-//! Swift: `Sources/StenoAudio/Capture/AudioDevices.swift`.
 
 use objc2_core_audio::{
     AudioObjectPropertySelector, kAudioDevicePropertyDeviceIsRunningSomewhere,
@@ -24,8 +23,6 @@ use super::hal::{self, AGGREGATE_UID_PREFIX, CoreAudioError, Id, SYSTEM, UNKNOWN
 pub struct AudioDevices;
 
 impl AudioDevices {
-    /// Every device the HAL lists, in HAL order. Private aggregates Steno
-    /// creates are included while they exist.
     pub fn all() -> Result<Vec<AudioDeviceInfo>, CoreAudioError> {
         let ids: Vec<Id> = hal::read_array(
             SYSTEM,
@@ -49,9 +46,7 @@ impl AudioDevices {
     }
 
     /// The app's input picker: every device with input channels but the
-    /// private aggregates Steno's own captures create, which a recording
-    /// would otherwise list as a choice while it runs. Rust only: Swift
-    /// lists them.
+    /// private aggregates Steno's own captures create.
     pub fn inputs() -> Result<Vec<AudioDeviceInfo>, CoreAudioError> {
         Ok(Self::all()?
             .into_iter()
@@ -59,7 +54,6 @@ impl AudioDevices {
             .collect())
     }
 
-    /// The device with `uid`, or `None` when it is not connected.
     pub fn device(uid: &str) -> Result<Option<AudioDeviceInfo>, CoreAudioError> {
         Ok(Self::all()?.into_iter().find(|d| d.uid == uid))
     }
@@ -80,13 +74,11 @@ impl AudioDevices {
         )?)
     }
 
-    /// The default system output device's UID, `None` when none resolves.
     #[must_use]
     pub fn default_system_output_uid() -> Option<String> {
         hal::uid(Self::default_device(kAudioHardwarePropertyDefaultSystemOutputDevice).ok()?).ok()
     }
 
-    /// The default output device's UID, `None` when none resolves.
     #[must_use]
     pub fn default_output_uid() -> Option<String> {
         hal::uid(Self::default_device(kAudioHardwarePropertyDefaultOutputDevice).ok()?).ok()

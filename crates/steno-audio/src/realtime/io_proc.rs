@@ -1,14 +1,8 @@
 //! The IOProc body, separated from the HAL so the pointer arithmetic over
-//! `StreamLayout` is tested on every OS with buffer lists built by hand.
-//! Swift: `Sources/StenoAudio/RealTime/IOProcRunner.swift` (`deliver`).
-//!
-//! The macOS backend (`capture::live`) turns the HAL's `AudioBufferList`
-//! into a slice of [`BufferView`]s on the stack and calls [`deliver`]. No
-//! arrays are created, no closures called, nothing logged inside the
-//! callback. Safe code holds its buffers as [`SliceView`]s and goes
-//! through [`deliver_slices`], the safe form: the WASAPI capture threads
-//! via [`PacketRouter`](super::PacketRouter), and the PipeWire backend
-//! after [`interleaved_view`] has turned its one mapped buffer into a view.
+//! `StreamLayout` is tested on every OS with hand-built buffer lists. The
+//! macOS backend calls [`deliver`] with [`BufferView`]s on the stack; the
+//! WASAPI and PipeWire backends call the safe [`deliver_slices`]. Nothing
+//! allocates, locks or logs inside the callback.
 
 use super::sink::LaneFrameSink;
 use crate::capture::layout::{ChannelRef, LaneSource};
@@ -17,7 +11,6 @@ use crate::capture::layout::{ChannelRef, LaneSource};
 /// `None` for a buffer the HAL delivered without data.
 #[derive(Debug, Clone, Copy)]
 pub struct BufferView {
-    /// Interleaved channels in the buffer.
     pub channels: usize,
     /// Interleaved samples; `channels * frames` floats.
     pub data: Option<*const f32>,
@@ -26,13 +19,10 @@ pub struct BufferView {
 }
 
 /// The first sample of `channel` in `buffers`, `None` when the buffer is
-/// missing, has no data, or is not shaped as the layout expects: the
-/// channel must sit inside the buffer's channel count, the stride must be
-/// that count, and the buffer must hold `frames` whole frames. The layout
-/// was resolved from the shapes the HAL reported at start; a buffer list
-/// shaped differently (an input that was reconfigured underneath the
-/// aggregate) becomes silence instead of a read past its end. Three
-/// integer compares, nothing else.
+/// missing, has no data, or is not shaped as the layout expects (channel
+/// inside the buffer's count, stride equal to it, `frames` whole frames).
+/// A buffer list reshaped since start becomes silence, not a read past its
+/// end.
 #[inline(always)]
 fn samples(channel: &ChannelRef, buffers: &[BufferView], frames: usize) -> Option<*const f32> {
     let buffer = buffers.get(channel.buffer)?;
@@ -48,10 +38,8 @@ fn samples(channel: &ChannelRef, buffers: &[BufferView], frames: usize) -> Optio
     Some(unsafe { data.add(channel.offset) })
 }
 
-/// The callback's frame count: from the first source whose buffer carries
-/// any, so a first lane whose buffer arrived missing or with no channels
-/// becomes silence instead of costing the other lanes their audio. 0 when
-/// no source's buffer carries a frame.
+/// The callback's frame count, from the first source whose buffer carries
+/// any; 0 when none does.
 #[inline(always)]
 pub(crate) fn callback_frames(buffers: &[BufferView], sources: &[LaneSource]) -> usize {
     for source in sources {
@@ -68,12 +56,9 @@ pub(crate) fn callback_frames(buffers: &[BufferView], sources: &[LaneSource]) ->
 }
 
 /// One callback's input buffers into the sink's rings following `sources`.
-/// The frame count comes from the first source whose buffer carries frames;
-/// a buffer the HAL delivered without data, or shaped unlike the layout the
-/// pointers were resolved for, becomes silence so the lanes stay aligned. A
-/// callback where no source's buffer carries a frame has no length to write
-/// or to count as a drop, and is skipped. Whether the callback was written:
-/// `false` when skipped, or refused (and counted as dropped) by full rings.
+/// A missing or misshaped buffer becomes silence so the lanes stay aligned;
+/// a callback with no frames at all is skipped. Returns whether it was
+/// written (`false` when skipped or refused by full rings).
 ///
 /// # Safety
 ///
@@ -114,20 +99,14 @@ pub unsafe fn deliver(
 }
 
 /// The most buffers of one list an IOProc of the macOS backend reads or
-/// writes: on input the output device's inputs (usually none), the
-/// microphone's and the tap's, on output the output device's streams.
-/// Sixteen leaves room for a many-channel interface.
+/// writes; room for a many-channel interface.
 #[cfg(target_os = "macos")]
 pub const MAX_BUFFERS: usize = 16;
 
 /// The body of the call capture's silent output IOProc: zero-fills the
-/// first [`MAX_BUFFERS`] output buffers the HAL handed it, skipping a
-/// buffer without data or of size 0. The HAL zeroes an IOProc's output
-/// before the call already (measured on the Mac, A10 of
-/// `.plans/2026-10-07-stable-promotion.md`); the zeros are written again so
-/// that the promise of digital silence does not rest on the HAL. One
-/// `write_bytes` per buffer over memory the HAL owns: no allocation, no
-/// lock, no syscall.
+/// first [`MAX_BUFFERS`] output buffers, skipping a buffer without data.
+/// The HAL already zeroes them; writing zeros again keeps the promise of
+/// digital silence from resting on the HAL.
 ///
 /// # Safety
 ///
@@ -158,17 +137,12 @@ pub unsafe fn silence_output(list: std::ptr::NonNull<objc2_core_audio_types::Aud
     }
 }
 
-/// One input buffer as safe code holds it: a WASAPI capture packet (valid
-/// from `GetBuffer` to `ReleaseBuffer`), the follower's staging copy, or a
-/// dequeued PipeWire buffer ([`interleaved_view`]), its interleaved samples
-/// borrowed for the call. `None` for a buffer flagged silent
-/// (`AUDCLNT_BUFFERFLAGS_SILENT`) or memory that cannot be read as
-/// interleaved `f32`, which becomes zeros.
+/// One input buffer as safe code holds it (a WASAPI packet, the follower's
+/// staging copy, or a dequeued PipeWire buffer), its interleaved samples
+/// borrowed for the call.
 #[derive(Debug, Clone, Copy)]
 pub struct SliceView<'a> {
-    /// Interleaved channels in the buffer.
     pub channels: usize,
-    /// Frames in the buffer.
     pub frames: usize,
     /// `channels * frames` interleaved samples, or `None` for silence.
     pub samples: Option<&'a [f32]>,
@@ -178,12 +152,9 @@ pub struct SliceView<'a> {
 /// follower's staging copy, with room to spare.
 pub const MAX_SLICE_BUFFERS: usize = 4;
 
-/// [`deliver`] for buffers held as slices: builds the [`BufferView`]s on
-/// the stack and delivers them, so the caller needs no `unsafe`. A slice
-/// shorter than `channels * frames` is treated as silent: its buffer keeps
-/// the length it claims and becomes zeros, so the lanes stay aligned and
-/// nothing reads past its end. Buffers beyond [`MAX_SLICE_BUFFERS`] are
-/// ignored. Whether the callback was written, as [`deliver`] answers.
+/// [`deliver`] for buffers held as slices, so the caller needs no
+/// `unsafe`. A slice shorter than `channels * frames` is treated as silent
+/// (it gets no pointer). Buffers beyond [`MAX_SLICE_BUFFERS`] are ignored.
 #[inline(always)]
 pub fn deliver_slices(
     buffers: &[SliceView<'_>],
@@ -216,17 +187,11 @@ pub fn deliver_slices(
 }
 
 /// One PipeWire buffer of interleaved `f32` as a [`SliceView`]: `memory`
-/// is the mapped `spa_data` (`maxsize` bytes), `offset`, `size` and
-/// `stride` its `spa_chunk`, `channels` the format's channel count. The
-/// chunk's offset is taken modulo the memory size as SPA defines it, a
-/// chunk running past the end is cut to what the memory holds (audio chunks
-/// do not wrap), and a partial last frame is dropped. Memory that is
-/// missing, misaligned for `f32`, or strided unlike `channels` interleaved
-/// samples becomes a view without samples, so [`deliver_slices`] writes
-/// silence of the chunk's length instead of reading past the buffer. A
-/// stride of 0 (a producer that leaves it unset) is read as `channels`
-/// samples. A handful of integer operations, no allocation; the view
-/// borrows `memory`, valid as long as the buffer stays dequeued.
+/// is the mapped `spa_data`, `offset`, `size` and `stride` its `spa_chunk`.
+/// The offset is taken modulo the memory size as SPA defines it, a chunk
+/// past the end is cut, and a partial last frame dropped. Missing,
+/// misaligned or oddly strided memory becomes a view without samples
+/// (silence); a stride of 0 means `channels` samples.
 #[inline(always)]
 #[must_use]
 pub fn interleaved_view(
@@ -289,7 +254,6 @@ mod tests {
         // Four frames of three channels, sample `10 * frame + channel`.
         let samples: Vec<f32> = (0..12u8).map(|i| f32::from(i / 3 * 10 + i % 3)).collect();
         let memory = bytes(&samples);
-        // From the second frame, a chunk far longer than the memory.
         let view = interleaved_view(Some(memory), 12, 4_096, 12, 3);
         assert_eq!(view.frames, 3, "three whole frames are left");
         let lanes = [AudioLane::Mic, AudioLane::System];

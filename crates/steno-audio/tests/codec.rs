@@ -1,15 +1,7 @@
-//! Decode and mixdown on files built in setup: a two-channel 48 kHz CAF
-//! from the recording writer, a 16 kHz WAV master, and the sinc resampler
-//! on a 44.1 kHz tone; plus the phone path's containers on committed
-//! synthetic fixtures in `Tests/Fixtures/audio/` (ffmpeg encodes of half a
-//! second of a 440 Hz sine, `tone-440-44k1-500ms.m4a`; of the same
-//! sine after 0.2 s of silence, mono and with a second channel,
-//! `tone-440-44k1-onset-200ms.m4a` and `tone-440-1000-44k1-stereo-onset.m4a`;
-//! and two files from Apple's encoder in the phone recorder's layout,
-//! `tone-440-44k1-onset-200ms-apple.m4a` and
-//! `silence-44k1-avaudiorecorder.m4a`; there is no AAC encoder in pure
-//! Rust to build them in setup).
-//! Swift: `Tests/StenoAudioTests/AVFoundationAudioCodecTests.swift`.
+//! Decode and mixdown on files built in setup (a two-channel 48 kHz CAF
+//! from the recording writer, a 16 kHz WAV master, a 44.1 kHz tone) and on
+//! the phone path's committed synthetic AAC fixtures in
+//! `Tests/Fixtures/audio/`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -114,8 +106,8 @@ fn call_asset(files: &RecordingFiles) -> AudioAsset {
     )
 }
 
-/// A two-lane meeting folder: 1 kHz on the mic lane at 0.5, 1 kHz on the
-/// system lane at 0.25, two seconds, with sidecars.
+/// A two-lane meeting folder: 1 kHz on the mic lane at 0.5, on the system
+/// lane at 0.25, two seconds, with sidecars.
 fn make_call_asset(directory: &Path) -> AudioAsset {
     let layout = RecordingLayout::new(directory, Uuid::new_v4());
     call_asset(&write_call(&layout, 2.0, true).files())
@@ -193,14 +185,10 @@ async fn decodes_each_lane_of_the_master_like_its_sidecar() {
     );
 }
 
-/// The group delay compensation, checked where a shift is visible: a
-/// 1 kHz tone has a 16-sample period at 16 kHz, so a 32- or 64-sample
-/// error passes a sample-by-sample compare. An onset at 1.0 s on the mic
-/// lane lands at 16 000 (within one) in the master decode, which drops the
-/// FIR's group delay so the lane sits on the master's time like a
-/// zero-phase conversion; the sidecar, written live by the same causal
-/// filter, carries that delay and has the onset 32 samples (2 ms) later,
-/// as Swift's did. The two decodes agree once that shift is undone.
+/// The group delay compensation, checked on an onset: the master decode
+/// drops the FIR's group delay and puts the onset at 16 000, the sidecar
+/// written live carries it 32 samples later. The two agree once that shift
+/// is undone.
 #[tokio::test]
 async fn master_decode_is_zero_phase_and_the_sidecar_lags_one_group_delay() {
     let directory = tempfile::tempdir().unwrap();
@@ -235,9 +223,8 @@ async fn master_decode_is_zero_phase_and_the_sidecar_lags_one_group_delay() {
     assert!(max_error < 0.02, "shifted decodes differ by {max_error}");
 }
 
-/// Crash recovery through the real decoder: a master whose writer never
-/// reached `finish()` (data chunk size -1) reads to the last frame, and
-/// sidecars with zero-size headers are skipped in favour of the master.
+/// Crash recovery: a master whose writer never reached `finish()` reads to
+/// the last frame, and sidecars with zero-size headers are skipped.
 #[tokio::test]
 async fn an_unfinished_master_with_empty_sidecars_decodes_from_the_master() {
     let directory = tempfile::tempdir().unwrap();
@@ -331,11 +318,8 @@ async fn wav_master_decodes_through_symphonia() {
     );
 }
 
-/// A stereo 16-bit PCM WAV at 48 kHz, built byte by byte: the left channel
-/// a 440 Hz sine at 0.5, the right a 1 kHz sine at 0.1. Every container the
-/// phone path reads in the other tests is mono, so this is what pins the
-/// de-interleaving: each channel decodes to its own samples, at its own
-/// level and frequency, through `read_channel` and `decode_path`.
+/// A stereo 16-bit PCM WAV at 48 kHz built byte by byte: each channel
+/// decodes to its own samples, level and frequency.
 #[test]
 fn a_stereo_wav_decodes_each_channel_on_its_own() {
     let frames = 24_000usize;
@@ -396,9 +380,7 @@ fn a_stereo_wav_decodes_each_channel_on_its_own() {
 }
 
 /// The phone's m4a and a 16 kHz WAV declare their length in their
-/// headers: half a second without the AAC priming, which the decode
-/// drops too (it keeps the encoder's padding, under a packet), and six
-/// seconds. A header that declares more than five hours is capped there.
+/// headers; a header that declares more than five hours is capped there.
 #[test]
 fn a_containers_declared_duration_is_read_without_decoding() {
     let path = fixture("tone-440-44k1-500ms.m4a");
@@ -455,13 +437,9 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The phone path's container: half a second of a 440 Hz sine at 0.5,
-/// mono 44.1 kHz, as AAC-LC (ffmpeg). Frequency, level and the
-/// exact-length rule hold through `decode_path`, and it starts on the
-/// encoder's first sample: the decoder trims the AAC priming the MP4 edit
-/// list declares (1 024 samples, which the lane used to start with). The
-/// onset fixture below pins the AAC cut to the sample. The same sine as an
-/// MP3 is no kind of file Steno reads (`tests/codec_sizes.rs`).
+/// The phone path's container (half a second of a 440 Hz sine, mono
+/// 44.1 kHz AAC-LC from ffmpeg): frequency, level and the exact-length rule
+/// hold through `decode_path`, and the edit list's priming is trimmed.
 #[test]
 fn the_aac_fixture_decodes_from_its_first_sample() {
     {
@@ -520,10 +498,8 @@ enum Declared {
     /// ffmpeg's own edit list: 1 024.
     EditList,
     /// An empty edit (a delay before the track), then ffmpeg's: 1 024.
-    /// Android's `MPEG4Writer` writes that for a delayed track.
     DelayThenEditList,
-    /// No edit list, iTunes' gapless tag naming this many samples: the
-    /// layout of `AVAudioFile` and `afconvert`.
+    /// No edit list, iTunes' gapless tag naming this many samples.
     Gapless(u32),
     /// ffmpeg's edit list and a gapless tag naming this many.
     EditListAndGapless(u32),
@@ -543,8 +519,7 @@ enum Layout {
     /// `AVAudioRecorder`'s: major brand `M4A `, `mp42` for `iso2`, no
     /// `udta`, ES_ID 0, stream byte 0x14.
     Recorder,
-    /// Android's `MPEG4Writer`'s (`mp42`, no `udta`, ES_ID 0, 0x15) under
-    /// an `.m4a`'s major brand: the recorder's but for the stream byte.
+    /// Android's `MPEG4Writer`'s: the recorder's but for the stream byte.
     Android,
     /// The recorder's with major brand `mp42`.
     MajorMp42,
@@ -586,8 +561,6 @@ fn esds_fields(bytes: &[u8]) -> (usize, usize) {
         bytes,
         &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"],
     );
-    // `stsd`'s header, version and flags and count; `mp4a`'s header and
-    // its 28 bytes of fields.
     let esds = stsd + 16 + 8 + 28;
     assert_eq!(&bytes[esds + 4..esds + 8], b"esds");
     // A descriptor's tag, then a length whose bytes but the last have
@@ -600,7 +573,6 @@ fn esds_fields(bytes: &[u8]) -> (usize, usize) {
         }
         at + 1
     };
-    // The box's header and its version and flags.
     let es_id = body(0x03, esds + 12);
     assert_eq!(bytes[es_id + 2], 0, "no optional ES fields");
     // The decoder config: the object type, then the stream byte.
@@ -608,13 +580,11 @@ fn esds_fields(bytes: &[u8]) -> (usize, usize) {
 }
 
 /// `bytes`, an ffmpeg onset fixture, rewritten as `declared` says, in
-/// `directory`. A dropped edit list or `udta` is renamed `free` (the box
-/// stays, so no offset moves); an added edit or gapless tag grows `moov`,
-/// the file's last box.
+/// `directory`. A dropped box is renamed `free`, so no offset moves; an
+/// added one grows `moov`, the file's last box.
 fn variant(directory: &Path, bytes: &[u8], declared: Declared) -> PathBuf {
     let mut bytes = bytes.to_vec();
     let edts = box_offset(&bytes, &[b"moov", b"trak", b"edts"]);
-    // `edts`'s header, then `elst`'s, its version and flags and its count.
     let (elst, entries) = (edts + 8, edts + 8 + 8 + 4 + 4);
     assert_eq!(&bytes[elst + 4..elst + 8], b"elst");
     match declared {
@@ -640,8 +610,6 @@ fn variant(directory: &Path, bytes: &[u8], declared: Declared) -> PathBuf {
             bytes[edts + 4..edts + 8].copy_from_slice(b"free");
             let (major, third, udta, es_id, stream) = layout.marks();
             assert_eq!((&bytes[4..8], &bytes[24..28]), (&b"ftyp"[..], &b"iso2"[..]));
-            // `ftyp`'s header, the major brand, the minor version, then
-            // the compatible brands `M4A `, `isom` and the third.
             bytes[8..12].copy_from_slice(major);
             bytes[24..28].copy_from_slice(third);
             if !udta {
@@ -681,7 +649,6 @@ fn gapless_udta(priming: u32) -> Vec<u8> {
         b.extend_from_slice(body);
         b
     };
-    // Version and flags, then the body.
     let full_box = |kind: &[u8; 4], body: &[u8]| plain_box(kind, &[&[0u8; 4][..], body].concat());
     let value = format!(" 00000000 {priming:08X} 00000000 0000000000005A00");
     let mut data = vec![0, 0, 0, 1, 0, 0, 0, 0];
@@ -738,12 +705,7 @@ const PRIMING: usize = 1_024;
 const PAST_THE_BOUND: Declared = Declared::Gapless(4_097);
 
 /// The cases of [`the_aac_priming_is_trimmed_to_the_sample`] and its
-/// stereo sibling, each with the frames the decoder should cut: the
-/// declared priming one packet (1 024), after a delay edit too; Apple's
-/// 2 112 (two packets and 64 frames, a cut inside a packet), the
-/// decoder's bound and one past it; nothing declared, which cuts Apple's
-/// 2 112 in `AVAudioRecorder`'s layout alone; and an edit list that wins
-/// over a gapless tag, even at 0.
+/// stereo sibling, each with the frames the decoder should cut.
 const DECLARATIONS: [(Declared, usize); 15] = [
     (Declared::EditList, PRIMING),
     (Declared::DelayThenEditList, PRIMING),
@@ -762,21 +724,11 @@ const DECLARATIONS: [(Declared, usize); 15] = [
     (Declared::ZeroEditAndGapless(2_112), 0),
 ];
 
-/// The AAC priming trimmed to the sample. The fixture is 0.2 s of silence
-/// and then a 440 Hz sine at 0.5 from sample 8 820 (ffmpeg's AAC encoder,
-/// which primes 1 024 samples and says so in the edit list). With the
-/// edit list (after a delay edit too), or iTunes' gapless tag naming
-/// 1 024 (Apple's layout), the
-/// lane starts on the encoder's first sample, so the tone crosses the
-/// onset threshold on the sample the PCM given to the encoder does
-/// (8 822), and at 3 201 at 16 kHz. A tag naming more cuts that many
-/// frames, inside a packet too; one past [`MAX_PRIMING_FRAMES`] cuts
-/// nothing; a file that declares neither loses Apple's 2 112, as
-/// AVFoundation assumes, only with every mark of `AVAudioRecorder`'s
-/// layout, and keeps every sample in ffmpeg's, in Android's and with any
-/// one mark missing; an edit list beside a tag wins, even at 0. Every
-/// trimmed decode is the untrimmed one less exactly its cut, bit for bit:
-/// the trim comes from the container.
+/// The AAC priming trimmed to the sample, whatever declares it (an edit
+/// list, a gapless tag, or nothing in `AVAudioRecorder`'s layout alone);
+/// past [`MAX_PRIMING_FRAMES`] nothing is cut, and an edit list beside a
+/// tag wins. Every trimmed decode is the untrimmed one less exactly its
+/// cut, bit for bit.
 #[test]
 fn the_aac_priming_is_trimmed_to_the_sample() {
     const ONSET: usize = 8_820;
@@ -826,12 +778,8 @@ fn the_aac_priming_is_trimmed_to_the_sample() {
     }
 }
 
-/// The same cuts on two channels, a 440 Hz sine from sample 8 820 on the
-/// first and a 1 kHz one from 11 025 on the second (ffmpeg, as the mono
-/// fixture): each channel's onset moves by the cut, and each channel is
-/// the untrimmed one less exactly its cut, so the cut drops whole frames,
-/// never one channel's samples. A stereo file in `AVAudioRecorder`'s
-/// layout loses Apple's 2 112 frames as a mono one does.
+/// The same cuts on two channels: each channel's onset moves by the cut,
+/// so the cut drops whole frames, never one channel's samples.
 #[test]
 fn a_stereo_track_loses_the_same_frames_on_each_channel() {
     let pcm_onsets = [
@@ -860,15 +808,10 @@ fn a_stereo_track_loses_the_same_frames_on_each_channel() {
     }
 }
 
-/// The phone's own layout: `AVAudioRecorder` writes AAC in MP4 with no
-/// edit list and no gapless tag, though Apple's encoder primed 2 112
-/// samples, and AVFoundation drops them. Two fixtures made on a Mac with
-/// the phone's settings (AAC, 44.1 kHz mono, 64 kbps, quality 96; recipe
-/// in `Tests/Fixtures/README.md`): half a second of silence from
-/// `AVAudioRecorder` itself (the microphone gave zeros), and the onset
-/// fixture's PCM through `AVAudioFile`, its gapless tag dropped to match
-/// the recorder's layout. The decoder's lengths and onset are
-/// AVFoundation's, read off the same files.
+/// The phone's own layout: `AVAudioRecorder` writes no edit list and no
+/// gapless tag, though Apple's encoder primed 2 112 samples. On two
+/// fixtures made on a Mac with the phone's settings, the decoder's lengths
+/// and onset are AVFoundation's.
 #[test]
 fn the_phones_recorder_layout_decodes_as_avfoundation_reads_it() {
     let recorder = fixture("silence-44k1-avaudiorecorder.m4a");
@@ -911,8 +854,7 @@ fn the_sinc_resampler_keeps_level_and_period_at_44100() {
     let hertz = frequency(steady, 16_000.0);
     assert!((hertz - 1_000.0).abs() < 5.0, "{hertz} Hz");
 
-    // The passband edge, as the module doc states it: within 0.3 dB at
-    // 6 kHz, about -1.3 dB at 6.5 kHz.
+    // The passband edge: within 0.3 dB at 6 kHz, about -1.3 dB at 6.5 kHz.
     let droop = |hertz: f64| {
         let output = SymphoniaAudioCodec::to_16k(&tone_44k1(hertz, count), 44_100);
         level_against_sine(&output[1_000..31_000], 0.5)
@@ -929,13 +871,8 @@ fn the_sinc_resampler_keeps_level_and_period_at_44100() {
 }
 
 /// A sidecar is taken only when it is exactly as long as the master's
-/// 16 kHz lane. Its 32-bit size fields wrap after 37.3 hours, so the
-/// header of a long sidecar can claim a short lane and still parse; here
-/// a three-second sidecar's header claims 1 000 samples and a chunk after
-/// them covers the rest, as a wrapped size can land. That, a sidecar a
-/// frame longer and one a frame shorter (a full disk stopped it after
-/// the master's frame), and one a sample off either way all decode from
-/// the master, sample for sample; the writer's own sidecar is still taken.
+/// 16 kHz lane: a wrapped size, a frame longer or shorter, or a sample off
+/// all decode from the master; the writer's own sidecar is still taken.
 #[tokio::test]
 async fn a_sidecar_whose_length_disagrees_with_the_master_is_not_taken() {
     let directory = tempfile::tempdir().unwrap();
@@ -1005,10 +942,8 @@ async fn a_sidecar_whose_length_disagrees_with_the_master_is_not_taken() {
     }
 }
 
-/// A master that fails after its sidecar was set aside for disagreeing
-/// with it (here the asset lists a lane the master has no channel for,
-/// which fails the same way an I/O error mid-file does) falls back to
-/// that sidecar: a transcript from a sidecar beats none.
+/// A master that fails after its sidecar was set aside falls back to that
+/// sidecar.
 #[tokio::test]
 async fn a_master_that_fails_falls_back_to_the_sidecar_that_disagreed() {
     let directory = tempfile::tempdir().unwrap();
@@ -1046,9 +981,7 @@ async fn a_master_that_fails_falls_back_to_the_sidecar_that_disagreed() {
 }
 
 /// The payload of each AAC packet of a fixture's one track, in file
-/// order: the `stsz` sizes, laid out from each chunk's `stco` offset, with
-/// as many packets per chunk as `stsc` says (ffmpeg writes a short file
-/// as one chunk, Apple's encoder as several).
+/// order, from `stsz`, `stco` and `stsc`.
 fn packet_payloads(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
     let table = [b"moov", b"trak", b"mdia", b"minf", b"stbl"];
     let word = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
@@ -1081,9 +1014,8 @@ fn packet_payloads(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
     payloads
 }
 
-/// The fixture `name` with `change` applied to its bytes, given the
-/// payload of each of its packets, written into `directory` as
-/// `damaged.m4a`.
+/// The fixture `name` with `change` applied to its bytes, written into
+/// `directory` as `damaged.m4a`.
 fn damaged_copy(
     directory: &Path,
     name: &str,
@@ -1121,21 +1053,11 @@ fn largest_difference(a: &[f32], b: &[f32], frames: std::ops::Range<usize>) -> f
     frames.map(|i| (a[i] - b[i]).abs()).fold(0.0, f32::max)
 }
 
-/// A packet that does not decode becomes silence of its length, in place.
-/// The damaged fixture has packets 9, 10 and 15 of 23 overwritten (zeros,
-/// `0xAA` and `0x55`: invalid data, a program config element and a
-/// coupling channel element, the last two of which stopped the whole
-/// decode before); with the 1 024 frames of priming trimmed, packet k
-/// holds frames (k - 1) * 1 024 to k * 1 024. The decode is as long as the
-/// clean one at the source rate and at 16 kHz, and so is the mixdown;
-/// the damaged packets read as exact silence; everything before the first
-/// is the clean decode bit for bit; the first packet after each damaged
-/// run comes from a fresh decoder, so it is no louder than the clean
-/// decode there (the stale overlap would click above it); the rest is the
-/// clean decode within 2 * 10^-3, the noise the decoder substitutes in a
-/// few bands coming from a generator that started over (most of it within
-/// 10^-5); and the three are counted, with their 3 * 1 024 frames of
-/// silence.
+/// A packet that does not decode becomes silence of its length, in place
+/// (packets 9, 10 and 15 overwritten): the lengths match the clean decode,
+/// the damaged packets are exact silence, everything before them is bit
+/// for bit, the first packet after comes from a fresh decoder (no click),
+/// the rest is within 2 * 10^-3, and the three are counted.
 #[tokio::test]
 async fn a_damaged_packet_becomes_silence_of_its_length() {
     let clean_path = fixture("tone-440-44k1-500ms.m4a");
@@ -1164,8 +1086,7 @@ async fn a_damaged_packet_becomes_silence_of_its_length() {
         let largest = largest_difference(a, b, after.clone());
         assert!(largest < 2e-3, "{after:?}: {largest}");
     }
-    // The fresh decoder: the stale tail of the packet before the damage
-    // would add to the first one after it, peaking 0.17 over the tone.
+    // The fresh decoder: a stale tail would peak 0.17 over the tone.
     let peak = |samples: &[f32], frames: std::ops::Range<usize>| {
         samples[frames]
             .iter()
@@ -1204,11 +1125,8 @@ async fn a_damaged_packet_becomes_silence_of_its_length() {
     }
 }
 
-/// A damaged packet inside the encoder priming is trimmed with it: packet
-/// 0 is all priming (1 024 frames), so its silence is cut whole, the decode
-/// keeps its length, no second of it is silent and no part is counted, as
-/// none of the recording was lost; from the second packet after it is the
-/// clean decode within the noise generator's drift.
+/// A damaged packet inside the encoder priming is trimmed with it: the
+/// decode keeps its length and counts no damage.
 #[test]
 fn a_damaged_packet_in_the_priming_is_trimmed_with_it() {
     let directory = tempfile::tempdir().unwrap();
@@ -1229,11 +1147,8 @@ fn a_damaged_packet_in_the_priming_is_trimmed_with_it() {
 }
 
 /// A damaged packet after one that decoded is trimmed by its own
-/// timestamp too. Apple's encoder primes 2 112 frames, two packets and 64
-/// frames: packet 1, after a decoded packet 0, is all priming, so it costs
-/// no frame and is not counted; packet 2 loses its first 64 frames to the
-/// priming and leaves 960 frames of silence. Either way the decode keeps
-/// the clean length, so the audio after it keeps its time.
+/// timestamp too: under Apple's 2 112-frame priming, packet 1 costs no
+/// frame and packet 2 leaves 960 frames of silence.
 #[test]
 fn a_damaged_packet_after_a_decoded_one_is_trimmed_by_its_timestamp() {
     let name = "tone-440-44k1-onset-200ms-apple.m4a";
@@ -1259,13 +1174,8 @@ fn a_damaged_packet_after_a_decoded_one_is_trimmed_by_its_timestamp() {
 }
 
 /// A damaged run from the first packet, before any packet gave the
-/// stream's shape (symphonia's MP4 reader declares no channel count for
-/// AAC), is held until the first packet that decodes, then becomes
-/// silence of its length less the priming: packets 0 to 3 zeroed are
-/// three packets of silence after the 1 024 frames of priming (three
-/// parts counted, as packet 0 costs no audio), the decode
-/// keeps the clean length at the source rate and at 16 kHz, and the audio
-/// after it sits where the clean decode has it.
+/// stream's shape, is held until the first packet that decodes, then
+/// becomes silence of its length less the priming.
 #[test]
 fn a_damaged_run_from_the_first_packet_keeps_its_length() {
     let directory = tempfile::tempdir().unwrap();
@@ -1292,10 +1202,8 @@ fn a_damaged_run_from_the_first_packet_keeps_its_length() {
 }
 
 /// A corrupt first packet that reads as a channel pair in a mono file
-/// (`0x2F` leads with a channel pair element) costs that packet only:
-/// symphonia's AAC decoder fixes its channel layout at its first packet
-/// before checking it, and a reset keeps that layout, so every packet
-/// after it failed; the decoder after a damaged packet is a fresh one.
+/// costs that packet only: the decoder after a damaged packet is a fresh
+/// one, not a reset.
 #[test]
 fn a_first_packet_read_as_a_channel_pair_costs_only_itself() {
     let directory = tempfile::tempdir().unwrap();
@@ -1315,16 +1223,9 @@ fn a_first_packet_read_as_a_channel_pair_costs_only_itself() {
     assert_eq!(damaged.samples.len(), clean.samples.len());
 }
 
-/// A packet that makes symphonia's AAC decoder panic (an index out of
-/// bounds in its section data, reached from a fresh decoder) is a damaged
-/// packet too: the panic is caught, the packet becomes silence, the
-/// decoder is replaced, and the file decodes. In the stereo fixture,
-/// packet 21 with its bytes from 27 on set to `0xFF` fails, and packet 22,
-/// zeros but for a 4 at byte 6, then panics the fresh decoder. Packet 22
-/// is the last, whose container duration is 546 frames where its decode
-/// gives 1 024, so the decode is 478 frames shorter than the clean one.
-/// With the app's crash-log hook installed, the caught panic writes no
-/// crash log and the one already in the folder stays.
+/// A packet that makes symphonia's AAC decoder panic is a damaged packet
+/// too: the panic is caught, the packet becomes silence, the decoder is
+/// replaced, and the file decodes. The caught panic writes no crash log.
 #[test]
 fn a_packet_that_panics_the_decoder_becomes_silence() {
     thread_local! {
@@ -1366,13 +1267,8 @@ fn a_packet_that_panics_the_decoder_becomes_silence() {
     assert!(damaged.samples[at(21)..].iter().all(|&s| s == 0.0));
 }
 
-/// A stereo file's damaged packets are silence in both channels, of the
-/// packet's length in frames: packets 12, 13 and 18 of the stereo fixture
-/// zeroed, after both of its tones began. Each channel keeps its clean length, at the source rate, at
-/// 16 kHz and in the mixdown, the damaged packets are exact zeros,
-/// everything before them is the clean decode bit for bit, and the rest is
-/// within 5 * 10^-3 of it (the noise generator's drift, larger in the
-/// second channel's 1 kHz tone than in the mono fixture).
+/// A stereo file's damaged packets are silence in both channels; each
+/// channel keeps its clean length and the rest is within 5 * 10^-3.
 #[tokio::test]
 async fn a_stereo_files_damaged_packets_are_silence_in_both_channels() {
     let directory = tempfile::tempdir().unwrap();
@@ -1418,10 +1314,7 @@ async fn a_stereo_files_damaged_packets_are_silence_in_both_channels() {
     assert_eq!(lengths[0], lengths[1]);
 }
 
-/// The mono fixture with its media timescale doubled (88 200, twice the
-/// sample rate): the `mdhd` timescale and duration, every `stts` delta and
-/// the edit list's start, in place. A damaged packet's duration is then
-/// 2 048 ticks, still 1 024 frames.
+/// The mono fixture with its media timescale doubled, in place.
 fn at_double_timescale(bytes: &mut [u8]) {
     let word = |bytes: &[u8], at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
     let track = [b"moov", b"trak"];
@@ -1444,10 +1337,8 @@ fn at_double_timescale(bytes: &mut [u8]) {
     }
 }
 
-/// A damaged packet's length goes through the track's time base: in a
-/// file whose timescale is twice its rate, the clean decode is the
-/// original's bit for bit, and packets 9, 10 and 15 zeroed are 1 024
-/// frames of silence each, so the decode keeps the clean length.
+/// A damaged packet's length goes through the track's time base: at a
+/// doubled timescale it is still 1 024 frames.
 #[test]
 fn a_damaged_packets_length_goes_through_the_time_base() {
     let directory = tempfile::tempdir().unwrap();
@@ -1471,11 +1362,8 @@ fn a_damaged_packets_length_goes_through_the_time_base() {
     assert!(damaged.samples[at(9)..at(11)].iter().all(|&s| s == 0.0));
 }
 
-/// A file with more damaged packets than clean ones fails rather than
-/// decode to more silence than sound (`MAX_DAMAGED_SHARE`, a half): 11 of
-/// the 23 packets damaged decode, with the count; 12, and every one, fail,
-/// in the lane, at the source rate and in the mixdown, which leaves no
-/// file.
+/// A file with more damaged packets than clean ones fails, in the lane, at
+/// the source rate and in the mixdown; 11 of 23 still decode.
 #[tokio::test]
 async fn a_file_with_more_damaged_packets_than_clean_ones_fails() {
     assert_eq!(steno_audio::codec::MAX_DAMAGED_SHARE, 0.5);

@@ -7,61 +7,9 @@
 //!   -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
-//! Tones go in with `pw-play`: into `steno-test-sink` through the session
-//! manager's own linking, into the virtual microphone `steno-test-mic` by a
-//! stream the session manager leaves alone and `pw-link` (`wireplumber`
-//! links playback only into sinks). Each `start` and `stop()` runs on its
-//! own thread with a deadline, so a hang fails the test instead of
-//! stalling the suite. The tests share one daemon, so they run one at a
-//! time and put back what they move.
-//!
-//! The tests cover: each lane carries its own tone in the layout `start`
-//! answers; a refused second start and a start after a failed one; one
-//! report per default move or burst of moves, not before the coalescing
-//! delay after the last, and the rebuild's restart on the new default; a
-//! report while other apps' streams keep coming and going; no report for a
-//! default that comes back or for an unrelated node; a lost microphone or
-//! its link reported as the input gone (in person or during a call), a lost
-//! monitor link as the output gone, both links lost (the monitor's first)
-//! as the output gone, and the capture's connection closed from outside as
-//! the audio service restarting; a report stuck in its handler
-//! not holding `stop()` past its 2 s bound, with no frame after it and the
-//! capture torn down once the handler returns.
-//!
-//! A round the machine stretched past the coalescing delay is not held to
-//! the one-burst checks (the timing of its one report, or no report for a
-//! default that came back), and the test prints that. A missing report
-//! says whether the session manager never moved the default or the
-//! capture missed the move. The backend's logs go to the test output, at
-//! `info` unless a non-empty `RUST_LOG` says otherwise.
-//!
-//! The input list and the meeting detection's source run here too: the
-//! list names the test microphone and follows a source coming and going,
-//! and a list while the session manager is stopped leaves a capture's
-//! default moves reported; a `pw-record` of the microphone shows up holding
-//! it with its pid and goes when it ends, with a change for both, while
-//! Steno's own capture is never listed. An unknown microphone UID records the default
-//! source, says so in the stream and follows default moves; a chosen
-//! microphone announced later is a change, and the restart records it. A
-//! chosen source that is listed but never runs (its owner stopped) leaves
-//! the recording on the default source, at the start and after the
-//! rebuild its arrival causes. A chosen source whose owner stops
-//! mid-recording is reported by the session's stall watchdog, retried
-//! while the stopped owner holds the graph up, and recorded again once it
-//! resumes. A daemon killed mid-recording and started again (the harness's
-//! `--kill-daemons` and `--start-daemons`) is reported as the audio service
-//! restarting, and the recording resumes on the new daemon with its gap
-//! covering the outage. A recording whose process is stopped and resumed
-//! (`SIGSTOP`, `SIGCONT`) fills and counts the cycles it missed, counts a
-//! stop too long to fill, and counts one that ends just after its stop; a
-//! daemon stopped across the recording's stop is counted by the stop.
-//!
-//! The real-time promise is counted on the real thread here: libpipewire
-//! runs the stream's `process` on its data-loop thread, which this file
-//! finds in `/proc/self/task` and counts with
-//! `CountingAllocator::allocations_on` for a second of cycles. After
-//! `stop()` that thread and the capture's own are gone from the process,
-//! and the capture's node from the daemon.
+//! Each `start` and `stop()` runs on its own thread with a deadline, so a
+//! hang fails instead of stalling the suite. The tests share one daemon, so
+//! they run one at a time and put back what they move.
 #![cfg(target_os = "linux")]
 // Test arithmetic: sample counts and frequencies cast freely.
 #![allow(
@@ -100,9 +48,7 @@ const SECOND_SINK: &str = "steno-test-sink-2";
 const MIC: &str = "steno-test-mic";
 const SINK_TONE: f64 = 440.0;
 const MIC_TONE: f64 = 1_000.0;
-/// The capture stream's `node.name`.
 const CAPTURE_NODE: &str = "steno-capture";
-/// A call's lanes.
 const CALL: [AudioLane; 2] = [AudioLane::Mic, AudioLane::System];
 const COALESCE_DELAY: Duration = LiveCaptureBackend::COALESCE_DELAY;
 /// The backend's private `COALESCE_LIMIT`: a burst that never settles is
@@ -111,13 +57,12 @@ const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 /// The backend's private `STOP_TIMEOUT`: how long `stop()` waits for a
 /// report in its handler and for the capture thread.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
-/// How long a test listens for a report that must not come: three
-/// coalescing delays, fixed so that a shorter delay cannot shorten it.
+/// How long a test listens for a report that must not come.
 const QUIET: Duration = Duration::from_millis(1_500);
 /// How long the daemon and WirePlumber get to settle after a change.
 const SETTLE: Duration = Duration::from_secs(2);
-/// How long a tone's stream gets to be linked: the first test after the
-/// daemon came up can wait on WirePlumber still starting.
+/// How long a tone's stream gets to be linked; WirePlumber may still be
+/// starting.
 const TONE_LINKED: Duration = Duration::from_secs(15);
 
 /// The backend's logs into the test output, at `info` unless a non-empty
@@ -134,13 +79,12 @@ fn show_logs() {
         .try_init();
 }
 
-/// Every log line since a test last cleared it, for a test that checks
-/// which path in the backend reported a change when the report alone looks
-/// the same.
+/// Every log line since a test last cleared it, for tests that check which
+/// path reported a change.
 static LOGS: Mutex<String> = Mutex::new(String::new());
 
-/// Writes the logs into the test output (through `print!`, as the test
-/// writer does, so the harness captures them) and into [`LOGS`].
+/// Writes the logs into the test output (through `print!`, so the harness
+/// captures them) and into [`LOGS`].
 struct LogTee;
 
 impl std::io::Write for LogTee {
@@ -171,7 +115,6 @@ fn within<T: Send + 'static>(
         .unwrap_or_else(|_| panic!("{what} did not return within {limit:?}"))
 }
 
-/// Starts `backend` on its own thread with a deadline.
 fn start(
     backend: &Arc<LiveCaptureBackend>,
     lanes: &[AudioLane],
@@ -190,15 +133,13 @@ fn start(
     })
 }
 
-/// Stops `backend` on its own thread with a deadline.
 fn stop(backend: &Arc<LiveCaptureBackend>) {
     let backend = Arc::clone(backend);
     within(Duration::from_secs(5), "stop", move || backend.stop());
 }
 
-/// Runs a PipeWire tool to completion, for at most 10 s, so a daemon that
-/// stopped answering fails the test instead of hanging the suite; whether
-/// it succeeded.
+/// Runs a PipeWire tool to completion, for at most 10 s; whether it
+/// succeeded.
 fn tool(program: &str, args: &[&str]) -> bool {
     Command::new("timeout")
         .arg("10")
@@ -235,7 +176,7 @@ impl Tone {
         (dir, path)
     }
 
-    /// Into a sink, linked by WirePlumber; returns once the link is there.
+    /// Into a sink, linked by WirePlumber, once the link is there.
     fn into_sink(sink: &str, frequency: f64) -> Self {
         let (dir, path) = Self::file(frequency);
         let name = format!("steno-test-tone-{frequency}");
@@ -288,7 +229,6 @@ impl Drop for Tone {
     }
 }
 
-/// This process's threads: kernel id and name.
 fn threads() -> Vec<(usize, String)> {
     std::fs::read_dir("/proc/self/task")
         .expect("/proc/self/task")
@@ -301,16 +241,14 @@ fn threads() -> Vec<(usize, String)> {
         .collect()
 }
 
-/// Whether a thread of this process has `part` in its name: PipeWire's
-/// data loop (`data-loop.0`) or the capture's own `steno-pipewire`.
+/// A thread of this process with `part` in its name.
 fn thread_named(part: &str) -> Option<usize> {
     threads()
         .into_iter()
         .find_map(|(id, name)| name.contains(part).then_some(id))
 }
 
-/// The kernel id of PipeWire's data-loop thread in this process, where the
-/// stream's `process` runs.
+/// The kernel id of PipeWire's data-loop thread, where `process` runs.
 fn data_loop_thread() -> usize {
     thread_named("data-loop")
         .unwrap_or_else(|| panic!("no PipeWire data-loop thread among {:?}", threads()))
@@ -331,7 +269,6 @@ fn node_id(name: &str) -> Option<u64> {
     node_in(&dump(), name)
 }
 
-/// The global id of the node named `name` among `objects`.
 fn node_in(objects: &[serde_json::Value], name: &str) -> Option<u64> {
     objects.iter().find_map(|object| {
         let found = object.pointer("/info/props/node.name")?.as_str()?;
@@ -339,8 +276,7 @@ fn node_in(objects: &[serde_json::Value], name: &str) -> Option<u64> {
     })
 }
 
-/// The links among `objects`: each one's global id and the ids of the
-/// nodes it connects, from and to.
+/// The links among `objects`: id, from node, to node.
 fn links_in(objects: &[serde_json::Value]) -> impl Iterator<Item = (u64, u64, u64)> + '_ {
     let id = |object: &serde_json::Value, pointer: &str| {
         object.pointer(pointer).and_then(serde_json::Value::as_u64)
@@ -360,8 +296,8 @@ fn links_in(objects: &[serde_json::Value]) -> impl Iterator<Item = (u64, u64, u6
         })
 }
 
-/// Removes, as a patchbay or a policy would, one of the capture's links
-/// from each node named in `from`, in that order.
+/// Removes, as a patchbay would, one of the capture's links from each node
+/// named in `from`, in that order.
 fn destroy_capture_links_from(from: &[&str]) {
     let objects = dump();
     let node = |name| node_in(&objects, name).unwrap_or_else(|| panic!("no node {name}"));
@@ -380,8 +316,7 @@ fn destroy_capture_links_from(from: &[&str]) {
     }
 }
 
-/// Whether the daemon holds a link from the node named `from` to the node
-/// named `to`, from `pw-dump`.
+/// Whether the daemon holds a link from node `from` to node `to`.
 fn linked(from: &str, to: &str) -> bool {
     let objects = dump();
     let (Some(from), Some(to)) = (node_in(&objects, from), node_in(&objects, to)) else {
@@ -402,10 +337,8 @@ fn eventually(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
     true
 }
 
-/// Stops `backend` and checks the teardown: the capture thread joined
-/// (it held the only other references to `sink`), no frame after `stop()`
-/// returns, both capture threads gone from the process, the capture's
-/// node gone from the daemon.
+/// Stops `backend` and checks the teardown: no frame after `stop()`, both
+/// capture threads gone, the capture's node gone from the daemon.
 fn stop_and_check_teardown(backend: &Arc<LiveCaptureBackend>, sink: &Arc<LaneFrameSink>) {
     stop(backend);
     let after_stop = sink.available_to_read();
@@ -444,8 +377,8 @@ fn power(samples: &[f32], frequency: f64) -> f64 {
     previous * previous + before * before - coefficient * previous * before
 }
 
-/// `samples` carry `wanted` and not `other`: at least a hundred times the
-/// power, and audible.
+/// `samples` carry `wanted` at a hundred times the power of `other`, and
+/// audibly.
 fn assert_tone(samples: &[f32], wanted: f64, other: f64, lane: &str) {
     let peak = samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
     let (wanted_power, other_power) = (power(samples, wanted), power(samples, other));
@@ -459,7 +392,6 @@ fn assert_tone(samples: &[f32], wanted: f64, other: f64, lane: &str) {
     );
 }
 
-/// Empties the rings; the frames the first lane held.
 fn drain(sink: &LaneFrameSink) -> usize {
     let held: Vec<usize> = (0..sink.lanes().len())
         .map(|lane| sink.ring(lane).drain_all().len())
@@ -486,8 +418,8 @@ fn collect(sink: &LaneFrameSink, frames: usize) -> Vec<Vec<f32>> {
 /// A device-change report and when the handler got it.
 type Report = (DeviceChangeReason, Instant);
 
-/// The next device-change report, which must come within 3 s after the
-/// coalescing delay.
+/// The next device-change report, due within 3 s after the coalescing
+/// delay.
 fn next_report(reasons: &Receiver<Report>) -> DeviceChangeReason {
     reasons
         .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
@@ -495,7 +427,6 @@ fn next_report(reasons: &Receiver<Report>) -> DeviceChangeReason {
         .0
 }
 
-/// A sink whose device-change reports arrive on the returned channel.
 fn reporting_sink(lanes: &[AudioLane]) -> (Arc<LaneFrameSink>, Receiver<Report>) {
     let (sender, receiver) = channel();
     let sender = Mutex::new(sender);
@@ -574,7 +505,6 @@ fn in_person_records_only_the_microphone_by_its_uid() {
     stop_and_check_teardown(&backend, &sink);
 }
 
-/// The test microphone, as the fallback for a chosen one that is missing.
 fn test_mic_as_the_fallback() -> CaptureInput {
     CaptureInput {
         uid: MIC.to_owned(),
@@ -595,7 +525,7 @@ fn an_unknown_microphone_records_the_default_source_and_follows_it() {
     assert_eq!(stream.input, Some(test_mic_as_the_fallback()));
     let audio = collect(&sink, 24_000);
     assert_tone(&audio[0], MIC_TONE, SINK_TONE, "the default source");
-    // On the fallback, the capture follows the default as one without a UID.
+    // On the fallback, the capture follows the default.
     let other = TemporaryMic::create("steno-test-mic-default");
     let _restore = DefaultSource;
     DefaultSource::set(other.name);
@@ -642,10 +572,8 @@ fn a_chosen_microphone_that_comes_back_is_reported_and_recorded_again() {
     stop_and_check_teardown(&backend, &sink);
 }
 
-/// A source whose owner stopped answering (SIGSTOP once it is listed and
-/// both its halves have their ports): connected, so it is chosen, but its
-/// link never runs. The child is resumed and killed when dropped, by the
-/// PID recorded here.
+/// A source whose owner is stopped (SIGSTOP) once it is listed with its
+/// ports: chosen, but its link never runs. Resumed and killed when dropped.
 struct StalledSource {
     child: Child,
 }
@@ -655,14 +583,12 @@ impl StalledSource {
     /// The loopback's other half, a sink.
     const SINK: &str = "steno-test-stalled-in";
 
-    /// Listed, configured and stopped.
     fn create() -> Self {
         let source = Self::running();
         source.stop_owner();
         source
     }
 
-    /// Listed and configured, its owner still running.
     fn running() -> Self {
         let child = Command::new("pw-loopback")
             .args([
@@ -684,9 +610,8 @@ impl StalledSource {
         let source = Self { child };
         let listed = || inputs().iter().any(|device| device.uid == Self::NAME);
         assert!(eventually(SETTLE, listed), "the stalled source is listed");
-        // The session manager configures the ports through the owner: one
-        // stopped before they exist holds the session manager up, and with
-        // it every start, which is not what these tests are about.
+        // Ports are configured through the owner; stopping it before they
+        // exist would hold up the session manager and every start.
         let configured = || {
             let objects = dump();
             let ports = |name: &str, direction: &str| {
@@ -726,7 +651,6 @@ impl Drop for StalledSource {
     }
 }
 
-/// A session asking for [`StalledSource::NAME`] on the live backend.
 fn session_choosing_the_stalled_source(directory: &Path) -> CaptureSession {
     let mut configuration = CaptureConfiguration::new(CaptureMode::InPerson, directory);
     configuration.input_device_uid = Some(StalledSource::NAME.to_owned());
@@ -740,9 +664,8 @@ fn session_choosing_the_stalled_source(directory: &Path) -> CaptureSession {
     .expect("the session")
 }
 
-/// A chosen source that is linked but whose graph never runs fails the
-/// start with [`CaptureError::DidNotRun`], the error the session answers by
-/// trying the default at once, and leaves the backend ready to start again.
+/// A chosen source that never runs fails the start with
+/// [`CaptureError::DidNotRun`] and leaves the backend ready again.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_chosen_source_that_does_not_run_fails_the_start_as_did_not_run() {
@@ -762,12 +685,8 @@ fn a_chosen_source_that_does_not_run_fails_the_start_as_did_not_run() {
 }
 
 /// A chosen source that is connected but does not run never costs the
-/// recording while the default source works. At the start, its failed
-/// start is followed by one on the default. During a recording on the
-/// fallback, its arrival is a change whose first restart fails on it after
-/// the 3 s start deadline and is followed by one on the default, so the
-/// recording goes on after a gap of about that long, which the silence
-/// fills: the master stays on wall time.
+/// recording: at the start and at its arrival, the default takes over and
+/// the gap is filled with silence.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
@@ -791,9 +710,8 @@ fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
         assert!(!result.statistics.ended_on_device_loss);
     }
 
-    // The arrival races the stop: a rebuild that starts on the source
-    // before `kill -STOP` lands records it, running. That try proves
-    // nothing, so it is stopped and the arrival is redone, up to 3 times.
+    // The arrival races the stop: a rebuild before `kill -STOP` lands proves
+    // nothing, so the arrival is redone, up to 3 times.
     let mut tries = 0;
     let (seen, started, _stalled) = loop {
         tries += 1;
@@ -853,13 +771,9 @@ fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
     );
 }
 
-/// The chosen source records, then its owner stops mid-recording (no
-/// notification of any kind): the session's watchdog reports the stall
-/// `STALL_TIMEOUT` later, the rebuild's restarts fail while the stopped
-/// owner holds the graph up (`DidNotRun`, the default's try included) and
-/// go on past `RESTART_ATTEMPTS`, saying so, instead of ending the
-/// recording, and once the owner resumes a later restart runs and the
-/// recording goes on, its gap filled.
+/// The chosen source's owner stops mid-recording: the watchdog reports the
+/// stall, restarts go on past `RESTART_ATTEMPTS` instead of ending the
+/// recording, and once the owner resumes the recording goes on.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
@@ -891,9 +805,7 @@ fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
         "stall reported {:.2} s after the stop",
         stopped.elapsed().as_secs_f64()
     );
-    // The restarts pass `RESTART_ATTEMPTS` while the graph does not run
-    // (each waits out the 3 s start deadline on the source and on the
-    // default); before the fix the recording ended there.
+    // The restarts pass `RESTART_ATTEMPTS` while the graph does not run.
     assert_eq!(
         notices.recv_timeout(Duration::from_secs(40)),
         Ok(CaptureNotice::StillRestarting {
@@ -938,9 +850,8 @@ fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
         "the master: {:.2} s, gap {:.2} s, {missed:.3} s missed",
         result.statistics.duration, result.statistics.gap_seconds
     );
-    // The stall is the gap's, not the stop's: a rebuild's stop reads
-    // nothing at it (A18 of `.plans/2026-10-07-stable-promotion.md`). A
-    // busy runner's thread may miss a cycle or two besides.
+    // The stall is the gap's; a rebuild's stop reads nothing at it. A busy
+    // runner may miss a cycle or two besides.
     assert!(missed <= 0.15, "{missed:.3} s missed besides the gap");
     assert!(
         result.statistics.duration > 2.0 + CaptureSession::MAXIMUM_GAP.as_secs_f64(),
@@ -949,9 +860,8 @@ fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
     );
 }
 
-/// Runs the harness script with `call` (`--kill-daemons`,
-/// `--start-daemons`) on the daemon and WirePlumber this test runs under,
-/// for at most 60 s.
+/// Runs the harness script with `call` on this test's daemons, for at most
+/// 60 s.
 fn harness(call: &str) {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/pipewire-headless.sh");
     let status = Command::new("timeout")
@@ -965,9 +875,7 @@ fn harness(call: &str) {
     assert!(status.success(), "{call}: {status}");
 }
 
-/// The daemons the harness started at its latest start, one to three
-/// (`start_checked` in the harness starts them again while they send no
-/// metadata changes).
+/// The daemons the harness started at its latest start, one to three.
 fn daemon_starts() -> usize {
     let root = std::env::var("STENO_PIPEWIRE_HEADLESS_ROOT").expect("run under the harness");
     std::fs::read_to_string(Path::new(&root).join("daemon-starts"))
@@ -977,22 +885,14 @@ fn daemon_starts() -> usize {
         .expect("a count")
 }
 
-/// The PipeWire daemon killed mid-recording, as a crash or an update of
-/// it does, and started again a few seconds later: the capture's lost
-/// connection is reported as the audio service restarting, the restarts go
-/// on while the daemon is gone, and once it is back the recording resumes
-/// on it, never `DeviceLost`, its gaps covering the outage so the master
-/// stays on wall time. The harness may start the daemons more than once
-/// before they send metadata changes, ending the ones before: a recording
-/// that resumed on such a short-lived daemon loses it too and rebuilds
-/// again, so there is at most one rebuild per daemon start, and each gap
-/// stays within `MAXIMUM_GAP`. The daemons this test starts are the ones
-/// the tests after it run on.
+/// The PipeWire daemon killed mid-recording and started again: reported as
+/// the audio service restarting, and the recording resumes on the new
+/// daemon, never `DeviceLost`, with at most one rebuild per daemon start
+/// and each gap within `MAXIMUM_GAP`. Later tests run on these daemons.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_daemon_killed_and_started_again_resumes_the_recording() {
     const OUTAGE: Duration = Duration::from_secs(3);
-    // How long no notice follows the last resume.
     const QUIET: Duration = Duration::from_secs(2);
     show_logs();
     let directory = tempfile::tempdir().expect("tempdir");
@@ -1026,7 +926,6 @@ fn a_daemon_killed_and_started_again_resumes_the_recording() {
     harness("--start-daemons");
     let back = killed.elapsed();
     let starts = daemon_starts();
-    // Every notice until a resume that `QUIET` follows.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut gaps = Vec::new();
     loop {
@@ -1056,8 +955,7 @@ fn a_daemon_killed_and_started_again_resumes_the_recording() {
         "daemon back {:.2} s after the kill, {starts} daemon starts, gaps {gaps:?}",
         back.as_secs_f64()
     );
-    // The master ends somewhere within the stop, which a loaded host can
-    // stretch to half a second.
+    // The master ends within the stop, up to half a second on a loaded host.
     let stopping = began.elapsed().as_secs_f64();
     let result = session.stop().expect("the recording");
     let wall = began.elapsed().as_secs_f64();
@@ -1069,9 +967,8 @@ fn a_daemon_killed_and_started_again_resumes_the_recording() {
         statistics.duration, statistics.gap_seconds
     );
     assert!(!statistics.ended_on_device_loss);
-    // The outage is the gaps', not the stops': a rebuild's stop reads
-    // nothing at it (A18 of `.plans/2026-10-07-stable-promotion.md`). A
-    // busy runner's thread may miss a cycle or two besides.
+    // The outage is the gaps'; a rebuild's stop reads nothing at it. A busy
+    // runner may miss a cycle or two besides.
     assert!(missed <= 0.15, "{missed:.3} s missed besides the gaps");
     assert!(
         (1..=starts).contains(&statistics.device_changes),
@@ -1094,16 +991,9 @@ fn a_daemon_killed_and_started_again_resumes_the_recording() {
     );
 }
 
-/// Asking whether a chosen source runs costs the recording nothing,
-/// whether it runs or not: while a recording on the default source goes
-/// on, probes of a source whose owner is stopped answer `false`, one once
-/// the owner resumed `true`, and the recording got no report, no gap and
-/// no dropped frame. Its master, the cycles the capture's thread missed in
-/// it as zeros (A18 of `.plans/2026-10-07-stable-promotion.md`), is at
-/// most 0.1 s shorter than the wall time from the end of its start to its
-/// stop, and at most 0.1 s longer than the wall time from before its start
-/// to the end of its stop. The probe's own stream is not the recording's, so a
-/// stopped owner that wedges what it is linked to wedges the probe alone.
+/// Probing a chosen source costs the recording nothing: probes of a stopped
+/// source answer `false`, of a resumed one `true`, and the recording gets
+/// no report, no gap and no drop, its master within 0.1 s of wall time.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn probing_a_chosen_source_costs_the_recording_nothing() {
@@ -1157,8 +1047,7 @@ fn probing_a_chosen_source_costs_the_recording_nothing() {
         statistics.dropped_frames
     );
     let master = statistics.duration;
-    // The cycles the capture's thread missed are in the master as zeros,
-    // so it stays on wall time however busy the machine is.
+    // Missed cycles are in the master as zeros, so it stays on wall time.
     let missed = statistics.filled_seconds;
     println!(
         "the master: {master:.3} s against {stopping:.3} to {wall:.3} s of wall time, \
@@ -1171,18 +1060,17 @@ fn probing_a_chosen_source_costs_the_recording_nothing() {
     );
 }
 
-/// A child shell that stops and resumes a process (`SIGSTOP`,
-/// `SIGCONT`) and prints the time of each signal it sends. Dropped before
-/// [`Self::finish`] (a test that panicked), it ends the shell, resumes the
-/// process and reaps the shell, so no later test is stopped by it.
+/// A child shell that stops and resumes a process and prints the time of
+/// each signal. Dropped before [`Self::finish`], it resumes the process and
+/// reaps the shell.
 struct Stopper {
     shell: Option<Child>,
     pid: String,
 }
 
 impl Stopper {
-    /// A shell that runs `script`, in which `$PID` is `pid` and `signal
-    /// STOP` or `signal CONT` sends that signal and prints when.
+    /// A shell that runs `script`, where `$PID` is `pid` and `signal STOP`
+    /// or `signal CONT` sends that signal and prints when.
     fn spawn(pid: &str, script: &str) -> Self {
         let shell = Command::new("sh")
             .arg("-c")
@@ -1198,8 +1086,8 @@ impl Stopper {
         }
     }
 
-    /// Waits for the shell and returns each stop's `STOP` and `CONT` as it
-    /// printed them, in seconds since the epoch.
+    /// Waits for the shell; each stop's `STOP` and `CONT` times, in seconds
+    /// since the epoch.
     fn finish(mut self) -> Vec<(f64, f64)> {
         let shell = self.shell.take().expect("the shell");
         let output = shell.wait_with_output().expect("the shell");
@@ -1237,11 +1125,10 @@ impl Drop for Stopper {
     }
 }
 
-/// What [`stopped_run`] recorded.
 struct StoppedRun {
     statistics: steno_audio::capture::CaptureStatistics,
-    /// The wall time from the end of the start to the stop, and from
-    /// before the start to the end of the stop.
+    /// The wall time from the end of the start to the stop, and from before
+    /// the start to the end of the stop.
     stopping: f64,
     wall: f64,
     /// How long each stop lasted, as the shell sent the signals.
@@ -1251,22 +1138,13 @@ struct StoppedRun {
 }
 
 impl StoppedRun {
-    /// The stops' total length.
     fn stopped(&self) -> f64 {
         self.stops.iter().sum()
     }
 
-    /// The master, the silence written for what the capture's thread
-    /// missed included, and the audio it counted and left out, against the
-    /// wall time: at most 0.15 s shorter than from the end of the start to
-    /// the stop, at most 0.15 s longer than from before the start to the
-    /// end of the stop. This bounds the written audio and the unfilled
-    /// count from above: a busy host's thread misses cycles besides the
-    /// stops, which are counted too, so a count above the stops' length is
-    /// no fault, but zeros written twice, or written and counted unfilled,
-    /// pass the wall time. A filled count recorded without its zeros, or
-    /// twice, leaves the master's length as it is: only the sink's unit
-    /// tests bound the filled count from above.
+    /// The master with its missed-audio silence, plus the unfilled count,
+    /// within 0.15 s of the wall time: zeros written twice, or written and
+    /// counted unfilled, would pass it.
     fn assert_on_wall_time(&self) {
         let held = self.statistics.duration + self.statistics.unfilled_seconds;
         assert!(
@@ -1279,14 +1157,10 @@ impl StoppedRun {
     }
 }
 
-/// A call recording of about `length` whose whole process a child shell
-/// stops (`SIGSTOP`) for each of `stops` seconds and resumes (`SIGCONT`),
-/// the first one second in and one second apart: the stable plan's gate
-/// procedure for A18 (`.plans/2026-10-07-stable-promotion.md`), which no
-/// load does as surely. The test thread is stopped with the rest, so the
-/// recording's stop comes once it wakes at `length` or after the last
-/// stop, whichever is later. Both lanes hold the same length, nothing is
-/// dropped, and the stop logs what was missed at `warn`.
+/// A call recording of about `length` whose process a child shell stops for
+/// each of `stops` seconds, the first one second in and one second apart.
+/// Both lanes keep one length, nothing drops, and the stop logs the missed
+/// audio at `warn`.
 fn stopped_run(stops: &[f64], length: Duration) -> StoppedRun {
     show_logs();
     let directory = tempfile::tempdir().expect("tempdir");
@@ -1363,9 +1237,8 @@ fn stopped_run(stops: &[f64], length: Duration) -> StoppedRun {
     run
 }
 
-/// Three stops of 0.6 s: the cycles missed in each are filled with
-/// silence and counted, at least the stops' length less what PipeWire kept
-/// across each (about 50 ms), so the master stays on wall time.
+/// Three stops of 0.6 s are filled with silence and counted, so the master
+/// stays on wall time.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_recording_stopped_three_times_fills_and_counts_what_it_missed() {
@@ -1379,16 +1252,9 @@ fn a_recording_stopped_three_times_fills_and_counts_what_it_missed() {
     run.assert_on_wall_time();
 }
 
-/// One stop of 2.5 s, past the fill limit and the session's stall
-/// timeout, whose watchdog is stopped with the rest: the missed audio is
-/// not filled but counted, and the master falls short of wall time by
-/// that much. Every later moment of the recording (a transcript's time
-/// stamps) then sits that much early against the wall clock; the test
-/// prints it. Should the watchdog report the stall first, the rebuild's gap
-/// counts it instead, whether or not the capture's thread then delivers
-/// its late cycle before the rebuild's stop: once either way, and the
-/// restart's time to its first frame counts unfilled, so the master and
-/// the unfilled audio stay on wall time in both.
+/// One stop of 2.5 s, past the fill limit: counted, not filled, so the
+/// master falls short of wall time. If the watchdog reports it first, the
+/// rebuild's gap counts it instead, once either way.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_recording_stopped_too_long_to_fill_counts_what_it_missed() {
@@ -1408,11 +1274,8 @@ fn a_recording_stopped_too_long_to_fill_counts_what_it_missed() {
     );
 }
 
-/// A stop of 0.6 s that ends just after the recording's stop was due:
-/// no cycle may come after it, so the backend's `stop()` reads the
-/// clock and counts it, unless the data loop's late cycle wins the race
-/// to the gate. Nothing of it is silent either way: at least the stop's
-/// length missed, less the cycle delivered last and the one in flight.
+/// A stop that ends just after the recording's stop was due: the backend's
+/// `stop()` counts it, unless the late cycle wins the race to the gate.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_recording_stopped_just_before_its_stop_counts_what_it_missed() {
@@ -1426,14 +1289,9 @@ fn a_recording_stopped_just_before_its_stop_counts_what_it_missed() {
     run.assert_on_wall_time();
 }
 
-/// The PipeWire daemon itself stopped (`SIGSTOP`) 1.5 s into a call
-/// recording and held so across the recording's stop, resumed 0.3 s into
-/// it: no cycle runs after the stop began, so only the backend's `stop()`,
-/// which compares `CLOCK_MONOTONIC` with the last cycle's time, can count
-/// the time since that cycle. It counts about the time the daemon was
-/// stopped before the stop, written as silence, so the master stays on
-/// wall time. A guard resumes the daemon and reaps its shell whatever
-/// happens.
+/// The daemon stopped 1.5 s into a call and held across the recording's
+/// stop: only the backend's `stop()` can count the time since the last
+/// cycle, written as silence, so the master stays on wall time.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_daemon_stopped_across_the_recordings_stop_is_counted_by_the_stop() {
@@ -1464,7 +1322,7 @@ fn a_daemon_stopped_across_the_recordings_stop_is_counted_by_the_stop() {
         ),
     );
     // The shell sends STOP at once; the recording's stop comes `STALL`
-    // after it, its CONT 0.3 s into that stop.
+    // later, CONT 0.3 s into it.
     std::thread::sleep(STALL);
     let stopping = started.elapsed().as_secs_f64();
     let (asked, asked_at) = (Instant::now(), SystemTime::now());
@@ -1601,19 +1459,11 @@ fn moving_the_default_output_is_reported_once() {
     stop(&backend);
 }
 
-/// Expects one `DefaultOutputChanged` report and no second, after
-/// WirePlumber moved the default to `to`. `since` is taken right before
-/// the last switch; when `timed`, the report must come no sooner than the
-/// coalescing delay after it.
-///
-/// WirePlumber moves `default.audio.sink` after the configured one, so
-/// the report gets time, and a failure says which side missed:
-/// WirePlumber, which did not move the default, or the capture, which did
-/// not report the move. The metadata is read only once the report is
-/// late: a client binding it while WirePlumber moves the default can keep
-/// that move from every client already bound (seen with WirePlumber
-/// 0.5.14 and PipeWire 1.6.5), so polling it here would make the miss it
-/// looks for. `context` prefixes the failure messages.
+/// Expects one `DefaultOutputChanged` report and no second after
+/// WirePlumber moved the default to `to`; when `timed`, no sooner than the
+/// coalescing delay after `since`. The metadata is read only once the
+/// report is late: binding it while WirePlumber moves the default can hide
+/// that move from every bound client (WirePlumber 0.5.14, PipeWire 1.6.5).
 fn assert_output_moved_once(
     reasons: &Receiver<Report>,
     to: &str,
@@ -1634,8 +1484,8 @@ fn assert_output_moved_once(
         )
     });
     let after = at.duration_since(since);
-    // From before the last switch: WirePlumber moves the default before
-    // `pw-metadata` has exited, never before it started.
+    // From before the last switch: WirePlumber never moves the default
+    // before `pw-metadata` started.
     assert!(
         !timed || after >= COALESCE_DELAY,
         "{context}reported {after:?} after the last switch, inside the coalescing delay"
@@ -1647,12 +1497,9 @@ fn assert_output_moved_once(
     );
 }
 
-/// Whether the switches reach the daemon as one burst, judged the
-/// coalescing delay after its last switch: each of `gaps` (from the start
-/// of one `DefaultSink::set` to the return of the next) at least 50 ms
-/// short of the delay, and `whole`, the first call to the last, short
-/// enough that the 2 s cap cannot judge it sooner. Prints why not, after
-/// `context`.
+/// Whether the switches reach the daemon as one burst: each of `gaps` at
+/// least 50 ms short of the coalescing delay and `whole` short of the 2 s
+/// cap. Prints why not.
 fn one_burst(gaps: &[Duration], whole: Duration, context: &str) -> bool {
     let tight = gaps
         .iter()
@@ -1667,8 +1514,8 @@ fn one_burst(gaps: &[Duration], whole: Duration, context: &str) -> bool {
     tight
 }
 
-/// What `pw-metadata` prints of the `default` metadata on subject 0:
-/// `key`, or every key; nothing when it fails.
+/// What `pw-metadata` prints of the `default` metadata: `key`, or every
+/// key; nothing when it fails.
 fn read_default_metadata(key: Option<&str>) -> String {
     Command::new("pw-metadata")
         .args(["-n", "default", "0"])
@@ -1714,11 +1561,8 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
             "round {round}: the default is not {from}; {}",
             default_metadata()
         );
-        // Within the coalescing delay of each other: one report, timed
-        // from the last. WirePlumber usually moves the default while `set`
-        // runs, so two moves are never further apart than the start of one
-        // call and the return of the next; when it moves after `set`
-        // returned, `one_burst`'s 50 ms spare covers its lag.
+        // Within the coalescing delay of each other: one report, timed from
+        // the last; `one_burst`'s 50 ms spare covers WirePlumber's lag.
         let context = format!("round {round}: ");
         let first = Instant::now();
         DefaultSink::set(to);
@@ -1756,12 +1600,9 @@ fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
     let backend = Arc::new(LiveCaptureBackend::new());
     let _restore = DefaultSink;
     start(&backend, &lanes, None, &sink).expect("start");
-    // There and back within the coalescing delay: back as soon as
-    // WirePlumber moved it (about 15 ms). Polling the metadata while
-    // WirePlumber moves the default can keep the move from the capture
-    // (see `assert_output_moved_once`), and a missed move also ends in no
-    // report, so this round can pass without the capture having seen the
-    // move; a fixed pause instead would not know when WirePlumber moved.
+    // There and back within the coalescing delay, back as soon as
+    // WirePlumber moved it. Polling the metadata could hide the move, so a
+    // missed move also passes this round.
     let there = Instant::now();
     DefaultSink::set(SECOND_SINK);
     assert!(
@@ -1777,8 +1618,7 @@ fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
             "a default that came back is no change"
         );
     } else if reasons.recv_timeout(COALESCE_LIMIT + QUIET).is_ok() {
-        // Away long enough to be judged moved: restart on the default that
-        // came back, as the session's rebuild would.
+        // Away long enough to be judged moved: restart, as a rebuild would.
         stop(&backend);
         sink.rearm_device_change();
         assert!(
@@ -1798,9 +1638,8 @@ fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
     stop(&backend);
 }
 
-/// Short playback streams into the default sink, one after another on a
-/// thread, as other apps' notification sounds come and go; stopped when
-/// dropped.
+/// Short playback streams into the default sink one after another, as
+/// other apps' sounds; stopped when dropped.
 struct Churn {
     done: Arc<AtomicBool>,
     streams: Arc<AtomicUsize>,
@@ -1836,7 +1675,6 @@ impl Churn {
         }
     }
 
-    /// Streams played to the end so far.
     fn streams(&self) -> usize {
         self.streams.load(Ordering::Relaxed)
     }
@@ -1887,8 +1725,7 @@ fn assert_reported_after(lanes: &[AudioLane], outside: impl FnOnce(), gone: Devi
     stop_and_check_teardown(&backend, &sink);
 }
 
-/// Destroys the capture's client in the daemon (the `client.id` of its
-/// node), so the server drops the capture's connection.
+/// Destroys the capture's client in the daemon, which drops its connection.
 fn destroy_own_client() {
     let client = dump()
         .iter()
@@ -1932,9 +1769,8 @@ fn a_monitor_then_a_microphone_link_removed_are_reported_as_the_output_gone() {
     );
 }
 
-/// The capture's connection closed from outside, in a call and in
-/// person, is the daemon's change, not a device's: the session restarts
-/// until a start runs, as after a daemon that went away.
+/// The capture's connection closed from outside is the audio service
+/// restarting, in a call and in person.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_connection_closed_from_outside_is_reported_as_the_audio_service_restarting() {
@@ -1947,7 +1783,6 @@ fn a_connection_closed_from_outside_is_reported_as_the_audio_service_restarting(
     }
 }
 
-/// The `steno-capture` nodes in the graph.
 fn capture_nodes() -> usize {
     dump()
         .iter()
@@ -1960,7 +1795,6 @@ fn capture_nodes() -> usize {
         .count()
 }
 
-/// The threads of this process with `part` in their name.
 fn threads_named(part: &str) -> usize {
     threads()
         .iter()
@@ -1968,9 +1802,8 @@ fn threads_named(part: &str) -> usize {
         .count()
 }
 
-/// A sink whose handler sends each report on the returned receiver, and
-/// is stuck in the first, as a handler waiting for a lock, until the
-/// returned sender sends.
+/// A sink whose handler sends each report on the receiver and is stuck in
+/// the first until the returned sender sends.
 fn sink_stuck_in_its_first_report(
     lanes: &[AudioLane],
 ) -> (Arc<LaneFrameSink>, Receiver<DeviceChangeReason>, Sender<()>) {
@@ -1995,11 +1828,9 @@ fn sink_stuck_in_its_first_report(
     (Arc::new(sink), handler_entered, release)
 }
 
-/// A report stuck in the handler holds `stop()` only to its bound, and the
-/// session's rebuild then starts the same backend on the same sink while
-/// the old capture's thread and node are still there: the rebuilt capture
-/// records both lanes beside it and through its teardown, and that
-/// teardown reads as no change.
+/// A report stuck in the handler holds `stop()` only to its bound, and a
+/// rebuild on the same backend and sink records beside the old capture,
+/// whose teardown reads as no change.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_report_stuck_in_its_handler_holds_neither_stop_nor_the_rebuild() {
@@ -2028,8 +1859,7 @@ fn a_report_stuck_in_its_handler_holds_neither_stop_nor_the_rebuild() {
         took < STOP_TIMEOUT + Duration::from_secs(1),
         "stop() returns at its bound, returned after {took:?}"
     );
-    // The stream runs on while the handler holds the PipeWire thread, so
-    // cycles keep coming: wait for several, short of the ring's headroom.
+    // Cycles keep coming while the handler holds the PipeWire thread.
     let after_stop = sink.available_to_read();
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(
@@ -2047,9 +1877,8 @@ fn a_report_stuck_in_its_handler_holds_neither_stop_nor_the_rebuild() {
     // started on the same sink beside the old capture.
     sink.rearm_device_change();
     start(&backend, &lanes, None, &sink).expect("a start beside the stuck capture");
-    // Waited for: one CI run counted one thread here and listed both right
-    // after. The old capture cannot go before the release, so a count that
-    // never reaches two still fails.
+    // Waited for: the count can lag. The old capture cannot go before the
+    // release, so a count that never reaches two still fails.
     assert!(
         eventually(SETTLE, || threads_named("steno-pipewire") == 2),
         "the old capture's thread stays while stuck: {:?}",
@@ -2111,8 +1940,7 @@ fn a_report_stuck_in_its_handler_holds_neither_stop_nor_the_rebuild() {
     stop_and_check_teardown(&backend, &sink);
 }
 
-/// A lingering virtual microphone, created by `pw-cli`; destroyed when
-/// dropped if the test did not.
+/// A lingering virtual microphone created by `pw-cli`, destroyed on drop.
 struct TemporaryMic {
     name: &'static str,
 }
@@ -2238,7 +2066,7 @@ fn the_input_list_names_the_sources() {
 }
 
 /// WirePlumber, stopped with `SIGSTOP` until dropped, so it answers no
-/// ping. Its pid is the private daemon's own WirePlumber client's.
+/// ping.
 struct StoppedSessionManager {
     pid: String,
 }
@@ -2272,9 +2100,7 @@ impl Drop for StoppedSessionManager {
 }
 
 /// A list while WirePlumber answers no ping binds nothing that waits for
-/// it, so a capture bound before still hears the next default move. A list
-/// that bound the `default` metadata and closed before the pong stopped
-/// those events for every client on PipeWire before 1.6.9.
+/// it, so a capture bound before still hears the next default move.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_list_while_the_session_manager_stalls_leaves_default_moves_reported() {
@@ -2303,8 +2129,7 @@ fn a_list_while_the_session_manager_stalls_leaves_default_moves_reported() {
     stop(&backend);
 }
 
-/// A `pw-record` of the test microphone into a temporary file, killed
-/// when dropped.
+/// A `pw-record` of the test microphone, killed when dropped.
 struct Recorder {
     child: Child,
     _dir: tempfile::TempDir,
@@ -2339,7 +2164,6 @@ impl Drop for Recorder {
     }
 }
 
-/// The source's view of `pid`, read afresh.
 fn activity_of(
     source: &steno_audio::detection::LiveProcessAudioActivity,
     pid: i32,
@@ -2352,7 +2176,6 @@ fn activity_of(
         .find(|process| process.pid == pid)
 }
 
-/// Waits up to `limit` for a change message, dropping any others queued.
 fn changed_within(changes: &Receiver<()>, limit: Duration) -> bool {
     let arrived = changes.recv_timeout(limit).is_ok();
     while changes.try_recv().is_ok() {}

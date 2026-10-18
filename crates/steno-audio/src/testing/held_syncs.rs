@@ -1,9 +1,6 @@
 //! Held syncs, behind the `test-support` feature: a session's writer
-//! whose periodic sync of the files blocks, as a `FlushFileBuffers` or an
-//! `fsync` on a slow disk does, until the test lets it go, so a test can
-//! prove what keeps going while the writer thread is stuck in one (the
-//! level stream, A20 of `.plans/2026-10-07-stable-promotion.md`). Rust
-//! only: Swift syncs only at the close.
+//! whose periodic sync blocks until the test lets it go, so a test can
+//! prove what keeps going while the writer thread is stuck in one.
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -32,7 +29,6 @@ struct Gate {
 #[derive(Debug, Default)]
 struct State {
     released: bool,
-    /// Whether a sync has begun, held or let through.
     began: bool,
 }
 
@@ -75,7 +71,6 @@ impl HeldSyncs {
     }
 }
 
-/// The production writer with its periodic sync behind the gate.
 struct HeldWriter {
     writer: RecordingWriter,
     gate: Arc<Gate>,

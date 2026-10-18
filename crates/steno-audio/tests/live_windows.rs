@@ -1,32 +1,14 @@
-//! The Windows live backend against the real WASAPI (WP10a).
-//!
-//! **Nobody has run the ignored tests on hardware yet.** The
-//! `windows-latest` CI runner has no audio endpoint, so it records no
-//! microphone; process loopback runs there all the same and delivers
-//! silence. The `#[ignore]`d tests here are the live check a Windows
-//! machine with a microphone and speakers must run before the backend
-//! ships (the plan's parity list):
+//! The Windows live backend against the real WASAPI. Nobody has run the
+//! `#[ignore]`d tests on hardware yet; a Windows machine with a microphone
+//! and speakers must, playing audio, before the backend ships:
 //!
 //! ```text
 //! cargo test -p steno-audio --test live_windows -- --ignored --nocapture
 //! ```
 //!
-//! These tests print a record of each run and the backend's `info` logs
-//! (which loopback runs, the follower's underrun, slip and trim counts at
-//! stop); without `--nocapture` the harness swallows both. A non-empty
-//! `RUST_LOG` replaces their `steno_audio=info` filter. Play audio during
-//! `call_capture_records_both_lanes` (any media player) so the loopback has
-//! something to deliver.
-//!
-//! The tests that are not ignored run on every Windows host, the CI runner
-//! included: they check that the COM paths return within a bound with an
-//! answer (a capture that fails with "no input device" is a pass) instead
-//! of hanging or crashing. Each run happens on its own thread joined with
-//! a deadline, so a hang fails instead of stalling the suite. On the CI
-//! runner (`GITHUB_ACTIONS` set) the system-lane capture must also start,
-//! deliver whole periods, stop dead and restart. CI runs them with
-//! `--nocapture`, so its log shows what COM answered.
-// Plan package names (WP10a) are not code.
+//! The other tests run on every Windows host, CI included: the COM paths
+//! answer within a bound instead of hanging.
+// Windows API names in the docs are not code.
 #![allow(clippy::doc_markdown)]
 #![cfg(windows)]
 
@@ -41,8 +23,8 @@ use steno_audio::{
 };
 use steno_core::AudioLane;
 
-/// The backend's logs into the test output, at `info` unless a non-empty
-/// `RUST_LOG` says otherwise.
+/// The backend's logs into the test output, at `info` unless `RUST_LOG`
+/// says otherwise.
 fn show_logs() {
     let filter = std::env::var("RUST_LOG")
         .ok()
@@ -76,19 +58,15 @@ fn peak(samples: &[f32]) -> f32 {
 /// What one start, capture, stop run saw.
 struct Run {
     callbacks: usize,
-    /// Frames per lane delivered before `stop()` returned.
     available: usize,
     /// Frames per lane that arrived in the 300 ms after `stop()`.
     after_stop: usize,
     peaks: Vec<f32>,
 }
 
-/// Starts the backend for `lanes`, captures `duration`, stops, and returns
-/// the callbacks counted in between (each completed callback signals the
-/// sink's wake once), what arrived after the stop and each lane's peak, or
-/// `None` when the start failed, which is printed. The same backend first
-/// starts and stops `restarts` times, as the session's rebuild does, and
-/// the run is the last one's.
+/// Starts the backend for `lanes` after `restarts` start-stop rounds,
+/// captures `duration`, stops, and returns what it counted; `None` when the
+/// start failed.
 fn start_capture_stop(lanes: Vec<AudioLane>, duration: Duration, restarts: usize) -> Option<Run> {
     show_logs();
     within(Duration::from_secs(60), "start, capture, stop", move || {
@@ -197,12 +175,9 @@ fn a_capture_without_a_device_answers_and_stops() {
     backend.stop();
 }
 
-/// The CI runner has no endpoint, but process loopback runs there and
-/// delivers a silent 10 ms period per callback, so the system-lane path is
-/// checked for real: it starts, delivers whole periods, delivers nothing
-/// once `stop()` has returned, and the same backend starts again, three
-/// times over. Only where `GITHUB_ACTIONS` is set: elsewhere a machine may
-/// have no audio service at all.
+/// On the CI runner process loopback delivers silence, so the system lane
+/// starts, delivers whole periods, stops dead and restarts, three times.
+/// Only where `GITHUB_ACTIONS` is set.
 #[test]
 fn on_the_ci_runner_a_system_capture_delivers_stops_and_restarts() {
     // One engine period, 10 ms at 48 kHz.
@@ -254,8 +229,7 @@ fn in_person_capture_records_the_microphone() {
     assert_eq!(run.after_stop, 0, "nothing arrives after stop()");
 }
 
-/// A UID that names no endpoint (a Core Audio UID from a settings file
-/// synced from a Mac) records the default capture endpoint and says so.
+/// A UID that names no endpoint records the default endpoint and says so.
 #[test]
 #[ignore = "needs a Windows machine with a microphone; run with -- --ignored --nocapture"]
 fn an_unknown_microphone_records_the_default_input() {

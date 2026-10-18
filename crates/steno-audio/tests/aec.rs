@@ -1,6 +1,5 @@
 //! The Speex canceller on the synthetic echo fixtures, with the ERLE table
 //! `steno dev aec-bench --synthetic` prints.
-//! Swift: `Tests/StenoAudioTests/SpeexEchoCancellerTests.swift`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -51,10 +50,8 @@ fn one_decimal(value: f32) -> f32 {
     (value * 10.0).round() / 10.0
 }
 
-/// The parity table from `.plans/spikes/2026-10-01-spike-rust-capture.md`:
-/// Swift's `aec-bench --synthetic` (CSpeex) and the vendored Speex agree to
-/// the printed precision. Re-asserted here so a change to the fixtures, the
-/// build flags or the canceller's controls shows up as a number.
+/// The ERLE table, asserted to the printed precision so a change to the
+/// fixtures, the build flags or the canceller's controls shows up.
 #[test]
 fn erle_table_matches_the_swift_bench() {
     let m = material();

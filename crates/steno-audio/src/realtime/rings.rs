@@ -1,16 +1,7 @@
-//! One ring per channel plus the invariant that keeps channels aligned.
-//! Swift: `Sources/StenoAudio/RealTime/LaneRings.swift`.
-//!
-//! A block is reserved for every ring or refused, and counted as dropped,
-//! for every ring. The producer (IOProc, synthetic backend, processing
-//! thread) calls `reserve`, one `write`/`write_mixed`/`write_zeros` per
-//! channel, then `commit`, which wakes the consumer once. Nothing on that
-//! path allocates or locks.
-//!
-//! [`LaneFrameSink`](super::LaneFrameSink) (IOProc to processing thread) and
-//! [`FrameRelay`](super::FrameRelay) (processing thread to writer thread)
-//! are this type with lane names and a fixed frame size respectively; the
-//! reservation logic lives here once.
+//! One ring per channel, kept aligned: a block is reserved on every ring or
+//! refused (and counted as dropped) on every ring. The producer calls
+//! `reserve`, one write per channel, then `commit`, which wakes the
+//! consumer once; nothing on that path allocates or locks.
 
 use super::ring::LaneRingBuffer;
 use super::wake::Wake;
@@ -34,13 +25,11 @@ impl LaneRings {
         }
     }
 
-    /// Rings.
     #[must_use]
     pub fn count(&self) -> usize {
         self.rings.len()
     }
 
-    /// Ring `channel`.
     #[must_use]
     pub fn ring(&self, channel: usize) -> &LaneRingBuffer {
         &self.rings[channel]
@@ -92,7 +81,6 @@ impl LaneRings {
             .unwrap_or(0)
     }
 
-    /// Refused samples per channel.
     #[must_use]
     pub fn dropped_samples(&self) -> Vec<usize> {
         self.rings
