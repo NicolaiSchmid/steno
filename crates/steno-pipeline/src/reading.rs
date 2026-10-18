@@ -644,8 +644,13 @@ mod tests {
         (store, meeting, asset)
     }
 
+    /// The folder of the marks under `dir`'s support directory.
+    fn marks_folder(dir: &Path) -> PathBuf {
+        dir.join("support").join(ReadingMarks::FOLDER)
+    }
+
     fn on_disk(dir: &Path) -> usize {
-        std::fs::read_dir(dir.join("support").join(ReadingMarks::FOLDER)).map_or(0, Iterator::count)
+        std::fs::read_dir(marks_folder(dir)).map_or(0, Iterator::count)
     }
 
     fn launch(dir: &Path, store: &Store) -> Arc<ReadingMarks> {
@@ -766,8 +771,7 @@ mod tests {
         let (store, meeting, _) = store_with_meeting(dir.path());
         let master = dir.path().join("recording.m4a");
         killed_in_a_read(&launch(dir.path(), &store), meeting.id, &master);
-        let folder = dir.path().join("support").join(ReadingMarks::FOLDER);
-        let file = std::fs::read_dir(&folder)
+        let file = std::fs::read_dir(marks_folder(dir.path()))
             .unwrap()
             .next()
             .unwrap()
@@ -817,11 +821,7 @@ mod tests {
         let master = dir.path().join("recording.m4a");
         killed_in_a_read(&launch(dir.path(), &store), meeting.id, &master);
         let name = format!("{}.json", Uuid::new_v4());
-        let file = dir
-            .path()
-            .join("support")
-            .join(ReadingMarks::FOLDER)
-            .join(&name);
+        let file = marks_folder(dir.path()).join(&name);
         std::fs::write(&file, b"{}").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
         if std::fs::read(&file).is_ok() {
@@ -846,9 +846,8 @@ mod tests {
         let log = crate::fixtures::CapturedLog::warnings();
         let dir = tempfile::tempdir().unwrap();
         let (store, _, _) = store_with_meeting(dir.path());
-        let support = dir.path().join("support");
-        std::fs::create_dir_all(&support).unwrap();
-        let folder = support.join(ReadingMarks::FOLDER);
+        let folder = marks_folder(dir.path());
+        std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
         std::fs::write(&folder, b"").unwrap();
 
         let marks = launch(dir.path(), &store);
@@ -1053,7 +1052,7 @@ mod tests {
     fn a_mark_whose_write_failed_after_the_rename_goes_with_its_read() {
         let dir = tempfile::tempdir().unwrap();
         let (store, meeting, _) = store_with_meeting(dir.path());
-        std::fs::create_dir_all(dir.path().join("support").join(ReadingMarks::FOLDER)).unwrap();
+        std::fs::create_dir_all(marks_folder(dir.path())).unwrap();
         let syncs = Arc::new(Gated::default());
         let marks = launch_with(dir.path(), &store, syncs.clone());
         syncs.fail_folder.store(true, Ordering::SeqCst);
@@ -1062,7 +1061,7 @@ mod tests {
         assert_eq!(on_disk(dir.path()), 1, "renamed into place");
         drop(reading);
         assert_eq!(on_disk(dir.path()), 0);
-        let _ = std::fs::remove_dir_all(dir.path().join("support").join(ReadingMarks::FOLDER));
+        let _ = std::fs::remove_dir_all(marks_folder(dir.path()));
         assert!(!launch(dir.path(), &store).holds(meeting.id));
     }
 
