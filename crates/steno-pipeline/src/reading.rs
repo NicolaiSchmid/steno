@@ -55,8 +55,10 @@
 //!   failed for another reason: only a run that returned writes those. A
 //!   mark that cannot be read names its meeting and stage only in its
 //!   body, so it counts no meeting: the launch says so at `warn`, leaves
-//!   it, and counts it as one of an in-process speech engine's, which turns
-//!   the fallback on. A later launch that reads it counts it as any other.
+//!   it, and on the Mac counts it as a mark of the speech engine in this
+//!   process, which turns the fallback on. A folder that cannot be listed
+//!   counts the same, once, under the folder's name. A later launch that
+//!   reads the mark counts it as any other.
 //! - **Never touched again automatically.** A quarantined meeting's
 //!   marks stay on disk: they are the quarantine. The launch resume, the
 //!   resumes after a model install or a busy store, and the adoption skip
@@ -232,11 +234,12 @@ impl ReadingMarks {
             marks.entry(mark.meeting_id).or_default().push((file, mark));
         }
         // Its meeting and stage are unknown: on the safe side, a mark of
-        // the engine's, which counts no meeting.
-        let mut found = Found {
-            speech: unread,
-            ..Found::default()
-        };
+        // the engine's, which counts no meeting. Only the Mac runs one in
+        // this process.
+        let mut found = Found::default();
+        if cfg!(target_os = "macos") {
+            found.speech = unread;
+        }
         for (meeting_id, left) in marks {
             let (files, left): (Vec<PathBuf>, Vec<Mark>) = left.into_iter().unzip();
             let speech: Vec<String> = files
@@ -299,10 +302,11 @@ impl ReadingMarks {
     /// The names of the marks the launch kept of an in-process speech
     /// engine's load or transcription ([`ReadStage::Transcribe`]): each is
     /// one that ended with the app, which turns the fallback on
-    /// ([`crate::SpeechFallback`]). So does a mark the launch could not
-    /// read, on the safe side, as its stage is in its body. The marks
-    /// beside a finished meeting, which the launch removed, are not among
-    /// them.
+    /// ([`crate::SpeechFallback`]). On the Mac, among them is each mark
+    /// the launch could not read, on the safe side, as only its body names
+    /// its stage, and [`ReadingMarks::FOLDER`] when the folder could not be
+    /// listed. The marks beside a finished meeting, which the launch
+    /// removed, are not among them.
     #[must_use]
     pub fn speech_marks_left(&self) -> BTreeSet<String> {
         self.found().speech.clone()
@@ -531,27 +535,39 @@ impl Drop for Reading {
 }
 
 /// The marks in `folder` with their files, and the names of the files
-/// that could not be read, each logged at `warn` and left: a mark among
-/// them names its meeting and stage only in its body. A file that does not
-/// parse (not one this module wrote) is logged and left.
+/// that could not be read, each logged at `warn` and left (only a mark's
+/// body names its meeting and stage, so the launch counts them as speech
+/// marks on the Mac). A folder or an entry that cannot be listed counts
+/// once, under [`ReadingMarks::FOLDER`], logged at `warn`. A file that
+/// does not parse (not one this module wrote) is logged at `debug` and
+/// left.
 fn read_folder(folder: &Path) -> (Vec<(PathBuf, Mark)>, BTreeSet<String>) {
     let mut marks = Vec::new();
     let mut unread = BTreeSet::new();
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return (marks, unread);
+    let entries = match std::fs::read_dir(folder) {
+        Ok(entries) => entries.collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => vec![Err(error)],
     };
-    let paths = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"));
-    for path in paths {
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(error) => {
+                tracing::warn!(path = %folder.display(), %error, "the reading marks could not be listed; on the Mac they count as a mark of the speech engine in this process");
+                unread.insert(ReadingMarks::FOLDER.to_owned());
+                continue;
+            }
+        };
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
         match std::fs::read(&path).map(|bytes| serde_json::from_slice::<Mark>(&bytes)) {
             Ok(Ok(mark)) => marks.push((path, mark)),
             Ok(Err(_)) => {
                 tracing::debug!(path = %path.display(), "not a reading mark; left alone");
             }
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "a reading mark could not be read; it is left, and counts as one of an in-process speech engine's");
+                tracing::warn!(path = %path.display(), %error, "a reading mark could not be read; it is left as it is and, on the Mac, counts as a mark of the speech engine in this process");
                 unread.extend(
                     path.file_name()
                         .map(|name| name.to_string_lossy().into_owned()),
@@ -638,6 +654,12 @@ mod tests {
             store,
             Utc::now(),
         ))
+    }
+
+    /// `name` as a speech mark on the Mac, the only platform with a speech
+    /// engine in the app's process; nothing elsewhere.
+    fn on_the_mac(name: &str) -> BTreeSet<String> {
+        BTreeSet::from_iter(cfg!(target_os = "macos").then(|| name.to_owned()))
     }
 
     /// A launch whose read of `meeting_id`'s recording ended with the app.
@@ -733,10 +755,10 @@ mod tests {
         );
     }
 
-    /// A mark that cannot be read counts as a speech engine's, on the safe
-    /// side, since its meeting and stage are in its body; the launch says
-    /// so at `warn` and leaves it as it is. A later launch that reads it
-    /// counts its meeting's stop once.
+    /// A mark that cannot be read counts as a mark of the speech engine's
+    /// on the Mac, on the safe side, since only its body names its meeting
+    /// and stage; the launch says so at `warn` and leaves it as it is. A
+    /// later launch that reads it counts its meeting's stop once.
     #[test]
     fn a_mark_that_cannot_be_read_counts_as_a_speech_mark_and_stays() {
         let log = crate::fixtures::CapturedLog::warnings();
@@ -758,7 +780,7 @@ mod tests {
 
         let unread = launch(dir.path(), &store);
         let name = file.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(unread.speech_marks_left(), BTreeSet::from([name.clone()]));
+        assert_eq!(unread.speech_marks_left(), on_the_mac(&name));
         assert!(!unread.holds(meeting.id));
         assert!(file.is_dir(), "left as it is");
         let text = log.text();
