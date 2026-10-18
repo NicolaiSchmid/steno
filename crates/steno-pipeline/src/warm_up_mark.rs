@@ -242,12 +242,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(WarmUpMark::FILE_NAME);
         std::mem::forget(Arc::new(WarmUpMark::at_launch(dir.path())).begin());
-        assert!(path.exists());
+        let id = std::fs::read_to_string(&path).unwrap().trim().to_owned();
+        assert!(uuid::Uuid::parse_str(&id).is_ok(), "{id}");
 
-        let before = launch_lines(log);
         let mark = Arc::new(WarmUpMark::at_launch(dir.path()));
         assert!(mark.skipping());
-        assert_eq!(launch_lines(log), before + 1, "{}", log.text());
+        let text = log.text();
+        assert_eq!(lines_of(&text, &id, "ended with the app;"), 1, "{text}");
         assert!(mark.begin().is_none());
         assert!(path.exists(), "a skipped warm-up leaves the mark");
         assert!(
@@ -278,13 +279,12 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// The launch's lines captured so far, from every test in the binary.
-    fn launch_lines(log: &crate::fixtures::CapturedLog) -> usize {
-        log.text()
-            .lines()
-            .filter(|line| {
-                line.contains("the last warm-up of the speech models ended with the app")
-            })
+    /// The captured lines that name the mark `id` and say `what`. Every
+    /// test in the binary logs into the capture, and others find marks of
+    /// their own left over, so only the id picks out this test's lines.
+    fn lines_of(text: &str, id: &str, what: &str) -> usize {
+        text.lines()
+            .filter(|line| line.contains(id) && line.contains(what))
             .count()
     }
 
@@ -326,13 +326,10 @@ mod tests {
         let next = WarmUpMark::at_launch(dir.path());
         assert!(next.skipping());
         let text = log.text();
-        let ours = |what: &str| {
-            text.lines()
-                .filter(|line| line.contains(&id) && line.contains(what))
-                .count()
-        };
-        assert_eq!(ours("is held off;"), 1, "{text}");
-        assert_eq!(ours("ended with the app"), 0, "{text}");
+        assert_eq!(lines_of(&text, &id, "is held off;"), 1, "{text}");
+        // No semicolon, unlike the left-over test's count, so no rewording
+        // of that line slips past.
+        assert_eq!(lines_of(&text, &id, "ended with the app"), 0, "{text}");
     }
 
     /// A load while a held-off warm-up still runs leaves that warm-up its
