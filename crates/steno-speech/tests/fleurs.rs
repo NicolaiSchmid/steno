@@ -23,9 +23,10 @@ use std::time::Instant;
 
 use steno_audio::SymphoniaAudioCodec;
 use steno_audio::realtime::RateConverter;
+use steno_speech::engine::pipeline_config;
 use steno_speech::wer::{normalise, word_errors};
 use steno_speech::{
-    ModelAsset, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig, SAMPLE_RATE, VadConfig,
+    ModelAsset, OnnxBackend, OnnxOptions, OnnxSpeechEngine, SAMPLE_RATE, VadConfig,
 };
 
 const SPIKE_F_MEAN_WER: f64 = 0.053;
@@ -72,7 +73,7 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
     let mut transcriber = OnnxSpeechEngine::open_transcriber(
         &models,
         &OnnxOptions::default(),
-        PipelineConfig::default(),
+        pipeline_config(),
         VadConfig::default(),
     )
     .expect("open the export and Silero");
@@ -164,8 +165,9 @@ fn upsample(samples: &[f32], rate: f64) -> Vec<f32> {
 /// One-sided, as the G1 gate above is: the two lanes differ only at the
 /// resamplers' passband edges, yet that flips single words either way,
 /// so a file's WER moves by up to two points between them and the means
-/// by half a point (measured on atlas: 5.51 % from 48 kHz, 5.02 % from
-/// 44.1 kHz). FLEURS is 16 kHz speech, so this measures the two
+/// by half a point (measured on atlas at the engine's settings: 5.40 %
+/// from 48 kHz, 5.05 % from 44.1 kHz; 5.51 and 5.02 % before A16b of
+/// `.plans/2026-10-07-stable-promotion.md`). FLEURS is 16 kHz speech, so this measures the two
 /// passbands and phases on real speech; the aliasing of content above
 /// 8 kHz is `steno-audio`'s `tests/resampler_sweep.rs`.
 #[test]
@@ -179,7 +181,7 @@ fn fleurs_wer_from_44k1_is_at_most_a_tenth_of_a_point_over_48k() {
     let mut transcriber = OnnxSpeechEngine::open_transcriber(
         &models,
         &OnnxOptions::default(),
-        PipelineConfig::default(),
+        pipeline_config(),
         VadConfig::default(),
     )
     .expect("open the export and Silero");
