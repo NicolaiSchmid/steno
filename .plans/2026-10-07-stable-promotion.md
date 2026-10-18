@@ -2611,12 +2611,12 @@ Each lands before `0.11.0-rc.1`.
     names its meeting and stage, but only while the settings run the speech
     engine in the app's process (Parakeet v3 on CoreML,
     `SpeechSetup::runtime` with the fallback aside, passed to
-    `SpeechFallback::at_launch`); with the sidecar running speech (Whisper
-    chosen, the ONNX sidecar on the Mac, every other platform) such a mark
-    is only logged. Logged at `warn` and left as it is, such a mark counts
-    no meeting, so that meeting's quarantine comes one crash later, and
-    beside CoreML a decode, mixdown or length mark that cannot be read turns
-    the fallback on as a false alarm. While the fallback is on,
+    `SpeechFallback::at_launch`); with the sidecar running speech
+    (`onnxSidecarOnMac` in `speech.json` on the Mac, every other platform)
+    such a mark is only logged. Logged at `warn` and left as it is, such a
+    mark counts no meeting, so that meeting's quarantine comes one crash
+    later, and beside CoreML a decode, mixdown or length mark that cannot be
+    read turns the fallback on as a false alarm. While the fallback is on,
     `SpeechSetup::runtime` puts Parakeet v3 in the speech sidecar, where a
     repeated abort ends only the child and the meeting stays retryable; the
     Parakeet row of Settings and onboarding is then the sidecar's fp32
@@ -2674,23 +2674,23 @@ Each lands before `0.11.0-rc.1`.
     once beside an engine in the app's process and not beside the sidecar
     (the app's build: on the Mac only), counts no meeting's stop, stays when
     a meeting's run reads through, and counts its meeting's stop once when a
-    later launch reads it; a folder of marks that cannot be listed, which
-    counts once; and a file there that does not parse, which turns nothing
-    on; the warm-up held off until a load, a running warm-up's mark kept
-    through a load, and the launch's line for a held mark; the app's build
-    turns the fallback on from a mark and its end holds the warm-up off; the
-    model service's wrapper passes the fallback through; the waiting and
-    fallback titles in the host and the Settings action, which keeps the
-    fallback on when it cannot be ended and the offer when the rebuild
-    fails, until a later reload succeeds; kill tests: a child killed in a
-    job's CoreML load, after which the next launch processes that meeting in
-    the sidecar, a recording loads nothing in the app's process beside it or
-    after it, the next launch keeps the sidecar, and the user's "Use again"
-    puts the next meeting on CoreML with no warm-up beside its recording,
-    the recording after it warms up again, and a later launch keeps CoreML;
-    and a child killed in the warm-up's load, after which the same holds
-    and, after "Use again", the first CoreML load is the job's, not a
-    warm-up beside the recording.
+    later launch reads it; a folder of marks that cannot be listed, which is
+    listed once, as `reading`; and a file there that does not parse, which
+    turns nothing on; the warm-up held off until a load, a running warm-up's
+    mark kept through a load, and the launch's line for a held mark; the
+    app's build turns the fallback on from a mark and its end holds the
+    warm-up off; the model service's wrapper passes the fallback through;
+    the waiting and fallback titles in the host and the Settings action,
+    which keeps the fallback on when it cannot be ended and the offer when
+    the rebuild fails, until a later reload succeeds; kill tests: a child
+    killed in a job's CoreML load, after which the next launch processes
+    that meeting in the sidecar, a recording loads nothing in the app's
+    process beside it or after it, the next launch keeps the sidecar, and
+    the user's "Use again" puts the next meeting on CoreML with no warm-up
+    beside its recording, the recording after it warms up again, and a later
+    launch keeps CoreML; and a child killed in the warm-up's load, after
+    which the same holds and, after "Use again", the first CoreML load is
+    the job's, not a warm-up beside the recording.
   - Gate: A19's check in G2 (**Nicolai**, on the Mac), a forced fallback.
   - Owner: audio. Lands before `0.11.0-rc.1` (D9).
 - **A20 The level meter never freezes behind a sync of the files.** Found
