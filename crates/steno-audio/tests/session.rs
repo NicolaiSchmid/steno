@@ -2224,7 +2224,7 @@ fn a_device_change_keeps_recording_on_the_same_files() {
     let notices = session.notices();
     let meeting_id = Uuid::new_v4();
     session.start(meeting_id).unwrap();
-    // No read of the first stream: the producer can reach the change before this thread runs.
+    // No read of the first stream: the change's rebuild can already have replaced it.
     assert_eq!(
         recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
