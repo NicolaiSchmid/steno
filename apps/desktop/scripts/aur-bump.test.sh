@@ -2,10 +2,7 @@
 # Checks apps/desktop/scripts/aur-bump.sh against a copy of packaging/aur
 # and a local bare repository standing in for the AUR: the PKGBUILD and
 # .SRCINFO lines it rewrites (and only those), the files it pushes, a
-# second run, and every refusal. The copy is the package as it will be
-# after the first push by hand (Bump step 3 done, so no drop-in copies);
-# the checked-in package, which still has them, is refused. rust-ci.yml
-# runs it on Linux.
+# second run, and every refusal. rust-ci.yml runs it on Linux.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,18 +25,8 @@ root() {
   echo "$scratch/$1"
 }
 
-# Bump step 3 on a copy: the drop-in copies, their sources, checksums and
-# _copy calls go.
 stepped="$(root stepped)"
 aur="$stepped/packaging/aur"
-copies=(autostart-service-stop-timeout.conf gnome-scope-stop-timeout.conf)
-for copy in "${copies[@]}"; do
-  index="$(sed -n 's/^\tsource = //p' "$aur/.SRCINFO" | grep -nxF "$copy" | cut -d: -f1)"
-  sum="$(sed -n 's/^\tsha256sums = //p' "$aur/.SRCINFO" | sed -n "${index}p")"
-  sed -i "/^  '$copy'$/d; /'$sum'/d; /^  _copy $copy /d" "$aur/PKGBUILD"
-  sed -i "/^\tsource = $copy$/d; /^\tsha256sums = $sum$/d" "$aur/.SRCINFO"
-  rm "$aur/$copy"
-done
 cp -R "$aur" "$scratch/before"
 
 # The AUR, holding the pinned package and a file no longer in it.
@@ -127,7 +114,6 @@ output="$(run "$stepped" 0.11.1)" || fail "the second run failed: $output"
 refused 'a candidate' 'the AUR takes stable releases only, not 0.11.1-rc.1' run "$stepped" 0.11.1-rc.1
 printf 'deb bytes\n' > "$scratch/assets/steno-desktop_0.11.2_amd64.deb"
 refused 'a missing .asc' 'has no steno-desktop_0.11.2_amd64.deb.asc' run "$stepped" 0.11.2
-refused 'the package with its drop-in copies' 'still installs drop-in copies' run "$(root pinned)" 0.11.1
 remote="$(root remote)"
 sed -i 's|^\tsource = LICENSE$|\tsource = https://example.com/LICENSE|' "$remote/packaging/aur/.SRCINFO"
 refused 'a third remote source' 'nothing else remote' run "$remote" 0.11.1

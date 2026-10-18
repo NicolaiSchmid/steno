@@ -96,12 +96,7 @@ for the Rust side.
 
    The speech sidecar gets its samples on stdin and answers on stdout, never through a
    socket, and opens no connection (WP4c); the diarizer's lanes reach it the same way.
-   On Linux the app, not the sidecar, asks the
-   systemd user manager over the user bus's Unix socket for a scope of the sidecar's
-   own, sending the sidecar's pid, the unit names and the scope's fixed settings, nothing
-   else (`crates/steno-speech/src/sidecar/scope.rs`, P6 of
-   `.plans/2026-10-07-stable-promotion.md`; simplify step 4 removes these scopes and
-   with them that request). ONNX Runtime's telemetry is off in every
+   ONNX Runtime's telemetry is off in every
    process that opens a session (`init_environment` in
    `crates/steno-speech/src/onnx.rs`, which `steno-diarize` calls too). Until the
    cutover the Swift app keeps its own list in `AGENTS.md`.

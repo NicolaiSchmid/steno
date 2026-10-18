@@ -1,7 +1,7 @@
-//! Linux: what the shell's D-Bus clients share. Each runs on a thread of
-//! its own (`spawn_client`) over a connection whose calls wait five
-//! seconds at most (`patient`), so a frozen bus holds only that thread.
-//! `tests::Daemon` is the private bus their tests run on.
+//! Linux: the D-Bus helpers the tray host's follower (`tray_host`) runs
+//! on: a thread of its own (`spawn_client`) over a connection whose calls
+//! wait five seconds at most (`patient`), so a frozen bus holds only that
+//! thread. `tests::Daemon` is the private bus its tests run on.
 
 use std::time::Duration;
 
@@ -10,13 +10,8 @@ use zbus::blocking::{Connection, Proxy};
 use zbus::names::{BusName, OwnedUniqueName};
 use zbus::proxy::CacheProperties;
 
-/// How long a client waits for a method's answer, so a frozen bus cannot
-/// make `EndSession` miss its deadline.
+/// How long a client waits for a method's answer.
 const CALL_PATIENCE: Duration = Duration::from_secs(5);
-
-// Longer would let a frozen bus hold `EndSession` past the session
-// manager's patience.
-const _: () = assert!(CALL_PATIENCE.as_millis() <= 5_000);
 
 /// The connection `builder` makes, with `CALL_PATIENCE` on every call.
 pub fn patient(builder: Builder<'_>) -> zbus::Result<Connection> {
@@ -57,7 +52,7 @@ pub fn proxy<'a>(
         .build()
 }
 
-pub fn bus(connection: &Connection) -> zbus::Result<zbus::blocking::fdo::DBusProxy<'_>> {
+fn bus(connection: &Connection) -> zbus::Result<zbus::blocking::fdo::DBusProxy<'_>> {
     zbus::blocking::fdo::DBusProxy::builder(connection)
         .cache_properties(CacheProperties::No)
         .build()

@@ -10,11 +10,9 @@
 # <types> is the comma-separated list Tauri's `--bundles` takes:
 #
 #   deb       deb/*.deb, unpacked with dpkg-deb -x, into usr/bin/; also
-#             the stop timeout drop-ins for the autostart unit and GNOME's
-#             scope under usr/lib/systemd/user/, the postinst that
-#             reloads the user managers for them, the dependency on
-#             PipeWire, the one on the glibc the binaries need, and the
-#             Hyprland rules (usr/share/steno-desktop/hyprland-steno.lua),
+#             the dependency on PipeWire, the one on the glibc the
+#             binaries need, and the Hyprland rules
+#             (usr/share/steno-desktop/hyprland-steno.lua),
 #             byte for byte apps/desktop/src-tauri/linux/hyprland-steno.lua
 #   appimage  appimage/*.AppImage, unpacked with --appimage-extract, into
 #             usr/bin/
@@ -123,31 +121,12 @@ side_by_side() {
   no_host_paths "$dir/$app" "$dir/$sidecar"
 }
 
-# drop_in <path below usr/lib/systemd/user/> <file in src-tauri/linux/>:
-# the unpacked .deb holds that file there, byte for byte.
-drop_in() {
-  local target="usr/lib/systemd/user/$1"
-  cmp -s "$scratch/deb/$target" "$linux/$2" \
-    || die "the .deb does not install linux/$2 as /$target"
-  echo "ok: the .deb installs /$target"
-}
 
 check_deb() {
   local deb
   deb="$(one "$bundle/deb/*.deb")"
   dpkg-deb -x "$deb" "$scratch/deb"
   side_by_side "$scratch/deb/usr/bin" steno-desktop "$sidecar_name"
-  # The stop timeout drop-ins for the unit systemd makes from the autostart
-  # entry and for GNOME's scope (apps/desktop/src-tauri/src/stop_timeout.rs);
-  # `\x2d` is literal, as systemd names the directories.
-  drop_in 'app-steno\x2ddesktop@autostart.service.d/10-steno.conf' autostart-service-stop-timeout.conf
-  drop_in 'app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf' gnome-scope-stop-timeout.conf
-  dpkg-deb -e "$deb" "$scratch/deb-control"
-  [[ -x "$scratch/deb-control/postinst" ]] \
-    || die "the .deb has no executable postinst"
-  cmp -s "$scratch/deb-control/postinst" "$linux/deb-postinst.sh" \
-    || die "the .deb's postinst is not linux/deb-postinst.sh"
-  echo "ok: the .deb's postinst is linux/deb-postinst.sh"
   # PipeWire's library under either name (Ubuntu 24.04's t64 rename),
   # and its client.conf (pipewire-bin, through pipewire), without which
   # every recording fails at its start.

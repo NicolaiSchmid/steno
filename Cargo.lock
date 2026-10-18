@@ -5310,7 +5310,6 @@ dependencies = [
  "async-trait",
  "block2",
  "gdk",
- "gio",
  "libc",
  "objc2",
  "objc2-app-kit",
@@ -5338,7 +5337,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "url",
  "uuid",
  "zbus",
@@ -5546,7 +5544,6 @@ dependencies = [
  "tracing",
  "ureq",
  "whatlang",
- "zbus",
 ]
 
 [[package]]

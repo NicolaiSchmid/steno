@@ -31,7 +31,7 @@
 # store and to send the close; with `--with-host` also Python's GObject
 # bindings), and the web dist embedded as for the smoke (smoke-linux.sh).
 # The app's log stays in the work directory it prints. The steps it shares
-# with lost-display-linux.sh are in xvfb-recording-linux.sh.
+# with locked-store-linux.sh are in xvfb-recording-linux.sh.
 set -euo pipefail
 
 name=close-without-tray

@@ -6,7 +6,6 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The variable a package's wrapper sets to the path the autostart entry
 /// names, when the launcher is not beside the binary (the AUR wrapper).
@@ -167,9 +166,9 @@ fn exec_value(path: &str) -> String {
     quoted
 }
 
-/// Writes the autostart entry naming [`launcher_path`] atomically, so a
-/// reload of the user manager never reads half of it. Without such a path
-/// it fails with [`NO_STABLE_PATH`] and writes nothing.
+/// Writes the autostart entry naming [`launcher_path`], through a
+/// temporary file renamed over the old one. Without such a path it fails
+/// with [`NO_STABLE_PATH`] and writes nothing.
 pub fn write_entry(app_name: &str) -> io::Result<()> {
     let path = entry_path_here(app_name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
@@ -183,7 +182,19 @@ fn write_entry_at(path: &Path, app_name: &str, exec: Option<&Path>) -> io::Resul
         );
         return Err(io::Error::new(io::ErrorKind::NotFound, NO_STABLE_PATH));
     };
-    crate::stop_timeout::install(path, &entry(app_name, exec)).map(|_| ())
+    let directory = path
+        .parent()
+        .ok_or_else(|| io::Error::other("the entry has no directory"))?;
+    std::fs::create_dir_all(directory)?;
+    // Hidden, so the XDG autostart generator never reads it as an entry.
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temporary = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let written = std::fs::write(&temporary, entry(app_name, exec))
+        .and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
 }
 
 fn exec_of(entry: &str) -> Option<&str> {
@@ -204,78 +215,14 @@ fn is_earlier_entry(entry: &str, candidates: &[PathBuf]) -> bool {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Removal {
-    /// It stays: unmanaged, or not an earlier build's entry.
-    Keep,
-    /// It goes now.
-    Now,
-    /// It goes at the exit: the app runs as the unit made from it, which a
-    /// reload without the entry would leave outside the session.
-    AtExit,
-}
-
-fn removal(managed: bool, earlier: bool, as_autostart_unit: bool) -> Removal {
-    match (managed && earlier, as_autostart_unit) {
-        (false, _) => Removal::Keep,
-        (true, false) => Removal::Now,
-        (true, true) => Removal::AtExit,
-    }
-}
-
-/// Set at launch when an earlier build's entry waits for the exit.
-static EARLIER_ENTRY_AT_EXIT: AtomicBool = AtomicBool::new(false);
-
 /// At launch, while the system manages the login item, removes the
-/// autostart entry an earlier build wrote, and only such an entry; as the
-/// autostart unit, at the exit instead ([`remove_earlier_entry_at_exit`]).
+/// autostart entry an earlier build wrote, and only such an entry.
 pub fn remove_earlier_entry(app_name: &str) {
-    let Some(path) = entry_path_here(app_name) else {
-        return;
-    };
-    let removal = remove_or_defer(
-        &path,
-        super::login_item_is_managed(),
-        &candidates_here(),
-        crate::stop_timeout::runs_as_autostart_unit(),
-    );
-    if removal == Removal::AtExit {
-        EARLIER_ENTRY_AT_EXIT.store(true, Ordering::Relaxed);
+    if super::login_item_is_managed()
+        && let Some(path) = entry_path_here(app_name)
+    {
+        remove_if_earlier(&path, &candidates_here());
     }
-}
-
-fn remove_or_defer(
-    path: &Path,
-    managed: bool,
-    candidates: &[PathBuf],
-    as_autostart_unit: bool,
-) -> Removal {
-    let earlier =
-        std::fs::read_to_string(path).is_ok_and(|entry| is_earlier_entry(&entry, candidates));
-    let removal = removal(managed, earlier, as_autostart_unit);
-    match removal {
-        Removal::Keep => {}
-        Removal::Now => {
-            remove_if_earlier(path, candidates);
-        }
-        Removal::AtExit => tracing::info!(
-            "the autostart entry an earlier build wrote goes when Steno exits: Steno runs as the unit made from it"
-        ),
-    }
-    removal
-}
-
-/// After the shutdown of an exit, removes the entry left for the exit if
-/// it is still an earlier build's; not for an update's relaunch, which
-/// runs on in the same unit. True when the entry went.
-pub fn remove_earlier_entry_at_exit(app_name: &str, relaunching: bool) -> bool {
-    removes_at_exit(EARLIER_ENTRY_AT_EXIT.load(Ordering::Relaxed), relaunching)
-        && entry_path_here(app_name)
-            .is_some_and(|path| remove_if_earlier(&path, &candidates_here()))
-}
-
-fn removes_at_exit(deferred: bool, relaunching: bool) -> bool {
-    deferred && !relaunching
 }
 
 /// Removes the entry at `path` when it is an earlier build's; true when it
@@ -600,54 +547,18 @@ mod tests {
         }
     }
 
-    /// An earlier entry goes only while managed: now, or at the exit as
-    /// the unit.
+    /// Only an earlier build's entry is removed, on a real file.
     #[test]
-    fn an_earlier_entry_goes_only_while_managed_and_at_the_exit_as_the_unit() {
-        assert_eq!(removal(true, true, false), Removal::Now);
-        assert_eq!(removal(true, true, true), Removal::AtExit);
-        for as_unit in [false, true] {
-            assert_eq!(removal(false, true, as_unit), Removal::Keep);
-            assert_eq!(removal(true, false, as_unit), Removal::Keep);
-            assert_eq!(removal(false, false, as_unit), Removal::Keep);
-        }
-        assert!(removes_at_exit(true, false));
-        assert!(
-            !removes_at_exit(true, true),
-            "an update's relaunch keeps it"
-        );
-        assert!(!removes_at_exit(false, false));
-    }
-
-    /// The launch and exit steps on a real file.
-    #[test]
-    fn a_store_entry_waits_for_the_exit_as_the_autostart_unit() {
+    fn only_an_earlier_entry_is_removed() {
         let dir = tempfile::tempdir().unwrap();
         let path = entry_path("steno-desktop", dir.path());
         let store = Path::new("/nix/store/aaaa-steno-desktop/bin/.steno-desktop-wrapped");
-        let write = |exec: &Path| write_entry_at(&path, "steno-desktop", Some(exec)).unwrap();
-
-        assert_eq!(
-            remove_or_defer(&path, true, &[], false),
-            Removal::Keep,
-            "no entry"
-        );
-
-        write(store);
-        assert_eq!(remove_or_defer(&path, false, &[], false), Removal::Keep);
-        assert!(path.exists(), "an unmanaged launch keeps it");
-        assert_eq!(remove_or_defer(&path, true, &[], false), Removal::Now);
-        assert!(!path.exists(), "outside the unit it goes at once");
-
-        write(store);
-        assert_eq!(remove_or_defer(&path, true, &[], true), Removal::AtExit);
-        assert!(path.exists(), "as the unit it stays while the app runs");
-        assert!(removes_at_exit(true, false));
+        assert!(!remove_if_earlier(&path, &[]), "no entry");
+        write_entry_at(&path, "steno-desktop", Some(store)).unwrap();
         assert!(remove_if_earlier(&path, &[]));
-        assert!(!path.exists(), "gone after the exit");
-
-        write(Path::new("/opt/steno/steno-desktop"));
-        assert_eq!(remove_or_defer(&path, true, &[], false), Removal::Keep);
+        assert!(!path.exists());
+        let own = Path::new("/opt/steno/steno-desktop");
+        write_entry_at(&path, "steno-desktop", Some(own)).unwrap();
         assert!(!remove_if_earlier(&path, &[]));
         assert!(path.exists(), "an entry no earlier build wrote stays");
     }
@@ -673,16 +584,10 @@ mod tests {
             if !managed {
                 return;
             }
-            // The exit step re-reads the entry; a relaunch keeps it.
-            EARLIER_ENTRY_AT_EXIT.store(true, Ordering::Relaxed);
+            // This build's own entry stays.
             write_entry(BINARY).unwrap();
-            assert!(!remove_earlier_entry_at_exit(BINARY, false));
+            remove_earlier_entry(BINARY);
             assert!(path.exists(), "this build's own entry stays");
-            write_entry_at(&path, BINARY, Some(&per_user)).unwrap();
-            assert!(!remove_earlier_entry_at_exit(BINARY, true));
-            assert!(path.exists(), "an update's relaunch keeps it");
-            assert!(remove_earlier_entry_at_exit(BINARY, false));
-            assert!(!path.exists(), "gone after the exit");
             return;
         }
         for managed in [false, true] {

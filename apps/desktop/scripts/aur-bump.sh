@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bumps the AUR package `steno-desktop-bin` (packaging/aur, stable plan X6)
-# to a stable release and pushes it to the AUR: Bump steps 1, 2 and 4 of
+# to a stable release and pushes it to the AUR: Bump steps 1, 2 and 3 of
 # packaging/aur/README.md without makepkg, then the push its "Push to the
 # AUR" section describes. desktop-release.yml's `publish` runs it for a
 # stable release once AUR_SSH_PRIVATE_KEY exists, and then opens a pull
@@ -15,8 +15,7 @@
 #   URLs with them, so it stays what `makepkg --printsrcinfo` prints
 #   (aur-ci.yml checks that on the pull request).
 # - Fails without changing the push target when the PKGBUILD is not in the
-#   form above (a third release source, the 0.1.0 pin's drop-in copies that
-#   Bump step 3 deletes) or a rewrite did not take.
+#   form above (a third release source) or a rewrite did not take.
 # - The push: a clone of the AUR repository, its files replaced by
 #   PKGBUILD, .SRCINFO, .gitignore, keys/, every local source and the
 #   install script (and a changelog, if named), one
@@ -59,9 +58,6 @@ asc_sha="$(sha "$assets/$deb.asc")"
 sources="$(sed -n 's/^\tsource = //p' "$aur/.SRCINFO")"
 [[ "$(grep -c '://' <<< "$sources")" == 2 && "$(head -n 2 <<< "$sources" | grep -c '://')" == 2 ]] \
   || die "packaging/aur/.SRCINFO does not list the .deb and its .asc first and nothing else remote: $sources"
-if grep -q '^ *_copy ' "$aur/PKGBUILD"; then
-  die "packaging/aur/PKGBUILD still installs drop-in copies; the release .deb ships them (README, Bump step 3)"
-fi
 
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/aur-bump.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
