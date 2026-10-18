@@ -11,16 +11,6 @@
   steno,
 }: let
   lib = pkgs.lib;
-  conf = lib.importJSON ../apps/desktop/src-tauri/tauri.conf.json;
-  # The `.deb`'s systemd user files (P5's stop timeout drop-ins), as
-  # `<path below lib/systemd/user/> <file in src-tauri/>` lines: the package
-  # holds each one where the `.deb` puts it.
-  userUnitFiles = lib.concatStrings (lib.mapAttrsToList (
-    target: source: let
-      below = lib.removePrefix "/usr/lib/systemd/user/" target;
-    in
-      lib.optionalString (below != target) "${below}\t${source}\n"
-  ) (conf.bundle.linux.deb.files or {}));
 
   system = modules:
     nixpkgs.lib.nixosSystem {
@@ -45,7 +35,6 @@
     {
       users.users.alice.isNormalUser = true;
       programs.steno.users = ["alice"];
-      programs.steno.inhibitDelayMaxSec = 15;
       programs.steno.handoverPort = 23900;
     }
   ];
@@ -96,8 +85,6 @@ in {
   "the package is built with STENO_DISTRIBUTION=${steno.env.STENO_DISTRIBUTION}, not nix";
     pkgs.runCommand "steno-package-check" {
       nativeBuildInputs = [pkgs.file];
-      inherit userUnitFiles;
-      src = ../apps/desktop/src-tauri;
       tray = steno.passthru.trayLibrary;
       onnxruntime = lib.getLib pkgs.onnxruntime;
     } ''
@@ -135,15 +122,6 @@ in {
 
       grep -q '^Exec=steno-desktop %u$' ${steno}/share/applications/steno-desktop.desktop \
         || { echo "the desktop entry's Exec is not steno-desktop %u"; exit 1; }
-
-      while IFS=$'\t' read -r below source; do
-        [ -n "$below" ] || continue
-        cmp "${steno}/lib/systemd/user/$below" "$src/$source" \
-          || { echo "lib/systemd/user/$below differs from $source"; exit 1; }
-        cmp "${steno}/share/systemd/user/$below" "$src/$source" \
-          || { echo "share/systemd/user/$below differs from $source"; exit 1; }
-        echo "ok: lib/systemd/user/$below, also under share/"
-      done <<< "$userUnitFiles"
       touch $out
     '';
 
@@ -160,8 +138,6 @@ in {
   assert systemWide.config.services.gnome.gnome-keyring.enable;
   assert !withAgent.config.services.gnome.gnome-keyring.enable;
   assert !withGpgAgent.config.services.gnome.gnome-keyring.enable;
-  assert !(systemWide.config.services.logind.settings.Login ? InhibitDelayMaxSec);
-  assert perUser.config.services.logind.settings.Login.InhibitDelayMaxSec == 15;
   assert lib.assertMsg (systemWide.config.environment.sessionVariables.STENO_LOGIN_ITEM or null == "managed")
   "the session lacks STENO_LOGIN_ITEM=managed";
   assert lib.assertMsg (perUser.config.environment.sessionVariables.STENO_LOGIN_ITEM or null == "managed")
@@ -179,7 +155,6 @@ in {
   assert lib.assertMsg (!(opensTcp defaultPort noLogin.config) && !(opensMdns noLogin.config) && portVariable noLogin.config == toString defaultPort)
   "openFirewall = false still opens a port, or drops STENO_HANDOVER_PORT";
     pkgs.runCommand "steno-module-check" {
-      inherit userUnitFiles;
       systemWideUnits = userUnits systemWide.config;
       perUserUnits = userUnits perUser.config;
     } ''
@@ -189,7 +164,6 @@ in {
       for units in "$systemWideUnits" "$perUserUnits"; do
         unit="$units/steno.service"
         cat "$unit"
-        has 'TimeoutStopSec=20s'
         has 'Type=exec'
         has 'Slice=app.slice'
         # A switch leaves a running Steno alone.
@@ -200,10 +174,6 @@ in {
         if grep -q '^Environment="PATH=' "$unit"; then echo "steno.service sets PATH"; exit 1; fi
         test -e "$units/graphical-session.target.wants/steno.service" \
           || { echo "graphical-session.target does not want steno.service"; exit 1; }
-        while IFS=$'\t' read -r below source; do
-          [ -n "$below" ] || continue
-          test -e "$units/$below" || { echo "the user units lack $below"; exit 1; }
-        done <<< "$userUnitFiles"
       done
       unit="$systemWideUnits/steno.service"
       has 'ExecStart=/run/current-system/sw/bin/steno-desktop'

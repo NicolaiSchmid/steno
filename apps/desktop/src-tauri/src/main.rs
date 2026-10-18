@@ -27,8 +27,6 @@ fn write_stderr_line(line: std::fmt::Arguments<'_>) {
 }
 
 mod actions;
-#[cfg(target_os = "linux")]
-mod appimage;
 mod autostart;
 mod bridge;
 #[cfg(target_os = "linux")]
@@ -37,8 +35,6 @@ mod deep_links;
 mod dialogs;
 #[cfg(target_os = "linux")]
 mod display;
-#[cfg(target_os = "linux")]
-mod display_lost;
 #[cfg(feature = "fixture-host")]
 mod fixtures;
 mod host;
@@ -46,8 +42,6 @@ mod identifier;
 #[cfg(target_os = "macos")]
 mod menu;
 mod navigation;
-#[cfg(target_os = "linux")]
-mod own_scope;
 mod packaged;
 mod panel_anchor;
 mod panel_geometry;
@@ -55,11 +49,7 @@ mod panels;
 mod permissions;
 mod platform;
 mod recording;
-#[cfg(target_os = "linux")]
-mod session_end;
 mod smoke;
-#[cfg(target_os = "linux")]
-mod stop_timeout;
 mod tray;
 #[cfg(target_os = "linux")]
 mod tray_host;
@@ -80,13 +70,7 @@ fn main() {
         None,
     );
     #[cfg(target_os = "linux")]
-    {
-        display::choose();
-        display_lost::watch();
-    }
-    // Before the app is built: GTK unsets it when it starts.
-    #[cfg(target_os = "linux")]
-    let startup_id = session_end::startup_id();
+    display::choose();
     // The runtime the services graph runs on, beside Tauri's own. Leaked:
     // dropping a runtime waits without a bound for every blocking task on
     // it, and Tauri drops whatever owns it before the process exits.
@@ -148,13 +132,7 @@ fn main() {
             bridge::panel_call
         ])
         .setup(move |app| {
-            if setup(app.handle(), runtime)? {
-                #[cfg(target_os = "linux")]
-                {
-                    session_end::watch(app.handle(), startup_id);
-                    display_lost::arm(app.handle());
-                }
-            }
+            setup(app.handle(), runtime)?;
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -163,16 +141,12 @@ fn main() {
 }
 
 /// Builds the host, the tray and the main window, opens onboarding when
-/// the host asks for it, and runs the launch sequence. False when this app
-/// refuses to start (`refuse_to_start`), with no host, tray or window.
+/// the host asks for it, and runs the launch sequence. An app that refuses
+/// to start (`refuse_to_start`) builds no host, tray or window.
 fn setup(
     handle: &tauri::AppHandle,
     runtime: &'static tokio::runtime::Runtime,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    // Before the first window starts WebKit's processes, so they follow the
-    // app into its scope.
-    #[cfg(target_os = "linux")]
-    own_scope::take_own_scopes();
+) -> Result<(), Box<dyn std::error::Error>> {
     handle.manage(std::sync::Arc::new(updater::ShellUpdates::new(
         handle.clone(),
     )));
@@ -182,7 +156,7 @@ fn setup(
             handle,
             Refused::plain(refusal, format!("{SWIFT_BUNDLE_ID} is running")),
         );
-        return Ok(false);
+        return Ok(());
     }
     #[cfg(not(feature = "fixture-host"))]
     let host = match host::Host::real(handle, runtime) {
@@ -191,7 +165,7 @@ fn setup(
             // The whole error, paths included, only at debug level.
             tracing::debug!("not starting: {error}");
             refuse_to_start(handle, Refused::after(&error));
-            return Ok(false);
+            return Ok(());
         }
     };
     #[cfg(feature = "fixture-host")]
@@ -213,11 +187,9 @@ fn setup(
     host::host(handle).launch(handle, runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle, autostart::status(handle).is_on());
-    #[cfg(target_os = "linux")]
-    autostart::sync_at_launch(handle);
     #[cfg(unix)]
     exit_on_signals(handle, runtime);
-    Ok(true)
+    Ok(())
 }
 
 const REFUSED_CODE: i32 = 3;
@@ -589,22 +561,6 @@ fn shut_down_before_exit(app: &tauri::AppHandle) {
     steno_services::flush_logs();
 }
 
-/// The shutdown before an update's relaunch: on Linux it marks the exit as
-/// a relaunch first, so the login item stays for the next process.
-fn shut_down_for_relaunch(app: &tauri::AppHandle) {
-    #[cfg(target_os = "linux")]
-    autostart::relaunching();
-    shut_down_before_exit(app);
-}
-
-/// The save before an end no exit request announced, on Linux: the
-/// pipeline quits first, then the shutdown runs on this thread's behalf.
-#[cfg(target_os = "linux")]
-fn save_before_end(app: &tauri::AppHandle) {
-    host::host(app).quit_pipeline();
-    shut_down_before_exit(app);
-}
-
 /// The onboarding window closed: the host counts its pages as seen, and a
 /// smoke run counts the close.
 fn onboarding_closed(app: &tauri::AppHandle) {
@@ -623,16 +579,11 @@ fn count_onboarding_seen<H: host::ShellHost>(host: H) {
 
 /// What every exit runs once: the host's shutdown, then a `warn` line with
 /// how long it took, so a machine's log shows the save against the waits
-/// it must fit in. Then, on Linux, the login item's exit step, only once
-/// the save is over; last the panels' anchor, which waits for a slow disk.
+/// it must fit in; then the panels' anchor, which waits for a slow disk.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
     let shutdown = host::host(app).shutdown_action();
     let app = app.clone();
-    timed_then(shutdown, move || {
-        #[cfg(target_os = "linux")]
-        autostart::at_exit(&app, autostart::relaunching_now());
-        panels::flush_anchor(&app);
-    })
+    timed_then(shutdown, move || panels::flush_anchor(&app))
 }
 
 fn timed_then(
@@ -896,23 +847,6 @@ fn single_instance_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The exit turns the Linux login item off before it waits for the
-    /// panels' anchor.
-    #[test]
-    fn the_exit_flushes_the_anchor_after_the_login_item() {
-        let main = include_str!("main.rs").replace("\r\n", "\n");
-        let start = main.find("\nfn exit_action(").unwrap();
-        let end = start + main[start..].find("\n}\n").unwrap();
-        let exit = &main[start..end];
-        let login_item = exit
-            .find("autostart::at_exit(&app, autostart::relaunching_now());")
-            .expect("the exit turns the Linux login item off");
-        let flush = exit
-            .find("panels::flush_anchor(&app);")
-            .expect("the exit flushes the anchor");
-        assert!(login_item < flush);
-    }
 
     /// A running Swift app refuses the start before the host is built.
     #[cfg(not(feature = "fixture-host"))]

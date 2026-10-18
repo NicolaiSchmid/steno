@@ -20,7 +20,7 @@ Everything the Swift app does outside its three windows, per OS:
 |---|---|---|---|
 | Tray (`tray.rs`) | Menu bar extra with a template icon | Status notifier item (libayatana-appindicator) | Notification area icon |
 | Floating panels (`panels.rs`) | Non-activating `NSPanel`s on every space (`tauri-nspanel`) | Always-on-top undecorated windows, under XWayland on a Wayland session (see below) | Always-on-top undecorated windows |
-| Launch at login (`autostart.rs`, `autostart/main_app.rs`, `packaged.rs`) | `SMAppService.mainApp`, as the Swift app (see Launch at login on macOS) | `~/.config/autostart` entry naming a stable path (see Packaged installs), and systemd drop-ins for the stop timeout (`stop_timeout.rs`, see Launch at login under systemd) | Run registry key |
+| Launch at login (`autostart.rs`, `autostart/main_app.rs`, `packaged.rs`) | `SMAppService.mainApp`, as the Swift app (see Launch at login on macOS) | `~/.config/autostart` entry naming a stable path (see Packaged installs) | Run registry key |
 | Updates (`updater.rs`) | signed manifest per lane | same; off on a packaged install (see Packaged installs) | same |
 | Permissions (`permissions.rs`) | microphone TCC status and prompt; system audio and calendar deferred to the host's probes | unknown (nothing to query before capture; the portal asks when the stream opens) | unknown (the privacy switch decides at capture time) |
 | Deep links (`deep_links.rs`) | `steno:` through `CFBundleURLTypes`, written into the bundle by the deep-link plugin from `plugins.deep-link` | the `.deb`'s desktop entry from `linux/` (`Exec=… %u`, the `x-scheme-handler/steno` MIME type); an AppImage and a debug build register at start | registry (debug builds register at start) |
@@ -51,75 +51,13 @@ exits reach the shutdown these ways:
   ends the process at once, unsaved; a SIGHUP never does. A signal the
   app inherited ignored (`nohup`, a background job's SIGINT) stays
   ignored.
-- A logout on GNOME or Xfce saves before the session manager lets the
-  app go: the app registers with it on the session bus (GNOME's
-  `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager`,
-  which serves the same protocol under names of its own,
-  `session_end.rs`). The session manager first asks whether the session
-  may end, and the logout can still be called off after that (GNOME's
-  confirmation dialog, another Xfce app; xfce4-session then tells the app
-  nothing), so the app answers at once, records on, and saves at the end,
-  which gnome-session waits about ten seconds for and xfce4-session
-  seven. When xfce4-session tells the app to leave (Session settings'
-  Quit Program), the app unregisters, which calls off the kill
-  xfce4-session would send 15 seconds later, then saves and quits.
-  xfce4-session also tells a client to leave right after it dropped it,
-  when a checkpoint (Save Session) has waited a minute, usually with no
-  logout to follow, and with no kill; the app then records on and
-  registers again, so a later logout still reaches it. On Wayland
-  xfce4-session quits right after it asked, with no end and no cancel to
-  follow, so there the app saves when asked, answers, and ends with the
-  display. Should the session go on after all (the app took it for a
-  Wayland one wrongly), the app says so 30 seconds later and relaunches
-  once the message is closed, so the user can record again.
-- Where no session manager runs (KDE Plasma, wlroots desktops), the app
-  follows the desktop portal's session monitor. It answers the portal's
-  query at once, since the user can still call the logout off then, and
-  saves when the portal reports the session ending. Plasma 6.6's portal
-  serves the monitor, but nothing in Plasma 6.6 asks it yet, and the
-  other portals report no end; the next point is what saves there.
-- Every logout ends the display server, and so does a shutdown once
-  logind goes ahead; GDK would end the process with it. The app's log
-  writer sees GDK's last line and holds that exit until the save has
-  ended (`display_lost.rs`), so a save that outlasts a session manager's
-  or logind's wait still ends, at most ten seconds after it began. On
-  KDE Plasma this is the save: ksmserver asks only XSMP clients, which
-  GTK 3 is not, and on Wayland KWin closes only native Wayland windows,
-  not the app's, which run under XWayland. The writer knows GDK's lines
-  by GTK 3.24.52's wording; a GTK that rewords them ends the app unsaved
-  again. Only a kill ends the save early: systemd's `SIGKILL` once a
-  stop has waited out the unit's `TimeoutStopSec` (90 s unless the unit
-  sets another; the autostart unit and GNOME's app scope set 5 s, which
-  Steno's drop-ins raise to 20 s, see below), xfce4-session's `SIGKILL`
-  15 seconds after it told the app to leave, which the app calls off by
-  unregistering first, or a second SIGTERM.
-- While a recording runs the app holds the portal's logout inhibitor
-  ("A meeting is being recorded") and releases it when the recording
-  stops. GNOME then lists Steno in its logout dialog, also for
-  `gnome-session-quit --logout --no-prompt`, so the user can go back to
-  the meeting; logging out anyway saves as above (read from
-  gnome-session's and the GTK portal's source; not yet seen on a real
-  GNOME session). Plasma 6.6's portal records it for its session
-  monitor, which nothing in Plasma asks yet; the GTK portal outside
-  GNOME (Xfce, wlroots) refuses it.
-- A system shutdown or reboot on Linux saves while logind waits: the app
-  holds logind's `shutdown` delay lock and releases it after the save.
-  logind waits for the lock at most five seconds by default
-  (`InhibitDelayMaxSec`), then goes ahead; the SIGTERM that follows waits
-  for the save in progress, and so does the display closing. Sleep and
-  the screen lock do not stop a recording.
-- An autostarted Steno on a desktop that runs XDG autostart through
-  systemd (KDE Plasma, and uwsm sessions such as Omarchy's Hyprland) is
-  the unit `app-steno\x2ddesktop@autostart.service`, which
-  `systemd-xdg-autostart-generator` makes from the entry with
-  `TimeoutStopSec=5s`. On GNOME, gnome-session starts the entry, and
-  gnome-shell an app from the dash or the app grid, in a scope of its
-  own, `app-gnome-steno\x2ddesktop-<pid>.scope`, which gnome-session's
-  `app-gnome-.scope.d/override.conf` gives `TimeoutStopSec=5s` too. When
-  the session ends, systemd sends SIGTERM and, once the stop has waited
-  out that `TimeoutStopSec`, `SIGKILL`, while the save may need ten
-  seconds and the process two more to end. Two drop-ins raise both
-  timeouts to 20 s (see Launch at login under systemd).
+- A logout or a shutdown on Linux saves only when it reaches the app as
+  SIGTERM with time to spare, as when systemd stops the unit Steno runs
+  in. Otherwise (the display server ending first, which makes GDK end the
+  process, or a kill once the unit's stop timeout has passed, 5 s for the
+  XDG autostart unit and GNOME's app scopes) the recording in progress
+  loses its unsaved end: the next launch recovers it from its audio file,
+  with `failed` as its end reason. The same holds for the OOM killer.
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).
@@ -135,31 +73,6 @@ exits reach the shutdown these ways:
   the pipeline, so its job could leave the meeting failed; unverified
   (WP10).
 
-What starts the save on each Linux desktop, from the desktops' source
-(GTK 3.24.52, xfce4-session 4.20.4, Plasma 6.6.5, gnome-session 50.1);
-only a kill cuts it off on any of them:
-
-| Desktop | What starts the save |
-|---|---|
-| GNOME (X11, Wayland) | `EndSession`, about ten seconds to answer; then the display closing holds the exit until the save has ended |
-| Xfce on X11 | `EndSession`, seven seconds to answer; then the display closing holds the exit until the save has ended |
-| Xfce on Wayland | `QueryEndSession`; xfce4-session quits at once, and the display closing holds the exit until the save has ended |
-| Xfce's Quit Program (Session settings) | `Stop`; the app unregisters first, so xfce4-session's kill 15 seconds later does not come |
-| KDE Plasma 6.6 (Wayland, X11) | the display closing |
-| A desktop whose portal reports the end | the portal's ending state, then the display closing |
-| Hyprland under uwsm (Omarchy) | at a logout, SIGTERM to Steno's scope or autostart unit while Hyprland still runs; at `hyprctl dispatch exit` or a crash, the display closing (see Hyprland) |
-| wlroots and others | the display closing |
-| A shutdown or reboot (all) | logind's delay lock (five seconds by default, 15 on Omarchy), then SIGTERM and the display closing, which both wait for the save |
-
-The session clients, the portal's monitor and inhibitor and the logind
-lock are tested against fakes on a private bus. The lost display ran
-under Xvfb and headless sway with a recording in progress, and a real
-xfce4-session 4.20.4 logout ran on X11 and on Wayland under labwc, and
-its Quit Program and Save Session under a recording on X11; no
-real GNOME or KDE Plasma session has run yet (before the first Linux
-release). The autostart unit's stop ran under a real systemd user
-manager, in a container (see Launch at login under systemd).
-
 On Linux an exit that went through ends the process two seconds later at
 the latest (`end_within` in `main.rs`): the single-instance plugin
 releases its bus name at the run loop's end and waits for the bus
@@ -169,33 +82,6 @@ The speech sidecar ignores SIGINT, SIGTERM and SIGHUP on Linux and
 macOS: Ctrl-C, a closed terminal and systemd signal it with the app, and
 it would otherwise end its job first. It exits within a heartbeat once
 the app is gone.
-
-On Linux, when the app runs in a unit of a systemd user manager (a
-launcher's scope, the autostart service), the sidecar gets a transient
-scope of its own right after its start,
-`app-steno\x2dspeech\x2dsidecar-<pid>.scope`, in the app's slice and
-`PartOf` the app's unit (`crates/steno-speech/src/sidecar/scope.rs`).
-`systemd-oomd`, which some distributions turn on for the user's session,
-kills a whole cgroup under memory pressure. With the sidecar in a cgroup
-of its own, oomd takes the sidecar first and the recording goes on: the
-job that was transcribing or diarizing fails that stage as after any
-crash of the sidecar, and the next job starts a new one. Speaker
-diarization runs in the sidecar too, so the app's own cgroup stays a
-candidate only under pressure that lasts after the sidecar is gone.
-
-The app asks the user manager for the scope over the user bus's Unix
-socket in `$XDG_RUNTIME_DIR`, sending the sidecar's pid, the unit names
-and the scope's fixed settings, nothing else, and waits about two seconds
-for the sidecar to be in it. A start the manager has not carried out by
-then is called off and the sidecar stays in the app's cgroup; a sidecar
-that joined its scope just before, or that a late manager moves
-afterwards, stays in its scope. Without a user manager, a user bus or a
-unit (a plain shell, a container), or when the manager refuses, the
-sidecar stays in the app's cgroup. Stopping the app's unit also stops the
-sidecar's scope. The log says which happened: `speech sidecar in a scope
-of its own`, `the speech sidecar stays in the app's cgroup`, or, when
-nothing tells whether the manager moved it, `the speech sidecar stays
-where the user manager put it`.
 
 Snapshots reach the windows, the tray and the panels from the main thread
 (`WindowSink` in `host.rs`): the host emits under its `publishing` lock
@@ -373,143 +259,6 @@ link is logged and ignored. A link that reaches a window before its page
 has mounted (a cold launch) waits in `windows::Pages` and is published on
 the page's `page.ready`.
 
-### Launch at login under systemd
-
-systemd gives the autostart unit and GNOME's app scope 5 s to stop (see
-the exits above). Two drop-ins raise that to 20 s: the shutdown's ten
-seconds and the process's two more, with room to spare, and still short
-enough that a hung app does not hold a logout for long.
-
-| File in `linux/` | Unit | Name in the unit's `.d` directory |
-|---|---|---|
-| `autostart-service-stop-timeout.conf` (`[Service]`) | `app-steno\x2ddesktop@autostart.service`, the autostart unit | `10-steno.conf`, so a drop-in of the user's own (`systemctl --user edit`) still wins |
-| `gnome-scope-stop-timeout.conf` (`[Scope]`) | `app-gnome-steno\x2ddesktop-.scope`, every scope GNOME starts Steno in | `zz-steno.conf`: drop-ins apply in file name order, so it comes after gnome-session's `override.conf` |
-
-They reach the user manager two ways:
-
-- The `.deb` installs both under `/usr/lib/systemd/user/`
-  (`bundle.linux.deb.files` in `tauri.conf.json`), and its `postinst`
-  (`linux/deb-postinst.sh`) has every running user manager reload its
-  units, so a Steno autostarted before an upgrade gets the 20 s too
-  (`check-bundle.sh` checks all three files).
-- The app writes the same files under the same names into
-  `~/.config/systemd/user/`, whatever `XDG_CONFIG_HOME` says: the
-  autostart entry is always under `~/.config/autostart`, so only a user
-  manager that reads `~/.config` has the unit. GNOME's drop-in is
-  written at every launch and never removed; the autostart unit's while
-  Launch at login is on, at each launch and when it is switched on. After
-  writing a file the app asks the user manager to reload its units over
-  the session bus, so a running session takes the new timeout at once.
-  The write leaves a mark in the support directory
-  (`~/.local/share/Steno/systemd-reload-owed`) that only a reload that
-  went through clears, so a reload that failed, was skipped or was cut
-  off is asked for again at the next launch or switch; with nothing
-  written and nothing owed the app does not reload, since each reload
-  reruns every generator of the user manager (`stop_timeout.rs`). This
-  covers the AppImage, and installs that turned Launch at login on
-  before the drop-ins existed. A directory it cannot write is logged, and
-  the unit keeps 5 s.
-
-While the system manages the login item (`STENO_LOGIN_ITEM=managed`,
-Packaged installs below), the switch writes nothing, though it shows on.
-The app writes the autostart unit's drop-in only while it runs as that
-unit and the unit's entry stands (an entry an earlier build wrote, or
-the user's own), with the reload that applies it, and the exit that
-removes an earlier build's entry removes the drop-in with it.
-
-To check a running Steno: `systemctl --user show 'app-steno*'
-'app-gnome-steno*' -p TimeoutStopUSec -p DropInPaths` shows 20 s and the
-drop-in.
-
-A reload while the autostart entry is gone unloads the running
-autostart unit, and the session's end then stops the app without a
-SIGTERM, before its save. So the app, while it runs as the autostart
-unit, asks for a reload only while the entry stands, and the `postinst`
-skips a user whose entry is gone unless their autostart unit is known
-to be stopped (`inactive` or `failed`).
-
-Outside the autostart unit, turning Launch at login off removes the
-entry and the autostart unit's drop-in at once, with no reload. While
-the app runs as the autostart unit, the entry stays until the app
-exits, since any other reload of the user manager (a package install,
-another app, `nixos-rebuild switch`) would unload the unit. Settings and
-the tray show the switch off at once; the app marks the choice in the
-support directory (`~/.local/share/Steno/launch-at-login-off-at-exit`)
-and removes the entry and the drop-in after the exit's save. A mark
-left by a kill or a crash is applied at the next launch that does not
-run as the unit, so the next login still autostarts the app once; an
-update's relaunch keeps it. Turning it on again before the exit clears
-the mark and leaves the entry as it is: the plugin rewrites an entry by
-emptying it first, and a reload that read it empty would unload the
-unit. A launch as the
-autostart unit that finds no entry (an older release removed it at
-once, or the user did, and then an update relaunched in the unit) puts
-the entry back with the mark, so the unit gets its drop-in and the reload
-that applies it, and the entry goes again after the save.
-
-The user's copies stay after the package is removed. They name only
-Steno's units and change nothing once the app is gone.
-
-On Arch and NixOS every package change reloads the user managers
-(Arch's systemd package ships a pacman hook that does; so do
-`nixos-rebuild switch` and `home-manager switch`), so there only the kept
-entry protects a running autostart unit. Where the AUR and Nix packages
-put the drop-ins is under Packaged installs.
-
-The app logs how long each shutdown took at `warn` (`the shutdown
-ended`, with `elapsed`; on Linux in the journal of the unit), so a real
-machine's log shows how long a save takes. In a container limited to one
-CPU, under a real systemd user manager: without the drop-ins, the
-autostart unit and GNOME's scope killed a stand-in that needs 8 s to
-save, 5 s after SIGTERM; with them, it finished. A debug build with 8 s
-added before its save wrote the drop-ins at launch, and the running unit
-and scope took 20 s. Stopped in either, it saved, and the meeting was
-`queued` with its duration. It saved the same way when Launch at login
-was turned off mid-recording and the user manager reloaded after that.
-With the stand-in autostarted before the drop-ins existed, installing
-them and running the `postinst` gave the running unit and scope 20 s,
-and the session's end let it finish; without the `postinst` the unit
-kept 5 s and killed it.
-
-At a reboot the save runs inside logind's delay (above), before systemd
-stops anything. On Omarchy logind waits up to 15 s (`InhibitDelayMaxSec`),
-more than the save's ten; the user manager itself then gets only 5 s
-(`user@.service` `TimeoutStopSec=5s`), which a drop-in for Steno's unit
-cannot raise, so that path relies on the delay. Elsewhere logind waits 5 s
-by default and the user manager 120 s, so a save that outlasts logind's
-wait finishes under the drop-ins' 20 s. Started inside another program's
-service, as a Hyprland key binding without `uwsm-app` starts it in uwsm's
-`wayland-wm@.service`, Steno moves into a scope of its own at launch,
-with the same 20 s (see Hyprland).
-
-Run from the AppImage, Steno reads its files from the image's mount,
-which the AppImage runtime's own process, the mount server, serves. Up
-to 0.1.0-rc.3 the mount server stays in the unit Steno was started in,
-on every systemd desktop, or in the launcher's own unit when the
-launcher moves only Steno into a scope after starting it (GNOME), and
-that unit's stop ends it while Steno saves: in a `uwsm-app`-style scope
-it was gone 0.26 s into the stop, and in one of two runs Steno went with
-it, unsaved; started as GNOME starts apps, Steno lost 3 of 3 recordings
-(the runs are listed under Hyprland).
-
-From the release after 0.1.0-rc.3 on, Steno finds its mount server at
-launch by the image's FUSE connection (Linux 6.16 and later) and the pipe
-the runtime keeps open to it (`src/appimage.rs`), however the image was
-started, and moves every process that matches into
-`app-steno\x2ddesktop\x2dimage-<pid>.scope` in `app.slice`, also when
-Steno itself stays in its unit. No session's end stops that scope. The
-mount server ends by itself once Steno has exited, together with every
-program Steno started that still holds the image's pipe (a browser it
-opened a link in), since those may run Steno's bundled libraries from the
-mount. After an update, the updated Steno is one of those programs, so
-the replaced image's mount, and the disk space of its deleted file, stay
-until the updated Steno quits. Each move is logged ("moved the AppImage's
-mount server"). A move that fails, or a mount server Steno cannot find,
-logs a warning.
-In a login's `session-<n>.scope` (Hyprland without uwsm), outside the
-user manager, the mount server stays beside Steno, with a warning, and
-that scope's stop ends both.
-
 ## Packaged installs
 
 A package manager that installs Steno also updates it, and may start it at
@@ -519,7 +268,7 @@ login itself. Environment variables tell the app (stable plan X5,
 | Variable | Set by | What the app does |
 |---|---|---|
 | `STENO_DISTRIBUTION=aur` or `=nix` | the Nix package at build time (`env`) and in its wrapper; the AUR package's `/usr/bin` wrapper | Never checks for updates: the tray's Check for Updates says "Updates come from your package manager.", and Settings > General shows that line in place of the check and the two switches. A value in the environment wins over the one the build was given (`steno_services::updates::updates_are_managed`) |
-| `STENO_LOGIN_ITEM=managed` | the NixOS module, for its user service and the session (`environment.sessionVariables`) | Leaves Launch at login to the system: it never writes, rewrites or removes the autostart entry, the first launch registers nothing, the autostart unit's drop-in is written only for the unit made from an entry that stands and goes with that entry, Settings shows the switch on and locked with "Your system opens Steno when you log in and manages this setting.", and the tray's item is checked and disabled. It removes one entry, below |
+| `STENO_LOGIN_ITEM=managed` | the NixOS module, for its user service and the session (`environment.sessionVariables`) | Leaves Launch at login to the system: it never writes, rewrites or removes the autostart entry, the first launch registers nothing, Settings shows the switch on and locked with "Your system opens Steno when you log in and manages this setting.", and the tray's item is checked and disabled. It removes one entry, below |
 | `STENO_HANDOVER_PORT=<port>` | the NixOS module, for its user service and the session | Listens for the phone on that port (see The phone handover behind a firewall) |
 
 Steno also leaves updates to the package manager, whatever
@@ -535,13 +284,8 @@ variable. To update it, update the flake input that pins Steno
 
 With `STENO_LOGIN_ITEM=managed`, the one entry the app removes is one an
 earlier build wrote: its `Exec` starts a program in `/nix/store`, or
-names one of the paths in step 3 below. That entry goes at launch,
-unless the app runs as the unit systemd made from it
-(`app-steno\x2ddesktop@autostart.service`): then it goes when Steno
-exits, after the save, since a reload without the entry unloads that
-unit (see Launch at login under systemd). While Steno runs as that unit
-it gives the unit its stop timeout drop-in, and removes the drop-in with
-the entry. Without the variable, such an entry stays as it is; if Steno
+names one of the paths in step 3 below. That entry goes at launch.
+Without the variable, such an entry stays as it is; if Steno
 no longer opens at login, turn Launch at login off and on again.
 
 Without `STENO_LOGIN_ITEM=managed`, the entry the app writes on Linux
@@ -585,15 +329,13 @@ What a package sets:
   module (`nix/module.nix`) sets `STENO_LOGIN_ITEM=managed` on its
   service and in `environment.sessionVariables` when it starts Steno at
   login; without the module, the app finds the profile's path itself
-  (step 3). The `.deb`'s drop-ins come with the `.deb`'s tree (see The
-  Nix package and the NixOS module).
+  (step 3).
 - **AUR** (stable plan X6): `STENO_DISTRIBUTION=aur` in the `/usr/bin`
   wrapper, and `STENO_EXEC_PATH=/usr/bin/steno-desktop` when the wrapper
   runs a binary elsewhere (`/usr/lib/steno-desktop/`). A package whose
   `/usr/bin/steno-desktop` is the binary itself, or a link to it, needs
   no `STENO_EXEC_PATH`; it still needs `STENO_DISTRIBUTION=aur`, from a
-  wrapper or from the build's environment, and both drop-ins under
-  `/usr/lib/systemd/user/`.
+  wrapper or from the build's environment.
 
 ## The phone handover behind a firewall
 
@@ -750,103 +492,11 @@ bind = SUPER SHIFT, S, exec, uwsm-app -- steno-desktop
 ```
 
 `uwsm-app` runs Steno in a scope of its own in `app-graphical.slice`,
-which uwsm stops before Hyprland. No session manager or portal reports
-the session's end on Hyprland, so what saves a recording in progress is
-a signal, logind's delay or the display closing (from uwsm's, Omarchy's
-and systemd's source and the container runs below; not yet run on a real
-Hyprland session, stable plan X1):
-
-| End | What starts the save | How long it has |
-|---|---|---|
-| Log out (Omarchy's menu, `uwsm stop`) | SIGTERM to Steno's scope, with Hyprland and the display still up | 90 s in `uwsm-app`'s scope; 20 s in Steno's own scope (below) and in the autostart unit with its drop-in |
-| Reboot, power off (the menu, `systemctl reboot`) | logind's `PrepareForShutdown`, while Steno holds the delay lock; then the logout's SIGTERM | logind's delay: 15 s on Omarchy, and the save has to end inside it, since the user manager then gets only 5 s to stop; 5 s elsewhere, after which the SIGTERM waits for the save |
-| `hyprctl dispatch exit` | the display closing; then uwsm's shutdown target stops Steno's scope with SIGTERM, which waits for the save | as at a logout |
-| Hyprland crashes | as `hyprctl dispatch exit` | as at a logout |
-| Hyprland freezes, a hard power-off, `reboot -f` | nothing | none: the next launch recovers the recording from its audio file, with `failed` as its end reason |
-
-A key binding that runs `exec, steno-desktop` without `uwsm-app` starts
-Steno inside Hyprland's own unit, `wayland-wm@hyprland.desktop.service`.
-Up to 0.1.0-rc.3 Steno stays there, and a logout cuts its save off:
-stopping that unit sends SIGTERM to Hyprland and Steno together, and once
-Hyprland has exited, systemd sends a second SIGTERM to every process left
-in the unit, which ends Steno at once, unsaved, as a second Ctrl-C does.
-The unit's `TimeoutStopSec=10` would cut off a longer save too. The next
-launch recovers the recording from its audio file, with `failed` as its
-end reason and its last moments missing.
-
-From the release after 0.1.0-rc.3 on, Steno looks at its cgroup at
-launch (`/proc/self/cgroup`). When that is a service of the user manager
-that is not Steno's own (its name does not say `steno`) and whose main
-process is another program, Steno asks the user manager for a scope of
-its own, `app-steno\x2ddesktop-<pid>.scope` in `app-graphical.slice`,
-with `TimeoutStopSec=20s`, `PartOf=` and `After=graphical-session.target`,
-and moves there, usually before its first window opens
-(`src/own_scope.rs`). A logout then stops Steno as it stops a `uwsm-app`
-scope: first, with one SIGTERM and the display still up. Started at
-login (`exec-once`), Steno moves once the session is up
-(`graphical-session.target`); a logout before then, while the session is
-still starting, leaves it in Hyprland's unit, where the save is cut off
-as above. Its log (the user journal) says "moved into a scope of
-its own"; a move that fails logs a warning that names the unit Steno
-stays in, and the advice above holds. The same move covers any other
-program's service that starts Steno, such as a launcher that runs as a
-service. Steno's own units (the autostart unit, the NixOS module's
-`steno.service`, `uwsm-app -t service`'s) and every scope, another
-program's too, stay as they are. The speech sidecar's scope (above) then
-sits beside Steno's.
-
-Run from the AppImage, Steno also moves the image's mount server into a
-scope of its own and logs the move, as on every systemd desktop
-([Launch at login under systemd](#launch-at-login-under-systemd)).
-
-Where each start leaves Steno, from the release after 0.1.0-rc.3:
-
-| Started by | Steno runs in | At a logout |
-|---|---|---|
-| The launcher, `uwsm-app -- steno-desktop` | `uwsm-app`'s scope | SIGTERM, 90 s |
-| `bind = ..., exec, steno-desktop` | its own scope, moved at launch | SIGTERM, 20 s |
-| `exec-once = steno-desktop` | Hyprland's unit until the session is up, then its own scope | SIGTERM, 20 s |
-| Launch at login | `app-steno\x2ddesktop@autostart.service` | SIGTERM, 20 s (drop-in) |
-| Any start, Hyprland without uwsm | the login's `session-<n>.scope` | the display closing or SIGTERM |
-
-To see where Steno runs: `cat /proc/$(pidof -s steno-desktop)/cgroup`
-ends in a `.scope`, or in `app-steno\x2ddesktop@autostart.service` when a
-login started it, never in `wayland-wm@hyprland.desktop.service`.
-
-On NixOS, `programs.hyprland.withUWSM = true` makes the session a uwsm
-session, as above. Without uwsm, Hyprland and everything it starts run in
-the login's `session-<n>.scope`, outside the user manager, where Steno
-stays; the save then starts with the display closing or a SIGTERM, as on
-other wlroots desktops.
-
-Measured in a container limited to one CPU, under a real systemd 255 user
-manager with uwsm 0.26.4's `app-graphical.slice` and
-`wayland-session-shutdown.target` and a stand-in for its
-`wayland-wm@.service` (uwsm's ordering and stop propagation,
-`TimeoutStopSec=10`, and a stand-in compositor that starts Steno the way a
-key binding's `exec` does), stopping that unit as `uwsm stop` does, with a
-recording running and the display (Xvfb) up:
-
-| Steno | Save (a test build's added waits) | Result |
-|---|---|---|
-| In Hyprland's unit (the move turned off, as before) | as fast as it goes | gone 0.26 s after the stop, unsaved; the next launch recovered it, `failed` |
-| In Hyprland's unit (the move turned off) | 4 s before the save starts, 8 s in it | both SIGTERMs logged; ended at the second, unsaved |
-| Moved into its own scope | as fast as it goes | `queued`, `quit`; the scope stopped before the compositor |
-| Moved into its own scope | 4 s before the save starts, 8 s in it | `queued`, `quit`; gone 12.6 s after the stop, no kill |
-| Moved into its own scope, the compositor killed with SIGSEGV | 4 s before the save starts, 8 s in it | `queued`, `quit`, through uwsm's shutdown target; 12.6 s |
-| In a `uwsm-app`-style scope, graphical-session.target or the compositor's unit stopped | 8 s in it | `queued`, `quit`; the scope's 90 s; no move |
-| Started while graphical-session.target waited 8 s for the compositor (`exec-once`), moved once it was reached | 8 s in it | `queued`, `quit`; the move logged after the first window; gone 8.3 s after the stop |
-| The same, the compositor exiting instead (`hyprctl dispatch exit`) | 8 s in it | `queued`, `quit`; 8.3 s, with WebKit's processes left in the compositor's unit |
-| Moved from an AppImage (rc.3's runtime), the compositor exiting or its unit stopped | 8 s in it | `queued`, `quit`; 8.3 s; the mount server in its own scope, gone with Steno and not before |
-| From an AppImage in a `uwsm-app`-style scope, the mount server left in it (as up to 0.1.0-rc.3) | 8 s in it | the server gone 0.26 s after the stop; in one run the save still ended at 8.1 s (`queued`) and Steno was gone after 18.9 s, in the other Steno was gone after 6.8 s, unsaved (`recording`) |
-| From an AppImage in a `uwsm-app`-style scope, or as the autostart unit at a logout | 8 s in it | `queued`, `quit`; 8.3 s; the mount server in its own scope, gone with Steno and not before |
-| From an AppImage started as GNOME starts apps (the launcher's unit spawns it, then moves only Steno into a scope), the launcher's unit stopped, then Steno's scope; the mount server left in the launcher's unit (as up to 0.1.0-rc.3) | 8 s in it | the mount server gone 2.0 s in, with the launcher's unit; Steno unsaved (`recording`), 3 of 3 runs |
-| The same, the mount server moved | 8 s in it | `queued`, `quit`; the mount server in its own scope, gone with Steno 10.3 s after the launcher's stop; 23 of 23 runs |
-| From an AppImage as the main process of a user's own service, its stop; the mount server left in the service (as up to 0.1.0-rc.3) | 8 s in it | the mount server gone 0.26 s in; Steno unsaved (`recording`), 2 of 2 runs |
-| The same, the mount server moved | 8 s in it | `queued`, `quit`; 8.3 s, the mount server gone with Steno; 2 of 2 runs |
-
-WebKit's processes started in Steno's scope too, except those of a window
-that opened before a late move.
+which uwsm stops with SIGTERM before Hyprland, with the display still up,
+so a recording in progress is saved. A key binding that runs
+`exec, steno-desktop` without `uwsm-app` starts Steno inside Hyprland's
+own unit, where a logout ends it together with Hyprland and the recording
+loses its unsaved end; the next launch recovers it from its audio file.
 
 ## The update from the Swift app (macOS)
 
@@ -1332,11 +982,6 @@ the `.deb`'s tree. The differences:
   the sidecar beside it stays the plain binary.
 - `STENO_DISTRIBUTION=nix` is also in the build environment, the default
   the app is built with (see Packaged installs).
-- The `.deb`'s systemd user files (the stop timeout drop-ins, P5) end up
-  in `share/systemd/user/`, where stdenv moves them, with
-  `lib/systemd/user` a link to it. The module links them into the user
-  units; without the module, the app's own copies in
-  `~/.config/systemd/user/` cover a profile install.
 
 The crates' hashes come from `Cargo.lock`. The web UI's dependencies are
 one fixed-output hash, `pnpmDeps.hash` in `nix/package.nix`: a change to
@@ -1355,7 +1000,7 @@ steno.nixosModules.default
 
 It installs the package system-wide, or for the users in
 `programs.steno.users` only, and starts Steno with the graphical session as
-the user service `steno.service` (`TimeoutStopSec=20s` and
+the user service `steno.service` (with
 `STENO_LOGIN_ITEM=managed`, which the app reads as Packaged installs says;
 `programs.steno.launchAtLogin = false` turns it off). The service runs the
 profile path, `/run/current-system/sw/bin/steno-desktop` or
@@ -1394,9 +1039,7 @@ API key or this computer's phone pairing; they stay in
 `~/.local/share/keyrings`. Beside an SSH agent,
 `services.gnome.gnome-keyring.enable = true` with
 `services.gnome.gcr-ssh-agent.enable = false` keeps the keyring. The
-module links the package's systemd user files, and raises logind's
-`InhibitDelayMaxSec` when `programs.steno.inhibitDelayMaxSec` is set. It
-opens the handover's port, `programs.steno.handoverPort` (23820), and UDP
+module opens the handover's port, `programs.steno.handoverPort` (23820), and UDP
 5353 for mDNS in the firewall, which `programs.steno.openFirewall = false`
 leaves closed, and sets `STENO_HANDOVER_PORT` to that port on the service
 and in `environment.sessionVariables` (see The phone handover behind a
@@ -1943,41 +1586,14 @@ corners render black there; a desktop shows them rounded. Xvfb has no
 tray host either; a smoke run stands in for one, so the built tray counts
 and the run checks the close rule a desktop with a tray gets.
 
-After the run the script checks the stop timeout drop-ins, then runs the
-smoke once more in the same `HOME`, which must write nothing and reload
-only for a reload still owed. Every launch names the binary in
-`STENO_EXEC_PATH`, resolved to an absolute path, since a build under
-`target/` has no path that outlives an upgrade. Then it runs the smoke
-as the autostart unit, in a throwaway `HOME` and a cgroup named after
-the unit, below a delegated `systemd-run --user` scope. The first run,
-with `~/.config/autostart` unwritable, must fail to restore the entry,
-ask for no reload and leave it owed. A launch outside the unit then
-counts the first launch and writes the entry, which must name the binary
-whole; the script removes it and its drop-in. The next run must restore
-the entry, marked, reload, keep it through Launch at login turned on
-again, and remove it and its drop-in after the shutdown's line. The last
-ends as an update's relaunch (`STENO_SMOKE_RELAUNCH=1`, which ends
-through the relaunch's shutdown without restarting) and must keep the
-entry, the mark and the drop-in. Then three runs while the system
-manages the login item, each with an earlier build's store entry: the
-first must remove it at launch and leave the autostart unit's drop-in
-alone; the second, as the unit, must keep the entry while it runs, give
-the unit its drop-in with a reload, and remove both after the shutdown's
-line; the third, as the unit, ends as a relaunch and must keep both.
-Without a user manager that starts the scope, or as a root that can
-write to the unwritable directory, it skips the runs as the unit, unless
-`STENO_REQUIRE_UNIT_SMOKE` is set, as in CI. Its last launch is over a
-database it cannot open, which must refuse (exit 3) and leave an entry
-marked to go in place.
-
-`scripts/pipewire-headless.sh apps/desktop/scripts/lost-display-linux.sh
-[binary] [seconds]` checks end to end that a recording is saved when the
-display goes away: it starts the shell on an Xvfb server of its own with
-a fresh `HOME`, starts a recording with the record shortcut (xdotool),
-ends the server after `seconds` (4 by default) and fails unless the app
-logged its save and the store holds the meeting `queued` with a
-duration. CI's Linux job runs it after the smoke; outside CI it needs
-`Xvfb`, `xdotool` and `python3` on the `PATH` besides the smoke's setup.
+After the run the script checks the shutdown's `warn` line. Every launch
+names the binary in `STENO_EXEC_PATH`, resolved to an absolute path, since
+a build under `target/` has no path that outlives an upgrade. A first
+launch in a throwaway `HOME` must write the autostart entry naming the
+binary whole, and one while the system manages the login item must remove
+an earlier build's store entry. Its last launches are over a database it
+cannot open and one whose lock another process holds, which must refuse
+(exit 3) and leave the autostart entry in place.
 
 `scripts/pipewire-headless.sh apps/desktop/scripts/close-without-tray-linux.sh
 [binary] [seconds]` checks stock GNOME's case end to end: the headless
@@ -1988,8 +1604,9 @@ manager's close button does (`WM_DELETE_WINDOW`, sent through the
 binary's own libX11), and fails unless the app logged that no tray host
 shows its icon, the close's quit and the shutdown's end, exited with 0
 within 30 s, and the store holds the meeting `queued` with a duration and
-`quit` as its end reason. CI's Linux job runs it after the lost display,
-with the same tools.
+`quit` as its end reason. CI's Linux job runs it after the smoke; outside
+CI it needs `Xvfb`, `xdotool` and `python3` on the `PATH` besides the
+smoke's setup.
 
 With `--with-host` (`close-without-tray-linux.sh --with-host [binary]
 [seconds]`) the same script runs beside a stand-in watcher with a host
@@ -2052,10 +1669,10 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 |---|---|
 | `apps/desktop/src-tauri/Cargo.toml` | Crate `steno-desktop`, binary `steno-desktop`; features `fixture-host` (opt-in) and `custom-protocol` (embeds the bundle, see Build). Dependency versions come from the workspace table in `Cargo.toml` |
 | `apps/desktop/src-tauri/tauri.conf.json` | `frontendDist` is the web app's `dist/`; no `version`, so Tauri takes the crate's; `beforeDevCommand` and `beforeBuildCommand` run `pnpm dev` and `pnpm build` with `cwd` `../../macos/web`: the CLI runs them from `src-tauri`, the directory holding this file, which is also where `frontendDist` (`../../macos/web/dist`) resolves from; `csp` lets the page load only its own scripts, styles, fonts and images, and `connect-src` only the IPC origins (`ipc:`, `http://ipc.localhost`), so nothing the page does reaches the network; `plugins` carries the `steno` scheme and the updater's public key and stable endpoint; `bundle` the six installer targets (see Bundles); no windows are declared, `windows.rs` and `panels.rs` create them |
-| `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop`, `linux/*-stop-timeout.conf` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles); the stop timeout drop-ins for the autostart unit and GNOME's scope (see Launch at login under systemd) |
+| `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`, and the folder and volume purpose strings of this app's own; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart on Linux and Windows, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, quits through Quit's path otherwise, saving a recording first; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `dbus.rs`, on Linux: what the D-Bus clients share (a connection with a five-second call timeout, the client's thread, the name owner, the bus's and the owner's proxies) and the tests' private bus. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display. `stop_timeout.rs`, on Linux: the systemd drop-ins for the stop timeout |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart on Linux and Windows, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, quits through Quit's path otherwise, saving a recording first; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `dbus.rs`, on Linux: what the tray host's follower runs on (a connection with a five-second call timeout, the client's thread, the name owner, the owner's proxies) and the tests' private bus |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items and their words per platform, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/tray_host.rs` | On Linux, whether a status notifier host shows the tray's icon: the follower on the session bus and the rule it decides by |
 | `apps/desktop/src-tauri/src/platform.rs` | The initialization script that tells every page its platform |
@@ -2069,10 +1686,9 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/fixtures.rs` (and `host.rs` under the feature) | With `--features fixture-host`, the fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh`, `smoke-macos.sh` | The smoke CI runs under Xvfb on Linux and in the runner's session on macOS |
-| `apps/desktop/scripts/lost-display-linux.sh` | Ends the display server under a recording and fails unless the app saved it first; CI's Linux job runs it |
 | `apps/desktop/scripts/close-without-tray-linux.sh` | Closes the main window under a recording where no tray host runs and fails unless the app quit and saved it; with `--with-host`, beside a stand-in host, fails unless the tray's menu holds every action, the close hid the window and the menu's Quit saved the recording; CI's Linux job runs both |
 | `apps/desktop/scripts/tray-watcher-linux.py` | The stand-in status notifier watcher with a host for that check, and its reads and clicks of the tray's menu |
-| `apps/desktop/scripts/xvfb-recording-linux.sh` | What those two share, sourced by both: the argument and tool checks, the app on an Xvfb server of its own with a recording started, the wait for its exit and the store's check |
+| `apps/desktop/scripts/xvfb-recording-linux.sh` | What `close-without-tray-linux.sh` and `locked-store-linux.sh` share, sourced by both: the argument and tool checks, the app on an Xvfb server of its own with a recording started, the wait for its exit and the store's check |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
 | `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh`, `release-workflow.test.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `v*` tag, and the Sparkle handoff (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh`; `release-workflow.test.sh` checks the workflow against the stable plan and runs six of its steps against a stub `gh` and scratch origins |
 | `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check, and runs the `.app` check's bundle id and Sparkle key, and the `--handoff` checks, over stub bundles (`check-bundle.test.sh`) |

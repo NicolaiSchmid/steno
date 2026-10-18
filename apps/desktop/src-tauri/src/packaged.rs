@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 mod linux;
 
 #[cfg(target_os = "linux")]
-pub use linux::{remove_earlier_entry, remove_earlier_entry_at_exit, write_entry};
+pub use linux::{remove_earlier_entry, write_entry};
 
 /// The variable a package sets to say the system starts the app at login.
 pub const LOGIN_ITEM_VARIABLE: &str = "STENO_LOGIN_ITEM";

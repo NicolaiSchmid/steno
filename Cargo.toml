@@ -65,15 +65,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # over `objc2-service-management`; already in the lock through
 # `tauri-plugin-autostart`'s `auto-launch`.
 smappservice-rs = "0.1.3"
-# Linux only: the session bus query that tells whether a tray host shows the
-# tray icon (`gio`), the backends GDK may open (`gdk`), and the log writer
-# that saves when GDK reports a lost display (`display_lost`, through
-# `gio`'s `glib`). Both already in the lock through GTK, which the shell
-# links anyway.
+# Linux only: the backends GDK may open (`gdk`). Already in the lock
+# through GTK, which the shell links anyway.
 gdk = "0.18"
-gio = "0.18"
-# Linux only: the desktop shell's logout and shutdown clients on D-Bus
-# (`session_end`) and the services' Secret Service client
+# Linux only: the desktop shell's tray host follower on D-Bus
+# (`tray_host`) and the services' Secret Service client
 # (`steno-services`' `secrets`). Already in the lock through the
 # single-instance and opener plugins.
 zbus = "5.19"

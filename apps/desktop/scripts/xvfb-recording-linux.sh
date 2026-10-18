@@ -1,6 +1,6 @@
 # shellcheck shell=bash disable=SC2154 # `name` is the sourcing script's
-# Sourced, not run: what lost-display-linux.sh and
-# close-without-tray-linux.sh share. Each sets `name`, its log prefix, and
+# Sourced, not run: what close-without-tray-linux.sh and
+# locked-store-linux.sh share. Each sets `name`, its log prefix, and
 # sources this file with its arguments ([path/to/steno-desktop]
 # [seconds]). Sourcing it checks them and the tools (Xvfb, xdotool,
 # python3; exit 2 on a usage error or a missing tool) and makes the work

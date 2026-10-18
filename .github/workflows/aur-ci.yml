@@ -1,8 +1,7 @@
 # The AUR package (packaging/aur): builds it from the release .deb in an
 # Arch Linux container, verifies the .deb against the release key, installs
 # it and checks the files (packaging/check-aur.sh). It also runs when the
-# drop-ins in apps/desktop/src-tauri/linux, which the check compares with,
-# the release key, LICENSE, SpeexDSP's COPYING, the salvage's AAC tables or
+# release key, LICENSE, SpeexDSP's COPYING, the salvage's AAC tables or
 # the handover's port (which the ufw profile opens) change, and weekly, so a
 # package that Arch renames or splits fails here before it fails for users.
 name: AUR CI
@@ -11,8 +10,6 @@ on:
   pull_request:
     paths:
       - 'packaging/**'
-      - 'apps/desktop/src-tauri/linux/autostart-service-stop-timeout.conf'
-      - 'apps/desktop/src-tauri/linux/gnome-scope-stop-timeout.conf'
       - 'apps/desktop/release-signing-key.asc'
       - 'LICENSE'
       - 'crates/steno-audio/vendor/speexdsp/COPYING'
@@ -23,8 +20,6 @@ on:
     branches: ['main']
     paths:
       - 'packaging/**'
-      - 'apps/desktop/src-tauri/linux/autostart-service-stop-timeout.conf'
-      - 'apps/desktop/src-tauri/linux/gnome-scope-stop-timeout.conf'
       - 'apps/desktop/release-signing-key.asc'
       - 'LICENSE'
       - 'crates/steno-audio/vendor/speexdsp/COPYING'

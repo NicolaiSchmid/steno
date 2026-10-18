@@ -18,7 +18,6 @@ below first.
 | `/usr/lib/steno-desktop/steno-desktop`, `/usr/lib/steno-desktop/steno-speech-sidecar` | The `.deb`'s `/usr/bin`. They move together because the app starts the sidecar from beside its own binary |
 | `/usr/bin/steno-desktop` | [`steno-desktop.sh`](steno-desktop.sh): sets `STENO_DISTRIBUTION=aur` (the in-app updater stays off; pacman updates) and `STENO_EXEC_PATH=/usr/bin/steno-desktop` (the path the autostart entry names), then runs the binary. Both take effect from the first release that contains #261; rc.3 ignores them |
 | `/usr/share/applications/steno-desktop.desktop`, `/usr/share/icons/hicolor/*/apps/steno-desktop.png` | The `.deb`, unchanged. The entry's `Exec=steno-desktop` finds the wrapper on `PATH` |
-| `/usr/lib/systemd/user/app-steno\x2ddesktop@autostart.service.d/10-steno.conf`, `/usr/lib/systemd/user/app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf` | The stop timeout drop-ins (P5), `[Service]` and `[Scope]` `TimeoutStopSec=20s`: the `.deb`'s from the first release that contains #227; for the pinned `.deb`, the copies here, [`autostart-service-stop-timeout.conf`](autostart-service-stop-timeout.conf) and [`gnome-scope-stop-timeout.conf`](gnome-scope-stop-timeout.conf) |
 | `/etc/ufw/applications.d/steno-desktop` | [`ufw-steno-desktop`](ufw-steno-desktop): the `ufw` profile `Steno`, TCP 23820, the phone handover's port on Linux (X4). `sudo ufw allow Steno` opens it; `ufw` admits mDNS by default, so the profile leaves UDP 5353 out. In `backup=`: an edited profile survives an upgrade. Another port there also needs the same port in Steno (`STENO_HANDOVER_PORT` or `handoverPort`) and `sudo ufw app update Steno` for the rule already added |
 | `/usr/share/licenses/steno-desktop-bin/LICENSE` | [`LICENSE`](LICENSE), a copy of the repository's |
 | `/usr/share/licenses/steno-desktop-bin/speexdsp-COPYING` | [`speexdsp-COPYING`](speexdsp-COPYING), a copy of `crates/steno-audio/vendor/speexdsp/COPYING`: the binary compiles in SpeexDSP's echo canceller, and its BSD licence asks for the notice with the binary |
@@ -26,19 +25,7 @@ below first.
 
 The install script, [`steno-desktop.install`](steno-desktop.install), only
 prints `sudo ufw allow Steno` after an install or an upgrade, and
-`sudo ufw delete allow Steno` after a removal. Arch's `systemd` package
-reloads every running user manager after any package changes a file under
-`usr/lib/systemd/user/` (`30-systemd-daemon-reload-user.hook`), so a running
-Steno picks the drop-ins up at the install without the script's help. From
-the first release that contains #227, the autostart entry the app keeps
-until it exits keeps a running, autostarted Steno safe through that reload
-(P5); step 8 of the Omarchy gate, which #227 adds, tests it.
-
-`package()` installs a copy only while the pinned `.deb` lacks the file,
-and the build fails once the `.deb` ships it; Bump step 3 then deletes the
-copy. `check-aur.sh` requires each copy to be its file in
-`apps/desktop/src-tauri/linux/`, and both drop-ins in the package with
-`TimeoutStopSec=20s`, whichever supplied them.
+`sudo ufw delete allow Steno` after a removal.
 
 `check-aur.sh` requires the profile's port to be `LINUX_PORT` in
 `crates/steno-handover/src/configuration.rs` (the AUR job also runs when
@@ -68,19 +55,13 @@ check that they apply.
 
 ## The pinned release
 
-`pkgver=0.1.0rc3` pins `desktop-v0.1.0-rc.3`, which contains none of #227,
+`pkgver=0.1.0rc3` pins `desktop-v0.1.0-rc.3`, which contains none of
 #261, #267 and #276. It builds and checks this directory; it is not a release to
 publish:
 
 - rc.3 ignores `STENO_DISTRIBUTION` and `STENO_EXEC_PATH` (X5, #261): its
   in-app updater stays on, and the autostart entry its first launch
   writes names `/usr/lib/steno-desktop/steno-desktop`, not the wrapper.
-- rc.3 removes its autostart entry as soon as launch at login is turned off
-  (P5, #227). The reload during any install that touches
-  `usr/lib/systemd/user/` (this package's, or `pipewire`'s or `systemd`'s)
-  then unloads a running, autostarted Steno's unit, and the end of the
-  session stops it without SIGTERM, so it cannot save the recording: P3
-  salvages the meeting as `failed`, without its unsaved tail.
 - That entry survives the upgrade to a release that contains #261, and
   every login then starts the new binary without the wrapper: the in-app
   updater stays on and the entry keeps the binary's path. Once on such a
@@ -94,8 +75,8 @@ publish:
 - rc.3's `.deb` lacks the Hyprland rules (X2, #267), and its panels are
   titled "Steno", so the rules would not match them.
 
-The first AUR push is a release that contains #227 and #261 (any release
-from main now does).
+The first AUR push is a release that contains #261 (any release from main
+now does).
 
 ## Install a candidate
 
@@ -115,7 +96,7 @@ differ. The key is on no keyserver yet, so `gpg --recv-keys` and the import
 that AUR helpers such as yay and paru run for a missing `validpgpkeys` key
 both fail; with the key imported as above, they verify with it.
 
-Then, for a new candidate after Bump steps 1 to 5, build and install, and
+Then, for a new candidate after Bump steps 1 to 4, build and install, and
 open the handover's port once:
 
 ```sh
@@ -131,9 +112,7 @@ An upgrade replaces the files under a running Steno: it keeps running the
 old binary, but starts the new sidecar for the next meeting it processes.
 Once no recording runs, quit Steno and start it again from the launcher.
 
-Quit Steno before `pacman -R steno-desktop-bin`: the removal takes the
-drop-ins away, so a running, autostarted Steno has the generator's 5 s stop
-timeout until it exits. The removal leaves `~/.local/share/Steno` and
+The removal leaves `~/.local/share/Steno` and
 `~/.config` as they are. The rule `sudo ufw allow Steno` added outlives
 the package. The removal prints `sudo ufw delete allow Steno`, which
 closes the port even though the profile has gone with the package.
@@ -149,15 +128,10 @@ closes the port even though the profile has gone with the package.
 2. Update the checksums: `updpkgsums` (from `pacman-contrib`) downloads the
    `.deb` and its `.asc` and rewrites `sha256sums`. The `.deb`'s line must
    match its line in the release's `SHA256SUMS`.
-3. When the release's `.deb` ships a drop-in (from the first release that
-   contains #227), `makepkg` fails with "the .deb ships ...: delete ..." and
-   names the copy. Delete it, its `source` and `sha256sums` entries and its
-   `_copy` line; with the last copy, also the `_copy` helper and the three
-   `local` lines above the calls.
-4. Regenerate the metadata the AUR reads: `makepkg --printsrcinfo > .SRCINFO`.
-5. Install it (`makepkg -si`) and check that `/usr/lib/steno-desktop/` holds
+3. Regenerate the metadata the AUR reads: `makepkg --printsrcinfo > .SRCINFO`.
+4. Install it (`makepkg -si`) and check that `/usr/lib/steno-desktop/` holds
    both binaries and that Steno starts from the launcher.
-6. Commit `PKGBUILD` and `.SRCINFO` here, then, for a stable release, push
+5. Commit `PKGBUILD` and `.SRCINFO` here, then, for a stable release, push
    to the AUR.
 
 The release key expires on 2029-10-04, and `makepkg` then refuses every new
@@ -167,8 +141,7 @@ OpenPGP signatures"), copy the new public key over `keys/pgp/` too.
 `packaging/check-aur.sh` checks the checksums, the signature, `.SRCINFO`
 and the installed files in a throwaway Arch container (the AUR package job
 in `.github/workflows/aur-ci.yml` runs it on every pull request that touches
-this directory, the drop-ins in `apps/desktop/src-tauri/linux/`, the release
-key, `LICENSE`, SpeexDSP's `COPYING` or the salvage's AAC tables). From the checkout's root:
+this directory, the release key, `LICENSE`, SpeexDSP's `COPYING` or the salvage's AAC tables). From the checkout's root:
 
 ```sh
 docker run --rm --cpus=2 --memory=4g -v "$PWD":/src:ro \
@@ -183,7 +156,7 @@ install script `install=` names (`steno-desktop.install`) and `keys/pgp/`,
 the release key. Not this README.
 
 **The first push is by hand** (Nicolai, at gate G3, with a release that
-contains #227 and #261), from an AUR account with an SSH key added under
+contains #261), from an AUR account with an SSH key added under
 "My Account":
 
 ```sh
@@ -204,11 +177,11 @@ creates the package. The AUR accepts only the `master` branch.
 the AUR account and stores its private half as the repository secret
 `AUR_SSH_PRIVATE_KEY`; the `publish` job then runs
 `apps/desktop/scripts/aur-bump.sh` for each stable release (Bump steps 1,
-2 and 4 without `makepkg`, then the push above), and opens a pull request
+2 and 3 without `makepkg`, then the push above), and opens a pull request
 with the same bump here, so this directory does not fall behind the AUR.
-The script refuses a PKGBUILD that still installs drop-in copies (Bump
-step 3) or lists another remote source, so those bumps stay by hand. A pull
+The script refuses a PKGBUILD that lists another remote source, so such a
+bump stays by hand. A pull
 request the workflow opens starts no checks; close and reopen it to run
 `aur-ci.yml`. Candidates are never pushed:
 they are installed with `makepkg -si` from this directory after Bump steps
-1 to 5.
+1 to 4.

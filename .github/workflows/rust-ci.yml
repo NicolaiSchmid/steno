@@ -26,9 +26,7 @@ name: Rust CI
 # Linux also builds the web UI (its bridge transports are the shell's other
 # half), checks it, runs the Tauri shell's headless smoke under Xvfb
 # (apps/desktop/scripts/smoke-linux.sh; the screenshots are uploaded as
-# `desktop-smoke-screens`), ends the Xvfb server under a recording and
-# requires the recording saved
-# (apps/desktop/scripts/lost-display-linux.sh), closes the main window
+# `desktop-smoke-screens`), closes the main window
 # under a recording on a session bus with no tray host and requires the
 # app to quit and save it, and beside a stand-in host requires the close
 # to hide the window and the tray menu's Quit to save it
@@ -238,8 +236,8 @@ jobs:
             "$($drive.variable)=$($drive.letter):\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
-      # The shell's logout and shutdown tests and the services' Secret
-      # Service tests run their fakes on a private `dbus-daemon`
+      # The shell's tray host tests and the services' Secret Service
+      # tests run their fakes on a private `dbus-daemon`
       # (scripts/setup-linux.sh installs it); on Linux a missing daemon
       # fails them instead of skipping them.
       - name: Require the D-Bus tests (Linux)
@@ -367,23 +365,6 @@ jobs:
           grep -qF "test result: ok. $expected passed" "$log" \
             || { echo "::error::expected $expected PipeWire live tests to pass"; exit 1; }
 
-      # The real sidecar in a systemd scope of its own (P6 of the stable
-      # plan), asked of the runner's user manager: the test runs in a scope
-      # of that manager, as the app runs in a launcher's, and fails unless
-      # the sidecar's cgroup names its active scope and no scope is left
-      # after the sidecar ends. A test binary that runs nothing would pass
-      # too, so the step greps for the one pass.
-      - name: Speech sidecar in a scope of its own
-        if: matrix.name == 'linux'
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          log="$RUNNER_TEMP/sidecar-scope.log"
-          systemd-run --user --scope --quiet \
-            cargo test -p steno-speech-sidecar --test user_scope --locked -- --ignored --nocapture | tee "$log"
-          grep -qF "test result: ok. 1 passed" "$log" \
-            || { echo "::error::the sidecar's scope test did not pass"; exit 1; }
-
       # Every apps/desktop/scripts/*.test.sh: the desktop release
       # workflow's platform filter, MSI version, updater manifest and lanes,
       # asset gathering, checksums and signatures, release notes, the bundle
@@ -435,31 +416,17 @@ jobs:
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
       # the dev URL is dropped through Tauri's configuration merge. Each run
       # ends itself after 15 s; the step limit catches a hang before that.
-      # The runner's user manager starts the scope the runs as the
-      # autostart unit need, so they may not be skipped here.
       - name: Desktop smoke
         if: matrix.name == 'linux'
         timeout-minutes: 5
         env:
           TAURI_CONFIG: '{"build":{"devUrl":null}}'
-          STENO_REQUIRE_UNIT_SMOKE: 1
         run: |
           cargo build -p steno-desktop --locked
           apps/desktop/scripts/smoke-linux.sh target/debug/steno-desktop 15
-      # The smoke's binary again, recording inside the headless PipeWire:
-      # the Xvfb server ends under the recording, and the step fails unless
-      # the app saved it before GDK ended the process (the meeting `queued`
-      # with a duration), which only the log writer in `display_lost.rs`
-      # does.
-      - name: Desktop lost display
-        if: matrix.name == 'linux'
-        timeout-minutes: 5
-        run: |
-          scripts/pipewire-headless.sh \
-            apps/desktop/scripts/lost-display-linux.sh target/debug/steno-desktop
-      # Again, on the headless PipeWire's session bus, where no status
-      # notifier watcher runs, as on GNOME without the AppIndicator
-      # extension: closing the main window under a recording must quit
+      # The smoke's binary again, on the headless PipeWire's session bus,
+      # where no status notifier watcher runs, as on GNOME without the
+      # AppIndicator extension: closing the main window under a recording must quit
       # through Quit's path and save it (the meeting `queued`, ended by
       # `quit`), not hide the window behind a tray nothing shows.
       - name: Desktop close without a tray

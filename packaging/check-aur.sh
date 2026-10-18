@@ -11,26 +11,20 @@
 #   validpgpkeys names another fingerprint, or source= lacks the .deb's .asc;
 # - LICENSE differs from the repository's, speexdsp-COPYING from
 #   crates/steno-audio/vendor/speexdsp/COPYING, symphonia-aac-tables.rs
-#   from crates/steno-audio/src/codec/salvage/tables.rs, or a copy here of a
-#   drop-in from its file in apps/desktop/src-tauri/linux/;
+#   from crates/steno-audio/src/codec/salvage/tables.rs;
 # - license= is not exactly MIT, BSD-3-Clause and MPL-2.0, the licences of
 #   LICENSE, speexdsp-COPYING and symphonia-aac-tables.rs (read from
 #   .SRCINFO, which the first check holds to the PKGBUILD);
-# - the PKGBUILD's _copy, while it has one, installs a copy over a file the
-#   .deb ships or not where the .deb lacks it;
 # - the .deb's checksum or its signature from the release key does not
 #   verify, makepkg skipped either check, or the package does not build
-#   and install (which includes a copy still here when the .deb ships its
-#   file);
+#   and install;
 # - namcap reports an error;
 # - a file is missing: the binary and the sidecar side by side in
-#   /usr/lib/steno-desktop, the /usr/bin wrapper, the drop-ins, the
-#   desktop entry, the licenses;
+#   /usr/lib/steno-desktop, the /usr/bin wrapper, the desktop entry, the
+#   licenses;
 # - the wrapper is not executable, or its commands are not exactly the three
 #   that set STENO_DISTRIBUTION=aur and STENO_EXEC_PATH=/usr/bin/steno-desktop
 #   and run the binary;
-# - an installed drop-in is not the copy here while one exists, or its
-#   settings are not exactly its section and TimeoutStopSec=20s;
 # - the ufw profile does not open the handover's Linux port
 #   (HandoverConfiguration::LINUX_PORT in crates/steno-handover), is not
 #   installed as /etc/ufw/applications.d/steno-desktop and kept on upgrade
@@ -84,22 +78,6 @@ diff -u <(printf '\tlicense = %s\n' MIT BSD-3-Clause MPL-2.0) <(grep $'^\tlicens
   || die "license= is not exactly MIT, BSD-3-Clause and MPL-2.0, the licences of the three files above"
 echo "ok: license= declares MIT, BSD-3-Clause and MPL-2.0"
 
-# The stop timeout drop-ins (P5): the path under /usr/lib/systemd/user, the
-# file in apps/desktop/src-tauri/linux (and its copy here while the pinned
-# .deb lacks it) and the section it sets.
-linux="$root/apps/desktop/src-tauri/linux"
-drop_ins=(
-  'app-steno\x2ddesktop@autostart.service.d/10-steno.conf autostart-service-stop-timeout.conf Service'
-  'app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf gnome-scope-stop-timeout.conf Scope'
-)
-# A copy that Bump step 3 has deleted is not checked.
-for entry in "${drop_ins[@]}"; do
-  read -r _ conf _ <<<"$entry"
-  [[ ! -e "$work/$conf" ]] || cmp -s "$linux/$conf" "$work/$conf" \
-    || die "packaging/aur/$conf is not apps/desktop/src-tauri/linux/$conf"
-done
-echo "ok: the copies of the drop-ins are apps/desktop/src-tauri/linux's"
-
 # The ufw profile opens the port the app binds on Linux.
 port="$(sed -n 's/^ *pub const LINUX_PORT: u16 = \([0-9]*\);$/\1/p' \
   "$root/crates/steno-handover/src/configuration.rs")"
@@ -107,21 +85,6 @@ port="$(sed -n 's/^ *pub const LINUX_PORT: u16 = \([0-9]*\);$/\1/p' \
 [[ "$(grep -E '^ports=' "$work/ufw-steno-desktop")" == "ports=$port/tcp" ]] \
   || die "packaging/aur/ufw-steno-desktop does not open exactly $port/tcp, the handover's LINUX_PORT"
 echo "ok: the ufw profile opens $port/tcp, the handover's LINUX_PORT"
-
-# The pinned .deb lacks the drop-ins, so the build never trips _copy's
-# guard. While the PKGBUILD has _copy, call it on a stand-in for the
-# unpacked .deb: a file there stops it, a missing one is installed.
-if grep -q '^_copy()' "$work/PKGBUILD"; then
-  fake="$(mktemp -d)"
-  # error and pkgdir are makepkg's, for _copy.
-  # shellcheck source=/dev/null disable=SC2034,SC2329
-  (cd "$work" && source ./PKGBUILD && error() { :; } && pkgdir="$fake" \
-    && mkdir "$fake/deb" && touch "$fake/deb/f" && ! _copy LICENSE "$fake/deb/f" \
-    && _copy LICENSE "$fake/new/f" && cmp -s LICENSE "$fake/new/f") \
-    || die "_copy installs a copy over a file the .deb ships, or not where it lacks one"
-  rm -rf "$fake"
-  echo "ok: _copy fails on a file the .deb ships and installs one it lacks"
-fi
 
 as_builder "gpg --batch --import keys/pgp/$fpr.asc"
 as_builder 'makepkg -si --noconfirm' 2>&1 | tee /tmp/makepkg.log
@@ -166,18 +129,6 @@ grep -vE '^[[:space:]]*(#|$)' /usr/bin/steno-desktop \
     'exec /usr/lib/steno-desktop/steno-desktop "$@"') - \
   || die "the wrapper's commands differ from the three expected"
 echo "ok: the wrapper is an executable sh script that sets STENO_DISTRIBUTION and STENO_EXEC_PATH, then runs the binary"
-
-for entry in "${drop_ins[@]}"; do
-  read -r unit conf section <<<"$entry"
-  installed="/usr/lib/systemd/user/$unit"
-  grep -qxF "$installed" <<<"$files" || die "the package does not install $installed"
-  [[ ! -e "$work/$conf" ]] || cmp -s "$installed" "$work/$conf" \
-    || die "$installed is not packaging/aur/$conf"
-  grep -vE '^[[:space:]]*(#|$)' "$installed" \
-    | diff -u <(printf '%s\n' "[$section]" 'TimeoutStopSec=20s') - \
-    || die "$installed does not set exactly [$section] TimeoutStopSec=20s"
-  echo "ok: the package installs $installed, which sets exactly [$section] TimeoutStopSec=20s"
-done
 
 profile=/etc/ufw/applications.d/steno-desktop
 grep -qxF "$profile" <<<"$files" || die "the package does not install $profile"

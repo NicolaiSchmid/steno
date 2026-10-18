@@ -128,7 +128,7 @@ impl UpdateSource for ShellUpdates {
     async fn relaunch(&self) {
         let handle = self.app.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || {
-            crate::shut_down_for_relaunch(&handle);
+            crate::shut_down_before_exit(&handle);
         })
         .await;
         self.app.restart()

@@ -19,6 +19,11 @@
     then "/run/current-system/sw/bin/steno-desktop"
     else "/etc/profiles/per-user/%u/bin/steno-desktop";
 in {
+  imports = [
+    (lib.mkRemovedOptionModule ["programs" "steno" "inhibitDelayMaxSec"]
+      "Steno no longer holds logind's shutdown delay lock; set services.logind.settings.Login.InhibitDelayMaxSec yourself if you need it.")
+  ];
+
   options.programs.steno = {
     enable = lib.mkEnableOption "Steno, the bot-free meeting recorder";
 
@@ -93,17 +98,6 @@ in {
         `allowedUDPPorts`.
       '';
     };
-
-    inhibitDelayMaxSec = lib.mkOption {
-      type = lib.types.nullOr lib.types.ints.positive;
-      default = null;
-      example = 15;
-      description = ''
-        Sets logind's `InhibitDelayMaxSec` (systemd's default is 5 s) so
-        that a reboot or a power-off waits for Steno to save a recording in
-        progress. `null` leaves logind's setting alone.
-      '';
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -116,11 +110,6 @@ in {
 
     environment.systemPackages = lib.mkIf (cfg.users == []) [cfg.package];
     users.users = lib.genAttrs cfg.users (_: {packages = [cfg.package];});
-
-    # The package's stop timeout drop-ins (P5) for the unit the XDG autostart
-    # generator makes and for GNOME's app scope: `systemd.packages` links
-    # lib/systemd/user/ into the user units as well.
-    systemd.packages = [cfg.package];
 
     systemd.user.services.steno = lib.mkIf cfg.launchAtLogin {
       description = "Steno meeting recorder";
@@ -145,9 +134,6 @@ in {
         Type = "exec";
         ExecStart = executable;
         Slice = "app.slice";
-        # The save of a recording in progress at logout (P5 of
-        # .plans/2026-10-07-stable-promotion.md).
-        TimeoutStopSec = "20s";
       };
     };
     # A Steno started from the launcher in a session that began after the
@@ -183,9 +169,5 @@ in {
       || config.programs.ssh.startAgent
       || config.programs.gnupg.agent.enableSSHSupport
     )) (lib.mkDefault true);
-
-    services.logind.settings.Login = lib.mkIf (cfg.inhibitDelayMaxSec != null) {
-      InhibitDelayMaxSec = cfg.inhibitDelayMaxSec;
-    };
   };
 }
