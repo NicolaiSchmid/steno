@@ -1603,11 +1603,12 @@ Each lands before `0.11.0-rc.1`.
        glued them after it, or, with no chunk's owned span starting or
        ending between the word's start and the piece, as a copy of a piece
        it kept elsewhere or a piece of a word it dropped; the exceptions are
-       limit E at its exact signature and the three named limits below
-       (across an undecoded gap, E across its own window, and (ii) inside
-       the old merge's glue), each counted apart, the three capped. A
-       duplicate is allowed, a loss never, and the glue limits below are
-       text only.
+       limit E at its exact signature and the seven named limits below
+       (across an undecoded gap, E and (ii) across their own window, E and
+       (ii) inside the old merge's glue, E inside its leading glue, and a
+       copy before the text-leading orphan), each counted apart, the seven
+       capped, none across text the old merge kept. A duplicate is allowed,
+       a loss never, and the glue limits below are text only.
        This is measured, not proved: the test below is its gate, and its
        exemptions are one closed table.
   - Which test checks which clause:
@@ -1653,10 +1654,17 @@ Each lands before `0.11.0-rc.1`.
       after a copy), and pieces compared by placed word and id. A text-only
       glue shape found later becomes a named limit whose count the gate
       reports and caps at its value on the CI seed; a lost word or piece
-      always fails. The three named so far, each capped at 0, are the
+      always fails. The seven named so far, each capped at 0, are the
       limits below across an undecoded gap (`Tally::across_gap`), E across
-      its own window (`Tally::across_own_window`) and (ii) inside the old
-      merge's glue (`Tally::inside_glue`). The check's first line
+      its own window (`Tally::across_own_window`), (ii) across its own
+      window (`Tally::orphan_across_own_window`), (ii) inside the old
+      merge's glue (`Tally::inside_glue`), E inside the old merge's glue
+      (`Tally::rest_inside_glue`) and inside its leading glue
+      (`Tally::rest_inside_lead_glue`), and a copy before the text-leading
+      orphan (`Tally::copy_before_lead`). The check of the text-leading
+      orphan tries them too. None of them holds a word that grew across a
+      piece the old merge kept of another word: that is the merge bar's
+      core (below), which fails at any scale. The check's first line
       is a sanity rule: identical token sequences pass, so it never fails
       the old merge's text against itself
       (`the_boundary_check_never_fails_the_old_merges_text_against_itself`,
@@ -1668,16 +1676,32 @@ Each lands before `0.11.0-rc.1`.
       (`the_boundary_check_fails_each_planted_glue_and_passes_each_limit`):
       planted texts fail it for both earlier forms of the drain below (the
       rest of a word glued onto the word before an empty chunk) and for
-      three more glues, and limit E, case 855 and an (ii) glue pass. A
-      second (`the_boundary_check_counts_a_glue_in_a_class_only_at_its_signature`)
+      three more glues, and limit E, case 1411 of seed 0x120f372fe94f82d,
+      case 855, an (ii) glue and the old merge's own glue pass. A second
+      (`the_boundary_check_counts_a_glue_in_a_class_only_at_its_signature`)
       plants the glues next to each counted class, which no class may
       take: a copy across only a chunk's owned end, the rest of a dropped
       word inside the old merge's glue across a boundary a plain window
       decodes, the text across a chunk that heard nothing (below), an
-      orphan across an undecoded gap or across a recovered chunk's owned
-      start, a kept copy there, an owned start the recovery's window does
-      not hold, a crossing of more than that start, a plain chunk's owned
-      start, and a kept orphan moved inside the old merge's glue. Where
+      orphan across an undecoded gap, a kept copy across a recovered
+      chunk's owned start, an owned start the recovery's window does not
+      hold, a crossing of more than that start, a plain chunk's owned
+      start, and a kept orphan moved inside the old merge's glue; an
+      orphan the old merge dropped, glued across a recovered chunk's owned
+      start, passes as (ii) across its own window. A third
+      (`the_boundary_check_fails_a_counted_glue_across_text_the_old_merge_kept`)
+      plants each counted limit as it comes out, then across a word the
+      old merge kept on its own between the two pieces, which fails; one
+      of them has the shape a planted glue met at case 644 of seed
+      0x7a76000000000076 (a dropped word's piece glued onto the old
+      merge's first word across five words it kept), which E across its
+      own window counted before. A fourth
+      (`the_boundary_check_fails_a_glue_beside_each_class_found_at_scale`)
+      plants a glue beside each of the four limits named last, which
+      fails, and a fifth
+      (`the_boundary_check_counts_a_crossing_at_the_edge_of_a_window_or_a_span`)
+      a decoded window that begins at a word's first piece and a piece
+      exactly on a chunk's owned start. Where
       the fake hears every frame, it also checks that every word a gap's window or
       an accepted recovery heard in its reach comes out, orphans aside;
       that check can fire on a word both merges drop, as a run's LCS can
@@ -1807,13 +1831,15 @@ Each lands before `0.11.0-rc.1`.
       or the recording cuts a word off: 6 in 100,000 of the new-seed cases.
       `a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_the_word_before_it`
       and `a_recovery_that_begins_at_an_orphan_can_glue_it_onto_the_word_before_it`
-      pin today's text. Where the recovery begins at an orphan that is the
+      (the orphan layout's seed 0x120f372fe94f82d, case 1411) pin today's
+      text. Where the recovery begins at an orphan that is the
       only copy of a word's end (its full stop), the word comes out without
       it, and the stop after a copy of the word before
       (`a_recovery_that_begins_at_an_orphan_can_glue_the_end_of_a_word_onto_the_word_before_it`,
       case 855 of seed 0x3ec9e6e5fd29f060, a window deaf at its end). The
       test accepts that only at this exact signature and counts it apart
-      (`Tally::led`): once in about 285,000 new-seed cases.
+      (`Tally::led`): twice in about 1,060,000 new-seed cases (cases 855
+      and 2296, the second of seed 0x49a86d2c7ddf7441 at jitter 3).
     - (ii): the partition keeps an orphan word the merge before it
       dropped, glued to the word before it where no chunk's owned span
       starts or ends between them: keep over drop, as #263 chose.
@@ -1869,14 +1895,65 @@ Each lands before `0.11.0-rc.1`.
       24,000; never in 200,000 cases of the gate's and the orphan layout.
       `an_orphan_the_old_merge_dropped_can_come_out_inside_its_glue_across_a_chunk`
       pins case 1381's text, cut to five words.
+    - (ii) across its own window, a named limit: an orphan word the old
+      merge dropped comes out glued onto the word before it, after that
+      word's full stop, which the old merge dropped too, across the owned
+      start of the next chunk, which that chunk's recovered window holds
+      ("w9.s28" for "w9"), over a fake that hears every frame. Text only,
+      never a loss, counted apart (`Tally::orphan_across_own_window`) and
+      capped at its CI-seed value, 0. Seen only in the layout the gate
+      does not generate: once in 24,000 such cases (case 742 of seed
+      0x6f04000000000004, at jitter 1) and never in two more runs of
+      24,000; never in 300,000 cases of the gate's and the orphan layout.
+      `an_orphan_the_old_merge_dropped_can_come_out_across_a_boundary_its_window_decodes`
+      pins case 742's text, cut to three words.
+    - E inside the old merge's glue, a named limit: a recovery that
+      missed a word's start keeps its rest inside the old merge's own glue
+      after the word before it, before that glue's end, across the owned
+      start of a gap whose window decodes ("w14.s32.s36" for "w14..s36").
+      The old merge dropped the rest: text only, never a loss, counted
+      apart (`Tally::rest_inside_glue`) and capped at its CI-seed value, 0.
+      Seen only at a window deaf at its start or at both edges, in the
+      layout the gate does not generate: 1, 8 and 16 times in three runs
+      of 24,000 such cases (cases 797, 857 and 1095 among them); never in
+      300,000 cases of the gate's and the orphan layout.
+      `a_recovery_that_missed_a_words_start_can_keep_its_rest_inside_the_old_merges_glue`
+      pins case 857's text, cut to four words.
+    - E inside the old merge's leading glue, a named limit: the same rest
+      inside the old merge's glue after its text-leading orphan (".s23."
+      for ".."), counted apart (`Tally::rest_inside_lead_glue`) and capped
+      at its CI-seed value, 0. Seen only at a window deaf at its start, in
+      that layout: 4 times in 24,000 such cases (case 136 of seed
+      0xab72f372fe94f82e, at all four jitters), never in two more runs of
+      24,000 nor in the 300,000.
+      `a_recovery_that_missed_a_words_start_can_keep_its_rest_inside_the_old_merges_leading_glue`
+      pins case 136's text, cut to four words.
+    - A copy before the text-leading orphan, a named limit in the
+      duplicate family: the gap's window's copy of a piece the old merge
+      kept comes out before the orphan an accepted recovery begins with,
+      which leads the old merge's text, glued to it ("s33s35s33" for
+      "s35s33"). The recovery's tokens step back over the copy, and the
+      seam rule cannot drop it, as the copy is no word start. Text only,
+      never a loss, counted apart (`Tally::copy_before_lead`) and capped
+      at its CI-seed value, 0. Seen only at a window deaf at its start, in
+      that layout: 4 times in 24,000 such cases (case 499 of seed
+      0xd3b79b97f4a7c19, at all four jitters), never in two more runs of
+      24,000 nor in the 300,000.
+      `a_copy_of_a_piece_the_old_merge_kept_can_come_out_before_its_text_leading_orphan`
+      pins case 499's text, cut to three words.
     The test's count of longer words the boundaries allow, limits E and (ii) and
     the longer copies the seam rule keeps: 26 at CI's seed; over 100,000
     new-seed cases (jitter 0 to 3, the deaf mix), 686 in the 50,000 of the
     gate's layouts and 2,932 in 50,000 with orphans at every seam, with 0
     words, pieces or boundaries lost and the limit across an undecoded gap
     as above; over another 100,000, 694 and 3,173, with 0 words, pieces or
-    boundaries lost and every named limit at 0.
-  - The merge bar (restated 2026-10-18):
+    boundaries lost and every named limit at 0; over a third 100,000, with
+    the seven limits counted, 661 and 3,187, with 0 words, pieces or
+    boundaries lost, every named limit at 0 and no word grown across text
+    the old merge kept; and over 24,000 cases of the layout the gate does
+    not generate, 1,452, with 0 lost, (ii) inside the old merge's glue 25
+    and E inside it 16.
+  - The merge bar (2026-10-18):
     1. 0 words and 0 pieces lost at the CI seed and over at least 100,000
        new-seed cases, every layout included. A loss is a blocker.
     2. The CoreML replay identical, ONNX FLEURS byte-identical, and the
