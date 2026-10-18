@@ -1,11 +1,7 @@
-//! User-facing words for the core's enums and values, after
-//! `apps/macos/Steno/Design/Labels.swift`. Raw values are storage and wire
-//! spellings and never reach a label.
-//!
-//! Dates: Swift formatted through `Date.FormatStyle` in the viewer's locale
-//! and time zone; the host has no locale table, so the English wordings
-//! and the 24-hour clock stand in, in the zone the [`Host`](crate::Host)
-//! was given. The parity list notes the gap.
+//! User-facing words for the core's enums and values. Raw values are
+//! storage and wire spellings and never reach a label. Dates use English
+//! wordings and the 24-hour clock, in the zone the [`Host`](crate::Host)
+//! was given.
 
 use chrono::{DateTime, Datelike, FixedOffset, Utc};
 use steno_core::{
@@ -13,7 +9,6 @@ use steno_core::{
     RecordingEndReason,
 };
 
-/// Swift: `MeetingSource.label`.
 #[must_use]
 pub fn source_label(source: MeetingSource) -> &'static str {
     match source {
@@ -23,7 +18,7 @@ pub fn source_label(source: MeetingSource) -> &'static str {
     }
 }
 
-/// What the queue row says while the stage runs. Swift: `PipelineStage.label`.
+/// What the queue row says while the stage runs.
 #[must_use]
 pub fn stage_label(stage: PipelineStage) -> &'static str {
     match stage {
@@ -40,7 +35,7 @@ pub fn stage_label(stage: PipelineStage) -> &'static str {
     }
 }
 
-/// The state word. Swift: `MeetingState.label`.
+/// The state word.
 #[must_use]
 pub fn state_label(state: MeetingStateKind) -> &'static str {
     match state {
@@ -52,19 +47,19 @@ pub fn state_label(state: MeetingStateKind) -> &'static str {
     }
 }
 
-/// "10:06". Swift: `DisplayFormat.time`.
+/// "10:06".
 #[must_use]
 pub fn time(date: DateTime<Utc>, zone: FixedOffset) -> String {
     date.with_timezone(&zone).format("%H:%M").to_string()
 }
 
-/// "Monday". Swift: `DisplayFormat.weekday`.
+/// "Monday".
 #[must_use]
 pub fn weekday(date: DateTime<Utc>, zone: FixedOffset) -> String {
     date.with_timezone(&zone).format("%A").to_string()
 }
 
-/// "Sep 28". Swift: `DisplayFormat.monthDay`.
+/// "Sep 28".
 #[must_use]
 pub fn month_day(date: DateTime<Utc>, zone: FixedOffset) -> String {
     let local = date.with_timezone(&zone);
@@ -72,27 +67,25 @@ pub fn month_day(date: DateTime<Utc>, zone: FixedOffset) -> String {
 }
 
 /// `YYYY-MM-DD` of `date` in `zone`; the page formats the label.
-/// Swift: `MainWindowSnapshots.dayString`.
 #[must_use]
 pub fn day_string(date: DateTime<Utc>, zone: FixedOffset) -> String {
     date.with_timezone(&zone).format("%Y-%m-%d").to_string()
 }
 
 /// The calendar day `date` falls on in `zone`, as a day number: what
-/// groups the list and measures a title's age. Swift: `calendar.startOfDay`.
+/// groups the list and measures a title's age.
 #[must_use]
 pub fn day_number(date: DateTime<Utc>, zone: FixedOffset) -> i32 {
     date.with_timezone(&zone).date_naive().num_days_from_ce()
 }
 
 /// The last six days read as a weekday in the derived title; older days as
-/// month and day. Swift: `Meeting.weekdayTitleDays`.
+/// month and day.
 pub const WEEKDAY_TITLE_DAYS: i32 = 6;
 
-/// What the list entry and the detail heading call the meeting: the stored
-/// title unless it is the intake's default, in which case "Monday 10:06"
-/// for the last six days and "Sep 28 10:06" before that, in `zone`. The
-/// stored value is never touched. Swift: `Meeting.displayTitle`.
+/// What the list and the detail heading call the meeting: the stored title
+/// unless it is the intake's default, then "Monday 10:06" for the last six
+/// days and "Sep 28 10:06" before that, in `zone`.
 #[must_use]
 pub fn display_title(meeting: &Meeting, now: DateTime<Utc>, zone: FixedOffset) -> String {
     if !meeting.title_origin.is_default() {
@@ -107,8 +100,7 @@ pub fn display_title(meeting: &Meeting, now: DateTime<Utc>, zone: FixedOffset) -
     format!("{day} {}", time(meeting.started_at, zone))
 }
 
-/// The meeting header's end-reason row; `None` for a manual stop, where
-/// the user was there. Swift: `RecordingEndReason.sentence`.
+/// The meeting header's end-reason row; `None` for a manual stop.
 #[must_use]
 pub fn end_reason_sentence(reason: &RecordingEndReason) -> Option<String> {
     match reason {
@@ -130,15 +122,9 @@ pub fn end_reason_sentence(reason: &RecordingEndReason) -> Option<String> {
 }
 
 /// The detail's warning when the decoder replaced parts of the recording
-/// by silence, or read a recording that had no index up to where it was
-/// cut off or could not be read (a phone recording whose recorder was
-/// killed), so its end may be missing; `None` for a recording that decoded
-/// clean. Names the phone's recording, the only one that can hold damaged
-/// packets (AAC) or lack its index, and says how long the silence lasts
-/// rather than how many packets it replaced, rounded to tenths of a
-/// second, seconds or minutes. Rust only:
-/// `AVFoundation` conceals damaged packets and says nothing, and cannot
-/// read a recording without its index.
+/// by silence, or read a phone recording without its index up to where it
+/// was cut off; `None` for a clean decode. Says how long the silence
+/// lasts, rounded.
 #[must_use]
 pub fn damaged_audio_warning(damage: AudioDamage, source: MeetingSource) -> Option<String> {
     if damage.is_none() {
@@ -180,8 +166,7 @@ fn silence_length(seconds: f64) -> String {
     }
 }
 
-/// What the rule does to the files, as Settings > Recording says it under the
-/// picker. Swift: `AudioRetention.footnote`.
+/// What the rule does to the files, as Settings > Recording says it.
 #[must_use]
 pub fn retention_footnote(retention: AudioRetention) -> String {
     match retention {
@@ -201,15 +186,12 @@ pub fn retention_footnote(retention: AudioRetention) -> String {
     }
 }
 
-/// The Obsidian destination's stored id. Swift:
-/// `ObsidianFolderDestination.destinationID`.
+/// The Obsidian destination's stored id.
 pub const OBSIDIAN_DESTINATION_ID: &str = "obsidian-folder";
 
 /// The destination as the footer names it: "Obsidian" for the stored
-/// vault, "Obsidian (Notes)" for a vault `steno deliver --vault` named
-/// (its id is `obsidian-folder@<vault path>`, the vault's folder in the
-/// brackets), and any other destination by its id, the only name this app
-/// has for it. Swift: `Delivery.destinationDisplayName`.
+/// vault, "Obsidian (Notes)" for one `steno deliver --vault` named
+/// (`obsidian-folder@<vault path>`), and any other by its id.
 #[must_use]
 pub fn destination_display_name(delivery: &Delivery) -> String {
     let id = delivery.destination_id.as_str();
@@ -228,9 +210,8 @@ pub fn destination_display_name(delivery: &Delivery) -> String {
     }
 }
 
-/// "4.2 GB", "485 MB", "22 MB": Foundation's `ByteCountFormatter` in its
-/// file style, decimal units, one decimal for megabytes and two for
-/// gigabytes, trailing zeros dropped. Swift: `ByteCountFormatter.fileSize`.
+/// "4.2 GB", "485 MB", "22 MB": decimal units, one decimal for megabytes
+/// and two for gigabytes, trailing zeros dropped.
 #[must_use]
 pub fn file_size(bytes: i64) -> String {
     const UNITS: [(&str, f64, usize); 4] = [
@@ -268,8 +249,8 @@ pub fn utc() -> FixedOffset {
 mod tests {
     use super::*;
 
-    /// The silence in tenths of a second below a second, whole seconds
-    /// below a minute and whole minutes after, rounded to the nearest.
+    /// The silence rounds to tenths below a second, whole seconds below a
+    /// minute and whole minutes after.
     #[test]
     fn the_silence_reads_in_seconds_or_minutes() {
         for (seconds, words) in [

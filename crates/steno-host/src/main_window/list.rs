@@ -1,11 +1,7 @@
-//! The list column, after `Main/MeetingListViewModel.swift`: every meeting
-//! from the store, filtered by state, tag and an FTS query, grouped by
-//! calendar day for the cards. The selection survives list updates and
-//! clears only when a meeting the list had is gone.
-//!
-//! Swift debounced the query 200 ms on the clock before searching; the
-//! blocking host searches when the command arrives, and the page debounces
-//! typing (the parity list notes it).
+//! The list column: every meeting from the store, filtered by state, tag
+//! and an FTS query, grouped by calendar day for the cards. The selection
+//! survives list updates and clears only when a meeting the list had is
+//! gone. The page debounces the query.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,7 +13,7 @@ use uuid::Uuid;
 use crate::labels::day_string;
 use crate::services::{FileSystem, LeftRecording};
 
-/// Whether `filter` shows `meeting`. Swift: `StateFilter.matches`.
+/// Whether `filter` shows `meeting`.
 #[must_use]
 pub fn filter_matches(filter: ListFilter, meeting: &Meeting) -> bool {
     match filter {
@@ -32,7 +28,7 @@ pub fn filter_matches(filter: ListFilter, meeting: &Meeting) -> bool {
 }
 
 /// One card: the meetings that started on `day` (`YYYY-MM-DD` in the
-/// model's zone), newest first. Swift: `MeetingListViewModel.DayGroup`.
+/// model's zone), newest first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DayGroup {
     pub day: String,
@@ -59,7 +55,6 @@ impl DayGroup {
     }
 }
 
-/// Swift: `MeetingListViewModel`.
 #[derive(Debug)]
 pub struct MeetingListViewModel {
     pub all: Vec<Meeting>,
@@ -77,7 +72,7 @@ pub struct MeetingListViewModel {
     pub selection: Option<Uuid>,
     /// Day boundaries for the cards; the viewer's zone.
     pub zone: FixedOffset,
-    /// How many hits a search reads at most. Swift: `limit: 200`.
+    /// How many hits a search reads at most.
     pub search_limit: i64,
 }
 
@@ -101,10 +96,9 @@ impl MeetingListViewModel {
         }
     }
 
-    /// The store's meeting table as of now: what `observeMeetings()`
-    /// delivered. Each update names the meetings it removed, so a selection
-    /// made ahead of its row survives an emission snapshotted before the
-    /// insert. The speakers and persons reload with it.
+    /// The store's meetings as of now. Each update names the meetings it
+    /// removed, so a selection made ahead of its row survives. The speakers
+    /// and persons reload with it.
     pub fn reload(&mut self, store: &Store) {
         match store.all_meetings() {
             Ok(mut meetings) => {
@@ -230,13 +224,11 @@ impl MeetingListViewModel {
         }
     }
 
-    /// The store refuses while the capture writer or the pipeline holds
-    /// the meeting's files; the controls say so before the attempt. A
-    /// meeting left `recording` can go while the recorder is idle
-    /// (`recorder_idle`): no capture here writes it then. The host still
-    /// refuses one whose master another process may be writing
+    /// The store refuses while the capture writer or the pipeline holds the
+    /// meeting's files; the controls say so first. A meeting left
+    /// `recording` can go while the recorder is idle, unless another
+    /// process may be writing its master
     /// ([`Recorder::left_recording`](crate::services::Recorder::left_recording)).
-    /// Rust only: Swift refused every recording row.
     #[must_use]
     pub fn can_delete(meeting: &Meeting, recorder_idle: bool) -> bool {
         match meeting.state.kind() {
@@ -246,21 +238,15 @@ impl MeetingListViewModel {
         }
     }
 
-    /// The store's delete: rows, receipt and the meeting's files go (the
-    /// folder when the recording lives in one, else each file), through
-    /// the file system seam; a meeting still recording or processing is
-    /// refused and the reason shown. A file that resists does not stop the
-    /// rest; the first failure is shown, since the rows are gone and no
-    /// sweep finds that audio again. A deleted selection clears itself when
-    /// the list reloads. With `recording`, the meeting is one left
-    /// `recording` ([`Self::can_delete`]): it goes too. When no asset row
-    /// names the meeting's files (one left `recording`, one that failed
-    /// before its asset was saved), its folder in each of `left`'s audio
-    /// folders goes with it, so the next launch does not adopt the master
-    /// again; `left` is `None` when the caller found an asset, and is
-    /// required for a meeting left `recording`. Returns whether the rows
-    /// went. Swift: `MeetingStore.delete`, which removed only what an asset
-    /// named.
+    /// The store's delete: rows, receipt and the meeting's files (its
+    /// folder, else each file); a meeting recording or processing is
+    /// refused with the reason shown. A file that resists does not stop the
+    /// rest; the first failure is shown, since no sweep finds that audio
+    /// again. With `recording`, a meeting left `recording`
+    /// ([`Self::can_delete`]) goes too. When no asset names the meeting's
+    /// files, its folder in each of `left`'s audio folders goes, so the next
+    /// launch does not adopt the master; `left` is `None` when the caller
+    /// found an asset. Returns whether the rows went.
     pub fn delete(
         &mut self,
         id: Uuid,

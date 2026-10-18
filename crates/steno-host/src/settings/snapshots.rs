@@ -1,5 +1,5 @@
 //! The Settings window's topics as pure mappings from the six section view
-//! models to the contract snapshots, after `Web/SettingsSnapshots.swift`.
+//! models to the contract snapshots.
 
 use steno_bridge::{
     ExportSettingsSnapshot, GeneralAcknowledgement, GeneralAcknowledgementGroup, GeneralLoginItem,
@@ -23,11 +23,10 @@ use crate::services::{ListenerState, LoginItemStatus, Services, SpeechModels, Up
 use crate::speech::ModelAsset;
 
 /// The General section's line under launch at login when the system
-/// manages it (`LoginItemStatus::Managed`). Rust only.
+/// manages it (`LoginItemStatus::Managed`).
 pub const MANAGED_LOGIN_ITEM: &str =
     "Your system opens Steno when you log in and manages this setting.";
 /// The Updates row's line on a packaged install (`HostConfig::updates_managed`).
-/// Rust only.
 pub const MANAGED_UPDATES: &str = "Updates come from your package manager.";
 
 /// A login item the system manages is on, which the page shows locked.
@@ -40,8 +39,7 @@ fn login_item(status: LoginItemStatus) -> GeneralLoginItem {
     }
 }
 
-/// The libraries Steno ships with, for the Acknowledgements dialog; the
-/// Rust port's own list arrives with the Linux release (WP8).
+/// The libraries Steno ships with, for the Acknowledgements dialog.
 pub fn libraries() -> Vec<GeneralAcknowledgement> {
     [
         (
@@ -158,12 +156,10 @@ pub fn general(
 pub const DISCONNECTED_INPUT: &str = "Microphone not connected";
 
 /// The picker's devices: the list, then the chosen device when the list
-/// lacks it (unplugged, or a UID saved on another computer), named
-/// [`DISCONNECTED_INPUT`], so the picker shows it as not connected rather
-/// than as a bare UID; a recording then records the default input on every
-/// platform (see `CaptureBackend::start` in `steno-audio`). After a failed
-/// list nothing is known to be connected, so no entry is added. Rust only:
-/// the Swift picker shows no entry for it.
+/// lacks it (unplugged, or saved on another computer), named
+/// [`DISCONNECTED_INPUT`]; a recording then records the default input.
+/// After a failed list nothing is known to be connected, so nothing is
+/// added.
 fn recording_devices(audio: &AudioSettingsViewModel) -> Vec<RecordingDevice> {
     let mut devices: Vec<RecordingDevice> = audio
         .devices
@@ -385,7 +381,7 @@ pub fn export(obsidian: &ObsidianSettingsViewModel, subtitle: &str) -> ExportSet
 }
 
 /// What the iPhone section says while phone handover waits for `reason`,
-/// in the words of `platform`. Rust only.
+/// in the words of `platform`.
 #[must_use]
 pub fn waiting_message(reason: PhoneWaitingReason, platform: Platform) -> String {
     let computer = platform.mac_or("Mac", "computer");
@@ -418,17 +414,16 @@ pub fn waiting_message(reason: PhoneWaitingReason, platform: Platform) -> String
              know. Choose Try again if you put the old one back, or Pair again to start over."
         ),
         // Some phones know another pairing or none: Pair again is the way
-        // on. The second sentence names this app's button, just below; the
-        // import step adds the section (`PARTLY_REPLACED_PAIRING` in
-        // `steno-services`), and the details line stops after the first.
+        // on. The import step adds this section (`PARTLY_REPLACED_PAIRING`
+        // in `steno-services`), whose details line stops after the first
+        // sentence.
         PhoneWaitingReason::PartlyReplaced => format!(
             "Some of your phones were paired before this {computer}'s pairing changed and can't \
              connect. To reconnect them, choose Pair again."
         ),
         // The clock, not the pairing: Try again leads, and the words do not
-        // ask for Pair again, which would drop pairings the phones may still
-        // know. It stays the second button, the way out when a time was
-        // saved while the clock ran ahead.
+        // ask for Pair again, which would drop pairings the phones may
+        // still know.
         PhoneWaitingReason::ClockBehind => format!(
             "This {computer}'s date and time are earlier than when its phone pairing was made, \
              so Steno can't tell which pairing your phones know. Check the date and time{}, then \

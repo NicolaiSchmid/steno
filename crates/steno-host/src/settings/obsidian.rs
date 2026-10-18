@@ -1,7 +1,6 @@
 //! Export: `Settings::obsidian` (`None` means off), validated on save
-//! through the destination with the host's lock released; its messages
-//! are shown verbatim.
-//! Swift: `Settings/ObsidianSettingsViewModel.swift`.
+//! through the destination with the host's lock released; its messages are
+//! shown verbatim.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +21,6 @@ pub struct ObsidianSettingsViewModel {
     /// True after a save; cleared by saving again.
     pub saved: bool,
     stored: Option<ObsidianSettings>,
-    /// Counts the saves begun, so that each has a number.
     saves: u64,
     /// The number of the save whose vault check runs now: only that save
     /// stores, and a load while it runs leaves the form to it.
@@ -30,8 +28,7 @@ pub struct ObsidianSettingsViewModel {
 }
 
 /// A save begun under the host's lock, whose vault check runs with the
-/// lock released ([`ObsidianSettingsViewModel::begin_save`]). Rust only:
-/// Swift validated on the main actor, which blocked nothing else.
+/// lock released ([`ObsidianSettingsViewModel::begin_save`]).
 #[derive(Debug)]
 pub struct VaultSave {
     /// The settings to store; `None` turns the export off.
@@ -42,9 +39,8 @@ pub struct VaultSave {
 
 impl VaultSave {
     /// The destination's check of the draft: it writes and removes a probe
-    /// file in the vault, which a slow folder, or the Mac while its Files
-    /// and Folders prompt is up, can hold. Turning the export off checks
-    /// nothing.
+    /// file, which a slow folder or the Mac's Files and Folders prompt can
+    /// hold. Turning the export off checks nothing.
     pub fn validate(&self, services: &Services) -> Result<(), VaultRefusal> {
         self.draft
             .as_ref()
@@ -53,9 +49,8 @@ impl VaultSave {
 }
 
 impl ObsidianSettingsViewModel {
-    /// Loads the stored settings into the form. A save whose vault check
-    /// runs keeps the form: it stores the draft the user chose, and a load
-    /// would show the settings it replaces.
+    /// Loads the stored settings into the form, unless a save's check runs:
+    /// the form then shows the draft that save will store.
     pub fn load(&mut self, store: &Store) {
         if self.in_flight.is_some() {
             return;
@@ -99,11 +94,9 @@ impl ObsidianSettingsViewModel {
         self.enabled && self.vault_path.trim().is_empty()
     }
 
-    /// The typed settings as entered; `None` when disabled. Fields this
-    /// build does not know come from the stored value, so a draft nobody
-    /// edited equals it and [`commit`](Self::commit) saves nothing; the
-    /// save takes them again from the value stored at that moment, since
-    /// another writer may have added some.
+    /// The typed settings; `None` when disabled. Unknown fields come from
+    /// the stored value, so an unedited draft equals it and
+    /// [`commit`](Self::commit) saves nothing.
     #[must_use]
     pub fn draft(&self) -> Option<ObsidianSettings> {
         if !self.enabled {
@@ -139,10 +132,9 @@ impl ObsidianSettingsViewModel {
         self.commit()
     }
 
-    /// Begins a save when the draft differs from what is stored, or when
-    /// a check runs: an edit undone while it runs saves the stored value
-    /// again, so the earlier save does not store what the form no longer
-    /// shows. On without a vault waits for the chooser and saves nothing.
+    /// Begins a save when the draft differs from what is stored, or while a
+    /// check runs (an edit undone meanwhile saves the stored value again).
+    /// On without a vault saves nothing.
     pub fn commit(&mut self) -> Option<VaultSave> {
         if self.needs_vault() || (self.in_flight.is_none() && self.draft() == self.stored) {
             self.validation_message = None;
@@ -151,10 +143,9 @@ impl ObsidianSettingsViewModel {
         Some(self.begin_save())
     }
 
-    /// Begins a save of the draft: [`VaultSave::validate`] checks it
-    /// through the destination, which writes and removes a probe file in
-    /// the vault, so the host runs it with its lock released, and
-    /// [`finish_save`](Self::finish_save) stores it.
+    /// Begins a save of the draft: the host runs [`VaultSave::validate`]
+    /// with its lock released, then [`finish_save`](Self::finish_save)
+    /// stores it.
     pub fn begin_save(&mut self) -> VaultSave {
         self.saved = false;
         self.validation_message = None;
@@ -166,10 +157,9 @@ impl ObsidianSettingsViewModel {
         }
     }
 
-    /// Stores the settings `save` validated; a failed validation stores
-    /// nothing and reports the destination's message. A save that another
-    /// save followed while its check ran stores nothing: the later one
-    /// decides what is stored.
+    /// Stores the settings `save` validated; a failed validation reports
+    /// the destination's message. A save overtaken by a later one stores
+    /// nothing.
     pub fn finish_save(
         &mut self,
         save: VaultSave,
@@ -186,9 +176,8 @@ impl ObsidianSettingsViewModel {
         }
         let draft = save.draft;
         let result = update_settings(store, |settings| {
-            // The unknown fields as stored now, not as loaded: another
-            // writer may have added some since. They may belong to the
-            // vault, so another vault starts without them.
+            // The unknown fields as stored now, since another writer may
+            // have added some; another vault starts without them.
             let mut next = draft;
             if let Some(next) = &mut next {
                 next.extra = match &settings.obsidian {

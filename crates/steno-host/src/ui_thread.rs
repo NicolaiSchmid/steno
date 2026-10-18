@@ -1,17 +1,8 @@
 //! The thread the shell draws on, marked so a host call made there fails
-//! in a debug build. Every host call can wait on the store (up to its 5 s
-//! busy timeout while another process holds the write lock), on a native
-//! prompt or on the recorder's stop, and on the thread that runs the event
-//! loop that wait freezes every window, the tray and the floating panels.
-//! So the shell marks that thread once ([`mark_ui_thread`], before its
-//! event loop starts), and each of its host entry points checks it
-//! ([`assert_off_ui_thread`]). The one host call the main thread makes is
-//! the launch, during setup, before the event loop runs; it does not go
-//! through those entry points (the host's `Threads` section).
-//!
-//! The mark is per thread, so a test marks a thread of its own and the
-//! others stay unmarked. Rust only: the Swift app's host was `@MainActor`
-//! by design.
+//! in a debug build. A host call can wait on the store's busy timeout, a
+//! native prompt or the recorder's stop, and on the event loop's thread
+//! that freezes every window. The shell marks that thread
+//! ([`mark_ui_thread`]) and its entry points check ([`assert_off_ui_thread`]).
 
 use std::cell::Cell;
 

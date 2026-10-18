@@ -1,17 +1,13 @@
 //! The summary as the detail pane lays it out: the core's rendered
-//! sections (`steno_core::summary`, after
-//! `Sources/StenoCore/Summary/SummaryMarkdown.swift`, every speaker cluster
-//! label replaced by the speaker's current name) with each bullet split
-//! back into its lead and text, as `MainWindowSnapshots.bullet` did.
+//! sections (`steno_core::summary`, cluster labels replaced by current
+//! names) with each bullet split back into its lead and text.
 
 use steno_bridge::{DetailSummaryBullet, DetailSummarySection};
 use steno_core::MeetingExport;
 use steno_core::summary::sections;
 
-/// The sections in the wire vocabulary: each rendered bullet split back
-/// into its lead and text, the bold markers dropped, as the page shows
-/// plain sentences. Swift: `MeetingDetailSnapshot.init` over
-/// `MainWindowSnapshots.bullet`.
+/// The sections in the wire vocabulary: each bullet split into its lead
+/// and text, the bold markers dropped.
 #[must_use]
 pub fn detail_sections(export: &MeetingExport) -> Vec<DetailSummarySection> {
     sections(export)
@@ -25,7 +21,6 @@ pub fn detail_sections(export: &MeetingExport) -> Vec<DetailSummarySection> {
 }
 
 /// A rendered bullet (`**lead**: text`) back into its lead and text.
-/// Swift: `MainWindowSnapshots.bullet`.
 #[must_use]
 pub fn bullet(rendered: &str) -> DetailSummaryBullet {
     if let Some(after_marker) = rendered.strip_prefix("**")
@@ -42,7 +37,7 @@ pub fn bullet(rendered: &str) -> DetailSummaryBullet {
     }
 }
 
-/// Inline Markdown without its bold markers. Swift: `MainWindowSnapshots.plain`.
+/// Inline Markdown without its bold markers.
 #[must_use]
 pub fn plain(inline: &str) -> String {
     inline.replace("**", "")

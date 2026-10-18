@@ -1,46 +1,27 @@
-//! The `recording` topic's feed: one thread (`steno-host-recording`) that
-//! reads the recorder's status and sends the snapshot, with no host lock
-//! taken, so the levels, `Stopping` and a stop's hook never wait for a
-//! reload, a command or a publish under the view-model lock (decision 3 of
-//! `.plans/2026-10-12-store-off-the-workers.md`).
+//! The `recording` topic's feed: one thread that reads the recorder's
+//! status and sends the snapshot with no host lock taken, so the levels,
+//! `Stopping` and a stop's hook never wait for a reload, a command or a
+//! publish.
 //!
-//! - **A poke** sets "poked", unparks the thread and returns: the
-//!   recorder's hook ([`Host::recorder_changed`](crate::Host::recorder_changed)),
-//!   on the levels thread and on the stop's thread alike, and the start
-//!   command.
-//! - **Each pass** reads "page ready" first, then swaps "poked" to false,
-//!   and "resend" too once the page is ready, then reads `status()` (the
-//!   recorder's status lock, released before anything else), and sends
-//!   nothing unless the page was ready when the pass began. A snapshot goes
-//!   out at once when "resend" was set or when anything but its levels differs
-//!   from the last one sent; after a poke, one that moved only the levels,
-//!   or did not move, waits out the rest of [`RECORDING_INTERVAL`] and goes
-//!   out when it ends, so every hook still gets its snapshot. Only a
-//!   snapshot that went out stamps the interval and becomes the last one
-//!   sent. A wake with neither flag set and no snapshot held back (the
-//!   unpark of a poke an earlier pass already answered) reads and sends
-//!   nothing. The sink is taken from its slot, then emitted to with the
-//!   slot released.
-//! - **A move** of the recorder's state or meeting, before `page.ready`
-//!   too, asks the reload owner for a pass
-//!   ([`Host::request_reload`](crate::Host::request_reload)): a start
-//!   wrote the meeting `recording`, a stop queued it, and the list must
-//!   follow, since the web app tells a live row from one left `recording`
-//!   by the recorder's state.
-//! - **`page.ready`** sets "resend", then "page ready", then unparks the
-//!   thread, and never touches the last snapshot sent: every `page.ready`,
-//!   a reloaded page's or another window's, gets the current `recording`
-//!   once, from an idle recorder too. The order makes "once" hold: a pass
-//!   that finds the page ready finds "resend" set, and one that began
-//!   before the page was ready leaves "resend" for the next.
+//! - **A poke** sets "poked", unparks the thread and returns.
+//! - **Each pass** reads "page ready", swaps "poked" (and "resend" once the
+//!   page is ready), reads `status()`, and sends only if the page was ready
+//!   when the pass began. A snapshot goes out at once on "resend" or when
+//!   anything but its levels changed; otherwise it waits out the rest of
+//!   [`RECORDING_INTERVAL`], so every hook still gets its snapshot. Only a
+//!   snapshot that went out stamps the interval.
+//! - **A move** of the recorder's state or meeting asks the reload owner
+//!   for a pass ([`Host::request_reload`](crate::Host::request_reload)),
+//!   since the list tells a live row from one left `recording` by the
+//!   recorder's state.
+//! - **`page.ready`** sets "resend", then "page ready", then unparks: every
+//!   `page.ready` gets the current `recording` exactly once. A pass that
+//!   finds the page ready finds "resend" set; one that began before leaves
+//!   it for the next.
 //!
-//! Only the feed's thread touches the last snapshot sent and when it went,
-//! so they need no lock; other threads reach it through the three flags
-//! and the unpark. The thread holds a `Weak` on the host and ends once no
-//! host is left. Each topic is a full state, so the order between `recording`
-//! and a publish's batch decides nothing. Swift: the main window's
-//! `TopicPublisher` throttling `.recording` (`MainWindowBridge`), on the
-//! main actor.
+//! Only the feed's thread touches the last snapshot sent, so it needs no
+//! lock. The thread holds a `Weak` on the host and ends once no host is
+//! left.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -53,41 +34,38 @@ use uuid::Uuid;
 use crate::main_window::snapshots::recording_snapshot;
 use crate::services::RecorderStatus;
 
-/// 20 Hz: the level meter's rate on the page. Swift:
-/// `MainWindowBridge.recordingInterval`.
+/// 20 Hz: the level meter's rate on the page.
 pub const RECORDING_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The recorder's state and meeting, whose move asks for a reload.
 pub(crate) type Position = (RecordingState, Option<Uuid>);
 
-/// What the feed reads and where it sends: the host's shared state. Each
-/// method takes at most one leaf lock, briefly, and none of the host's.
+/// What the feed reads and where it sends. Each method takes at most one
+/// leaf lock, briefly, and none of the host's.
 pub(crate) trait Source: Send + Sync {
     fn feed(&self) -> &RecordingFeed;
-    /// The recorder's status.
     fn status(&self) -> RecorderStatus;
     /// The sink attached now, the slot's lock released.
     fn sink(&self) -> Option<Arc<dyn EventSink>>;
     /// The recorder's state or meeting moved: asks the reload owner for a
-    /// pass, which only sets a flag and wakes it.
+    /// pass.
     fn moved(&self);
 }
 
-/// The flags other threads set, and the handle that wakes the feed's
-/// thread.
+/// The flags other threads set, and the handle that wakes the feed.
 pub(crate) struct RecordingFeed {
     page_ready: AtomicBool,
     /// The next pass sends the current snapshot, changed or not.
     resend: AtomicBool,
-    /// A poke came since the last pass: the status may have moved. Set at
-    /// first, so the first pass reads the status even when a move came
-    /// before the thread could be woken.
+    /// A poke came since the last pass. Set at first, so the first pass
+    /// reads the status even when a move came before the thread could be
+    /// woken.
     poked: AtomicBool,
     thread: OnceLock<thread::Thread>,
     /// The thread's handle, so a test can tell that it ended.
     #[cfg(test)]
     joined: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
-    /// Runs once, in the first pass, between its swaps and its send check,
+    /// Runs once in the first pass, between its swaps and its send check,
     /// so a test can land a `page.ready` there.
     #[cfg(test)]
     pause: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -108,8 +86,8 @@ impl RecordingFeed {
     }
 
     /// Starts the feed's thread over `source`, whose recorder stood at
-    /// `seen` before the host loaded its view models, so a move after that
-    /// asks for a reload.
+    /// `seen` before the host loaded, so a move after that asks for a
+    /// reload.
     pub(crate) fn start<S: Source + 'static>(
         source: &Arc<S>,
         seen: Position,
@@ -129,38 +107,33 @@ impl RecordingFeed {
         Ok(())
     }
 
-    /// The recorder's status may have moved: wakes the feed's thread for
-    /// a pass that sends it; takes no lock.
+    /// Wakes the feed for a pass; takes no lock.
     pub(crate) fn poke(&self) {
         self.poked.store(true, Ordering::SeqCst);
         self.wake();
     }
 
-    /// `page.ready`: the next pass sends the current snapshot at once,
-    /// changed or not.
+    /// `page.ready`: the next pass sends the current snapshot at once.
     pub(crate) fn page_did_become_ready(&self) {
         self.resend.store(true, Ordering::SeqCst);
         self.page_ready.store(true, Ordering::SeqCst);
         self.wake();
     }
 
-    /// Wakes the feed's thread: for a poke, a `page.ready`, and at the
-    /// host's drop, so it ends.
+    /// Wakes the feed's thread; at the host's drop, so it ends.
     pub(crate) fn wake(&self) {
         if let Some(thread) = self.thread.get() {
             thread.unpark();
         }
     }
 
-    /// The thread's handle, taken.
     #[cfg(test)]
     pub(crate) fn take_thread(&self) -> Option<thread::JoinHandle<()>> {
         self.joined.lock().unwrap().take()
     }
 }
 
-/// The feed's thread: a pass per wake, asleep in between, until no host
-/// is left.
+/// The feed's thread: a pass per wake until no host is left.
 fn run<S: Source>(source: &Weak<S>, mut seen: Position) {
     let mut sent = Sent::default();
     let mut held = false;
@@ -178,9 +151,8 @@ fn run<S: Source>(source: &Weak<S>, mut seen: Position) {
     }
 }
 
-/// One pass (the module doc), `held` when the last one held a snapshot
-/// back; how long until the snapshot this one holds back may go out,
-/// `None` when it holds none.
+/// One pass, `held` when the last one held a snapshot back; returns how
+/// long until the snapshot this one holds back may go out.
 fn pass<S: Source>(
     source: &S,
     seen: &mut Position,
@@ -226,10 +198,8 @@ struct Sent {
 }
 
 impl Sent {
-    /// How long `snapshot` must wait at `now`, `None` when it goes out
-    /// now: at once on `resend`, for the first one, or when anything but
-    /// the levels moved; otherwise once the interval since the last one
-    /// that went out has passed.
+    /// How long `snapshot` must wait at `now`; `None` when it goes out now
+    /// (on `resend`, the first one, or anything but the levels moved).
     fn wait(&self, snapshot: &RecordingSnapshot, resend: bool, now: Instant) -> Option<Duration> {
         let (last, at) = self.last.as_ref()?;
         if resend || without_level(last) != without_level(snapshot) {
@@ -239,7 +209,6 @@ impl Sent {
         (!left.is_zero()).then_some(left)
     }
 
-    /// `snapshot` went out at `now`.
     fn went_out(&mut self, snapshot: RecordingSnapshot, now: Instant) {
         self.last = Some((snapshot, now));
     }
@@ -268,7 +237,7 @@ mod tests {
     use crate::{Host, HostConfig};
 
     /// What "live" means here: one hop through the feed's thread, loose
-    /// enough for a loaded machine at `nice 19`.
+    /// enough for a loaded machine.
     const LIVE: Duration = Duration::from_millis(100);
 
     /// How long a test waits for what must come before it fails as hung.
@@ -303,8 +272,8 @@ mod tests {
                 .collect()
         }
 
-        /// Waits for the `n`th `recording` snapshot, `what` ([`found`]);
-        /// when it arrived and its payload.
+        /// Waits for the `n`th `recording` snapshot; when it arrived and its
+        /// payload.
         fn nth_recording(&self, n: usize, what: &str) -> (Instant, serde_json::Value) {
             found(what, || self.recordings().into_iter().nth(n - 1))
         }
@@ -332,9 +301,8 @@ mod tests {
         });
     }
 
-    /// P40 check 21: before `page.ready` neither a level update nor a
-    /// state change reaches the sink; the first snapshot goes out once it
-    /// came, and carries the status as it is then.
+    /// Before `page.ready` nothing reaches the sink; the first snapshot
+    /// then carries the status as it is.
     #[test]
     fn the_recording_feed_sends_nothing_before_page_ready() {
         let (host, fakes, sink) = host();
@@ -357,10 +325,8 @@ mod tests {
         assert_eq!(sink.recordings().len(), 1);
     }
 
-    /// P40 check 21: with the view-model lock held (as a reload or a save
-    /// that waits on the store holds it), level updates reach the sink
-    /// within [`LIVE`] of their hook, and so does `Stopping`; each hook
-    /// returns at once.
+    /// With the view-model lock held, level updates and `Stopping` reach
+    /// the sink within [`LIVE`], and each hook returns at once.
     #[test]
     fn the_recording_feed_runs_while_the_view_models_are_held() {
         let (host, fakes, sink) = host();
@@ -414,9 +380,8 @@ mod tests {
         drop(held);
     }
 
-    /// P40 check 21: a second `page.ready` (a reloaded page, another
-    /// window) gets the current `recording` once more, though the recorder
-    /// is idle and its status has not moved since the first.
+    /// A second `page.ready` gets the current `recording` once more, though
+    /// nothing moved.
     #[test]
     fn a_second_page_ready_gets_the_recording_again() {
         let (host, _fakes, sink) = host();
@@ -431,12 +396,9 @@ mod tests {
         assert_eq!(sink.recordings().len(), before + 1, "once per page.ready");
     }
 
-    /// P40 check 21, the throttle on its own clock: a level update held
-    /// back neither becomes the last snapshot sent nor restarts the
-    /// interval, and goes out when the interval since the last one that
-    /// went out ends; two level updates inside one interval fold into one
-    /// send, the later one's. Anything but the levels, and a resend, goes
-    /// at once.
+    /// The throttle: a held-back level update neither stamps the interval
+    /// nor becomes the last sent, and goes out when the interval ends; two
+    /// inside one interval fold into the later. Anything else goes at once.
     #[test]
     fn a_held_level_update_stamps_no_interval() {
         let at = |mic: f64| {
@@ -478,8 +440,7 @@ mod tests {
         assert_eq!(sent.wait(&at(0.4), true, ms(53)), None);
 
         // Through the feed: a level update 30 ms after a send is held, and
-        // goes out once the interval since that send ends. Had the hold
-        // stamped the interval, each wake would hold it again.
+        // goes out once the interval since that send ends.
         let (host, fakes, sink) = host();
         host.page_ready().unwrap();
         sink.nth_recording(1, "page.ready's snapshot");
@@ -499,10 +460,9 @@ mod tests {
         );
     }
 
-    /// P40 check 18: a command that reaches the host before `page.ready`
-    /// (the page sends `page.ready` without awaiting it) loses no snapshot:
-    /// once `page.ready` arrives, every topic, `recording` included,
-    /// reaches the sink within [`LIVE`], with the command's effect.
+    /// A command before `page.ready` loses no snapshot: once `page.ready`
+    /// arrives, every topic reaches the sink within [`LIVE`], with the
+    /// command's effect.
     #[test]
     fn a_command_before_page_ready_loses_no_snapshot() {
         let (host, _fakes, sink) = host();
@@ -539,8 +499,8 @@ mod tests {
         assert_eq!(list["filter"], "ready", "{list}");
     }
 
-    /// A source of the feed's own, with an idle recorder that never
-    /// moves, whose drop wakes the thread as the host's does.
+    /// A source with an idle recorder whose drop wakes the thread as the
+    /// host's does.
     struct Probe {
         feed: RecordingFeed,
         sink: Arc<Sink>,
@@ -568,16 +528,12 @@ mod tests {
         }
     }
 
-    /// P40 check 21, the interleaving behind "once per `page.ready`": the
-    /// feed's first pass (a poke is owed from the start) is paused after
-    /// its swaps and before its send check, and `page.ready` lands there.
-    /// The pass began before the page was ready, so it leaves "resend" to
-    /// the next pass, and exactly one `recording` goes out.
+    /// A `page.ready` landing inside a pass that began before the page was
+    /// ready yields exactly one `recording`.
     #[test]
     fn a_page_ready_during_the_first_pass_sends_the_recording_once() {
-        // A lock and a condition variable, not a channel: a channel's
-        // blocking receive parks the thread and would take the unpark
-        // `page.ready` leaves for the next pass.
+        // A lock and a condition variable, not a channel: a blocking
+        // receive would take the unpark `page.ready` leaves for the next pass.
         #[derive(Default)]
         struct Step(Mutex<u8>, Condvar);
         impl Step {
@@ -623,10 +579,8 @@ mod tests {
         });
     }
 
-    /// The feed's thread ends once the last clone of the host is gone:
-    /// the host's drop wakes it, and it holds the host only for a pass,
-    /// so the host's own reader closes too. The thread is idle and owed
-    /// no wake when the last clone goes, so only the drop's wake ends it.
+    /// The feed's thread ends once the last clone of the host is gone, and
+    /// the host's own reader closes too.
     #[test]
     fn the_feed_ends_with_the_host() {
         let now = steno_core::json::parse_date("2026-09-29T12:50:00.000Z").unwrap();

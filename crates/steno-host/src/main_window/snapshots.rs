@@ -1,7 +1,5 @@
 //! The main window's topics as pure mappings from view model state to the
-//! contract snapshots, after `Web/MainWindowSnapshots.swift`. No store
-//! access here: the view models own every rule, these spell their state in
-//! the wire vocabulary.
+//! contract snapshots. No store access: the view models own every rule.
 
 use std::collections::BTreeMap;
 
@@ -35,7 +33,7 @@ use crate::summary_markdown::detail_sections;
 pub const PEOPLE_PALETTE_SIZE: u32 = 8;
 
 /// The palette index of an id: FNV-1a over the 16 bytes, so one person
-/// keeps one colour across launches. Swift: `MainWindowSnapshots.colorIndex`.
+/// keeps one colour across launches.
 #[must_use]
 pub fn color_index(id: Uuid) -> i64 {
     let mut hash: u32 = 2_166_136_261;
@@ -66,27 +64,23 @@ pub fn state(kind: MeetingStateKind) -> BridgeState {
     }
 }
 
-/// The controller state the `app` topic reads. Swift: the `AppController`
-/// properties `AppSnapshot.init(controller:)` touched.
+/// The controller state the `app` topic reads.
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
     pub requested_meeting_id: Option<Uuid>,
     pub requested_settings_section: Option<SettingsSection>,
     pub setup_banner_dismissed: bool,
     /// The engine notice is pending ([`engine_notice::PENDING_KEY`]); it
-    /// takes the setup banner's place until dismissed. Rust only.
+    /// takes the setup banner's place until dismissed.
     pub speech_engine_notice: bool,
     pub stored_settings: Option<Settings>,
-    /// The iPhone card; the Swift main window never set it (the parity list
-    /// notes it), the Rust host fills it from the handover service.
+    /// The iPhone card, from the handover service.
     pub phone: Option<AppPhone>,
 }
 
-/// The setup banner shows while at least one meeting exists, the
-/// configuration is incomplete and "Not now" was not pressed this launch.
-/// A pending engine notice shows in its place, meetings or not, with no
-/// action but its dismissal. Deep links are the controller's pending
-/// requests as they stand.
+/// The setup banner shows while a meeting exists, the configuration is
+/// incomplete and "Not now" was not pressed this launch; a pending engine
+/// notice shows in its place, meetings or not.
 #[must_use]
 pub fn app_snapshot(
     app: &AppState,
@@ -296,8 +290,7 @@ pub fn list_snapshot(list: &MeetingListViewModel, now: DateTime<Utc>) -> Meeting
 }
 
 /// Segments grouped into speaker turns: consecutive segments of one speaker
-/// become one turn spanning them; a segment without a speaker is always
-/// its own turn. Swift: `MainWindowSnapshots.turns`.
+/// become one turn; a segment without a speaker is always its own turn.
 #[must_use]
 pub fn turns(
     segments: &[TranscriptSegment],
@@ -328,8 +321,7 @@ pub fn turns(
 
 /// One delivery as the footer words it: the destination, then "Exported
 /// 10:02", "Pending" or "Failed: reason", and after an export each warning
-/// its receipt carries. Swift: `MainWindowSnapshots.deliveryLine`; the
-/// warnings are Rust only.
+/// its receipt carries.
 #[must_use]
 pub fn delivery_line(delivery: &Delivery, zone: FixedOffset) -> String {
     let status = match &delivery.status {
@@ -351,8 +343,7 @@ pub fn delivery_line(delivery: &Delivery, zone: FixedOffset) -> String {
 }
 
 /// A failed delivery once the launch stopped retrying it: "Export to
-/// Obsidian (Work) keeps failing: reason". Rust only: Swift never retried
-/// at launch.
+/// Obsidian (Work) keeps failing: reason".
 #[must_use]
 pub fn keeps_failing_line(delivery: &Delivery, reason: &str) -> String {
     format!(
@@ -407,9 +398,7 @@ fn export_snapshot(detail: &MeetingDetailViewModel, zone: FixedOffset) -> Detail
     }
 }
 
-/// The detail pane once its export has loaded; `None` before (the host
-/// publishes `null` for the topic then). Every derived value comes from
-/// the view model's own accessors.
+/// The detail pane once its export has loaded; `None` before.
 #[must_use]
 pub fn detail_snapshot(
     detail: &MeetingDetailViewModel,
@@ -440,8 +429,7 @@ pub fn detail_snapshot(
 
     Some(MeetingDetailSnapshot {
         id: meeting.id,
-        // The heading derives the title like the list does ("Monday 10:06"
-        // for the intake default). Swift: `meeting.displayTitle()`.
+        // The heading derives the title as the list does.
         title: display_title(meeting, now, zone),
         started_at: meeting.started_at,
         duration_seconds: meeting.duration,
@@ -497,9 +485,8 @@ pub fn detail_snapshot(
         can_process_again: detail.can_process_again(),
         can_rerun_summary: detail.can_rerun_summary(),
         is_busy: detail.is_busy,
-        // The speakers model's error (a clip that would not play, a name
-        // that could not be saved) rides on the detail's: the page has one
-        // error line. Swift showed it in the popover; the parity list notes it.
+        // The speakers model's error rides on the detail's: the page has
+        // one error line.
         error: detail
             .error
             .clone()
@@ -507,9 +494,8 @@ pub fn detail_snapshot(
     })
 }
 
-/// One row per speaker: the person's name or the cluster label, the
-/// suggestion the picker opens with, the palette index and the playback
-/// state.
+/// One row per speaker: the name or cluster label, the suggestion the
+/// picker opens with, the palette index and the playback state.
 fn speaker_rows(detail: &MeetingDetailViewModel, playing: Option<Uuid>) -> Vec<DetailSpeaker> {
     let speakers = &detail.speakers;
     speakers

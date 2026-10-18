@@ -1,63 +1,33 @@
-//! The host module of the Rust port: the view models behind the three
-//! windows and the [`Host`] that answers the bridge over the real
-//! [`Store`](steno_core::Store). Ported from the Swift app's view models
-//! (`apps/macos/Steno/{Main,Settings,Onboarding,Speakers}`) and its window
-//! bridges (`apps/macos/Steno/Web/*Bridge.swift`, `*Snapshots.swift`,
-//! `TopicPublisher.swift`). Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`,
-//! WP6. The plan placed this module in `steno-core`; the bridge contract
-//! depends on the core, so the host, which needs both, sits above them in
-//! its own crate instead.
+//! The view models behind the three windows and the [`Host`] that answers
+//! the bridge over the real [`Store`](steno_core::Store). Its own crate
+//! because it needs both the core and the bridge contract.
 //!
-//! - [`host`]: [`Host`], [`HostConfig`], the dialog closures and the
-//!   lifecycle calls the shell makes between commands.
+//! - [`host`]: [`Host`], [`HostConfig`], the dialogs and the lifecycle
+//!   calls the shell makes between commands.
 //! - [`publisher`]: the coalescing of topics; [`recording_feed`]: the
 //!   `recording` topic's own thread and its 20 Hz throttle.
-//! - [`services`] and `fakes`: the seams to the shell, the pipeline and
-//!   the other crates, and a fake for each (behind the `fakes` feature).
+//! - [`services`] and `fakes`: the seams to the shell and the other
+//!   crates, and a fake for each (behind the `fakes` feature).
 //! - [`main_window`], [`settings`], [`onboarding`], [`speakers`]: the view
 //!   models and snapshots, one module per window.
-//! - [`setup`], [`labels`], [`speech`], [`summary_markdown`]: the copy and
-//!   the labels the view models share, the speech engines and assets table
-//!   that moves to WP4, and the detail's split of the core's rendered
-//!   summary.
+//! - [`setup`], [`labels`], [`speech`], [`summary_markdown`]: shared copy
+//!   and labels, the speech engines and assets, and the detail's split of
+//!   the rendered summary.
 //!
-//! Every call blocks until it is done: for as long as a native prompt is
-//! up if it asks one, and for as long as the store waits for another
-//! process's write lock. So the shell runs each command and page load on
-//! Tauri's blocking pool (`call_blocking` in
-//! `apps/desktop/src-tauri/src/host.rs`), and each tray action, window
-//! request and the onboarding window's close on a thread of its own that
-//! takes them one at a time in the order they came (`call_in_order`
-//! there), never on a runtime worker or the thread that runs its event
-//! loop, which it marks with [`mark_ui_thread`] so a call there fails a
-//! debug build ([`assert_off_ui_thread`]); the services' polls call from
-//! their runtime's blocking pool. [`host`]'s `Threads` section has the rest of
-//! the rules, and the one exemption, the launch.
+//! Every call blocks until done, for as long as a native prompt is up or
+//! the store waits for another process's lock. So the shell calls from
+//! Tauri's blocking pool, or from its ordered lane for tray actions and
+//! window requests, never on a runtime worker or the event loop's thread,
+//! which it marks with [`mark_ui_thread`] so a call there fails a debug
+//! build ([`assert_off_ui_thread`]). [`host`]'s `Threads` section has the
+//! rest of the rules.
 //!
-//! The crate holds no UI framework and no I/O of its own beyond the store:
-//! everything the Swift app reached through a system framework (TCC,
-//! `ServiceManagement`, Sparkle, Core Audio, `EventKit`, the capture session,
-//! the pipeline, the model store, the LLM probe, the handover listener, the
-//! Finder) is a trait in [`services`], with a fake for each in `fakes`,
-//! so the whole host runs without a shell on a temporary database: that is how the
-//! tests work and how the CLI can drive it. The core's own boundaries
-//! (`steno_core::protocols`) are consumed where one exists
-//! ([`SecretStore`](steno_core::SecretStore) for the API key, with the
-//! core's `testing` fake behind it in `fakes`); the rest wait for the
-//! crates that implement them (WP4, WP5, WP7) and are shaped so the switch
-//! is a `use` line.
-//!
-//! The view models are plain state machines behind the [`Host`]'s mutex,
-//! which is what the Swift `@MainActor` amounted to. Where Swift followed
-//! the store through GRDB observation, the Rust host reloads in
-//! [`Host::reload_pass`], which the services' poll task runs every two
-//! seconds and on each [`Host::request_reload`], and which reloads only
-//! when the store's change mark moved or a reload was asked for; where
-//! Swift republished a topic through observation tracking, each command
-//! here names the topics it changed and the
-//! [`TopicPublisher`](publisher::TopicPublisher) coalesces them into one
-//! full snapshot per topic, as `TopicPublisher.swift` did. `recording`
-//! comes from its own feed, at most at 20 Hz.
+//! The crate holds no UI framework and no I/O beyond the store: everything
+//! else is a trait in [`services`], so the whole host runs without a shell
+//! on a temporary database. The view models are plain state machines
+//! behind the [`Host`]'s mutex; each command names the topics it changed,
+//! and the [`TopicPublisher`](publisher::TopicPublisher) coalesces them
+//! into one full snapshot per topic.
 
 // Bridge snapshots and recorder status values carry many flags each; the
 // shape is the contract's, not a design choice to lint.

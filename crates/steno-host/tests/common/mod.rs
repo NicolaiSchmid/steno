@@ -1,8 +1,6 @@
-//! What the tests without a shell share, after
-//! `apps/macos/StenoTests/BridgeTestSupport.swift` and
-//! `apps/macos/StenoTests/TestSupport.swift`: a host over a temporary
-//! database and the fakes, a sink that records what the host publishes,
-//! the sample meeting the fixtures describe, and the request shapes.
+//! What the tests without a shell share: a host over a temporary database
+//! and the fakes, a sink that records what the host publishes, the sample
+//! meeting the fixtures describe, and the request shapes.
 
 #![allow(dead_code, clippy::too_many_arguments, clippy::too_many_lines)]
 
@@ -29,7 +27,7 @@ pub fn date(text: &str) -> DateTime<Utc> {
     steno_core::json::parse_date(text).unwrap()
 }
 
-/// `00000000-0000-0000-0000-0000000000NN`. Swift: `SampleData.uuid`.
+/// `00000000-0000-0000-0000-0000000000NN`.
 pub fn uuid(n: u32) -> Uuid {
     Uuid::parse_str(&format!("00000000-0000-0000-0000-{n:012X}")).unwrap()
 }
@@ -38,7 +36,7 @@ pub fn now() -> DateTime<Utc> {
     date(NOW)
 }
 
-/// Records every event the host publishes. Swift: `RecordingSink`.
+/// Records every event the host publishes.
 #[derive(Default)]
 pub struct RecordingSink {
     pub events: Mutex<Vec<BridgeEvent>>,
@@ -82,8 +80,8 @@ impl RecordingSink {
         self.all(topic).len()
     }
 
-    /// Waits until `n` `recording` snapshots arrived: the feed sends them
-    /// from its own thread. Panics after five seconds.
+    /// Waits until `n` `recording` snapshots arrived (sent from the feed's
+    /// thread). Panics after five seconds.
     pub fn wait_for_recording(&self, n: usize) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while self.count(BridgeTopic::Recording) < n {
@@ -103,17 +101,15 @@ impl EventSink for RecordingSink {
 }
 
 /// The host over a temporary on-disk store with every fake, a recording
-/// sink attached and `page.ready` sent, so each command's publishes are
-/// on the sink. Swift: `TestSupport.environment()` plus the bridge under test.
+/// sink attached and `page.ready` sent.
 pub struct Harness {
     pub dir: tempfile::TempDir,
     pub store: Arc<Store>,
     pub fakes: FakeServices,
     pub host: Host,
     pub sink: Arc<RecordingSink>,
-    /// The host as the `confirm_with` prompt sees it; emptied on drop, so
-    /// the prompt's handle does not keep the host (and its feed thread)
-    /// alive past the test.
+    /// The host as the `confirm_with` prompt sees it; emptied on drop so the
+    /// prompt does not keep the host alive past the test.
     prompt_host: Arc<Mutex<Option<Host>>>,
 }
 
@@ -168,8 +164,7 @@ impl HarnessBuilder {
         self
     }
 
-    /// The destructive prompt runs `prompt`, which gets the host as it
-    /// stands while the prompt is up and answers for the user.
+    /// The destructive prompt runs `prompt` with the host as it stands.
     pub fn confirm_with(
         mut self,
         prompt: impl Fn(&Host, &ConfirmDestructiveParams) -> bool + Send + Sync + 'static,
@@ -183,8 +178,7 @@ impl HarnessBuilder {
         self.choose_in_turn(path.as_slice())
     }
 
-    /// What the folder chooser returns, one answer per call; the last one
-    /// repeats, and none cancels.
+    /// The folder chooser's answers, one per call; the last one repeats.
     pub fn choose_in_turn(mut self, paths: &[&str]) -> Self {
         self.chosen = paths.iter().map(PathBuf::from).collect();
         self
@@ -196,8 +190,7 @@ impl HarnessBuilder {
         self
     }
 
-    /// Changes the services the fakes give before the host is built (a
-    /// secret store of the test's own over the fake one).
+    /// Changes the services the fakes give before the host is built.
     pub fn change_services(
         mut self,
         change: impl FnOnce(&mut steno_host::services::Services) + 'static,
@@ -206,7 +199,7 @@ impl HarnessBuilder {
         self
     }
 
-    /// The host runs on `platform`; the Mac (Swift's words) by default.
+    /// The host runs on `platform`; the Mac by default.
     pub fn platform(mut self, platform: Platform) -> Self {
         self.config.platform = platform;
         self
@@ -218,9 +211,7 @@ impl HarnessBuilder {
         self
     }
 
-    /// The shell runs outside an installed app bundle
-    /// (`HostConfig::installed_bundle`), as from `target/` or a mounted disk
-    /// image; inside one by default.
+    /// The shell runs outside an installed app bundle; inside one by default.
     pub fn outside_installed_bundle(mut self) -> Self {
         self.config.installed_bundle = false;
         self
@@ -235,7 +226,7 @@ impl HarnessBuilder {
     pub fn build(self) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
-        // A known audio folder, as the Swift preview wrote one.
+        // A known audio folder.
         let mut settings = store.settings().unwrap();
         settings.audio_folder = file_url(&dir.path().join("audio"), true);
         settings.launch_at_login = false;
@@ -276,8 +267,7 @@ impl HarnessBuilder {
         host.attach(sink.clone());
         if self.page_ready {
             host.page_ready().unwrap();
-            // The feed's `recording` comes from its own thread; cleared
-            // with the rest once it came.
+            // The feed's `recording` comes from its own thread.
             sink.wait_for_recording(1);
             sink.clear();
         }
@@ -317,8 +307,7 @@ impl Harness {
         self.host.snapshot(topic).unwrap()
     }
 
-    /// Polls until `condition` holds, for what the host finishes on another
-    /// thread (a throttled publish, a download); panics after five seconds.
+    /// Polls until `condition` holds; panics after five seconds.
     pub fn wait_for(&self, what: &str, condition: impl Fn(&Harness) -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !condition(self) {
@@ -351,10 +340,8 @@ impl Harness {
     }
 }
 
-/// Runs `call` on its own thread and returns what it returned, failing the
-/// test after five seconds instead of hanging it: for a call that must not
-/// wait on something the test still holds (a gated download, a sink that
-/// reads the host back).
+/// Runs `call` on its own thread and returns its result, failing the test
+/// after five seconds instead of hanging it.
 pub fn within_five_seconds<R: Send + 'static>(
     what: &str,
     call: impl FnOnce() -> R + Send + 'static,
@@ -368,15 +355,11 @@ pub fn within_five_seconds<R: Send + 'static>(
         .unwrap_or_else(|_| panic!("{what} did not return within five seconds"))
 }
 
-/// What "live" means for a call that must not wait on a held vault check:
-/// one call that must not wait on the vault, as `LIVE` in
-/// `steno_services::testing` says it for the held store.
+/// How long a call that must not wait on a held vault check may take.
 pub const LIVE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Holds the fake's vault checks: each says on the returned receiver that
-/// it began, then waits until the returned sender sends or drops, or five
-/// seconds pass, so a check the host runs under its lock fails the test's
-/// bound instead of hanging it.
+/// Holds the fake's vault checks: each reports on the receiver that it
+/// began, then waits until the sender sends or drops, or five seconds pass.
 pub fn hold_vault_checks(
     harness: &Harness,
 ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
@@ -393,9 +376,8 @@ pub fn hold_vault_checks(
     (checking, release)
 }
 
-/// Holds the fake's first vault check as [`hold_vault_checks`] holds each;
-/// the later ones answer at once, so a test can undo an edit while the
-/// first check runs.
+/// Holds the first vault check as [`hold_vault_checks`] does; the later
+/// ones answer at once.
 pub fn hold_the_first_vault_check(
     harness: &Harness,
 ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
@@ -412,11 +394,8 @@ pub fn hold_the_first_vault_check(
     (checking, release)
 }
 
-// The sample meeting the bridge fixtures describe
-// (`Sources/StenoBridge/BridgeSamples.swift`),
-// as rows the pipeline would have left: three persons, the ready meeting
-// with its asset, four speakers, three turns, two tasks and a decision, an
-// in-person meeting without a summary and a failed call.
+// The sample meeting the bridge fixtures describe, as rows the pipeline
+// would have left.
 
 pub const MEETING: u32 = 0x01;
 pub const MEETING_IN_PERSON: u32 = 0x03;
@@ -583,8 +562,8 @@ fn segment(
     }
 }
 
-/// Writes the sample into `store`, with the master and three clips under
-/// the settings' audio folder marked as existing in the fake file system.
+/// Writes the sample into `store`, its master and three clips marked as
+/// existing in the fake file system.
 pub fn populate_sample(store: &Store, fakes: &FakeServices) {
     let audio_folder = &file_url_path(&store.settings().unwrap().audio_folder).unwrap();
     for person in [
@@ -755,16 +734,14 @@ pub fn drop_sample_summary(store: &Store) {
     store.replace_summary(&bare, &[], &[], &[]).unwrap();
 }
 
-/// Installs the models a meeting needs (the speech model and the
-/// diarizer), so onboarding shows no speech models row.
+/// Installs the speech model and the diarizer.
 pub fn install_speech_models(fakes: &FakeServices) {
     for asset in steno_host::speech::ModelAsset::OFFERED {
         fakes.speech_models.set_installed(asset, None);
     }
 }
 
-/// Stores `path` as the vault, the other export settings left as they are
-/// by default.
+/// Stores `path` as the vault.
 pub fn store_vault(store: &Store, path: &str) {
     let mut settings = store.settings().unwrap();
     settings.obsidian = Some(ObsidianSettings {

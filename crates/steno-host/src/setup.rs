@@ -1,15 +1,13 @@
-//! What the main window says about the setup state, after
-//! `apps/macos/Steno/Main/SetupStatus.swift` and `Services/Settings+Setup.swift`:
-//! whether the endpoint and the vault are configured, why the Summary and
-//! Tasks tabs have nothing to show, what the export footer shows, what the
-//! setup banner says, and the copy all of them share.
+//! What the main window says about the setup state: whether the endpoint
+//! and the vault are configured, why the Summary and Tasks tabs have
+//! nothing to show, the export footer, the setup banner, and their shared
+//! copy.
 
 use steno_bridge::{DetailTab, Platform};
 use steno_core::{Delivery, DeliveryStatus, LlmProvider, Meeting, MeetingState, Settings};
 
 /// The chosen provider is set up (endpoint: URL and model stored; Codex:
 /// confirmed and a model picked); the pipeline runs the LLM passes.
-/// Swift: `Settings.llmConfigured`, through `LLMEndpoint(settings:)`.
 #[must_use]
 pub fn llm_configured(settings: &Settings) -> bool {
     match settings.llm_provider {
@@ -31,16 +29,14 @@ pub fn llm_configured(settings: &Settings) -> bool {
 }
 
 /// An Obsidian vault is stored; the deliver stage has a destination.
-/// Swift: `Settings.vaultConfigured`.
 #[must_use]
 pub fn vault_configured(settings: &Settings) -> bool {
     settings.obsidian.is_some()
 }
 
 /// Why the Summary and Tasks tabs have nothing to show. A `ready` meeting
-/// whose `summary` is none was processed without an LLM endpoint; whether
-/// one exists now comes from `Settings`, so the row can offer the fix or
-/// the re-run. Swift: `SummaryStatus`.
+/// without a summary was processed without an endpoint; whether one exists
+/// now decides whether the row offers the fix or the re-run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SummaryStatus {
     /// Recording, queued, processing or failed without a summary.
@@ -52,9 +48,7 @@ pub enum SummaryStatus {
     /// Ready without a summary; an endpoint exists now, so "Run summary" works.
     SkippedRunnable,
     /// Ready without a summary; an endpoint exists, but the API key is
-    /// withheld ([`WithheldApiKey`](crate::services::WithheldApiKey)), so the row
-    /// says the key is not available yet and opens Settings > Summaries.
-    /// Rust only.
+    /// withheld ([`WithheldApiKey`](crate::services::WithheldApiKey)).
     SkippedKeyWithheld,
 }
 
@@ -120,7 +114,7 @@ impl SummaryStatus {
     }
 }
 
-/// The one action of a skipped row. Swift: `SummaryStatus.SkippedRow.Action`.
+/// The one action of a skipped row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkippedAction {
     /// Opens Settings > Summaries.
@@ -139,7 +133,7 @@ impl SkippedAction {
     }
 }
 
-/// What a tab shows for a skipped summary. Swift: `SummaryStatus.SkippedRow`.
+/// What a tab shows for a skipped summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkippedRow {
     pub title: &'static str,
@@ -149,7 +143,7 @@ pub struct SkippedRow {
 }
 
 /// What the detail footer shows. One vocabulary: "export", never
-/// "delivered". Swift: `ExportStatus`.
+/// "delivered".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportStatus {
     /// No delivery rows and no vault.
@@ -173,7 +167,7 @@ impl ExportStatus {
     }
 }
 
-/// Every delivery is `delivered`. Swift: `[Delivery].allDelivered`.
+/// Every delivery is `delivered`.
 #[must_use]
 pub fn all_delivered(deliveries: &[Delivery]) -> bool {
     deliveries
@@ -182,7 +176,7 @@ pub fn all_delivered(deliveries: &[Delivery]) -> bool {
 }
 
 /// What the main window's setup banner says; `None` when both the endpoint
-/// and the vault are configured. Swift: `SetupBannerMessage`.
+/// and the vault are configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupBannerMessage {
     BothMissing,
@@ -240,24 +234,21 @@ impl SetupBannerMessage {
     }
 }
 
-/// The one-time notice of a speech engine the Swift app offered and the
-/// Rust app has none for (`Store::retire_speech_engine`): it shows in the
-/// setup banner's place until dismissed, with no action but the dismissal.
-/// Rust only.
+/// The one-time notice of a retired speech engine
+/// (`Store::retire_speech_engine`): it shows in the setup banner's place
+/// until dismissed.
 pub mod engine_notice {
     pub const TITLE: &str = "Steno now transcribes with Parakeet v3";
     pub const BODY: &str = "The speech model you chose before is not part of this version, so Steno switched to Parakeet v3, which understands 25 European languages. If it is not downloaded yet, download it in Settings > Transcription.";
 
-    /// The `Preferences` flag (`preferences.json`) that is true while the
-    /// notice is pending: the app sets it when it retires the stored
-    /// engine, before the database changes, and OK clears it. Not a
-    /// `setting` row, which the Swift app's save would delete.
+    /// The `Preferences` flag that is true while the notice is pending: set
+    /// before the database changes, cleared by OK. Not a `setting` row,
+    /// which the Swift app's save would delete.
     pub const PENDING_KEY: &str = "steno.speechEngineNotice";
 }
 
-/// The onboarding plan's user-facing strings for the main window, in one
-/// place so the banner, the tabs and the footer cannot drift. Swift:
-/// `SetupCopy`.
+/// The main window's user-facing strings, in one place so the banner, the
+/// tabs and the footer cannot drift.
 pub mod copy {
     pub const BANNER_BOTH_MISSING_TITLE: &str = "Summaries and export are off.";
     pub const BANNER_BOTH_MISSING_BODY: &str = "Steno has no LLM endpoint and no Obsidian vault yet, so meetings keep a raw transcript on this Mac.";
@@ -275,7 +266,7 @@ pub mod copy {
     pub const SUMMARY_SKIPPED_TITLE: &str = "Summary skipped";
     pub const SUMMARY_SKIPPED_BODY: &str =
         "No LLM endpoint is configured. The transcript is complete.";
-    /// A summary skipped while the API key was withheld (Rust only).
+    /// A summary skipped while the API key was withheld.
     pub const SUMMARY_KEY_WITHHELD_BODY: &str = "Steno can't use your API key yet, so this meeting has no summary. Enter your API key in Settings, then run the summary. The transcript is complete.";
     pub const SUMMARY_RUNNABLE_TITLE: &str = "No summary yet";
     pub const SUMMARY_RUNNABLE_BODY: &str =
@@ -308,8 +299,6 @@ mod tests {
         }
     }
 
-    /// Swift: `SetupStatusTests.testConfiguredFlagsCoverTheFourCombinations`
-    /// and `testBannerMessageFollowsWhatIsMissing`.
     #[test]
     fn the_banner_follows_what_is_missing() {
         let none = settings(None, None, false);
@@ -345,8 +334,6 @@ mod tests {
         assert!(llm_configured(&codex));
     }
 
-    /// Swift: `SetupStatusTests.testSummaryStatusKeysOffTheSummaryTheStateAndTheEndpoint`
-    /// and `testSkippedRowsCarryTheActions`.
     #[test]
     fn summary_status_keys_off_the_summary_the_state_and_the_endpoint() {
         assert_eq!(SummaryStatus::of(None, true), SummaryStatus::Pending);
@@ -409,7 +396,6 @@ mod tests {
         assert_eq!(SummaryStatus::Present.skipped_row(DetailTab::Summary), None);
     }
 
-    /// Swift: `SetupStatusTests.testExportStatusKeysOffTheDeliveriesAndTheVault`.
     #[test]
     fn export_status_keys_off_the_deliveries_and_the_vault() {
         assert_eq!(ExportStatus::of(&[], false), ExportStatus::NoVault);

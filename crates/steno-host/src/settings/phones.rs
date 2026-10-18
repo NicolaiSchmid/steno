@@ -1,18 +1,9 @@
 //! iPhone: paired devices, the pairing QR code, revoke, and transfers in
 //! flight. The listener starts for the first pairing and stays on while
-//! phones are paired. Swift: `Settings/PhonesSettingsViewModel.swift`.
-//!
-//! Swift polled the paired devices every two seconds while a code was
-//! shown; the blocking host refreshes on [`PhonesSettingsViewModel::refresh_after_pairing`],
-//! which the shell calls on its timer and the tests call directly.
-//!
-//! Rust only: while the handover waits ([`Handover::waiting`]), the
-//! section offers Try again and Pair again instead of a pairing. Both may
-//! wait on a keychain prompt, so the host runs them in three steps, as the
-//! onboarding's permission requests: [`PhonesSettingsViewModel::begin_busy`]
-//! under its lock, the call with the lock released, then
-//! [`PhonesSettingsViewModel::finish_try_again`] or
-//! [`PhonesSettingsViewModel::finish_pair_again`].
+//! phones are paired. While the handover waits ([`Handover::waiting`]), the
+//! section offers Try again and Pair again instead; both may wait on a
+//! keychain prompt, so the host runs them with its lock released between
+//! [`PhonesSettingsViewModel::begin_busy`] and the matching `finish_*`.
 //!
 //! [`Handover::waiting`]: crate::services::Handover::waiting
 
@@ -93,7 +84,7 @@ impl PhonesSettingsViewModel {
     }
 
     /// The listener state, the receipts and why the handover waits, as the
-    /// service has them now: what the observations delivered.
+    /// service has them now.
     pub fn refresh(&mut self, services: &Services) {
         if let Some(handover) = &services.handover {
             self.listener = handover.state();
@@ -103,8 +94,7 @@ impl PhonesSettingsViewModel {
     }
 
     /// Try again or Pair again is about to run with the host's lock
-    /// released; `false` while one is already under way, which the host
-    /// then leaves to itself.
+    /// released; `false` while one is already under way.
     pub fn begin_busy(&mut self) -> bool {
         !std::mem::replace(&mut self.busy, true)
     }

@@ -1,6 +1,6 @@
 //! The sidebar subtitles: one short status per section, computed from the
 //! settings, the permissions, the model store, the paired devices and the
-//! updater. Swift: `Settings/SettingsOverviewViewModel.swift`.
+//! updater.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -15,8 +15,7 @@ use crate::setup::llm_configured;
 use crate::speech::{ModelAsset, SpeechEngineId};
 
 /// The pure rule behind the subtitles; `paired_count` is `None` while the
-/// handover is unavailable (Swift's `handoverAvailable` false). Swift:
-/// `SettingsOverviewViewModel.subtitles`.
+/// handover is unavailable.
 #[must_use]
 pub fn subtitles(
     platform: Platform,
@@ -100,7 +99,6 @@ pub fn subtitles(
 }
 
 /// The subtitles over the store and the services as they stand now.
-/// Swift: `SettingsOverviewViewModel.refresh`.
 #[must_use]
 pub fn refresh(
     store: &Store,
@@ -131,7 +129,6 @@ pub fn refresh(
         &services.updater.last_outcome(),
         version,
     );
-    // Rust only: the Swift app's handover never waited.
     if services
         .handover
         .as_ref()
@@ -143,5 +140,5 @@ pub fn refresh(
 }
 
 /// The iPhone section's subtitle while phone handover waits for Try again
-/// or Pair again. Rust only.
+/// or Pair again.
 pub const PHONES_WAITING: &str = "Phones waiting";

@@ -1,8 +1,7 @@
-//! The speaker picker through the host, ported from `SpeakersViewModelTests`.
-//! `SpeakerPickerStateTests` have no port: the keyboard model of the open
-//! picker lives in the web page now.
+//! The speaker picker through the host. The open picker's keyboard model
+//! lives in the web page.
 
-// The ported suites keep one Swift test per function, long as some are.
+// Some tests are long.
 #![allow(clippy::too_many_lines)]
 
 mod common;
@@ -61,7 +60,6 @@ fn select(
     })
 }
 
-/// Swift: `testRowsListEverySpeakerInClusterOrder`.
 #[test]
 fn rows_list_every_speaker_in_cluster_order() {
     let harness = sample();
@@ -85,8 +83,7 @@ fn rows_list_every_speaker_in_cluster_order() {
     assert_eq!(detail["speakers"][0]["hasClip"], true);
 }
 
-/// Swift: `testOptionsStartWithTheVoiceMatchAndNeverListTheOwnPerson`, `testPrefillIsTheSuggestedName`,
-/// `testBuildingOptionsWritesNothing`.
+/// The prefill is the suggested name, and building the options writes nothing.
 #[test]
 fn options_start_with_the_voice_match_and_never_list_the_own_person() {
     let harness = sample();
@@ -154,8 +151,8 @@ fn options_start_with_the_voice_match_and_never_list_the_own_person() {
     );
 }
 
-/// Swift: `testSelectingAPersonConfirmsAndRowsFollowTheExport`, `testSelectingTheOwnPersonIsANoOp`,
-/// `testClosingThePickerRedeliversOnceAfterChanges`.
+/// Selecting the own person is a no-op; closing the picker redelivers once
+/// after changes.
 #[test]
 fn selecting_a_person_confirms_and_re_exports_once() {
     let harness = sample();
@@ -227,7 +224,6 @@ fn selecting_a_person_confirms_and_re_exports_once() {
     );
 }
 
-/// Swift: `testSelectingCreateNamesANewPersonAndReusesAnExistingName`, `testACreateOptionForAnAttendeeTakesTheEmail`.
 #[test]
 fn selecting_create_names_a_new_person_reuses_an_existing_name_and_takes_an_attendee_email() {
     let harness = sample();
@@ -280,7 +276,6 @@ fn selecting_create_names_a_new_person_reuses_an_existing_name_and_takes_an_atte
     );
 }
 
-/// Swift: `testLLMNameSuggestionIsAMentionedOption`.
 #[test]
 fn an_llm_name_suggestion_is_a_mentioned_option() {
     let harness = sample();
@@ -331,7 +326,7 @@ fn an_llm_name_suggestion_is_a_mentioned_option() {
     );
 }
 
-/// Swift: `testPlayWithoutAClipFileReportsAnError`.
+/// Playing without a clip file reports an error.
 #[test]
 fn playback_follows_the_clip_files() {
     let harness = sample();
@@ -410,10 +405,8 @@ fn a_clip_that_ends_republishes_the_detail() {
     assert_eq!(detail["speakers"][0]["isPlaying"], false);
 }
 
-/// Confirming a speaker once its meeting's audio is gone removes the clip
-/// its row names, under the name of the run that wrote it, and no other
-/// file: not an earlier clip of that speaker no row names, not another
-/// speaker's clip.
+/// Confirming a speaker once the audio is gone removes only the clip its
+/// row names, under the run that wrote it.
 #[test]
 fn confirming_after_the_audio_is_gone_removes_the_run_clip_the_row_names() {
     use steno_core::paths::file_url;

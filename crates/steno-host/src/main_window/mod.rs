@@ -1,5 +1,4 @@
-//! The main window's view models and their snapshots, after
-//! `apps/macos/Steno/Main/` and `Web/MainWindowSnapshots.swift`.
+//! The main window's view models and their snapshots.
 
 pub mod detail;
 pub mod list;

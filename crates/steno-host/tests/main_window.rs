@@ -1,8 +1,7 @@
-//! The main window's behaviour through the host, ported from
-//! `MainWindowBridgeTests`, `MeetingListViewModelTests`,
-//! `MeetingDetailViewModelTests` and `DisplayTitleTests`.
+//! The main window's behaviour through the host: the list, the detail and
+//! the derived titles.
 
-// The ported suites keep one Swift test per function, long as some are.
+// Some tests are long.
 #![allow(clippy::too_many_lines)]
 
 mod common;
@@ -54,7 +53,6 @@ fn id(n: u32) -> String {
     steno_core::json::uuid_string(uuid(n))
 }
 
-/// Swift: `anEmptyStorePublishesEveryTopicAndTheFirstMeetingFlipsTheApp`.
 #[test]
 fn page_ready_publishes_every_topic_once_and_the_first_meeting_flips_the_app() {
     let harness = Harness::builder().without_page_ready().build();
@@ -69,8 +67,7 @@ fn page_ready_publishes_every_topic_once_and_the_first_meeting_flips_the_app() {
         "nothing before page.ready"
     );
     harness.host.page_ready().unwrap();
-    // `recording` comes from the feed's thread, every other topic from the
-    // publish, in order.
+    // `recording` comes from the feed's thread, every other topic in order.
     harness.sink.wait_for_recording(1);
     let published = |topics: Vec<BridgeTopic>| {
         topics
@@ -116,8 +113,7 @@ fn page_ready_publishes_every_topic_once_and_the_first_meeting_flips_the_app() {
     );
 }
 
-/// Swift: `setFilterChangesTheListAndRepublishes`, `testFiltersByStateAndTagAndKeepsSelection`,
-/// `testCountsIgnoreTheTagFilterAndTheSettersClearIt`, `theThreeFilterSettersClearEveryFilter`.
+/// The counts ignore the tag filter, and the three setters clear every filter.
 #[test]
 fn filters_narrow_the_list_keep_the_selection_and_the_counts() {
     let harness = sample();
@@ -214,7 +210,7 @@ fn filters_narrow_the_list_keep_the_selection_and_the_counts() {
     assert_eq!(list["query"], "");
 }
 
-/// Swift: `selectingAnUnlistedMeetingWaitsForItsRow`, `testASelectionMadeAheadOfItsRowSurvivesTheNextUpdate`.
+/// A selection made ahead of its row survives the next update.
 #[test]
 fn selecting_an_unlisted_meeting_waits_for_its_row() {
     let harness = sample();
@@ -256,7 +252,6 @@ fn selecting_an_unlisted_meeting_waits_for_its_row() {
     assert_eq!(detail["summaryStatus"]["kind"], "pending");
 }
 
-/// Swift: `deleteAsksFirst`, `testDeleteRemovesTheMeetingAndRefusesABusyOne`.
 #[test]
 fn delete_asks_first_and_refuses_a_busy_meeting() {
     let harness = Harness::builder()
@@ -305,8 +300,7 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
     let _ = confirming.snapshot(BridgeTopic::MeetingsList);
     confirming.sink.clear();
     // Whether each commit saw the entry already forgotten: the delete's
-    // commit must, since the launch's adoption reads the entries after the
-    // rows.
+    // commit must, since a launch's adoption reads the entries after the rows.
     let forgotten_at_commit: Arc<Mutex<Vec<bool>>> = Arc::default();
     let (seen, recorder) = (
         forgotten_at_commit.clone(),
@@ -334,9 +328,8 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
     assert!(confirming.store.meeting(uuid(MEETING)).unwrap().is_none());
     assert!(confirming.store.asset(uuid(MEETING)).unwrap().is_none());
     assert_eq!(confirming.store.persons().unwrap().len(), 3, "people stay");
-    // The meeting folder goes whole, through the file system seam. An
-    // asset names it, so the recorder is not asked where else it may be;
-    // it forgets what it kept for the meeting's recovery.
+    // The meeting folder goes whole, through the file system seam, and the
+    // recorder forgets what it kept for the meeting's recovery.
     let folder = confirming
         .audio_folder()
         .join(steno_core::json::uuid_string(uuid(MEETING)));
@@ -386,8 +379,7 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         Some(Value::Null)
     );
 
-    // A queued meeting has a progress entry; deleting it evicts the entry,
-    // as the store's `deleted` event did (`ProcessingProgressModel.apply`).
+    // A queued meeting has a progress entry; deleting it evicts the entry.
     let queued = Harness::builder()
         .confirm(true)
         .seed(|store, _| {
@@ -419,9 +411,6 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
     assert_eq!(queued.sink.count(BridgeTopic::Progress), 1);
 }
 
-/// A file that will not go is reported once the rows are gone (no sweep
-/// finds that audio again), as `MeetingStore.delete` threw its first
-/// failure; a delete the store refuses keeps the meeting's progress entry.
 #[test]
 fn a_delete_reports_files_that_stay_and_a_refusal_keeps_the_progress_entry() {
     let harness = Harness::builder()
@@ -490,11 +479,8 @@ fn a_delete_reports_files_that_stay_and_a_refusal_keeps_the_progress_entry() {
     );
 }
 
-/// A confirmed delete the store refuses (the pipeline took the meeting up
-/// while the prompt was open) records the entry the recorder forgot for
-/// it again: the row stays, and until it is durable that entry is what
-/// lets a launch adopt its master. One whose entry cannot be forgotten is
-/// refused before any row goes.
+/// The forgotten recorder entry is recorded again so a launch can adopt the
+/// master; one that cannot be forgotten is refused before any row goes.
 #[test]
 fn a_delete_that_does_not_go_through_keeps_the_recorders_entry() {
     let refused = Harness::builder()
@@ -566,9 +552,6 @@ fn a_delete_that_does_not_go_through_keeps_the_recorders_entry() {
     );
 }
 
-/// A delete that a panic unwinds before its commit (here inside the
-/// write, as the commit runs) keeps the row, and the recorder's entry is
-/// recorded again as the drop guard unwinds.
 #[test]
 fn a_delete_unwound_before_its_commit_keeps_the_recorders_entry() {
     let armed = Arc::new(AtomicBool::new(false));
@@ -614,9 +597,6 @@ fn a_delete_unwound_before_its_commit_keeps_the_recorders_entry() {
     );
 }
 
-/// Two delete prompts for one meeting: the second, answered after the
-/// first deleted the meeting, finds no row and records no entry for a
-/// meeting that is gone.
 #[test]
 fn a_second_delete_prompt_records_no_entry_for_a_deleted_meeting() {
     let harness = Harness::builder()
@@ -650,18 +630,14 @@ fn a_second_delete_prompt_records_no_entry_for_a_deleted_meeting() {
     assert!(harness.fakes.recorder.recorded.lock().unwrap().is_empty());
 }
 
-/// A refused delete reads the row and restores its entry under the host
-/// lock: a second prompt's delete, begun between the two, waits for the
-/// restore and then forgets that entry with the rows, so the deleted
-/// meeting keeps no entry.
+/// The refused delete restores its entry under the host lock.
 #[test]
 fn a_second_delete_waits_for_a_refused_deletes_restore() {
     let first = Arc::new(AtomicBool::new(true));
     let harness = Harness::builder()
         .confirm_with(move |host, _| {
             if first.swap(false, Ordering::SeqCst) {
-                // The pipeline takes the meeting up while the first prompt
-                // is open.
+                // The pipeline takes the meeting up while the prompt is open.
                 let mut meeting = host.store().meeting(uuid(MEETING)).unwrap().unwrap();
                 meeting.state = MeetingState::Processing;
                 host.store().save_meeting(&meeting).unwrap();
@@ -711,8 +687,6 @@ fn a_second_delete_waits_for_a_refused_deletes_restore() {
     assert!(harness.fakes.recorder.recorded.lock().unwrap().is_empty());
 }
 
-/// The detail heading derives the title as the list does (Swift:
-/// `meeting.displayTitle()`), so an untitled meeting reads "Monday 10:06".
 #[test]
 fn the_detail_heading_derives_an_untitled_meetings_title() {
     let harness = Harness::builder()
@@ -742,9 +716,7 @@ fn the_detail_heading_derives_an_untitled_meetings_title() {
     );
 }
 
-/// Parts of a recording the decoder replaced by silence show as the
-/// detail's audio warning, naming the phone's recording and saying how
-/// long the silence lasts; a recording that decoded clean carries none.
+/// A clean recording carries no warning.
 #[test]
 fn the_detail_warns_about_a_recording_replaced_in_parts_by_silence() {
     let harness = Harness::builder()
@@ -802,9 +774,8 @@ fn the_detail_warns_about_a_recording_replaced_in_parts_by_silence() {
     }
 }
 
-/// A sink that reads the host back from inside `emit`: the Tauri shell
-/// serialises on the webview thread, and the host must not hold its lock
-/// while it does.
+/// A sink that reads the host back from inside `emit`: the host must not
+/// hold its lock while it emits.
 struct ReentrantSink {
     host: Mutex<Option<steno_host::Host>>,
     seen: Mutex<Vec<(BridgeTopic, Option<Value>)>>,
@@ -830,8 +801,8 @@ fn snapshots_are_emitted_outside_the_hosts_lock() {
         seen: Mutex::new(Vec::new()),
     });
     harness.host.attach(sink.clone());
-    // A new selection publishes the list, then the detail it swapped in.
-    // An emit under the lock deadlocks the sink's read: fail, do not hang.
+    // A new selection publishes the list, then the detail. An emit under the
+    // lock deadlocks the sink's read: fail, do not hang.
     let host = harness.host.clone();
     within_five_seconds("the selection", move || {
         host.meetings_select(MeetingIdParams {
@@ -851,8 +822,7 @@ fn snapshots_are_emitted_outside_the_hosts_lock() {
     );
 }
 
-/// A sink as slow as a window channel can be: it sleeps 0 to 7 ms per emit,
-/// spread by a hash of the emit count, and keeps the payloads per topic in
+/// A sink that sleeps 0 to 7 ms per emit and keeps the payloads per topic in
 /// arrival order.
 #[derive(Default)]
 struct SlowSink {
@@ -876,12 +846,8 @@ impl EventSink for SlowSink {
     }
 }
 
-/// Snapshots are built under the lock and emitted after it; only the
-/// publishing mutex keeps two publishers from emitting in the opposite
-/// order to the one they built in, which would leave the page on an older
-/// state. Two threads raise a counter (the meeting count, the recorder's
-/// warning) and notify; three more publish the same topics as fast as they
-/// can; per topic, what reaches the sink never goes backwards.
+/// Snapshots are built under the lock and emitted after it; per topic,
+/// concurrent publishes never reach the sink out of order.
 #[test]
 fn concurrent_publishes_reach_the_sink_in_build_order() {
     const WRITES: u32 = 40;
@@ -964,8 +930,6 @@ fn concurrent_publishes_reach_the_sink_in_build_order() {
     );
 }
 
-/// `meeting.revealRecording`, `meeting.revealExport`, `page.layout`,
-/// `recording.keepGoing` and `recording.clearMessages` through the host.
 #[test]
 fn reveal_layout_and_the_recorder_messages_reach_their_services() {
     let harness = sample();
@@ -1051,7 +1015,6 @@ fn reveal_layout_and_the_recorder_messages_reach_their_services() {
     assert!(recording.get("error").is_none());
 }
 
-/// Swift: `notesLandOnTheMeetingTheyWereTypedFor`.
 #[test]
 fn notes_land_on_the_meeting_they_were_typed_for() {
     let harness = sample();
@@ -1102,7 +1065,6 @@ fn notes_land_on_the_meeting_they_were_typed_for() {
     );
 }
 
-/// Swift: `methodsOfOtherWindowsAndOfNoSelectionAreTypedErrors`.
 #[test]
 fn methods_without_a_selection_are_typed_errors() {
     let harness = Harness::builder().build();
@@ -1132,8 +1094,8 @@ fn methods_without_a_selection_are_typed_errors() {
     );
 }
 
-/// Swift: `testTagsTypedAreNormalised`, `testTemplateChangeRerunsSummaryAndReexportRedelivers`,
-/// `testRunSummaryFailureIsReported`.
+/// Typed tags are normalised, a template change reruns the summary and
+/// re-exports, and a failed run is reported.
 #[test]
 fn tags_templates_and_reruns_reach_the_store_and_the_pipeline() {
     let harness = sample();
@@ -1225,9 +1187,7 @@ fn tags_templates_and_reruns_reach_the_store_and_the_pipeline() {
     assert_eq!(detail["isBusy"], false);
 }
 
-/// A re-run or a re-export that fails after the pipeline accepted it
-/// arrives as `OperationFailed`; the selected meeting's detail shows it on
-/// its error line, another meeting's failure leaves the line alone.
+/// Another meeting's failure leaves the line alone.
 #[test]
 fn a_background_failure_of_the_selected_meeting_reaches_the_detail_error_line() {
     let harness = sample();
@@ -1277,8 +1237,7 @@ fn a_background_failure_of_the_selected_meeting_reaches_the_detail_error_line() 
     assert_eq!(detail["isBusy"], false);
 }
 
-/// Swift: `testKeepAudioTogglesRetention`, `testKeepToggleShowsOnlyWhenTheDefaultIsNotForever`,
-/// `testTurningKeepOffUnderDeleteAfterProcessingAsksFirst`.
+/// The keep toggle shows only when the default is not forever.
 #[test]
 fn keep_audio_goes_through_the_pipeline_and_asks_before_deleting_now() {
     let harness = sample();
@@ -1306,8 +1265,8 @@ fn keep_audio_goes_through_the_pipeline_and_asks_before_deleting_now() {
         (uuid(MEETING), AudioRetention::KeepDays(30))
     );
 
-    // Under "until processed, then delete" with a ready meeting and nothing
-    // left to export, turning keep off asks first; a decline changes nothing.
+    // Under "until processed, then delete" with nothing left to export,
+    // turning keep off asks first; a decline changes nothing.
     set_retention(&harness.store, AudioRetention::DeleteAfterProcessing);
     harness.host.store_changed();
     let declining = Harness::builder()
@@ -1351,10 +1310,7 @@ fn keep_audio_goes_through_the_pipeline_and_asks_before_deleting_now() {
     );
 }
 
-/// A ready, exported meeting without a stamp whose speakers or transcript
-/// may be incomplete ([`steno_core::results_need_the_audio`]) says why the
-/// recording is kept; with every lane transcribed it reads as on its way
-/// to the retention stage. Rust only.
+/// With every lane transcribed it does not.
 #[test]
 fn an_incomplete_meeting_says_why_its_recording_is_kept() {
     let harness = Harness::builder()
@@ -1376,9 +1332,7 @@ fn an_incomplete_meeting_says_why_its_recording_is_kept() {
     assert_eq!(detail["retention"]["filesExist"], true);
 }
 
-/// A ready meeting kept incomplete is offered "Process again" (the line
-/// names it as the way out), and the click reaches the pipeline; the same
-/// meeting with every lane transcribed is not offered it.
+/// The same meeting with every lane transcribed is not.
 #[test]
 fn a_ready_meeting_kept_incomplete_offers_process_again() {
     let harness = Harness::builder()
@@ -1408,8 +1362,6 @@ fn a_ready_meeting_kept_incomplete_offers_process_again() {
     );
 }
 
-/// `ui.confirmDestructive` hands the page's prompt to the shell's dialog
-/// as sent and replies with the answer, a decline included.
 #[test]
 fn the_pages_destructive_prompt_reaches_the_dialog() {
     let asked = Arc::new(Mutex::new(Vec::new()));
@@ -1432,12 +1384,8 @@ fn the_pages_destructive_prompt_reaches_the_dialog() {
     assert_eq!(*asked.lock().unwrap(), vec![prompt]);
 }
 
-/// The delete-recording prompt runs with the lock released, so the
-/// selection can move while it is up. The answer lands on the meeting it
-/// was asked for and the newly selected one is untouched, as in Swift,
-/// whose `MainWindowBridge.setKeepAudio(_:on:confirming:)` held the asked
-/// meeting's detail model across the prompt. A refusal for a meeting no
-/// longer selected comes back as the reply's error.
+/// The prompt runs with the lock released; a refusal for a meeting no longer
+/// selected comes back as the reply's error.
 #[test]
 fn keep_audio_lands_on_the_meeting_it_was_asked_for_when_the_selection_moved() {
     let prompts = Arc::new(Mutex::new(Vec::new()));
@@ -1497,8 +1445,7 @@ fn keep_audio_lands_on_the_meeting_it_was_asked_for_when_the_selection_moved() {
         "both answers landed on the meeting they were asked for"
     );
 
-    // The pipeline's refusal for the meeting no longer selected is the
-    // reply's error; the selected meeting's error line stays empty.
+    // The refusal for the meeting no longer selected is the reply's error.
     harness
         .fakes
         .pipeline
@@ -1531,9 +1478,6 @@ fn keep_audio_lands_on_the_meeting_it_was_asked_for_when_the_selection_moved() {
     );
 }
 
-/// A meeting deleted while the prompt is up is `not_found` and nothing
-/// changes. Swift's `applyRetention` failed on the missing asset row; the
-/// host names the missing meeting instead.
 #[test]
 fn keep_audio_on_a_meeting_deleted_during_the_prompt_is_not_found() {
     let store_slot = Arc::new(Mutex::new(None::<Arc<steno_core::Store>>));
@@ -1563,11 +1507,7 @@ fn keep_audio_on_a_meeting_deleted_during_the_prompt_is_not_found() {
     );
 }
 
-/// The pipeline is the only judge of a keep change, as in Swift: its
-/// refusal goes on the selected meeting's error line (the reply still says
-/// the user went ahead), and a meeting still processing takes the rule,
-/// which `applyRetention` documents as safe; only a meeting delete refuses
-/// a busy meeting. Swift: `MeetingDetailViewModel.setKeepAudio(_:)`.
+/// The pipeline alone judges a keep change.
 #[test]
 fn a_refused_keep_change_shows_on_the_detail_and_a_busy_meeting_takes_the_rule() {
     let harness = Harness::builder()
@@ -1621,7 +1561,7 @@ fn a_refused_keep_change_shows_on_the_detail_and_a_busy_meeting_takes_the_rule()
     );
 }
 
-/// Swift: `testExportStatusFollowsTheDeliveriesAndTheVault`, `testSummaryStatusFollowsTheSummaryAndTheEndpoint`.
+/// The export and summary rows follow the deliveries, the vault and the endpoint.
 #[test]
 fn the_detail_footer_and_summary_rows_follow_the_store() {
     let harness = sample();
@@ -1698,10 +1638,8 @@ fn the_detail_footer_and_summary_rows_follow_the_store() {
     );
 }
 
-/// A meeting processed while the API key was withheld (the Swift import's
-/// gate) has no summary though an endpoint is set: while the gate still
-/// withholds the key the row says so in plain words and opens Settings,
-/// with no re-run on offer; once a key is saved it is the runnable row.
+/// A meeting processed while the API key was withheld says so and opens
+/// Settings, with no re-run; once a key is saved it is the runnable row.
 #[test]
 fn a_summary_skipped_for_a_withheld_key_says_so_until_the_key_is_saved() {
     let harness = Harness::builder()
@@ -1745,10 +1683,7 @@ fn a_summary_skipped_for_a_withheld_key_says_so_until_the_key_is_saved() {
     assert_eq!(detail["canRerunSummary"], true);
 }
 
-/// A withheld key released without a settings change, by a key-only
-/// Summaries save or by the import's step, publishes the open detail
-/// again: its Run summary appears with the command, not with the next
-/// store poll.
+/// A key released without a settings change publishes the open detail again.
 #[test]
 fn the_detail_goes_out_again_once_a_key_write_or_the_import_releases_the_key() {
     for release in ["a key-only save", "the import's step"] {
@@ -1802,7 +1737,6 @@ fn the_detail_goes_out_again_once_a_key_write_or_the_import_releases_the_key() {
     }
 }
 
-/// Swift: `openURLAcceptsOnlyWebAndMailLinks`, `theAppPublishCarryingADeepLinkConsumesIt`.
 #[test]
 fn open_url_takes_https_and_mail_links_and_only_onboarding_closes_itself() {
     let harness = sample();
@@ -1894,7 +1828,6 @@ fn open_url_takes_https_and_mail_links_and_only_onboarding_closes_itself() {
     assert_eq!(error.code, BridgeErrorCode::InvalidParams);
 }
 
-/// Swift: `theRecordingSnapshotFollowsTheRecorder`.
 #[test]
 fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
     let harness = Harness::builder().build();
@@ -1905,8 +1838,7 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
             mode: steno_bridge::CaptureMode::InPerson,
         })
         .unwrap();
-    // The feed sends the start's `recording` from its own thread; nothing
-    // else is called.
+    // The feed sends the start's `recording` from its own thread.
     harness.wait_for("the start's recording", |harness| {
         harness
             .sink
@@ -1923,8 +1855,7 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
         steno_core::json::uuid_string(live)
     );
 
-    // A stop right after the start's snapshot must not read "recording"
-    // until the next command: the feed sends it.
+    // A stop right after the start's snapshot does not read "recording".
     harness.host.recording_stop().unwrap();
     harness.wait_for("the stop to publish", |harness| {
         harness.sink.last(BridgeTopic::Recording).unwrap()["state"] == "idle"
@@ -1940,12 +1871,8 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
     });
 }
 
-/// A meeting left `recording` (a save that failed, a folder gone for
-/// good) can be deleted while the recorder is idle and its master is not
-/// being written, with its folder in each audio folder the recorder names
-/// (no asset row names them), and the recorder forgets it. While the
-/// recorder records, every recording row is refused, the live one among
-/// them; so is one whose master another process still writes. Rust only.
+/// While the recorder records, or another process writes the master, every
+/// such row is refused.
 #[test]
 fn a_recording_row_can_be_deleted_while_the_recorder_is_idle() {
     let mut left = sample_meeting();
@@ -2012,7 +1939,6 @@ fn a_recording_row_can_be_deleted_while_the_recorder_is_idle() {
     assert_eq!(*harness.fakes.recorder.forgotten.lock().unwrap(), [left.id]);
 }
 
-/// Swift: `DisplayTitleTests`.
 #[test]
 fn derived_titles_read_weekday_or_month_day_and_time() {
     let mut meeting = sample_meeting();
@@ -2037,7 +1963,6 @@ fn derived_titles_read_weekday_or_month_day_and_time() {
     assert_eq!(meeting.source, MeetingSource::MacCall);
 }
 
-/// Swift: `MainWindowSnapshotHelperTests`.
 #[test]
 fn turns_merge_consecutive_segments_and_delivery_lines_name_the_destination() {
     let meeting_id = uuid(MEETING);
@@ -2115,8 +2040,7 @@ fn an_export_line_shows_the_warnings_of_the_receipt_it_delivered() {
         format!("Obsidian · Exported 08:02 · {NO_AUDIO}")
     );
 
-    // A later attempt that failed keeps the last receipt; its warning is
-    // not this attempt's.
+    // A later failed attempt keeps the last receipt but not its warning.
     let failed = Delivery {
         status: DeliveryStatus::Failed("disk full".to_owned()),
         ..delivered
@@ -2127,8 +2051,7 @@ fn an_export_line_shows_the_warnings_of_the_receipt_it_delivered() {
     );
 }
 
-/// The failed sample meeting with a recording of its own on disk (in the
-/// fake file system); its master's path.
+/// The failed meeting's recording in the fake file system; its master's path.
 fn give_the_failed_meeting_a_recording(store: &steno_core::Store, fakes: &FakeServices) -> PathBuf {
     let audio_folder =
         steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
@@ -2152,11 +2075,8 @@ fn give_the_failed_meeting_a_recording(store: &steno_core::Store, fakes: &FakeSe
     master
 }
 
-/// "Process again" on the selected failed meeting whose recording is on
-/// disk is offered (`canProcessAgain`) and reaches the pipeline; each
-/// refusal is the error line in the user's words, and one while the app
-/// quits shows nothing. A meeting that is not failed is not offered and
-/// never reaches the pipeline.
+/// Each refusal is the error line, none while the app quits; a meeting that
+/// is not failed is not offered it.
 #[test]
 fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
     let harness = Harness::builder()
@@ -2168,8 +2088,7 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
     let pipeline = &harness.fakes.pipeline;
     let error_line = || harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"].clone();
 
-    // The selection is the ready meeting with every lane transcribed: not
-    // offered.
+    // The ready meeting with every lane transcribed: not offered.
     assert_eq!(
         harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
         false
@@ -2239,11 +2158,7 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
     assert_eq!(error_line(), Value::Null);
 }
 
-/// A stale page clicks "Process again" on the selected failed meeting after
-/// its recording has gone (the button is hidden, the page has not caught
-/// up). The detail refuses before the pipeline is asked, and the error line
-/// says the recording is gone: the meeting is failed, so "Only a failed
-/// meeting" would be wrong.
+/// A stale click after the recording has gone is refused before the pipeline.
 #[test]
 fn process_again_words_a_gone_recording_through_the_detail() {
     let master = Arc::new(Mutex::new(PathBuf::new()));
@@ -2294,12 +2209,8 @@ fn process_again_words_a_gone_recording_through_the_detail() {
     );
 }
 
-/// While the API key is withheld for the stored endpoint (the Swift
-/// import's gate), a failed meeting with its recording on disk is not
-/// offered "Process again": the run would complete with no cleanup and no
-/// summary, and the button would then be gone for good. A stale click is
-/// refused before the pipeline is asked, in plain words. Once a key is
-/// saved it is offered and reaches the pipeline.
+/// While the API key is withheld, a failed meeting is not offered "Process
+/// again" and a stale click is refused; once a key is saved it is offered.
 #[test]
 fn process_again_waits_for_a_withheld_key() {
     let harness = Harness::builder()
@@ -2375,8 +2286,7 @@ fn process_again_words_a_gone_recording_for_the_platform() {
 /// Every prompt the destructive dialog was shown.
 type Prompts = Arc<Mutex<Vec<steno_bridge::ConfirmDestructiveParams>>>;
 
-/// The prompts the destructive dialog was shown, answered with `answer`
-/// as it stands when asked.
+/// The prompts the destructive dialog was shown, answered with `answer`.
 fn recording_prompts(
     answer: &Arc<AtomicBool>,
 ) -> (
@@ -2395,12 +2305,8 @@ fn recording_prompts(
     (asked, prompt)
 }
 
-/// "Process again" on a ready meeting kept incomplete whose speakers the
-/// user confirmed (the sample's Nicolai and Jérôme) asks first, in plain
-/// words: a run that diarizes may clear their names, and the note is
-/// written again. A decline changes nothing: the pipeline is not asked,
-/// the meeting stays ready, no error line. The accept runs it. A ready,
-/// complete meeting is refused without the prompt. Rust only.
+/// A decline changes nothing, the accept runs it; a ready, complete meeting
+/// is refused without the prompt.
 #[test]
 fn process_again_asks_before_it_clears_confirmed_speaker_names() {
     let answer = Arc::new(AtomicBool::new(false));
@@ -2475,9 +2381,8 @@ fn process_again_asks_before_it_clears_confirmed_speaker_names() {
     );
 }
 
-/// A failed meeting with no confirmed speaker runs at once, as before; one
-/// whose speaker the user named asks first too, and a decline leaves it
-/// failed and unasked of the pipeline.
+/// A failed meeting with no confirmed speaker runs at once; one with a named
+/// speaker asks first, and a decline leaves it unasked of the pipeline.
 #[test]
 fn process_again_on_a_failed_meeting_asks_only_with_a_confirmed_speaker() {
     let answer = Arc::new(AtomicBool::new(false));
@@ -2544,9 +2449,6 @@ fn process_again_on_a_failed_meeting_asks_only_with_a_confirmed_speaker() {
     );
 }
 
-/// The prompt runs with the lock released, so the selection can move
-/// while it is up: an accept then starts nothing, neither on the meeting
-/// asked about nor on the one now selected.
 #[test]
 fn process_again_starts_nothing_when_the_selection_moved_during_its_prompt() {
     let harness = Harness::builder()
@@ -2584,10 +2486,6 @@ fn process_again_starts_nothing_when_the_selection_moved_during_its_prompt() {
     );
 }
 
-/// A ready meeting whose recording may be damaged (the pipeline's record
-/// of parts replaced by silence) is kept incomplete and offered "Process
-/// again", every lane transcribed or not; "Delete recording now" still
-/// applies the user's rule to it. Rust only.
 #[test]
 fn a_damaged_recording_reads_kept_incomplete_and_can_still_be_deleted_now() {
     let harness = Harness::builder()
@@ -2621,9 +2519,7 @@ fn a_damaged_recording_reads_kept_incomplete_and_can_still_be_deleted_now() {
     );
 }
 
-/// A run refused for a missing model leaves the meeting queued; its
-/// progress entry then says what to do (stage `modelsMissing`), until the
-/// next run's first event. Rust only.
+/// Its progress stage reads `modelsMissing` until the next run's first event.
 #[test]
 fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
     let harness = Harness::builder()
@@ -2680,9 +2576,7 @@ fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
     assert_eq!(entry(&harness)["stage"], "decode");
 }
 
-/// A job that waits for the recording under way before it runs the speech
-/// engine in the app's process says so, under the `waiting` stage, until
-/// the run's next event. Rust only (A19).
+/// It shows the `waiting` stage until the run's next event.
 #[test]
 fn a_meeting_whose_job_waits_for_the_recording_says_so() {
     let harness = Harness::builder()
@@ -2720,10 +2614,8 @@ fn a_meeting_whose_job_waits_for_the_recording_says_so() {
     assert_eq!(entry(&harness)["stage"], "transcribe");
 }
 
-/// While the speech sidecar stands in for the Neural Engine, which ended
-/// the app, a meeting waiting for models says why its models are missing;
-/// once the user turns the Neural Engine back on, it says what it said
-/// before. Rust only (A19).
+/// While the speech sidecar stands in for the Neural Engine, a meeting
+/// waiting for models says why; once the Neural Engine is back, it does not.
 #[test]
 fn a_meeting_waiting_for_the_sidecars_models_says_the_neural_engine_is_off() {
     let harness = Harness::builder()
@@ -2760,10 +2652,7 @@ fn a_meeting_waiting_for_the_sidecars_models_says_the_neural_engine_is_off() {
     );
 }
 
-/// A run the store kept locked leaves the meeting queued, or `processing`
-/// when the store refused that write too; its progress entry then says
-/// what it waits for (stage `storeBusy`), until the next run's first
-/// event. Rust only.
+/// The meeting stays queued or `processing`, its stage `storeBusy`.
 #[test]
 fn a_meeting_the_store_kept_waiting_says_what_it_waits_for() {
     let harness = Harness::builder()
@@ -2805,10 +2694,7 @@ fn a_meeting_the_store_kept_waiting_says_what_it_waits_for() {
     assert_eq!(entry(&harness)["stage"], "decode");
 }
 
-/// A pending engine notice (its `preferences.json` flag) takes the setup
-/// banner's place, marked as a notice and with no action to offer;
-/// dismissing it clears the flag, so the next host (the next launch) shows
-/// the setup banner again and the notice never.
+/// Dismissing the notice clears its flag for good.
 #[test]
 fn the_engine_notice_shows_once_in_the_banners_place() {
     use steno_host::services::Preferences as _;
@@ -2860,10 +2746,8 @@ fn empty_the_mic_lane(store: &steno_core::Store) {
         .unwrap();
 }
 
-/// The stored shape a diarizer fallback on a re-run leaves: a room row
-/// beside diarized speakers, owning one tap segment, every lane
-/// transcribed, delivered, no stamp. The detail reads keptIncomplete from
-/// the room arm alone.
+/// The stored shape a diarizer fallback on a re-run leaves: a room row beside
+/// diarized speakers, owning one tap segment, every lane transcribed.
 #[test]
 fn a_room_row_beside_diarized_speakers_reads_kept_incomplete() {
     let harness = Harness::builder()
@@ -2906,12 +2790,8 @@ fn a_room_row_beside_diarized_speakers_reads_kept_incomplete() {
     assert_eq!(detail["retention"]["filesExist"], true);
 }
 
-/// The incomplete line never hides another status: with the sample's mic
-/// lane emptied (so `results_need_the_audio` holds), a stamp still reads
-/// deletesOn, a keep keptForever, gone files deleted, a failed meeting
-/// keptProcessingFailed and a failed export keptUntilExportSucceeds.
-/// Read first, the incomplete line would tell the user a recording is
-/// kept when the sweep is about to delete it, or already did.
+/// The incomplete line never hides another status: a stamp, a keep, gone
+/// files, a failed meeting and a failed export each still read as such.
 #[test]
 fn kept_incomplete_never_hides_another_status() {
     let kind = |seed: fn(&steno_core::Store, &steno_host::fakes::FakeServices)| {
@@ -2979,10 +2859,7 @@ fn kept_incomplete_never_hides_another_status() {
     );
 }
 
-/// The host reads on a reader of its own (`Store::with_own_reader`), held
-/// with its view models: a reload does not wait for a read held open on
-/// the shared reader (a long export, say), and a second host over the same
-/// store is refused while the first lives.
+/// A reload does not wait on the shared reader; a second host is refused.
 #[test]
 fn the_host_reads_on_a_reader_of_its_own() {
     let harness = Harness::builder().build();
@@ -3007,8 +2884,8 @@ fn the_host_reads_on_a_reader_of_its_own() {
             reloaded.send(()).unwrap();
         }
     });
-    // A second, five times under the busy timeout; a reload on the shared
-    // reader waits until the long read ends.
+    // Five times under the busy timeout: a reload on the shared reader
+    // would wait until the long read ends.
     let answered = reload.recv_timeout(std::time::Duration::from_secs(1));
     end.send(()).unwrap();
     long_read.join().unwrap().unwrap();
@@ -3031,8 +2908,7 @@ fn the_host_reads_on_a_reader_of_its_own() {
     );
 }
 
-/// A failed rebuild after "Use again" leaves this run on the speech
-/// sidecar, so a meeting waiting for its models keeps saying why.
+/// A failed rebuild after "Use again" leaves this run on the speech sidecar.
 #[test]
 fn a_failed_rebuild_keeps_the_neural_engine_off_title() {
     let harness = Harness::builder()

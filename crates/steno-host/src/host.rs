@@ -1,129 +1,64 @@
-//! The bridge host over the real store: one [`Host`] owns every view model
-//! of the three windows and answers all 78 methods, after
-//! `Web/{MainWindowBridge,SettingsBridge,OnboardingBridge}.swift` and the
-//! controller state of `AppController.swift` the bridges read. Commands
-//! map one to one onto the view models' methods, so no rule lives here;
-//! the destructive ones ask through the shell's `confirm` first and the
-//! folder choosers through `choose_folder`, the two native surfaces the
-//! page cannot draw.
-//!
-//! One host for the three windows where Swift had three: the Tauri shell
-//! has one event channel per window and routes a published topic to the
-//! window that shows it (`app` to the main and the Settings window). The
-//! Swift hosts loaded their view models when a window opened; this one
-//! loads them all at construction, so a window that opens later publishes
-//! at once on its `page.ready`, and it re-reads the Settings sections when
-//! the stored settings change under them ([`Host::reload_pass`], a write
-//! from the onboarding window), which is what reopening the Swift window
-//! did.
+//! The bridge host over the real store: one [`Host`] owns the view models
+//! of the three windows and answers every bridge method. Commands map one
+//! to one onto the view models' methods; destructive ones ask the shell's
+//! `confirm` first, folder choosers go through `choose_folder`.
 //!
 //! # Which window is calling
 //!
-//! The shell answers each window's commands through [`Host::for_window`],
-//! a clone of the host bound to that window (`Dispatcher::new(host
-//! .for_window(BridgeWindow::Onboarding))`). Four methods depend on it: the
-//! Summaries form sends the Settings window's method names
-//! (`settings.summaries.selectPreset`, `.update`, `.test`,
-//! `.refreshCodexStatus`) from both windows, and each window answers them
-//! on its own `LlmSettingsViewModel` and republishes its own topic, as
-//! `SummariesCommands` did in Swift. Every other method answers the same
-//! from any window. A host that was never bound ([`Host::new`]) answers as
-//! the main and Settings windows do.
+//! The shell answers each window through [`Host::for_window`]. The
+//! Summaries methods (`settings.summaries.*`) are sent by both the Settings
+//! and the onboarding window, and each answers them on its own
+//! `LlmSettingsViewModel`. A host never bound answers as the main window.
 //!
 //! # Publishing
 //!
-//! Every command publishes the topics it changed before it returns
-//! (`settings.transcription.download` is the one that keeps publishing
-//! after it returns, from the download's thread), and the page treats each
-//! snapshot as a full state, so the order in which the reply and the
-//! snapshots arrive decides nothing (the dispatcher's doc says why they
-//! can cross). Snapshots are built under the host's
-//! lock and emitted after it is released, in build order (one publisher
-//! runs at a time), so a sink may read [`Host::snapshot`] from inside
-//! `emit`, and a slow sink never holds a command or the recorder. A sink
-//! must not run a command from inside `emit`.
-//!
-//! The `recording` topic is not published: a thread the host owns sends
-//! it ([`recording_feed`]), at most at 20 Hz, woken by
-//! [`Host::recorder_changed`], the start and `page.ready`.
+//! Every command publishes the topics it changed before it returns, except
+//! `settings.transcription.download`, which keeps publishing from the
+//! download's thread. Snapshots are built under the host's lock and emitted
+//! after it is released, in build order, so a sink may read
+//! [`Host::snapshot`] from inside `emit` but must not run a command there.
+//! The `recording` topic comes from its own thread ([`recording_feed`]).
 //!
 //! # Reloads
 //!
-//! One owner runs the reloads: the services' poll task, which runs
-//! [`Host::reload_pass`] on its two-second tick and on each
-//! [`Host::request_reload`]. A pass runs its light part, which follows
-//! what the store does not hold, every time, and reloads the rows and the
-//! stored settings only when a reload was asked for or the store's change
-//! mark ([`Store::change_mark`]) moved: an idle app reloads nothing. The
-//! event follower asks after it applied an event, the `recording` feed
-//! when the recorder's state or meeting moved. [`Host::store_changed`]
-//! runs a forced pass on the caller's thread, for the launch and the
-//! tests. What the mark does not see shows at the next forced pass: a
-//! recording's files removed outside Steno, a default title that turns
-//! from a weekday into a date.
+//! The services' poll task runs [`Host::reload_pass`] on its tick and on
+//! each [`Host::request_reload`]. A pass always runs its light part and
+//! reloads rows and settings only when asked or when the store's change
+//! mark ([`Store::change_mark`]) moved. [`Host::store_changed`] runs a
+//! forced pass on the caller's thread.
 //!
 //! # Threads
 //!
-//! The crate doc says which thread the shell calls from: its blocking pool,
-//! for every command and page load, its ordered lane for each deep link,
-//! tray action and the onboarding window's close, and never the thread it
-//! marks with [`mark_ui_thread`](crate::mark_ui_thread). The services'
-//! event follower and their reload owner ([`Host::apply_meeting_event`],
-//! [`Host::reload_pass`]) call from their runtime's blocking pool, so a
-//! reload that waits never holds a runtime worker, and so do the update
-//! schedule's `Host::updates_changed` and the gated handover's
-//! `Host::phones_changed`, which wait for the view-model lock a settings
-//! save may hold through its busy wait. Under the lock the host reads on
-//! a reader of its own ([`Store::with_own_reader`]), so no read there
-//! waits for a write. One exemption: the launch
-//! (`steno_services::App::launch`, with
-//! [`Host::should_open_onboarding`] before it) runs on the shell's main
-//! thread during setup, once the main window is built and before the
-//! event loop runs. It reloads once ([`Host::store_changed`]), and there
-//! it also writes: it resumes the meetings and exports left unfinished
-//! (unless a keyring answer or the Swift import is pending) and runs the
-//! retention sweep (unless the import is pending). It is not a shell
-//! entry point, so the mark does not assert there.
+//! The shell calls from its blocking pool, never from the thread marked by
+//! [`mark_ui_thread`](crate::mark_ui_thread). The event follower and the
+//! reload owner call from their runtime's blocking pool, so a reload that
+//! waits never holds a runtime worker. Under the lock the host reads on a
+//! reader of its own ([`Store::with_own_reader`]). The launch
+//! (`steno_services::App::launch`) is the one exemption: it runs on the
+//! main thread during setup and also writes (resuming unfinished work, the
+//! retention sweep).
 //!
-//! Locks are taken in one order (decision 3 of
-//! `.plans/2026-10-12-store-off-the-workers.md`): the publishing mutex,
-//! then the view models, then the store's writer, then a reader (the
-//! shared one, then the host's; held only inside its closure; nothing is
-//! taken under a reader, except by the checkpoint, which takes both after
-//! the writer), and last the leaves, each taken alone and briefly: the
-//! sink slot, the recorder's status lock, the secret store's read in
-//! `reload_sections`. The rules it needs:
+//! Locks are taken in one order: the publishing mutex, then the view
+//! models, then the store's writer, then a reader (shared, then the
+//! host's; nothing is taken under a reader except by the checkpoint), and
+//! last the leaves, each taken alone and briefly: the sink slot, the
+//! recorder's status lock, the secret store's read. The rules it needs:
 //!
-//! - The `recording` feed and the recorder's hook take no host lock: the
-//!   feed takes the recorder's status lock, releases it, then the sink
-//!   slot, so no `recording` snapshot and no stop waits for a reload, a
-//!   write or a publish.
+//! - The `recording` feed and the recorder's hook take no host lock.
 //! - Under the view models nothing runs a publish, a pass,
-//!   [`Host::store_changed`], [`Host::recorder_changed`] or a command: a
-//!   publish takes the publishing mutex, which comes first. Asking for a
-//!   reload only sets a flag.
-//! - The recorder calls its hook only with its own locks released: the
-//!   services' hook also reads the recorder's status.
-//! - No `Store` call inside a `Store` closure (the store debug-asserts
-//!   it), and the writer's commit hook takes no lock and calls nothing.
+//!   [`Host::store_changed`], [`Host::recorder_changed`] or a command.
+//!   Asking for a reload only sets a flag.
+//! - The recorder calls its hook only with its own locks released.
+//! - No `Store` call inside a `Store` closure, and the writer's commit hook
+//!   takes no lock and calls nothing.
 //!
-//! The dialogs (`confirm`, `choose_folder`) are called with no lock held,
-//! on the command's thread. The services are called with the view-model
-//! lock held, so they must not call back into the host (the `services`
-//! module doc has the rule), except for the calls that run with it
-//! released: the recorder's commands, whose changes reach the host
-//! (`Host::recorder_changed`), the permission prompts, the LLM probe, the
-//! Codex calls, the model download and onboarding's vault check, the
-//! prompts, the probe and the check with their busy state published first.
-//! `settings.transcription.download` replies after its first publish and
-//! keeps publishing from its own thread until the download ends; a second
-//! download of the asset reattaches to that thread instead of starting one.
-//! The feed's thread starts in [`Host::new`] and ends with the last clone.
-//! The core's async boundaries (the secret store) are awaited on the host's
-//! own runtime. A call that arrives inside a tokio runtime anyway (a
-//! `#[tokio::test]`, a command that skipped `spawn_blocking`) awaits the
-//! secret store on a helper thread instead of panicking, and still blocks
-//! that worker.
+//! The dialogs are called with no lock held. The services are called with
+//! the view-model lock held, so they must not call back into the host,
+//! except for the calls made with it released: the recorder's commands,
+//! the permission prompts, the LLM probe, the Codex calls, the model
+//! download and onboarding's vault check. The secret store is awaited on
+//! the host's own runtime, or on a helper thread when the call arrives
+//! inside a tokio runtime.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -168,33 +103,23 @@ use crate::speakers::{OptionKind, SpeakerOption as ModelOption};
 use crate::speech::{ModelAsset, SpeechEngineId};
 use crate::tray::{self, TrayMeetings};
 
-/// What the shell tells the host once. Swift: the bundle's marketing
-/// version and the viewer's calendar.
+/// What the shell tells the host once.
 #[derive(Debug, Clone)]
 pub struct HostConfig {
-    /// `CFBundleShortVersionString`; "0" in a bundle without one.
+    /// The app's version; "0" in a bundle without one.
     pub version: String,
     /// The viewer's zone, for day groups and derived titles.
     pub zone: FixedOffset,
-    /// The OS the host runs on: which permissions onboarding and Settings
-    /// list, and whether the host's sentences say "this Mac" or "this
-    /// computer". The shell passes `Platform::CURRENT`; the parity tests
-    /// pass the Mac, whose words are Swift's.
+    /// The OS the host runs on: which permissions are listed, and whether
+    /// sentences say "this Mac" or "this computer".
     pub platform: Platform,
-    /// A package manager delivers the updates (stable plan X5,
-    /// `steno_services::updates::updates_are_managed`): the General
-    /// section offers no check and says where updates come from, and
-    /// `updates.check` checks nothing. Rust only.
+    /// A package manager delivers the updates: General offers no check and
+    /// `updates.check` checks nothing.
     pub updates_managed: bool,
-    /// The shell runs from an installed app bundle: inside a `.app` (one
-    /// built under `target/` too), and neither on a mounted disk image nor
-    /// translocated by Gatekeeper. On the Mac only such a launch registers
-    /// the login item at its first launch and counts it
-    /// ([`Host::register_login_item_on_first_launch`]), so a run that
-    /// would register a path about to disappear leaves the first launch to
-    /// the installed copy. The shell decides from its own path; off the Mac
-    /// it is not read. False by default, as for the CLI and the tests. Rust
-    /// only.
+    /// The shell runs from an installed app bundle (not a disk image, not
+    /// translocated). On the Mac only such a launch registers the login
+    /// item at first launch ([`Host::register_login_item_on_first_launch`]).
+    /// Not read off the Mac.
     pub installed_bundle: bool,
 }
 
@@ -211,39 +136,30 @@ impl Default for HostConfig {
 }
 
 /// The destructive confirmation: a native alert in the shell, a stub in
-/// tests. Swift: `MainWindowBridge.Confirm`.
+/// tests.
 pub type Confirm = Box<dyn Fn(&ConfirmDestructiveParams) -> bool + Send + Sync>;
 
 /// The folder chooser: takes the folder to start in and returns the
-/// choice, `None` when cancelled. Swift: `SettingsBridge.ChooseFolder`.
+/// choice, `None` when cancelled.
 pub type ChooseFolder = Box<dyn Fn(Option<&Path>) -> Option<PathBuf> + Send + Sync>;
 
 /// The shell's tray ([`Host::on_tray`]); called while the host publishes,
 /// so it must not call into the host.
 pub type TraySink = Box<dyn Fn(TrayMeetings) + Send + Sync>;
 
-/// What constructing a host can fail on.
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    /// The thread that feeds the `recording` topic
-    /// ([`recording_feed`]) did not start.
+    /// The thread that feeds the `recording` topic did not start.
     #[error("the host's recording feed could not start: {0}")]
     FeedThread(std::io::Error),
 }
 
-/// The core's boundaries are async; the host waits on them here, on one
-/// current-thread runtime shared by every call. Blocking on a runtime from
-/// a thread that is already inside one panics, and a host call can arrive
-/// on such a thread (an `async` Tauri command that skipped
-/// `spawn_blocking`, a test under `#[tokio::test]`): there the future is
-/// awaited on a scoped helper thread instead, so the call blocks like every
-/// other host call and never panics. The secret store is the only boundary
-/// awaited this way, a handful of times per Save. The runtime has its timer
-/// and I/O drivers, so a store may time out or talk to a socket. Build
-/// timers inside the future: one made on the caller's runtime is driven by
-/// the runtime this call blocks.
+/// Waits on an async boundary on the host's shared current-thread runtime.
+/// Called from inside a runtime, the future is awaited on a scoped helper
+/// thread instead of panicking. Build timers inside the future: one made on
+/// the caller's runtime is not driven here.
 pub(crate) fn block_on<F>(future: F) -> F::Output
 where
     F: std::future::Future + Send,
@@ -265,29 +181,25 @@ where
     }
 }
 
-/// The view models and the controller state behind the host's mutex.
 struct Inner {
-    /// The host's handle on the store ([`Store::with_own_reader`]): its
-    /// reads use a reader connection of the host's own, so a read under
-    /// this lock never waits for a write, nor for a read elsewhere in the
-    /// process. Its writes are the shared writer's. Only the holder of this
-    /// lock reads on it.
+    /// The host's own-reader handle ([`Store::with_own_reader`]), so a read
+    /// under this lock never waits for a write. Only the lock holder reads
+    /// on it.
     store: Arc<Store>,
     app: AppState,
-    /// Whether the list had meetings at its last publish; the `app` topic
-    /// reads this so it republishes when the list empties or fills, not
-    /// with every list change.
+    /// Whether the list had meetings at its last publish, so `app`
+    /// republishes only when the list empties or fills.
     has_meetings: bool,
     /// `meetings.select` for a meeting the list does not have yet.
     pending_selection: Option<Uuid>,
     list: MeetingListViewModel,
     detail: Option<MeetingDetailViewModel>,
     progress: ProcessingProgressModel,
-    /// Meetings the pipeline flagged with unconfirmed speakers this launch
-    /// (`speakersNeedReview`), pruned at each reload ([`tray::prune_reviews`]).
+    /// Meetings flagged with unconfirmed speakers this launch, pruned at
+    /// each reload.
     reviews: BTreeSet<Uuid>,
-    /// The clip the player played at the last pass, so the detail goes
-    /// out again once a clip ends.
+    /// The clip playing at the last pass, so the detail republishes once it
+    /// ends.
     playing_clip: Option<PathBuf>,
     general: GeneralSettingsViewModel,
     audio: AudioSettingsViewModel,
@@ -298,36 +210,33 @@ struct Inner {
     subtitles: BTreeMap<SettingsSection, String>,
     onboarding: OnboardingViewModel,
     publisher: TopicPublisher,
-    /// The store's change mark the rows were last loaded at
-    /// ([`Host::reload_pass`]); `None` when it could not be read, which
-    /// reloads at the next pass.
+    /// The change mark the rows were last loaded at; `None` reloads at the
+    /// next pass.
     reloaded_at: Option<ChangeMark>,
 }
 
-/// What every clone of a [`Host`] shares: the store, the services, the
-/// view models and the sink.
+/// What every clone of a [`Host`] shares.
 struct Shared {
     store: Arc<Store>,
     services: Services,
     config: HostConfig,
     inner: Mutex<Inner>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
-    /// Held for the whole of a publish, so snapshots reach the sink in the
-    /// order they were built while `inner` is free between the two.
+    /// Held for a whole publish, so snapshots reach the sink in build
+    /// order while `inner` is free in between.
     publishing: Mutex<()>,
     dialogs: RwLock<Dialogs>,
     /// The `recording` topic's feed, which takes none of the locks above.
     feed: RecordingFeed,
     /// The shell's tray, told the meeting rows with every publish that
-    /// moved them ([`Host::on_tray`]).
+    /// moved them.
     tray: Mutex<Option<TraySink>>,
     /// What asks the reload owner for a pass ([`Host::request_reload`]).
     reloads: Reloads,
 }
 
-/// The reload owner's inbox: a forced pass is owed while `forced` is set,
-/// and `wake` wakes the owner for it. Takes no lock of the host's, so
-/// anything may ask.
+/// The reload owner's inbox: a forced pass is owed while `forced` is set.
+/// Takes no host lock, so anything may ask.
 #[derive(Default)]
 struct Reloads {
     forced: AtomicBool,
@@ -362,7 +271,6 @@ impl recording_feed::Source for Shared {
     }
 }
 
-/// The shell's two native surfaces.
 struct Dialogs {
     confirm: Confirm,
     choose_folder: ChooseFolder,
@@ -370,18 +278,14 @@ struct Dialogs {
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        // The feed's thread holds a `Weak`; woken, it finds no host and
-        // ends.
+        // The feed's thread holds a `Weak`; woken, it finds no host and ends.
         self.feed.wake();
     }
 }
 
-/// Swift: `MainWindowBridge`, `SettingsBridge` and `OnboardingBridge` in
-/// one, over `AppController`. Cheap to clone: every clone is a handle on
-/// the same view models, bound to the window it answers for
+/// The bridge host for all three windows. Cheap to clone: every clone is a
+/// handle on the same view models, bound to the window it answers for
 /// ([`Host::for_window`]).
-///
-/// The whole drive, without a shell:
 ///
 /// ```
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -391,7 +295,6 @@ impl Drop for Shared {
 /// use steno_host::fakes::FakeServices;
 /// use steno_host::{Host, HostConfig};
 ///
-/// // Where the snapshots go: the shell's window channels, here a list.
 /// #[derive(Default)]
 /// struct Sink(std::sync::Mutex<Vec<BridgeTopic>>);
 /// impl EventSink for Sink {
@@ -408,8 +311,7 @@ impl Drop for Shared {
 /// let sink = Arc::new(Sink::default());
 /// host.attach(sink.clone());
 ///
-/// // `page.ready` publishes every topic once, in order, and the
-/// // `recording` feed sends its topic from its own thread.
+/// // `page.ready` publishes every topic once; `recording` comes from the feed.
 /// host.page_ready()?;
 /// let published = || sink.0.lock().unwrap().len();
 /// let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -418,9 +320,7 @@ impl Drop for Shared {
 /// }
 /// assert_eq!(published(), 12);
 ///
-/// // A write from elsewhere (the pipeline, another process) moves the
-/// // store's change mark: the reload owner's next pass reloads what Swift
-/// // followed through observation and republishes.
+/// // A write elsewhere moves the change mark; the next pass republishes.
 /// let mut settings = store.settings()?;
 /// settings.meeting_detection_enabled = false;
 /// store.save_settings(&settings)?;
@@ -430,7 +330,6 @@ impl Drop for Shared {
 ///     false
 /// );
 ///
-/// // One dispatcher per window answers that window's commands.
 /// let onboarding = steno_bridge::Dispatcher::new(host.for_window(BridgeWindow::Onboarding));
 /// assert_eq!(
 ///     onboarding.dispatch_json(r#"{"id":"1","method":"onboarding.back","params":null}"#),
@@ -454,9 +353,8 @@ impl std::fmt::Debug for Host {
     }
 }
 
-/// Every topic, in the order `page.ready` publishes them: the main
-/// window's, then the Settings sections, then onboarding. `recording`
-/// comes from its feed instead, on the feed's thread.
+/// Every topic, in the order `page.ready` publishes them. `recording`
+/// comes from its feed instead.
 pub const TOPICS: [BridgeTopic; 12] = [
     BridgeTopic::App,
     BridgeTopic::Recording,
@@ -472,8 +370,7 @@ pub const TOPICS: [BridgeTopic; 12] = [
     BridgeTopic::Onboarding,
 ];
 
-/// What a model download or remove changes: Settings' Transcription
-/// section and onboarding's speech models row, which reads its states.
+/// What a model download or remove changes.
 const MODEL_TOPICS: [BridgeTopic; 2] =
     [BridgeTopic::SettingsTranscription, BridgeTopic::Onboarding];
 
@@ -486,22 +383,18 @@ const SECTION_TOPICS: [BridgeTopic; 6] = [
     BridgeTopic::SettingsPhone,
 ];
 
-/// What a delete of a meeting that may still be recorded says, as the
-/// Swift host said for a recording row.
+/// What a delete of a meeting that may still be recorded says.
 const STILL_RECORDING: &str = "This meeting is still recording.";
 
-/// A confirmed delete refused because what the recorder kept for the
-/// meeting's recovery could not be forgotten. Rust only.
+/// A confirmed delete refused because the recorder's recovery state for
+/// the meeting could not be forgotten.
 const COULD_NOT_DELETE: &str = "Steno could not delete this meeting.";
 
-/// Swift: `MainWindowBridge.deleteMeetingMessage`.
 pub const DELETE_MEETING_MESSAGE: &str = "The transcript, summary, tasks and the recording on this Mac are removed. Files already exported to Obsidian stay. People stay.";
 
-/// [`DELETE_MEETING_MESSAGE`] on Windows and Linux: "this computer" for
-/// "this Mac".
+/// [`DELETE_MEETING_MESSAGE`] on Windows and Linux.
 pub const DELETE_MEETING_MESSAGE_ELSEWHERE: &str = "The transcript, summary, tasks and the recording on this computer are removed. Files already exported to Obsidian stay. People stay.";
 
-/// Swift: `MainWindowBridge.deleteRecordingPrompt`.
 pub fn delete_recording_prompt() -> ConfirmDestructiveParams {
     ConfirmDestructiveParams {
         title: "Delete this recording now?".to_owned(),
@@ -511,12 +404,9 @@ pub fn delete_recording_prompt() -> ConfirmDestructiveParams {
     }
 }
 
-/// What "Process again" asks first when the meeting has a speaker the user
-/// confirmed or named ([`MeetingDetailViewModel::process_again_asks_first`]):
-/// a run whose diarizer works gives new speakers, and a name it cannot
-/// match to one of them again is cleared; the note is delivered again,
-/// beside the user's own when they edited it. Rust only: the Swift app
-/// refuses "Process again".
+/// What "Process again" asks first when the meeting has a confirmed or
+/// named speaker: a name the new run cannot match again is cleared, and
+/// the note is delivered again.
 pub fn process_again_prompt() -> ConfirmDestructiveParams {
     ConfirmDestructiveParams {
         title: "Process this meeting again?".to_owned(),
@@ -527,8 +417,7 @@ pub fn process_again_prompt() -> ConfirmDestructiveParams {
     }
 }
 
-/// The warning before Pair again (`settings.iphone.pairAgain`), in the
-/// words of `platform`. Rust only.
+/// The warning before Pair again, in the words of `platform`.
 #[must_use]
 pub fn pair_again_prompt(platform: Platform) -> ConfirmDestructiveParams {
     ConfirmDestructiveParams {
@@ -543,20 +432,18 @@ pub fn pair_again_prompt(platform: Platform) -> ConfirmDestructiveParams {
     }
 }
 
-/// System Settings > Privacy & Security > Files and Folders, which the
-/// vault row opens when the write to the vault was refused. Rust only.
+/// System Settings > Privacy & Security > Files and Folders, opened when
+/// the write to the vault was refused.
 pub const FILES_AND_FOLDERS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
 
-/// The preferences flag Swift's `AppController` set on its first launch on
-/// the Mac; here it counts the first launch on Linux and Windows.
+/// The preferences flag that counts the first launch on Linux and Windows
+/// (and, before, the Mac).
 pub const LOGIN_ITEM_REGISTERED_KEY: &str = "steno.loginItemRegistered";
 
 /// The flag that counts the first launch on the Mac, where the login item
-/// is `SMAppService.mainApp` (D4 of `.plans/2026-10-07-stable-promotion.md`).
-/// A key of its own: a desktop build under the earlier identifier set
-/// [`LOGIN_ITEM_REGISTERED_KEY`] for the Launch Agent that the shell now
-/// removes, so that flag must not stop the first registration. Rust only.
+/// is `SMAppService.mainApp`. Its own key: an earlier build set
+/// [`LOGIN_ITEM_REGISTERED_KEY`] for a Launch Agent that is now removed.
 pub const MAIN_APP_REGISTERED_KEY: &str = "steno.mainAppRegistered";
 
 /// The flag that counts the first launch on `platform`
@@ -578,20 +465,17 @@ fn no_selection() -> BridgeError {
 }
 
 impl Host {
-    /// Loads every view model from the store and the services. Nothing is
-    /// published until a sink is attached and `page.ready` arrives. The
-    /// host reads on a reader of its own ([`Store::with_own_reader`]), held
-    /// with its view models until the last clone is dropped; a second host
-    /// over the same store fails with [`StoreError::OwnReaderOpen`] until
-    /// then.
+    /// Loads every view model; nothing is published until a sink is
+    /// attached and `page.ready` arrives. Holds a reader of its own until
+    /// the last clone drops, so a second host over the same store fails
+    /// with [`StoreError::OwnReaderOpen`].
     pub fn new(
         store: Arc<Store>,
         services: Services,
         config: HostConfig,
     ) -> Result<Self, HostError> {
         let own = Arc::new(store.with_own_reader()?);
-        // Before the loads, so a commit or a move of the recorder after
-        // them reloads at the next pass.
+        // Before the loads, so a change after them reloads at the next pass.
         let reloaded_at = own.change_mark().ok();
         let recorder = services.recorder.status();
         let key = KeyRead::from(block_on(services.secrets.secret(&SecretKey::llm_api_key())));
@@ -624,7 +508,6 @@ impl Host {
             phone: Self::phone_card(&services),
             ..AppState::default()
         };
-        // `recording` is the feed's.
         let publisher = TopicPublisher::new(
             TOPICS
                 .into_iter()
@@ -674,8 +557,8 @@ impl Host {
         })
     }
 
-    /// The shell's two native surfaces, shared by every clone. Without
-    /// them every destructive prompt declines and every chooser cancels.
+    /// The shell's two native surfaces. Without them every destructive
+    /// prompt declines and every chooser cancels.
     #[must_use]
     pub fn with_dialogs(self, confirm: Confirm, choose_folder: ChooseFolder) -> Self {
         *self
@@ -696,12 +579,11 @@ impl Host {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Asks the shell's destructive prompt.
     fn confirm(&self, prompt: &ConfirmDestructiveParams) -> bool {
         (self.dialogs().confirm)(prompt)
     }
 
-    /// The same host, answering for `window`: see the module doc.
+    /// The same host, answering for `window`.
     #[must_use]
     pub fn for_window(&self, window: BridgeWindow) -> Host {
         Host {
@@ -710,26 +592,24 @@ impl Host {
         }
     }
 
-    /// The window this handle answers for.
     #[must_use]
     pub fn window(&self) -> BridgeWindow {
         self.window
     }
 
-    /// The sink snapshots go to. Swift: `attach(_:)`.
+    /// The sink snapshots go to.
     pub fn attach(&self, sink: Arc<dyn EventSink>) {
         *lock(&self.shared.sink) = Some(sink);
     }
 
-    /// Where the tray's meeting rows go: told them now, and again with
-    /// every publish of `progress` or `meetings.list`, page or none.
+    /// Where the tray's meeting rows go: now, and with every publish of
+    /// `progress` or `meetings.list`.
     pub fn on_tray(&self, sink: TraySink) {
         let _publishing = lock(&self.shared.publishing);
         sink(self.tray_meetings());
         *lock(&self.shared.tray) = Some(sink);
     }
 
-    /// The tray's meeting rows as the view models stand.
     #[must_use]
     pub fn tray_meetings(&self) -> TrayMeetings {
         let inner = self.lock();
@@ -741,16 +621,13 @@ impl Host {
         &self.shared.services
     }
 
-    /// The shared store, the one the host was built over, for code that
-    /// runs without the host's lock: its reads use the shared reader.
+    /// The shared store, for code that runs without the host's lock.
     #[must_use]
     pub fn store(&self) -> &Arc<Store> {
         &self.shared.store
     }
 
-    /// The iPhone card for the `app` topic: the first paired device, as
-    /// reachable as the listener is listening. The Swift main window left
-    /// it nil; the parity list notes the difference.
+    /// The iPhone card for the `app` topic: the first paired device.
     fn phone_card(services: &Services) -> Option<AppPhone> {
         let handover = services.handover.as_ref()?;
         let device = handover.paired_devices().ok()?.into_iter().next()?;
@@ -772,17 +649,10 @@ impl Host {
         lock(&self.shared.inner)
     }
 
-    // Publishing
-
-    /// The topic's snapshot as the view models stand, with the publish
-    /// hooks the Swift bridges ran before building (the list's fill and
-    /// the detail swap). `None` for a topic the host does not send; `null`
-    /// for `meeting.detail` without a selection. Those hooks may change
-    /// state (a pending selection lands, the detail model swaps) and queue
-    /// topics, which go out with the next publish, not from here.
-    ///
-    /// `recording` is read from the recorder directly, with no lock of the
-    /// host's taken, as its feed reads it.
+    /// The topic's snapshot as the view models stand, after the publish
+    /// hooks (the list's fill, the detail swap), which may change state and
+    /// queue topics for the next publish. `None` for a topic the host does
+    /// not send; `null` for `meeting.detail` without a selection.
     pub fn snapshot(&self, topic: BridgeTopic) -> Option<Value> {
         if topic == BridgeTopic::Recording {
             let status = self.shared.services.recorder.status();
@@ -792,22 +662,19 @@ impl Host {
         self.build(&mut inner, topic)
     }
 
-    /// A test's hold on the view models, as a reload or a save that waits
-    /// on the store holds them.
+    /// A test's hold on the view models.
     #[cfg(test)]
     pub(crate) fn hold_view_models(&self) -> impl Sized + '_ {
         self.lock()
     }
 
-    /// The `recording` feed's thread, taken, so a test can tell that it
-    /// ended.
+    /// The `recording` feed's thread, taken, so a test can tell it ended.
     #[cfg(test)]
     pub(crate) fn take_feed_thread(&self) -> Option<thread::JoinHandle<()>> {
         self.shared.feed.take_thread()
     }
 
-    /// Every topic but `recording`, which the feed sends
-    /// ([`recording_feed`]).
+    /// Every topic but `recording`.
     fn build(&self, inner: &mut Inner, topic: BridgeTopic) -> Option<Value> {
         let now = self.now();
         let snapshot = match topic {
@@ -885,11 +752,9 @@ impl Host {
         snapshot.ok()
     }
 
-    /// Publishes every pending topic: builds the snapshots under the lock,
-    /// emits them once it is released and the page is ready, in build
-    /// order, and runs the publish's side effects (a deep link is consumed
-    /// by the publish that carried it). Called at the end of every command
-    /// and every pass, never with the view models held.
+    /// Publishes every pending topic: builds under the lock, emits once it
+    /// is released and the page is ready, and runs the side effects. Never
+    /// called with the view models held.
     fn publish(&self) {
         let _publishing = lock(&self.shared.publishing);
         // Bounded: each pass only schedules what a consumed request changed.
@@ -904,8 +769,8 @@ impl Host {
                     .iter()
                     .any(|topic| matches!(topic, BridgeTopic::Progress | BridgeTopic::MeetingsList))
                     .then(|| tray::tray_meetings(&inner.list, &inner.progress, &inner.reviews));
-                // Nothing goes out before `page.ready`; the snapshots are
-                // still built for their side effects.
+                // Nothing goes out before `page.ready`; snapshots are still
+                // built for their side effects.
                 let sink = lock(&self.shared.sink)
                     .clone()
                     .filter(|_| inner.publisher.is_page_ready());
@@ -930,14 +795,10 @@ impl Host {
         }
     }
 
-    /// The app publish consumes the controller's requests after the
-    /// snapshot has carried them once: the meeting becomes the selection,
-    /// the section is cleared once the page saw it. The `app` topic goes to
-    /// the main and the Settings window, so the first emit clears a
-    /// Settings deep link whichever window received it; that is enough
-    /// because the shell also passes the section in the route of a
-    /// Settings window it opens (`apps/desktop/src-tauri/src/windows.rs`),
-    /// so a window that opens later still lands on it.
+    /// Consumes the controller's requests once the `app` snapshot carried
+    /// them. A Settings deep link is cleared at the first emit to either
+    /// window; the shell also passes the section in the route of a window
+    /// it opens, so a later window still lands on it.
     fn did_publish_app(inner: &mut Inner, emitted: bool) {
         if let Some(requested) = inner.app.requested_meeting_id.take() {
             inner.pending_selection = None;
@@ -951,10 +812,9 @@ impl Host {
         }
     }
 
-    /// The list publish's side effects: a selection asked for ahead of its
-    /// row is applied once the row is listed, the first fill selects the
-    /// newest meeting, and `has_meetings` flips (re-publishing `app`) only
-    /// when the list empties or fills.
+    /// The list publish's side effects: a pending selection lands once its
+    /// row is listed, the first fill selects the newest meeting, and
+    /// `has_meetings` flips only when the list empties or fills.
     fn follow_list_fill(inner: &mut Inner) {
         let filled = !inner.list.all.is_empty();
         if let Some(pending) = inner.pending_selection
@@ -972,8 +832,7 @@ impl Host {
         }
     }
 
-    /// One detail model per selected meeting, torn down when the selection
-    /// moves on.
+    /// One detail model per selected meeting.
     fn sync_detail(&self, inner: &mut Inner) {
         let selection = inner.list.selection;
         if selection == inner.detail.as_ref().map(|detail| detail.id) {
@@ -998,69 +857,47 @@ impl Host {
         inner.publisher.schedule(BridgeTopic::MeetingDetail);
     }
 
-    // What the app tells the host between commands
-
-    /// The store changed (the pipeline wrote, a recording started, another
-    /// process saved): a forced pass ([`Self::reload_pass`]) on the
-    /// caller's thread, which reloads what Swift followed through
-    /// observation and republishes it, whatever the change mark says. The
-    /// launch's first load and its reconcile and the tests call it;
-    /// everything else asks the reload owner ([`Self::request_reload`]).
+    /// A forced pass ([`Self::reload_pass`]) on the caller's thread,
+    /// whatever the change mark says. For the launch and the tests;
+    /// everything else calls [`Self::request_reload`].
     pub fn store_changed(&self) {
         self.pass(true);
     }
 
-    /// Asks the reload owner (the services' poll task) for a forced pass:
-    /// sets a flag and wakes it, and takes no lock of the host's, so any
-    /// thread may ask, with any lock held. Requests made while a pass runs
-    /// fold into one more pass. The event follower asks after it applied
-    /// an event, the recording feed when the recorder's state or meeting
-    /// moved.
+    /// Asks the reload owner for a forced pass. Takes no host lock, so any
+    /// thread may ask with any lock held; requests during a pass fold into
+    /// one more pass.
     pub fn request_reload(&self) {
         self.shared.request_reload();
     }
 
-    /// Completes once a reload was asked for ([`Self::request_reload`]),
-    /// at once when one was asked since the last wait: what the reload
-    /// owner waits for beside its tick.
+    /// Completes once a reload was asked for since the last wait.
     pub async fn reload_requested(&self) {
         self.shared.reloads.wake.notified().await;
     }
 
-    /// How many reloads were asked for since the host was built. Tests
-    /// read it.
+    /// How many reloads were asked for, for the tests.
     #[doc(hidden)]
     #[must_use]
     pub fn reload_request_count(&self) -> u64 {
         self.shared.reloads.requests.load(Ordering::Relaxed)
     }
 
-    /// The host's own store handle, whose reader its reloads read on
-    /// ([`Store::with_own_reader`]), so a test can hold that reader. Takes
-    /// the view-model lock. Tests only; never call it under the view-model
-    /// lock or hold its reader.
+    /// The host's own store handle, so a test can hold its reader. Takes
+    /// the view-model lock; tests only.
     #[doc(hidden)]
     #[must_use]
     pub fn own_store(&self) -> Arc<Store> {
         self.lock().store.clone()
     }
 
-    /// One pass of the reload owner, which the services run on each poll
-    /// tick and each request (`steno_services::App::launch`). It takes the
-    /// view-model lock and runs the light part, which follows what the
-    /// store does not hold (the pairing, the subtitles over the OS
-    /// permissions and the models, the withheld API key, and the system
-    /// audio rows' wait for the recording, cleared once the recorder is
-    /// idle). It reloads the list, the progress, the detail and the
-    /// stored settings only when a reload was asked for since the last
-    /// pass or the store's change mark ([`Store::change_mark`]) moved since
-    /// the last reload: the flag is taken before the mark is read, and the
-    /// mark before the reload reads, so a request or a commit that comes
-    /// during a pass is caught by the next. An idle app reloads nothing.
-    /// When the stored settings changed, the Settings sections load again
-    /// too (an unsaved draft in one of them is replaced by the stored
-    /// values, as reopening the Swift window did); a write that left the
-    /// settings alone keeps every draft.
+    /// One pass of the reload owner. Runs the light part (pairing,
+    /// subtitles, the withheld key, the system audio rows) every time, and
+    /// reloads rows and stored settings only when a reload was asked for or
+    /// the change mark moved. The flag is taken before the mark is read and
+    /// the mark before the reload reads, so a request or commit during a
+    /// pass is caught by the next. Changed settings reload the Settings
+    /// sections too, replacing any unsaved draft.
     pub fn reload_pass(&self) {
         self.pass(false);
     }
@@ -1081,8 +918,7 @@ impl Host {
         self.publish();
     }
 
-    /// The reload's rows: the list, the progress over it and the open
-    /// detail, all scheduled.
+    /// The list, the progress over it and the open detail, all scheduled.
     fn reload_rows(&self, inner: &mut Inner) {
         let now = self.now();
         inner.list.reload(&inner.store);
@@ -1104,13 +940,9 @@ impl Host {
         }
     }
 
-    /// A pass's light part ([`Self::reload_pass`]), every pass. The pairing
-    /// poll Swift's Phones pane ran every two seconds while a code was
-    /// shown: a phone that arrived closes the code and a code that ran out
-    /// closes itself, and `settings.phone` is published each time. Once
-    /// the recorder is idle, the system audio rows no longer say the test
-    /// was refused for the recording (`Host::waits_for_recording`). A
-    /// clip that ended republishes the detail, so its play button resets.
+    /// A pass's light part: the pairing poll (a phone that arrived or a
+    /// code that ran out closes the code), the system audio rows once the
+    /// recorder is idle, and the detail once a clip ended.
     fn follow_outside_the_store(&self, inner: &mut Inner) {
         let now = self.now();
         inner
@@ -1133,11 +965,8 @@ impl Host {
         self.follow_key_and_subtitles(inner);
     }
 
-    /// The recorder's state, levels or messages changed: pokes the
-    /// `recording` feed and returns, with no lock taken, so the levels
-    /// thread and the stop's thread never wait for the host. When the
-    /// recorder's state or meeting moved, the feed asks the reload owner
-    /// for a pass ([`recording_feed`]).
+    /// Pokes the `recording` feed and returns with no lock taken, so the
+    /// recorder's threads never wait for the host.
     pub fn recorder_changed(&self) {
         self.shared.feed.poke();
     }
@@ -1168,7 +997,6 @@ impl Host {
         self.publish();
     }
 
-    /// The handover listener or a transfer changed.
     pub fn phones_changed(&self) {
         {
             let mut inner = self.lock();
@@ -1179,10 +1007,8 @@ impl Host {
         self.publish();
     }
 
-    /// An update check started or ended, outside a command (the daily
-    /// schedule, the tray's Check for Updates): the General section and the
-    /// overview's subtitle follow. Rust only: the Swift view model observed
-    /// `UpdaterController`.
+    /// An update check started or ended outside a command: General and
+    /// the overview follow.
     pub fn updates_changed(&self) {
         {
             let mut inner = self.lock();
@@ -1203,7 +1029,7 @@ impl Host {
         self.publish();
     }
 
-    /// Deep link into Settings. Swift: `AppController.openSettings`.
+    /// Deep link into Settings.
     pub fn open_settings(&self, section: SettingsSection) {
         {
             let mut inner = self.lock();
@@ -1213,7 +1039,6 @@ impl Host {
         self.publish();
     }
 
-    /// Whether the onboarding window should open at launch.
     #[must_use]
     pub fn should_open_onboarding(&self) -> bool {
         OnboardingViewModel::should_open(
@@ -1223,26 +1048,15 @@ impl Host {
         )
     }
 
-    /// The first launch with the setting on registers the login item, once:
-    /// only while it reads `NotRegistered`, as in Swift, so one already
-    /// enabled or awaiting approval is left as it is and the launch counts.
-    /// The count is a preferences flag per platform ([`first_launch_key`]);
-    /// after it, only the switch in General registers or removes the login
-    /// item, so one the user removed in the system's settings stays
-    /// removed. A login item the system manages is left alone, and the
-    /// first launch is not counted, so a later install that leaves launch
-    /// at login to the app still registers it once. Nor is a launch counted
-    /// whose registration failed (on Linux, no launcher at a path that
-    /// outlives an upgrade): a warning is logged, General shows the switch
-    /// off, and a later launch tries again. On the Mac a login item the
-    /// system cannot find (`NotFound`) is not counted either: a run outside
-    /// an app bundle, such as `cargo run`, reads it, shares the installed
-    /// app's preferences, and would otherwise stop the installed app's
-    /// first registration for good. Nor, on the Mac, does a launch from
-    /// outside an installed bundle register or count anything
-    /// ([`HostConfig::installed_bundle`]). Swift:
-    /// `AppController.registerLoginItemOnFirstLaunch`, which counts the
-    /// launch before it registers.
+    /// Registers the login item on the first launch with the setting on,
+    /// once, and only while it reads `NotRegistered`; afterwards only the
+    /// General switch changes it. The launch is not counted
+    /// ([`first_launch_key`]) when the system manages the item, when the
+    /// registration failed, or on the Mac when the item reads `NotFound`
+    /// (a run outside a bundle, such as `cargo run`, would otherwise stop
+    /// the installed app's first registration). On the Mac a launch from
+    /// outside an installed bundle does nothing
+    /// ([`HostConfig::installed_bundle`]).
     pub fn register_login_item_on_first_launch(&self) {
         use crate::services::LoginItemStatus;
         let config = &self.shared.config;
@@ -1280,18 +1094,13 @@ impl Host {
         inner.general.login_item = login_item.status();
     }
 
-    /// The onboarding window closed, by its own close button or after the
-    /// close Finish asked for; the shell calls this for either. Closing
-    /// counts as having seen the pages, so the opener returns only for a
-    /// missing required permission (Swift: `OnboardingWindow.onDisappear`),
-    /// and the model starts over, as Swift built one per window: a window
-    /// opened again begins on page 1, not finished.
+    /// The onboarding window closed. Closing counts as having seen the
+    /// pages, so it reopens only for a missing required permission, and
+    /// the model starts over at page 1.
     pub fn onboarding_window_closed(&self) {
         OnboardingViewModel::mark_completed(&self.shared.services);
-        // Closing the window over the import step skips it: phone
-        // handover waits, and the step returns at the next launch. The
-        // skip never waits: a run whose prompt is up is left to end by
-        // itself.
+        // Closing over the import step skips it until the next launch,
+        // without waiting for a prompt that is up.
         if let Some(import) = &self.shared.services.swift_import
             && import.status().stage == crate::services::SwiftImportStage::Pending
         {
@@ -1309,11 +1118,8 @@ impl Host {
     }
 
     /// The secret store answers again after a read failed while the
-    /// keyring asked the user (it opened, or the choice fell to the file):
-    /// the Summaries section and onboarding's summaries step read the API
-    /// key again, unless their key field holds an unsaved edit or a save
-    /// wrote the key while it was read, and keep everything else they show
-    /// ([`LlmSettingsViewModel::reload_key`]).
+    /// keyring asked: Summaries and onboarding read the key again, unless
+    /// it holds an unsaved edit ([`LlmSettingsViewModel::reload_key`]).
     pub fn secrets_changed(&self) {
         let read_at = {
             let inner = self.lock();
@@ -1341,8 +1147,6 @@ impl Host {
         ))
     }
 
-    // Helpers for the commands
-
     fn with_detail<R>(
         inner: &mut Inner,
         body: impl FnOnce(&mut MeetingDetailViewModel, &Store) -> R,
@@ -1355,9 +1159,8 @@ impl Host {
             .ok_or_else(no_selection)
     }
 
-    /// A command on the selected meeting's detail (`no_selection` without
-    /// one) that changes only the detail's own state: the detail topic
-    /// republishes.
+    /// A command on the selected detail (`no_selection` without one) that
+    /// changes only the detail's own state.
     fn detail_command<R>(&self, body: impl FnOnce(&mut MeetingDetailViewModel) -> R) -> Outcome<R> {
         self.on_detail(
             |detail, _| body(detail),
@@ -1367,9 +1170,8 @@ impl Host {
         )
     }
 
-    /// A command on the selected meeting's detail after which the detail,
-    /// or the pipeline on its behalf, wrote to the store: the detail and
-    /// the list reload before publishing.
+    /// A command on the selected detail after which the store changed: the
+    /// detail and the list reload before publishing.
     fn detail_write<R>(
         &self,
         body: impl FnOnce(&mut MeetingDetailViewModel, &Store) -> R,
@@ -1392,8 +1194,7 @@ impl Host {
         outcome
     }
 
-    /// Runs the shell's folder chooser from `current` and `apply` on the
-    /// chosen folder; the reply carries the choice, `None` when cancelled.
+    /// Runs the folder chooser from `current` and `apply` on the choice.
     fn choose(&self, current: Option<&Path>, apply: impl FnOnce(&Path)) -> ChosenPathReply {
         let chosen = (self.dialogs().choose_folder)(current);
         if let Some(folder) = &chosen {
@@ -1404,7 +1205,6 @@ impl Host {
         }
     }
 
-    /// The detail's store state after a write the detail made itself.
     fn reload_detail(&self, inner: &mut Inner) {
         if let Some(detail) = inner.detail.as_mut() {
             detail.reload(
@@ -1418,8 +1218,7 @@ impl Host {
         inner.publisher.schedule(BridgeTopic::MeetingDetail);
     }
 
-    /// The sidebar subtitles follow every Settings command; a change
-    /// republishes every section, as the observed map did.
+    /// Refreshes the sidebar subtitles; a change republishes every section.
     fn refresh_subtitles(&self, inner: &mut Inner) {
         let next = overview::refresh(
             &inner.store,
@@ -1435,24 +1234,18 @@ impl Host {
         }
     }
 
-    /// After a command that may have written settings: the stored settings
-    /// the `app` topic and the detail read are re-read, and when they
-    /// changed from another window's point of view (`reload_sections`: a
-    /// store change, an onboarding save) the Settings sections load again,
-    /// as Swift's did when its window opened. The subtitles follow either
-    /// way, and so does the speech fallback ([`Self::follow_speech_fallback`]).
+    /// After a command that may have written settings: re-reads them, and
+    /// when `reload_sections` and they changed, reloads the Settings
+    /// sections. The subtitles and the speech fallback follow either way.
     fn follow_settings(&self, inner: &mut Inner, reload_sections: bool) {
         self.follow_stored_settings(inner, reload_sections);
         self.follow_speech_fallback(inner);
         self.follow_key_and_subtitles(inner);
     }
 
-    /// A Summaries save that rebuilt the pipeline ends a rebuild "Use
-    /// again" left pending ([`SpeechSettingsViewModel::pipeline_rebuilt`]),
-    /// and a meeting waiting for its models says the Neural Engine is off
-    /// exactly while the Transcription section does. The import's one-off
-    /// reload at its key gate does not pass here; the next launch reads
-    /// the fallback's file either way. Rust only.
+    /// A Summaries save that rebuilt the pipeline ends a pending "Use
+    /// again" rebuild, and a meeting waiting for its models says the
+    /// Neural Engine is off exactly while Transcription does.
     fn follow_speech_fallback(&self, inner: &mut Inner) {
         let settings = inner.llm.take_pipeline_rebuilt();
         let onboarding = inner.onboarding.llm.take_pipeline_rebuilt();
@@ -1471,8 +1264,6 @@ impl Host {
         }
     }
 
-    /// [`Self::follow_settings`]'s read of the stored settings, and the
-    /// sections' load when they changed and `reload_sections` says so.
     fn follow_stored_settings(&self, inner: &mut Inner, reload_sections: bool) {
         let latest = inner.store.settings().ok();
         if latest != inner.app.stored_settings {
@@ -1490,21 +1281,17 @@ impl Host {
         }
     }
 
-    /// [`Self::follow_settings`]'s tail, which reads no stored row but the
-    /// settings the subtitles name.
     fn follow_key_and_subtitles(&self, inner: &mut Inner) {
-        // A key saved, or the import's step over, may release a withheld
-        // key without a settings change: the detail follows it as well.
+        // A saved key may release a withheld key without a settings change.
         if self.follow_key_withheld(inner) {
             inner.publisher.schedule(BridgeTopic::MeetingDetail);
         }
         self.refresh_subtitles(inner);
     }
 
-    /// Sets the open detail's `key_withheld` to whether the API key is
-    /// withheld for the stored endpoint now
-    /// ([`WithheldApiKey`](crate::services::WithheldApiKey)), as the
-    /// pipeline asks it; true when that changed it.
+    /// Sets the open detail's `key_withheld` from the stored endpoint now
+    /// ([`WithheldApiKey`](crate::services::WithheldApiKey)); true when it
+    /// changed.
     fn follow_key_withheld(&self, inner: &mut Inner) -> bool {
         let withheld = self
             .shared
@@ -1521,17 +1308,11 @@ impl Host {
         changed
     }
 
-    /// Every Settings section's `load`, as `SettingsBridge.load()` ran them
-    /// when the window opened. A download in flight keeps its state. The
-    /// API key is read from the secret store here with the lock held: this
-    /// runs only when the stored settings changed (an outside write, an
-    /// onboarding save), and moving it out would split one reload into two
-    /// publishes. On Linux and Windows the read never asks the user (the
-    /// Secret Service store asks only on a write or at its own start); on
-    /// the Mac the Keychain may show its access dialog for an item another
-    /// app wrote (the Swift app's key, once at the cutover), and every
-    /// window waits until the user answers it. A `SecretStore` must not call
-    /// back into the host.
+    /// Every Settings section's `load`; a download in flight keeps its
+    /// state. Reads the API key with the lock held, which runs only when the
+    /// stored settings changed. On the Mac the Keychain may show its access
+    /// dialog here and every window waits for it. A `SecretStore` must not
+    /// call back into the host.
     fn reload_sections(&self, inner: &mut Inner) {
         let store = &inner.store;
         let services = &self.shared.services;
@@ -1556,11 +1337,9 @@ impl Host {
         self.publish();
     }
 
-    /// An onboarding command: page 2 writes the same settings the Summaries
-    /// and Export sections show, so those reload when it did. The exit is
-    /// the model's: the command that sets `finished` closes the window, as
-    /// `OnboardingWindow` did on that change, after the page saw it.
-    /// Answers what `body` answered.
+    /// An onboarding command: page 2 writes the settings Summaries and
+    /// Export show, so those reload when it did. Answers what `body`
+    /// answered.
     fn onboarding_command<R>(&self, body: impl FnOnce(&mut Inner) -> R) -> R {
         let (answer, finished) = {
             let mut inner = self.lock();
@@ -1583,12 +1362,9 @@ impl Host {
     }
 
     /// Page 1's vault row ([`OnboardingViewModel::begin_vault_check`]):
-    /// when the model says the check is due, the row reads checking and
-    /// the probe write runs on its own thread, since macOS holds it while
-    /// its Files and Folders prompt is up; the outcome lands on the row.
-    /// Called once the onboarding page is ready and after every onboarding
-    /// command, so a page that reaches page 1 later (after the import step,
-    /// Back from page 2) checks then.
+    /// when the check is due, the probe write runs on its own thread, since
+    /// macOS holds it while its Files and Folders prompt is up. Called once
+    /// the page is ready and after every onboarding command.
     fn check_vault_if_due(&self) {
         let settings = {
             let mut guard = self.lock();
@@ -1625,9 +1401,8 @@ impl Host {
     }
 
     /// A command on the Export section whose `edit` may begin a save: the
-    /// vault check ([`VaultSave::validate`]) writes and removes a probe
-    /// file in the vault, so it runs with the lock released, and the save
-    /// lands under it again. Rust only: Swift validated on the main actor.
+    /// vault check ([`VaultSave::validate`]) writes a probe file, so it runs
+    /// with the lock released.
     fn export_command(
         &self,
         edit: impl FnOnce(&mut ObsidianSettingsViewModel) -> Option<VaultSave>,
@@ -1645,8 +1420,8 @@ impl Host {
         });
     }
 
-    /// Page 2's vault save, checked with the lock released as
-    /// [`export_command`](Self::export_command) checks the Export section's.
+    /// Page 2's vault save, checked as
+    /// [`export_command`](Self::export_command) does.
     fn onboarding_vault_command(&self, begin: impl FnOnce(&mut OnboardingViewModel) -> VaultSave) {
         let save = self.onboarding_command(|inner| begin(&mut inner.onboarding));
         let validated = save.validate(&self.shared.services);
@@ -1672,31 +1447,24 @@ impl Host {
     }
 
     /// Whether a request for `kind` is refused for the recording: the
-    /// system audio test plays a tone, and a recording that is starting,
-    /// running or stopping would pick it up. Asked before the request, so the row
-    /// never shows Asking for a test that cannot run. The services keep
-    /// the two apart as well, for a start that comes while the test runs
-    /// (`steno_services::permissions`).
+    /// system audio test plays a tone a starting, running or stopping
+    /// recording would pick up.
     fn waits_for_recording(&self, kind: PermissionKind) -> bool {
         kind == PermissionKind::SystemAudio
             && self.shared.services.recorder.status().state != RecordingState::Idle
     }
 
     /// Requests `kind`, and says whether the request waited for the
-    /// recording after all: a start during the system audio test stopped
-    /// it, so it found nothing and the state is still `unknown`.
+    /// recording after all (a start during the test stopped it).
     fn request_unless_recording(&self, kind: PermissionKind) -> (PermissionState, bool) {
         let state = self.shared.services.permissions.request(kind);
         let waited = state == PermissionState::Unknown && self.waits_for_recording(kind);
         (state, waited)
     }
 
-    /// Marks a view model busy under the lock and publishes, runs `work`
-    /// with the lock released, then applies its result under the lock and
-    /// publishes again: the page sees the busy flag while a prompt or a
-    /// probe is up, and no other topic waits on it. `begin` returns `None`
-    /// when there is nothing to run. Swift awaited inside the model, on the
-    /// main actor, which blocked nothing else.
+    /// Marks a view model busy and publishes, runs `work` with the lock
+    /// released, then applies its result and publishes again. `begin`
+    /// returns `None` when there is nothing to run.
     fn outside_lock<W, R>(
         &self,
         topic: BridgeTopic,
@@ -1725,7 +1493,6 @@ impl Host {
         self.publish();
     }
 
-    /// The topic the window's Summaries form rides on.
     fn summaries_topic(window: BridgeWindow) -> BridgeTopic {
         if window == BridgeWindow::Onboarding {
             BridgeTopic::Onboarding
@@ -1734,14 +1501,10 @@ impl Host {
         }
     }
 
-    /// A command on `window`'s Summaries form: that window's model, its own
-    /// topic, and the probe the model asked for run outside the lock
-    /// afterwards. The four form commands pass the calling window (see the
-    /// module doc), the Codex card and Save the Settings window. A save
-    /// that writes the key does so under the lock, and a keyring may ask
-    /// the user to confirm or unlock that write (the Linux store waits up
-    /// to two minutes): until the user answers, every window and the tray
-    /// wait with it.
+    /// A command on `window`'s Summaries form, then the probe the model
+    /// asked for, outside the lock. A save writes the key under the lock,
+    /// and a keyring may ask the user first (up to two minutes on Linux):
+    /// every window and the tray wait with it.
     fn summaries_command(
         &self,
         window: BridgeWindow,
@@ -1758,9 +1521,8 @@ impl Host {
         self.run_pending_probe(window);
     }
 
-    /// Runs the probe the window's Summaries model asked for, if any:
-    /// `isTesting` goes out first, the service is called with the lock
-    /// released, the report lands and goes out.
+    /// Runs the probe the window's Summaries model asked for, if any, with
+    /// the lock released.
     fn run_pending_probe(&self, window: BridgeWindow) {
         if !self.lock().llm_mut(window).probe_pending() {
             return;
@@ -1798,8 +1560,6 @@ impl Host {
         });
     }
 
-    /// A settings command over the model states, which Settings'
-    /// Transcription section and onboarding's speech models row both read.
     fn models_command(&self, body: impl FnOnce(&mut Inner)) {
         self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
             body(inner);
@@ -1807,15 +1567,11 @@ impl Host {
         });
     }
 
-    /// Applies the keep flag to `meeting_id`, the meeting selected when the
-    /// command arrived, after the delete-recording prompt when `confirming`;
-    /// the reply says whether the user went ahead. The prompt runs with the
-    /// lock released, so the selection can move while it is up (a recording
-    /// starts, a deep link lands): the answer still lands on the meeting it
-    /// was asked for, as Swift's did (`setKeepAudio(_:on:confirming:)` held
-    /// that meeting's detail model). A meeting deleted meanwhile is
-    /// `not_found` and nothing changes. A refusal goes on the detail's error
-    /// line while that meeting is selected, else into a `failed` reply.
+    /// Applies the keep flag to `meeting_id`, after the delete-recording
+    /// prompt when `confirming`; the reply says whether the user went
+    /// ahead. The prompt runs with the lock released, so the answer lands
+    /// on the meeting it was asked for even if the selection moved. A
+    /// meeting deleted meanwhile is `not_found`.
     fn set_keep_audio(
         &self,
         keep: bool,
@@ -1851,13 +1607,12 @@ impl Host {
         outcome
     }
 
-    /// Marks the iPhone section busy and publishes it; `false` while Try
-    /// again or Pair again already runs.
+    /// Marks the iPhone section busy; `false` while Try again or Pair again
+    /// already runs.
     fn begin_phones_busy(&self) -> bool {
         self.change_phones(PhonesSettingsViewModel::begin_busy)
     }
 
-    /// `change` on the iPhone section, then publishes the section alone.
     fn change_phones<T>(&self, change: impl FnOnce(&mut PhonesSettingsViewModel) -> T) -> T {
         let changed = {
             let mut inner = self.lock();
@@ -1869,10 +1624,8 @@ impl Host {
         changed
     }
 
-    /// Try again's or Pair again's outcome through `finish`, and what it
-    /// may have changed: the sidebar's subtitle, the main window's phone
-    /// card, and the import step, which Try again may have run (unless the
-    /// onboarding window runs it now and publishes its own outcome).
+    /// Try again's or Pair again's outcome, and what it may have changed:
+    /// the subtitle, the phone card and the import step.
     fn finish_phones_busy(&self, finish: impl FnOnce(&mut PhonesSettingsViewModel, &Services)) {
         let services = &self.shared.services;
         let import = {
@@ -1893,9 +1646,8 @@ impl Host {
         }
     }
 
-    /// The import's outcome on the step, and everything it may have
-    /// changed: the API key the Summaries sections read and the listener
-    /// the Phones section and the main window's phone card show.
+    /// The import's outcome on the step, and the key and listener it may
+    /// have changed.
     fn finish_swift_import(&self, status: crate::services::SwiftImportStatus, skipped: bool) {
         let services = &self.shared.services;
         self.onboarding_command(|inner| {
@@ -1911,11 +1663,10 @@ impl Host {
         });
     }
 
-    /// Page 1 moves on by itself once every step is handled, as the Swift
-    /// page did, the speech models row has nothing left to download, and
-    /// the vault row is neither checking nor refused (Check again makes its
-    /// check due before this runs); only after a command that can change a
-    /// step, so Back from page 2 stays on page 1.
+    /// Page 1 moves on by itself once every step is handled, nothing is
+    /// left to download and the vault row is neither checking nor refused.
+    /// Only after a command that can change a step, so Back from page 2
+    /// stays on page 1.
     fn advance_if_handled(&self, inner: &mut Inner) {
         if inner.onboarding.page == steno_bridge::OnboardingPage::Permissions
             && inner.onboarding.permissions_handled()
@@ -1927,8 +1678,7 @@ impl Host {
     }
 
     /// The page's option back into the model's: a person is looked up
-    /// among the people the picker was built from; a create row carries
-    /// its name.
+    /// among the picker's people; a create row carries its name.
     fn model_option(option: &SpeakerOption, inner: &Inner) -> Outcome<ModelOption> {
         match option.kind {
             SpeakerOptionKind::Person => {
@@ -1971,8 +1721,7 @@ impl Inner {
         self.subtitles.get(&section).map_or("", String::as_str)
     }
 
-    /// The Summaries model the window owns: onboarding's on page 2, the
-    /// Settings section's otherwise.
+    /// The Summaries model the window owns.
     fn llm_mut(&mut self, window: BridgeWindow) -> &mut LlmSettingsViewModel {
         if window == BridgeWindow::Onboarding {
             &mut self.onboarding.llm
@@ -1982,7 +1731,6 @@ impl Inner {
     }
 }
 
-/// A picker row in the wire vocabulary; the tag is the row's detail.
 fn wire_option(option: &ModelOption) -> SpeakerOption {
     match &option.kind {
         OptionKind::Person(person) => SpeakerOption {
@@ -2002,17 +1750,10 @@ fn wire_option(option: &ModelOption) -> SpeakerOption {
 
 /// The entry a confirmed delete forgot
 /// ([`Recorder::forget_recording`](crate::services::Recorder::forget_recording)),
-/// recorded again when dropped unless the rows went (`folder` taken): a
-/// delete refused (the pipeline took the meeting up while the prompt was
-/// open), not committed, or unwound by a panic keeps its row, and until
-/// the row is durable its entry is what lets a launch adopt the master.
-/// Unless the row is gone: a second prompt for the meeting, answered
-/// after the first one deleted it, records nothing again, and a row that
-/// cannot be read keeps its entry. The read and the restore hold the host
-/// lock, which every delete commits under, so no other prompt's delete
-/// lands between them. Dropped with the lock released: after
-/// [`Host::command`] returns, or as a panic unwinds past its guard. Rust
-/// only.
+/// recorded again on drop unless the rows went (`folder` taken), so a
+/// refused, uncommitted or panicked delete keeps what lets a launch adopt
+/// the master. A row already gone records nothing. Read and restore hold
+/// the host lock; dropped with it released.
 struct ForgottenEntry<'a> {
     host: &'a Host,
     meeting_id: Uuid,
@@ -2048,11 +1789,8 @@ impl BridgeHost for Host {
     }
 
     fn page_layout(&self, _params: PageLayoutParams) -> Outcome<()> {
-        // Validated and dropped: nothing reads the page's size yet.
         Ok(())
     }
-
-    // meetings
 
     fn meetings_set_filter(&self, params: SetFilterParams) -> Outcome<()> {
         self.command(&[BridgeTopic::MeetingsList], |inner| {
@@ -2123,10 +1861,8 @@ impl BridgeHost for Host {
             (prompt, recording)
         };
         // Where the meeting's folder may be, for a meeting left `recording`
-        // or one whose files no asset names; one an asset names needs none
-        // of it. A row left `recording` may be one another process still
-        // records (the Swift app started after this one): its master on
-        // disk says so. Read with the lock released.
+        // (another process may still record it) or one no asset names.
+        // Read with the lock released.
         let named = !recording && matches!(self.shared.store.asset(params.meeting_id), Ok(Some(_)));
         let left = (!named).then(|| {
             self.shared
@@ -2139,11 +1875,9 @@ impl BridgeHost for Host {
         }
         let confirmed = self.confirm(&prompt);
         if confirmed {
-            // Before the rows go, so the launch's adoption, which reads the
-            // entries after the rows, never finds the meeting gone and its
-            // master still there (a removal not done yet, or one that
-            // failed). An entry that stays would bring the meeting back at
-            // the next launch: the delete is refused before any row goes.
+            // Before the rows go, so the launch's adoption never finds the
+            // meeting gone and its master still there; an entry that stays
+            // refuses the delete before any row goes.
             let Ok(folder) = self
                 .shared
                 .services
@@ -2173,8 +1907,7 @@ impl BridgeHost for Host {
                         recording,
                     );
                     inner.list.reload(&inner.store);
-                    // The store's `deleted` event, posted only when the rows
-                    // went: a queued meeting's progress entry goes with it,
+                    // Posted only when the rows went: the progress entry goes
                     // and the forgotten entry is not recorded again.
                     if deleted {
                         forgotten.folder = None;
@@ -2190,8 +1923,6 @@ impl BridgeHost for Host {
         }
         Ok(ConfirmReply { confirmed })
     }
-
-    // meeting
 
     fn meeting_set_tab(&self, params: SetTabParams) -> Outcome<()> {
         self.detail_command(|detail| detail.tab = params.tab)
@@ -2224,11 +1955,8 @@ impl BridgeHost for Host {
     }
 
     /// "Process again" on the selected meeting, after
-    /// [`process_again_prompt`] when the meeting has a speaker the user
-    /// confirmed or named. A decline changes nothing: no claim, no state,
-    /// no error line. The prompt runs with the lock released; when the
-    /// selection moved while it was up, nothing is started, so a run never
-    /// starts on a meeting the user was not asked about.
+    /// [`process_again_prompt`] when needed. A decline changes nothing;
+    /// when the selection moved while the prompt was up, nothing starts.
     fn meeting_process_again(&self) -> Outcome<()> {
         let (meeting_id, asks) = {
             let inner = self.lock();
@@ -2261,8 +1989,7 @@ impl BridgeHost for Host {
     }
 
     fn meeting_save_notes(&self, params: SaveNotesParams) -> Outcome<()> {
-        // The page debounces typing and names the meeting, so the text is
-        // written where it says, selected or not, the moment it arrives.
+        // The text is written to the meeting it names, selected or not.
         let now = self.now();
         self.shared
             .store
@@ -2307,8 +2034,6 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    // speakers
-
     fn speakers_options(&self, params: SpeakerOptionsParams) -> Outcome<SpeakerOptionsReply> {
         let inner = self.lock();
         let detail = inner.detail.as_ref().ok_or_else(no_selection)?;
@@ -2335,8 +2060,8 @@ impl BridgeHost for Host {
                 {
                     detail.speakers_changed();
                 }
-                // The page has no "picker closed" moment the host can see;
-                // one re-export per change is idempotent.
+                // The host cannot see the picker close; one re-export per
+                // change is idempotent.
                 detail.picker_closed(&*self.shared.services.pipeline);
             });
             self.reload_detail(&mut inner);
@@ -2362,13 +2087,9 @@ impl BridgeHost for Host {
         })
     }
 
-    // recording
-
     fn recording_start(&self, params: StartRecordingParams) -> Outcome<()> {
-        // The sidebar control's start: the recorder starts, then the live
-        // row is requested so the window selects it. A start that fails
-        // re-reads the permissions, with no lock held: the recorder reports
-        // the change through `recorder_changed`.
+        // The recorder starts, then the live row is requested so the window
+        // selects it. A failed start re-reads the permissions.
         let recorder = &self.shared.services.recorder;
         recorder.start(params.mode, None);
         let status = recorder.status();
@@ -2408,9 +2129,8 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    /// "Not now" on the setup banner hides it for this launch; OK on the
-    /// engine notice, which shows in its place, clears its pending flag
-    /// ([`engine_notice::PENDING_KEY`]), so it never shows again.
+    /// "Not now" hides the setup banner for this launch; OK on the engine
+    /// notice clears [`engine_notice::PENDING_KEY`] so it never shows again.
     fn setup_dismiss_banner(&self) -> Outcome<()> {
         self.command(&[BridgeTopic::App], |inner| {
             if inner.app.speech_engine_notice {
@@ -2425,8 +2145,6 @@ impl BridgeHost for Host {
         });
         Ok(())
     }
-
-    // settings.general
 
     fn settings_general_set_launch_at_login(&self, params: SetBoolParams) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsGeneral, |inner| {
@@ -2495,8 +2213,6 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    // settings.recording
-
     fn settings_recording_set_input_device(&self, params: SetStringParams) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsRecording, |inner| {
             let uid = (!params.value.is_empty()).then_some(params.value);
@@ -2564,8 +2280,6 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    // settings.transcription
-
     fn settings_transcription_set_engine(&self, params: SetStringParams) -> Outcome<()> {
         let engine: SpeechEngineId = params.value.parse().map_err(|_| {
             BridgeError::invalid_params(format!("Unknown speech engine {}.", params.value))
@@ -2580,9 +2294,8 @@ impl BridgeHost for Host {
 
     fn settings_transcription_download(&self, params: AssetIdParams) -> Outcome<()> {
         let asset = parse_asset(&params)?;
-        // The reply returns at once; the download runs on its own thread
-        // and publishes as it goes, as Swift's task did.
-        // A download of the asset still running is reattached to instead.
+        // The reply returns at once; the download publishes from its own
+        // thread. A download of the asset still running is reattached to.
         let starts = {
             let mut inner = self.lock();
             let starts = inner.speech.begin_download(asset);
@@ -2619,17 +2332,16 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    /// The rows change to the Neural Engine's model, and a meeting waiting
-    /// for the speech sidecar's models stops saying the Neural Engine is
-    /// off (`follow_speech_fallback`). After a failed rebuild both
-    /// stay as they are until a reload succeeds.
+    /// Switches to the Neural Engine's model; a meeting waiting for the
+    /// sidecar's models stops saying the Neural Engine is off. A failed
+    /// rebuild leaves both until a reload succeeds.
     fn settings_transcription_use_neural_engine(&self) -> Outcome<()> {
         self.models_command(|inner| inner.speech.use_neural_engine(&self.shared.services));
         Ok(())
     }
 
     // settings.summaries: the four form commands answer on the calling
-    // window's model (see the module doc), the rest on the Settings section.
+    // window's model, the rest on the Settings section.
 
     fn settings_summaries_select_preset(&self, params: SetStringParams) -> Outcome<()> {
         let preset: LlmPreset = params.value.parse().map_err(|_| {
@@ -2660,8 +2372,8 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    /// The confirmation is saved under the lock, the model list fetched
-    /// with it released, then the pick saved and probed.
+    /// Saves the confirmation under the lock, fetches the model list with
+    /// it released, then saves and probes the pick.
     fn settings_summaries_confirm_codex(&self) -> Outcome<()> {
         let services = &self.shared.services;
         self.outside_lock(
@@ -2719,8 +2431,6 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    // settings.export
-
     fn settings_export_set_enabled(&self, params: SetBoolParams) -> Outcome<()> {
         self.export_command(|obsidian| obsidian.set_enabled(params.value));
         Ok(())
@@ -2753,8 +2463,6 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    // settings.iphone
-
     fn settings_phone_begin_pairing(&self) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsPhone, |inner| {
             inner.phones.begin_pairing(&self.shared.services);
@@ -2776,11 +2484,9 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    /// Three steps, as [`Self::onboarding_import`]: the page sees `busy`
-    /// while a keychain prompt may be up, the handover reads its identity
-    /// again with the lock released (on the Mac, while the import waits,
-    /// the import's export and its prompt), then the outcome. A second Try
-    /// again or a Pair again while one runs does nothing.
+    /// The page sees `busy` while a keychain prompt may be up, the handover
+    /// reads its identity again with the lock released, then the outcome
+    /// lands. A second Try again or Pair again while one runs does nothing.
     fn settings_phone_try_again(&self) -> Outcome<()> {
         let Some(handover) = self.shared.services.handover.clone() else {
             return Ok(());
@@ -2793,12 +2499,10 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    /// The warning first, the shell's destructive prompt ([`pair_again_prompt`]),
-    /// shown while the section is busy so no Try again starts meanwhile;
-    /// then as [`Self::settings_phone_try_again`]. Nothing is asked once
-    /// the handover no longer waits (a page from before Try again or the
-    /// unlock ended the wait): the section is refreshed instead. The reply
-    /// says whether the user went ahead.
+    /// Asks [`pair_again_prompt`] while the section is busy, then runs as
+    /// [`Self::settings_phone_try_again`]. Once the handover no longer
+    /// waits, nothing is asked and the section is refreshed. The reply says
+    /// whether the user went ahead.
     fn settings_phone_pair_again(&self) -> Outcome<ConfirmReply> {
         let Some(handover) = self.shared.services.handover.clone() else {
             return Ok(ConfirmReply { confirmed: false });
@@ -2819,16 +2523,13 @@ impl BridgeHost for Host {
         Ok(ConfirmReply { confirmed: true })
     }
 
-    // onboarding
-
     fn onboarding_request(&self, params: PermissionKindParams) -> Outcome<()> {
         let kind = params.kind;
         if self.waits_for_recording(kind) {
             self.onboarding_command(|inner| inner.onboarding.waits_for_recording = Some(kind));
             return Ok(());
         }
-        // Three steps so the page sees `isRequesting` while the prompt is
-        // up, as it did with Swift's awaited request.
+        // Three steps so the page sees `isRequesting` while the prompt is up.
         self.onboarding_command(|inner| inner.onboarding.begin_request(kind));
         let (state, waited) = self.request_unless_recording(kind);
         self.onboarding_command(|inner| {
@@ -2881,8 +2582,8 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    /// As [`Self::settings_summaries_confirm_codex`], on the onboarding
-    /// page's Summaries row.
+    /// As [`Self::settings_summaries_confirm_codex`], on onboarding's
+    /// Summaries row.
     fn onboarding_confirm_summaries_with_codex(&self) -> Outcome<()> {
         let services = &self.shared.services;
         self.outside_lock(
@@ -2938,11 +2639,9 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    /// Three steps, as [`Self::onboarding_request`]: the page sees
-    /// `importing` while the keychain prompts are up, the import runs with
-    /// the lock released, then the outcome. A second Continue or Try again
-    /// while a run is under way does nothing: that run publishes the
-    /// outcome.
+    /// The page sees `importing` while the keychain prompts are up, the
+    /// import runs with the lock released, then the outcome lands. A second
+    /// Continue or Try again while one runs does nothing.
     fn onboarding_import(&self) -> Outcome<()> {
         let Some(import) = self.shared.services.swift_import.clone() else {
             return Ok(());
@@ -2956,7 +2655,7 @@ impl BridgeHost for Host {
     }
 
     /// Not now while a run's prompts are up does nothing: that run
-    /// publishes the outcome, and its Try again stays on the step.
+    /// publishes the outcome.
     fn onboarding_skip_import(&self) -> Outcome<()> {
         let Some(import) = self.shared.services.swift_import.clone() else {
             return Ok(());
@@ -2977,8 +2676,6 @@ impl BridgeHost for Host {
         Ok(())
     }
 
-    // system
-
     fn updates_check(&self) -> Outcome<()> {
         if !self.shared.config.updates_managed {
             self.shared.services.updater.check_for_updates();
@@ -2988,8 +2685,8 @@ impl BridgeHost for Host {
     }
 
     fn system_open_url(&self, params: OpenUrlParams) -> Outcome<()> {
-        // Only `https:` and `mailto:`, as `BridgeSystemCommands.openURL`
-        // accepted: a page cannot open files, plain `http:` or run scripts.
+        // Only `https:` and `mailto:`: a page cannot open files, plain
+        // `http:` or run scripts.
         let lower = params.url.to_lowercase();
         if !(lower.starts_with("https://") || lower.starts_with("mailto:")) {
             return Err(BridgeError::invalid_params(
@@ -3071,10 +2768,8 @@ mod tests {
     use crate::fakes::FakeServices;
     use crate::services::Clock;
 
-    /// A boundary that sleeps, as a secret store with a timeout would,
-    /// needs the host runtime's timer, here and on the helper thread:
-    /// without it the call panics with "timers are disabled". The sleep is
-    /// made inside the future, as a boundary's `async fn` makes it.
+    /// A boundary that sleeps needs the host runtime's timer, here and on
+    /// the helper thread.
     async fn a_boundary_with_a_timeout() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
@@ -3089,10 +2784,9 @@ mod tests {
         block_on(a_boundary_with_a_timeout());
     }
 
-    /// A commit that lands while [`Host::new`] loads its view models (here
-    /// from the clock, which the progress asks once the list has loaded)
-    /// reaches the list at the first pass of the reload owner: the change
-    /// mark is read before the loads, so the commit moved it.
+    /// A commit that lands while [`Host::new`] loads its view models
+    /// reaches the list at the first pass: the change mark is read before
+    /// the loads.
     #[test]
     fn a_commit_during_the_hosts_loads_shows_at_the_first_pass() {
         /// Saves a new meeting on each reading while `committing`.
