@@ -77,6 +77,7 @@ pub mod setup;
 pub mod speakers;
 pub mod speech;
 pub mod summary_markdown;
+pub mod tray;
 mod ui_thread;
 
 pub use host::{Host, HostConfig};

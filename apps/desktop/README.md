@@ -204,9 +204,13 @@ of its own, and the tray's setters wait for the main thread when called
 from another, so a snapshot delivered on the emitting thread would hold
 the lock, or the feed, until the main thread is free.
 
-The tray menu is the Swift menu bar popover's controls: Record (Stop
-recording while recording, with the recorder's words between), Record in
-person, Open Steno, Settings, Launch at login, Check for Updates, Quit.
+The tray menu is the Swift menu bar popover's: Record (Stop recording
+while recording, with the recorder's words between), Record in person,
+the meetings whose speakers wait for a review, the processing queue and
+the five recent meetings (a click opens the meeting), Open Steno,
+Settings, Launch at login, Check for Updates, Quit. The pending reviews
+also show as a number beside the icon on macOS and on Linux hosts that
+draw a status notifier's label, and in the tooltip everywhere.
 Each platform names them its own way (`MenuAction::label_on`): the Mac's
 "Settings…", "Check for Updates…" and "Quit Steno", the first two
 without the ellipsis on Windows and Linux, "Exit Steno" on Windows; only
@@ -214,8 +218,7 @@ the Mac's menu shows shortcut hints.
 Recorder commands are bridge methods sent through the main window
 (`actions.rs`), so the shell has no recorder logic of its own; it follows
 the recorder off the `recording` snapshots the host publishes to that
-window (`recording.rs`). The queue and recent rows of the Swift popover are
-the main window's.
+window (`recording.rs`).
 
 Every tray action is in the menu, and a click on the icon does nothing
 the menu does not: macOS and Windows open the menu on a left click as on
@@ -2097,8 +2100,7 @@ window as always present: a close hides it, or ends the process when no
 tray stands, so publishing to it never fails for want of a window.
 What the Swift app's login item does once this app replaced it is for
 the real handoff to show (R3 of `.plans/2026-10-07-stable-promotion.md`).
-The macOS menu bar has no Record menu yet (`⌘⇧R` and Record In Person are
-the tray's and the sidebar's), and no Find Meetings (`⌘F`). On macOS the
+On macOS the
 system audio permission has no status API; the audio crate's probe (WP5)
 records it and until then it reads `unknown`. The panels are re-tuned on
 the Mac once they run there beside the Swift ones (the plan's risk

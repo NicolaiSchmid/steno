@@ -269,7 +269,7 @@ fn setup(
     autostart::remove_earlier_entry(handle);
     #[cfg(target_os = "macos")]
     autostart::remove_earlier_agent();
-    host::host(handle).launch(runtime);
+    host::host(handle).launch(handle, runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle, autostart::status(handle).is_on());
     #[cfg(target_os = "linux")]

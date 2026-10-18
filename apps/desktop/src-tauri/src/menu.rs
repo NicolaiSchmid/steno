@@ -5,19 +5,27 @@
 //! and Quit Steno as the tray's item, which quits through
 //! `actions::quit` and the run loop), the Edit menu whose predefined items
 //! give the webviews their undo, cut, copy, paste and select-all
-//! shortcuts, and the Window menu. The items share the tray's ids, so the
-//! one handler `main.rs` registers (`actions::on_menu_event`) serves both
-//! menus. Linux and Windows show no menu bar; the tray carries the
-//! actions there.
+//! shortcuts, with Find Meetings (⌘F), the Record menu (Record, ⌘⇧R, and
+//! Record in person, retitled with the tray's rows, `RecordMenu`) and the
+//! Window menu. The items share the tray's ids, so the one handler
+//! `main.rs` registers (`actions::on_menu_event`) serves both menus.
+//! Linux and Windows show no menu bar; the tray carries the actions there.
 //!
 //! Swift: `AppCommands` in `StenoApp.swift`.
 
 use tauri::{
-    AppHandle, Wry,
-    menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu},
+    AppHandle, Manager, Wry,
+    menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu},
 };
 
 use crate::actions::MenuAction;
+
+/// The Record menu's two items, which the tray retitles with its own
+/// Record rows (`tray::build`).
+pub struct RecordMenu {
+    pub record: MenuItem<Wry>,
+    pub in_person: MenuItem<Wry>,
+}
 
 /// The whole menu bar; `Builder::menu` installs it.
 pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
@@ -58,8 +66,16 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &PredefinedMenuItem::copy(app, None)?,
             &PredefinedMenuItem::paste(app, None)?,
             &PredefinedMenuItem::select_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuAction::FindMeetings.item(app, Some("Cmd+F"))?,
         ],
     )?;
+    let records = RecordMenu {
+        record: MenuAction::Record.item(app, Some("Cmd+Shift+R"))?,
+        in_person: MenuAction::RecordInPerson.item(app, None)?,
+    };
+    let record = Submenu::with_items(app, "Record", true, &[&records.record, &records.in_person])?;
+    app.manage(records);
     let window = Submenu::with_items(
         app,
         "Window",
@@ -71,5 +87,5 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &PredefinedMenuItem::close_window(app, None)?,
         ],
     )?;
-    Menu::with_items(app, &[&application, &edit, &window])
+    Menu::with_items(app, &[&application, &edit, &record, &window])
 }

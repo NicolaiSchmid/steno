@@ -2,10 +2,13 @@
 //! platform. On macOS it is the menu bar extra (a template icon, so it
 //! follows the bar's appearance); on Linux it is a status notifier item and
 //! on Windows a notification area icon, both with the app icon. The menu
-//! is the Swift popover's controls without its queue and recent rows, which
-//! the main window shows: Record (or Stop), Record in person, Open Steno,
-//! Settings, Launch at login, Check for Updates, Quit (Exit on Windows).
-//! Only the Mac's menu shows shortcut hints (`shortcut`).
+//! is the Swift popover's: Record (or Stop), Record in person, the
+//! meetings whose speakers wait for a review, the processing queue and the
+//! five recent meetings (each opens its meeting), Open Steno, Settings,
+//! Launch at login, Check for Updates, Quit (Exit on Windows). Pending
+//! reviews also count on the icon: a number beside it on macOS and where a
+//! Linux host shows a label, and in the tooltip everywhere. Only the Mac's
+//! menu shows shortcut hints (`shortcut`).
 //!
 //! Every action is in the menu (`MENU`), and a click on the icon does
 //! nothing the menu does not: macOS and Windows open the menu on a left
@@ -35,14 +38,16 @@ use std::sync::Mutex;
 use tauri::{
     AppHandle, Manager, Wry,
     image::Image,
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
 };
 
 use steno_bridge::Platform;
+use steno_core::json::uuid_string;
+use steno_host::tray::{TrayMeetings, TrayRow};
 
 use crate::{
-    actions::MenuAction,
+    actions::{MEETING_PREFIX, MenuAction},
     autostart,
     recording::{RecorderState, RecordingState},
 };
@@ -102,13 +107,117 @@ pub const fn record_rows(state: RecordingState, quitting: bool) -> RecordRows {
     }
 }
 
-/// The icon's tooltip, the Swift label's accessibility text: "Steno" or
-/// "Steno, recording" (the elapsed time is the bubble's, not the tray's).
-pub fn tooltip(state: RecordingState) -> &'static str {
-    if state.is_busy() {
+/// The icon's tooltip, the Swift label's accessibility text, "Steno" or
+/// "Steno, recording" (the elapsed time is the bubble's, not the tray's),
+/// then the pending reviews: "Steno, 2 meetings to review".
+pub fn tooltip(state: RecordingState, reviews: usize) -> String {
+    let base = if state.is_busy() {
         "Steno, recording"
     } else {
         "Steno"
+    };
+    match reviews {
+        0 => base.to_owned(),
+        1 => format!("{base}, 1 meeting to review"),
+        n => format!("{base}, {n} meetings to review"),
+    }
+}
+
+/// The number beside the icon: the pending reviews, none at 0.
+fn badge(reviews: usize) -> Option<String> {
+    (reviews > 0).then(|| reviews.to_string())
+}
+
+/// One line of the meeting block, which sits between the Record rows and
+/// Open Steno.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Line {
+    Separator,
+    Header(&'static str),
+    Meeting(TrayRow),
+}
+
+/// The meeting block: the reviews, then "Processing" over the queue, then
+/// "Recent" over the recent meetings, each part that has rows after a
+/// separator.
+fn lines(meetings: &TrayMeetings) -> Vec<Line> {
+    let mut lines = Vec::new();
+    for (header, rows) in [
+        (None, &meetings.reviews),
+        (Some("Processing"), &meetings.queue),
+        (Some("Recent"), &meetings.recent),
+    ] {
+        if rows.is_empty() {
+            continue;
+        }
+        lines.push(Line::Separator);
+        lines.extend(header.map(Line::Header));
+        lines.extend(rows.iter().cloned().map(Line::Meeting));
+    }
+    lines
+}
+
+/// Whether two blocks have the same items and differ at most in a
+/// meeting row's text, so the texts can be set in place; a progress event
+/// moves only the percentage.
+fn same_items(shown: &[Line], next: &[Line]) -> bool {
+    shown.len() == next.len()
+        && shown.iter().zip(next).all(|pair| match pair {
+            (Line::Meeting(shown), Line::Meeting(next)) => shown.meeting_id == next.meeting_id,
+            (shown, next) => shown == next,
+        })
+}
+
+/// Where the meeting block starts in the menu: after the Record rows.
+const BLOCK_AT: usize = 2;
+
+/// A menu item of the meeting block.
+enum BlockItem {
+    Separator(PredefinedMenuItem<Wry>),
+    Text(MenuItem<Wry>),
+}
+
+impl BlockItem {
+    fn new(app: &AppHandle, line: &Line) -> tauri::Result<Self> {
+        Ok(match line {
+            Line::Separator => BlockItem::Separator(PredefinedMenuItem::separator(app)?),
+            Line::Header(text) => {
+                BlockItem::Text(MenuItem::with_id(app, *text, *text, false, None::<&str>)?)
+            }
+            Line::Meeting(row) => BlockItem::Text(MenuItem::with_id(
+                app,
+                format!("{MEETING_PREFIX}{}", uuid_string(row.meeting_id)),
+                &row.text,
+                true,
+                None::<&str>,
+            )?),
+        })
+    }
+
+    fn item(&self) -> &dyn IsMenuItem<Wry> {
+        match self {
+            BlockItem::Separator(item) => item,
+            BlockItem::Text(item) => item,
+        }
+    }
+}
+
+/// The meeting block as shown, and what the icon's tooltip says.
+struct Block {
+    lines: Vec<Line>,
+    items: Vec<BlockItem>,
+    recording: RecordingState,
+    reviews: usize,
+}
+
+impl Default for Block {
+    fn default() -> Self {
+        Block {
+            lines: Vec::new(),
+            items: Vec::new(),
+            recording: RecordingState::Idle,
+            reviews: 0,
+        }
     }
 }
 
@@ -168,12 +277,15 @@ impl RowState {
 }
 
 /// The live items, kept as managed state so a `recording` snapshot can
-/// retitle them.
+/// retitle them. The Record rows are the tray's and, on macOS, the menu
+/// bar's Record menu's (`menu::RecordMenu`).
 pub struct Tray {
-    record: MenuItem<Wry>,
-    in_person: MenuItem<Wry>,
+    menu: Menu<Wry>,
+    record: Vec<MenuItem<Wry>>,
+    in_person: Vec<MenuItem<Wry>>,
     launch_at_login: CheckMenuItem<Wry>,
     rows: Mutex<RowState>,
+    block: Mutex<Block>,
 }
 
 /// A menu item's shortcut hint, on the Mac only: the menu bar extra's
@@ -196,8 +308,9 @@ enum Row {
     Separator,
 }
 
-/// The tray's menu, top to bottom: every `MenuAction` once, so nothing
-/// waits on a click the host may not pass on. Quit is the shell's own
+/// The tray's menu, top to bottom, without the meeting block: every
+/// `MenuAction` but Find Meetings once, so nothing waits on a click the
+/// host may not pass on. Quit is the shell's own
 /// item, not muda's predefined Quit, which ends the process without
 /// `ExitRequested`, so the shell could not shut down cleanly.
 const MENU: [Row; 10] = [
@@ -243,7 +356,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .tooltip(tooltip(RecordingState::Idle));
+        .tooltip(tooltip(RecordingState::Idle, 0));
     builder = if cfg!(target_os = "macos") {
         // The four-bar mark as a template image: the menu bar draws it in
         // its own colour, as it drew the SF Symbol.
@@ -258,13 +371,69 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         builder
     };
     builder.build(app)?;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let (mut records, mut in_persons) = (vec![record], vec![in_person]);
+    #[cfg(target_os = "macos")]
+    if let Some(bar) = app.try_state::<crate::menu::RecordMenu>() {
+        records.push(bar.record.clone());
+        in_persons.push(bar.in_person.clone());
+    }
     app.manage(Tray {
-        record,
-        in_person,
+        menu,
+        record: records,
+        in_person: in_persons,
         launch_at_login,
         rows: Mutex::new(RowState::new(switchable)),
+        block: Mutex::default(),
     });
     Ok(())
+}
+
+/// The host's meeting rows changed (`Host::on_tray`), on the main thread:
+/// the meeting block and the badge follow.
+pub fn note_meetings(app: &AppHandle, meetings: &TrayMeetings) {
+    let Some(tray) = app.try_state::<Tray>() else {
+        return;
+    };
+    let mut block = lock(&tray.block);
+    let next = lines(meetings);
+    if same_items(&block.lines, &next) {
+        for ((item, shown), line) in block.items.iter().zip(&block.lines).zip(&next) {
+            if let (BlockItem::Text(item), Line::Meeting(row)) = (item, line)
+                && shown != line
+            {
+                let _ = item.set_text(&row.text);
+            }
+        }
+    } else {
+        for item in block.items.drain(..) {
+            let _ = tray.menu.remove(item.item());
+        }
+        for line in &next {
+            match BlockItem::new(app, line) {
+                Ok(item) => {
+                    let _ = tray.menu.insert(item.item(), BLOCK_AT + block.items.len());
+                    block.items.push(item);
+                }
+                Err(error) => tracing::warn!(%error, "a tray row could not be built"),
+            }
+        }
+    }
+    block.lines = next;
+    let reviews = meetings.reviews.len();
+    if block.reviews != reviews {
+        block.reviews = reviews;
+        if let Some(icon) = app.tray_by_id(TRAY_ID) {
+            let _ = icon.set_title(badge(reviews));
+            let _ = icon.set_tooltip(Some(tooltip(block.recording, reviews)));
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A `recording` snapshot reached the main window: retitle the items.
@@ -274,8 +443,12 @@ pub fn note_recording(app: &AppHandle, state: RecordingState) {
     };
     let change = tray.row_state().recording(state);
     set_rows(&tray, change);
-    if let Some(icon) = app.tray_by_id(TRAY_ID) {
-        let _ = icon.set_tooltip(Some(tooltip(state)));
+    let mut block = lock(&tray.block);
+    if block.recording != state {
+        block.recording = state;
+        if let Some(icon) = app.tray_by_id(TRAY_ID) {
+            let _ = icon.set_tooltip(Some(tooltip(state, block.reviews)));
+        }
     }
 }
 
@@ -292,9 +465,7 @@ pub fn note_quitting(app: &AppHandle) {
 
 impl Tray {
     fn row_state(&self) -> std::sync::MutexGuard<'_, RowState> {
-        self.rows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock(&self.rows)
     }
 }
 
@@ -308,12 +479,14 @@ fn set_rows(tray: &Tray, change: Option<Rows>) {
     else {
         return;
     };
-    for (item, (text, enabled)) in [
+    for (items, (text, enabled)) in [
         (&tray.record, record.record),
         (&tray.in_person, record.in_person),
     ] {
-        let _ = item.set_text(text);
-        let _ = item.set_enabled(enabled);
+        for item in items {
+            let _ = item.set_text(text);
+            let _ = item.set_enabled(enabled);
+        }
     }
     let _ = tray.launch_at_login.set_enabled(launch_at_login);
 }
@@ -365,14 +538,24 @@ mod tests {
         }
     }
 
-    /// Every action is in the tray's menu once, so a host that passes no
-    /// left click on still reaches each; separators only between items.
+    /// Every action but Find Meetings is in the tray's menu once, so a
+    /// host that passes no left click on still reaches each; separators
+    /// only between items.
     #[test]
     fn the_menu_holds_every_action_once() {
         for &action in MenuAction::ALL {
             let rows = MENU.iter().filter(|&&row| row == Row::Item(action));
-            assert_eq!(rows.count(), 1, "{action}");
+            let expected = usize::from(action != MenuAction::FindMeetings);
+            assert_eq!(rows.count(), expected, "{action}");
         }
+        assert_eq!(
+            MENU[..BLOCK_AT],
+            [
+                Row::Item(MenuAction::Record),
+                Row::Item(MenuAction::RecordInPerson)
+            ],
+            "the meeting block follows the Record rows"
+        );
         assert_ne!(MENU.first(), Some(&Row::Separator));
         assert_ne!(MENU.last(), Some(&Row::Separator));
         assert!(
@@ -476,10 +659,71 @@ mod tests {
     }
 
     #[test]
-    fn the_tooltip_is_the_swift_accessibility_label() {
-        assert_eq!(tooltip(RecordingState::Idle), "Steno");
-        assert_eq!(tooltip(RecordingState::Starting), "Steno, recording");
-        assert_eq!(tooltip(RecordingState::Recording), "Steno, recording");
+    fn the_tooltip_is_the_swift_accessibility_label_and_the_reviews() {
+        assert_eq!(tooltip(RecordingState::Idle, 0), "Steno");
+        assert_eq!(tooltip(RecordingState::Starting, 0), "Steno, recording");
+        assert_eq!(tooltip(RecordingState::Recording, 0), "Steno, recording");
+        assert_eq!(
+            tooltip(RecordingState::Idle, 1),
+            "Steno, 1 meeting to review"
+        );
+        assert_eq!(
+            tooltip(RecordingState::Recording, 2),
+            "Steno, recording, 2 meetings to review"
+        );
+        assert_eq!(badge(0), None);
+        assert_eq!(badge(3).as_deref(), Some("3"));
+    }
+
+    fn row(n: u128, text: &str) -> TrayRow {
+        TrayRow {
+            meeting_id: uuid::Uuid::from_u128(n),
+            text: text.to_owned(),
+        }
+    }
+
+    /// Each part with rows comes after a separator, the queue and the
+    /// recent meetings under their header; a block with no rows is empty.
+    #[test]
+    fn the_meeting_block_lists_each_part_that_has_rows() {
+        assert_eq!(lines(&TrayMeetings::default()), []);
+        let meetings = TrayMeetings {
+            queue: vec![row(1, "Standup — Transcribing… 10%")],
+            recent: vec![row(2, "Weekly sync")],
+            reviews: vec![row(2, "Review speakers in Weekly sync")],
+        };
+        assert_eq!(
+            lines(&meetings),
+            [
+                Line::Separator,
+                Line::Meeting(meetings.reviews[0].clone()),
+                Line::Separator,
+                Line::Header("Processing"),
+                Line::Meeting(meetings.queue[0].clone()),
+                Line::Separator,
+                Line::Header("Recent"),
+                Line::Meeting(meetings.recent[0].clone()),
+            ]
+        );
+    }
+
+    /// A progress event moves a row's text only, which is set in place; a
+    /// meeting that joins or leaves rebuilds the block.
+    #[test]
+    fn only_a_new_meeting_rebuilds_the_block() {
+        let queued = |text| TrayMeetings {
+            queue: vec![row(1, text)],
+            ..TrayMeetings::default()
+        };
+        let shown = lines(&queued("Standup — Transcribing… 10%"));
+        assert!(same_items(
+            &shown,
+            &lines(&queued("Standup — Transcribing… 40%"))
+        ));
+        let mut two = queued("Standup — Transcribing… 40%");
+        two.queue.push(row(3, "Retro — Waiting to process"));
+        assert!(!same_items(&shown, &lines(&two)));
+        assert!(!same_items(&shown, &lines(&TrayMeetings::default())));
     }
 
     #[test]

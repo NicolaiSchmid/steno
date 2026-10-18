@@ -190,7 +190,7 @@ describe("the meeting detail", () => {
 });
 
 describe("the sidebar", () => {
-	it("records with Ctrl+Shift+R in the shell, and leaves ⌘⇧R to the Swift app's menu", async () => {
+	it("records with Ctrl+Shift+R off the Mac, and leaves ⌘⇧R to the Mac's Record menu", async () => {
 		const linux = await createBridgeHarness();
 		const { unmount } = renderWithBridge(
 			<Sidebar />,
@@ -202,7 +202,7 @@ describe("the sidebar", () => {
 		unmount();
 
 		const mac = await createBridgeHarness();
-		renderWithBridge(<Sidebar />, mac, SWIFT_MAC);
+		renderWithBridge(<Sidebar />, mac, platformFor("macos"));
 		fireEvent.keyDown(window, { key: "R", metaKey: true, shiftKey: true });
 		expect(callsTo(mac.transport, "recording.toggle")).toHaveLength(0);
 	});
