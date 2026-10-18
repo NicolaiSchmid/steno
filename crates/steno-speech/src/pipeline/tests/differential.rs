@@ -878,10 +878,10 @@ struct Losses {
     /// 0.
     across_gap: usize,
     /// Words of the old merge's text the boundaries flag, held once such a
-    /// piece, of a place the old merge did not keep, may also cross
-    /// boundaries that only the window of the accepted recovery that holds
-    /// the piece decodes: limit E across its own window. Counted and
-    /// capped as `across_gap`, at 0.
+    /// piece, of a place the old merge did not keep and in an accepted
+    /// recovery's owned span, may cross that span's owned start alone,
+    /// which the recovery's window holds: limit E across its own window.
+    /// Counted and capped as `across_gap`, at 0.
     across_own_window: usize,
     /// Words of the old merge's text the boundaries flag, held once a
     /// piece of an orphan word the old merge dropped may lie inside the
@@ -953,9 +953,9 @@ impl Losses {
 ///   The same glue across a chunk whose decoded window heard nothing is
 ///   no such limit, and fails
 ///   (`a_recovery_that_missed_a_words_start_can_glue_its_rest_across_a_chunk_that_heard_nothing`).
-/// - Limit E across its own window: the same, across a chunk's owned
-///   boundary that only the window of the recovery that kept the rest
-///   decodes ([`Losses::across_own_window`];
+/// - Limit E across its own window: the same, across the owned start of
+///   the recovered chunk that kept the rest, which that recovery's window
+///   holds ([`Losses::across_own_window`];
 ///   `a_recovery_that_missed_a_words_start_can_glue_its_rest_across_a_boundary_its_window_decodes`).
 /// - Limit (ii) inside the old merge's glue: an orphan word the old merge
 ///   dropped comes out inside the old merge's own glue after the same
@@ -1099,8 +1099,8 @@ fn ref_chain(words: &[Placed], vocab: &Vocab, w: usize, head: usize) -> bool {
 /// class's: a later piece of a placed word across chunks' owned
 /// boundaries that lie in no decoded window, with no decoded window
 /// wholly between ([`Losses::across_gap`]); the same for a place the old
-/// merge did not keep, where the window of the accepted recovery that
-/// holds the piece may hold those boundaries
+/// merge did not keep, in an accepted recovery's owned span, across that
+/// span's owned start alone, which the recovery's window holds
 /// ([`Losses::across_own_window`]); a piece of an orphan word the old
 /// merge dropped, inside the old merge's own glue after the same word
 /// ([`Losses::inside_glue`]); or a piece no placed word lies near
@@ -1193,24 +1193,29 @@ impl<'a> RefTexts<'a> {
             let chunks = self.spans.iter().filter(|s| s.chunk);
             chunks.flat_map(|s| [s.owned.start, s.owned.end]).any(cuts)
         };
-        // Whether a decoded window holds `b`, not counting, with
-        // `own_window`, the window of an accepted recovery that holds the
-        // piece.
-        let decoded = |b: usize, own_window: bool| {
-            self.spans
+        // A later piece of a placed word, with no decoded window wholly
+        // between.
+        let later = place.is_some_and(|(_, i)| i > 0)
+            && !self
+                .windows
+                .iter()
+                .any(|w| between.start <= w.start && w.end <= between.end);
+        // Across only owned boundaries that lie in no decoded window.
+        let undecoded = || !crosses(&|b| self.windows.iter().any(|w| w.contains(&b)));
+        // A piece the old merge did not keep, in an accepted recovery's
+        // owned span, across that span's owned start alone, which the
+        // recovery's window holds.
+        let own_start = || {
+            let recovered = self
+                .spans
                 .iter()
                 .zip(self.windows)
-                .any(|(s, w)| w.contains(&b) && !(own_window && *w != s.window && w.contains(&at)))
-        };
-        // A later piece of a placed word across only undecoded owned
-        // boundaries, with no decoded window wholly between.
-        let across = |own_window: bool| {
-            place.is_some_and(|(_, i)| i > 0)
-                && !crosses(&|b| decoded(b, own_window))
-                && !self
-                    .windows
-                    .iter()
-                    .any(|w| between.start < w.start && w.end <= between.end)
+                .find(|(s, w)| s.chunk && **w != s.window && s.owned.contains(&at));
+            place.is_some_and(|p| !self.kept.contains(&p))
+                && recovered.is_some_and(|(s, w)| {
+                    let start = s.owned.start;
+                    w.contains(&start) && !crosses(&|b| b != start)
+                })
         };
         let follows = |(w, _): (usize, usize), (h, _): (usize, usize)| {
             self.glued.contains(&(h, w)) || ref_chain(&self.case.words, self.vocab, w, h)
@@ -1219,10 +1224,8 @@ impl<'a> RefTexts<'a> {
             || place.is_some() && !crosses(&|_| true)
             || match extras {
                 Extras::Check => false,
-                Extras::AcrossGap => across(false),
-                Extras::AcrossOwnWindow => {
-                    across(true) && place.is_some_and(|p| !self.kept.contains(&p))
-                }
+                Extras::AcrossGap => later && undecoded(),
+                Extras::AcrossOwnWindow => later && own_start(),
                 Extras::InsideGlue => place.zip(first).is_some_and(|((w, _), (h, _))| {
                     ref_orphan(&self.case.words, self.vocab, w)
                         && !self.kept_words.contains(&w)
@@ -2601,11 +2604,60 @@ fn the_boundary_check_counts_a_glue_in_a_class_only_at_its_signature() {
     let orphan = [(0, 0), (0, 1), (0, 3), (2, 0), (2, 1), (3, 0)];
     assert!(check(&case, &mut run, &main, &orphan));
     // In the layout of the limit across its own window, an orphan the old
-    // merge dropped, glued onto word 20 across the boundary only the
-    // recovery's window decodes.
+    // merge dropped, glued onto word 20 across the recovered chunk's owned
+    // start, which its window holds.
     let (case, mut run) = ref_own_window_case(1);
     let orphan = [(0, 0), (2, 0), (2, 1), (3, 0), (3, 1)];
     assert!(check(&case, &mut run, &[(0, 0), (3, 0), (3, 1)], &orphan));
+    // And a copy of the rest of word 13, which the old merge kept whole,
+    // glued onto word 20 there.
+    let main = [(0, 0), (1, 0), (1, 1), (3, 0), (3, 1)];
+    let copy = [(0, 0), (1, 1), (1, 0), (1, 1), (3, 0), (3, 1)];
+    assert!(check(&case, &mut run, &main, &copy));
+    // The limit's own text, with the windows planted so that the
+    // recovery's window no longer holds its owned start, which the third
+    // chunk's window holds instead.
+    let main = [(0, 0), (2, 0), (2, 1), (3, 0), (3, 1)];
+    let glued = [(0, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1)];
+    let windows = run.new.windows.clone();
+    run.new.windows[3].start = 1_270_000;
+    run.new.windows[2].end = 1_266_000;
+    assert!(check(&case, &mut run, &main, &glued));
+    // And word 13's rest glued onto word 7, in the second chunk's owned
+    // span but inside the third chunk's planted window, across the third
+    // chunk's owned span too.
+    run.new.windows = windows;
+    run.new.windows[2].start = 900_000;
+    let mut case = case;
+    case.words.push(ref_placed(vec![7], 57.12, 4));
+    let main = [(4, 0), (0, 0), (3, 0), (3, 1)];
+    let glued = [(4, 0), (1, 1), (0, 0), (3, 0), (3, 1)];
+    assert!(check(&case, &mut run, &main, &glued));
+    // The rest of a word the old merge dropped, glued across a plain
+    // chunk's owned start: chunks of 8 s over one long region, which the
+    // fake decodes.
+    let config = random_config(3, true);
+    let regions = vec![sample_count(1.0)..sample_count(19.0)];
+    let samples = crafted(25.0, &regions, &[]);
+    let spans = partition(&samples, &regions, &config.chunker);
+    let second = spans.iter().filter(|s| s.chunk).nth(1).unwrap();
+    let words = vec![
+        ref_placed(vec![5, 25], 3.0, 4),
+        Placed {
+            pieces: vec![10, 30],
+            frame: second.owned.start / FRAME_SAMPLES + 2,
+            frames: 4,
+        },
+    ];
+    let case = ref_case(samples, words, regions);
+    let mut run = ref_run(&case, &config, 0, Hearing::every_frame(0));
+    assert_eq!(run.new.stats.recoveries_accepted, 0);
+    assert!(check(
+        &case,
+        &mut run,
+        &[(0, 0), (0, 1)],
+        &[(0, 0), (0, 1), (1, 1)]
+    ));
     // In the layout of the orphan inside the old merge's glue, an orphan
     // the old merge kept after word 7, moved inside its glue after word 9.
     let (case, mut run) = ref_inside_glue_case(0);
