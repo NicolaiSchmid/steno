@@ -2606,7 +2606,12 @@ Each lands before `0.11.0-rc.1`.
     A15's warm-up mark and A17's marks of the CoreML stage
     (`ReadStage::Transcribe`, written only for an engine in the app's
     process); one it has not seen turns the fallback on, durably, logged
-    at `warn`. While it is on, `SpeechSetup::runtime` puts Parakeet v3 in
+    at `warn`. A reading mark that cannot be read counts as a CoreML mark,
+    on the safe side, since its meeting and stage are only in its body:
+    logged at `warn` and left as it is, it counts no meeting, so that
+    meeting's quarantine comes one crash later, and a decode or mixdown
+    mark that cannot be read turns the fallback on as a false alarm. While
+    it is on, `SpeechSetup::runtime` puts Parakeet v3 in
     the speech sidecar, where a repeated abort ends only the child and the
     meeting stays retryable; the Parakeet row of Settings and onboarding
     is then the sidecar's fp32 model, and a meeting whose models are
@@ -2658,7 +2663,9 @@ Each lands before `0.11.0-rc.1`.
     mark, the user's action, the marks it forgets, a file that does not
     parse, cannot be read (its bytes kept) or cannot be written, a warm-up
     mark that cannot be written, and a warm-up mark that cannot be read,
-    which turns it on once and a later one again; the warm-up held off
+    which turns it on once and a later one again, and a reading mark that
+    cannot be read, which turns it on once and counts its meeting's stop
+    once when a later launch reads it; the warm-up held off
     until a load, a running warm-up's mark kept through a load, and the
     launch's line for a held mark; the app's build turns the fallback on
     from a mark and its end holds the warm-up off; the model service's
