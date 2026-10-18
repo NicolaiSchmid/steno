@@ -1,88 +1,37 @@
-//! The encoder priming of an MP4 (m4a) file's AAC track. symphonia 0.5
-//! parses the edit list and ignores it, and does not read iTunes' gapless
-//! tag at all; AVFoundation dropped the priming, so the decode starts on
-//! the first sample the encoder was given.
-//! Swift: `AVAudioFile`, which applies it (no code of Steno's).
-//!
-//! Where it comes from, first match wins:
-//!
-//! - the track's edit list (`moov/trak/edts/elst`): the media time of its
-//!   first edit that is not empty, in the track's timescale (`mdhd`).
-//!   ffmpeg writes it (1 024 samples for its AAC encoder), as do other ISO
-//!   writers;
-//! - iTunes' gapless tag (`moov/udta/meta/ilst/----`, named `iTunSMPB`):
-//!   its second field, in samples, counted in the same timescale. Apple's
-//!   `AVAudioFile` and `afconvert` write it (2 112 samples), with no edit
-//!   list: the Swift app's mixdowns;
-//! - neither, in `AVAudioRecorder`'s layout: [`APPLE_PRIMING`], the
-//!   2 112 samples AVFoundation assumes. The phone's recorder (expo-audio's
-//!   `AVAudioRecorder`, `mobile/src/features/recorder/recording-options.ts`,
-//!   the one AAC source the handover accepts) writes neither box, yet
-//!   primes 2 112 samples like every Apple AAC encoder;
-//! - neither, in any other layout: no priming. Every sample is kept, as
-//!   25 ms of an encoder's quiet start is harmless and 25 ms of speech is
-//!   not: Android's `MPEG4Writer` primes 1 024 and declares nothing.
-//!
-//! `AVAudioRecorder`'s layout, read off its files on macOS 26 (mono,
-//! stereo, paused) and on no other writer's: major brand `M4A ` (the
-//! `.m4a` the phone names), `mp42` among the compatible brands, no
-//! `moov/udta` (so no encoder tag or gapless tag), and in the sound
-//! track's `esds` an ES_ID of 0 and the stream byte 0x14 (audio, with the
-//! reserved bit clear). ffmpeg writes `iso2`, a `udta` with its encoder
-//! tag, ES_ID 1 and 0x15; Android's `MPEG4Writer` `mp42`, no `udta` and
-//! ES_ID 0, but 0x15. A file that misses any of the five keeps its
-//! priming: a wrong guess costs 48 ms of quiet start, never speech.
-//!
-//! The edit list wins even when its edit starts at media time 0 next to a
-//! gapless tag that names a priming (some remuxers write that): the edit
-//! list is what ISO players apply, so the decode starts where ffmpeg's
-//! does, and the most it can cost is a lane that keeps 48 ms of the
-//! encoder's quiet start; nothing is cut. Only the boxes on the way are
-//! read, by seeking; the sample tables are skipped. An empty edit (media
-//! time -1, a delay before the track) is skipped, as silence nobody
-//! recorded; the next edit's media time is the priming. A priming longer
-//! than [`MAX_PRIMING_FRAMES`] is not applied: it would cut audio an
-//! editor kept, and keeping it loses nothing. The padding after the last
-//! sample stays: under a packet of silence.
+//! The encoder priming of an MP4 (m4a) file's AAC track, which symphonia
+//! ignores: the edit list's first non-empty media time, else iTunes'
+//! gapless tag, else [`APPLE_PRIMING`] for a file in `AVAudioRecorder`'s
+//! layout (brands `M4A `/`mp42`, no `udta`, ES_ID 0, stream byte 0x14),
+//! else none. A wrong guess costs a quiet start, never speech.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// The longest priming the decoder trims, in frames at the track's rate:
-/// nearly twice Apple's 2 112 and four of ffmpeg's 1 024-sample packets.
-/// A longer start is an edit, not priming. A frame count rather than a
-/// time, as the encoders prime a number of samples at any rate.
+/// a longer start is an edit, not priming.
 pub const MAX_PRIMING_FRAMES: u64 = 4_096;
 
-/// The priming AVFoundation assumes for AAC in MP4 that declares none:
-/// what Apple's AAC encoder primes, in samples at the track's rate. The
-/// decoder assumes it only in `AVAudioRecorder`'s layout (see the module
-/// doc); any other undeclared file keeps every sample.
+/// The priming Apple's AAC encoder adds, in samples at the track's rate,
+/// assumed only in `AVAudioRecorder`'s layout (the phone's recorder writes
+/// neither an edit list nor a gapless tag).
 pub const APPLE_PRIMING: u64 = 2_112;
 
 /// The priming of an MP4 file's sound track, in ticks of its timescale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Priming {
-    /// Ticks before the first sample the encoder was given.
     pub ticks: u64,
-    /// The track's ticks per second (`mdhd`): its sample rate for every
-    /// writer seen, and the full rate of an HE-AAC track, which the
-    /// decoder reads as LC at half of it.
+    /// The track's ticks per second (`mdhd`).
     pub timescale: u32,
-    /// Where `ticks` came from.
     pub source: PrimingSource,
 }
 
 /// Where a [`Priming`] was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimingSource {
-    /// The edit list's first media time.
     EditList,
-    /// iTunes' gapless tag.
     Gapless,
-    /// Neither, in `AVAudioRecorder`'s layout: [`APPLE_PRIMING`]. A file
-    /// that declares neither in any other layout has no [`Priming`].
+    /// Neither, in `AVAudioRecorder`'s layout: [`APPLE_PRIMING`].
     Unstated,
 }
 
@@ -102,9 +51,7 @@ impl Priming {
     }
 
     /// The priming of the first sound track of the MP4 file at `path`;
-    /// `None` when it is not an MP4 file, has no sound track, declares no
-    /// priming and is not in `AVAudioRecorder`'s layout, or cannot be read
-    /// (the decode then starts where symphonia starts it).
+    /// `None` when there is none or it cannot be read.
     #[must_use]
     pub fn read(path: &Path) -> Option<Self> {
         let mut file = File::open(path).ok()?;
@@ -155,9 +102,7 @@ impl Priming {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Mp4Box {
     pub(super) kind: [u8; 4],
-    /// The body's first byte.
     pub(super) start: u64,
-    /// One past the body's last byte.
     pub(super) end: u64,
 }
 
@@ -252,13 +197,11 @@ fn child(file: &mut File, parent: Mp4Box, kind: [u8; 4]) -> Option<Mp4Box> {
     children(file, parent).into_iter().find(|b| b.kind == kind)
 }
 
-/// Reads `buffer.len()` bytes at `offset`.
 pub(super) fn read_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Option<()> {
     file.seek(SeekFrom::Start(offset)).ok()?;
     file.read_exact(buffer).ok()
 }
 
-/// Up to `limit` bytes of `b`'s body.
 fn body(file: &mut File, b: Mp4Box, limit: usize) -> Option<Vec<u8>> {
     let length = usize::try_from(b.end - b.start).ok()?.min(limit);
     let mut bytes = vec![0u8; length];
@@ -318,9 +261,8 @@ fn first_media_time(elst: &[u8]) -> Option<u64> {
 }
 
 /// Whether a file that declares no priming is laid out as
-/// `AVAudioRecorder` writes AAC in an `.m4a` (see the module doc), apart
-/// from the missing `udta`, which the caller checks: its brands, and its
-/// sound track's ES_ID and stream byte.
+/// `AVAudioRecorder` writes AAC in an `.m4a`, apart from the missing
+/// `udta`, which the caller checks.
 fn recorder_layout(file: &mut File, ftyp: Mp4Box, mdia: Mp4Box) -> bool {
     body(file, ftyp, 64).is_some_and(|ftyp| recorder_brands(&ftyp))
         && stream_signature(file, mdia) == Some((0, 0x14))
@@ -328,8 +270,6 @@ fn recorder_layout(file: &mut File, ftyp: Mp4Box, mdia: Mp4Box) -> bool {
 
 /// Whether the body of an `ftyp` box names `AVAudioRecorder`'s brands for
 /// an `.m4a`: the major brand `M4A ` and `mp42` among the compatible ones.
-/// The salvage of a recording without a `moov` checks them too
-/// ([`super::salvage`]).
 pub(crate) fn recorder_brands(ftyp: &[u8]) -> bool {
     // The major brand, the minor version, then the compatible brands.
     ftyp.get(..4) == Some(b"M4A ")

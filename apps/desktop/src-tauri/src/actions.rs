@@ -1,25 +1,9 @@
 //! What the tray, the menu bar, the dock and a deep link can do without a
-//! page: start or stop the recorder, open a window, switch launch at
-//! login, check for updates, quit. The menus' items are `MenuAction`s,
-//! and `on_menu_event` is the one handler for both menus (the tray's,
-//! `tray.rs`, and on macOS the menu bar's, `menu.rs`). Recorder commands
-//! are bridge methods the host answers (`recording.toggle`,
-//! `recording.start`), sent through the main window as if its page had
-//! sent them, so the shell holds no recorder logic of its own.
-//!
-//! Menu events arrive on the main thread, which runs the event loop every
-//! window, the tray and the panels draw on, so nothing here calls the host
-//! there: the host's call is queued on the shell's ordered lane
-//! (`host::call_in_order`) and the handler returns. A Stop that waits
-//! (another process holds the store's write lock, and the save tries for
-//! up to 15 s) leaves the main thread free, so the recorder's own
-//! `Stopping` reaches the tray at once, as its `recording` snapshot. The
-//! lane keeps the clicks in order, as the main thread did: a Record
-//! clicked during that stop runs once it has ended, and Quit waits for it
-//! ([`quit_from_menu`]), having refused every start first.
-//!
-//! Swift: `MenuBarView.swift` (the buttons), `AppCommands` in
-//! `StenoApp.swift` (the Record menu).
+//! page. `on_menu_event` handles both menus; recorder commands are bridge
+//! methods sent through the main window, so the shell holds no recorder
+//! logic. Host calls run on the shell's ordered lane
+//! (`host::call_in_order`), never on the main thread, so a slow Stop
+//! cannot freeze the tray and clicks keep their order.
 
 use serde_json::{Value, json};
 pub use steno_bridge::CaptureMode;
@@ -37,8 +21,7 @@ use crate::{
 };
 
 steno_core::string_enum! {
-    /// The menu items, by id (`as_str`). The ids are stable strings so a
-    /// test can map them both ways without a menu.
+    /// The menu items, by their stable id (`as_str`).
     pub enum MenuAction {
         Record = "record",
         RecordInPerson = "record-in-person",
@@ -56,17 +39,14 @@ steno_core::string_enum! {
 pub const MEETING_PREFIX: &str = "meeting:";
 
 impl MenuAction {
-    /// The item's text at rest on this platform ([`Self::label_on`]);
-    /// `record_label` replaces the first while the recorder is busy.
+    /// The item's text on this platform ([`Self::label_on`]).
     pub const fn label(self) -> &'static str {
         self.label_on(Platform::CURRENT)
     }
 
-    /// The item's text on `platform`: the Mac's "Settings…", "Check for
-    /// Updates…" and "Quit Steno", Windows' "Exit Steno", and on Windows
-    /// and Linux "Settings" and "Check for Updates" without the ellipsis,
-    /// which there marks an item that asks for more input before it acts;
-    /// both of these act at once (the update dialog is the check's result).
+    /// The item's text on `platform`. The ellipsis appears on macOS only;
+    /// elsewhere it marks an item that asks for more input, and these act
+    /// at once.
     pub const fn label_on(self, platform: Platform) -> &'static str {
         match self {
             Self::Record => "Record",
@@ -83,16 +63,13 @@ impl MenuAction {
         }
     }
 
-    /// The plain menu item for the action, in the tray's menu or the menu
-    /// bar's.
     pub fn item(self, app: &AppHandle, accelerator: Option<&str>) -> tauri::Result<MenuItem<Wry>> {
         MenuItem::with_id(app, self.as_str(), self.label(), true, accelerator)
     }
 }
 
-/// The bridge method and params a tray action sends. The tray starts a
-/// call through `recording.toggle` and names the mode only for an
-/// in-person recording.
+/// The bridge method and params a tray action sends; the mode is named
+/// only for an in-person recording.
 pub fn recorder_command(mode: Option<CaptureMode>) -> (&'static str, Value) {
     match mode {
         None => ("recording.toggle", Value::Null),
@@ -101,9 +78,7 @@ pub fn recorder_command(mode: Option<CaptureMode>) -> (&'static str, Value) {
 }
 
 /// The window the host answers tray commands through: the main window,
-/// created when the user closed it. The host publishes the resulting
-/// `recording` snapshot there, which is also where the tray and the
-/// panels read it.
+/// created when the user closed it.
 pub fn host_window(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
     if let Some(window) = app.get_webview_window(BridgeWindow::Main.as_str()) {
         return Ok(window);
@@ -111,18 +86,15 @@ pub fn host_window(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
     windows::open(app, BridgeWindow::Main, None, None).map_err(failed)
 }
 
-/// Starts (`Some(mode)`) or toggles (`None`) the recorder through the host:
-/// the host window is found (or made) here, on the main thread, and the
-/// call is queued off it ([`record_through`]).
+/// Starts (`Some(mode)`) or toggles (`None`) the recorder through the host.
 pub fn record(app: &AppHandle, mode: Option<CaptureMode>) -> Result<(), BridgeError> {
     let window = host_window(app)?;
     record_through(app.clone(), window, mode);
     Ok(())
 }
 
-/// The host's half of [`record`]: on the shell's ordered lane, after the
-/// clicks before it, returning at once; a failure is logged from there, as
-/// a menu item has no one to report it to.
+/// The host's half of [`record`], queued on the ordered lane; a failure is
+/// logged, as a menu item has no one to report it to.
 pub fn record_through<H: ShellHost>(host: H, window: H::Window, mode: Option<CaptureMode>) {
     let (method, params) = recorder_command(mode);
     host::call_in_order(host, "menu", move |host| {
@@ -130,22 +102,19 @@ pub fn record_through<H: ShellHost>(host: H, window: H::Window, mode: Option<Cap
     });
 }
 
-/// Opens or focuses a window; errors are logged, as a menu item has no one
-/// to report them to.
+/// Opens or focuses a window; errors are logged.
 pub fn open(app: &AppHandle, window: BridgeWindow) {
     if let Err(error) = windows::open(app, window, None, None) {
         stderr_line!("[steno-desktop] opening the {window} window failed: {error}");
     }
 }
 
-/// Checks for an update and offers it, off the caller's thread; the
-/// tray's item and `updates.check` from Settings both ask.
+/// Checks for an update and offers it, off the caller's thread.
 pub fn check_for_updates(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move { updater::check_and_offer(&app).await });
 }
 
-/// A menu item was chosen, in the tray's menu or the menu bar's.
 pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
     let MenuId(id) = event.id();
     if let Some(meeting_id) = id
@@ -167,8 +136,7 @@ pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
             Ok(window) => launch_at_login_through(app.clone(), window),
             Err(error) => {
                 report(Err(error));
-                // The check mark follows the system, even when the change
-                // failed, read off the main thread.
+                // The check mark follows the system, even after a failure.
                 host::call_in_order(app.clone(), "menu", |host| {
                     host.note_login_item(host.login_item_on());
                     Ok(())
@@ -181,7 +149,6 @@ pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
     }
 }
 
-/// Opens the main window on `meeting_id`, as a deep link does.
 fn open_meeting(app: &AppHandle, meeting_id: uuid::Uuid) {
     let request = steno_bridge::WindowParams {
         window: BridgeWindow::Main,
@@ -193,12 +160,10 @@ fn open_meeting(app: &AppHandle, meeting_id: uuid::Uuid) {
     }
 }
 
-/// The page's own ⌘F, pressed in the main window: its search field takes
-/// the focus (`useShortcut` in `meeting-list.tsx`).
+/// The page's own ⌘F, dispatched in the main window to focus its search.
 const FIND_MEETINGS_SCRIPT: &str = "window.dispatchEvent(new KeyboardEvent('keydown', \
     { key: 'f', code: 'KeyF', metaKey: true }));";
 
-/// Find Meetings: brings the main window up and focuses its search.
 fn find_meetings(app: &AppHandle) {
     let shown = windows::open(app, BridgeWindow::Main, None, None)
         .and_then(|window| window.eval(FIND_MEETINGS_SCRIPT));
@@ -213,9 +178,8 @@ fn report(result: Result<(), BridgeError>) {
     }
 }
 
-/// The bridge method and params that tell the host the login item
-/// changed: the same call Settings > General makes, so its snapshot
-/// follows whichever menu switched it.
+/// The call Settings > General makes when the login item changed, so the
+/// host's snapshot follows whichever surface switched it.
 pub fn launch_at_login_command(value: bool) -> (&'static str, Value) {
     (
         "settings.general.setLaunchAtLogin",
@@ -223,16 +187,9 @@ pub fn launch_at_login_command(value: bool) -> (&'static str, Value) {
     )
 }
 
-/// Switches launch at login, tells the host through `window` and moves
-/// the tray's check mark, for the tray's item and for Settings alike.
-/// The host hears of a failed switch too: it tries again and, failing,
-/// shows why in Settings > General. Blocking (the system's login item,
-/// then the host), so it runs off the main thread: from Settings on
-/// Tauri's blocking pool (`bridge::host_command`), from the tray on the
-/// shell's ordered lane ([`launch_at_login_through`]). Once the host has
-/// answered, even when the change failed, the system's login item is read
-/// again here and the check mark shows it, on the main thread.
-/// Swift: `MenuBarViewModel.setLaunchAtLogin`.
+/// Switches launch at login, tells the host through `window` (also on
+/// failure, so Settings can show why) and moves the tray's check mark to
+/// what the system then says. Blocking, so it runs off the main thread.
 pub fn set_launch_at_login<H: ShellHost>(
     host: &H,
     window: &H::Window,
@@ -247,10 +204,9 @@ pub fn set_launch_at_login<H: ShellHost>(
     Ok(())
 }
 
-/// The tray's Launch at login: [`set_launch_at_login`] on the shell's
-/// ordered lane, returning at once; a failure is logged from there. The
-/// item switches what the system says once the clicks before it have
-/// landed, read there, so a second click undoes the first.
+/// The tray's Launch at login on the ordered lane. It reads the system's
+/// state once the clicks before it have landed, so a second click undoes
+/// the first.
 pub fn launch_at_login_through<H: ShellHost>(host: H, window: H::Window) {
     host::call_in_order(host, "menu", move |host| {
         let wanted = !host.login_item_on();
@@ -258,15 +214,12 @@ pub fn launch_at_login_through<H: ShellHost>(host: H, window: H::Window) {
     });
 }
 
-/// The code Quit exits with.
 pub const QUIT_CODE: i32 = 0;
 
-/// Ends the process through the run loop, so `ExitRequested` carries a code
-/// and `main` lets it through (a code-less request is the last window
-/// closing, which the tray keeps alive) once the shutdown ran: a recording
-/// in progress is saved first (`main::exit_request`). Quit in the tray's
-/// menu and in the macOS menu bar, a destroyed main window with no tray,
-/// and SIGTERM, SIGINT and SIGHUP all end here.
+/// Ends the process through the run loop with an exit code, so `main`
+/// lets the request through once the shutdown has saved any recording (a
+/// code-less request is the last window closing, which the tray keeps
+/// alive).
 pub fn quit(app: &AppHandle) {
     app.exit(QUIT_CODE);
 }
@@ -280,18 +233,11 @@ pub fn quit_from_menu(app: &AppHandle) {
     });
 }
 
-/// The menus' Quit on `host`, on the main thread. Every recording start is
-/// refused at once (`ShellHost::refuse_starts`), so a Record from any
-/// surface, the tray's queued before the Quit included, says "Steno is
-/// quitting" and leaves no meeting to save on the way out; the tray's
-/// Record rows read "Quitting…", disabled, and Launch at login is
-/// disabled (`tray::note_quitting`). Then `exit` waits for the actions
-/// clicked before the Quit ([`exit_after_queued`]): a Stop whose save
-/// waits on the store finishes it, with its own end reason, as it did when
-/// the main thread ran the Stop and the Quit waited behind it. Past
-/// `patience` the exit goes ahead: its shutdown tries the stop's commit no
-/// more, and a save still waiting leaves the meeting `recording` for the
-/// next launch's recovery.
+/// The menus' Quit on `host`, on the main thread. Refuses every recording
+/// start at once and marks the tray as quitting, then exits once the
+/// actions clicked before it have run ([`exit_after_queued`]) or
+/// `patience` has passed; a save still waiting then is left to the next
+/// launch's recovery.
 pub fn quit_through<H: ShellHost>(
     host: &H,
     patience: std::time::Duration,
@@ -303,8 +249,7 @@ pub fn quit_through<H: ShellHost>(
 }
 
 /// Calls `exit` from a thread of its own once every job queued on `host`'s
-/// lane before this call has run, or once `patience` has passed, whichever
-/// comes first; returns at once.
+/// lane before this call has run, or after `patience`; returns at once.
 pub fn exit_after_queued<H: ShellHost>(
     host: &H,
     patience: std::time::Duration,
@@ -330,9 +275,7 @@ mod tests {
     use super::*;
     use crate::host::gated::{GatedHost, Opens, returns_at_once};
 
-    /// A host whose stop is held (its save waits on the store), with the
-    /// tray's Stop clicked and waiting at the gate, which opens when the
-    /// guard drops.
+    /// A host whose stop is held until the returned guard drops.
     fn a_held_stop() -> (GatedHost, Opens) {
         let host = GatedHost::holding("recording.toggle");
         let opens = host.opens_on_drop();
@@ -344,9 +287,7 @@ mod tests {
         (host, opens)
     }
 
-    /// The tray's Record while the host's stop is held (its save waits on
-    /// the store): the menu event returns at once, and the stop goes on
-    /// and ends on the lane.
+    /// The tray's Record during a held stop returns at once.
     #[test]
     fn the_trays_record_returns_before_the_stop_ends() {
         let host = GatedHost::holding("recording.toggle");
@@ -365,9 +306,8 @@ mod tests {
         assert!(host.wait_answered("recording.toggle", Duration::from_secs(5)));
     }
 
-    /// The tray's Launch at login while the host's answer is held: the
-    /// menu event returns at once, the login item is switched, and the
-    /// check mark moves once the host has answered.
+    /// The tray's Launch at login returns at once while the host is held,
+    /// and the check mark moves once the host has answered.
     #[test]
     fn the_trays_launch_at_login_returns_before_the_host_answers() {
         let (method, _) = launch_at_login_command(true);
@@ -397,14 +337,8 @@ mod tests {
         assert_eq!(host.checked(), [true], "as read once switched");
     }
 
-    /// The tray's Stop, on a stand-in main thread: the host publishes
-    /// `Stopping` and its save then waits. The `recording` topic is
-    /// throttled to 20 Hz and levels publish it all through a recording,
-    /// so `Stopping` goes out from the host's `recording` feed, a thread
-    /// of its own. The snapshot reaches the main thread through the window
-    /// sink and the tray's Record row reads "Stopping…" while the save
-    /// still waits, since the menu event returned at once and left the
-    /// main thread free.
+    /// The tray's Record row reads "Stopping…" while the stop's save still
+    /// waits, since the menu event left the main thread free.
     #[cfg(not(feature = "fixture-host"))]
     #[test]
     fn the_tray_reads_stopping_while_the_stop_still_runs() {
@@ -416,9 +350,8 @@ mod tests {
 
         type Task = Box<dyn FnOnce() + Send>;
 
-        /// The main thread: runs what is posted to it in order; a
-        /// `recording` snapshot delivered there retitles the Record row as
-        /// `tray::note_recording` does, and the row's text goes to `rows`.
+        /// A stand-in main thread: runs posted tasks in order and records
+        /// the Record row's text as `tray::note_recording` sets it.
         #[derive(Clone)]
         struct StandInMain {
             id: std::thread::ThreadId,
@@ -489,11 +422,7 @@ mod tests {
         assert!(host.wait_answered("recording.toggle", Duration::from_secs(5)));
     }
 
-    /// Two quick tray clicks, Record in person and then Record (a
-    /// toggle), reach the host in the order they were made, as they did
-    /// when the main thread ran them one after the other. Reordered, the
-    /// toggle would start a call recording and the in-person start be
-    /// refused; spawned one per click on Tauri's pools, some pairs are.
+    /// Two quick tray clicks reach the host in the order they were made.
     #[test]
     fn two_quick_tray_clicks_reach_the_host_in_click_order() {
         let rounds = 300;
@@ -512,9 +441,8 @@ mod tests {
         );
     }
 
-    /// A Record clicked while the Stop before it waits on the store (the
-    /// recorder reads `Stopping`, where a start is ignored) runs once that
-    /// stop has ended, so it starts a recording rather than being dropped.
+    /// A Record clicked during a waiting Stop runs after it and starts a
+    /// recording rather than being dropped.
     #[test]
     fn a_record_clicked_during_a_held_stop_runs_after_it() {
         let (host, _opens) = a_held_stop();
@@ -528,10 +456,7 @@ mod tests {
         assert_eq!(host.answered(), ["recording.toggle", "recording.start"]);
     }
 
-    /// Two quick Launch at login clicks, made while the Stop clicked before
-    /// them still waits on the store, switch the item on and then off: the
-    /// second reads what the system says once the first has landed, where
-    /// reading it at the click would repeat the first.
+    /// Two quick Launch at login clicks switch the item on and then off.
     #[test]
     fn a_second_launch_at_login_click_undoes_the_first() {
         let (host, _opens) = a_held_stop();
@@ -543,9 +468,8 @@ mod tests {
         assert_eq!(host.checked(), [true, false]);
     }
 
-    /// A Launch at login whose switch the system refuses: the host still
-    /// hears of it, and the check mark shows what the system says, read
-    /// in the job once the host answered, not what was asked.
+    /// A refused switch still reaches the host, and the check mark shows
+    /// what the system says.
     #[test]
     fn a_refused_launch_at_login_leaves_the_check_mark_on_the_system() {
         let (method, _) = launch_at_login_command(true);
@@ -557,10 +481,7 @@ mod tests {
         assert_eq!(host.checked(), [false]);
     }
 
-    /// The menus' Quit while the Stop clicked before it waits on the
-    /// store: the exit waits for that stop, so its save finishes with its
-    /// own end reason, as when the main thread ran the Stop and the Quit
-    /// waited behind it; then the exit comes.
+    /// Quit waits for the Stop clicked before it, then exits.
     #[test]
     fn a_quit_waits_for_the_stop_clicked_before_it() {
         let (host, _opens) = a_held_stop();
@@ -581,9 +502,7 @@ mod tests {
         );
     }
 
-    /// A stop that still waits once the patience has passed does not hold
-    /// the exit: it goes ahead about when the patience ends, never seconds
-    /// later, and the shutdown takes over the stop.
+    /// A stop still waiting after the patience does not hold the exit.
     #[test]
     fn a_quit_goes_ahead_once_its_patience_has_passed() {
         let (host, _opens) = a_held_stop();
@@ -602,9 +521,8 @@ mod tests {
         );
     }
 
-    /// The menus' Quit refuses every start and retitles the tray before it
-    /// returns, on the main thread, while the Stop clicked before it still
-    /// waits on the store: neither waits behind that stop on the lane.
+    /// Quit refuses starts and retitles the tray before returning, without
+    /// waiting behind a pending stop.
     #[test]
     fn a_quit_refuses_starts_and_retitles_the_tray_at_once() {
         let (host, _opens) = a_held_stop();
@@ -617,11 +535,8 @@ mod tests {
         assert_eq!(host.answered(), Vec::<String>::new(), "the stop is held");
     }
 
-    /// A Record clicked while the Stop before it waits on the store, then
-    /// Quit: the Record runs after the stop and before the exit, and is
-    /// refused, as the Quit refused every start before either ran, so no
-    /// recording is left to save on the way out. Its call takes 300 ms
-    /// here, so an exit that came before it would find it unanswered.
+    /// A Record queued between a waiting Stop and Quit is refused, so no
+    /// recording is left to save on the way out.
     #[test]
     fn a_record_queued_before_a_quit_is_refused_before_the_exit() {
         let host = GatedHost::holding("recording.toggle")
@@ -690,8 +605,7 @@ mod tests {
         );
     }
 
-    /// The tray's login item tells the host what Settings tells it, in the
-    /// recorded params shape.
+    /// The tray's login item sends the same params Settings does.
     #[test]
     fn the_login_item_tells_the_host_as_settings_does() {
         let fixture: Value = serde_json::from_str(include_str!(

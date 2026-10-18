@@ -1,36 +1,15 @@
-//! Whether a recording is under way, as the jobs see it (A19 of
-//! `.plans/2026-10-07-stable-promotion.md`). An in-process speech engine
-//! (`CoreML` on the Mac) runs in the app's process, so an abort inside it
-//! that no `@catch` stops ends the app, and a recording under way with it:
-//! everything recorded after the abort is lost (D3). So while a recording
-//! starts, runs or stops, a job loads and runs no in-process speech engine.
-//! It waits at its next call, its meeting saying "Waiting for the
-//! recording to finish" ([`MeetingEvent::WaitingForRecording`]), and goes
-//! on once the recorder is idle. The speech sidecar runs in a child, whose
-//! abort ends only the child, so its jobs do not wait. Rust only: the
-//! Swift pipeline ran `CoreML` beside a recording.
-//!
-//! - **What waits.** Each in-process speech call of a job: the load at
-//!   its start and each lane's transcription. A call under way when a
-//!   recording starts runs to its end; the job's next call waits. The
-//!   recorder's own warm-up while it records
-//!   ([`ProcessingPipeline::warm_up_while_recording`]) does not wait: it is
-//!   guarded by the [`WarmUpMark`](crate::WarmUpMark) instead.
-//! - **The recorder's side.** The services' recorder sets
-//!   [`LiveRecording::set`] on every change of its state: live from
-//!   `Starting` to `Idle`. The pipeline reads its state, never the
-//!   recorder.
-//!
-//! [`MeetingEvent::WaitingForRecording`]: steno_core::MeetingEvent::WaitingForRecording
-//! [`ProcessingPipeline::warm_up_while_recording`]: crate::ProcessingPipeline::warm_up_while_recording
+//! Whether a recording is under way, as the jobs see it. An abort in an
+//! in-process speech engine ends the app and the recording, so while one
+//! runs a job waits before its next in-process speech call
+//! ([`MeetingEvent::WaitingForRecording`](steno_core::MeetingEvent::WaitingForRecording)).
+//! Sidecar jobs do not wait.
 
 use std::sync::Arc;
 
 use tokio::sync::watch;
 
 /// Whether a recording is under way; clones share it. Never live from
-/// [`Default`], as for the `steno` command and the tests without a
-/// recorder.
+/// [`Default`].
 ///
 /// ```
 /// use steno_pipeline::LiveRecording;
@@ -58,14 +37,13 @@ impl Default for LiveRecording {
 }
 
 impl LiveRecording {
-    /// The recorder's state changed: `live` from the start of a recording
-    /// to the end of its stop.
+    /// The recorder's state changed: `live` from the start of a recording to
+    /// the end of its stop.
     pub fn set(&self, live: bool) {
         self.0
             .send_if_modified(|now| std::mem::replace(now, live) != live);
     }
 
-    /// Whether a recording is under way now.
     #[must_use]
     pub fn is_live(&self) -> bool {
         *self.0.borrow()

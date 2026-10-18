@@ -1,15 +1,8 @@
 //! The pipeline over a `SidecarSpeechEngine` on the real
-//! `steno-speech-sidecar` binary (its fake engine, so no models), the
-//! engine the app runs Parakeet on off the Mac: the two-lane fixture call.
-//! The child starts at the job's warm-up, transcribes both lanes, and is
-//! gone before the diarizer runs; the next job starts a child of its own.
-//!
-//! The diarizer runs in the same engine's child: a child that dies while
-//! it diarizes fails that stage only.
-//!
-//! The binary is the one in the target directory, which
-//! `cargo test --workspace` builds (as does
-//! `cargo build -p steno-speech-sidecar`).
+//! `steno-speech-sidecar` binary (its fake engine, so no models), which
+//! `cargo test --workspace` builds: each job's child transcribes, is gone
+//! before the diarizer runs, and a child that dies while it diarizes fails
+//! that stage only.
 
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
@@ -87,12 +80,9 @@ async fn each_job_starts_the_sidecar_and_frees_it_once_its_lanes_are_transcribed
     );
 }
 
-/// The diarizer the app runs, in the same sidecar engine as speech: each
-/// job's child transcribes and is released, then a child of the
-/// diarizer's own diarizes and stops. The first job's diarizing child
-/// aborts (as ONNX Runtime would): its diarize stage fails, the job still
-/// ends `ready` with the fallback's speakers, and the app runs on. The
-/// second job diarizes in a new child.
+/// The diarizer in the same sidecar engine as speech: the first job's
+/// diarizing child aborts, its stage fails and the job still ends `ready`
+/// with the fallback's speakers; the second job diarizes in a new child.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_dies_while_it_diarizes_fails_that_stage_and_the_next_job_diarizes() {
     let dir = tempfile::tempdir().unwrap();
@@ -160,8 +150,7 @@ async fn a_child_that_dies_while_it_diarizes_fails_that_stage_and_the_next_job_d
             .iter()
             .any(|speaker| speaker.embedding.is_some() && speaker.sample_clip_range.is_some());
         assert_eq!(diarized, job == 2, "job {job}: {speakers:?}");
-        // The crash's fallback stores the room speaker, which keeps the
-        // recording unstamped; the job that diarizes is stamped.
+        // The fallback's room speaker keeps the recording unstamped.
         let room = speakers
             .iter()
             .any(|speaker| speaker.id == steno_core::room_speaker_id(meeting.id));
@@ -175,9 +164,8 @@ async fn a_child_that_dies_while_it_diarizes_fails_that_stage_and_the_next_job_d
     assert!(marker.exists(), "the first diarizing child aborted");
 }
 
-/// A diarizer that fails as `SidecarDiarizer` does when the speech
-/// sidecar's child dies, overruns the deadline or the memory ceiling
-/// while it diarizes: the real error type, boxed as the boundary boxes it.
+/// A diarizer that fails as `SidecarDiarizer` does when the sidecar's
+/// child dies, boxed as the boundary boxes it.
 struct FailingInTheSidecar(SidecarFailure);
 
 /// One way the child fails, made fresh for each job.
@@ -199,12 +187,10 @@ impl steno_core::Diarizer for FailingInTheSidecar {
     }
 }
 
-/// Each way the speech sidecar's child fails while it diarizes (#266: a
-/// crash, which a systemd-oomd kill is too, the deadline, the 6 GiB
-/// ceiling) reaches the diarizer fallback behind the app's model gate:
-/// the job ends `ready`, the room speaker is stored, the recording stays
-/// unstamped under "delete after processing", and the meeting detail says
-/// it is kept because the results may be incomplete.
+/// Each way the sidecar's child fails while it diarizes (a crash, the
+/// deadline, the memory ceiling) reaches the diarizer fallback: the job
+/// ends `ready` with the room speaker, and the recording is kept as
+/// possibly incomplete.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_sidecar_diarize_failure_keeps_the_recording_incomplete() {
     let failures: [(&str, SidecarFailure); 4] = [

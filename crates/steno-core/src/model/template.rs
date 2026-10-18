@@ -1,14 +1,12 @@
-//! The summary templates: section ids and headings fixed by the core,
-//! prompt text edited in `Sources/StenoCore/Resources/Templates/*.json`.
-//! Swift: `Sources/StenoCore/Templates/SummaryTemplate.swift`.
+//! The summary templates: section ids and headings fixed by the core, prompt
+//! text in `Sources/StenoCore/Resources/Templates/*.json`.
 
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
-/// One summary template; the four bundled ones come from
-/// `Sources/StenoCore/Resources/Templates/*.json`, the one copy both
-/// implementations read until cutover.
+/// One summary template; the bundled files are shared with the Swift app
+/// until cutover.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SummaryTemplate {
@@ -65,8 +63,8 @@ impl SummaryTemplate {
         "interview",
     ];
 
-    /// The four fixed templates in [`Self::BUNDLED_IDS`] order. Parsed once;
-    /// a malformed file is a packaging error and panics with the file name.
+    /// The four bundled templates, parsed once; a malformed file panics with its
+    /// name.
     #[must_use]
     pub fn bundled() -> &'static [SummaryTemplate] {
         &BUNDLED
@@ -94,8 +92,7 @@ mod tests {
             .map(|template| template.id.as_str())
             .collect();
         assert_eq!(ids, SummaryTemplate::BUNDLED_IDS);
-        // The menu order `SummaryTemplate.bundledIDs` lists in
-        // `Sources/StenoCore/Templates/SummaryTemplate.swift`.
+        // The menu order.
         assert_eq!(
             SummaryTemplate::BUNDLED_IDS,
             [

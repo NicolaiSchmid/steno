@@ -1,9 +1,6 @@
-//! The ONNX backend on the repository's two-voice `say` fixture: two
-//! speakers, as the Swift model test expects. Ignored because it needs the
-//! model files: set `STENO_MODELS_DIR` to a models directory holding
-//! `onnx/diarization/`, or allow the download (about 32 MB) into it or,
-//! without the variable, into the default models directory
-//! (`steno_speech::ModelStore::from_environment`).
+//! The ONNX backend finds two speakers on the repository's two-voice `say`
+//! fixture. Ignored because it needs the model files (`STENO_MODELS_DIR`, or a
+//! download of about 32 MB).
 
 #![cfg(feature = "onnx")]
 
@@ -37,8 +34,7 @@ fn two_voices_fixture_gives_two_speakers() {
     let audio = fixture("two-speakers-mf.wav");
     let result = pipeline.diarize(&audio).expect("diarizes");
     eprintln!("{result:#?}");
-    // The fixture is under thirty seconds, so the refinement leaves the
-    // mapping alone; the mapping itself must find two voices.
+    // Under thirty seconds the refinement leaves the mapping alone.
     assert_eq!(result.clusters.len(), 2, "{result:?}");
     for cluster in &result.clusters {
         let embedding = cluster.embedding.as_ref().expect("embedding");

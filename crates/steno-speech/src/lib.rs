@@ -1,81 +1,9 @@
 //! Steno's speech pipeline above the tensors: voice activity detection, the
 //! pause-aligned chunker, the greedy TDT decoder, the overlap merge and the
-//! mapping from pieces to segments, with the model calls behind one trait:
-//! ONNX Runtime here, `CoreML` in `steno-speech-coreml`, which runs the
-//! same [`Transcriber`] under its own chunker settings and detector. Plan:
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (WP4, invariant 4) and
-//! decisions 1 to 5 of `.plans/2026-10-01-cross-platform-speech-stack.md`.
-//!
-//! - [`backend`]: [`SpeechBackend`], the four model calls (features,
-//!   encoder, decoder step, joint step), the tensors they exchange and the
-//!   logits split.
-//! - [`features`]: the `NeMo` mel preprocessor in Rust.
-//! - [`vocab`]: `tokens.txt`, word boundaries, the splice-safe set.
-//! - [`decoder`]: the greedy TDT loop over one encoder window.
-//! - [`vad`]: [`VoiceActivityDetector`], Silero through ONNX Runtime, and
-//!   energy detectors: a fixed threshold for tests, one that follows the
-//!   recording's level for the `CoreML` engine.
-//! - [`chunker`]: the longest-pause layout with the 60 s memory clamp, or
-//!   the models' fixed 15 s window (`CoreML`), the extra windows over the
-//!   audio the layout leaves out, and [`partition`](chunker::partition),
-//!   the recording split once into owned spans.
-//! - [`merge`]: the time-tolerant LCS merge of overlapping windows.
-//! - [`segmentation`]: pieces to words to [`RawSegment`](steno_core::RawSegment)s.
-//! - [`language`]: the per-segment language tagger.
-//! - [`pipeline`]: [`Transcriber`], which runs the above in order, decodes
-//!   each span (a chunk or an extra window) on one backend or several in
-//!   parallel, retries empty chunks with a wider window, and joins the
-//!   spans' tokens by runs.
-//! - [`onnx`]: the ONNX Runtime backend over our fp32 export, with the
-//!   encoder on `DirectML` on Windows when the settings ask and the probe
-//!   passes ([`EncoderProvider`]).
-//! - [`model_store`]: the manifest, its two hosts and the checksummed,
-//!   resumable download, and [`Install`], whether a missing file may be
-//!   downloaded.
-//! - [`engine`]: [`OnnxSpeechEngine`], the in-process `SpeechEngine` the
-//!   sidecar hosts, and its settings
-//!   ([`pipeline_config`](engine::pipeline_config)).
-//! - [`sidecar`]: [`SidecarSpeechEngine`], the `SpeechEngine` over the
-//!   `steno-speech-sidecar` child process, and its wire protocol, and the
-//!   process-wide switch-off of `DirectML` after a child crashed, hung or
-//!   overran the memory ceiling on it during a load or a request
-//!   ([`sidecar::directml_switched_off`]), and on Linux the child's own
-//!   systemd scope (`sidecar` docs).
-//! - [`runtime`]: [`SpeechSettings`] and [`SpeechRuntime`], which engine
-//!   runs on which platform.
-//! - [`wav`]: the 16 kHz PCM-16 reader of the example and the tests.
-//! - [`wer`]: the word error rate and the word-start agreement the FLEURS
-//!   gate, the `CoreML` parity harness and the CLI's bake-off score with.
-//! - [`error`]: [`SpeechError`], the one error type, and [`SidecarError`],
-//!   its cause when the speech sidecar fails.
-//!
-//! # Models
-//!
-//! Nothing is committed. [`ModelStore::new`] takes the store root, which
-//! holds one folder per asset: `<root>/parakeet-tdt-0.6b-v3-fp32/`,
-//! `<root>/silero-vad/` and `steno-diarize`'s `<root>/diarization/`.
-//! Steno's root is the `onnx/` folder of its models directory
-//! ([`ModelStore::in_models_directory`]). The app and the CLI take the
-//! models directory from the settings, else `STENO_MODELS_DIR`,
-//! else `<support directory>/Models` (`steno-services`);
-//! [`ModelStore::from_environment`], for the `transcribe` example and the
-//! FLEURS test, takes it from the same variable and default. The Mac's
-//! `CoreML` Parakeet has a store of its own at the models directory's
-//! `fluidaudio/` ([`ModelStore::coreml_in_models_directory`]), its one
-//! asset in `fluidaudio/parakeet-tdt-0.6b-v3/`, where the Swift app's
-//! `FluidAudio` puts it.
-//!
-//! Where each model is hosted: [`model_store`].
-//!
-//! # Threads and process boundaries
-//!
-//! Inference is synchronous and CPU-bound. [`OnnxSpeechEngine`] runs it on
-//! a blocking thread when a tokio runtime is present. The app does not run
-//! it in its own process (invariant 4, speech-stack decision 5): when it
-//! runs ONNX speech it runs [`SidecarSpeechEngine`], which hosts the same
-//! [`Transcriber`] in `steno-speech-sidecar` and sends it the audio over a
-//! pipe, so an abort out of ONNX Runtime ends the child and not the app.
-//! Which platform runs which engine: [`runtime`].
+//! mapping to segments, with the model calls behind [`SpeechBackend`]: ONNX
+//! Runtime here, `CoreML` in `steno-speech-coreml`. The app runs ONNX speech
+//! only in the sidecar ([`SidecarSpeechEngine`]), which gets the audio only
+//! over its stdin; which platform runs which engine: [`runtime`].
 //!
 //! ```no_run
 //! use steno_core::{AudioBuffer16k, SpeechEngine};
@@ -90,11 +18,9 @@
 //! # }
 //! ```
 
-// Signal processing counts samples, frames and bins in `usize` and turns
-// them into seconds and weights in `f32`/`f64` on every other line; the
-// values are tiny (a recording is under 2^32 samples) and the per-site
-// allowances the other crates use would bury the arithmetic. The remaining
-// pedantic lints stay on.
+// Signal processing converts sample, frame and bin counts to floats on every
+// other line; the values are tiny and per-site allowances would bury the
+// arithmetic.
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,

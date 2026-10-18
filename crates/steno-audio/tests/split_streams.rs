@@ -1,10 +1,8 @@
-//! The two-stream capture path the WASAPI backend runs (WP10a), without
-//! WASAPI: the stream plan, the latency arithmetic, which engine answers
-//! are trusted, the follower's
-//! jitter-buffer policy and the master's routing into the sink, over
-//! synthetic packets. Runs on every OS; on the Windows runner these are the
-//! backend's unit tests, since the runner has no audio device. No Swift
-//! counterpart.
+//! The two-stream capture path the WASAPI backend runs, without WASAPI:
+//! the stream plan, latency arithmetic, trusted engine answers, the
+//! follower's jitter buffer and the master's routing, over synthetic
+//! packets. On the Windows runner, which has no audio device, these are the
+//! backend's unit tests.
 
 // Test arithmetic: sample counts cast freely, and samples compare exactly
 // on purpose (the path copies, folds by halves or writes zeros).
@@ -60,7 +58,6 @@ fn silent(frames: usize, channels: usize) -> SliceView<'static> {
     }
 }
 
-/// The master body for `plan`, pulling from `follower` into `sink`.
 fn master_body(
     plan: &SplitStreamPlan,
     follower: &Arc<FollowerLane>,
@@ -130,16 +127,15 @@ fn no_lanes_is_refused() {
     ));
 }
 
-/// The packets that measure `QPC_CALIBRATION_FRAMES`: one more than the
-/// 10 ms packets in it, since each advance is read at the next packet.
+/// The packets that measure `QPC_CALIBRATION_FRAMES`: one more than fit,
+/// since each advance is read at the next packet.
 const CALIBRATION_PACKETS: u64 = QPC_CALIBRATION_FRAMES / 480 + 1;
 
 /// The QPC's 100 ns units in one 10 ms packet.
 const QPC_PACKET: u64 = 100_000;
 
-/// One WASAPI stream's clocks as `GetBuffer` gives them, 10 ms packets of
-/// 48 kHz frames: the device position advances `per_packet` a packet, the
-/// QPC `qpc_per_packet` (0: the engine gives none).
+/// One WASAPI stream's clocks, 10 ms packets: the device position advances
+/// `per_packet` a packet, the QPC `qpc_per_packet` (0: none).
 struct Clocks {
     positions: DevicePositions,
     next: Packet,
@@ -171,8 +167,7 @@ impl Clocks {
         self
     }
 
-    /// One packet, flagged or not, with a timestamp error or not: what it
-    /// reports.
+    /// One packet, flagged or not: what it reports.
     fn deliver(&mut self, discontinuity: bool, timestamp_error: bool) -> Missed {
         let packet = Packet {
             discontinuity,
@@ -184,7 +179,6 @@ impl Clocks {
         missed
     }
 
-    /// `packets` clean packets: none reports a loss.
     fn clean(&mut self, packets: u64) -> &mut Self {
         for _ in 0..packets {
             assert!(self.deliver(false, false).is_none(), "a clean packet");
@@ -192,8 +186,7 @@ impl Clocks {
         self
     }
 
-    /// `packets` packets lost, then the flagged packet after them: what it
-    /// reports.
+    /// `packets` packets lost, then the flagged packet: what it reports.
     fn lose(&mut self, packets: u64) -> Missed {
         self.skip(packets).deliver(true, false)
     }
@@ -207,8 +200,7 @@ fn unfilled(unfilled: usize) -> Missed {
     Missed { fill: 0, unfilled }
 }
 
-/// That `missed` counts `lost` unfilled, or up to 1 % more: a ratio
-/// measured over a few packets errs over, never under.
+/// That `missed` counts `lost` unfilled, or up to 1 % more.
 #[track_caller]
 fn assert_counted(missed: Missed, lost: usize, context: &str) {
     assert!(
@@ -217,12 +209,8 @@ fn assert_counted(missed: Missed, lost: usize, context: &str) {
     );
 }
 
-/// A QPC that measures within 2 % of real time over two seconds fills a
-/// discontinuity's loss exactly, up to the fill limit and unfilled past
-/// it, whatever unit the device positions count in, positions that never
-/// move included: 16 and 8 kHz hands-free headsets write no extra zeros,
-/// and a device above 48 kHz misses no jump. Before the two seconds, the
-/// loss is counted, not filled.
+/// A sane QPC fills a discontinuity's loss exactly, up to the fill limit,
+/// whatever unit the positions count in; before two seconds it only counts.
 #[test]
 fn a_sane_qpc_fills_exactly_what_was_lost_whatever_the_positions() {
     for (engine_rate, per_packet) in [
@@ -248,16 +236,9 @@ fn a_sane_qpc_fills_exactly_what_was_lost_whatever_the_positions() {
     }
 }
 
-/// Without a QPC a discontinuity is counted unfilled at the largest of the
-/// device position's readings: one a frame, the mix format's rate against
-/// 48 kHz, and the ratio measured so far, in the first packets too. So the
-/// right unit reads the loss and the note counts it: 16 kHz positions on a
-/// 16 kHz engine, 16 kHz positions with no mix format (once a clean pair is
-/// measured), 44.1 kHz positions on a 44.1 kHz engine. The mix format's
-/// reading of 48 kHz positions on that engine, and one a frame of 96 kHz
-/// positions on a 48 kHz engine, read more than the loss: an overcount, no
-/// zeros. Positions that never move read nothing (the note's wall-time
-/// shortfall and the follower's padding count that loss).
+/// Without a QPC a discontinuity counts unfilled at the largest position
+/// reading, so the right unit reads the loss and others overcount; frozen
+/// positions read nothing.
 #[test]
 fn without_a_sane_qpc_the_largest_reading_is_counted_unfilled() {
     for (engine_rate, per_packet, lost) in [
@@ -282,10 +263,7 @@ fn without_a_sane_qpc_the_largest_reading_is_counted_unfilled() {
     }
 }
 
-/// A ratio measured over one clean pair of packets errs over, never under:
-/// positions at 10 668 Hz, read to the whole position, advance 106 or 107
-/// a packet, and a loss of 18 packets after one pair counts at least the
-/// 8 640 frames lost.
+/// A ratio measured over one clean pair errs over, never under.
 #[test]
 fn a_ratio_measured_over_one_pair_errs_over() {
     for start in 0..48 {
@@ -304,9 +282,8 @@ fn a_ratio_measured_over_one_pair_errs_over() {
     }
 }
 
-/// A QPC that is not sane never fills, and is not read while the last clean
-/// pair's did not match its frames: one that runs at twice the time, one
-/// 2.5 % fast, one that never moves. One 1.5 % fast is sane.
+/// A QPC off by 2.5 % or more, or frozen, never fills; one 1.5 % fast is
+/// sane.
 #[test]
 fn a_qpc_off_by_more_than_2_percent_never_fills() {
     for (qpc_per_packet, fills) in [
@@ -334,11 +311,8 @@ fn a_qpc_off_by_more_than_2_percent_never_fills() {
     assert!(stuck.lose(50).is_none(), "neither clock moves");
 }
 
-/// `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR` rules out the QPC only: a flagged
-/// packet with the flag, the flagged packet right after it, and a flagged
-/// packet after a packet with the flag, each count their loss from the
-/// device position, whether the QPC fills, is absent or is still measured.
-/// With positions that never move nothing reads such a loss.
+/// A timestamp error rules out the QPC only: flagged packets near it count
+/// from the device position.
 #[test]
 fn a_timestamp_error_rules_out_only_the_qpc() {
     for (qpc_per_packet, warm) in [
@@ -381,10 +355,7 @@ fn a_timestamp_error_rules_out_only_the_qpc() {
     assert!(stuck.skip(50).deliver(true, true).is_none());
 }
 
-/// Packets with a timestamp error stay out of both measurements: every
-/// other packet with the flag (and half as long) for a second, then clean
-/// packets, and the positions measure exactly one a frame, the QPC exactly
-/// real time.
+/// Packets with a timestamp error stay out of both measurements.
 #[test]
 fn timestamp_errors_are_left_out_of_the_measurement() {
     let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
@@ -406,10 +377,8 @@ fn timestamp_errors_are_left_out_of_the_measurement() {
     assert!(clocks.positions.fills());
 }
 
-/// An unflagged idle of endpoint loopback (25 ms or 10 s with no packets)
-/// and a step back stay out of both measurements, which stay exact, so a
-/// later loss fills exactly; at 96 kHz too, where the positions count two
-/// a frame.
+/// An unflagged idle and a step back stay out of both measurements, so a
+/// later loss fills exactly.
 #[test]
 fn an_idle_gap_or_a_step_back_does_not_skew_the_measurement() {
     for (engine_rate, per_packet, idle) in [
@@ -437,11 +406,8 @@ fn an_idle_gap_or_a_step_back_does_not_skew_the_measurement() {
     assert_eq!(clocks.lose(50), filled(24_000));
 }
 
-/// Once the positions moved, a clean packet that advances more than 1.5
-/// times what the ratio measured so far explains stays out of the sums,
-/// below what the engine's rate allows too: 16 kHz positions on a 96 kHz
-/// engine (whose rate allows 2.5 a frame), with an unflagged idle of five
-/// packets after ten, still read a later loss in full.
+/// Once positions moved, a clean packet past 1.5 times the measured ratio
+/// stays out of the sums.
 #[test]
 fn an_idle_inside_the_rate_bound_stays_out_once_the_ratio_is_measured() {
     let mut clocks = Clocks::new(Some(96_000), 160, 0);
@@ -450,10 +416,8 @@ fn an_idle_inside_the_rate_bound_stays_out_once_the_ratio_is_measured() {
     assert_counted(clocks.lose(50), 24_000, "after the idle");
 }
 
-/// A QPC measured off by more than 2 % over two seconds is not read, even
-/// when its last clean pair happened to match: pairs in turn exact and 1.4
-/// times real time measure 1.2 times, and a flagged packet whose QPC reads
-/// three times the loss counts what the positions read.
+/// A QPC off by more than 2 % over two seconds is not read, even when its
+/// last pair matched.
 #[test]
 fn a_qpc_measured_off_is_not_read_even_after_a_matching_pair() {
     let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
@@ -470,8 +434,7 @@ fn a_qpc_measured_off_is_not_read_even_after_a_matching_pair() {
     assert_counted(clocks.deliver(true, false), 24_000, "the positions");
 }
 
-/// Device positions that jitter by a few frames a packet around one a
-/// frame (470 and 490 in turn) stay in the measurement, and read a loss.
+/// Positions that jitter by a few frames stay in the measurement.
 #[test]
 fn positions_that_jitter_stay_in_the_measurement() {
     let mut clocks = Clocks::new(None, 480, 0);
@@ -483,10 +446,8 @@ fn positions_that_jitter_stay_in_the_measurement() {
     assert_eq!(clocks.positions.ratio(), Some(1.0));
 }
 
-/// A flagged packet counts nothing when its clocks sit behind the last
-/// packet's, or less than half a packet past where that one ended (the
-/// engine's rounding, as on the other backends); a jump of more counts in
-/// full.
+/// A flagged packet counts nothing for clocks behind the last packet or
+/// less than half a packet past its end; more counts in full.
 #[test]
 fn a_flagged_packet_counts_only_a_jump_of_more_than_half_a_packet() {
     for qpc_per_packet in [0, QPC_PACKET] {
@@ -515,9 +476,8 @@ fn a_flagged_packet_counts_only_a_jump_of_more_than_half_a_packet() {
     }
 }
 
-/// A garbage position or QPC counts at most an hour, and the sink's counts
-/// saturate rather than wrap: two garbage readings and a packet later, the
-/// count is still the most it holds.
+/// A garbage reading counts at most an hour, and the sink's counts
+/// saturate.
 #[test]
 fn a_garbage_reading_is_capped_and_the_counters_saturate() {
     let mut clocks = Clocks::new(Some(48_000), 480, 0);
@@ -543,9 +503,7 @@ fn a_garbage_reading_is_capped_and_the_counters_saturate() {
     );
 }
 
-/// Device positions that never move (as CI's process loopback reports
-/// them) never panic on the audio thread, whatever the mix format says, a
-/// 0 Hz one included: they measure no ratio and read no jump.
+/// Frozen positions never panic, whatever the mix format says.
 #[test]
 fn positions_that_never_move_divide_nothing_by_zero() {
     for engine_rate in [None, Some(0), Some(16_000), Some(48_000)] {
@@ -565,8 +523,8 @@ fn positions_that_never_move_divide_nothing_by_zero() {
     }
 }
 
-/// The stop's line names both clocks; positions that never move say
-/// "0.0000 a frame", which step 9 of the Windows gate fails on.
+/// The stop's line names both clocks; frozen positions say "0.0000 a
+/// frame".
 #[test]
 fn the_stop_line_names_both_clocks() {
     let mut clocks = Clocks::new(Some(48_000), 0, QPC_PACKET);
@@ -578,11 +536,8 @@ fn the_stop_line_names_both_clocks() {
     );
 }
 
-/// What [`over_positions`] saw: what the flagged packet reported, the
-/// sink's counts and the lanes' lengths, and the seconds the recorder's
-/// note would say are missing (the lane that missed most's zeros, plus the
-/// larger of the lane that left most unfilled and the master's shortfall
-/// to wall time beyond the drift allowance).
+/// What [`over_positions`] saw, and the seconds the recorder's note would
+/// say are missing.
 #[derive(Debug)]
 struct OverPositions {
     reported: Missed,
@@ -594,13 +549,9 @@ struct OverPositions {
     note: f64,
 }
 
-/// The two stream bodies of a call over 6 s of 10 ms ticks, each stream's
-/// packets read by its own [`DevicePositions`] on an engine at
-/// `engine_rate` whose positions advance `per_packet` a tick and whose QPC
-/// `qpc_per_packet` (0: none), as `run_stream` does: the follower's
-/// (system) thread out for `follower_out` ticks from tick `from`, or the
-/// master's (microphone) for `master_out`, the packet after flagged as a
-/// discontinuity.
+/// The two stream bodies of a call over 6 s of 10 ms ticks, each read by
+/// its own [`DevicePositions`]: the follower out for `follower_out` ticks
+/// from `from`, or the master for `master_out`, then a flagged packet.
 fn over_positions(
     engine_rate: Option<u32>,
     (per_packet, qpc_per_packet): (u64, u64),
@@ -692,15 +643,9 @@ fn on_the_system(frames: usize) -> BTreeMap<AudioLane, usize> {
         .collect()
 }
 
-/// The system stream's thread out for 0.5, 0.9 or 1.5 s, on the follower,
-/// whose missed audio the master's pulls pad with zeros, so the master
-/// stays on wall time and only the count can tell. Those zeros, less the
-/// target the lane re-primes on, count as filled whatever the follower's
-/// clocks read: a sane QPC, 16 kHz positions with no QPC, positions that
-/// never move, early in the stream or late. A clock that reads more than
-/// the padding (the QPC past the fill limit) counts the rest unfilled.
-/// Every time the note counts the loss, and the lanes keep the master's
-/// length.
+/// The system stream's thread out for 0.5 to 1.5 s: the master's padding
+/// counts as filled whatever the follower's clocks read, the note counts
+/// the loss, and the lanes keep one length.
 #[test]
 fn a_follower_loss_is_counted_whatever_its_clocks_read() {
     for (name, rate, clocks, from) in [
@@ -745,9 +690,7 @@ fn a_follower_loss_is_counted_whatever_its_clocks_read() {
     }
 }
 
-/// A drift underrun (the follower short by a packet, nothing flagged)
-/// stays in the underrun count and is not counted as missed, after a
-/// discontinuity was counted too.
+/// A drift underrun stays an underrun, not missed audio.
 #[test]
 fn a_drift_underrun_is_not_counted_as_missed() {
     let lanes = [AudioLane::Mic, AudioLane::System];
@@ -781,10 +724,8 @@ fn a_drift_underrun_is_not_counted_as_missed() {
     assert_eq!(sink.filled_samples(), on_the_system(480), "nothing more");
 }
 
-/// The follower reports a discontinuity before it queues the packet: a
-/// master pull in between, with the lane still padding, takes nothing, and
-/// the pull that re-primes on the follower's audio takes the padding and
-/// the count together, once.
+/// The follower reports a discontinuity before it queues the packet; the
+/// padding and the count are taken together, once.
 #[test]
 fn a_discontinuity_waits_for_the_lane_to_prime() {
     let follower = FollowerLane::for_streams(PERIOD, 4_800);
@@ -813,11 +754,8 @@ fn a_discontinuity_waits_for_the_lane_to_prime() {
     assert!(follower.take_missed().is_none(), "once");
 }
 
-/// The microphone's thread out for 1.5 s with no QPC, early or late in
-/// the stream: counted unfilled from its positions, so the note says it
-/// however long the recording runs (the master's shortfall alone falls
-/// inside the drift allowance from about 25 minutes on), and the system
-/// audio queued for that time is dropped, so the lanes keep one length.
+/// The microphone's thread out for 1.5 s with no QPC: counted unfilled, and
+/// the system audio queued meanwhile dropped, so the lanes keep one length.
 #[test]
 fn a_master_loss_without_a_qpc_is_counted() {
     for from in [50, 300] {
@@ -971,9 +909,8 @@ fn a_fast_follower_slips_back_to_the_target_once_a_window_stays_above_high_water
     let follower = FollowerLane::new(480, 960, 1_920, 48_000);
     let mut scratch = vec![0.0f32; 4_096];
     let mut out = vec![0.0f32; 480];
-    // Primed at 960; then the follower delivers 960 extra frames at once
-    // and keeps one packet per pull: the queue stays at 1 440 after each
-    // pull, above the high-water mark.
+    // Primed at 960; then 960 extra frames at once and one packet per pull:
+    // the queue stays at 1 440, above high water.
     follower.push(packet(&ramp(0, 960), 1), &mut scratch);
     assert_eq!(follower.pull(&mut out), 0);
     follower.push(packet(&ramp(960, 1_440), 1), &mut scratch);
@@ -984,8 +921,6 @@ fn a_fast_follower_slips_back_to_the_target_once_a_window_stays_above_high_water
         follower.push(packet(&ramp(pushed, 480), 1), &mut scratch);
         pushed += 480;
     }
-    // The first window held the priming pull's 480; the second has seen
-    // three pulls at 1 440.
     assert_eq!(lost, 0, "no window has stayed above high water yet");
     assert_eq!(follower.queued(), 1_920);
     // Its fourth pull closes the window: the lowest queue, 1 440, slips to
@@ -1006,8 +941,7 @@ fn a_fast_follower_slips_back_to_the_target_once_a_window_stays_above_high_water
     assert_eq!(follower.trimmed_frames(), 0);
 }
 
-/// The slip takes the window's lowest queue, not the last pull's: a burst
-/// that lands just before the window closes stays queued.
+/// The slip takes the window's lowest queue, not the last pull's.
 #[test]
 fn a_burst_before_the_window_closes_survives_the_slip() {
     let follower = FollowerLane::new(480, 960, 1_920, 48_000);
@@ -1031,8 +965,7 @@ fn a_burst_before_the_window_closes_survives_the_slip() {
     assert_eq!(follower.queued(), 1_440, "the burst stays queued");
 }
 
-/// A re-prime after an underrun starts a fresh window, so a sustained
-/// excess after it slips one window later.
+/// A re-prime after an underrun starts a fresh window.
 #[test]
 fn a_reprime_starts_a_fresh_slip_window() {
     let follower = FollowerLane::new(480, 960, 1_920, 48_000);
@@ -1062,8 +995,7 @@ fn a_reprime_starts_a_fresh_slip_window() {
     );
 }
 
-/// A queue more than the master's buffer above the high-water mark cannot
-/// be a late master, so it slips on the pull that sees it.
+/// A queue more than the master's buffer above high water slips at once.
 #[test]
 fn a_queue_beyond_the_masters_buffer_slips_at_once() {
     // Ceiling: high water 960 plus a 960-frame master buffer.
@@ -1090,8 +1022,7 @@ fn a_queue_beyond_the_masters_buffer_slips_at_once() {
     assert_eq!(out, ramp(3_360, 480), "the newest frames survive the slip");
 }
 
-/// A slip at once starts a fresh window, so the excess queued before it
-/// does not count toward the next window's end.
+/// A slip at once starts a fresh window.
 #[test]
 fn a_slip_at_once_starts_a_fresh_window() {
     // Ten pulls a window; ceiling: high water 960 plus a 960-frame buffer.
@@ -1109,14 +1040,12 @@ fn a_slip_at_once_starts_a_fresh_window() {
     for _ in 0..9 {
         assert_eq!(feed(480), 0);
     }
-    // Three pulls above the high-water mark, then a burst above the
-    // ceiling.
+    // Three pulls above high water, then a burst above the ceiling.
     assert_eq!(feed(1_200), 0);
     assert_eq!(feed(480), 0);
     assert_eq!(feed(480), 0);
     assert_eq!(feed(1_440), 1_680, "2 160 left is above 1 920: at once");
-    // Above the high-water mark again for nine pulls, one short of a
-    // fresh window.
+    // Nine pulls above high water, one short of a window.
     assert_eq!(feed(1_200), 0);
     for pull in 0..8 {
         assert_eq!(feed(480), 0, "pull {pull} after the slip");
@@ -1125,7 +1054,7 @@ fn a_slip_at_once_starts_a_fresh_window() {
 }
 
 /// [`FollowerLane::for_streams`] sets the ceiling a master buffer above
-/// the high-water mark: 1 440 + 960 for 10 ms periods behind 20 ms.
+/// high water.
 #[test]
 fn the_stream_policy_slips_at_once_a_master_buffer_above_high_water() {
     let follower = FollowerLane::for_streams(480, 960);
@@ -1152,8 +1081,7 @@ fn the_stream_policy_keeps_two_periods_and_slips_one_period_above() {
     let pulls_per_window = FollowerLane::SLIP_WINDOW / 480;
     follower.push(packet(&ramp(0, 1_440), 1), &mut scratch);
     assert_eq!(follower.pull(&mut out), 0, "primed at the target");
-    // `extra` frames at once, then a period pushed per period pulled for
-    // two windows: the frames lost.
+    // `extra` frames at once, then a period per period for two windows.
     let mut pushed = 1_440;
     let mut sustain = |extra: usize| {
         follower.push(packet(&ramp(pushed, extra), 1), &mut scratch);
@@ -1166,22 +1094,15 @@ fn the_stream_policy_keeps_two_periods_and_slips_one_period_above() {
         }
         lost
     };
-    // One period too many: 1 440 left after every pull is the high-water
-    // mark, which a whole window at it does not pass.
     assert_eq!(sustain(480), 0, "at the high-water mark: no slip");
-    // Two periods too many: one window later the lowest queue, 1 920,
-    // slips to 960.
     assert_eq!(sustain(480), 960);
     assert_eq!(follower.slipped_frames(), 960);
     assert_eq!(follower.underrun_frames(), 0);
     assert_eq!(follower.queued(), 960, "back at the target");
 }
 
-/// Equal clocks, and the master's thread misses two periods and then
-/// drains its three packets back to back. The queue rises for a moment
-/// and falls back on its own: nothing slips and nothing underruns, and the
-/// system lane keeps its lag. Judging each pull alone would discard 960
-/// frames here and pad the next jitter with zeros.
+/// The master misses two periods and drains three packets back to back:
+/// nothing slips or underruns, and the system lane keeps its lag.
 #[test]
 fn a_late_master_with_equal_clocks_slips_nothing() {
     let period = 480;
@@ -1195,9 +1116,8 @@ fn a_late_master_with_equal_clocks_slips_nothing() {
         // The fold is the frame's number, counting from 1.
         follower.push(packet(&ramp(pushed + 1, period), 1), &mut scratch);
         pushed += period;
-        // The master misses ticks 50 and 51 and drains three packets at
-        // 52; at 120 it runs twice, the second time before the follower's
-        // next packet, and so skips 121.
+        // The master misses 50 and 51 and drains three at 52; at 120 it runs
+        // twice and skips 121.
         let pulls = match tick {
             50 | 51 | 121 => 0,
             52 => 3,
@@ -1216,17 +1136,15 @@ fn a_late_master_with_equal_clocks_slips_nothing() {
     );
     assert_eq!(follower.underrun_frames(), 0);
     assert_eq!(lost, 0);
-    // Zeros only while priming, then every frame in order: the lag never
-    // changed.
+    // Zeros only while priming, then every frame in order.
     let first = delivered.iter().position(|s| *s != 0.0).unwrap();
     assert_eq!(first, 2 * period, "two pulls of zeros while priming");
     let lane = &delivered[first..];
     assert_eq!(lane, ramp(1, lane.len()).as_slice());
 }
 
-/// A follower clock 0.5 % fast (2.4 extra frames per 480), sustained for
-/// ten seconds: the queue creeps up, slips back each time a window stays
-/// above the high-water mark, and never runs away or underruns.
+/// A follower clock 0.5 % fast for ten seconds: the queue slips back each
+/// window and never runs away or underruns.
 #[test]
 fn a_drifting_follower_slips_repeatedly_and_stays_bounded() {
     let period = 480;
@@ -1272,8 +1190,7 @@ fn audio_queued_before_the_first_pull_is_trimmed_uncounted() {
     assert_eq!(follower.queued(), 480);
     assert_eq!(follower.slipped_frames(), 0);
 
-    // A later re-prime trims nothing: that excess is recorded audio, which
-    // only a sustained slip may drop.
+    // A later re-prime trims nothing: that excess is recorded audio.
     follower.pull(&mut out);
     follower.pull(&mut out);
     assert!(follower.underrun_frames() > 0);
@@ -1283,8 +1200,7 @@ fn audio_queued_before_the_first_pull_is_trimmed_uncounted() {
     assert_eq!(follower.trimmed_frames(), 3_840);
 }
 
-/// A pre-roll above the ceiling is trimmed at the first pull, not
-/// slipped: nothing lost, nothing below the target skipped.
+/// A pre-roll above the ceiling is trimmed at the first pull, not slipped.
 #[test]
 fn a_pre_roll_above_the_ceiling_is_trimmed_not_slipped() {
     let follower = FollowerLane::for_streams(480, 960);
@@ -1298,8 +1214,7 @@ fn a_pre_roll_above_the_ceiling_is_trimmed_not_slipped() {
     assert_eq!(follower.queued(), 960);
 }
 
-/// The trim is decided at the master's first pull: a follower that starts
-/// after the master delivers recorded audio, which is never trimmed.
+/// A follower that starts after the master's first pull is never trimmed.
 #[test]
 fn audio_queued_after_the_masters_first_pull_is_not_trimmed() {
     let follower = FollowerLane::new(480, 960, 4_800, 48_000);
@@ -1364,11 +1279,8 @@ fn a_full_staging_ring_refuses_whole_packets_and_the_master_counts_them() {
     );
 }
 
-/// A follower that fills its staging before the master's first pull (a
-/// master slow to start) refuses its newest packet, so all it queued is
-/// older than that gap: the first pull drops it and the refused packet,
-/// uncounted, and the lane primes on what follows. An overflow after the
-/// first pull is counted.
+/// A follower that fills its staging before the master's first pull drops
+/// that backlog uncounted; an overflow after the first pull is counted.
 #[test]
 fn an_overflow_before_the_first_pull_drops_the_stale_queue_uncounted() {
     let follower = FollowerLane::new(0, 1_024, 4_800, 1_024);
@@ -1498,20 +1410,15 @@ fn a_slice_shorter_than_it_claims_is_delivered_as_silence_of_its_claimed_length(
     assert_eq!(drain(&sink, 1), full);
 }
 
-/// The follower pushing and the master pulling on two threads at once, as
-/// the capture threads do: whatever the interleaving, the mic lane arrives
-/// whole, both lanes stay the same length, the system lane keeps its order
-/// with no torn sample, and every pushed follower frame is delivered,
-/// counted as lost, trimmed before the master's first pull or still
-/// queued. Small enough for every CI job; the
-/// `tsan` job runs it under ThreadSanitizer.
+/// The follower and the master on two threads at once: lanes stay whole,
+/// equal and ordered, and every follower frame is accounted for. The `tsan`
+/// job runs it under ThreadSanitizer.
 #[test]
 fn a_follower_and_a_master_on_two_threads_account_for_every_frame() {
     const PERIOD: usize = 480;
     const PACKETS: usize = 150;
     let lanes = [AudioLane::Mic, AudioLane::System];
     let plan = SplitStreamPlan::new(&lanes).unwrap();
-    // Two seconds per lane hold all 150 periods, so nothing drains early.
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let follower = Arc::new(FollowerLane::for_streams(PERIOD, 4_800));
     let mut master = master_body(&plan, &follower, PERIOD, &sink);
@@ -1535,7 +1442,6 @@ fn a_follower_and_a_master_on_two_threads_account_for_every_frame() {
         }
     }
     let pushed = follower_thread.join().unwrap();
-    // A last empty pull hands over any staging overflow not yet reported.
     let late_lost = follower.pull(&mut []);
 
     let mic_lane = drain(&sink, 0);
@@ -1570,7 +1476,7 @@ fn a_follower_and_a_master_on_two_threads_account_for_every_frame() {
     assert_eq!(sink.dropped_samples().get(&AudioLane::Mic), None);
 }
 
-// Missed audio (A18 of `.plans/2026-10-07-stable-promotion.md`)
+// Missed audio
 
 /// 10 ms periods at 48 kHz.
 const PERIOD: usize = 480;
@@ -1580,10 +1486,8 @@ const ENGINE_PERIODS: usize = 10;
 /// What [`run_outage`] saw in the sink.
 #[derive(Debug)]
 struct Outage {
-    /// The microphone's frame less the system's at each sink position that
-    /// holds both, once before the outage and at every change after it,
-    /// with the period: the target (960) when the follower's thread runs
-    /// first in each period, a period more when the master's does.
+    /// The microphone's frame less the system's where the sink holds both,
+    /// before the outage and at every change after, with the period.
     lags: Vec<(usize, i64)>,
     mic_filled: usize,
     system_filled: usize,
@@ -1591,23 +1495,17 @@ struct Outage {
     system_unfilled: usize,
     system_dropped: usize,
     slipped: usize,
-    /// The seconds the recorder's note would say are missing, as the
-    /// session and the recorder count them: the lane that missed most's
-    /// zeros, plus the larger of the lane that left most unfilled and the
-    /// master's shortfall to wall time beyond the drift allowance.
+    /// The seconds the recorder's note would say are missing.
     note: f64,
-    /// The seconds truly missing: the master's shortfall to wall time, plus
-    /// the microphone's zeros for what its thread missed.
+    /// The seconds truly missing.
     truth: f64,
 }
 
-/// The period [`run_outage`]'s outages start in.
 const OUTAGE_START: usize = 50;
 
-/// Period `t` of a stream's thread that is out for `out` periods from
-/// [`OUTAGE_START`] (0: never): its packet; nothing while it is out; once
-/// it is back, the ten oldest packets the engine kept, then `lost` (what
-/// its device position says) and its packet.
+/// Period `t` of a stream's thread out for `out` periods from
+/// [`OUTAGE_START`]: nothing while out, then the ten kept packets, then
+/// `lost` and its packet.
 fn outage_period<'a>(
     body: &mut StreamBody,
     t: usize,
@@ -1627,20 +1525,15 @@ fn outage_period<'a>(
     }
 }
 
-/// [`run_outage_in_order`] with the follower's thread running first in
-/// each period.
+/// [`run_outage_in_order`] with the follower's thread first.
 fn run_outage(follower_out: usize, master_out: usize) -> Outage {
     run_outage_in_order(follower_out, master_out, false)
 }
 
-/// The two stream bodies as the WASAPI backend builds them (the follower
-/// behind a master with a 100 ms buffer that fills what it missed), over
-/// 400 periods in which source frame `f` of either stream is `f + 1`: the
-/// follower's thread out for `follower_out` periods and the master's for
-/// `master_out` ([`outage_period`]), what each missed filled up to
-/// [`MISSED_FILL_LIMIT`] and unfilled past it, as `run_stream` hands it
-/// over. In each period the master's thread runs first when
-/// `master_first`, the follower's otherwise.
+/// The two stream bodies as the WASAPI backend builds them over 400
+/// periods (source frame `f` is `f + 1`), the follower out for
+/// `follower_out` periods and the master for `master_out`; the master's
+/// thread runs first in each period when `master_first`.
 #[allow(clippy::too_many_lines)]
 fn run_outage_in_order(follower_out: usize, master_out: usize, master_first: bool) -> Outage {
     let lanes = [AudioLane::Mic, AudioLane::System];
@@ -1744,12 +1637,8 @@ fn run_outage_in_order(follower_out: usize, master_out: usize, master_first: boo
     }
 }
 
-/// That `outage`'s system lane counts at least the `lost` frames and at
-/// most an engine buffer more, and the note at least what is truly missing
-/// and at most that buffer more. The buffer is the follower's padding: the
-/// master pads its lane with zeros while it is out, and the packets the
-/// engine kept arrive late and slip, so the padding counts as filled, up
-/// to the engine's buffer above what the engine dropped.
+/// That `outage`'s system lane counts the `lost` frames up to an engine
+/// buffer more, and the note what is truly missing up to that buffer more.
 fn assert_counted_once(outage: &Outage, lost: usize) {
     let system = outage.system_filled + outage.system_unfilled;
     let buffer = ENGINE_PERIODS * PERIOD;
@@ -1765,15 +1654,8 @@ fn assert_counted_once(outage: &Outage, lost: usize) {
     );
 }
 
-/// Both threads out for 200 and 300 ms, as a stopped process is: the
-/// master fills its lost part, which pulls the system audio queued for
-/// that time; the follower only counts its own, which the master's pulls
-/// pad with zeros, and nothing is counted twice. When the follower's
-/// thread wakes first the system lane stays where it was behind the
-/// microphone and nothing slips. When the master's does, its kept packets
-/// find the follower's not yet queued, and the follower's land late, as
-/// after an outage of the follower alone: the queue slips them back within
-/// two slip windows, and the lag ends where it started.
+/// Both threads out for 200 and 300 ms: nothing counts twice, and the lag
+/// ends where it started in either order.
 #[test]
 fn a_stall_of_both_threads_keeps_the_lanes_aligned() {
     for out in [20, 30] {
@@ -1798,13 +1680,8 @@ fn a_stall_of_both_threads_keeps_the_lanes_aligned() {
     }
 }
 
-/// Both threads out past the fill limit, 1.5 and 2.5 s, in either order:
-/// the microphone's lane counts its jump unfilled and the system lane the
-/// follower's, so the note counts the time once, as truly missing, and the
-/// lag ends where it started. With the follower's thread first, the
-/// packet it queued for the time the master resumes at stays queued: the
-/// target it held from before the outage (20 ms) pairs with the master's
-/// first two packets after it, and from the third the lag is back.
+/// Both threads out past the fill limit, in either order: each lane counts
+/// its own jump, the note counts the time once, and the lag returns.
 #[test]
 fn an_outage_of_both_threads_past_the_fill_limit_counts_once() {
     for out in [150, 250] {
@@ -1829,8 +1706,7 @@ fn an_outage_of_both_threads_past_the_fill_limit_counts_once() {
         assert_eq!(outage.lags.len(), 3, "{outage:?}");
         assert_eq!(outage.lags[1].0, resumed, "{outage:?}");
         assert_eq!(outage.lags[2], (resumed + 2, 960), "{outage:?}");
-        // One thread alone: the master's loss is the microphone's, the
-        // follower's the system audio's, and the note says either once.
+        // One thread alone: the note says its loss once.
         for (follower_out, master_out) in [(out, 0), (0, out)] {
             let outage = run_outage(follower_out, master_out);
             let context = format!("{follower_out} and {master_out} periods: {outage:?}");
@@ -1847,10 +1723,8 @@ fn an_outage_of_both_threads_past_the_fill_limit_counts_once() {
     }
 }
 
-/// The master's thread alone out for 200 and 300 ms: the system audio
-/// queued meanwhile rises past the old ceiling (its buffer above the
-/// high-water mark), and the kept packets and the fill pull it all, so
-/// nothing slips and the lanes stay aligned.
+/// The master's thread alone out for 200 and 300 ms: nothing slips and the
+/// lanes stay aligned.
 #[test]
 fn a_stall_of_the_master_alone_keeps_the_lanes_aligned() {
     for out in [20, 30] {
@@ -1863,10 +1737,8 @@ fn a_stall_of_the_master_alone_keeps_the_lanes_aligned() {
     }
 }
 
-/// A jump the master's thread missed too long to fill counts on its lane
-/// and drops the system audio queued for that time, counted on the system
-/// lane, so the follower's lane loses the same span; the target and the
-/// next packet's pull stay queued, the next packet's own time.
+/// A master jump too long to fill drops the system audio queued for that
+/// time, so both lanes lose the same span.
 #[test]
 fn an_unfilled_jump_of_the_master_drops_the_follower_audio_of_that_time() {
     let lanes = [AudioLane::Mic, AudioLane::System];
@@ -1923,12 +1795,8 @@ fn an_unfilled_jump_of_the_master_drops_the_follower_audio_of_that_time() {
     assert_eq!(follower.slipped_frames(), 0, "not a slip");
 }
 
-/// The follower's thread alone out for 150 to 300 ms: the master padded
-/// its lane with zeros meanwhile, so the follower only counts what it lost.
-/// Its kept packets still land late, as any late packets do, until the
-/// queue slips back to the target within two slip windows, and that slip
-/// stays the same however long the outage: zeros staged for the lost part
-/// would queue up and slip as much real system audio again.
+/// The follower's thread alone out for 150 to 300 ms: it counts only what
+/// it lost, and the slip stays the same however long the outage.
 #[test]
 fn a_stall_of_the_follower_alone_stages_no_zeros() {
     for out in [15, 20, 30] {
@@ -1948,8 +1816,7 @@ fn a_stall_of_the_follower_alone_stages_no_zeros() {
 
 // --- the stop, and padding that is no loss --------------------------------
 
-/// A call's two bodies over one sink, as the WASAPI backend builds them,
-/// 10 ms packets each.
+/// A call's two bodies over one sink, 10 ms packets each.
 struct Call {
     sink: Arc<LaneFrameSink>,
     follower: Arc<FollowerLane>,
@@ -1998,9 +1865,8 @@ impl Call {
         self.master_packet();
     }
 
-    /// The backend's stop once both threads are joined, the streams' end
-    /// readings `master_end` and `follower_end` (`None`: endpoint loopback,
-    /// not read).
+    /// The backend's stop, with the streams' end readings (`None`: not
+    /// read).
     fn stop(&self, master_end: Missed, follower_end: Option<Missed>) {
         count_at_stop(
             &self.sink,
@@ -2022,12 +1888,8 @@ impl Call {
     }
 }
 
-/// The system stream's thread out for the last 0.5 s before the stop; its
-/// engine kept 10 packets and lost 40 (19 200 frames), which its final
-/// drain reads from the flagged packet after the kept ones. However the
-/// two final drains fall, the backend's stop counts that loss on the system
-/// lane: the master's last pull may come before the follower's flagged
-/// packet, or the lane may never prime again.
+/// The system thread out for the last 0.5 s before the stop: the stop
+/// counts that loss on the system lane however the final drains fall.
 #[test]
 fn a_follower_out_at_the_stop_is_counted_at_the_backends_stop() {
     for (master_first, master_packets_after) in [(true, 0), (false, 0), (false, 1), (false, 2)] {
@@ -2062,10 +1924,8 @@ fn a_follower_out_at_the_stop_is_counted_at_the_backends_stop() {
     }
 }
 
-/// An engine that refused the newest packets while the system thread was
-/// out into the stop flags none: the final drain hands over only the kept
-/// packets. The stop's counter reading of a stream that delivers
-/// continuously (process loopback) counts it, and the padding past it.
+/// A loss into the stop with no flag: the stop's counter reading counts it
+/// on a continuous stream.
 #[test]
 fn a_follower_loss_no_packet_flags_is_counted_from_the_stops_reading() {
     let mut call = Call::new();
@@ -2086,9 +1946,8 @@ fn a_follower_loss_no_packet_flags_is_counted_from_the_stops_reading() {
     );
 }
 
-/// The stop's readings are left out when the session stops to rebuild (its
-/// gap covers that time); what the follower's lane holds from its flagged
-/// packets is not. The master's reading counts on its own lane alone.
+/// A rebuild's stop leaves out the stop's readings but not the follower's
+/// flagged padding.
 #[test]
 fn the_stops_readings_count_on_their_own_lanes_and_not_at_a_rebuild() {
     let mut call = Call::new();
@@ -2116,10 +1975,7 @@ fn the_stops_readings_count_on_their_own_lanes_and_not_at_a_rebuild() {
     );
 }
 
-/// An unflagged 10 s idle of the follower (endpoint loopback, nothing
-/// playing) re-primes like any underrun. A flagged packet a second later,
-/// spurious or after a 10 ms loss, counts only its own loss: the idle's
-/// padding was forgotten once the hold passed.
+/// After an unflagged 10 s idle, a later flag counts only its own loss.
 #[test]
 fn padding_older_than_the_hold_is_no_discontinuitys_loss() {
     for missed in [Missed::default(), filled(480)] {
@@ -2142,11 +1998,8 @@ fn padding_older_than_the_hold_is_no_discontinuitys_loss() {
     }
 }
 
-/// An engine that refused the newest packets while the system thread was
-/// out hands over its 10 kept packets unflagged, the lane re-primes on
-/// them, and only the packet a period later carries the discontinuity.
-/// The follower's clocks read nothing (positions that never move, no
-/// QPC), so the padding alone counts the 40 lost packets, inside the hold.
+/// Kept packets unflagged and the flag a period later, with clocks that
+/// read nothing: the padding alone counts the 40 lost packets.
 #[test]
 fn a_flag_after_the_kept_packets_counts_the_padding_within_the_hold() {
     for follower_first in [true, false] {
@@ -2181,10 +2034,8 @@ fn a_flag_after_the_kept_packets_counts_the_padding_within_the_hold() {
     }
 }
 
-/// Positions that stand still for the first packets (process loopback that
-/// starts in silence) and then move measure from the pair after the move,
-/// so a 0.5 s loss with no QPC counts what was lost, whatever the mix
-/// format, rather than a hundred times it.
+/// Positions frozen at first measure from the pair after the move, so a
+/// loss counts what was lost, not a hundred times it.
 #[test]
 fn positions_that_stood_still_measure_from_after_their_first_move() {
     for engine_rate in [None, Some(48_000), Some(16_000)] {
@@ -2205,10 +2056,8 @@ fn positions_that_stood_still_measure_from_after_their_first_move() {
     }
 }
 
-/// A unit neither 48 kHz nor the mix format explains, whose first pair
-/// spans an idle no packet flagged (it passes the rate bound, since no
-/// ratio is measured yet): the second pair replaces it, so a 10 ms loss
-/// after it is still counted.
+/// An unexplained unit whose first pair spans an unflagged idle: the second
+/// pair replaces it, so a later 10 ms loss is counted.
 #[test]
 fn a_first_pair_over_an_idle_is_replaced_by_the_next() {
     // 14 350 position units a second against the stream's 48 kHz.
@@ -2231,9 +2080,8 @@ fn a_first_pair_over_an_idle_is_replaced_by_the_next() {
     assert!(missed.unfilled >= 480, "{missed:?}");
 }
 
-/// A flagged packet is filled only while the QPC's last clean pair matched
-/// its frames to within half a packet: one that read 60 % short leaves it
-/// counted, one that read 30 % long (scheduling jitter) does not.
+/// A jump is filled only while the QPC's last clean pair matched within
+/// half a packet.
 #[test]
 fn a_qpc_whose_last_pair_did_not_match_fills_nothing() {
     let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
@@ -2252,9 +2100,8 @@ fn a_qpc_whose_last_pair_did_not_match_fills_nothing() {
     assert_eq!(clocks.lose(50), filled(24_000));
 }
 
-/// The stop's counter reading: what passed the last packet's end beyond the
-/// one in flight, unfilled, only on a sane QPC and a last packet that had
-/// one.
+/// The stop's counter reading: past the in-flight packet, unfilled, only on
+/// a sane QPC.
 #[test]
 fn the_stop_reads_the_counter_only_on_a_sane_qpc() {
     let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
@@ -2299,10 +2146,7 @@ fn the_stop_reads_the_counter_only_on_a_sane_qpc() {
     assert!(stuck.positions.missed_until(1 << 50).is_none(), "no QPC");
 }
 
-/// The stop reads the counter only while the last clean pair matched, as
-/// a jump is filled only then: after a pair that read 60 % short, a stop
-/// half a second on reads nothing, and after a matching pair again it
-/// reads the half second.
+/// The stop reads the counter only while the last clean pair matched.
 #[test]
 fn the_stop_reads_nothing_after_a_last_pair_that_did_not_match() {
     let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
@@ -2321,9 +2165,7 @@ fn the_stop_reads_nothing_after_a_last_pair_that_did_not_match() {
     );
 }
 
-/// A stall of one and a half packets past the one in flight at the stop is
-/// read, and one of under half a packet is not: the stop reads at a jump's
-/// resolution, half the last packet.
+/// The stop reads at a jump's resolution, half the last packet.
 #[test]
 fn the_stop_reads_a_stall_of_a_packet_and_a_half() {
     let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
@@ -2334,8 +2176,7 @@ fn the_stop_reads_a_stall_of_a_packet_and_a_half() {
     assert!(clocks.positions.missed_until(stop(4)).is_none());
 }
 
-/// A continuous stream's sizes for the start's reading: 10 ms periods, a
-/// stream latency of 20 ms, so a first packet up to 30 ms after the start
+/// A continuous stream's sizes: a first packet up to 30 ms after the start
 /// is on time.
 const START_SIZES: StreamSizes = StreamSizes {
     buffer_frames: 4_800,
@@ -2343,9 +2184,8 @@ const START_SIZES: StreamSizes = StreamSizes {
     latency_frames: 960,
 };
 
-/// A stream started at `start`'s QPC whose first packet comes
-/// `late_packets` packets of QPC after it, then two seconds of clean
-/// packets so the QPC is sane.
+/// A stream whose first packet comes `late_packets` after `start`'s QPC,
+/// then two seconds of clean packets.
 fn started_late(start: bool, late_packets: u64) -> Clocks {
     let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
     if start {
@@ -2355,11 +2195,8 @@ fn started_late(start: bool, late_packets: u64) -> Clocks {
     clocks
 }
 
-/// A microphone or process-loopback stream whose first packet comes half a
-/// second after its start (an engine that dropped its oldest packets before
-/// the thread's first drain, no packet flagged) counts that half second
-/// unfilled at the stop, less the start latency: the stream's latency and
-/// one period.
+/// A first packet half a second after the start counts that half second
+/// unfilled at the stop, less the start latency.
 #[test]
 fn a_first_packet_half_a_second_late_counts_what_came_before_it() {
     let clocks = started_late(true, 50);
@@ -2375,8 +2212,7 @@ fn a_first_packet_half_a_second_late_counts_what_came_before_it() {
     );
 }
 
-/// A first packet within the start latency (the stream's latency and one
-/// period) counts nothing, nor one less than half a period past it.
+/// A first packet within the start latency counts nothing.
 #[test]
 fn a_first_packet_inside_the_start_latency_counts_nothing() {
     for late_packets in [0, 1, 3] {
@@ -2399,10 +2235,8 @@ fn a_first_packet_inside_the_start_latency_counts_nothing() {
     );
 }
 
-/// Endpoint loopback may start in an idle, so its thread gives its
-/// positions no start, and a first packet half a second late counts
-/// nothing; nor does one on a QPC that is not sane (still measuring, or
-/// none).
+/// No start given (endpoint loopback) or no sane QPC: a late first packet
+/// counts nothing.
 #[test]
 fn a_stream_given_no_start_or_no_sane_qpc_counts_nothing_before_its_first_packet() {
     assert_eq!(
@@ -2430,12 +2264,8 @@ fn a_stream_given_no_start_or_no_sane_qpc_counts_nothing_before_its_first_packet
     );
 }
 
-/// An hour of 10 ms packets on a QPC that gives no clean pairs (absent,
-/// always flagged with a timestamp error, or running at twice the time)
-/// is never judged sane, but the stop's verdict calls it not sane once
-/// 2 s of frames came: the stop line warns. A stream under 2 s by its
-/// frames stays not judged (the line at `info`), and a good QPC is sane.
-/// The counting's own verdict does not change.
+/// A QPC with no clean pairs is never sane, and the stop's verdict calls it
+/// not sane once 2 s came; under 2 s it stays not judged.
 #[test]
 fn a_stream_of_2_s_or_more_without_clean_qpc_pairs_is_judged_not_sane() {
     let run = |packets: u64, qpc: &dyn Fn(u64) -> u64, timestamp_error: bool| {
@@ -2478,8 +2308,8 @@ fn a_stream_of_2_s_or_more_without_clean_qpc_pairs_is_judged_not_sane() {
     );
 }
 
-/// A first packet with a timestamp error does not read the start: the
-/// next packet with a QPC does, less the frames delivered before it.
+/// A first packet with a timestamp error does not read the start; the next
+/// does.
 #[test]
 fn the_first_packet_with_a_qpc_reads_the_start_past_the_frames_before_it() {
     let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
@@ -2494,9 +2324,7 @@ fn the_first_packet_with_a_qpc_reads_the_start_past_the_frames_before_it() {
     );
 }
 
-/// A first packet with a timestamp error does not read the start even
-/// when its QPC is wrong (a second early, before the start): the first
-/// clean packet does, less the frames delivered before it.
+/// The same when that first packet's QPC is before the start.
 #[test]
 fn a_first_packet_with_a_timestamp_error_never_reads_the_start() {
     let mut clocks = Clocks::new(Some(48_000), 480, QPC_PACKET);
@@ -2513,10 +2341,8 @@ fn a_first_packet_with_a_timestamp_error_never_reads_the_start() {
     );
 }
 
-/// Two hours of 10 ms packets on both streams in a debug build (overflow
-/// checks on), positions and QPC that start near the top of their range
-/// and wrap, a 0.5 s loss on each stream every ten minutes: nothing
-/// panics, and every loss counts on both lanes.
+/// Two hours on both streams with wrapping clocks and a loss every ten
+/// minutes: nothing panics, every loss counts.
 #[test]
 fn two_hours_of_wrapping_clocks_count_every_loss() {
     let mut call = Call::new();
@@ -2564,9 +2390,7 @@ fn two_hours_of_wrapping_clocks_count_every_loss() {
     );
 }
 
-/// A flagged packet long after the follower came back from an unflagged
-/// idle, while the master was out (its queue then far past the hold), is
-/// no part of that idle: the idle's padding is not counted.
+/// A flag long after an unflagged idle does not count the idle's padding.
 #[test]
 fn a_flag_long_after_the_follower_came_back_takes_no_padding() {
     let mut call = Call::new();
@@ -2588,9 +2412,7 @@ fn a_flag_long_after_the_follower_came_back_takes_no_padding() {
     assert_eq!(call.system(), (0, 0));
 }
 
-/// A follower out for 27 packets flags its loss on one packet, then idles
-/// for 6 s before the lane primes again: the flag takes the outage's
-/// padding, not the idle's.
+/// A flag before a 6 s idle takes the outage's padding, not the idle's.
 #[test]
 fn a_pending_flag_does_not_take_the_idle_after_it() {
     let mut call = Call::new();
@@ -2615,10 +2437,7 @@ fn a_pending_flag_does_not_take_the_idle_after_it() {
     );
 }
 
-/// The follower out for 0.6 s, then both threads: on resume the master
-/// drains its kept packets, the follower's kept ones run out before its
-/// flagged packet comes, and the lane underruns once more. That underrun
-/// does not hide the outage's padding.
+/// An underrun after the resume does not hide the outage's padding.
 #[test]
 fn an_underrun_before_the_flag_keeps_the_outages_padding() {
     for follower_first in [true, false] {
@@ -2657,8 +2476,7 @@ fn an_underrun_before_the_flag_keeps_the_outages_padding() {
     }
 }
 
-/// A follower out from its second packet, before the lane first primed:
-/// the padding of that outage counts at its flag.
+/// An outage before the lane first primed counts its padding at its flag.
 #[test]
 fn a_follower_out_before_the_first_prime_counts_its_padding() {
     let mut call = Call::new();
@@ -2682,10 +2500,8 @@ fn a_follower_out_before_the_first_prime_counts_its_padding() {
     );
 }
 
-/// Positions that stand still while the pairs around them are left out
-/// (timestamp errors) still measure from the pair after their first move:
-/// the pair that spans it read 59 of a packet's 960 frames, and would read
-/// an idle 32 times over.
+/// Frozen positions among left-out pairs still measure from the pair after
+/// their first move.
 #[test]
 fn a_first_move_after_left_out_pairs_is_left_out_too() {
     let mut positions = DevicePositions::new(Some(48_000));
@@ -2709,11 +2525,8 @@ fn a_first_move_after_left_out_pairs_is_left_out_too() {
     );
 }
 
-/// The stop takes the padding of the run that holds the outage: the run
-/// before the re-prime when the lane primed on the engine's kept packets
-/// before the microphone's last pull and the flag came after it, the
-/// current one when the lane is still out. The follower's clocks read
-/// nothing, so only the padding counts.
+/// The stop takes the padding of the run that holds the outage, primed
+/// again or still out.
 #[test]
 fn the_stop_takes_the_padding_of_the_outage_whether_or_not_the_lane_primed() {
     // Primed again: the kept packets were pulled, the flag came after.
@@ -2738,10 +2551,7 @@ fn the_stop_takes_the_padding_of_the_outage_whether_or_not_the_lane_primed() {
         "primed: filled {filled}, unfilled {unfilled}"
     );
 
-    // Still out: an engine that kept two packets, the microphone's last
-    // pull before the follower's final drain. The lane lacks the 48
-    // packets the engine lost, all of them padded, none of its lag left
-    // to come off.
+    // Still out: the lane lacks the 48 packets the engine lost, all padded.
     let mut call = Call::new();
     for _ in 0..200 {
         call.tick();
@@ -2761,11 +2571,8 @@ fn the_stop_takes_the_padding_of_the_outage_whether_or_not_the_lane_primed() {
     );
 }
 
-/// Both threads resume together after the follower's 0.5 s outage: the
-/// lane primes on part of the engine's kept packets, runs out while the
-/// follower's thread drains the rest, and primes again within the hold.
-/// The flag after them counts the outage's padding once, with the short
-/// run between the two primes: not the first run twice.
+/// Both threads resume after a follower outage and the lane primes twice:
+/// the flag counts the padding once.
 #[test]
 fn a_second_reprime_within_the_hold_counts_the_outage_once() {
     let mut call = Call::new();
@@ -2796,11 +2603,8 @@ fn a_second_reprime_within_the_hold_counts_the_outage_once() {
     );
 }
 
-/// Two unflagged idles, then a flag after the second. The hold is counted
-/// in the follower's frames, so a second idle however long does not use it
-/// up: with 5 packets of audio between them (under the hold of 11) both
-/// idles' padding counts at the flag, an overcount of the first idle, at
-/// most both idles; with 20 packets between, only the second's counts.
+/// Two unflagged idles, then a flag: both idles count when under the hold
+/// apart, only the second when further.
 #[test]
 fn a_second_idle_within_the_hold_counts_the_first_too() {
     for (between, most) in [(5, 152 * PERIOD), (20, 52 * PERIOD)] {
@@ -2829,10 +2633,8 @@ fn a_second_idle_within_the_hold_counts_the_first_too() {
     }
 }
 
-/// An unflagged 6 s idle of the follower that ends while the master is
-/// out: the follower queues 30 packets, more than the hold, before the
-/// master's next pull primes the lane, so a flag right after (at the stop)
-/// takes nothing of the idle's padding.
+/// An idle that ends while the master is out, past the hold: a flag right
+/// after takes none of its padding.
 #[test]
 fn an_idle_that_ends_while_the_master_is_out_is_forgotten_at_the_reprime() {
     let mut call = Call::new();
@@ -2857,11 +2659,7 @@ fn an_idle_that_ends_while_the_master_is_out_is_forgotten_at_the_reprime() {
     );
 }
 
-/// The follower out for 1 s while the master pulls, back with a flag its
-/// clocks read nothing for, one master pull, then the master out while the
-/// follower queues 30 packets and flags a second loss: the second flag
-/// keeps the first's padding, whether the stop comes right after it or 50
-/// packets on. One flag counts the same.
+/// A second flag keeps the first's padding, whenever the stop comes.
 #[test]
 fn a_second_flag_while_the_master_is_out_keeps_the_first_flags_padding() {
     for (second_flag, at_stop) in [(true, true), (true, false), (false, false)] {
@@ -2899,10 +2697,7 @@ fn a_second_flag_while_the_master_is_out_keeps_the_first_flags_padding() {
     }
 }
 
-/// The follower out for 1 s, back with eight kept packets and a flag its
-/// clocks read nothing for, then a spurious flag three packets on: the
-/// outage's padding counts once. The first flag's snapshot takes the
-/// padding out of the runs, so the second finds none of it.
+/// A spurious second flag after an outage: the padding counts once.
 #[test]
 fn a_spurious_flag_right_after_an_outage_counts_its_padding_once() {
     let mut call = Call::new();
@@ -2932,11 +2727,8 @@ fn a_spurious_flag_right_after_an_outage_counts_its_padding_once() {
     );
 }
 
-/// A process loopback follower (it delivers continuously) out when the
-/// stop comes, its loss flagged by no packet and its clocks reading
-/// nothing: the padding still running counts at the stop. Endpoint
-/// loopback idles, so its padding at the stop counts only after a flag
-/// (the documented limit).
+/// A process loopback follower out at the stop: its running padding counts
+/// at the stop.
 #[test]
 fn a_continuous_follower_out_at_the_stop_counts_its_padding_unflagged() {
     for continuous in [true, false] {
@@ -2960,10 +2752,7 @@ fn a_continuous_follower_out_at_the_stop_counts_its_padding_unflagged() {
     }
 }
 
-/// Positions that move from the start, stand still for a pair mid-stream
-/// and move again keep their measured ratio: only positions still from the
-/// start begin their sums afresh. On a unit no mix format explains
-/// (14 350 a second) the 0.5 s loss after the pause is still read.
+/// Positions that pause mid-stream keep their measured ratio.
 #[test]
 fn a_pause_of_the_positions_mid_stream_keeps_the_ratio() {
     let mut clocks = Clocks::new(None, 143, 0);
@@ -2979,9 +2768,8 @@ fn a_pause_of_the_positions_mid_stream_keeps_the_ratio() {
     );
 }
 
-/// Only the second pair can replace the first: a short pair mid-stream
-/// (half an advance) stays one pair among many, so a loss after it reads
-/// within a few percent, not twice over.
+/// A short pair mid-stream cannot replace the first, so a later loss reads
+/// within a few percent.
 #[test]
 fn a_short_pair_mid_stream_replaces_nothing() {
     let mut clocks = Clocks::new(None, 143, 0);

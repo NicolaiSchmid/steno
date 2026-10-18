@@ -5,11 +5,7 @@ view models, the services, Sparkle, the iPhone listener) whose three windows, th
 Settings and onboarding, are pages of the web UI in [`web/`](web/README.md) rendered by
 `WKWebView` from the app bundle, with one bridge per window mapping view model state to
 snapshots and page commands to view model calls. SwiftUI draws only the menu bar item and the
-floating panels (the recording bubble, the detection prompt). Plans:
-[`.plans/2026-09-25-macos-app-and-release.md`](../../.plans/2026-09-25-macos-app-and-release.md)
-(app target, CI, release) and
-[`.plans/2026-09-29-macos-webview-ui.md`](../../.plans/2026-09-29-macos-webview-ui.md) (the web
-windows, the bridge, the design language).
+floating panels (the recording bubble, the detection prompt).
 
 ## Generate and build
 
@@ -123,8 +119,7 @@ Edit `Steno/Resources/AppIcon.svg`, run `scripts/make-app-icon.sh` (ImageMagick 
 `scripts/make-app-icon.sh --check` compares bytes; it is exact only for the ImageMagick and librsvg
 pair that produced the committed files (7.1.2 and 2.62 today), and it also reports a `Contents.json`
 that Xcode's asset editor reformatted. A diff after a Homebrew upgrade or an Xcode edit means
-re-render and commit, not a bug. Design and geometry:
-[`.plans/2026-09-28-app-icon.md`](../../.plans/2026-09-28-app-icon.md).
+re-render and commit, not a bug.
 
 Where things live at runtime: the database in `~/Library/Application Support/Steno/steno.sqlite`,
 recordings in the folder chosen in Audio settings (default `…/Steno/Audio`), models in
@@ -132,8 +127,7 @@ recordings in the folder chosen in Audio settings (default `…/Steno/Audio`), m
 account `llm-api-key`), the handover identity in the login keychain. With the ChatGPT (Codex)
 summaries choice, Steno reads and refreshes the Codex CLI's own sign-in in `~/.codex/auth.json`
 (or `$CODEX_HOME/auth.json`) and stores nothing of it elsewhere; the choice is off until the
-user confirms it in onboarding or Settings > Summaries
-([`.plans/2026-09-29-codex-chatgpt-provider.md`](../../.plans/2026-09-29-codex-chatgpt-provider.md)).
+user confirms it in onboarding or Settings > Summaries.
 
 ## Releases (retired)
 
@@ -227,5 +221,4 @@ release's rehearsal is R7 in the stable plan.
 ### Homebrew
 
 `brew tap nicolaischmid/tap && brew install --cask steno` installs the DMG the cask points at;
-`brew upgrade --cask steno` follows the tap, Sparkle follows the `appcast` branch. Plan:
-[`.plans/2026-09-28-homebrew-and-nix.md`](../../.plans/2026-09-28-homebrew-and-nix.md).
+`brew upgrade --cask steno` follows the tap, Sparkle follows the `appcast` branch.

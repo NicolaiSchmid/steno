@@ -1,36 +1,19 @@
-//! Real-time safety evidence: a counting global allocator. No Swift
-//! counterpart (the Swift tests hook libmalloc's `malloc_logger`, Darwin
-//! only).
-//!
-//! While counting is on for the current thread, every allocation,
-//! reallocation and deallocation that thread makes is counted. An
-//! integration test installs it as `#[global_allocator]` (each test binary
-//! has its own), runs the IOProc body, the WASAPI two-stream bodies, the
-//! PipeWire process body, the processing loop with the real Speex
-//! canceller and the relay hand-off on its own thread, and asserts the
-//! count is zero. The report prints the count; anything above zero
-//! means the callback path allocated.
-//!
-//! The current thread is identified by the OS (`gettid` on Linux,
-//! `pthread_self` on other Unixes, `GetCurrentThreadId` on Windows), calls
-//! that neither allocate nor touch Rust's thread-local machinery, so the
-//! allocator may make them re-entrantly. (A `thread_local!` address worked
-//! on Linux and macOS but counted nothing on the Windows runner.) On Linux
-//! the id is the kernel's thread id, the one `/proc/self/task` lists, so a
-//! test can count a thread it did not start, PipeWire's data loop
-//! ([`CountingAllocator::allocations_on`]).
+//! Real-time safety evidence: a counting global allocator. While counting
+//! is on, every allocator call the counted thread makes is counted. The
+//! thread is identified by an OS call (`gettid`, `pthread_self`,
+//! `GetCurrentThreadId`) that neither allocates nor touches Rust's
+//! thread-local machinery, so the allocator may make it re-entrantly.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// The `#[global_allocator]` a test binary installs to count one thread's
-/// allocations; see the module doc.
+/// allocations.
 pub struct CountingAllocator;
 
-/// One measurement at a time: the counters are process-wide, and the test
-/// harness runs tests on several threads, so a second `allocations_during`
-/// would reset the count and move the counted thread under the first.
+/// One measurement at a time: the counters are process-wide, and a second
+/// measurement would reset the first's.
 static MEASURING: Mutex<()> = Mutex::new(());
 
 static COUNTING: AtomicBool = AtomicBool::new(false);
@@ -123,18 +106,16 @@ impl CountingAllocator {
     }
 
     /// Allocations the calling thread made while running `body`. Only
-    /// meaningful when this type is the process's `#[global_allocator]`;
-    /// otherwise the count is always zero and proves nothing, which the
-    /// callers' "the hook sees a deliberate allocation" test guards.
-    /// Measurements are serialised process-wide (see `MEASURING`).
+    /// meaningful when this type is the `#[global_allocator]`; otherwise
+    /// the count is always zero, which the callers' deliberate-allocation
+    /// test guards.
     pub fn allocations_during(body: impl FnOnce()) -> u64 {
         Self::allocations_on(thread_id(), body)
     }
 
-    /// Allocations thread `thread` (an id as [`Self::current_thread`]
-    /// gives it, on Linux the kernel's thread id) made while the calling
-    /// thread ran `body`: how a test counts a thread it cannot run code on.
-    /// Serialised with [`Self::allocations_during`].
+    /// Allocations thread `thread` made while the calling thread ran
+    /// `body`: how a test counts a thread it cannot run code on (on Linux
+    /// by kernel thread id).
     pub fn allocations_on(thread: usize, body: impl FnOnce()) -> u64 {
         let _guard = MEASURING
             .lock()

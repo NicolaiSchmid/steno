@@ -1,43 +1,8 @@
-//! The breaker for a warm-up that takes the app down. The recorder loads
-//! an in-process speech engine (`CoreML` on the Mac) while a recording
-//! runs ([`ProcessingPipeline::warm_up_while_recording`]). An Objective-C
-//! exception there is caught at the model call, but an abort that no
-//! `@catch` stops (a C++ exception, an allocation that fails) ends the app
-//! and the recording with it, and would end every later recording at the
-//! same point too. So the warm-up is marked on disk while it runs, and a
-//! mark left over turns it off. Rust only: Swift warmed up at every
-//! recording.
-//!
-//! - **The mark**: [`WarmUpMark::FILE_NAME`] in the support directory,
-//!   written durably ([`replace_file`]: synced, renamed, the folder synced)
-//!   before the warm-up starts and removed the same way once it returns,
-//!   failed or not, since the app lived through it. It holds a random id
-//!   of its own, so the fallback ([`crate::SpeechFallback`]) tells a mark
-//!   it has seen from a new one.
-//! - **The launch check**: [`WarmUpMark::at_launch`]. A mark there is a
-//!   warm-up that ended with the app, so from then on recordings skip the
-//!   warm-up, and the launch says so once at `warn`. The first meeting then
-//!   loads the models in its processing, after the recording.
-//! - **Clearing it**: only the engine in this process, loaded in a
-//!   meeting's processing (the speech sidecar standing in for it does not
-//!   count): the mark goes and the next recording warms up again. A
-//!   load that takes the app down there leaves the mark, and its meeting
-//!   is counted by the reading marks ([`crate::reading`]): read once
-//!   more, and quarantined the second time in a row. A mark left over
-//!   also turns the fallback on: the jobs run the speech sidecar instead
-//!   ([`crate::SpeechFallback`]), and no meeting loads the models in this
-//!   process until the user turns the engine back on.
-//! - **Held off**: the user's end of the fallback writes a mark of its own
-//!   (`WarmUpMark::hold_off`, its id `held-<uuid>`), so recordings skip the
-//!   warm-up, at this launch and every later one, until a meeting's
-//!   processing has loaded the engine: that first load never runs beside a
-//!   recording. The launch that finds it says the warm-up is held off, not
-//!   that it ended with the app.
-//!
-//! A folder that cannot be written leaves the warm-up unguarded, as
-//! before: the failure is logged at `warn` and the warm-up runs. The
-//! pipeline writes and removes the mark off the async workers, since both
-//! sync the disk.
+//! The breaker for a warm-up that takes the app down: the recording's
+//! warm-up ([`ProcessingPipeline::warm_up_while_recording`]) is marked on
+//! disk ([`WarmUpMark::FILE_NAME`]) while it runs, and a mark left over at
+//! launch, or a held mark from the fallback's turn-off, turns warm-ups off
+//! until a meeting's processing loads the engine.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -47,7 +12,7 @@ use crate::files::{Access, remove_durably, replace_file};
 #[cfg(doc)]
 use crate::ProcessingPipeline;
 
-/// The mark, and whether the warm-up is off; see the module doc.
+/// The mark, and whether the warm-up is off.
 #[derive(Debug)]
 pub struct WarmUpMark {
     /// `None` in memory (the tests, the CLI): nothing is written.
@@ -59,18 +24,15 @@ pub struct WarmUpMark {
 
 #[derive(Debug, Default)]
 struct State {
-    /// A mark outlived its process, or the warm-up is held off: no
-    /// warm-up until a load clears it.
+    /// A mark outlived its process, or the warm-up is held off.
     skipping: bool,
     /// Warm-ups running now; the first writes the mark, the last removes it.
     running: usize,
 }
 
 impl WarmUpMark {
-    /// The mark's name in the support directory.
     pub const FILE_NAME: &'static str = "warm-up-in-progress";
 
-    /// The start of a held mark's id (`WarmUpMark::hold_off`).
     const HELD_PREFIX: &'static str = "held-";
 
     /// A mark that writes nothing and never turns the warm-up off.
@@ -83,9 +45,9 @@ impl WarmUpMark {
         }
     }
 
-    /// The launch check over the mark in `support_directory`: a mark left
-    /// there turns the warm-up off until a load clears it, and is logged
-    /// once at `warn`. Call it once per launch, before any recording.
+    /// The launch check over the mark in `support_directory`, logged once at
+    /// `warn` when one is left. Call it once per launch, before any
+    /// recording.
     #[must_use]
     pub fn at_launch(support_directory: &Path) -> Self {
         let path = support_directory.join(Self::FILE_NAME);
@@ -118,16 +80,13 @@ impl WarmUpMark {
         }
     }
 
-    /// The id of the mark the launch found left over: a warm-up that ended
-    /// with the app, or `held-<uuid>` for one the user's end of the
-    /// fallback held off. Earlier builds wrote `1` in every mark; an empty
-    /// mark gives an empty id.
+    /// The id of the mark the launch found left over (`held-<uuid>` for a
+    /// held one; `1` or empty from older builds).
     #[must_use]
     pub fn left_over(&self) -> Option<&str> {
         self.left_over.as_deref()
     }
 
-    /// Whether recordings skip the warm-up now.
     #[must_use]
     pub fn skipping(&self) -> bool {
         self.state().skipping
@@ -149,14 +108,9 @@ impl WarmUpMark {
         Some(WarmingUp(Arc::clone(self)))
     }
 
-    /// Holds the warm-up off, at this launch and every later one, until a
-    /// meeting's processing has loaded the engine: the mark is written
-    /// durably with a fresh id (`held-<uuid>`), which this returns. The
-    /// user's end of the fallback ([`crate::SpeechFallback::turn_off`]), so
-    /// the engine's first load after it never runs beside a recording. A
-    /// mark that cannot be written returns the error, and the fallback
-    /// stays on; the warm-up is off for this run all the same, until a
-    /// load.
+    /// Holds the warm-up off until a meeting's processing has loaded the
+    /// engine, across launches, with a fresh `held-<uuid>` mark it returns.
+    /// On a write error the warm-up is still off for this run.
     pub(crate) fn hold_off(&self) -> std::io::Result<String> {
         let id = format!("{}{}", Self::HELD_PREFIX, uuid::Uuid::new_v4());
         let mut state = self.state();
@@ -165,19 +119,16 @@ impl WarmUpMark {
         Ok(id)
     }
 
-    /// A meeting's processing loaded the speech engine: a mark left over
-    /// goes and recordings warm up again (the mark of a warm-up running now
-    /// stays until it returns).
+    /// A meeting's processing loaded the speech engine: a mark left over goes
+    /// and recordings warm up again.
     pub(crate) fn speech_engine_loaded(&self) {
-        // A mark while skipping is the one left over or held off; a
-        // warm-up still running (held off meanwhile) removes it as it ends.
+        // A warm-up still running removes the mark as it ends.
         let mut state = self.state();
         if std::mem::take(&mut state.skipping) && state.running == 0 {
             self.remove();
         }
     }
 
-    /// Writes the mark with `id`, durably.
     fn write(&self, id: &str) -> std::io::Result<()> {
         match &self.path {
             Some(path) => replace_file(path, format!("{id}\n").as_bytes(), Access::Default),
@@ -198,9 +149,8 @@ impl WarmUpMark {
     }
 }
 
-/// A warm-up in progress; dropping it ends it, which the app lived
-/// through, so the last one running removes the mark, unless the warm-up
-/// was held off meanwhile (`WarmUpMark::hold_off`), whose mark stays.
+/// A warm-up in progress; dropping the last one removes the mark, unless the
+/// warm-up was held off meanwhile.
 pub(crate) struct WarmingUp(Arc<WarmUpMark>);
 
 impl Drop for WarmingUp {
@@ -233,9 +183,8 @@ mod tests {
         assert!(!WarmUpMark::at_launch(dir.path()).skipping());
     }
 
-    /// A mark a previous process left turns the warm-up off at launch, at
-    /// every launch, until a load in processing clears it; each launch
-    /// that finds it says so in one `warn` line.
+    /// A mark left over turns the warm-up off at every launch until a load
+    /// clears it, with one `warn` line per launch.
     #[test]
     fn a_mark_left_over_skips_the_warm_up_until_a_load_clears_it() {
         let log = crate::fixtures::CapturedLog::warnings();
@@ -263,8 +212,7 @@ mod tests {
         assert!(!WarmUpMark::at_launch(dir.path()).skipping());
     }
 
-    /// A load while a warm-up runs keeps that warm-up's mark; a load with
-    /// nothing left over writes and removes nothing.
+    /// A load while a warm-up runs keeps that warm-up's mark.
     #[test]
     fn a_load_leaves_a_running_warm_up_its_mark() {
         let dir = tempfile::tempdir().unwrap();
@@ -279,18 +227,16 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// The captured lines that name the mark `id` and say `what`. Every
-    /// test in the binary logs into the capture, and others find marks of
-    /// their own left over, so only the id picks out this test's lines.
+    /// The captured lines that name the mark `id` and say `what`; the id
+    /// picks out this test's lines among every test's.
     fn lines_of(text: &str, id: &str, what: &str) -> usize {
         text.lines()
             .filter(|line| line.contains(id) && line.contains(what))
             .count()
     }
 
-    /// The user's end of the fallback holds the warm-up off: a fresh mark,
-    /// which the next launch finds too, and no warm-up until a load clears
-    /// it; a warm-up running meanwhile leaves the held mark in place.
+    /// Holding off writes a mark the next launch finds too, and no warm-up
+    /// runs until a load clears it.
     #[test]
     fn a_warm_up_held_off_stays_off_until_a_load_clears_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -316,8 +262,7 @@ mod tests {
         drop(mark.begin().unwrap());
     }
 
-    /// A launch that finds a held mark says the warm-up is held off, once,
-    /// not that a warm-up ended with the app.
+    /// A launch that finds a held mark says the warm-up is held off.
     #[test]
     fn a_launch_over_a_held_mark_says_it_is_held_off() {
         let log = crate::fixtures::CapturedLog::warnings();
@@ -327,13 +272,11 @@ mod tests {
         assert!(next.skipping());
         let text = log.text();
         assert_eq!(lines_of(&text, &id, "is held off;"), 1, "{text}");
-        // No semicolon, unlike the left-over test's count, so no rewording
-        // of that line slips past.
+        // No semicolon, so no rewording of that line slips past.
         assert_eq!(lines_of(&text, &id, "ended with the app"), 0, "{text}");
     }
 
-    /// A load while a held-off warm-up still runs leaves that warm-up its
-    /// mark until it returns.
+    /// A load while a held-off warm-up runs leaves its mark until it returns.
     #[test]
     fn a_load_while_a_held_warm_up_runs_keeps_its_mark() {
         let dir = tempfile::tempdir().unwrap();

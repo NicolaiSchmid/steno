@@ -1,10 +1,7 @@
 //! The phone's half of the wire, read as text from `mobile/` and held
-//! against what the server encodes and decodes: the field names of every
-//! JSON body, the value kinds the phone's `decodeShape` demands, the enum
-//! values, the constants, the seven paths and the QR query names. The iOS
-//! side runs the mirror image in `native-contract.test.ts`, so a rename on
-//! either side fails one CI or the other. Swift:
-//! `Tests/StenoHandoverTests/WireContractTests.swift`.
+//! against what the server encodes and decodes: field names, value kinds,
+//! enum values, constants, paths and QR query names. The phone runs the
+//! mirror image in `native-contract.test.ts`.
 
 #![allow(
     clippy::assert_is_empty,
@@ -285,8 +282,8 @@ fn request_bodies_use_the_phones_field_names() {
 
 #[test]
 fn the_server_decodes_bodies_exactly_as_the_phone_encodes_them() {
-    // `metadataFor` in `recording-client.ts` and `JSON.stringify`, as the
-    // phone's own tests pin them: lowercase UUID, `.000Z`, standard base64.
+    // As the phone's `metadataFor` encodes: lowercase UUID, `.000Z`, standard
+    // base64.
     let sha = base64::engine::general_purpose::STANDARD.encode([3u8; 32]);
     let phone_metadata = format!(
         r#"{{"recordingID":"6f9619ff-8b86-d011-b42d-00c04fc964ff","startedAt":"2026-09-25T09:00:00.000Z","durationSeconds":61.5,"byteCount":3000,"sha256":"{sha}","chunkSize":1024,"format":"m4aAAC","deviceName":"Nicolai's iPhone"}}"#

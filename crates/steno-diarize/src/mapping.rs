@@ -1,14 +1,7 @@
-//! Turns and chunks into `DiarizationResult`: one `SpeakerCluster` per
-//! label that has a turn, labelled "Speaker n" in order of first speech,
-//! with merged ranges, the normalised cluster embedding and the sample
-//! clip. Swift: `Sources/StenoSpeech/Diarization/DiarizationMapping.swift`,
-//! `ClusterEmbedding.swift` and `SampleClipPicker.swift`, one for one.
-//!
-//! The turns are the final word on who spoke when (frame voting over the
-//! whole recording); the chunks are the per-window embeddings that fed
-//! clustering, and a chunk's span is a local speaker's extent inside one
-//! window, not a turn. A label that appears only in chunks lost every
-//! frame vote and gets no speaker.
+//! Turns and chunks into `DiarizationResult`: one `SpeakerCluster` per label
+//! that has a turn, "Speaker n" in order of first speech, with merged ranges,
+//! the cluster embedding and the sample clip. Turns decide who spoke when; a
+//! label that appears only in chunks gets no speaker.
 
 use std::collections::HashMap;
 
@@ -18,16 +11,13 @@ use steno_core::{
 
 use crate::first_max_by;
 
-/// The user-facing label of the cluster at `index` in order of first
-/// speech: `Speaker 1`, `Speaker 2`, ... Spelled here and nowhere else,
-/// as [`crate::timeline::cluster_label`] spells the turn labels.
+/// The user-facing label of the cluster at `index`: `Speaker 1`, `Speaker 2`, ...
 #[must_use]
 pub fn display_label(index: usize) -> String {
     format!("Speaker {}", index + 1)
 }
 
-/// Chunks arrive without a quality; each takes the quality of the turn it
-/// overlaps most first.
+/// Chunks take the quality of the turn they overlap most.
 #[must_use]
 pub fn result(turns: &[SpeakerTurn], raw: &[ClusterChunk]) -> DiarizationResult {
     let chunks = assigning_quality(raw, turns);
@@ -107,8 +97,8 @@ pub fn merged(ranges: &[TimeRange]) -> Vec<TimeRange> {
     result
 }
 
-/// Each chunk takes the quality of the turn of its speaker it overlaps
-/// most, 1 when none overlaps.
+/// Each chunk takes the quality of its speaker's turn it overlaps most, 1
+/// when none overlaps.
 #[must_use]
 pub fn assigning_quality(chunks: &[ClusterChunk], turns: &[SpeakerTurn]) -> Vec<ClusterChunk> {
     chunks
@@ -139,13 +129,9 @@ fn overlap(turn: &SpeakerTurn, chunk: &ClusterChunk) -> f64 {
     (turn.end.min(chunk.end) - turn.start.max(chunk.start)).max(0.0)
 }
 
-/// The embedding the mapping gives a cluster: each chunk vector brought to
-/// unit length, summed with its duration as weight, then L2-normalised.
-/// Normalising first means a few high-norm windows (crosstalk, music,
-/// clipping) cannot steer the mean. `None` without a usable chunk; chunks
-/// of another dimension, of zero duration or with a non-finite value are
-/// skipped, a defence only: extraction rejects the wrong dimension and the
-/// backends drop a non-finite vector.
+/// The cluster embedding: each chunk vector at unit length, summed with its
+/// duration as weight, then L2-normalised, so a few high-norm windows cannot
+/// steer the mean. `None` without a usable chunk; bad chunks are skipped.
 #[must_use]
 pub fn cluster_embedding(chunks: &[ClusterChunk]) -> Option<Embedding> {
     let mut sum = vec![0.0f32; Embedding::DIMENSION];
@@ -156,7 +142,6 @@ pub fn cluster_embedding(chunks: &[ClusterChunk]) -> Option<Embedding> {
             && chunk.embedding.iter().all(|value| value.is_finite())
     }) {
         let unit = Embedding(chunk.embedding.clone()).normalized();
-        // Durations are seconds; f32 holds them to the microsecond.
         #[allow(clippy::cast_possible_truncation)]
         let weight = chunk.duration() as f32;
         for (target, value) in sum.iter_mut().zip(&unit.0) {
@@ -167,25 +152,21 @@ pub fn cluster_embedding(chunks: &[ClusterChunk]) -> Option<Embedding> {
     usable.then(|| Embedding(sum).normalized())
 }
 
-/// Core documents `sample_clip_range` as "at most ten seconds"; this is
-/// the one place that number lives and nothing can raise it.
+/// Core documents `sample_clip_range` as at most ten seconds.
 pub const CLIP_TARGET_SECONDS: f64 = 10.0;
 /// Below this the longest range is too short to name a voice from.
 pub const CLIP_MINIMUM_SECONDS: f64 = 3.0;
 
-/// The clip a user hears when naming a speaker and the confidence stored
-/// beside it.
+/// The clip a user hears when naming a speaker, and its confidence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipChoice {
     pub range: Option<TimeRange>,
     pub cluster_confidence: f32,
 }
 
-/// The longest contiguous range of the cluster, capped to
-/// [`CLIP_TARGET_SECONDS`] and centred on the highest-quality chunk inside
-/// it, the earlier range and the earlier chunk on a tie. Confidence is the
-/// duration-weighted mean chunk quality, halved when the longest range is
-/// under [`CLIP_MINIMUM_SECONDS`].
+/// The longest range of the cluster, capped to [`CLIP_TARGET_SECONDS`] and
+/// centred on its highest-quality chunk. Confidence is the duration-weighted
+/// mean chunk quality, halved under [`CLIP_MINIMUM_SECONDS`].
 #[must_use]
 pub fn pick_clip(ranges: &[TimeRange], chunks: &[ClusterChunk]) -> ClipChoice {
     let Some(longest) = first_max_by(ranges, |lhs, rhs| length(lhs).total_cmp(&length(rhs))) else {
@@ -225,8 +206,7 @@ pub fn pick_clip(ranges: &[TimeRange], chunks: &[ClusterChunk]) -> ClipChoice {
     }
 }
 
-/// Duration-weighted mean chunk quality in `0...1`; zero without
-/// duration. A chunk with a non-finite quality does not count.
+/// Duration-weighted mean chunk quality in `0...1`, ignoring non-finite ones.
 #[must_use]
 pub fn mean_quality(chunks: &[ClusterChunk]) -> f32 {
     let scored = || chunks.iter().filter(|chunk| chunk.quality.is_finite());
@@ -237,13 +217,11 @@ pub fn mean_quality(chunks: &[ClusterChunk]) -> f32 {
     let weighted: f64 = scored()
         .map(|chunk| f64::from(chunk.quality) * chunk.duration())
         .sum();
-    // Clamped to 0...1 before narrowing.
     #[allow(clippy::cast_possible_truncation)]
     let quality = (weighted / total).clamp(0.0, 1.0) as f32;
     quality
 }
 
-/// `upper - lower`.
 #[must_use]
 pub fn length(range: &TimeRange) -> f64 {
     range.upper - range.lower

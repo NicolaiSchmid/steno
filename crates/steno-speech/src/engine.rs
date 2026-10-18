@@ -1,8 +1,5 @@
-//! The `SpeechEngine` over the ONNX backend: `prepare` installs and loads
-//! the models once, `transcribe` runs the pipeline on a blocking thread.
-//! The id is `parakeet-v3`, the Swift engine's: it is the same model and
-//! the same setting; which backend runs it is the platform's business.
-//! Swift: `Sources/StenoSpeech/Engines/ParakeetEngine.swift`.
+//! The `SpeechEngine` over the ONNX backend: `prepare` installs and loads the
+//! models once, `transcribe` runs the pipeline on a blocking thread.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -18,43 +15,30 @@ use crate::onnx::{OnnxBackend, OnnxOptions};
 use crate::pipeline::{PipelineConfig, RecoveryConfig, Transcriber};
 use crate::vad::{SileroVad, VadConfig};
 
-/// The engine id of Parakeet TDT v3, whichever backend runs it: the
-/// Swift engine's, stored in `Settings.speechEngineID`
-/// (`SpeechEngineID.parakeetV3`).
+/// The engine id of Parakeet TDT v3, whichever backend runs it; the value
+/// stored in the settings, which the Swift app reads too.
 pub const PARAKEET_V3_ID: &str = "parakeet-v3";
 
-/// The 25 European languages of Parakeet TDT v3 (NVIDIA model card;
-/// `SpeechEngineID.parakeetV3Languages`).
+/// The 25 European languages of Parakeet TDT v3 (NVIDIA model card).
 pub const PARAKEET_V3_LANGUAGES: [&str; 25] = [
     "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt",
     "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
 ];
 
-/// The shared pipeline's defaults with two chunker settings of the
-/// engine's own, measured on FLEURS German `cat/` and the calibration
-/// corpus (A16b in `.plans/2026-10-07-stable-promotion.md`):
+/// The shared pipeline's defaults with the engine's own chunker settings,
+/// measured on FLEURS German and a corpus of real calls:
 ///
 /// - the first chunk starts at the recording's start
-///   ([`ChunkerConfig::from_start`]), so the lead-in is decoded with the
-///   speech after it: FLEURS 4.865 % mean WER against 4.882 % without, the
-///   corpus's mean WER against the Swift transcripts 9.735 % instead of
-///   9.814 %, and no word added where the Swift transcripts have none;
-/// - the tail is decoded in extra windows ([`Gaps::Tail`]) once it is at
-///   least [`MIN_GAP_SECONDS`](crate::chunker::MIN_GAP_SECONDS) long, so
-///   quiet speech after the last speech the detector hears comes through;
-///   FLEURS and the corpus are unchanged by it;
-/// - the first chunk is also judged as it was before it started at 0
+///   ([`ChunkerConfig::from_start`]), so the lead-in is decoded with the speech
+///   after it;
+/// - the tail is decoded in extra windows ([`Gaps::Tail`]), so quiet speech
+///   after the last detected speech comes through;
+/// - the first chunk is still judged as if it started at the first speech
 ///   ([`RecoveryConfig::first_chunk_as_before`]), so a short first chunk's
-///   recovery still keeps the words in the skipped pause after it: on the
-///   fake backend 134 of the 157 such words the earlier start lost come
-///   back, while FLEURS, the corpus and a meeting give the same text (the
-///   judgment never fires there) at one more decode of the first chunk.
+///   recovery keeps the words in the pause after it.
 ///
-/// The long pauses stay skipped (`long_pause_seconds`, 3 s): extra windows
-/// over every gap ([`Gaps::All`], the `CoreML` engine's setting) inserted
-/// words there, 19 more on FLEURS (5.198 %) and some where the Swift
-/// transcripts have none, scored worse on the corpus (9.916 %) and cost
-/// +27 % on FLEURS and +41 % on a 15-minute meeting's two lanes.
+/// Long pauses stay skipped: extra windows over every gap ([`Gaps::All`])
+/// inserted wrong words and cost about a third more time.
 #[must_use]
 pub fn pipeline_config() -> PipelineConfig {
     PipelineConfig {
@@ -88,8 +72,8 @@ impl OnnxSpeechEngine {
     /// [`PARAKEET_V3_LANGUAGES`].
     pub const LANGUAGES: [&'static str; 25] = PARAKEET_V3_LANGUAGES;
 
-    /// An engine over `store` with the engine's settings
-    /// ([`pipeline_config`]); nothing is loaded until `prepare`.
+    /// An engine over `store` with [`pipeline_config`]; nothing is loaded until
+    /// `prepare`.
     #[must_use]
     pub fn new(store: ModelStore, options: OnnxOptions) -> Self {
         Self::with_config(store, options, pipeline_config(), VadConfig::default())
@@ -117,10 +101,9 @@ impl OnnxSpeechEngine {
         &self.store
     }
 
-    /// Installs what is missing from `store`, loads the export and Silero
-    /// and returns the transcriber the engine runs; the model-gated test
-    /// and the `transcribe` example open theirs the same way. Blocking;
-    /// download progress goes to `tracing` at debug level.
+    /// Installs what is missing from `store`, loads the export and Silero and
+    /// returns the transcriber the engine runs. Blocking; download progress
+    /// goes to `tracing` at debug level.
     ///
     /// ```no_run
     /// use steno_speech::engine::pipeline_config;
@@ -148,10 +131,9 @@ impl OnnxSpeechEngine {
         Self::load_installed(store, options, config, vad)
     }
 
-    /// [`OnnxSpeechEngine::open_transcriber`] without the downloads: the
-    /// export and Silero must already be in `store`, else
-    /// [`SpeechError::NotInstalled`]. What `steno-speech-sidecar` runs, so
-    /// the child never opens a connection.
+    /// [`OnnxSpeechEngine::open_transcriber`] without the downloads: the files
+    /// must already be in `store`, else [`SpeechError::NotInstalled`]. What the
+    /// sidecar runs, so the child never opens a connection.
     pub fn load_installed(
         store: &ModelStore,
         options: &OnnxOptions,
@@ -182,8 +164,7 @@ pub(crate) fn log_download(progress: DownloadProgress<'_>) {
     );
 }
 
-/// Runs `work` off the async executor when one is present, inline
-/// otherwise.
+/// Runs `work` off the async executor when one is present, inline otherwise.
 pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, SpeechError> {
@@ -235,9 +216,7 @@ impl SpeechEngine for OnnxSpeechEngine {
         }
         self.prepare().await?;
         let loaded = Arc::clone(&self.loaded);
-        // One copy of the recording per call, for the blocking thread; the
-        // speech sidecar copies again into its payload
-        // (`sidecar::protocol::encode_samples`).
+        // One copy of the recording per call, for the blocking thread.
         let samples = audio.samples.clone();
         let hint = hint.cloned();
         let transcript = blocking(move || {

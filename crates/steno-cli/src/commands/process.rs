@@ -1,18 +1,8 @@
-//! `steno process <wav>`: copies the 16 kHz mono WAV (and the system lane
-//! for a call) into `<audio folder>/<meetingID>/`, enqueues the meeting and
-//! waits for the pipeline. Prints one line per progress event to standard
-//! error, `stage percent remaining`, and the meeting id alone to standard
-//! output; a note on stderr says when the summary was skipped for lack of
-//! an LLM endpoint. Swift: `Sources/steno/Commands/Process.swift`.
-//!
+//! `steno process <wav>`: copies the WAV (and the system lane for a call)
+//! into the meeting's folder, enqueues it and waits for the pipeline,
+//! printing progress to stderr and the meeting id to stdout.
 //! `steno process --meeting <id>` processes a stored meeting again from its
-//! recording, and reports as above: a meeting the app offers "Process
-//! again" for (a failed one, or a ready one whose results may be
-//! incomplete or whose recording may be damaged), through the pipeline's
-//! `process_again`, or
-//! with `--allow-ready` a ready one too, through `reprocess` (see
-//! `--allow-ready` for what that replaces). Rust only: Swift's CLI had no
-//! such flag.
+//! recording; a ready one only with `--allow-ready`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -143,8 +133,7 @@ impl Process {
         self.validate(input)?;
         let store = self.database.open()?;
         let settings = store.settings().map_err(Failure::runtime)?;
-        // `--audio-folder` is a plain path for this run; the stored setting
-        // is the app's and never changes here.
+        // `--audio-folder` is for this run; the stored setting never changes.
         let root = match &self.audio_folder {
             Some(folder) => crate::wiring::standardized(folder),
             None => file_url_path(&settings.audio_folder)
@@ -245,9 +234,8 @@ impl Process {
         .await
     }
 
-    /// Builds the pipeline from the settings and the speech flags, starts
-    /// `meeting_id`'s run with `start`, prints its progress, waits for it
-    /// and reports how it ended.
+    /// Builds the pipeline, starts `meeting_id`'s run with `start`, prints
+    /// its progress and reports how it ended.
     async fn run_and_report(
         &self,
         store: &Arc<Store>,
@@ -317,8 +305,7 @@ impl Process {
 }
 
 /// What the command prints when its run left the meeting queued because
-/// another program kept the database locked past its busy timeout: the
-/// command does not wait for it, and the app's next launch processes it.
+/// the database stayed locked; the app's next launch processes it.
 fn left_queued(meeting_id: Uuid) -> Failure {
     Failure::runtime(format!(
         "Meeting {} was not processed: another program kept the database locked. It stays in \
@@ -334,9 +321,8 @@ fn reprocess_failure(error: ReprocessError) -> Failure {
         ReprocessError::MeetingNotFound(id) => {
             Failure::usage(format!("No meeting has the id {}.", uuid_string(id)))
         }
-        // The command's pipeline is its own, so a meeting the app left
-        // waiting for models or for the database reads as queued here: the
-        // app may not be running at all.
+        // A meeting the app left waiting reads as queued here: the app may
+        // not be running at all.
         ReprocessError::Unfinished {
             meeting_id,
             state: MeetingStateKind::Queued | MeetingStateKind::Processing,
@@ -377,9 +363,8 @@ fn reprocess_failure(error: ReprocessError) -> Failure {
     }
 }
 
-/// `stage percent remaining`, the stage padded to the longest name so the
-/// percents line up, and the lane when the stage runs over more than one:
-/// `transcribe     3% 1m 20s, lane 2 of 2`.
+/// `stage percent remaining`, padded so the percents line up, and the lane
+/// when there is more than one: `transcribe     3% 1m 20s, lane 2 of 2`.
 #[must_use]
 pub fn progress_line(progress: &ProcessingProgress) -> String {
     let width = PipelineStage::ALL
@@ -415,11 +400,8 @@ pub fn remaining_text(remaining: f64) -> String {
     }
 }
 
-/// The meeting's title for `--title`, else the file name of `input`. A
-/// given title is the user's: the app shows it, as the export does, and
-/// the summary keeps it. Swift's CLI stores it as the default title (see
-/// the parity list). It is stored trimmed, and an empty or blank one is no
-/// title, as in the intake.
+/// The meeting's title for `--title`, stored trimmed as the user's title,
+/// else the file name of `input`. A blank one is no title.
 fn title_and_origin(given: Option<&str>, input: &Path) -> (String, TitleOrigin) {
     match given.map(str::trim) {
         Some(title) if !title.is_empty() => (title.to_owned(), TitleOrigin::User),

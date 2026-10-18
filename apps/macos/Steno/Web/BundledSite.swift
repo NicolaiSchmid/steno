@@ -5,8 +5,6 @@ import Foundation
 /// becomes a file URL, a content type and the response headers. Pure, so the
 /// traversal and fallback rules test hostlessly; the WebKit plumbing lives in
 /// the handler.
-///
-/// Plan: `.plans/2026-09-29-macos-webview-ui.md`, Decision 3.
 struct BundledSite: Equatable, Sendable {
   struct Resource: Equatable, Sendable {
     var fileURL: URL

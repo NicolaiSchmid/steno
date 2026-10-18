@@ -1,5 +1,4 @@
 //! Where the API key lives.
-//! Swift: `Sources/StenoCore/Protocols/SecretStore.swift`.
 
 use std::fmt;
 
@@ -7,8 +6,8 @@ use async_trait::async_trait;
 
 use super::BoundaryResult;
 
-/// A secret's name. The app stores secrets in the platform keyring, the
-/// CLI and tests in a 0600 file, the environment or memory.
+/// A secret's name. The app keeps secrets in the platform keyring, the CLI and
+/// tests in a 0600 file, the environment or memory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SecretKey(pub String);
 
@@ -57,9 +56,7 @@ pub trait SecretStore: Send + Sync {
     /// `None` removes the secret.
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()>;
 
-    /// Where the secrets are kept; `None` when the store does not say or
-    /// has not decided yet. No Swift counterpart (the Swift app keeps them
-    /// in the Keychain only).
+    /// Where the secrets are kept; `None` when the store does not say.
     fn place(&self) -> Option<SecretPlace> {
         None
     }

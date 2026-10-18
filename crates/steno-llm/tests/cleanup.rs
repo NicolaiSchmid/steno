@@ -1,7 +1,6 @@
 //! The cleanup pass over the stub server: count, order, ids and raw text
-//! preserved; validation of merged, reworded and emptied answers; one retry
-//! then raw; bounded concurrency; transport failures propagate.
-//! Swift: `CleanupTests`, `CleanupValidationTests`.
+//! preserved; validation; one retry then raw; bounded concurrency;
+//! transport failures propagate.
 
 mod common;
 
@@ -18,8 +17,7 @@ use steno_llm::{
     RetryPolicy, TranscriptChunk, TranscriptChunker,
 };
 
-/// A cleaner over the stub server with no retries and the system clock;
-/// every request is answered at once, so nothing ever sleeps.
+/// A cleaner over the stub server with no retries and the system clock.
 fn cleaner(
     server: &StubChatServer,
     chunker: Option<TranscriptChunker>,
@@ -126,8 +124,8 @@ async fn preserves_count_order_ids_and_raw_text_and_rewrites_text() {
     );
 }
 
-/// A model that answers `Me: text` for every segment of a call: the
-/// transcript comes back without the labels and without a retry.
+/// A model answering `Me: text` for every segment: labels are stripped
+/// without a retry.
 #[tokio::test]
 async fn a_model_echoing_the_speaker_label_is_cleaned_without_a_retry() {
     let server = StubChatServer::start().await.unwrap();
@@ -325,8 +323,7 @@ async fn never_exceeds_max_concurrent_requests() {
 #[tokio::test]
 async fn transport_failures_propagate_instead_of_falling_back_to_raw() {
     let server = StubChatServer::start().await.unwrap();
-    // Every chunk in flight gets the same answer, so the first error to
-    // surface is always this one.
+    // Every chunk gets the same answer, so this error surfaces first.
     server.respond(Arc::new(|_| Some(scripts.unauthorized())));
     let cleaner = cleaner(&server, Some(TranscriptChunker::new(150, 220, 3)), |_| {});
     let error = cleaner.clean(&cleanup_input(&standup())).await.unwrap_err();
@@ -430,15 +427,11 @@ fn output_tokens_scale_with_the_chunk_and_stay_under_the_ceiling() {
     assert!((256..1_000).contains(&tokens), "{tokens}");
 }
 
-// Validation from the model's side
-
 fn first_chunk() -> TranscriptChunk {
     TranscriptChunker::default().chunk(&standup().segments, Some(&de()))[0].clone()
 }
 
-/// The model reads `[3] Me: words` and some answer `Me: words`. The label
-/// is one word, so the word-count check alone would pass it; the draft
-/// strips a leading index and any known label first, and nothing else: a
+/// A leading index and known label are stripped, and nothing else: a
 /// colon-bearing first word that is no label stays.
 #[test]
 fn an_echoed_speaker_label_is_stripped_before_validation() {
@@ -503,10 +496,8 @@ fn an_echoed_speaker_label_is_stripped_before_validation() {
     assert_eq!(stripped.ordered_texts(), texts);
 }
 
-/// Swift walks `Character`s, grapheme clusters: a colon carrying a
-/// combining mark is no separator, a space carrying one is whitespace
-/// before the index but no decoration after the label, and the opening
-/// stretch ends after 32 clusters.
+/// Grapheme clusters: a colon with a combining mark is no separator, and
+/// the opening stretch ends after 32 clusters.
 #[test]
 fn echoed_labels_are_found_by_grapheme_cluster() {
     let labels = SpeakerLabels::new(&standup().speakers);
@@ -562,7 +553,6 @@ fn merged_answers_are_rejected_by_count_and_by_duplicate_index() {
             ),
         ]
     );
-    // Renumbering the merged answer hides nothing: the count still fails.
     for (index, segment) in merged.segments.iter_mut().enumerate() {
         segment.index = i64::try_from(index).unwrap();
     }
@@ -687,9 +677,8 @@ async fn a_retry_that_comes_back_right_is_applied_and_not_a_failed_chunk() {
     assert!(chunks.len() >= 3);
     let victim = chunks[1].segments[0].text.clone();
     let victim_for_responder = victim.clone();
-    // First answer for the victim chunk drops a segment; the retry is
-    // perfect and capitalises every segment so the applied text is
-    // recognisable.
+    // The victim chunk's first answer drops a segment; the retry is perfect
+    // and capitalises every segment.
     server.respond(Arc::new(move |request| {
         let first_user = request
             .chat

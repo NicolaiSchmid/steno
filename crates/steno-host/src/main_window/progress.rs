@@ -1,6 +1,4 @@
-//! Where the pipeline is with every meeting that is queued or processing,
-//! after `Main/ProcessingProgressModel.swift`, and the two event types it
-//! consumes, after `Sources/StenoCore/{Pipeline/ProcessingProgress,Events/MeetingEvent}.swift`.
+//! Where the pipeline is with every meeting that is queued or processing.
 //! The event types live in the core (`steno_core::MeetingEvent`,
 //! `steno_core::ProcessingProgress`) and are re-exported here.
 
@@ -15,7 +13,6 @@ use crate::labels::stage_label;
 pub use steno_core::{MeetingEvent, ProcessingProgress};
 
 /// One queued or processing meeting as the model tracks it.
-/// Swift: `ProcessingProgressModel.Entry`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProgressEntry {
     pub meeting_id: Uuid,
@@ -24,30 +21,27 @@ pub struct ProgressEntry {
     pub progress: Option<ProcessingProgress>,
     /// When `progress` landed, or when the entry was created.
     pub since: DateTime<Utc>,
-    /// What the last run was set aside for, the meeting waiting `queued`
-    /// (or left `processing` by the store) until the next run's first
-    /// event; `None` otherwise. Rust only.
+    /// What the last run was set aside for, until the next run's first
+    /// event.
     pub parked: Option<Parked>,
 }
 
-/// Why the last run of a meeting `queued` (or left `processing` by the
-/// store) was set aside. Rust only: the Swift pipeline downloaded the
-/// models inside the run and failed it on a busy store.
+/// Why the last run of a meeting `queued` (or left `processing`) was set
+/// aside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parked {
     /// A model is not installed ([`MeetingEvent::ModelsMissing`]).
     ModelsMissing,
     /// Another process held the store ([`MeetingEvent::StoreBusy`]).
     StoreBusy,
-    /// The job waits for the recording under way before it runs the speech
-    /// engine in the app's process ([`MeetingEvent::WaitingForRecording`]).
+    /// The job waits for the recording under way before it runs the
+    /// in-process speech engine ([`MeetingEvent::WaitingForRecording`]).
     ForRecording,
 }
 
 impl Parked {
-    /// What the entry says instead of a stage; `speech_fallback`: the
-    /// speech sidecar stands in for the engine in the app's process
-    /// ([`ProcessingProgressModel::speech_fallback`]).
+    /// What the entry says instead of a stage; `speech_fallback` when the
+    /// sidecar stands in for the in-process engine.
     pub(crate) const fn title(self, speech_fallback: bool) -> &'static str {
         match self {
             Parked::ModelsMissing if speech_fallback => {
@@ -60,9 +54,8 @@ impl Parked {
     }
 
     /// The entry's bridge stage. A job waiting for the recording keeps
-    /// `waiting`, with no new stage: the card says "Waiting for the
-    /// recording to finish", while the meeting list's row, which reads
-    /// the stage, says "Waiting to process" as for any queued job.
+    /// `waiting`, so the list row says "Waiting to process" while the card
+    /// says why.
     pub(crate) const fn stage(self) -> &'static str {
         match self {
             Parked::ModelsMissing => ProgressEntry::MODELS_MISSING_STAGE,
@@ -80,32 +73,27 @@ impl ProgressEntry {
     /// The bridge stage before a run's first event.
     pub const WAITING_STAGE: &'static str = "waiting";
 
-    /// The title of a meeting whose run was refused for a missing model,
-    /// `PipelineFailure::MODELS_MISSING` in `steno-pipeline`.
+    /// The title of a meeting whose run was refused for a missing model.
     pub const MODELS_MISSING_TITLE: &'static str = "Download the speech models in Settings";
 
-    /// The bridge stage of such a meeting, beside `waiting` and the
-    /// pipeline's stages; the page drops "starts when the current meeting
-    /// finishes" for it.
+    /// The bridge stage of such a meeting; the page drops "starts when the
+    /// current meeting finishes" for it.
     pub const MODELS_MISSING_STAGE: &'static str = "modelsMissing";
 
-    /// [`Self::MODELS_MISSING_TITLE`] while the speech sidecar stands in
-    /// for the Neural Engine, which ended the app: its models are the ones
-    /// to download, and this says why. Rust only.
+    /// [`Self::MODELS_MISSING_TITLE`] while the sidecar stands in for the
+    /// Neural Engine, which ended the app.
     pub const FALLBACK_MODELS_MISSING_TITLE: &'static str =
         "Neural Engine off after a crash: download the speech models in Settings";
 
-    /// The title of a meeting whose job waits for the recording under way
-    /// before it runs the speech engine in the app's process. Rust only.
+    /// The title of a meeting whose job waits for the recording under way.
     pub const WAITING_FOR_RECORDING_TITLE: &'static str = "Waiting for the recording to finish";
 
     /// The title of a meeting whose run met the store locked by another
-    /// process (the other app, another program).
+    /// process.
     pub const STORE_BUSY_TITLE: &'static str =
         "Waiting for another app to finish with Steno's data";
 
-    /// The bridge stage of such a meeting, beside `modelsMissing`; the page
-    /// drops "starts when the current meeting finishes" for it too.
+    /// The bridge stage of such a meeting, as `modelsMissing`.
     pub const STORE_BUSY_STAGE: &'static str = "storeBusy";
 
     #[must_use]
@@ -113,13 +101,8 @@ impl ProgressEntry {
         self.progress.as_ref().map(|progress| progress.stage)
     }
 
-    /// `stage_label` plus an ellipsis, "Transcribing…"; [`Self::WAITING_TITLE`]
-    /// before the first event, [`Self::MODELS_MISSING_TITLE`] after a
-    /// refusal for a missing model ([`Self::FALLBACK_MODELS_MISSING_TITLE`]
-    /// with `speech_fallback`, [`ProcessingProgressModel::speech_fallback`]),
-    /// [`Self::STORE_BUSY_TITLE`] after one by a busy store and
-    /// [`Self::WAITING_FOR_RECORDING_TITLE`] while the job waits for a
-    /// recording.
+    /// `stage_label` plus an ellipsis, "Transcribing…", or the waiting or
+    /// parked title before the run's first event.
     #[must_use]
     pub fn title(&self, speech_fallback: bool) -> String {
         if let Some(parked) = self.parked {
@@ -147,13 +130,11 @@ impl ProgressEntry {
     }
 }
 
-/// Swift: `ProcessingProgressModel`.
 #[derive(Debug, Default)]
 pub struct ProcessingProgressModel {
     pub entries: BTreeMap<Uuid, ProgressEntry>,
-    /// The speech sidecar stands in for the engine in the app's process,
-    /// which ended the app (`SpeechModels::speech_fallback`): a meeting
-    /// waiting for models says so. Rust only.
+    /// The sidecar stands in for the in-process engine, which ended the
+    /// app: a meeting waiting for models says so.
     pub speech_fallback: bool,
 }
 
@@ -163,12 +144,11 @@ impl ProcessingProgressModel {
         self.entries.get(&meeting_id)
     }
 
-    /// `progress` at `decode`, the first event of a run, starts a new entry
-    /// even when an earlier run's entry is still there; any other stage
-    /// updates the meeting's entry and never lowers its fraction. Progress
-    /// for a meeting without an entry drives nothing. `deleted` evicts.
-    /// `modelsMissing`, `storeBusy` and `waitingForRecording` start an
-    /// entry without progress that says so, until the run's next event.
+    /// `progress` at `decode`, a run's first event, starts a new entry;
+    /// any other stage updates the entry and never lowers its fraction.
+    /// Progress without an entry drives nothing; `deleted` evicts.
+    /// `modelsMissing`, `storeBusy` and `waitingForRecording` park the
+    /// entry until the run's next event.
     pub fn apply(&mut self, event: &MeetingEvent, now: DateTime<Utc>) {
         match event {
             MeetingEvent::Progress {
@@ -231,11 +211,9 @@ impl ProcessingProgressModel {
         );
     }
 
-    /// The meeting list as the store delivers it: every meeting in `queued`
-    /// or `processing` has an entry (without progress until its first
-    /// event) and a meeting listed in another state loses its entry. A
-    /// meeting absent from the list keeps its entry; deletion evicts
-    /// through the `deleted` event.
+    /// The meeting list as the store delivers it: every meeting `queued` or
+    /// `processing` has an entry, one listed in another state loses it, and
+    /// one absent keeps it (deletion evicts through the `deleted` event).
     pub fn meetings_changed(&mut self, meetings: &[Meeting], now: DateTime<Utc>) {
         for meeting in meetings {
             match meeting.state.kind() {

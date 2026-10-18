@@ -1,6 +1,5 @@
 //! RMS and peak over a metering window, in dBFS, and the atomic slot the
 //! processing thread publishes them through.
-//! Swift: `Sources/StenoAudio/RealTime/LevelMeter.swift`.
 
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -17,13 +16,11 @@ pub struct LevelMeter {
 }
 
 impl LevelMeter {
-    /// Empty: silence until samples arrive.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Adds `samples` to the window.
     #[inline(always)]
     pub fn accumulate(&mut self, samples: &[f32]) {
         let mut squares = 0.0f64;
@@ -46,7 +43,6 @@ impl LevelMeter {
         self.peak
     }
 
-    /// The window so far, without resetting.
     #[must_use]
     pub fn current(&self) -> LaneLevel {
         if self.count == 0 {
@@ -79,11 +75,9 @@ impl LevelMeter {
     }
 }
 
-/// The latest [`LaneLevels`] written by the processing thread as atomic bit
-/// patterns, read by whoever hands them on (the session's level
-/// publisher, `capture::level_publisher`), which each publish wakes.
-/// The reader may observe a torn pair across a publish; levels feed a
-/// meter, nothing else, so no lock is worth it.
+/// The latest [`LaneLevels`] as atomic bit patterns, written by the
+/// processing thread and read by the level publisher, which each publish
+/// wakes. A torn read across a publish is fine for a meter.
 #[derive(Debug)]
 pub struct LevelSlot {
     mic_rms: AtomicU32,
@@ -112,8 +106,7 @@ impl LevelSlot {
         }
     }
 
-    /// The processing thread's levels for the next reader, which it wakes
-    /// (one more [`Wake::signal`], the cost the relay's wake already has).
+    /// The processing thread's levels for the next reader, which it wakes.
     #[inline(always)]
     pub fn publish(&self, mic: LaneLevel, system: Option<LaneLevel>) {
         self.mic_rms.store(mic.rms.to_bits(), Ordering::Relaxed);
@@ -135,13 +128,12 @@ impl LevelSlot {
     }
 
     /// The publish count so far; a reader hands the levels on when it
-    /// changed.
+    /// changes.
     #[must_use]
     pub fn current_generation(&self) -> usize {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// The last published levels.
     #[must_use]
     pub fn levels(&self) -> LaneLevels {
         LaneLevels {
@@ -161,8 +153,7 @@ impl LevelSlot {
 mod tests {
     use super::*;
 
-    /// Each publish signals the reader's wake, so the publisher is woken
-    /// by it rather than by its poll.
+    /// Each publish signals the reader's wake.
     #[test]
     fn a_publish_wakes_the_reader() {
         let slot = LevelSlot::new(false);

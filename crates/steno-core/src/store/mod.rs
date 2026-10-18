@@ -1,13 +1,7 @@
-//! The SQLite store over the file the Swift app writes: the same
-//! migrations, recorded in `grdb_migrations` the way GRDB records them, the
-//! same column encodings, and the read and write paths the pipeline and the
-//! host need. The queries the windows ask for (`search`, `export`,
-//! `speakers_for_meetings`, `recent_persons`) live here too, written with
-//! the [`convert`] codecs.
-//! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
-//!
-//! The migration procedure both sides follow is in
-//! `crates/steno-core/migrations/README.md`.
+//! The SQLite store over the file the Swift app also writes: the same
+//! migrations, recorded in `grdb_migrations` as GRDB records them, the same
+//! column encodings, and the read and write paths the pipeline and the host
+//! need. The migration procedure is in `crates/steno-core/migrations/README.md`.
 
 mod assets;
 pub mod convert;
@@ -44,41 +38,29 @@ pub use timings::StageRateRow;
 
 use crate::model::MeetingStateKind;
 
-/// Errors a store call can raise beyond SQLite's own, plus the ones the
-/// migrator adds. Swift: `MeetingStoreError` in
-/// `Sources/StenoCore/Storage/MeetingStore.swift`; the cases the Swift
-/// store raises from methods not ported yet are absent here.
+/// Errors a store call can raise beyond SQLite's own, plus the migrator's.
 #[derive(Debug, Error)]
 pub enum StoreError {
-    /// SQLite's own errors, among them a row this build cannot decode:
-    /// rusqlite's `FromSqlConversionFailure` and `InvalidColumnType` carry
-    /// an enum text this build does not know, an invalid UUID, a JSON
-    /// column that does not parse, a malformed embedding blob or an
-    /// unparsable date. Such a row was written by another build (or by
-    /// hand); the call itself was sound.
+    /// SQLite's own errors, among them a row this build cannot decode (an
+    /// unknown enum text, an invalid UUID or JSON, a malformed blob or
+    /// date), written by another build or by hand.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
-    /// The `setting` path only: its rows are merged into one JSON object
-    /// and decoded as [`Settings`](crate::model::Settings) outside SQLite,
-    /// so a value that does not fit fails here, not as a column
-    /// conversion. Every other JSON column goes through
-    /// [`convert::DbJson`] and surfaces as [`StoreError::Sqlite`].
+    /// The `setting` path only: the merged rows do not decode as
+    /// [`Settings`](crate::model::Settings). Every other JSON column
+    /// surfaces as [`StoreError::Sqlite`].
     #[error("JSON column: {0}")]
     Json(#[from] serde_json::Error),
-    /// The `setting` path only: the row under `key` cannot be read as the
-    /// setting this build knows by that key (another build wrote it, or a
-    /// hand edit), so the settings do not load. The value is left out: a
-    /// setting can hold a server address or a folder path, and this text
-    /// goes into the log and the "could not start" dialog. Rust only.
+    /// The `setting` path only: the row under `key` cannot be read as that
+    /// setting. The value is left out: it can hold a server address or a
+    /// folder path, and this text goes into the log and a dialog.
     #[error("the stored setting {key} {problem}")]
     UndecodableSetting {
         key: String,
         problem: SettingProblem,
     },
-    /// The `setting` path only: every row reads on its own as its setting,
-    /// but not all of them together. Like
-    /// [`StoreError::UndecodableSetting`], the text leaves the values out.
-    /// Rust only.
+    /// The `setting` path only: every row reads on its own, but not all of
+    /// them together. The text leaves the values out.
     #[error("the stored settings cannot be read together")]
     UndecodableSettings,
     #[error(transparent)]
@@ -99,53 +81,39 @@ pub enum StoreError {
     #[error("meeting {0} is {1} and cannot be deleted")]
     MeetingBusy(Uuid, MeetingStateKind),
     /// [`Store::save_stopped_recording`] on a meeting no longer
-    /// `recording`: nothing was written. Rust only.
+    /// `recording`: nothing was written.
     #[error("meeting {0} is {1}, not recording")]
     NotRecording(Uuid, MeetingStateKind),
-    /// [`Store::insert_meeting_with_asset`] on a meeting id that already
-    /// has a row: nothing was written. Rust only.
+    /// [`Store::insert_meeting_with_asset`] on an id that already has a
+    /// row: nothing was written.
     #[error("meeting {0} already exists")]
     MeetingExists(Uuid),
-    /// The phone intake's admission of a recording whose receipt is another
-    /// upload's, raised at the intake's own read and by
-    /// `save_admission_durably`: it belongs to another device (the admitting
-    /// phone was revoked and another one announced the same recording id,
-    /// or took the receipt over), or it holds other bytes (the phone
-    /// announced another file under the id). Swift:
-    /// `MeetingStoreError.receiptOfAnotherUpload`.
+    /// The phone intake's admission of a recording whose receipt belongs to
+    /// another device or holds other bytes.
     #[error("the receipt of recording {0} belongs to another upload")]
     ReceiptOfAnotherUpload(Uuid),
     /// [`Store::open_without_migrating`] only: the database lacks a
-    /// migration this build would apply (the payload, the first of them),
-    /// so an older app still runs on it, or the app is still migrating it.
-    /// Rust only.
+    /// migration this build would apply (the first of them).
     #[error("the database lacks migration {0}, which this version would apply")]
     PendingMigration(String),
-    /// GRDB's check before a migration commits: its rows no longer satisfy
-    /// the foreign keys, so it was rolled back and the database is as it
-    /// was. `count` is every violating row, `table` the one the first of
-    /// them is in.
+    /// A migration left foreign key violations and was rolled back. `count`
+    /// is every violating row, `table` the first one's.
     #[error("{count} foreign key violations after migrating, the first in {table}")]
     ForeignKeyViolations { table: String, count: i64 },
-    /// `PRAGMA journal_mode = WAL` left the file in another mode. SQLite
-    /// does that when the VFS has no shared memory, which is what a
-    /// network volume gets (SQLite's `unix-none`); the file stays on its
-    /// rollback journal, and the store refuses it rather than run two
-    /// processes on one. The mode the pragma answered with is the payload.
+    /// `PRAGMA journal_mode = WAL` left the file in another mode, as on a
+    /// network volume without shared memory; the store refuses it rather
+    /// than run two processes on a rollback journal.
     #[error("the database is in journal mode {0}, not wal")]
     JournalModeNotWal(String),
-    /// [`Store::with_own_reader`] while the handle an earlier call returned
-    /// is still alive: a store opens at most [`READERS`] readers. Rust
-    /// only.
+    /// [`Store::with_own_reader`] while an earlier handle is still alive.
     #[error("the host's reader is already open")]
     OwnReaderOpen,
 }
 
 impl StoreError {
     /// Another connection held the lock past the busy timeout
-    /// (`SQLITE_BUSY`, its WAL `SQLITE_BUSY_SNAPSHOT` form, or
-    /// `SQLITE_LOCKED` from a shared-cache table lock): nothing is wrong
-    /// with the call, and a caller that can wait should retry it.
+    /// (`SQLITE_BUSY`, `SQLITE_BUSY_SNAPSHOT` or `SQLITE_LOCKED`): a caller
+    /// that can wait should retry.
     #[must_use]
     pub fn is_busy(&self) -> bool {
         matches!(
@@ -154,9 +122,8 @@ impl StoreError {
         )
     }
 
-    /// SQLite's result code, for an error SQLite raised: a word such as
-    /// `NotADatabase` or `CannotOpen` that names no path and no value, so
-    /// a log line may carry it. Rust only.
+    /// SQLite's result code (`NotADatabase`, `CannotOpen`), which names no
+    /// path and no value, so a log line may carry it.
     #[must_use]
     pub fn sqlite_code(&self) -> Option<ErrorCode> {
         match self {
@@ -169,69 +136,44 @@ impl StoreError {
 pub type Result<T> = std::result::Result<T, StoreError>;
 
 /// How long a connection waits for another process's lock before giving
-/// up. Swift: `configuration.busyMode = .timeout(5)` in
-/// `MeetingStore.onDisk`; GRDB's own default fails at once.
+/// up.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The most reader connections a store opens: the shared reader, which
-/// [`Store::read`] uses on every handle but one, and the host's own
-/// ([`Store::with_own_reader`]). An upper bound: the CLI opens only the
-/// first, and an in-memory store none.
+/// The most reader connections a store opens: the shared reader and the
+/// host's own ([`Store::with_own_reader`]).
 pub const READERS: usize = 2;
 
-/// The shared reader's index in [`Connections::readers`].
 const SHARED_READER: usize = 0;
 
-/// The host's reader's index in [`Connections::readers`].
 const OWN_READER: usize = 1;
 
 /// The store over the database: one writer connection and up to
-/// [`READERS`] reader connections, as the Swift app's `DatabasePool` has
-/// one writer and a set of readers.
+/// [`READERS`] reader connections.
 ///
-/// - **The writer** runs the migrations at open and every
-///   [`Store::write`], [`Store::write_durably`] and
-///   [`Store::checkpoint_durably`]; SQLite serialises writes anyway. A
-///   write that waits out the busy timeout holds the writer, so the next
-///   write waits behind it.
-/// - **A reader** runs [`Store::read`] and every method built on it, and
-///   is `query_only`, so a write through it fails loudly. It keeps no
-///   transaction open between calls, and a read never falls back to the
-///   writer: in WAL mode it reads its snapshot while another connection
-///   writes, so a read never waits for a write. Each reader is one mutex,
-///   held only for its closure. Nothing is taken under it, except by the
-///   checkpoint, which takes both readers after the writer. The handle
-///   [`Store::open`] returns reads on the shared reader (the detection
-///   poll, the pipeline, the handover, the delivery, the CLI); the host's
-///   handle ([`Store::with_own_reader`]) reads on a connection of its own,
-///   so its reads never queue behind theirs.
-/// - **The checkpoint** takes the writer, then the shared reader, then
-///   the host's: a read in flight ends first, and no new one starts until
-///   it returns. Under another process's lock it keeps both readers
-///   through `wal_checkpoint`'s busy wait, up to the five-second busy
-///   timeout. That is accepted: its only callers are the launch and the
-///   recorder's fallbacks when a recording's folder record cannot be
-///   written or forgotten (a stop, a delete), none of them on a path the
-///   UI waits on.
+/// - **The writer** runs the migrations and every [`Store::write`],
+///   [`Store::write_durably`] and [`Store::checkpoint_durably`].
+/// - **A reader** runs [`Store::read`] and is `query_only`. In WAL mode it
+///   reads its snapshot while another connection writes, so a read never
+///   waits for a write. Each reader is one mutex, held only for its
+///   closure, and nothing is taken under it except by the checkpoint. The
+///   handle [`Store::open`] returns reads on the shared reader; the host's
+///   ([`Store::with_own_reader`]) on its own.
+/// - **The checkpoint** takes the writer, then the shared reader, then the
+///   host's. Under another process's lock it holds both readers up to the
+///   busy timeout; its callers are the launch and the recorder's
+///   fallbacks, none on a path the UI waits on.
 /// - **In memory**, one connection serves every role, since separate
-///   connections to `:memory:` do not share a database. Every handle locks
-///   it, and [`Store::read`] turns `query_only` on for its closure only.
+///   connections to `:memory:` do not share a database.
 ///
-/// Every method blocks on its connection's lock and on SQLite; async code
-/// calls through `Store::reading` and `Store::writing` (feature `tokio`),
-/// which run the call on tokio's blocking pool. The mutexes are `std`'s
-/// and not reentrant: a `Store` method called from inside a
-/// [`Store::read`] or [`Store::write`] closure waits on its own lock, and
-/// a debug build asserts instead. Query the connection the closure was
-/// given: inside the crate through the submodules' free functions,
-/// outside it with the [`convert`] codecs.
+/// Every method blocks; async code calls through `Store::reading` and
+/// `Store::writing` (feature `tokio`). The mutexes are not reentrant: a
+/// `Store` method called inside a [`Store::read`] or [`Store::write`]
+/// closure deadlocks (a debug build asserts). Query the closure's
+/// connection instead, with the [`convert`] codecs.
 ///
-/// The five-second busy timeout is a margin, not a guarantee. Measured
-/// against the Swift app rebuilding its FTS index over 600,000 segments,
-/// Rust writers waited up to 2.5 s of it; a Swift transaction longer than
-/// the timeout surfaces here as `database is locked`, which
-/// [`StoreError::is_busy`] recognises and the host (WP6) treats as
-/// retryable.
+/// The five-second busy timeout is a margin, not a guarantee: a longer
+/// transaction in another process surfaces as `database is locked`, which
+/// [`StoreError::is_busy`] recognises as retryable.
 pub struct Store {
     connections: Arc<Connections>,
     /// The index in [`Connections::readers`] this handle reads on.
@@ -242,25 +184,22 @@ pub struct Store {
 /// handle mean nothing committed between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeMark {
-    /// The writer's commits, from its commit hook.
     commits: u64,
     /// `PRAGMA data_version` on the handle's reader; 0 in memory.
     data_version: i64,
 }
 
-/// What every handle on one database shares.
 struct Connections {
     writer: Mutex<Connection>,
-    /// The database file, which a reader opens; `None` in memory, where the
-    /// writer's connection serves every role.
+    /// The database file; `None` in memory, where the writer serves every
+    /// role.
     path: Option<PathBuf>,
     /// The shared reader, then the host's; `None` until opened, and always
     /// in memory.
     readers: [Mutex<Option<Connection>>; READERS],
     /// Whether the handle [`Store::with_own_reader`] returned is alive.
     own_reader_open: AtomicBool,
-    /// The writer's commits since the store opened, which its commit hook
-    /// counts ([`Store::change_mark`]).
+    /// The writer's commits since the store opened ([`Store::change_mark`]).
     commits: Arc<AtomicU64>,
     /// [`Store::probe_commits`].
     #[cfg(any(test, feature = "testing"))]
@@ -292,27 +231,19 @@ impl Drop for Store {
 }
 
 impl Store {
-    /// Opens (creating) the database at `path`, applies every pending
-    /// migration and backfills the admission ledger from the admitted
-    /// receipts (`Store::backfill_handover_admissions`). The parent
-    /// directory is created. The connection is set up like the Swift app's
-    /// writer: WAL mode, `synchronous = NORMAL`, foreign
-    /// keys on and a five-second busy timeout. With `NORMAL` in WAL mode a
-    /// commit waits for an fsync only when it runs a checkpoint or is the
-    /// first commit after one, so a power loss or OS crash can roll back
-    /// commits that no checkpoint has copied into the database yet; an app
-    /// crash loses nothing. A commit that must be on the disk when it
-    /// returns goes through [`Store::write_durably`]. `checkpoint_fullfsync`
-    /// is on, as in Apple's system SQLite that GRDB uses (the bundled SQLite
-    /// here defaults it off), so a checkpoint on Apple platforms flushes the
-    /// drive's cache before the WAL it copied can be overwritten, and a
-    /// power loss after it cannot undo a durable commit.
-    /// Swift: `MeetingStore.onDisk`, whose `DatabasePool` runs GRDB's
-    /// `Database.setUpWALMode`.
+    /// Opens (creating) the database at `path` and its parent directory,
+    /// applies every pending migration and backfills the admission ledger.
+    /// WAL mode, `synchronous = NORMAL`, foreign keys on, a five-second busy
+    /// timeout. With `NORMAL` a power loss can roll back commits no
+    /// checkpoint has copied yet (an app crash loses nothing); a commit that
+    /// must be on disk goes through [`Store::write_durably`].
+    /// `checkpoint_fullfsync` is on (the bundled SQLite defaults it off), so
+    /// a checkpoint on Apple platforms flushes the drive's cache before the
+    /// WAL it copied can be overwritten.
     ///
-    /// Another process (the Swift app, a second copy of this one) may hold
-    /// the file at the same time: every write here begins immediate, so one
-    /// writer waits for the other on the busy timeout instead of failing.
+    /// Another process may hold the file at the same time: every write
+    /// begins immediate, so one writer waits on the busy timeout instead of
+    /// failing.
     pub fn open(path: impl AsRef<Path>) -> Result<Store> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -321,15 +252,11 @@ impl Store {
         Self::new(set_up(Connection::open(path)?)?, Some(path))
     }
 
-    /// Opens the existing database at `path` as [`Store::open`] does, but
-    /// applies no migration: for a process that runs beside the app that
-    /// holds the database (`steno export` while Steno runs), which must
-    /// not change the schema under it; the admission backfill of
-    /// [`Store::open`] does not run either. Fails when the file is missing,
-    /// and when the database lacks a migration this build would apply
-    /// ([`StoreError::PendingMigration`]); one it does not know is ignored,
-    /// as [`Store::open`] ignores it. Rust only: the Swift CLI always
-    /// migrated.
+    /// Opens the existing database as [`Store::open`] does, but applies no
+    /// migration and no backfill: for a process beside the running app
+    /// (`steno export`) that must not change the schema under it. Fails
+    /// when the file is missing or lacks a migration this build would apply
+    /// ([`StoreError::PendingMigration`]); unknown ones are ignored.
     pub fn open_without_migrating(path: impl AsRef<Path>) -> Result<Store> {
         use rusqlite::OpenFlags;
         let path = path.as_ref();
@@ -340,15 +267,13 @@ impl Store {
         Self::over(connection, Some(path))
     }
 
-    /// A private in-memory database; tests use this. Its one connection is
-    /// the writer and every reader.
+    /// A private in-memory database, for tests.
     pub fn in_memory() -> Result<Store> {
         Self::new(Connection::open_in_memory()?, None)
     }
 
-    /// The store over `connection`, migrated, with the admission ledger
-    /// backfilled ([`Store::backfill_handover_admissions`]); `path` is the
-    /// file's, `None` in memory.
+    /// The store over `connection`, migrated and backfilled; `path` is
+    /// `None` in memory.
     fn new(mut connection: Connection, path: Option<&Path>) -> Result<Store> {
         connection.pragma_update(None, "foreign_keys", true)?;
         migrator::migrate(&mut connection)?;
@@ -357,15 +282,14 @@ impl Store {
         Ok(store)
     }
 
-    /// The store over a writer that is set up and at the current schema,
-    /// with the shared reader opened on `path` and the writer's commit hook
-    /// counting its commits from now on.
+    /// The store over a migrated writer, with the shared reader opened on
+    /// `path` and the commit hook counting from now on.
     fn over(writer: Connection, path: Option<&Path>) -> Result<Store> {
         let shared = path.map(open_reader).transpose()?;
         let commits = Arc::new(AtomicU64::new(0));
         let counted = commits.clone();
-        // Inside the writer's commit: it takes no lock and calls nothing,
-        // and `false` lets the commit go on.
+        // Inside the writer's commit: takes no lock, calls nothing; `false`
+        // lets the commit go on.
         writer.commit_hook(Some(move || {
             counted.fetch_add(1, Ordering::AcqRel);
             false
@@ -384,15 +308,11 @@ impl Store {
         })
     }
 
-    /// A second handle on the same database, whose reads use a reader
-    /// connection of its own; its writes and its checkpoint are the same
-    /// writer's. The host holds it with its view models, so only the holder
-    /// of the host's lock reads on it, and those reads never wait for a
-    /// read elsewhere in the process. One at a time: while its handle is
-    /// alive, a second call fails with [`StoreError::OwnReaderOpen`]; once
-    /// it is dropped, its connection closes and a new host can open
-    /// another. In memory the handle reads on the one connection. Rust
-    /// only: the Swift host read through the pool's readers.
+    /// A second handle whose reads use a reader connection of its own; its
+    /// writes and checkpoint are the same writer's. The host holds it, so
+    /// its reads never wait for a read elsewhere in the process. One at a
+    /// time: while it is alive a second call fails with
+    /// [`StoreError::OwnReaderOpen`].
     ///
     /// ```
     /// # fn main() -> steno_core::store::Result<()> {
@@ -422,25 +342,17 @@ impl Store {
         Ok(own)
     }
 
-    /// Where the database stands, for a reload that runs only when it
-    /// moved: two marks read on this handle compare unequal once anything
-    /// committed between them. It joins two counts. The writer's commit
-    /// hook counts this process's commits, which is all an in-memory store
-    /// has: its one connection's `data_version` does not move for its own
-    /// commits. `PRAGMA data_version` on this handle's reader moves when
-    /// any other connection commits, the other processes' included (the
-    /// Swift app, the CLI), and the writer's own too.
+    /// Where the database stands: two marks read on this handle differ once
+    /// anything committed between them. It joins the writer's commit count
+    /// (all an in-memory store has) and `PRAGMA data_version` on this
+    /// handle's reader, which moves for every other connection's commits,
+    /// other processes' included.
     ///
-    /// The hook runs just before a commit is visible, so a mark read in
-    /// between can count a commit whose rows a read still misses; the
-    /// reader's `data_version` moves only once it is visible, so the next
-    /// mark differs again. In memory, a read waits for the commit on the
-    /// one connection. A commit that changed nothing, or failed after the
-    /// hook, moves it too.
-    ///
-    /// Takes this handle's reader for one pragma, never the writer. Rust
-    /// only: the Swift app followed the database through GRDB's
-    /// observation.
+    /// The hook runs just before a commit is visible, so a mark can count a
+    /// commit a read still misses; `data_version` moves once it is visible,
+    /// so the next mark differs again. A commit that changed nothing, or
+    /// failed after the hook, moves it too. Takes this handle's reader for
+    /// one pragma, never the writer.
     ///
     /// ```
     /// # fn main() -> steno_core::store::Result<()> {
@@ -469,28 +381,21 @@ impl Store {
         })
     }
 
-    /// The writer. A panic while a caller held it has already rolled its
-    /// transaction back, so a poisoned lock is reused, not an error.
+    /// The writer. A panic while a caller held it already rolled its
+    /// transaction back, so a poisoned lock is reused.
     fn writer(&self) -> MutexGuard<'_, Connection> {
         lock(&self.connections.writer)
     }
 
-    /// Runs `body` inside one deferred transaction, so every query it makes
-    /// sees the same snapshot of the file (an export's seven selects read
-    /// one meeting, not a meeting another process is rewriting between
-    /// them), as GRDB's `reader.read` did. Nothing is written; the
-    /// transaction is rolled back when `body` returns. It runs on this
-    /// handle's reader, which is `query_only`, so a write in `body` fails
-    /// with `SQLITE_READONLY`; in memory it runs on the one connection
-    /// with `query_only` on for the closure. `body` must not begin a
-    /// transaction of its own: SQLite does not nest them, so its `BEGIN`
-    /// fails.
+    /// Runs `body` inside one deferred transaction, so every query sees the
+    /// same snapshot, and rolls it back. On this handle's `query_only`
+    /// reader, so a write fails with `SQLITE_READONLY`. `body` must not
+    /// begin a transaction of its own: SQLite does not nest them.
     pub fn read<T>(&self, body: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         self.snapshot(|transaction| body(transaction))
     }
 
-    /// [`Store::read`] for a body that wants the transaction itself, so its
-    /// signature says every query runs inside the one snapshot.
+    /// [`Store::read`] for a body that wants the transaction itself.
     fn snapshot<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let _inside = Inside::enter(&self.connections);
         if self.connections.path.is_none() {
@@ -505,37 +410,24 @@ impl Store {
     }
 
     /// Runs `body` inside one transaction, committed when it returns `Ok`.
-    /// The transaction begins `IMMEDIATE`, as GRDB's `DatabasePool` writer
-    /// does: a deferred one that reads first and writes second cannot be
-    /// upgraded once another connection has written in between (WAL's
-    /// `SQLITE_BUSY_SNAPSHOT`), and the busy handler does not retry that.
-    /// Beginning immediate takes the write lock up front, so the second
-    /// writer waits on the busy timeout instead of failing with
-    /// `database is locked`.
+    /// It begins `IMMEDIATE`: a deferred one that reads then writes cannot
+    /// be upgraded once another connection wrote in between
+    /// (`SQLITE_BUSY_SNAPSHOT`, which the busy handler does not retry);
+    /// immediate makes the second writer wait on the busy timeout instead.
     pub fn write<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let _inside = Inside::enter(&self.connections);
         self.commit_on(&mut self.writer(), body)
     }
 
     /// [`Store::write`] whose commit is on the disk when it returns, for
-    /// the commits an answer to another device depends on: the phone
-    /// intake's admission, before `complete` tells the phone to delete its
-    /// copy; the `failed` receipt after a failed admission commit, which
-    /// writes over that commit's frames before the intake removes its copy;
-    /// a pairing, whose token the phone keeps; and a revoke. Also the
-    /// merge's [`Store::replace_transcript`], before the pipeline removes
-    /// the sample clips the earlier speaker rows named.
-    /// The transaction runs under `synchronous = FULL` with `fullfsync`
-    /// on, so its commit syncs the WAL (with `F_FULLFSYNC` on Apple
-    /// platforms, which also flushes the drive's cache) instead of leaving
-    /// that to the next checkpoint; the sync covers every earlier commit
-    /// in the WAL too. That costs one WAL fsync per commit, plus a flush
-    /// of the drive's cache on Apple platforms, all while the lock is held,
-    /// so other writes wait for it. SQLite refuses to change `synchronous`
-    /// inside a transaction, so the levels are set before `BEGIN` and set
-    /// back once the transaction has ended (committed, rolled back or
-    /// unwound by a panic), all under one hold of the lock: no other write
-    /// runs under them. Swift: `MeetingStore.writeDurably`.
+    /// commits another device or a file removal depends on: the phone
+    /// intake's admission and its `failed` receipt, a pairing, a revoke,
+    /// and [`Store::replace_transcript`] before the old sample clips go.
+    /// Runs under `synchronous = FULL` with `fullfsync` (`F_FULLFSYNC` on
+    /// Apple platforms), so the commit syncs the WAL and every earlier
+    /// commit in it. SQLite refuses to change `synchronous` inside a
+    /// transaction, so the levels are set before `BEGIN` and reset once it
+    /// ended (even by a panic), all under one hold of the lock.
     pub fn write_durably<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let _inside = Inside::enter(&self.connections);
         let mut full = FullSync::hold(self.writer())?;
@@ -544,29 +436,19 @@ impl Store {
 
     /// Copies every commit in the WAL into the database file, syncs it, and
     /// starts the WAL over, so a power loss afterwards brings back what the
-    /// store reads now. `HandoverService::checkpoint_store` runs it at launch,
-    /// before the handover listener starts, and says why.
-    /// `PRAGMA wal_checkpoint(TRUNCATE)` under `synchronous = FULL` with
-    /// `fullfsync` on copies the frames, syncs the database file, waits until
-    /// no reader is left in the WAL and truncates the WAL file, keeping a new
-    /// salt for its next header. The truncation is not synced: after a power
-    /// loss the file can come back with its old header and frames, and recovery
-    /// replays every frame under the header's salt, which would put older pages
-    /// back over the checkpointed ones. So one durable write that changes a
-    /// page follows, under the same hold of the lock: a private table created
-    /// and dropped, which leaves the schema and the applied migrations as they
-    /// were. Its commit writes the WAL header with the new salt and syncs it
-    /// with its frames, so recovery replays only those frames: every older one
-    /// carries the old salt. A failed sync is an error, and so is a checkpoint
-    /// that another connection (a writer, or a reader still in the WAL) blocks
-    /// when the busy timeout runs out: SQLite's `SQLITE_BUSY`, which GRDB
-    /// throws too and [`StoreError::is_busy`] recognises, since the commits it
-    /// could not copy are not known to be on the disk. This process's own
-    /// readers cannot block it: it takes the writer, then the shared
-    /// reader, then the host's, so a read in flight ends first and no new
-    /// one starts until it returns. An in-memory store has no WAL and no
-    /// reader of its own: it takes its one lock once and returns. Swift:
-    /// `MeetingStore.checkpointDurably`.
+    /// store reads now. Runs at launch before the handover listener starts.
+    ///
+    /// `wal_checkpoint(TRUNCATE)` under `synchronous = FULL` with
+    /// `fullfsync` truncates the WAL, but the truncation is not synced:
+    /// after a power loss the old header and frames can come back, and
+    /// recovery would replay older pages over the checkpointed ones. So one
+    /// durable write follows under the same lock (a private table created
+    /// and dropped), whose commit syncs a WAL header with the new salt, so
+    /// recovery replays only its frames. A failed sync is an error, and so
+    /// is a checkpoint another connection blocks past the busy timeout
+    /// (`SQLITE_BUSY`, [`StoreError::is_busy`]). This process's readers
+    /// cannot block it: it takes the writer, then both readers. In memory
+    /// it takes its one lock and returns.
     pub fn checkpoint_durably(&self) -> Result<()> {
         let _inside = Inside::enter(&self.connections);
         let mut full = FullSync::hold(self.writer())?;
@@ -586,8 +468,8 @@ impl Store {
         if wal_frames < 0 {
             return Ok(());
         }
-        // A commit that changes no page writes no frame, and so no WAL
-        // header; creating a table always changes one.
+        // A commit that changes no page writes no WAL header; creating a
+        // table always changes one.
         self.commit_on(&mut full.connection, |transaction| {
             transaction
                 .execute_batch("CREATE TABLE stenoWalRestart(x); DROP TABLE stenoWalRestart;")?;
@@ -595,9 +477,8 @@ impl Store {
         })
     }
 
-    /// The `IMMEDIATE` transaction of [`Store::write`] on `connection`,
-    /// committed when `body` returns `Ok`. `self` carries the commit probe,
-    /// which only test builds have.
+    /// The `IMMEDIATE` transaction of [`Store::write`] on `connection`.
+    /// `self` carries the commit probe, which only test builds have.
     #[cfg_attr(not(any(test, feature = "testing")), allow(clippy::unused_self))]
     fn commit_on<T>(
         &self,
@@ -614,12 +495,9 @@ impl Store {
         Ok(value)
     }
 
-    /// Runs `probe` inside every write transaction from now on, right before it
-    /// commits, so a test can read what the commit will write and the
-    /// connection's pragmas then. One probe per store; a second call is
-    /// ignored. `probe` must not call the store: the lock is held. Swift: the
-    /// tests' `CommitLog`, which folds the writer's statements into its
-    /// commits.
+    /// Runs `probe` inside every write transaction from now on, right
+    /// before it commits. One probe per store; a second call is ignored.
+    /// `probe` must not call the store: the lock is held.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn probe_commits(&self, probe: impl Fn(&Connection) + Send + Sync + 'static) {
@@ -627,9 +505,7 @@ impl Store {
     }
 
     /// The writer's connection, outside any transaction, for a test that
-    /// tunes it (its busy timeout, `query_only` so every write fails) or
-    /// reads its pragmas: [`Store::read`] runs on a reader. `body` must not
-    /// call the store: the writer is held.
+    /// tunes it or reads its pragmas. `body` must not call the store.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn on_writer<T>(&self, body: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
@@ -670,8 +546,7 @@ impl Store {
     }
 }
 
-/// The file connection set up as [`Store::open`] says: the busy timeout,
-/// WAL mode, `synchronous = NORMAL` and `checkpoint_fullfsync` on.
+/// The file connection set up as [`Store::open`] says.
 fn set_up(connection: Connection) -> Result<Connection> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     enable_wal(&connection)?;
@@ -681,7 +556,7 @@ fn set_up(connection: Connection) -> Result<Connection> {
 }
 
 /// A reader on the file at `path`: set up as the writer is, then
-/// `query_only`, so a write through it fails.
+/// `query_only`.
 fn open_reader(path: &Path) -> Result<Connection> {
     let connection = set_up(Connection::open(path)?)?;
     connection.pragma_update(None, "query_only", true)?;
@@ -712,11 +587,9 @@ thread_local! {
     static INSIDE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Marks the thread as inside a store call on one database for as long as
-/// it lives, so a `Store` call on that database from inside a closure, on
-/// any handle, asserts in a debug build instead of waiting on a lock its
-/// own thread holds. A call on another database's store (a second
-/// process, in a test) is no nesting.
+/// Marks the thread as inside a store call on one database while it lives,
+/// so a nested `Store` call on that database, on any handle, asserts in a
+/// debug build instead of deadlocking. Another database is no nesting.
 struct Inside(usize);
 
 impl Inside {
@@ -743,9 +616,8 @@ impl Drop for Inside {
     }
 }
 
-/// The in-memory connection under `query_only` for as long as it is held,
-/// so [`Store::read`] there fails a write as a reader does; dropping it
-/// turns `query_only` off again, once the read's transaction has ended.
+/// The in-memory connection under `query_only` while held, so
+/// [`Store::read`] there fails a write as a reader does.
 struct QueryOnly<'a> {
     connection: MutexGuard<'a, Connection>,
 }
@@ -764,10 +636,10 @@ impl Drop for QueryOnly<'_> {
     }
 }
 
-/// The connection under `synchronous = FULL` and `fullfsync = ON` for as
-/// long as it is held; dropping it sets back the levels it found. A
-/// transaction borrows it, so the transaction has ended (a dropped one
-/// rolls back) before the levels go back, which SQLite requires.
+/// The connection under `synchronous = FULL` and `fullfsync = ON` while
+/// held; dropping it restores the levels it found. A transaction borrows
+/// it, so the transaction has ended before the levels go back, as SQLite
+/// requires.
 struct FullSync<'a> {
     connection: MutexGuard<'a, Connection>,
     synchronous: i64,
@@ -779,7 +651,7 @@ impl<'a> FullSync<'a> {
         let synchronous = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
         let fullfsync = connection.pragma_query_value(None, "fullfsync", |row| row.get(0))?;
         // Built before the first change, so a failing second pragma still
-        // sets the first one back.
+        // resets the first.
         let held = FullSync {
             connection,
             synchronous,
@@ -804,14 +676,10 @@ impl Drop for FullSync<'_> {
     }
 }
 
-/// `PRAGMA journal_mode = WAL`, checked: the pragma answers with the mode
-/// the file ended up in, and anything but `wal` is
-/// [`StoreError::JournalModeNotWal`]. Switching a fresh file's mode
-/// rewrites the header under an exclusive lock, and when two connections
-/// have both read the old header and race for it SQLite hands the loser a
-/// plain `SQLITE_BUSY` without consulting the busy handler. The loser
-/// retries until the winner is done (then the pragma finds WAL set and
-/// does nothing) or the busy timeout is spent.
+/// `PRAGMA journal_mode = WAL`, checked: anything but `wal` is
+/// [`StoreError::JournalModeNotWal`]. Two connections racing to switch a
+/// fresh file get a plain `SQLITE_BUSY` without the busy handler, so the
+/// loser retries until the winner is done or the busy timeout is spent.
 fn enable_wal(connection: &Connection) -> Result<()> {
     let deadline = Instant::now() + BUSY_TIMEOUT;
     loop {
@@ -838,14 +706,13 @@ const SCHEMA_DUMP_QUERIES: &[&str] = &[
     "SELECT 'migration|' || identifier FROM grdb_migrations ORDER BY rowid",
 ];
 
-/// `sql` with `params` through the connection's statement cache: the
-/// per-row inserts of a transaction prepare their statement once.
+/// `sql` with `params` through the statement cache.
 fn execute_cached(connection: &Connection, sql: &str, params: impl Params) -> Result<()> {
     connection.prepare_cached(sql)?.execute(params)?;
     Ok(())
 }
 
-/// Every row of `sql` through `map`: GRDB's `fetchAll`.
+/// Every row of `sql` through `map`.
 fn query_all<T>(
     connection: &Connection,
     sql: &str,
@@ -857,7 +724,7 @@ fn query_all<T>(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// `INSERT INTO table (columns) VALUES (?1, …)`: GRDB's `insert`.
+/// `INSERT INTO table (columns) VALUES (?1, …)`.
 fn insert_sql(table: &str, columns: &str) -> String {
     let placeholders: Vec<String> = (1..=columns.split(',').count())
         .map(|index| format!("?{index}"))
@@ -869,13 +736,8 @@ fn insert_sql(table: &str, columns: &str) -> String {
 }
 
 /// [`insert_sql`] with `ON CONFLICT DO UPDATE` on every column but the
-/// first, the primary key: GRDB's `save`, which replaces the row in place
-/// when it exists (so the FTS update triggers fire) and inserts it otherwise.
-///
-/// `upsert_sql("decision", "id, meetingID, text")` is
-/// `INSERT INTO decision (id, meetingID, text) VALUES (?1, ?2, ?3)
-/// ON CONFLICT(id) DO UPDATE SET meetingID = excluded.meetingID,
-/// text = excluded.text`.
+/// first, the primary key: replaces the row in place when it exists (so
+/// the FTS update triggers fire) and inserts it otherwise.
 fn upsert_sql(table: &str, columns: &str) -> String {
     let mut names = columns.split(',').map(str::trim);
     let key = names.next().expect("the key column comes first");
@@ -897,13 +759,9 @@ mod tests {
     use super::*;
     use crate::testing::WriteLockHold;
 
-    /// What "live" means in the reader tests: well under the busy timeout
-    /// a waiting write runs out. The "P40 check" numbers below are the
-    /// acceptance table's in `.plans/2026-10-12-store-off-the-workers.md`,
-    /// whose services' checks take one second for "live" instead.
+    /// What "live" means in the reader tests: well under the busy timeout.
     const LIVE: Duration = Duration::from_millis(200);
 
-    /// A file store and the host's handle on it.
     fn file_store(directory: &tempfile::TempDir) -> (Arc<Store>, Store, PathBuf) {
         let path = directory.path().join("steno.sqlite");
         let store = Arc::new(Store::open(&path).unwrap());
@@ -911,10 +769,8 @@ mod tests {
         (store, host, path)
     }
 
-    /// A write that waits out another connection's write lock holds the
-    /// writer, and a read on the shared reader and on the host's still
-    /// answers at once, as the detection poll and the host's reload need
-    /// (P40 check 10).
+    /// A write in its busy wait holds the writer, and a read on either
+    /// reader still answers at once.
     #[test]
     fn a_read_does_not_wait_behind_a_write_that_waits_on_another_connection() {
         let directory = tempfile::tempdir().unwrap();
@@ -942,8 +798,7 @@ mod tests {
         writer.join().unwrap().unwrap();
     }
 
-    /// The host's reader is its own: a read held open on the shared reader
-    /// (a long export, say) does not hold up a read on the host's.
+    /// A read held open on the shared reader does not hold up the host's.
     #[test]
     fn the_hosts_reads_do_not_wait_for_a_read_on_the_shared_reader() {
         let directory = tempfile::tempdir().unwrap();
@@ -961,8 +816,8 @@ mod tests {
             }
         });
         read.recv().unwrap();
-        // On a thread of its own, so a read that waits fails the test once
-        // the long read ends instead of waiting for it forever.
+        // On its own thread, so a read that waits fails the test instead of
+        // hanging.
         let (answered, answer) = mpsc::channel();
         let host_read = thread::spawn(move || {
             let started = Instant::now();
@@ -977,10 +832,8 @@ mod tests {
         assert!(took < LIVE, "the host's read took {took:?}");
     }
 
-    /// A write inside `read` fails with `SQLITE_READONLY` on every reader:
-    /// the file store's shared reader and the host's, and the in-memory
-    /// store's one connection, whose `query_only` ends with the closure,
-    /// so its next write commits (P40 check 15).
+    /// A write inside `read` fails with `SQLITE_READONLY` on every reader,
+    /// and the in-memory store's `query_only` ends with the closure.
     #[test]
     fn a_write_through_read_fails_on_both_stores() {
         let directory = tempfile::tempdir().unwrap();
@@ -1018,10 +871,7 @@ mod tests {
         }
     }
 
-    /// A `Store` call from inside a store closure asserts in a debug
-    /// build. On another lock (the host's reader inside a write) it would
-    /// not even wait; on the same one it would wait forever (P40 check
-    /// 15).
+    /// A `Store` call from inside a store closure asserts in a debug build.
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "a Store call inside a Store closure")]
@@ -1031,8 +881,8 @@ mod tests {
         let _ = store.write(|_| host.settings());
     }
 
-    /// A second host reader is refused while the first one's handle
-    /// lives, and opens again once it is dropped.
+    /// A second host reader is refused while the first lives, and opens
+    /// again once it is dropped.
     #[test]
     fn one_host_reader_at_a_time() {
         let directory = tempfile::tempdir().unwrap();
@@ -1046,9 +896,7 @@ mod tests {
     }
 
     /// The durable checkpoint waits for the reads in flight on both
-    /// readers, and no read starts on either until it returns: here a
-    /// commit probe holds the checkpoint's last step (its WAL restart
-    /// write) while a read on each reader is asked for (P40 check 15).
+    /// readers, and no read starts on either until it returns.
     #[test]
     fn the_checkpoint_waits_for_reads_in_flight_and_holds_off_new_ones() {
         let directory = tempfile::tempdir().unwrap();
@@ -1094,8 +942,7 @@ mod tests {
         }
         inside.recv_timeout(Duration::from_secs(5)).unwrap();
 
-        // The checkpoint holds its last step: a read on either reader
-        // waits for it.
+        // The checkpoint holds its last step: a read on either reader waits.
         let (done, reads_done) = mpsc::channel::<&'static str>();
         let new_reads: Vec<_> = readers
             .into_iter()
@@ -1118,11 +965,9 @@ mod tests {
         }
     }
 
-    /// The checkpoint takes the writer before the readers: one that waits
-    /// for the writer, held by a write in another connection's busy wait,
-    /// holds no reader meanwhile, so a read on either reader still
-    /// answers. Taken the other way round, both reads would wait out the
-    /// write's busy timeout. The bound is a second, five times under it.
+    /// The checkpoint takes the writer before the readers, so while it
+    /// waits for a writer in another connection's busy wait, reads still
+    /// answer.
     #[test]
     fn a_checkpoint_waiting_for_the_writer_holds_no_reader() {
         let directory = tempfile::tempdir().unwrap();
@@ -1167,18 +1012,15 @@ mod tests {
         }
     }
 
-    /// The in-memory store's one connection is its writer and every
-    /// reader, and its checkpoint takes that lock once and returns at
-    /// once, as `checkpoint_store` at launch needs in the app tests (P40
-    /// check 15).
+    /// The in-memory store's checkpoint takes its one lock once and
+    /// returns at once.
     #[test]
     fn the_in_memory_checkpoint_takes_its_one_lock_once() {
         let store = Store::in_memory().unwrap();
         let host = store.with_own_reader().unwrap();
         let (done, checkpointed) = mpsc::channel();
         // Both handles move to that thread, so a checkpoint that waits on
-        // its own lock fails the test instead of the handles' drop waiting
-        // with it.
+        // its own lock fails the test instead of hanging the drop.
         thread::spawn(move || {
             for handle in [&store, &host] {
                 done.send(handle.checkpoint_durably()).unwrap();
@@ -1193,9 +1035,8 @@ mod tests {
     }
 
     /// The write that restarts the WAL after a durable checkpoint commits
-    /// under `synchronous = FULL` (2), in the checkpoint's hold of the
-    /// lock, and is its only commit. Swift:
-    /// `aDurableCheckpointRestartsTheWAL`.
+    /// under `synchronous = FULL`, in the checkpoint's hold of the lock,
+    /// and is its only commit.
     #[test]
     fn the_wal_restart_write_commits_under_full() {
         let directory = tempfile::tempdir().unwrap();
@@ -1214,10 +1055,9 @@ mod tests {
         assert_eq!(*levels.lock().unwrap(), [2]);
     }
 
-    /// `unix-none` is SQLite's VFS without shared memory, the one a network
-    /// volume ends up with: the pragma leaves the file on its rollback
-    /// journal and answers `delete`, and the store refuses the file. It
-    /// exists only in SQLite's unix VFS set.
+    /// `unix-none` is SQLite's VFS without shared memory, as on a network
+    /// volume: the file stays on its rollback journal and the store
+    /// refuses it.
     #[cfg(unix)]
     #[test]
     fn a_vfs_without_shared_memory_is_refused() {
@@ -1237,10 +1077,8 @@ mod tests {
         );
     }
 
-    /// P40 check 20, the store's side: a commit on another connection to
-    /// the file (another process: the Swift app, the CLI) moves the host
-    /// handle's change mark, through its reader's `data_version`, which
-    /// this store's commit hook never sees.
+    /// A commit on another connection to the file moves the host handle's
+    /// change mark through its reader's `data_version`.
     #[test]
     fn a_commit_from_another_connection_moves_the_change_mark() {
         let directory = tempfile::tempdir().unwrap();
@@ -1253,11 +1091,8 @@ mod tests {
         assert_ne!(host.change_mark().unwrap(), before);
     }
 
-    /// P40 check 20, the store's side: this process's commit moves the
-    /// mark on every handle, the in-memory store's included, whose one
-    /// connection's `data_version` stays put for its own commits, so only
-    /// the writer's commit hook counts it there. A read moves nothing. The
-    /// marks of two handles are not compared: each reads its own reader.
+    /// This process's commit moves the mark on every handle, in memory
+    /// through the commit hook alone. A read moves nothing.
     #[test]
     fn an_in_process_commit_moves_the_change_mark_and_a_read_does_not() {
         let directory = tempfile::tempdir().unwrap();

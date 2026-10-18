@@ -1,4 +1,4 @@
-//! `DeliveryLedgerTests`: the delivery policy without a filesystem.
+//! The delivery policy without a filesystem.
 
 mod common;
 
@@ -139,9 +139,7 @@ fn spellings_of_one_root_are_the_same_root() {
     );
 }
 
-/// A receipt from a root the file system resolves to this one (a symlink,
-/// another case on a case-insensitive disk) applies; the destination asks
-/// its sink and passes the answer in.
+/// A receipt from a root the file system resolves to this one applies.
 #[test]
 fn a_root_the_file_system_resolves_to_this_one_is_the_same_root() {
     let previous = receipt("/link-to-vault", &[(NOTE, FileOwnership::Owned)]);
@@ -151,9 +149,8 @@ fn a_root_the_file_system_resolves_to_this_one_is_the_same_root() {
     assert!(other.is_first_delivery());
 }
 
-/// Copies beside a note are named by date, numbered from 2 on the same
-/// day, and listed newest first by date and then number, not by name:
-/// `… 2)` comes after `…)` and `… 10)` after `… 9)`.
+/// Copies are named by date, numbered from 2 within a day, and listed
+/// newest first by date and number, not by name.
 #[test]
 fn copies_beside_a_note_are_ordered_by_date_and_number() {
     let copy = |date: &str, number: u32| DeliveryLedger::copy_beside_path(NOTE, date, number);
@@ -226,9 +223,8 @@ fn copies_beside_a_note_are_ordered_by_date_and_number() {
     assert_eq!(listed(&[NOTE.to_owned()]), Vec::<String>::new());
 }
 
-/// Bytes Steno wrote to the note or to a copy beside it are Steno's at the
-/// note: the user who moved a copy over the note took Steno's version.
-/// Another note's copy, a managed page's hash or other bytes are not.
+/// Bytes Steno wrote to the note or a copy beside it are Steno's; other
+/// bytes are not.
 #[test]
 fn bytes_steno_wrote_to_the_note_or_a_copy_beside_it_are_steno_s() {
     let copy = DeliveryLedger::copy_beside_path(NOTE, "2026-10-07", 2);
@@ -261,9 +257,8 @@ fn bytes_steno_wrote_to_the_note_or_a_copy_beside_it_are_steno_s() {
     );
 }
 
-/// A kept note keeps the hash Steno last wrote there, or gets this
-/// render's when no receipt applies. A file the applying receipt does not
-/// list is one Steno never wrote, and gets no entry.
+/// A kept note keeps the hash Steno last wrote, or this render's without a
+/// receipt; a file the receipt does not list gets no entry.
 #[test]
 fn keep_records_the_delivered_hash_or_the_render_s() {
     let json = "Meetings/2026-09-24-sync/meeting.json";

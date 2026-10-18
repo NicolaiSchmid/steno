@@ -1,53 +1,10 @@
-//! The post-meeting pipeline of the Rust port: `process` with the Swift
-//! stage order and semantics, the `progress` events the host shows, the
-//! learned stage rates, the two recording intakes and the retention sweep.
-//! Ported from `Sources/StenoCore/Pipeline/`, `Storage/RecordingIntake.swift`,
-//! `Storage/LocalRecordingIntake.swift` and `Storage/RetentionSweep.swift`.
-//! Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md` (`WP6b`).
+//! The post-meeting pipeline: [`ProcessingPipeline`] runs a meeting's
+//! stages, posts its progress, learns stage rates, and owns the phone and
+//! local recording intakes and the retention sweep. It sits above
+//! `steno-core` and knows the boundaries and the store, never an engine.
+//! Async store calls go through the store's facade, on the blocking pool.
 //!
-//! | Module | What it holds |
-//! |--------|---------------|
-//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue` and `enqueue_saved`, `reprocess` (refused with a [`ReprocessError`]), `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `resume_unfinished` and `redeliver_unfinished` for the launch, the in-flight set ([`InFlight`]) a reload shares, with the [`JobHold`] an update's install takes, `warm_up`, `warm_up_while_recording` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, [`PipelineFailure`] and its [`FailureKind`], a run refused for missing models or by a busy store and [`ModelWaits`] with `resume_waiting` and `resume_waiting_for_store` for them, the in-process turn a job takes while no recording is live ([`LiveRecording`]), `apply_retention`, the stages |
-//! | [`damaged_audio`] | [`DamagedAudio`], what of each meeting's recording the decoder replaced by silence (the parts and their seconds), in `damaged-audio.json` |
-//! | [`export_retries`] | [`ExportRetries`], the launch re-exports in a row per meeting that did not deliver every row, in `export-retries.json` |
-//! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
-//! | [`run`] | One run's progress state with the monotonic clamp |
-//! | [`crash_loop`] | Launch recovery's guard against a crash loop: the runs that ended with the app, counted in the meeting's folder |
-//! | [`reading`] | [`ReadingMarks`], every read of a recording marked in the support directory: a meeting whose read ended with the app is read once more, and quarantined ([`READ_STOPPED`]) the second time in a row until Process again |
-//! | [`live_recording`] | [`LiveRecording`], whether a recording is under way: a job runs no speech engine in the app's process meanwhile |
-//! | [`speech_fallback`] | [`SpeechFallback`], the speech sidecar in place of the engine in the app's process once that engine ended the app, until the user turns it back on |
-//! | [`warm_up_mark`] | [`WarmUpMark`], the recording's warm-up marked in the support directory, so one that ended with the app turns the warm-up off until a job loads the speech engine; the user's end of the fallback holds it off the same way |
-//! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
-//! | [`intake`] | The phone intake ([`RecordingIntake`], which notes its copies' folders and uploads ([`NotedUpload`]) in [`AdmissionFolders`]) and the Mac one ([`LocalRecordingIntake`]) |
-//! | [`lane_merger`] | The lanes into one ordered transcript |
-//! | [`speaker_memory`] | The store-backed cosine `SpeakerMemory` |
-//! | [`retention`] | [`RetentionSweep`] over expired assets |
-//! | [`sample_clips`] | The speakers' sample clips written under each run's own names, named by the merge, and the files of the meeting's speakers that no row names swept after it |
-//! | [`fixtures`] | The synthetic audio fixtures and the WAV writer |
-//! | [`files`] | Durable writes: a file replaced in one step, a recording copied, new folders, a file removed, a JSON file read and written, set aside when corrupt; its Windows module is the one place in the crate allowed `unsafe` |
-//!
-//! The crate sits above `steno-core` and below the services assembly: it
-//! knows the boundaries (`steno_core::protocols`) and the store, never an
-//! engine. The Swift package kept this in `StenoCore`; here it is its own
-//! crate because it needs an async runtime (`tokio`) that the core, which
-//! every crate depends on, pulls in only behind its `tokio` feature, and
-//! because the host crate already set the precedent of one crate per layer
-//! above the core. Every store call of an async step goes through the
-//! store's facade (`Store::reading`, `Store::writing`), so a write that
-//! waits for another process waits on the blocking pool, never on a
-//! runtime worker. The synchronous halves (the enqueues, the claims, the
-//! resumes and the local intake the recorder's stop drives on its own
-//! thread) call the store directly.
-//!
-//! One operation runs per meeting at a time; stage durations feed the
-//! `stageRate` table only when the meeting was alone in flight; every
-//! stage attributes its own errors and `process` marks the meeting failed
-//! in one place, or leaves it `queued` when a model is missing, until an
-//! install, a reload that finds the models, or the launch resumes it
-//! ([`ModelWaits`]), and when another process holds the store past its
-//! busy timeout, until the store's retry resumes it. A pipeline over
-//! core's fakes, as the CLI runs it
-//! without `--engine`:
+//! A pipeline over core's fakes, as the CLI runs it without `--engine`:
 //!
 //! ```no_run
 //! use std::sync::Arc;

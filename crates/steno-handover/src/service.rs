@@ -1,8 +1,6 @@
 //! The computer's side of the handover as the host and the CLI see it: one
 //! object that owns the listener, the pairing session and the receipt
-//! stream. The host renders `begin_pairing().url_string()` as a QR code,
-//! lists `paired_devices()`, calls `revoke`, and watches `states` and
-//! `receipts`. Swift: `HandoverService.swift`.
+//! stream.
 
 use std::sync::Arc;
 
@@ -17,8 +15,8 @@ use crate::identity::HandoverIdentity;
 use crate::pairing::PairingPayload;
 use crate::server::{HandoverServer, ServerError, ServerMetrics};
 
-/// Where the listener stands. Named `ListenerState` because core's
-/// `HandoverState` is the per-recording receipt state.
+/// Where the listener stands; core's `HandoverState` is the per-recording
+/// receipt state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListenerState {
     Stopped,
@@ -26,15 +24,14 @@ pub enum ListenerState {
     Failed(String),
 }
 
-/// [`HandoverService::checkpoint_store`] failed: the store's commits are
-/// not known to be on the disk. Swift: `StoreNotSynced`.
+/// [`HandoverService::checkpoint_store`] failed: the store's commits are not
+/// known to be on the disk.
 #[derive(Debug, thiserror::Error)]
 #[error("the database could not be synced to the disk: {0}")]
 pub struct StoreNotSynced(pub StoreError);
 
-/// The computer's side of the handover: one per host, created with
-/// [`HandoverService::new`], started and stopped with the app. The fields
-/// are what the host and the tests read; the listener itself is private.
+/// The computer's side of the handover: one per host, started and stopped
+/// with the app.
 pub struct HandoverService {
     pub configuration: HandoverConfiguration,
     pub identity: Arc<HandoverIdentity>,
@@ -55,17 +52,12 @@ impl std::fmt::Debug for HandoverService {
 }
 
 impl HandoverService {
-    /// The launch checkpoint, which the app and `steno dev handover serve`
-    /// run before they read the identity and build the service:
-    /// [`Store::checkpoint_durably`], which copies every commit into the
-    /// synced database file and restarts the WAL. The intake answers a
-    /// phone's retry `complete` from a stored receipt with no write of its
-    /// own, and after a crash recovery can read back an admission whose
-    /// WAL sync failed (Linux keeps a page whose fsync failed in its cache,
-    /// marked clean). The checkpoint puts that admission on the disk, and
-    /// the restart keeps a power loss from replaying older WAL frames over
-    /// it, before any phone is answered. On an error the caller builds no
-    /// listener. Swift: `HandoverService.checkpointStore(_:)`.
+    /// The launch checkpoint, run before the identity is read and the service
+    /// built: [`Store::checkpoint_durably`] copies every commit into the synced
+    /// database file and restarts the WAL. A retried `complete` is answered
+    /// from a stored receipt with no write of its own, so an admission whose
+    /// WAL sync failed must reach the disk before any phone is answered. On an
+    /// error the caller builds no listener.
     pub fn checkpoint_store(store: &Store) -> Result<(), StoreNotSynced> {
         store.checkpoint_durably().map_err(StoreNotSynced)
     }
@@ -159,15 +151,14 @@ impl HandoverService {
 
     // Pairing and devices
 
-    /// Opens a pairing window and returns what the QR code shows
-    /// (`url_string`). Replaces any open window; the secret is single use
-    /// and expires after `configuration.pairing_window`.
+    /// Opens a pairing window, replacing any open one, and returns what the QR
+    /// code shows. The secret is single use and expires after
+    /// `configuration.pairing_window`.
     pub fn begin_pairing(&self) -> PairingPayload {
         self.engine.begin_pairing()
     }
 
-    /// Closes the open pairing window, if any: the QR code on screen pairs
-    /// nothing from now on.
+    /// Closes the open pairing window, if any.
     pub fn cancel_pairing(&self) {
         self.engine.cancel_pairing();
     }
@@ -177,8 +168,8 @@ impl HandoverService {
         self.engine.with_store(Store::paired_devices).await
     }
 
-    /// Forgets the phone: its next request is answered 401, which the phone
-    /// shows as unpaired.
+    /// Forgets the phone: its next request is answered 401, and it shows as
+    /// unpaired.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         self.engine.revoke(device_id).await
     }
@@ -197,8 +188,7 @@ impl HandoverService {
     }
 
     /// Every handover receipt touched since start, oldest first, updated as
-    /// chunks arrive and a recording completes. The UI reads it directly;
-    /// `received_bytes ≈ received_chunks.len() * chunk_size`.
+    /// chunks arrive and a recording completes.
     #[must_use]
     pub fn receipts(&self) -> watch::Receiver<Vec<HandoverReceipt>> {
         self.receipt_updates.subscribe()
@@ -206,8 +196,8 @@ impl HandoverService {
 
     // Lifecycle
 
-    /// Binds the listener (and advertises when configured). Idempotent.
-    /// Sweeps orphaned inbox files first.
+    /// Sweeps orphaned inbox files, then binds the listener (and advertises
+    /// when configured). Idempotent.
     pub async fn start(&self) -> Result<(), ServerError> {
         let mut server = self.server.lock().await;
         if server.is_some() {
@@ -237,10 +227,9 @@ impl HandoverService {
         }
     }
 
-    /// Stops the listener ([`HandoverServer::stop`]) and reports
-    /// [`ListenerState::Stopped`]. Idempotent. Holds the lock across the
-    /// stop, so a start called meanwhile binds only once this listener has
-    /// let its port go ([`HandoverServer::stop`]).
+    /// Stops the listener and reports [`ListenerState::Stopped`]. Idempotent.
+    /// Holds the lock across the stop, so a concurrent start binds only once
+    /// the port is free.
     pub async fn stop(&self) {
         let mut guard = self.server.lock().await;
         if let Some(server) = guard.take() {

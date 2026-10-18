@@ -13,16 +13,13 @@ pub enum SpeechError {
     #[error("CoreML: {0}")]
     CoreMl(String),
 
-    /// CoreML raised an Objective-C exception, which the `coreml` module
-    /// caught at the boundary (`coreml::contained`): its `name` and
-    /// `reason`, empty when it had none (and then left out of the text).
-    /// The engine drops its models after one, so the next call loads them
-    /// again.
+    /// CoreML raised an Objective-C exception, caught by `coreml::contained`:
+    /// its `name` and `reason` (empty when it had none). The engine drops its
+    /// models after one.
     #[error("CoreML raised {name}{}", reason_suffix(.reason))]
     Exception { name: String, reason: String },
 
-    /// An output, or an input built for a model, had a shape the port
-    /// does not expect.
+    /// An output, or an input built for a model, had an unexpected shape.
     #[error("unexpected shape for {name}: {shape:?}")]
     Shape {
         name: &'static str,
@@ -58,7 +55,7 @@ pub enum SpeechError {
 
 impl SpeechError {
     /// Whether this is, or carries through the shared pipeline, an
-    /// Objective-C exception CoreML raised ([`SpeechError::Exception`]).
+    /// Objective-C exception ([`SpeechError::Exception`]).
     #[must_use]
     pub fn is_exception(&self) -> bool {
         match self {
@@ -80,8 +77,8 @@ fn reason_suffix(reason: &str) -> String {
     }
 }
 
-/// A model call's failure inside the shared pipeline, which carries it as
-/// a backend error and hands it back unchanged.
+/// A model call's failure inside the shared pipeline, carried as a backend
+/// error and handed back unchanged.
 impl From<SpeechError> for steno_speech::SpeechError {
     fn from(error: SpeechError) -> Self {
         match error {
@@ -113,9 +110,8 @@ mod tests {
         ));
     }
 
-    /// The engine tells an exception from any other failure also once the
-    /// shared pipeline has carried it back, and the text a meeting fails
-    /// with names the exception and its reason.
+    /// An exception stays recognisable after the shared pipeline carries it
+    /// back, and the error text names it and its reason.
     #[test]
     fn an_exception_is_known_bare_and_through_the_pipeline() {
         let exception = || SpeechError::Exception {

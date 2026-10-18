@@ -1,11 +1,9 @@
-//! Shared by the model-gated integration tests: the environment gate and
-//! the PCM-16 WAV reader. The tests score with spike F's scorer,
-//! [`steno_speech::wer`].
+//! Shared by the model-gated integration tests: the environment gate and the
+//! PCM-16 WAV reader.
 
 // `dead_code`: the `transcribe` example includes this module for `read_wav`
-// alone. The cast allows repeat the crate's because a test target does not
-// inherit `lib.rs` attributes and `[lints] workspace = true` leaves no room
-// for a per-package table.
+// alone. The cast allows repeat the crate's, as a test target does not inherit
+// `lib.rs` attributes.
 #![allow(
     dead_code,
     clippy::cast_precision_loss,
@@ -20,7 +18,7 @@ use std::path::{Path, PathBuf};
 use steno_speech::{ModelAsset, ModelStore};
 
 /// The model store, when both assets are installed in the models directory
-/// `STENO_MODELS_DIR` names; read the way [`ModelStore::from_environment`] reads it.
+/// `STENO_MODELS_DIR` names.
 pub fn installed_store() -> Option<ModelStore> {
     let directory = ModelStore::environment_models_directory()?;
     let store = ModelStore::in_models_directory(&directory);
@@ -36,8 +34,7 @@ pub fn fleurs_dir() -> Option<PathBuf> {
     root.join("cat").is_dir().then_some(root)
 }
 
-/// Says which variable would have let the model-gated test run, and what
-/// the directory it names needs.
+/// Says which variable would have let the model-gated test run.
 pub fn skip(variable: &str, needs: &str) {
     eprintln!("skipped: {variable} is unset or lacks {needs}");
 }

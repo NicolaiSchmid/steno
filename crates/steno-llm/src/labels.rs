@@ -1,6 +1,5 @@
 //! Speaker ids to the cluster labels the model sees, and the transcript as
 //! the model reads it.
-//! Swift: `Sources/StenoLLM/Transcript/SpeakerLabels.swift`.
 
 use std::collections::HashMap;
 
@@ -8,9 +7,7 @@ use steno_core::{Speaker, TranscriptSegment};
 use uuid::Uuid;
 
 /// Speaker ids to the cluster labels the model sees ("Speaker 1"), and
-/// back. Labels are what prompts and answers carry; the core's renderer
-/// swaps them for names later, so the model never needs to know a person's
-/// id.
+/// back, so the model never needs a person's id.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SpeakerLabels {
     labels_by_id: HashMap<Uuid, String>,
@@ -41,9 +38,8 @@ impl SpeakerLabels {
             .map_or(Self::UNKNOWN, String::as_str)
     }
 
-    /// The speaker whose label matches, case-insensitively and ignoring
-    /// surrounding spaces and tabs (Foundation's `.whitespaces`); `None`
-    /// for unknown labels.
+    /// The speaker whose label matches, case-insensitively and trimmed of
+    /// spaces and tabs.
     #[must_use]
     pub fn speaker_id(&self, label: &str) -> Option<Uuid> {
         self.ids_by_label
@@ -51,9 +47,8 @@ impl SpeakerLabels {
             .copied()
     }
 
-    /// True for a speaker's label or [`Self::UNKNOWN`], the labels a prompt
-    /// line can start with, case-insensitively and ignoring surrounding
-    /// spaces and tabs (Foundation's `.whitespaces`).
+    /// True for a speaker's label or [`Self::UNKNOWN`], case-insensitively
+    /// and trimmed of spaces and tabs.
     #[must_use]
     pub fn is_label(&self, candidate: &str) -> bool {
         let normalized = candidate.trim_matches(is_swift_whitespace).to_lowercase();
@@ -61,8 +56,7 @@ impl SpeakerLabels {
     }
 }
 
-/// Foundation's `CharacterSet.whitespaces`: Unicode `Zs` plus tab, no line
-/// breaks.
+/// Unicode `Zs` plus tab, no line breaks.
 pub(crate) fn is_swift_whitespace(c: char) -> bool {
     matches!(
         c,
@@ -89,8 +83,7 @@ pub fn render_lines(segments: &[TranscriptSegment], labels: &SpeakerLabels) -> S
         .join("\n")
 }
 
-/// Lines without indices for the summary pass, where nothing is mapped
-/// back by position: `Speaker 1: text`.
+/// Lines without indices for the summary pass: `Speaker 1: text`.
 #[must_use]
 pub fn render_plain_lines(segments: &[TranscriptSegment], labels: &SpeakerLabels) -> String {
     segments

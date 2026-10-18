@@ -1,10 +1,6 @@
-//! The vocabulary beside the CoreML models: `parakeet_vocab.json`, an
-//! object from decimal ids to the 8,192 SentencePiece pieces of
-//! `parakeet-tdt-0.6b-v3`, read into the shared [`Vocab`]. The file marks a
-//! word start with a leading space where the ONNX export's `tokens.txt`
-//! has `▁`; [`Vocab`] reads both. The blank, id 8,192, is not in the file
-//! and is appended, as `tokens.txt` lists it last.
-//! Swift: `FluidAudio`'s `AsrModels.loadVocabulary`.
+//! The vocabulary beside the CoreML models: `parakeet_vocab.json`, decimal
+//! ids to the 8,192 SentencePiece pieces, read into the shared [`Vocab`].
+//! The blank, id 8,192, is not in the file and is appended.
 
 use std::path::Path;
 
@@ -12,8 +8,8 @@ use steno_speech::Vocab;
 
 use crate::SpeechError;
 
-/// The blank (and start-of-sequence) id of the v3 joint
-/// (`TdtConfig.blankId`): one past the file's last piece.
+/// The blank (and start-of-sequence) id of the v3 joint: one past the
+/// file's last piece.
 pub const BLANK_TOKEN: u32 = 8192;
 
 /// The vocabulary in `path`.

@@ -1,6 +1,5 @@
 //! The Codex client: the Responses API on OpenAI's Codex backend with the
 //! ChatGPT sign-in from the credential store.
-//! Swift: `Sources/StenoLLM/Codex/CodexResponsesClient.swift`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,8 +22,7 @@ use crate::{
 };
 
 /// What the Codex client fails with: a model-service failure or a sign-in
-/// problem. The [`LanguageModel`] impl boxes the inner error, so a caller
-/// downcasts to [`LlmError`] or [`CodexCredentialError`] directly.
+/// problem.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum CodexError {
     #[error(transparent)]
@@ -35,7 +33,7 @@ pub enum CodexError {
 
 impl CodexError {
     /// The inner error boxed, so a caller downcasts to [`LlmError`] or
-    /// [`CodexCredentialError`] without knowing about this wrapper.
+    /// [`CodexCredentialError`] directly.
     #[must_use]
     pub fn boxed(self) -> BoxError {
         match self {
@@ -45,19 +43,13 @@ impl CodexError {
     }
 }
 
-/// The Codex [`LlmClient`]: the Responses API on OpenAI's Codex backend with
-/// the ChatGPT sign-in from [`CodexCredentialStore`]. Same shape as
-/// [`OpenAiCompatibleClient`] (per-attempt timeout on the injected clock,
-/// exponential retries, structured output mode fallback remembered per
-/// client, every secret redacted from every error), with three differences
-/// the backend forces: the answer arrives as an event stream and is
-/// buffered whole, a 401 refreshes the sign-in once before it counts, and
-/// no output ceiling or temperature is sent because the backend rejects
-/// them. Identifies itself as Steno (`User-Agent`, `originator`).
+/// The Codex [`LlmClient`]. Like [`OpenAiCompatibleClient`], except that the
+/// answer arrives as an event stream buffered whole, a 401 refreshes the
+/// sign-in once, and no output ceiling or temperature is sent because the
+/// backend rejects them.
 pub struct CodexResponsesClient {
     endpoint: LlmEndpoint,
     credentials: Arc<CodexCredentialStore>,
-    /// The error instead when the default client could not be built.
     http: Result<reqwest::Client, LlmError>,
     retry: RetryPolicy,
     clock: Arc<dyn Clock>,
@@ -68,10 +60,8 @@ pub struct CodexResponsesClient {
 }
 
 impl CodexResponsesClient {
-    /// The `client_version` the model list is filtered by: the server hides
-    /// models newer than the Codex version named, so a high sentinel shows
-    /// them all. A capability filter, not Steno's identity; that is in the
-    /// headers.
+    /// The `client_version` the model list is filtered by; the server hides
+    /// models newer than it, so a high sentinel shows them all.
     pub const MODEL_LIST_CLIENT_VERSION: &'static str = "99.0.0";
     pub const ORIGINATOR: &'static str = "steno";
 
@@ -85,7 +75,7 @@ impl CodexResponsesClient {
     ];
 
     /// A client over the CLI's sign-in with the default HTTP client, retry
-    /// policy and system clock. Nothing is read until the first request.
+    /// policy and system clock.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -112,12 +102,8 @@ impl CodexResponsesClient {
         }
     }
 
-    /// An HTTP client of the caller's, for a proxy or for connect and read
-    /// timeouts. Its overall `ClientBuilder::timeout` does not apply: every
-    /// request carries its own, the wall-clock backstop past
-    /// `endpoint.request_timeout`, and reqwest prefers that. Start it from
-    /// [`transport::http_client_builder`]: reqwest comes without a TLS
-    /// provider here, and that builder installs one.
+    /// A caller-supplied HTTP client, for a proxy or timeouts. Start it from
+    /// [`transport::http_client_builder`], which installs the TLS provider.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
         self.http = Ok(http);
@@ -142,10 +128,8 @@ impl CodexResponsesClient {
         self
     }
 
-    /// One completion with this crate's own error types.
     pub async fn complete_llm(&self, request: &LlmRequest) -> Result<LlmResponse, CodexError> {
-        // Shared by every attempt of this completion; atomic only so the
-        // attempt futures borrow nothing from the loop's closure.
+        // Atomic only so the attempt futures borrow nothing from the loop.
         let refreshed_after_unauthorized = AtomicBool::new(false);
         let refreshed = &refreshed_after_unauthorized;
         transport::run_attempts(
@@ -155,9 +139,8 @@ impl CodexResponsesClient {
             move |attempt| async move {
                 match self.attempt(request, attempt, refreshed).await {
                     Ok(outcome) => Ok(outcome),
-                    // The token endpoint hiccuped: a transport failure like
-                    // any other, worth the same backoff. The other credential
-                    // errors are final.
+                    // A transient token endpoint failure gets the same
+                    // backoff; other credential errors are final.
                     Err(CodexCredentialError::RefreshFailed(detail)) => {
                         Ok(Attempt::Failed(LlmError::Transport(detail)))
                     }
@@ -207,10 +190,8 @@ impl CodexResponsesClient {
             });
         }
         if reply.status == 401 && !refreshed_after_unauthorized.load(Ordering::Relaxed) {
-            // The file may hold a token the CLI already rotated (no
-            // network), else one refresh; then a 401 is the answer. A
-            // refresh that failed for a reason a retry may fix does not
-            // use this up: the next attempt may refresh again.
+            // A token the CLI already rotated, else one refresh; then a 401
+            // is the answer.
             self.credentials
                 .refreshed_if_still_using(&credentials.access_token)
                 .await?;
@@ -228,8 +209,7 @@ impl CodexResponsesClient {
     }
 
     /// Every model the backend offers this account, in the server's order;
-    /// [`CodexModel::is_listed`] marks the ones a picker should show. Fails
-    /// with the credential error when there is no sign-in.
+    /// [`CodexModel::is_listed`] marks the ones a picker should show.
     pub async fn list_models(&self) -> Result<Vec<CodexModel>, CodexError> {
         let credentials = self.credentials.current().await?;
         let secrets = credentials.secrets();
@@ -247,9 +227,8 @@ impl CodexResponsesClient {
         Ok(list.models)
     }
 
-    /// The sign-in's account line (the file, refreshed first when due), the
-    /// model list (tolerated when it fails) and one tiny structured
-    /// completion. Any failure of the completion is returned.
+    /// The account line, the model list (failure tolerated) and one tiny
+    /// structured completion.
     pub async fn probe_llm(&self) -> Result<EndpointProbe, CodexError> {
         let credentials = self.credentials.current().await?;
         let start = self.clock.now();
@@ -267,10 +246,7 @@ impl CodexResponsesClient {
         })
     }
 
-    // Requests
-
-    /// `low` for the many small cleanup chunks and the probe, `medium` for
-    /// the summary passes.
+    /// `low` for cleanup chunks and the probe, `medium` for the summary.
     #[must_use]
     pub fn reasoning_effort(purpose: &str) -> &'static str {
         if purpose.starts_with("cleanup") || purpose == "probe" {
@@ -280,8 +256,7 @@ impl CodexResponsesClient {
         }
     }
 
-    /// The wire `text.format` for a request under `mode`; `None` sends
-    /// none.
+    /// The wire `text.format` for `mode`; `None` sends none.
     #[must_use]
     pub fn text_format(
         format: &LlmResponseFormat,
@@ -377,8 +352,7 @@ impl CodexResponsesClient {
             ),
         ] {
             if let Ok(mut value) = reqwest::header::HeaderValue::from_str(&text) {
-                // Sensitive: the `Debug` form of the headers and of any
-                // request built from them prints `Sensitive`, not the token.
+                // `Debug` prints `Sensitive`, not the token.
                 value.set_sensitive(true);
                 headers.insert(name, value);
             }
@@ -389,7 +363,6 @@ impl CodexResponsesClient {
         headers
     }
 
-    /// One attempt raced against `endpoint.request_timeout` on the clock.
     async fn perform(
         &self,
         request: reqwest::Request,
@@ -405,10 +378,8 @@ impl CodexResponsesClient {
         .await
     }
 
-    // Replies
-
-    /// A 2xx body as the response: the buffered event stream, or a backend
-    /// that answered the whole response object at once.
+    /// A 2xx body as the response: the buffered event stream, or the whole
+    /// response object at once.
     pub fn parse(reply: &HttpReply, secrets: &[String]) -> Result<LlmResponse, LlmError> {
         if wire::looks_like_event_stream(
             reply.headers.get("content-type").map(String::as_str),
@@ -429,13 +400,9 @@ impl CodexResponsesClient {
         )
     }
 
-    /// The buffered event stream to one response: message items from
-    /// `response.output_item.done`, the status and usage from
-    /// `response.completed` or `response.incomplete`. `response.failed` and
-    /// `error` fail: a plan limit or another final code as a non-retryable
-    /// `Http`, anything else (overload, unknown) as a retryable `Transport`.
-    /// A stream that ends without a terminal event is a transport failure
-    /// (the connection was cut).
+    /// The buffered event stream to one response. `response.failed` and
+    /// `error` fail: final codes as non-retryable `Http`, anything else as
+    /// retryable `Transport`. A stream without a terminal event was cut.
     pub fn parse_stream(body: &[u8], secrets: &[String]) -> Result<LlmResponse, LlmError> {
         let mut items: Vec<ResponsesOutputItem> = Vec::new();
         let mut terminal: Option<ResponsesResponse> = None;
@@ -522,8 +489,7 @@ impl CodexResponsesClient {
     }
 
     /// A 429 is a rate limit unless the body names the plan's usage limit,
-    /// which no backoff cures within a meeting; that and every other status
-    /// are `Http`, not retried unless 408 or 5xx.
+    /// which no backoff cures; that is `Http`.
     #[must_use]
     pub fn classify(reply: &HttpReply, secrets: &[String]) -> LlmError {
         let envelope = wire::decode::<CodexErrorEnvelope>(&reply.body).ok();
@@ -548,9 +514,8 @@ impl CodexResponsesClient {
         }
     }
 
-    /// A `response.failed` or `error` event as an [`LlmError`]: final codes
-    /// (the plan's limit, a prompt the backend will never take) are `Http`
-    /// so no backoff runs; the rest are `Transport` and retried.
+    /// A `response.failed` or `error` event: final codes are `Http`, the
+    /// rest `Transport` and retried.
     #[must_use]
     pub fn stream_failure(code: Option<&str>, message: &str, secrets: &[String]) -> LlmError {
         let code = code.map(str::to_lowercase);
@@ -574,8 +539,7 @@ impl CodexResponsesClient {
         LlmError::Transport(message)
     }
 
-    /// A 400 that names the structured output request (the Responses API
-    /// spells it `text.format`): the cue to fall back one mode.
+    /// A 400 naming `text.format`: the cue to fall back one mode.
     #[must_use]
     pub fn complains_about_text_format(body: &str) -> bool {
         body.to_lowercase().contains("text.format")

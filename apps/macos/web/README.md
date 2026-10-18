@@ -2,9 +2,7 @@
 
 The pixels of the Mac windows: one React app, bundled by Vite and served by
 the app from its own URL scheme. Swift keeps the state and the audio; the page
-draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
-`.plans/2026-09-29-macos-webview-ui.md`. Spec for the look:
-`.plans/2026-10-01-t3code-design-polish.md`.
+draws snapshots and sends commands over the bridge (`src/bridge/`).
 
 ## Commands
 

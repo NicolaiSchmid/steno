@@ -1,24 +1,18 @@
 //! The 48 kHz synthetic signals the audio tests and `aec-bench --synthetic`
-//! use. Swift: `Sources/StenoAudio/Testing/AudioFixtures.swift`.
-//!
-//! Tones and sweeps from integer phase accumulators, a speech-like far-end
-//! from seeded SplitMix64 noise, a seeded room impulse response, and the
-//! echoed microphone built from them. Deterministic on every machine;
-//! never committed, always built in test setup. Same seeds and arithmetic
-//! as Swift, so the Speex ERLE table matches `steno dev aec-bench
-//! --synthetic` (the table in `tests/aec.rs`).
+//! use: tones and sweeps, a speech-like far end from seeded noise, a
+//! seeded room impulse response, and the echoed microphone built from
+//! them. Deterministic on every machine, so the ERLE table in
+//! `tests/aec.rs` holds.
 
 use crate::aec::EchoMetrics;
 
-/// Namespace for the generators; see the module doc.
 pub struct AudioFixtures;
 
-/// SplitMix64, as `Sources/StenoCore/Testing/SplitMix64.swift`.
+/// SplitMix64.
 #[derive(Debug, Clone)]
 pub struct SplitMix64(pub u64);
 
 impl SplitMix64 {
-    /// The next 64 bits.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -30,7 +24,6 @@ impl SplitMix64 {
 
     /// Uniform in `[0, 1)` from the top 53 bits.
     pub fn unit(&mut self) -> f64 {
-        // 53 bits fit an f64 mantissa exactly.
         let numerator = (self.next() >> 11) as f64;
         numerator / (1u64 << 53) as f64
     }
@@ -183,7 +176,7 @@ impl AudioFixtures {
             .collect()
     }
 
-    /// Swift's integer phase step for `frequency` at 48 kHz.
+    /// The integer phase step for `frequency` at 48 kHz.
     #[must_use]
     pub fn phase_increment(frequency: f64) -> u32 {
         Self::phase_increment_at(frequency, Self::SAMPLE_RATE)

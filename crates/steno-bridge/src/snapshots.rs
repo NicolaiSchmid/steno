@@ -1,5 +1,5 @@
-//! The snapshots the host publishes per topic, after
-//! `Sources/StenoBridge/Snapshots.swift`; the type mapping is in the crate doc.
+//! The snapshots the host publishes per topic; the type mapping is in the
+//! crate doc.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,6 @@ pub trait Snapshot: Serialize {
 // app
 
 /// Window-wide state: what the main window needs before any meeting loads.
-/// Swift: `AppSnapshot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
@@ -47,7 +46,6 @@ impl Snapshot for AppSnapshot {
     const TOPIC: BridgeTopic = BridgeTopic::App;
 }
 
-/// Swift: `AppSnapshot.SetupBanner`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSetupBanner {
@@ -56,13 +54,11 @@ pub struct AppSetupBanner {
     pub offers_summaries: bool,
     pub offers_vault: bool,
     /// A one-time notice in the banner's place, which the page dismisses
-    /// with OK rather than "Not now"; left out when false. Rust only: the
-    /// Swift app shows no notice there.
+    /// with OK rather than "Not now"; left out when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_notice: bool,
 }
 
-/// Swift: `AppSnapshot.Phone`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppPhone {
@@ -79,7 +75,6 @@ pub struct AppPhone {
 // recording
 
 string_enum! {
-    /// Swift: `RecordingSnapshot.State`.
     pub enum RecordingState {
         Idle = "idle",
         Starting = "starting",
@@ -89,14 +84,12 @@ string_enum! {
 }
 
 /// RMS in 0...1 per lane; the page draws the meter, at most 20 Hz.
-/// Swift: `RecordingSnapshot.Level`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RecordingLevel {
     pub mic: f64,
     pub system: f64,
 }
 
-/// Swift: `RecordingSnapshot.AutoStop`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingAutoStop {
@@ -105,7 +98,6 @@ pub struct RecordingAutoStop {
     pub reason: String,
 }
 
-/// Swift: `RecordingSnapshot`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingSnapshot {
@@ -144,7 +136,6 @@ impl Snapshot for RecordingSnapshot {
 
 // progress
 
-/// Swift: `ProgressSnapshot.Entry`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressEntry {
@@ -157,7 +148,6 @@ pub struct ProgressEntry {
     pub estimated_remaining_seconds: Option<f64>,
 }
 
-/// Swift: `ProgressSnapshot`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProgressSnapshot {
     pub entries: Vec<ProgressEntry>,
@@ -170,7 +160,6 @@ impl Snapshot for ProgressSnapshot {
 // meetings.list
 
 string_enum! {
-    /// Swift: `BridgeListFilter`.
     pub enum ListFilter {
         All = "all",
         Processing = "processing",
@@ -179,7 +168,6 @@ string_enum! {
     }
 }
 
-/// Swift: `SpeakerChip`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeakerChip {
@@ -191,7 +179,6 @@ pub struct SpeakerChip {
     pub is_confirmed: bool,
 }
 
-/// Swift: `MeetingRow`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingRow {
@@ -212,7 +199,6 @@ pub struct MeetingRow {
     pub tags: Vec<String>,
 }
 
-/// Swift: `MeetingsListSnapshot.Counts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListCounts {
     pub all: i64,
@@ -221,14 +207,12 @@ pub struct ListCounts {
     pub failed: i64,
 }
 
-/// Swift: `MeetingsListSnapshot.Tag`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListTag {
     pub name: String,
     pub count: i64,
 }
 
-/// Swift: `MeetingsListSnapshot.DayGroup`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListDayGroup {
     /// Calendar day in the user's zone, `YYYY-MM-DD`; the page formats labels.
@@ -236,7 +220,6 @@ pub struct ListDayGroup {
     pub meetings: Vec<MeetingRow>,
 }
 
-/// Swift: `MeetingsListSnapshot`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingsListSnapshot {
@@ -264,7 +247,6 @@ impl Snapshot for MeetingsListSnapshot {
 // meeting.detail
 
 string_enum! {
-    /// Swift: `MeetingDetailSnapshot.Tab`.
     pub enum DetailTab {
         Summary = "summary",
         Transcript = "transcript",
@@ -274,20 +256,17 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `MeetingDetailSnapshot.Retention.Kind`.
     pub enum DetailRetentionKind {
         Deleted = "deleted",
         DeletesOn = "deletesOn",
         KeptUntilExportSucceeds = "keptUntilExportSucceeds",
         KeptProcessingFailed = "keptProcessingFailed",
-        /// Rust only: the Swift app never reports it.
         KeptIncomplete = "keptIncomplete",
         KeptWhileProcessing = "keptWhileProcessing",
         KeptForever = "keptForever",
     }
 }
 
-/// Swift: `MeetingDetailSnapshot.Retention`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailRetention {
@@ -303,11 +282,8 @@ pub struct DetailRetention {
     pub files_exist: bool,
 }
 
-/// Swift: `MeetingDetailSnapshot.Speaker.Assignment`, an alias of
-/// `StenoCore.SpeakerAssignment.Kind`; hence the core type itself.
 pub use steno_core::SpeakerAssignmentKind;
 
-/// Swift: `MeetingDetailSnapshot.Speaker`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailSpeaker {
@@ -333,21 +309,18 @@ pub struct DetailSpeaker {
     pub is_playing: bool,
 }
 
-/// Swift: `MeetingDetailSnapshot.Template`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailTemplate {
     pub id: String,
     pub name: String,
 }
 
-/// Swift: `MeetingDetailSnapshot.SummarySection.Bullet`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailSummaryBullet {
     pub lead: String,
     pub text: String,
 }
 
-/// Swift: `MeetingDetailSnapshot.SummarySection`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailSummarySection {
     pub id: String,
@@ -355,7 +328,6 @@ pub struct DetailSummarySection {
     pub bullets: Vec<DetailSummaryBullet>,
 }
 
-/// Swift: `MeetingDetailSnapshot.Turn`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailTurn {
@@ -374,11 +346,8 @@ pub struct DetailTurn {
     pub text: String,
 }
 
-/// Swift: `MeetingDetailSnapshot.Task.Priority`, an alias of
-/// `StenoCore.TaskPriority`; hence the core type itself.
 pub use steno_core::TaskPriority;
 
-/// Swift: `MeetingDetailSnapshot.Task`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailTask {
@@ -400,7 +369,6 @@ pub struct DetailTask {
 }
 
 string_enum! {
-    /// Swift: `MeetingDetailSnapshot.Export.Status`.
     pub enum DetailExportStatus {
         NotConfigured = "notConfigured",
         Pending = "pending",
@@ -409,7 +377,6 @@ string_enum! {
     }
 }
 
-/// Swift: `MeetingDetailSnapshot.Export`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailExport {
@@ -420,7 +387,6 @@ pub struct DetailExport {
 }
 
 string_enum! {
-    /// Swift: `MeetingDetailSnapshot.SummaryStatus.Kind`.
     pub enum DetailSummaryStatusKind {
         Pending = "pending",
         Present = "present",
@@ -429,7 +395,6 @@ string_enum! {
     }
 }
 
-/// Swift: `MeetingDetailSnapshot.SummaryStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailSummaryStatus {
@@ -442,8 +407,7 @@ pub struct DetailSummaryStatus {
     pub action_title: Option<String>,
 }
 
-/// Swift: `MeetingDetailSnapshot`. The topic's payload is this or `null`
-/// when no meeting is selected.
+/// The topic's payload is this or `null` when no meeting is selected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingDetailSnapshot {
@@ -462,7 +426,7 @@ pub struct MeetingDetailSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<String>,
     /// The warning that parts of the recording could not be decoded and
-    /// were replaced by silence. Rust only: the Swift host never sends it.
+    /// were replaced by silence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_warning: Option<String>,
     pub tags: Vec<String>,
@@ -479,8 +443,7 @@ pub struct MeetingDetailSnapshot {
     pub decisions: Vec<String>,
     pub notes: String,
     pub export: DetailExport,
-    /// Whether the page shows "Process again". Swift sends `false`: its
-    /// app refuses the action.
+    /// Whether the page shows "Process again".
     pub can_process_again: bool,
     pub can_rerun_summary: bool,
     pub is_busy: bool,
@@ -500,11 +463,9 @@ impl Snapshot for Option<MeetingDetailSnapshot> {
 // onboarding
 
 string_enum! {
-    /// Swift: `OnboardingSnapshot.Page`.
     pub enum OnboardingPage {
         /// Before page 1, on the Mac's first launch after the update from
-        /// the Swift app while that app's handover identity has not been
-        /// brought over ([`OnboardingImport`]). Rust only.
+        /// the Swift app while its handover identity is not brought over.
         Import = "import",
         Permissions = "permissions",
         Setup = "setup",
@@ -512,14 +473,13 @@ string_enum! {
 }
 
 string_enum! {
-    /// Where the import step stands. Rust only.
+    /// Where the import step stands.
     pub enum OnboardingImportState {
         /// Not run yet: the step explains the prompts and offers Continue.
         Pending = "pending",
         /// The keychain prompts are up.
         Importing = "importing",
-        /// The export was denied, failed or skipped: phone handover waits
-        /// until the step runs again, with Try again or at the next launch.
+        /// The export was denied, failed or skipped: phone handover waits.
         Waiting = "waiting",
         /// The identity is in place; the step is over.
         Done = "done",
@@ -527,22 +487,18 @@ string_enum! {
 }
 
 /// The import step: what the new app brings over from the Swift app's
-/// keychain items, behind one login-password prompt each. Rust only: the
-/// Swift app has no such step (plan `.plans/2026-10-07-stable-promotion.md`,
-/// S6).
+/// keychain items, behind one login-password prompt each.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OnboardingImport {
     pub state: OnboardingImportState,
-    /// How many login-password prompts the step may bring up, one per
-    /// keychain item it reads.
+    /// How many login-password prompts the step may bring up.
     pub prompts: i64,
     /// Why the last export did not bring the identity over, in a sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// Swift: `OnboardingSnapshot.PermissionStep`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(
@@ -557,16 +513,13 @@ pub struct OnboardingPermissionStep {
     pub is_requesting: bool,
     pub is_skipped: bool,
     /// As the Recording section's
-    /// [`waits_for_recording`](crate::RecordingPermission::waits_for_recording):
-    /// the system audio test was refused, or stopped, because a recording
-    /// is starting, running or stopping; cleared once the recorder is idle
-    /// again. Left out when false. Rust only.
+    /// [`waits_for_recording`](crate::RecordingPermission::waits_for_recording).
+    /// Left out when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub waits_for_recording: bool,
 }
 
 string_enum! {
-    /// Swift: `OnboardingSnapshot.SetupStep.Kind`.
     pub enum OnboardingSetupStepKind {
         Summaries = "summaries",
         Vault = "vault",
@@ -574,7 +527,6 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `OnboardingSnapshot.SetupStep.State`.
     pub enum OnboardingSetupStepState {
         Open = "open",
         Saved = "saved",
@@ -582,7 +534,6 @@ string_enum! {
     }
 }
 
-/// Swift: `OnboardingSnapshot.SetupStep`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OnboardingSetupStep {
@@ -595,7 +546,6 @@ pub struct OnboardingSetupStep {
 
 /// The Obsidian vault row: the chosen folder (absent until chosen), why the
 /// last save was refused, and the store's error if saving failed.
-/// Swift: `OnboardingSnapshot.Vault`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OnboardingVault {
@@ -612,11 +562,8 @@ pub struct OnboardingVault {
 }
 
 /// Page 1's speech models row, shown while the models a meeting needs were
-/// missing when onboarding opened (the speaker models after the update
-/// from the Swift app, every model on a fresh install), and kept, as
-/// installed, once they arrive. Download starts
-/// [`BridgeMethod::SettingsTranscriptionDownload`](crate::BridgeMethod::SettingsTranscriptionDownload)
-/// once per id in `asset_ids`, the install Settings runs. Rust only.
+/// missing when onboarding opened, and kept, as installed, once they
+/// arrive. Download runs Settings' download once per id in `asset_ids`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OnboardingSpeechModels {
@@ -624,8 +571,7 @@ pub struct OnboardingSpeechModels {
     /// The row's status line: "Not downloaded · 33 MB", "Downloading… 40%",
     /// "Installed".
     pub detail: String,
-    /// The models Download or Retry starts; empty while they download or
-    /// once they are installed.
+    /// The models Download or Retry starts; empty while downloading or done.
     #[serde(rename = "assetIDs")]
     pub asset_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -636,7 +582,7 @@ pub struct OnboardingSpeechModels {
 }
 
 string_enum! {
-    /// Whether Steno may write to the stored vault. Rust only.
+    /// Whether Steno may write to the stored vault.
     pub enum OnboardingVaultAccessState {
         /// The check runs; macOS may be asking for the folder.
         Checking = "checking",
@@ -644,18 +590,15 @@ string_enum! {
         /// The folder refused the write, most often because macOS's Files
         /// and Folders setting is off for Steno.
         Refused = "refused",
-        /// The vault cannot be used for another reason the system setting
-        /// does not fix: the folder is not there (an unmounted disk, a
-        /// renamed vault) or the check could not run.
+        /// The vault cannot be used for a reason the system setting does
+        /// not fix: the folder is gone or the check could not run.
         Unusable = "unusable",
     }
 }
 
-/// Page 1's vault row on the Mac: the stored vault is written to once while
-/// the page shows, so a Files and Folders prompt for a vault under
-/// Documents, Desktop, Downloads or iCloud Drive comes up here rather than
-/// at the first export. Absent without a stored vault, and off the Mac.
-/// Rust only.
+/// Page 1's vault row on the Mac: the stored vault is written to once here,
+/// so a Files and Folders prompt comes up now rather than at the first
+/// export. Absent without a stored vault, and off the Mac.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OnboardingVaultAccess {
@@ -669,7 +612,7 @@ pub struct OnboardingVaultAccess {
 }
 
 /// The onboarding window: page 1's permission steps and page 2's two setup
-/// rows. Swift: `OnboardingSnapshot`.
+/// rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OnboardingSnapshot {
@@ -686,13 +629,13 @@ pub struct OnboardingSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_sentence: Option<String>,
     /// The import step, present while [`OnboardingPage::Import`] is or
-    /// was current. Rust only.
+    /// was current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swift_import: Option<OnboardingImport>,
-    /// Page 1's speech models row. Rust only.
+    /// Page 1's speech models row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speech_models: Option<OnboardingSpeechModels>,
-    /// Page 1's vault row. Rust only.
+    /// Page 1's vault row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault_access: Option<OnboardingVaultAccess>,
     /// Set once onboarding is over; the page closes the window.

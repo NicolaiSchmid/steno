@@ -1,10 +1,6 @@
 //! Every fixture in `apps/macos/web/fixtures/bridge/` decodes into its Rust
-//! type and re-encodes byte for byte. The mapping from file name to type
-//! mirrors `BridgeSamples.fixtures` in `Sources/StenoBridge/BridgeSamples.swift`,
-//! followed by the fixtures the Rust bridge alone owns (the import step,
-//! a summary skipped for a withheld API key, phone handover waiting);
-//! `contract.ts` is checked for every string enum the crate spells, top level
-//! and nested. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
+//! type and re-encodes byte for byte, and `contract.ts` agrees with every
+//! string enum the crate spells.
 
 mod common;
 
@@ -24,8 +20,8 @@ fn raw<T: std::fmt::Display>(all: &[T]) -> Vec<String> {
 
 type Reencode = fn(&[u8]) -> Result<Vec<u8>, String>;
 
-/// Decodes the bytes as `T` and re-encodes them as the fixture file would be
-/// written: `BridgeJSON.encode` plus a trailing newline.
+/// Decodes the bytes as `T` and re-encodes them as the fixture file is
+/// written, with a trailing newline.
 fn reencode<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let value: T = serde_json::from_slice(bytes).map_err(|e| format!("decode: {e}"))?;
     let mut out = json::to_canonical_string(&value).map_err(|e| format!("encode: {e}"))?;
@@ -33,7 +29,7 @@ fn reencode<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<Vec<u8>, St
     Ok(out.into_bytes())
 }
 
-/// File name to type, in the order of `BridgeSamples.fixtures`.
+/// File name to type.
 const FIXTURES: &[(&str, Reencode)] = &[
     ("app", reencode::<AppSnapshot>),
     ("recording", reencode::<RecordingSnapshot>),
@@ -120,7 +116,6 @@ const FIXTURES: &[(&str, Reencode)] = &[
     ),
     ("reply.confirm", reencode::<ConfirmReply>),
     ("reply.chosenPath", reencode::<ChosenPathReply>),
-    // Rust only, after Swift's list (`BridgeFixturesTests.rustOnly`).
     ("onboarding.import", reencode::<OnboardingSnapshot>),
     (
         "meeting.detail.keyWithheld",
@@ -224,11 +219,8 @@ fn every_topic_has_a_snapshot_fixture() {
 }
 
 /// The string literals of one list in `contract.ts`, found by walking the
-/// anchors in order: the last anchor ends in the list's `[`, the earlier ones
-/// narrow the search to the right declaration (`export const
-/// recordingSnapshot = z`, then `state: z.enum([`). Both spellings the file
-/// uses, `export const bridgeTopics = [` and `export const listFilter = z.enum([`,
-/// are anchors in this sense.
+/// anchors in order: the last one ends in the list's `[`, the earlier ones
+/// narrow the search to the right declaration.
 fn contract_ts_strings(anchors: &[&str]) -> Vec<String> {
     let path = repository_root().join("apps/macos/web/src/bridge/contract.ts");
     let source = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -290,9 +282,8 @@ fn contract_ts_shared_vocabulary_matches() {
     assert_eq!(top_level("platform"), raw(Platform::ALL));
 }
 
-/// `READS_CALENDAR` in `src/lib/platform.tsx`, as Biome writes it,
-/// against whether `PermissionKind::for_platform` lists the calendar:
-/// the page shows General's calendar row by it.
+/// `READS_CALENDAR` in `src/lib/platform.tsx` against whether
+/// `PermissionKind::for_platform` lists the calendar.
 #[test]
 fn platform_tsx_reads_the_calendar_where_the_platform_lists_it() {
     let path = repository_root().join("apps/macos/web/src/lib/platform.tsx");

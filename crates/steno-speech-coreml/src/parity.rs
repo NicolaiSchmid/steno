@@ -1,18 +1,8 @@
-//! The parity harness: every `<name>.wav` of a corpus through the
-//! engine, scored against `<name>.parakeet-v3.json`, the `RawSegment`
-//! array Steno's Swift engine produced for the same file (`steno bakeoff`
-//! output). Reports WER of the Rust text against the Swift text,
-//! word-start agreement where the words match, wall time and RTFx per
-//! file, and the load average around the run, because the decoder loop is
-//! thousands of small CoreML calls whose cost is CPU scheduling.
-//! Swift: `Sources/StenoSpeech/Bakeoff/BakeoffRunner.swift`.
-//!
-//! Manual: `cargo run --release -p steno-speech-coreml --bin
-//! steno-coreml-parity -- ~/steno-spikes/corpus
-//! ~/steno-spikes/baseline-bakeoff` on Forge, or the ignored test in
-//! `tests/parity.rs` with `STENO_CALIBRATION_CORPUS` set.
-//! `scripts/coreml-parity-forge.sh` runs it over FLEURS German and the
-//! corpus at a base and a head revision and scores both.
+//! The parity harness: every `<name>.wav` of a corpus through the engine,
+//! scored against `<name>.parakeet-v3.json`, the segments the Swift engine
+//! produced for the same file. Reports WER, word-start agreement, wall time,
+//! RTFx and the load average around the run. `scripts/coreml-parity-forge.sh`
+//! runs it at a base and a head revision.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -53,15 +43,11 @@ impl Default for Options {
 pub struct FileResult {
     /// File stem shared by the WAV and the baseline JSON.
     pub name: String,
-    /// Audio length.
     pub audio_seconds: f64,
     /// Transcription wall time, model load excluded.
     pub wall_seconds: f64,
-    /// Merged tokens.
     pub tokens: usize,
-    /// Chunks the layout chose.
     pub chunks: usize,
-    /// Counters of the run.
     pub stats: DecodeStats,
     /// Word errors of the Rust text against the Swift text.
     pub errors: WordErrors,
@@ -86,28 +72,22 @@ impl FileResult {
 pub struct Report {
     /// One row per corpus file, in name order.
     pub files: Vec<FileResult>,
-    /// Word errors summed over the corpus.
     pub total: WordErrors,
-    /// Time to load the four models and the vocabulary.
     pub model_load_seconds: f64,
-    /// Chunks decoded at once.
     pub workers: usize,
-    /// `vm.loadavg` before the first file.
     pub load_before: String,
-    /// `vm.loadavg` after the last file.
     pub load_after: String,
 }
 
 impl Report {
-    /// Mean of the per-file WERs (the plan's target is this mean).
+    /// Mean of the per-file WERs.
     #[must_use]
     pub fn mean_file_wer(&self) -> f64 {
         self.mean(|file| file.errors.rate())
     }
 
-    /// Mean signed word-start offset of the Rust words from the Swift
-    /// words, in seconds, over every matched word of the corpus: positive
-    /// when Rust starts later. The parity test gates it.
+    /// Mean signed word-start offset of the Rust words from the Swift words,
+    /// in seconds, over every matched word: positive when Rust starts later.
     #[must_use]
     pub fn mean_start_offset_seconds(&self) -> f64 {
         let matched: usize = self.files.iter().map(|file| file.timing.matched).sum();
@@ -132,7 +112,6 @@ impl Report {
         self.mean(FileResult::rtfx)
     }
 
-    /// Mean of `value` over the files; zero without files.
     fn mean(&self, value: impl Fn(&FileResult) -> f64) -> f64 {
         if self.files.is_empty() {
             return 0.0;
@@ -218,7 +197,6 @@ pub fn load_average() -> String {
         )
 }
 
-/// The baseline segments for `name`.
 fn read_baseline(baseline_dir: &Path, name: &str) -> Result<Vec<RawSegment>, SpeechError> {
     let path = baseline_dir.join(format!("{name}.parakeet-v3.json"));
     let text = std::fs::read_to_string(&path)?;
@@ -244,8 +222,8 @@ fn timed_words(segments: &[RawSegment]) -> Vec<TimedText> {
         .collect()
 }
 
-/// Run the corpus. Files are the `*.wav` of `corpus_dir` in name order;
-/// a file without a baseline is an error.
+/// Run the corpus: the `*.wav` of `corpus_dir` in name order; a file
+/// without a baseline is an error.
 pub fn run(
     corpus_dir: &Path,
     baseline_dir: &Path,

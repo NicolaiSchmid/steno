@@ -1,7 +1,5 @@
-//! The host's `ExportValidator` over the Obsidian destination: the Export
-//! settings' vault check, and onboarding's vault row, which tells a folder
-//! that refused the write from one that is not there. Swift:
-//! `ObsidianFolderDestination.validate()`.
+//! The host's `ExportValidator` over the Obsidian destination: the vault
+//! check, which tells a folder that refused the write from a missing one.
 
 use steno_adapters::{ObsidianError, ObsidianFolderDestination};
 use steno_core::ObsidianSettings;

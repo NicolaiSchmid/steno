@@ -1,6 +1,5 @@
 //! Full-text search over transcript segments and meeting titles and
 //! summaries, through the two FTS5 tables the migrations keep in sync.
-//! Swift: `Sources/StenoCore/Storage/MeetingStore+Search.swift`.
 
 use rusqlite::{Connection, params};
 use uuid::Uuid;
@@ -18,9 +17,8 @@ pub struct SearchHit {
     pub rank: f64,
 }
 
-/// GRDB's `FTS5Pattern(matchingAllTokensIn:)`: every token of `query` as a
-/// quoted phrase, so FTS5 syntax in the text never reaches the parser;
-/// `None` when the query holds no token.
+/// Every token of `query` as a quoted phrase, so FTS5 syntax in the text
+/// never reaches the parser; `None` when the query holds no token.
 #[must_use]
 pub fn fts5_pattern(query: &str) -> Option<String> {
     let tokens: Vec<String> = query
@@ -75,9 +73,8 @@ fn search_rows(connection: &Connection, pattern: &str, limit: i64) -> Result<Vec
             })
         },
     )?);
-    // Byte order of a UUID is the order of its upper-case string, so the
-    // tie-break matches Swift's `uuidString` compare without the strings; a
-    // meeting hit (no segment) sorts before its segments, as "" did.
+    // A UUID's byte order is the order of its uppercase string; a meeting
+    // hit (no segment) sorts before its segments.
     hits.sort_by(|left, right| {
         left.rank
             .total_cmp(&right.rank)
@@ -89,9 +86,8 @@ fn search_rows(connection: &Connection, pattern: &str, limit: i64) -> Result<Vec
 }
 
 impl Store {
-    /// Matches every token of `query` (unicode61: case- and
-    /// diacritic-insensitive, so "jerome" finds "Jérôme") over transcript
-    /// segments and meeting titles and summaries, best rank first. An
+    /// Matches every token of `query` (case- and diacritic-insensitive)
+    /// over segments and meeting titles and summaries, best rank first. An
     /// empty query matches nothing.
     pub fn search(&self, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
         let Some(pattern) = fts5_pattern(query) else {

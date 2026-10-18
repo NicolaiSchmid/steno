@@ -1,5 +1,4 @@
 //! Audio assets: their format, lanes and retention.
-//! Swift: `Sources/StenoCore/Model/Audio.swift`.
 
 use std::collections::BTreeMap;
 
@@ -121,9 +120,8 @@ impl<'de> Deserialize<'de> for AudioRetention {
     }
 }
 
-/// The recording files of one meeting. `url` is the master, `sidecars_16k`
-/// the per-lane 16 kHz decodes, `mixdown_url` the AAC mono export. URLs are
-/// `file://` strings, as Swift stores them.
+/// The recording files of one meeting: `url` the master, `sidecars_16k` the
+/// per-lane 16 kHz decodes, `mixdown_url` the AAC export, all `file://` URLs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioAsset {
@@ -164,24 +162,15 @@ impl AudioAsset {
     }
 }
 
-/// The longest recording in which a lane can come out with no segment at
-/// all and still be taken as silent; past it the lane most likely failed to
-/// transcribe ([`results_need_the_audio`]). Rust only.
+/// The longest recording in which a lane with no segment still counts as
+/// silent rather than failed.
 pub const EMPTY_LANE_MAXIMUM_SECONDS: f64 = 30.0;
 
-/// Whether a ready meeting's results could still need its recording, so
-/// the automatic retention keeps it unstamped: the diarizer failed and the
-/// segments no stored speaker covers went to the one unknown room speaker
-/// ([`room_speaker_id`]), whose stored row is the mark, or a lane the
-/// asset recorded (a call records the system audio and the mic, an
-/// in-person or phone meeting one lane) has no segment while the meeting
-/// runs longer than [`EMPTY_LANE_MAXIMUM_SECONDS`] or has no positive
-/// duration. It errs towards keeping: a call whose mic stayed muted is
-/// kept too. The pipeline asks it before the automatic stamp, over the
-/// rows it reads from the store, and the meeting detail's recording line
-/// asks it over the export, so both read the same rule. A rule the user
-/// applies is stamped as chosen. Rust only: Swift stamps once every
-/// delivery succeeded.
+/// Whether a ready meeting's results could still need its recording, so the
+/// automatic retention keeps it: the diarizer fell back to the room speaker
+/// ([`room_speaker_id`]), or a recorded lane has no segment while the meeting
+/// runs past [`EMPTY_LANE_MAXIMUM_SECONDS`] or has no positive duration. It
+/// errs towards keeping. The pipeline and the meeting detail share this rule.
 #[must_use]
 pub fn results_need_the_audio(
     meeting: &Meeting,
@@ -262,8 +251,7 @@ mod tests {
         }
     }
 
-    /// The room speaker the diarizer fallback leaves keeps the recording,
-    /// however short the meeting and whatever its lanes hold.
+    /// The diarizer fallback's room speaker keeps the recording, whatever else.
     #[test]
     fn the_room_speaker_needs_the_audio() {
         let mut meeting = crate::testing::sample_data::meeting();
@@ -279,8 +267,8 @@ mod tests {
         assert!(!results_need_the_audio(&meeting, &diarized, &both, &asset));
     }
 
-    /// A recorded lane with no segment keeps the recording past the bound,
-    /// and at any length when the meeting has no positive duration.
+    /// A recorded lane with no segment keeps the recording past the bound, or at
+    /// any length without a positive duration.
     #[test]
     fn an_empty_lane_needs_the_audio_past_the_bound_or_without_a_duration() {
         let mut meeting = crate::testing::sample_data::meeting();
@@ -307,8 +295,7 @@ mod tests {
                 "{duration} s with every lane transcribed"
             );
         }
-        // A one-lane recording: the lane the asset did not record is not
-        // missing.
+        // A one-lane recording: the lane it did not record is not missing.
         let mut phone = call_asset(meeting.id);
         phone.lanes = vec![AudioLane::Mixed];
         meeting.duration = 0.0;
@@ -321,11 +308,7 @@ mod tests {
         ));
     }
 
-    /// A failed meeting is offered "Process again" whatever its rows; a
-    /// ready one only while its results need the audio (here the diarizer
-    /// fallback's room row) or its recording may be damaged, and its asset
-    /// is on record; an unfinished one never, damaged or not
-    /// ([`Meeting::offers_process_again`]).
+    /// Which meetings are offered "Process again" ([`Meeting::offers_process_again`]).
     #[test]
     fn a_failed_meeting_and_a_ready_one_kept_incomplete_offer_process_again() {
         let mut meeting = crate::testing::sample_data::meeting();

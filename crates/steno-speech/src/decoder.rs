@@ -1,19 +1,9 @@
-//! The greedy TDT decode of one encoder window, the one loop both backends
-//! run (plan invariant 4). Per frame the joint runs on the current
-//! projection; a blank advances by its duration (at least one frame); a
-//! token is emitted at the frame, fed to the prediction network, and
-//! advances by its duration, where a zero duration keeps the frame for up
-//! to `max_symbols_per_frame` symbols before a forced advance of one.
-//!
+//! The greedy TDT decode of one encoder window, the one loop both backends run.
+//! A blank advances by its duration (at least one frame); a token is emitted,
+//! fed to the prediction network and advances by its duration, where a zero
+//! duration keeps the frame for up to `max_symbols_per_frame` symbols.
 //! [`DecoderConfig::default`] is `NeMo`'s reference semantics
-//! (`GreedyTDTInfer`), which sherpa-onnx matched at 5.3 % WER in spike F;
-//! the ONNX and the `CoreML` backends both run it. Three of `FluidAudio`'s
-//! guards (two symbols a frame, 150 tokens a window, a token past the
-//! window's end dropped) changed nothing on FLEURS German and are not
-//! ported (A2 in `.plans/2026-10-07-stable-promotion.md`); its tail flush
-//! of the last window, not measured, is not ported either.
-//! Swift: `FluidAudio`'s `TdtDecoderV3`, ported in
-//! `spikes/coreml-rs/src/decoder.rs`.
+//! (`GreedyTDTInfer`).
 
 use crate::backend::{DecoderState, EncoderOutput, FRAME_SAMPLES, ModelShape, SpeechBackend};
 use crate::error::SpeechError;
@@ -22,14 +12,13 @@ use crate::error::SpeechError;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Token {
     pub id: u32,
-    /// The encoder frame (80 ms) the token was emitted at, counted from the
-    /// start of the recording.
+    /// The encoder frame (80 ms) the token was emitted at, from the start of
+    /// the recording.
     pub frame: usize,
-    /// Samples the window started past a frame boundary of the recording,
-    /// so the token's frame begins at sample `frame * FRAME_SAMPLES + phase`
-    /// ([`Token::sample`]). Below [`FRAME_SAMPLES`]; 0 on the grid. The
-    /// timings add it and the merge's monotonic pass orders by (frame,
-    /// phase); the merge's matching and the recovery count whole frames.
+    /// Samples the window started past a frame boundary, so the token's frame
+    /// begins at [`Token::sample`]. Below [`FRAME_SAMPLES`]; 0 on the grid. The
+    /// merge orders by (frame, phase); its matching and the recovery count
+    /// whole frames.
     pub phase: usize,
     /// The joint's probability for the piece ([`confidence`]).
     pub confidence: f32,
@@ -48,18 +37,16 @@ impl Token {
 /// Limits of the loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecoderConfig {
-    /// Symbols with duration zero allowed on one frame before the loop
-    /// moves on (`NeMo`'s `max_symbols`).
+    /// Zero-duration symbols allowed on one frame before the loop moves on
+    /// (`NeMo`'s `max_symbols`).
     pub max_symbols_per_frame: usize,
     /// Tokens per second of window, plus 16, beyond which the window is
-    /// abandoned as a runaway; the token that crosses the budget is kept.
-    /// German speech needs about ten.
+    /// abandoned as a runaway; the crossing token is kept.
     pub tokens_per_second: usize,
 }
 
-/// `max_symbols_per_frame` is `NeMo`'s default `max_symbols` of 10; the
-/// token budget is this crate's own guard, sized so a 60 s chunk of fast
-/// German (about ten tokens a second) is never cut.
+/// `max_symbols_per_frame` is `NeMo`'s default of 10; the token budget is sized
+/// so a 60 s chunk of fast German (about ten tokens a second) is never cut.
 impl Default for DecoderConfig {
     fn default() -> Self {
         DecoderConfig {
@@ -93,8 +80,8 @@ impl DecodeStats {
     }
 }
 
-/// The joint's probability as a confidence: non-finite values are zero,
-/// the rest clamped to `0..=1` (`TdtDurationMapping.clampProbability`).
+/// The joint's probability as a confidence: non-finite values are zero, the
+/// rest clamped to `0..=1`.
 #[must_use]
 pub fn confidence(probability: f32) -> f32 {
     // NaN passes through `clamp`.
@@ -105,8 +92,8 @@ pub fn confidence(probability: f32) -> f32 {
     }
 }
 
-/// Frames for the joint's duration bin `bin`; a bin outside the model's
-/// table is a shape error.
+/// Frames for duration bin `bin`; a bin outside the model's table is a shape
+/// error.
 fn duration(shape: &ModelShape, bin: usize) -> Result<usize, SpeechError> {
     shape.durations.get(bin).copied().ok_or_else(|| {
         SpeechError::Shape(format!(
@@ -116,12 +103,10 @@ fn duration(shape: &ModelShape, bin: usize) -> Result<usize, SpeechError> {
     })
 }
 
-/// Decodes `encoder` with a fresh prediction-network state, primed with
-/// the blank as start of sequence. `start_sample` is the window's first
-/// sample in the recording: token frames count from the frame it falls
-/// in, and the samples it lies past that frame's start are each token's
-/// [`Token::phase`], so a window off the frame grid times its tokens from
-/// where it really starts. A window abandoned at the token budget is
+/// Decodes `encoder` with a fresh prediction-network state, primed with the
+/// blank. `start_sample` is the window's first sample in the recording: token
+/// frames count from the frame it falls in, and its offset into that frame is
+/// each token's [`Token::phase`]. A window abandoned at the token budget is
 /// logged as a warning.
 pub fn decode_window<B: SpeechBackend + ?Sized>(
     backend: &mut B,
@@ -161,8 +146,8 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
             continue;
         }
         let frame = t;
-        // A zero duration holds the frame until the symbol limit forces
-        // an advance of one.
+        // A zero duration holds the frame until the symbol limit forces an
+        // advance of one.
         let advance = if duration == 0 && symbols_here + 1 < config.max_symbols_per_frame {
             0
         } else {
@@ -199,9 +184,8 @@ mod tests {
     use super::*;
     use crate::backend::{DecoderStep, Features, JointDecision};
 
-    /// A backend driven by a script of joint decisions, in call order; the
-    /// decoder step records what it was fed and the state it was fed with,
-    /// and returns that state with every `h` one higher.
+    /// A backend driven by a script of joint decisions; the decoder step
+    /// records what it was fed and returns the state with every `h` one higher.
     struct ScriptedBackend {
         shape: ModelShape,
         script: std::collections::VecDeque<JointDecision>,
@@ -334,8 +318,8 @@ mod tests {
         assert_eq!(tokens[2].sample(), start + 4 * FRAME_SAMPLES);
         // SOS priming, then one feed per token.
         assert_eq!(backend.fed, vec![9, 1, 2, 3]);
-        // Priming starts from zeros of `layers * hidden`; each feed takes
-        // the state the step before it returned.
+        // Priming starts from zeros; each feed takes the state the step before
+        // returned.
         assert_eq!(
             backend
                 .states
@@ -358,8 +342,7 @@ mod tests {
             ..DecoderConfig::default()
         };
         let (tokens, _) = decode_with(&mut backend, &encoder(2), &config).unwrap();
-        // Three on frame 0, three on frame 1, then the window ends; each
-        // records the predicted duration zero, the forced advance included.
+        // Three on frame 0, three on frame 1, then the window ends.
         assert_eq!(
             tokens
                 .iter()
@@ -431,9 +414,8 @@ mod tests {
 
     #[test]
     fn a_frame_width_the_joint_does_not_take_is_a_shape_error() {
-        // Two-wide frames for a joint that takes one: slicing by the model's
-        // width would read past the data, by the frames' width the joint
-        // would get the wrong input.
+        // Two-wide frames for a joint that takes one: the frames' width, not
+        // the model's, must slice the data.
         let mut backend = ScriptedBackend::new(&[]);
         let wide = EncoderOutput {
             hidden: 2,

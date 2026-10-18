@@ -10,9 +10,9 @@ the UI ships.
 The three speech settings (`SpeechSettings` in `crates/steno-speech/src/runtime.rs`) live
 only in `speech.json` in the support directory, which nothing writes, and the bridge has no
 field for them, so the Settings window shows none. `steno-services` reads the file once at
-launch (`steno_services::speech::speech_settings`); the speech-stack plan
-(`.plans/2026-10-01-cross-platform-speech-stack.md`, decisions 4 and 5, gate G4) says what
-each does:
+launch (`steno_services::speech::speech_settings`). The speech-stack decisions (CoreML on
+the Mac with the ONNX sidecar as a fallback, a configurable models host, DirectML behind
+gate G4) give each its job:
 
 | Setting | What it does | Platform |
 |---|---|---|

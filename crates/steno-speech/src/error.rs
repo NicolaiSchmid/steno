@@ -1,8 +1,5 @@
-//! [`SpeechError`], the crate's one error type, and [`SidecarError`], its
-//! cause when the speech sidecar fails. Every boundary method of the
-//! engines returns it through `?` as a `BoxError`, so the pipeline prints
-//! it as text.
-//! Swift: `StenoSpeechError` in `Sources/StenoSpeech/StenoSpeech.swift`.
+//! [`SpeechError`], the crate's one error type, and [`SidecarError`], its cause
+//! when the speech sidecar fails.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,8 +12,7 @@ pub enum SpeechError {
     /// ONNX Runtime refused a model, an input or a run.
     #[error("ONNX Runtime: {0}")]
     Runtime(#[from] ort::Error),
-    /// ONNX Runtime refused a session option (the builder error carries
-    /// the builder for recovery, so it is reported as text).
+    /// ONNX Runtime refused a session option, reported as text.
     #[error("ONNX Runtime session options: {0}")]
     SessionOptions(String),
     /// A file could not be read, written, renamed or removed.
@@ -34,8 +30,8 @@ pub enum SpeechError {
         directory: PathBuf,
         missing: Vec<String>,
     },
-    /// A missing file has no source in the manifest and no mirror is set
-    /// (no asset Steno ships); it has to be put in place by hand.
+    /// A missing file has no source in the manifest and no mirror is set; it
+    /// has to be put in place by hand.
     #[error(
         "model {asset} has no download location; put its files in {}",
         directory.display()
@@ -66,9 +62,7 @@ pub enum SpeechError {
         expected: String,
         actual: String,
     },
-    /// An asset id in a manifest is not one plain path component, or a
-    /// file name is not plain components joined by `/`, so joining it to
-    /// the root could escape it.
+    /// An asset id or file name in a manifest that could escape the root.
     #[error("model asset {asset}: {name:?} is not a plain file or directory name")]
     InvalidName { asset: String, name: String },
     /// `tokens.txt` is not the sherpa-onnx `piece id` list in id order.
@@ -77,8 +71,8 @@ pub enum SpeechError {
     /// A model's inputs, outputs or metadata do not fit the export contract.
     #[error("model shape: {0}")]
     Shape(String),
-    /// The blocking worker thread that runs inference ended without a
-    /// result (a panic or a runtime shutdown).
+    /// The blocking worker thread ended without a result (a panic or a runtime
+    /// shutdown).
     #[error("the speech worker thread stopped: {0}")]
     Worker(String),
     /// `transcribe` before `prepare` succeeded.
@@ -87,22 +81,17 @@ pub enum SpeechError {
     /// A WAV file is not 16 kHz PCM-16.
     #[error("{}: {detail}", path.display())]
     Wav { path: PathBuf, detail: String },
-    /// The speech sidecar failed: unless the child reported the error
-    /// itself ([`SidecarError::reported_by_the_child`]) or nothing was sent
-    /// ([`SidecarError::NotUtf8`]), no child is left running, and the next
-    /// call starts a fresh one.
+    /// The speech sidecar failed; unless the child reported the error itself or
+    /// nothing was sent, no child is left running.
     #[error("speech sidecar: {0}")]
     Sidecar(#[from] SidecarError),
-    /// A backend outside this crate failed (the `CoreML` one); its own
-    /// error says how.
+    /// A backend outside this crate failed (the `CoreML` one).
     #[error(transparent)]
     Backend(Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// How the speech sidecar failed. Every error but one the child reported
-/// itself ([`SidecarError::reported_by_the_child`]) or
-/// [`SidecarError::NotUtf8`] leaves the parent without a child: the next
-/// `prepare`, `transcribe` or `diarize` spawns and loads again.
+/// How the speech sidecar failed. Every error but one the child reported itself
+/// or [`SidecarError::NotUtf8`] leaves the parent without a child.
 #[derive(Debug, Error)]
 pub enum SidecarError {
     /// The binary could not be started.
@@ -112,17 +101,15 @@ pub enum SidecarError {
         #[source]
         source: std::io::Error,
     },
-    /// A pipe to or from the child failed, or a thread that supervises it
-    /// could not start.
+    /// A pipe to or from the child failed, or a supervising thread could not
+    /// start.
     #[error("a pipe to or from the child: {0}")]
     Pipe(#[source] std::io::Error),
-    /// The child sent bytes the protocol does not define, answered with
-    /// the wrong message or spoke another protocol version; it was killed.
+    /// The child broke the protocol or spoke another version; it was killed.
     #[error("protocol violation, the child was killed: {0}")]
     Protocol(String),
-    /// The child died before answering, at start or mid-request: an abort
-    /// out of ONNX Runtime, a panic, a signal, an exit, a library it could
-    /// not load. `stderr` is the last lines it wrote.
+    /// The child died before answering: an abort out of ONNX Runtime, a panic,
+    /// a signal, an exit. `stderr` is the last lines it wrote.
     #[error("the child died before answering ({status}){}", if stderr.is_empty() { String::new() } else { format!(": {stderr}") })]
     Crashed { status: String, stderr: String },
     /// The child did not answer within the request's limit and was killed.
@@ -133,28 +120,23 @@ pub enum SidecarError {
         "the child used {rss_bytes} bytes, over the {ceiling_bytes} byte ceiling, and was killed"
     )]
     MemoryCeiling { rss_bytes: u64, ceiling_bytes: u64 },
-    /// The child reported an error of its own (models that failed to load,
-    /// a run ONNX Runtime refused) and keeps running.
+    /// The child reported an error of its own and keeps running.
     #[error("{0}")]
     Remote(String),
-    /// The child failed while it loaded the diarizer's models, as the
-    /// inner error says: it refused a file ONNX Runtime cannot load
-    /// ([`SidecarError::Remote`], and it keeps running), or it died, hung,
-    /// broke the protocol or overran the ceiling there and was killed (a
-    /// file that makes ONNX Runtime abort, say). Told apart from a failed
-    /// diarization, so the caller can check the files.
+    /// The child failed while it loaded the diarizer's models: it refused a
+    /// file ([`SidecarError::Remote`], and keeps running), or it died, hung,
+    /// broke the protocol or overran the ceiling and was killed. Told apart
+    /// from a failed diarization, so the caller can check the files.
     #[error("the diarizer's models did not load: {0}")]
     DiarizerLoad(Box<SidecarError>),
-    /// A path the protocol's JSON carries (the models root, a diarizer
-    /// model file) is not valid UTF-8; nothing was sent to a child.
+    /// A path the protocol carries is not valid UTF-8; nothing was sent.
     #[error("the model path {} is not valid UTF-8, which the protocol cannot carry", path.display())]
     NotUtf8 { path: PathBuf },
 }
 
 impl SidecarError {
     /// Whether the child reported the error itself and still runs:
-    /// [`SidecarError::Remote`], also inside a
-    /// [`SidecarError::DiarizerLoad`].
+    /// [`SidecarError::Remote`], also inside a [`SidecarError::DiarizerLoad`].
     #[must_use]
     pub fn reported_by_the_child(&self) -> bool {
         match self {

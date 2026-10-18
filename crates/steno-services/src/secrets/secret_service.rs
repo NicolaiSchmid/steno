@@ -1,20 +1,8 @@
-//! The Secret Service (`org.freedesktop.secrets`) on the session bus: the
-//! keyring GNOME Keyring, `KWallet` and `KeePassXC` serve on Linux. A small
-//! client over `zbus`, which the desktop shell already links, so the store
-//! adds no crate, no C library and no second async runtime crate.
-//! No Swift counterpart (the Swift app is macOS-only); the label follows
-//! `KeychainSecretStore.swift`.
-//!
-//! The secret crosses the bus in the `plain` algorithm. The session bus is
-//! a socket only the user's own processes reach, and reading another
-//! client's messages on it (`dbus-monitor`, `BecomeMonitor`) takes that same
-//! user, who can read Steno's memory and files anyway, so the `dh-ietf1024`
-//! exchange would add a cipher and a key exchange without keeping the
-//! secret from anyone who could not already read it. The bus is local; no
-//! secret leaves the computer. A session bus whose address is not a
-//! `unix:` socket (`tcp:` in some remote or container setups would carry
-//! the secret in clear) is not used: every secret then stays with the file,
-//! or, once the file is marked, is unavailable for the run.
+//! The Secret Service (`org.freedesktop.secrets`) on the session bus, a
+//! small client over `zbus`. The secret crosses the bus in the `plain`
+//! algorithm: only the user's own processes reach the session bus, and
+//! they can read Steno's memory anyway. A bus that is not a `unix:` socket
+//! is never used, so no secret leaves the computer.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,66 +31,31 @@ use crate::handover::FingerprintFile;
 /// [`FileSecretStore`] it wraps, or, once the file is marked, the secrets
 /// unavailable for the run; `STENO_<KEY>` wins either way.
 ///
-/// The choice is made once, on a thread of the store's own that starts
-/// when the store is made, and logged: the store connects, opens a
-/// session, finds the default collection and unlocks it and Steno's items
-/// in it (the provider may ask the user). The connection and the session
-/// get two seconds together, as a bus that takes the connection and never
-/// answers is under no other deadline. No bus, no provider, no answer in
-/// those two seconds, no default collection, or an unlock the user
-/// declines or leaves unanswered leaves every secret of this process with
-/// the file, never some here and some there; once the file is marked,
-/// they are unavailable for the run instead (a key the file lacks is an
-/// error, never `None`). A call made while the choice runs waits for it,
-/// except while the provider's prompt is on screen: then it fails at once
-/// with [`KeyringUnavailable::Unlocking`], so no read (the app's start on
-/// the main thread, the host under its lock, a window's close) waits on
-/// the user. [`SecretServiceStore::unlocked_after_prompt`] says when to
-/// read again.
+/// The choice is made once, on the store's own thread, and logged: the
+/// store connects (two seconds for the connection and the session), finds
+/// the default collection and unlocks it and Steno's items (the provider
+/// may ask the user). Any failure leaves every secret of this process with
+/// the file. A call during the choice waits for it, except while the
+/// provider's prompt is on screen: then it fails at once with
+/// [`KeyringUnavailable::Unlocking`], so no read waits on the user;
+/// [`SecretServiceStore::unlocked_after_prompt`] says when to read again.
+/// After the choice only a write asks the user.
 ///
-/// After the choice only a write asks the user, as a write is something
-/// the user did: a read of a collection or an item that is locked again
-/// fails with [`KeyringUnavailable::Locked`] and dismisses the provider's
-/// prompt unseen. A bus error, or a provider that stops answering, fails a
-/// call the same way, so the user reads the keyring's sentence, not the
-/// bus's (the log keeps the bus's). A write waits for the answer, up to
-/// two minutes; the host saves under its lock, so a keyring locked again
-/// while the app runs holds every window and the tray until the user
-/// answers the prompt Settings' save raised.
+/// On choosing the service the first time, the store copies the file's
+/// entries into it, reads each back, and marks the file as moved, keeping
+/// the entries: providers may hold a new item only in memory for a while,
+/// so the entries go only on a later launch that reads every value back.
+/// At that first move the API key takes the file's value; the handover
+/// identity keeps the service's (phones pinned one), and the file's
+/// fingerprint is recorded first so the handover reports the service's as
+/// replaced (`pin_file_identity`). After the marker a write drops that
+/// key's copy from the file at once.
 ///
-/// On choosing the service the first time, the store copies what the file
-/// holds into it, reads each value back, and then marks the file as moved
-/// ([`FileSecretStore`] says what the marker does), keeping the entries: a
-/// provider may hold a new item only in memory for a while (`KWallet` and
-/// `KeePassXC` save on their own schedule), so the entries go only on a
-/// later launch whose own connection reads every value back. A value the
-/// provider lost by then is written again. A failure before the marker is
-/// written keeps the file for this process.
-///
-/// A key both hold at the first move: the API key takes the file's value,
-/// as only this app writes either store and a file entry is then from
-/// before the move or from a run that could not open the keyring (and is
-/// the newer value; a removal there leaves an empty value, which removes
-/// the item). The handover identity keeps the service's: an identity is
-/// never replaced, as the phones pinned one of them, and the file's stays
-/// in the file until an identity is stored, or for the user to take by
-/// hand. As this computer's phones paired with the file's identity, its
-/// fingerprint is recorded first when none is ([`FingerprintFile`]), so the
-/// handover reports the service's as replaced instead of adopting it,
-/// unless every paired phone predates the file's identity
-/// (`pin_file_identity`).
-/// After the marker the service wins for every key, and a write through
-/// the store drops that key's copy from the file at once, so a removal or
-/// a change in the launch that moved the entries is never undone by the
-/// copy.
-///
-/// Items are filed under the attributes `service` ([`KEYRING_SERVICE`])
-/// and `username` (the key's raw value), the names the `keyring` crate
-/// uses, labelled `Steno <key>` for the keyring's window. Where several
-/// items match a key (another tool wrote one), the store reads the one
-/// with the lowest object path and a write removes the others. A value
-/// with a line break (the handover identity's PEM) is stored on one line,
-/// base64 behind `steno-base64:`.
+/// Items are filed under `service` ([`KEYRING_SERVICE`]) and `username`
+/// (the key's raw value), as the `keyring` crate files them. Where several
+/// match a key, the lowest object path is read and a write removes the
+/// others. A value with a line break is stored base64 behind
+/// `steno-base64:`.
 pub struct SecretServiceStore {
     shared: Arc<Shared>,
 }
@@ -111,14 +64,13 @@ struct Shared {
     file: FileSecretStore,
     /// Where the handover identity's fingerprint is recorded.
     record: FingerprintFile,
-    /// The database the paired phones are read from when the move pins
-    /// the file's identity.
+    /// The database the paired phones are read from when the move pins the
+    /// file's identity.
     phones: Option<Arc<Store>>,
     /// How long a prompt may stay unanswered.
     prompt_timeout: Duration,
     backend: OnceLock<Backend>,
-    /// Whether the file carries the move's marker, for a choice of the
-    /// file: the secrets are then in the keyring.
+    /// Whether the file carries the move's marker.
     marked: AtomicBool,
     phase: watch::Sender<Phase>,
     /// Whether a call failed with [`KeyringUnavailable::Unlocking`]; set
@@ -155,22 +107,16 @@ enum Backend {
 /// How long a D-Bus call may take, libdbus's default.
 const CALL_TIMEOUT: Duration = Duration::from_secs(25);
 /// How long the connection and its first call (the session) may take
-/// together. The method timeout does not cover the connection's set-up
-/// (the SASL handshake and the bus's `Hello`), so a bus that takes the
-/// connection and never answers would hold the choice, and every call
-/// waiting on it, for good. A provider the bus starts on that first call
-/// and that needs longer leaves the run without the keyring; the next
-/// start finds it running.
+/// together: the method timeout does not cover the connection's set-up, so
+/// a bus that never answers would hold the choice for good.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long the store waits for the user to answer the provider's prompt.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl SecretServiceStore {
-    /// The Secret Service on `bus` (the session bus in the app), falling
-    /// back to `file`, with the handover identity's fingerprint in `record`
-    /// and the paired phones in `phones` (the app's database; `None` where
-    /// there is none, which the move reads as phones it cannot read); the
-    /// choice starts now, on the store's own thread.
+    /// The Secret Service on `bus`, falling back to `file`, with the handover
+    /// identity's fingerprint in `record` and the paired phones in `phones`;
+    /// the choice starts now, on the store's own thread.
     #[must_use]
     pub(super) fn new(
         file: FileSecretStore,
@@ -243,15 +189,10 @@ impl SecretServiceStore {
         SecretServiceStore { shared }
     }
 
-    /// Resolves once the choice is made, the service or the file, whether
-    /// or not anything was unlocked: true when a call failed with
-    /// [`KeyringUnavailable::Unlocking`] on the way, so now is the moment
-    /// to make it again.
-    ///
-    /// Every prompt of the choice counts, whether the provider shows a
-    /// window or not (`KeePassXC` answers every `CreateItem` with a prompt
-    /// that may show nothing, and the Secret Service API does not say
-    /// which); a call is turned away only while one is open.
+    /// Resolves once the choice is made: true when a call failed with
+    /// [`KeyringUnavailable::Unlocking`] on the way, so now is the moment to
+    /// make it again. Every prompt counts, shown or not (`KeePassXC` may show
+    /// nothing).
     pub fn unlocked_after_prompt(&self) -> SecretsUnlocked {
         let mut phase = self.shared.phase.subscribe();
         Box::pin(async move {
@@ -265,10 +206,9 @@ impl SecretServiceStore {
         })
     }
 
-    /// The chosen backend, waiting for the choice unless it waits on the
-    /// user. The backend is set before the phase turns `Chosen`; a call
-    /// turned away is noted under the phase's lock, so the choice either
-    /// is made before this look or hears of it.
+    /// The chosen backend, waiting for the choice unless it waits on the user.
+    /// A call turned away is noted under the phase's lock, so the choice
+    /// either is made before this look or hears of it.
     async fn backend(&self) -> Result<&Backend, KeyringUnavailable> {
         let mut phase = self.shared.phase.subscribe();
         let _ = phase.wait_for(|phase| *phase != Phase::Choosing).await;
@@ -335,9 +275,8 @@ impl Shared {
         });
     }
 
-    /// The backend `choose` gives, or the file when it panics (inside
-    /// `zbus` or `serde`), so the choice still settles and no call waits
-    /// for it for good.
+    /// The backend `choose` gives, or the file when it panics, so the choice
+    /// still settles.
     fn or_file_on_panic(&self, choose: impl FnOnce(&Self) -> Backend) -> Backend {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| choose(self))).unwrap_or_else(
             |_| {
@@ -350,8 +289,7 @@ impl Shared {
         )
     }
 
-    /// Where the secrets are when the choice falls back to the file, for
-    /// the log.
+    /// Where the secrets are when the choice falls back to the file.
     fn fallback_note(&self) -> &'static str {
         if self.file.read().is_ok_and(|contents| contents.moved) {
             "the secrets stay in the keyring, unavailable this run"
@@ -446,11 +384,8 @@ impl Shared {
 
 #[async_trait]
 impl SecretStore for SecretServiceStore {
-    /// Never asks the user. A read of the service has one deadline over
-    /// all its calls, as long as one D-Bus call may take (25 s), so a
-    /// provider that stops answering holds a caller (the host under its
-    /// lock) that long once, not once per call; the read then fails as a
-    /// locked keyring.
+    /// Never asks the user. One deadline of one D-Bus call (25 s) over all of
+    /// a read's calls; a read that times out fails as a locked keyring.
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
         if let Some(value) = self.shared.file.environment_value(key) {
             return Ok(Some(value.to_owned()));
@@ -466,17 +401,13 @@ impl SecretStore for SecretServiceStore {
         }
     }
 
-    /// `None` and an empty value remove the item, as the keyring store
-    /// does; the file keeps an empty value, so the next move removes the
-    /// item too. May ask the user to unlock.
+    /// `None` and an empty value remove the item; the file keeps an empty
+    /// value, so the next move removes the item too. May ask the user.
     ///
-    /// A write to the service drops the key's copy the move left in the
-    /// file: the service holds the newer value, and a later launch would
-    /// otherwise write the old one back over a removal, or read it in a run
-    /// that cannot open the keyring. A removal drops the copy first, so a
-    /// crash between the two cannot bring the key back; a write drops it
-    /// after the service holds the value, as the copy may be the only one
-    /// the provider has saved.
+    /// A write drops the key's copy the move left in the file, so a later
+    /// launch never writes the old one back. A removal drops the copy first;
+    /// a write drops it after the service holds the value, as the copy may be
+    /// the only one the provider saved.
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
         match self.backend().await? {
             Backend::Service(keyring) => {
@@ -502,8 +433,7 @@ impl SecretStore for SecretServiceStore {
         }
     }
 
-    /// `None` until the choice is made. A marked file says the keyring:
-    /// the secrets moved there, though this run could not open it.
+    /// `None` until the choice is made. A marked file says the keyring.
     fn place(&self) -> Option<SecretPlace> {
         match self.shared.backend.get()? {
             Backend::Service(_) => Some(SecretPlace::Keyring),
@@ -570,11 +500,9 @@ struct Keyring {
     collection: CollectionProxy<'static>,
 }
 
-/// What a value with a line break is stored behind, base64 after it.
-/// GNOME Keyring's unencrypted keyring file (Omarchy's default, which
-/// unlocks without a password) keeps each secret on one `secret=` line, and
-/// a line break in a value makes the daemon reject the whole file at its
-/// next start, every app's secrets with it.
+/// What a value with a line break is stored behind, base64 after it:
+/// GNOME Keyring's unencrypted keyring file keeps each secret on one line,
+/// and a line break makes the daemon reject the whole file.
 const ONE_LINE_PREFIX: &str = "steno-base64:";
 
 /// `value` as it is stored: itself, or base64 behind [`ONE_LINE_PREFIX`]
@@ -648,8 +576,7 @@ impl Keyring {
     }
 
     /// The first move: copies every entry of `contents` into the service,
-    /// reads each back, then marks the file; how many it copied. The
-    /// entries stay in the file until a later launch ([`Keyring::tidy`]).
+    /// reads each back, then marks the file; how many it copied.
     async fn take_over(
         &self,
         file: &FileSecretStore,
@@ -684,10 +611,9 @@ impl Keyring {
         Ok(copied)
     }
 
-    /// A later launch: removes each file entry this connection reads back
-    /// from the service, writes again the ones the provider lost, and drops
-    /// an API key the service has since replaced; how many it removed. A
-    /// handover identity that differs stays in both.
+    /// A later launch: removes each file entry read back from the service,
+    /// writes again the ones the provider lost, and drops an API key the
+    /// service replaced; how many it removed.
     async fn tidy(
         &self,
         file: &FileSecretStore,
@@ -779,10 +705,8 @@ impl Keyring {
             .collection
             .create_item(properties, &secret, true)
             .await?;
-        // A create that needs a prompt answers "no object" and names the
-        // item in the prompt's result (`KeePassXC` always does, and updates
-        // the item it replaces in place). An item not named either way
-        // may be any of `items`, so none is deleted.
+        // A create that needs a prompt names the item in the prompt's result. An
+        // item not named either way may be any of `items`, so none is deleted.
         let completed = self.complete(prompt, ask).await?;
         let Some(created) = [Some(created), completed]
             .into_iter()
@@ -831,9 +755,8 @@ impl Keyring {
         self.complete(prompt, ask).await.map(drop)
     }
 
-    /// Shows `prompt` (unless it is none) and waits for the user's answer,
-    /// or dismisses it unseen when the call may not ask; the object the
-    /// answer names, when it names one (a created item).
+    /// Shows `prompt` and waits for the answer, or dismisses it unseen when
+    /// the call may not ask; the object the answer names, if any.
     async fn complete(
         &self,
         prompt: OwnedObjectPath,
@@ -871,23 +794,11 @@ impl Keyring {
 }
 
 /// Records the fingerprint of the file's identity, `pem`, where the
-/// handover identity's decision ([`decision::decide`], as the move) pins
-/// it over the phones paired in `phones` (none: phones it cannot read),
-/// judged at `now`. This computer's phones paired with the file's
-/// identity, so the handover's load then finds the service's replaced
-/// instead of adopting it; where no phone can know the file's identity it
-/// records nothing, and the load judges the service's by the same rule.
-///
-/// Its record drops the note of an unfinished Pair again. The move runs
-/// inside the first Secret Service choice, which settles before the
-/// handover's first read, so the only window in which it can meet a note
-/// is a Pair again chosen while the move's unlock prompt is up. That Pair
-/// again's write is refused because the keyring is unlocking, and the next
-/// read waits as replaced (the pinned fingerprint against the service's
-/// identity); it never mints. A note written over a pin that landed
-/// between the note's read and its write leaves the note with nothing
-/// recorded beside the service's identity, which reads as unknown and
-/// waits as replaced too.
+/// handover identity's decision ([`decision::decide`]) pins it over the
+/// phones paired in `phones`, judged at `now`, so the handover's load finds
+/// the service's identity replaced instead of adopting it. Where no phone
+/// can know the file's identity it records nothing. A Pair again racing the
+/// move waits as replaced; it never mints.
 fn pin_file_identity(
     record: &FingerprintFile,
     pem: &str,
@@ -938,10 +849,8 @@ fn pin_file_identity(
 }
 
 /// A call's failure after the choice as the user reads it: a bus error or
-/// a provider that stopped answering reads as a locked keyring, in the
-/// keyring's sentence; the bus's goes to the log. A collection that left
-/// the bus between two calls (`KeePassXC` removes a locked database's,
-/// with its items) is one such error, a provider that quit another.
+/// a provider that stopped answering reads as a locked keyring; the bus's
+/// error goes to the log.
 fn as_locked(error: ServiceError) -> ServiceError {
     match error {
         ServiceError::Bus(_) | ServiceError::NoAnswer => {
@@ -959,13 +868,9 @@ struct Connected {
     session: OwnedObjectPath,
 }
 
-/// [`connect`] on a thread of its own, waited for `patience` at most:
-/// [`ServiceError::NoAnswer`] after that, which the choice takes as a
-/// keyring it could not open. The thread holds the bus's address and its
-/// socket only, no lock and nothing of the store's, so one the bus never
-/// answers waits there alone until the process ends, and an answer that
-/// comes later reaches no one: the connection it built closes with the
-/// thread.
+/// [`connect`] on a thread of its own, waited for `patience` at most, then
+/// [`ServiceError::NoAnswer`]. The thread holds nothing of the store's, so
+/// one the bus never answers waits there alone.
 async fn connect_within(bus: Bus, patience: Duration) -> Result<Connected, ServiceError> {
     let deadline = Instant::now() + patience;
     let (done, outcome) = tokio::sync::oneshot::channel();
@@ -986,9 +891,8 @@ async fn connect_within(bus: Bus, patience: Duration) -> Result<Connected, Servi
         })
 }
 
-/// Connects to `bus` and opens a `plain` session. A bus that takes the
-/// connection only after `deadline` is not asked for a session: the
-/// choice stopped waiting then.
+/// Connects to `bus` and opens a `plain` session, unless the connection
+/// came after `deadline`.
 async fn connect(bus: &Bus, deadline: Instant) -> Result<Connected, ServiceError> {
     let builder = match bus {
         Bus::Session => zbus::connection::Builder::session()?,
@@ -1007,9 +911,8 @@ async fn connect(bus: &Bus, deadline: Instant) -> Result<Connected, ServiceError
     })
 }
 
-/// Whether the session bus at `address` (`DBUS_SESSION_BUS_ADDRESS`) is
-/// local. Unset or not Unicode, `zbus` uses the socket in
-/// `XDG_RUNTIME_DIR`, which is.
+/// Whether the session bus at `address` is local. Unset, `zbus` uses the
+/// socket in `XDG_RUNTIME_DIR`, which is.
 fn session_is_local(address: Result<String, std::env::VarError>) -> bool {
     address.map_or(true, |address| local_bus(&address))
 }

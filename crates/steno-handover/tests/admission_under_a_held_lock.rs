@@ -1,14 +1,6 @@
 //! A phone admission while another connection holds the database's write
-//! lock, through the real `RecordingIntake` behind the real handover
-//! service (`.plans/2026-10-12-store-off-the-workers.md`, "The phone
-//! admission runs to its end" in the facade's as-built). `complete` never
-//! answers 200 unless the meeting is durable, since the phone then deletes
-//! its copy; a refusal leaves no meeting row, no ledger row and no copy
-//! unless it is noted for the launch, and the phone's retry once the lock
-//! goes admits the recording exactly once. An admission whose request is
-//! dropped (a phone that hung up mid-admit) still commits, is enqueued
-//! once, keeps its `completing` mark until it ends, and the retry is
-//! answered from it.
+//! lock, through the real `RecordingIntake`: `complete` answers 200 only for
+//! a durable meeting, and the retry or a dropped admission admits once.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -35,34 +27,21 @@ use uuid::Uuid;
 
 const CHUNK_SIZE: i64 = 128 * 1024;
 
-/// How long a test waits before it fails as hung, as steno-audio's
-/// `HANG_GUARD`: every wait here ends once a busy timeout or two ran out.
+/// How long a test waits before it fails as hung.
 const HANG_GUARD: Duration = Duration::from_secs(120);
 
-/// How long an admission may take to end once the test lets the lock go:
-/// a loose two busy timeouts, so an admission that never ends (its task
-/// not spawned, and the request dropped) fails here rather than at
-/// [`HANG_GUARD`].
+/// How long an admission may take to end once the lock goes.
 const AFTER_THE_LOCK: Duration = Duration::from_secs(10);
 
-/// One answer that must not wait on the lock, as `LIVE` in steno-services'
-/// testing module: a fifth of the five-second busy timeout a wait on the
-/// lock runs out, and loose enough for a loaded machine.
+/// One answer that must not wait on the lock: a fifth of the busy timeout.
 const LIVE: Duration = Duration::from_secs(1);
 
-/// How long [`complete_with_the_commit_under_the_lock`] holds the lock from
-/// the admission's copy on: two busy timeouts, past the commit's one
-/// however far the host's sleeps overshoot it (SQLite's busy handler
-/// counts the sleeps it asked for, and each Windows `Sleep` ends on a
-/// 15.6 ms tick, so five seconds take about 5.6), well inside the `failed`
-/// save's tries ([`RecordingIntake::FAILED_SAVE_ATTEMPTS`] back-offs and
-/// busy timeouts after the commit), and the answer still inside the test
-/// phone's 15-second request timeout.
+/// How long [`complete_with_the_commit_under_the_lock`] holds the lock: two
+/// busy timeouts, past the commit's one even on Windows' 15.6 ms ticks.
 const PAST_THE_COMMIT: Duration = Duration::from_secs(10);
 
-/// The admission folders the intake noted and not yet settled. With
-/// [`Noted::lock_at_the_next_copy`], the next `copying` takes the write
-/// lock from another connection, so the admission's commit meets it.
+/// The admission folders the intake noted and not yet settled; with
+/// [`Noted::lock_at_the_next_copy`], the next `copying` takes the write lock.
 #[derive(Default)]
 struct Noted {
     folders: Mutex<BTreeMap<Uuid, PathBuf>>,
@@ -116,8 +95,7 @@ impl Noted {
     }
 }
 
-/// A file store with an audio folder, the intake's noted folders and its
-/// enqueue count.
+/// A file store with an audio folder, the noted folders and an enqueue count.
 struct World {
     dir: tempfile::TempDir,
     path: PathBuf,
@@ -157,7 +135,6 @@ impl World {
         .noting_folders_in(self.noted.clone())
     }
 
-    /// The handover service over this world's store and intake.
     async fn service(&self, start: bool) -> TestService {
         TestService::with(Options {
             chunk_size: CHUNK_SIZE,
@@ -181,7 +158,6 @@ impl World {
             .unwrap()
     }
 
-    /// Every file under the audio folder.
     fn audio_files(&self) -> Vec<PathBuf> {
         fn walk(dir: &Path, into: &mut Vec<PathBuf>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
@@ -208,8 +184,7 @@ impl World {
             .map(|receipt| receipt.state.kind())
     }
 
-    /// The lock held from another connection, let go after `hold` on a
-    /// thread of its own.
+    /// The lock held from another connection, let go after `hold`.
     fn hold_for(&self, hold: Duration) -> std::thread::JoinHandle<()> {
         let lock = WriteLockHold::new(&self.path);
         std::thread::spawn(move || {
@@ -218,7 +193,6 @@ impl World {
         })
     }
 
-    /// How many meetings the intake enqueued.
     fn enqueues(&self) -> usize {
         self.enqueued.load(Ordering::SeqCst)
     }
@@ -230,9 +204,8 @@ impl World {
         assert_eq!(self.enqueues(), 1, "enqueued once");
     }
 
-    /// Drops `call`, an admission, once its copy took the write lock from
-    /// another connection, so its commit waits on the lock until
-    /// [`Noted::release`].
+    /// Drops `call`, an admission, once its copy took the write lock, so its
+    /// commit waits until [`Noted::release`].
     async fn dropped_at_the_copy<T: std::fmt::Debug>(&self, call: impl Future<Output = T>) {
         self.noted.lock_at_the_next_copy(&self.path);
         let mut call = pin!(call);
@@ -242,8 +215,7 @@ impl World {
         }
     }
 
-    /// Waits until the intake enqueued `count` meetings, once the lock
-    /// went.
+    /// Waits until the intake enqueued `count` meetings once the lock went.
     async fn until_enqueued(&self, count: usize) {
         let deadline = Instant::now() + AFTER_THE_LOCK;
         while self.enqueues() < count {
@@ -263,9 +235,7 @@ async fn bounded<T>(what: &str, call: impl Future<Output = T>) -> T {
         .unwrap_or_else(|_| panic!("{what} within {HANG_GUARD:?}"))
 }
 
-/// A paired phone uploads, then `complete` runs while the lock is held
-/// for `hold`; returns the world, the service, the phone, the recording's
-/// metadata and the first answer's status.
+/// `complete` of a paired phone's upload while the lock is held for `hold`.
 async fn complete_under(
     hold: Duration,
 ) -> (
@@ -296,10 +266,8 @@ async fn complete_under(
     (world, test, phone, metadata, first.status)
 }
 
-/// A paired phone uploads, then `complete` runs with the lock taken at the
-/// admission's copy and let go [`PAST_THE_COMMIT`] later, so the commit
-/// runs out its busy timeout whatever the request, the verify and the
-/// copy took. Returns as [`complete_under`] does.
+/// As [`complete_under`], with the lock held from the copy until
+/// [`PAST_THE_COMMIT`] later.
 async fn complete_with_the_commit_under_the_lock() -> (
     World,
     TestService,
@@ -335,9 +303,8 @@ async fn complete_with_the_commit_under_the_lock() -> (
     (world, test, phone, metadata, first.status)
 }
 
-/// The phone's retry and a replay once the lock went: one meeting, one
-/// ledger row, one enqueue, an announce answered `complete`, and no copy
-/// on the disk that no meeting owns unless it is noted for the launch.
+/// The retry and a replay once the lock went admit once, and no unowned,
+/// unnoted copy is left.
 async fn the_retry_admits_once(
     world: &World,
     test: &TestService,
@@ -375,10 +342,8 @@ async fn the_retry_admits_once(
     );
 }
 
-/// A seven-second hold: the `verifying` write runs out one busy timeout,
-/// then the admission commits once the lock goes, so the phone gets a 200
-/// with a durable meeting, one ledger row and one copy, and a replay
-/// answers the same meeting.
+/// A seven-second hold: the `verifying` write times out once, then the
+/// admission commits and the phone gets a 200.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_complete_under_a_seven_second_hold_answers_with_a_durable_meeting() {
     let (world, test, phone, metadata, status) = complete_under(Duration::from_secs(7)).await;
@@ -398,12 +363,8 @@ async fn a_complete_under_a_seven_second_hold_answers_with_a_durable_meeting() {
     the_retry_admits_once(&world, &test, &phone, &metadata).await;
 }
 
-/// The lock held from the admission's copy until past its commit
-/// ([`complete_with_the_commit_under_the_lock`]): the commit runs out its
-/// busy timeout, so the phone gets an error with no meeting, no ledger row
-/// and no copy; the `failed` save lands once the lock goes. The retry
-/// admits the recording exactly once. The `verifying` write under the lock
-/// is the seven-second hold's.
+/// The lock held past the commit: an error with no meeting, ledger row or
+/// copy; the retry admits exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_complete_whose_commit_meets_the_lock_fails_cleanly_and_its_retry_admits_once() {
     let (world, test, phone, metadata, status) = complete_with_the_commit_under_the_lock().await;
@@ -424,8 +385,7 @@ async fn a_complete_whose_commit_meets_the_lock_fails_cleanly_and_its_retry_admi
     the_retry_admits_once(&world, &test, &phone, &metadata).await;
 }
 
-/// A device paired in `world`'s store and a recording file for the intake
-/// alone.
+/// A device paired in `world`'s store and a recording file for the intake.
 fn upload(
     world: &World,
 ) -> (
@@ -456,10 +416,8 @@ fn upload(
     (device, metadata, file)
 }
 
-/// The intake alone, the lock held for `hold` from the moment `admit` is
-/// asked, so the admission's commit meets it: an error with no row, the
-/// upload kept, and no copy once the `failed` save landed; then a retry
-/// and a replay admit once.
+/// The intake alone with the lock held for `hold` from `admit` on: an error
+/// with no row or copy, then the retry and a replay admit once.
 async fn intake_alone(hold: Duration) {
     let world = world();
     let (device, metadata, file) = upload(&world);
@@ -492,17 +450,13 @@ async fn intake_alone(hold: Duration) {
     assert_eq!(world.audio_files().len(), 1, "one copy");
 }
 
-/// Seven seconds: the commit runs out its busy timeout, and the `failed`
-/// save lands once the lock goes.
+/// Seven seconds: the commit times out; the `failed` save lands after.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn the_intake_under_a_seven_second_hold_fails_cleanly_and_admits_once() {
     intake_alone(Duration::from_secs(7)).await;
 }
 
-/// Twelve seconds: the commit and the first `failed` save run out their
-/// busy timeouts; the save is tried again
-/// ([`RecordingIntake::FAILED_SAVE_ATTEMPTS`]) and lands once the lock
-/// goes, so the copy goes too.
+/// Twelve seconds: the first `failed` save times out too and is tried again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn the_intake_under_a_twelve_second_hold_tries_the_failed_save_again() {
     intake_alone(Duration::from_secs(12)).await;
@@ -527,10 +481,8 @@ async fn a_dropped_admit_still_commits_and_enqueues() {
     world.admitted_once();
 }
 
-/// A paired phone's two-chunk upload, whose `complete` is dropped once
-/// the admission's copy took the write lock: the admission waits on it
-/// until [`Noted::release`]. Returns the world, the service, the phone and
-/// the recording id.
+/// A two-chunk upload whose `complete` is dropped once the copy took the
+/// lock.
 async fn a_complete_dropped_at_the_copy() -> (World, TestService, EngineDevice, Uuid) {
     let world = world();
     let test = world.service(false).await;
@@ -543,11 +495,8 @@ async fn a_complete_dropped_at_the_copy() -> (World, TestService, EngineDevice, 
     (world, test, phone, id)
 }
 
-/// The `completing` mark outlives a `complete` dropped mid-admit: while
-/// the admission still waits on the lock, the phone's retry gets the 409
-/// of a recording in flight at once, `verifying` with every chunk listed,
-/// so it backs off and uploads nothing, and no second admission starts
-/// (one noted copy). Once the lock goes, the admission ends as usual.
+/// The `completing` mark outlives a dropped `complete`: the retry gets the
+/// in-flight 409 at once and no second admission starts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retry_while_a_dropped_complete_still_admits_is_told_to_wait() {
     let (world, _test, phone, id) = a_complete_dropped_at_the_copy().await;
@@ -568,10 +517,8 @@ async fn a_retry_while_a_dropped_complete_still_admits_is_told_to_wait() {
     assert_eq!(world.noted.len(), 0, "the admission settled its copy");
 }
 
-/// A `complete` dropped mid-admit, as a phone that hangs up does: the
-/// admission commits once the lock goes, is enqueued once, and the
-/// receipt ends `complete`, so the phone's retry gets a 200 with that
-/// meeting, not a 409 that asks for the chunks again.
+/// A dropped `complete` commits once the lock goes, is enqueued once, and
+/// the retry gets a 200 with that meeting, not a 409.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_complete_dropped_mid_admit_leaves_its_meeting_and_the_retry_is_answered_from_it() {
     let (world, test, phone, id) = a_complete_dropped_at_the_copy().await;

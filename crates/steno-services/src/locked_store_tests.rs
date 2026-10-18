@@ -1,15 +1,7 @@
 //! What stays live while another process holds the database's write lock
-//! and a write of this process waits behind it: the checks of
-//! `.plans/2026-10-12-store-off-the-workers.md` ("Acceptance") that need
-//! the recorder, the host and the store together. Each holds the lock for
-//! [`HeldStore::HOLD`] from another connection, with a write of this
-//! process waiting out its busy timeout behind it ([`Waiting`]): a
-//! pipeline write, with a forced reload in flight as the reload owner runs
-//! one, which the host's own reader keeps from waiting; or, for checks 1
-//! and 2, a settings save, which waits with the view-model lock held. The
-//! `recording` feed and the recorder's hook take no host lock, so neither
-//! wait reaches them. "Live" is [`LIVE`]. Each runs on a runtime with one
-//! worker, so a wait on that worker would show too. Rust only.
+//! and a write of this process waits behind it, with the recorder, the host
+//! and the store together. "Live" is [`LIVE`]; each runs on a runtime with
+//! one worker, so a wait on that worker would show too.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,12 +19,10 @@ use crate::testing::{
 /// What waits behind the held lock in a check.
 #[derive(Debug, Clone, Copy)]
 enum Waiting {
-    /// A write of this process, as a pipeline write does, and a forced
-    /// reload in flight.
+    /// A pipeline write and a forced reload in flight.
     PipelineWrite,
-    /// A settings save, tried again whenever its busy timeout runs out,
-    /// which holds the host's view-model lock while it waits: the host's
-    /// writes keep that lock until the host actor.
+    /// A settings save, which holds the host's view-model lock while it
+    /// waits.
     SettingsSave,
 }
 
@@ -66,7 +56,7 @@ impl Waiting {
 }
 
 impl Wait {
-    /// Lets the lock go once [`HeldStore::HOLD`] has passed, and waits for
+    /// Lets the lock go once [`HeldStore::HOLD`] has passed and waits for
     /// what waited; returns when the lock went.
     fn release_after_hold(mut self) -> Instant {
         let released = self.held.release_after_hold();
@@ -85,10 +75,9 @@ fn levels_flow(sink: &crate::testing::TimedSink, since: Instant) {
     );
 }
 
-/// P40 check 1: while a pipeline write waits, and while a settings save
-/// waits with the view-model lock held, the level updates keep reaching
-/// the hook all through the hold, each `recorder_changed` returns live,
-/// and a `recording` snapshot reaches the sink within [`LIVE`] of it.
+/// While a pipeline write or a settings save waits, the level updates keep
+/// reaching the hook, each `recorder_changed` returns live, and a
+/// `recording` snapshot reaches the sink within [`LIVE`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn levels_keep_flowing_while_another_process_holds_the_write_lock() {
     let capture = synthetic_recorder();
@@ -101,7 +90,7 @@ async fn levels_keep_flowing_while_another_process_holds_the_write_lock() {
     capture.stop();
 }
 
-/// Check 1's assertions for one [`Waiting`].
+/// The level checks for one [`Waiting`].
 fn levels_flow_while(waiting: Waiting, capture: &SyntheticRecorder, hosted: &Hosted) {
     let wait = waiting.begin(capture, hosted);
     let since = Instant::now();
@@ -123,8 +112,8 @@ fn levels_flow_while(waiting: Waiting, capture: &SyntheticRecorder, hosted: &Hos
         "{waiting:?}: the levels kept calling the hook: {} calls",
         calls.len()
     );
-    // A hook stuck from before the hold began would leave the calls a
-    // gap instead: one begins within `LIVE` of the last all through it.
+    // A stuck hook would leave a gap: one call begins within `LIVE` of the
+    // last all through the hold.
     let mut last = since;
     for call in &calls {
         let gap = call.began.duration_since(last);
@@ -157,8 +146,7 @@ fn levels_flow_while(waiting: Waiting, capture: &SyntheticRecorder, hosted: &Hos
 }
 
 /// A recording whose input device changes `after` seconds into it, once
-/// `outages` lets the change go: the capture rebuilds on the new one and
-/// its notice thread calls the change hook.
+/// `outages` lets the change go.
 fn recording_whose_device_changes(after: f64, outages: &HeldOutages) -> SyntheticRecorder {
     let outages = outages.clone();
     synthetic_recorder_over(Arc::new(move |configuration| {
@@ -174,14 +162,10 @@ fn recording_whose_device_changes(after: f64, outages: &HeldOutages) -> Syntheti
     }))
 }
 
-/// P40 check 2: a device change while a pipeline write waits, and while a
-/// settings save waits with the view-model lock held, reaches the host
-/// through the notice thread's hook, which returns live each time, so the
-/// auto-stop's countdown, hidden while the capture recovers, is armed
-/// again at the capture's resume while the write still waits, within
-/// [`END_TO_END`] of the change's first notice: no notice waits for the
-/// host. The change is held until the countdown is armed and the write
-/// waits. A recording of its own per case, each with one device change.
+/// A device change while a write waits reaches the host through the notice
+/// thread's hook, which returns live, so the auto-stop's countdown is armed
+/// again at the capture's resume within [`END_TO_END`]: no notice waits for
+/// the host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_device_notice_reaches_the_host_while_a_write_waits() {
     for waiting in [Waiting::PipelineWrite, Waiting::SettingsSave] {
@@ -189,7 +173,7 @@ async fn a_device_notice_reaches_the_host_while_a_write_waits() {
     }
 }
 
-/// Check 2 for one [`Waiting`].
+/// The device change check for one [`Waiting`].
 fn a_device_notice_reaches_the_host_while(waiting: Waiting) {
     let outages = HeldOutages::default();
     let capture = recording_whose_device_changes(2.0, &outages);
@@ -247,14 +231,13 @@ fn a_device_notice_reaches_the_host_while(waiting: Waiting) {
     capture.stop();
 }
 
-/// P40 check 6, narrowed to the pipeline write's case: while the write
-/// waits, `meetings.select` and a Settings command, which reads the stored
-/// settings, answer live, and the detail they select reaches the sink.
+/// While a pipeline write waits, `meetings.select` and a Settings command
+/// answer live, and the selected detail reaches the sink.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_command_answers_while_a_write_waits() {
     let capture = synthetic_recorder();
-    // Two meetings: the first fill selects the newer, so selecting the
-    // older one moves the detail.
+    // The first fill selects the newer, so selecting the older moves the
+    // detail.
     let newer = steno_core::testing::sample_data::meeting();
     let mut meeting = newer.clone();
     meeting.id = uuid::Uuid::new_v4();

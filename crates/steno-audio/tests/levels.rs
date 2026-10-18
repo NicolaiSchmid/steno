@@ -1,15 +1,6 @@
-//! The level stream while the writer thread is stuck in a sync of the
-//! files: A20 of `.plans/2026-10-07-stable-promotion.md`. The writer syncs
-//! every 5 s of audio, and a sync can take seconds (`FlushFileBuffers` on
-//! Windows, a slow or external disk); the levels go out from a thread of
-//! their own, so the meter does not freeze meanwhile. The sync is held
-//! through [`HeldSyncs`] (behind `test-support`), so the test does not
-//! depend on how slow the disk is. Rust only: Swift syncs only at the
-//! close.
-//!
-//! A test binary of its own, so no other test shares the machine with the
-//! one claim here that reads wall time: how late a level reaches the
-//! consumer.
+//! The level stream keeps flowing while the writer thread is stuck in a
+//! file sync, held through [`HeldSyncs`]. A test binary of its own, since
+//! it reads wall time.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,15 +17,12 @@ use uuid::Uuid;
 const LEVEL_INTERVAL: Duration = Duration::from_millis(100);
 /// How late against that cadence a level may reach the consumer.
 const LATE: Duration = Duration::from_millis(100);
-/// How long the test watches the levels while the sync is held: ten
-/// levels' worth.
+/// How long the test watches the levels while the sync is held.
 const WATCHED: Duration = Duration::from_secs(1);
 
-/// While the writer's first sync is held, a level reaches the consumer at
-/// least every [`LEVEL_INTERVAL`] plus [`LATE`], each the live tone's, not
-/// a stale one; once the sync is let go the recording loses nothing.
-/// Publishing the levels from the writer thread again fails it: no level
-/// arrives while the sync is held.
+/// While the writer's sync is held, live levels still arrive at least every
+/// [`LEVEL_INTERVAL`] plus [`LATE`]; once released the recording loses
+/// nothing.
 #[test]
 fn levels_keep_reaching_the_consumer_while_the_writer_is_held_in_a_sync() {
     let directory = tempfile::tempdir().unwrap();
@@ -72,8 +60,7 @@ fn levels_keep_reaching_the_consumer_while_the_writer_is_held_in_a_sync() {
             arrivals.push((Instant::now(), level));
         }
     }
-    // Let go before any assertion, so a failure does not leave the stop
-    // waiting for the writer thread.
+    // Let go before any assertion, so a failure does not hang the stop.
     held.release();
     let result = session.stop().unwrap();
 

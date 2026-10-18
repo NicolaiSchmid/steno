@@ -1,34 +1,9 @@
-//! `SidecarSpeechEngine` against the real `steno-speech-sidecar` binary:
-//! the protocol round trip, health and graceful shutdown, installing the
-//! models, and every way the child can fail. During a request (killed,
-//! aborting the way an uncaught C++ exception does, panicking, panicking
-//! after a flood of stderr, exiting, failing to send its reply, hanging
-//! past the deadline, allocating past the memory ceiling, writing garbage,
-//! reporting an error) or at start (staying silent, speaking another
-//! protocol version), each failure must come back as an error from the
-//! engine. Between requests (killed, over the ceiling), the next call
-//! replaces the child without an error. None may take the test process
-//! down, and the engine must work on the next call. Dropping the engine
-//! stops its child, inside a runtime or not. Driven by hand, without the
-//! client, a child must greet first, exit when its parent's pipes close,
-//! idle or busy, with status 2 on a request it cannot read, and on unix
-//! answer a request that SIGINT, SIGTERM and SIGHUP reach mid-request (on
-//! Linux, ignore them before it writes its ready message).
-//!
-//! Nothing here ends a child with `DirectML` in use. Such an end during a
-//! load or a request switches `DirectML` off for the rest of the process's
-//! run, so those tests run in binaries of their own (`directml_switch_off.rs`,
-//! `directml_probe_crash.rs`, `directml_lost_encoder.rs`); so do the tests
-//! of a child on `DirectML` that ends between requests
-//! (`directml_idle_death.rs`, `directml_idle_overrun.rs`), so that a
-//! regression there cannot switch it off here.
-//!
-//! The fake engine needs no models; the last test, ignored by default,
-//! runs the real one and fails unless `STENO_MODELS_DIR` holds them
-//! (`cargo test -p steno-speech-sidecar --release -- --ignored`). With
-//! `STENO_FLEURS_DIR` it also compares the sidecar's transcripts with the
-//! in-process engine's, on a FLEURS clip and on a crafted quiet tail
-//! (`steno-speech`'s `tests/common/crafted.rs`, included by path).
+//! `SidecarSpeechEngine` against the real `steno-speech-sidecar` binary: the
+//! protocol round trip, health, shutdown, installing the models, and every way
+//! the child can fail, during a request, at start or between requests. No
+//! failure may take the test process down, and the engine must work on the next
+//! call. Tests that end a child with `DirectML` in use run in binaries of their
+//! own, since that switches `DirectML` off for the rest of the process.
 
 #![allow(
     clippy::cast_precision_loss,
@@ -64,8 +39,7 @@ fn gone_soon(pid: u32) -> bool {
     within_ten_seconds(|| (!alive(pid)).then_some(())).is_some()
 }
 
-/// The pid the `--fault-once` marker in `dir` holds, once the faulting
-/// child has written it.
+/// The pid the `--fault-once` marker in `dir` holds, once written.
 fn faulted(dir: &tempfile::TempDir) -> Option<u32> {
     std::fs::read_to_string(dir.path().join("faulted"))
         .ok()?
@@ -73,8 +47,7 @@ fn faulted(dir: &tempfile::TempDir) -> Option<u32> {
         .ok()
 }
 
-/// [`faulted`] for a child that must have written its marker by now; the
-/// test fails saying which child never did.
+/// [`faulted`] for a child that must have written its marker by now.
 fn faulted_child(dir: &tempfile::TempDir, which: &str) -> u32 {
     faulted(dir).unwrap_or_else(|| {
         panic!(
@@ -96,10 +69,8 @@ fn spawn_by_hand(args: &[&str]) -> Child {
     command.spawn().unwrap()
 }
 
-/// Has `command`'s child start with SIGINT, SIGTERM and SIGHUP at their
-/// default action, so the signal tests check the child's own ignore, not
-/// one inherited from a test process run under `nohup` or as a background
-/// job. Unix only.
+/// Has `command`'s child start with SIGINT, SIGTERM and SIGHUP at their default
+/// action, so the signal tests check the child's own ignore. Unix only.
 fn default_exit_signals(command: &mut Command) {
     #[cfg(unix)]
     {
@@ -120,8 +91,8 @@ fn default_exit_signals(command: &mut Command) {
     let _ = command;
 }
 
-/// Reads past the heartbeats to the child's next other message. A child
-/// that sends none fails the test, not hangs it.
+/// Reads past the heartbeats to the child's next other message; none fails the
+/// test rather than hangs it.
 fn next_reply(stdout: &mut BufReader<ChildStdout>) -> Reply {
     for _ in 0..100 {
         match protocol::read_header::<_, Reply>(stdout).unwrap().unwrap() {
@@ -151,7 +122,7 @@ fn stderr_of(child: &mut Child) -> String {
 }
 
 /// Waits up to ten seconds for `child` to exit; kills it and panics with
-/// `message` if it does not.
+/// `message` otherwise.
 fn exit_status(child: &mut Child, message: &str) -> ExitStatus {
     within_ten_seconds(|| child.try_wait().unwrap()).unwrap_or_else(|| {
         let _ = child.kill();
@@ -209,10 +180,8 @@ async fn requests_round_trip_the_audio_bit_for_bit_in_one_child() {
     assert_eq!(engine.health().await.unwrap(), None);
 }
 
-/// The `DirectML` request crosses to the child with the load on Windows,
-/// and the provider it answers with comes back in the health report; the
-/// fake engine answers `DirectML` whenever it is asked, as if the probe
-/// passed. Elsewhere the client asks for the CPU whatever the options say.
+/// The `DirectML` request crosses to the child on Windows and the answered
+/// provider shows in the health report; elsewhere the client asks for the CPU.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_directml_request_reaches_the_child_on_windows_and_its_provider_comes_back() {
     for (directml, expected) in [(false, EncoderProvider::Cpu), (true, ASKED_FOR_DIRECTML)] {
@@ -226,8 +195,8 @@ async fn the_directml_request_reaches_the_child_on_windows_and_its_provider_come
     }
 }
 
-/// A child whose encoder leaves `DirectML` after it loaded says so in its
-/// next answers, and the health report follows.
+/// A child whose encoder leaves `DirectML` after loading says so in its next
+/// answers.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_provider_follows_a_fallback_after_the_load() {
     let (engine, _dir) = engine_with_fault("fallback", |c| c.options.directml = true);
@@ -238,13 +207,9 @@ async fn the_provider_follows_a_fallback_after_the_load() {
     assert_eq!(engine.spawns(), 1);
 }
 
-/// The transcript carries the provider too: a child that fell back to
-/// the CPU mid-job and then dies, before any health request, ended on the
-/// CPU, so the next child is asked for `DirectML` again. The death is
-/// found by a health request, which counts it as one during a request
-/// (`prepare` and `transcribe` would replace the child on `DirectML`
-/// whatever its provider). The crash report holds the child's line about
-/// the fallback, written once though two answers followed it.
+/// A child that fell back to the CPU mid-job and then dies ended on the CPU, so
+/// the next child is asked for `DirectML` again. The crash report holds the
+/// fallback line, written once.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_dies_after_falling_back_to_the_cpu_leaves_directml_on() {
     let (engine, _dir) = engine_with_fault("fallback", |c| c.options.directml = true);
@@ -264,8 +229,8 @@ async fn a_child_that_dies_after_falling_back_to_the_cpu_leaves_directml_on() {
     assert!(!directml_switched_off());
 }
 
-/// Driven by hand: the line about the fallback goes to stderr once,
-/// though every answer after it reports the CPU.
+/// Driven by hand: the fallback line goes to stderr once, though every later
+/// answer reports the CPU.
 #[test]
 fn a_child_says_once_that_its_encoder_fell_back_to_the_cpu() {
     let mut child = spawn_by_hand(&["--fake-engine", "--fault", "fallback"]);
@@ -294,9 +259,8 @@ fn a_child_says_once_that_its_encoder_fell_back_to_the_cpu() {
     assert_eq!(stderr.matches(FALLBACK_NOTICE).count(), 1, "{stderr}");
 }
 
-/// An error the child reports and a release are no reason to give up on
-/// `DirectML`: the next child is asked for it again. (A child on the CPU
-/// that crashes does not count either; the client's unit tests show it.)
+/// A reported error and a release do not count against `DirectML`: the next
+/// child is asked for it again.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_error_or_a_release_leaves_directml_on() {
     let (engine, _dir) = engine_with_fault("error", |c| c.options.directml = true);
@@ -313,9 +277,8 @@ async fn an_error_or_a_release_leaves_directml_on() {
     assert!(!directml_switched_off());
 }
 
-/// A child that dies inside a load on the CPU is a crash, with no second
-/// child within the call: only a load that asked for `DirectML` is the
-/// probe's to retry. The next call starts a child that loads.
+/// A child that dies inside a load on the CPU is a crash, with no second child
+/// within the call; only a `DirectML` load is the probe's to retry.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_crash_inside_a_load_on_the_cpu_is_not_retried_within_the_call() {
     let (engine, _dir) = engine_with_fault("abort-on-load", |_| {});
@@ -346,8 +309,7 @@ async fn a_child_killed_mid_request_is_an_error_and_the_next_call_recovers() {
                 .map_err(|e| e.to_string())
         })
     };
-    // The request is in flight once the child has read it and written its
-    // marker (a blocking wait: the runtime has other workers).
+    // The request is in flight once the child has written its marker.
     assert_eq!(within_ten_seconds(|| faulted(&dir)), Some(pid));
     assert!(!running.is_finished());
     assert!(kill(pid));
@@ -396,8 +358,7 @@ async fn a_panic_or_an_exit_is_a_crash_with_the_child_s_last_words() {
     .await;
 }
 
-/// A panicking child named a crash log folder writes its own crash log
-/// there, beside what its stderr gives the parent.
+/// A panicking child named a crash log folder writes its crash log there.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panicking_child_leaves_a_crash_log_in_the_folder_it_was_given() {
     let logs = tempfile::tempdir().unwrap();
@@ -426,9 +387,9 @@ async fn a_panicking_child_leaves_a_crash_log_in_the_folder_it_was_given() {
     );
 }
 
-/// A crash report waits for the end of stderr, not only for the exit: a
-/// process the child left behind holds stderr and writes a line 300 ms
-/// after the child exited, and the report still holds it.
+/// A crash report waits for the end of stderr, not only the exit: a leftover
+/// process writes a line 300 ms after the child exited, and the report holds
+/// it.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_crash_report_waits_for_stderr_a_process_left_behind_still_holds() {
@@ -445,8 +406,7 @@ async fn a_crash_report_waits_for_stderr_a_process_left_behind_still_holds() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_flood_of_stderr_leaves_a_crash_report_of_bounded_size() {
-    // 1 MiB without a newline, then the panic: the report keeps the panic
-    // and at most 20 pieces of 4 KiB.
+    // The report keeps the panic and at most 20 pieces of 4 KiB.
     let (engine, _dir) = engine_with_fault("flood", |_| {});
     assert_recovers(&engine, |error| {
         let SidecarError::Crashed { stderr, .. } = error else {
@@ -461,7 +421,7 @@ async fn a_flood_of_stderr_leaves_a_crash_report_of_bounded_size() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_hangs_is_killed_at_the_deadline() {
     // The floor also bounds the recovery call, a fresh child's first
-    // transcription, so it leaves a busy runner room.
+    // transcription.
     let (engine, _dir) = engine_with_fault("hang", |c| {
         c.transcribe_timeout_floor = Duration::from_secs(2);
     });
@@ -496,9 +456,8 @@ async fn a_child_over_the_memory_ceiling_is_killed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn garbage_on_stdout_is_a_protocol_violation() {
-    // The garbage claims a 16 MiB header; the parent refuses it at the
-    // first byte, a protocol violation, instead of waiting out the 30 s
-    // deadline for the rest, which would be a timeout.
+    // The garbage claims a 16 MiB header; the parent refuses it at the first
+    // byte instead of waiting out the deadline.
     let (engine, _dir) = engine_with_fault("garbage", |_| {});
     assert_recovers(&engine, |error| {
         assert!(
@@ -545,9 +504,8 @@ async fn a_child_of_another_protocol_version_is_refused() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_never_greets_is_killed_when_its_start_times_out() {
-    // It reads nothing, so a closed stdin does not end it: only the kill
-    // when the client drops the failed start does. The timeout leaves a
-    // slow start on a busy runner time to write its marker.
+    // It reads nothing, so only the kill when the client drops the failed start
+    // ends it.
     let (engine, dir) = engine_with_fault("silent", |c| {
         c.startup_timeout = Duration::from_secs(20);
     });
@@ -556,8 +514,8 @@ async fn a_child_that_never_greets_is_killed_when_its_start_times_out() {
         matches!(sidecar_error(error.as_ref()), SidecarError::Timeout { .. }),
         "{error}"
     );
-    // A child that has not started within the 20 s start timeout is
-    // killed before it writes its marker: then this says so.
+    // A child that has not started within the start timeout is killed before it
+    // writes its marker.
     let silent = faulted_child(&dir, "silent");
     if !gone_soon(silent) {
         kill(silent);
@@ -588,8 +546,8 @@ fn dropping_the_engine_stops_its_child_inside_a_runtime_or_not() {
 
 #[test]
 fn a_busy_child_exits_when_its_parent_goes_away() {
-    // Driven by hand: the child hangs inside a transcription, so it never
-    // reads the closed stdin; its next heartbeat finds stdout gone.
+    // Driven by hand: the child hangs inside a transcription; its next
+    // heartbeat finds stdout gone.
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("faulted");
     let mut child = spawn_by_hand(&[
@@ -629,9 +587,8 @@ fn a_busy_child_exits_when_its_parent_goes_away() {
 fn the_signals_that_end_the_app_leave_a_request_in_the_child_answered() {
     use std::io::Write as _;
 
-    // Driven by hand: the child has half of a request's audio, so it is
-    // inside the request when the signals arrive, as Ctrl-C, a closed
-    // terminal or systemd deliver them to the app's child too.
+    // Driven by hand: the child has half of a request's audio, so it is inside
+    // the request when the signals arrive.
     let mut child = spawn_by_hand(&["--fake-engine", "--heartbeat-ms", "20"]);
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
@@ -696,8 +653,8 @@ fn the_exit_signals_are_ignored_before_the_ready_message_is_written() {
             .map_or(0, |mask| u64::from_str_radix(mask.trim(), 16).unwrap())
     }
 
-    // A full stdout pipe holds the child inside its ready write; by then
-    // it must ignore the signals, and they must not end it.
+    // A full stdout pipe holds the child inside its ready write; by then it
+    // must ignore the signals.
     let (reader, writer) = std::io::pipe().unwrap();
     let fd = writer.as_raw_fd();
     let chunk = [0u8; 4096];
@@ -764,9 +721,8 @@ fn the_exit_signals_are_ignored_before_the_ready_message_is_written() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_real_engine_reports_missing_models_and_keeps_running() {
-    // No `--fake-engine`: the child tries the store and says what is
-    // missing; it downloads nothing (the client installs nothing either,
-    // with no assets).
+    // No `--fake-engine`: the child says what is missing in the store and
+    // downloads nothing.
     let dir = tempfile::tempdir().unwrap();
     let mut config = SidecarConfig::new(binary());
     config.heartbeat = Duration::from_millis(20);
@@ -789,9 +745,8 @@ async fn the_real_engine_reports_missing_models_and_keeps_running() {
 
 #[test]
 fn the_child_greets_and_exits_when_its_parent_goes_away() {
-    // Driven by hand, without the client: a closed stdin is a dead parent.
-    // The ready message comes first, even before a heartbeat 1 ms apart,
-    // and from a child that waits 200 ms before it greets.
+    // Driven by hand: a closed stdin is a dead parent. The ready message comes
+    // first, even before a 1 ms heartbeat and from a child that greets late.
     let faults: [&[&str]; 2] = [&[], &["--fault", "slow-start"]];
     for fault in faults {
         let args = [&["--fake-engine", "--heartbeat-ms", "1"][..], fault].concat();
@@ -814,8 +769,7 @@ fn the_child_greets_and_exits_when_its_parent_goes_away() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_died_while_idle_is_replaced_without_an_error() {
-    // Killed between jobs (by the system for memory, say): the next call
-    // starts a new child instead of failing on the dead one.
+    // Killed between jobs: the next call starts a new child instead of failing.
     let dir = tempfile::tempdir().unwrap();
     let engine = engine_in(&dir, config(&[]));
     engine.prepare().await.unwrap();
@@ -827,14 +781,14 @@ async fn a_child_that_died_while_idle_is_replaced_without_an_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_over_the_ceiling_while_idle_is_replaced_without_an_error() {
-    // It answers, then reports a resident set over the ceiling. The next
-    // call starts a new child instead of handing the request to it.
+    // It answers, then reports a resident set over the ceiling; the next call
+    // starts a new child.
     let (engine, _dir) = engine_with_fault("swell", |_| {});
     engine.prepare().await.unwrap();
     let pid = engine.pid().unwrap();
     assert_works(&engine, &tone(0.5)).await;
-    // The report is queued while no request runs, so the next call finds
-    // it before it sends one.
+    // The report is queued while idle, so the next call finds it before it
+    // sends one.
     assert!(
         fault_queued_soon(&engine),
         "the reader never queued the report over the ceiling"
@@ -846,10 +800,9 @@ async fn a_child_over_the_ceiling_while_idle_is_replaced_without_an_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reply_the_child_cannot_send_is_a_crash_that_says_why() {
-    // A transcript over the frame limit: the child says so on stderr and
-    // exits with status 2 rather than leave the parent waiting.
-    // The deadline is not what this test checks: debug serialization of
-    // the transcript takes seconds on a loaded machine.
+    // A transcript over the frame limit: the child says so on stderr and exits
+    // with status 2. The deadline is generous: debug serialization takes
+    // seconds on a loaded machine.
     let (engine, _dir) = engine_with_fault("oversize", |c| {
         c.transcribe_timeout_floor = Duration::from_secs(300);
     });
@@ -865,10 +818,8 @@ async fn a_reply_the_child_cannot_send_is_a_crash_that_says_why() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_heartbeat_does_not_hold_back_the_answers() {
-    // Every frame is flushed as it is written: with a heartbeat an hour
-    // apart, nothing else would push the ready message and the replies
-    // out of the child's stdout buffer before the deadlines (60 s to
-    // start, 30 s for the health request).
+    // Every frame is flushed as it is written: with a heartbeat an hour apart,
+    // nothing else would push the replies out before the deadlines.
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(&[]);
     config.heartbeat = Duration::from_secs(3600);
@@ -881,8 +832,8 @@ async fn a_slow_heartbeat_does_not_hold_back_the_answers() {
 
 #[test]
 fn a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2() {
-    // A header that is no frame, then audio cut short by a closed stdin.
-    // stdout stays open, so a heartbeat cannot end the child first.
+    // A header that is no frame, then audio cut short by a closed stdin; stdout
+    // stays open.
     type Write = fn(&mut std::process::ChildStdin);
     let cases: [(&str, Write); 2] = [
         ("unreadable request", |stdin| {
@@ -923,9 +874,8 @@ fn a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2() {
     assert_eq!(status.code(), Some(2), "without stderr: {status}");
 }
 
-/// Serves `body` to every connection; the one numbered `slow` (from 0)
-/// gets its headers at once, says so on the returned receiver, and gets
-/// the body once the returned sender fires.
+/// Serves `body` to every connection; the one numbered `slow` gets its headers
+/// at once, says so on the receiver, and its body once the sender fires.
 fn serve_model(body: Vec<u8>, slow: usize) -> (String, mpsc::Receiver<()>, mpsc::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/model.onnx", listener.local_addr().unwrap());
@@ -996,8 +946,8 @@ async fn the_engine_installs_its_models_on_first_use_and_outside_its_lock() {
     // A transcription without `prepare` installs them too.
     assert_works(&engine, &tone(0.2)).await;
     assert!(store.is_installed(&asset));
-    // Gone while the child runs: `prepare` fetches the file again, and
-    // the running child answers while that download is held.
+    // Gone while the child runs: `prepare` fetches it again, and the child
+    // answers while that download is held.
     std::fs::remove_file(store.directory(&asset).join("model.onnx")).unwrap();
     let preparing = {
         let engine = Arc::clone(&engine);
@@ -1006,8 +956,8 @@ async fn the_engine_installs_its_models_on_first_use_and_outside_its_lock() {
     asked
         .recv_timeout(Duration::from_secs(30))
         .expect("prepare did not download");
-    // The download cannot end before the release below, so a health
-    // answer now did not wait for it.
+    // The download cannot end before the release, so a health answer now did
+    // not wait for it.
     let health = engine.health().await.unwrap().unwrap();
     assert!(!preparing.is_finished());
     assert!(health.loaded);
@@ -1051,11 +1001,8 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
             .unwrap()
             .is_empty()
     );
-    // With FLEURS at hand: the sidecar's transcript is the in-process
-    // engine's, segment for segment, so the sidecar runs the engine's
-    // settings: on a FLEURS clip, whose first chunk starts at the
-    // recording's start, and on a quiet tail only the tail's windows
-    // decode.
+    // With FLEURS at hand: the sidecar's transcript matches the in-process
+    // engine's, segment for segment, on a FLEURS clip and on a quiet tail.
     if let Some(dir) = std::env::var_os("STENO_FLEURS_DIR").map(std::path::PathBuf::from) {
         let clip = dir.join("cat/fleurs-de-cat-01.wav");
         assert!(clip.is_file(), "STENO_FLEURS_DIR has no {}", clip.display());

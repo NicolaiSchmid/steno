@@ -1,15 +1,7 @@
 //! The partial file of one recording: chunks land at `index * chunk_size`,
-//! so the file is sparse until the last chunk arrives and the phone may
-//! send chunks in any order or twice. Whole-file hashing streams in 1 MiB
-//! reads.
-//!
-//! Every chunk write and the hash run on the blocking pool, never on the
-//! engine's task: a chunk's fsync or the hash of a 4 GiB file would
-//! otherwise hold every other request, including the auth gate of
-//! unrelated connections and `/v1/hello`. Opening the partial and reading
-//! its `Identity` are single metadata calls and stay on the task.
-//! `Identity` tells the file a verify hashed from one created again at its
-//! path. Swift: `Upload/ReceivingFile.swift`.
+//! so the file is sparse until complete and chunks may come in any order or
+//! twice. Chunk writes and the hash run on the blocking pool, so an fsync or
+//! a 4 GiB hash never holds other requests.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -23,8 +15,7 @@ use crate::pinning::constant_time_equals;
 pub const READ_BLOCK: usize = 1024 * 1024;
 
 /// Creates an empty partial file, or opens an existing one without
-/// truncating it: two `begin`s that race never empty a partial that holds
-/// a chunk.
+/// truncating it, so racing `begin`s never empty a partial.
 pub fn create(path: &Path) -> std::io::Result<()> {
     OpenOptions::new()
         .create(true)
@@ -49,8 +40,8 @@ pub async fn write(
     .await
 }
 
-/// Whether `file`, streamed through SHA-256 from its current position (the
-/// start of a freshly opened file), hashes to `expected`.
+/// Whether `file`, streamed through SHA-256 from its current position,
+/// hashes to `expected`.
 pub async fn hash_matches(file: Arc<File>, expected: Vec<u8>) -> std::io::Result<bool> {
     off_task(move || {
         let mut file = &*file;
@@ -68,13 +59,10 @@ pub async fn hash_matches(file: Arc<File>, expected: Vec<u8>) -> std::io::Result
     .await
 }
 
-/// The volume and file number of a file. While a handle to a file is
-/// open, no other file gets its number, even after the file is unlinked:
-/// a path whose identity matches the identity of an open handle names
-/// that very file. The verify keeps the partial open from before the
-/// `verifying` write to the promote, so the file it hashed is the file it
-/// promotes. Swift: `ReceivingFile.Identity`, which relies on APFS never
-/// reusing a file number instead.
+/// The volume and file number of a file. While a handle to a file is open,
+/// no other file gets its number, even after the file is unlinked, so a
+/// path whose identity matches an open handle's names that very file. The
+/// verify keeps the partial open until the promote for that reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
     volume: u64,
@@ -104,9 +92,8 @@ impl Identity {
 
 #[cfg(windows)]
 impl Identity {
-    /// The identity of the open `file`: the 128-bit file id where the
-    /// file system keeps one, else the 64-bit file index. std's
-    /// `MetadataExt::file_index` is not stable yet.
+    /// The identity of the open `file`: the 128-bit file id where the file
+    /// system keeps one, else the 64-bit file index.
     #[allow(unsafe_code)]
     pub fn of(file: &File) -> std::io::Result<Identity> {
         use std::os::windows::io::AsRawHandle as _;
@@ -146,12 +133,10 @@ impl Identity {
         })
     }
 
-    /// The identity of the file at `path` now, through a handle open for
-    /// the call. std opens with delete sharing, so this short-lived handle
-    /// blocks no rename or delete of the file. A delete while the verify
-    /// holds the partial open may only be marked pending until it closes:
-    /// an announce in between gets a 500 and this call fails, so the verify
-    /// answers 409; no file is lost.
+    /// The identity of the file at `path` now, through a handle open for the
+    /// call. std opens with delete sharing, so this handle blocks no rename or
+    /// delete; a delete pending meanwhile makes this fail, and the verify
+    /// answers 409.
     pub fn at(path: &Path) -> std::io::Result<Identity> {
         Self::of(&File::open(path)?)
     }

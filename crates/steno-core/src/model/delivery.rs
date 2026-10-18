@@ -1,5 +1,4 @@
 //! Deliveries of a meeting to a destination and their receipts.
-//! Swift: `Sources/StenoCore/Model/Delivery.swift`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -82,8 +81,8 @@ impl<'de> Deserialize<'de> for DeliveryStatus {
     }
 }
 
-/// Per-destination delivery state of one meeting, one row per (meeting,
-/// destination); the id derives from the pair.
+/// Per-destination delivery state of one meeting; the id derives from the
+/// (meeting, destination) pair.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Delivery {
@@ -105,7 +104,6 @@ pub struct Delivery {
 }
 
 impl Delivery {
-    /// The one id of the (meeting, destination) pair.
     #[must_use]
     pub fn id_for(meeting_id: Uuid, destination_id: &str) -> Uuid {
         derived_uuid(meeting_id, &format!("delivery-{destination_id}"))
@@ -130,8 +128,8 @@ pub struct DeliveredFile {
     pub sha256: Vec<u8>,
 }
 
-/// What a destination wrote, passed back on re-delivery so it overwrites
-/// its own files and never touches anything else.
+/// What a destination wrote, passed back on re-delivery so it overwrites only
+/// its own files.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryReceipt {
@@ -141,13 +139,9 @@ pub struct DeliveryReceipt {
     pub folder: String,
     pub files: Vec<DeliveredFile>,
     pub renderer_version: i64,
-    /// What this delivery could not do as asked although it succeeded, in
-    /// words for the user: a note edited in the vault since the last
-    /// delivery is kept and the new version goes beside it, or the audio
-    /// was already removed. The meeting's export line and `steno deliver`
-    /// show them until the next delivery, which starts without any. Empty,
-    /// and absent from the JSON, when there is nothing to say, so a receipt
-    /// without warnings reads and encodes as Swift's. Swift: none.
+    /// What this delivery could not do as asked although it succeeded, in words
+    /// for the user, until the next delivery. Absent from the JSON when empty, so
+    /// the Swift app still decodes the receipt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }

@@ -1,10 +1,6 @@
-//! Capture: the backend seam, the session state machine over it and its
-//! level publisher, the stream layout, the device-change comparison, the
-//! two-stream plan (`split_streams`), the live backends (Core Audio,
-//! PipeWire, WASAPI), how loud their starts log while restarts go on
-//! (`start_log`) and the Mac's system audio permission probe
-//! (`permission`).
-//! Swift: `Sources/StenoAudio/Capture/`.
+//! Capture: the backend seam, the session state machine over it, the
+//! stream layout, the live backends (Core Audio, PipeWire, WASAPI) and the
+//! Mac's system audio permission probe.
 
 pub mod backend;
 pub mod configuration;

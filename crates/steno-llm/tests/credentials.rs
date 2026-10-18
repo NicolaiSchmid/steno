@@ -1,9 +1,6 @@
 //! The Codex credential store over a temporary home and a stub token
-//! endpoint: reading the CLI's file, the refresh windows, the atomic
-//! write-back that keeps unknown keys, the re-read on a reused token, the
-//! shared refresh for concurrent callers and the redaction of both tokens
-//! and the account id.
-//! Swift: `CodexCredentialStoreTests`, `CodexCredentialStoreConcurrencyTests`.
+//! endpoint: reading, refresh windows, atomic write-back, shared refresh
+//! and redaction.
 
 mod common;
 
@@ -197,7 +194,6 @@ async fn a_spent_refresh_token_means_sign_in_again() {
         "the refresh token never lands in an error"
     );
     assert!(error.to_string().contains("codex login"));
-    // The file is untouched by a failed refresh.
     assert_eq!(home.store().stored().unwrap().refresh_token, "rt_original");
 }
 
@@ -209,8 +205,7 @@ async fn a_reused_token_rereads_the_file_the_cli_may_have_rotated() {
     let file = home.file();
     home.server.respond(Arc::new(move |request| {
         if refresh_body(request)["refresh_token"] == "rt_original" {
-            // Simulate the CLI having refreshed in between: it wrote a new
-            // token.
+            // The CLI refreshed in between.
             write_auth(
                 &file,
                 AuthFile::default()
@@ -238,12 +233,10 @@ async fn a_transient_refresh_failure_is_not_a_sign_in_problem() {
     );
 }
 
-/// `CODEX_HOME` as given, else `~/.codex`.
 fn home_for(codex_home: Option<&str>) -> std::path::PathBuf {
     home_for_os(codex_home.map(OsStr::new))
 }
 
-/// [`home_for`] with a value that need not be Unicode.
 fn home_for_os(codex_home: Option<&OsStr>) -> std::path::PathBuf {
     CodexCredentialStore::default_home(|name| {
         assert_eq!(name, "CODEX_HOME");
@@ -258,8 +251,7 @@ fn default_home_honours_codex_home() {
         std::path::Path::new("/tmp/elsewhere")
     );
     assert_eq!(home_for(None).file_name().unwrap(), ".codex");
-    // A trailing slash, as a shell export often has, does not double up;
-    // an empty override is no override.
+    // A trailing slash does not double up; an empty override is no override.
     let slashed = home_for(Some("/tmp/elsewhere/"));
     assert_eq!(
         CodexCredentialStore::new(slashed).file_path(),
@@ -268,8 +260,7 @@ fn default_home_honours_codex_home() {
     assert_eq!(home_for(Some("")).file_name().unwrap(), ".codex");
 }
 
-/// A `CODEX_HOME` that is not Unicode (a Latin-1 byte on Unix, an
-/// unpaired surrogate on Windows) is the home as it is, not `~/.codex`.
+/// A non-Unicode `CODEX_HOME` is used as it is, not `~/.codex`.
 #[test]
 fn a_codex_home_that_is_not_unicode_is_used_as_it_is() {
     #[cfg(unix)]
@@ -299,7 +290,6 @@ async fn a_file_without_auth_mode_is_a_chatgpt_login() {
     let credentials = home.store().stored().unwrap();
     assert_eq!(credentials.account_id, "acct_stored");
     assert_eq!(credentials.email.as_deref(), Some("nicolai@example.com"));
-    // The mode is compared without regard to case.
     home.write(AuthFile {
         auth_mode: Some("ChatGPT".to_owned()),
         ..AuthFile::default()
@@ -319,8 +309,7 @@ async fn missing_or_empty_tokens_and_no_account_id_are_malformed() {
         home.store().stored().unwrap_err(),
         CodexCredentialError::Malformed("no account id".to_owned())
     );
-    // An id token without the account claim is as good as none, and an
-    // empty stored id does not shadow the claim.
+    // An id token without the account claim is as good as none.
     home.write(AuthFile {
         id: Some(JwtClaims::unsigned_token(&json!({"email": "a@b.c"}))),
         account_id: None,
@@ -362,9 +351,8 @@ async fn missing_or_empty_tokens_and_no_account_id_are_malformed() {
     assert_eq!(home.server.requests().len(), 0);
 }
 
-/// `needs_refresh` at its edges: no `last_refresh` (a file the CLI wrote
-/// at login and never refreshed) is not stale; exactly eight days is not
-/// stale; the token is refreshed strictly inside five minutes of `exp`.
+/// `needs_refresh` at its edges: no `last_refresh` and exactly eight days
+/// are not stale; refresh happens strictly inside five minutes of `exp`.
 #[tokio::test]
 async fn a_file_never_refreshed_is_not_stale_and_the_windows_are_exact() {
     let home = CodexHome::new().await;
@@ -404,7 +392,6 @@ async fn a_file_never_refreshed_is_not_stale_and_the_windows_are_exact() {
     assert_eq!(home.store().current().await.unwrap().refresh_token, "rt_2");
     assert_eq!(home.server.request_count(), 1);
 
-    // An already-expired token is refreshed too, not rejected.
     home.write(AuthFile::default().access(&CodexHome::access_token(-3_600, "plus")));
     home.server.enqueue([scripts.token_refresh(
         &CodexHome::access_token(3_600, "plus"),
@@ -414,9 +401,8 @@ async fn a_file_never_refreshed_is_not_stale_and_the_windows_are_exact() {
     assert_eq!(home.store().current().await.unwrap().refresh_token, "rt_3");
 }
 
-/// The token endpoint may answer without a rotated refresh token or id
-/// token: the old ones stay in the file. And a `CODEX_HOME` holds more
-/// than `auth.json`: the write-back leaves every other entry alone.
+/// A refresh answer without a rotated refresh or id token keeps the old
+/// ones, and the write-back leaves other entries in `CODEX_HOME` alone.
 #[tokio::test]
 async fn a_refresh_without_rotation_keeps_the_old_tokens_and_touches_only_auth_json() {
     let home = CodexHome::new().await;
@@ -450,14 +436,12 @@ async fn a_refresh_without_rotation_keeps_the_old_tokens_and_touches_only_auth_j
     assert_eq!(std::fs::read(&config).unwrap(), config_bytes);
     let session_entries = file_names(&sessions);
     assert_eq!(session_entries, ["rollout.jsonl"]);
-    // The next read sees the written file, so no second refresh.
     assert_eq!(home.store().current().await.unwrap(), credentials);
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// The token endpoint's other answers: a 401 without a known code is a dead
-/// sign-in, a 200 that is not JSON and a cut connection are transient, and
-/// none of them names the refresh token or changes the file.
+/// A 401 without a known code is a dead sign-in; a non-JSON 200 and a cut
+/// connection are transient; none names the token or changes the file.
 #[tokio::test]
 async fn other_token_endpoint_answers_are_classified_and_redacted() {
     let home = CodexHome::new().await;
@@ -490,7 +474,6 @@ async fn other_token_endpoint_answers_are_classified_and_redacted() {
     };
     assert!(!message.contains("rt_original"));
 
-    // A permanent code on an unexpected status is still permanent.
     home.server
         .enqueue([scripts.token_refresh_rejected("refresh_token_invalidated", 403)]);
     let invalidated = home.store().current().await.unwrap_err();
@@ -506,8 +489,7 @@ async fn other_token_endpoint_answers_are_classified_and_redacted() {
     assert_eq!(home.server.request_count(), 4);
 }
 
-/// A reused-token answer when the file has not changed is final: one
-/// re-read, no second request.
+/// A reused-token answer over an unchanged file is final after one re-read.
 #[tokio::test]
 async fn a_reused_token_with_an_unchanged_file_is_final() {
     let home = CodexHome::new().await;
@@ -537,8 +519,7 @@ fn jwt_claims_decode_base64url_without_padding() {
     assert_eq!(JwtClaims::email(&profile).as_deref(), Some("p@q.r"));
 }
 
-/// Two chunks arriving while the token is inside its window must not both
-/// spend the same refresh token; the real endpoint rejects the second.
+/// Two concurrent callers inside the window spend the refresh token once.
 #[tokio::test]
 async fn concurrent_callers_share_one_refresh() {
     let home = CodexHome::new().await;
@@ -563,7 +544,6 @@ async fn concurrent_callers_share_one_refresh() {
     assert_eq!(b, c);
     assert_eq!(a.refresh_token, "rt_2");
     assert_eq!(home.server.request_count(), 1);
-    // Once done, the next caller reads the file and needs nothing.
     assert_eq!(
         store.current().await.unwrap().access_token,
         CodexHome::access_token(3_600, "plus")
@@ -571,8 +551,8 @@ async fn concurrent_callers_share_one_refresh() {
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// `codex logout` during the round trip removes the file; the write-back
-/// must not recreate it with the new tokens.
+/// `codex logout` during the round trip: the write-back does not recreate
+/// the file.
 #[tokio::test]
 async fn a_sign_out_during_the_refresh_is_not_undone_by_the_write_back() {
     let home = CodexHome::new().await;
@@ -591,10 +571,8 @@ async fn a_sign_out_during_the_refresh_is_not_undone_by_the_write_back() {
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// A file that does not parse during the round trip (the CLI half way
-/// through writing it) is not written over: the call answers with the new
-/// tokens and keeps them, and once the file holds the posted token again
-/// the next call writes them and posts nothing.
+/// A file that does not parse during the round trip is not written over;
+/// the tokens are kept and written once the file holds the posted token.
 #[tokio::test]
 async fn a_file_half_written_during_the_refresh_gets_the_new_sign_in_without_being_written() {
     let home = CodexHome::new().await;
@@ -621,9 +599,8 @@ async fn a_file_half_written_during_the_refresh_gets_the_new_sign_in_without_bei
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// A login during the round trip that holds another refresh token wins
-/// even when it holds no sign-in Steno can use (here no account id): it is
-/// left as it is, and the new tokens are dropped.
+/// A login during the round trip with another refresh token wins, even
+/// without a usable sign-in.
 #[tokio::test]
 async fn a_login_steno_cannot_use_during_the_refresh_is_left_alone() {
     let home = CodexHome::new().await;
@@ -651,10 +628,8 @@ async fn a_login_steno_cannot_use_during_the_refresh_is_left_alone() {
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// Once the endpoint has turned a refresh token down for good, the callers
-/// that waited for that refresh get the same answer from the lock, not from
-/// the network: the dead token is posted once. Only a token the CLI
-/// rotated since is tried again.
+/// A refresh token refused for good is posted once; waiters get the same
+/// answer. A token the CLI rotated since is tried again.
 #[tokio::test]
 async fn a_permanent_refusal_is_shared_with_the_waiting_callers() {
     let home = CodexHome::new().await;
@@ -677,13 +652,11 @@ async fn a_permanent_refusal_is_shared_with_the_waiting_callers() {
         );
     }
     assert_eq!(home.server.request_count(), 1, "one POST for three callers");
-    // A later caller over the same file: still no round trip.
     assert!(matches!(
         store.current().await.unwrap_err(),
         CodexCredentialError::SignInExpired(_)
     ));
     assert_eq!(home.server.request_count(), 1);
-    // The CLI signs in again: the new token is tried.
     home.write(
         AuthFile::default()
             .access(&CodexHome::access_token(10, "plus"))
@@ -697,9 +670,8 @@ async fn a_permanent_refusal_is_shared_with_the_waiting_callers() {
     );
 }
 
-/// `{"error": {"code": …}}`, the shape the endpoint uses beside the flat
-/// one: a permanent code on a 400 is final, and a reused code triggers the
-/// re-read.
+/// The nested `{"error": {"code": …}}` shape: a permanent code on a 400 is
+/// final, and a reused code triggers the re-read.
 #[tokio::test]
 async fn nested_error_codes_are_permanent_and_trigger_the_reread() {
     let home = CodexHome::new().await;
@@ -751,8 +723,7 @@ async fn nested_error_codes_are_permanent_and_trigger_the_reread() {
     assert_eq!(second.server.request_count(), 2);
 }
 
-/// A token the endpoint echoes inside its error code never reaches the
-/// detail either.
+/// A token echoed inside the error code never reaches the detail.
 #[tokio::test]
 async fn error_codes_are_redacted_too() {
     let home = CodexHome::new().await;
@@ -767,8 +738,8 @@ async fn error_codes_are_redacted_too() {
     assert!(detail.contains("[redacted]"));
 }
 
-/// The permanent and reused decisions read the code as sent: an account id
-/// that happens to occur in it is redacted from the detail only.
+/// Decisions read the code as sent; a secret in it is redacted from the
+/// detail only.
 #[tokio::test]
 async fn a_secret_inside_the_error_code_changes_no_decision() {
     for code in ["invalid_grant", "refresh_token_reused"] {
@@ -788,13 +759,12 @@ async fn a_secret_inside_the_error_code_changes_no_decision() {
     }
 }
 
-/// A refresh that cannot reach the token endpoint names the cause, not only
-/// reqwest's "error sending request".
+/// An unreachable token endpoint names the cause.
 #[tokio::test]
 async fn a_refresh_that_cannot_connect_names_the_cause() {
     let home = CodexHome::new().await;
     home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
-    // Port 1 (tcpmux) is closed on every runner: the connection is refused.
+    // Port 1 is closed on every runner.
     let store = home
         .store()
         .with_token_endpoint(url::Url::parse("http://127.0.0.1:1/oauth/token").unwrap());
@@ -807,9 +777,7 @@ async fn a_refresh_that_cannot_connect_names_the_cause() {
 }
 
 /// Answers the refresh with `access` and `rt_2` after turning `auth.json`
-/// into a non-empty directory, which the store cannot read, so it keeps
-/// the new tokens without writing them. Later refreshes get `access` and
-/// `rt_3`, with the directory left as it is.
+/// into a non-empty directory; later refreshes get `access` and `rt_3`.
 fn occupy_the_file_during_the_refresh(home: &CodexHome, access: &str) {
     let file = home.file();
     let access = access.to_owned();
@@ -824,8 +792,7 @@ fn occupy_the_file_during_the_refresh(home: &CodexHome, access: &str) {
     }));
 }
 
-/// A store whose first refresh answered `access` and `rt_2` while
-/// `auth.json` could not be read, so it keeps them in memory.
+/// A store keeping `access` and `rt_2` in memory after an unreadable file.
 async fn store_keeping_a_refresh(home: &CodexHome, access: &str) -> CodexCredentialStore {
     home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
     occupy_the_file_during_the_refresh(home, access);
@@ -834,8 +801,8 @@ async fn store_keeping_a_refresh(home: &CodexHome, access: &str) -> CodexCredent
     store
 }
 
-/// Makes `directory` read-only; false, with the mode restored, where the
-/// process writes past the mode, as root does.
+/// Makes `directory` read-only; false where the process writes past the
+/// mode, as root does.
 #[cfg(unix)]
 fn make_read_only(directory: &std::path::Path) -> bool {
     set_mode(directory, 0o500);
@@ -852,7 +819,6 @@ fn set_mode(directory: &std::path::Path, mode: u32) {
     std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).unwrap();
 }
 
-/// The refresh tokens the store posted, in order.
 fn posted_refresh_tokens(home: &CodexHome) -> Vec<serde_json::Value> {
     home.server
         .requests()
@@ -861,10 +827,8 @@ fn posted_refresh_tokens(home: &CodexHome) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// A file that cannot be read during the round trip is not written over:
-/// the call answers with the new tokens and the store keeps them in
-/// memory. Once the file holds the spent token again, the next call
-/// writes the kept tokens over its current contents and posts nothing.
+/// An unreadable file during the round trip is not written over; once it
+/// holds the spent token again, the next call writes the kept tokens.
 #[tokio::test]
 async fn a_file_that_cannot_be_read_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
     let home = CodexHome::new().await;
@@ -872,8 +836,6 @@ async fn a_file_that_cannot_be_read_keeps_the_new_sign_in_and_writes_it_on_the_n
     assert_eq!(file_names(home.directory.path()), ["auth.json"]);
     assert!(home.file().is_dir(), "nothing was written");
 
-    // The file is back with the spent token, and a key the CLI wrote
-    // meanwhile.
     std::fs::remove_dir_all(home.file()).unwrap();
     home.write(AuthFile {
         extra: vec![
@@ -899,14 +861,11 @@ async fn a_file_that_cannot_be_read_keeps_the_new_sign_in_and_writes_it_on_the_n
     assert_eq!(file_names(home.directory.path()), ["auth.json"]);
 }
 
-/// A second refresh while the file still cannot be read posts the kept
-/// token, not the spent one, and its tokens are what the file gets once
-/// it holds the spent token again.
+/// A second refresh while the file is unreadable posts the kept token.
 #[tokio::test]
 async fn a_second_refresh_while_the_file_cannot_be_read_posts_the_kept_token() {
     let home = CodexHome::new().await;
     let store = store_keeping_a_refresh(&home, &CodexHome::access_token(10, "plus")).await;
-    // The kept tokens expire too, and the next call refreshes them.
     assert_eq!(store.current().await.unwrap().refresh_token, "rt_3");
     assert_eq!(
         posted_refresh_tokens(&home),
@@ -914,7 +873,6 @@ async fn a_second_refresh_while_the_file_cannot_be_read_posts_the_kept_token() {
     );
     std::fs::remove_dir_all(home.file()).unwrap();
     home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
-    // A call that does not refresh: the 401 path for a token from before.
     let latest = store.refreshed_if_still_using("at_before").await.unwrap();
     assert_eq!(latest.refresh_token, "rt_3");
     assert_eq!(home.server.request_count(), 2);
@@ -922,9 +880,8 @@ async fn a_second_refresh_while_the_file_cannot_be_read_posts_the_kept_token() {
     assert_eq!(file_names(home.directory.path()), ["auth.json"]);
 }
 
-/// A file that does not parse (the CLI half way through writing it) gets
-/// the kept tokens for that call and is not written over; once it holds
-/// the spent token again, the next call writes them.
+/// A file that does not parse gets the kept tokens for that call and is
+/// written once it holds the spent token again.
 #[tokio::test]
 async fn a_file_that_does_not_parse_gets_the_kept_sign_in_without_being_written() {
     let home = CodexHome::new().await;
@@ -945,9 +902,7 @@ async fn a_file_that_does_not_parse_gets_the_kept_sign_in_without_being_written(
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// A file that parses but holds another refresh token wins even when it
-/// holds no sign-in Steno can use (here no account id): the kept tokens
-/// go and the file is left as it is.
+/// A parsing file with another refresh token wins over the kept tokens.
 #[tokio::test]
 async fn a_parsed_file_with_another_token_wins_even_without_a_sign_in_steno_can_use() {
     let home = CodexHome::new().await;
@@ -969,8 +924,7 @@ async fn a_parsed_file_with_another_token_wins_even_without_a_sign_in_steno_can_
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// A `codex logout` after a failed write-back stays signed out: the kept
-/// tokens and their temporary go.
+/// `codex logout` after a failed write-back stays signed out.
 #[tokio::test]
 async fn a_logout_after_a_failed_write_stays_signed_out() {
     let home = CodexHome::new().await;
@@ -984,9 +938,7 @@ async fn a_logout_after_a_failed_write_stays_signed_out() {
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// `codex login --api-key` after a failed write-back wins: the file holds
-/// no tokens, so the kept ones are not put over the key, and they and
-/// their temporary go.
+/// `codex login --api-key` after a failed write-back wins.
 #[tokio::test]
 async fn an_api_key_login_after_a_failed_write_wins_over_the_kept_sign_in() {
     let home = CodexHome::new().await;
@@ -1003,9 +955,7 @@ async fn an_api_key_login_after_a_failed_write_wins_over_the_kept_sign_in() {
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// A file that still holds the spent token but no longer reads back with
-/// the kept tokens put over it (here `auth_mode` became an API key) wins:
-/// it is not written over, and the kept tokens and their temporary go.
+/// A file that no longer reads back with the kept tokens over it wins.
 #[tokio::test]
 async fn a_kept_sign_in_that_no_longer_reads_back_over_the_file_is_dropped() {
     let home = CodexHome::new().await;
@@ -1025,10 +975,8 @@ async fn a_kept_sign_in_that_no_longer_reads_back_over_the_file_is_dropped() {
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// A sign-in file that cannot be written at all (the folder is read-only)
-/// leaves no temporary behind; the new tokens are answered and kept in
-/// memory, and once the folder is writable the next call writes them and
-/// posts nothing.
+/// An unwritable folder leaves no temporary; the kept tokens are written
+/// once the folder is writable.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failed_write_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
@@ -1065,9 +1013,7 @@ async fn a_failed_write_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
     assert_eq!(home.document()["tokens"]["access_token"], json!(fresh));
 }
 
-/// A second refresh while the write keeps failing posts the kept token,
-/// not the spent one, and its tokens are what the file gets once it can
-/// be written.
+/// A second refresh while the write keeps failing posts the kept token.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_second_refresh_while_the_write_keeps_failing_posts_the_kept_token() {
@@ -1103,9 +1049,7 @@ async fn a_second_refresh_while_the_write_keeps_failing_posts_the_kept_token() {
     assert_eq!(file_names(&directory), ["auth.json"]);
 }
 
-/// A file the user changed after a failed write-back (a new `codex
-/// login`) wins over the tokens kept in memory, and the temporary they
-/// left goes.
+/// A new `codex login` after a failed write-back wins over the kept tokens.
 #[tokio::test]
 async fn a_new_login_after_a_failed_write_wins_over_the_kept_sign_in() {
     let home = CodexHome::new().await;
@@ -1162,8 +1106,7 @@ async fn the_unauthorized_path_trusts_a_rotated_file() {
     assert_eq!(home.server.requests().len(), 0);
 }
 
-/// `codex login --api-key` during the round trip: the write-back must not
-/// put the old sign-in tokens over the new key.
+/// `codex login --api-key` during the round trip: the key is not overwritten.
 #[tokio::test]
 async fn an_api_key_login_during_the_refresh_is_not_overwritten() {
     let home = CodexHome::new().await;
@@ -1182,8 +1125,7 @@ async fn an_api_key_login_during_the_refresh_is_not_overwritten() {
     assert_eq!(std::fs::read(home.file()).unwrap(), api_key_login);
 }
 
-/// A new `codex login` (or a CLI refresh) during the round trip wrote a
-/// different refresh token: that file is the answer, left as it stands.
+/// A different refresh token written during the round trip is the answer.
 #[tokio::test]
 async fn a_new_login_during_the_refresh_is_returned_and_left_alone() {
     let home = CodexHome::new().await;
@@ -1210,8 +1152,7 @@ async fn a_new_login_during_the_refresh_is_returned_and_left_alone() {
     assert_eq!(home.server.request_count(), 1);
 }
 
-/// A reused-token answer when the CLI has already written a token fit to
-/// send: that token is used, not spent on a second refresh.
+/// A reused-token answer when the CLI already wrote a fresh token uses it.
 #[tokio::test]
 async fn a_reused_token_takes_the_clis_usable_tokens_without_refreshing_them() {
     let home = CodexHome::new().await;

@@ -10,10 +10,8 @@ use steno_core::*;
 
 use common::{MEETING_ID, PERSON_ID, date, populate, uuid};
 
-/// Raw column text through `sqlite3` when a usable CLI is available (the
-/// independent reader), else through a second rusqlite connection. A CLI
-/// built without FTS5 cannot open the file at all (the schema has the
-/// `transcriptSearch` virtual table), so it counts as absent too.
+/// Raw column text through `sqlite3` when a CLI with FTS5 is available, else
+/// through a second rusqlite connection.
 fn raw(path: &std::path::Path, sql: &str) -> String {
     let cli = match Command::new("sqlite3")
         .arg("-batch")

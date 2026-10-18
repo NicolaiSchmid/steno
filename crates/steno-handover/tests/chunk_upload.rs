@@ -1,7 +1,6 @@
-//! 1 MiB chunks, a little over 3 MiB of seeded random bytes, a mid-chunk
-//! disconnect, resume from `GET` status, a duplicate chunk, then complete;
-//! bytes on disk equal the source. A hash mismatch is 422 and the partial
-//! is gone.
+//! Chunked upload with a mid-chunk disconnect, resume from status, a
+//! duplicate chunk and complete: the bytes on disk equal the source. A hash
+//! mismatch is 422 and the partial is gone.
 
 #![allow(
     clippy::assert_is_empty,
@@ -64,8 +63,7 @@ async fn upload_survives_disconnect_resumes_skips_duplicates_and_completes() {
         204
     );
 
-    // Chunk 1 breaks off after 100 KiB: head with the full length, part of
-    // the body, then the connection goes away.
+    // Chunk 1 breaks off after 100 KiB of its body.
     let raw = test.raw_client();
     let interrupted = raw
         .exchange(
@@ -213,8 +211,7 @@ async fn hash_mismatch_is_422_and_the_partial_is_gone() {
             .contains("announce again")
     );
 
-    // The phone starts over: re-announcing the same id (same metadata) after
-    // a failure is a resume, 200 with no chunks.
+    // Re-announcing the same id after a failure is a resume: 200, no chunks.
     let again = phone.announce(&metadata).await;
     assert_eq!(again.status, 200);
     assert!(
@@ -332,8 +329,7 @@ async fn chunk_and_metadata_errors_are_answered_without_side_effects() {
         200,
         "announcing twice is fine"
     );
-    // Other bytes under the id, and the same bytes from another device,
-    // are `tests/admission_ledger.rs`'s.
+    // Other bytes or devices under the id: see `admission_ledger.rs`.
     assert_eq!(
         other.status(metadata.recording_id).await.status,
         404,
@@ -454,10 +450,8 @@ async fn chunk_and_metadata_errors_are_answered_without_side_effects() {
 
 #[tokio::test]
 async fn chunks_in_flight_at_once_all_land_in_the_receipt() {
-    // The phone keeps two background tasks going, and after a relaunch the
-    // background session may deliver several at once. The engine yields
-    // while it saves a receipt, so every concurrent chunk must survive into
-    // the same receipt: no lost update, in memory or in the store.
+    // Concurrent chunks, as after a relaunch, must all survive into the same
+    // receipt, in memory and in the store.
     let intake = fake_intake(meeting_id());
     let chunk_size: i64 = 64 * 1024;
     let test = TestService::with_intake(chunk_size, intake.clone()).await;
@@ -552,10 +546,8 @@ async fn announce_after_complete_reports_complete_with_every_chunk() {
 
 #[tokio::test]
 async fn a_complete_recording_announced_in_other_chunks_is_delivered() {
-    // The same bytes in other chunks are the file the computer holds once
-    // it is `complete`, and are delivered: every chunk of the phone's split
-    // is listed, so it posts `complete` and takes the meeting id. Other
-    // bytes under the id are `tests/admission_ledger.rs`'s.
+    // The same bytes in other chunks of a `complete` recording are delivered:
+    // every chunk of the phone's split is listed.
     let intake = fake_intake(meeting_id());
     let test = TestService::with_intake(CHUNK_SIZE, intake.clone()).await;
     let phone = Phone::pair(&test).await;
@@ -602,8 +594,7 @@ async fn a_complete_recording_announced_in_other_chunks_is_delivered() {
 
 #[tokio::test]
 async fn a_vanished_partial_is_404_on_chunk_and_a_re_announce_starts_over() {
-    // The phone's executor answers a 404 on a chunk by re-announcing with
-    // an empty chunk set ("The Mac forgot the upload; starting over").
+    // The phone answers a 404 on a chunk by re-announcing from scratch.
     let test = TestService::with_chunk_size(CHUNK_SIZE).await;
     let phone = Phone::pair(&test).await;
     let bytes = seeded_bytes(2 * CHUNK_SIZE as usize, 8);
@@ -652,8 +643,8 @@ async fn a_vanished_partial_is_404_on_chunk_and_a_re_announce_starts_over() {
 
 #[tokio::test]
 async fn a_negative_chunk_index_is_400_at_the_engine() {
-    // The router never matches a negative index; the engine is driven
-    // directly here and must not compute `index * chunk_size` for one.
+    // The router never matches a negative index; the engine must not compute
+    // `index * chunk_size` for one.
     let test = TestService::with_chunk_size(CHUNK_SIZE).await;
     let device = EngineDevice::paired(&test, "Engine phone").await;
     let bytes = seeded_bytes(CHUNK_SIZE as usize, 9);
@@ -682,8 +673,7 @@ async fn a_negative_chunk_index_is_400_at_the_engine() {
 
 #[tokio::test]
 async fn a_failed_write_is_500_without_the_inbox_path() {
-    // An I/O error names the file, and the inbox lives under the user's
-    // home; the phone gets the step that failed and nothing else.
+    // An I/O error names the file; the phone gets only the failed step.
     let test = TestService::with_chunk_size(CHUNK_SIZE).await;
     let phone = Phone::pair(&test).await;
     let bytes = seeded_bytes(CHUNK_SIZE as usize, 10);

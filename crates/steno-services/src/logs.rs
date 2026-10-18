@@ -1,22 +1,8 @@
-//! The log output of the shell and the CLI: [`log_to_stderr`] installs it,
-//! [`flush_logs`] writes out what is queued before the process exits.
-//!
-//! A log line never waits for stderr. The thread that logs formats it and
-//! queues it for one writer thread, and a full queue drops the line (the
-//! writer reports how many when it catches up): a write that blocks (a
-//! stalled disk, a full pipe nobody reads) would otherwise stop whichever
-//! thread logged, a capture thread included, and every other thread that
-//! logs behind it on the stderr lock. Only log lines are queued: the
-//! shell's `stderr_line!` and the CLI's progress lines still write to
-//! stderr directly, so they can wait, and a queued line can come out after
-//! a later one of theirs.
-//!
-//! Privacy rule for every line at `warn` and above: ids, stages, counts and
-//! error kinds only, never transcript or model text, audio, a file path or
-//! a secret. Full error text goes to `debug`.
-//!
-//! Swift: `Logger(subsystem:category:)`, the system log, which never waits
-//! on stderr either.
+//! The log output of the shell and the CLI. A line never waits for stderr:
+//! it is queued for one writer thread, and a full queue drops it. Every
+//! line at `warn` and above carries ids, stages, counts and error kinds
+//! only, never transcript text, audio, a file path or a secret; full
+//! errors go to `debug`.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,9 +16,7 @@ use tracing_subscriber::fmt::MakeWriter;
 pub const LOG_FILTER: &str = "warn";
 
 /// The lines the queue holds before it drops new ones: a few seconds of
-/// `RUST_LOG=debug` at its busiest. The bound is in lines, not bytes, so
-/// long lines (a debug line's full error text) can make it tens of
-/// megabytes.
+/// `RUST_LOG=debug` at its busiest.
 const QUEUED_LINES: usize = 4096;
 
 /// How long [`flush_logs`] waits for the writer thread.
@@ -44,18 +28,11 @@ const PANIC_FLUSH_PATIENCE: Duration = Duration::from_millis(250);
 /// The queue of the installed output, for [`flush_logs`].
 static OUTPUT: OnceLock<LineQueue> = OnceLock::new();
 
-/// Installs the log output of the shell and the CLI: lines on stderr,
-/// filtered by `RUST_LOG`, else by `default_filter` (the shell passes
-/// [`LOG_FILTER`]), so what the services warn about (no keychain, no
-/// handover identity, a re-run or re-export that failed in the background)
-/// is seen. A second call does nothing. A panic writes out the queued
-/// lines (waiting at most a quarter of a second) before its message, so
-/// the lines that explain a crash are not lost with it; a panic inside
-/// [`steno_core::crash_log::expected`] does neither.
-///
-/// A line that cannot be written is dropped: one that finds the queue full
-/// (see the module doc), and one stderr refuses (after a closed terminal
-/// every write fails).
+/// Installs the log output: lines on stderr, filtered by `RUST_LOG`, else
+/// by `default_filter`. A second call does nothing. A panic writes out the
+/// queued lines (waiting at most a quarter of a second) before its message;
+/// a panic inside [`steno_core::crash_log::expected`] does not. A line that
+/// finds the queue full, or that stderr refuses, is dropped.
 ///
 /// ```no_run
 /// steno_services::log_to_stderr(steno_services::LOG_FILTER);
@@ -78,8 +55,7 @@ pub fn log_to_stderr(default_filter: &str) {
     if installed.is_ok() && OUTPUT.set(queue).is_ok() {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic| {
-            // A panic its caller catches and logs (the decoder's) waits
-            // for nothing and prints nothing.
+            // A panic its caller catches and logs waits for nothing.
             if steno_core::crash_log::is_expected() {
                 return;
             }
@@ -91,10 +67,9 @@ pub fn log_to_stderr(default_filter: &str) {
     }
 }
 
-/// Writes out the lines queued so far, waiting at most a second for a
-/// stalled stderr; a no-op before [`log_to_stderr`]. The shell and the CLI
-/// call it before the process exits, since `std::process::exit` takes the
-/// writer thread down with whatever it still holds.
+/// Writes out the lines queued so far, waiting at most a second; a no-op
+/// before [`log_to_stderr`]. Call it before `std::process::exit`, which
+/// ends the writer thread at once.
 pub fn flush_logs() {
     if let Some(queue) = OUTPUT.get() {
         queue.flush_within(FLUSH_PATIENCE);
@@ -250,17 +225,15 @@ mod tests {
         }
     }
 
-    /// The thread that logs goes on while stderr is stuck: the queue fills,
-    /// further lines are dropped and counted, a flush gives up at its
-    /// bound, and once stderr moves again the queued lines come out in
-    /// order, then how many were dropped, without a flush to ask for it.
+    /// The thread that logs goes on while stderr is stuck: further lines are
+    /// dropped and counted, a flush gives up at its bound, and once stderr
+    /// moves the queued lines come out in order, then the drop count.
     #[test]
     fn a_stalled_output_never_blocks_the_thread_that_logs() {
         let output = Recorded::default();
         let stall = output.0.lock().unwrap();
         let queue = spawn_writer(output.clone(), 4);
-        // On a thread of its own, so a send that waits fails the test
-        // rather than hanging it.
+        // On a thread of its own, so a send that waits fails the test.
         let (logged, done) = std::sync::mpsc::channel();
         let writer = queue.clone();
         std::thread::spawn(move || {
@@ -293,8 +266,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(queue.flush_within(Duration::from_secs(10)));
-        // The four queued lines and the one the writer held when it
-        // stalled, if it had taken one by then; the rest were dropped.
+        // The four queued lines and the one the writer held, if any.
         let mut lines = output.lines();
         let report = lines.pop().unwrap();
         let numbers: Vec<usize> = lines
@@ -310,9 +282,8 @@ mod tests {
         );
     }
 
-    /// A flush that joins the lines a stall queued answers only after the
-    /// count of the dropped ones, which an exit would otherwise lose: each
-    /// slow write gives the flush time to take the first free slot.
+    /// A flush after a stall answers only after the count of the dropped
+    /// lines is written.
     #[test]
     fn a_flush_behind_dropped_lines_reports_them_before_it_answers() {
         let output = Recorded::default();
@@ -350,9 +321,8 @@ mod tests {
     }
 }
 
-// Unix only: there a closed terminal no longer ends the app (the shell's
-// SIGHUP asks for Quit), so its writes to stderr fail; on Windows a closed
-// console ends the process, and a release build has no console.
+// Unix only: there a closed terminal leaves the app running with failing
+// stderr writes; on Windows it ends the process.
 #[cfg(all(test, unix))]
 mod closed_stderr {
     use std::process::{Command, Stdio};
@@ -360,10 +330,9 @@ mod closed_stderr {
     /// Set in the copy of this test binary the test runs.
     const LOGGING_CHILD: &str = "STENO_TEST_LOGGING_CHILD";
 
-    /// The child logs a warning to a stderr nobody reads (a pipe with no
-    /// reader fails each write, as a closed terminal does), so the line
-    /// is lost; the child must still pass, not panic. `--nocapture`, or
-    /// the test harness would catch an `eprintln!` that panics.
+    /// A child logging to a stderr nobody reads loses the line but does not
+    /// panic. `--nocapture`, or the harness would catch a panicking
+    /// `eprintln!`.
     #[test]
     fn a_log_line_to_a_closed_stderr_is_dropped_without_a_panic() {
         if std::env::var_os(LOGGING_CHILD).is_some() {

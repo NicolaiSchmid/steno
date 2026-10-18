@@ -1,22 +1,9 @@
-//! The crafted cases of the extra windows (`ChunkerConfig::decode_gaps`),
-//! shared by both engines' tests: this crate's `tests/extra_windows.rs`
-//! (ONNX) and `steno-speech-coreml`'s (`CoreML`), which includes this file
-//! by path. The cases are cut from FLEURS German `cat/` (file 02 for the
-//! loud speech, 03 for the quiet), so nothing here is a recording of a
-//! meeting:
-//!
-//! - quiet speech, 6.65 s or 9.1 s at -20 and -26 dB, as the lead-in,
-//!   between two loud stretches and as the tail, where a detector may hear
-//!   no speech and the chunks leave it out ([`quiet_cases`]);
-//! - 4 s of digital silence before, 9.1 s between and 4 s after the loud
-//!   speech, and the same with synthetic room noise (filtered noise and
-//!   mains hum at -50 dBFS) under the whole file ([`quiet_room`]): chunks
-//!   decode part of each stretch, extra windows the rest of the noise
-//!   (digital silence gets none), and no word may lie in them.
-//!
-//! `STENO_EXTRA_WINDOWS_OUT` writes every case as a 16 kHz WAV with an
-//! empty Swift baseline beside it, so another revision's harness runs the
-//! same audio.
+//! The crafted cases of the extra windows, cut from FLEURS German `cat/` and
+//! shared with `steno-speech-coreml`'s tests, which include this file by path:
+//! quiet speech at -20 and -26 dB as lead-in, gap or tail ([`quiet_cases`]),
+//! and digital silence or room noise around loud speech, where no word may lie
+//! ([`quiet_room`]). `STENO_EXTRA_WINDOWS_OUT` writes every case as a 16 kHz
+//! WAV.
 
 // Each test target uses only part of it.
 #![allow(dead_code)]
@@ -27,8 +14,8 @@ use std::path::{Path, PathBuf};
 use steno_speech::wav::read_pcm16;
 use steno_speech::{SAMPLE_RATE, Transcript};
 
-/// Words a silent or noisy stretch keeps clear of its loud neighbours: a
-/// word whose middle falls this close to a stretch's edge is theirs.
+/// A word whose middle falls this close to a silent stretch's edge belongs to
+/// its loud neighbours.
 pub const EDGE_SECONDS: f64 = 0.25;
 
 /// `STENO_FLEURS_DIR`, or `None` with a message.
@@ -93,8 +80,8 @@ fn join(name: String, parts: &[(&[f32], bool)]) -> Case {
     }
 }
 
-/// The quiet cases: `(position, level)` for the lead-in, a 6.65 s and a
-/// 9.1 s gap and the tail, at 0, -20 and -26 dB.
+/// The quiet cases: `(position, level)` for the lead-in, a 6.65 s and a 9.1 s
+/// gap and the tail, at 0, -20 and -26 dB.
 pub fn quiet_cases(dir: &Path) -> Vec<(String, f32, Case)> {
     let loud = cut(dir, "fleurs-de-cat-02", 9.94, 24.22);
     let after = cut(dir, "fleurs-de-cat-02", 25.54, 38.46);
@@ -122,8 +109,8 @@ pub fn quiet_cases(dir: &Path) -> Vec<(String, f32, Case)> {
     cases
 }
 
-/// Room tone: white noise through a one-pole low-pass, with 50 and 100 Hz
-/// hum, at `dbfs` RMS; the same samples every run.
+/// Room tone: low-passed white noise with 50 and 100 Hz hum, at `dbfs` RMS; the
+/// same samples every run.
 fn room_noise(len: usize, dbfs: f32) -> Vec<f32> {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     let mut low = 0.0f32;
@@ -152,8 +139,8 @@ fn room_noise(len: usize, dbfs: f32) -> Vec<f32> {
     out
 }
 
-/// Silence before, between and after the loud speech; with `noise`, room
-/// tone under the whole file.
+/// Silence before, between and after the loud speech; with `noise`, room tone
+/// under the whole file.
 pub fn quiet_room(dir: &Path, noise: bool) -> Case {
     let loud = cut(dir, "fleurs-de-cat-02", 9.94, 24.22);
     let after = cut(dir, "fleurs-de-cat-02", 25.54, 38.46);
@@ -179,8 +166,7 @@ pub fn quiet_room(dir: &Path, noise: bool) -> Case {
     case
 }
 
-/// Words whose middle lies inside `range`, `margin` seconds in from both
-/// ends.
+/// Words whose middle lies inside `range`, `margin` seconds in from both ends.
 pub fn words_inside(transcript: &Transcript, range: &Range<usize>, margin: f64) -> Vec<String> {
     let (from, to) = (time(range.start) + margin, time(range.end) - margin);
     transcript
@@ -191,8 +177,7 @@ pub fn words_inside(transcript: &Transcript, range: &Range<usize>, margin: f64) 
         .collect()
 }
 
-/// Writes `case` for another revision's harness when
-/// `STENO_EXTRA_WINDOWS_OUT` is set.
+/// Writes `case` when `STENO_EXTRA_WINDOWS_OUT` is set.
 pub fn write_out(case: &Case) {
     let Some(dir) = std::env::var_os("STENO_EXTRA_WINDOWS_OUT").map(PathBuf::from) else {
         return;

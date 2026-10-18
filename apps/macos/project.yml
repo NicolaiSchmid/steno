@@ -4,8 +4,7 @@
 # the Swift package at the repository root plus Sparkle; signing, versions
 # and the deployment target live in `Config/*.xcconfig`.
 #
-# Identifiers are immutable once a build ships (see
-# .plans/2026-09-25-v1-program.md): bundle id `uno.schmid.steno.mac`, team
+# Identifiers are immutable once a build ships: bundle id `uno.schmid.steno.mac`, team
 # `KQB68F43PW`. TCC and Sparkle key off the bundle id.
 name: Steno
 
@@ -74,8 +73,7 @@ targets:
     # The web UI (apps/macos/web) is built with pnpm and copied into the
     # bundle as `Web/` before compilation; CI builds it in its own step and
     # the phase then only copies. The phase writes into the product, which
-    # Xcode's script sandbox forbids, hence the setting below
-    # (.plans/2026-09-29-macos-webview-ui.md, Decision 8).
+    # Xcode's script sandbox forbids, hence the setting below.
     preBuildScripts:
       - name: Build web UI
         basedOnDependencyAnalysis: false

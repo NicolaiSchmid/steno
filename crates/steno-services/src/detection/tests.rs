@@ -1,9 +1,6 @@
-//! Swift's `DetectionTests`: the controller's decisions as a table over a
-//! fake recorder and a fake panel, then the detector's events through the
-//! real `MeetingDetector` over a fake process list and a `ManualClock`,
-//! and the prompt's Record into the capture recorder. No sleeps: the clock
-//! is advanced by hand and the tests wait for its sleepers or for the
-//! panel.
+//! The controller's decisions as a table over a fake recorder and panel,
+//! then the real `MeetingDetector` over a fake process list and a
+//! `ManualClock`, and the prompt's Record into the capture recorder.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -149,9 +146,9 @@ fn harness() -> Harness {
     harness_over(recorder.clone(), recorder)
 }
 
-/// A harness over `capture`'s recorder, whose changes reach the
-/// controller as `App::launch` routes them. Declared after `capture`, so
-/// the controller stops before the capture waits for its pipeline.
+/// A harness over `capture`'s recorder, whose changes reach the controller
+/// as `App::launch` routes them. Declared after `capture`, so it stops
+/// first.
 fn harness_over_capture(capture: &SyntheticRecorder) -> Harness {
     let harness = harness_over(capture.recorder.clone(), Arc::new(FakeRecorder::default()));
     let hooked = Arc::downgrade(&harness.controller);
@@ -185,10 +182,8 @@ impl Drop for Harness {
     }
 }
 
-/// Swift's `testControllerSuppressesWhileRecordingAndWhenDisabled`, one
-/// row per state: an opened microphone prompts only when detection is on,
-/// nothing records and no prompt is up; while recording it goes to the
-/// recorder instead.
+/// An opened microphone prompts only when detection is on, nothing records
+/// and no prompt is up; while recording it goes to the recorder instead.
 #[test]
 fn an_opened_microphone_prompts_only_when_on_idle_and_no_prompt_is_up() {
     #[allow(clippy::struct_excessive_bools, reason = "a row of a table")]
@@ -274,9 +269,8 @@ fn an_opened_microphone_prompts_only_when_on_idle_and_no_prompt_is_up() {
     }
 }
 
-/// Every way a prompt goes: a release, a recording starting, detection
-/// turned off, the X and Record. Each takes the prompt down once, and the
-/// next opened microphone prompts again.
+/// Every way a prompt goes takes it down once, and the next opened
+/// microphone prompts again.
 #[test]
 fn every_way_a_prompt_goes_takes_it_down_and_frees_the_slot() {
     #[derive(Debug, Clone, Copy)]
@@ -352,9 +346,8 @@ fn every_way_a_prompt_goes_takes_it_down_and_frees_the_slot() {
     }
 }
 
-/// One numbering: the panel hands back the controller's number, so an X
-/// or a Record aimed at a prompt that closed, landing once another came
-/// up, answers nothing, and the prompt up stays with its countdown.
+/// An X or a Record aimed at a prompt that closed answers nothing, and the
+/// prompt up stays.
 #[test]
 fn a_stale_x_or_record_answers_nothing() {
     let harness = harness();
@@ -403,9 +396,8 @@ fn the_prompt_times_out_after_its_sixty_seconds() {
     );
 }
 
-/// Swift's `testEventsWhileRecordingReachTheRecorder`: both events reach
-/// the recorder with the name resolved while it records, nothing while
-/// idle, and the prompt's Record names its app (none without a bundle id).
+/// Both events reach the recorder while it records, nothing while idle,
+/// and the prompt's Record names its app.
 #[test]
 fn events_while_recording_reach_the_recorder_with_the_name_resolved() {
     let harness = harness();
@@ -448,10 +440,8 @@ fn events_while_recording_reach_the_recorder_with_the_name_resolved() {
     );
 }
 
-/// P40 check 10 (`.plans/2026-10-12-store-off-the-workers.md`): while
-/// another process holds the write lock and a write of this process waits
-/// behind it, the detection poll's read of the setting answers live, on the
-/// shared reader, and turns detection off as the setting says.
+/// While another process holds the write lock, the detection poll's read
+/// of the setting answers live and turns detection off as it says.
 #[test]
 fn the_detection_poll_reads_the_settings_while_a_write_waits() {
     let harness = harness();
@@ -473,9 +463,8 @@ fn the_detection_poll_reads_the_settings_while_a_write_waits() {
     held.release_after_hold();
 }
 
-/// Swift's `testSettingsChangesFollowThroughToTheDetector`, and a detector
-/// that cannot start yet (`PipeWire` not up at login) is started by the
-/// next read of the setting.
+/// Settings changes reach the detector, and a detector that cannot start
+/// yet is started by the next read of the setting.
 #[test]
 fn the_setting_starts_and_stops_the_detector_and_a_failed_start_is_retried() {
     let harness = harness();
@@ -536,8 +525,7 @@ fn advance(harness: &Harness, sleepers: usize, seconds: f64) {
     harness.clock.advance(Duration::from_secs_f64(seconds));
 }
 
-/// The prompt's Record for prompt `number` on a thread of its own, as the
-/// panel calls it, failing the test only if it never returns.
+/// The prompt's Record on a thread of its own, as the panel calls it.
 fn record(harness: &Harness, number: Option<u64>) {
     let controller = harness.controller.clone();
     on_own_thread(HANG_GUARD, "Record returned", move || {
@@ -545,9 +533,8 @@ fn record(harness: &Harness, number: Option<u64>) {
     });
 }
 
-/// Swift's `testDetectorEventsReachTheControllerAfterTheDebounce`, through
-/// the real detector: the prompt comes after the 2 s debounce, goes with
-/// the release's, and a blip shorter than the debounce never prompts.
+/// Through the real detector: the prompt comes after the 2 s debounce,
+/// goes with the release's, and a shorter blip never prompts.
 #[test]
 fn the_detector_s_events_reach_the_controller_after_the_debounce() {
     let harness = harness();
@@ -600,10 +587,8 @@ fn the_detector_s_events_reach_the_controller_after_the_debounce() {
     assert_eq!(harness.panel.shown().len(), 2, "a blip is not a call");
 }
 
-/// After a relaunch (an update's, a crash's) during a call, the microphone
-/// is already held when the detector starts: it prompts after the debounce
-/// like any newly opened one. The stable plan's S2 relies on it for a
-/// Record the update install refused.
+/// A microphone already held when the detector starts (after a relaunch
+/// during a call) prompts after the debounce like any newly opened one.
 #[test]
 fn a_call_already_under_way_at_launch_prompts() {
     let harness = harness();
@@ -617,10 +602,9 @@ fn a_call_already_under_way_at_launch_prompts() {
         });
 }
 
-/// Swift's `testStopDuringAStillOpenMicrophoneDoesNotRePrompt`, over the
-/// capture recorder: the prompt's Record starts a call recording for Zoom;
-/// a Stop while Zoom still holds the microphone prompts no more, and a
-/// microphone released and opened again does.
+/// The prompt's Record starts a call recording for Zoom; a Stop while Zoom
+/// still holds the microphone prompts no more, and a microphone released
+/// and opened again does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again() {
     let capture = synthetic_recorder();
@@ -673,10 +657,8 @@ async fn the_prompt_records_the_call_and_a_stop_during_it_does_not_prompt_again(
         });
 }
 
-/// A recording started from the main window while the prompt is up takes
-/// the prompt down, and the prompt's Record, should a click still land,
-/// does not start a second recording; nor does a prompt's call start that
-/// reaches the recorder while it records, which the recorder refuses.
+/// A recording started from the main window takes the prompt down, and a
+/// late Record or call start does not start a second recording.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prompt_never_starts_a_second_recording() {
     let capture = synthetic_recorder();
@@ -730,8 +712,7 @@ fn a_windows_executable_is_named_without_its_extension() {
     }
 }
 
-/// A process list whose snapshots wait while its gate is closed, as a
-/// detector's start waits while `PipeWire` reconnects at logout.
+/// A process list whose snapshots wait while its gate is closed.
 struct GatedActivity {
     /// Whether the gate is closed, and how many snapshots wait at it.
     gate: Mutex<(bool, usize)>,
@@ -749,7 +730,7 @@ impl GatedActivity {
     }
 
     /// Turns `controller` on on a thread of its own and returns once its
-    /// detector's start waits at the gate, the thread still in it.
+    /// detector's start waits at the gate.
     fn hold_a_start(&self, controller: &Arc<DetectionController>) -> std::thread::JoinHandle<()> {
         let starting = {
             let controller = controller.clone();
@@ -791,8 +772,7 @@ impl steno_audio::ProcessAudioActivitySource for GatedActivity {
 }
 
 /// The stop turns detection off and takes the prompt down at once, though
-/// a detector start still waits on its first snapshot; only the
-/// detector's own stop waits for that.
+/// a detector start still waits; only the detector's own stop waits.
 #[test]
 fn a_stop_takes_the_prompt_down_while_a_detector_start_still_waits() {
     let (_dir, store) = temp_store();
@@ -818,9 +798,8 @@ fn a_stop_takes_the_prompt_down_while_a_detector_start_still_waits() {
     assert!(!controller.is_detecting(), "the detector stopped after all");
 }
 
-/// Swift's quit saved the recording first. A detector start held in its
-/// snapshot (`PipeWire` reconnecting at logout) does not hold up the quit
-/// save of a call recording: `App::shutdown` stops detection last.
+/// A detector start held in its snapshot does not hold up the quit save of
+/// a call recording: `App::shutdown` stops detection last.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_quit_save_does_not_wait_for_a_held_detector_start() {
     use steno_core::RecordingEndReason;
@@ -853,8 +832,7 @@ async fn the_quit_save_does_not_wait_for_a_held_detector_start() {
         },
     )
     .await;
-    // The meeting is written before the stop joins its threads and goes
-    // idle.
+    // The meeting is written before the stop goes idle.
     eventually_within(HANG_GUARD, "the recorder settled", || {
         app.recorder.status().state == RecordingState::Idle
     })

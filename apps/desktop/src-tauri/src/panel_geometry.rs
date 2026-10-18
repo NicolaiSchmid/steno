@@ -1,15 +1,10 @@
 //! Where a floating panel sits: rectangles in logical points (origin
-//! top-left, Tauri's convention, not `AppKit`'s), the anchor both panels
-//! hang from, the frame a panel of a given size takes under it, and what
-//! a page's size report may ask for. Plain values and plain functions;
-//! `panels.rs` applies them to windows.
-//!
-//! Swift: `FloatingPanelModel.swift` (the anchor and its validation),
-//! `FloatingPanel.swift` (`contentSizeDidChange`).
+//! top-left), the anchor both panels hang from, and what a page's size
+//! report may ask for. Plain values; `panels.rs` applies them to windows.
 
 use serde::{Deserialize, Serialize};
 
-/// `Theme.Space.sm`: the default anchor's distance from the screen's top.
+/// The default anchor's distance from the screen's top.
 pub const DEFAULT_TOP_INSET: f64 = 8.0;
 
 /// A rectangle in logical points, origin top-left.
@@ -35,7 +30,6 @@ impl Rect {
         self.x + self.width / 2.0
     }
 
-    /// The point a panel at this frame hangs from.
     pub fn top_center(&self) -> (f64, f64) {
         (self.mid_x(), self.y)
     }
@@ -52,7 +46,6 @@ impl Rect {
         x >= self.x && x < self.max_x() && y >= self.y && y < self.max_y()
     }
 
-    /// Whether `other` lies wholly inside, edges included.
     pub fn contains(&self, other: &Rect) -> bool {
         other.x >= self.x
             && other.y >= self.y
@@ -88,13 +81,12 @@ impl PanelAnchor {
         }
     }
 
-    /// The frame of a panel of `size` hanging from the anchor.
     pub fn frame_for(&self, size: (f64, f64)) -> Rect {
         frame_hanging_from(self.top_center, size)
     }
 
-    /// The anchor that describes a panel at `frame`, on the screen among
-    /// `screens` that holds its top-centre point (else `fallback`).
+    /// The anchor of a panel at `frame`, on the screen holding its top
+    /// centre (else `fallback`).
     pub fn from_frame(frame: Rect, screens: &[Rect], fallback: Rect) -> Self {
         let point = frame.top_center();
         Self {
@@ -103,10 +95,8 @@ impl PanelAnchor {
         }
     }
 
-    /// A saved anchor is kept while a panel of `size` hanging from it lies
-    /// within one of the current screens; otherwise the default on
-    /// `fallback`. Before the page has measured, `size` is `PROBE_SIZE`
-    /// and only the anchor point itself is checked.
+    /// Keeps a saved anchor while a panel of `size` hanging from it lies
+    /// within one screen; otherwise the default on `fallback`.
     pub fn validated(
         saved: Option<Self>,
         size: (f64, f64),
@@ -124,13 +114,12 @@ impl PanelAnchor {
     }
 }
 
-/// The size a saved anchor is validated with before its panel's page has
-/// measured: one point each way, so a panel that will fit is not thrown
-/// back to the default because the width before measuring is the maximum.
+/// The size an anchor is validated with before the page has measured, so a
+/// panel that will fit is not thrown back to the default.
 pub const PROBE_SIZE: (f64, f64) = (1.0, 1.0);
 
-/// The frame of a panel of `size` whose top-centre point is `top_center`,
-/// on whole points.
+/// The frame of a panel of `size` hanging from `top_center`, on whole
+/// points.
 pub fn frame_hanging_from(top_center: (f64, f64), size: (f64, f64)) -> Rect {
     Rect::new(
         (top_center.0 - size.0 / 2.0).round(),
@@ -140,21 +129,19 @@ pub fn frame_hanging_from(top_center: (f64, f64), size: (f64, f64)) -> Rect {
     )
 }
 
-/// Two sizes within a point of each other are the same size (the window
-/// system rounds to the pixel grid).
+/// Sizes within a point are the same (the window system rounds to pixels).
 pub fn same_size(a: (f64, f64), b: (f64, f64)) -> bool {
     (a.0 - b.0).abs() < 1.0 && (a.1 - b.1).abs() < 1.0
 }
 
-/// Two points within a point of each other are the same point: a window
-/// at a logical position reports it back in pixels.
+/// Points within a point are the same: a window reports its position back
+/// in pixels.
 pub fn same_point(a: (f64, f64), b: (f64, f64)) -> bool {
     same_size(a, b)
 }
 
 /// `frame` moved by the least that puts it inside `screen`, on whole
-/// points, its size kept; a frame as wide or as tall as the screen sits
-/// at its left or top edge.
+/// points; a frame as large as the screen sits at its left or top edge.
 pub fn fitted(frame: Rect, screen: Rect) -> Rect {
     let x = frame
         .x
@@ -167,19 +154,15 @@ pub fn fitted(frame: Rect, screen: Rect) -> Rect {
     Rect::new(x, y, frame.width, frame.height)
 }
 
-/// Whether a page's report is a size at all: finite and at least a point
-/// each way (a sub-point, zero or negative size is no size).
+/// Whether a report is a size: finite and at least a point each way.
 pub fn is_size(reported: (f64, f64)) -> bool {
     let is_length = |value: f64| value.is_finite() && value >= 1.0;
     is_length(reported.0) && is_length(reported.1)
 }
 
-/// The size a panel takes from its page's report: one that `is_size`,
-/// rounded up to whole points (the window system sizes in whole pixels,
-/// and a window a fraction narrower than its pill clips it and, on
-/// `WebKitGTK`, summons scrollbars), and clamped to the work area it hangs
-/// in, so a report of a million points cannot grow the window past its
-/// screen.
+/// The size a panel takes from its page's report: rounded up to whole
+/// points, since a window narrower than its pill clips it, and clamped to
+/// the work area.
 pub fn accepted_size(reported: (f64, f64), work_area: (f64, f64)) -> Option<(f64, f64)> {
     is_size(reported).then(|| {
         (
@@ -195,7 +178,6 @@ mod tests {
 
     const SCREEN: Rect = Rect::new(0.0, 25.0, 1440.0, 875.0);
     const SECOND: Rect = Rect::new(1440.0, 0.0, 1920.0, 1080.0);
-    /// `SCREEN`'s size, the work area a report is clamped to.
     const AREA: (f64, f64) = (1440.0, 875.0);
 
     #[test]
@@ -205,7 +187,6 @@ mod tests {
         assert_eq!(anchor.screen, SCREEN);
         let frame = anchor.frame_for((480.0, 56.0));
         assert_eq!(frame, Rect::new(480.0, 33.0, 480.0, 56.0));
-        // Both contents hang from the same point.
         let bubble = anchor.frame_for((240.0, 40.0));
         assert_eq!(bubble.mid_x(), frame.mid_x());
         assert_eq!(bubble.y, frame.y);
@@ -237,7 +218,6 @@ mod tests {
         let anchor = PanelAnchor::from_frame(frame, &[SCREEN, SECOND], SCREEN);
         assert_eq!(anchor.top_center, (1620.0, 100.0));
         assert_eq!(anchor.screen, SECOND);
-        // Off every screen: the fallback is recorded as the screen.
         let off =
             PanelAnchor::from_frame(Rect::new(-500.0, -500.0, 240.0, 40.0), &[SCREEN], SCREEN);
         assert_eq!(off.screen, SCREEN);
@@ -253,13 +233,12 @@ mod tests {
             PanelAnchor::validated(Some(saved), (240.0, 40.0), &[SCREEN, SECOND], SCREEN),
             saved
         );
-        // The second screen is gone: back to the default on the main one.
         assert_eq!(
             PanelAnchor::validated(Some(saved), (240.0, 40.0), &[SCREEN], SCREEN),
             PanelAnchor::default_in(SCREEN)
         );
-        // A panel whose bottom would hang below the screen does not fit,
-        // even though its anchor point lies inside.
+        // A panel hanging below the screen does not fit, though its anchor
+        // point does.
         let low = PanelAnchor {
             top_center: (720.0, 880.0),
             screen: SCREEN,
@@ -274,9 +253,8 @@ mod tests {
         );
     }
 
-    /// A bubble dragged to the right edge fits as the 240-point pill it
-    /// is; before the page has measured, the probe keeps it there where
-    /// the 480-point maximum would have thrown it back to the default.
+    /// The probe keeps a bubble at the right edge that the maximum width
+    /// would throw back.
     #[test]
     fn the_probe_keeps_an_anchor_the_unmeasured_width_would_reject() {
         let near_edge = PanelAnchor {
@@ -295,7 +273,6 @@ mod tests {
             PanelAnchor::validated(Some(near_edge), (480.0, 56.0), &[SCREEN], SCREEN),
             PanelAnchor::default_in(SCREEN)
         );
-        // The probe still rejects a point that is on no screen.
         let gone = PanelAnchor {
             top_center: (1620.0, 100.0),
             screen: SECOND,
@@ -360,33 +337,27 @@ mod tests {
         assert!(is_size((1e9, 40.0)));
     }
 
-    /// A fraction of a point rounds up, so the window is never narrower
-    /// than the pill it holds.
+    /// A fraction of a point rounds up.
     #[test]
     fn a_report_rounds_up_to_whole_points() {
         assert_eq!(accepted_size((78.465, 41.91), AREA), Some((79.0, 42.0)));
         assert_eq!(accepted_size((244.5, 40.0), AREA), Some((245.0, 40.0)));
         assert_eq!(accepted_size((1.2, 1.0), AREA), Some((2.0, 1.0)));
-        // Up, not to the nearest: a tenth of a point is a whole point more.
         assert_eq!(accepted_size((244.1, 40.2), AREA), Some((245.0, 41.0)));
     }
 
-    /// A frame that overhangs its screen moves in by the overhang and keeps
-    /// its size; one inside stays where it is.
+    /// An overhanging frame moves in and keeps its size.
     #[test]
     fn a_frame_is_moved_inside_its_screen() {
         let inside = Rect::new(480.0, 33.0, 480.0, 56.0);
         assert_eq!(fitted(inside, SCREEN), inside);
-        // A saved anchor near the right edge and a page wider than the probe.
         let right = frame_hanging_from((1430.0, 100.0), (463.0, 56.0));
         assert_eq!(fitted(right, SCREEN), Rect::new(977.0, 100.0, 463.0, 56.0));
-        // The default anchor and a report as large as the work area.
         let whole = frame_hanging_from((720.0, 33.0), (1440.0, 875.0));
         assert_eq!(fitted(whole, SCREEN), SCREEN);
         let left_top = Rect::new(-30.0, 0.0, 79.0, 42.0);
         assert_eq!(fitted(left_top, SCREEN), Rect::new(0.0, 25.0, 79.0, 42.0));
-        // A screen at a fractional origin (a scaled monitor) is entered on
-        // whole points.
+        // A fractional screen origin is entered on whole points.
         let scaled = Rect::new(1440.4, 0.0, 1535.2, 863.2);
         assert_eq!(
             fitted(Rect::new(2900.0, 850.0, 79.0, 42.0), scaled),
@@ -402,7 +373,7 @@ mod tests {
         assert_eq!(accepted_size((240.0, 1e9), AREA), Some((240.0, 875.0)));
         assert_eq!(accepted_size((1440.0, 875.0), AREA), Some((1440.0, 875.0)));
         assert_eq!(accepted_size((1441.0, 876.0), AREA), Some((1440.0, 875.0)));
-        // The rounding happens before the clamp, so the clamp holds.
+        // The rounding happens before the clamp.
         assert_eq!(accepted_size((1439.5, 874.5), AREA), Some((1440.0, 875.0)));
     }
 }

@@ -1,5 +1,5 @@
 //! `--db PATH`, the failure type with its exit code, and the dependencies
-//! every command that processes needs. Swift: `Sources/steno/Wiring.swift`.
+//! every command that processes needs.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -63,12 +63,9 @@ impl DatabaseOptions {
         }
     }
 
-    /// The record of what the decoder replaced by silence per meeting
-    /// ([`steno_pipeline::DamagedAudio`]) beside the database, the app's
-    /// support directory by default, so a command that runs the pipeline
-    /// writes the marks the app's detail reads, and its retention rule is
-    /// to ask. The
-    /// command holds the database's lock, so the app is not running.
+    /// The record of what the decoder replaced by silence
+    /// ([`steno_pipeline::DamagedAudio`]) beside the database, where the
+    /// app reads it.
     pub fn damaged_audio(&self) -> Result<Arc<steno_pipeline::DamagedAudio>, Failure> {
         let path = self.path()?;
         let directory = path.parent().unwrap_or_else(|| Path::new(""));
@@ -77,11 +74,9 @@ impl DatabaseOptions {
         )))
     }
 
-    /// The reads of a recording marked beside the database, as the app
-    /// marks them ([`steno_pipeline::ReadingMarks`]), read as a launch
-    /// reads them: a mark a crash left quarantines its meeting in
-    /// `store`, which only `process --meeting` (Process again) runs again.
-    /// The command holds the database's lock, so the app is not running.
+    /// The reading marks beside the database ([`steno_pipeline::ReadingMarks`]),
+    /// read as a launch reads them: a mark a crash left quarantines its
+    /// meeting until `process --meeting`.
     pub fn reading_marks(
         &self,
         store: &Store,
@@ -95,11 +90,9 @@ impl DatabaseOptions {
         )))
     }
 
-    /// Opens the database for a command that writes, holding its lock
-    /// (`steno_core::DatabaseLock`) until the process ends; refused while
-    /// the app or another steno command holds it, so the two never process
-    /// one meeting twice or fail each other's recording. Rust only: the
-    /// Swift CLI took no lock.
+    /// Opens the database for a command that writes, holding its lock until
+    /// the process ends; refused while the app or another steno command
+    /// holds it.
     pub fn open(&self) -> Result<Arc<Store>, Failure> {
         let path = self.path()?;
         match take_lock(&path, true)? {
@@ -111,20 +104,14 @@ impl DatabaseOptions {
         }
     }
 
-    /// Opens the database for a command that only reads. With no app on
-    /// it, as [`DatabaseOptions::open`] does, migrating included, but it
-    /// lets go of the lock once the database is open (unless this process
-    /// holds it for a write), so a long read never keeps the app out.
-    /// Beside the app, which holds it, without migrating
-    /// (`Store::open_without_migrating`), so a newer CLI never changes the
-    /// schema under an older app: SQLite's WAL lets it read while the app
-    /// writes. Refused while the database lacks a migration this build
-    /// would apply. Rust only.
+    /// Opens the database for a command that only reads. With no app on it,
+    /// as [`DatabaseOptions::open`] does but letting go of the lock once
+    /// open; beside the app, without migrating, so a newer CLI never changes
+    /// the schema under an older app.
     pub fn open_to_read(&self) -> Result<Arc<Store>, Failure> {
         let path = self.path()?;
         match take_lock(&path, false)? {
-            // The lock, if this call took it, guards the migration and is
-            // let go of at the end of this arm.
+            // The lock guards the migration and is let go of after it.
             Lock::Taken(_lock) => steno_services::open_store(&path).map_err(Failure::runtime),
             Lock::Held => match Store::open_without_migrating(&path) {
                 Ok(store) => Ok(Arc::new(store)),
@@ -140,10 +127,10 @@ impl DatabaseOptions {
 /// Whether [`take_lock`] took the database's lock.
 #[derive(Debug)]
 enum Lock {
-    /// This process holds it, or runs on a filesystem without locks. The
-    /// lock this call took for its caller to let go of, if it took one.
+    /// Taken, or no locks on this filesystem; the lock for the caller to
+    /// let go of, if it took one.
     Taken(Option<DatabaseLock>),
-    /// Another process (the app, another steno command) holds it.
+    /// Another process holds it.
     Held,
 }
 
@@ -154,11 +141,8 @@ static HELD_LOCKS: std::sync::Mutex<Vec<(PathBuf, Option<DatabaseLock>)>> =
 
 /// Takes the lock of the database at `database`, at once or not at all:
 /// for the rest of the process when `keep`, else for the caller to let go
-/// of. Nothing to take when this process holds it already. On a filesystem
-/// without locks the command runs without it and says so once. Through
-/// `steno_services::lock_database`, which creates the database's folder
-/// first as the app does, so a first command on a fresh `--db` path is
-/// not an error.
+/// of. On a filesystem without locks the command runs without it and says
+/// so once.
 fn take_lock(database: &Path, keep: bool) -> Result<Lock, Failure> {
     let mut held = HELD_LOCKS
         .lock()
@@ -183,8 +167,7 @@ fn take_lock(database: &Path, keep: bool) -> Result<Lock, Failure> {
     }
 }
 
-/// The engine ids the Swift CLI knew; `--engine` lists them in its error
-/// and its help. Only `parakeet-v3` has a Rust engine today.
+/// The engine ids `--engine` takes; every one runs Parakeet v3 today.
 pub const ENGINE_IDS: [&str; 4] = [
     "parakeet-v3",
     "parakeet-ultra",
@@ -220,10 +203,9 @@ impl SpeechOptions {
     }
 }
 
-/// The absolute path with `.` and `..` resolved lexically and no trailing
-/// separator, so the same vault gets the same destination id, and a path
-/// the CLI stores or prints is the same however it was spelled. Swift:
-/// `URL.standardizedFileURL.path`, which does not resolve symlinks either.
+/// The absolute path with `.` and `..` resolved lexically (symlinks are
+/// not) and no trailing separator, so the same vault gets the same
+/// destination id however it was spelled.
 pub fn standardized(path: &Path) -> PathBuf {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let mut result = PathBuf::new();
@@ -251,12 +233,9 @@ pub fn paths() -> Result<StenoPaths, Failure> {
     StenoPaths::create_default().map_err(Failure::runtime)
 }
 
-/// The speech setup over `models_directory`, the speech settings read
-/// from the default support directory without creating it. Its sidecar
-/// downloads a missing model on first use (`Install::Allowed`): a user who
-/// runs an explicit command in a terminal asked for the work and sees its
-/// output. The app's setup never does (`Install::Never`, the default), and
-/// this one is built here, not shared with it.
+/// The speech setup over `models_directory`. Unlike the app's, its sidecar
+/// downloads a missing model on first use: a user who runs an explicit
+/// command asked for the work and sees its output.
 pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
     let mut setup = SpeechSetup::in_models_directory(
         models_directory,
@@ -266,13 +245,9 @@ pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
     setup
 }
 
-/// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
-/// the 0600 secrets file in the support directory. After the Linux app
-/// moved the file's secrets into the Secret Service, which the command
-/// line does not read, the file keeps a copy of the key only until the
-/// app's next launch removes it or the app saves the key; a key it no
-/// longer holds is read as none and the run goes on without one, saying so
-/// on stderr, as on the Mac, whose app keeps the key in the Keychain.
+/// The LLM API key from `STENO_LLM_API_KEY` or the 0600 secrets file. A
+/// key the app moved into the keyring, which the CLI does not read, is
+/// read as none, and the run goes on without one, saying so on stderr.
 pub async fn api_key() -> Result<Option<String>, Failure> {
     api_key_under(&paths()?).await
 }
@@ -309,16 +284,14 @@ fn key_or_none(
     }
 }
 
-/// The LLM passes from the settings, `None` without an endpoint. The API
-/// key is read only when [`sends_key`].
+/// The LLM passes from the settings, `None` without an endpoint.
 pub async fn llm_passes(
     settings: &Settings,
 ) -> Result<Option<steno_services::llm::Passes>, Failure> {
     passes_reading(settings, api_key).await
 }
 
-/// [`llm_passes`] with the key from `read`, called only when
-/// [`sends_key`].
+/// [`llm_passes`] with the key from `read`, called only when [`sends_key`].
 async fn passes_reading(
     settings: &Settings,
     read: impl AsyncFnOnce() -> Result<Option<String>, Failure>,
@@ -343,9 +316,9 @@ fn sends_key(settings: &Settings) -> bool {
         && steno_llm::LlmEndpoint::from_settings(settings).is_some()
 }
 
-/// The pipeline dependencies: core's fakes for speech and diarization
-/// unless `--engine` names a real one; the LLM passes from the settings;
-/// delivery through the real coordinator unless a command passes its own.
+/// The pipeline dependencies: fakes for speech and diarization unless
+/// `--engine` names a real one; delivery through the real coordinator
+/// unless a command passes its own.
 pub fn dependencies(
     store: Arc<Store>,
     settings: &Settings,
@@ -355,8 +328,7 @@ pub fn dependencies(
     llm: Option<steno_services::llm::Passes>,
     events: MeetingEventBus,
 ) -> Result<PipelineDependencies, Failure> {
-    // Where the engine runs, so its load and transcriptions are marked as
-    // reads when that is this process.
+    // Marks the engine's reads when it runs in this process.
     let mut in_process = false;
     let (speech_engine, diarizer, memory): (
         Arc<dyn steno_core::SpeechEngine>,
@@ -372,8 +344,7 @@ pub fn dependencies(
             let sidecar = Arc::new(steno_services::speech::sidecar_engine(&speech));
             in_process = speech.runtime(engine).runs_in_process();
             (
-                // The flag names the engine for this run, as the Swift CLI's
-                // `makeSpeechEngine(engine, ...)` did; the stored id does not.
+                // The flag names the engine for this run, not the stored id.
                 steno_services::speech::speech_engine_in(engine, &speech, &sidecar),
                 process_diarizer(sidecar),
                 Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
@@ -406,11 +377,7 @@ pub fn dependencies(
 }
 
 /// The diarizer `steno process --engine` runs in the child of `sidecar`.
-/// It stays on `Install::Allowed`: a user who runs an explicit command in
-/// a terminal asked for the work and sees its output, so it may download
-/// the diarizer's models on first use. The app's pipelines never do
-/// (`Install::Never` in `steno_services::speech::SpeechEngines`), and
-/// this wiring is built here, not shared with them.
+/// Unlike the app's, it may download its models on first use.
 fn process_diarizer(
     sidecar: Arc<steno_speech::SidecarSpeechEngine>,
 ) -> Arc<dyn steno_core::Diarizer> {
@@ -434,8 +401,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// The damage a command's pipeline records goes to the file beside the
-    /// database, where the app reads it.
+    /// The damage a command's pipeline records goes beside the database.
     #[test]
     fn the_damage_is_recorded_beside_the_database() {
         let dir = tempfile::tempdir().unwrap();
@@ -459,8 +425,7 @@ mod tests {
         );
     }
 
-    /// After the Linux app's move the file has no key: none, as on the
-    /// Mac; any other failure stays one.
+    /// A key moved to the keyring reads as none; any other failure stays one.
     #[test]
     fn a_key_kept_in_the_keyring_reads_as_none() {
         let key = SecretKey::llm_api_key();
@@ -475,8 +440,7 @@ mod tests {
         assert!(key_or_none(Err("the file is damaged".into()), &key).is_err());
     }
 
-    /// Only a configured server endpoint reads the key, and the passes
-    /// get the key it read.
+    /// Only a configured server endpoint reads the key.
     #[tokio::test]
     async fn only_a_server_endpoint_sends_the_key() {
         let endpoint = Settings {
@@ -514,8 +478,7 @@ mod tests {
         assert_eq!(reads.get(), 1, "no other provider reads it");
     }
 
-    /// The command's own read over a file the app marked: a copy the move
-    /// left is used, and none once the app's next launch removed it.
+    /// A copy the move left in the file is used; none once it is removed.
     #[tokio::test]
     async fn the_key_is_read_from_a_marked_file_and_none_once_it_left() {
         if std::env::var_os("STENO_LLM_API_KEY").is_some() {
@@ -552,8 +515,7 @@ mod tests {
         assert_eq!(standardized(&root.join("..")), root);
     }
 
-    /// A command that opens the database twice holds its lock once: the
-    /// second open must not find its own process in the way.
+    /// A command that opens the database twice holds its lock once.
     #[test]
     fn opening_twice_in_one_process_holds_the_lock_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -569,8 +531,7 @@ mod tests {
         ));
     }
 
-    /// A database named like its own lock file is refused before anything
-    /// opens it.
+    /// A database named like its own lock file is refused.
     #[test]
     fn a_database_with_the_extension_lock_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -582,8 +543,7 @@ mod tests {
         assert!(!dir.path().join("steno.lock").exists());
     }
 
-    /// A command that only reads lets go of a lock it found free once the
-    /// database is open, so the app can start while it runs.
+    /// A command that only reads lets go of the lock once the database is open.
     #[test]
     fn reading_with_a_free_lock_lets_go_of_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -595,9 +555,8 @@ mod tests {
         DatabaseLock::acquire(&database).expect("the read let go of the lock");
     }
 
-    /// The command's speech sidecar may download a missing model, where
-    /// the app's setup, built the same way without the CLI's switch, may
-    /// not.
+    /// The command's speech sidecar may download a missing model; the app's
+    /// may not.
     #[test]
     fn the_commands_sidecar_may_download_its_models() {
         let dir = tempfile::tempdir().unwrap();
@@ -612,8 +571,7 @@ mod tests {
         assert_eq!(app.sidecar.install, steno_speech::Install::Never);
     }
 
-    /// `steno process` may download the diarizer's models: over an empty
-    /// models directory its diarizer's `prepare` asks the mirror.
+    /// `steno process` may download the diarizer's models.
     #[tokio::test(flavor = "multi_thread")]
     async fn steno_process_may_download_the_diarizers_models() {
         use std::io::{BufRead, BufReader, Write};
@@ -646,10 +604,8 @@ mod tests {
         assert!(requests.load(Ordering::SeqCst) > 0);
     }
 
-    /// `--engine` over the models directory `<dir>/models-\xff` (a name
-    /// that is not UTF-8) passed to `dependencies`, as `steno process`
-    /// passes the settings', with `stored` as the settings' engine: the
-    /// error of the engine's `prepare`, which fails without the network.
+    /// The error of `--engine`'s `prepare` over a models directory whose
+    /// name is not UTF-8, with `stored` as the settings' engine.
     #[cfg(unix)]
     async fn prepare_error(dir: &Path, flag: &str, stored: &str) -> (PathBuf, String) {
         use std::os::unix::ffi::OsStrExt as _;
@@ -673,14 +629,9 @@ mod tests {
         (models, error.to_string())
     }
 
-    /// The flag, not the stored id, picks the engine, over the models
-    /// directory the caller passes. Every engine reports `parakeet-v3`, and off
-    /// the Mac every id runs in the speech sidecar, so only the Mac can
-    /// tell the engines apart: there the flag's `parakeet-v3` is the
-    /// `CoreML` engine, the stored Whisper id the sidecar's. `CoreML`
-    /// misses its bundles under the given directory's
-    /// `fluidaudio/parakeet-tdt-0.6b-v3`; the sidecar would refuse the
-    /// root before any download.
+    /// The flag, not the stored id, picks the engine, over the given models
+    /// directory: on the Mac `parakeet-v3` is the `CoreML` engine, which
+    /// misses its bundles there.
     #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_engine_flag_wins_over_the_stored_engine() {
@@ -694,9 +645,8 @@ mod tests {
         );
     }
 
-    /// Off the Mac the sidecar runs every id; its refusal of the root that
-    /// is not UTF-8 names the `onnx/` folder of the given directory, not
-    /// the default one.
+    /// Off the Mac the sidecar's refusal names the given directory's `onnx/`
+    /// folder, not the default one.
     #[cfg(all(unix, not(target_os = "macos")))]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_engine_runs_over_the_models_dir_it_is_given() {

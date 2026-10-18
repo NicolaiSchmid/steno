@@ -1,8 +1,6 @@
-//! The two recording intakes: the phone's (`RecordingIntake`, core's
-//! `HandoverIntake`) and the Mac's (`LocalRecordingIntake`). Every rule
-//! about the rows lives here so the app, the CLI and the handover service
-//! share one spelling. Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`
-//! and `Sources/StenoCore/Storage/LocalRecordingIntake.swift`.
+//! The two recording intakes: the phone's (`RecordingIntake`) and the
+//! Mac's (`LocalRecordingIntake`). Every rule about the rows lives here so
+//! the app, the CLI and the handover service share one spelling.
 
 use std::future::Future;
 use std::path::Path;
@@ -22,22 +20,18 @@ use uuid::Uuid;
 
 use crate::pipeline::{Now, PipelineFailure, ProcessingPipeline};
 
-/// Hands a queued meeting and its asset to the pipeline: the phone
-/// intake's, which saved them itself. The production wiring is
-/// [`ProcessingPipeline::enqueue_saved`]; tests pass a counting closure.
+/// Hands a meeting and asset the phone intake saved to the pipeline
+/// ([`ProcessingPipeline::enqueue_saved`] in production).
 pub type Enqueue = Arc<
     dyn Fn(Meeting, AudioAsset) -> Pin<Box<dyn Future<Output = Result<(), PipelineFailure>> + Send>>
         + Send
         + Sync,
 >;
 
-/// Commits the Mac recording that stopped, by its meeting id, its result
-/// and the retention to give its asset (`None`: the settings' default),
-/// and hands it to the pipeline: the local intake's. The production
-/// wiring is [`ProcessingPipeline::enqueue_stopped_recording`], which
-/// commits through [`Store::save_stopped_recording`] and returns the
-/// meeting as saved; tests pass a closure that commits the same way or
-/// fails.
+/// Commits the stopped Mac recording (meeting id, result, asset retention,
+/// `None` for the settings' default) and hands it to the pipeline
+/// ([`ProcessingPipeline::enqueue_stopped_recording`] in production);
+/// returns the meeting as saved.
 pub type EnqueueStopped = Arc<
     dyn Fn(
             Uuid,
@@ -55,7 +49,7 @@ pub fn phone_title(started_at: DateTime<Utc>, zone: FixedOffset) -> String {
 }
 
 /// "Call 2026-09-24 11:00", "Meeting 2026-09-24 11:00" or "Phone recording
-/// 2026-09-24 11:00" in `zone`. Swift: `LocalRecordingIntake.defaultTitle`.
+/// 2026-09-24 11:00" in `zone`.
 #[must_use]
 pub fn default_title(
     source: MeetingSource,
@@ -74,32 +68,23 @@ pub fn default_title(
 }
 
 /// Where the phone intake notes the meeting folder it copies an upload
-/// into, and the upload the copy holds, from before the copy until the
-/// admission commits or the copy is gone. A copy left with no meeting (a
-/// crash before the commit, a commit and its `failed` save both failing)
-/// is then one this install wrote, which the launch adopts, unlike a
-/// meeting folder another install wrote into a shared audio folder
-/// (`steno_services`' recovery). The launch adopts a copy that holds the
-/// upload it was noted for with that upload's ledger row, and the phone's
-/// retry admits into it ([`AdmissionFolders::noted_copy`]), so the
-/// recording is one meeting either way. The app's notes go into the
-/// records beside the database; `()` notes nothing. Rust only.
+/// into, from before the copy until the admission commits or the copy is
+/// gone. A copy left with no meeting is then known to be this install's, so
+/// the launch adopts it and the phone's retry admits into it
+/// ([`AdmissionFolders::noted_copy`]). `()` notes nothing.
 pub trait AdmissionFolders: Send + Sync {
-    /// Before the copy of `upload` into meeting `meeting_id`'s folder in
-    /// `audio_folder`. An error refuses the admission before anything is
-    /// copied or committed; the phone keeps its copy and tries again.
+    /// Before the copy of `upload` into `meeting_id`'s folder. An error
+    /// refuses the admission before anything is copied or committed.
     fn copying(
         &self,
         meeting_id: Uuid,
         audio_folder: &Path,
         upload: &NotedUpload,
     ) -> std::io::Result<()>;
-    /// The admission of `meeting_id` committed, or its copy is gone. A
-    /// failure is the implementation's to log.
+    /// The admission of `meeting_id` committed, or its copy is gone.
     fn settled(&self, meeting_id: Uuid);
-    /// The meeting id and audio folder of a copy of `upload` that an
-    /// earlier admission noted and did not settle, if any. None by
-    /// default, and for a note that names no upload (an older build's).
+    /// The meeting id and audio folder of an unsettled noted copy of
+    /// `upload`, if any.
     fn noted_copy(&self, _upload: &NotedUpload) -> Option<(Uuid, std::path::PathBuf)> {
         None
     }
@@ -113,9 +98,8 @@ impl AdmissionFolders for () {
     fn settled(&self, _: Uuid) {}
 }
 
-/// The upload a phone admission's copy holds, as the admission ledger
-/// keys it: the recording id, the size and the SHA-256. Noted with the
-/// copy's folder ([`AdmissionFolders::copying`]). Rust only.
+/// The upload a phone admission's copy holds, as the admission ledger keys
+/// it: the recording id, the size and the SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotedUpload {
@@ -135,9 +119,8 @@ impl NotedUpload {
         }
     }
 
-    /// Whether the file at `path` is this upload whole: its size and its
-    /// SHA-256. A copy cut short (a crash during the copy) is not, so
-    /// neither the launch nor a retry answers the phone with it.
+    /// Whether the file at `path` is this upload whole (size and SHA-256);
+    /// a copy cut short by a crash is not.
     pub fn is_held_by(&self, path: &Path) -> std::io::Result<bool> {
         let len = std::fs::metadata(path)?.len();
         if i64::try_from(len).ok() != Some(self.byte_count) {
@@ -147,44 +130,20 @@ impl NotedUpload {
     }
 }
 
-/// Admits a fully received phone recording: copies the file into the
-/// audio folder (`RecordingLayout`), commits the `HandoverReceipt` as
-/// complete together with a `phone` meeting `queued` with a `mixed`
-/// asset under the default retention, deletes the upload, and only then
+/// Admits a fully received phone recording: copies the file into the audio
+/// folder, commits the `HandoverReceipt` as complete together with a
+/// `queued` phone meeting and its asset, deletes the upload, and only then
 /// hands the meeting to the pipeline. Idempotent on `recording_id`.
 ///
-/// The phone deletes its own copy once `complete` answers 200, so
-/// everything the admission wrote is on the disk first. The parent of
-/// every folder it created, the copy and the meeting folder are synced
-/// before the receipt is marked complete
-/// ([`crate::files::create_new_dir_durably`],
-/// [`crate::files::copy_durably`]); Swift syncs its `copyItem` copy and
-/// the folders the same way. The receipt, the meeting and its asset
-/// commit in one durable transaction ([`Store::save_admission_durably`]),
-/// so no crash, full disk or busy store leaves a `complete` receipt
-/// without its meeting. When that commit fails, the receipt is saved
-/// `failed` durably ([`Store::save_handover_receipt_durably`], tried again
-/// while the database is busy, up to
-/// [`RecordingIntake::FAILED_SAVE_ATTEMPTS`] in all, with the writer free
-/// between the tries), and the copy is removed only once that save
-/// succeeds: a failed commit can still be replayed after a crash, and its
-/// meeting then needs the copy. The phone keeps its own copy either way. Bytes the admission ledger already
-/// holds with a meeting (another device's upload of them, taken over
-/// during the first admission) are that meeting: the receipt is completed
-/// with it, the copy goes, and nothing is enqueued.
-/// The enqueue after the commit is [`ProcessingPipeline::enqueue_saved`]
-/// in [`RecordingIntake::over`]; its failure does not undo the admission,
-/// the meeting waits `queued` for the next launch's resume. The
-/// admission, the enqueue included, runs in a task of its own, so a caller
-/// that drops `admit` (a phone that hung up mid-admit) leaves the
-/// admission to finish and its meeting enqueued (Rust only: hyper drops
-/// a request's future when the phone hangs up). The copy's folder is
-/// noted before the copy ([`AdmissionFolders`], Rust only). The noted copy
-/// an earlier admission of the same bytes left with no meeting (its
-/// commit and its `failed` save both gave up under a lock another
-/// process held) is admitted where it is, not copied again, and is never
-/// removed by this admission: the launch may be adopting it (Rust only).
-/// Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
+/// The phone deletes its copy once `complete` answers 200, so the copy and
+/// its folders are synced and the receipt, meeting and asset commit in one
+/// durable transaction first. When that commit fails, the receipt is saved
+/// `failed` durably and only then is the copy removed: a failed commit can
+/// still be replayed after a crash, and its meeting then needs the copy.
+/// Bytes the admission ledger already holds with a meeting are that
+/// meeting: the receipt completes with it and nothing is enqueued. The
+/// admission runs in a task of its own, so a phone that hangs up mid-admit
+/// leaves it to finish.
 pub struct RecordingIntake {
     store: Arc<Store>,
     enqueue: Enqueue,
@@ -194,19 +153,14 @@ pub struct RecordingIntake {
 }
 
 impl RecordingIntake {
-    /// How many times the `failed` receipt save after a failed admission
-    /// commit is tried while another connection holds the database: each
-    /// try already waits out the store's five-second busy timeout. The
-    /// copy goes only once that save is on the disk, so each try lengthens
-    /// the hold the admission outlasts without leaving a copy for the
-    /// launch to adopt. Rust only.
+    /// How many times the `failed` receipt save after a failed commit is
+    /// tried while another connection holds the database; each try already
+    /// waits out the store's five-second busy timeout.
     pub const FAILED_SAVE_ATTEMPTS: usize = 3;
 
     /// How long the intake waits, with the writer free, before each try of
-    /// the `failed` save: a write of this process that queued for the
-    /// writer behind the busy commit or the try before (a host write, a
-    /// pipeline step) takes it meanwhile, so none waits more than one busy
-    /// timeout behind the admission. Rust only.
+    /// the `failed` save, so a queued write of this process gets the writer
+    /// meanwhile.
     pub const FAILED_SAVE_BACK_OFF: Duration = Duration::from_millis(200);
 
     #[must_use]
@@ -220,15 +174,14 @@ impl RecordingIntake {
         }
     }
 
-    /// The intake noting each copy's folder in `folders`. Rust only.
+    /// The intake noting each copy's folder in `folders`.
     #[must_use]
     pub fn noting_folders_in(mut self, folders: Arc<dyn AdmissionFolders>) -> Self {
         self.folders = folders;
         self
     }
 
-    /// The production wiring over `pipeline`, which processes the
-    /// meetings the intake saved ([`ProcessingPipeline::enqueue_saved`]).
+    /// The production wiring over `pipeline`.
     #[must_use]
     pub fn over(store: Arc<Store>, pipeline: ProcessingPipeline, zone: FixedOffset) -> Self {
         let now = pipeline.dependencies().now.clone();
@@ -246,8 +199,7 @@ impl RecordingIntake {
 
 /// What the intake's one store step decided ([`admit_on`]).
 enum Admission {
-    /// Answered from the store, or by the ledger's meeting for these
-    /// bytes: nothing to enqueue.
+    /// Answered from the store or the ledger: nothing to enqueue.
     Answered(Uuid),
     /// Committed: the meeting and its asset to hand to the pipeline.
     Admitted(Box<(Meeting, AudioAsset)>),
@@ -255,8 +207,8 @@ enum Admission {
 
 #[async_trait]
 impl HandoverIntake for RecordingIntake {
-    /// The store step (`Store::writing`) holds the reads, the durable copy,
-    /// the commit and the `failed` save; a panic in the task resumes here.
+    /// The store step runs the reads, the copy, the commit and the `failed`
+    /// save; a panic in the task resumes here.
     async fn admit(
         &self,
         file: &Path,
@@ -286,8 +238,7 @@ impl HandoverIntake for RecordingIntake {
     }
 }
 
-/// [`RecordingIntake::admit`]'s task: the store step, then the enqueue of
-/// a meeting it committed.
+/// [`RecordingIntake::admit`]'s task: the store step, then the enqueue.
 async fn admit_and_enqueue(
     store: Arc<Store>,
     enqueue: Enqueue,
@@ -301,8 +252,7 @@ async fn admit_and_enqueue(
         Admission::Admitted(admitted) => {
             let (meeting, asset) = *admitted;
             let meeting_id = meeting.id;
-            // Admitted: a pipeline that cannot take the meeting now
-            // leaves it `queued`, and the next launch resumes it.
+            // Admitted: the meeting stays `queued` for the next launch.
             if let Err(failure) = enqueue(meeting, asset).await {
                 tracing::warn!(%meeting_id, stage = failure.stage.as_str(), "admitted meeting not enqueued");
             }
@@ -311,8 +261,7 @@ async fn admit_and_enqueue(
     }
 }
 
-/// What [`admit_on`] needs of the call and of the intake, owned, so the
-/// step runs on the store's blocking pool.
+/// What [`admit_on`] needs, owned, so the step runs on the blocking pool.
 struct AdmitStep {
     file: std::path::PathBuf,
     metadata: RecordingMetadata,
@@ -337,12 +286,9 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
         folders,
     } = step;
     let existing = store.handover_receipt(metadata.recording_id)?;
-    // Another upload's receipt under this id is never completed or
-    // answered from: another phone's (this one was revoked, and that one
-    // announced the id or took the receipt over), which would take this
-    // meeting for its own and delete its copy; or one of other bytes (the
-    // phone announced another file under the id), whose `complete` would
-    // get this meeting and delete a file never admitted.
+    // Another upload's receipt under this id (another phone's, or other
+    // bytes under the same id) is never completed or answered from: its
+    // `complete` would delete a file never admitted.
     if existing.as_ref().is_some_and(|receipt| {
         receipt.device_id != device.id
             || receipt.byte_count != metadata.byte_count
@@ -350,10 +296,8 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
     }) {
         return Err(StoreError::ReceiptOfAnotherUpload(metadata.recording_id).into());
     }
-    // A retry of an admitted recording is answered from the store with
-    // no write of its own: the launch checkpoint
-    // (`HandoverService::checkpoint_store`) put every earlier commit on
-    // the disk, and this process commits its admissions durably.
+    // A retry of an admitted recording is answered from the store without
+    // writing: every earlier commit is already durable.
     if let Some(meeting_id) = existing
         .as_ref()
         .and_then(|receipt| receipt.state.meeting_id())
@@ -365,8 +309,8 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
     let settings = store.settings()?;
     let timestamp = now();
     let upload = NotedUpload::of(metadata);
-    // The noted copy: a second copy would be a second meeting once the
-    // launch adopts the first.
+    // A second copy would be a second meeting once the launch adopts the
+    // first.
     let reused = reusable_copy(store, folders.as_ref(), &upload, metadata.format)?;
     let is_reused = reused.is_some();
     let (meeting_id, layout, destination) = if let Some(reused) = reused {
@@ -376,8 +320,8 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
         let audio_folder = file_url_path(&settings.audio_folder)
             .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
         let layout = RecordingLayout::new(&audio_folder, meeting_id);
-        // The copy and its folder are on the disk before the receipt says
-        // complete: the phone deletes its own copy on that answer.
+        // Durable before the receipt says complete: the phone deletes its
+        // copy on that answer.
         folders.copying(meeting_id, &audio_folder, &upload)?;
         let destination = copy_into_new_folder(file, &layout, metadata.format)
             .inspect_err(|_| folders.settled(meeting_id))?;
@@ -430,9 +374,7 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
 
     let committed = match store.commit_admission_durably(&receipt, &meeting, &asset) {
         Ok(committed) => {
-            // The noted copy, answered by the ledger as another meeting,
-            // stays noted: the launch decides what becomes of it
-            // (`steno_services`' recovery).
+            // The noted copy stays noted: the launch decides its fate.
             let answered_elsewhere = is_reused
                 && matches!(committed, AdmissionCommit::Earlier { meeting_id: admitted, .. } if admitted != meeting_id);
             if !answered_elsewhere {
@@ -441,15 +383,10 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
             committed
         }
         Err(error) => {
-            // The refusal of another upload's receipt wrote nothing, and
-            // that receipt is left as it is. Any other failed commit is not
-            // proof that nothing committed: a WAL sync that fails leaves
-            // the commit's frames in the WAL, and recovery after a crash
-            // replays them. The durable `failed` save writes over them, or
-            // voids them when the WAL restarts, so the copy goes only once
-            // that save is on the disk; otherwise it stays, still noted,
-            // so the next launch adopts it unless a replay brings its
-            // meeting back. The noted copy stays noted either way.
+            // The refusal of another upload's receipt wrote nothing. Any
+            // other failed commit may still be replayed from the WAL after a
+            // crash, so the copy goes only once the durable `failed` save
+            // writes over it; otherwise it stays noted for the next launch.
             let copy_goes = matches!(error, StoreError::ReceiptOfAnotherUpload(_)) || {
                 receipt.state = HandoverState::Failed(format!("admit: {error}"));
                 save_failed_receipt(store, &receipt)
@@ -468,10 +405,8 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
             meeting_id: admitted,
             ..
         } => {
-            // The ledger held these bytes with a meeting: the receipt is
-            // complete with it. A new copy and its folder belong to no
-            // meeting. The noted copy is that meeting's master when the
-            // launch adopted it meanwhile, and is left alone otherwise too.
+            // The ledger's meeting owns these bytes: a new copy belongs to
+            // no meeting, and the noted copy is left alone.
             if !is_reused {
                 let _ = std::fs::remove_file(&destination);
                 let _ = std::fs::remove_dir(&layout.directory);
@@ -481,12 +416,10 @@ fn admit_on(store: &Store, step: &AdmitStep) -> BoundaryResult<Admission> {
     }
 }
 
-/// The copy of `upload` that `folders` noted for an earlier admission which
-/// neither committed nor removed it, when its meeting has no row and the
-/// copy still holds the upload whole ([`NotedUpload::is_held_by`]): its
-/// meeting id, layout and master in `format`. A copy that cannot be read
-/// or holds other bytes is left to the launch, and the upload is copied
-/// again.
+/// The copy of `upload` an earlier admission noted and neither committed
+/// nor removed, when its meeting has no row and the copy still holds the
+/// upload whole: its meeting id, layout and master in `format`. Otherwise
+/// the upload is copied again.
 fn reusable_copy(
     store: &Store,
     folders: &dyn AdmissionFolders,
@@ -513,10 +446,8 @@ fn reusable_copy(
     }
 }
 
-/// The phone intake's test seam: the services' race tests hold a retry
-/// between its check that the noted copy has no meeting row and its
-/// commit, and let the launch run there. Behind the `testing` feature,
-/// which only dev-dependencies enable.
+/// The phone intake's test seam: race tests hold a retry between its
+/// no-row check for the noted copy and its commit. Behind `testing`.
 #[cfg(feature = "testing")]
 pub mod seams {
     use std::sync::{Arc, Mutex};
@@ -527,10 +458,8 @@ pub mod seams {
 
     static AFTER_THE_REUSE_CHECK: Mutex<Vec<Hook>> = Mutex::new(Vec::new());
 
-    /// Calls `hook` with the noted copy's meeting id each time a retry
-    /// found that it has no meeting row, before the retry reads the copy.
-    /// Every hook stays for the process, so each test's ignores the ids of
-    /// the others.
+    /// Calls `hook` with the noted copy's meeting id each time a retry found
+    /// it has no row. Hooks stay for the process.
     pub fn on_the_reuse_check(hook: impl Fn(Uuid) + Send + Sync + 'static) {
         AFTER_THE_REUSE_CHECK
             .lock()
@@ -550,11 +479,8 @@ pub mod seams {
 }
 
 /// The durable `failed` save of `receipt` after a failed admission commit,
-/// tried again while the database is busy, up to
-/// [`RecordingIntake::FAILED_SAVE_ATTEMPTS`] in all: whether it is on the
-/// disk. Each try waits [`RecordingIntake::FAILED_SAVE_BACK_OFF`] first,
-/// holding nothing: every store call takes the writer only for itself, so
-/// a write queued behind the commit or the try before runs in between.
+/// tried up to [`RecordingIntake::FAILED_SAVE_ATTEMPTS`] times while the
+/// database is busy, backing off holding nothing: whether it is on disk.
 fn save_failed_receipt(store: &Store, receipt: &HandoverReceipt) -> bool {
     for attempt in 1..=RecordingIntake::FAILED_SAVE_ATTEMPTS {
         std::thread::sleep(RecordingIntake::FAILED_SAVE_BACK_OFF);
@@ -568,12 +494,9 @@ fn save_failed_receipt(store: &Store, receipt: &HandoverReceipt) -> bool {
     false
 }
 
-/// Copies the verified upload `file` durably into the new meeting folder of
-/// `layout` and returns the copy's path. A folder already at the layout's
-/// path fails the attempt before the copy and is left as it is
-/// ([`crate::files::create_new_dir_durably`]). A failed copy removes the
-/// meeting folder, which only this call made; the upload and the phone's
-/// copy remain, and the phone's retry copies into a new folder.
+/// Copies the verified upload `file` durably into `layout`'s new meeting
+/// folder and returns the copy's path. An existing folder at that path
+/// fails before the copy; a failed copy removes the folder it made.
 fn copy_into_new_folder(
     file: &Path,
     layout: &RecordingLayout,
@@ -588,7 +511,6 @@ fn copy_into_new_folder(
 }
 
 /// What a finished capture hands to [`LocalRecordingIntake::complete`].
-/// Swift: `RecordingResult`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordingResult {
     pub asset: AudioAsset,
@@ -606,8 +528,7 @@ pub struct Attendee {
 /// Errors of the Mac recording transaction beyond the store's own.
 #[derive(Debug, thiserror::Error)]
 pub enum LocalRecordingIntakeError {
-    /// `complete` on a meeting that is not `recording`: nothing is written
-    /// and nothing is marked failed.
+    /// `complete` on a meeting that is not `recording`: nothing is written.
     #[error("meeting {0} is {1}, not recording")]
     NotRecording(Uuid, MeetingStateKind),
     #[error(transparent)]
@@ -628,10 +549,9 @@ impl LocalRecordingIntakeError {
     }
 }
 
-/// The Mac recording transaction. `begin` writes the `recording` row the
-/// list shows while the capture session runs; `complete` turns the
-/// finished capture into a `queued` meeting with its asset and hands both
-/// to the pipeline; `fail` records why a recording never made it.
+/// The Mac recording transaction: `begin` writes the `recording` row,
+/// `complete` turns the capture into a `queued` meeting for the pipeline,
+/// `fail` records why a recording never made it.
 pub struct LocalRecordingIntake {
     store: Arc<Store>,
     enqueue: EnqueueStopped,
@@ -653,10 +573,8 @@ impl LocalRecordingIntake {
     }
 
     /// This intake with [`Self::complete`] asking `keep_trying` before each
-    /// further try of a busy commit, and trying no more once it says no:
-    /// the recorder's stop asks whether the app is quitting, so a stop for
-    /// the exit, or one under way when the exit came, ends within the
-    /// exit's patience. Rust only, as the retry is.
+    /// further try of a busy commit, so a stop during the app's exit ends in
+    /// time.
     #[must_use]
     pub fn retrying_while(
         mut self,
@@ -684,11 +602,9 @@ impl LocalRecordingIntake {
     }
 
     /// Writes the `recording` meeting `meeting_id` and its `them`
-    /// participants in one transaction. The caller picks the id, so the
-    /// recorder can note where the recording goes before its row exists.
-    /// An empty title becomes the default title with
-    /// `title_origin` default; a title with a calendar event id is
-    /// `calendar`, one without is `user`.
+    /// participants in one transaction. An empty title becomes the default
+    /// title; a title with a calendar event id is `calendar`, one without
+    /// is `user`.
     pub fn begin(
         &self,
         meeting_id: Uuid,
@@ -738,12 +654,8 @@ impl LocalRecordingIntake {
     }
 
     /// Names the recording `meeting_id`, begun without an event, after the
-    /// calendar event `calendar_event_id` that came in since, as
-    /// [`Self::begin`] would have: a title that is not blank with the
-    /// origin `calendar`, and the attendees as `them` participants, under
-    /// the store's rule ([`Store::name_recording_after_event`]); returns
-    /// whether it wrote. Rust only: the recorder never waits for the
-    /// calendar.
+    /// calendar event that came in since, as [`Self::begin`] would have
+    /// ([`Store::name_recording_after_event`]); returns whether it wrote.
     pub fn name_after_event(
         &self,
         meeting_id: Uuid,
@@ -763,29 +675,19 @@ impl LocalRecordingIntake {
     }
 
     /// How many times [`Self::complete`] tries its commit while another
-    /// connection holds the database: each try already waits out the
-    /// store's five-second busy timeout.
+    /// connection holds the database.
     pub const COMMIT_ATTEMPTS: usize = 3;
 
-    /// Writes the duration and the end reason, sets the asset's retention
-    /// (`retention`, else the settings' default as it is now) with
-    /// `expires_at` cleared, and enqueues the meeting: the meeting, now
-    /// `queued`, and its asset in one commit, which writes only while the
-    /// row is still `recording` and keeps what else was saved on it since.
-    /// The commit makes its own reads; [`Store::save_stopped_recording`]
-    /// says where, and why no settings row fails it.
+    /// Writes the duration, the end reason and the asset's retention, and
+    /// enqueues the meeting: `queued` meeting and asset in one commit, which
+    /// writes only while the row is still `recording` and keeps what else
+    /// was saved on it since ([`Store::save_stopped_recording`]).
     ///
-    /// A commit that finds the database busy is tried again, up to
-    /// [`Self::COMMIT_ATTEMPTS`] in all, while [`Self::retrying_while`]'s
-    /// check allows, and each try reads again.
-    ///
-    /// A meeting that is not `recording` when the commit reads it is left
-    /// alone, its row untouched, and one deleted meanwhile is not brought
-    /// back. Any other failure leaves the meeting `recording` and returns
-    /// the error: the recording stays on disk, and the next launch's
-    /// recovery finds it there and queues it. Swift marked the meeting
-    /// failed without its asset, so the recording was lost to the list;
-    /// the retry and the recording kept are Rust only.
+    /// A busy commit is tried again, up to [`Self::COMMIT_ATTEMPTS`] in
+    /// all, while [`Self::retrying_while`]'s check allows. A meeting no
+    /// longer `recording` is left alone. Any other failure leaves it
+    /// `recording` and returns the error; the next launch's recovery queues
+    /// it.
     pub async fn complete(
         &self,
         meeting_id: Uuid,
@@ -821,9 +723,8 @@ impl LocalRecordingIntake {
             Ok(meeting) => return Ok(meeting),
             Err(failure) => failure,
         };
-        // The failure is the pipeline's, so the row says why: one that
-        // moved on or went is not this recording's to save. Read only
-        // after a failure that was not busy, which the caller retries.
+        // Only a non-busy failure is the row's to record, and only while
+        // it is still this recording.
         if !failure.is_busy()
             && let Ok(now) = self.store.meeting(meeting_id)
         {
@@ -841,8 +742,7 @@ impl LocalRecordingIntake {
         Err(failure.into())
     }
 
-    /// Marks the meeting failed: a capture that could not start or could
-    /// not be saved.
+    /// Marks the meeting failed: a capture that could not start or be saved.
     pub fn fail(&self, meeting_id: Uuid, reason: &str) -> Result<(), LocalRecordingIntakeError> {
         self.store.set_state(
             meeting_id,
@@ -856,8 +756,8 @@ impl LocalRecordingIntake {
 }
 
 /// One `them` participant per distinct attendee (by email, else by name,
-/// case-insensitively; blank names dropped), ids derived from the meeting
-/// id so a retried `begin` writes the same rows.
+/// case-insensitively), ids derived from the meeting id so a retried
+/// `begin` writes the same rows.
 #[must_use]
 pub fn participants_from(attendees: &[Attendee], meeting_id: Uuid) -> Vec<Participant> {
     let mut seen = std::collections::BTreeSet::new();
@@ -927,8 +827,7 @@ mod tests {
         store
     }
 
-    /// A phone paired in `store`, and the metadata of a nine-byte upload
-    /// from it that started at `now`.
+    /// A phone paired in `store` and a nine-byte upload's metadata from it.
     fn paired_phone(store: &Store, now: DateTime<Utc>) -> (PairedDevice, RecordingMetadata) {
         let device = PairedDevice {
             id: Uuid::new_v4(),
@@ -967,8 +866,7 @@ mod tests {
         upload
     }
 
-    /// `device`'s receipt of the recording `metadata` describes, in
-    /// `state`, with its first chunk received at `now`.
+    /// `device`'s receipt of `metadata`'s recording in `state`.
     fn receipt_of(
         device: &PairedDevice,
         metadata: &RecordingMetadata,
@@ -988,11 +886,8 @@ mod tests {
         }
     }
 
-    /// A write of this process that comes for the writer between two tries
-    /// of the `failed` save, while another connection holds the lock, gets
-    /// it at once: the save backs off holding nothing. The write ends, busy,
-    /// after its own busy timeout, not after the next try's as well. Once
-    /// the lock goes, the next try saves.
+    /// A write that comes between two tries of the `failed` save gets the
+    /// writer at once, and the next try saves once the lock goes.
     #[test]
     fn a_write_queued_behind_the_failed_save_runs_between_its_tries() {
         use tracing_subscriber::layer::SubscriberExt as _;
@@ -1029,9 +924,7 @@ mod tests {
         let waited = queued.elapsed();
         drop(hold);
         assert!(written.is_err_and(|error| error.is_busy()));
-        // Its own busy timeout. A write that also waited out the second
-        // try waits at least the rest of it, so two busy timeouts less
-        // half a back-off.
+        // Its own busy timeout, not the second try's as well.
         assert!(
             waited < BUSY_TIMEOUT + Duration::from_secs(3),
             "the write waited {waited:?}"
@@ -1039,8 +932,7 @@ mod tests {
         assert!(saving.join().unwrap(), "the try after the write saved");
     }
 
-    /// Says once on its channel that a try of the `failed` save found the
-    /// database busy.
+    /// Says once that a try of the `failed` save found the database busy.
     struct SaysBusy(std::sync::mpsc::SyncSender<()>);
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SaysBusy {
@@ -1055,9 +947,7 @@ mod tests {
         }
     }
 
-    /// The commit reads the row in its own transaction and refuses one
-    /// that is not `recording`: nothing is written, and the error says the
-    /// row's state.
+    /// The commit refuses a row that is not `recording` and writes nothing.
     #[tokio::test]
     async fn completing_a_meeting_that_is_not_recording_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1159,9 +1049,8 @@ mod tests {
         (meeting, result)
     }
 
-    /// An enqueue that commits as the pipeline's does (the meeting and the
-    /// asset in one transaction, its error wrapped the same way) and
-    /// counts its calls; `after_call` runs after each.
+    /// An enqueue that commits as the pipeline's does and counts its calls;
+    /// `after_call` runs after each.
     fn committing_enqueue(
         store: Arc<Store>,
         calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -1178,8 +1067,7 @@ mod tests {
         })
     }
 
-    /// The pipeline's commit of a stopped recording, its error wrapped the
-    /// same way.
+    /// The pipeline's commit of a stopped recording.
     fn commit_stopped(
         store: &Store,
         meeting_id: Uuid,
@@ -1198,10 +1086,8 @@ mod tests {
             .map_err(|error| PipelineFailure::wrapping(&error, PipelineStage::Decode))
     }
 
-    /// A commit that finds another connection holding the database is
-    /// tried again and lands; one that keeps finding it leaves the meeting
-    /// `recording` (not failed, so the next launch recovers its master)
-    /// and returns the busy error.
+    /// A busy commit is tried again and lands; one that stays busy leaves
+    /// the meeting `recording` and returns the busy error.
     #[tokio::test]
     async fn a_busy_commit_is_tried_again_and_one_that_stays_busy_leaves_the_recording() {
         let dir = tempfile::tempdir().unwrap();
@@ -1236,8 +1122,7 @@ mod tests {
         );
         assert!(store.asset(meeting.id).unwrap().is_some());
 
-        // The lock is released after the last try, so a write after it (a
-        // `fail`, as before) would land and show.
+        // Released after the last try, so a later write would land and show.
         let (meeting, result) = a_recording(&store, dir.path());
         let hold = Mutex::new(Some(WriteLockHold::new(&path)));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1264,9 +1149,7 @@ mod tests {
         assert!(store.asset(meeting.id).unwrap().is_none());
     }
 
-    /// Each try of a busy commit reads the settings again: a default
-    /// retention another connection saved while the first try waited is
-    /// the one the asset gets once the next try lands.
+    /// Each try of a busy commit reads the settings' default retention again.
     #[tokio::test]
     async fn each_try_of_a_busy_commit_reads_the_settings_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1301,10 +1184,8 @@ mod tests {
         );
     }
 
-    /// A commit that fails for another reason (a full disk) is not tried
-    /// again and leaves the meeting `recording`, as `begin` wrote it; a
-    /// busy commit is tried again only while the intake's check allows,
-    /// asked before each further try.
+    /// A non-busy failure is not retried and leaves the meeting `recording`;
+    /// a busy commit is retried only while the intake's check allows.
     #[tokio::test]
     async fn a_failed_commit_leaves_the_recording_and_only_a_busy_one_is_tried_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1366,11 +1247,8 @@ mod tests {
         assert_eq!(store.meeting(meeting.id).unwrap().unwrap(), meeting);
     }
 
-    /// The commit reads the row in its own transaction: a recording failed
-    /// or deleted before its commit (here by the enqueue, just before it
-    /// commits as the pipeline does) is not brought back `queued`, and
-    /// nothing is written; a note saved meanwhile on one still `recording`
-    /// is kept by the commit.
+    /// A recording failed or deleted before its commit is not brought back
+    /// `queued`; a note saved meanwhile on one still `recording` is kept.
     #[tokio::test]
     async fn a_recording_that_moved_on_before_the_commit_is_not_brought_back() {
         let dir = tempfile::tempdir().unwrap();
@@ -1444,9 +1322,8 @@ mod tests {
         assert_eq!(stored.scratchpad, "a note");
     }
 
-    /// Makes every meeting insert fail, as a full disk or a busy store
-    /// would fail the admission's commit; with `failed_receipts_too`, the
-    /// save of a `failed` receipt fails as well.
+    /// Makes every meeting insert fail; with `failed_receipts_too`, the
+    /// `failed` receipt save as well.
     fn refuse_writes(store: &Store, failed_receipts_too: bool) {
         let mut sql = String::from(
             "CREATE TRIGGER refuse_meetings BEFORE INSERT ON meeting \
@@ -1481,11 +1358,8 @@ mod tests {
         (enqueue, admitted)
     }
 
-    /// A phone recording lands in the audio folder as its meeting's master,
-    /// and the upload is deleted. A refused one (a failed admission commit)
-    /// leaves a `failed` receipt, the upload for the retry and no copy.
-    /// Swift: `admitPlacesTheFileEnqueuesOnceAndIsIdempotent` and
-    /// `aFailedAdmissionCommitLeavesAFailedReceiptTheUploadAndNoMeeting`.
+    /// A phone recording becomes its meeting's master and the upload goes;
+    /// a refused one leaves a `failed` receipt, the upload and no copy.
     #[tokio::test]
     async fn a_phone_recording_lands_in_the_audio_folder_and_a_refused_one_leaves_no_copy() {
         let dir = tempfile::tempdir().unwrap();
@@ -1549,9 +1423,8 @@ mod tests {
         assert_eq!(admitted.lock().unwrap().len(), 1, "nothing is enqueued");
     }
 
-    /// [`AdmissionFolders`] that lists each call: for `copying`, how many
-    /// files the audio folder held then, and `None` for `settled`.
-    /// `copying` fails while `refuse` is set.
+    /// [`AdmissionFolders`] that lists each call; `copying` fails while
+    /// `refuse` is set.
     #[derive(Default)]
     struct NotedFolders {
         calls: Mutex<Vec<(Uuid, Option<usize>)>>,
@@ -1578,11 +1451,8 @@ mod tests {
         }
     }
 
-    /// The copy's folder is noted before the copy and settled once the
-    /// admission commits. A failed commit whose `failed` save fails too
-    /// keeps the note with its copy, so the launch adopts the copy as this
-    /// install's; a note that cannot be written refuses the admission
-    /// before anything is copied. Rust only.
+    /// The copy's folder is noted before the copy and settled on commit; a
+    /// note that cannot be written refuses the admission.
     #[tokio::test]
     async fn a_copys_folder_is_noted_from_before_the_copy_until_its_admission_settles() {
         for (refuse_note, refuse_commit) in [(false, false), (false, true), (true, false)] {
@@ -1624,16 +1494,8 @@ mod tests {
         }
     }
 
-    /// A failed admission commit leaves no `complete` receipt behind, also
-    /// when the save of the `failed` one fails too (a full disk): the
-    /// receipt stays as the listener left it, the upload stays for the
-    /// retry, and the engine's sweep keeps it. Two separate commits would
-    /// leave a `complete` receipt without its meeting, and the phone's
-    /// retried `complete` would answer 200 for a meeting that never existed.
-    /// The copy stays too: without a durable `failed` receipt over it, a
-    /// failed commit whose frames reached the WAL can be replayed after a
-    /// crash, and its meeting then needs the copy. Swift:
-    /// `aFailedAdmissionWhoseFailedSaveFailsKeepsTheCopyAndNoCompleteReceipt`.
+    /// A failed commit whose `failed` save fails too leaves no `complete`
+    /// receipt, and keeps the upload and the copy.
     #[tokio::test]
     async fn a_failed_admission_whose_failed_save_fails_keeps_the_copy_and_no_complete_receipt() {
         let dir = tempfile::tempdir().unwrap();
@@ -1672,16 +1534,8 @@ mod tests {
         assert!(admitted.lock().unwrap().is_empty());
     }
 
-    /// A receipt of another upload under the same recording id is never
-    /// completed: another phone's (the admitting phone was revoked and the
-    /// other one announced the id; the admitting phone then paired again),
-    /// or the admitting phone's own of other bytes (it announced another file
-    /// under the id), made before the intake read the receipt or between
-    /// its read and its commit. The intake refuses, and that receipt stays
-    /// as it was: completed, it would answer that upload's `complete` with
-    /// this meeting, and the phone would delete a recording never admitted;
-    /// no ledger row says those bytes were admitted. Swift:
-    /// `aReceiptOfAnotherUploadIsNeverCompleted(afterTheRead:otherBytes:)`.
+    /// A receipt of another upload under the same recording id (another
+    /// phone's, or other bytes) is never completed, whenever it appears.
     #[tokio::test]
     async fn a_receipt_of_another_upload_is_never_completed() {
         for (after_the_read, other_bytes) in
@@ -1696,9 +1550,8 @@ mod tests {
                 name: "Other phone".to_owned(),
                 ..device.clone()
             };
-            // The revoke, the other phone's announce, and this phone pairing
-            // again under the same device id; or this phone's announce of
-            // another file under the id.
+            // Another phone's announce under this id, or this phone's of
+            // another file.
             let owner = if other_bytes { &device } else { &other };
             let theirs = HandoverReceipt {
                 sha256: if other_bytes {
@@ -1729,8 +1582,7 @@ mod tests {
                         now,
                     ))
                     .unwrap();
-                // The intake reads the clock once, after its receipt read
-                // and before its commit.
+                // The intake reads the clock once, between its read and commit.
                 let takeover = Mutex::new(Some(takeover));
                 Arc::new(move || {
                     if let Some(takeover) = takeover.lock().unwrap().take() {
@@ -1778,10 +1630,8 @@ mod tests {
         }
     }
 
-    /// Once the rows committed, the recording is admitted: an enqueue that
-    /// fails then (the pipeline is gone) leaves the meeting `queued` for the
-    /// next launch, and the phone is told `complete`. Swift:
-    /// `anEnqueueThatFailsAfterTheCommitStillAdmits`.
+    /// An enqueue that fails after the commit still admits; the meeting
+    /// stays `queued`.
     #[tokio::test]
     async fn an_enqueue_that_fails_after_the_commit_still_admits() {
         let dir = tempfile::tempdir().unwrap();
@@ -1812,9 +1662,7 @@ mod tests {
         assert!(!upload.exists());
     }
 
-    /// A copy that fails leaves the receipt short of complete, admits
-    /// nothing and leaves no meeting folder behind: the phone, told nothing
-    /// landed, keeps its recording.
+    /// A failed copy admits nothing and leaves no meeting folder.
     #[tokio::test]
     async fn an_upload_that_cannot_be_copied_is_not_marked_complete() {
         let dir = tempfile::tempdir().unwrap();
@@ -1850,8 +1698,7 @@ mod tests {
         assert_eq!(folders, Vec::<std::path::PathBuf>::new());
     }
 
-    /// A folder already at the new meeting's path (an id that collided)
-    /// fails the copy before any write and keeps the recording it holds.
+    /// A folder already at the new meeting's path fails the copy untouched.
     #[test]
     fn a_folder_already_at_the_meeting_path_is_never_written_or_removed() {
         let dir = tempfile::tempdir().unwrap();
@@ -1867,8 +1714,7 @@ mod tests {
         assert!(upload.exists());
     }
 
-    /// A decoder and a dispatcher nothing reaches: the pipeline quits before
-    /// the admission, so nothing is processed.
+    /// A decoder and dispatcher nothing reaches.
     struct Unreached;
 
     #[async_trait]
@@ -1897,8 +1743,7 @@ mod tests {
         }
     }
 
-    /// One write transaction as the store's commit probe saw it right
-    /// before its commit.
+    /// One write transaction as the commit probe saw it.
     #[derive(Debug, Clone, PartialEq)]
     struct Commit {
         /// `PRAGMA synchronous`: 1 is `NORMAL`, 2 is `FULL`.
@@ -1909,8 +1754,7 @@ mod tests {
         meeting: bool,
     }
 
-    /// Every commit on `store` from now on, as [`Commit`]s about
-    /// `recording_id`.
+    /// Every commit on `store` from now on, about `recording_id`.
     fn commits_of(store: &Store, recording_id: Uuid) -> Arc<Mutex<Vec<Commit>>> {
         let commits: Arc<Mutex<Vec<Commit>>> = Arc::default();
         let seen = commits.clone();
@@ -1939,8 +1783,7 @@ mod tests {
         commits
     }
 
-    /// A pipeline over `store` whose decoder and dispatcher nothing
-    /// reaches ([`Unreached`]), its clock stopped at `now`.
+    /// A pipeline over `store` nothing reaches, its clock stopped at `now`.
     fn unreached_pipeline(store: &Arc<Store>, now: DateTime<Utc>) -> ProcessingPipeline {
         ProcessingPipeline::new(
             crate::PipelineDependencies::new(
@@ -1956,11 +1799,8 @@ mod tests {
         )
     }
 
-    /// The production local intake commits a stopped recording through
-    /// [`ProcessingPipeline::enqueue_stopped_recording`]: its enqueue,
-    /// handed a recording whose row failed meanwhile, fails with the
-    /// store's `NotRecording` and writes nothing, where the plain
-    /// `enqueue` would bring the row back `queued`.
+    /// The production local intake's enqueue refuses a row that failed
+    /// meanwhile with `NotRecording` and writes nothing.
     #[tokio::test]
     async fn the_production_local_intake_commits_only_a_row_still_recording() {
         let dir = tempfile::tempdir().unwrap();
@@ -1995,13 +1835,8 @@ mod tests {
             .unwrap()
     }
 
-    /// The production intake commits the `complete` receipt and the meeting in
-    /// one transaction under `synchronous = FULL`, and leaves the connection at
-    /// `NORMAL`. Every commit is a point a crash could stop at, and that one is
-    /// the only one: the enqueue ([`ProcessingPipeline::enqueue_saved`]) writes
-    /// nothing. A power loss after the commit cannot be tested; that it ran
-    /// under `FULL` can. Swift:
-    /// `theProductionIntakeCommitsItsReceiptAndMeetingDurably`.
+    /// The production intake commits the `complete` receipt and the meeting
+    /// in one `synchronous = FULL` transaction, and leaves `NORMAL` after.
     #[tokio::test]
     async fn the_production_intake_commits_its_receipt_and_meeting_durably() {
         let dir = tempfile::tempdir().unwrap();
@@ -2035,12 +1870,8 @@ mod tests {
         assert!(store.meeting(meeting_id).unwrap().is_some());
     }
 
-    /// A failed admission commit leaves one commit, its `failed` receipt,
-    /// under `FULL`, while the copy is still there: a failed commit is not
-    /// proof that nothing committed, and the durable `failed` commit is
-    /// what writes over a commit a crash could replay. Only then is the
-    /// copy removed, and the connection is back at `NORMAL`. Swift:
-    /// `aFailedAdmissionCommitSavesFailedDurablyBeforeItRemovesTheCopy`.
+    /// A failed commit saves `failed` under `FULL` before the copy is
+    /// removed, and the connection is back at `NORMAL`.
     #[tokio::test]
     async fn a_failed_admission_commit_saves_failed_durably_before_it_removes_the_copy() {
         /// A commit's level, the receipt's state and the copies on the disk.
@@ -2085,12 +1916,8 @@ mod tests {
         assert_eq!(synchronous(&store), 1);
     }
 
-    /// The same bytes admitted under another device's receipt (it took the
-    /// receipt over while the first admission ran, and wrote it back
-    /// unfinished) are the meeting the ledger holds: the receipt is
-    /// completed with it, no second meeting is written or enqueued, and
-    /// neither the copy nor its folder stays. Swift:
-    /// `bytesTheLedgerHoldsAreAdmittedAsTheirMeeting`.
+    /// Bytes the ledger holds under another device's receipt are its
+    /// meeting: no second meeting, no copy left.
     #[tokio::test]
     async fn bytes_the_ledger_holds_are_admitted_as_their_meeting() {
         let dir = tempfile::tempdir().unwrap();
@@ -2149,12 +1976,8 @@ mod tests {
         assert!(!upload.exists());
     }
 
-    /// A `complete` receipt whose meeting is gone (the separate receipt and
-    /// meeting commits of earlier releases, with a crash or a full disk
-    /// between them) is not an idempotent return: the intake admits the
-    /// file again into a new meeting, since the phone never got its 200 and
-    /// still holds the recording. Swift:
-    /// `aCompleteReceiptWhoseMeetingIsGoneIsAdmittedAgain`.
+    /// A `complete` receipt whose meeting is gone is admitted again into a
+    /// new meeting.
     #[tokio::test]
     async fn a_complete_receipt_whose_meeting_is_gone_is_admitted_again() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,32 +1,9 @@
-//! The system permissions per OS, as far as each exposes them, and
-//! [`ShellPermissions`], the host's `Permissions` over them, which the
-//! services wrap with the Mac's system audio probe
-//! (`steno_services::permissions::SystemPermissions`).
-//!
-//! macOS: the microphone has a TCC status and a prompt (`AVCaptureDevice`),
-//! and so has the calendar (`EventKit`, through `steno_macos::calendar`);
-//! the system audio tap has no status API, so the shell answers `unknown`
-//! for it and the services answer what their probe last found; the local
-//! network prompt appears on the first Bonjour registration and has no
-//! status API either, so it stays `unknown`. The usage strings the
-//! prompts show are in `Info.plist` beside `tauri.conf.json`.
-//!
-//! Linux and Windows: no permission model the shell can query ahead of
-//! capture. `PipeWire`'s portal asks when the stream opens and WASAPI
-//! follows the Windows microphone privacy switch, neither of which the
-//! shell can read beforehand, so every permission reports `unknown` there,
-//! which the host counts as not required
-//! (`steno_host::services::permission_is_missing`).
-//!
-//! | TCC status | State |
-//! |------------|-------|
-//! | not determined | `unknown` (the prompt has not been shown) |
-//! | restricted | `denied` |
-//! | denied | `denied` |
-//! | authorized (the calendar: full access) | `granted` |
-//! | the calendar's write-only access | `denied` (no event can be read) |
-//!
-//! Swift: `PermissionsService.swift`.
+//! The system permissions per OS, and [`ShellPermissions`], the host's
+//! `Permissions` over them. On macOS the microphone and the calendar have
+//! a TCC status and a prompt; system audio and the local network have no
+//! status API and stay `unknown`. Linux and Windows expose nothing before
+//! capture, so every permission is `unknown`, which the host counts as not
+//! required.
 
 pub use steno_bridge::{PermissionKind, PermissionState};
 
@@ -42,7 +19,8 @@ enum Tcc {
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl Tcc {
-    /// The bridge's state for it; see the module doc's table.
+    /// The bridge's state: not determined is `unknown`, authorized (for the
+    /// calendar, full access) is `granted`, anything else `denied`.
     fn state(self) -> PermissionState {
         match self {
             Tcc::NotDetermined => PermissionState::Unknown,
@@ -52,7 +30,6 @@ impl Tcc {
     }
 }
 
-/// The state without prompting.
 #[cfg_attr(feature = "fixture-host", allow(dead_code))]
 pub fn state(kind: PermissionKind) -> PermissionState {
     match kind {
@@ -62,9 +39,8 @@ pub fn state(kind: PermissionKind) -> PermissionState {
     }
 }
 
-/// Prompts where the OS has a prompt the shell can raise, and blocks until
-/// the user answers; elsewhere the state as it stands. System audio's
-/// prompt is the services' probe.
+/// Prompts where the shell can raise a prompt, blocking until the user
+/// answers; elsewhere the state as it stands.
 #[cfg_attr(feature = "fixture-host", allow(dead_code))]
 pub fn request(kind: PermissionKind) -> PermissionState {
     match kind {
@@ -74,8 +50,7 @@ pub fn request(kind: PermissionKind) -> PermissionState {
     }
 }
 
-/// The settings pane for a permission, to open with the opener; `None`
-/// where the OS has none the shell can address.
+/// The settings pane for a permission; `None` where the OS has none.
 pub fn system_settings_url(kind: PermissionKind) -> Option<String> {
     if cfg!(target_os = "macos") {
         let pane = match kind {
@@ -101,9 +76,8 @@ pub fn system_settings_url(kind: PermissionKind) -> Option<String> {
     }
 }
 
-/// The host's `Permissions` over this module, opening the settings panes
-/// through the opener. The host calls `request` with its lock released,
-/// on a thread that may wait for the user.
+/// The host's `Permissions` over this module. The host calls `request`
+/// with its lock released, on a thread that may wait for the user.
 #[cfg(not(feature = "fixture-host"))]
 pub struct ShellPermissions {
     pub app: tauri::AppHandle,
@@ -130,11 +104,9 @@ impl steno_host::services::Permissions for ShellPermissions {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    //! TCC through `AVFoundation` and `steno_macos::calendar`.
-    //! `requestAccessForMediaType:completionHandler:` shows the system
-    //! prompt the first time and answers from the record after; the
-    //! completion block runs on an arbitrary queue, so the answer crosses a
-    //! channel back to the caller.
+    //! TCC through `AVFoundation` and `steno_macos::calendar`. The access
+    //! request's completion block runs on an arbitrary queue, so the
+    //! answer crosses a channel back to the caller.
 
     use std::sync::Mutex;
     use std::sync::mpsc;
@@ -193,8 +165,8 @@ mod platform {
         .state()
     }
 
-    /// The prompt, then the state it left: a refusal or an error is
-    /// `denied`, as Swift's `PermissionsService.request` answered.
+    /// The prompt, then the state it left; a refusal or an error is
+    /// `denied`.
     pub fn request_calendar() -> PermissionState {
         match request_full_access() {
             Ok(true) => PermissionState::Granted,
@@ -209,10 +181,8 @@ mod platform {
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
-    //! Nothing to query before capture: the portal asks when the stream
-    //! opens, Windows decides by its privacy switch. Neither is known here,
-    //! so the honest answer is `unknown`, not a `granted` the OS may
-    //! contradict at the first recording. No calendar is read off the Mac.
+    //! Nothing to query before capture, so the honest answer is `unknown`,
+    //! not a `granted` the OS may contradict at the first recording.
 
     use super::PermissionState;
 
@@ -237,7 +207,7 @@ mod platform {
 mod tests {
     use super::*;
 
-    /// The four TCC statuses, as the module doc's table maps them.
+    /// The four TCC statuses map as `Tcc::state` says.
     #[test]
     fn the_four_tcc_statuses_map_to_the_bridges_states() {
         assert_eq!(Tcc::NotDetermined.state(), PermissionState::Unknown);

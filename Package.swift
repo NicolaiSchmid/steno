@@ -58,7 +58,7 @@ let package = Package(
     ),
     .target(name: "StenoLLM", dependencies: ["StenoCore"]),
     // The JSON contract with the web UI; pure Foundation so it builds and
-    // tests on Linux (.plans/2026-09-29-macos-webview-ui.md, Decision 5).
+    // tests on Linux.
     .target(name: "StenoBridge", dependencies: ["StenoCore"]),
     .target(name: "StenoAdapters", dependencies: ["StenoCore"]),
     .target(

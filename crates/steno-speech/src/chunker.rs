@@ -1,38 +1,7 @@
-//! The pause-aligned chunk layout (decision 1 of the speech-stack plan):
-//! chunks aim at `target_seconds` and cut at the longest VAD pause inside
-//! the search window either side of the target, else at the quietest
-//! 100 ms frame there. A long pause that starts before the window's far
-//! edge, or within `min_chunk_seconds` past it, ends the chunk early, and
-//! no chunk decodes it. `overlap_seconds` of audio is shared with the next
-//! chunk for the merge. No chunk exceeds `max_seconds`: for ONNX a memory
-//! clamp (attention grows with the square of the window: 13 GB at 600 s,
-//! spike E), not the position table's 800 s cap; for `CoreML` the models'
-//! fixed 15 s window.
-//!
-//! A gap is a stretch of the recording no chunk covers: the lead-in before
-//! the first chunk, a long pause between two chunks, the rest of a pause a
-//! chunk's start moves past, and the tail after the last chunk (or the
-//! whole recording, when there is no chunk). [`ChunkerConfig::decode_gaps`]
-//! says which gaps of [`MIN_GAP_SECONDS`] or more are covered with extra
-//! windows: none, the tail, or every one; the chunks stay where [`layout`]
-//! put them. With [`ChunkerConfig::from_start`] the first chunk starts at
-//! the recording's start, so the lead-in is decoded with the speech after
-//! it; a lead-in longer than the first chunk is decoded only as far as that
-//! chunk reaches.
-//!
-//! [`partition`] splits the recording once into the [`Span`]s that own it,
-//! one per chunk and one per extra window, and gives each the bound its
-//! decode keeps words from ([`Span::reach`]).
-//!
-//! The search and the cuts are ported from
-//! `spikes/onnx-speech/src/chunker.rs`; the long-pause rule is not. The
-//! spike laid out the tail before looking for long pauses and ignored those
-//! within `min_chunk_seconds` of a chunk's start, so it decoded some of
-//! them, and the spike D numbers ran that way. The rule here skips every
-//! one, as the spike's doc and decision 1 say, and looks
-//! `min_chunk_seconds` past the window's far edge, where the spike looked
-//! up to it.
-//! Swift: none; `FluidAudio`'s `ChunkProcessor` cuts at fixed 15 s strides.
+//! The pause-aligned chunk layout: chunks aim at `target_seconds` and cut at
+//! the longest VAD pause near the target, else at the quietest 100 ms frame; a
+//! long pause ends the chunk early and is not decoded. [`partition`] splits the
+//! recording into the [`Span`]s that own it.
 
 use std::ops::Range;
 
@@ -44,7 +13,7 @@ pub enum Cut {
     /// The middle of the longest pause in the search window.
     Pause,
     /// `pad_seconds` into a pause of `long_pause_seconds` or more, or at the
-    /// clamp or the end of the audio when that comes first.
+    /// clamp or the end of the audio.
     LongPause,
     /// The quietest 100 ms frame in the search window; no pause there.
     Energy,
@@ -69,29 +38,27 @@ impl Chunk {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkerConfig {
     pub target_seconds: f32,
-    /// Either side of the target where the cut may fall. The window never
-    /// reaches past `max_seconds`: a target closer to the clamp than this
-    /// moves back.
+    /// Either side of the target where the cut may fall; a target closer to the
+    /// clamp than this moves back.
     pub search_seconds: f32,
-    /// Shared with the next chunk; the plan says 1 to 2 s.
+    /// Shared with the next chunk for the merge.
     pub overlap_seconds: f32,
     /// A pause this long ends the chunk and is not decoded, unless
     /// `decode_gaps` decodes every gap.
     pub long_pause_seconds: f32,
-    /// The longest chunk or window: the memory clamp, or the models' fixed
-    /// 15 s window (`CoreML`).
+    /// The longest chunk or window: for ONNX a memory clamp (attention grows
+    /// with the square of the window), for `CoreML` the models' fixed 15 s
+    /// window.
     pub max_seconds: f32,
     /// Silence kept around speech at a chunk's edges.
     pub pad_seconds: f32,
-    /// No cut inside speech falls closer than this to the chunk's start; a
-    /// long pause or the end of speech may end a chunk sooner.
+    /// No cut inside speech falls closer than this to the chunk's start.
     pub min_chunk_seconds: f32,
-    /// Which gaps of [`MIN_GAP_SECONDS`] or more are also decoded, in extra
-    /// windows ([`partition`]). None by default.
+    /// Which gaps of [`MIN_GAP_SECONDS`] or more are also decoded in extra
+    /// windows. None by default.
     pub decode_gaps: Gaps,
-    /// The first chunk starts at the recording's start, not `pad_seconds`
-    /// before the first speech, so the lead-in is decoded with the speech
-    /// after it, as far as that chunk reaches. Off by default.
+    /// The first chunk starts at the recording's start, so the lead-in is
+    /// decoded with the speech after it. Off by default.
     pub from_start: bool,
 }
 
@@ -100,23 +67,16 @@ pub struct ChunkerConfig {
 pub enum Gaps {
     /// No gap: the audio the chunks leave out is not decoded.
     None,
-    /// The tail after the last chunk, the audio after the last speech;
-    /// without a chunk, nothing.
+    /// The tail after the last speech; without a chunk, nothing.
     Tail,
-    /// Every gap: the lead-in, the long pauses, the rest of a pause a
-    /// chunk's start moves past, and the tail.
+    /// Every gap: the lead-in, the long pauses, the rest of a pause a chunk's
+    /// start moves past, and the tail.
     All,
 }
 
-/// The defaults are the spike D harness values
-/// (`spikes/onnx-speech/src/main.rs`: target 25 s, search 4 s, long pause
-/// 3 s, pad 0.25 s); `max_seconds` 60 is decision 1 (the harness ran with
-/// a 190 s clamp); `overlap_seconds` 2 is `FluidAudio`'s, within decision
-/// 1's 1 to 2 s, and scored better than 1.5 s on FLEURS German on both
-/// backends (A2 in `.plans/2026-10-07-stable-promotion.md`);
-/// `min_chunk_seconds` is new here and keeps a cut in speech from landing
-/// right after a chunk's start; no gap is decoded, and the first chunk
-/// starts just before the first speech.
+/// Target 25 s, search 4 s, long pause 3 s, pad 0.25 s and a 60 s clamp;
+/// `overlap_seconds` 2 scored better than 1.5 s on FLEURS German on both
+/// backends.
 impl Default for ChunkerConfig {
     fn default() -> Self {
         ChunkerConfig {
@@ -133,8 +93,8 @@ impl Default for ChunkerConfig {
     }
 }
 
-/// Pauses between speech regions, including the leading and the trailing
-/// silence. `speech` is sorted and non-overlapping.
+/// Pauses between speech regions, leading and trailing silence included.
+/// `speech` is sorted and non-overlapping.
 #[must_use]
 pub fn pauses(speech: &[Range<usize>], total: usize) -> Vec<Range<usize>> {
     let mut out = Vec::new();
@@ -151,8 +111,8 @@ pub fn pauses(speech: &[Range<usize>], total: usize) -> Vec<Range<usize>> {
     out
 }
 
-/// The centre of the quietest 100 ms frame inside `lo..hi`, or the middle
-/// when no whole frame fits.
+/// The centre of the quietest 100 ms frame inside `lo..hi`, or the middle when
+/// no whole frame fits.
 #[must_use]
 pub fn quietest_point(audio: &[f32], lo: usize, hi: usize) -> usize {
     let frame = SAMPLE_RATE / 10;
@@ -192,12 +152,11 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
     } else {
         speech[0].start.saturating_sub(pad)
     };
-    // Where the last chunk ended; every cut falls after it, so every chunk
-    // adds audio even when the search window reaches back into the overlap.
+    // Every cut falls after the last chunk's end, so every chunk adds audio.
     let mut previous_end = 0;
     loop {
-        // A start inside a pause snaps forward to just before the next
-        // speech, except the first chunk's with `from_start`.
+        // A start inside a pause snaps forward to just before the next speech,
+        // except the first chunk's with `from_start`.
         let snaps = !(config.from_start && chunks.is_empty());
         if snaps && let Some(pause) = pauses.iter().find(|p| p.start <= start && start < p.end) {
             if pause.end >= total {
@@ -208,21 +167,19 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
         if start >= speech_end {
             break;
         }
-        // The search window never reaches past the clamp: a target too
-        // close to it moves back.
+        // The search window never reaches past the clamp.
         let want = start + target.min(max - search);
         let reach = want + search;
-        // Where a cut may fall: never closer than `min_chunk` to the start,
-        // and always after the previous chunk's end.
+        // Never closer than `min_chunk` to the start, and always after the
+        // previous chunk's end.
         let lo = want
             .saturating_sub(search)
             .max(start + min_chunk)
             .max(previous_end + 1);
         let hi = reach.max(lo + 1);
         // A long pause that starts before the cut window closes, or within
-        // `min_chunk` past it, ends the chunk early, tail or not: a cut
-        // before it would leave a sliver of a chunk up to the pause, and no
-        // overlap is needed across silence.
+        // `min_chunk` past it, ends the chunk early: a cut before it would
+        // leave a sliver of a chunk.
         let far = (reach + min_chunk).max(hi).min(start + max);
         if let Some(pause) = pauses
             .iter()
@@ -264,68 +221,47 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
             cut,
         });
         // The next chunk starts `overlap` before this one's end and at least
-        // `min_chunk` (at least one sample) after this one's start, so an
-        // overlap longer than the chunk still makes linear progress.
+        // `min_chunk` after this one's start, so the layout always progresses.
         start = end.saturating_sub(overlap).max(start + min_chunk);
         previous_end = end;
     }
     chunks
 }
 
-/// Gaps shorter than this are not decoded: on FLEURS German `cat/` the
-/// extra windows over such gaps (0.25 to 2.3 s) inserted words, eight, all
-/// wrong, and recovered none, and on the calibration corpus they inserted
-/// words the Swift transcripts do not have (A2 in
-/// `.plans/2026-10-07-stable-promotion.md`).
+/// Gaps shorter than this are not decoded: on FLEURS German the extra windows
+/// over such gaps inserted only wrong words.
 pub const MIN_GAP_SECONDS: f32 = 2.5;
 
-/// One stretch of the recording and the decode that owns it
-/// ([`partition`]).
+/// One stretch of the recording and the decode that owns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
     /// The share of the recording this span owns. The owned ranges of a
     /// partition are sorted, disjoint and cover the recording.
     pub owned: Range<usize>,
-    /// The samples decoded: a chunk of the [`layout`], or a window over a
-    /// gap. It holds `owned`, except the share of an undecoded gap the span
-    /// owns, and is never longer than `max_seconds`.
+    /// The samples decoded: a chunk of the [`layout`], or a window over a gap.
+    /// It holds `owned`, except an undecoded gap's share, and is never longer
+    /// than `max_seconds`.
     pub window: Range<usize>,
-    /// The samples whose words this span's decode keeps. For a gap's
-    /// window, the window: it keeps its whole decode. For a chunk, the
-    /// range the merge before the partition kept from an accepted
-    /// recovery: the window and `overlap_seconds` either side, rounded out
-    /// to whole encoder frames and clamped to the recording; a word with a
-    /// piece in it is kept from its start to the punctuation after its
-    /// last piece in it. A chunk's plain decode goes whole to its run's
-    /// merge, and reads no reach.
+    /// The samples whose words this span's decode keeps. For a gap's window,
+    /// the window. For a chunk, the window and `overlap_seconds` either side,
+    /// rounded out to whole encoder frames and clamped to the recording, used
+    /// when a recovery is accepted; a chunk's plain decode reads no reach.
     pub reach: Range<usize>,
-    /// A chunk of the layout, which is decoded again with more audio around
-    /// it when it looks empty; a gap's window is decoded as it is.
+    /// A chunk of the layout, decoded again with more audio around it when it
+    /// looks empty; a gap's window is decoded as it is.
     pub chunk: bool,
 }
 
-/// The recording split once into the spans that own it, in order: one per
-/// chunk of the [`layout`] and one per extra window over a gap that
-/// [`ChunkerConfig::decode_gaps`] decodes. Two neighbouring windows share their
-/// owned boundary at the middle of the audio between their edges: the
-/// middle of their overlap, the edge a chunk and a gap's window share, or
-/// the middle of an undecoded gap, whose halves the windows either side
-/// own. The first span owns from the recording's start and the last to its
-/// end; without a window there is no span.
+/// The recording split once into the spans that own it, in order: one per chunk
+/// of the [`layout`] and one per extra window over a gap
+/// [`ChunkerConfig::decode_gaps`] names. Neighbouring windows share their owned
+/// boundary at the middle of the audio between their edges; the first span owns
+/// from the start, the last to the end.
 ///
-/// The extra windows (see the module doc) cover each gap of at least
-/// [`MIN_GAP_SECONDS`] that `decode_gaps` names and stay inside it:
-/// no window reaches into a chunk.
-/// A gap longer than `max_seconds` is split into windows of equal length
-/// that share `overlap_seconds` with each other. A shorter gap is not
-/// decoded, even where it is the uncovered edge of a longer pause. Nor is a
-/// window of digital silence, where every sample is exactly zero, which
-/// holds no sound to decode; on the calibration corpus two windows in three
-/// were. No threshold applies: a window with any sample that is not zero
-/// is decoded. The capture writes its lanes as 16-bit samples, which rounds
-/// anything under half a step (about -96 dBFS) to zero, so a window of a
-/// recorded lane is digital silence only when nothing in it reaches that
-/// floor, and the decoder would get the same zeros without the skip.
+/// Extra windows stay inside their gap; a gap longer than `max_seconds` is
+/// split into equal windows sharing `overlap_seconds`. A gap under
+/// [`MIN_GAP_SECONDS`] is not decoded, nor is a window of digital silence
+/// (every sample exactly zero), which holds nothing the decoder could hear.
 #[must_use]
 pub fn partition(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) -> Vec<Span> {
     spans(audio, &layout(audio, speech, config), config)
@@ -382,8 +318,8 @@ fn spans(audio: &[f32], chunks: &[Chunk], config: &ChunkerConfig) -> Vec<Span> {
     spans
 }
 
-/// Splits `range` into the fewest windows of at most `max` samples that
-/// share `overlap` with the next, all of one length (to a sample).
+/// Splits `range` into the fewest equal windows of at most `max` samples that
+/// share `overlap` with the next.
 fn split(range: Range<usize>, max: usize, overlap: usize) -> impl Iterator<Item = Range<usize>> {
     let stride = range.len().saturating_sub(overlap);
     let count = stride.div_ceil(max - overlap).max(1);
@@ -495,10 +431,8 @@ mod tests {
 
     #[test]
     fn a_target_past_the_clamp_moves_the_search_window_below_it() {
-        // target + search (37.7 s) reaches past max (16 s): the window moves
-        // back to 1 to 16 s, so the short pause at 10 s is the cut, not the
-        // longer one at 28 s beyond the clamp; the speech up to the 40 s
-        // long pause is still laid out.
+        // The window moves back to 1 to 16 s, so the short pause at 10 s is the
+        // cut, not the longer one past the clamp.
         let speech = [
             0..s(10.0),
             s(10.5)..s(28.0),
@@ -516,8 +450,7 @@ mod tests {
         assert_eq!(chunks[0].range, 0..s(10.25));
         assert!(chunks.iter().all(|c| c.seconds() <= 16.0));
         assert!(covers(&chunks, &speech), "{chunks:?}");
-        // A search wider than the clamp shrinks to it: the window is 2 to
-        // 16 s from the start.
+        // A search wider than the clamp shrinks to it.
         let wide = ChunkerConfig {
             search_seconds: 20.0,
             ..config
@@ -545,8 +478,8 @@ mod tests {
 
     #[test]
     fn a_long_pause_in_the_search_window_ends_the_chunk_at_its_start() {
-        // The 4 s pause starts at 26 s, between the target and the window's
-        // far edge: the chunk ends at its start, not in its middle.
+        // The 4 s pause starts between the target and the window's far edge:
+        // the chunk ends at its start.
         let speech = [0..s(26.0), s(30.0)..s(40.0)];
         let chunks = layout(&audio(41.0, &speech), &speech, &ChunkerConfig::default());
         assert_eq!(chunks[0].range, 0..s(26.25));
@@ -555,9 +488,8 @@ mod tests {
 
     #[test]
     fn a_long_pause_just_past_the_search_window_ends_the_chunk() {
-        // The 120 s pause starts at 29.3 s, past the 21 to 29 s window but
-        // within min_chunk of it. Cutting inside the speech before it would
-        // leave a 2 s chunk between that cut and the pause.
+        // The 120 s pause starts just past the 21 to 29 s window, within
+        // `min_chunk`; a cut before it would leave a 2 s chunk.
         let speech = [0..s(29.3), s(149.3)..s(160.0)];
         let mut samples = audio(162.0, &speech);
         for x in &mut samples[s(28.9)..s(29.0)] {
@@ -571,8 +503,8 @@ mod tests {
                 (s(149.05)..s(160.25), Cut::Tail)
             ]
         );
-        // With min_chunk past the window's far edge, the search for a cut
-        // starts beyond it, and a long pause there is still skipped.
+        // With `min_chunk` past the window's far edge, a long pause there is
+        // still skipped.
         let speech = [0..s(5.0), s(10.0)..s(20.0)];
         let config = ChunkerConfig {
             target_seconds: 3.0,
@@ -587,8 +519,8 @@ mod tests {
 
     #[test]
     fn a_long_pause_past_the_clamp_waits_for_the_next_chunk() {
-        // The 11 s pause starts past the 10 s clamp. Ending the first chunk
-        // at it would cut at the clamp and skip the speech from 10 to 11 s.
+        // The 11 s pause starts past the 10 s clamp; ending the chunk at it
+        // would skip the speech from 10 to 11 s.
         let speech = [0..s(11.0), s(20.0)..s(25.0)];
         let config = ChunkerConfig {
             target_seconds: 8.0,
@@ -616,8 +548,8 @@ mod tests {
 
     #[test]
     fn the_next_chunk_starts_at_least_min_chunk_after_the_last_one() {
-        // The 5 s overlap reaches back past the start of the chunk that
-        // cut at 3.05 s.
+        // The 5 s overlap reaches back past the start of the chunk that cut at
+        // 3.05 s.
         let speech = [0..s(20.0)];
         let mut samples = audio(20.0, &speech);
         for x in &mut samples[s(3.0)..s(3.1)] {
@@ -636,8 +568,7 @@ mod tests {
 
     #[test]
     fn a_tail_does_not_decode_its_own_long_pause() {
-        // All the speech fits in one chunk, but the 24 s pause inside it is
-        // skipped like any other long pause.
+        // The 24 s pause inside the one chunk is skipped like any long pause.
         let speech = [0..s(2.0), s(26.0)..s(27.0)];
         let chunks = layout(&audio(28.0, &speech), &speech, &ChunkerConfig::default());
         assert_eq!(
@@ -651,9 +582,8 @@ mod tests {
 
     #[test]
     fn the_search_window_never_reaches_behind_the_previous_chunk() {
-        // target - search (4 s) is under the overlap (4.5 s), so the second
-        // chunk's window opens inside the first; the quiet frame at 5.6 s
-        // would otherwise end the second chunk before the first did.
+        // The second chunk's window opens inside the first; the quiet frame at
+        // 5.6 s would otherwise end it before the first did.
         let speech = [0..s(30.0)];
         let mut samples = audio(30.0, &speech);
         for x in &mut samples[s(5.6)..s(5.7)] {
@@ -691,10 +621,7 @@ mod tests {
 
     #[test]
     fn odd_configurations_still_move_every_end_forward() {
-        // Two minimal configurations from a randomised search: a search
-        // window opening inside the previous chunk could end a chunk where
-        // the previous one did (the midpoint of a one-sample pause); a long
-        // pause shorter than twice the padding was hit repeatedly.
+        // Two minimal cases from a randomised search.
         let speech = [0..5_280, 21_440..516_480];
         let config = ChunkerConfig {
             target_seconds: 8.31,
@@ -759,8 +686,8 @@ mod tests {
 
     #[test]
     fn owned_shares_meet_in_the_middle_of_an_overlap_or_an_undecoded_gap() {
-        // Two chunks sharing 2 s, a 1 s gap too short to decode, a 10 s
-        // gap the window owns exactly, and the tail.
+        // Two chunks sharing 2 s, a 1 s gap too short to decode, a 10 s gap,
+        // and the tail.
         let chunks = [
             chunk(s(1.0)..s(10.0)),
             chunk(s(8.0)..s(14.0)),
@@ -808,8 +735,8 @@ mod tests {
         // Chunks that touch or overlap leave nothing out.
         let touching = [chunk(0..s(10.0)), chunk(s(10.0)..s(20.0))];
         assert!(gap_windows(&sound(s(20.0)), &touching, &gaps_on(15.0)).is_empty());
-        // Stretches under MIN_GAP_SECONDS are left out: the 2.49 s lead-in,
-        // the 1 s gap and the 2 s tail; the 2.5 s gap is decoded.
+        // Stretches under `MIN_GAP_SECONDS` are left out; the 2.5 s gap is
+        // decoded.
         let short = [
             chunk(s(2.49)..s(6.0)),
             chunk(s(7.0)..s(9.0)),
@@ -820,9 +747,8 @@ mod tests {
             [s(9.0)..s(11.5)]
         );
         assert!(gap_windows(&sound(s(2.0)), &[], &gaps_on(15.0)).is_empty());
-        // A window of digital silence is left out; one zero sample short
-        // of it is not, though its last sample is negative and far below
-        // any threshold.
+        // A window of digital silence is left out; one with a single non-zero
+        // sample is not.
         let mut audio = sound(s(40.0));
         audio[s(10.0)..s(20.0)].fill(0.0);
         audio[s(30.0)..s(40.0) - 1].fill(0.0);
@@ -867,16 +793,16 @@ mod tests {
             gap_windows(&sound(s(40.0)), &chunks, &tail),
             [s(30.0)..s(40.0)]
         );
-        // A tail under MIN_GAP_SECONDS is left out, 2.45 s too, and so is
-        // a tail of digital silence; without a chunk there is no tail.
+        // A short tail or one of digital silence is left out; without a chunk
+        // there is no tail.
         assert!(gap_windows(&sound(s(32.0)), &chunks, &tail).is_empty());
         assert!(gap_windows(&sound(s(32.45)), &chunks, &tail).is_empty());
         let mut silent = sound(s(40.0));
         silent[s(30.0)..].fill(0.0);
         assert!(gap_windows(&silent, &chunks, &tail).is_empty());
         assert!(gap_windows(&sound(s(40.0)), &[], &tail).is_empty());
-        // The undecoded gaps are owned half and half by the chunks around
-        // them, the tail by its window.
+        // Undecoded gaps are owned half and half by the chunks around them, the
+        // tail by its window.
         let owned: Vec<Range<usize>> = spans(&sound(s(40.0)), &chunks, &tail)
             .into_iter()
             .map(|span| span.owned)
@@ -886,8 +812,7 @@ mod tests {
 
     #[test]
     fn from_start_the_first_chunk_decodes_the_lead_in() {
-        // Speech from 3 to 20 s and 21 to 26 s: the one chunk starts at 0
-        // instead of 2.75 s.
+        // The one chunk starts at 0 instead of 2.75 s.
         let speech = [s(3.0)..s(20.0), s(21.0)..s(26.0)];
         let samples = audio(28.0, &speech);
         let from_start = ChunkerConfig {
@@ -911,9 +836,8 @@ mod tests {
             cuts(&layout(&samples, &speech, &unpadded)),
             vec![(0..s(26.0), Cut::Tail)]
         );
-        // A lead-in longer than a chunk: the first chunk decodes its first
-        // 25 s or so, and the next starts again just before the speech, as
-        // without the switch.
+        // A lead-in longer than a chunk: the first chunk decodes its first 25 s
+        // or so, then the next starts just before the speech.
         let speech = [s(70.0)..s(75.0)];
         let chunks = layout(&audio(76.0, &speech), &speech, &from_start);
         assert_eq!(chunks.len(), 2, "{chunks:?}");
@@ -924,11 +848,9 @@ mod tests {
 
     #[test]
     fn with_extra_windows_only_short_stretches_are_left_out() {
-        // Random speech under the CoreML settings and others, the first
-        // chunk at the recording's start or not: the chunks decode every
-        // speech region, every stretch neither the chunks nor the extra
-        // windows cover is under MIN_GAP_SECONDS, no window reaches into a
-        // chunk or past the clamp, and the windows come in order.
+        // Random speech under several configurations: every speech region is
+        // decoded, every uncovered stretch is under `MIN_GAP_SECONDS`, and no
+        // window reaches into a chunk or past the clamp.
         let mut seed = 0x2545_f491_4f6c_dd1d_u64;
         let mut below = |n: usize| {
             seed ^= seed << 13;
@@ -952,8 +874,7 @@ mod tests {
                 from_start: (case / 4) % 2 == 1,
                 ..ChunkerConfig::default()
             };
-            // Faint sound outside the speech, so no window is digital
-            // silence.
+            // Faint sound outside the speech, so no window is digital silence.
             let mut samples = vec![1e-6f32; total];
             for region in &speech {
                 samples[region.clone()].fill(0.5);
@@ -1006,8 +927,8 @@ mod tests {
             assert_eq!(reach, window, "{}", context());
             return;
         }
-        // The window ± the overlap, on the frame grid, with less than a
-        // frame more either side, and clamped to the recording.
+        // The window ± the overlap, on the frame grid, clamped to the
+        // recording.
         let overlap = sample_count(config.overlap_seconds);
         let (from, to) = (window.start.saturating_sub(overlap), window.end + overlap);
         assert!(reach.start.is_multiple_of(FRAME_SAMPLES), "{}", context());
@@ -1030,17 +951,11 @@ mod tests {
 
     #[test]
     fn a_partition_owns_every_sample_once() {
-        // Clauses 1 to 3 of the ownership invariant, whatever the merge
-        // does with them: the owned ranges are sorted, disjoint, never
-        // empty and cover the recording; a window holds its owned range
-        // except the audio no window decodes, and is never longer than the
-        // clamp; the chunk spans are the layout's chunks. And the reach: a
-        // gap's window's is its window; a chunk's is its window ± the
-        // overlap, rounded out to the frame grid and clamped to the
-        // recording. Random speech over the default settings, the engines'
-        // and odd ones, with the extra windows over no gap, the tail or
-        // every gap, the first chunk at the recording's start or not, and
-        // some gaps of digital silence.
+        // The ownership invariant over random speech and configurations: owned
+        // ranges are sorted, disjoint, non-empty and cover the recording; a
+        // window holds its owned range except undecoded audio and stays within
+        // the clamp; the chunk spans are the layout's chunks; and each span's
+        // reach is as `Span::reach` says.
         let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
         let mut below = |n: usize| {
             seed ^= seed << 13;
@@ -1104,8 +1019,7 @@ mod tests {
                     "{}",
                     context()
                 );
-                // Outside its window a span owns only audio no window
-                // decodes: half an undecoded gap.
+                // Outside its window a span owns only half an undecoded gap.
                 for edge in [
                     span.owned.start..span.window.start.min(span.owned.end),
                     span.window.end.max(span.owned.start)..span.owned.end,

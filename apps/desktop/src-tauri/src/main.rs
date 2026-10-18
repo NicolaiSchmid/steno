@@ -1,74 +1,26 @@
-//! The Tauri shell (WP3, WP8 and WP6b of
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`): three windows and two
-//! floating panels around the web UI in `apps/macos/web`, a tray icon, and
-//! the `bridge_call` command the page's Tauri transport talks to. The shell
-//! holds no logic: the bridge is answered by `steno_host::Host` over the
-//! services graph (`host`); with the opt-in `fixture-host` feature it is
-//! answered from the recorded fixtures instead, so the UI runs without a
-//! database.
+//! The Tauri shell: three windows and two floating panels around the web UI
+//! in `apps/macos/web`, a tray icon, and the `bridge_call` command the
+//! page's Tauri transport talks to. It holds no logic: the bridge is
+//! answered by `steno_host::Host` over the services graph (`host`), or by
+//! the recorded fixtures with the `fixture-host` feature.
 //!
-//! What the shell owns beside the windows (WP8): the tray (`tray`, and on
-//! Linux whether a status notifier host shows it, `tray_host`), the macOS
-//! menu bar (`menu`), the actions behind both menus (`actions`), the recorder
-//! state the shell follows (`recording`), the panels (`panels`) and their
-//! geometry (`panel_geometry`), window lifetime (`windows`; the close and
-//! exit rules are in this file), launch at login (`autostart`, and on a
-//! packaged install `packaged`), updates (`updater`), the OS permissions
-//! (`permissions`), the `steno:` links (`deep_links`), the native dialogs
-//! (`dialogs`), the single instance, on Linux the D-Bus helpers its clients
-//! share (`dbus`), the logout and shutdown clients (`session_end`) and the
-//! systemd drop-ins for the stop timeout (`stop_timeout`), a scope of its own
-//! when it starts inside another program's service, and one for each of the
-//! `AppImage`'s mount servers (`own_scope`, `appimage`), and on a Wayland
-//! session the `XWayland` backend the panels need (`display`).
-//! Every one is a thin module over a Tauri plugin or an OS API with its
-//! rules in plain functions the tests cover. Everything that is on the
-//! wire (errors, topics, windows, sections, params) is the `steno-bridge`
-//! crate's type; the shell adds only what it needs on top
-//! (`recording::RecorderState`, `windows::Spec`). Secrets are not the
-//! shell's: the keyring `SecretStore` lives in `steno-services` (#173,
-//! `WP6b`).
-//!
-//! Every exit runs `App::shutdown` first, at most `SHUTDOWN_PATIENCE` (ten
-//! seconds), over one `ExitGate`: it quits the pipeline (no new job
-//! starts), stops and saves a recording in progress and stops the handover
-//! listener. Quit from either menu, the close that ends the process when no
-//! tray stands, and on Linux and macOS SIGTERM, SIGINT and SIGHUP (a plain
-//! `kill`, Ctrl-C, a closed terminal, systemd at a shutdown) are exit
-//! requests the gate holds (`exit_request`, `exit_on_signals`); a signal
-//! quits the pipeline at once, before its request reaches the main thread.
-//! A signal the app inherited ignored stays ignored (`ignored`). The Dock's
-//! Quit, a logout and a shutdown on macOS, and a logoff and a shutdown on
-//! Windows, reach the run loop only as its last event, and an update's
-//! relaunch bypasses the request, so both run the same shutdown first
-//! (`shut_down_before_exit`). The one exception: a second SIGTERM or a
-//! second SIGINT ends the process at once, unsaved (`forced_exit`). On
-//! Linux a logout on GNOME or Xfce, through the session manager, a logout
-//! where the desktop portal reports the session's end, and a system
-//! shutdown or reboot run the same shutdown before they let the app go,
-//! over D-Bus (`session_end`); the display closing under the app at the end
-//! of any session runs it before GDK ends the process (`display_lost`);
-//! and an exit that went through ends the process `EXIT_GRACE` later at the
-//! latest (`end_within`). Open: the Windows logoff is untested on hardware,
-//! and Windows' end-session timeout (about five seconds) is shorter than
-//! `SHUTDOWN_PATIENCE` (WP10); the Linux paths have not run on a real
-//! GNOME or KDE Plasma session (before the first Linux release).
+//! Every exit runs `App::shutdown` first, at most `SHUTDOWN_PATIENCE`, over
+//! one `ExitGate`, so a recording in progress is saved: Quit, the last
+//! close without a tray, exit signals, and the run loop's last event alike.
+//! A second SIGTERM or SIGINT ends the process at once, unsaved.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-// The fixture host leaves the real host's seams (the login item, the
-// opener, the alert) unused.
+// The fixture host leaves the real host's seams unused.
 #![cfg_attr(feature = "fixture-host", allow(dead_code))]
 
 /// `eprintln!` for the shell's own lines, minus its panic: once the
-/// terminal the app started from has closed, every write to stderr fails,
-/// and the line is dropped instead.
+/// terminal the app started from has closed, the line is dropped instead.
 macro_rules! stderr_line {
     ($($line:tt)*) => {
         $crate::write_stderr_line(format_args!($($line)*))
     };
 }
 
-/// What `stderr_line!` writes.
 fn write_stderr_line(line: std::fmt::Arguments<'_>) {
     use std::io::Write as _;
     let _ = writeln!(std::io::stderr(), "{line}");
@@ -120,9 +72,9 @@ use crate::windows::BridgeWindow;
 
 fn main() {
     steno_services::log_to_stderr(steno_services::LOG_FILTER);
-    // After the log output, whose hook it runs after its own: a panic
-    // leaves a file under the support directory, since an app opened from
-    // the Finder or at login has no stderr anyone reads.
+    // After the log output: a panic leaves a file under the support
+    // directory, since an app opened from the Finder or at login has no
+    // stderr anyone reads.
     steno_core::crash_log::install_crash_log_hook(
         steno_core::StenoPaths::default_support_directory(),
         None,
@@ -135,27 +87,21 @@ fn main() {
     // Before the app is built: GTK unsets it when it starts.
     #[cfg(target_os = "linux")]
     let startup_id = session_end::startup_id();
-    // The runtime the services graph runs on, beside Tauri's own: the
-    // pipeline, the recorder's saves, the handover listener and the signal
-    // listeners. Leaked, so it is never dropped: dropping a runtime waits,
-    // without a bound, for every blocking task on it (a transcription, a
-    // model load), and Tauri drops whatever owns it before the process
-    // exits (the `setup` closure; the run loop's handler on Linux and
-    // Windows).
+    // The runtime the services graph runs on, beside Tauri's own. Leaked:
+    // dropping a runtime waits without a bound for every blocking task on
+    // it, and Tauri drops whatever owns it before the process exits.
     let runtime: &'static tokio::runtime::Runtime = Box::leak(Box::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("a tokio runtime"),
     ));
-    // The thread the event loop runs on: a host call here fails a debug
-    // build (`host.rs`), since it would freeze every window and the tray
-    // for as long as it waits.
+    // A host call on the event loop's thread fails a debug build, since it
+    // would freeze every window and the tray.
     steno_host::mark_ui_thread();
     let mut builder = tauri::Builder::default();
-    // First, so a second instance exits before it builds anything; it
-    // hands its arguments (a `steno:` link among them) to this one and
-    // the main window comes forward.
+    // First, so a second instance exits before it builds anything and
+    // hands its arguments to this one.
     if single_instance_available() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if host::is_running(app) {
@@ -176,16 +122,15 @@ fn main() {
         .plugin(platform::plugin());
     #[cfg(target_os = "macos")]
     {
-        // The menu bar's menu is the shell's own: Tauri's default one ends
-        // in a Quit that terminates without `ExitRequested`.
+        // The shell's own menu bar: Tauri's default one ends in a Quit that
+        // terminates without `ExitRequested`.
         builder = builder
             .plugin(tauri_nspanel::init())
             .enable_macos_default_menu(false)
             .menu(menu::build);
     }
     let app = builder
-        // One handler for every menu: the tray's on every platform and
-        // the menu bar's on macOS reach the same listeners.
+        // One handler for every menu: the tray's and the menu bar's.
         .on_menu_event(|app, event| {
             if host::is_running(app) {
                 actions::on_menu_event(app, &event);
@@ -218,17 +163,14 @@ fn main() {
 }
 
 /// Builds the host, the tray and the main window, opens onboarding when
-/// the host asks for it, and runs the launch sequence. False when the
-/// Swift app runs, another process holds the database, or the host cannot
-/// be built (the database cannot be opened or read): this app then shows
-/// why and ends (`refuse_to_start`), with no host, tray or window.
+/// the host asks for it, and runs the launch sequence. False when this app
+/// refuses to start (`refuse_to_start`), with no host, tray or window.
 fn setup(
     handle: &tauri::AppHandle,
     runtime: &'static tokio::runtime::Runtime,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    // First, before the first window starts WebKit's processes, so they
-    // follow the app into its scope; and the AppImage's mount servers into
-    // theirs.
+    // Before the first window starts WebKit's processes, so they follow the
+    // app into its scope.
     #[cfg(target_os = "linux")]
     own_scope::take_own_scopes();
     handle.manage(std::sync::Arc::new(updater::ShellUpdates::new(
@@ -246,8 +188,7 @@ fn setup(
     let host = match host::Host::real(handle, runtime) {
         Ok(host) => host,
         Err(error) => {
-            // The whole error, paths included, only at debug level (the
-            // `steno_services::logs` rule).
+            // The whole error, paths included, only at debug level.
             tracing::debug!("not starting: {error}");
             refuse_to_start(handle, Refused::after(&error));
             return Ok(false);
@@ -279,44 +220,30 @@ fn setup(
     Ok(true)
 }
 
-/// The exit code of an app that refused to start (`refuse_to_start`).
 const REFUSED_CODE: i32 = 3;
 
 /// How long a refused app waits for its dialog to be closed before it ends
-/// anyway (`refuse_to_start`).
+/// anyway.
 const REFUSED_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The Swift app's bundle id. It takes no database lock
-/// (`steno_core::DatabaseLock`), so this app looks for it by name.
+/// The Swift app's bundle id. It takes no database lock, so this app looks
+/// for it by name.
 const SWIFT_BUNDLE_ID: &str = "uno.schmid.steno.mac";
 
-/// Why this app refuses to start (`refuse_to_start`), with its dialog's
-/// title and text. A refusal the user can fix gets a variant of its own:
-/// its words name what to fix and end with what to do, then "open Steno
-/// again" ([`Refused::after`] adds the details its dialog needs).
+/// Why this app refuses to start, with its dialog's title and text. A
+/// refusal the user can fix names what to fix, then "open Steno again".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {
-    /// The Swift app runs: its launch and this one's would fail each
-    /// other's live recording, and it takes no lock to say so.
+    /// The Swift app runs; it takes no lock to say so.
     OlderSteno,
-    /// Another process holds the database: another app (an app under the
-    /// old identifier beside one under the new, one the single-instance
-    /// guard missed: Linux without a session bus, a failed connect on the
-    /// Mac), or a `steno` command.
+    /// Another process holds the database: another app or a `steno`
+    /// command.
     DatabaseHeld,
-    /// A stored setting cannot be read, or the settings cannot be read
-    /// together (`steno_services::BuildError::Setting`). The dialog names
-    /// the setting's key when one setting is at fault, and the database,
-    /// never a value. It says to fix or remove that setting there, or to
-    /// check the settings there when they cannot be read together, since
-    /// opening Steno again does not help. The app has changed nothing.
+    /// A stored setting, or the settings together, cannot be read. The
+    /// dialog names the key and the database, never a value.
     UnreadableSetting,
-    /// The host could not be built for another reason: the database cannot
-    /// be opened, migrated or read, or the support directory cannot be
-    /// created. A line without a path goes to the log
-    /// ([`refusal_log_line`]), the full error to debug. Nothing in the
-    /// database is lost: what may have committed before the failure (a
-    /// migration, the admission backfill) only adds.
+    /// The host could not be built for another reason (the database or the
+    /// support directory). Nothing in the database is lost.
     Unavailable,
 }
 
@@ -346,10 +273,9 @@ impl Refusal {
     }
 }
 
-/// What a refused start shows and logs (`refuse_to_start`): the refusal,
-/// the line for stderr and the error-level log, which names no path or
-/// value (the `steno_services::logs` rule), and the dialog's text, which
-/// may name the database.
+/// What a refused start shows and logs: the refusal, the log line, which
+/// names no path or value, and the dialog's text, which may name the
+/// database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Refused {
     refusal: Refusal,
@@ -358,7 +284,6 @@ struct Refused {
 }
 
 impl Refused {
-    /// A refusal whose dialog is its [`Refusal::text`] alone.
     fn plain(refusal: Refusal, log_line: String) -> Self {
         Self {
             refusal,
@@ -367,12 +292,9 @@ impl Refused {
         }
     }
 
-    /// The refusal for a host that could not be built, which `setup`
-    /// passes on whole: [`Refusal::DatabaseHeld`] while another process
-    /// holds the database, [`Refusal::UnreadableSetting`] with the
-    /// setting's key and the database for stored settings the app cannot
-    /// read, else [`Refusal::Unavailable`]; the log line is
-    /// [`refusal_log_line`].
+    /// The refusal for a host that could not be built:
+    /// [`Refusal::DatabaseHeld`], [`Refusal::UnreadableSetting`], else
+    /// [`Refusal::Unavailable`].
     #[cfg(not(feature = "fixture-host"))]
     fn after(error: &host::ShellHostError) -> Self {
         use steno_core::StoreError;
@@ -395,8 +317,7 @@ impl Refused {
                  They are stored in the database at {database}. Steno has not changed them: \
                  check the settings there, then open Steno again."
             ),
-            // Not built today (`steno_services::BuildError::Setting` holds
-            // the two above only); named so a new variant must choose.
+            // Not built today; named so a new variant must choose.
             StoreError::Sqlite(_)
             | StoreError::Json(_)
             | StoreError::Io(_)
@@ -426,9 +347,8 @@ impl Refused {
 }
 
 /// The error-level log line for a host that could not be built: what went
-/// wrong, and for a stored setting its key and the problem, never a path
-/// or a value (the `steno_services::logs` rule; the dialog may name the
-/// database, the log may not).
+/// wrong, never a path or a value (the dialog may name the database, the
+/// log may not).
 #[cfg(not(feature = "fixture-host"))]
 fn refusal_log_line(error: &host::ShellHostError) -> String {
     use host::ShellHostError;
@@ -460,7 +380,6 @@ fn refusal_log_line(error: &host::ShellHostError) -> String {
                 error.kind()
             )
         }
-        // Names the key and the problem only.
         ShellHostError::Build(BuildError::Setting { source, .. }) => source.to_string(),
         // SQLite's result code names no path or value.
         ShellHostError::Build(BuildError::Store(error)) => match error.sqlite_code() {
@@ -471,10 +390,8 @@ fn refusal_log_line(error: &host::ShellHostError) -> String {
     }
 }
 
-/// The refusal due before the host is built, with `running` answering
-/// whether an app with a bundle id runs ([`platform_app_running`] in the
-/// product): [`Refusal::OlderSteno`] while the Swift app runs. A Swift app
-/// started after this one is not kept out.
+/// The refusal due before the host is built: [`Refusal::OlderSteno`] while
+/// the Swift app runs, as `running` answers.
 #[cfg(not(feature = "fixture-host"))]
 fn refusal_before_build(running: impl FnOnce(&str) -> bool) -> Option<Refusal> {
     running(SWIFT_BUNDLE_ID).then_some(Refusal::OlderSteno)
@@ -502,17 +419,10 @@ fn platform_app_running(bundle_id: &str) -> bool {
     }
 }
 
-/// Says why this app does not start (the [`Refused`] dialog's title and
-/// message), writes its log line to stderr and the log at error level (so
-/// it names no path or value), and ends
-/// with [`REFUSED_CODE`] once the dialog is closed, before it opens a window:
-/// two apps on one database would fail each other's recordings at launch,
-/// and a host that could not be built writes nothing more. Its run loop has
-/// no host to shut down (`host::is_running`). Should the dialog never show,
-/// or its callback never run, the process ends after [`REFUSED_PATIENCE`]
-/// all the same, or after the wait of a smoke run (`STENO_SMOKE_SECONDS`,
-/// so the smoke sees the refusal end): it holds nothing to save. Rust only:
-/// the Swift app relied on macOS opening one copy per bundle id.
+/// Says why this app does not start, logs it without a path or value, and
+/// ends with [`REFUSED_CODE`] once the dialog is closed, before it opens a
+/// window. Should the dialog never close, the process ends after
+/// [`REFUSED_PATIENCE`] (or the smoke run's wait) all the same.
 fn refuse_to_start(handle: &tauri::AppHandle, refused: Refused) {
     use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 
@@ -541,15 +451,14 @@ fn refuse_to_start(handle: &tauri::AppHandle, refused: Refused) {
         .show(move |_| app.exit(REFUSED_CODE));
 }
 
-/// A signal that asks for the exit Quit asks for (`exit_on_signals`).
+/// A signal that asks for the exit Quit asks for.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExitSignal {
     kind: tokio::signal::unix::SignalKind,
     name: &'static str,
-    /// The code a second one ends the process with at once, 128 plus the
-    /// signal's number, as the shells report it; none for SIGHUP, which
-    /// never forces the exit.
+    /// The code a second one ends the process with, 128 plus the signal's
+    /// number; none for SIGHUP, which never forces the exit.
     forced_code: Option<i32>,
 }
 
@@ -573,10 +482,9 @@ impl ExitSignal {
     const ALL: [Self; 3] = [Self::TERMINATE, Self::INTERRUPT, Self::HANGUP];
 }
 
-/// Whether the signal `number` is ignored now, as `nohup` and a shell's
-/// background job (SIGINT) leave it at launch; false when its disposition
-/// cannot be read. The app does not listen for such a signal, so it stays
-/// ignored: installing a handler would undo it.
+/// Whether the signal `number` is ignored now, as `nohup` leaves it; false
+/// when unreadable. The app does not listen for such a signal, so it stays
+/// ignored.
 #[cfg(unix)]
 fn ignored(number: libc::c_int) -> bool {
     // SAFETY: an all-zero `sigaction` is a valid value, and a null new
@@ -586,9 +494,8 @@ fn ignored(number: libc::c_int) -> bool {
     read == 0 && current.sa_sigaction == libc::SIG_IGN
 }
 
-/// What `signal` does after the exit signals already `seen`, which it
-/// joins: the code to end the process with at once (a second SIGTERM, a
-/// second SIGINT), or none to ask for the Quit exit.
+/// What `signal` does after the exit signals already `seen`: the code to
+/// end the process with at once, or none to ask for the Quit exit.
 #[cfg(unix)]
 fn forced_exit(signal: ExitSignal, seen: &mut Vec<ExitSignal>) -> Option<i32> {
     if seen.contains(&signal) {
@@ -598,11 +505,9 @@ fn forced_exit(signal: ExitSignal, seen: &mut Vec<ExitSignal>) -> Option<i32> {
     None
 }
 
-/// One arrival of `signal`: the code to end the process with at once
-/// (`forced_exit`), or none once it has quit the pipeline and then asked
-/// for Quit, in that order, so the pipeline is quit before the request
-/// waits for the main thread. The guard on `seen` is released before
-/// either step.
+/// One arrival of `signal`: the code to end the process with at once, or
+/// none once it has quit the pipeline and then asked for Quit, so the
+/// pipeline is quit before the request waits for the main thread.
 #[cfg(unix)]
 fn on_exit_signal(
     signal: ExitSignal,
@@ -624,24 +529,11 @@ fn on_exit_signal(
 }
 
 /// SIGTERM, SIGINT and SIGHUP ask for the exit Quit asks for, so the
-/// shutdown runs first: a plain `kill`, Ctrl-C in a terminal, a closed
-/// terminal, systemd at a shutdown. A logout on Linux saves here when
-/// logind ends the session's processes (with `KillUserProcesses=yes`,
-/// systemd stops the scope with SIGTERM, then SIGHUP); on GNOME and Xfce
-/// the session manager's end saves first (`session_end`), and on every
-/// desktop the display closing does (`display_lost`). On macOS a logout
-/// goes through `RunEvent::Exit` instead.
-/// Each signal quits the pipeline on the blocking pool, off the main
-/// thread and the async workers (the quit syncs the disk), and then, in
-/// the same task, asks for the exit (`Host::quit_pipeline`), so a job a
-/// busy main thread would let fail first stays resumable. The loop goes on
-/// receiving meanwhile: a second SIGTERM or a second SIGINT ends the
-/// process at once, unsaved (`forced_exit`), even while the first one's
-/// quit waits on the disk, so a run loop that no longer answers still ends
-/// with a plain `kill` or Ctrl-C twice; a SIGHUP never does, so the one
-/// that follows a session scope's SIGTERM still saves. A signal the app
-/// inherited ignored stays ignored (`ignored`).
-/// Swift had no handler; each of them ended the app unsaved.
+/// shutdown runs first. Each quits the pipeline on the blocking pool and
+/// then asks for the exit, so a job stays resumable even while the main
+/// thread is busy. A second SIGTERM or SIGINT ends the process at once,
+/// unsaved; a SIGHUP never does, so the one that follows a session scope's
+/// SIGTERM still saves. A signal inherited ignored stays ignored.
 #[cfg(unix)]
 fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -667,9 +559,8 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
                 }
             };
             while arrivals.recv().await.is_some() {
-                // On the blocking pool, as the pipeline's quit removes its
-                // reading marks, which syncs the disk; not waited for, so
-                // the next arrival is received while it runs.
+                // Not waited for, so the next arrival is received while the
+                // quit syncs the disk.
                 let (app, seen) = (app.clone(), seen.clone());
                 tokio::task::spawn_blocking(move || {
                     let forced = on_exit_signal(
@@ -688,54 +579,41 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
     }
 }
 
-/// Runs the shutdown for an exit no request held, on this thread's behalf,
-/// and returns once it ended (at most `SHUTDOWN_PATIENCE`), waiting for
-/// the one already running (a held request's, an earlier exit's) instead
-/// of starting one; at once when it already ran. `RunEvent::Exit`, the
-/// updater's relaunch and the Linux logout and shutdown clients
-/// (`session_end`) call it, each right before the process ends, so it
-/// writes out the queued log lines too.
-///
-/// Swift: the Dock's Quit and a logout reached `applicationShouldTerminate`
-/// as Quit did.
+/// Runs the shutdown for an exit no request held and returns once it ended
+/// (at most `SHUTDOWN_PATIENCE`), joining one already running; at once when
+/// it already ran. Called right before the process ends, so it writes out
+/// the queued log lines too.
 fn shut_down_before_exit(app: &tauri::AppHandle) {
     app.state::<steno_services::app::ExitGate>()
         .exiting(steno_services::app::SHUTDOWN_PATIENCE, exit_action(app));
     steno_services::flush_logs();
 }
 
-/// The shutdown before an update's relaunch (`updater`, and the smoke's
-/// `STENO_SMOKE_RELAUNCH`): on Linux it marks the exit as a relaunch first
-/// (`autostart::relaunching`), so the exit's step keeps the login item for
-/// the next process, which runs on in the same unit.
+/// The shutdown before an update's relaunch: on Linux it marks the exit as
+/// a relaunch first, so the login item stays for the next process.
 fn shut_down_for_relaunch(app: &tauri::AppHandle) {
     #[cfg(target_os = "linux")]
     autostart::relaunching();
     shut_down_before_exit(app);
 }
 
-/// The save before an end that no exit request announced, on Linux: the
-/// pipeline quits first, as for an exit signal (`Host::quit_pipeline`),
-/// then the shutdown runs on the calling thread's behalf
-/// (`shut_down_before_exit`). The logout and shutdown clients
-/// (`session_end`) and the lost display (`display_lost`) call it.
+/// The save before an end no exit request announced, on Linux: the
+/// pipeline quits first, then the shutdown runs on this thread's behalf.
 #[cfg(target_os = "linux")]
 fn save_before_end(app: &tauri::AppHandle) {
     host::host(app).quit_pipeline();
     shut_down_before_exit(app);
 }
 
-/// The onboarding window closed, kept or destroyed: the host counts its
-/// pages as seen ([`count_onboarding_seen`]), and a smoke run counts the
-/// close.
+/// The onboarding window closed: the host counts its pages as seen, and a
+/// smoke run counts the close.
 fn onboarding_closed(app: &tauri::AppHandle) {
     app.state::<smoke::Smoke>().note_onboarding_closed();
     count_onboarding_seen(app.clone());
 }
 
-/// `Host::onboarding_window_closed`, queued on the shell's ordered lane
-/// (`host::call_in_order`): it reloads onboarding from the store, and the
-/// window's close arrives on the main thread.
+/// `Host::onboarding_window_closed`, queued on the shell's ordered lane,
+/// since it reads the store.
 fn count_onboarding_seen<H: host::ShellHost>(host: H) {
     host::call_in_order(host, "the onboarding window's close", |host| {
         host.onboarding_window_closed();
@@ -743,20 +621,10 @@ fn count_onboarding_seen<H: host::ShellHost>(host: H) {
     });
 }
 
-/// What every exit runs once (`ExitGate`): the host's shutdown
-/// (`Host::shutdown_action`), then a `warn` line with how long it took, so
-/// a machine's log, under the default filter (`LOG_FILTER`), shows how
-/// long a save takes against the waits it has to fit in: systemd's stop
-/// timeout, the session manager's, logind's delay. A shutdown cut off at
-/// `SHUTDOWN_PATIENCE` logs the gate's warning first, and this line only
-/// if the save ends before the process does. After it, on Linux, Launch
-/// at login turned off while the app ran as the autostart unit goes off,
-/// and an autostart entry an earlier build wrote that waited for the exit
-/// goes, unless the exit is an update's relaunch (`autostart::at_exit`):
-/// only once the save is over, since until then the unit the app runs as
-/// needs the entry. Last, the panels' anchor a drag queued reaches the
-/// disk (`panels::flush_anchor`); it waits for a slow disk, so it goes
-/// after the login item, which matters more than the panels' place.
+/// What every exit runs once: the host's shutdown, then a `warn` line with
+/// how long it took, so a machine's log shows the save against the waits
+/// it must fit in. Then, on Linux, the login item's exit step, only once
+/// the save is over; last the panels' anchor, which waits for a slow disk.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
     let shutdown = host::host(app).shutdown_action();
     let app = app.clone();
@@ -767,7 +635,6 @@ fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
     })
 }
 
-/// `shutdown`, the line with its duration, then `after`, in that order.
 fn timed_then(
     shutdown: impl FnOnce() + Send + 'static,
     after: impl FnOnce() + Send + 'static,
@@ -780,16 +647,14 @@ fn timed_then(
     }
 }
 
-/// One turn of the run loop; nothing for an app that refused to start
-/// (`refuse_to_start`), which has no host and ends without a shutdown.
+/// One turn of the run loop; nothing for an app that refused to start.
 fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     if !host::is_running(app) {
         return;
     }
     match event {
-        // Quit from either menu, an exit signal, the smoke's exit, the
-        // last window closing with no tray: the shutdown runs first
-        // (`exit_request`).
+        // Quit, an exit signal, the smoke's exit, the last window closing
+        // with no tray: the shutdown runs first.
         tauri::RunEvent::ExitRequested { code, api, .. } => {
             let handle = app.clone();
             if exit_request(
@@ -811,17 +676,12 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 api.prevent_exit();
             }
         }
-        // The run loop's last event. After a request the gate held, the
-        // shutdown has run; the Dock's Quit, a logout and a shutdown on
-        // macOS raise no request (tao answers `applicationWillTerminate`,
-        // which AppKit waits for), nor do a logoff and a shutdown on
-        // Windows (tao answers `WM_ENDSESSION`), so the shutdown runs
-        // here, on Windows until the end-session timeout (about five
-        // seconds) ends the process.
+        // The run loop's last event. The Dock's Quit, a logout or shutdown
+        // on macOS and a logoff or shutdown on Windows raise no request, so
+        // the shutdown runs here.
         tauri::RunEvent::Exit => shut_down_before_exit(app),
-        // The main window closes: hidden and kept while a tray can bring
-        // it back (`hides_on_close`); destroyed otherwise. `has_tray` is
-        // asked here, once per close, and the events that follow reuse it.
+        // The main window closes: hidden while a tray can bring it back,
+        // destroyed otherwise; `has_tray` is asked once per close.
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::CloseRequested { api, .. },
@@ -844,10 +704,8 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 }
             }
         }
-        // Settings or onboarding closes on Linux: kept, not destroyed
-        // (`windows::keeps_on_close`, #160); the host hears of
-        // onboarding's close as it does of a destroyed window. A window
-        // that could not be kept is destroyed, so the close still happens.
+        // Settings or onboarding closes on Linux: kept, not destroyed; one
+        // that could not be kept is destroyed.
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::CloseRequested { api, .. },
@@ -870,10 +728,8 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 }
             }
         }
-        // A window is gone: its page no longer listens; a destroyed main
-        // window with no tray ends the process (`exits_when_destroyed`). A
-        // kept window (`windows::Kept`) is destroyed only as the app ends,
-        // and the host heard of its close when it was kept.
+        // A window is gone; a destroyed main window with no tray ends the
+        // process.
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::Destroyed,
@@ -888,8 +744,7 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 actions::quit(app);
             }
         }
-        // A panel the user dragged: its anchor follows (`panels::moved`
-        // tells a drag from the window taking its size).
+        // A panel the user dragged: its anchor follows.
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::Moved(position),
@@ -899,8 +754,7 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 panels::moved(app, panel, position);
             }
         }
-        // The Dock icon was clicked with no window open: the main window
-        // comes back, as it does for the Swift app.
+        // The Dock icon was clicked with no window open: main comes back.
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {
             has_visible_windows: false,
@@ -910,13 +764,9 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     }
 }
 
-/// Builds the tray. No tray is not fatal: the windows still work, and
-/// closing main then ends the process (`exits_when_destroyed`). On Linux
-/// the tray crate panics (rather than errs) when libayatana-appindicator
-/// is not installed, so the panic is caught here; the .deb depends on the
-/// library, the `AppImage` does not bundle it (README, Bundles). On
-/// Linux a built tray starts the follower that tells whether a host shows
-/// it (`tray_host::follow`), which logs what it finds.
+/// Builds the tray. No tray is not fatal: closing main then ends the
+/// process. On Linux the tray crate panics without
+/// libayatana-appindicator, so the panic is caught here.
 fn build_tray(app: &tauri::AppHandle) {
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tray::build(app)));
     match built {
@@ -934,8 +784,7 @@ fn build_tray(app: &tauri::AppHandle) {
     }
 }
 
-/// Whether a tray stands (`tray_stands`): `tray::build` manages `Tray` on
-/// success.
+/// Whether a tray stands; `tray::build` manages `Tray` on success.
 fn has_tray(app: &tauri::AppHandle) -> bool {
     tray_stands(
         app.try_state::<tray::Tray>().is_some(),
@@ -944,16 +793,14 @@ fn has_tray(app: &tauri::AppHandle) -> bool {
     )
 }
 
-/// Whether a tray stands: it was `built` and something shows it, a `host`
-/// (`tray::has_host`) or a smoke run, which stands in for the host Xvfb
-/// lacks so it checks the close rule a desktop with a tray gets.
+/// Whether a tray stands: it was `built` and a `host` shows it, or a smoke
+/// run stands in for the host Xvfb lacks.
 fn tray_stands(built: bool, smoke: bool, host: bool) -> bool {
     built && (smoke || host)
 }
 
-/// What `has_tray` said when the main window last closed, so the
-/// `Destroyed` and the exit request that follow a close decide as the
-/// close did, even when a tray host comes or goes between them.
+/// What `has_tray` said when main last closed, so the events that follow
+/// a close decide as it did.
 #[derive(Default)]
 struct TrayAtClose(std::sync::Mutex<Option<bool>>);
 
@@ -969,41 +816,29 @@ impl TrayAtClose {
     }
 }
 
-/// The tray as the last close of main found it, else as it is now.
 fn tray_at_close(app: &tauri::AppHandle) -> bool {
     app.state::<TrayAtClose>()
         .noted()
         .unwrap_or_else(|| has_tray(app))
 }
 
-/// Whether closing the window of `label` hides it instead: the main window
-/// while a tray can bring it back, as the Swift main window closes behind
-/// the menu bar item (and the tray's recorder commands keep a window to go
-/// through). Settings and onboarding are kept on Linux
-/// (`windows::keeps_on_close`); every other close destroys the window.
+/// Whether closing the window of `label` hides it instead: main while a
+/// tray can bring it back.
 fn hides_on_close(label: &str, has_tray: bool) -> bool {
     label == BridgeWindow::Main.as_str() && has_tray
 }
 
-/// Whether the window of `label` being destroyed ends the process: the
-/// main window with no tray, since nothing else reaches the app; the
-/// Swift app always has its menu bar item. The panels' windows are
-/// hidden, never destroyed, so once one has existed the last window never
-/// closes on its own, and the process would linger invisibly.
+/// Whether the window of `label` being destroyed ends the process: main
+/// with no tray, since nothing else reaches the app (the hidden panels
+/// would otherwise keep it lingering invisibly).
 fn exits_when_destroyed(label: &str, has_tray: impl FnOnce() -> bool) -> bool {
     label == BridgeWindow::Main.as_str() && !has_tray()
 }
 
-/// What an exit request does; true lets it through now. `exits_on`
-/// decides whether the process ends at all. The first one that ends it is
-/// held: `shutdown` runs on a thread of its own (`App::shutdown`), at most
-/// `SHUTDOWN_PATIENCE`, and then `exit` raises the request again with its
-/// code (zero for one without), which goes through. A request while the
-/// shutdown runs is held too (the exit is coming), and the shutdown runs
-/// once (`ExitGate`).
-///
-/// Swift: `applicationShouldTerminate` answered `.terminateLater`, awaited
-/// `AppController.shutdown()` and replied.
+/// What an exit request does; true lets it through now. The first one
+/// that ends the process is held while `shutdown` runs on a thread of its
+/// own, then `exit` raises it again with its code, which goes through. A
+/// request during the shutdown is held too; the shutdown runs once.
 fn exit_request(
     code: Option<i32>,
     has_tray: impl FnOnce() -> bool,
@@ -1022,31 +857,23 @@ fn exit_request(
     )
 }
 
-/// Whether an exit request ends the process. One with a code is the shell's
-/// own (`AppHandle::exit` from Quit, the smoke's) and always does. One
-/// without comes from the last window closing: with a tray the process
-/// stays, as the Swift menu bar app stays when its window closes
-/// (`applicationShouldTerminateAfterLastWindowClosed` in `StenoApp.swift`);
-/// without one it ends. The tray is asked only for one without a code.
+/// Whether an exit request ends the process: one with a code is the
+/// shell's own and always does; one without (the last window closing) only
+/// when no tray stands.
 fn exits_on(code: Option<i32>, has_tray: impl FnOnce() -> bool) -> bool {
     code.is_some() || !has_tray()
 }
 
 /// How long the run loop may take to end on Linux once an exit went
-/// through, before the process ends anyway (`end_within`).
+/// through.
 #[cfg(target_os = "linux")]
 const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Calls `end` on a thread of its own `grace` from now, unless the process
-/// has ended by then. On Linux an exit that went through ends this way at
-/// the latest, with its code: the single-instance plugin releases its name
-/// on the session bus at `RunEvent::Exit` (before the shell's own handler
-/// runs) and waits for the bus's answer without a bound, so a frozen
-/// session bus would hold the exit. The bus drops the name with the
-/// connection anyway, and an exit goes through only once the shutdown
-/// ended or ran out of patience, so ending the teardown early loses
-/// nothing. An update's relaunch (`tauri::RESTART_EXIT_CODE`) is left to
-/// the teardown, which relaunches at its end.
+/// has ended. On Linux the single-instance plugin waits without a bound
+/// for the session bus at `RunEvent::Exit`, so a frozen bus would hold the
+/// exit; ending early loses nothing. An update's relaunch is left to the
+/// teardown.
 #[cfg(target_os = "linux")]
 fn end_within(grace: std::time::Duration, end: impl FnOnce() + Send + 'static) {
     std::thread::spawn(move || {
@@ -1055,16 +882,13 @@ fn end_within(grace: std::time::Duration, end: impl FnOnce() + Send + 'static) {
     });
 }
 
-/// Whether the session bus is named (`DBUS_SESSION_BUS_ADDRESS`): the
-/// shell treats a session without one as having none.
+/// Whether the session bus is named (`DBUS_SESSION_BUS_ADDRESS`).
 fn session_bus_named() -> bool {
     std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
 }
 
-/// Whether the single-instance plugin can run: on Linux it holds a name on
-/// the session bus and panics without one (a headless CI run under
-/// `xvfb-run` has none), so it is skipped there; macOS and Windows need
-/// nothing.
+/// Whether the single-instance plugin can run: on Linux it panics without
+/// a session bus, so it is skipped there.
 fn single_instance_available() -> bool {
     !cfg!(target_os = "linux") || session_bus_named()
 }
@@ -1073,12 +897,10 @@ fn single_instance_available() -> bool {
 mod tests {
     use super::*;
 
-    /// The exit, after the save, turns the Linux login item off first and
-    /// then waits for the panels' anchor, so a slow disk cannot hold the
-    /// login item's change past the time the system gives the app.
+    /// The exit turns the Linux login item off before it waits for the
+    /// panels' anchor.
     #[test]
     fn the_exit_flushes_the_anchor_after_the_login_item() {
-        // Without the carriage returns a Windows checkout may add.
         let main = include_str!("main.rs").replace("\r\n", "\n");
         let start = main.find("\nfn exit_action(").unwrap();
         let end = start + main[start..].find("\n}\n").unwrap();
@@ -1092,9 +914,7 @@ mod tests {
         assert!(login_item < flush);
     }
 
-    /// A running Swift app refuses the start before the host is built; with
-    /// none running the start goes on. Only the Swift app's bundle id is
-    /// asked about.
+    /// A running Swift app refuses the start before the host is built.
     #[cfg(not(feature = "fixture-host"))]
     #[test]
     fn a_running_swift_app_refuses_the_start() {
@@ -1106,11 +926,8 @@ mod tests {
         assert_eq!(Refusal::OlderSteno.title(), "An older Steno is running");
     }
 
-    /// A host that cannot be built maps to its refusal: a store that cannot
-    /// be opened is [`Refusal::Unavailable`], a database another process
-    /// holds [`Refusal::DatabaseHeld`], each with its text alone. That
-    /// `setup` shows it and exits with [`REFUSED_CODE`] is the Linux
-    /// smoke's refusal runs (`apps/desktop/scripts/smoke-linux.sh`).
+    /// A host that cannot be built maps to its refusal, each with its text
+    /// alone.
     #[cfg(not(feature = "fixture-host"))]
     #[test]
     fn a_host_that_cannot_be_built_maps_to_its_refusal() {
@@ -1131,8 +948,7 @@ mod tests {
         assert_eq!(held.message, Refusal::DatabaseHeld.text());
     }
 
-    /// Stored settings the app cannot read say which one, where, and what
-    /// to do in the dialog, one setting or the settings together.
+    /// Unreadable stored settings say which one, where, and what to do.
     #[cfg(not(feature = "fixture-host"))]
     #[test]
     fn an_unreadable_setting_names_itself_in_the_dialog() {
@@ -1173,11 +989,7 @@ mod tests {
         );
     }
 
-    /// The error-level log line of every refusal after a failed build,
-    /// which `setup` passes on whole, names no path (the
-    /// `steno_services::logs` rule): a setting's line has its key and the
-    /// problem, the lock's says another Steno holds the database, while
-    /// the dialog still names the database.
+    /// The log line of every refusal after a failed build names no path.
     #[cfg(not(feature = "fixture-host"))]
     #[test]
     fn a_refusal_logs_no_path() {
@@ -1254,9 +1066,7 @@ mod tests {
         assert!(!platform_app_running("com.nicolaischmid.steno.no-such-app"));
     }
 
-    /// What runs after the shutdown (on Linux, Launch at login turned off
-    /// as the autostart unit, and an earlier build's autostart entry that
-    /// waited for the exit) runs only once the save is over.
+    /// What runs after the shutdown runs only once the save is over.
     #[test]
     fn the_exit_action_runs_its_after_step_once_the_shutdown_ended() {
         let steps = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1274,13 +1084,11 @@ mod tests {
         assert!(exits_on(Some(0), asked));
         assert!(exits_on(Some(1), asked));
         assert!(!exits_on(None, || true));
-        // No tray: the last window closing ends the process.
         assert!(exits_on(None, || false));
     }
 
-    /// The run loop's round trip: `exit` raises the request again, as
-    /// `AppHandle::exit` raises `ExitRequested`, and reports whether that
-    /// one went through.
+    /// The run loop's round trip: `exit` raises the request again and
+    /// reports whether that one went through.
     fn requested_again(
         gate: steno_services::app::ExitGate,
         steps: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -1298,10 +1106,8 @@ mod tests {
         }
     }
 
-    /// Quit (the tray's item, the menu bar's, `actions::quit`, a signal):
-    /// the request is held, the shutdown runs once, then the process exits
-    /// with Quit's code; nothing exits before the shutdown ended, and a
-    /// second Quit meanwhile is held too, without a second shutdown.
+    /// Quit: the request is held, the shutdown runs once, then the process
+    /// exits with Quit's code; a second Quit meanwhile is held too.
     #[test]
     fn a_quit_runs_the_shutdown_once_and_holds_a_second_quit_until_it_ends() {
         use std::sync::{Arc, Mutex, atomic::AtomicUsize, atomic::Ordering};
@@ -1345,9 +1151,7 @@ mod tests {
         assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
     }
 
-    /// Closing main with no tray: the code-less request that ends the
-    /// process is held the same way and exits with zero after the
-    /// shutdown.
+    /// Closing main with no tray is held the same way and exits with zero.
     #[test]
     fn a_close_without_a_tray_runs_the_shutdown_before_the_process_ends() {
         use std::sync::{Arc, Mutex};
@@ -1392,7 +1196,6 @@ mod tests {
             .expect("the shutdown ran");
     }
 
-    /// A tray stands when it was built and a host or a smoke run shows it.
     #[test]
     fn a_tray_stands_when_built_and_shown() {
         for (built, smoke, host, stands) in [
@@ -1411,9 +1214,8 @@ mod tests {
         }
     }
 
-    /// With a tray, closing main hides it and the process stays; without
-    /// one, main is destroyed and the process ends with it, whatever else
-    /// (a hidden panel) is still around. The other windows just close.
+    /// With a tray, closing main hides it; without one, main is destroyed
+    /// and the process ends with it.
     #[test]
     fn main_hides_behind_a_tray_and_ends_the_process_without_one() {
         assert!(hides_on_close("main", true));
@@ -1431,9 +1233,7 @@ mod tests {
         }
     }
 
-    /// Only a second SIGTERM or a second SIGINT ends the process at once;
-    /// every other exit signal asks for Quit, and a SIGHUP, the one systemd
-    /// sends right after a session scope's SIGTERM, never forces the exit.
+    /// Only a second SIGTERM or SIGINT ends the process at once.
     #[cfg(unix)]
     #[test]
     fn a_second_sigterm_or_sigint_forces_the_exit_and_a_sighup_never_does() {
@@ -1481,8 +1281,7 @@ mod tests {
         assert_eq!(steps.borrow().len(), 2);
     }
 
-    /// The exit signals are SIGTERM, SIGINT and SIGHUP, and only the first
-    /// two force a second time, with 128 plus their number.
+    /// The exit signals, and the codes the first two force with.
     #[cfg(unix)]
     #[test]
     fn the_exit_signals_are_sigterm_sigint_and_sighup() {
@@ -1500,10 +1299,8 @@ mod tests {
         );
     }
 
-    /// A signal ignored at launch (`nohup`, a background job's SIGINT)
-    /// reads as ignored; a default one does not, nor does one whose
-    /// disposition cannot be read (no such signal). The disposition is read
-    /// as it is: SIGUSR2, which nothing here uses, ignored for the test.
+    /// A signal ignored at launch reads as ignored; a default or unreadable
+    /// one does not. SIGUSR2, which nothing here uses, is the test's.
     #[cfg(unix)]
     #[test]
     fn a_signal_ignored_at_launch_reads_as_ignored() {
@@ -1523,11 +1320,8 @@ mod tests {
     #[cfg(unix)]
     const STDERR_CHILD: &str = "STENO_TEST_STDERR_CHILD";
 
-    /// The child writes a line to a stderr nobody reads (a pipe with no
-    /// reader fails each write, as a closed terminal does), so the line is
-    /// lost; the child must still pass, not panic. `--nocapture`, or the
-    /// test harness would catch the line. Unix only, as the services' test
-    /// of their log lines.
+    /// A line written to a stderr nobody reads is lost without a panic.
+    /// `--nocapture`, or the test harness would catch the line.
     #[cfg(unix)]
     #[test]
     fn a_line_to_a_closed_stderr_is_dropped_without_a_panic() {
@@ -1578,9 +1372,8 @@ mod tests {
         }
     }
 
-    /// The onboarding window's close counts the pages as seen on the lane:
-    /// the close (on the main thread) returns while the host's reload of
-    /// onboarding is held, and the host then hears of it.
+    /// The onboarding window's close returns while the host's reload is
+    /// held on the lane, and the host then hears of it.
     #[test]
     fn the_onboarding_close_reaches_the_host_off_the_closing_thread() {
         use std::time::Duration;

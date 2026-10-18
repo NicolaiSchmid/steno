@@ -1,19 +1,10 @@
-//! Snapshot parity against the recorded bridge fixtures
-//! (`apps/macos/web/fixtures/bridge/`): for every snapshot and reply
-//! fixture, the store and service state that produces it is built, the
-//! host's snapshot is encoded with `steno_core::json::to_canonical_string`
-//! and compared byte for byte with the file.
-//!
-//! Where a fixture cannot be reproduced from any store or service state,
-//! because `Sources/StenoBridge/BridgeSamples.swift` wrote a hand-picked
-//! value the view models never compute, the difference is listed as a
-//! [`Deviation`] on the fixture: a JSON pointer, the value the host
-//! produces instead, and why.
-//! The test applies the deviations to the fixture and then demands byte
-//! equality, so everything not listed is proven equal, and the table the
-//! test prints is the PR's parity table.
+//! Snapshot parity against the bridge fixtures (`apps/macos/web/fixtures/bridge/`):
+//! for every fixture the state that produces it is built and the host's
+//! canonical JSON is compared byte for byte. A hand-picked fixture value the
+//! host never computes is listed as a [`Deviation`]; everything else must
+//! be equal.
 
-// The ported suites keep one Swift test per function, long as some are.
+// Some tests are long.
 #![allow(clippy::too_many_lines)]
 
 mod common;
@@ -126,9 +117,8 @@ fn assert_parity(name: &str, host: &Value, deviations: &[Deviation]) {
     println!("{row}");
 }
 
-/// The first JSON pointer at which the two values differ, with both
-/// sides, walking objects by key and arrays by index so an inserted
-/// element names its own pointer instead of shifting every line after it.
+/// The first JSON pointer at which the two values differ, with both sides;
+/// arrays are walked by index so an inserted element names its own pointer.
 fn first_difference(expected: &Value, actual: &Value) -> Option<String> {
     fn walk(pointer: &str, expected: &Value, actual: &Value) -> Option<String> {
         match (expected, actual) {
@@ -275,7 +265,7 @@ fn progress() {
             lane_count: 1,
         },
     });
-    // A run refused for missing models: the second entry, Rust only.
+    // A run refused for missing models: the second entry.
     harness
         .host
         .apply_meeting_event(&MeetingEvent::ModelsMissing {
@@ -448,7 +438,7 @@ fn settings_recording() {
         })
         .build();
     // Forever once (keeping two recordings), then back to 30 days: the
-    // count stays, as the view model keeps it.
+    // count stays.
     harness
         .host
         .settings_recording_set_retention(SetRetentionParams {
@@ -487,8 +477,7 @@ fn settings_transcription() {
             fakes.speech_models.fail_downloads(Some("offline"));
         })
         .build();
-    // The download's one progress report publishes the snapshot the fixture
-    // describes; the host then records the failure.
+    // The download's one progress report publishes the fixture's snapshot.
     harness
         .host
         .settings_transcription_download(AssetIdParams {
@@ -699,10 +688,8 @@ fn settings_iphone_pairing() {
     );
 }
 
-/// `settings.iphone.waiting` has no Swift sample (the Swift app's handover
-/// never waits); it is written in the recorder's format, and this proves
-/// the host produces it: the paired phone while the previous version's
-/// pairing did not come over.
+/// The host produces `settings.iphone.waiting`: the paired phone while the
+/// previous version's pairing did not come over.
 #[test]
 fn settings_iphone_waiting() {
     let harness = Harness::builder()
@@ -746,8 +733,7 @@ fn onboarding_permissions() {
             kind: PermissionKind::LocalNetwork,
         })
         .unwrap();
-    // `onboarding`'s `isRequesting` is the first of the two publishes
-    // `onboarding.request` makes, before the prompt.
+    // `isRequesting` is the first of `onboarding.request`'s two publishes.
     harness.sink.clear();
     harness
         .host
@@ -779,10 +765,8 @@ fn onboarding_permissions() {
     );
 }
 
-/// `meeting.detail.keyWithheld` has no Swift sample (the Swift app read
-/// its API key itself); it is written in the recorder's format, and this
-/// proves the host produces it: the sample meeting processed without a
-/// summary while the Swift import's gate withholds the key.
+/// The host produces `meeting.detail.keyWithheld`: the sample meeting
+/// processed without a summary while the import's gate withholds the key.
 #[test]
 fn meeting_detail_key_withheld() {
     let harness = Harness::builder()
@@ -802,9 +786,8 @@ fn meeting_detail_key_withheld() {
     );
 }
 
-/// `onboarding.import` has no Swift sample (the Swift app has no import
-/// step); it is written in the recorder's format, and this proves the host
-/// produces it: the step after a denied export, on a fresh install.
+/// The host produces `onboarding.import`: the step after a denied export,
+/// on a fresh install.
 #[test]
 fn onboarding_import() {
     let harness = Harness::builder()
@@ -828,11 +811,9 @@ fn onboarding_import() {
     );
 }
 
-/// `onboarding.handoff` has no Swift sample (the Swift app has neither
-/// row); it is written in the recorder's format, and this proves the host
-/// produces it: page 1 at the first launch after the Swift app, with the
-/// `CoreML` speech model in place, the speaker models missing, and a
-/// vault in Documents whose write macOS refused.
+/// The host produces `onboarding.handoff`: page 1 at the first launch after
+/// the previous app, with the `CoreML` speech model in place, the speaker
+/// models missing, and a vault whose write macOS refused.
 #[test]
 fn onboarding_handoff() {
     let harness = Harness::builder()
@@ -887,8 +868,7 @@ fn onboarding_setup() {
             kind: PermissionKind::LocalNetwork,
         })
         .unwrap();
-    // The form on page 2 sends the Settings method name from the
-    // onboarding window.
+    // Page 2's form sends the Settings method from the onboarding window.
     harness
         .host
         .for_window(BridgeWindow::Onboarding)

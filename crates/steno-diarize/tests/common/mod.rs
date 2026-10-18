@@ -56,7 +56,6 @@ pub fn cluster(
     }
 }
 
-/// The sample index at `seconds`.
 pub fn sample_index(seconds: f64) -> usize {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let index = (seconds * AudioBuffer16k::SAMPLE_RATE) as usize;
@@ -64,7 +63,7 @@ pub fn sample_index(seconds: f64) -> usize {
 }
 
 /// Audio where `layout` says which speaker constant fills each range; the
-/// rest is zero (silence).
+/// rest is silence.
 pub fn audio(layout: &[(f32, TimeRange)], duration: f64) -> AudioBuffer16k {
     let mut samples = vec![0.0f32; sample_index(duration)];
     for (speaker, range) in layout {
@@ -88,17 +87,14 @@ impl SplitMix64 {
         z ^ (z >> 31)
     }
 
-    /// Uniform in `0..n`.
     pub fn below(&mut self, n: u64) -> u64 {
         self.next_u64() % n
     }
 
-    /// Uniform in `lower..=upper`.
     pub fn int(&mut self, lower: u64, upper: u64) -> u64 {
         lower + self.below(upper - lower + 1)
     }
 
-    /// Uniform in `0.0..1.0`.
     pub fn unit(&mut self) -> f64 {
         #[allow(clippy::cast_precision_loss)]
         let value = (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64;

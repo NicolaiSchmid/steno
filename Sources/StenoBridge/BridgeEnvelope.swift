@@ -7,8 +7,6 @@ import StenoCore
 /// `BridgeFixturesTests` and the web tests parse the same files, so a rename
 /// on either side fails one CI or the other. Snapshots flow host to page as
 /// events; commands flow page to host as method calls with a reply.
-///
-/// Plan: `.plans/2026-09-29-macos-webview-ui.md`, Decisions 5 and 6.
 public enum BridgeJSON {
   /// `StenoJSON`'s convention: sorted keys, indentation, ISO dates, so the
   /// fixtures diff cleanly in git and two encodes of equal values match.

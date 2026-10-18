@@ -1,15 +1,8 @@
 //! A run that meets the store locked by another process past its busy
-//! timeout: the meeting waits `queued` for the store with what the run
-//! committed, never `failed`, and the store's retry
-//! (`resume_waiting_for_store`) processes it once the lock is let go; a
-//! resume the store refuses is owed to that retry. The lock is a second
-//! connection's `BEGIN IMMEDIATE`, as a `steno` command's write holds it.
-//!
-//! Every test runs on one worker: the pipeline reaches the store through
-//! its facade (`Store::reading`, `Store::writing`), so a write that waits
-//! out the busy timeout waits on the blocking pool, and the worker stays
-//! free for a test's timer or a quit
-//! (`.plans/2026-10-12-store-off-the-workers.md`, check 13).
+//! timeout: the meeting waits `queued` for the store, never `failed`, and
+//! the store's retry processes it once the lock goes. Every test runs on one
+//! worker, since store calls wait on the blocking pool and must leave the
+//! worker free.
 
 mod common;
 
@@ -36,8 +29,8 @@ use uuid::Uuid;
 /// store's five-second busy timeout.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// A gate a fake waits at once: `entered` when it is reached, then it
-/// waits for `open`.
+/// A gate a fake waits at once: `entered` when reached, then it waits for
+/// `open`.
 #[derive(Default)]
 struct Gate {
     used: AtomicBool,
@@ -46,7 +39,6 @@ struct Gate {
 }
 
 impl Gate {
-    /// The first call waits here.
     async fn pass(&self) {
         if !self.used.swap(true, Ordering::SeqCst) {
             self.entered.notify_one();
@@ -61,8 +53,8 @@ impl Gate {
     }
 }
 
-/// The fake engine, its first warm-up held at `gate`: the run's first
-/// write (`processing`) comes right after.
+/// The fake engine, its first warm-up held at `gate`, right before the
+/// run's first write.
 #[derive(Default)]
 struct HeldWarmUp {
     gate: Gate,
@@ -93,8 +85,8 @@ impl SpeechEngine for HeldWarmUp {
     }
 }
 
-/// The passthrough cleaner, its first cleanup held at `gate`: the merge
-/// has committed the transcript by then, and the cleanup's write follows.
+/// The passthrough cleaner, its first cleanup held at `gate`, after the
+/// merge committed.
 #[derive(Default)]
 struct HeldCleaner {
     gate: Gate,
@@ -109,7 +101,6 @@ impl TranscriptCleaner for HeldCleaner {
     }
 }
 
-/// The store's error for SQLite's result `code`.
 fn sqlite_error(code: std::ffi::c_int, message: &str) -> StoreError {
     StoreError::Sqlite(rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(code),
@@ -117,19 +108,16 @@ fn sqlite_error(code: std::ffi::c_int, message: &str) -> StoreError {
     ))
 }
 
-/// The store's busy error, as SQLite reports a lock another connection
-/// held past the busy timeout.
+/// The store's busy error, as for a lock held past the busy timeout.
 fn busy() -> StoreError {
     sqlite_error(rusqlite::ffi::SQLITE_BUSY, "database is locked")
 }
 
-/// The store's error for a full disk: not the lock.
 fn full() -> StoreError {
     sqlite_error(rusqlite::ffi::SQLITE_FULL, "database or disk is full")
 }
 
-/// A speaker memory over the store whose first match meets `error`:
-/// boxed, as `StoreSpeakerMemory` returns it.
+/// A speaker memory over the store whose first match meets `error`.
 struct FailsOnce {
     error: fn() -> StoreError,
     failed: AtomicBool,
@@ -151,7 +139,6 @@ impl SpeakerMemory for FailsOnce {
     }
 }
 
-/// The dependencies with a [`FailsOnce`] speaker memory over `error`.
 fn memory_failing_once(
     error: fn() -> StoreError,
 ) -> impl FnOnce(PipelineDependencies) -> PipelineDependencies {
@@ -166,7 +153,7 @@ fn memory_failing_once(
 }
 
 /// A store with an audio folder in `dir`, and a pipeline over it with
-/// `engine`; `dependencies` changes the rest.
+/// `engine`.
 struct World {
     _dir: tempfile::TempDir,
     path: std::path::PathBuf,
@@ -193,8 +180,7 @@ fn world(
 }
 
 impl World {
-    /// Enqueues a two-lane call starting `minutes` after the sample start;
-    /// its meeting id.
+    /// Enqueues a two-lane call starting `minutes` after the sample start.
     fn enqueue_call(&self, minutes: i64) -> Uuid {
         let mut meeting = sample_data::meeting();
         meeting.id = Uuid::new_v4();
@@ -210,10 +196,9 @@ impl World {
         meeting.id
     }
 
-    /// Saves what the last process left `queued`: a meeting at the sample
-    /// start without its asset row, and a two-lane call a minute later; their
-    /// ids. A launch's resume fails the first at a write before it starts
-    /// the other.
+    /// Saves what the last process left `queued`: a meeting without its
+    /// asset row, and a two-lane call a minute later; a launch's resume
+    /// fails the first at a write before it starts the other.
     fn left_queued(&self) -> (Uuid, Uuid) {
         let mut gone = sample_data::meeting();
         gone.id = Uuid::new_v4();
@@ -233,14 +218,12 @@ impl World {
         (gone.id, queued.id)
     }
 
-    /// A second connection that holds the write lock until it is dropped,
-    /// as another process's write transaction does.
+    /// A second connection that holds the write lock until dropped.
     fn lock(&self) -> WriteLockHold {
         WriteLockHold::new(&self.path)
     }
 
-    /// Takes the lock once `gate` is reached, then opens the gate: the
-    /// write after it meets the lock.
+    /// Takes the lock once `gate` is reached, then opens the gate.
     async fn lock_at(&self, gate: &Gate) -> WriteLockHold {
         gate.reached().await;
         let lock = self.lock();
@@ -248,8 +231,8 @@ impl World {
         lock
     }
 
-    /// The pipeline's connection gives up on a lock at once instead of
-    /// after five seconds, for the tests that are not about the wait.
+    /// The pipeline's connection gives up on a lock at once instead of after
+    /// five seconds.
     fn without_busy_timeout(&self) {
         self.store
             .on_writer(|connection| connection.busy_timeout(Duration::ZERO))
@@ -260,13 +243,11 @@ impl World {
         self.store.meeting(meeting_id).unwrap().unwrap().state
     }
 
-    /// Waits until `meeting_id` waits for the store and its run ended.
     async fn until_parked(&self, meeting_id: Uuid) {
         until_parked(&self.pipeline, meeting_id).await;
     }
 
-    /// The next launch: a fresh pipeline (its own waits, quit latch and
-    /// in-flight set) over the same store.
+    /// The next launch: a fresh pipeline over the same store.
     fn launch(&self) -> ProcessingPipeline {
         ProcessingPipeline::new(common::dependencies(
             &self.store,
@@ -275,7 +256,6 @@ impl World {
     }
 }
 
-/// Waits until `meeting_id` waits for the store on `pipeline`.
 async fn until_waiting_for_store(pipeline: &ProcessingPipeline, meeting_id: Uuid) {
     let waits = pipeline.dependencies().model_waits.clone();
     tokio::time::timeout(PATIENCE, async {
@@ -287,14 +267,13 @@ async fn until_waiting_for_store(pipeline: &ProcessingPipeline, meeting_id: Uuid
     .expect("the meeting waits for the store");
 }
 
-/// Waits until `meeting_id` waits for the store on `pipeline` and every
-/// run there ended.
+/// Waits until `meeting_id` waits for the store on `pipeline` and every run
+/// there ended.
 async fn until_parked(pipeline: &ProcessingPipeline, meeting_id: Uuid) {
     until_waiting_for_store(pipeline, meeting_id).await;
     pipeline.wait_until_idle().await;
 }
 
-/// `ids` in the order the waits list them.
 fn sorted(ids: impl IntoIterator<Item = Uuid>) -> Vec<Uuid> {
     let mut ids: Vec<Uuid> = ids.into_iter().collect();
     ids.sort();
@@ -303,8 +282,7 @@ fn sorted(ids: impl IntoIterator<Item = Uuid>) -> Vec<Uuid> {
 
 /// Two meetings waiting for their models, the older one's asset row gone,
 /// then the models installed and the lock taken: an install's resume meets
-/// the lock at its write that fails the older one, before it starts the
-/// other. The world, the older meeting, the other and the lock.
+/// the lock before it starts the other.
 async fn waiting_for_models_under_the_lock() -> (World, Uuid, Uuid, WriteLockHold) {
     let engine = Arc::new(Uninstalled::default());
     let world = world(engine.clone(), identity);
@@ -331,8 +309,8 @@ async fn waiting_for_models_under_the_lock() -> (World, Uuid, Uuid, WriteLockHol
     (world, gone, kept, lock)
 }
 
-/// Whether the store's retry is woken within a moment: a wake-up is kept
-/// until it is awaited, so this also takes one an earlier step left.
+/// Whether the store's retry is woken within a moment (a wake-up is kept
+/// until awaited).
 async fn store_retry_woken(pipeline: &ProcessingPipeline) -> bool {
     let waits = pipeline.dependencies().model_waits.clone();
     tokio::time::timeout(Duration::from_millis(200), waits.until_store_retry())
@@ -348,12 +326,8 @@ fn drain(receiver: &mut EventReceiver) -> Vec<MeetingEvent> {
     events
 }
 
-/// The run's first write meets the lock and waits out the whole
-/// five-second busy timeout: the meeting stays `queued` with no failure
-/// reason, posts `StoreBusy` (not `ModelsMissing`) and waits for the
-/// store, not for models. An install's resume leaves it alone, and
-/// "Process again" says what it waits for. Once the lock is let go, the
-/// store's retry processes it to `ready`.
+/// A first write that meets the lock leaves the meeting `queued` waiting
+/// for the store, and the store's retry processes it to `ready`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_run_the_store_keeps_locked_past_its_busy_timeout_waits_queued_and_then_runs() {
     let engine = Arc::new(HeldWarmUp::default());
@@ -371,8 +345,7 @@ async fn a_run_the_store_keeps_locked_past_its_busy_timeout_waits_queued_and_the
         waited >= Duration::from_secs(5),
         "the write waited out the busy timeout"
     );
-    // The park writes nothing over a meeting still `queued`, so it does
-    // not wait out the busy timeout a second time.
+    // The park writes nothing over a meeting still `queued`.
     assert!(
         waited < Duration::from_secs(8),
         "the park waited on the lock again: {waited:?}"
@@ -413,11 +386,8 @@ async fn a_run_the_store_keeps_locked_past_its_busy_timeout_waits_queued_and_the
     assert_eq!(waits.waiting_for_store(), Vec::<Uuid>::new());
 }
 
-/// A lock that comes once the merge committed the transcript: the
-/// cleanup's write is refused, and so is the park's write of `queued`, so
-/// the meeting stays `processing` in the store. It waits all the same, its
-/// transcript, its recording and its asset row as the run left them, and
-/// the retry once the lock is let go processes it to `ready`.
+/// A lock after the merge leaves the meeting `processing` with its
+/// transcript and audio, and the retry processes it to `ready`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_run_the_store_stops_after_the_merge_keeps_its_transcript_and_its_audio() {
     let cleaner = Arc::new(HeldCleaner::default());
@@ -453,9 +423,8 @@ async fn a_run_the_store_stops_after_the_merge_keeps_its_transcript_and_its_audi
     assert_eq!(world.state(meeting), MeetingState::Ready);
 }
 
-/// A speaker match the store refuses (the speaker memory reads the store)
-/// does not cost the meeting its speakers, as another failure there would:
-/// the run waits for the store, and the retry matches them.
+/// A speaker match the store refuses makes the run wait for the store, and
+/// the retry matches the speakers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_speaker_match_the_store_refuses_waits_instead_of_dropping_the_match() {
     let world = world(
@@ -477,9 +446,7 @@ async fn a_speaker_match_the_store_refuses_waits_instead_of_dropping_the_match()
     assert_eq!(world.state(meeting), MeetingState::Ready);
 }
 
-/// A meeting waiting for its models is not taken by the store's retry: it
-/// stays waiting for them, unstarted, and "Process again" still says to
-/// download them.
+/// A meeting waiting for its models is not taken by the store's retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn the_store_retry_leaves_a_meeting_waiting_for_models_alone() {
     let engine = Arc::new(Uninstalled::default());
@@ -505,12 +472,8 @@ async fn the_store_retry_leaves_a_meeting_waiting_for_models_alone() {
     );
 }
 
-/// An install's resume the store refuses (here its write that marks a
-/// waiting meeting whose asset row is gone failed): the meetings it took
-/// wait for the store from then on, their cards say so (`StoreBusy`), and
-/// the store's retry is woken. Once the lock is let go, the retry starts
-/// them: the one with an asset runs to `ready`, the other is failed as
-/// the resume would have.
+/// An install's resume the store refuses leaves its meetings waiting for
+/// the store, and the retry starts them once the lock goes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_resume_the_store_refuses_waits_for_the_store_retry() {
     let (world, gone, kept, lock) = waiting_for_models_under_the_lock().await;
@@ -544,10 +507,8 @@ async fn a_resume_the_store_refuses_waits_for_the_store_retry() {
     assert_eq!(waits.waiting_for_store(), Vec::<Uuid>::new());
 }
 
-/// The launch's resume the store refuses is owed to the store's retry,
-/// and stays owed while the lock refuses the retry too; the retry runs it
-/// again once the lock is let go: the queued meeting is processed, not
-/// left for the next launch.
+/// The launch's resume the store refuses stays owed to the store's retry,
+/// which runs it once the lock goes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_launch_resume_the_store_refuses_runs_again_on_the_store_retry() {
     let world = world(Arc::new(FakeSpeechEngine::default()), identity);
@@ -564,8 +525,7 @@ async fn a_launch_resume_the_store_refuses_runs_again_on_the_store_retry() {
         "the store's retry was woken"
     );
     assert_eq!(world.state(queued), MeetingState::Queued);
-    // A retry while the lock is still held is refused too: the launch's
-    // resume stays owed.
+    // A retry while the lock is still held is refused too.
     assert!(pipeline.resume_waiting_for_store().unwrap_err().is_busy());
     assert_eq!(world.state(queued), MeetingState::Queued);
 
@@ -576,9 +536,8 @@ async fn a_launch_resume_the_store_refuses_runs_again_on_the_store_retry() {
     assert!(matches!(world.state(gone), MeetingState::Failed { .. }));
 }
 
-/// A store error that is not the lock (a full disk, from the speaker
-/// memory) is not a wait for the store: it costs the match only, as
-/// before, and the meeting runs to `ready`.
+/// A store error that is not the lock costs the match only, and the meeting
+/// runs to `ready`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_store_error_that_is_not_the_lock_does_not_wait_for_the_store() {
     assert!(!full().is_busy());
@@ -596,11 +555,9 @@ async fn a_store_error_that_is_not_the_lock_does_not_wait_for_the_store() {
     );
 }
 
-/// A retry the lock refuses again (at its write that fails a meeting
-/// whose asset row is gone) keeps both meetings waiting for the store,
-/// not for models, and wakes the next retry. A retry that fails for
-/// another reason (the store refuses writes) drops them: they stay
-/// `queued`, unfailed, and the next launch processes them.
+/// A retry the lock refuses again keeps the meetings waiting and wakes the
+/// next retry; one that fails otherwise leaves them `queued` for the next
+/// launch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_retry_the_lock_refuses_keeps_its_meetings_and_another_failure_leaves_them_queued() {
     let (world, gone, kept, lock) = waiting_for_models_under_the_lock().await;
@@ -653,11 +610,8 @@ async fn a_retry_the_lock_refuses_keeps_its_meetings_and_another_failure_leaves_
     assert!(matches!(world.state(gone), MeetingState::Failed { .. }));
 }
 
-/// The store's retry that reruns a launch's resume puts back the meeting
-/// waiting for the store that another operation (a re-export) holds at
-/// that moment, and only that one: a held meeting that did not wait for
-/// the store is left `queued` for the next launch, as a launch leaves it,
-/// and neither is put back to wait for models.
+/// A retry of a launch's resume puts back only the held meeting that waited
+/// for the store; others stay `queued` for the next launch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_owed_launch_resume_puts_back_the_held_meeting_that_waits_for_the_store() {
     let world = world(
@@ -668,8 +622,8 @@ async fn an_owed_launch_resume_puts_back_the_held_meeting_that_waits_for_the_sto
     let waits = pipeline.dependencies().model_waits.clone();
     let parked = world.enqueue_call(2);
     world.until_parked(parked).await;
-    // Older than `parked`, so the launch's resume meets the lock at its
-    // write that fails `gone`, before it reaches the others.
+    // Older than `parked`, so the launch's resume meets the lock at the
+    // write that fails `gone`.
     let (gone, other) = world.left_queued();
     world.without_busy_timeout();
     let lock = world.lock();
@@ -699,10 +653,8 @@ async fn an_owed_launch_resume_puts_back_the_held_meeting_that_waits_for_the_sto
     assert_eq!(world.state(other), MeetingState::Queued);
 }
 
-/// Sets up a meeting left `processing` by a park whose `queued` write met
-/// the lock, as in `a_run_the_store_stops_after_the_merge_keeps_its_transcript_and_its_audio`:
-/// the world, the meeting, the lock still held and the transcript's
-/// segment count.
+/// A meeting left `processing` by a park whose `queued` write met the lock:
+/// the world, the meeting, the held lock and the transcript's segment count.
 async fn left_processing_by_the_lock() -> (World, Uuid, WriteLockHold, usize) {
     let cleaner = Arc::new(HeldCleaner::default());
     let world = world(Arc::new(FakeSpeechEngine::default()), |dependencies| {
@@ -719,9 +671,8 @@ async fn left_processing_by_the_lock() -> (World, Uuid, WriteLockHold, usize) {
     (world, meeting, lock, segments)
 }
 
-/// The app quits while such a meeting is `processing`, the lock is let
-/// go, and the next launch resumes it to `ready`, its transcript not
-/// doubled.
+/// A quit, then the lock goes, and the next launch resumes the meeting to
+/// `ready` without doubling its transcript.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_meeting_the_lock_left_processing_runs_at_the_next_launch() {
     let (world, meeting, lock, segments) = left_processing_by_the_lock().await;
@@ -734,9 +685,8 @@ async fn a_meeting_the_lock_left_processing_runs_at_the_next_launch() {
     assert_eq!(world.store.segments(meeting).unwrap().len(), segments);
 }
 
-/// The same, but the next launch comes while the lock is still held: its
-/// run waits for the store again, unfailed, and its retry processes the
-/// meeting once the lock is let go.
+/// A next launch while the lock is still held waits for the store again and
+/// its retry processes the meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_meeting_the_lock_left_processing_waits_again_at_a_launch_under_the_lock() {
     let (world, meeting, lock, segments) = left_processing_by_the_lock().await;
@@ -756,9 +706,8 @@ async fn a_meeting_the_lock_left_processing_waits_again_at_a_launch_under_the_lo
     assert_eq!(world.store.segments(meeting).unwrap().len(), segments);
 }
 
-/// A quit while a meeting waits `queued` for the store: a retry after the
-/// quit starts nothing, the meeting is not failed, and the next launch
-/// processes it.
+/// After a quit a retry starts nothing, and the next launch processes the
+/// meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_quit_while_a_meeting_waits_for_the_store_leaves_it_for_the_next_launch() {
     let engine = Arc::new(HeldWarmUp::default());
@@ -787,9 +736,8 @@ async fn a_quit_while_a_meeting_waits_for_the_store_leaves_it_for_the_next_launc
     assert_eq!(world.state(meeting), MeetingState::Ready);
 }
 
-/// A quit while the run still waits out the store's five-second busy
-/// timeout on its first write: the meeting is not failed and not recorded
-/// as waiting, and the next launch processes it.
+/// A quit during the busy timeout neither fails nor records the meeting as
+/// waiting; the next launch processes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_quit_while_a_run_waits_on_the_lock_leaves_the_meeting_for_the_next_launch() {
     let engine = Arc::new(HeldWarmUp::default());
@@ -824,11 +772,8 @@ async fn a_quit_while_a_run_waits_on_the_lock_leaves_the_meeting_for_the_next_la
     assert_eq!(world.state(meeting), MeetingState::Ready);
 }
 
-/// A models install while a meeting waits for the store and the other
-/// process still holds the lock: the install's resume takes only the
-/// meeting waiting for models, whose run then waits for the store too.
-/// Neither is failed, and the store's retry processes both once the lock
-/// is let go.
+/// A models install while the lock is held takes only the meeting waiting
+/// for models; the store's retry later processes both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_models_install_under_the_lock_leaves_both_meetings_waiting_for_the_store() {
     let engine = Arc::new(Uninstalled::default());
@@ -869,10 +814,8 @@ async fn a_models_install_under_the_lock_leaves_both_meetings_waiting_for_the_st
     }
 }
 
-/// A meeting waiting for the store does not keep an update's install
-/// out: the in-flight set reads idle, so the install takes its hold, and a
-/// retry during the hold runs nothing. The install quits the app; the
-/// meeting stays `queued`, unfailed, and the next launch processes it.
+/// A meeting waiting for the store does not keep an update's install out;
+/// after the install's quit the next launch processes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_update_hold_during_a_store_wait_runs_nothing_and_the_relaunch_processes_it() {
     let world = world(
@@ -909,8 +852,8 @@ async fn an_update_hold_during_a_store_wait_runs_nothing_and_the_relaunch_proces
     assert_eq!(world.state(meeting), MeetingState::Ready);
 }
 
-/// The same install given up (its hold dropped, no quit): the run the
-/// retry started under the hold goes on to `ready`.
+/// The same install given up: the run the retry started goes on to
+/// `ready`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_retry_under_an_update_hold_runs_once_the_hold_is_given_up() {
     let world = world(
@@ -927,11 +870,8 @@ async fn a_retry_under_an_update_hold_runs_once_the_hold_is_given_up() {
     assert_eq!(world.state(meeting), MeetingState::Ready);
 }
 
-/// Two meetings the last process left `queued`, a launch's resume the
-/// lock refused at its write that fails the older one, and then, with the
-/// lock let go, a meeting that waits for its models (the newest): the
-/// world, the engine, the older left meeting, the other and the one
-/// waiting for models. The launch's resume is owed to the store's retry.
+/// Two meetings left `queued` whose launch resume the lock refused, then a
+/// newer meeting waiting for its models; the launch's resume is owed.
 async fn an_owed_launch_resume_and_a_meeting_waiting_for_models()
 -> (World, Arc<Uninstalled>, Uuid, Uuid, Uuid) {
     let engine = Arc::new(Uninstalled::default());
@@ -949,10 +889,8 @@ async fn an_owed_launch_resume_and_a_meeting_waiting_for_models()
     (world, engine, gone, queued, models)
 }
 
-/// The store's retry that reruns a launch's resume takes the meetings
-/// waiting for models, as the launch's resume does: with the models in
-/// place, it runs the one waiting for them to `ready`, and it no longer
-/// reads as waiting.
+/// The retry of a launch's resume runs the meeting waiting for models once
+/// they are in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_owed_launch_resume_takes_the_meetings_waiting_for_models() {
     let (world, engine, gone, queued, models) =
@@ -974,10 +912,8 @@ async fn an_owed_launch_resume_takes_the_meetings_waiting_for_models() {
     );
 }
 
-/// The store's retry that reruns a launch's resume while another
-/// operation (a re-export) holds the meeting waiting for models puts it
-/// back to wait for them: the models install then starts it, rather than
-/// only the next launch.
+/// The retry of a launch's resume puts a held meeting waiting for models
+/// back to wait for them, so the models install starts it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_owed_launch_resume_keeps_a_held_meeting_waiting_for_its_models() {
     let (world, engine, gone, queued, models) =
@@ -1004,11 +940,8 @@ async fn an_owed_launch_resume_keeps_a_held_meeting_waiting_for_its_models() {
     assert_eq!(world.state(queued), MeetingState::Ready);
 }
 
-/// The store's retry that reruns a launch's resume and meets the lock
-/// again is owed again and wakes the next retry, and puts the meeting
-/// waiting for models back to wait for them meanwhile: a models install
-/// in between starts it, and the next retry, with the lock let go, runs
-/// every queued meeting.
+/// A retry of a launch's resume that meets the lock again stays owed, keeps
+/// the models wait, and the next retry runs every queued meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_owed_launch_resume_the_lock_refuses_again_keeps_the_meeting_waiting_for_models() {
     let (world, engine, gone, queued, models) =
@@ -1034,11 +967,8 @@ async fn an_owed_launch_resume_the_lock_refuses_again_keeps_the_meeting_waiting_
     assert_eq!(waits.waiting(), Vec::<Uuid>::new());
 }
 
-/// The store's retry that reruns a launch's resume and fails for another
-/// reason than the lock (the store refuses writes) is not owed again and
-/// wakes no retry: the left meetings stay `queued` for the next launch,
-/// and the one waiting for models is put back to wait for them, so the
-/// models install starts it.
+/// A retry of a launch's resume that fails otherwise is not owed again; the
+/// meeting waiting for models still waits for them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_owed_launch_resume_another_failure_ends_keeps_the_meetings_waiting_for_models() {
     let (world, engine, gone, queued, models) =
@@ -1073,15 +1003,9 @@ async fn an_owed_launch_resume_another_failure_ends_keeps_the_meetings_waiting_f
     assert_eq!(world.state(models), MeetingState::Ready);
 }
 
-/// P40 check 11 (`.plans/2026-10-12-store-off-the-workers.md`): a phone
-/// admission that meets the lock waits on the blocking pool, its copy and
-/// its commit in one step, so a timer task on the runtime's one worker
-/// keeps ticking, and the admission commits once the lock goes. The lock
-/// is held for two seconds, inside the admission's busy timeout, which a
-/// longer hold would run out: the phone's retry is the handover's. The
-/// timer may stand still for 600 ms at most, the window of the services'
-/// own worker check (`the_poll_and_the_events_task_never_block_a_worker`):
-/// a worker the admission held would stand still for the whole hold.
+/// A phone admission that meets the lock waits on the blocking pool, so a
+/// timer on the one worker keeps ticking (stalls of at most 600 ms), and
+/// the admission commits once the lock goes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_admit_under_a_held_lock_leaves_the_worker_free() {
     use steno_core::{AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata};

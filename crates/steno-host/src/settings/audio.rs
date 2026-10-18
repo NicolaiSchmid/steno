@@ -2,7 +2,6 @@
 //! recordings folder with its disk usage, and the "Keep recordings" rule.
 //! Switching the rule to Forever keeps every recording still on disk; a
 //! shorter rule applies to new recordings only.
-//! Swift: `Settings/AudioSettingsViewModel.swift`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,7 +15,7 @@ use super::{SectionError, update_settings};
 use crate::labels::retention_footnote;
 use crate::services::{InputDevice, Services};
 
-/// The recordings folder's logical size. Swift: `AudioSettingsViewModel.FolderUsage`.
+/// The recordings folder's logical size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FolderUsageState {
     Measuring,
@@ -36,7 +35,6 @@ pub fn recording_permissions(platform: Platform) -> impl Iterator<Item = Permiss
         .filter(move |kind| PermissionKind::for_platform(platform).contains(kind))
 }
 
-/// The stepper's range for the days rule.
 pub const DAY_RANGE: std::ops::RangeInclusive<i64> = 1..=3650;
 
 #[derive(Debug)]
@@ -48,9 +46,8 @@ pub struct AudioSettingsViewModel {
     pub input_device_uid: Option<String>,
     pub audio_folder: PathBuf,
     pub folder_usage: FolderUsageState,
-    /// Whether a power cut may lose recent recordings in the folder (a
-    /// Windows drive that is neither NTFS nor `ReFS`, or a network drive or
-    /// mount); Settings warns.
+    /// Whether a power cut may lose recent recordings in the folder;
+    /// Settings warns.
     pub folder_may_lose_recent_writes: bool,
     pub retention_mode: RetentionMode,
     pub retention_days: i64,
@@ -58,10 +55,8 @@ pub struct AudioSettingsViewModel {
     pub kept_forever: Option<i64>,
     pub permissions: BTreeMap<PermissionKind, PermissionState>,
     pub requesting: Option<PermissionKind>,
-    /// The permission whose last request was refused, or stopped, for the
-    /// recording (the system audio test, which the host refuses while a
-    /// recording starts, runs or stops); cleared when the recorder is idle
-    /// again, or by the next request.
+    /// The permission whose last request was refused or stopped for the
+    /// recording; cleared when the recorder is idle, or by the next request.
     pub waits_for_recording: Option<PermissionKind>,
     pub errors: SectionError,
 }
@@ -156,12 +151,11 @@ impl AudioSettingsViewModel {
         self.save(store, move |settings| settings.input_device_uid = uid);
     }
 
-    /// Saves `folder` as the audio folder. The folder it leaves, as the
-    /// stored settings name it, is remembered first
-    /// ([`Recorder::remember_audio_folder`](crate::services::Recorder::remember_audio_folder)):
-    /// a recording started there goes on there, and crash recovery must
-    /// look for it there (Rust only: Swift had no recovery). Nothing is
-    /// moved. Swift: `AudioSettingsViewModel.setAudioFolder`.
+    /// Saves `folder` as the audio folder. The folder it leaves is
+    /// remembered first
+    /// ([`Recorder::remember_audio_folder`](crate::services::Recorder::remember_audio_folder)),
+    /// since a recording started there goes on there and crash recovery
+    /// must look for it there. Nothing is moved.
     pub fn set_audio_folder(&mut self, folder: &Path, store: &Store, services: &Services) {
         let leaving = store
             .settings()
@@ -181,9 +175,7 @@ impl AudioSettingsViewModel {
         services.opener.reveal(&self.audio_folder);
     }
 
-    /// Swift measured off the main actor and dropped a result for a folder
-    /// that changed meanwhile; the blocking host measures in place. The
-    /// folder's drive is checked with it.
+    /// Measures the folder and checks its drive.
     pub fn measure_folder_usage(&mut self, services: &Services) {
         self.folder_usage = match services.folder_usage.measure(&self.audio_folder) {
             Ok(bytes) => FolderUsageState::Bytes(bytes),
@@ -235,8 +227,8 @@ impl AudioSettingsViewModel {
             .unwrap_or(PermissionState::Unknown)
     }
 
-    /// Marks the step as requesting; false while another request is up.
-    /// The host runs the prompt outside its lock and calls
+    /// Marks the step as requesting; false while another request is up. The
+    /// host runs the prompt outside its lock and calls
     /// [`Self::finish_request`].
     pub fn begin_request(&mut self, kind: PermissionKind) -> bool {
         if self.requesting.is_some() {

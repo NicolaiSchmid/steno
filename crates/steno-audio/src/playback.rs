@@ -1,33 +1,8 @@
-//! The one gate every in-app playback goes through: no in-app playback
-//! while recording, enforced by [`Playback`]. No Swift counterpart.
-//!
-//! On macOS the call capture's process tap includes Steno's own process
-//! (A10 of `.plans/2026-10-07-stable-promotion.md`): the tap aggregate runs
-//! only while a process the tap includes drives the output, so the
-//! capture's silent output IOProc must be inside it. Anything else Steno
-//! played would land in the recording's system lane. The one player is the
-//! speakers' clip player (`steno_services::clip_player`), which asks this
-//! gate; the web UI plays nothing, since its `<audio>` would play from the
-//! web view's media process, which the tap includes and this gate cannot
-//! see.
-//!
-//! - A player asks [`Playback::begin`] for a [`PlaybackPermit`] before it
-//!   plays, starts through [`PlaybackPermit::start`], and plays only while
-//!   it holds the permit. While a recording runs the gate answers
-//!   [`PlaybackRefused`], worded for the UI.
-//! - The capture session takes a hold on the gate before its backend
-//!   starts (before the tap exists) and keeps it across every rebuild; it
-//!   is released when the recording's teardown is done, and on any error
-//!   or panic by its drop. Only the capture session takes one.
-//! - Taking a hold stops every playback that runs: each permit's `on_stop`
-//!   runs once, and the permit reads [`PlaybackPermit::is_stopped`] from
-//!   then on. A start runs under the gate's lock, so a hold taken between
-//!   `begin` and the start refuses it, and a start under way finishes
-//!   before the hold, whose `on_stop` then stops it. Playback may begin
-//!   again once the last hold is released.
-//!
-//! [`Playback::global`] is the process's gate, the one the capture session
-//! and a player use; a test that must not share it makes a private one.
+//! The gate every in-app playback goes through: no playback while
+//! recording. On macOS the call capture's process tap includes Steno's own
+//! process, so anything Steno played would land in the system lane. The
+//! capture session holds the gate while it records; taking the hold stops
+//! every playback that runs.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
@@ -39,15 +14,13 @@ type OnStop = Box<dyn FnOnce() + Send>;
 
 #[derive(Default)]
 struct Gate {
-    /// Recordings holding the gate.
     recordings: usize,
-    /// The id the next permit gets.
     next_permit: u64,
     /// The permits playing now, with what stops each.
     playing: BTreeMap<u64, OnStop>,
 }
 
-/// The gate; see the module doc. A cheap handle: clones share one gate.
+/// The playback gate. A cheap handle: clones share one gate.
 #[derive(Clone)]
 pub struct Playback {
     gate: Arc<Mutex<Gate>>,
@@ -70,9 +43,7 @@ impl std::fmt::Debug for Playback {
 pub struct PlaybackRefused;
 
 impl Playback {
-    /// A gate of its own, shared by nothing else: for a test that must not
-    /// share [`Self::global`] (`CaptureSession::with_playback`). A player
-    /// always asks the global gate.
+    /// A private gate, for a test that must not share [`Self::global`].
     #[doc(hidden)]
     #[must_use]
     #[allow(
@@ -85,8 +56,8 @@ impl Playback {
         }
     }
 
-    /// The process's gate: the one the capture session holds while it
-    /// records, and the one every in-app player asks.
+    /// The process's gate, held by the capture session and asked by every
+    /// player.
     #[must_use]
     pub fn global() -> Self {
         static GLOBAL: LazyLock<Playback> = LazyLock::new(Playback::new);
@@ -143,9 +114,8 @@ impl Playback {
     }
 
     /// Holds the gate for one recording until the hold is dropped, and
-    /// stops every playback that runs: each `on_stop` runs on this thread,
-    /// with the gate unlocked, before this returns. Holds count, so two
-    /// recordings keep the gate shut until both are released.
+    /// stops every playback (each `on_stop` runs on this thread, unlocked,
+    /// before this returns). Holds count.
     #[must_use = "the gate opens again when the hold is dropped"]
     pub(crate) fn hold_for_recording(&self) -> RecordingHold {
         let stopping = {
@@ -164,7 +134,7 @@ impl Playback {
     }
 }
 
-/// Permission to play, from [`Playback::begin`]; see the module doc.
+/// Permission to play, from [`Playback::begin`].
 #[derive(Debug)]
 pub struct PlaybackPermit {
     playback: Playback,
@@ -173,10 +143,9 @@ pub struct PlaybackPermit {
 
 impl PlaybackPermit {
     /// Runs `start` (the player's start) under the gate's lock, unless a
-    /// recording has started since the permit was given. A recording's hold
-    /// waits for it, then runs `on_stop`, so nothing starts once a hold is
-    /// taken. `start` must only start the player, not play the clip
-    /// through, and must not ask the gate again.
+    /// recording has started since the permit was given, so nothing starts
+    /// once a hold is taken. `start` must not play the clip through nor ask
+    /// the gate again.
     ///
     /// # Errors
     ///
@@ -269,9 +238,8 @@ mod tests {
         assert_eq!(stops.load(Ordering::SeqCst), 1, "once, not per recording");
     }
 
-    /// The gap between `begin` and the first sound: once a hold is taken
-    /// the player cannot start, and a start under way finishes before the
-    /// hold, whose `on_stop` then stops it.
+    /// Once a hold is taken the player cannot start; a start under way
+    /// finishes first and is then stopped.
     #[test]
     fn a_player_cannot_start_once_a_recording_holds_the_gate() {
         let playback = Playback::new();

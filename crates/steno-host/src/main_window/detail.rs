@@ -1,7 +1,7 @@
-//! One meeting's detail, after `Main/MeetingDetailViewModel.swift`: the
-//! export and deliveries from the store, the bundled templates, the selected
-//! tab and the speakers. Speaker changes apply at once and mark the meeting
-//! dirty; the vault re-exports when the picker closes or the view goes away.
+//! One meeting's detail: the export and deliveries from the store, the
+//! bundled templates, the selected tab and the speakers. Speaker changes
+//! apply at once and mark the meeting dirty; the vault re-exports when the
+//! picker closes or the view goes away.
 
 use chrono::{DateTime, Utc};
 use steno_bridge::DetailTab;
@@ -20,7 +20,6 @@ use crate::speakers::SpeakersViewModel;
 
 /// What the header's "Recording" line says; `None` for the one case
 /// Settings already covers: kept forever with the files present.
-/// Swift: `MeetingDetailViewModel.RecordingStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingStatus {
     /// The master file is gone (swept, or removed by hand).
@@ -32,16 +31,13 @@ pub enum RecordingStatus {
     /// A finite rule, no stamp, meeting failed: re-processing needs the audio.
     KeptProcessingFailed,
     /// A finite rule, no stamp, meeting ready and delivered, but its
-    /// speakers or transcript may be incomplete
-    /// ([`steno_core::results_need_the_audio`]) or its recording may be
-    /// damaged ([`MeetingDetailViewModel::audio_may_be_damaged`]), so the
-    /// automatic retention keeps the recording. Rust only.
+    /// results may be incomplete ([`steno_core::results_need_the_audio`])
+    /// or its recording damaged, so retention keeps the recording.
     KeptIncomplete,
     /// A finite rule, no stamp, meeting still on its way to the retention stage.
     KeptWhileProcessing,
 }
 
-/// Swift: `MeetingDetailViewModel`.
 #[derive(Debug)]
 pub struct MeetingDetailViewModel {
     pub id: Uuid,
@@ -52,22 +48,20 @@ pub struct MeetingDetailViewModel {
     /// `Settings::default_retention`, followed through the settings.
     pub default_retention: AudioRetention,
     pub llm_configured: bool,
-    /// The API key is withheld from the pipeline now for the stored
-    /// endpoint ([`WithheldApiKey`](crate::services::WithheldApiKey)), set
-    /// by the host as it builds the snapshot and after every command: a
-    /// skipped summary says so, none re-runs, and no failed meeting is
-    /// processed again (it would complete without its cleanup and summary).
+    /// The API key is withheld for the stored endpoint
+    /// ([`WithheldApiKey`](crate::services::WithheldApiKey)), set by the
+    /// host: a skipped summary says so, none re-runs, and no failed meeting
+    /// is processed again.
     pub key_withheld: bool,
     pub vault_configured: bool,
     /// The launch stopped re-exporting the meeting
-    /// ([`Pipeline::export_keeps_failing`]), read with the deliveries.
+    /// ([`Pipeline::export_keeps_failing`]).
     pub export_keeps_failing: bool,
     /// What of the recording its last decode replaced by silence
-    /// ([`Pipeline::damaged_audio`]), read with the deliveries.
+    /// ([`Pipeline::damaged_audio`]).
     pub damaged_audio: steno_core::AudioDamage,
     /// Whether the recording may have parts replaced by silence
-    /// ([`Pipeline::audio_may_be_damaged`]), read with the deliveries,
-    /// for the retention status to keep such a recording.
+    /// ([`Pipeline::audio_may_be_damaged`]).
     pub audio_may_be_damaged: bool,
     pub error: Option<String>,
     pub is_busy: bool,
@@ -76,13 +70,13 @@ pub struct MeetingDetailViewModel {
     /// A speaker was named or reassigned since the last re-export.
     pub speakers_dirty: bool,
     /// The last re-export was refused because the pipeline held the
-    /// meeting; try again when the export shows it ready.
+    /// meeting; retried once it is ready.
     retry_redeliver_when_ready: bool,
 }
 
 impl MeetingDetailViewModel {
-    /// Seeded from the stored settings so the rows and the footer render
-    /// the configured state on their first frame.
+    /// Seeded from the stored settings so the first frame shows the
+    /// configured state.
     #[must_use]
     pub fn new(meeting_id: Uuid, settings: Option<&Settings>) -> Self {
         MeetingDetailViewModel {
@@ -108,14 +102,12 @@ impl MeetingDetailViewModel {
         }
     }
 
-    /// The bundled templates the picker offers.
     #[must_use]
     pub fn templates() -> &'static [SummaryTemplate] {
         SummaryTemplate::bundled()
     }
 
-    /// The export and the deliveries as the store has them now: what the
-    /// two store observations delivered. Feeds the speakers and retries a
+    /// The export and the deliveries as the store has them now; retries a
     /// refused re-export once the meeting is ready.
     pub fn reload(&mut self, store: &Store, files: &dyn FileSystem, pipeline: &dyn Pipeline) {
         // A meeting deleted under the detail has no export, not an error.
@@ -155,9 +147,8 @@ impl MeetingDetailViewModel {
         self.audio_may_be_damaged = pipeline.audio_may_be_damaged(self.id);
     }
 
-    /// The settings as stored now: the keep toggle appears and disappears
-    /// with the default rule, the rows and the footer with the endpoint and
-    /// the vault.
+    /// The settings as stored now (the keep toggle, the rows and the
+    /// footer follow them).
     pub fn apply_settings(&mut self, settings: &Settings) {
         self.default_retention = settings.default_retention;
         self.llm_configured = llm_configured(settings);
@@ -195,23 +186,18 @@ impl MeetingDetailViewModel {
         self.can_rerun() && self.llm_configured && !self.key_withheld && self.has_transcript()
     }
 
-    /// "Process again": the meeting is one it is offered for
-    /// ([`Meeting::offers_process_again`] over the export's rows and
-    /// [`audio_may_be_damaged`](Self::audio_may_be_damaged): failed, or
-    /// ready and kept incomplete), its recording is on disk, and the API
-    /// key is not withheld ([`key_withheld`](Self::key_withheld)).
-    /// The snapshot's `canProcessAgain`, and the guard of
-    /// [`process_again`](Self::process_again), so the button and the action
-    /// cannot drift apart.
+    /// "Process again": offered for the meeting
+    /// ([`Meeting::offers_process_again`]), its recording on disk, and the
+    /// key not withheld. Both the snapshot's `canProcessAgain` and the guard
+    /// of [`process_again`](Self::process_again), so they cannot drift.
     #[must_use]
     pub fn can_process_again(&self) -> bool {
         self.process_again_refusal().is_none()
     }
 
-    /// "Process again" asks first ([`crate::host::process_again_prompt`]):
-    /// it is offered, and a speaker of the meeting is confirmed to a
-    /// person, by a pick or a typed name, which a run whose diarizer works
-    /// may not find again. Failed or ready alike.
+    /// "Process again" asks first ([`crate::host::process_again_prompt`])
+    /// when it is offered and a speaker is confirmed to a person, which the
+    /// new run may not find again.
     #[must_use]
     pub fn process_again_asks_first(&self) -> bool {
         self.can_process_again()
@@ -222,9 +208,7 @@ impl MeetingDetailViewModel {
             })
     }
 
-    /// Why the detail itself refuses "Process again": the meeting is not
-    /// one it is offered for, its recording is gone, or the API key is
-    /// withheld.
+    /// Why the detail itself refuses "Process again".
     fn process_again_refusal(&self) -> Option<ProcessAgainRefusal> {
         let offered = self.export.as_ref().is_some_and(|export| {
             export.meeting.offers_process_again(
@@ -277,10 +261,7 @@ impl MeetingDetailViewModel {
         }
     }
 
-    // Actions
-
     /// Trimmed, lowercased, de-duplicated and sorted; empties dropped.
-    /// Swift: `MeetingDetailViewModel.tags(from:)`.
     #[must_use]
     pub fn tags_from(list: &[String]) -> Vec<String> {
         let mut tags: Vec<String> = list
@@ -304,7 +285,7 @@ impl MeetingDetailViewModel {
     }
 
     /// Stores the template and re-runs summarize plus deliver with it. An
-    /// id the bundle does not have changes nothing.
+    /// unknown id changes nothing.
     pub fn set_template(
         &mut self,
         template_id: &str,
@@ -340,13 +321,10 @@ impl MeetingDetailViewModel {
         self.run("Re-export", || pipeline.redeliver(id));
     }
 
-    /// "Process again", offered while [`can_process_again`] holds: the
-    /// pipeline saves the meeting queued and runs it from the start with
-    /// its recording; the caller's reload then shows it queued. A refusal,
-    /// the detail's own (not offered, the recording gone, or the key
-    /// withheld) or the pipeline's, is the error line in
-    /// [`process_again_refusal_line`]'s words; one while the app quits
-    /// shows nothing. Rust only: the Swift app refuses it.
+    /// "Process again", while [`can_process_again`] holds: the pipeline
+    /// saves the meeting queued and runs it from the start. A refusal is
+    /// the error line in [`process_again_refusal_line`]'s words; one while
+    /// the app quits shows nothing.
     ///
     /// [`can_process_again`]: Self::can_process_again
     pub fn process_again(&mut self, pipeline: &dyn Pipeline, platform: Platform) {
@@ -367,8 +345,6 @@ impl MeetingDetailViewModel {
             }
         }
     }
-
-    // Recording line
 
     #[must_use]
     pub fn recording_status(&self) -> Option<RecordingStatus> {
@@ -427,8 +403,8 @@ impl MeetingDetailViewModel {
             .is_some_and(|asset| asset.retention == AudioRetention::KeepForever)
     }
 
-    /// The pipeline's stamp guard over the observed state: the default rule
-    /// stamps today, the meeting is ready and nothing is left to export.
+    /// The pipeline's stamp guard: the default rule stamps today, the
+    /// meeting is ready and nothing is left to export.
     #[must_use]
     pub fn would_delete_now(&self) -> bool {
         self.default_retention == AudioRetention::DeleteAfterProcessing
@@ -438,16 +414,13 @@ impl MeetingDetailViewModel {
             && all_delivered(&self.deliveries)
     }
 
-    // Speakers
-
     /// A speaker changed: the owner marks the meeting dirty.
     pub fn speakers_changed(&mut self) {
         self.speakers_dirty = true;
     }
 
-    /// The header popover or a transcript picker closed: re-export once
-    /// when a speaker changed, else nothing. A refusal keeps the flag and
-    /// retries at the next ready tick.
+    /// A picker closed: re-export once when a speaker changed. A refusal
+    /// keeps the flag and retries at the next ready tick.
     pub fn picker_closed(&mut self, pipeline: &dyn Pipeline) {
         if self.speakers_dirty {
             self.redeliver_speaker_changes(pipeline);
@@ -461,10 +434,8 @@ impl MeetingDetailViewModel {
         }
     }
 
-    /// The view is going away (selection change, window closed): playback
-    /// stops and a pending re-export is flushed once. Swift retried after
-    /// three seconds in a detached task; the blocking host makes the one
-    /// attempt.
+    /// The view is going away: playback stops and a pending re-export is
+    /// attempted once.
     pub fn view_disappeared(&mut self, pipeline: &dyn Pipeline, player: &dyn ClipPlayer) {
         self.speakers.stop_playback(player);
         if !self.speakers_dirty {
@@ -499,10 +470,8 @@ impl MeetingDetailViewModel {
         self.is_busy = false;
     }
 
-    /// A re-run or a re-export the pipeline accepted failed later, in the
-    /// background (`MeetingEvent::OperationFailed`): the error line says so
-    /// in the words a refused call gets there, as Swift's awaited
-    /// call did for both.
+    /// A re-run or re-export the pipeline accepted failed later
+    /// (`MeetingEvent::OperationFailed`): the error line says so.
     pub fn operation_failed(&mut self, operation: MeetingOperation, failure: &str) {
         self.error = Some(format!("{} failed: {failure}", operation.label()));
     }
@@ -541,12 +510,9 @@ pub fn process_again_refusal_line(
 }
 
 /// The keep flag on `meeting_id`, selected or not: `keep` sets
-/// `keepForever`; off restores the default retention from Settings. Both go
-/// through the pipeline's `apply_retention`, so the stamp and the
-/// `retentionApplied` post are the pipeline's, and so is the one refusal (a
-/// meeting without an audio asset); a processing meeting takes the rule and
-/// is stamped later. The error is the line the detail shows. Swift:
-/// `MeetingDetailViewModel.setKeepAudio(_:)`.
+/// `keepForever`; off restores the default retention. Both go through the
+/// pipeline's `apply_retention`, which stamps and may refuse (no audio
+/// asset). The error is the line the detail shows.
 pub fn set_keep_audio(
     meeting_id: Uuid,
     keep: bool,

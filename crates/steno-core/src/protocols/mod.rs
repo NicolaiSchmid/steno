@@ -1,38 +1,15 @@
-//! The pluggable boundaries, one trait per file, after
-//! `Sources/StenoCore/Protocols` (whose `PipelineBoundaries.swift` holds the
-//! five stage traits). Two implementations before generalising further; the
-//! pipeline holds each as `Arc<dyn Trait>`.
-//!
-//! - [`SpeechEngine`]: speech to text for one lane.
-//! - [`Diarizer`]: who spoke when, for one lane.
-//! - [`EchoCanceller`]: the one synchronous, real-time boundary.
-//! - [`LanguageModel`]: one completion; sends text and only text.
-//! - [`Destination`]: a one-way push target.
-//! - [`SecretStore`] and [`SecretKey`]: the API key and whatever follows it;
-//!   [`SecretPlace`] says where a store keeps them.
-//! - [`SpeakerMemory`]: known voices across meetings.
-//! - [`AudioDecoder`], [`TranscriptCleaner`], [`MeetingSummarizer`],
-//!   [`DeliveryDispatcher`], [`HandoverIntake`]: the pipeline's stage
-//!   boundaries (`PipelineBoundaries.swift`).
+//! The pluggable boundaries, one trait per file. The pipeline holds each as
+//! `Arc<dyn Trait>`.
 //!
 //! # The async form
 //!
-//! Every asynchronous trait is written with [`async_trait`](macro@async_trait), decided once
-//! here: native `async fn` in traits (Rust 1.75) is not dyn-compatible, and
-//! the pipeline needs `Arc<dyn SpeechEngine>` and friends, so the methods
-//! are boxed futures with a `Send` bound. Implementations put
-//! `#[async_trait]` on their `impl` block and write `async fn` as usual.
-//! The cost is one allocation per call on boundaries that take seconds to
-//! minutes, which is nothing; the audio thread never crosses one of these
-//! (see [`EchoCanceller`]). Because the traits are `Send + Sync` with
-//! `Send` futures, an implementor holding a handle that is not `Sync` (a
-//! Core ML model object, for example) wraps it in a `Mutex` or owns a worker
-//! thread and talks to it over a channel.
+//! Asynchronous traits use [`async_trait`](macro@async_trait) because native
+//! `async fn` in traits is not dyn-compatible. An implementor holding a handle
+//! that is not `Sync` wraps it in a `Mutex` or a worker thread.
 //!
 //! # Implementing a boundary
 //!
-//! `#[async_trait]` on the `impl`, `async fn` inside, and the result is
-//! held as `Arc<dyn Trait>`:
+//! `#[async_trait]` on the `impl`, `async fn` inside:
 //!
 //! ```
 //! use std::sync::Arc;
@@ -77,18 +54,8 @@
 //!
 //! # Errors
 //!
-//! Swift's protocols throw `any Error`; the Rust form is [`BoxError`], so
-//! an engine, a destination or a client returns its own `thiserror` type
-//! through `?` and the pipeline reports it as text. Boundaries that must
-//! not fail (`DeliveryDispatcher`) return no `Result`.
-//!
-//! # Languages
-//!
-//! Swift distinguishes `LanguageTag` (the stored string) from
-//! `Locale.Language` (Foundation's type at the engine boundary) and
-//! converts between them at `SpeechEngine`. Rust has no Foundation, so the
-//! engine boundary speaks [`LanguageTag`](crate::LanguageTag) directly: one
-//! BCP-47 newtype, no conversion.
+//! Boundaries return [`BoxError`]; those that must not fail
+//! (`DeliveryDispatcher`) return no `Result`.
 
 mod audio_decoder;
 mod delivery_dispatcher;
@@ -118,22 +85,19 @@ pub use speaker_memory::{DEFAULT_MATCH_MARGIN, SpeakerMemory};
 pub use speech_engine::SpeechEngine;
 pub use transcript_cleaner::TranscriptCleaner;
 
-/// What a boundary reports when it fails: any error, sendable across
-/// threads, printed for the user. Swift's `any Error`.
+/// What a boundary reports when it fails: any sendable error, printed for the user.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// `Result` over [`BoxError`].
 pub type BoundaryResult<T> = Result<T, BoxError>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Compiles only when `T` is a trait object the pipeline can hold in an
-    /// `Arc`: dyn-compatible, `Send` and `Sync`.
+    /// Compiles only when `T` can be held as `Arc<dyn T>`.
     fn assert_shared_object<T: Send + Sync + ?Sized>() {}
 
-    /// The one boundary the audio thread owns: dyn-compatible and `Send`.
+    /// The one boundary the audio thread owns.
     fn assert_owned_object<T: Send + ?Sized>() {}
 
     #[test]

@@ -1,5 +1,4 @@
 //! `delivery` rows.
-//! Swift: the delivery methods of `Sources/StenoCore/Storage/MeetingStore.swift`.
 
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::{Connection, Row, params};
@@ -48,9 +47,7 @@ impl Store {
         self.write(|transaction| save(transaction, delivery))
     }
 
-    /// Removes the rows with `ids`; ids without a row are ignored. The
-    /// dispatcher drops the rows of a destination that is no longer
-    /// configured with this.
+    /// Removes the rows with `ids`; ids without a row are ignored.
     pub fn delete_deliveries(&self, ids: &[Uuid]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
@@ -68,11 +65,9 @@ impl Store {
     }
 
     /// The ready meetings with an export left unfinished at `now`, oldest
-    /// first: a delivery still `pending` (the process ended while it ran)
-    /// or one that `failed` with its last attempt more than `retry_after`
-    /// before `now`, after `now` (the clock ran ahead then), or never. The
-    /// launch re-exports these. Rust only: Swift retried a failed export
-    /// only when asked.
+    /// first: a delivery still `pending`, or one that `failed` with its
+    /// last attempt more than `retry_after` before `now`, after `now`, or
+    /// never. The launch re-exports these.
     pub fn meetings_with_unfinished_deliveries(
         &self,
         now: DateTime<Utc>,
@@ -99,7 +94,6 @@ impl Store {
         })
     }
 
-    /// The meeting's deliveries by destination id.
     pub fn deliveries(&self, meeting_id: Uuid) -> Result<Vec<Delivery>> {
         self.read(|connection| {
             query_all(

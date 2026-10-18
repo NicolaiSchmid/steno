@@ -1,16 +1,7 @@
 //! The safe wrapper over `objc2-core-ml`: load a compiled `.mlmodelc`,
 //! allocate `MLMultiArray` inputs, run a prediction, read the outputs, and
-//! [`contained`], the autorelease pool and `@catch` every one of those
-//! calls runs in. The only module in the crate that may contain `unsafe`;
-//! every block states the invariant it relies on. Nothing above this
-//! module sees a pointer, an `NSArray`, an Objective-C object or an
-//! Objective-C exception.
-//!
-//! Binding choice and the API gaps are in
-//! `.plans/spikes/2026-10-01-spike-coreml-rust.md`: `objc2-core-ml` is
-//! generated from the CoreML headers, so every class and selector the
-//! pipeline needs exists under its Objective-C name, and it shares the
-//! `objc2` runtime with the AppKit and CoreAudio crates the app will use.
+//! [`contained`], the pool and `@catch` every call runs in. The only module
+//! in the crate with `unsafe`; every block states the invariant it relies on.
 
 // `dataPointer` is a `void *`; CoreML allocates `MLMultiArray` storage
 // aligned for its element type (the Swift side binds it with
@@ -35,41 +26,24 @@ use objc2_foundation::{NSArray, NSDictionary, NSException, NSNumber, NSString, N
 
 use crate::SpeechError;
 
-/// Runs `work`, one model call with its inputs and output reads or a
-/// model load, inside one autorelease pool and an Objective-C `@catch`
-/// (objc2's [`objc2::exception::catch`]). Every CoreML call the crate makes
-/// goes through here ([`crate::backend`]), so the recorder's warm-up and a
-/// job's load are covered as well as each prediction.
+/// Runs `work` (one model call or load) inside one autorelease pool and an
+/// Objective-C `@catch` ([`objc2::exception::catch`]). Every CoreML call goes
+/// through here ([`crate::backend`]).
 ///
-/// - **The pool**: CoreML returns its feature values and output arrays at
-///   +0, and objc2 retains them through the fast autorelease handshake,
-///   which an unlucky inlining can miss and a build with debug assertions
-///   always skips; a missed one is autoreleased into the calling thread's
-///   pool, which nothing drained while a transcription ran. With debug
-///   assertions, 10 minutes of audio left about 6 300 IOSurface regions
-///   behind, and the next file failed to allocate one and aborted. One pool
-///   per call drains them before the next call, so the footprint stays
-///   flat (A15 of `.plans/2026-10-07-stable-promotion.md`).
-/// - **The catch**: an exception that reached a Rust frame without it
-///   aborts the process ("Rust cannot catch foreign exceptions"). Caught, it
-///   becomes [`SpeechError::Exception`] with its name and reason, so the
-///   meeting fails like any other speech failure and its audio is kept.
-///   A C++ exception or an abort inside CoreML is not an Objective-C
-///   exception and still ends the process; the recorder's warm-up mark
-///   (`steno_pipeline::WarmUpMark`) and the pipeline's crash-loop guard
-///   keep that from repeating at every recording and every launch; A17
-///   (#298) adds a working marker over the speech stage.
+/// - **The pool**: outputs come back at +0 and a missed fast autorelease
+///   handshake leaves them in the thread's pool; without a pool per call,
+///   long transcriptions leaked IOSurfaces until allocation failed.
+/// - **The catch**: an exception reaching a Rust frame aborts the process.
+///   Caught, it becomes [`SpeechError::Exception`], so the meeting fails like
+///   any speech failure and its audio is kept. A C++ exception or an abort
+///   inside CoreML still ends the process.
 ///
-/// The catch needs Rust frames that unwind: under `panic = "abort"` every
-/// exception would abort the process again, so such a build does not
-/// compile.
+/// The catch needs Rust frames that unwind, so a `panic = "abort"` build
+/// does not compile.
 pub fn contained<T>(work: impl FnOnce() -> Result<T, SpeechError>) -> Result<T, SpeechError> {
-    // Unwind safety, asserted: an exception unwinds `work` midway (objc2
-    // runs the Rust destructors on the way, releasing what was retained),
-    // so whatever `work` was building is dropped half done. `work` only
-    // reads the shared models and builds fresh arrays, and the engine drops
-    // its models after an exception (`CoreMlParakeetEngine`), so nothing
-    // half updated is used again.
+    // Unwind safety, asserted: `work` only reads the shared models and builds
+    // fresh arrays, and the engine drops its models after an exception
+    // (`CoreMlParakeetEngine`), so nothing half updated is used again.
     objc2::exception::catch(AssertUnwindSafe(|| autoreleasepool(|_| work())))
         .unwrap_or_else(|exception| Err(exception_error(exception)))
 }
@@ -100,8 +74,8 @@ fn exception_error(exception: Option<Retained<Exception>>) -> SpeechError {
     SpeechError::Exception { name, reason }
 }
 
-/// Where a model runs. The names are CoreML's; FluidAudio's defaults for
-/// the Parakeet bundles are in [`crate::backend::ComputeUnitsPlan`].
+/// Where a model runs. The names are CoreML's; the Parakeet defaults are in
+/// [`crate::backend::ComputeUnitsPlan`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputeUnits {
     CpuOnly,
@@ -189,9 +163,7 @@ impl fmt::Debug for Model {
 
 impl Model {
     /// Load the compiled bundle at `path` (a `.mlmodelc` directory) with
-    /// `units`; CoreML compiles for the Neural Engine on first load and
-    /// caches the result, so a cold load takes seconds and a warm one
-    /// about one. Run it inside [`contained`].
+    /// `units`; a cold load takes seconds. Run it inside [`contained`].
     pub(crate) fn load(path: &Path, units: ComputeUnits) -> Result<Model, SpeechError> {
         let load_error = |message: String| SpeechError::ModelLoad {
             path: path.to_path_buf(),
@@ -228,9 +200,8 @@ impl Model {
         self.units
     }
 
-    /// One prediction. Run it inside [`contained`] with the building of
-    /// its inputs and the reading of its outputs, so one pool drains what
-    /// all three leave autoreleased and an exception stays out of Rust.
+    /// One prediction. Run it inside [`contained`] together with building its
+    /// inputs and reading its outputs.
     pub(crate) fn predict(&self, inputs: &Inputs) -> Result<Outputs, SpeechError> {
         let provider: &ProtocolObject<dyn MLFeatureProvider> =
             ProtocolObject::from_ref(&*inputs.inner);
@@ -418,10 +389,9 @@ impl Array {
     }
 
     /// The base pointer. `dataPointer` is deprecated in favour of
-    /// `getBytesWithHandler`, which needs `block2` closures; FluidAudio
-    /// itself still reads `dataPointer`, and the pointer stays valid for
-    /// the array's lifetime, which every caller here respects by holding
-    /// `&self` for as long as the slice lives.
+    /// `getBytesWithHandler`, which needs `block2` closures; the pointer stays
+    /// valid for the array's lifetime, which every caller here respects by
+    /// holding `&self` for as long as the slice lives.
     #[allow(deprecated)]
     fn base(&self) -> *mut u8 {
         // SAFETY: `dataPointer` is a property read on a live array.
@@ -666,9 +636,8 @@ mod tests {
         }
     }
 
-    /// An `NSException` raised inside comes out as an ordinary error with
-    /// its name and reason, the Rust values on the way are dropped, and the
-    /// process carries on.
+    /// An `NSException` raised inside comes out as an error with its name and
+    /// reason, and the Rust values on the way are dropped.
     #[test]
     fn an_exception_inside_becomes_an_error_with_its_name_and_reason() {
         let dropped = Cell::new(false);
@@ -717,8 +686,7 @@ mod tests {
     }
 
     /// What a call leaves autoreleased is released by the time `contained`
-    /// returns, so a missed fast autorelease handshake cannot pile up
-    /// IOSurfaces across calls.
+    /// returns.
     #[test]
     fn what_a_call_leaves_autoreleased_is_released_before_it_returns() {
         let weak = contained(|| {

@@ -284,7 +284,7 @@ import Testing
     #expect(SpeechEngineID(rawValue: "Parakeet-V3") == nil, "ids are case-sensitive")
   }
 
-  /// The defaults `.plans/2026-09-29-speaker-calibration.md` settled: threshold
+  /// The defaults the speaker calibration settled: threshold
   /// 0.8, refinement on.
   @Test func diarizerConfigDefaultsArePlanConstants() {
     let config = FluidDiarizerConfig.default

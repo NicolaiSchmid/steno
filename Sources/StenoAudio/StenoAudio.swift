@@ -1,6 +1,5 @@
 /// `StenoAudio`: capture (tap and mic lanes), echo cancellation, meeting
-/// detection, the recording writer and the AVFoundation decoder. See
-/// `.plans/2026-09-25-audio-capture.md`.
+/// detection, the recording writer and the AVFoundation decoder.
 ///
 /// ## Threads and hand-offs
 ///

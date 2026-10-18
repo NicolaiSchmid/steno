@@ -1,9 +1,6 @@
 //! From decoder tokens to [`RawSegment`]s: token timings as `FluidAudio`
 //! reports them, `SentencePiece` pieces joined into words, words cut into
 //! segments at pauses, sentence ends and a length cap.
-//! Swift: `Sources/StenoSpeech/Segmentation/TokenAggregator.swift`,
-//! `Sources/StenoSpeech/Segmentation/TranscriptSegmenter.swift` and
-//! `FluidAudio`'s `createTokenTimings`.
 
 use steno_core::{RawSegment, TimedWord};
 
@@ -11,18 +8,16 @@ use crate::backend::{FRAME_SECONDS, SAMPLE_RATE};
 use crate::decoder::Token;
 use crate::vocab::{Vocab, starts_word, strip_boundary};
 
-/// One timed piece per token: start one frame before the emission frame
-/// (TDT emits after the frame it describes), from the window's own start
-/// (the token's phase), not the recording frame it falls in, and never
+/// One timed piece per token: start one frame before the emission frame (TDT
+/// emits after the frame it describes), offset by the token's phase and never
 /// before 0; end after the token's duration, at least one frame.
 #[must_use]
 pub fn timed_pieces(tokens: &[Token], vocab: &Vocab) -> Vec<TimedWord> {
     tokens
         .iter()
         .map(|token| {
-            // The phase is added to the frame's time, rather than the start
-            // computed from samples, so a window on the frame grid keeps
-            // the timings it always had, bit for bit.
+            // The phase is added to the frame's time, so a window on the frame
+            // grid keeps its timings bit for bit.
             let start = match token.frame {
                 0 => 0.0,
                 frame => {
@@ -40,12 +35,11 @@ pub fn timed_pieces(tokens: &[Token], vocab: &Vocab) -> Vec<TimedWord> {
         .collect()
 }
 
-/// Joins pieces into words. A piece starting with a space or the marker
-/// begins a word; punctuation-only pieces glue to the word before them,
-/// except an opening mark after a boundary (`▁¿`, `▁¡`, `▁'`, or a bare
-/// `▁` before the mark), which begins the next word; pieces that are only a
-/// boundary carry it to the next piece.
-/// A word's confidence is the mean of its pieces'.
+/// Joins pieces into words. A piece starting with a space or the marker begins
+/// a word; punctuation-only pieces glue to the word before them, except an
+/// opening mark after a boundary, which begins the next word; boundary-only
+/// pieces carry it to the next piece. A word's confidence is the mean of its
+/// pieces'.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenAggregator;
 
@@ -82,8 +76,7 @@ impl TokenAggregator {
                 }
                 continue;
             }
-            // An opening mark is left to the boundary rule below: it begins
-            // a word after a boundary and glues without one.
+            // An opening mark is left to the boundary rule below.
             let glues =
                 text.chars().all(is_punctuation_or_symbol) && !text.starts_with(OPENING_MARKS);
             match current.as_mut() {
@@ -109,29 +102,25 @@ impl TokenAggregator {
     }
 }
 
-/// Marks that open what follows them, so a boundary before one belongs to
-/// the next word ("hola ¿qué", not "hola¿qué"). The apostrophe opens a
-/// quote only with a boundary (`▁'`); without one it ends a quote or sits
-/// inside a word and glues.
+/// Marks that open what follows them, so a boundary before one belongs to the
+/// next word ("hola ¿qué"). The apostrophe opens a quote only after a boundary.
 const OPENING_MARKS: [char; 6] = ['¿', '¡', '(', '[', '{', '\''];
 
-/// Swift's `punctuationCharacters` and `symbols` sets, near enough: not a
-/// letter, digit, space or control character.
+/// Punctuation and symbols: not a letter, digit, space or control character.
 fn is_punctuation_or_symbol(c: char) -> bool {
     c.is_ascii_punctuation() || !(c.is_alphanumeric() || c.is_whitespace() || c.is_control())
 }
 
-/// Cuts words into segments: a new one after a gap over `split_gap_seconds`,
-/// after sentence-final punctuation, and when the next word would push the
-/// segment past `max_segment_seconds`. `language` stays `None`; the tagger
-/// fills it.
+/// Cuts words into segments: after a gap over `split_gap_seconds`, after
+/// sentence-final punctuation, and before a word that would push the segment
+/// past `max_segment_seconds`. `language` stays `None`; the tagger fills it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TranscriptSegmenter {
     pub max_segment_seconds: f64,
     pub split_gap_seconds: f64,
 }
 
-/// Swift's defaults (30 s, 0.7 s).
+/// 30 s segments at most, split at 0.7 s gaps.
 impl Default for TranscriptSegmenter {
     fn default() -> Self {
         TranscriptSegmenter {

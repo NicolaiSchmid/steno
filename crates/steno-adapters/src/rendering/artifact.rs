@@ -1,6 +1,4 @@
 //! The renderer facade and the files it produces.
-//! Swift: `Sources/StenoAdapters/Rendering/ArtifactRenderer.swift` and
-//! `RenderedArtifact.swift`.
 
 use chrono_tz::Tz;
 use serde_json::Value;
@@ -30,10 +28,8 @@ pub struct RenderedArtifact {
     pub data: Vec<u8>,
 }
 
-/// One person's page for this meeting; `file_name` is relative to the
-/// destination's people folder. `page` is the page as created from scratch,
-/// `line` the one line the destination merges into the managed block of a
-/// page that already exists.
+/// One person's page for this meeting, `file_name` relative to the people
+/// folder: `page` when created new, `line` to merge into an existing one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersonPage {
     pub file_name: String,
@@ -41,11 +37,9 @@ pub struct PersonPage {
     pub line: String,
 }
 
-/// Pure renderers from the canonical model to bytes: folder note, transcript
-/// and tasks Markdown, `WebVTT`, `meeting.json` and person pages. No I/O, no
-/// clock; equal inputs give equal bytes on every machine. Destinations pass
-/// the pinned folder basename as `folder_slug` on re-export so note names
-/// stay put when the title changes.
+/// Pure renderers from the canonical model to bytes. No I/O, no clock;
+/// equal inputs give equal bytes. On re-export the pinned folder basename
+/// comes in as `folder_slug` so note names stay put.
 ///
 /// ```
 /// use steno_adapters::rendering::{ArtifactRenderer, RenderOptions};
@@ -60,11 +54,8 @@ pub struct PersonPage {
 pub struct ArtifactRenderer;
 
 impl ArtifactRenderer {
-    /// Bumped whenever the Mac's bytes change (the goldens Swift shares);
-    /// recorded in every receipt and pinned by
-    /// `Tests/Fixtures/snapshots/obsidian/VERSION`. A Windows or Linux
-    /// call's word in the info line ([`RenderOptions::platform`]) does not
-    /// bump it.
+    /// Bumped whenever the Mac's bytes change; recorded in every receipt
+    /// and pinned by `Tests/Fixtures/snapshots/obsidian/VERSION`.
     pub const VERSION: i64 = 2;
 
     #[must_use]
@@ -72,10 +63,8 @@ impl ArtifactRenderer {
         ArtifactRenderer
     }
 
-    /// The five files of the meeting folder. `meeting.json` comes first
-    /// because a folder is recognised as this meeting's crashed attempt by
-    /// that file alone, so it must be the first one on disk; then the three
-    /// notes and the `WebVTT`. Audio is copied by the destination, not rendered.
+    /// The five files of the meeting folder. `meeting.json` comes first, as
+    /// that file alone marks a folder as this meeting's crashed attempt.
     pub fn render_meeting_files(
         &self,
         export: &MeetingExport,
@@ -114,8 +103,7 @@ impl ArtifactRenderer {
         ])
     }
 
-    /// One page per person in export order when the options render person
-    /// pages, else none. The file name is the wikilink target the notes use.
+    /// One page per person in export order when person pages are on.
     #[must_use]
     pub fn render_person_pages(
         &self,
@@ -139,9 +127,8 @@ impl ArtifactRenderer {
             .collect()
     }
 
-    /// Frontmatter, `# Title`, the info line, `## Summary` (core's
-    /// `summary::render` verbatim), `## Decisions` and `## Scratchpad` when
-    /// present.
+    /// Frontmatter, title, info line, summary, and decisions and scratchpad
+    /// when present.
     #[must_use]
     pub fn render_folder_note(
         &self,
@@ -177,17 +164,14 @@ impl ArtifactRenderer {
         WebVttRenderer { export }.render()
     }
 
-    /// `meeting.json`: the `StenoJSON` pretty encoding of the export,
-    /// byte-identical to `steno export`. Serialised to text first so an
-    /// `f32` keeps its shortest form (`0.88`, not the widened double a
-    /// `Value` would hold), then printed Foundation's way.
+    /// `meeting.json`, byte-identical to `steno export`. Serialised to
+    /// text first so an `f32` keeps its shortest form.
     pub fn render_json(&self, export: &MeetingExport) -> Result<Vec<u8>, serde_json::Error> {
         let value: Value = serde_json::from_str(&serde_json::to_string(export)?)?;
         Ok(steno_core::json::to_canonical_string(&value)?.into_bytes())
     }
 
-    /// The folder basename a destination pinned, else the one this export
-    /// would get.
+    /// The pinned folder basename, else this export's.
     fn slug(export: &MeetingExport, options: &RenderOptions, folder_slug: Option<&str>) -> String {
         folder_slug.map_or_else(
             || MeetingFolder::basename(&export.meeting, options.time_zone),
@@ -195,14 +179,13 @@ impl ArtifactRenderer {
         )
     }
 
-    /// The lowercase UUID every note carries as `steno_id` (`Uuid`'s
-    /// `Display` form).
+    /// The lowercase UUID every note carries as `steno_id`.
     pub(crate) fn steno_id(export: &MeetingExport) -> String {
         export.meeting.id.to_string()
     }
 
-    /// The frontmatter and `# Title — Kind` heading the transcript and tasks
-    /// notes open with; `kind` is `"Transcript"` or `"Tasks"`.
+    /// The frontmatter and `# Title — Kind` heading of the transcript and
+    /// tasks notes.
     pub(crate) fn note_head(export: &MeetingExport, kind: &str, time_zone: Tz) -> Vec<String> {
         let mut frontmatter = Frontmatter::new(time_zone);
         frontmatter.append(
@@ -220,8 +203,7 @@ impl ArtifactRenderer {
         ]
     }
 
-    /// Segments by start, ties broken by id so the order is total. Ids
-    /// compare as bytes, which orders them as their hex strings do.
+    /// Segments by start, ties broken by id so the order is total.
     pub(crate) fn ordered_segments(export: &MeetingExport) -> Vec<&TranscriptSegment> {
         let mut segments: Vec<&TranscriptSegment> = export.segments.iter().collect();
         segments.sort_by(|left, right| {

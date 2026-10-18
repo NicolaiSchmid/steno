@@ -1,10 +1,6 @@
-//! The `steno` command line tool. Product commands are `record`, `process`,
-//! `export` and `deliver`; every developer tool sits under `steno dev`.
-//! Swift: `Sources/steno/`. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`, `WP6b`.
-//!
-//! Exit codes: 0 success, 1 usage (bad arguments, unknown template, an
-//! unknown engine or asset), 2 a runtime failure (database, files, a failed
-//! pipeline run).
+//! The `steno` command line tool: `record`, `process`, `export`, `deliver`
+//! and the developer tools under `steno dev`. Exits 0 on success, 1 on a
+//! usage error, 2 on a runtime failure.
 
 mod commands;
 mod wiring;
@@ -15,9 +11,8 @@ use crate::commands::{Command, Steno};
 use crate::wiring::Failure;
 
 fn main() {
-    // `warn`, without the pipeline's line for a failed background run: the
-    // CLI waits for its run and prints the failure itself, as Swift's
-    // `steno process` did, so the line would say it twice.
+    // Without the pipeline's line for a failed background run: the CLI
+    // prints the failure itself.
     steno_services::log_to_stderr(&format!(
         "{},{}=off",
         steno_services::LOG_FILTER,
@@ -44,11 +39,9 @@ fn main() {
             Command::Dev(command) => command.run().await,
         }
     });
-    // Write out the queued log lines once the runtime is gone, since its
-    // tasks may log as they end, and before the failure message, so they
-    // come out ahead of it, as when lines were written at once. The shutdown
-    // waits a second at most: a worker parked in a blocking call would
-    // otherwise hold the exit, as the desktop's leaked runtime avoids.
+    // Flush the queued log lines after the runtime's tasks end and before
+    // the failure message. A worker parked in a blocking call would hold
+    // the exit, hence the one-second cap.
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     steno_services::flush_logs();
     let Err(failure) = outcome else {

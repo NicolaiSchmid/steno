@@ -1,67 +1,8 @@
 //! The host's `Recorder` over the capture session and the Mac recording
-//! intake. Swift: `apps/macos/Steno/Recording/RecordingController.swift`.
-//! The status carries what the capture session reports.
-//!
-//! A start looks the calendar up ([`crate::calendar`]) on a thread of its
-//! own before it opens the devices. The event under way (or the next
-//! within fifteen minutes) names the meeting, and its attendees, except
-//! the calendar's owner, become its `them` participants, as in Swift's
-//! `RecordingController.start`. Without calendar access, without an
-//! event, or while the calendar has not answered when the row is written,
-//! the meeting starts with the default title; an answer that comes later
-//! names it under the store's rule (`Store::name_recording_after_event`)
-//! or is dropped. So the lookup never holds a start up or fails one. Rust
-//! only: Swift awaited it.
-//!
-//! A start never asks for a permission: the calendar is read only with
-//! the access the user already gave. The system audio test plays a tone,
-//! so it runs only while no recording starts, runs or stops, and a start
-//! stops one under way before it opens a device
-//! (`CaptureRecorder::run_tone_test`).
-//!
-//! The auto-stop after a call ends is [`crate::auto_stop`]'s policy, fed
-//! by [`CaptureRecorder::microphone_activity`]; its stop is the Stop
-//! button's.
-//!
-//! A stop that cannot store its meeting (the database still busy after the
-//! intake's tries, a full disk) keeps the recording on disk and the meeting
-//! `recording`, and the status says the next launch processes it; a stop
-//! whose capture failed recovers the master as the launch does
-//! ([`crate::recovery`]), and one whose meeting failed or went meanwhile
-//! says it was not stored. Rust only: Swift's stop failed the meeting.
-//!
-//! Each recording has a watcher thread. A session that fails on its own (a
-//! device that stayed lost, a write that failed on a full disk) is finished
-//! there as Stop would finish it: the recording so far is saved and queued,
-//! and the status says in plain words why it ended. Swift: the states task
-//! of `RecordingController.observe`, which said "Recording failed:
-//! `<error>`" and kept the device-loss warning beside it; here the one
-//! error line also says the recording is saved. The watcher also keeps an
-//! eye on the free space on the volumes of the recordings folder and of
-//! the database, the smaller of the two: a recording warns when about half
-//! an hour is left, does not start without room, and stops and is saved
-//! before the disk fills, on every platform. On the Mac the reading is the
-//! larger of `statvfs` and the space macOS frees for important use
-//! (`steno_macos::volume`), which counts what APFS would purge, held to
-//! `statvfs` plus 384 MiB, so below 128 MiB of `statvfs` there is no room
-//! (`DiskWatch::HARD_FLOOR_BYTES`); a failed read of the second leaves
-//! `statvfs` alone. A volume that reports no size, or more space free than
-//! it holds (some network and FUSE file systems), counts as unreadable and
-//! never warns, stops or refuses a recording. Rust only: Swift had no disk
-//! check.
-//!
-//! The session's notices are followed too: while its restarts go on past
-//! `CaptureSession::RESTART_ATTEMPTS`, until audio arrives again, the
-//! status warns "No audio from `<device>`. Still trying.", naming the
-//! microphone only when a stall of it started the rebuild and its clock
-//! drives the capture (an in-person capture, any capture on Windows), and
-//! "No audio is arriving. Still trying." otherwise: a Mac call capture runs
-//! on the output's clock and a Linux one on the graph's driver, which may
-//! be the sink. After the stop a note says about how many seconds of the
-//! recording are missing (`missing_seconds`: the silence written in place
-//! of audio, and the audio the master does not hold), once that is more
-//! than about a second, and from which device on the same terms. Rust
-//! only.
+//! intake. A start names the meeting after the calendar event under way
+//! without ever waiting on the lookup; a per-recording watcher thread
+//! finishes a session that fails on its own, warns and stops before the
+//! disk fills, and follows the session's notices for missing audio.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,8 +34,8 @@ use crate::calendar::{Calendar, CalendarLookups, Lookup, NoCalendar};
 use crate::pipeline::CurrentPipeline;
 use crate::recovery::{RecoveryError, Unrecoverable};
 
-/// Builds a capture session for a configuration; the product passes
-/// `CaptureSession::new`, tests a synthetic backend.
+/// Builds a capture session for a configuration; tests pass a synthetic
+/// backend.
 pub type MakeCaptureSession =
     Arc<dyn Fn(CaptureConfiguration) -> Result<CaptureSession, String> + Send + Sync>;
 
@@ -107,38 +48,29 @@ pub(crate) struct Volume {
     pub(crate) total: u64,
 }
 
-/// What the volume that holds a path reports; the product asks the file
-/// system ([`DiskWatch::system`]), tests pass a fake.
+/// What the volume that holds a path reports; tests pass a fake.
 pub(crate) type FreeSpace = Arc<dyn Fn(&Path) -> std::io::Result<Volume> + Send + Sync>;
 
-/// How a recording watches the free space; see the module doc.
+/// How a recording watches the free space.
 #[derive(Clone)]
 pub(crate) struct DiskWatch {
     /// Reads a volume.
     pub(crate) free_space: FreeSpace,
     /// How often a recording reads it.
     pub(crate) interval: Duration,
-    /// The database's folder, whose volume is read beside the recordings
-    /// folder's: the save writes there too.
+    /// The database's folder, whose volume is read too: the save writes there.
     pub(crate) database_folder: Option<PathBuf>,
 }
 
 impl DiskWatch {
     /// Below this a recording does not start, and one in progress stops and
     /// is saved: room for the database, the processing and the system, so
-    /// the save itself never meets a full disk. On the Mac the reading
-    /// also counts the space APFS would purge for the user (tens of GB
-    /// with local Time Machine snapshots), which `statvfs` leaves out, held
-    /// to `statvfs` plus 384 MiB, so below 128 MiB of `statvfs` there is no
-    /// room ([`Self::HARD_FLOOR_BYTES`], `mac_volume`).
+    /// the save itself never meets a full disk.
     pub(crate) const STOP_BELOW_BYTES: u64 = 512 * 1024 * 1024;
-    /// Below this `statvfs` reading the Mac does not start a recording and
-    /// stops one in progress, whatever space macOS says it frees for
-    /// important use: `CacheDelete` purges that space asynchronously and a
-    /// write never waits for it, so a write can meet a full disk while the
-    /// purgeable space is still counted. The purge's window is the 384 MiB
-    /// gap up to [`Self::STOP_BELOW_BYTES`], about 15 minutes of a call's
-    /// writing; what is left keeps the save its room.
+    /// Below this `statvfs` reading the Mac does not start or go on,
+    /// whatever space macOS says it frees for important use: `CacheDelete`
+    /// purges that space asynchronously and a write never waits for it. The
+    /// 384 MiB gap up to [`Self::STOP_BELOW_BYTES`] is the purge's window.
     #[cfg(any(target_os = "macos", test))]
     pub(crate) const HARD_FLOOR_BYTES: u64 = 128 * 1024 * 1024;
     /// The recording time left above [`Self::STOP_BELOW_BYTES`] below which
@@ -146,10 +78,7 @@ impl DiskWatch {
     pub(crate) const WARN_BELOW: Duration = Duration::from_secs(30 * 60);
 
     /// The system's free space, read every five seconds, on the volumes of
-    /// the recordings folder and of `database_folder`: `statvfs` and
-    /// `GetDiskFreeSpaceExW`, on the Mac with the space free for important
-    /// use beside it (`mac_volume`). The floor stops recordings on every
-    /// platform (see [`Self::STOP_BELOW_BYTES`]).
+    /// the recordings folder and of `database_folder`.
     #[must_use]
     pub(crate) fn system(database_folder: Option<&Path>) -> Self {
         Self {
@@ -161,10 +90,8 @@ impl DiskWatch {
 
     /// The bytes free for a recording into `audio_folder`: the smaller of
     /// what its volume and the database folder's report, each asked of its
-    /// nearest folder that exists (the recordings folder may not exist
-    /// before the first recording). A volume that cannot be read, reports
-    /// no size or more free than its size is left out; `None` when none is
-    /// left, which never stops a recording.
+    /// nearest existing folder. Unreadable or implausible volumes are left
+    /// out; `None` when none is left, which never stops a recording.
     fn free_for(&self, audio_folder: &Path) -> Option<u64> {
         std::iter::once(audio_folder)
             .chain(self.database_folder.as_deref())
@@ -172,8 +99,8 @@ impl DiskWatch {
             .min()
     }
 
-    /// The bytes free on the volume of `folder`, when it reports a size
-    /// that holds them.
+    /// The bytes free on the volume of `folder`, when it reports a size that
+    /// holds them.
     fn available(&self, folder: &Path) -> Option<u64> {
         let existing = folder.ancestors().find(|path| path.exists())?;
         match (self.free_space)(existing) {
@@ -192,13 +119,10 @@ impl DiskWatch {
     }
 }
 
-/// The volume that holds a path as the system reports it
-/// ([`DiskWatch::system`]): `statvfs`, an error when that read fails, and
-/// the space free for important use beside it ([`mac_volume`]), left out
-/// when that read fails ([`important_use`]): the reading drops to
-/// `statvfs`, which can stop a recording. Each read asks macOS afresh on a
-/// new `NSURL` (a reused one caches its values; see
-/// `steno_macos::volume`), so the reading follows the writes.
+/// The volume that holds a path: `statvfs`, with the space free for
+/// important use beside it, left out when that read fails. Each read asks
+/// macOS afresh on a new `NSURL` (a reused one caches its values), so the
+/// reading follows the writes.
 #[cfg(target_os = "macos")]
 fn system_volume() -> FreeSpace {
     let failing = Mutex::default();
@@ -213,19 +137,16 @@ fn system_volume() -> FreeSpace {
     })
 }
 
-/// The volume that holds a path as the system reports it
-/// ([`DiskWatch::system`]).
+/// The volume that holds a path as the system reports it.
 #[cfg(not(target_os = "macos"))]
 fn system_volume() -> FreeSpace {
     Arc::new(statvfs)
 }
 
-/// The space free for important use on the volume of `path` as `read`
-/// reports it, `None` when the read fails. The first failure of a streak
-/// on a folder logs a `warn` line with the error's kind alone (the error's
-/// text names the folder), every failure the full error at `debug`; a
-/// read that succeeds ends the streak. `failing` holds the folders whose
-/// last read failed.
+/// The space free for important use on the volume of `path`, `None` when
+/// `read` fails. The first failure of a streak on a folder warns with the
+/// error's kind alone (its text names the folder); `failing` holds the
+/// folders whose last read failed.
 #[cfg(any(target_os = "macos", test))]
 fn important_use(
     path: &Path,
@@ -254,8 +175,7 @@ fn important_use(
     }
 }
 
-/// `statvfs` (`GetDiskFreeSpaceExW` on Windows) of the volume that holds
-/// `path`.
+/// `statvfs` (`GetDiskFreeSpaceExW` on Windows) of the volume of `path`.
 fn statvfs(path: &Path) -> std::io::Result<Volume> {
     fs4::statvfs(path).map(|stats| Volume {
         available: stats.available_space(),
@@ -263,14 +183,11 @@ fn statvfs(path: &Path) -> std::io::Result<Volume> {
     })
 }
 
-/// The Mac's reading of a volume from its `statvfs` and the space macOS
-/// frees on it for `important` use (`None` when that read failed): the
-/// larger of the two, so the space APFS would purge counts, and a 0 from a
-/// volume `CacheDelete` does not manage (an external drive, a disk image)
-/// leaves `statvfs` deciding. It is held to `statvfs` plus the gap between
-/// [`DiskWatch::STOP_BELOW_BYTES`] and [`DiskWatch::HARD_FLOOR_BYTES`]: it
-/// is below the floor once the larger reading is, or `statvfs` is below
-/// the hard floor, and the minutes left count to whichever comes first.
+/// The Mac's reading of a volume: the larger of `statvfs` and the space
+/// free for `important` use (so purgeable space counts; a 0 from a volume
+/// `CacheDelete` does not manage leaves `statvfs` deciding), held to
+/// `statvfs` plus the gap between [`DiskWatch::STOP_BELOW_BYTES`] and
+/// [`DiskWatch::HARD_FLOOR_BYTES`].
 #[cfg(any(target_os = "macos", test))]
 fn mac_volume(statvfs: Volume, important: Option<u64>) -> Volume {
     let ceiling = statvfs
@@ -286,8 +203,7 @@ fn mac_volume(statvfs: Volume, important: Option<u64>) -> Volume {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Room {
     Enough,
-    /// A warning ([`low_space_warning`]) with the minutes of recording
-    /// left, at least one.
+    /// A warning with the minutes of recording left, at least one.
     Low {
         minutes: u64,
     },
@@ -297,9 +213,8 @@ enum Room {
 
 impl Room {
     /// The room `free` bytes leave a recording that writes
-    /// `bytes_per_second`: below the floor there is none, and the warning
-    /// comes under [`DiskWatch::WARN_BELOW`] above it, the minutes counting
-    /// to it.
+    /// `bytes_per_second`: none below the floor, a warning under
+    /// [`DiskWatch::WARN_BELOW`] above it.
     fn of(free: u64, bytes_per_second: u64) -> Self {
         let rate = bytes_per_second.max(1);
         let Some(spare) = free.checked_sub(DiskWatch::STOP_BELOW_BYTES) else {
@@ -314,21 +229,18 @@ impl Room {
     }
 }
 
-/// The bytes a second the files of `configuration` grow by: the 48 kHz
-/// Float32 master, one 16 kHz Int16 sidecar per lane, and the raw
-/// microphone when kept. About 1.6 GB an hour for a call.
+/// The bytes a second the files of `configuration` grow by: about 1.6 GB an
+/// hour for a call.
 fn bytes_per_second(configuration: &CaptureConfiguration) -> u64 {
     let lanes = configuration.lanes().len() as u64;
     let raw = u64::from(configuration.keep_raw_mic_lane);
     (lanes + raw) * 48_000 * 4 + lanes * 16_000 * 2
 }
 
-/// The status line of a saved recording whose result carries `failure`,
-/// in plain words: the error's text names paths and threads, so it goes to
-/// the log instead ([`log_failure`]). A device that disappeared cut the
-/// recording short whoever stopped it; a write or a close that failed did
-/// so only when the session ended on its own (`failed`), and a Stop, a
-/// quit or a call that ended met it in a recording that may miss its end.
+/// The status line of a saved recording whose result carries `failure`, in
+/// plain words (the error's text names paths, so it goes to the log). A
+/// lost device cut the recording short whoever stopped it; a failed write
+/// or close only when the session ended on its own.
 fn ended_with(failure: &CaptureError, reason: &RecordingEndReason) -> &'static str {
     match (failure, reason) {
         (CaptureError::DeviceLost, _) => {
@@ -343,8 +255,8 @@ fn ended_with(failure: &CaptureError, reason: &RecordingEndReason) -> &'static s
     }
 }
 
-/// The kind of `failure` a `warn` line names, never its text (it can hold
-/// a path or an OS error).
+/// The kind of `failure` a `warn` line names, never its text (it can hold a
+/// path).
 fn failure_kind(failure: &CaptureError) -> &'static str {
     match failure {
         CaptureError::DeviceLost => "device lost",
@@ -357,8 +269,7 @@ fn failure_kind(failure: &CaptureError) -> &'static str {
     }
 }
 
-/// A `warn` line for a recording that ended with `failure`: the meeting,
-/// the reason and the failure's kind ([`failure_kind`]).
+/// A `warn` line for a recording that ended with `failure`.
 fn log_failure(meeting_id: Uuid, failure: &CaptureError, reason: &RecordingEndReason) {
     tracing::warn!(
         meeting = %meeting_id,
@@ -368,27 +279,25 @@ fn log_failure(meeting_id: Uuid, failure: &CaptureError, reason: &RecordingEndRe
     );
 }
 
-/// The prefix of the status line of a start that failed; what follows
-/// says why in plain words ([`refused`]). Swift put the error's text
-/// after it; the plain words are Rust only.
+/// The prefix of the status line of a start that failed; [`refused`] says
+/// why.
 const COULD_NOT_START: &str = "Recording could not start:";
 
 /// Why a recording that `CaptureRecorder::start` refused did not start.
 const NO_ROOM_TO_START: &str = "the disk is almost full. Free some space and try again.";
 
-/// Why a start whose capture session could not be built, or did not open
-/// its devices for a reason with no words of its own, did not start.
+/// Why a start whose session could not be built, or whose devices did not
+/// open for no stated reason, did not start.
 const DEVICES_DID_NOT_OPEN: &str = "Steno could not open the audio devices.";
 
-/// `reason` for the status line of a start that failed, after a `warn`
-/// line that names the failure's `kind`, never the error's text.
+/// `reason` for a failed start's status line, after a `warn` line naming
+/// `kind`, never the error's text.
 fn refused(kind: &str, reason: impl Into<String>) -> String {
     tracing::warn!(kind, "the recording could not start");
     reason.into()
 }
 
-/// Why a capture session's start that failed with `error` did not start,
-/// in plain words.
+/// Why a capture session's start that failed with `error` did not start.
 fn capture_refused(error: &CaptureError) -> String {
     let reason = match error {
         CaptureError::InputDeviceUnavailable => "no microphone is available.".to_owned(),
@@ -414,8 +323,7 @@ fn intake_kind(error: &LocalRecordingIntakeError) -> &'static str {
     }
 }
 
-/// A `warn` line for the recording of `meeting_id` that could not be
-/// saved, naming the failure's `kind`, never the error's text.
+/// A `warn` line for a recording that could not be saved, naming `kind`.
 fn log_not_saved(meeting_id: Uuid, kind: &str) {
     tracing::warn!(meeting = %meeting_id, kind, "the recording could not be saved");
 }
@@ -430,8 +338,8 @@ const MEETING_NOT_STORED: &str = "Recording could not be saved: Steno could not 
 /// Why a stop did not save its recording.
 #[derive(Debug, Clone, Copy)]
 enum Unsaved {
-    /// The recording stays on disk and its meeting `recording`, for the
-    /// next launch to recover ([`KEPT_FOR_THE_NEXT_LAUNCH`]).
+    /// The recording stays on disk and its meeting `recording`, for the next
+    /// launch to recover.
     Kept,
     /// The meeting failed or moved on; the status line says how.
     Settled(&'static str),
@@ -447,13 +355,10 @@ impl Unsaved {
     }
 }
 
-/// What a stop says when the meeting could not be stored. A meeting
-/// another process moved on is not this recorder's to keep; otherwise the
-/// recording stays on disk and the meeting `recording`, and the next
-/// launch recovers it. Either way the files and the folder recorded for
-/// the meeting stay, so the next launch adopts the master of a meeting
-/// whose row was deleted meanwhile ([`crate::recovery`]). Rust only:
-/// Swift's `complete` marked the meeting failed without its asset.
+/// What a stop says when the meeting could not be stored. A meeting another
+/// process moved on is not this recorder's to keep; otherwise the meeting
+/// stays `recording` for the next launch. Either way the files and the
+/// recorded folder stay, so the next launch can adopt the master.
 fn not_saved(meeting_id: Uuid, error: &LocalRecordingIntakeError) -> Unsaved {
     log_not_saved(meeting_id, intake_kind(error));
     if matches!(
@@ -470,18 +375,15 @@ fn not_saved(meeting_id: Uuid, error: &LocalRecordingIntakeError) -> Unsaved {
     }
 }
 
-/// The status line of a stop whose recording stays on disk and its
-/// meeting `recording`, for the next launch to recover.
+/// The status line of a stop whose recording is kept for the next launch.
 const KEPT_FOR_THE_NEXT_LAUNCH: &str = "The recording is kept, but it could not be saved right now. \
      Steno will process it the next time it starts.";
 
-/// The status warning of a stop whose capture failed and whose files were
-/// recovered.
+/// The warning of a stop whose capture failed and whose files were recovered.
 const RECOVERED_AFTER_A_FAILURE: &str =
     "Recording stopped because of an error; the audio up to that point was kept.";
 
-/// The warning of a recording with `minutes` left, which promises the
-/// stop.
+/// The warning of a recording with `minutes` left.
 fn low_space_warning(minutes: u64) -> String {
     let unit = if minutes == 1 { "minute" } else { "minutes" };
     format!(
@@ -503,27 +405,21 @@ struct Active {
     mode: CaptureMode,
     /// The latest lane levels, written by the forwarding thread.
     levels: Arc<Mutex<Option<LaneLevels>>>,
-    /// The forwarding thread, joined once the session is dropped; none
-    /// when it could not be spawned, and the recording runs without levels.
+    /// The forwarding thread, joined once the session is dropped; `None`
+    /// when it could not be spawned.
     level_thread: Option<JoinHandle<()>>,
-    /// The input recorded in place of the chosen microphone, now and
-    /// earlier in the recording. Kept apart from the status's own warning
-    /// so a rebuild can set and clear it; written at the start and by
-    /// `notice_thread`, cleared by `clear_messages`.
+    /// The input recorded in place of the chosen microphone, kept apart from
+    /// the status's own warning so a rebuild can set and clear it.
     fallback: Arc<Mutex<Fallback>>,
-    /// A device that stopped delivering, as the notices tell it; written
-    /// by `notice_thread`. Rust only.
+    /// A device that stopped delivering, as the notices tell it.
     outage: Arc<Mutex<Outage>>,
-    /// When the session began recording, for the audio missing from the
-    /// master against wall time after the stop ([`missing_audio_note`]).
+    /// When the session began recording, for the missing-audio note.
     recording_since: Instant,
-    /// Re-reads the microphone after each rebuild, joined once the session
-    /// is dropped; none when it could not be spawned, and the fallback
-    /// warning stays as the start left it.
+    /// Re-reads the microphone after each rebuild; `None` when it could not
+    /// be spawned.
     notice_thread: Option<JoinHandle<()>>,
-    /// The disk watch's warning, set at the start and by the watcher. Kept
-    /// apart from the status's own warning so it does not hide the
-    /// fallback warning or outlive the low room. Rust only.
+    /// The disk watch's warning, kept apart from the status's own warning so
+    /// it neither hides the fallback warning nor outlives the low room.
     disk_warning: DiskWarning,
 }
 
@@ -531,10 +427,8 @@ struct Active {
 struct DiskWarning {
     /// The minutes left at the latest reading; `None` with room.
     minutes: Option<u64>,
-    /// The minutes left when the user dismissed the warning
-    /// (`clear_messages`): it shows again only once fewer are left. A
-    /// reading with room forgets it, so a later low room warns afresh; a
-    /// room too small to go on stops the recording, whose error says so.
+    /// The minutes left when the user dismissed the warning: it shows again
+    /// only once fewer are left. A reading with room forgets it.
     dismissed: Option<u64>,
 }
 
@@ -563,15 +457,13 @@ impl DiskWarning {
     }
 }
 
-/// The input a recording records in place of the chosen microphone, as
-/// the warnings name it ([`fallback_input`]). Rust only.
+/// The input a recording records in place of the chosen microphone.
 #[derive(Default)]
 struct Fallback {
-    /// The input now, shown as [`fallback_warning`] while recording;
-    /// `None` on the chosen microphone.
+    /// The input now; `None` on the chosen microphone.
     current: Option<String>,
-    /// The latest input the recording was on, kept after a return to the
-    /// chosen microphone, shown as [`fallback_note`] after the stop.
+    /// The latest fallback input, kept after a return to the chosen
+    /// microphone for the note after the stop.
     was_on: Option<String>,
 }
 
@@ -585,47 +477,31 @@ impl Fallback {
     }
 }
 
-/// A device that stopped delivering in a recording, as the session's
-/// notices tell it. Rust only.
+/// A device that stopped delivering in a recording.
 #[derive(Default)]
 struct Outage {
-    /// The microphone whose stall the latest rebuild followed
-    /// ([`DeviceChangeReason::DeliveryStalled`]) when its clock drives the
-    /// capture ([`microphone_is_the_master`]), the one known to have
-    /// stopped delivering; `None` when that rebuild followed another
-    /// change, or another clock stalled, which says nothing of which device
-    /// is silent. Named by the warning and the note after the stop
-    /// ([`missing_audio_note`]).
+    /// The microphone whose stall the latest rebuild followed, when its
+    /// clock drives the capture ([`microphone_is_the_master`]); `None`
+    /// otherwise, as another stall says nothing of which device is silent.
     stalled: Option<String>,
-    /// Whether the session's restarts went on past
-    /// `CaptureSession::RESTART_ATTEMPTS` (`StillRestarting`) and no audio
-    /// arrived since ([`no_audio_warning`]); cleared by `Delivering`, not
-    /// by a resume (a stream that resumes may stall again soon), and once
-    /// dismissed.
+    /// The restarts went on past `CaptureSession::RESTART_ATTEMPTS` and no
+    /// audio arrived since; cleared by `Delivering` (not a resume, which may
+    /// stall again soon) and once dismissed.
     still_trying: bool,
-    /// The capture is recovering: from a `DeviceChanged` until it is back,
-    /// at its `DeviceResumed` when no `StillRestarting` is outstanding
-    /// (`restarting`), else at `Delivering`; a dismissal leaves it. The
-    /// call auto-stop waits meanwhile, for one grace at most: the
-    /// countdown the release armed is not shown and ends nothing, a fresh
-    /// one takes its place when it runs out or once the capture is back
-    /// (the notice thread calls [`CaptureRecorder::resume_auto_stop`]),
-    /// and that one ends the call whatever the capture does
-    /// ([`crate::auto_stop`]; S2 in `.plans/2026-10-07-stable-promotion.md`).
-    /// A restart of the audio service empties the call detector's process
-    /// list too, so the call app seems to have let go of the microphone.
-    /// Rust only.
+    /// The capture is recovering: from a `DeviceChanged` until its
+    /// `DeviceResumed` (or `Delivering` while `restarting`). The call
+    /// auto-stop waits meanwhile, for one grace at most, then a fresh
+    /// countdown ends the call whatever the capture does
+    /// ([`crate::auto_stop`]). A dismissal leaves it.
     recovering: bool,
-    /// A `StillRestarting` came and no `Delivering` since: a resume then
-    /// does not end the recovery, since the stream may stall again soon.
-    /// Unlike `still_trying`, a dismissal leaves it. Rust only.
+    /// A `StillRestarting` came and no `Delivering` since, so a resume does
+    /// not end the recovery. A dismissal leaves it.
     restarting: bool,
 }
 
 impl Outage {
-    /// Follows `notice` for the warning and the recovery (the stalled
-    /// device aside, which the notice thread reads from the session);
-    /// `true` when it ends a recovery, so the auto-stop resumes.
+    /// Follows `notice` for the warning and the recovery; `true` when it ends
+    /// a recovery, so the auto-stop resumes.
     fn follow(&mut self, notice: &CaptureNotice) -> bool {
         match notice {
             CaptureNotice::DeviceChanged(_) => {
@@ -648,26 +524,20 @@ impl Outage {
         }
     }
 
-    /// The user dismissed the messages: the warning goes until the
-    /// restarts go on once more; the recovery stands.
+    /// The user dismissed the messages: the warning goes until the restarts
+    /// go on once more; the recovery stands.
     fn dismiss(&mut self) {
         self.still_trying = false;
     }
 }
 
-/// Whether the microphone's clock drives a capture in `mode`, so that a
-/// stall is the microphone's: an in-person capture records it alone, and
-/// the WASAPI backend makes it the master stream whenever a lane needs
-/// it. A Mac call capture runs on the output's clock (the aggregate's
-/// master) and a Linux one on the graph's driver, which may be the sink.
-/// The WASAPI rule is the one its `delivers_continuously` states
-/// (steno-audio `capture/live/wasapi`); a change there comes here too. The
-/// session asks the backend the near question for its restarts
-/// ([`CaptureBackend::stall_may_be_the_microphone`]: whether a stall may be
-/// the microphone's, so that the default input in its place may help),
-/// which says "may" where this rule must be sure before it names a device:
-/// a Linux call answers `true` there and `false` here. A change to either
-/// goes to the other. Rust only.
+/// Whether the microphone's clock drives a capture in `mode`, so a stall is
+/// the microphone's: an in-person capture records it alone, and WASAPI
+/// makes it the master whenever a lane needs it. A Mac call runs on the
+/// output's clock and a Linux one on the graph's driver. This must be sure
+/// before it names a device, unlike
+/// [`CaptureBackend::stall_may_be_the_microphone`], which says "may"; a
+/// change to either goes to the other.
 ///
 /// [`CaptureBackend::stall_may_be_the_microphone`]: steno_audio::CaptureBackend::stall_may_be_the_microphone
 fn microphone_is_the_master(mode: CaptureMode) -> bool {
@@ -677,15 +547,13 @@ fn microphone_is_the_master(mode: CaptureMode) -> bool {
 struct Inner {
     status: RecorderStatus,
     active: Option<Active>,
-    /// Set by [`CaptureRecorder::stop_for_quit`]: the app is ending, so
-    /// no recording starts any more.
+    /// Set by [`CaptureRecorder::stop_for_quit`]: no recording starts any more.
     quitting: bool,
-    /// The [`Recorder::hold_starts`] holds alive: while there is one, a
-    /// start is refused with [`INSTALLING_UPDATE`].
+    /// The [`Recorder::hold_starts`] holds alive: while there is one, a start
+    /// is refused with [`INSTALLING_UPDATE`].
     start_holds: usize,
-    /// What the launch has to say ([`CaptureRecorder::note_adopted`]):
-    /// shown after the status's own warning whenever the recorder is idle,
-    /// until the user dismisses the messages. Rust only.
+    /// What the launch has to say, shown whenever the recorder is idle until
+    /// the user dismisses the messages.
     launch_note: Option<String>,
     /// The auto-stop after a call ends, for the recording in progress.
     calls: CallWatch,
@@ -693,23 +561,16 @@ struct Inner {
     tone_tests: ToneTests,
 }
 
-/// The system audio tests that play their tone now
-/// ([`CaptureRecorder::run_tone_test`]); the cancel that stops them is
-/// [`CaptureRecorder::tone_cancel`].
+/// The system audio tests that play their tone now.
 struct ToneTests {
     running: usize,
-    /// How long a start waits for the stopped tests to end; the
-    /// recorder's own tests set it.
+    /// How long a start waits for the stopped tests to end.
     patience: Duration,
 }
 
-/// How long a start waits for a system audio test it stopped to end,
-/// after which the recording starts all the same. The test looks at its
-/// cancel every 100 ms, never plays its tone again once the cancel is
-/// raised, and kills its player before it stops its tap
-/// (`steno_audio::capture::permission`), so the tone has ended before
-/// this bound matters: it covers a tap stuck inside the system, however
-/// long the tone.
+/// How long a start waits for a system audio test it stopped to end, after
+/// which the recording starts all the same. The tone has ended well before
+/// this; it covers a tap stuck inside the system.
 const TONE_TEST_PATIENCE: Duration = Duration::from_secs(5);
 
 /// [`CaptureRecorder`]'s [`StartHold`]: the last one dropped clears the
@@ -749,9 +610,8 @@ fn linear(db: f32) -> f64 {
     10f64.powf(f64::from(db) / 20.0).clamp(0.0, 1.0)
 }
 
-/// The input `stream` records in place of the chosen microphone (the
-/// fallback), as the warnings name it; `None` on the chosen one. Rust only:
-/// Swift fails the start when the chosen microphone is missing.
+/// The input `stream` records in place of the chosen microphone; `None` on
+/// the chosen one.
 fn fallback_input(stream: Option<&CaptureStream>) -> Option<String> {
     let input = stream?.input.as_ref().filter(|input| input.is_fallback)?;
     Some(
@@ -762,22 +622,20 @@ fn fallback_input(stream: Option<&CaptureStream>) -> Option<String> {
     )
 }
 
-/// The device `stream` records, as the warnings about missing audio name
-/// it: its microphone's name, else "the microphone".
+/// The device `stream` records, by its microphone's name, else "the
+/// microphone".
 fn device_name(stream: Option<&CaptureStream>) -> String {
     stream
         .and_then(|stream| stream.input.as_ref()?.name.clone())
         .unwrap_or_else(|| "the microphone".to_owned())
 }
 
-/// The share of wall time a device clock may run apart from the wall
-/// clock, which the note about missing audio leaves out: 0.1 %, twice the
-/// 500 ppm a cheap device drifts.
+/// The share of wall time a device clock may drift, which the missing-audio
+/// note leaves out: 0.1 %, twice a cheap device's 500 ppm.
 const CLOCK_DRIFT: f64 = 0.001;
 
-/// The warning while no audio arrives and the session keeps restarting
-/// the capture, naming the device when it is known to be the one that
-/// stopped delivering (`stalled`). Rust only.
+/// The warning while no audio arrives and the session keeps restarting,
+/// naming the device when it is known to have stalled.
 fn no_audio_warning(stalled: Option<&str>) -> String {
     match stalled {
         Some(device) => format!("No audio from {device}. Still trying."),
@@ -785,37 +643,22 @@ fn no_audio_warning(stalled: Option<&str>) -> String {
     }
 }
 
-/// The seconds a recording's master is missing, for
-/// [`missing_audio_note`], from its `statistics` and its `wall` seconds of
-/// wall time:
-///
-/// - the silence written in place of audio: the rebuilds' gaps
-///   (`gap_seconds`) and the cycles the capture's thread missed
-///   (`filled_seconds`, A18 of `.plans/2026-10-07-stable-promotion.md`);
-/// - and the audio the master does not hold, the larger of two readings of
-///   it: the jumps the capture's thread missed that were too long to fill
-///   (`unfilled_seconds`), and the wall time `duration` falls short of
-///   (a gap past `MAXIMUM_GAP`, a stop inside one) beyond what the device
-///   clocks drift from the wall clock ([`CLOCK_DRIFT`]; 300 to 500 ppm: 2
-///   to 4 s in two hours). The larger, since an unfilled jump is also wall
-///   time the master lacks, and the drift allowance alone would hide one
-///   of 3.6 s in an hour.
-///
-/// Rust only.
+/// The seconds a recording's master is missing, from its `statistics` and
+/// `wall` seconds of wall time: the silence written for gaps and missed
+/// cycles, plus the larger of the jumps too long to fill and the wall time
+/// `duration` falls short of beyond [`CLOCK_DRIFT`] (the larger, since an
+/// unfilled jump is also wall time the master lacks).
 fn missing_seconds(statistics: &CaptureStatistics, wall: f64) -> f64 {
     let short = (wall - statistics.duration - wall * CLOCK_DRIFT).max(0.0);
     statistics.gap_seconds + statistics.filled_seconds + statistics.unfilled_seconds.max(short)
 }
 
-/// The note after a recording whose master holds `missing` seconds of
-/// silence written for gaps, or of wall time it does not hold at all,
-/// when that is more than about a second; it names the cause only when
-/// the latest gap followed a stall of `stalled`. Rust only.
+/// The note after a recording missing more than about a second; it names
+/// the cause only when the latest gap followed a stall of `stalled`.
 fn missing_audio_note(missing: f64, stalled: Option<&str>) -> Option<String> {
     if missing.is_nan() || missing <= 1.0 {
         return None;
     }
-    // Rounded to the nearest second.
     let seconds = Duration::try_from_secs_f64(missing + 0.5).ok()?.as_secs();
     let missing = if seconds == 1 {
         "About 1 second of the recording is missing".to_owned()
@@ -834,8 +677,7 @@ fn fallback_warning(input: &str) -> String {
 }
 
 /// The note after a recording that was on the fallback `input` at some
-/// point, so a recording nobody watched still says which microphone it
-/// heard; joined after [`recording_warning`]'s lines.
+/// point; joined after [`recording_warning`]'s lines.
 fn fallback_note(input: &str) -> String {
     format!(
         "Steno recorded from {input} while the microphone chosen in Settings was not available."
@@ -845,10 +687,8 @@ fn fallback_note(input: &str) -> String {
 /// The host's change hook ([`CaptureRecorder::on_change`]).
 type Hook = Option<Arc<dyn Fn() + Send + Sync>>;
 
-/// The thread that forwards the levels, which arrive on `receiver` at
-/// 10 Hz, into `shared` (`Active::levels`) and calls `hook`, so the host
-/// republishes `recording`; it ends with the session. None when it could
-/// not be spawned, and the recording runs without levels.
+/// The thread that forwards the 10 Hz levels into `shared` and calls `hook`;
+/// it ends with the session. `None` when it could not be spawned.
 fn forward_levels(
     receiver: Receiver<AudioLevels>,
     shared: Arc<Mutex<Option<LaneLevels>>>,
@@ -870,24 +710,14 @@ fn forward_levels(
         .ok()
 }
 
-/// The thread that follows the session's notices and calls `hook`: a
-/// rebuild's start notes into `outage` the microphone it replaces when a
-/// stall of it started it, in a capture in `mode` that runs on the
-/// microphone's clock, and none otherwise; restarts that go on past
-/// `RESTART_ATTEMPTS` mark it there as still trying until audio arrives
-/// again (`Delivering`); the resume re-reads the microphone into
-/// `fallback`, since a rebuild may record another one; and the end of a
-/// recovery ([`Outage::recovering`]) resumes `recorder`'s auto-stop, with
-/// the outage's lock released, since the recorder takes its own lock and
-/// then the outage's. It reads the session with the outage's lock
-/// released, so nothing that waits for that lock waits on a rebuild's
-/// start; a device change begins the recovery before that read, so a
-/// countdown that runs out while it waits ends nothing.
-/// It holds `session` and `recorder` weakly, so dropping the session ends
-/// the notices and the thread, and the recorder, which holds the thread's
-/// handle, makes no cycle; a stop joins the thread without the recorder's
-/// lock. None when it could not be spawned, and the warnings stay as the
-/// start left them.
+/// The thread that follows the session's notices and calls `hook`: it notes
+/// a stalled microphone into `outage`, marks still-trying restarts, re-reads
+/// the microphone into `fallback` on a resume, and resumes `recorder`'s
+/// auto-stop at the end of a recovery. Lock order is the recorder's, then
+/// the outage's, so it reads the session and resumes with the outage's lock
+/// released. It holds `session` and `recorder` weakly, so dropping the
+/// session ends it and there is no cycle. `None` when it could not be
+/// spawned.
 fn follow_the_notices(
     notices: Receiver<CaptureNotice>,
     mode: CaptureMode,
@@ -909,16 +739,14 @@ fn follow_the_notices(
                 let Some(session) = session.upgrade() else {
                     return;
                 };
-                // A device change begins the recovery before the session is
-                // read: that read may wait behind a rebuild's start, and a
-                // countdown that runs out meanwhile ends nothing (S2).
+                // Begin the recovery before reading the session: that read
+                // may wait behind a rebuild, and a countdown that runs out
+                // meanwhile must end nothing.
                 if matches!(notice, CaptureNotice::DeviceChanged(_)) {
                     lock_outage().follow(&notice);
                 }
                 // Then the session, with no lock held: a rebuild's start
-                // holds the session's lock for seconds, and the status, the
-                // microphone's activity and the auto-stop's countdown take
-                // the outage's lock.
+                // holds the session's lock for seconds.
                 let stalled = match notice {
                     // The stream is still the replaced one until the resume.
                     CaptureNotice::DeviceChanged(reason) => Some(
@@ -980,38 +808,31 @@ pub struct CaptureRecorder {
     /// Where the known audio folders are listed ([`crate::audio_folders`]).
     support_directory: PathBuf,
     inner: Mutex<Inner>,
-    /// Set by [`Recorder::refuse_starts`] at a menu Quit: a start is
-    /// refused with [`QUITTING_REFUSAL`]. Outside `inner`, so the shell's
-    /// main thread sets it without waiting for the status lock; `start`
-    /// reads it under that lock. Apart from `quitting`, which the
-    /// shutdown sets and which also ends a stop's retries of its save.
+    /// Set by [`Recorder::refuse_starts`] at a menu Quit: a start is refused
+    /// with [`QUITTING_REFUSAL`]. Outside `inner`, so the shell's main thread
+    /// sets it without waiting for the status lock; `start` reads it under
+    /// that lock.
     starts_refused: AtomicBool,
-    /// The cancel a start, the menu's Quit and the shutdown raise to stop
-    /// the system audio tests running ([`Self::run_tone_test`]), shared by
-    /// every test running and fresh for the first test after none ran.
-    /// Outside `inner`, so [`Recorder::refuse_starts`] raises it on the
-    /// shell's main thread without the status lock: a leaf, held only to
-    /// replace, clone or raise the cancel, never while waiting, and taken
-    /// after `inner` when both are.
+    /// The cancel that stops the system audio tests running, shared by every
+    /// test running. Outside `inner`, so [`Recorder::refuse_starts`] raises
+    /// it without the status lock: a leaf, held only to replace, clone or
+    /// raise the cancel, never while waiting, and taken after `inner` when
+    /// both are.
     tone_cancel: Mutex<steno_audio::clock::Cancel>,
     /// Signalled with every status change, for [`Self::settle`].
     changes: Condvar,
     /// Called after every status change so the host republishes.
     changed: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// How recordings watch the disk; [`DiskWatch::system`] without the
-    /// database folder until the app names it, or a test's own
-    /// ([`Self::watch_disk_with`]).
+    /// How recordings watch the disk.
     disk: Mutex<DiskWatch>,
-    /// The clock the auto-stop's grace runs on; the system's, or a
-    /// test's ([`Self::count_down_on`]).
+    /// The clock the auto-stop's grace runs on.
     clock: Mutex<Arc<dyn steno_audio::Clock>>,
-    /// The calendar a start reads ([`Self::name_meetings_from`]; none
-    /// until the app names one).
+    /// The calendar a start reads; none until the app names one.
     calendar: CalendarLookups,
     /// This recorder, for the watcher threads.
     this: Weak<CaptureRecorder>,
-    /// Runs in [`Self::notify`] between the read of the state and the
-    /// live flag's change, where a test checks the lock is held.
+    /// Runs in [`Self::notify`] between the read of the state and the live
+    /// flag's change, where a test checks the lock is held.
     #[cfg(test)]
     before_live: Mutex<Hook>,
 }
@@ -1068,8 +889,8 @@ impl CaptureRecorder {
         })
     }
 
-    /// Names each recording after the event `calendar` has under way when
-    /// it starts, from the next start on (see the module doc).
+    /// Names each recording after the event `calendar` has under way when it
+    /// starts, from the next start on.
     pub fn name_meetings_from(&self, calendar: Arc<dyn Calendar>) {
         self.calendar.read_from(calendar);
     }
@@ -1111,19 +932,14 @@ impl CaptureRecorder {
     }
 
     /// Runs `test`, the system audio test, unless a recording is starting,
-    /// running or stopping, or the app quits (the menu's Quit refused the
-    /// starts, or the shutdown began): the test plays a tone, and a
-    /// recording would pick it up. `None` then, and `test` never runs. A
-    /// start while it runs raises the `Cancel` it gets and waits for it to
-    /// return before it opens a device ([`Self::stop_tone_tests`]); the
-    /// menu's Quit and the shutdown raise it without waiting. Rust only:
-    /// Swift ran its test whatever the recorder did.
+    /// running or stopping, or the app quits: the test plays a tone a
+    /// recording would pick up. `None` then. A start while it runs raises
+    /// its `Cancel` and waits for it to return ([`Self::stop_tone_tests`]).
     pub(crate) fn run_tone_test<T>(
         &self,
         test: impl FnOnce(&steno_audio::clock::Cancel) -> T,
     ) -> Option<T> {
-        /// Counts the test out, also by a panic, and wakes a start that
-        /// waits for it.
+        /// Counts the test out, also by a panic, and wakes a waiting start.
         struct Ended<'a>(&'a CaptureRecorder);
         impl Drop for Ended<'_> {
             fn drop(&mut self) {
@@ -1140,9 +956,9 @@ impl CaptureRecorder {
                 );
                 return None;
             }
-            // Read under the cancel's lock, which `refuse_starts` takes
-            // after it set the flag: either the flag is seen here, or the
-            // cancel handed out is raised there.
+            // Under the cancel's lock, which `refuse_starts` takes after it
+            // set the flag: either the flag is seen here, or the cancel
+            // handed out is raised there.
             let mut cancel = self.tone_cancel();
             if self.starts_refused.load(Ordering::Acquire) {
                 tracing::debug!("the system audio test is refused: the app quits");
@@ -1158,10 +974,8 @@ impl CaptureRecorder {
         Some(test(&cancel))
     }
 
-    /// Stops the system audio tests a start found running and waits, for
-    /// up to [`TONE_TEST_PATIENCE`], until they returned, so no tone plays
-    /// into the recording. The recorder is already `Starting`, so no new
-    /// test begins meanwhile.
+    /// Stops the system audio tests a start found running and waits up to
+    /// [`TONE_TEST_PATIENCE`] for them, so no tone plays into the recording.
     fn stop_tone_tests(&self) {
         let inner = self.inner();
         if inner.tone_tests.running == 0 {
@@ -1178,12 +992,10 @@ impl CaptureRecorder {
         }
     }
 
-    /// Another app's microphone activity while Steno records ([`crate::auto_stop`]):
-    /// an `Opened` while the recording starts or runs is a call, and stops
-    /// a countdown; a `Released` while a call records arms the countdown,
-    /// once such a call was seen, not shown while the capture recovers
-    /// (then [`Self::resume_auto_stop`] replaces it). Ignored while idle or
-    /// stopping. Swift: `RecordingController.microphoneActivity`.
+    /// Another app's microphone activity while Steno records
+    /// ([`crate::auto_stop`]): an `Opened` is a call and stops a countdown;
+    /// a `Released` during a call arms the countdown. Ignored while idle or
+    /// stopping.
     pub fn microphone_activity(&self, activity: MicrophoneActivity) {
         let mut inner = self.inner();
         let state = inner.status.state;
@@ -1204,26 +1016,21 @@ impl CaptureRecorder {
         self.notify();
     }
 
-    /// The capture is back after a device change or a restart: while a
-    /// call records whose app let go of the microphone and has not opened
-    /// it since, a fresh countdown takes the place of the one the release
-    /// armed ([`crate::auto_stop`]), since the detector does not report
-    /// that release again; one that took its place already stays. Takes the
-    /// recorder's lock only to arm, spawns the countdown's thread and
-    /// waits for nothing, so the capture's notice thread may call it: a
-    /// stop joins that thread without the lock. An armed countdown is
-    /// reported through the change hook ([`Self::on_change`]). Call it
-    /// holding no lock the change hook takes, the capture's outage lock
-    /// among them: the hook runs on the calling thread and reads the
-    /// status.
+    /// The capture is back after a device change or a restart: during a call
+    /// whose app let go of the microphone, a fresh countdown replaces the
+    /// one the release armed, since the detector does not report that
+    /// release again. Takes the recorder's lock only to arm and waits for
+    /// nothing, so the notice thread may call it. Call it holding no lock
+    /// the change hook takes (the outage lock among them): the hook runs on
+    /// the calling thread.
     pub fn resume_auto_stop(&self) {
         if self.arm_auto_stop(&mut self.inner(), CallWatch::resume) {
             self.notify();
         }
     }
 
-    /// While a call records, arms the auto-stop with `arm` at the clock's
-    /// now and spawns its countdown; `true` when it armed.
+    /// During a call, arms the auto-stop with `arm` and spawns its
+    /// countdown; `true` when it armed.
     fn arm_auto_stop(
         &self,
         inner: &mut Inner,
@@ -1259,11 +1066,8 @@ impl CaptureRecorder {
         true
     }
 
-    /// Whether the capture of the recording in progress is recovering
-    /// ([`Outage::recovering`]), so the auto-stop waits: the countdown the
-    /// release armed is not shown, and running out it is replaced by a
-    /// fresh one ([`CallWatch::postpone`]). Takes the outage's lock under
-    /// the recorder's, as the status does. Rust only.
+    /// Whether the capture of the recording in progress is recovering, so
+    /// the auto-stop waits. Takes the outage's lock under the recorder's.
     fn capture_recovering(inner: &Inner) -> bool {
         inner.active.as_ref().is_some_and(|active| {
             active
@@ -1274,12 +1078,10 @@ impl CaptureRecorder {
         })
     }
 
-    /// The auto-stop's countdown `number` ran out: the recording stops and
-    /// is saved as Stop does, with the call's end reason, unless the
-    /// countdown was disarmed meanwhile, the recording is already
-    /// stopping, or it is the countdown the release armed and the capture
-    /// is recovering: then a fresh one takes its place, shown, and that
-    /// one ends the call whatever the capture does.
+    /// The auto-stop's countdown `number` ran out: the recording stops as
+    /// Stop does, with the call's end reason, unless it was disarmed, the
+    /// recording is stopping, or the capture is recovering (then a fresh
+    /// countdown takes its place).
     fn call_ended(&self, number: u64) {
         let (active, reason) = {
             let mut inner = self.inner();
@@ -1305,12 +1107,8 @@ impl CaptureRecorder {
     }
 
     /// Tells the user under the Record control that the launch adopted
-    /// `count` recordings it found in the audio folder with no meeting
-    /// ([`crate::recovery::adopt_orphans`]): "Recovered a recording that
-    /// was missing from your list. It is being processed.", or the count.
-    /// Shown while the recorder is idle until the user dismisses the
-    /// messages; a recording started meanwhile hides it until it stops.
-    /// Rust only.
+    /// `count` recordings with no meeting. Shown while idle until the user
+    /// dismisses the messages.
     pub(crate) fn note_adopted(&self, count: usize) {
         if count == 0 {
             return;
@@ -1343,11 +1141,10 @@ impl CaptureRecorder {
     }
 
     /// Every change of the status ends here. The live flag is read and set
-    /// under the recorder's lock, so two notifies never apply out of
-    /// order: the pipelines learn whether a recording is under way (live
-    /// from `Starting` to `Idle`), so no job runs `CoreML` beside one
-    /// ([`steno_pipeline::live_recording`]). The flag's send neither
-    /// blocks nor takes the recorder's lock.
+    /// under the recorder's lock, so two notifies never apply out of order:
+    /// the pipelines learn whether a recording is under way, so no job runs
+    /// `CoreML` beside one. The flag's send neither blocks nor takes the
+    /// recorder's lock.
     fn notify(&self) {
         {
             let inner = self.inner();
@@ -1369,9 +1166,8 @@ impl CaptureRecorder {
         }
     }
 
-    /// Waits until no start or stop is in progress and hands back the
-    /// lock, the recorder `Idle` or `Recording` under it. Swift:
-    /// `RecordingController.awaitSettled`.
+    /// Waits until no start or stop is in progress and hands back the lock,
+    /// the recorder `Idle` or `Recording` under it.
     fn settle(&self) -> MutexGuard<'_, Inner> {
         self.changes
             .wait_while(self.inner(), |inner| {
@@ -1400,27 +1196,13 @@ impl CaptureRecorder {
     }
 
     /// Loads the models processing needs in the background while the
-    /// recording runs, so processing does not wait for the cold load; only
-    /// when the models of the current pipeline's speech engine and the
-    /// diarizer's are installed, so it never starts a download. The engine
-    /// is the one the pipeline was built with ([`BuiltEngine`]), not the id
-    /// stored now (Rust only: Swift asked about the stored id): after a
-    /// failed reload, or an engine the Swift app saved meanwhile, the two
-    /// differ. An engine in this process (`CoreML` on
-    /// the Mac) is loaded with the diarizer, as Swift did. Where the speech
-    /// sidecar runs the engine ([`SpeechRuntime`]), only the diarizer's
-    /// warm-up runs: the child would hold its 2.2 GB through the whole
-    /// recording, outside any job's claim, so the job starts it instead.
-    /// The diarizer's warm-up checks its models and starts no child: its
-    /// models load into the sidecar's child when it diarizes. Swift:
-    /// `AppEnvironment.warmUpPipelineIfModelsInstalled`, called when a
-    /// recording starts. It runs only there, never at launch or on a
-    /// capture restart. The in-process warm-up is marked on disk while it
-    /// runs ([`WarmUpMark`]): one that took the app down, an abort that no
-    /// `@catch` stops, turns the warm-up off from the next launch until a
-    /// meeting's processing loads the models, so it cannot end every
-    /// recording at the same point (A15 of
-    /// `.plans/2026-10-07-stable-promotion.md`).
+    /// recording runs, only when the models of the pipeline's built engine
+    /// ([`BuiltEngine`]) and the diarizer are installed, so it never
+    /// downloads. Where the speech sidecar runs the engine
+    /// ([`SpeechRuntime`]), only the diarizer's check runs: the child would
+    /// hold its 2.2 GB through the whole recording. The in-process warm-up
+    /// is marked on disk while it runs ([`WarmUpMark`]), so one that took
+    /// the app down turns itself off until processing loads the models.
     ///
     /// [`BuiltEngine`]: crate::pipeline::BuiltEngine
     /// [`WarmUpMark`]: steno_pipeline::WarmUpMark
@@ -1440,8 +1222,7 @@ impl CaptureRecorder {
             };
             // One line, and the recording goes on: processing loads the
             // models again and fails its meeting retryably if they still
-            // do not load. A `CoreML` exception is caught at the model
-            // call and arrives here as its name and reason.
+            // do not load.
             if let Err(failure) = warmed {
                 tracing::warn!(%failure, "the warm-up failed; processing loads the models");
             }
@@ -1449,10 +1230,8 @@ impl CaptureRecorder {
     }
 
     /// Notes `folder` as the one meeting `meeting_id` is recorded into,
-    /// before its row is written, and among the known folders
-    /// ([`crate::audio_folders`]). A failure is logged and the recording
-    /// goes on: recovery still looks in the settings' folder and every
-    /// asset's. Rust only: Swift had no recovery.
+    /// before its row is written ([`crate::audio_folders`]). A failure is
+    /// logged and the recording goes on.
     fn record_audio_folder(&self, meeting_id: Uuid, folder: &Path) {
         self.remember_audio_folder(folder);
         if let Err(error) =
@@ -1463,9 +1242,8 @@ impl CaptureRecorder {
         }
     }
 
-    /// The capture configuration of a recording in `mode`, from the
-    /// settings, and its recordings folder; the error says why not in
-    /// plain words, for after [`COULD_NOT_START`].
+    /// The capture configuration of a recording in `mode` and its recordings
+    /// folder; the error says why not, for after [`COULD_NOT_START`].
     fn configuration(&self, mode: CaptureMode) -> Result<(CaptureConfiguration, PathBuf), String> {
         let settings = self
             .store
@@ -1489,8 +1267,8 @@ impl CaptureRecorder {
         Ok((configuration, audio_folder))
     }
 
-    /// Starts the session and the meeting; the error says why not in plain
-    /// words, for after [`COULD_NOT_START`].
+    /// Starts the session and the meeting; the error says why not, for
+    /// after [`COULD_NOT_START`].
     fn start_inner(&self, mode: CaptureMode) -> Result<(), String> {
         // First, so the calendar answers while the devices open.
         let lookup = self.calendar.start(Utc::now());
@@ -1507,16 +1285,13 @@ impl CaptureRecorder {
             .map_err(|_| refused("no session", DEVICES_DID_NOT_OPEN))?;
         let session = Arc::new(session);
         // Before the row: a kill from here on leaves a row whose master
-        // recovery must find in this folder, whatever the settings name by
-        // then.
+        // recovery must find in this folder.
         let meeting_id = Uuid::new_v4();
         self.record_audio_folder(meeting_id, &audio_folder);
         let started_at = Utc::now();
         let intake = self.intake();
         if !self.begin_meeting(&intake, meeting_id, source(mode), started_at, lookup) {
-            // Nothing was recorded. An entry that stays is forgotten by a
-            // later launch, once the failed row is durable or the folder
-            // provably holds no master.
+            // Nothing was recorded; a later launch forgets the entry.
             let _ = self.forget_recording(meeting_id);
             return Err(refused("meeting", "Steno could not create the meeting."));
         }
@@ -1585,8 +1360,7 @@ impl CaptureRecorder {
             });
         }
         begun.disarm();
-        // Not joined: it may be the thread that finishes the recording,
-        // and it ends on its own once the session is gone.
+        // Not joined: it may be the thread that finishes the recording.
         let this = self.this.clone();
         let spawned = std::thread::Builder::new()
             .name("steno-recording-watch".into())
@@ -1597,14 +1371,11 @@ impl CaptureRecorder {
         Ok(())
     }
 
-    /// Writes the `recording` row of `meeting_id` through `intake`, named
-    /// after the event the calendar's `lookup` found when it has already
-    /// answered; a lookup still reading names the row once it answers
-    /// ([`Self::name_when_answered`]). `false` when the row could not be
-    /// written. Never waits for the calendar, not even briefly: a start
-    /// must not depend on how fast it answers. A wait added here would
-    /// have to run on the recorder's clock (`count_down_on` in the tests) so
-    /// that a test with a frozen clock catches it.
+    /// Writes the `recording` row of `meeting_id`, named after the event the
+    /// calendar's `lookup` found if it has already answered, else once it
+    /// answers ([`Self::name_when_answered`]). `false` when the row could
+    /// not be written. Never waits for the calendar; a wait added here would
+    /// have to run on the recorder's clock so a frozen-clock test catches it.
     fn begin_meeting(
         &self,
         intake: &LocalRecordingIntake,
@@ -1636,12 +1407,9 @@ impl CaptureRecorder {
         true
     }
 
-    /// Names the recording `meeting_id`, whose row was written before the
-    /// calendar answered, after the event `pending` finds, if any, under
-    /// the store's rule (`Store::name_recording_after_event`). `meeting_id`
-    /// is the start's own, captured here, never the recorder's current
-    /// meeting, so a late answer never reaches the next recording. An
-    /// answer the rule drops is logged at debug, without the event.
+    /// Names the recording `meeting_id` after the event `pending` finds,
+    /// under the store's rule. `meeting_id` is the start's own, so a late
+    /// answer never reaches the next recording.
     fn name_when_answered(&self, pending: Lookup, meeting_id: Uuid) {
         let (store, pipeline, zone) = (self.store.clone(), self.pipeline.clone(), self.zone);
         pending.then(move |event| {
@@ -1670,12 +1438,10 @@ impl CaptureRecorder {
         });
     }
 
-    /// The watcher of the recording of `meeting_id` (see the module doc),
-    /// until its session leaves `Recording` or is gone. A `Failed` the
-    /// session reached on its own finishes the recording here. Every
-    /// `disk.interval` so does a write that failed without one (the session
-    /// could not spawn its thread to end it), and the free space for
-    /// `folder` is read against `rate` bytes a second.
+    /// The watcher of the recording of `meeting_id`, until its session
+    /// leaves `Recording` or is gone: it finishes a session that failed on
+    /// its own or had a write fail, and reads the free space for `folder`
+    /// against `rate` bytes a second every `disk.interval`.
     fn watch(
         this: &Weak<Self>,
         meeting_id: Uuid,
@@ -1729,8 +1495,7 @@ impl CaptureRecorder {
         }
     }
 
-    /// Whether the session of `meeting_id`, still the one recording, had a
-    /// write fail ([`CaptureSession::write_failed`]).
+    /// Whether the session of `meeting_id`, still recording, had a write fail.
     fn write_failed(&self, meeting_id: Uuid) -> bool {
         let session = self
             .inner()
@@ -1742,9 +1507,8 @@ impl CaptureRecorder {
         session.is_some_and(|session| session.write_failed())
     }
 
-    /// Stops the recording of `meeting_id` with `reason` and `error` for the
-    /// status, when it is still the one in progress; a Stop or a quit that
-    /// came first wins.
+    /// Stops the recording of `meeting_id` with `reason` and `error`, when it
+    /// is still the one in progress; a Stop or a quit that came first wins.
     fn stop_recording(&self, meeting_id: Uuid, reason: RecordingEndReason, error: Option<String>) {
         let active = {
             let mut inner = self.inner();
@@ -1762,9 +1526,8 @@ impl CaptureRecorder {
         }
     }
 
-    /// Notes the disk watch's reading of `minutes` left while the recording
-    /// of `meeting_id` runs, `None` with room ([`Active::disk_warning`]);
-    /// not once it is stopping, whose outcome sets the messages.
+    /// Notes the disk watch's reading of `minutes` left, `None` with room;
+    /// not once the recording is stopping.
     fn warn(&self, meeting_id: Uuid, minutes: Option<u64>) {
         let mut inner = self.inner();
         if inner.status.state != RecordingState::Recording {
@@ -1786,17 +1549,13 @@ impl CaptureRecorder {
         self.notify();
     }
 
-    /// Quitting: once a start or a stop in progress has settled, a
-    /// recording is stopped with the `quit` end reason and saved (the
-    /// asset written and the meeting enqueued) before this returns; a
-    /// stop already under way is waited for instead, so its reason stands,
-    /// and neither tries a busy commit again (Rust only, as the retry is).
-    /// No recording starts once this is called. Swift: `awaitSettled()` and
-    /// then `stop(reason: .quit)` in `AppController.shutdown`.
+    /// Quitting: once a start or stop in progress has settled, a recording
+    /// is stopped with the `quit` end reason and saved before this returns;
+    /// a stop already under way is waited for instead, and neither retries
+    /// a busy commit. No recording starts once this is called.
     pub fn stop_for_quit(&self) {
-        // Before the wait, so a stop under way tries its commit no more
-        // ([`Self::finish_stop`]) and nothing starts meanwhile. A system
-        // audio test running is stopped, not waited for.
+        // Before the wait, so a stop under way retries its commit no more
+        // and nothing starts meanwhile.
         {
             let mut inner = self.inner();
             inner.quitting = true;
@@ -1808,9 +1567,8 @@ impl CaptureRecorder {
         }
     }
 
-    /// Takes the session of the recording in progress and marks the
-    /// recorder `Stopping`, the auto-stop disarmed; none when nothing
-    /// records.
+    /// Takes the session of the recording in progress and marks the recorder
+    /// `Stopping`, the auto-stop disarmed; `None` when nothing records.
     fn begin_stop(inner: &mut Inner) -> Option<Active> {
         let active = inner.active.take()?;
         inner.calls.reset();
@@ -1819,24 +1577,16 @@ impl CaptureRecorder {
     }
 
     /// Stops the session `begin_stop` took and saves the recording, then
-    /// leaves the recorder `Idle` with the outcome's message; the host
-    /// hears of `Stopping` and of `Idle`. `error` says why the recorder
-    /// stopped on its own; without it, a failure the result carries (a
-    /// device that stayed lost, a write or a close that failed) does
-    /// ([`ended_with`]). A panic on the way leaves the recorder `Idle`
-    /// too ([`Unwinding`]), so the next recording can start and a quit
-    /// does not wait for good. One before or inside the save leaves the
-    /// meeting's row `recording` over closed files (the session's drop
-    /// closes them), which the next launch recovers ([`crate::recovery`]).
-    /// The folder recorded for the meeting is never forgotten here
-    /// ([`crate::audio_folders`]): the next launch does that once the row
-    /// is durable.
+    /// leaves the recorder `Idle` with the outcome's message. `error` says
+    /// why the recorder stopped on its own; else a failure the result
+    /// carries does ([`ended_with`]). A panic leaves the recorder `Idle` too
+    /// ([`Unwinding`]) and the row `recording` for the next launch. The
+    /// recorded folder is never forgotten here.
     fn finish_stop(&self, active: Active, reason: RecordingEndReason, error: Option<String>) {
         let unwinding = Unwinding::of(self, RecordingState::Stopping, SAVE_PANICKED);
         self.notify();
         // Once the app quits, a busy commit is tried no more, so the stop
-        // ends within the exit's patience; a busy database leaves the
-        // meeting `recording` for the next launch.
+        // ends within the exit's patience.
         let intake = {
             let this = self.this.clone();
             self.intake().retrying_while(move || {
@@ -1882,12 +1632,9 @@ impl CaptureRecorder {
                 .recover_failed_stop(&intake, &active, &failure, &reason)
                 .map(|()| (Some(RECOVERED_AFTER_A_FAILURE.to_owned()), 0.0, error)),
         };
-        // The folder recorded for the meeting stays whatever the outcome:
-        // a saved meeting's commit is not durable yet (`synchronous =
-        // NORMAL`), so a power loss can still take its row, and a meeting
-        // deleted meanwhile has no row; the next launch forgets the entry
-        // of a meeting with a row once a durable checkpoint has run, and
-        // adopts the master of one without ([`crate::recovery`]).
+        // The recorded folder stays whatever the outcome: a saved commit is
+        // not durable yet (`synchronous = NORMAL`), and the next launch
+        // forgets the entry once a durable checkpoint has run.
         drop(active.session);
         for thread in [active.level_thread, active.notice_thread]
             .into_iter()
@@ -1931,14 +1678,11 @@ impl CaptureRecorder {
         self.notify();
     }
 
-    /// A stop whose session failed and took the asset with it
-    /// ([`CaptureSession::stop`]): what the writer wrote may still be on
-    /// disk, and is recovered as an interrupted recording is at launch.
-    /// The session created the master when it started, so one that cannot
-    /// be found now, or a folder that cannot be read, keeps the meeting for
-    /// the next launch: a volume unmounted under its mount point leaves an
-    /// empty folder there. Else the meeting fails. Rust only: Swift's
-    /// `stop` failed the meeting.
+    /// A stop whose session failed and took the asset with it: the master
+    /// is recovered as an interrupted recording is at launch. A master that
+    /// cannot be found now, or an unreadable folder, keeps the meeting for
+    /// the next launch (an unmounted volume leaves an empty folder); else
+    /// the meeting fails.
     fn recover_failed_stop(
         &self,
         intake: &LocalRecordingIntake,
@@ -1990,10 +1734,8 @@ impl CaptureRecorder {
 
 /// Held through [`CaptureRecorder::finish_stop`] in `Stopping` and through
 /// a start in `Starting`: if either unwinds, the drop leaves the recorder
-/// `Idle` with `error` instead of in that state for good, which `settle`
-/// (a quit) would wait on forever and which no start or Stop leaves; a
-/// state the step had already left is left alone. Forgotten once the
-/// outcome is in the status.
+/// `Idle` with `error`, which `settle` would otherwise wait on forever; a
+/// state the step had already left is left alone.
 struct Unwinding<'a> {
     recorder: &'a CaptureRecorder,
     holds: RecordingState,
@@ -2026,12 +1768,9 @@ impl Drop for Unwinding<'_> {
 }
 
 /// Held through a start from the moment its meeting is begun until it
-/// records: if the start unwinds (a panic in the session's start, or after
-/// it), the drop stops the session, which closes the files its writer
-/// made, removes the meeting's folder, as the session does when its
-/// backend does not start, marks the meeting failed and forgets its
-/// recorded folder, so neither a `recording` row nor a folder of empty
-/// files is left of a start the user was told did not happen. Rust only.
+/// records: if the start unwinds, the drop stops the session, removes the
+/// meeting's folder, fails the meeting and forgets its recorded folder, so
+/// nothing is left of a start the user was told did not happen.
 struct BegunMeeting<'a> {
     recorder: &'a CaptureRecorder,
     meeting_id: Uuid,
@@ -2051,8 +1790,7 @@ impl Drop for BegunMeeting<'_> {
         let Some(session) = self.session.take() else {
             return;
         };
-        // An error here is the session's state after its own guard. The
-        // stop comes first: it closes the files, and Windows does not
+        // The stop comes first: it closes the files, and Windows does not
         // delete a folder whose files are open.
         let _ = session.stop();
         let _ = std::fs::remove_dir_all(&self.folder);
@@ -2100,8 +1838,7 @@ impl Recorder for CaptureRecorder {
                     .still_trying
                     .then(|| no_audio_warning(outage.stalled.as_deref()))
             };
-            // Every warning that applies, the disk's first; the status's
-            // own is `None` while recording.
+            // Every warning that applies, the disk's first.
             status.warning = [active.disk_warning.shown(), no_audio, fallback]
                 .into_iter()
                 .flatten()
@@ -2142,8 +1879,7 @@ impl Recorder for CaptureRecorder {
             inner.status.warning = None;
             inner.calls.begin(call_app);
         }
-        // A meeting a panicking start had begun is failed on the way
-        // ([`BegunMeeting`]).
+        // A meeting a panicking start had begun is failed on the way.
         let unwinding = Unwinding::of(self, RecordingState::Starting, START_PANICKED);
         self.notify();
         self.stop_tone_tests();
@@ -2198,8 +1934,6 @@ impl Recorder for CaptureRecorder {
         inner.status.warning = None;
         inner.status.error = None;
         inner.launch_note = None;
-        // The fallback's warning and note until the next rebuild says
-        // otherwise, the disk's until less room is left ([`DiskWarning`]).
         if let Some(active) = inner.active.as_mut() {
             *active
                 .fallback
@@ -2224,16 +1958,14 @@ impl Recorder for CaptureRecorder {
 
     fn remember_audio_folder(&self, folder: &Path) {
         if let Err(error) = crate::audio_folders::remember(&self.support_directory, folder) {
-            // The folder can name the user; recovery still looks in the
-            // settings' folder and in every asset's.
+            // The folder can name the user.
             tracing::warn!("an audio folder could not be added to the known folders");
             tracing::debug!(%error, "known audio folders not written");
         }
     }
 
-    /// The folder recorded for the meeting ([`crate::audio_folders`]), the
-    /// settings' one and the known ones (`recovery::meeting_folders`); a
-    /// master in one modified within the launch's
+    /// The folders the meeting may be in (`recovery::meeting_folders`); a
+    /// master modified within
     /// [`LiveRecordingCheck::fresh_within`](crate::recovery::LiveRecordingCheck::fresh_within)
     /// counts as still written.
     fn left_recording(&self, meeting_id: Uuid) -> LeftRecording {
@@ -2249,9 +1981,8 @@ impl Recorder for CaptureRecorder {
         }
     }
 
-    /// A write that fails after its rename (a folder that does not flush
-    /// on Windows) has forgotten the entry already: on any failure the
-    /// store is checkpointed durably, so the row no longer needs it.
+    /// On any failure the store is checkpointed durably, so the row no
+    /// longer needs the entry.
     fn forget_recording(&self, meeting_id: Uuid) -> std::io::Result<Option<PathBuf>> {
         crate::audio_folders::forget(&self.support_directory, &[meeting_id])
             .map(|mut forgotten| forgotten.remove(&meeting_id))
@@ -2269,7 +2000,7 @@ impl Recorder for CaptureRecorder {
     }
 
     /// When the entry cannot be written again, a durable checkpoint makes
-    /// the row survive a power loss, so the row no longer needs it.
+    /// the row survive a power loss.
     fn restore_recording(&self, meeting_id: Uuid, folder: &Path) {
         let Err(error) = crate::audio_folders::record(&self.support_directory, meeting_id, folder)
         else {
@@ -2293,19 +2024,11 @@ impl Recorder for CaptureRecorder {
     }
 }
 
-/// What a saved recording warns about, every line that applies joined
-/// into one: frames that never reached the files (in seconds of the lane
-/// that lost most, rounded to the nearest second, so from half a second
-/// on: a lone 10 ms drift slip is not worth a warning, and the log line
-/// keeps every count), and a call whose system audio stayed silent. The
-/// dropped frames name no cause, since the count holds several: the relay
-/// full behind a slow disk, ring overruns while the computer was too busy,
-/// frames a stop left undrained and, on Windows, the slips that absorb
-/// clock drift. A device that disappeared is the status's error instead
-/// ([`ended_with`]). Swift:
-/// `RecordingController.stop`, where a device loss replaced the silent-lane
-/// line as a warning and that line reads "The system audio lane stayed
-/// silent"; the joining and the dropped frames are Rust only.
+/// What a saved recording warns about, every line joined into one: frames
+/// that never reached the files (in seconds of the lane that lost most,
+/// rounded, so from half a second on), and a call whose system audio
+/// stayed silent. The dropped frames name no cause, since the count holds
+/// several. A lost device is the status's error instead ([`ended_with`]).
 fn recording_warning(mode: CaptureMode, statistics: &CaptureStatistics) -> Option<String> {
     let mut lines = Vec::new();
     let dropped = statistics
@@ -2331,8 +2054,7 @@ fn recording_warning(mode: CaptureMode, statistics: &CaptureStatistics) -> Optio
     (!lines.is_empty()).then(|| lines.join(" "))
 }
 
-/// A `warn` line when a recording lost frames, with the meeting's id and
-/// the count per lane (counts only, the log's privacy rule). Rust only.
+/// A `warn` line when a recording lost frames, with counts only.
 fn log_dropped_frames(meeting_id: Uuid, statistics: &CaptureStatistics) {
     if statistics.dropped_frames.values().any(|frames| *frames > 0) {
         tracing::warn!(
@@ -2343,9 +2065,8 @@ fn log_dropped_frames(meeting_id: Uuid, statistics: &CaptureStatistics) {
     }
 }
 
-/// The attendees of `event` that become the meeting's `them`
-/// participants: everyone but the calendar's owner, who is the recording's
-/// "me". Swift: the filter in `RecordingController.start`.
+/// The attendees of `event` that become the meeting's `them`: everyone but
+/// the calendar's owner.
 fn attendees_of(event: &steno_core::CalendarEvent) -> Vec<Attendee> {
     event
         .attendees
@@ -2359,8 +2080,7 @@ fn attendees_of(event: &steno_core::CalendarEvent) -> Vec<Attendee> {
 }
 
 /// The required permissions `permissions` reports denied, among the ones
-/// `platform` has: off the Mac, system audio has no switch of its own
-/// (Windows' is the microphone's), so it is never reported denied there.
+/// `platform` has: off the Mac, system audio has no switch of its own.
 fn denied_permissions(
     platform: steno_bridge::Platform,
     permissions: &dyn Permissions,
@@ -2394,11 +2114,9 @@ mod tests {
 
     struct Harness {
         store: Arc<Store>,
-        /// The bytes the disk watch reads as free; plenty unless a test
-        /// lowers it.
+        /// The bytes the disk watch reads as free.
         free: Arc<AtomicU64>,
-        /// The capture sessions the recorder builds; the synthetic tone
-        /// unless a test swaps in its own.
+        /// The capture sessions the recorder builds.
         capture: Arc<Mutex<MakeCaptureSession>>,
         recorder: Arc<CaptureRecorder>,
         engine: Arc<FakeSpeechEngine>,
@@ -2406,14 +2124,14 @@ mod tests {
         /// While set, a reload fails as a build error would and the
         /// current pipeline stays.
         failing_reloads: Arc<AtomicBool>,
-        /// Last, so a recorder dropped mid-recording closes its files
-        /// before the folder goes.
+        /// Last, so a recorder dropped mid-recording closes its files before
+        /// the folder goes.
         dir: tempfile::TempDir,
     }
 
     impl Drop for Harness {
-        /// Waits for the pipeline's runs, so a test that saved a recording
-        /// leaves no file of its processing behind (a speaker clip).
+        /// Waits for the pipeline's runs, so no processing file is left
+        /// behind.
         fn drop(&mut self) {
             let pipeline = self.recorder.pipeline.current();
             tokio::task::block_in_place(|| {
@@ -2429,8 +2147,8 @@ mod tests {
         move |engine_id| crate::speech::engine_runtime(engine_id, &speech_settings)
     }
 
-    /// The Mac's default rule, on every platform: `parakeet-v3` in this
-    /// process, every other id in the speech sidecar.
+    /// The Mac's default rule on every platform: `parakeet-v3` in process,
+    /// every other id in the sidecar.
     fn mac_rule(engine_id: &str) -> SpeechRuntime {
         if engine_id == "parakeet-v3" {
             SpeechRuntime::CoreMlInProcess
@@ -2457,10 +2175,8 @@ mod tests {
         )
     }
 
-    /// A recorder over `models`, the settings naming `engine_id`. Each
-    /// build, the first and every reload, records the engine id stored
-    /// at that moment and the runtime `runtime_of` gives it, as
-    /// `app::pipeline_dependencies` does.
+    /// A recorder over `models`, the settings naming `engine_id`. Each build
+    /// records the stored engine id and the runtime `runtime_of` gives it.
     fn harness_over(
         models: Arc<dyn SpeechModels>,
         engine_id: &str,
@@ -2556,8 +2272,7 @@ mod tests {
         }
     }
 
-    /// A disk watch over `free_space`, read every 20 ms, on the recordings
-    /// folder's volume alone.
+    /// A disk watch over `free_space`, read every 20 ms.
     fn disk_with(
         free_space: impl Fn(&Path) -> std::io::Result<Volume> + Send + Sync + 'static,
     ) -> DiskWatch {
@@ -2576,8 +2291,8 @@ mod tests {
         }
     }
 
-    /// The real writer with `before` run ahead of every write; an error
-    /// from it fails that write.
+    /// The real writer with `before` run ahead of every write; its error
+    /// fails that write.
     struct BeforeWrite<F> {
         inner: RecordingWriter,
         before: F,
@@ -2599,9 +2314,7 @@ mod tests {
         }
     }
 
-    /// A capture session over `backend` and a relay of `headroom` frames
-    /// whose writers are [`BeforeWrite`]s, each with a `before` from
-    /// `make_before`.
+    /// A capture session over `backend` whose writers are [`BeforeWrite`]s.
     fn session_with_writes<F>(
         configuration: CaptureConfiguration,
         backend: Arc<dyn steno_audio::CaptureBackend>,
@@ -2627,9 +2340,8 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
-    /// Capture sessions over the synthetic tone as `device` changes it,
-    /// whose writer fails every write after the first `writes`, as a disk
-    /// that fills does.
+    /// Capture sessions whose writer fails every write after the first
+    /// `writes`, as a disk that fills does.
     fn failing_capture(
         writes: Option<usize>,
         device: fn(SyntheticOptions) -> SyntheticOptions,
@@ -2672,15 +2384,14 @@ mod tests {
         }
     }
 
-    /// Starts an in-person recording on a thread of its own, failing the
-    /// test as hung after [`HANG_GUARD`], and checks that it records.
+    /// Starts an in-person recording on its own thread, failing as hung
+    /// after [`HANG_GUARD`], and checks that it records.
     fn start(recorder: &Arc<CaptureRecorder>) {
         try_start(recorder, CaptureMode::InPerson);
         assert_eq!(recorder.status().state, RecordingState::Recording);
     }
 
-    /// Starts a `mode` recording on a thread of its own, which may refuse
-    /// it, failing the test as hung after [`HANG_GUARD`].
+    /// Starts a `mode` recording on its own thread, which may refuse it.
     fn try_start(recorder: &Arc<CaptureRecorder>, mode: CaptureMode) {
         let starting = recorder.clone();
         on_own_thread(HANG_GUARD, "the start returned", move || {
@@ -2688,15 +2399,13 @@ mod tests {
         });
     }
 
-    /// Stops the recording on a thread of its own and returns once the
-    /// stop saved it, failing the test as hung after [`HANG_GUARD`].
+    /// Stops the recording on its own thread and returns once it is saved.
     fn stop(recorder: &Arc<CaptureRecorder>) {
         let stopping = recorder.clone();
         on_own_thread(HANG_GUARD, "the stop returned", move || stopping.stop());
     }
 
-    /// Quits on a thread of its own, failing the test as hung after
-    /// [`HANG_GUARD`].
+    /// Quits on its own thread.
     fn quit(recorder: &Arc<CaptureRecorder>) {
         let quitting = recorder.clone();
         on_own_thread(HANG_GUARD, "quitting returned", move || {
@@ -2704,15 +2413,14 @@ mod tests {
         });
     }
 
-    /// The harness's recorder's status after a start on a thread of its
-    /// own, which may refuse it.
+    /// The status after a start on its own thread, which may refuse it.
     fn status_after_a_start(harness: &Harness) -> RecorderStatus {
         try_start(&harness.recorder, CaptureMode::InPerson);
         harness.recorder.status()
     }
 
-    /// Every change that finds the recorder in `state` holds it there for
-    /// a while; the receiver hears of each one as it begins.
+    /// Every change in `state` holds the recorder there a while; the
+    /// receiver hears of each as it begins.
     fn held_in(
         recorder: &Arc<CaptureRecorder>,
         state: RecordingState,
@@ -2731,9 +2439,8 @@ mod tests {
         seen
     }
 
-    /// Starts a recording and waits until its warm-up has loaded the
-    /// diarizer, which `warm_up` loads after the speech engine; whether
-    /// the speech engine was loaded too.
+    /// Starts a recording and waits for its warm-up to load the diarizer;
+    /// whether the speech engine was loaded too.
     async fn warmed_the_engine(harness: &Harness) -> bool {
         start(&harness.recorder);
         eventually("the diarizer was loaded while recording", || {
@@ -2743,9 +2450,8 @@ mod tests {
         harness.engine.preparations.count() > 0
     }
 
-    /// With the defaults, the Mac's `CoreML` engine and the diarizer are
-    /// both loaded, as Swift did; off the Mac the speech sidecar runs
-    /// Parakeet, so only the diarizer is.
+    /// With the defaults the Mac's `CoreML` engine and the diarizer load;
+    /// off the Mac only the diarizer does.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_warms_the_pipeline_up_when_the_models_are_installed() {
         let harness = harness(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]);
@@ -2753,9 +2459,7 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// With Parakeet in the speech sidecar (here chosen on every
-    /// platform), a recording's warm-up loads the diarizer only: the
-    /// child would otherwise stay resident through the recording.
+    /// With Parakeet in the sidecar, the warm-up loads the diarizer only.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_with_speech_in_the_sidecar_warms_the_diarizer_only() {
         let harness = harness_over(
@@ -2774,12 +2478,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(harness.engine.preparations.count(), 0);
         assert_eq!(harness.diarizer.preparations.count(), 0);
-        // Processing the recording loads them, as it always did.
         stop(&harness.recorder);
     }
 
-    /// The warm-up follows the engine a reload built: the Mac's rule on
-    /// every platform, so moving from an id the sidecar runs to the
+    /// The warm-up follows the engine a reload built: moving to the
     /// in-process `parakeet-v3` makes the recording load the engine.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_warm_up_follows_the_engine_a_reload_built() {
@@ -2797,14 +2499,8 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// After a failed reload the pipeline keeps the engine it was built
-    /// with, and so does the warm-up, whatever id the store holds now (a
-    /// Swift app that saved another engine looks the same): a pipeline on
-    /// the sidecar is not warmed into a child although the store names
-    /// the in-process `parakeet-v3`, and a pipeline on `CoreML` still
-    /// loads its engine although the store names a sidecar id. Each half
-    /// installs only the built engine's model and the diarizer, so the
-    /// installed check must ask about the built engine too.
+    /// After a failed reload the warm-up follows the built engine, not the
+    /// stored id, both for a pipeline on the sidecar and one on `CoreML`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn after_a_failed_reload_the_warm_up_follows_the_engine_the_pipeline_kept() {
         let sidecar = harness_over(
@@ -2828,11 +2524,8 @@ mod tests {
         stop(&in_process.recorder);
     }
 
-    /// A warm-up whose model load fails, as a `CoreML` exception caught at
-    /// the model call arrives (its name and reason), fails quietly: one
-    /// `warn` line gives the reason, the recording goes on without an error
-    /// or a warning, and its stop saves it with its audio. Processing then
-    /// fails the meeting retryably, which the pipeline's tests cover.
+    /// A warm-up whose model load fails gives one `warn` line; the recording
+    /// goes on without an error and its stop saves it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_warm_up_that_fails_leaves_the_recording_running_and_logs_one_line() {
         let log = steno_pipeline::fixtures::CapturedLog::warnings();
@@ -2893,9 +2586,8 @@ mod tests {
         }
     }
 
-    /// A harness whose capture records on `first` and, after one device
-    /// change 1 s in, on `after`: late enough that a test reads the start's
-    /// status before the rebuild changes it.
+    /// A harness whose capture records on `first` and, after a device change
+    /// 1 s in, on `after`.
     fn harness_on_inputs(
         first: steno_audio::CaptureInput,
         after: steno_audio::CaptureInput,
@@ -2931,11 +2623,9 @@ mod tests {
         )
     }
 
-    /// The recorder's warning without a leading missing-audio note
-    /// ([`missing_audio_note`]): a rebuild that takes over a second on a
-    /// loaded runner leaves a gap the stop notes, and the fallback tests
-    /// check the fallback's warning and note, not how long a rebuild took.
-    /// A stall's note names a cause, so it stays.
+    /// The recorder's warning without a leading missing-audio note, which a
+    /// slow rebuild on a loaded runner can add. A stall's note names a
+    /// cause, so it stays.
     fn without_the_missing_audio_note(recorder: &CaptureRecorder) -> Option<String> {
         let warning = recorder.status().warning?;
         let Some(rest) = leading_seconds(&warning)
@@ -2947,11 +2637,8 @@ mod tests {
         Some(rest.trim_start().to_owned()).filter(|rest| !rest.is_empty())
     }
 
-    /// A rebuild that records the default input in place of the chosen
-    /// microphone shows a warning naming the one recorded, until it is
-    /// dismissed (then no note follows the stop) or the recording stops.
-    /// The stop joins the thread that sets it: the hook it calls is held
-    /// up, and its handle on the input is gone once `stop` returns.
+    /// A rebuild onto the default input warns, naming it, until dismissed
+    /// or the recording stops; the stop joins the thread that sets it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_on_the_fallback_microphone_names_it_in_a_warning() {
         let harness = harness_on_inputs(
@@ -2982,9 +2669,8 @@ mod tests {
         assert_eq!(held.strong_count(), 0, "the notice thread was joined");
     }
 
-    /// A recording that starts on the default input in place of the chosen
-    /// microphone warns at once, names the system default when the input
-    /// has no name, and says after the stop which input it recorded.
+    /// A start on the default input warns at once, names the system
+    /// default when the input has no name, and notes it after the stop.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_that_starts_on_the_fallback_microphone_warns_at_once() {
         let harness = harness_on_inputs(input(Some("Built-in Audio"), true), input(None, true));
@@ -3015,8 +2701,8 @@ mod tests {
         );
     }
 
-    /// A recording that went back to the chosen microphone before the stop
-    /// still says after it which input it recorded on the way.
+    /// A recording back on the chosen microphone before the stop still notes
+    /// the fallback.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_back_on_the_chosen_microphone_still_notes_the_fallback() {
         let harness = harness_on_inputs(
@@ -3040,8 +2726,7 @@ mod tests {
         );
     }
 
-    /// The note joins the other warnings after the stop: a call on the
-    /// fallback whose system lane stayed silent says both.
+    /// The note joins the other warnings after the stop.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_fallback_note_follows_the_other_warnings() {
         let harness = harness_on_inputs(
@@ -3061,9 +2746,8 @@ mod tests {
         );
     }
 
-    /// Captures on "USB Microphone" over the synthetic backend at wall-clock
-    /// speed and the wall clock, set up by `options` (a stall or a change
-    /// `BEFORE_THE_OUTAGE` in, and the restarts after it), under a recorder.
+    /// A recorder capturing "USB Microphone" over the synthetic backend at
+    /// wall-clock speed, its outage set up by `options`.
     fn stalling_harness(options: fn(SyntheticOptions) -> SyntheticOptions) -> Harness {
         stalling_harness_over(options, None)
     }
@@ -3115,13 +2799,10 @@ mod tests {
         )
     }
 
-    /// Records over `harness`, holding its `outage` until the meter shows
-    /// the tone (first audio, so under [`HANG_GUARD`]; the outage's
-    /// rebuild would silence the meter), then releases it and records
-    /// until `warning` shows ([`until_the_warning`]); checks the meter
-    /// reads silence then and the warning stands for `holds` more; stops,
-    /// checks the note after the stop names the `stalled` device, or none,
-    /// and returns the seconds it says are missing.
+    /// Records over `harness` until the meter shows the tone, releases the
+    /// `outage`, and records until `warning` shows; checks the meter reads
+    /// silence and the warning stands for `holds` more, stops, checks the
+    /// note names `stalled`, and returns the seconds it says are missing.
     async fn until_still_trying(
         harness: &Harness,
         outage: &HeldOutages,
@@ -3133,7 +2814,7 @@ mod tests {
         let starting = std::time::Instant::now();
         start(&harness.recorder);
         // The master holds what came before the start returned, which the
-        // note's wall time leaves out: the warning stands that long more.
+        // note's wall time leaves out.
         let start_took = starting.elapsed();
         eventually_within(HANG_GUARD, "a level from the tone", || {
             status().levels.is_some_and(|levels| levels.mic > 0.1)
@@ -3156,8 +2837,8 @@ mod tests {
         let note = status().warning.unwrap_or_default();
         assert!(note.starts_with("About "), "only the missing audio: {note}");
         let seconds = seconds_missing(&note, stalled);
-        // Before the harness waits for the pipeline's runs, so none starts
-        // after that wait and writes into the folder it removed.
+        // Before the harness waits for the pipeline's runs, so none writes
+        // into the removed folder.
         eventually("the pipeline picked the saved meeting up", || {
             harness.engine.transcriptions.count() > 0
         })
@@ -3165,9 +2846,8 @@ mod tests {
         seconds
     }
 
-    /// The seconds the note after a stop says are missing, checking that
-    /// it ends with [`missing_audio_note`]'s note for them and the
-    /// `stalled` device, or none: "About 1 second" as well as the plural.
+    /// The seconds the note after a stop says are missing, checking its
+    /// wording and the `stalled` device.
     fn seconds_missing(note: &str, stalled: Option<&str>) -> u64 {
         let missing = note.find("About ").map_or("", |start| &note[start..]);
         let seconds = leading_seconds(missing).unwrap_or_else(|| panic!("the note: {note}"));
@@ -3179,24 +2859,18 @@ mod tests {
         seconds
     }
 
-    /// The seconds a `note` that starts with a missing-audio note says are
-    /// missing.
+    /// The seconds a leading missing-audio note in `note` says are missing.
     fn leading_seconds(note: &str) -> Option<u64> {
         note.strip_prefix("About ")?.split(' ').next()?.parse().ok()
     }
 
-    /// [`missing_audio_note`]'s note for `seconds` missing and the
-    /// `stalled` device, or none.
     fn note_for_seconds(seconds: u64, stalled: Option<&str>) -> Option<String> {
         // A gap that rounds to `seconds`, past the note's 1 s floor.
         missing_audio_note(Duration::from_secs(seconds).as_secs_f64() + 0.25, stalled)
     }
 
-    /// Waits for the recorder to show `warning`, as it does once the
-    /// restarts pass the attempts, failing the test as hung after
-    /// [`HANG_GUARD`]: the restarts are real work, which a loaded runner
-    /// stretches. A still-trying warning stays once it shows, so another
-    /// one fails the test at once, on its value.
+    /// Waits for the recorder to show `warning`, failing as hung after
+    /// [`HANG_GUARD`]; another still-trying warning fails at once.
     async fn until_the_warning(harness: &Harness, warning: &str) {
         let deadline = std::time::Instant::now() + HANG_GUARD;
         while harness.recorder.status().warning.as_deref() != Some(warning) {
@@ -3214,18 +2888,14 @@ mod tests {
         }
     }
 
-    /// Seconds of tone before the device stops delivering, or more: a test
-    /// that waits for the meter's level first holds the outage until then.
+    /// Seconds of tone before the device stops delivering, or more.
     const BEFORE_THE_OUTAGE: f64 = 3.0;
     const STILL_TRYING_ON_USB: &str = "No audio from USB Microphone. Still trying.";
     const USB_MICROPHONE: &str = "USB Microphone";
 
-    /// A device that stops delivering and whose restarts keep failing (a
-    /// graph that does not run): once they pass `RESTART_ATTEMPTS` the
-    /// recorder warns that no audio arrives from it, naming it, and the
-    /// meter reads silence rather than the last level; after the stop a
-    /// note says about how much of the recording is missing and from
-    /// which device.
+    /// A device whose restarts keep failing: past `RESTART_ATTEMPTS` the
+    /// recorder warns naming it, the meter reads silence, and the note after
+    /// the stop says how much is missing and from which device.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_device_that_stops_delivering_is_named_while_steno_keeps_trying() {
         let (harness, outage) = held_stalling_harness(|options| {
@@ -3245,11 +2915,8 @@ mod tests {
         assert!(seconds >= 3, "{seconds} s");
     }
 
-    /// The same warning when the restarts start but deliver nothing, with
-    /// no chosen microphone to fall back from (a clock master that hangs on
-    /// the Mac or on Windows, where such a device still starts): each
-    /// restart waits `STALL_TIMEOUT` for a first frame, so the warning
-    /// comes about ten seconds after the stall.
+    /// The same warning when the restarts start but deliver nothing: about
+    /// ten seconds after the stall.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn restarts_that_start_but_deliver_nothing_show_the_warning() {
         let (harness, outage) = held_stalling_harness(|options| {
@@ -3268,11 +2935,8 @@ mod tests {
         assert!(seconds >= 10, "{seconds} s");
     }
 
-    /// A call that delivers nothing from its start (a Mac call capture
-    /// whose silent output did not start, with nothing playing): its
-    /// restarts warn without naming the microphone, whose clock does not
-    /// drive a call capture there, and so does the note after the stop. On
-    /// Windows the microphone drives it, and is named.
+    /// A call that delivers nothing from its start warns without naming the
+    /// microphone, except on Windows, where its clock drives the call.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_call_with_nothing_playing_warns_without_naming_the_microphone() {
         let harness =
@@ -3296,8 +2960,7 @@ mod tests {
         .await;
     }
 
-    /// Restarts that go on after a device change rather than a stall name
-    /// no device: nothing says the one recorded is the one that is silent.
+    /// Restarts after a device change rather than a stall name no device.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn restarts_after_another_change_blame_no_device() {
         let (harness, outage) = held_stalling_harness(|options| {
@@ -3317,9 +2980,8 @@ mod tests {
         assert!(seconds >= 1, "{seconds} s");
     }
 
-    /// An ordinary device change, whose restarts did not go on past the
-    /// attempts, recovers at its resume, which resumes the auto-stop once;
-    /// a later resume ends no recovery.
+    /// An ordinary device change recovers at its resume, which resumes the
+    /// auto-stop once.
     #[test]
     fn a_device_change_recovers_at_its_resume() {
         let resumed = CaptureNotice::DeviceResumed {
@@ -3336,10 +2998,8 @@ mod tests {
         assert!(!outage.follow(&resumed), "nothing to end");
     }
 
-    /// Restarts that went on past the attempts recover only once audio is
-    /// back (`Delivering`): neither their resumes, a stream that stalls
-    /// again and resumes, nor a dismissal of the warning ends the
-    /// recovery, while the dismissal does end the warning.
+    /// Restarts past the attempts recover only once audio is back
+    /// (`Delivering`); a dismissal ends the warning, not the recovery.
     #[test]
     fn restarts_that_went_on_recover_only_once_audio_is_back() {
         let resumed = CaptureNotice::DeviceResumed {
@@ -3386,9 +3046,8 @@ mod tests {
         assert_eq!(microphone_is_the_master(CaptureMode::Call), cfg!(windows));
     }
 
-    /// Two hours of wall time against a master 2 s shorter is the device
-    /// clocks' drift, no note; a real shortfall, or a gap filled with
-    /// silence, still gives one.
+    /// A 2 s shortfall in two hours is clock drift, no note; a real
+    /// shortfall or a filled gap gives one.
     #[test]
     fn the_missing_seconds_leave_the_clock_drift_out() {
         let of = |duration: f64, gap_seconds: f64| CaptureStatistics {
@@ -3410,11 +3069,8 @@ mod tests {
         assert_eq!(missing_seconds(&of(60.0, 3.0), 60.0), 3.0);
     }
 
-    /// Every kind of missing audio adds up: a gap, missed cycles written as
-    /// silence and a jump too long to fill. The unfilled jump is wall time
-    /// the master lacks too, so it counts once, as the larger of the two:
-    /// in an hour's recording the drift allowance (3.6 s) alone would hide
-    /// a stall of 1.5 s, and the note shows it.
+    /// Every kind of missing audio adds up, the unfilled jump counted once
+    /// as the larger of it and the wall-time shortfall.
     #[test]
     fn a_gap_missed_cycles_and_an_unfilled_jump_add_up_in_the_note() {
         let hour = CaptureStatistics {
@@ -3446,12 +3102,8 @@ mod tests {
         );
     }
 
-    /// Cycles the capture's thread missed (A18 of
-    /// `.plans/2026-10-07-stable-promotion.md`), which the session writes
-    /// as silence, count in the note after the stop as the rebuilds' gaps
-    /// do: the synthetic producer misses 0.75 s twice, 1.5 s that the
-    /// master holds as zeros and the wall time does not show, and the note
-    /// says about 2 seconds are missing.
+    /// Cycles the capture's thread missed, written as silence, count in the
+    /// note: two 0.75 s misses say about 2 seconds are missing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn missed_cycles_count_in_the_note_after_the_stop() {
         let capture: MakeCaptureSession = Arc::new(|configuration: CaptureConfiguration| {
@@ -3486,8 +3138,8 @@ mod tests {
             harness.recorder.status().warning.as_deref(),
             Some("About 2 seconds of the recording are missing.")
         );
-        // Before the harness waits for the pipeline's runs, so none starts
-        // after that wait and writes into the folder it removed.
+        // Before the harness waits for the pipeline's runs, so none writes
+        // into the removed folder.
         eventually("the pipeline picked the saved meeting up", || {
             harness.engine.transcriptions.count() > 0
         })
@@ -3526,8 +3178,8 @@ mod tests {
         );
     }
 
-    /// Quitting stops the recording with `quit` and saves it: the meeting
-    /// is queued for processing when the call returns.
+    /// Quitting stops the recording with `quit` and saves it before it
+    /// returns.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quitting_stops_and_saves_the_recording_with_the_quit_reason() {
         let harness = harness(&[]);
@@ -3545,9 +3197,7 @@ mod tests {
     }
 
     /// Every pipeline sees a recording as under way from its start to the
-    /// end of its stop, and as over once the recorder is idle again, so no
-    /// job runs `CoreML` beside it (A19 of
-    /// `.plans/2026-10-07-stable-promotion.md`).
+    /// end of its stop, so no job runs `CoreML` beside it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_pipelines_see_a_recording_from_its_start_to_the_end_of_its_stop() {
         let harness = harness(&[]);
@@ -3578,12 +3228,8 @@ mod tests {
         assert!(!live(), "idle");
     }
 
-    /// The live flag changes under the recorder's lock at every change of
-    /// a recording, from its start to the end of its stop, so two notifies
-    /// on different threads never apply out of order: a stale one could
-    /// otherwise set the flag live after a stop, and every job would wait
-    /// for a recording that is over, or idle during a start, and a job
-    /// would run `CoreML` beside it (A19).
+    /// The live flag changes under the recorder's lock at every change, so
+    /// two notifies on different threads never apply out of order.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_live_flag_changes_under_the_recorders_lock() {
         let harness = harness(&[]);
@@ -3606,9 +3252,8 @@ mod tests {
         assert!(held.iter().all(|locked| *locked), "{held:?}");
     }
 
-    /// A Quit while a manual Stop is still saving waits for that save:
-    /// when quitting returns the asset is written and the meeting keeps the
-    /// manual stop's reason, rather than the app exiting mid-save.
+    /// A Quit while a manual Stop is saving waits for that save, keeping the
+    /// manual stop's reason.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quitting_during_a_stop_waits_for_its_save() {
         let harness = harness(&[]);
@@ -3627,8 +3272,7 @@ mod tests {
     }
 
     /// A recorder dropped mid-call with the auto-stop armed lets the
-    /// countdown's thread go, rather than leave it asleep for the rest of
-    /// the grace, or for good on a clock nobody advances.
+    /// countdown's thread go.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_dropped_recorder_lets_its_countdown_go() {
         let harness = harness(&[]);
@@ -3648,8 +3292,7 @@ mod tests {
         assert!(clock.wait_for_sleepers(0), "its countdown let go");
     }
 
-    /// A Quit while a start is under way stops the recording it starts,
-    /// rather than leaving it running into the exit.
+    /// A Quit during a start stops the recording it starts.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quitting_during_a_start_stops_the_recording_it_starts() {
         let harness = harness(&[]);
@@ -3666,8 +3309,7 @@ mod tests {
         assert!(harness.store.asset(meetings[0].id).unwrap().is_some());
     }
 
-    /// Once quitting ran, a start (the tray's Record while the exit waits)
-    /// records nothing, so no meeting is left recording past the exit.
+    /// Once quitting ran, a start records nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn no_recording_starts_after_quitting() {
         let harness = harness(&[]);
@@ -3676,10 +3318,8 @@ mod tests {
         assert_eq!(harness.store.all_meetings().unwrap(), []);
     }
 
-    /// While an install holds starts off, a start (the sidebar's or the
-    /// tray's Record) records nothing and says why; a
-    /// recording under way when the hold was taken goes on. Dropping the
-    /// hold clears the message, and the next start records.
+    /// While an install holds starts off, a start records nothing and says
+    /// why; a running recording goes on. Dropping the hold clears it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_start_during_an_install_is_refused_with_a_message() {
         let harness = harness(&[]);
@@ -3703,8 +3343,7 @@ mod tests {
     }
 
     /// An update whose install waits on a password prompt until the test
-    /// cancels it, as the updater's prompt for a `.deb` does; one the test
-    /// never cancels never returns.
+    /// cancels it; one never cancelled never returns.
     #[derive(Default)]
     struct PasswordPromptSource {
         prompt_up: tokio::sync::Notify,
@@ -3752,9 +3391,8 @@ mod tests {
         fn announce(&self, _version: &str) {}
     }
 
-    /// The user's yes to 0.12.0 on the runtime, after a check that found
-    /// it, over `source` and the app's gate on the harness's recorder and
-    /// pipeline.
+    /// The user's yes to 0.12.0 after a check that found it, over the app's
+    /// gate on the harness's recorder and pipeline.
     async fn offer_after_a_check(
         harness: &Harness,
         source: Arc<dyn crate::updates::UpdateSource>,
@@ -3776,10 +3414,8 @@ mod tests {
         tokio::spawn(async move { schedule.offer("0.12.0").await })
     }
 
-    /// A Record while the install waits on a password prompt records at
-    /// once, over the app's gate: recording always wins over an install.
-    /// Cancelling the prompt fails the install, which relaunches nothing,
-    /// and the recording goes on and is saved.
+    /// A Record during an install's password prompt records at once; a
+    /// cancelled prompt fails the install and the recording is saved.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_record_during_a_password_prompt_records() {
         let harness = harness(&[]);
@@ -3800,8 +3436,7 @@ mod tests {
         assert_eq!(harness.store.all_meetings().unwrap().len(), 1);
     }
 
-    /// A password prompt nobody answers, so the install never returns: a
-    /// Record records, and stopping saves the meeting.
+    /// With a prompt nobody answers, a Record records and Stop saves it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_password_prompt_nobody_answers_never_keeps_recording_off() {
         let harness = harness(&[]);
@@ -3822,12 +3457,9 @@ mod tests {
         quit(&harness.recorder);
     }
 
-    /// An update the user installs while a recording runs, over the app's
-    /// gate (stable plan P25): it asks whether to install once the
-    /// recording ends and, told yes, waits. Nothing downloads while the
-    /// recording runs or while its meeting is processed; once the meeting
-    /// is ready the update downloads, installs, and relaunches with
-    /// recording starts held off.
+    /// An update installed during a recording waits: nothing downloads until
+    /// the meeting is processed, then it installs and relaunches with starts
+    /// held off.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_users_install_waits_for_the_recording_and_its_processing() {
         let harness = harness(&[]);
@@ -3871,9 +3503,8 @@ mod tests {
         assert_eq!(harness.recorder.status().error, None, "the hold is gone");
     }
 
-    /// Answers yes, and records each step with what it found: the
-    /// meetings' states at the download, whether a Record at the relaunch
-    /// was refused.
+    /// Answers yes, and records the meetings' states at the download and
+    /// whether a Record at the relaunch was refused.
     #[derive(Default)]
     struct WaitingSource {
         store: Option<Arc<Store>>,
@@ -3952,8 +3583,7 @@ mod tests {
         fn announce(&self, _version: &str) {}
     }
 
-    /// Starts at the same moment begin one recording between them: the
-    /// others return without a session, and stopping saves that one.
+    /// Simultaneous starts begin one recording; stopping saves it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_starts_begin_one_recording() {
         let harness = harness(&[]);
@@ -3980,8 +3610,7 @@ mod tests {
         assert!(harness.store.asset(meetings[0].id).unwrap().is_some());
     }
 
-    /// The tray's Record and its Stop (`recording.toggle`): a toggle
-    /// starts a call recording, the next one stops and saves it.
+    /// The tray's toggle starts a call recording, the next one stops it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_toggle_starts_a_call_and_the_next_one_stops_it() {
         let harness = harness(&[]);
@@ -4001,10 +3630,8 @@ mod tests {
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
     }
 
-    /// Quit while recording, as the shell's run loop drives it: the exit
-    /// request is held, the recording is stopped once and saved, and only
-    /// then the exit runs; by then the asset is written and the meeting is
-    /// queued, and the pipeline goes on to process it.
+    /// Quit while recording, as the shell drives it: the exit waits until
+    /// the recording is saved and queued.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_quit_through_the_exit_gate_exits_after_the_recording_is_saved() {
         let harness = harness(&[]);
@@ -4042,11 +3669,9 @@ mod tests {
         .await;
     }
 
-    /// The configured engine decides which model counts: with the `CoreML`
-    /// Parakeet and the diarizer on disk but another engine id stored
-    /// (Whisper, picked in Settings or in the Swift app), the speech
-    /// sidecar would load the ONNX models, which are missing, and the
-    /// warm-up neither loads nor downloads.
+    /// The configured engine decides which model counts: with another engine
+    /// stored whose models are missing, the warm-up neither loads nor
+    /// downloads.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_checks_the_models_of_the_configured_engine() {
         let models_dir = tempfile::tempdir().unwrap();
@@ -4073,9 +3698,8 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// The synthetic capture, its writer thread dying (a panic) at its
-    /// write after the first `frames`, as a kill leaves the files: the
-    /// session's `stop()` then fails without an asset.
+    /// The synthetic capture, its writer thread panicking after the first
+    /// `frames`, so `stop()` fails without an asset.
     fn dying_capture(frames: usize, died: Arc<AtomicBool>) -> MakeCaptureSession {
         Arc::new(move |configuration: CaptureConfiguration| {
             let options = crate::testing::synthetic_tone(&configuration);
@@ -4099,11 +3723,9 @@ mod tests {
         })
     }
 
-    /// How many commit tries found the database held, and whether the try
-    /// in progress may end: what a quit test shares with its busy handler
-    /// ([`BusyTries::on_busy`]). Each test keeps one in a static of its
-    /// own, since SQLite's busy handler is a plain function that captures
-    /// nothing.
+    /// The commit tries that found the database held, and whether the one in
+    /// progress may end. Each test keeps one in a static, since SQLite's busy
+    /// handler captures nothing.
     struct BusyTries {
         tries: AtomicUsize,
         open: AtomicBool,
@@ -4126,12 +3748,9 @@ mod tests {
             self.open.store(true, Ordering::SeqCst);
         }
 
-        /// The quit test's busy handler, in place of the store's busy
-        /// timeout. SQLite calls it with `waits` 0 when a try first finds
-        /// the database held, so it counts the commit's tries, and it
-        /// keeps the try in progress waiting until the test opens it (or
-        /// for [`HANG_GUARD`]'s worth of 1 ms naps, at least that long), as
-        /// a long busy timeout would.
+        /// The busy handler: counts tries (`waits` 0 on a try's first call)
+        /// and keeps the try waiting until the test opens it or
+        /// [`HANG_GUARD`] passes.
         fn on_busy(&self, waits: i32) -> bool {
             if waits == 0 {
                 self.tries.fetch_add(1, Ordering::SeqCst);
@@ -4144,9 +3763,8 @@ mod tests {
         }
     }
 
-    /// Gives the harness's store `handler`, a quit test's
-    /// [`BusyTries::on_busy`], for its busy handler, and holds the
-    /// database from another connection until the hold is dropped.
+    /// Gives the store `handler` as its busy handler and holds the database
+    /// from another connection until the hold is dropped.
     fn held_with_counted_tries(
         harness: &Harness,
         handler: fn(i32) -> bool,
@@ -4158,9 +3776,8 @@ mod tests {
         steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"))
     }
 
-    /// [`quit`]s on a thread of its own and, once the recorder has seen the
-    /// quit, lets the commit's try end without waiting
-    /// ([`BusyTries::on_busy`] over `busy`).
+    /// [`quit`]s on its own thread and, once the recorder has seen it, lets
+    /// the commit's try end.
     async fn quit_while_busy(recorder: &Arc<CaptureRecorder>, busy: &BusyTries) {
         let quitting = recorder.clone();
         let quitter = std::thread::spawn(move || quit(&quitting));
@@ -4169,11 +3786,8 @@ mod tests {
         quitter.join().unwrap();
     }
 
-    /// A stop for the app's exit tries its commit once: with the database
-    /// held, quitting returns after one try, where the product's three
-    /// would each wait out the store's 5 s busy timeout (15 s, past the
-    /// exit's 10 s patience), and the meeting stays `recording` for the
-    /// next launch, its folder still recorded.
+    /// A stop for the exit tries its commit once, so quitting returns
+    /// within the exit's patience, and the meeting stays `recording`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_for_the_exit_tries_its_commit_once() {
         static BUSY: BusyTries = BusyTries::new();
@@ -4191,8 +3805,7 @@ mod tests {
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
-    /// The meeting of `meeting_id` was kept for the next launch: its row
-    /// `recording`, its `folder` still recorded, and the status says so.
+    /// The meeting was kept for the next launch, with `folder` recorded.
     fn assert_kept(harness: &Harness, meeting_id: Uuid, folder: &Path) {
         assert_eq!(
             harness.store.meeting(meeting_id).unwrap().unwrap().state,
@@ -4209,10 +3822,7 @@ mod tests {
         );
     }
 
-    /// A stop under way when the app quits tries its commit no more once
-    /// the quit came: with the database held, quitting returns after the
-    /// try in progress, where a second try would wait out the busy
-    /// timeout once more, and the meeting is kept for the next launch.
+    /// A stop under way when the app quits tries its commit no more.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_under_way_when_the_app_quits_tries_its_commit_no_more() {
         static BUSY: BusyTries = BusyTries::new();
@@ -4231,10 +3841,7 @@ mod tests {
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
-    /// A quit that comes while the stop's first try waits on the busy
-    /// database is seen before the next try: quitting returns once that
-    /// try ends, where a second try would wait out the busy timeout once
-    /// more, and the meeting is kept.
+    /// A quit during the stop's first busy try is seen before the next try.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_quit_during_the_stop_s_first_try_tries_no_more() {
         static BUSY: BusyTries = BusyTries::new();
@@ -4255,12 +3862,8 @@ mod tests {
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
-    /// After a menu Quit refused the starts, a start and a toggle from
-    /// any surface (the tray's Record queued behind a stop, the page's
-    /// Record during the exit's wait, the prompt's) record nothing and say
-    /// why, and no meeting is left behind; the recording under way when
-    /// the Quit came still stops through its own Stop, with its own end
-    /// reason.
+    /// After a menu Quit refused the starts, no start or toggle records, and
+    /// the running recording still stops with its own end reason.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_start_after_a_menu_quit_is_refused_with_a_message() {
         let harness = harness(&[]);
@@ -4303,10 +3906,8 @@ mod tests {
         );
     }
 
-    /// The menu Quit's refusal is not the shutdown's quit: a Stop whose
-    /// save finds the store held keeps trying its commit after the starts
-    /// were refused, where the shutdown's quit ends with the try in
-    /// progress, and the meeting is kept for the next launch.
+    /// The menu Quit's refusal is not the shutdown's quit: a Stop keeps
+    /// retrying its commit after it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_under_way_at_a_menu_quit_still_tries_its_commit_again() {
         static BUSY: BusyTries = BusyTries::new();
@@ -4331,8 +3932,7 @@ mod tests {
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
-    /// The launch's background half over `store` and `pipeline`, the
-    /// record under `support`, with every master an hour old.
+    /// The launch's background half, with every master an hour old.
     fn launch(store: &Arc<Store>, pipeline: &CurrentPipeline, support: &Path) -> Vec<Uuid> {
         crate::app::reconcile_at_launch(
             store,
@@ -4344,11 +3944,9 @@ mod tests {
         )
     }
 
-    /// A stop whose meeting was failed or deleted while it recorded (the
-    /// Swift app's launch, a delete) says the meeting was not stored, does
-    /// not bring a deleted meeting back, and keeps the folder recorded for
-    /// it: the next launch forgets the failed one's and adopts the deleted
-    /// one's master, which stayed on disk.
+    /// A stop whose meeting was failed or deleted while it recorded says it
+    /// was not stored and keeps the recorded folder, so the next launch
+    /// adopts the deleted one's master.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_whose_meeting_moved_on_while_recording_settles() {
         let changes: [fn(&Store, Uuid); 2] = [
@@ -4401,9 +3999,7 @@ mod tests {
         }
     }
 
-    /// A stop that saves its recording keeps the folder recorded for it,
-    /// since its commit is not durable yet; the next launch forgets it
-    /// once a durable checkpoint has run, and adopts nothing.
+    /// A saved stop keeps the recorded folder until a durable checkpoint.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_saved_stop_keeps_its_folder_for_the_next_launch_to_forget() {
         let harness = harness(&[]);
@@ -4426,11 +4022,8 @@ mod tests {
         assert!(crate::audio_folders::recorded(&support).unwrap().is_empty());
     }
 
-    /// A power loss after a short recording's start and saved stop, before
-    /// a checkpoint copied their commits into the database file: the
-    /// database comes back from that file alone, with no row, and the
-    /// next launch adopts the master, since the folder recorded for it
-    /// stayed.
+    /// After a power loss before a checkpoint, the next launch adopts the
+    /// master, since the recorded folder stayed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_power_loss_after_a_saved_stop_leaves_the_master_to_the_next_launch() {
         let harness = harness(&[]);
@@ -4452,10 +4045,8 @@ mod tests {
         assert!(store.asset(meeting_id).unwrap().is_some());
     }
 
-    /// A stop whose capture failed (the writer died and took the asset)
-    /// keeps what the writer wrote: the meeting is recovered from the
-    /// master on disk and queued with the `failed` end reason, and the
-    /// recorder says the audio was kept, rather than failing the meeting.
+    /// A stop whose capture failed recovers the master and queues it as
+    /// `failed`, rather than failing the meeting.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_whose_capture_failed_keeps_what_was_written() {
         let died = Arc::new(AtomicBool::new(false));
@@ -4501,11 +4092,8 @@ mod tests {
         );
     }
 
-    /// A stop whose capture failed and whose master cannot be found now
-    /// keeps the meeting for the next launch, with its folder recorded,
-    /// rather than failing it: the audio folder gone (an unmounted volume),
-    /// or only the meeting's folder in it (a volume unmounted under a
-    /// mount point that stays, empty).
+    /// A failed-capture stop whose master cannot be found now (an unmounted
+    /// volume) keeps the meeting for the next launch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_stop_whose_master_cannot_be_found_is_kept() {
         for unmount_the_audio_folder in [true, false] {
@@ -4544,13 +4132,10 @@ mod tests {
         crate::testing::database_in(harness.dir.path())
     }
 
-    /// P40 check 4 (`.plans/2026-10-12-store-off-the-workers.md`): a stop
-    /// while another process holds the write lock, and a write of this
-    /// process waits behind it, shows `Stopping` in the host within
-    /// [`LIVE`] of the recorder's notice and within
-    /// [`END_TO_END`](crate::testing::END_TO_END) of the stop, with a
-    /// reload in flight as the poll runs one; the save waits for the lock
-    /// and lands within a second of its release, past one busy timeout.
+    /// A stop while another process holds the write lock shows `Stopping`
+    /// within [`LIVE`] of the notice and
+    /// [`END_TO_END`](crate::testing::END_TO_END) of the stop, with a reload
+    /// in flight; the save lands within a second of the lock's release.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_stop_under_a_held_lock_shows_stopping_at_once_and_saves_once_the_lock_goes() {
         let harness = harness(&[]);
@@ -4568,8 +4153,7 @@ mod tests {
             .sink
             .recording_in("stopping", since, PATIENCE)
             .expect("the stop reached the host");
-        // The hook records its call once `recorder_changed` returned, after
-        // the sink got the snapshot.
+        // Recorded once `recorder_changed` returned.
         let noticed = found_within(PATIENCE, "the stop's notice", || {
             hosted
                 .hooks_since(since)
@@ -4595,18 +4179,9 @@ mod tests {
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
     }
 
-    /// P40 check 16: a stop while a forced reload is held in flight with
-    /// the view-model lock and the host's reader taken, and while another
-    /// thread's read holds the shared reader for three seconds, as a long
-    /// list load or an export does. The reload waits where the detail asks
-    /// the pipeline whether its export keeps failing, at a gate inside a
-    /// read on the host's reader, as a reload behind a slow store would.
-    /// `Stopping` shows in the host within 100 ms of the recorder's notice,
-    /// the meeting is saved within [`LIVE`] of it, and the stop ends with
-    /// its files finished while both reads are still held. The hook only
-    /// pokes the `recording` feed, which takes no host lock, and the save
-    /// reads the row and the default retention on the writer, inside its
-    /// own transaction.
+    /// A stop during a held forced reload and a three-second shared read
+    /// shows `Stopping` within 100 ms of the notice, saves within [`LIVE`],
+    /// and finishes its files while both reads are still held.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files() {
         const FEED: Duration = Duration::from_millis(100);
@@ -4623,8 +4198,7 @@ mod tests {
         assert!(pipeline.gate.reloads() > 0, "the meeting's detail is shown");
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        // Another connection, as another process reads, so watching the row
-        // takes neither reader of this one.
+        // Another connection, so watching the row takes neither reader.
         let watcher = Store::open_without_migrating(database(&harness)).unwrap();
 
         let armed = pipeline.gate.arm();
@@ -4702,14 +4276,9 @@ mod tests {
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
     }
 
-    /// P40 check 23: a stop is two moves of the recorder, `Stopping` and
-    /// then `Idle`, and each asks the reload owner for one pass; the
-    /// stopped meeting's row, out of `recording`, reaches the list within
-    /// [`LIVE`] of the lock's release, which lets the save land, from the
-    /// owner's forced pass, not from the stop's thread. The save waits on
-    /// a lock another connection holds, so `Stopping` lasts until the test
-    /// lets it go; the owner ticks once an hour, so only the requests
-    /// reload.
+    /// A stop's two moves (`Stopping`, `Idle`) each ask the reload owner for
+    /// a pass, and the stopped row reaches the list within [`LIVE`] of the
+    /// lock's release from the owner's forced pass, not the stop's thread.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_stop_asks_for_a_reload_per_move() {
         let harness = harness(&[]);
@@ -4784,10 +4353,8 @@ mod tests {
         owner.abort();
     }
 
-    /// Decision 4 of `.plans/2026-10-12-store-off-the-workers.md`: the stop
-    /// runs and saves on its own thread and never needs the runtime, so a
-    /// stop while the services runtime's only worker is blocked still
-    /// saves the meeting.
+    /// The stop runs and saves on its own thread, so it saves even while the
+    /// services runtime's only worker is blocked.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_stop_saves_while_every_runtime_worker_is_blocked() {
         let harness = harness(&[]);
@@ -4815,12 +4382,9 @@ mod tests {
         );
     }
 
-    /// P40 check 8: a start while another process holds the write lock
-    /// waits out the busy timeout writing its meeting, then is refused with
-    /// "Steno could not create the meeting." and no recording: no capture
-    /// ran and no row was written. Meanwhile the UI stays live: `Starting`
-    /// reaches the host live, as each change's `recording` snapshot does
-    /// (check 1), and a command answers live (check 6).
+    /// A start while another process holds the write lock waits out the busy
+    /// timeout, then is refused with no capture and no row, while `Starting`
+    /// and commands stay live.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_start_under_a_held_lock_is_refused_and_the_ui_stays_live() {
         use steno_bridge::BridgeHost as _;
@@ -4885,9 +4449,8 @@ mod tests {
         );
     }
 
-    /// A start whose meeting cannot be written (the database held past the
-    /// busy timeout) forgets the folder it recorded first, and writes no
-    /// row; the folder stays known.
+    /// A start whose meeting cannot be written forgets the folder it
+    /// recorded first; the folder stays known.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_start_whose_meeting_cannot_be_written_forgets_its_folder() {
         let harness = harness(&[]);
@@ -4914,11 +4477,8 @@ mod tests {
         );
     }
 
-    /// The recorder notes a recording's folder before the master exists:
-    /// a session whose start fails (its writer cannot be created) finds,
-    /// when it tries, the meeting's row written and its folder recorded and
-    /// known. The failed start fails the row and forgets the entry; the
-    /// folder stays known.
+    /// The folder is recorded before the master exists; a failed session
+    /// start fails the row and forgets the entry, the folder staying known.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_folder_is_recorded_before_the_master_and_forgotten_when_the_start_fails() {
         type Seen = (
@@ -4974,10 +4534,8 @@ mod tests {
         );
     }
 
-    /// A meeting left `recording` names the folder it was recorded into,
-    /// the settings' one and the known ones, and counts as still written
-    /// while its master was modified within the launch's ten seconds, so
-    /// the host refuses to delete it; an hour-old master does not.
+    /// A meeting left `recording` counts as still written while its master
+    /// is under ten seconds old, so the host refuses to delete it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_left_recording_is_still_written_while_its_master_is_fresh() {
         let harness = harness(&[]);
@@ -5016,10 +4574,8 @@ mod tests {
         );
     }
 
-    /// A delete that does not go through records the forgotten folder
-    /// again; a forget that cannot write the record (a read-only support
-    /// folder) is an error and keeps the entry, so the host refuses the
-    /// delete.
+    /// A delete that does not go through records the folder again; a forget
+    /// that cannot write the record keeps the entry, so the delete is refused.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_forgotten_folder_is_restored_and_a_failed_forget_keeps_it() {
@@ -5050,10 +4606,8 @@ mod tests {
         assert_eq!(entries.get(&meeting_id), Some(&folder));
     }
 
-    /// A restore that cannot write the record (a read-only support folder)
-    /// checkpoints the store durably instead: one commit under
-    /// `synchronous = FULL` (2), the checkpoint's WAL restart, so the row
-    /// survives a power loss without its entry.
+    /// A restore that cannot write the record checkpoints the store durably
+    /// instead (`synchronous = FULL`, a WAL restart).
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_restore_that_fails_checkpoints_the_store_durably() {
@@ -5083,11 +4637,8 @@ mod tests {
         assert_eq!(*levels.lock().unwrap(), [2]);
     }
 
-    /// A forget that fails (here a read-only support folder; on Windows
-    /// also a folder flush after the rename, which leaves the entry gone)
-    /// checkpoints the store durably: after a power loss the row is still
-    /// there, with or without its entry, so the master is never left with
-    /// neither.
+    /// A forget that fails checkpoints the store durably, so after a power
+    /// loss the row is still there.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_forget_then_a_power_loss_keeps_the_row() {
@@ -5179,8 +4730,7 @@ mod tests {
         );
     }
 
-    /// Under half a second lost is no warning: one 10 ms slip, as Windows'
-    /// drift correction makes, or 490 ms.
+    /// Under half a second lost is no warning.
     #[test]
     fn under_half_a_second_lost_warns_about_nothing() {
         for frames in [1, 49] {
@@ -5212,8 +4762,7 @@ mod tests {
         );
     }
 
-    /// A recording that lost frames leaves a `warn` line with the meeting
-    /// and the counts per lane; a clean one leaves none.
+    /// Lost frames leave a `warn` line with the counts per lane.
     #[test]
     fn dropped_frames_are_logged_with_the_meeting_and_the_counts() {
         let log = steno_pipeline::fixtures::CapturedLog::warnings();
@@ -5233,9 +4782,8 @@ mod tests {
         assert!(line.contains("Mic: 250, System: 0"), "{line}");
     }
 
-    /// A stop whose recording lost frames logs them with the meeting: a
-    /// backend delivers two seconds at once while the writer is stalled
-    /// behind a one-frame relay.
+    /// A stop whose recording lost frames, the writer stalled behind a
+    /// one-frame relay, logs them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_that_lost_frames_logs_them() {
         use steno_audio::testing::SyntheticCaptureBackend;
@@ -5249,8 +4797,7 @@ mod tests {
             &[(AudioLane::Mixed, 440.0)],
             2.0,
         )));
-        // The first write waits for `go`, so the backend overflows a
-        // one-frame relay meanwhile.
+        // The first write waits for `go`, so the backend overflows the relay.
         harness.capture_with({
             let backend = backend.clone();
             Arc::new(move |configuration| {
@@ -5284,12 +4831,8 @@ mod tests {
         );
     }
 
-    /// Waits until the recorder is idle again after a recording that ended
-    /// on its own, and returns the saved meeting. An ending takes its own
-    /// time before the save (a lost device's restarts back off for about
-    /// two seconds, a failed write waits for the watcher's tick), so only
-    /// [`HANG_GUARD`] bounds it: a recorder that never ends still fails
-    /// the test.
+    /// Waits until the recorder is idle after a recording that ended on its
+    /// own, bounded only by [`HANG_GUARD`], and returns the saved meeting.
     async fn ended_on_its_own(harness: &Harness, meeting_id: Uuid) -> steno_core::Meeting {
         eventually_within(HANG_GUARD, "the recording ended on its own", || {
             harness.recorder.status().state == RecordingState::Idle
@@ -5298,27 +4841,22 @@ mod tests {
         harness.store.meeting(meeting_id).unwrap().unwrap()
     }
 
-    /// A disk that fills mid-recording fails the session's writer; the
-    /// recorder hears of it at once instead of showing Recording until a
-    /// Stop: the recording so far is saved with `failed` and queued, and
-    /// the status says why it stopped.
+    /// A disk that fills mid-recording ends it at once: saved as `failed`,
+    /// queued, and the status says why.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_writer_that_fails_mid_recording_ends_and_saves_the_recording() {
         writer_fails_mid_recording(false).await;
     }
 
-    /// As [`a_writer_that_fails_mid_recording_ends_and_saves_the_recording`],
-    /// when the session finds no thread to end the recording on: the state
-    /// stays `Recording`, and the watcher's tick reads the failed write
-    /// ([`CaptureSession::write_failed`]) and stops and saves it.
+    /// The same when the session has no thread to end it on: the watcher's
+    /// tick reads the failed write and stops it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_write_the_session_cannot_end_is_stopped_by_the_watcher() {
         writer_fails_mid_recording(true).await;
     }
 
-    /// A recording whose writer fails after 30 frames ends on its own,
-    /// saved and with the plain error line; `no_thread` refuses the
-    /// session its thread to end it on.
+    /// A recording whose writer fails after 30 frames ends on its own;
+    /// `no_thread` refuses the session its ending thread.
     async fn writer_fails_mid_recording(no_thread: bool) {
         let harness = harness(&[]);
         let log = steno_pipeline::fixtures::CapturedLog::warnings();
@@ -5360,8 +4898,8 @@ mod tests {
         assert!(meeting.duration > 0.0);
     }
 
-    /// A device that stays lost through every restart ends the recording
-    /// with `deviceLost`, saved, and the status says so.
+    /// A device lost through every restart ends the recording with
+    /// `deviceLost`, saved.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_device_that_stays_lost_ends_and_saves_the_recording() {
         ends_as_a_lost_device(|options| {
@@ -5372,17 +4910,14 @@ mod tests {
         .await;
     }
 
-    /// A rebuild that panics after a device change ends the recording as a
-    /// device that stayed lost does: the recorder goes idle with its
-    /// error, and the meeting is saved with `deviceLost`.
+    /// A rebuild that panics ends the recording as a lost device does.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_rebuild_that_panics_ends_and_saves_the_recording() {
         ends_as_a_lost_device(|options| options.change_device_after(0.2).restart_panics()).await;
     }
 
-    /// A recording over the synthetic tone as `device` changes it ends on
-    /// its own as a lost device: the status says so, and the meeting is
-    /// saved with `deviceLost`.
+    /// A recording as `device` changes it ends as a lost device, saved with
+    /// `deviceLost`.
     async fn ends_as_a_lost_device(device: fn(SyntheticOptions) -> SyntheticOptions) {
         let harness = harness(&[]);
         harness.capture_with(failing_capture(None, device));
@@ -5400,11 +4935,8 @@ mod tests {
         assert!(meeting.duration > 0.0);
     }
 
-    /// A stop that panics part way (here the host's change hook, on the
-    /// stopping thread, before the save) leaves the recorder idle with an
-    /// error rather than stopping for good, and the next recording starts.
-    /// The meeting's row stays `recording` for the next launch, over a
-    /// master the session's drop closed, its recorded folder kept.
+    /// A stop that panics part way leaves the recorder idle with an error
+    /// and the row `recording` for the next launch; the next recording starts.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_that_panics_leaves_the_recorder_idle_with_an_error() {
         let harness = harness(&[]);
@@ -5449,9 +4981,7 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// A start that panics part way (here the host's change hook, on the
-    /// starting thread) leaves the recorder idle with an error rather than
-    /// starting for good, and the next recording starts.
+    /// A start that panics part way leaves the recorder idle with an error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_start_that_panics_leaves_the_recorder_idle_with_an_error() {
         let harness = harness(&[]);
@@ -5476,10 +5006,8 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// A start that panics once its meeting is begun and its writer made
-    /// the files (here the backend's start, once it runs) fails the
-    /// meeting, forgets its recorded folder and leaves no folder, and the
-    /// next recording starts.
+    /// A start that panics after its files exist fails the meeting, forgets
+    /// its folder and leaves no folder.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_start_that_panics_after_the_meeting_began_fails_it_and_leaves_no_folder() {
         let harness = harness(&[]);
@@ -5518,10 +5046,8 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// A device that disappeared cut the recording short whoever stopped
-    /// it; a failed write or close says "stopped early" only when it ended
-    /// the recording, and a Stop, a quit or an ended call that met one says
-    /// the saved recording may be incomplete.
+    /// A lost device cut the recording short whoever stopped it; a failed
+    /// write says "stopped early" only when it ended the recording.
     #[test]
     fn the_failure_line_follows_the_failure_and_who_stopped() {
         let write = CaptureError::WriterFailed("/Users/someone/Audio: No space left".into());
@@ -5544,8 +5070,8 @@ mod tests {
         );
     }
 
-    /// A capture that does not start says why in plain words, by case;
-    /// the `warn` line names the kind, never the error's text.
+    /// A capture that does not start says why in plain words; the `warn`
+    /// line names the kind only.
     #[test]
     fn a_capture_that_does_not_start_says_why_in_plain_words() {
         let log = steno_pipeline::fixtures::CapturedLog::warnings();
@@ -5575,8 +5101,7 @@ mod tests {
         assert!(!text.contains("plain-words-test"), "{text}");
     }
 
-    /// Without room for the save, a recording does not start, and no
-    /// meeting is written.
+    /// Without room for the save, a recording does not start.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_does_not_start_on_a_full_disk() {
         let harness = harness(&[]);
@@ -5595,9 +5120,8 @@ mod tests {
         assert_eq!(harness.store.meetings(10, 0).unwrap(), []);
     }
 
-    /// With little room the recording starts and warns how long it can
-    /// run; when the room runs out it stops and is saved before the disk
-    /// fills.
+    /// With little room the recording warns, then stops and is saved before
+    /// the disk fills.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_warns_when_the_disk_runs_low_and_stops_before_it_fills() {
         let harness = harness(&[]);
@@ -5652,9 +5176,8 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// A dismissed disk warning stays away while the room left is what it
-    /// was, shows again once less is left, and a reading with room forgets
-    /// the dismissal.
+    /// A dismissed disk warning returns only once less is left; a reading
+    /// with room forgets the dismissal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_dismissed_disk_warning_returns_only_with_less_room() {
         let harness = harness(&[]);
@@ -5742,9 +5265,8 @@ mod tests {
         assert_eq!(harness.recorder.status().error, None);
     }
 
-    /// A volume that reports no size (some network and FUSE file systems
-    /// answer zero blocks), or more free than it holds, is unreadable: the
-    /// recording starts and runs.
+    /// A volume that reports no size, or more free than it holds, is
+    /// unreadable: the recording runs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_volume_that_reports_no_size_lets_the_recording_run() {
         for reported in [
@@ -5779,9 +5301,8 @@ mod tests {
         }
     }
 
-    /// The free space is the smaller of the recordings folder's volume and
-    /// the database folder's; one that cannot be read is left out, and with
-    /// neither readable there is no number.
+    /// The free space is the smaller of the two volumes'; unreadable ones
+    /// are left out.
     #[test]
     fn the_free_space_is_the_smaller_of_the_two_volumes() {
         let audio = tempfile::tempdir().unwrap();
@@ -5840,16 +5361,9 @@ mod tests {
         );
     }
 
-    /// The system's reading of a folder's volume reports a size that holds
-    /// its free space, which the floor then counts on every platform. On
-    /// the Mac it counts the space free for important use: no less than
-    /// `statvfs` and no more than `statvfs` plus the gap between the floor
-    /// and the hard floor, and above `statvfs` by up to that gap where
-    /// important use reads more (a boot volume with purgeable space), give
-    /// or take what other processes write between the reads. Up to five
-    /// tries, the first whose `statvfs` reads before and after the reading
-    /// moved by no more than that tolerance deciding: a busy disk can move
-    /// further between two reads.
+    /// The system's reading of a folder's volume holds its free space; on
+    /// the Mac it lies between `statvfs` and `statvfs` plus the floor gap.
+    /// Up to five tries, as a busy disk moves between reads.
     #[test]
     fn the_system_reading_of_a_folder_s_volume_is_within_its_size() {
         let folder = tempfile::tempdir().unwrap();
@@ -5881,9 +5395,8 @@ mod tests {
         }
     }
 
-    /// A read of the space free for important use that keeps failing warns
-    /// once per streak on each folder, with the error's kind and not its
-    /// text, which names the folder; a read that succeeds ends the streak.
+    /// A failing important-use read warns once per streak per folder, with
+    /// the error's kind only.
     #[test]
     fn a_failing_important_use_read_warns_once_per_streak_without_the_folder() {
         let failing = Mutex::default();
@@ -5917,12 +5430,9 @@ mod tests {
     const MIB: u64 = 1024 * 1024;
     const GB: u64 = 1_000_000_000;
 
-    /// The Mac reads the larger of `statvfs` and the space free for
-    /// important use. A volume `CacheDelete` does not manage (an external
-    /// drive, a disk image, `/nix`) answers 0 for the second, and a 1 GB
-    /// disk image then records on `statvfs`'s reading, as it does when
-    /// that read fails; where APFS would purge, the purgeable space counts
-    /// up to the gap between the floor and the hard floor.
+    /// The Mac reads the larger of `statvfs` and the important-use space: a
+    /// volume answering 0 (a disk image) records on `statvfs`, and purgeable
+    /// space counts up to the floor gap.
     #[test]
     fn the_mac_reads_the_larger_of_statvfs_and_the_space_for_important_use() {
         let rate = 448_000;
@@ -5946,11 +5456,8 @@ mod tests {
         );
     }
 
-    /// Below the hard floor on `statvfs` the Mac's reading has no room,
-    /// whatever the space free for important use says: macOS may not have
-    /// purged in time. Above it the minutes count to the hard floor: a call
-    /// at 200 MiB of `statvfs` has 2 left, with 50 GB to purge. With that
-    /// read failed `statvfs` meets the floor itself.
+    /// Below the hard floor on `statvfs` there is no room, whatever macOS
+    /// may purge; above it the minutes count to the hard floor.
     #[test]
     fn the_mac_has_no_room_below_the_hard_floor_whatever_important_use_says() {
         let rate = 448_000;
@@ -5967,11 +5474,8 @@ mod tests {
         assert_eq!(room(floor, None), Room::Low { minutes: 1 });
     }
 
-    /// On the Mac's reading a recording does not start, and one in progress
-    /// stops and is saved, at a `statvfs` of 100 MiB though the space free
-    /// for important use reads 5 GB, and with that read failed at a
-    /// `statvfs` just below the floor; the words are those of every full
-    /// disk.
+    /// On the Mac's reading a recording neither starts nor goes on at a
+    /// `statvfs` of 100 MiB, though 5 GB may be purged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_mac_s_reading_refuses_and_stops_a_recording_below_its_floors() {
         for (low, important) in [
@@ -6011,8 +5515,7 @@ mod tests {
         }
     }
 
-    /// A 1 GB APFS or HFS+ disk image, attached for a test and detached
-    /// with it.
+    /// A 1 GB disk image, attached for a test and detached with it.
     #[cfg(target_os = "macos")]
     struct DiskImage {
         /// Holds the image and its mount point.
@@ -6022,8 +5525,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     impl DiskImage {
-        /// Creates an empty image of `file_system` and attaches it, hidden
-        /// from the Finder.
+        /// Creates an empty image of `file_system` and attaches it hidden.
         fn attach(file_system: &str) -> Self {
             let folder = tempfile::tempdir().unwrap();
             let image = folder.path().join("probe.dmg");
@@ -6069,13 +5571,9 @@ mod tests {
         }
     }
 
-    /// A recording into an external volume starts: on a 1 GB APFS or HFS+
-    /// disk image as the recordings folder and the disk watch's database
-    /// folder, which macOS reports 0 bytes free for important use on
-    /// (`CacheDelete` does not manage it), the disk watch reads about
-    /// `statvfs`'s free space and the start is not refused. Ignored: it
-    /// attaches disk images with `hdiutil` (no admin rights needed). On a
-    /// Mac, run
+    /// A recording onto a disk image, which reports 0 bytes for important
+    /// use, starts on `statvfs`'s reading. Ignored (it runs `hdiutil`); on a
+    /// Mac run
     /// `cargo test -p steno-services --lib -- --ignored --nocapture
     /// a_recording_into_a_disk_image_starts`.
     #[cfg(target_os = "macos")]
@@ -6113,8 +5611,7 @@ mod tests {
         }
     }
 
-    /// A low-space warning that arrives while the recording is stopping
-    /// does not show: the stop's outcome sets the messages.
+    /// A low-space warning that arrives while stopping does not show.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_disk_warning_during_a_stop_does_not_show() {
         let harness = harness(&[]);
@@ -6144,9 +5641,8 @@ mod tests {
         assert_eq!(bytes_per_second(&in_person), 416_000);
     }
 
-    /// The event "event-42" under way at the start, with an attendee and
-    /// the calendar's owner. Swift:
-    /// `testCalendarEventNamesTheMeetingAndWritesAttendees`.
+    /// The event "event-42" under way at the start, with an attendee and the
+    /// calendar's owner.
     fn roadmap_sync() -> steno_core::CalendarEvent {
         let now = Utc::now();
         steno_core::CalendarEvent {
@@ -6169,8 +5665,8 @@ mod tests {
         }
     }
 
-    /// Waits until the meeting `meeting_id` is named after
-    /// [`roadmap_sync`] with its one attendee, and checks it.
+    /// Waits until `meeting_id` is named after [`roadmap_sync`] with its one
+    /// attendee.
     async fn until_named_after_the_event(harness: &Harness, meeting_id: Uuid) {
         eventually("the event named the recording", || {
             harness
@@ -6194,9 +5690,8 @@ mod tests {
         assert_eq!(participants[0].email.as_deref(), Some("jerome@example.com"));
     }
 
-    /// The event under way at the start names the meeting, and its
-    /// attendees, except the calendar's owner, are its participants, whether
-    /// the answer was in when the row was written or came after.
+    /// The event under way names the meeting and its attendees but the owner
+    /// become participants, whether the answer came before the row or after.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_event_under_way_names_the_recording_and_its_attendees() {
         let harness = harness(&[]);
@@ -6211,17 +5706,15 @@ mod tests {
         assert_eq!(calendar.reads(), 1);
     }
 
-    /// A calendar that has not answered never holds the start up: the
-    /// recording runs under its default title, and the answer names it
-    /// once the calendar gives it, while it still records.
+    /// A calendar that has not answered never holds the start up; its later
+    /// answer names the recording.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_slow_calendar_never_holds_a_start_up() {
         let harness = harness(&[]);
         let calendar = crate::calendar::testing::FakeCalendar::with(vec![roadmap_sync()]);
         calendar.hold();
         harness.recorder.name_meetings_from(calendar.clone());
-        // Returns although the calendar is held: a start that waited for
-        // it would hang here until the guard fails the test.
+        // Returns although the calendar is held.
         start(&harness.recorder);
         assert!(calendar.wait_for_a_held_read(PATIENCE), "the lookup ran");
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
@@ -6236,10 +5729,8 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// A calendar that still has not answered the previous start is not
-    /// asked again: the next recording starts unnamed and no second
-    /// thread waits on the calendar. Once it answers, starts read it
-    /// again.
+    /// A calendar still answering the previous start is not asked again
+    /// until it answers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_calendar_that_hangs_is_read_by_one_start_at_a_time() {
         let harness = harness(&[]);
@@ -6265,8 +5756,7 @@ mod tests {
         .await;
     }
 
-    /// A calendar that fails, or lists no event, starts the recording as
-    /// before: the default title, no participants.
+    /// A failing or empty calendar gives the default title, no participants.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failing_or_empty_calendar_starts_as_before() {
         let failing = crate::calendar::testing::FakeCalendar::with(vec![roadmap_sync()]);
@@ -6286,9 +5776,7 @@ mod tests {
         }
     }
 
-    /// Waits until the calendar handed `count` answers over, so a test
-    /// can tell "the late answer ran and wrote nothing" from "it has not
-    /// run yet".
+    /// Waits until the calendar handed `count` answers over.
     async fn until_answered(harness: &Harness, count: usize) {
         eventually("the late answer was handed over", || {
             harness.recorder.calendar.answered.load(Ordering::SeqCst) == count
@@ -6296,9 +5784,8 @@ mod tests {
         .await;
     }
 
-    /// The store's rule, case "under its default title": a user who
-    /// renamed the recording before the calendar answered keeps the
-    /// title; the late answer writes nothing, also not at the stop.
+    /// A user who renamed the recording before the calendar answered keeps
+    /// the title.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_late_answer_never_overwrites_a_users_title() {
         let harness = harness(&[]);
@@ -6324,10 +5811,8 @@ mod tests {
         assert_eq!(stopped.title, "Typed", "the stop keeps the user's title");
     }
 
-    /// The store's rule, cases "only the meeting that asked" and "while
-    /// it still records": stop, then a quick start of the next recording
-    /// while the first one's lookup is still out. The late answer names
-    /// neither, not the stopped one that asked, not the newer one.
+    /// A late answer names neither the stopped recording that asked nor the
+    /// next one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_late_answer_never_touches_another_meeting() {
         let harness = harness(&[]);
@@ -6360,8 +5845,8 @@ mod tests {
     use steno_audio::capture::permission::ProbeAnswer;
     use steno_host::services::Preferences as _;
 
-    /// What the fake system audio test saw: its runs, and the order of
-    /// its tone's end and of the capture sessions the recorder made.
+    /// What the fake system audio test saw: its runs, and the order of its
+    /// tone's end and the capture sessions.
     #[derive(Default)]
     struct ToneLog {
         runs: AtomicUsize,
@@ -6378,9 +5863,8 @@ mod tests {
         }
     }
 
-    /// The Mac's permissions over the recorder of `harness`, their system
-    /// audio test `probe` (logged to the returned log) and flags kept in
-    /// memory.
+    /// The Mac's permissions over `harness`'s recorder with the system audio
+    /// test `probe`.
     fn tone_tested(
         harness: &Harness,
         probe: impl Fn(&steno_audio::clock::Cancel, &ToneLog) -> ProbeAnswer + Send + Sync + 'static,
@@ -6405,9 +5889,8 @@ mod tests {
         (permissions, log, preferences)
     }
 
-    /// The system audio test plays a tone a recording would pick up: while
-    /// a recording starts or runs, a request plays nothing and answers the
-    /// state as it was, and what the last test found stays.
+    /// While a recording starts or runs, a system audio test request plays
+    /// nothing and answers the state as it was.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_tone_test_never_plays_while_a_recording_starts_or_runs() {
         let harness = harness(&[]);
@@ -6453,10 +5936,8 @@ mod tests {
         assert_eq!(log.runs.load(Ordering::SeqCst), 1);
     }
 
-    /// A start while the system audio test plays its tone stops the test
-    /// first and opens its devices only once the test returned, so the
-    /// tone never reaches the recording. The stopped test found nothing:
-    /// the request answers the state as it was and stores no answer.
+    /// A start during the system audio test stops it and opens its devices
+    /// only once it returned; the stopped test stores no answer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_start_stops_the_tone_test_before_it_opens_a_device() {
         let harness = harness(&[]);
@@ -6464,8 +5945,7 @@ mod tests {
         let began = Mutex::new(began);
         let (permissions, log, preferences) = tone_tested(&harness, move |cancel, log| {
             began.lock().unwrap().send(()).unwrap();
-            // Plays until stopped; a start that did not stop it would
-            // open its devices meanwhile.
+            // Plays until stopped.
             if cancel.sleep(HANG_GUARD) {
                 return ProbeAnswer::Silent;
             }
@@ -6496,9 +5976,8 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// A test that does not stop when asked (stuck inside the system)
-    /// holds a start up for [`TONE_TEST_PATIENCE`] at most: the recording
-    /// starts all the same.
+    /// A test that does not stop holds a start up for
+    /// [`TONE_TEST_PATIENCE`] at most.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_tone_test_that_does_not_stop_never_keeps_a_recording_from_starting() {
         let harness = harness(&[]);
@@ -6520,11 +5999,8 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// A start waits for the stopped tone test to return before it opens a
-    /// device, however slowly the test stops, within the patience. The
-    /// test, once cancelled, keeps its tone for a second unless a device
-    /// opens first: a start that does not wait, or waits for no time,
-    /// opens one meanwhile.
+    /// A start waits for a slow-stopping tone test to return before opening
+    /// a device, within the patience.
     fn waits_for_a_slow_stopping_tone_test(patience: Option<Duration>) {
         let harness = harness(&[]);
         if let Some(patience) = patience {
@@ -6603,8 +6079,8 @@ mod tests {
         stopping.join().unwrap();
     }
 
-    /// A system audio test after one a start stopped runs again (the
-    /// cancel is fresh), and one asked for while quitting never runs.
+    /// A test after one a start stopped runs again; one asked while quitting
+    /// never runs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_test_after_a_stopped_one_runs_again_and_none_while_quitting() {
         let harness = harness(&[]);
@@ -6648,8 +6124,7 @@ mod tests {
         assert_eq!(log.runs.load(Ordering::SeqCst), 2, "no test while quitting");
     }
 
-    /// After the menu's Quit refused the starts, a system audio test is
-    /// refused too: its tone would play through the exit's wait.
+    /// After the menu's Quit, a system audio test is refused too.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_tone_test_after_a_menu_quit_is_refused() {
         let harness = harness(&[]);
@@ -6662,10 +6137,8 @@ mod tests {
         assert_eq!(log.runs.load(Ordering::SeqCst), 0, "no tone after a Quit");
     }
 
-    /// A system audio test under way when the menu's Quit refuses the
-    /// starts, or when the shutdown quits, is stopped at once: neither
-    /// waits for it, and its request answers within the patience rather
-    /// than after the test's own bound.
+    /// A system audio test under way at a menu Quit or the shutdown is
+    /// stopped at once, not waited for.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_tone_test_under_way_stops_at_a_menu_quit_and_at_the_shutdown() {
         for (quits, by) in [

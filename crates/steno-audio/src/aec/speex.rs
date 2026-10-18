@@ -1,17 +1,7 @@
 //! SpeexDSP's MDF adaptive filter followed by its preprocessor for residual
-//! echo suppression, behind [`steno_core::EchoCanceller`].
-//! Swift: `Sources/StenoAudio/AEC/SpeexEchoCanceller.swift`.
-//!
-//! 48 kHz on 10 ms frames with a 200 ms tail by default. Float in and out;
-//! `i16` scratch buffers for the C API are allocated once in `new`.
-//! `process` allocates nothing and takes no locks: Speex works inside the
-//! state it allocated up front. One frame of far-end per frame of near-end,
-//! captured at the same instant; the processing thread owns any extra
-//! delay.
-//!
-//! The FFI surface is declared by hand; the C sources are vendored under
-//! `vendor/speexdsp` (provenance in `PROVENANCE` there) and compiled by
-//! `build.rs`.
+//! echo suppression, behind [`steno_core::EchoCanceller`]. `process`
+//! allocates nothing and takes no locks. The FFI surface is declared by
+//! hand over the C sources vendored under `vendor/speexdsp`.
 
 use std::ffi::c_void;
 use std::os::raw::c_int;
@@ -67,7 +57,7 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-/// The Speex canceller; see the module doc.
+/// The Speex canceller.
 pub struct SpeexEchoCanceller {
     sample_rate: f64,
     frame_size: usize,
@@ -121,7 +111,6 @@ impl SpeexEchoCanceller {
         let tail = c_int::try_from(tail_length).map_err(|_| {
             EchoCancellerError::InitialisationFailed(format!("tail {tail_length} too large"))
         })?;
-        // Whole hertz of a sane rate.
         let mut rate = sample_rate as c_int;
         // SAFETY: plain C calls with valid arguments; null returns are
         // checked before use, and `ctl` pointers point at live locals.
@@ -178,7 +167,6 @@ impl SpeexEchoCanceller {
         }
     }
 
-    /// The rate given at construction.
     #[must_use]
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate

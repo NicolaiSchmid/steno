@@ -1,6 +1,6 @@
-//! The two limits the plan names: bodies over chunk size plus 64 KiB are
-//! answered 413 and the connection closes; unauthenticated requests are
-//! answered 401 before their body is read. And the route matcher.
+//! Bodies over chunk size plus 64 KiB are answered 413 and the connection
+//! closes; unauthenticated requests are answered 401 before their body is
+//! read. And the route matcher.
 
 #![allow(
     clippy::assert_is_empty,
@@ -59,9 +59,8 @@ async fn declared_body_over_the_chunk_limit_is_413_and_closes() {
 async fn streamed_body_over_the_limit_is_413_and_closes() {
     let test = TestService::with_chunk_size(CHUNK_SIZE).await;
     let raw = test.raw_client();
-    // No Content-Length: the counting handler must catch it as it arrives.
-    // `/v1/hello` needs no auth, so the counter is the only thing in the
-    // way; one byte past the limit is enough.
+    // No Content-Length on unauthenticated `/v1/hello`: the counting handler
+    // catches one byte past the limit.
     let oversized = usize::try_from(HandoverConfiguration::JSON_BODY_LIMIT).unwrap() + 1;
     let body = vec![0x42u8; oversized];
     let chunked = format!("{:x}\r\n", body.len())

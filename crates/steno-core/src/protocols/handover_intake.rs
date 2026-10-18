@@ -1,5 +1,4 @@
 //! Admits a fully received phone recording.
-//! Swift: `HandoverIntake` in `Sources/StenoCore/Protocols/PipelineBoundaries.swift`.
 
 use std::path::Path;
 

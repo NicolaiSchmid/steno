@@ -1,26 +1,17 @@
-//! When a capture's first callback came, against the capture's start
-//! (stable plan A9; A10's step 2 reads it). On the Mac a call capture's
-//! aggregate runs only while a process its tap includes drives the
-//! output, so the capture starts a silent output of its own first (A10);
-//! should that output not start, the IOProc waits for another app to play
-//! and a call's first seconds are missing from the recording. The IO
-//! thread stores the first callback's host time once; the backend reads
-//! it off that thread when the capture stops and logs the offset at
-//! `info`. A first callback later than [`FIRST_CALLBACK_ALLOWANCE`] is
-//! audio missed before it, which the stop of a recording's first start
-//! counts unfilled ([`FirstCallback::missed`]; A18, the design in
-//! [`realtime::missed`](super::missed)). No Swift equivalent.
+//! When a capture's first callback came, against the capture's start. The
+//! IO thread stores the first callback's host time once; the backend reads
+//! it at the stop and logs the offset. A first callback later than
+//! [`FIRST_CALLBACK_ALLOWANCE`] is audio missed before it, counted
+//! unfilled ([`FirstCallback::missed`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// How late after the device's start a first callback may come without
-/// counting as audio missed: A10's bound on it from the call to `start`
-/// (`.plans/2026-10-07-stable-promotion.md`), which comes before the
-/// device's start, so a normal first callback is well inside it.
+/// counting as audio missed; a normal one is well inside it.
 pub const FIRST_CALLBACK_ALLOWANCE: Duration = Duration::from_millis(200);
 
-/// The first callback's host time; see the module doc.
+/// The first callback's host time.
 ///
 /// ```
 /// use std::time::Duration;
@@ -40,7 +31,6 @@ pub struct FirstCallback {
 }
 
 impl FirstCallback {
-    /// No callback yet.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -48,11 +38,9 @@ impl FirstCallback {
         }
     }
 
-    /// The IO thread, every callback: keeps `host_time` (the HAL's clock,
-    /// in its ticks) when no callback came before. One relaxed load a
-    /// callback and one store on the first; nothing else. One thread calls
-    /// it (the IOProc), so the load and the store cannot race. A host time
-    /// of 0 is kept as 1, since 0 means none.
+    /// The IO thread, every callback: keeps `host_time` when no callback
+    /// came before. One relaxed load, and a store on the first; only the
+    /// IOProc calls it, so they cannot race. A host time of 0 is kept as 1.
     #[inline(always)]
     pub fn mark(&self, host_time: u64) {
         if self.host_time.load(Ordering::Relaxed) == 0 {
@@ -66,10 +54,9 @@ impl FirstCallback {
         Some(self.host_time.load(Ordering::Relaxed)).filter(|&t| t != 0)
     }
 
-    /// The first callback's offset from `started` (a host time taken just
-    /// before the device was started), `to_nanos` turning the clock's ticks
-    /// into nanoseconds; `None` when no callback came. A callback stamped
-    /// before `started` counts as an offset of 0.
+    /// The first callback's offset from `started` (taken just before the
+    /// device started), `to_nanos` converting ticks; `None` when none came.
+    /// A callback stamped before `started` is an offset of 0.
     #[must_use]
     pub fn offset(&self, started: u64, to_nanos: impl Fn(u64) -> u64) -> Option<Duration> {
         let first = self.host_time()?;
@@ -78,12 +65,9 @@ impl FirstCallback {
         )))
     }
 
-    /// The frames the capture missed before its first callback, at
-    /// `sample_rate`: the [`Self::offset`] from `started` beyond
-    /// [`FIRST_CALLBACK_ALLOWANCE`], all of them unfilled, since nothing
-    /// was there to fill; nothing when no callback came (the session's
-    /// stall watchdog restarts such a capture, and its gap holds that
-    /// time) or it came within the allowance.
+    /// The frames missed before the first callback at `sample_rate`: the
+    /// offset beyond [`FIRST_CALLBACK_ALLOWANCE`], all unfilled; nothing
+    /// when no callback came (the stall watchdog's gap holds that time).
     ///
     /// ```
     /// use steno_audio::realtime::FirstCallback;
@@ -105,9 +89,7 @@ impl FirstCallback {
 }
 
 /// The `info` line for a capture that ran for `ran`: the first callback's
-/// `offset` from its start, or that none came; `tap` says whether the
-/// capture had the system lane, whose IOProc waits on the silent output
-/// having started.
+/// `offset`, or that none came; `tap` says whether it had the system lane.
 #[must_use]
 pub fn first_callback_line(offset: Option<Duration>, ran: Duration, tap: bool) -> String {
     let what = if tap {
@@ -165,8 +147,7 @@ mod tests {
         assert_eq!(early.offset(started, to_nanos), Some(Duration::ZERO));
     }
 
-    /// Only the time past the allowance counts, unfilled, at the stream's
-    /// rate; none when the callback came inside it or never came.
+    /// Only the time past the allowance counts, unfilled.
     #[test]
     fn a_late_first_callback_counts_what_came_before_it_past_the_allowance() {
         let to_nanos = |ticks: u64| ticks * 125 / 3;

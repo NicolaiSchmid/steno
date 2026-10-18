@@ -1,14 +1,12 @@
-//! Invariant 2 of the plan: the Rust migrations produce the schema the Swift
-//! CLI produces. `fixtures/schema.swift.sql` is the normalised dump of a
-//! database `steno dev db migrate` created (`scripts/dump-swift-schema.sh`,
-//! macOS); the Rust store dumps a fresh database the same way.
+//! The Rust migrations produce the schema the Swift CLI produces:
+//! `fixtures/schema.swift.sql` is the normalised dump
+//! (`scripts/dump-swift-schema.sh`), compared with a fresh Rust database.
 
 use similar::TextDiff;
 use steno_core::Store;
 use steno_core::store::migrator;
 
-/// Comments out, CRLF to LF, trailing whitespace off: what the generating
-/// script and git on Windows might change without changing the schema.
+/// Comments out, CRLF to LF, trailing whitespace off.
 fn normalise(text: &str) -> String {
     text.lines()
         .map(|line| line.trim_end_matches('\r').trim_end())
@@ -67,23 +65,20 @@ fn reopening_applies_nothing_and_sets_the_grdb_pragmas() {
         .unwrap();
     assert_eq!(journal, "wal");
     assert_eq!(foreign_keys, 1);
-    // 1 is NORMAL, which GRDB's `DatabasePool` sets on its writer.
+    // 1 is NORMAL.
     assert_eq!(synchronous, 1);
-    // Milliseconds; `MeetingStore.onDisk`'s `.timeout(5)`.
+    // Milliseconds.
     assert_eq!(busy_timeout, 5000);
 }
 
-/// A database the Swift app migrated already records every identifier;
-/// opening it must not re-run anything. A database with an identifier this
-/// build does not know belongs to a newer app: it opens, as GRDB opens it,
-/// and the identifier stays recorded.
+/// A database the Swift app migrated is not migrated again, and one with an
+/// identifier this build does not know opens and keeps it.
 #[test]
 fn recorded_identifiers_are_honoured() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("steno.sqlite");
     {
-        // One transaction: on a rollback journal every statement would
-        // otherwise commit, and fsync, on its own.
+        // One transaction, so the statements do not each fsync.
         let mut connection = rusqlite::Connection::open(&path).unwrap();
         let transaction = connection.transaction().unwrap();
         transaction

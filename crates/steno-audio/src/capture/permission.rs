@@ -1,37 +1,17 @@
-//! The system audio permission probe. macOS has no status API for the
-//! system audio recording permission (`kTCCServiceAudioCapture`), so
-//! onboarding runs the real tap while another process (`afplay`, which the
-//! tap records like any app) plays a tone, and counts the first sample
-//! above [`LaneLevel::SILENT_PEAK_LINEAR`] (-80 dBFS) as the grant. Swift:
-//! `Sources/StenoAudio/Capture/SystemAudioPermission.swift`.
-//!
-//! The first run brings up the system prompt from inside the tap's start,
-//! and the tap delivers silence until the user answers, so the probe
-//! listens for up to [`PROBE_TIMEOUT`] and plays the tone again whenever it
-//! has ended; only the deadline means denied. macOS attributes a tool run
-//! from Terminal to Terminal, so the answer is the app's only when the
-//! bundled app runs it, whose `Info.plist` carries
-//! `NSAudioCaptureUsageDescription`. `tccutil reset AudioCapture
-//! <bundle id>` brings the prompt back. Off the Mac there is no probe:
-//! nothing there asks before a recording.
-//!
-//! The tone is audible, and a recording would pick it up: the caller
-//! keeps the probe and a recording apart, and raises the probe's
-//! [`Cancel`] to stop it early ([`ProbeAnswer::Stopped`]). Rust only:
-//! Swift's probe could not be stopped.
-//!
-//! [`LaneLevel::SILENT_PEAK_LINEAR`]: super::LaneLevel::SILENT_PEAK_LINEAR
+//! The macOS system audio permission probe. There is no status API for
+//! `kTCCServiceAudioCapture`, so the probe runs the real tap while `afplay`
+//! plays a tone and counts the first sample above -80 dBFS as the grant;
+//! silence until [`PROBE_TIMEOUT`] means denied. The tone is audible, so the
+//! caller keeps the probe and a recording apart.
 
 use std::time::Duration;
 
 use crate::clock::{Cancel, Clock};
 
 /// How long the probe listens before it counts the permission as denied.
-/// Swift: `request(timeout:)`'s default.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How often the probe looks at what the tap delivered. Swift:
-/// `SystemAudioPermission.pollInterval`.
+/// How often the probe looks at what the tap delivered.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What a probe found.
@@ -45,14 +25,10 @@ pub enum ProbeAnswer {
     Stopped,
 }
 
-/// The probe's loop, apart from the tap and the player, so a test drives it
-/// on a manual clock: every `poll_interval` it calls `keep_playing` (which
-/// plays the tone again once it ended), then `sample` for what the tap
-/// delivered since the last call. [`ProbeAnswer::Heard`] as soon as one
-/// sample is louder than -80 dBFS; [`ProbeAnswer::Silent`] once `timeout`
-/// has passed on `clock` without one; [`ProbeAnswer::Stopped`], with the
-/// tone not played again, once `cancel` is raised. Swift:
-/// `SystemAudioPermission.waitForSignal`.
+/// The probe's loop, apart from the tap and the player: every
+/// `poll_interval` it calls `keep_playing`, then `sample`. Heard on the
+/// first sample above -80 dBFS, silent once `timeout` passed, stopped once
+/// `cancel` is raised.
 pub fn wait_for_signal(
     timeout: Duration,
     poll_interval: Duration,
@@ -80,8 +56,7 @@ pub fn wait_for_signal(
     }
 }
 
-/// The probe's tone, apart from `afplay`, so a test sees when it plays and
-/// when it stops.
+/// The probe's tone, apart from `afplay`.
 #[cfg(any(target_os = "macos", test))]
 trait Tone {
     /// Plays the tone again unless it still plays.
@@ -90,10 +65,8 @@ trait Tone {
     fn stop(&mut self);
 }
 
-/// [`wait_for_signal`] over a started tap, then the probe's end: the tone
-/// stops before `stop_tap` closes the tap, so a tap stop stuck in the
-/// system never leaves the tone playing into a recording that starts
-/// meanwhile.
+/// [`wait_for_signal`] over a started tap. The tone stops before `stop_tap`,
+/// so a tap stop stuck in the system never leaves the tone playing.
 #[cfg(any(target_os = "macos", test))]
 fn listen(
     timeout: Duration,
@@ -111,8 +84,7 @@ fn listen(
     heard
 }
 
-/// The probe's tap, apart from the system's, so a test sees the probe end
-/// however its tap behaves.
+/// The probe's tap, apart from the system's.
 #[cfg(any(target_os = "macos", test))]
 trait Tap {
     /// Starts listening; an error names why it could not.
@@ -123,13 +95,10 @@ trait Tap {
     fn stop(&self);
 }
 
-/// Runs the probe for up to `timeout` (the product passes
-/// [`PROBE_TIMEOUT`]) and answers what the tap heard: the tap first, where
-/// the prompt appears, then the tone through `/usr/bin/afplay`, played
-/// again whenever it ended. A tap or a tone that cannot start answers
-/// [`ProbeAnswer::Silent`]. Blocks for as long as it listens, or until
-/// `cancel` is raised; it returns only once the player is stopped, then
-/// the tap closed. Swift: `SystemAudioPermission.request`.
+/// Runs the probe for up to `timeout`: the tap first (where the prompt
+/// appears), then the tone through `/usr/bin/afplay`. A tap or tone that
+/// cannot start answers [`ProbeAnswer::Silent`]. Blocks until it answers or
+/// `cancel` is raised, and returns only once the player and the tap stopped.
 #[cfg(target_os = "macos")]
 pub fn probe_system_audio(timeout: Duration, cancel: &Cancel) -> ProbeAnswer {
     use std::process::{Child, Command, Stdio};
@@ -140,8 +109,7 @@ pub fn probe_system_audio(timeout: Duration, cancel: &Cancel) -> ProbeAnswer {
     use crate::capture::{CaptureBackend as _, LiveCaptureBackend};
     use crate::realtime::LaneFrameSink;
 
-    /// The tone through `afplay`; stops the player however the probe
-    /// ends.
+    /// The tone through `afplay`; stops the player when dropped.
     struct Player {
         tone: std::path::PathBuf,
         player: Option<Child>,
@@ -183,8 +151,6 @@ pub fn probe_system_audio(timeout: Duration, cancel: &Cancel) -> ProbeAnswer {
     }
     impl Tap for SystemTap {
         fn start(&self) -> Result<(), String> {
-            // The stream's description is not needed: the probe looks
-            // only for a sample above the floor.
             self.backend
                 .start(&[AudioLane::System], None, self.sink.clone())
                 .map(drop)
@@ -219,12 +185,9 @@ pub fn probe_system_audio(timeout: Duration, cancel: &Cancel) -> ProbeAnswer {
     )
 }
 
-/// [`probe_system_audio`] over `tap`, the tone written into `dir` and
-/// played by the player `play` makes for it. The tone file is removed
-/// however the probe ends: once it has listened, been cancelled, or
-/// failed to start its tap, and when the file could not be written in
-/// full. Only a process that ends during a probe leaves it, for the next
-/// launch to remove ([`remove_leftover_tones`]).
+/// [`probe_system_audio`] over `tap`, the tone written into `dir`. The tone
+/// file is removed however the probe ends; only a process that dies during
+/// a probe leaves it, for [`remove_leftover_tones`].
 #[cfg(any(target_os = "macos", test))]
 fn probe_in(
     dir: &std::path::Path,
@@ -262,27 +225,21 @@ pub fn tone_directory() -> std::path::PathBuf {
     std::env::temp_dir()
 }
 
-/// The start and the end of a tone file's name,
-/// `steno-permission-<pid>-<uuid>.wav`.
+/// A tone file's name is `steno-permission-<pid>-<uuid>.wav`.
 const TONE_PREFIX: &str = "steno-permission-";
 const TONE_SUFFIX: &str = ".wav";
 
 /// How old a tone file must be before [`remove_leftover_tones`] takes it
-/// for a leftover: a probe needs its file for [`PROBE_TIMEOUT`] at most,
-/// so one this old belongs to no probe under way, not even another Steno
-/// process's.
+/// for a leftover; longer than any probe, even another process's, runs.
 pub const LEFTOVER_TONE_AGE: Duration = Duration::from_secs(120);
 
-/// The name of the tone file process `pid` writes for a probe, `id` new
-/// for each.
 #[cfg(any(target_os = "macos", test))]
 fn tone_file_name(pid: u32, id: uuid::Uuid) -> String {
     format!("{TONE_PREFIX}{pid}-{}{TONE_SUFFIX}", id.hyphenated())
 }
 
-/// Whether `name` is exactly what `tone_file_name` makes: the prefix, a
-/// process id in decimal without a leading zero, a hyphen, a version 4
-/// UUID in lowercase hyphenated form, and `.wav`.
+/// Whether `name` is exactly what `tone_file_name` makes (canonical decimal
+/// pid, lowercase hyphenated v4 UUID).
 fn is_tone_file_name(name: &str) -> bool {
     let Some(rest) = name
         .strip_prefix(TONE_PREFIX)
@@ -307,8 +264,8 @@ struct ToneFile(std::path::PathBuf);
 
 #[cfg(any(target_os = "macos", test))]
 impl ToneFile {
-    /// Writes the tone into a file of its own in `dir`. A write that
-    /// fails halfway leaves no file.
+    /// Writes the tone into a file of its own in `dir`; a failed write
+    /// leaves no file.
     fn write(dir: &std::path::Path) -> std::io::Result<Self> {
         let file = Self(dir.join(tone_file_name(std::process::id(), uuid::Uuid::new_v4())));
         std::fs::write(&file.0, tone_wav())?;
@@ -327,12 +284,9 @@ impl Drop for ToneFile {
     }
 }
 
-/// Removes the tone files a probe left in `dir` because its process ended
-/// first, at launch: only regular files named exactly as the probe names
-/// them, `steno-permission-<pid>-<uuid>.wav`, last written
-/// [`LEFTOVER_TONE_AGE`] or longer before `now`. A file that cannot be read or removed, or a `dir`
-/// that cannot be listed, is logged at debug and left. Blocks for as long
-/// as listing `dir` takes, so the launch calls it off its thread.
+/// Removes, at launch, tone files left in `dir` by a process that died
+/// mid-probe: regular files named exactly as the probe names them and at
+/// least [`LEFTOVER_TONE_AGE`] old. Errors are logged at debug. Blocking.
 pub fn remove_leftover_tones(dir: &std::path::Path, now: std::time::SystemTime) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -363,9 +317,7 @@ pub fn remove_leftover_tones(dir: &std::path::Path, now: std::time::SystemTime) 
     }
 }
 
-/// One second of a 1 kHz tone at half scale, as a 48 kHz mono 16-bit WAV
-/// file. Swift: `AudioFixtures.tone(frequency: 1_000, seconds: 1,
-/// amplitude: 0.5)` through `AudioFixtures.writeWAV`.
+/// One second of a 1 kHz tone at half scale, as a 48 kHz mono 16-bit WAV.
 #[cfg(any(target_os = "macos", test))]
 fn tone_wav() -> Vec<u8> {
     let samples = crate::testing::AudioFixtures::tone(1_000.0, 1.0, 0.5);
@@ -384,8 +336,7 @@ mod tests {
 
     use super::*;
 
-    /// A clock whose every sleep passes at once and moves it on by the
-    /// sleep's length, so the loop runs to its end on the test's thread.
+    /// A clock whose every sleep returns at once and moves it on.
     #[derive(Default)]
     struct SteppingClock(Mutex<Duration>);
 
@@ -400,9 +351,8 @@ mod tests {
         }
     }
 
-    /// The loop over a one-second deadline polled every 100 ms, `samples`
-    /// answering each poll by its number and `cancel` raised after the
-    /// poll it names; returns the answer, the polls and the tone restarts.
+    /// The loop over a one-second deadline polled every 100 ms; returns the
+    /// answer, the polls and the tone restarts.
     fn run_until(
         samples: impl Fn(usize) -> Vec<f32>,
         cancel_after: Option<usize>,
@@ -432,8 +382,7 @@ mod tests {
         run_until(samples, None)
     }
 
-    /// One sample above -80 dBFS is the grant, however late it comes; the
-    /// tone is kept playing before every look.
+    /// One sample above -80 dBFS is the grant, however late it comes.
     #[test]
     fn the_first_audible_sample_answers_granted() {
         let (granted, polls, plays) = run(|poll| {
@@ -447,9 +396,7 @@ mod tests {
         assert_eq!((polls, plays), (4, 4));
     }
 
-    /// Silence, and sound at or below -80 dBFS, until the deadline is
-    /// denied: the tap delivers zeros while the prompt is up and after a
-    /// refusal.
+    /// Silence, or sound at or below -80 dBFS, until the deadline is denied.
     #[test]
     fn silence_until_the_deadline_answers_denied() {
         let (granted, polls, _) = run(|_| vec![0.0, 1e-4, -1e-4]);
@@ -466,9 +413,7 @@ mod tests {
         assert_eq!(polls, 11);
     }
 
-    /// A raised cancel stops the probe at once, without a deadline and
-    /// without playing the tone again; one raised before the start plays
-    /// nothing.
+    /// A raised cancel stops the probe at once without playing the tone again.
     #[test]
     fn a_cancel_stops_the_probe_before_the_next_tone() {
         let (answer, polls, plays) = run_until(|_| vec![0.0], Some(3));
@@ -490,9 +435,7 @@ mod tests {
         assert_eq!((answer, plays), (ProbeAnswer::Stopped, 0));
     }
 
-    /// The probe's end, however it ends: the tone stops first, then the
-    /// tap, so a tap stop stuck in the system never leaves the tone
-    /// playing.
+    /// However the probe ends, the tone stops before the tap.
     #[test]
     fn the_tone_stops_before_the_tap() {
         use std::cell::RefCell;
@@ -545,8 +488,7 @@ mod tests {
         }
     }
 
-    /// A tap that starts unless `fails`, and answers each poll, counted
-    /// from 1, with what `sample` says.
+    /// A tap that starts unless `fails` and answers poll `n` with `sample(n)`.
     struct FakeTap<F: Fn(usize) -> Vec<f32>> {
         fails: bool,
         sample: F,
@@ -593,9 +535,8 @@ mod tests {
         fn stop(&mut self) {}
     }
 
-    /// [`probe_in`] over `tap` into `dir`, on a stepping clock; the
-    /// answer, whether the tone's file was there when its player was made,
-    /// and whether it was there at each play.
+    /// [`probe_in`] on a stepping clock; the answer and whether the tone's
+    /// file existed when the player was made and at each play.
     fn probe_into(
         dir: &std::path::Path,
         tap: &dyn Tap,
@@ -625,8 +566,7 @@ mod tests {
         std::fs::read_dir(dir).unwrap().next().is_none()
     }
 
-    /// The tone's file is there while the probe listens and gone once it
-    /// heard the tone or heard silence until the deadline.
+    /// The tone's file exists while the probe listens and is gone after.
     #[test]
     fn the_tone_file_is_removed_once_the_probe_has_listened() {
         for (heard, answer) in [(true, ProbeAnswer::Heard), (false, ProbeAnswer::Silent)] {
@@ -649,8 +589,7 @@ mod tests {
         }
     }
 
-    /// A probe cancelled while it listens (a start, the menu's Quit)
-    /// removes its tone file.
+    /// A cancelled probe removes its tone file.
     #[test]
     fn the_tone_file_is_removed_when_the_probe_is_cancelled() {
         let dir = tempfile::tempdir().unwrap();
@@ -669,8 +608,7 @@ mod tests {
         assert!(is_empty(dir.path()), "the tone file is gone");
     }
 
-    /// A tap that cannot start answers silent and removes the tone file it
-    /// wrote first; a tone that cannot be written leaves nothing.
+    /// A tap that cannot start answers silent and leaves no tone file.
     #[test]
     fn the_tone_file_is_removed_when_the_probe_fails() {
         let dir = tempfile::tempdir().unwrap();
@@ -688,13 +626,10 @@ mod tests {
         assert!(!missing.exists());
     }
 
-    /// At launch only regular files named exactly as the probe names them
-    /// and older than [`LEFTOVER_TONE_AGE`] are removed: a near miss of
-    /// the name, a fresh file (another Steno's probe under way), a
-    /// directory and a symbolic link with the name are left. A name that
-    /// differs only in case or by a trailing space is never taken either;
-    /// it is checked by name alone, since the Mac's and Windows' file
-    /// systems would make it the leftover's own file.
+    /// Only old regular files with the exact tone name are removed; near
+    /// misses, fresh files, directories and symlinks stay. Case and
+    /// trailing-space variants are checked by name alone, since
+    /// case-insensitive file systems would map them onto the leftover.
     #[test]
     fn only_old_tone_files_named_as_the_probe_names_them_are_removed_at_launch() {
         let dir = tempfile::tempdir().unwrap();

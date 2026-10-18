@@ -1,8 +1,5 @@
-//! The JSON bodies of the handover wire (v1).
-//! `mobile/modules/steno-link/src/wire.ts` mirrors every name here;
-//! `RecordingMetadata` is core's type. The host reads wire values only
-//! through `HandoverReceipt` and `PairingPayload`.
-//! Swift: `Routing/Wire.swift`.
+//! The JSON bodies of the handover wire (v1), mirrored name for name by
+//! `mobile/modules/steno-link/src/wire.ts`.
 
 use serde::{Deserialize, Serialize};
 use steno_core::HandoverStateKind;

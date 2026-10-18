@@ -1,16 +1,7 @@
 //! Linux: what the shell's D-Bus clients share. Each runs on a thread of
-//! its own (`spawn_client`) over a connection whose calls wait five seconds
-//! at most (`patient`), so a slow or frozen bus holds only that thread:
-//! the logout and shutdown clients (`session_end`), the user manager's
-//! reload (`stop_timeout`) and the tray host follower (`tray_host`). They
-//! ask the bus who owns a name (`owner_of`), which starts no service, and
-//! talk to that owner through a proxy that caches no property (`proxy`),
-//! and to the bus itself through one too (`bus`), with which `session_end`
-//! starts the portal.
-//! `tests::Daemon` is the private bus their tests run on, and
-//! `own_scope`'s too.
-//!
-//! Swift: none; the Mac app talks to no D-Bus.
+//! its own (`spawn_client`) over a connection whose calls wait five
+//! seconds at most (`patient`), so a frozen bus holds only that thread.
+//! `tests::Daemon` is the private bus their tests run on.
 
 use std::time::Duration;
 
@@ -19,24 +10,21 @@ use zbus::blocking::{Connection, Proxy};
 use zbus::names::{BusName, OwnedUniqueName};
 use zbus::proxy::CacheProperties;
 
-/// How long a client waits for a method's answer, so a frozen bus holds
-/// its thread this long at most per call: `EndSession` still quits in time
-/// (`session_end`), and a watcher that does not answer counts as no host
-/// (`tray_host`); five seconds at most, which the build checks.
+/// How long a client waits for a method's answer, so a frozen bus cannot
+/// make `EndSession` miss its deadline.
 const CALL_PATIENCE: Duration = Duration::from_secs(5);
 
-// A longer wait would let a frozen bus hold `EndSession`'s answer past the
-// session manager's patience.
+// Longer would let a frozen bus hold `EndSession` past the session
+// manager's patience.
 const _: () = assert!(CALL_PATIENCE.as_millis() <= 5_000);
 
-/// The connection `builder` makes, whose method calls wait `CALL_PATIENCE`
-/// at most.
+/// The connection `builder` makes, with `CALL_PATIENCE` on every call.
 pub fn patient(builder: Builder<'_>) -> zbus::Result<Connection> {
     builder.method_timeout(CALL_PATIENCE).build()
 }
 
-/// Runs `client` on a thread named `name`; an error ends it with `gap`,
-/// what the app is left without, in the log.
+/// Runs `client` on a thread named `name`; an error is logged with `gap`,
+/// what the app is left without.
 pub fn spawn_client(
     name: &'static str,
     gap: &'static str,
@@ -54,9 +42,7 @@ pub fn spawn_client(
     }
 }
 
-/// A proxy that caches no property: the cache would ask the bus for all of
-/// them, and the one property read (the tray watcher's, `tray_host`) is
-/// asked of the bus each time.
+/// A proxy that caches no property, so each read asks the bus.
 pub fn proxy<'a>(
     connection: &Connection,
     destination: &'a str,
@@ -71,15 +57,14 @@ pub fn proxy<'a>(
         .build()
 }
 
-/// The bus's own proxy, which caches no property.
 pub fn bus(connection: &Connection) -> zbus::Result<zbus::blocking::fdo::DBusProxy<'_>> {
     zbus::blocking::fdo::DBusProxy::builder(connection)
         .cache_properties(CacheProperties::No)
         .build()
 }
 
-/// The unique name that owns `name` on `connection`, none when no peer
-/// does. Asked of the bus (`GetNameOwner`), so asking starts none.
+/// The unique name that owns `name`, none when no peer does. Asking starts
+/// no service.
 pub fn owner_of(connection: &Connection, name: &str) -> zbus::Result<Option<OwnedUniqueName>> {
     match bus(connection)?.get_name_owner(BusName::try_from(name)?) {
         Ok(owner) => Ok(Some(owner)),
@@ -94,22 +79,19 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// A private bus: `dbus-daemon` on a socket of its own, ended with the
-    /// value.
+    /// A private `dbus-daemon`, ended with the value.
     pub(crate) struct Daemon {
         child: std::process::Child,
         address: String,
     }
 
     impl Daemon {
-        /// [`Daemon::start_at`] on a socket in the temp dir.
         pub(crate) fn start() -> Option<Self> {
             Self::start_at(&format!("unix:tmpdir={}", std::env::temp_dir().display()))
         }
 
-        /// The daemon on the D-Bus `address`; None when `dbus-daemon` is not
-        /// installed, unless `STENO_REQUIRE_DBUS_TEST` asks for it (CI on
-        /// Linux), which fails the test instead.
+        /// The daemon on `address`; `None` when `dbus-daemon` is missing,
+        /// unless `STENO_REQUIRE_DBUS_TEST` makes that a failure.
         pub(crate) fn start_at(address: &str) -> Option<Self> {
             let spawned = std::process::Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
@@ -145,7 +127,6 @@ pub(crate) mod tests {
             patient(self.builder()).unwrap()
         }
 
-        /// Ends the bus, and with it every connection to it.
         pub(crate) fn end(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
@@ -158,14 +139,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// A `patient` call to a peer that never answers gives up after
-    /// `CALL_PATIENCE`, not much later.
+    /// A call to a silent peer gives up after `CALL_PATIENCE`.
     #[test]
     fn a_patient_call_gives_up() {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        // No object served, so this peer answers no call.
         let silent = daemon.builder().build().unwrap();
         let peer = silent.unique_name().unwrap().to_string();
         let caller = daemon.connect();

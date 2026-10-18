@@ -1,22 +1,8 @@
 //! The length of one AAC-LC packet (a `raw_data_block`, ISO/IEC 14496-3
-//! 4.4.2.1) read off its bits, for a stream that has no sample table to say
-//! where each packet ends: the packet's syntax elements are walked to its
-//! `END` element, decoding every Huffman codeword on the way but none of
-//! the audio, and the packet ends at the next byte.
-//!
-//! Only the shape the phone's recorder writes is accepted (mono AAC-LC):
-//! one single channel element (`SCE`), any fill (`FIL`) and data stream
-//! (`DSE`) elements, and `END`, so a stream of more than one channel is
-//! refused. A channel pair, a coupling or low-frequency channel, a program
-//! config, predictor data or gain control (neither of which AAC-LC has), a
-//! reserved codebook, a section past the last band, a scale factor out of
-//! its range, an impossible escape or a packet longer than
-//! [`MAX_PACKET_BYTES`] is [`PacketError::Invalid`]: bytes that are not a
-//! packet of that shape, which ends the salvage there.
-//!
-//! The rate is not in the bits: 44.1 and 48 kHz share their band tables, so
-//! a packet at either parses the same. The salvage takes the rate from the
-//! phone's fixed preset instead ([`super::SAMPLE_RATE`]).
+//! 4.4.2.1) read off its bits, for a stream with no sample table: the
+//! syntax elements are walked to `END`, decoding every Huffman codeword but
+//! none of the audio. Only the phone's shape is accepted (one `SCE`, any
+//! `FIL` and `DSE`, `END`); anything else is [`PacketError::Invalid`].
 
 use std::sync::LazyLock;
 
@@ -35,8 +21,7 @@ pub enum PacketError {
     Invalid(&'static str),
 }
 
-/// The length in bytes of the packet that starts `bytes`; `bytes` may run on
-/// past it.
+/// The length in bytes of the packet that starts `bytes`.
 pub fn packet_length(bytes: &[u8]) -> Result<usize, PacketError> {
     let mut bits = Bits::new(bytes);
     let mut channels = 0;
@@ -46,7 +31,6 @@ pub fn packet_length(bytes: &[u8]) -> Result<usize, PacketError> {
                 if channels > 0 {
                     return Err(PacketError::Invalid("a second channel"));
                 }
-                // The element's instance tag.
                 bits.read(4)?;
                 channel_stream(&mut bits)?;
                 channels += 1;
@@ -107,8 +91,7 @@ const EIGHT_SHORT_SEQUENCE: u32 = 2;
 const TNS_MAX_ORDER_LONG: u32 = 12;
 const TNS_MAX_ORDER_SHORT: u32 = 7;
 
-/// An `individual_channel_stream` (4.4.2.7) outside a channel pair, so with
-/// its own `ics_info`.
+/// An `individual_channel_stream` (4.4.2.7) with its own `ics_info`.
 fn channel_stream(bits: &mut Bits<'_>) -> Result<(), PacketError> {
     let global_gain = bits.read(8)?;
     let window = ics_info(bits)?;
@@ -153,7 +136,6 @@ fn ics_info(bits: &mut Bits<'_>) -> Result<Window, PacketError> {
         return Err(PacketError::Invalid("the reserved bit is set"));
     }
     let short = bits.read(2)? == EIGHT_SHORT_SEQUENCE;
-    // The window shape.
     bits.bit()?;
     let mut groups = [1u16; 8];
     let mut group_count = 1;
@@ -290,7 +272,6 @@ fn tns_data(bits: &mut Bits<'_>, window: &Window) -> Result<(), PacketError> {
                 return Err(PacketError::Invalid("a TNS filter of too high an order"));
             }
             if order > 0 {
-                // The direction.
                 bits.bit()?;
                 let compressed = bits.read(1)?;
                 let coefficient_bits = 3 + coefficient_resolution - compressed;
@@ -373,7 +354,6 @@ struct Bits<'a> {
     /// Whether `bytes` was cut at [`MAX_PACKET_BYTES`]: running out of it
     /// then means a packet too long, not one cut off.
     capped: bool,
-    /// The next bit's index.
     at: usize,
 }
 
@@ -461,7 +441,6 @@ impl Tree {
         Self { nodes }
     }
 
-    /// The index of the codeword next in `bits`.
     fn decode(&self, bits: &mut Bits<'_>) -> Result<u16, PacketError> {
         let mut node = 0;
         loop {
@@ -477,7 +456,6 @@ impl Tree {
     }
 }
 
-/// The codebooks as trees, built once.
 struct Trees {
     spectrum: Vec<Tree>,
     scale_factors: Tree,
@@ -541,7 +519,6 @@ mod tests {
         (bytes, text.len().div_ceil(8))
     }
 
-    /// The codeword of `index` in `codebook` as '0' and '1'.
     fn code(codebook: &Codebook, index: usize) -> String {
         let (code, length) = (codebook.codes[index], usize::from(codebook.lens[index]));
         format!("{code:0length$b}")
@@ -562,7 +539,6 @@ mod tests {
         format!("000 0000 01100100 0 00 0 {bands:06b} 0").replace(' ', "")
     }
 
-    /// No pulse, TNS or gain control.
     const NO_TOOLS: &str = "000";
     const END_BITS: &str = "111";
 
@@ -735,7 +711,6 @@ mod tests {
             END_BITS,
         ]);
         assert_eq!(packet_length(&packet), Ok(length));
-        // Eight groups of one window: a section each.
         let mut parts = vec![short("0001", "0000000")];
         for _ in 0..8 {
             parts.extend(["0001".to_owned(), "001".to_owned()]);
@@ -886,7 +861,6 @@ mod tests {
             END_BITS,
         ]);
         assert_eq!(packet_length(&packet), Ok(length));
-        // The same unaligned is three bytes later by the padding's bits.
         let (packet, length) = bits(&[
             silent,
             "100 0000 0 00000011".replace(' ', "").as_str(),
@@ -971,7 +945,6 @@ mod tests {
             packet_length(&[0xe0]),
             Err(PacketError::Invalid(_))
         ));
-        // Zeros: a channel with no bands, then a second channel.
         assert!(matches!(
             packet_length(&[0; 16]),
             Err(PacketError::Invalid(_))

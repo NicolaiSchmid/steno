@@ -1,23 +1,8 @@
-//! The macOS live backend against the real HAL, ignored by default: these
-//! need a Mac with audio devices and run with `cargo test -p steno-audio
-//! --test live -- --ignored --nocapture` (without `--nocapture` the record
-//! they print is swallowed). Over SSH the tap and the microphone deliver
-//! silence (a session without a GUI gets no TCC grant), which is fine: what
-//! these assert is that enumeration returns, that `start` and `stop` return
-//! within a bound, that nothing hangs, that the in-person `IOProc` runs, and
-//! that a UID naming no device records the default input.
-//! Call mode's tap aggregate runs only while a process the tap includes
-//! drives the output, so the capture starts a silent output `IOProc` of its
-//! own on the aggregate's clock master before the aggregate's `IOProc`
-//! (A10, see `capture::live::backend`): with nothing playing, the call
-//! tests assert the first callback within 100 ms of `start` returning,
-//! within 200 ms of the call to `start` while the machine is quiet, and
-//! about one second of frames per second; without the silent output they
-//! fail with no callback at all, and a `start` that fails fails them too.
-//! Nothing may play during those runs.
-//! Each run happens on its own thread joined with a deadline, so a hang
-//! fails instead of stalling the suite.
-//! Swift: `Tests/StenoAudioTests/LiveCaptureBackendTests.swift`.
+//! The macOS live backend against the real HAL, ignored by default: run on
+//! a Mac with `cargo test -p steno-audio --test live -- --ignored
+//! --nocapture`. Over SSH the lanes deliver silence; the tests assert that
+//! calls return within bounds, the `IOProc` runs from the start (nothing may
+//! play meanwhile), and a UID naming no device records the default input.
 #![cfg(target_os = "macos")]
 // The docs name Core Audio's IOProc as the HAL spells it.
 #![allow(clippy::doc_markdown)]
@@ -84,11 +69,8 @@ fn device_enumeration_returns() {
 }
 
 /// Starts the backend for `lanes`, captures half a second, stops, and
-/// returns the IOProc callbacks counted in between (each completed callback
-/// signals the sink's wake once), or `None` when the start failed. A start
-/// that fails (no input device on a headless Mac, a tap refused without the
-/// capture permission) is printed, not failed. Zero callbacks means the
-/// IOProc never ran; callbacks with a zero peak mean it ran silent.
+/// returns the IOProc callbacks counted in between, or `None` when the
+/// start failed (printed, not failed).
 fn start_capture_stop(lanes: &'static [AudioLane]) -> Option<usize> {
     within(Duration::from_secs(30), "start, capture, stop", move || {
         let backend = LiveCaptureBackend::new();
@@ -134,9 +116,8 @@ fn start_capture_stop(lanes: &'static [AudioLane]) -> Option<usize> {
     })
 }
 
-/// A UID that names no device (a PipeWire node name from a settings file
-/// synced from Linux) records the default input and says so; the default's
-/// own UID records it as chosen.
+/// A UID that names no device records the default input and says so; the
+/// default's own UID records it as chosen.
 #[test]
 #[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
 fn an_unknown_microphone_records_the_default_input() {
@@ -188,22 +169,20 @@ fn in_person_capture_starts_and_stops_within_bounds() {
 }
 
 /// The bound on the first callback after `start` returns, for a call
-/// capture with nothing playing: what A10 changes.
+/// capture with nothing playing.
 const FIRST_CALLBACK: Duration = Duration::from_millis(100);
 
 /// The bound on the first callback after the call to `start`, so that a
 /// slower setup cannot hide behind [`FIRST_CALLBACK`]. Asserted only while
-/// both the one- and the five-minute load are below [`QUIET_LOAD`]: `start`
-/// itself took 54 to 100 ms on a quiet Mac and up to 844 ms on a busy one,
-/// and a one-minute load that just dropped hides a machine still busy.
+/// the machine is quiet ([`QUIET_LOAD`]).
 const END_TO_END: Duration = Duration::from_millis(200);
 
 /// The load below which [`END_TO_END`] is asserted, by both the one- and
 /// the five-minute average.
 const QUIET_LOAD: f64 = 4.0;
 
-/// The one- and the five-minute load averages (`sysctl vm.loadavg`, which
-/// prints `{ 1.23 2.34 3.45 }`), `None` when they do not read.
+/// The one- and the five-minute load averages, `None` when they do not
+/// read.
 fn load_average() -> Option<(f64, f64)> {
     let output = std::process::Command::new("sysctl")
         .args(["-n", "vm.loadavg"])
@@ -233,20 +212,15 @@ fn the_load_reads_the_one_and_the_five_minute_average() {
 
 /// What one call capture measured.
 struct CallRun {
-    /// The first callback after `start` returned.
     first: Option<Duration>,
-    /// How long `start` itself took.
     setup: Duration,
-    /// Frames on every lane, in seconds at the stream's rate.
     seconds: f64,
     elapsed: Duration,
-    /// The system lane's loudest sample.
     system_peak: f32,
 }
 
-/// Starts a call capture on `backend`, records `length` (drained every
-/// 10 ms, so the rings never fill), stops, and prints what it measured.
-/// A `start` that fails (the tap or the aggregate refused) fails the test.
+/// Starts a call capture on `backend`, records `length`, stops, and prints
+/// what it measured. A `start` that fails fails the test.
 #[allow(clippy::cast_precision_loss)]
 fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> CallRun {
     let lanes = [AudioLane::Mic, AudioLane::System];
@@ -291,7 +265,7 @@ fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> CallR
     let stopping = Instant::now();
     backend.stop();
     // What the stop wrote for audio the IO thread missed after its last
-    // callback (A18 of `.plans/2026-10-07-stable-promotion.md`).
+    // callback.
     frames += sink.available_to_read();
     let seconds = frames as f64 / stream.sample_rate;
     println!(
@@ -317,10 +291,8 @@ fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> CallR
 }
 
 /// What a call capture with nothing playing must show: its first callback
-/// within [`FIRST_CALLBACK`] of `start` returning, within [`END_TO_END`] of
-/// the call to `start` while the one- and five-minute loads are both under
-/// [`QUIET_LOAD`] (always printed), and about as many seconds of frames as
-/// it ran.
+/// within [`FIRST_CALLBACK`] (and [`END_TO_END`] while quiet), and about
+/// as many seconds of frames as it ran.
 fn assert_ran_from_the_start(run: &CallRun) {
     let first = run
         .first
@@ -353,13 +325,9 @@ fn assert_ran_from_the_start(run: &CallRun) {
     );
 }
 
-/// Plays nothing itself, and nothing else may play during the run: the
-/// call capture's own silent output keeps its tap aggregate running, so
-/// the first callback comes within [`FIRST_CALLBACK`] of `start` returning
-/// (and [`END_TO_END`] of the call) and four seconds hold about four
-/// seconds of frames on every lane. The system lane is all zeros too,
-/// which over SSH proves nothing about its content (a session without the
-/// capture grant gets a silent tap anyway).
+/// Nothing may play during the run: the call capture's own silent output
+/// keeps its tap aggregate running from the start, four seconds holding
+/// about four seconds of frames on every lane.
 #[test]
 #[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
 fn call_capture_runs_from_its_start_with_nothing_playing() {
@@ -374,10 +342,9 @@ fn call_capture_runs_from_its_start_with_nothing_playing() {
     assert_eq!(run.system_peak, 0.0, "the system lane is digital silence");
 }
 
-/// A rebuild as the session runs it after a device change, `stop()` and
-/// `start` again on the same backend: the rebuilt capture starts its silent
-/// output again and runs from its start too. A Mac with one output cannot
-/// change it, so the device change itself is not exercised here.
+/// A rebuild as the session runs it, `stop()` and `start` again: the
+/// rebuilt capture starts its silent output again and runs from its start
+/// too.
 #[test]
 #[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
 fn a_rebuilt_call_capture_keeps_its_silent_output() {
@@ -396,10 +363,8 @@ fn a_rebuilt_call_capture_keeps_its_silent_output() {
 }
 
 /// The session over the live backend, a call with nothing playing: a
-/// stall's rebuild restarts the capture, the restarted stream delivers
-/// within the session's wait for a first frame (`STALL_TIMEOUT`), so the
-/// restart counts as run, and no further restart follows while it records.
-/// Nothing may play during the run.
+/// stall's rebuild restarts the capture, which delivers within
+/// `STALL_TIMEOUT`, and no further restart follows.
 #[test]
 #[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
 fn a_silent_call_restart_counts_as_run() {

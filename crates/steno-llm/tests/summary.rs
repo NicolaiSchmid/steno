@@ -1,9 +1,6 @@
-//! The summary pass over the stub server: the single-shot path and its
-//! post-processing, repair, truncation, templates, assignees, dates,
-//! suggestions, language, usage, and the map and reduce path on the
-//! 60-minute fixture.
-//! Swift: `SummaryTests`, `SummaryContractTests`,
-//! `NamesTasksLanguageUsageTests`, `MapReduceTests`, `MapReduceEdgeTests`.
+//! The summary pass over the stub server: single-shot and post-processing,
+//! repair, templates, assignees, dates, suggestions, language, usage, and
+//! map and reduce.
 
 mod common;
 
@@ -143,8 +140,7 @@ async fn single_shot_builds_the_summary_output_from_the_draft() {
     assert_eq!(output.summary.template_id, "default");
     assert_eq!(output.summary.language, Some(de()));
 
-    // Sections: template order, unknown `wrap-up` dropped, empty optional
-    // `open-questions` dropped, translated heading kept.
+    // Template order, unknown and empty optional sections dropped.
     let ids: Vec<&str> = output
         .summary
         .sections
@@ -315,9 +311,8 @@ fn required_sections_survive_empty_and_headings_fall_back_to_the_template() {
     assert_eq!(output.decisions, ["a"]);
 }
 
-/// Small models in prompt-only mode sometimes split one section into two
-/// blocks with the same id; both halves are kept, in order, under the first
-/// heading the model wrote.
+/// A section split into two blocks with the same id is kept in order under
+/// the first heading.
 #[test]
 fn a_section_the_model_split_in_two_is_merged() {
     let draft = AnalysisDraft {
@@ -439,10 +434,7 @@ fn speaker_suggestions_are_filtered_clamped_and_one_per_speaker() {
     );
 }
 
-// Contract beyond the default template
-
-/// A draft that fills every section of `template` in reverse order, with
-/// one extra section the template does not know.
+/// A draft filling every section of `template` in reverse, plus one unknown.
 fn full_draft(template: &SummaryTemplate) -> AnalysisDraft {
     let mut sections: Vec<DraftSection> = template
         .sections
@@ -500,7 +492,6 @@ async fn every_template_round_trips_its_section_ids() {
                 section.id
             );
         }
-        // Schema: the id enum is the same list, for single shot and reduce.
         let id_enum = &builder.draft_schema().json_value()["properties"]["sections"]["items"]["properties"]
             ["id"]["enum"];
         assert_eq!(
@@ -520,8 +511,6 @@ async fn every_template_round_trips_its_section_ids() {
                 .contains(&quoted)
         );
 
-        // Post-processing: template order restored, the unknown id dropped,
-        // the model's headings kept.
         let server = StubChatServer::start().await.unwrap();
         server.enqueue([scripts.json(&full_draft(&template), Some(usage(10, 5)))]);
         let output = summarizer(&server, 32_000).summarize(&input).await.unwrap();
@@ -706,7 +695,6 @@ fn the_meeting_date_line_follows_the_summarizer_time_zone() {
         date_line(&input, chrono_tz::Pacific::Kiritimati)
             .starts_with("Meeting date: 2026-09-24 (Thursday).")
     );
-    // Map and reduce carry the same line.
     let builder = SummaryPromptBuilder::new(input.template.clone(), Utc);
     let chunk = TranscriptChunker::default().chunk(&input.segments, Some(&de()))[0].clone();
     assert!(
@@ -721,8 +709,8 @@ fn the_meeting_date_line_follows_the_summarizer_time_zone() {
     );
 }
 
-/// The instruction to translate the section headings follows the language
-/// line only where headings follow in the prompt.
+/// The heading translation rule follows the language line only where
+/// headings follow.
 #[test]
 fn the_headings_rule_appears_only_where_headings_follow() {
     let input = default_input();
@@ -750,8 +738,6 @@ fn the_headings_rule_appears_only_where_headings_follow() {
     assert!(!map.contains("Sections, in this order"));
     assert!(map.contains("Output language: German. Write the title, every heading"));
 }
-
-// Names, tasks, language, usage
 
 fn draft_with(speaker_names: Vec<DraftSpeakerName>, tasks: Vec<DraftTask>) -> AnalysisDraft {
     AnalysisDraft {
@@ -978,8 +964,6 @@ async fn usage_is_the_sum_of_every_call_including_repairs_and_missing_usage() {
     assert_eq!(meeting_total.prompt_tokens, 40 * calls + 700);
 }
 
-// Map and reduce
-
 fn call_input() -> SummaryInput {
     summary_input(
         &customer_call(),
@@ -1060,8 +1044,7 @@ async fn at_8k_context_issues_map_calls_then_one_reduce() {
             .map(|s| s.name.as_str())
             == Some("chunk_notes")
     }));
-    // Each map call may spend the chunk's share of the input budget on its
-    // notes, not the 1 500 ceiling.
+    // Each map call may spend the chunk's share, not the 1 500 ceiling.
     let budget = summarizer.budget_for(&call_input(), None);
     let notes_tokens = budget.map_notes_output_tokens(map_count);
     assert!((256..1_500).contains(&notes_tokens), "{notes_tokens}");
@@ -1257,14 +1240,11 @@ async fn map_bounded_keeps_order_and_propagates_the_first_error() {
     assert_eq!(failed, Err("boom"));
 }
 
-// Map and reduce beyond the happy path
-
 #[tokio::test]
 async fn oversized_notes_throw_transcript_too_long_after_the_map_and_before_the_reduce() {
     let server = StubChatServer::start().await.unwrap();
     let draft = canned("summary-default-standup");
-    // About 6 000 estimated tokens of notes per chunk: ten chunks cannot fit
-    // an 8k context however the reduce prompt is trimmed.
+    // Ten chunks of about 6 000 notes tokens cannot fit an 8k context.
     server.respond(Arc::new(move |request| {
         Some(if request.purpose.as_deref() == Some("summary-map") {
             scripts.json(&notes(0, 30, 600), Some(usage(10, 5)))
@@ -1302,8 +1282,6 @@ async fn a_map_answer_is_repaired_once_with_the_notes_schema_and_the_chunk_index
     server.respond(Arc::new(move |request| {
         Some(match request.purpose.as_deref() {
             Some("summary-map") => {
-                // Part 3 answers prose the first time; every answer claims
-                // chunk 0.
                 if request
                     .chat
                     .as_ref()
@@ -1387,15 +1365,12 @@ async fn a_map_answer_is_repaired_once_with_the_notes_schema_and_the_chunk_index
     );
 }
 
-/// The map ceiling is each chunk's share of the input budget, so a model
-/// that fills its ceiling on every chunk still leaves notes that fit the
-/// reduce call.
+/// A model filling its map ceiling on every chunk still fits the reduce call.
 #[tokio::test]
 async fn map_answers_that_fill_their_ceiling_still_fit_the_reduce() {
     let server = StubChatServer::start().await.unwrap();
     let draft = canned("summary-default-standup");
-    // A model spending about 70 percent of its ceiling on notes: 20-word
-    // points of 100 bytes, about 34 estimated tokens each.
+    // Notes at about 70 percent of the ceiling.
     server.respond(Arc::new(move |request| {
         let ceiling = request.chat.as_ref().and_then(|c| c.max_tokens);
         Some(match (request.purpose.as_deref(), ceiling) {

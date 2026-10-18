@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 /**
  * Fails when the production bundle carries the mock bridge or a recorded
- * fixture (plan `2026-09-29-macos-webview-ui.md`, the WP2 deviation closed
- * in WP5). `vite build` resolves `#bridge-fallback` to `fallback-none.ts`,
+ * fixture. `vite build` resolves `#bridge-fallback` to `fallback-none.ts`,
  * so neither should be reachable; this is the gate that proves it. Three
  * signals: a chunk named after a fixture key (`meetings.list-<hash>.js`),
  * a string value a fixture carries and the page's own sources never spell

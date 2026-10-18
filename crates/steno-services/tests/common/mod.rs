@@ -31,10 +31,9 @@ pub fn sidecar_binary() -> PathBuf {
     binary
 }
 
-/// The test `name` run alone in a child of this test binary, with `home`
-/// as its home (`HOME`, `XDG_DATA_HOME`, `APPDATA`), so the child's
-/// default support directory is under it, never the developer's. A child
-/// that opens it calls [`assert_temporary_home`] first.
+/// The test `name` run alone in a child of this test binary with `home`
+/// as its home, so its default support directory is never the
+/// developer's.
 pub fn child_in(home: &Path, name: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command

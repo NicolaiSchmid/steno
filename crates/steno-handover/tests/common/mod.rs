@@ -1,9 +1,6 @@
 //! One `HandoverService` on loopback with a minted identity, an in-memory
-//! store, a fake intake that takes the file as the real one does
-//! ([`TakingIntake`]), a wall clock the tests advance and a fresh temporary
-//! inbox. `advertise` is always false: nothing leaves 127.0.0.1.
-//! The clients pin the listener's fingerprint through `pinning`, the Rust
-//! form of the phone's `PinnedTrustEvaluator.swift`.
+//! store, a fake intake, a wall clock and a temporary inbox. `advertise` is
+//! always false: nothing leaves 127.0.0.1.
 
 #![allow(
     dead_code,
@@ -44,9 +41,7 @@ use uuid::Uuid;
 
 pub const START: i64 = 1_790_000_000;
 
-/// How long a test waits for a signal it is sure to get (an intake
-/// entered, a held future woken) before it fails instead of hanging the
-/// suite. A bound on a signal, not a guess at how long the work takes.
+/// How long a test waits for a signal it is sure to get before it fails.
 pub const SIGNAL_BOUND: Duration = Duration::from_secs(30);
 
 /// Waits for `signal`; panics with `what` after [`SIGNAL_BOUND`].
@@ -56,16 +51,8 @@ pub async fn signalled<T>(what: &str, signal: impl Future<Output = T>) -> T {
         .unwrap_or_else(|_| panic!("{what} within {SIGNAL_BOUND:?}"))
 }
 
-/// Runs `test` as a task on a runtime with one worker and one blocking
-/// thread, so the order in which store calls reach the pool is fixed: the
-/// worker runs the task spawned last first (tokio's LIFO slot), and the one
-/// blocking thread runs the calls in the order they arrive. An `in_order`
-/// that does not wait for the write before it, or a write sent to the pool
-/// straight from the request while the write before it still sits in its
-/// task, then commits out of order every time instead of only when threads
-/// race. Catching the first relies on the LIFO slot of the tokio pinned in
-/// `Cargo.lock`: a tokio without it weakens the catch but cannot make the
-/// fixed code fail.
+/// Runs `test` on one worker and one blocking thread, so store calls reach
+/// the pool in a fixed order and an out-of-order commit fails every time.
 pub fn on_one_worker(test: impl Future<Output = ()> + Send + 'static) {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -76,8 +63,7 @@ pub fn on_one_worker(test: impl Future<Output = ()> + Send + 'static) {
         .block_on(async { tokio::spawn(test).await.unwrap() });
 }
 
-/// Holds the store's one connection from another thread until
-/// [`StoreHold::release`], so a store call of the engine waits on it.
+/// Holds the store's one connection from another thread until released.
 pub struct StoreHold {
     release: mpsc::Sender<()>,
     holder: std::thread::JoinHandle<()>,
@@ -110,9 +96,7 @@ impl StoreHold {
     }
 }
 
-/// The one time source the service reads; tests move it to expire a
-/// pairing window or age a receipt, or hold the service's next read of it
-/// ([`WallClock::hold_next_read`]).
+/// The one time source the service reads; tests move it or hold it.
 #[derive(Clone)]
 pub struct WallClock {
     time: Arc<Mutex<DateTime<Utc>>>,
@@ -125,8 +109,7 @@ struct HeldRead {
     released: mpsc::Receiver<()>,
 }
 
-/// The service's next clock read, held on the thread that makes it until
-/// [`ClockHold::release`].
+/// The service's next clock read, held until [`ClockHold::release`].
 pub struct ClockHold {
     reached: mpsc::Receiver<()>,
     release: mpsc::Sender<()>,
@@ -162,11 +145,8 @@ impl WallClock {
         *self.time.lock().unwrap() += chrono::Duration::from_std(duration).unwrap();
     }
 
-    /// Holds the service's next read of the clock, on the thread that makes
-    /// it, until the hold is released, so a test stops a request at that
-    /// point while another one runs. Reads by the test itself go through.
-    /// A read not released within [`SIGNAL_BOUND`] panics, so a clock read
-    /// moved under the state lock fails the test.
+    /// Holds the service's next clock read until released; a hold not released
+    /// within [`SIGNAL_BOUND`] panics.
     pub fn hold_next_read(&self) -> ClockHold {
         let (reached, reached_here) = mpsc::channel();
         let (release, released) = mpsc::channel();
@@ -196,11 +176,8 @@ impl WallClock {
     }
 }
 
-/// Runs `request` against the engine on a thread of its own, as a second
-/// worker of the listener's runtime would, holds it at its clock read
-/// ([`WallClock::hold_next_read`]) while `meanwhile` runs, then lets it
-/// finish. Returns the held request's answer and what `meanwhile`
-/// returned.
+/// Runs `request` on its own thread, held at its clock read while
+/// `meanwhile` runs; returns both answers.
 pub async fn held_while<T>(
     test: &TestService,
     request: impl Future<Output = HandoverResponse> + Send + 'static,
@@ -212,9 +189,8 @@ pub async fn held_while<T>(
     (thread.join().unwrap(), during)
 }
 
-/// Runs `request` against the engine on a thread of its own and returns
-/// once it is held at its clock read, with the hold and the thread: the
-/// caller releases the one and joins the other.
+/// Runs `request` on its own thread and returns once it is held at its
+/// clock read.
 pub fn held(
     test: &TestService,
     request: impl Future<Output = HandoverResponse> + Send + 'static,
@@ -244,8 +220,7 @@ pub fn fake_intake(meeting_id: Uuid) -> Arc<FakeHandoverIntake> {
 }
 
 /// The meeting row a real intake commits with the `complete` receipt; the
-/// fake intakes write none. The engine reads a stored `complete` receipt
-/// whose meeting is missing as not admitted.
+/// engine reads a `complete` receipt without it as not admitted.
 pub fn save_admitted_meeting(store: &Store, meeting_id: Uuid) {
     store
         .save_meeting(&steno_core::Meeting {
@@ -255,8 +230,7 @@ pub fn save_admitted_meeting(store: &Store, meeting_id: Uuid) {
         .unwrap();
 }
 
-/// Runs `sql` on the store's connection; the tests make a store write or
-/// read fail with a temporary trigger or table.
+/// Runs `sql` on the store's connection, e.g. a failing temporary trigger.
 pub fn execute_batch(store: &Store, sql: &str) {
     store
         .write(|transaction| Ok(transaction.execute_batch(sql)?))
@@ -264,12 +238,7 @@ pub fn execute_batch(store: &Store, sql: &str) {
 }
 
 /// Takes the verified file out of the inbox before `inner` sees it, as the
-/// real intake does (`RecordingIntake::admit` in `steno-pipeline` copies
-/// it into the audio folder and deletes it), and puts it back when `inner`
-/// refuses, as the real intake leaves it for the phone's retry. The file
-/// moves into a directory of its own under the same name, so `inner` gets
-/// the same path for every attempt of a recording and the test reads the
-/// admitted bytes there after the engine discarded the recording's files.
+/// real intake does, and puts it back when `inner` refuses.
 pub struct TakingIntake {
     inner: Arc<dyn HandoverIntake>,
     directory: tempfile::TempDir,
@@ -301,14 +270,8 @@ impl HandoverIntake for TakingIntake {
     }
 }
 
-/// A `HandoverIntake` that fails the first `failures` admissions and then
-/// returns `meeting_id`: the pipeline refusing a file once. `delay` holds
-/// each admission open, the way the real intake's copy of a large file
-/// does; `admit_once` refuses every admission after the first successful
-/// one, the way the real intake fails when a second copy races the first
-/// one's removal of the source. A gated intake holds each admission until
-/// [`ScriptedIntake::release`], so a test acts while one is in flight
-/// without guessing how long the verify before it takes.
+/// An intake that fails the first `failures` admissions, then returns
+/// `meeting_id`; it can delay, admit once, or gate each admission.
 pub struct ScriptedIntake {
     pub meeting_id: Uuid,
     pub delay: Duration,
@@ -321,8 +284,8 @@ pub struct ScriptedIntake {
     released: Notify,
 }
 
-/// Carries the file path, as an I/O error from the real intake's copy
-/// would; the computer must not echo it to the phone or into the receipt.
+/// Carries the file path, as a real I/O error would; the computer must not
+/// echo it to the phone or into the receipt.
 #[derive(Debug)]
 pub struct Refused(pub PathBuf);
 
@@ -425,14 +388,9 @@ impl HandoverIntake for ScriptedIntake {
     }
 }
 
-/// An intake that commits each admission as the real one does
-/// (`RecordingIntake::admit` in `steno-pipeline`, without the copy): the
-/// `complete` receipt, a meeting under a fresh id and its asset in one
-/// durable transaction, which writes the ledger row
-/// (`Store::save_admission_durably`), or the receipt alone with the meeting
-/// the ledger holds for the same bytes; it refuses another upload's receipt
-/// the same way. [`StoreIntake::hold_next`] holds the next
-/// admission before or after its commit until [`StoreIntake::release`].
+/// An intake that commits like the real one, without the copy: the receipt,
+/// meeting and asset in one durable transaction, or the receipt alone with
+/// the ledger's meeting.
 pub struct StoreIntake {
     store: Arc<Store>,
     meetings: Mutex<Vec<Uuid>>,
@@ -544,8 +502,7 @@ pub struct Options {
     pub port: u16,
     pub read_timeout: Duration,
     pub start: bool,
-    /// The store in place of a fresh in-memory one: a second service over
-    /// it is the app after a restart.
+    /// The store in place of a fresh one: a second service over it is a restart.
     pub store: Option<Arc<Store>>,
 }
 
@@ -805,8 +762,7 @@ pub fn pairing(secret: &[u8]) -> String {
     format!("Pairing {}", STANDARD.encode(secret))
 }
 
-// Raw client: for the limit tests, where the assertion is about the
-// connection itself
+// Raw client: for the limit tests
 
 #[derive(Default)]
 pub struct Exchange {
@@ -837,10 +793,8 @@ impl RawClient {
         connector.connect(name, tcp).await
     }
 
-    /// Sends exactly the head and body it is given and reads one response.
-    /// Returns once a full response has been read and the server either
-    /// closed or `close_grace` passed; a response that never arrives within
-    /// `timeout` returns whatever was read.
+    /// Sends exactly the head and body it is given and reads one response,
+    /// waiting up to `close_grace` for a close and `timeout` overall.
     pub async fn exchange(
         &self,
         method: &str,
@@ -881,8 +835,7 @@ impl RawClient {
     }
 }
 
-/// Appends what arrives to `received` until `done` says so, the server
-/// closes (true) or `timeout` passes.
+/// Appends what arrives to `received` until `done`, a close (true) or `timeout`.
 pub async fn read_until(
     stream: &mut ClientStream,
     timeout: Duration,
@@ -909,8 +862,7 @@ pub async fn read_until(
     }
 }
 
-/// One complete HTTP/1.1 response (status, headers, body by
-/// `Content-Length`), or `None` while it is still incomplete.
+/// One complete HTTP/1.1 response, or `None` while it is incomplete.
 pub fn parse_response(bytes: &[u8]) -> Option<Exchange> {
     let end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
     let head = std::str::from_utf8(&bytes[..end]).ok()?;
@@ -937,8 +889,7 @@ pub fn parse_response(bytes: &[u8]) -> Option<Exchange> {
 
 // The phone
 
-/// A paired phone in the tests: the bearer from `/v1/pair` and the
-/// recording calls, over `LoopbackClient`.
+/// A paired phone in the tests, over `LoopbackClient`.
 pub struct Phone {
     pub client: LoopbackClient,
     pub token: String,
@@ -977,8 +928,7 @@ impl Phone {
         Self::pair_with(test, &payload, device_name).await
     }
 
-    /// Pairs a fresh device with the secret of `payload`, the window the
-    /// caller opened.
+    /// Pairs a fresh device with the secret of `payload`.
     pub async fn pair_with(
         test: &TestService,
         payload: &steno_handover::PairingPayload,
@@ -1020,8 +970,8 @@ impl Phone {
             .await
     }
 
-    /// Uploads one chunk with the hash header `UploadSession.swift` sets; a
-    /// different `declared_hash` simulates a corrupt body.
+    /// Uploads one chunk with its hash header; a different `declared_hash`
+    /// simulates a corrupt body.
     pub async fn upload(&self, recording_id: Uuid, index: i64, bytes: &[u8]) -> Response {
         self.upload_with(recording_id, index, bytes, Some(&sha256(bytes)))
             .await
@@ -1122,8 +1072,7 @@ pub fn chunks(bytes: &[u8], size: i64) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Deterministic pseudo-random bytes (`SplitMix64`), so a failing test can
-/// name what it sent.
+/// Deterministic pseudo-random bytes (`SplitMix64`).
 pub fn seeded_bytes(count: usize, seed: u64) -> Vec<u8> {
     let mut state = seed;
     let mut data = Vec::with_capacity(count + 8);
@@ -1154,8 +1103,7 @@ impl EngineDevice {
         Self::paired_on(&test.service, &test.store, device_name).await
     }
 
-    /// [`EngineDevice::paired`] on `service` over `store`, such as a
-    /// computer started again over a test's store.
+    /// [`EngineDevice::paired`] on `service` over `store`, e.g. after a restart.
     pub async fn paired_on(
         service: &Arc<HandoverService>,
         store: &Store,
@@ -1172,8 +1120,7 @@ impl EngineDevice {
         }
     }
 
-    /// Pairs again under the same device id and name, as a revoked phone
-    /// that scans a new code does, and returns the new pairing's view.
+    /// Pairs again under the same device id and name, as a revoked phone does.
     pub async fn pair_again(&self) -> EngineDevice {
         let payload = self.service.begin_pairing();
         let response =
@@ -1259,8 +1206,7 @@ impl EngineDevice {
     }
 }
 
-/// What the gate makes of `POST /v1/pair` with the secret of `payload`;
-/// panics on a rejection.
+/// The gate's answer to `POST /v1/pair` with `payload`'s secret; panics on a rejection.
 pub async fn pairing_principal(
     service: &HandoverService,
     payload: &steno_handover::PairingPayload,
@@ -1276,8 +1222,7 @@ pub async fn pairing_principal(
     }
 }
 
-/// `POST /v1/pair` with the secret of `payload`, the gate and the body
-/// straight into the engine.
+/// `POST /v1/pair` with the secret of `payload`, straight into the engine.
 pub async fn engine_pair(
     service: &HandoverService,
     payload: &steno_handover::PairingPayload,
@@ -1288,8 +1233,7 @@ pub async fn engine_pair(
     engine_pair_as(service, principal, device_id, device_name).await
 }
 
-/// The body of `POST /v1/pair` straight into the engine, as `principal`,
-/// the gate's answer at the head.
+/// The body of `POST /v1/pair` straight into the engine, as `principal`.
 pub async fn engine_pair_as(
     service: &HandoverService,
     principal: Principal,
@@ -1317,10 +1261,8 @@ pub async fn engine_hello(test: &TestService) -> HandoverResponse {
         .await
 }
 
-/// A fingerprint record in memory, as the app's `handover-identity.json`:
-/// the recorded fingerprint and the next one of an unfinished Pair again.
-/// It refuses records while `refuse` is set and notes while `refuse_note`
-/// is.
+/// An in-memory fingerprint record that refuses records while `refuse` is
+/// set and notes while `refuse_note` is.
 #[derive(Default)]
 pub struct MemoryRecord {
     pub recorded: Mutex<Option<String>>,

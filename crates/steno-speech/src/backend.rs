@@ -1,20 +1,13 @@
-//! The four model calls of a Parakeet TDT transducer behind one trait, so
-//! the decoder, the chunker and the merge are written once over any
-//! backend: [`crate::onnx`] here, the `CoreML` one in
-//! `steno-speech-coreml`.
-//! Swift: `FluidAudio`'s `AsrModels` (Preprocessor, Encoder, Decoder,
-//! `JointDecisionv3`), which `ParakeetEngine` drives through `AsrManager`.
-//!
-//! The `CoreML` joint returns the argmax token and the duration bin; the ONNX
-//! joiner returns raw logits over the vocabulary and the duration bins in
-//! one vector. [`split_logits`] is the one place that splits them.
+//! The four model calls of a Parakeet TDT transducer behind one trait, so the
+//! decoder, the chunker and the merge are written once over any backend:
+//! [`crate::onnx`] here, `CoreML` in `steno-speech-coreml`.
 
 use crate::error::SpeechError;
 
 /// The one sample rate of the pipeline; every model here takes 16 kHz.
 pub const SAMPLE_RATE: usize = 16_000;
-/// Seconds per encoder frame: a 10 ms mel hop times the subsampling factor
-/// of 8.
+/// Seconds per encoder frame: a 10 ms mel hop times the subsampling factor of
+/// 8.
 pub const FRAME_SECONDS: f64 = 0.08;
 /// Samples per encoder frame.
 pub const FRAME_SAMPLES: usize = SAMPLE_RATE * 8 / 100;
@@ -33,19 +26,17 @@ pub struct ModelShape {
     pub vocab_size: usize,
     /// The blank's id, `vocab_size - 1` for every `NeMo` export.
     pub blank_id: u32,
-    /// The TDT duration bins in encoder frames, `[0, 1, 2, 3, 4]` for
-    /// Parakeet v3; the joint's duration argmax indexes this.
+    /// The TDT duration bins in encoder frames, `[0, 1, 2, 3, 4]` for Parakeet
+    /// v3.
     pub durations: Vec<usize>,
-    /// Prediction network layers and hidden size (`pred_rnn_layers`,
-    /// `pred_hidden`).
+    /// Prediction network layers and hidden size.
     pub decoder_layers: usize,
     pub decoder_hidden: usize,
     /// The encoder's output width per frame (`d_model`).
     pub encoder_hidden: usize,
 }
 
-/// Mel features for one window, mel-major (`data[mel * frames + frame]`),
-/// the layout the encoder's `[1, mels, frames]` input takes.
+/// Mel features for one window, mel-major (`data[mel * frames + frame]`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Features {
     pub mels: usize,
@@ -53,8 +44,8 @@ pub struct Features {
     pub data: Vec<f32>,
 }
 
-/// Encoder frames for one window, frame-major (`data[frame * hidden ..]`),
-/// so [`EncoderOutput::frame`] is a slice.
+/// Encoder frames for one window, frame-major, so [`EncoderOutput::frame`] is a
+/// slice.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncoderOutput {
     pub hidden: usize,
@@ -89,8 +80,8 @@ impl DecoderState {
     }
 }
 
-/// One prediction-network step: the projection the joint consumes and the
-/// state after the fed token.
+/// One prediction-network step: the projection the joint consumes and the state
+/// after the fed token.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecoderStep {
     pub projection: Vec<f32>,
@@ -108,8 +99,7 @@ pub struct JointDecision {
 }
 
 /// The model calls. Implementations hold their sessions and buffers and are
-/// `Send`, so a transcriber can move to a worker thread or, later, behind
-/// the sidecar boundary of speech-stack decision 5; nothing is shared
+/// `Send`, so a transcriber can move to a worker thread; nothing is shared
 /// through globals.
 pub trait SpeechBackend: Send {
     fn shape(&self) -> &ModelShape;
@@ -120,8 +110,8 @@ pub trait SpeechBackend: Send {
     /// The encoder over one window of features.
     fn encode(&mut self, features: &Features) -> Result<EncoderOutput, SpeechError>;
 
-    /// One prediction-network step: feed `token` (the blank primes the
-    /// network) with `state`, get the projection and the next state.
+    /// One prediction-network step: feed `token` with `state`, get the
+    /// projection and the next state.
     fn decoder_step(
         &mut self,
         token: u32,
@@ -136,12 +126,11 @@ pub trait SpeechBackend: Send {
     ) -> Result<JointDecision, SpeechError>;
 }
 
-/// Splits the ONNX joiner's logits (`vocab_size` vocabulary logits followed
-/// by one logit per duration bin) into a [`JointDecision`]: argmax over the
-/// vocabulary with its softmax probability, argmax over the duration bins.
-/// The `CoreML` joint does this inside the model. Errors with
-/// [`SpeechError::Shape`] when `vocab_size` is 0 or no duration logit
-/// follows the vocabulary.
+/// Splits the ONNX joiner's logits (vocabulary, then one per duration bin) into
+/// a [`JointDecision`]: argmax over the vocabulary with its softmax
+/// probability, argmax over the duration bins; the `CoreML` joint does this
+/// inside the model. Errors with [`SpeechError::Shape`] when `vocab_size` is 0
+/// or no duration logit follows.
 pub fn split_logits(logits: &[f32], vocab_size: usize) -> Result<JointDecision, SpeechError> {
     if vocab_size == 0 {
         return Err(SpeechError::Shape(

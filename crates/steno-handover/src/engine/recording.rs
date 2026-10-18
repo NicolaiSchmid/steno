@@ -1,8 +1,6 @@
 //! The four recording routes: announce, status, chunk, complete. Every path
 //! is idempotent on the recording id, so a phone that lost the answer can
-//! simply repeat the call. `device` is the bearer principal the gate
-//! established; a recording belongs to the device that announced it.
-//! Swift: `Routing/RecordingHandler.swift`.
+//! repeat the call. A recording belongs to the device that announced it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,9 +32,8 @@ type MadeAndOpened = (HandoverReceipt, super::InOrder, Option<std::io::Result<()
 /// Where one decision of an announce ended.
 enum Announced {
     Answered(HandoverResponse),
-    /// Memory held another receipt of the recording id by the time of the
-    /// change than the one the decision was made on; the announce decides
-    /// again with that one.
+    /// Memory held another receipt by the time of the change; the announce
+    /// decides again with that one.
     Changed(Box<HandoverReceipt>),
 }
 
@@ -46,12 +43,11 @@ pub(super) fn no_such_recording() -> HandoverResponse {
 
 impl Engine {
     /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
-    /// recording (no receipt, or other bytes than the receipt's), 200 for a
-    /// known one, both with `RecordingStatus`; 200 `complete` with every
-    /// chunk listed for bytes the admission ledger shows admitted; 409 only
-    /// for admitted bytes over another device's unfinished upload of other
-    /// bytes; 401 when the device was revoked since its receipt read. The
-    /// decision table is in `.plans/2026-10-08-handover-admission-ledger.md`.
+    /// recording (no receipt, or other bytes), 200 for a known one, both with
+    /// `RecordingStatus`; 200 `complete` with every chunk listed for bytes the
+    /// admission ledger shows admitted; 409 only for admitted bytes over another
+    /// device's unfinished upload; 401 when the device was revoked since its
+    /// receipt read.
     pub(super) async fn announce(
         &self,
         recording_id: Uuid,
@@ -81,11 +77,8 @@ impl Engine {
             Ok(existing) => existing,
             Err(error) => return HandoverResponse::internal_error("reading the receipt", &error),
         };
-        // A first announce of the same recording on another thread may have
-        // made its receipt since the read above, and a chunk may have landed
-        // in it; a replacement may meet a receipt changed since the read, or
-        // since the ledger read it waited for. Then the receipt memory holds
-        // stays, and this announce decides again as if the read had found it.
+        // Another request may have changed the receipt since the read; then this
+        // announce decides again with the receipt memory holds.
         loop {
             let announced = match existing {
                 None => self.new_bytes(None, device, &metadata).await,
@@ -98,22 +91,12 @@ impl Engine {
         }
     }
 
-    /// An announce of bytes the receipt it read does not hold: it read none,
-    /// or `read`, a receipt of other bytes. The admission ledger decides
-    /// ([`steno_core::Store::admitted_meeting`]), read only here, so a
-    /// re-announce of the receipt's own bytes reaches its save without
-    /// another read. Its rows are never deleted, so a row read stays true;
-    /// an admission that commits after the read belongs to a receipt memory
-    /// then holds, which the replacement's check in
-    /// [`Engine::make_and_open`] finds.
-    ///
-    /// Bytes the ledger holds get a `complete` receipt with its meeting id
-    /// (200, every chunk listed, nothing opened: the phone posts
-    /// `complete`, takes the meeting id and deletes its copy), unless `read`
-    /// is another device's unfinished upload, which that answer would end
-    /// with that phone deleting its copy (409). Other bytes are a new
-    /// recording under the recording id (201), whose own `complete` admits
-    /// a meeting of its own.
+    /// An announce of bytes the read receipt does not hold. The admission
+    /// ledger decides: admitted bytes get a `complete` receipt with its meeting
+    /// id (200, nothing opened), unless `read` is another device's unfinished
+    /// upload, which that answer would make the other phone delete (409).
+    /// Other bytes are a new recording under the id (201). Ledger rows are
+    /// never deleted, so a row read stays true.
     async fn new_bytes(
         &self,
         read: Option<&HandoverReceipt>,
@@ -159,7 +142,7 @@ impl Engine {
     }
 
     /// A receipt of `metadata`'s bytes for `device` in `state`, no chunk
-    /// received, made now.
+    /// received.
     fn fresh(
         &self,
         device: &PairedDevice,
@@ -180,20 +163,11 @@ impl Engine {
         }
     }
 
-    /// Makes `fresh` the receipt of its recording id in place of
-    /// `expected`, the one the announce read (`None`: it read none), opens
-    /// its files (`begin`; none for a receipt answered `complete`) and
-    /// answers `status` with it. [`Announced::Changed`] when memory holds
-    /// another receipt by then.
-    ///
-    /// The place in line goes to the save whatever the opening did: nothing
-    /// between `change` and the save yields. A failed opening leaves the
-    /// receipt saved without files, so the phone's retried announce reopens
-    /// them as a re-announce. A device revoked since its receipt read opens
-    /// none and is answered 401: its receipt stayed out of memory, or left
-    /// it. That receipt is still saved, so a device revoked and paired
-    /// again since leaves a row without files, and its retried announce
-    /// reopens them as a re-announce.
+    /// Makes `fresh` the receipt in place of `expected` (the one the announce
+    /// read), opens its files and answers with it; [`Announced::Changed`] when
+    /// memory holds another receipt by then. The save happens whatever the
+    /// opening did; a retried announce reopens missing files. A device revoked
+    /// since its read opens none and is answered 401.
     async fn replace(
         &self,
         expected: Option<&HandoverReceipt>,
@@ -227,16 +201,9 @@ impl Engine {
     }
 
     /// An announce's step under the files lock: [`Engine::change`] makes
-    /// `fresh` the receipt memory holds while memory holds `expected` or
-    /// none, or declines with the one memory holds by then, and
-    /// [`Engine::open_files`] discards the recording id's files and opens
-    /// those of the receipt it made. One hold of the lock covers both, so
-    /// no other request creates or discards a file of the recording in
-    /// between, and the sidecar is the metadata of the receipt memory
-    /// holds. Nothing in it yields, and the lock is released before the
-    /// save. The unit tests check the lock is held at `change` and run
-    /// their in-between step where requests on other threads that take no
-    /// files lock could.
+    /// `fresh` the receipt, then [`Engine::open_files`] discards and opens the
+    /// recording's files, so no other request touches them in between. Nothing
+    /// in it yields; the lock is released before the save.
     fn make_and_open(
         &self,
         expected: Option<&HandoverReceipt>,
@@ -265,13 +232,11 @@ impl Engine {
         Ok((receipt, place, opened))
     }
 
-    /// A known recording announced again; the rows of the decision table
-    /// with a receipt. Other bytes than the receipt's go to the ledger
-    /// ([`Engine::new_bytes`]). The same bytes from another device take the
-    /// receipt over ([`Engine::take_over`]). Then, as the owner: a
-    /// `complete` receipt answers 200 with every chunk of the announced
-    /// split; one in another split starts its partial over under the
-    /// announced one (200, no chunk listed); else [`Engine::resume`].
+    /// A known recording announced again. Other bytes go to
+    /// [`Engine::new_bytes`], the same bytes from another device to
+    /// [`Engine::take_over`]. For the owner, a `complete` receipt answers 200
+    /// with every chunk; another split restarts the partial; else
+    /// [`Engine::resume`].
     async fn reannounce(
         &self,
         receipt: HandoverReceipt,
@@ -290,10 +255,9 @@ impl Engine {
                 Err(announced) => return announced,
             }
         };
-        // The chunk size matters only until the receipt is `complete`: the
-        // same bytes split otherwise are the file the computer holds. The
-        // answer lists every chunk of the phone's split, so it posts
-        // `complete`; the copy it is built from is never saved.
+        // Once `complete`, the split no longer matters. The answer lists every
+        // chunk of the phone's split so it posts `complete`; the copy is never
+        // saved.
         if complete {
             let resplit = HandoverReceipt {
                 chunk_size: metadata.chunk_size,
@@ -318,16 +282,10 @@ impl Engine {
         Announced::Answered(self.resume(receipt, device, metadata).await)
     }
 
-    /// The receipt of another device announced with the same size and
-    /// SHA-256 becomes `device`'s, its chunks and files kept: the same
-    /// bytes are the same recording, so whichever device's `complete`
-    /// admits them, the other phone's copy is that recording, and its next
-    /// announce takes the receipt back as `complete` and is answered
-    /// delivered. The older device's requests then find no receipt of
-    /// theirs (404), and its late writes leave this one alone
-    /// ([`Engine::update`]). [`Announced::Changed`] when memory holds
-    /// another receipt by then; a failed save is answered 500, with memory
-    /// holding the receipt as taken over.
+    /// The same bytes announced by another device take the receipt over, chunks
+    /// and files kept: the same bytes are the same recording. The older
+    /// device's requests then find no receipt of theirs (404).
+    /// [`Announced::Changed`] when memory holds another receipt by then.
     async fn take_over(
         &self,
         receipt: &HandoverReceipt,
@@ -355,15 +313,10 @@ impl Engine {
         Ok(taken)
     }
 
-    /// The owner's re-announce of the same bytes in the same split: 200
-    /// with the status. The partial is reopened when it or the sidecar is
-    /// gone (a sweep, a crash before the first chunk, a refusal), with the
-    /// same receipt and an empty chunk set; a verified file waiting for a
-    /// second intake attempt keeps its chunk set, so the phone's retry
-    /// (announce, then complete) sends no chunk twice. 401 with nothing
-    /// opened when the device was revoked since its receipt read. A receipt
-    /// a `complete` admitted meanwhile stays `complete` ([`Engine::update`]),
-    /// the answer says so, and the files this announce opened go.
+    /// The owner's re-announce of the same bytes and split: 200 with the
+    /// status. A missing partial or sidecar is reopened with an empty chunk
+    /// set; a verified file awaiting a second intake keeps it. 401 when the
+    /// device was revoked since its read.
     async fn resume(
         &self,
         mut receipt: HandoverReceipt,
@@ -384,9 +337,8 @@ impl Engine {
         {
             return HandoverResponse::internal_error("saving the receipt", &error);
         }
-        // The files `begin` just made go once the recording was admitted
-        // meanwhile: a stale `complete` would find them and verify an empty
-        // partial.
+        // Admitted meanwhile: drop the fresh files, or a stale `complete` would
+        // verify an empty partial.
         if receipt.state.kind() == HandoverStateKind::Complete {
             self.discard_own(recording_id, device.id);
         }
@@ -421,8 +373,8 @@ impl Engine {
         if receipt.state.kind() == HandoverStateKind::Complete {
             return HandoverResponse::empty(StatusCode::NO_CONTENT);
         }
-        // The router admits no negative index; the engine, driven directly,
-        // checks both ends before `index * chunk_size` is computed.
+        // The engine, driven directly, checks both ends before
+        // `index * chunk_size` is computed.
         let count = MetadataValidation::chunk_count(receipt.byte_count, receipt.chunk_size);
         if index < 0 || index >= count {
             return HandoverResponse::problem(
@@ -479,10 +431,7 @@ impl Engine {
         {
             return HandoverResponse::internal_error("writing the chunk", &error);
         }
-        // The write yielded: another chunk may have landed, the device may
-        // have been revoked, or a `complete` may have admitted the
-        // recording. Fold this chunk into the receipt as it stands now,
-        // never into the copy from before the write.
+        // The write yielded, so fold this chunk into the receipt as it stands now.
         match self.add_chunk(&receipt, index).await {
             None => no_such_recording(),
             Some(Err(error)) => HandoverResponse::internal_error("saving the receipt", &error),
@@ -490,26 +439,18 @@ impl Engine {
         }
     }
 
-    /// `POST /v1/recordings/{id}/complete`: 200 `{meetingID}` once every
-    /// chunk is present and the whole file hashes to the announced value;
-    /// 409 with the status while chunks are missing or while an earlier
-    /// `complete` is still verifying or admitting, and with no chunk listed
-    /// when the partial went or was created again during the verify; 422 on
-    /// a hash mismatch, after which the partial is gone and the phone starts
-    /// over; 401 from the revoke of the device until it pairs again, and
-    /// when a revoke landed during the receipt read or the verify of a
-    /// recording not yet admitted.
+    /// `POST /v1/recordings/{id}/complete`: 200 `{meetingID}` once every chunk
+    /// is present and the file hashes to the announced value; 409 with the
+    /// status while chunks are missing, an earlier `complete` is in flight, or
+    /// the partial was replaced during the verify; 422 on a hash mismatch (the
+    /// partial is gone); 401 when the device was revoked.
     pub(super) async fn complete(
         &self,
         recording_id: Uuid,
         device: &PairedDevice,
     ) -> HandoverResponse {
-        // `handle` refused a revoked device already; a revoke from another
-        // thread may land in between, so this checks again under the lock
-        // that takes the count. A `complete` that starts during the revoke's
-        // store delete takes the count already bumped and may still read the
-        // row, so the checks below would miss the revoke. The receipt's owner
-        // is not known yet, so nothing is discarded.
+        // Check the revoke again under the lock that takes the count: one may
+        // have landed since `handle` checked.
         let revocation = {
             let state = self.state();
             if state.revoked.contains(&device.id) {
@@ -522,25 +463,19 @@ impl Engine {
             Err(response) => return response,
         };
         if let Some(meeting_id) = receipt.state.meeting_id() {
-            // Admitted before, so a revoke during the read admits nothing
-            // new. A 401 would make the phone keep the recording, and its
-            // upload after pairing again would become a second meeting.
+            // Admitted before the revoke, so answer it: a 401 would make the phone
+            // keep the recording and upload a second meeting after pairing again.
             if self.revoked_since(device, revocation) {
                 self.forget_own(recording_id, device.id);
             }
             return HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id });
         }
-        // A revoke during the read missed the receipt if it was only in the
-        // store. Refuse before the `verifying` write, which would put its row
-        // back once the phone paired again; `verified_file` checks again
-        // after the hash.
+        // Refuse before the `verifying` write, which would put a revoked row back.
         if let Some(refused) = self.refusal(recording_id, device, revocation) {
             return refused;
         }
-        // One `complete` per recording at a time: the phone retries after
-        // its own timeout, and a second verify or admission of the same file
-        // must not start while the first is in flight. The phone answers a
-        // 409 whose status lists every chunk by backing off.
+        // One `complete` per recording at a time; the phone backs off on a 409
+        // that lists every chunk.
         let Some(completing) = self.begin_completing(recording_id) else {
             return HandoverResponse::json(StatusCode::CONFLICT, &Self::status_of(&receipt));
         };
@@ -560,13 +495,9 @@ impl Engine {
         }
     }
 
-    /// 401 when the device was revoked since `complete` took `revocation`,
-    /// also by a revoke that a pairing has since cleared from `revoked`.
-    /// That revoke may have missed the receipt, so its files are discarded
-    /// and it leaves memory, unless memory holds another device's receipt
-    /// of the recording id by then: another phone announced it after the
-    /// revoke, and the files are that phone's
-    /// ([`Engine::discard_and_forget_own`]).
+    /// 401 when the device was revoked since `complete` took `revocation`.
+    /// That revoke may have missed the receipt, so its files are discarded and
+    /// it leaves memory, unless memory holds another device's receipt of it.
     fn refusal(
         &self,
         recording_id: Uuid,
@@ -585,18 +516,12 @@ impl Engine {
         self.state().revocation_count(device.id) != revocation
     }
 
-    /// The verified file: the one already waiting after an earlier intake
-    /// failure, else the partial once every chunk is present (409 with the
-    /// status otherwise) and the whole file hashes to the announced value
-    /// (422 and the partial is discarded otherwise), promoted to its final
-    /// name. The partial stays open from before the `verifying` write to
-    /// the promote, and a partial gone or replaced meanwhile answers 409
-    /// with no chunk listed: the hash must be of the file the intake gets.
-    /// 200 with the meeting when another `complete` admitted the recording
-    /// since this one read the receipt. 401 when the device was revoked
-    /// since `complete` took `revocation`; only the admission task's start
-    /// lies between that check and the intake call: an admission past this
-    /// check may still finish; the revoke's discard can also make it fail.
+    /// The verified file: one already waiting after an intake failure, else the
+    /// partial once every chunk is present (409 otherwise) and its hash matches
+    /// (422 and discarded otherwise), promoted to its final name. The partial
+    /// stays open from before the `verifying` write to the promote so the hash
+    /// is of the file the intake gets. 200 when another `complete` admitted it
+    /// meanwhile; 401 when the device was revoked.
     async fn verified_file(
         &self,
         receipt: &mut HandoverReceipt,
@@ -613,8 +538,7 @@ impl Engine {
         let has_partial = self.inbox.has_partial(recording_id);
         if !every_chunk || !has_partial {
             if !has_partial {
-                // The state stays as memory holds it: a re-announce or a
-                // chunk may have changed it since `complete` read it.
+                // Keep the state memory holds; it may have changed since the read.
                 let _ = self.update(receipt, None, Some(Vec::new())).await;
                 if let Some(meeting_id) = receipt.state.meeting_id() {
                     return Verification::Answered(HandoverResponse::json(
@@ -628,10 +552,8 @@ impl Engine {
                 &Self::status_of(receipt),
             ));
         }
-        // Opened before the `verifying` write, the first yield. A partial
-        // discarded and created again meanwhile (a stale `complete`'s
-        // refusal, then the phone's announce) is another file, which
-        // `Identity` tells apart.
+        // Opened before the first yield; a partial replaced meanwhile is another
+        // file, which `Identity` tells apart.
         let partial = self.inbox.partial(recording_id);
         let opened = std::fs::File::open(&partial)
             .and_then(|file| Ok((receiving_file::Identity::of(&file)?, Arc::new(file))));
@@ -647,8 +569,7 @@ impl Engine {
         let _ = self
             .transition(receipt, HandoverState::Verifying, None)
             .await;
-        // A `complete` that read the receipt before another one admitted the
-        // recording finds it `complete` now, and answers with its meeting.
+        // Another `complete` admitted it since our read.
         if let Some(meeting_id) = receipt.state.meeting_id() {
             return Verification::Answered(HandoverResponse::json(
                 StatusCode::OK,
@@ -701,9 +622,7 @@ impl Engine {
                 ));
             }
         };
-        // Another thread may have replaced the partial between the check
-        // above and the rename: the file moved must still be the one hashed.
-        // A file moved in its place is not this upload's; it goes.
+        // The file moved must still be the one hashed; one moved in its place goes.
         if receiving_file::Identity::at(&promoted).ok() != Some(identity) {
             let _ = std::fs::remove_file(&promoted);
             return Verification::Answered(self.replaced_during_the_verify(receipt).await);
@@ -714,14 +633,9 @@ impl Engine {
     }
 
     /// The 401 of a `complete` whose device was revoked during the verify,
-    /// without a write: once the phone paired again, one would put back the
-    /// row the revoke deleted. The `verifying` write kept the receipt in
-    /// memory, so the revoke discarded the files itself; a partial there
-    /// now was created after that. While `revoked` holds the device it can
-    /// only be the revoked phone's (an announce that passed the gate before
-    /// the revoke), and it goes. Once the device paired again it is the new
-    /// pairing's upload, and it stays; so does another phone's upload of the
-    /// same recording id ([`Engine::discard_own_while_revoked`]).
+    /// without a write, which could put back the deleted row. A partial there
+    /// now goes while the device is still revoked; once paired again it is the
+    /// new pairing's upload and stays.
     fn revoked_during_the_verify(
         &self,
         recording_id: Uuid,
@@ -731,9 +645,8 @@ impl Engine {
         Self::unauthorized()
     }
 
-    /// The 409 of a partial gone or created again during the verify: the
-    /// chunk set is emptied, so the phone sends every chunk again into the
-    /// partial there now. Swift answers the same.
+    /// The 409 of a partial gone or recreated during the verify: the chunk set
+    /// is emptied, so the phone sends every chunk again.
     async fn replaced_during_the_verify(&self, receipt: &mut HandoverReceipt) -> HandoverResponse {
         let _ = self
             .transition(receipt, HandoverState::Receiving, Some(Vec::new()))
@@ -742,22 +655,12 @@ impl Engine {
     }
 
     /// Hands the verified file to the intake. On success the receipt is
-    /// `complete` and the answer is 200 whatever the receipt write did: the
-    /// real intake wrote this same receipt and deleted the file. Then every
-    /// file of the recording goes: the verified file if the intake left it,
-    /// the metadata sidecar, and a partial a re-announce opened during the
-    /// intake. A replayed complete returns the same id through the early
-    /// `complete` check. When another device announced the same recording
-    /// id meanwhile (this one was revoked during the intake), only the
-    /// verified file goes, and the rest is that phone's upload
-    /// ([`Engine::discard_own`]); no other request creates the verified
-    /// file while this admission holds the `completing` mark
-    /// ([`Completing::admit`]). On failure the verified file stays for the
-    /// phone's retry and the reason is fixed text, because the error may
-    /// name the file's path; unless memory holds a receipt of other bytes
-    /// by then (the phone announced another file under the id during the
-    /// intake): that upload's `complete` would hand this file to the intake
-    /// unhashed ([`Engine::verified_file`]), so it goes.
+    /// `complete`, the answer is 200 whatever the receipt write did, and every
+    /// file of the recording goes (only the verified file when another device
+    /// announced the id meanwhile). On failure the verified file stays for the
+    /// retry, with a fixed reason because the error may name its path, unless
+    /// memory now holds a receipt of other bytes, whose `complete` would hand
+    /// this file over unhashed.
     async fn admit(
         &self,
         file: &std::path::Path,
@@ -814,14 +717,10 @@ impl Engine {
 }
 
 impl Completing {
-    /// [`Engine::admit`] in a task of its own, which holds this mark until
-    /// the admission ends. A phone that hangs up mid-admit drops the
-    /// request, not the admission: the meeting commits and is enqueued, and
-    /// the receipt in memory ends `complete` (or `failed`). The phone's
-    /// retry gets a 409 listing every chunk while the mark is held, and is
-    /// answered from that receipt once it is gone, with no second
-    /// admission and no upload again. A panic in the task resumes here.
-    /// Rust only: hyper drops a request's future when the phone hangs up.
+    /// [`Engine::admit`] in its own task, which holds this mark until the
+    /// admission ends, so a phone hanging up drops the request, not the
+    /// admission. Its retry gets a 409 while the mark is held and the final
+    /// receipt after. A panic in the task resumes here.
     async fn admit(
         self,
         file: PathBuf,
@@ -849,11 +748,8 @@ impl Completing {
 
 #[cfg(test)]
 mod tests {
-    //! White-box checks of what a request on another worker thread can
-    //! leave in the synchronous stretches no gate of the integration tests
-    //! can stop: the state is built by hand, and the step after the
-    //! stretch is called as its route calls it, or the route runs with the
-    //! test's edit inside the stretch ([`first_announce`]).
+    //! White-box checks of what a request on another thread can leave in the
+    //! synchronous stretches the integration tests cannot gate.
 
     use std::cell::RefCell;
     use std::sync::Arc;
@@ -909,10 +805,8 @@ mod tests {
         }
     }
 
-    /// A `completing` mark holds the engine only while it lives: once it
-    /// drops, the owner's `Arc` is the only one again, so the engine's weak
-    /// handle on itself leaves no cycle and the engine is freed with its
-    /// owner.
+    /// A `completing` mark holds the engine only while it lives, so the weak
+    /// self-handle leaves no cycle.
     #[tokio::test]
     async fn a_dropped_mark_leaves_the_engine_to_its_owner() {
         let directory = tempfile::tempdir().unwrap();
@@ -931,11 +825,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_refusal_leaves_another_devices_receipt_and_files_alone() {
-        // X's revoke landed during the store read of phone X's `complete`
-        // and bumped the count, so the read did not remember X's receipt.
-        // In the stretch after the read, phone Y announced the same
-        // recording id on another thread, which made its receipt and opened
-        // its files. The refusal then leaves Y's upload alone.
+        // X's revoke landed during X's `complete` read; Y then announced the same
+        // id. The refusal leaves Y's upload alone.
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::in_memory().unwrap());
         let x = device("X");
@@ -979,12 +870,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_chunk_of_a_replaced_upload_leaves_the_new_receipt_alone() {
-        // A chunk request read the receipt and wrote its bytes at an offset
-        // of that receipt's split. Before it folds its chunk in, the phone
-        // announced the same bytes in another split (the partial restarts)
-        // or another file under the id (a new recording). The chunk is not
-        // the new upload's: the fold leaves its receipt alone, so the phone
-        // sends that chunk again.
+        // A chunk folded in after the phone re-split or replaced the upload leaves
+        // the new receipt alone.
         for resplit in [true, false] {
             let directory = tempfile::tempdir().unwrap();
             let store = Arc::new(Store::in_memory().unwrap());
@@ -1034,14 +921,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_late_complete_of_another_split_leaves_the_new_chunk_set_alone() {
-        // A `complete` read the receipt in the first split and found its
-        // partial replaced during the verify (the phone announced the same
-        // bytes in another split, which restarted the partial, and sent a
-        // chunk of it). Its answer empties the chunk set it read; written
-        // into the new split's receipt, it would drop that chunk, and the
-        // phone would send it again. The same holds for the hash mismatch's
-        // write and for the clear of a `complete` that found no partial.
-        // Swift: `aLateCompleteOfAnotherSplitLeavesTheNewChunkSetAlone`.
+        // A late `complete` of the first split, finding its partial replaced, must
+        // not empty the new split's chunk set.
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::in_memory().unwrap());
         let y = device("Y");
@@ -1088,18 +969,15 @@ mod tests {
         );
     }
 
-    /// An edit of the receipt memory holds, as a request on another thread
-    /// makes it.
+    /// An edit of memory's receipt, as a request on another thread makes it.
     type Edit = Box<dyn FnOnce(&mut HandoverReceipt)>;
 
     thread_local! {
-        /// The edit the next first announce on this thread runs between
-        /// its `change` and its opening.
+        /// The edit the next first announce runs between its `change` and opening.
         static MEANWHILE: RefCell<Option<Edit>> = const { RefCell::new(None) };
     }
 
-    /// Runs the edit [`first_announce`] set for this thread, if any; called
-    /// by `Engine::make_and_open` between its `change` and its opening.
+    /// Runs the edit [`first_announce`] set for this thread, if any.
     pub(super) fn meanwhile(engine: &Engine, recording_id: Uuid) {
         if let Some(edit) = MEANWHILE.take() {
             edit(
@@ -1113,9 +991,7 @@ mod tests {
     }
 
     /// Phone Y's announce of `ours`, which must find no receipt, with
-    /// `meanwhile` editing the receipt memory holds between its `change`
-    /// and its opening, as requests on other threads that take no files
-    /// lock would.
+    /// `meanwhile` run between its `change` and its opening.
     async fn first_announce(
         engine: &Engine,
         ours: &RecordingMetadata,
@@ -1135,13 +1011,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_first_announce_discards_the_partial_a_revoked_phone_left() {
-        // Phone X's partial is on disk and memory holds no receipt of it
-        // (a restart). X's revoke finds nothing in memory to discard, and
-        // its delete takes the row. Phone Y then announces the same
-        // recording id: its read finds nothing, and its announce discards
-        // X's partial before `begin`, so Y's chunks never land in X's
-        // bytes. X's `complete` from before the revoke is then refused and
-        // leaves Y's files alone.
+        // X's partial is on disk with no receipt in memory; X is revoked and Y
+        // announces the same id, discarding X's partial. X's stale `complete` is
+        // then refused and leaves Y's files alone.
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::in_memory().unwrap());
         let x = device("X");
@@ -1191,15 +1063,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_first_announce_whose_receipt_left_memory_before_its_opening_opens_nothing() {
-        // Phone X's upload of the recording id is under way after its
-        // revoke and pairing again: its partial and sidecar are on disk.
-        // Phone Y's first announce read nothing (X's receipt was out of
-        // memory and the store), took the files lock and made its receipt
-        // at its `change`. Before its opening, on other threads that take
-        // no files lock: Y is revoked, which drops Y's receipt from memory,
-        // and pairs again, and a request of X's writes X's receipt back.
-        // Y's opening then neither discards X's files nor writes Y's
-        // sidecar over X's.
+        // Y's first announce made its receipt; before its opening, Y is revoked
+        // and paired again and X's receipt is written back. Y's opening neither
+        // discards X's files nor writes Y's sidecar over them.
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::in_memory().unwrap());
         let x = device("X");
@@ -1241,16 +1107,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_first_announce_discards_a_waiting_verified_file_though_a_chunk_landed_first() {
-        // A verified file waits after an intake failure whose receipt a
-        // revoke deleted after a restart. Phone Y's first announce read
-        // nothing, took the files lock and made its receipt at its
-        // `change`. Before its opening, a chunk request of Y's from before
-        // an earlier revoke and pairing again folds its chunk into that
-        // receipt; it takes no files lock. Y's opening still discards the
-        // verified file: kept, Y's `complete` would admit it unhashed and
-        // Y's phone would delete its own recording. The chunk listed in
-        // the receipt but missing from the empty partial fails the hash, so
-        // Y's phone starts over.
+        // A stale chunk lands in Y's fresh receipt before its opening; the opening
+        // still discards the leftover verified file, so it is never admitted
+        // unhashed.
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::in_memory().unwrap());
         let y = device("Y");
@@ -1277,9 +1136,8 @@ mod tests {
         assert_eq!(engine.inbox.load_metadata(recording_id), Some(ours));
     }
 
-    /// A store call through the engine that panics is an I/O error, as a
-    /// failed one is: the request answers 500 and the connection lives on,
-    /// where the panic resumed in the request would unwind its connection.
+    /// A store call that panics answers 500 like a failed one, and the
+    /// connection lives on.
     #[tokio::test]
     async fn a_store_call_that_panics_is_an_io_error() {
         let directory = tempfile::tempdir().unwrap();

@@ -1,15 +1,11 @@
-//! A private session bus and a fake Secret Service on it, for the
-//! [`SecretServiceStore`](super::SecretServiceStore) tests: the parts of
-//! `org.freedesktop.Secret.Service`, `Collection`, `Item` and `Prompt`
-//! the store calls, with the `plain` session algorithm, one default
-//! collection that may start locked, items locked one by one as
-//! `KeePassXC` locks them, writes confirmed through a prompt as `KeePassXC`
-//! confirms them, and prompts the "user" accepts, dismisses or leaves open
-//! until the test answers.
+//! A private session bus and a fake Secret Service on it for the
+//! [`SecretServiceStore`](super::SecretServiceStore) tests: the parts the
+//! store calls, with the `plain` session, a default collection that may
+//! start locked, items locked one by one and writes confirmed through a
+//! prompt as `KeePassXC` does them, and prompts a test answers.
 
-// The interface macro hands every argument over by value and keeps the
-// D-Bus method's arguments and `&self` whether the fake reads them or not;
-// `State`'s switches are independent, one per behaviour a test asks for.
+// The interface macro hands every argument over by value and keeps unread
+// arguments; `State`'s switches are one per behaviour a test asks for.
 #![allow(
     clippy::needless_pass_by_value,
     clippy::struct_excessive_bools,
@@ -28,9 +24,8 @@ use zbus::{Connection, fdo};
 use super::secret_service::Secret;
 
 /// `dbus-daemon` on a socket of its own in a temporary folder, ended with
-/// the value. Its configuration names no service folder, so a name on it
-/// is never activated: the developer's own keyring daemon cannot start
-/// there, and nothing reaches the developer's session bus.
+/// the value. No name on it is ever activated, so nothing reaches the
+/// developer's keyring or session bus.
 pub struct Daemon {
     child: std::process::Child,
     pub address: String,
@@ -39,8 +34,7 @@ pub struct Daemon {
 
 impl Daemon {
     /// None when `dbus-daemon` is not installed, unless
-    /// `STENO_REQUIRE_DBUS_TEST` asks for it (CI on Linux), which fails the
-    /// test instead.
+    /// `STENO_REQUIRE_DBUS_TEST` asks for it, which fails the test instead.
     pub fn start() -> Option<Self> {
         let folder = tempfile::tempdir().unwrap();
         let config = folder.path().join("bus.conf");
@@ -123,10 +117,9 @@ pub struct State {
     pub hold: bool,
     /// The prompts left open, with what each answers.
     pub held: Vec<(OwnedObjectPath, Answer)>,
-    /// Whether `CreateItem` and `Delete` ask the user to confirm. A
-    /// confirmed `CreateItem` answers "no object" and names the item in its
-    /// prompt's `Completed`, as the specification and `KeePassXC` do; an
-    /// item it replaces keeps its path.
+    /// Whether `CreateItem` and `Delete` ask the user to confirm. A confirmed
+    /// `CreateItem` answers "no object" and names the item in its prompt's
+    /// `Completed`; an item it replaces keeps its path.
     pub confirm_writes: bool,
     /// Whether a confirmed `CreateItem`'s `Completed` names no item.
     pub unnamed_creates: bool,
@@ -136,13 +129,10 @@ pub struct State {
     pub garble_writes: bool,
     /// Whether the `default` alias names no collection.
     pub no_default: bool,
-    /// Whether the collection left the bus, as `KeePassXC`'s does when its
-    /// database locks: its methods and its items' fail with
-    /// `UnknownObject`, and an unlock that names it unlocks nothing and
-    /// asks nothing, as `KeePassXC`'s does.
+    /// Whether the collection left the bus: its methods and its items' fail
+    /// with `UnknownObject`, and an unlock naming it does nothing.
     pub collection_gone: bool,
-    /// Whether the collection leaves the bus right after the next search
-    /// answers, as when the database locks between the store's calls.
+    /// Whether the collection leaves the bus right after the next search.
     pub gone_after_search: bool,
     /// How many sessions were opened.
     pub sessions: usize,
@@ -155,8 +145,7 @@ pub struct State {
 }
 
 impl State {
-    /// The values of the items filed under `key` by the store's
-    /// attributes.
+    /// The values of the items filed under `key`.
     pub fn values(&self, key: &str) -> Vec<String> {
         self.items
             .values()
@@ -478,8 +467,8 @@ impl FakeItem {
         })
     }
 
-    /// Forgets the item; the object stays on the bus, answering
-    /// `GetSecret` with an error, as `SearchItems` no longer lists it.
+    /// Forgets the item; the object stays on the bus, answering `GetSecret`
+    /// with an error.
     async fn delete(
         &self,
         #[zbus(object_server)] server: &ObjectServer,

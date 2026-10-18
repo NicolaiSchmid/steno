@@ -1,8 +1,5 @@
-//! The host on Windows and Linux: the permissions it lists and the
-//! sentences that name the machine. The other suites run the Mac, whose
-//! words are Swift's; these pass `Platform::Windows` or `Platform::Linux`
-//! to the harness and check what changes, so every OS's CI checks every
-//! OS's words.
+//! The host on Windows and Linux: the permissions it lists and the sentences
+//! that name the machine. The other suites run the Mac.
 
 mod common;
 
@@ -57,9 +54,8 @@ fn onboarding_and_recording_list_the_permissions_the_platform_has() {
     }
 }
 
-/// A denied system audio tap counts on the Mac only: Linux records the
-/// sink without a permission, so its onboarding is done and Recording is
-/// ready with the microphone alone.
+/// A denied system audio tap counts on the Mac only: Linux needs no
+/// permission for it, so onboarding is done with the microphone alone.
 #[test]
 fn only_the_platforms_own_permissions_gate_onboarding_and_recording() {
     let deny_system_audio = |_: &steno_core::Store, fakes: &steno_host::fakes::FakeServices| {
@@ -97,14 +93,9 @@ fn only_the_platforms_own_permissions_gate_onboarding_and_recording() {
     );
 }
 
-/// The opener rule (stable plan S3), one row per platform, state of the
-/// required permissions and completed flag: `denied` is missing
-/// everywhere, `unknown` only on the Mac (not asked or not probed yet);
-/// off the Mac `unknown` is all the system says before a recording, so it
-/// counts as not required. A missing permission opens onboarding on its
-/// permissions page whatever the flag says; with none missing the flag
-/// decides. Page 1's Continue (`permissionsComplete`) and the Recording
-/// subtitle follow the same rule.
+/// The opener rule per platform: `denied` is missing everywhere, `unknown`
+/// only on the Mac. A missing permission opens onboarding on its permissions
+/// page; with none missing the completed flag decides.
 #[test]
 fn the_opener_counts_a_permission_missing_by_platform() {
     use PermissionState::{Denied, Granted, Unknown};

@@ -1,11 +1,7 @@
-//! The recording files: a crash-tolerant CAF master; 16 kHz WAV sidecars
-//! through an exact 3:1 resampler; the writer thread, which drains the
-//! relay into them and syncs every file every 5 s; `durable`, the one sync
-//! every file goes through; the readers the decoder, the tests and the
-//! bench tools use; and what crash recovery reads: the CAF header alone
-//! (`CafHeader`) and an unfinished sidecar finished from its length
-//! (`WavStreamWriter::recover`).
-//! Swift: `Sources/StenoAudio/Writer/`.
+//! The recording files: a crash-tolerant CAF master, 16 kHz WAV sidecars
+//! through an exact 3:1 resampler, the writer thread that drains the relay
+//! into them, the one durable sync, the readers, and what crash recovery
+//! reads.
 
 use std::path::Path;
 

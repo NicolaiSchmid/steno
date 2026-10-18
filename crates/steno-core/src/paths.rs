@@ -1,7 +1,5 @@
-//! Where the database and support files live. On the Mac this is Swift's
-//! `~/Library/Application Support/Steno/`, the file the Swift app writes
-//! today; Linux and Windows follow their platform conventions through the
-//! `directories` crate. Audio lives in `Settings::audio_folder`.
+//! Where the database and support files live, by platform convention.
+//! Audio lives in `Settings::audio_folder`.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -12,7 +10,6 @@ use directories::BaseDirs;
 /// The support directory and what hangs off it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StenoPaths {
-    /// The folder holding the database.
     pub support_directory: PathBuf,
 }
 
@@ -25,7 +22,6 @@ impl StenoPaths {
         }
     }
 
-    /// `<support>/steno.sqlite`.
     #[must_use]
     pub fn database_path(&self) -> PathBuf {
         self.support_directory.join("steno.sqlite")
@@ -37,18 +33,14 @@ impl StenoPaths {
         Self::support_directory(|name| std::env::var_os(name))
     }
 
-    /// The platform's support directory for the environment `lookup`
-    /// answers, which tests pass explicitly:
+    /// The platform's support directory for the environment `lookup` answers:
     ///
-    /// - macOS: `$HOME/Library/Application Support/Steno` (Swift's path;
-    ///   `HOME` first because not every Foundation honours it otherwise)
+    /// - macOS: `$HOME/Library/Application Support/Steno`
     /// - Linux: `$XDG_DATA_HOME/Steno`, else `$HOME/.local/share/Steno`
     /// - Windows: `%APPDATA%\Steno`
     ///
-    /// A variable holding a relative path counts as unset, as the XDG base
-    /// directory specification requires for `XDG_DATA_HOME`; `HOME` and
-    /// `APPDATA` get the same treatment. A path that is not Unicode is used
-    /// as it is: skipping it would open a second database elsewhere.
+    /// A relative path counts as unset. A path that is not Unicode is used as it
+    /// is: skipping it would open a second database elsewhere.
     ///
     /// ```
     /// let directory = steno_core::StenoPaths::support_directory(|name| {
@@ -90,11 +82,9 @@ impl StenoPaths {
     }
 }
 
-/// `path` as the `file://` URL string Swift's `URL(fileURLWithPath:)`
-/// produces: percent-encoding outside the URL path-allowed set, a trailing
-/// slash for a directory, forward slashes and a leading slash before a
-/// Windows drive letter. On Unix the path's bytes are encoded as they are,
-/// so a file name that is not UTF-8 round-trips through [`file_url_path`].
+/// `path` as the `file://` URL string Foundation's `URL(fileURLWithPath:)`
+/// produces. On Unix the path's bytes are encoded as they are, so a non-UTF-8
+/// name round-trips through [`file_url_path`].
 #[must_use]
 pub fn file_url(path: &Path, is_directory: bool) -> String {
     #[cfg(unix)]
@@ -132,23 +122,15 @@ pub fn file_url(path: &Path, is_directory: bool) -> String {
     url
 }
 
-/// RFC 3986 unreserved and sub-delims plus `:`, `@` and `/`: the characters
-/// Foundation leaves alone in a file URL's path.
+/// The characters Foundation leaves alone in a file URL's path.
 fn is_path_allowed(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&byte)
 }
 
-/// The local path of a `file://` URL as [`file_url`] spells it, read the
-/// way Swift's `URL.path` reads it: the host part dropped (empty,
-/// `localhost` or any other), the percent-encoding undone (a `%` not
-/// followed by two hex digits stays as it is), and one trailing slash
-/// dropped, so a directory reads back without it (`/` and a drive root
-/// such as `/C:/` keep theirs). On Unix the decoded bytes are the path as
-/// they are, so a file name need not be UTF-8; on Windows they must be
-/// UTF-8, and a drive path (`/C:/...`) loses its leading slash and takes
-/// backslashes, while a path without a drive keeps its forward slashes.
-/// `None` for any other scheme or a URL without a path. Swift: `URL.path`
-/// of a stored file URL.
+/// The local path of a `file://` URL, read as Foundation's `URL.path` reads it:
+/// host dropped, percent-encoding undone, one trailing slash dropped (`/` and a
+/// drive root keep theirs). On Windows the bytes must be UTF-8 and a drive path
+/// loses its leading slash. `None` for any other scheme or no path.
 #[must_use]
 pub fn file_url_path(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
@@ -183,10 +165,8 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
     #[cfg(not(unix))]
     {
         let decoded = String::from_utf8(bytes).ok()?;
-        // `file_url` spelt a Windows drive path with forward slashes behind
-        // a leading `/`; both are undone so the path reads back as the OS
-        // spells it. A path without a drive (a Mac URL read on Windows)
-        // keeps its slashes, which Windows reads as separators all the same.
+        // Undo `file_url`'s `/C:/` spelling of a drive path; a path without a drive
+        // keeps its forward slashes, which Windows reads as separators.
         #[cfg(windows)]
         let decoded = if starts_with_drive(decoded.as_bytes()) {
             decoded[1..].replace('/', "\\")
@@ -197,17 +177,13 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
     }
 }
 
-/// Whether decoded path bytes begin with a drive, `/X:` with `X` an ASCII
-/// letter, the way `file_url` spells `X:\...`. `/1:/a` does not.
+/// Whether decoded path bytes begin with `/X:`, `X` an ASCII letter.
 fn starts_with_drive(bytes: &[u8]) -> bool {
     matches!(bytes, [b'/', drive, b':', ..] if drive.is_ascii_alphabetic())
 }
 
-/// Drops a directory's one trailing `/` from decoded path bytes, as Swift's
-/// `URL.path` does, before any UTF-8 step: `/` stays, and so does a drive
-/// root `/X:/` (a drive letter `X`), because `C:` alone is drive-relative.
-/// Every other `.../` loses the slash, a name ending in `:` included
-/// (`/Volumes/a:/` reads as `/Volumes/a:`).
+/// Drops a directory's one trailing `/` from decoded path bytes; `/` and a
+/// drive root `/X:/` keep it, because `C:` alone is drive-relative.
 fn drop_trailing_slash(bytes: &mut Vec<u8>) {
     let drive_root = bytes.len() == 4 && starts_with_drive(bytes) && bytes[3] == b'/';
     if bytes.len() > 1 && bytes.last() == Some(&b'/') && !drive_root {
@@ -284,8 +260,7 @@ mod tests {
         assert_eq!(file_url_path("file://host-only"), None);
     }
 
-    /// The trailing-slash rule, on the decoded bytes and through
-    /// `file_url_path`.
+    /// The trailing-slash rule.
     #[test]
     fn a_directory_loses_its_trailing_slash_as_url_path_does() {
         let dropped = |path: &[u8]| {
@@ -310,8 +285,6 @@ mod tests {
             "the rule reads bytes, before any UTF-8 step"
         );
 
-        // Through `file_url_path`, which needs UTF-8 after the rule on
-        // Windows only.
         if cfg!(windows) {
             assert_eq!(file_url_path("file:///tmp/%FF/"), None, "not UTF-8");
         }
@@ -345,9 +318,8 @@ mod tests {
         }
     }
 
-    /// A directory reads back without its trailing slash, as `URL.path`
-    /// reads it; `/` and a drive root keep theirs. `Path` equality ignores
-    /// a trailing slash, so the spellings are compared.
+    /// A directory reads back without its trailing slash; `/` and a drive root
+    /// keep theirs.
     #[test]
     fn a_directory_reads_back_without_its_trailing_slash() {
         let spelt = |url: &str| file_url_path(url).unwrap().into_os_string();
@@ -368,8 +340,7 @@ mod tests {
         assert_eq!(spelt("file:///C:/"), drive_root);
     }
 
-    /// A Unix file name is bytes: one that is not UTF-8 encodes byte for
-    /// byte and decodes to the same path.
+    /// A non-UTF-8 Unix file name round-trips.
     #[cfg(unix)]
     #[test]
     fn non_utf8_paths_round_trip_on_unix() {
@@ -384,8 +355,6 @@ mod tests {
         assert_eq!(bytes("file:///tmp/%FF/"), b"/tmp/\xFF");
     }
 
-    /// The drive test behind the Windows respelling and the drive-root
-    /// slash: an ASCII letter, then `:`.
     #[test]
     fn only_a_letter_names_a_drive() {
         assert!(starts_with_drive(b"/C:/x"));
@@ -396,7 +365,6 @@ mod tests {
         assert!(!starts_with_drive(b"/C"));
     }
 
-    /// A lookup over `pairs`, as the process environment answers.
     fn lookup(pairs: Vec<(&str, OsString)>) -> impl Fn(&str) -> Option<OsString> {
         move |name| {
             pairs
@@ -443,9 +411,7 @@ mod tests {
         assert_eq!(directory, PathBuf::from("/home/nicolai/.local/share/Steno"));
     }
 
-    /// The variable the platform reads, holding a path that is not
-    /// Unicode (a Latin-1 byte on Unix, an unpaired surrogate on Windows),
-    /// names the support directory as it is.
+    /// A support directory path that is not Unicode is used as it is.
     #[test]
     fn a_path_that_is_not_unicode_is_used_as_it_is() {
         #[cfg(unix)]

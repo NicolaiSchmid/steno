@@ -10,9 +10,8 @@ import StenoSpeech
 /// the cosine range between the cluster embeddings. `--no-refinement`
 /// reports the clusters as the mapping produced them, so the pass's effect
 /// can be read off two runs. `--out` writes the same data with every cluster
-/// embedding as JSON. This is the tool `.plans/2026-09-29-speaker-calibration.md`
-/// was measured with (the step 6 calibration that
-/// `.plans/2026-09-25-speech-and-speakers.md` deferred to #34); recordings
+/// embedding as JSON. This is the tool the speaker calibration was measured
+/// with; recordings
 /// stay outside the repository, and the report holds embeddings and
 /// durations only.
 struct DevDiarizeSweep: AsyncParsableCommand {

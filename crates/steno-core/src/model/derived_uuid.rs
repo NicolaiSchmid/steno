@@ -1,14 +1,12 @@
 //! UUIDs derived from another and a salt.
-//! Swift: `Sources/StenoCore/Model/UUID+Derived.swift`.
 
 use uuid::Uuid;
 
 use crate::json::uuid_string;
 
-/// A UUID derived from `base` and `salt`, stable across runs and machines,
-/// bit for bit `UUID(derivedFrom:salt:)` in Swift: FNV-1a over the base's
-/// uppercase string and the salt, a splitmix step for the second half, and a
-/// version-4, variant-1 layout.
+/// A UUID derived from `base` and `salt`, stable across runs and machines and
+/// bit for bit the Swift app's: FNV-1a over the uppercase base and the salt, a
+/// splitmix step for the second half, a version-4 layout.
 #[must_use]
 pub fn derived_uuid(base: Uuid, salt: &str) -> Uuid {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -28,12 +26,10 @@ pub fn derived_uuid(base: Uuid, salt: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-/// The id of the one unknown room speaker a meeting falls back to when its
-/// diarizer fails (the pipeline's `Diarization::room_speaker`), which holds
-/// the segments no stored speaker covers: its own id, so a later run that
-/// diarizes never inherits its confirmation, and the sign
-/// [`results_need_the_audio`](crate::results_need_the_audio) reads. Rust
-/// only: Swift fails the meeting.
+/// The id of the unknown room speaker a meeting falls back to when its
+/// diarizer fails: its own id, so a later diarized run never inherits its
+/// confirmation, and the mark
+/// [`results_need_the_audio`](crate::results_need_the_audio) reads.
 #[must_use]
 pub fn room_speaker_id(meeting_id: Uuid) -> Uuid {
     derived_uuid(meeting_id, "speaker-room")
@@ -43,8 +39,7 @@ pub fn room_speaker_id(meeting_id: Uuid) -> Uuid {
 mod tests {
     use super::*;
 
-    /// A speaker row the Swift pipeline wrote: `speaker-<clusterLabel>`
-    /// derived from its meeting id.
+    /// A speaker row the Swift pipeline wrote derives the same id.
     #[test]
     fn matches_a_speaker_id_the_swift_pipeline_derived() {
         let meeting = Uuid::parse_str("516EADE8-40E5-4434-8AAF-9214A21A604E").unwrap();

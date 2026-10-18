@@ -1,7 +1,5 @@
 //! The host's `Pipeline` over the processing pipeline and the retention
-//! sweep, with the reload the Settings commands ask for. Swift:
-//! `AppEnvironment.reloadPipeline`, `runRetentionSweep`, and the
-//! `Task`s `MeetingDetailViewModel` ran the re-runs in.
+//! sweep, with the reload the Settings commands ask for.
 
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -22,43 +20,30 @@ use crate::app::BuildError;
 use crate::block_on;
 
 /// The speech engine a pipeline was built with: the engine id the
-/// settings named at the build and where [`SpeechSetup::runtime`] runs it.
-/// The recorder's warm-up reads it from [`CurrentPipeline`], not the id
-/// stored now (Rust only: Swift asked about the stored id).
-///
-/// [`SpeechSetup::runtime`]: crate::speech::SpeechSetup::runtime
+/// settings named at the build and where it runs. The recorder's warm-up
+/// reads it, not the id stored now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltEngine {
-    /// The stored engine id the build read.
     pub engine_id: String,
-    /// Where the pipeline's speech engine runs.
     pub runtime: SpeechRuntime,
 }
 
 /// One pipeline's dependencies and the speech engine they hold.
 pub struct BuiltPipeline {
-    /// What `ProcessingPipeline::new` takes.
     pub dependencies: PipelineDependencies,
-    /// Which speech engine `dependencies` hold and where it runs.
     pub engine: BuiltEngine,
 }
 
-/// Rebuilds the dependencies, and the engine they hold, from the stored
-/// settings and the API key.
+/// Rebuilds the dependencies and their engine from the stored settings.
 pub type MakeDependencies = Arc<dyn Fn() -> Result<BuiltPipeline, BuildError> + Send + Sync>;
 
-/// Whether the models a pipeline whose speech engine runs on the runtime
-/// needs are installed now: the app's gates' checks
-/// ([`SpeechEngines::models_installed`](crate::speech::SpeechEngines::models_installed)).
+/// Whether the models a pipeline on the runtime needs are installed now.
 pub type ModelsInstalled = Arc<dyn Fn(SpeechRuntime) -> bool + Send + Sync>;
 
 /// When [`CurrentPipeline`] tries again the meetings that wait for the
-/// store (another process held its write lock past the busy timeout, see
-/// [`ProcessingPipeline::resume_waiting_for_store`]): `first` after a
-/// meeting starts waiting, then twice as long after each try, up to
-/// `longest`, for as long as anything waits and the app runs. A quiet spell
-/// longer than `longest` after a try starts again from `first`. Rust only:
-/// the Swift pipeline failed the meeting.
+/// store's write lock: `first` after a meeting starts waiting, then twice
+/// as long after each try, up to `longest`. A quiet spell longer than
+/// `longest` starts again from `first`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreRetry {
     /// The wait before the first try.
@@ -68,16 +53,14 @@ pub struct StoreRetry {
 }
 
 impl StoreRetry {
-    /// The app's: 15 s, doubling to 4 minutes. Another program mostly holds
-    /// the lock for one transaction, so the first try gets through.
+    /// The app's: 15 s, doubling to 4 minutes.
     pub const APP: StoreRetry = StoreRetry {
         first: Duration::from_secs(15),
         longest: Duration::from_secs(4 * 60),
     };
 
-    /// The wait before the next try, given the wait before the last one
-    /// and how long ago that try ended; `first` before the first try, or
-    /// after a quiet spell longer than `longest`.
+    /// The wait before the next try, given the last wait and how long ago
+    /// that try ended.
     fn next_wait(self, last: Option<(Duration, Duration)>) -> Duration {
         match last {
             Some((wait, since)) if since <= self.longest => {
@@ -88,16 +71,14 @@ impl StoreRetry {
     }
 }
 
-/// The pipeline [`CurrentPipeline`] holds, with the engine it was built
-/// with, swapped together.
+/// The current pipeline and the engine it was built with, swapped
+/// together.
 struct Current {
     pipeline: ProcessingPipeline,
     engine: BuiltEngine,
 }
 
 impl Current {
-    /// The pipeline over `built`, sharing `latch`, `in_flight`, `waits`
-    /// and `live`.
     fn new(
         built: BuiltPipeline,
         latch: &QuitLatch,
@@ -120,23 +101,14 @@ impl Current {
 }
 
 /// The current pipeline behind a swap: a reload replaces it first, so a
-/// Save never waits for a run in progress; the retired pipeline is kept
-/// until it is idle, so meetings in flight finish on the dependencies they
-/// started with. Everything that enqueues resolves `current()` per call,
-/// so a recording that ends after a reload goes through the new one.
-/// Every pipeline it builds shares one [`QuitLatch`], so
-/// [`quit`](Self::quit) reaches the retired ones too, one in-flight set
-/// ([`InFlight`]), so the new one refuses a meeting a retired one still
-/// holds, and one [`ModelWaits`], so
-/// [`resume_waiting`](Self::resume_waiting) starts the meetings any of
-/// them left waiting for models, on the current one (the rules are on
-/// [`ModelWaits`]), and one [`LiveRecording`], so a retired one's job waits
-/// for a recording too. The meetings any of them left waiting for the store are
-/// tried again on the current one by a task of its own ([`StoreRetry`]),
-/// which ends when this value is dropped. Held by `App`, the recorder, the
-/// phone intake and [`HostPipeline`].
+/// Save never waits for a run; the retired pipeline is kept until idle,
+/// so meetings in flight finish on their dependencies. Enqueues resolve
+/// `current()` per call. Every pipeline it builds shares one
+/// [`QuitLatch`], one [`InFlight`] set, one [`ModelWaits`] and one
+/// [`LiveRecording`], so quits, claims, waits and the recorder's state
+/// reach the retired ones too. A task of its own retries the meetings
+/// waiting for the store ([`StoreRetry`]) until this value is dropped.
 pub struct CurrentPipeline {
-    /// Shared with the store's retry, which holds it weakly.
     current: Arc<Mutex<Current>>,
     make: MakeDependencies,
     runtime: tokio::runtime::Handle,
@@ -144,12 +116,9 @@ pub struct CurrentPipeline {
     in_flight: InFlight,
     model_waits: ModelWaits,
     /// The recorder's state, which every build waits on before it runs an
-    /// engine in this process ([`live_recording`](Self::live_recording)).
+    /// engine in this process.
     live_recording: LiveRecording,
-    /// Whether a resume starts the waiting meetings
-    /// ([`resuming_when`](Self::resuming_when)).
     models_installed: ModelsInstalled,
-    /// The task that tries again the meetings waiting for the store.
     store_retry: tokio::task::JoinHandle<()>,
 }
 
@@ -160,8 +129,7 @@ impl Drop for CurrentPipeline {
 }
 
 impl CurrentPipeline {
-    /// The pipeline over `built`, reloading through `make`, trying the
-    /// store again on [`StoreRetry::APP`].
+    /// The pipeline over `built`, reloading through `make`.
     #[must_use]
     pub fn new(
         built: BuiltPipeline,
@@ -197,8 +165,7 @@ impl CurrentPipeline {
         }
     }
 
-    /// Tries the store again on `retry` instead of [`StoreRetry::APP`]:
-    /// the tests' short waits.
+    /// Tries the store again on `retry` instead of [`StoreRetry::APP`].
     #[must_use]
     pub fn retrying_the_store(mut self, retry: StoreRetry) -> Self {
         self.store_retry.abort();
@@ -210,13 +177,10 @@ impl CurrentPipeline {
         self
     }
 
-    /// [`resume_waiting`](Self::resume_waiting), an install's or a
-    /// reload's, starts the waiting meetings only while `installed` holds
-    /// for the current pipeline's runtime, so an install that leaves
-    /// another model missing (the diarizer's finished before Parakeet v3)
-    /// or a settings save with the models still missing leaves their cards
-    /// asking for the download instead of starting each meeting only to
-    /// see it refused again. Without it every resume starts them.
+    /// [`resume_waiting`](Self::resume_waiting) starts the waiting meetings
+    /// only while `installed` holds for the current runtime, so a partial
+    /// install or a save with models still missing leaves their cards asking
+    /// for the download. Without it every resume starts them.
     #[must_use]
     pub fn resuming_when(mut self, installed: ModelsInstalled) -> Self {
         self.models_installed = installed;
@@ -227,36 +191,24 @@ impl CurrentPipeline {
         lock(&self.current)
     }
 
-    /// The pipeline new work goes to.
     #[must_use]
     pub fn current(&self) -> ProcessingPipeline {
         self.lock().pipeline.clone()
     }
 
-    /// The current pipeline and the speech engine it was built with, read
-    /// together, so a reload in between cannot pair one pipeline with
-    /// another's engine.
+    /// The current pipeline and its speech engine, read together.
     #[must_use]
     pub fn current_with_engine(&self) -> (ProcessingPipeline, BuiltEngine) {
         let current = self.lock();
         (current.pipeline.clone(), current.engine.clone())
     }
 
-    /// [`ProcessingPipeline::resume_waiting`] on the current pipeline,
-    /// from any thread, once its models are installed
-    /// ([`resuming_when`](Self::resuming_when)): the meetings a run on any
-    /// of its pipelines left `queued` for missing models since the last
-    /// resume start on the runtime. Called once a model install from
-    /// Settings or onboarding finished, and after every
-    /// [`reload`](Self::reload), so models the `steno` command installed
-    /// into the app's models directory are picked up at the next settings
-    /// change (or the next launch); it returns at once while a model is
-    /// missing or nothing waits. A failure is logged: the meetings stay
-    /// `queued` for the next of these or the launch's recovery, or, when
-    /// another process held the store, for the store's retry
-    /// ([`StoreRetry`]). Not the launch's recovery itself, which is
-    /// [`ProcessingPipeline::resume_unfinished`] over every queued meeting
-    /// (the store's retry runs it again when the store refused it too).
+    /// [`ProcessingPipeline::resume_waiting`] on the current pipeline, from
+    /// any thread, once its models are installed: the meetings any of its
+    /// pipelines left `queued` for missing models. Called after a model
+    /// install and after every [`reload`](Self::reload); returns at once
+    /// while a model is missing or nothing waits. A failure is logged and the
+    /// meetings stay `queued` for the next try.
     pub fn resume_waiting(&self) {
         let _entered = self.runtime.enter();
         let (pipeline, engine) = self.current_with_engine();
@@ -274,11 +226,9 @@ impl CurrentPipeline {
         }
     }
 
-    /// Quits every pipeline this one built or builds from now on, the
-    /// current one, the retired ones still finishing and a reload's
-    /// replacement, which share its latch and its reading marks: see
-    /// [`ProcessingPipeline::quit`], whose mark removals sync the disk, so
-    /// an async caller runs this on the blocking pool and waits for it.
+    /// Quits every pipeline this one built or builds from now on (see
+    /// [`ProcessingPipeline::quit`]). Its mark removals sync the disk, so an
+    /// async caller runs this on the blocking pool.
     pub fn quit(&self) {
         self.current().quit();
     }
@@ -289,32 +239,24 @@ impl CurrentPipeline {
         self.quit_latch.is_set()
     }
 
-    /// The in-flight set every pipeline this one builds shares, the
-    /// retired ones still finishing included: what an update's install
-    /// asks and holds ([`IdleGate`](crate::updates::IdleGate)).
+    /// The in-flight set every pipeline this one builds shares, which an
+    /// update's install asks and holds.
     #[must_use]
     pub fn in_flight(&self) -> &InFlight {
         &self.in_flight
     }
 
     /// Whether a recording is under way, as every pipeline it builds sees
-    /// it: the recorder sets it at each change of its state, and a job
-    /// runs no speech engine in this process while it is live
-    /// ([`steno_pipeline::live_recording`]).
+    /// it: no job runs an in-process engine while it is live.
     #[must_use]
     pub fn live_recording(&self) -> &LiveRecording {
         &self.live_recording
     }
 
-    /// Replaces the pipeline with one built from the stored settings and
-    /// the secret store's API key. A failed build keeps the current
-    /// pipeline and its engine. The app's builds keep the speech engine,
-    /// with its claims, while the stored engine id runs where it did, and
-    /// the diarizer ([`SpeechEngines`](crate::speech::SpeechEngines)), so
-    /// the retired pipeline's jobs and the new one's share them and the
-    /// one sidecar child. Then it resumes the meetings waiting for models
-    /// on the new pipeline once they are installed
-    /// ([`resume_waiting`](Self::resume_waiting)).
+    /// Replaces the pipeline with one built from the stored settings and the
+    /// API key; a failed build keeps the current one. The speech engine and
+    /// the diarizer are kept while the engine id runs where it did. Then it
+    /// resumes the meetings waiting for models.
     pub fn reload(&self) -> Result<(), BuildError> {
         let replacement = Current::new(
             (self.make)()?,
@@ -330,10 +272,9 @@ impl CurrentPipeline {
         Ok(())
     }
 
-    /// Claims the meeting on the current pipeline in place, so a refusal
-    /// is the call's error, then spawns the claimed operation on the
-    /// runtime; its failure reaches the detail's error line as the
-    /// `OperationFailed` event it posts.
+    /// Claims the meeting on the current pipeline in place, so a refusal is
+    /// the call's error, then spawns the operation; its failure reaches the
+    /// detail as the `OperationFailed` event it posts.
     fn claim_and_spawn(
         &self,
         claim: impl FnOnce(&ProcessingPipeline) -> Result<Operation, PipelineFailure>,
@@ -346,20 +287,16 @@ impl CurrentPipeline {
     }
 }
 
-/// The current pipeline, under its lock.
 fn lock(current: &Mutex<Current>) -> std::sync::MutexGuard<'_, Current> {
     current
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The store's retry ([`StoreRetry`]): waits until something waits for
-/// the store ([`ModelWaits::until_store_retry`]), then `retry`'s wait, then
-/// tries on the current pipeline, off the async workers, as a write can
-/// wait out the store's busy timeout. Ends once the [`CurrentPipeline`] is
-/// gone or quits.
+/// The store's retry: waits until something waits for the store, then
+/// `retry`'s wait, then tries on the current pipeline off the async
+/// workers. Ends once the [`CurrentPipeline`] is gone or quits.
 async fn retry_the_store(current: Weak<Mutex<Current>>, waits: ModelWaits, retry: StoreRetry) {
-    // The wait before the last try, and when that try ended.
     let mut last = None::<(Duration, tokio::time::Instant)>;
     loop {
         waits.until_store_retry().await;
@@ -404,31 +341,24 @@ async fn retry_the_store(current: Weak<Mutex<Current>>, waits: ModelWaits, retry
     }
 }
 
-/// The host's `Pipeline`. A summary re-run and a re-export are checked
-/// and claimed in place, so a refusal (the meeting is busy, no LLM is set
-/// up) comes back as the call's error, as the Swift detail saw it; the
-/// work itself then runs on the runtime and the call returns. The host
-/// calls with its state locked, and both talk to the network, so waiting
-/// here would park the runtime's workers on that lock (the event loop and
-/// the poll take it) until nobody is left to drive the request. A failure
-/// after the claim is posted as `MeetingEvent::OperationFailed`, which the
-/// host shows on the detail's error line. `apply_retention` touches the store
-/// only and completes in place, so the detail the host reads back right
-/// after already shows the new rule. "Process again" saves the meeting
-/// queued in place and spawns its run, so the detail the host reads back
-/// shows it queued.
+/// The host's `Pipeline`. A summary re-run and a re-export are claimed in
+/// place, so a refusal is the call's error; the work then runs on the
+/// runtime and the call returns, since the host calls with its state
+/// locked and waiting here would park the runtime's workers. A later
+/// failure is posted as `MeetingEvent::OperationFailed`.
+/// `apply_retention` and "Process again" complete their writes in place,
+/// so the detail read right after shows them.
 pub struct HostPipeline {
     pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
-    /// Reset by any re-export the user causes, and read for the detail's
-    /// "keeps failing" line.
+    /// Reset by any re-export the user causes; read for the "keeps failing"
+    /// line.
     pub export_retries: Arc<ExportRetries>,
 }
 
 impl Pipeline for HostPipeline {
-    /// A summary re-run exports the new summary, so, once the meeting is
-    /// claimed, it resets the count of launch re-exports as `redeliver`
-    /// does.
+    /// Once claimed, a summary re-run resets the meeting's count of launch
+    /// re-exports, as `redeliver` does.
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()> {
         self.pipeline
             .claim_and_spawn(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?;
@@ -436,9 +366,8 @@ impl Pipeline for HostPipeline {
         Ok(())
     }
 
-    /// Export again, or the re-export after a speaker change. Once the
-    /// meeting is claimed, its count of launch re-exports starts again from
-    /// 0; a refused one leaves the count.
+    /// Export again. Once claimed, the meeting's count of launch re-exports
+    /// starts again from 0; a refused one leaves it.
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()> {
         self.pipeline
             .claim_and_spawn(|pipeline| pipeline.claim_redeliver(meeting_id))?;
@@ -451,8 +380,8 @@ impl Pipeline for HostPipeline {
     }
 
     fn process_again(&self, meeting_id: Uuid) -> Result<(), ProcessAgainRefusal> {
-        // `reprocess` spawns the run on the runtime it is called in; the
-        // host calls from its own thread.
+        // `reprocess` spawns on the current runtime; the host calls from its
+        // own thread.
         let _runtime = self.pipeline.runtime.enter();
         self.pipeline
             .current()
@@ -460,8 +389,6 @@ impl Pipeline for HostPipeline {
             .map_err(process_again_refusal)
     }
 
-    /// From the current pipeline's [`DamagedAudio`](steno_pipeline::DamagedAudio),
-    /// which every reload shares.
     fn damaged_audio(&self, meeting_id: Uuid) -> steno_core::AudioDamage {
         self.pipeline
             .current()
@@ -470,8 +397,6 @@ impl Pipeline for HostPipeline {
             .damage(meeting_id)
     }
 
-    /// [`DamagedAudio::may_be_damaged`](steno_pipeline::DamagedAudio::may_be_damaged)
-    /// of the current pipeline's store.
     fn audio_may_be_damaged(&self, meeting_id: Uuid) -> bool {
         self.pipeline
             .current()
@@ -502,8 +427,7 @@ impl Pipeline for HostPipeline {
 
 /// The host's reading of a refused [`ProcessingPipeline::process_again`]:
 /// a queued or processing meeting is already being processed unless it
-/// waits for its models or the store, and a meeting without a recording on record
-/// reads as one whose recording is gone, as the pipeline's docs ask.
+/// waits for its models or the store.
 fn process_again_refusal(error: ReprocessError) -> ProcessAgainRefusal {
     match error {
         ReprocessError::MeetingNotFound(_) => ProcessAgainRefusal::MeetingGone,
@@ -528,8 +452,7 @@ fn process_again_refusal(error: ReprocessError) -> ProcessAgainRefusal {
 }
 
 /// The sweep at launch and after every processed meeting; a partial sweep
-/// is logged, not fatal. Warn says how many files stayed; their paths,
-/// which name the meetings' folders, go to debug.
+/// is logged at warn with a count, the paths at debug.
 pub fn run_sweep(sweep: &RetentionSweep) {
     match sweep.run(Utc::now()) {
         Ok(_) => {}
@@ -627,7 +550,6 @@ mod tests {
         }
     }
 
-    /// A pipeline whose re-exports go through a [`HeldDispatcher`].
     fn held_re_exports(
         store: &Arc<Store>,
         panics: bool,
@@ -671,8 +593,7 @@ mod tests {
         )
     }
 
-    /// Calls one of the host's synchronous methods as the host does; the
-    /// error as the detail shows it.
+    /// Calls one of the host's synchronous methods as the host does.
     fn call<T: Send + 'static>(
         f: impl FnOnce() -> BoundaryResult<T> + Send + 'static,
     ) -> Result<T, String> {
@@ -690,7 +611,6 @@ mod tests {
             .expect("the re-run reached the summarizer");
     }
 
-    /// The next event matching `wanted`, failing the test after a while.
     async fn next_event(
         receiver: &mut EventReceiver,
         wanted: impl Fn(&MeetingEvent) -> bool,
@@ -707,8 +627,7 @@ mod tests {
         .expect("the event was posted")
     }
 
-    /// A file the sweep could not remove is counted at warn; its path,
-    /// which names the meeting's folder, is not.
+    /// A file the sweep could not remove is counted at warn; its path is not.
     #[test]
     fn a_partial_sweep_warns_with_a_count_not_the_paths() {
         let (dir, store) = temp_store();
@@ -751,7 +670,6 @@ mod tests {
 
         let returned = call(move || service.rerun_summary(meeting.id, &meeting.template_id));
         assert_eq!(returned, Ok(()));
-        // The run was started: the summarizer is being asked.
         reached(&asked).await;
         release.notify_one();
     }
@@ -793,7 +711,6 @@ mod tests {
         );
     }
 
-    /// A new phone meeting, still recording.
     fn phone_meeting() -> steno_core::Meeting {
         let mut meeting = sample_data::meeting();
         meeting.id = Uuid::new_v4();
@@ -802,9 +719,8 @@ mod tests {
         meeting
     }
 
-    /// The phone meeting of `fixture` (a file in `Tests/Fixtures/audio/`,
-    /// copied into `dir`) processed through `service`'s real decoder, to
-    /// the state it ends in.
+    /// The phone meeting of `fixture`, copied into `dir`, processed through
+    /// the real decoder.
     async fn process_phone_fixture(
         service: &HostPipeline,
         store: &Store,
@@ -824,16 +740,14 @@ mod tests {
         .await
     }
 
-    /// A file in `Tests/Fixtures/audio/`.
     fn fixture_path(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../Tests/Fixtures/audio")
             .join(name)
     }
 
-    /// The phone meeting of the recording at `upload`, kept by
-    /// `retention`, processed through `service`'s real decoder, to the
-    /// state it ends in.
+    /// The phone meeting of `upload`, kept by `retention`, processed through
+    /// the real decoder.
     async fn process_phone_upload(
         service: &HostPipeline,
         store: &Store,
@@ -858,12 +772,8 @@ mod tests {
         store.meeting(meeting.id).unwrap().unwrap().state
     }
 
-    /// The damage the real decoder counts reaches the detail: a phone
-    /// recording with three undecodable packets processes to Ready, and
-    /// the host pipeline answers 3 parts and their 3 * 1 024 frames of
-    /// silence for it, from the support directory's file, after a reload
-    /// too; the same meeting processed again from a clean file answers
-    /// none.
+    /// Damage the real decoder counts reaches the detail, after a reload
+    /// too; the same meeting from a clean file answers none.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_damage_of_a_recording_reaches_the_detail() {
         let (dir, store) = temp_store();
@@ -909,13 +819,8 @@ mod tests {
         assert!(!service.audio_may_be_damaged(meeting.id));
     }
 
-    /// A phone recording whose recorder was killed (no `moov`) is salvaged
-    /// by the real decoder: the meeting processes to Ready, the host
-    /// pipeline answers that it was salvaged with no part lost, so its
-    /// detail warns and the retention rule keeps the recording, and the
-    /// recording is untouched. The same file in another app's layout (its
-    /// major brand changed) is not salvaged: the meeting fails, and its
-    /// recording stays as it was.
+    /// A phone recording with no `moov` is salvaged, warns and is kept; the
+    /// same file with another app's major brand fails, untouched.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_killed_phone_recording_is_salvaged_into_a_ready_meeting() {
         let (dir, store) = temp_store();
@@ -971,14 +876,9 @@ mod tests {
         assert!(service.damaged_audio(second.id).is_none());
     }
 
-    /// Through #241's wiring, a salvaged phone recording under "delete
-    /// after processing" is kept: the meeting is Ready, retention leaves
-    /// the recording unstamped because the pipeline's damage record says
-    /// the recording may be damaged, the sweep leaves the file, and the
-    /// meeting's detail, read through the host pipeline, says it is kept
-    /// because the results may be incomplete. The finished twin of the
-    /// same recording, which needs no salvage, is stamped and reads
-    /// "deletes on", so the salvage's mark is what keeps it.
+    /// A salvaged recording under "delete after processing" is kept: the
+    /// damage record stops the retention stamp and the detail says why. Its
+    /// clean twin is stamped.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_salvaged_recording_is_kept_incomplete_and_never_swept() {
         let (dir, store) = temp_store();
@@ -1038,10 +938,8 @@ mod tests {
         }
     }
 
-    /// A record of the damage that does not parse says nothing about any
-    /// meeting, so the host pipeline answers that every recording may be
-    /// damaged, while the detail's warning shows no damage it cannot
-    /// read.
+    /// An unparsable damage record makes every recording possibly damaged,
+    /// while the warning shows no damage.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unreadable_damage_record_makes_every_recording_possibly_damaged() {
         let (dir, store) = temp_store();
@@ -1060,10 +958,8 @@ mod tests {
         assert!(service.damaged_audio(meeting).is_none());
     }
 
-    /// A damaged recording whose damage cannot be written down (a support
-    /// directory that may not be written) fails the meeting at the decode
-    /// stage, so the retention rule never stamps it, and the recording
-    /// stays; a clean one, which changes nothing in the file, processes.
+    /// Damage that cannot be written down fails the meeting at decode, so
+    /// the recording stays; a clean one processes.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn damage_that_cannot_be_written_fails_the_meeting() {
@@ -1097,8 +993,7 @@ mod tests {
         .await;
         std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(clean, MeetingState::Ready);
-        // Root writes anywhere: then the damage was written and the
-        // meeting is ready.
+        // Root writes anywhere: then the meeting is ready.
         if support
             .join(steno_pipeline::DamagedAudio::FILE_NAME)
             .exists()
@@ -1115,8 +1010,7 @@ mod tests {
         assert!(master.exists(), "the recording stays");
     }
 
-    /// A summary re-run exports the new summary, so it starts the count of
-    /// launch re-exports from 0 as Export again does.
+    /// A summary re-run starts the count of launch re-exports from 0.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_re_run_resets_the_launch_re_export_count() {
         let (dir, store) = temp_store();
@@ -1164,7 +1058,6 @@ mod tests {
                 failure: "summarize: released without a summary".to_owned(),
             }
         );
-        // The meeting is released for the next operation.
         let again = service.clone();
         eventually("the meeting was released", || {
             service.pipeline.current().in_flight().is_empty()
@@ -1173,9 +1066,7 @@ mod tests {
         assert_eq!(call(move || again.redeliver(id)), Ok(()));
     }
 
-    /// A re-export holds its meeting until it ends: while it runs, a
-    /// second re-export and a re-run are refused; once it ends, the
-    /// meeting is free.
+    /// A re-export holds its meeting until it ends.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_running_re_export_holds_its_meeting_until_it_ends() {
         let (_dir, store) = temp_store();
@@ -1200,9 +1091,8 @@ mod tests {
         .await;
     }
 
-    /// A reload builds its pipeline from fresh dependencies, yet a re-export
-    /// the retired pipeline is still running holds its meeting on the new
-    /// one too: a second re-export is refused instead of running alongside.
+    /// A re-export on a retired pipeline still holds its meeting on the new
+    /// one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn after_a_reload_a_meeting_the_retired_pipeline_re_exports_is_refused() {
         let (_dir, store) = temp_store();
@@ -1247,10 +1137,8 @@ mod tests {
         .await;
     }
 
-    /// The user's Export again starts the meeting's count of launch
-    /// re-exports from 0, on disk too, so the detail no longer says the
-    /// export keeps failing and the next launch retries it. One refused
-    /// because the meeting is busy leaves the count.
+    /// Export again resets the count of launch re-exports, on disk too; a
+    /// refused one leaves it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn export_again_resets_the_launch_re_export_count() {
         let (dir, store) = temp_store();
@@ -1284,8 +1172,8 @@ mod tests {
         .await;
     }
 
-    /// A claimed operation that panics still reports: `OperationFailed`
-    /// with its stage, and the meeting is released.
+    /// A panicking operation still posts `OperationFailed` and releases the
+    /// meeting.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_re_run_or_re_export_that_panics_posts_the_failure_and_releases_the_meeting() {
         let (_dir, store) = temp_store();
@@ -1335,8 +1223,7 @@ mod tests {
         .await;
     }
 
-    /// Calls `process_again` as the host does, from a thread outside the
-    /// runtime.
+    /// Calls `process_again` from a thread outside the runtime.
     fn process_again(
         service: &Arc<HostPipeline>,
         meeting_id: Uuid,
@@ -1347,10 +1234,8 @@ mod tests {
         })
     }
 
-    /// `meeting` saved in `state` with a six-second call recorded under
-    /// `audio`, and that duration: a ready one with no transcript is under
-    /// the empty-lane bound, so its results are complete
-    /// (`steno_core::results_need_the_audio`).
+    /// `meeting` saved in `state` with a six-second call under `audio`, and
+    /// that duration.
     fn recorded_meeting(
         store: &Store,
         audio: &std::path::Path,
@@ -1370,8 +1255,8 @@ mod tests {
         (meeting, asset)
     }
 
-    /// "Process again" on a failed meeting whose master is on disk saves it
-    /// queued before the call returns, and the run takes it to ready.
+    /// "Process again" saves a failed meeting queued before it returns, and
+    /// the run takes it to ready.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_runs_a_failed_meeting_with_its_master_to_ready() {
         let (dir, store) = temp_store();
@@ -1390,8 +1275,7 @@ mod tests {
         assert_eq!(meeting_state(&store, meeting.id), MeetingState::Ready);
     }
 
-    /// Each refusal of `reprocess` reaches the host as the refusal the
-    /// detail words; a store failure keeps its text.
+    /// Each refusal of `reprocess` reaches the host as the detail's refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_process_again_says_why() {
         let (dir, store) = temp_store();
@@ -1449,11 +1333,8 @@ mod tests {
         );
     }
 
-    /// "Process again" is for a meeting it is offered for: a ready one is
-    /// refused below the host too, so a stale detail cannot run it again.
-    /// A ready meeting whose recording was swept is refused as not offered
-    /// too, not as one whose recording is gone: the rule is checked before
-    /// the files.
+    /// "Process again" refuses a meeting it is not offered for, also when its
+    /// recording was swept: the rule is checked before the files.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_refuses_a_ready_meeting() {
         let (dir, store) = temp_store();
@@ -1474,8 +1355,7 @@ mod tests {
         assert_eq!(meeting_state(&store, swept.id), MeetingState::Ready);
     }
 
-    /// A queued or processing meeting is already being processed; a
-    /// recording one is not offered.
+    /// A queued or processing meeting is already being processed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_on_a_queued_or_processing_meeting_is_busy() {
         let (dir, store) = temp_store();
@@ -1496,9 +1376,8 @@ mod tests {
         );
     }
 
-    /// What every [`FakeSidecar`] of a test shares: the children (alive
-    /// now, the most alive at once, started and stopped) and the gate the
-    /// first transcription waits at for `open` after notifying `entered`.
+    /// What every [`FakeSidecar`] shares: the children's counts and the gate
+    /// the first transcription waits at.
     #[derive(Default)]
     struct Children {
         live: AtomicUsize,
@@ -1516,9 +1395,8 @@ mod tests {
         }
     }
 
-    /// A speech engine that runs a pretend child, as the sidecar engine
-    /// does: `prepare` or `transcribe` starts it when none runs, `release`
-    /// stops it.
+    /// A speech engine that runs a pretend child: `prepare` or `transcribe`
+    /// starts it, `release` stops it.
     struct FakeSidecar {
         inner: FakeSpeechEngine,
         children: Arc<Children>,
@@ -1526,7 +1404,6 @@ mod tests {
     }
 
     impl FakeSidecar {
-        /// A sidecar engine with no child yet, counted in `children`.
         fn new(children: &Arc<Children>) -> Self {
             FakeSidecar {
                 inner: FakeSpeechEngine::default(),
@@ -1582,17 +1459,12 @@ mod tests {
         }
     }
 
-    /// A job on a pipeline a reload retired still transcribes in the
-    /// sidecar while a reload goes to the in-process engine and back and a
-    /// job on the new pipeline transcribes too: both run on the one
-    /// sidecar engine and its one child, the new job's end does not stop
-    /// the child under the retired one's, and the retired job's end stops
-    /// it once.
+    /// A retired job and a new one both run on the one sidecar child through
+    /// reloads, and only the retired job's end stops it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_while_a_job_transcribes_keeps_one_sidecar_child() {
         let (dir, store) = temp_store();
         let children = Arc::new(Children::default());
-        // The runtime of each build, in order.
         let builds = Arc::new(std::sync::Mutex::new(Vec::new()));
         let engines = Arc::new(SpeechEngines::with_builder(
             crate::speech::testing::setup(dir.path(), steno_speech::SpeechSettings::default()),
@@ -1668,9 +1540,8 @@ mod tests {
             "the new job ran on the retired job's child and left it running"
         );
 
-        // The reload's own wait took the retired job's handle, so
-        // `retired.wait_until_idle` would return at once: wait for the
-        // meeting and the child instead.
+        // The reload's wait took the retired job's handle: wait for the meeting
+        // and the child instead.
         children.open.notify_one();
         eventually("the retired job finished and stopped the child", || {
             meeting_state(&store, held) == MeetingState::Ready
@@ -1680,7 +1551,6 @@ mod tests {
         assert_eq!(children.counts(), [0, 1, 1, 1]);
     }
 
-    /// A build of `dependencies` with `parakeet-v3` in the speech sidecar.
     fn on_the_sidecar(dependencies: PipelineDependencies) -> BuiltPipeline {
         BuiltPipeline {
             dependencies,
@@ -1691,9 +1561,8 @@ mod tests {
         }
     }
 
-    /// A reload shares the recorder's state with the build it retires and
-    /// with the new one, so a job of either waits for a recording before
-    /// it runs an engine in this process (A19).
+    /// A reload shares the recorder's state with the retired build and the
+    /// new one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn every_build_sees_the_recording_a_reload_too() {
         let (_dir, store) = temp_store();
@@ -1716,10 +1585,8 @@ mod tests {
         );
     }
 
-    /// A `CurrentPipeline` whose every pipeline, reloads included, shares
-    /// `engine` behind one gate that refuses until the returned flag is set,
-    /// and one event bus; its reloads resume only once the flag is set, as
-    /// the app's do.
+    /// A `CurrentPipeline` whose pipelines share `engine` behind one gate
+    /// that refuses until the returned flag is set.
     fn gated_current(
         store: &Arc<Store>,
         engine: Arc<dyn SpeechEngine>,
@@ -1744,8 +1611,7 @@ mod tests {
         (installed, current)
     }
 
-    /// Enqueues a two-lane call in `audio` on `pipeline` as a meeting of
-    /// its own; its id.
+    /// Enqueues a two-lane call in `audio` on `pipeline`; its id.
     fn enqueue_call(audio: &std::path::Path, pipeline: &ProcessingPipeline) -> Uuid {
         let mut meeting = sample_data::meeting();
         meeting.id = Uuid::new_v4();
@@ -1760,7 +1626,6 @@ mod tests {
         store.meeting(id).unwrap().unwrap().state
     }
 
-    /// Whether `a` and `b` run on the same speech engine and its claims.
     fn same_engine(a: &ProcessingPipeline, b: &ProcessingPipeline) -> bool {
         a.dependencies()
             .speech_engine
@@ -1775,7 +1640,6 @@ mod tests {
         let mut receiver = service.pipeline.current().dependencies().events.subscribe();
         let id = meeting.id;
         assert_eq!(call(move || service.redeliver(id)), Ok(()));
-        // The re-export ran: its one stage posted progress.
         let event = next_event(&mut receiver, |event| {
             matches!(event, MeetingEvent::Progress { .. })
         })
@@ -1790,9 +1654,8 @@ mod tests {
         );
     }
 
-    /// A reload while a retired pipeline still transcribes meeting M, then
-    /// a model install's resume on the current pipeline: M is not started
-    /// again there, so it is processed once (one LLM pass, one export).
+    /// A resume after a reload does not start again a meeting a retired
+    /// pipeline still runs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_resume_after_a_reload_does_not_run_an_in_flight_meeting_twice() {
         let (dir, store) = temp_store();
@@ -1847,21 +1710,15 @@ mod tests {
         );
     }
 
-    /// A meeting a run left waiting for models, which the pipeline a
-    /// reload retired processes again on its own (`process`, holding the
-    /// meeting in the shared in-flight set) when an install's resume runs
-    /// on the current pipeline: the resume finds the meeting held through
-    /// the set every pipeline of the `CurrentPipeline` shares and skips
-    /// it, so the meeting is processed once more, not twice.
+    /// A resume skips a waiting meeting a retired pipeline processes again,
+    /// through the shared in-flight set.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_resume_after_a_reload_skips_a_waiting_meeting_the_retired_pipeline_holds() {
         let (dir, store) = temp_store();
         let children = Arc::new(Children::default());
         let engine = Arc::new(FakeSidecar::new(&children));
         let (installed, current) = gated_current(&store, engine.clone());
-        // The reload comes first, as its own resume would start a meeting
-        // waiting by then; the run on the retired pipeline then leaves the
-        // meeting waiting.
+        // The reload first, as its own resume would start the meeting.
         let retired = current.current();
         current.reload().unwrap();
         let waiting = enqueue_call(dir.path(), &retired);
@@ -1897,10 +1754,7 @@ mod tests {
         );
     }
 
-    /// Models the `steno` command installed into the app's models
-    /// directory leave Settings with no Download to press, so no install
-    /// resumes a meeting waiting for them: the next reload does, on the
-    /// new pipeline.
+    /// Models the `steno` command installed are picked up by the next reload.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_resumes_a_meeting_waiting_for_models_installed_meanwhile() {
         let (dir, store) = temp_store();
@@ -1916,10 +1770,7 @@ mod tests {
         assert_eq!(current.model_waits.waiting(), Vec::<Uuid>::new());
     }
 
-    /// A settings save while the models are still missing leaves the
-    /// meetings waiting for them waiting: the reload starts none of them,
-    /// so no card leaves "Download the speech models in Settings" for
-    /// `decode` and comes back.
+    /// A save while models are still missing starts no waiting meeting.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_with_the_models_still_missing_leaves_the_waiting_meetings_waiting() {
         a_resume_with_the_models_still_missing_leaves_the_waiting_meetings_waiting(|current| {
@@ -1928,8 +1779,7 @@ mod tests {
         .await;
     }
 
-    /// The same for an install that leaves another model missing (the
-    /// diarizer's finished, Parakeet v3's not yet): its resume starts none.
+    /// Neither does an install that leaves another model missing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_install_with_a_model_still_missing_leaves_the_waiting_meetings_waiting() {
         a_resume_with_the_models_still_missing_leaves_the_waiting_meetings_waiting(
@@ -1960,12 +1810,8 @@ mod tests {
         assert_eq!(current.model_waits.waiting(), [waiting]);
     }
 
-    /// A meeting a run left waiting for models is not "already being
-    /// processed": "Process again" from a stale detail says to download
-    /// the models, also when an earlier run's diarizer fallback left the
-    /// room speaker that keeps its recording (#237's refusal comes before
-    /// #241's rule), and the meeting keeps waiting, untouched, until an
-    /// install resumes it.
+    /// "Process again" on a meeting waiting for models says to download them,
+    /// and the meeting keeps waiting until an install resumes it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_on_a_meeting_waiting_for_models_says_to_download_them() {
         let (dir, store) = temp_store();
@@ -2016,10 +1862,8 @@ mod tests {
         Diarizer,
     }
 
-    /// A boundary behind the app's gate whose first load waits at a gate
-    /// (`checked`, then `go`) after the gate's check let it through, then
-    /// loads as the app's loaders do: refused with the store's or the
-    /// diarizer's `NotInstalled` while `installed` does not hold.
+    /// A boundary behind the app's gate whose first load waits after the
+    /// gate's check, then is refused while `installed` does not hold.
     struct LoadsAfterAGate {
         installed: crate::model_gate::InstalledCheck,
         not_installed: fn() -> steno_core::protocols::BoxError,
@@ -2031,7 +1875,6 @@ mod tests {
     }
 
     impl LoadsAfterAGate {
-        /// The boundary `removed` names, refusing as its loader does.
         fn new(removed: Removed, installed: crate::model_gate::InstalledCheck) -> Self {
             LoadsAfterAGate {
                 installed,
@@ -2111,8 +1954,7 @@ mod tests {
         }
     }
 
-    /// Pipelines whose speech engine or diarizer (`removed`'s) is
-    /// `boundary` behind the app's gate over `installed`.
+    /// Pipelines whose `removed` boundary sits behind the app's gate.
     fn behind_the_gate(
         store: &Arc<Store>,
         boundary: &Arc<LoadsAfterAGate>,
@@ -2143,12 +1985,9 @@ mod tests {
         })
     }
 
-    /// A Settings Remove of `removed`'s files while a run of a meeting
-    /// with "delete after processing" is past the gate's check and before
-    /// the load: the run is refused for missing models, the meeting stays
-    /// `queued` with no failure reason and waits, its audio is kept (no
-    /// retention stamp, the sweep takes nothing), and a reinstall's resume
-    /// processes it.
+    /// A Remove between the gate's check and the load: the run is refused,
+    /// the meeting waits `queued` with its audio kept, and a reinstall's
+    /// resume processes it.
     async fn a_remove_during_a_run_leaves_the_meeting_waiting_with_its_audio(removed: Removed) {
         use steno_host::services::SpeechModels as _;
         use steno_host::speech::ModelAsset;
@@ -2222,10 +2061,8 @@ mod tests {
         a_remove_during_a_run_leaves_the_meeting_waiting_with_its_audio(Removed::Diarizer).await;
     }
 
-    /// A meeting a run left waiting for models before a reload is started
-    /// by the app's model service once an install finished, on the
-    /// pipeline the reload built: every pipeline a `CurrentPipeline`
-    /// builds shares its waiting meetings.
+    /// A meeting left waiting before a reload is started by an install on
+    /// the reload's pipeline.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_install_after_a_reload_resumes_the_meeting_the_retired_pipeline_left_waiting() {
         use steno_host::services::SpeechModels as _;
@@ -2266,13 +2103,8 @@ mod tests {
         assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
     }
 
-    /// Onboarding's speech models row at the first launch after the Swift
-    /// app (stable plan, "First launch after the handoff"): the speech
-    /// model in place, the speaker models missing, and a meeting left
-    /// waiting for them. The row's Download, Settings' install of each id
-    /// the row lists, sent from the onboarding window, installs them and
-    /// resumes that meeting once: a second Download processes nothing
-    /// again.
+    /// Onboarding's Download of the missing speaker models resumes the
+    /// waiting meeting once; a second Download processes nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_onboarding_rows_download_resumes_the_meeting_waiting_for_the_models() {
         use steno_bridge::{AssetIdParams, BridgeHost as _, BridgeTopic, BridgeWindow};
@@ -2356,9 +2188,8 @@ mod tests {
         assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
     }
 
-    /// A speech engine whose first transcription decides its model is
-    /// missing and waits at a gate (`entered`, then `open`) before it
-    /// returns the refusal; every later call is refused at once.
+    /// A speech engine whose first transcription waits at a gate before it
+    /// refuses for a missing model; later calls refuse at once.
     #[derive(Default)]
     struct RefusingAfterAGate {
         used: AtomicBool,
@@ -2396,11 +2227,8 @@ mod tests {
         }
     }
 
-    /// A run being refused on a pipeline a reload then retired, whose
-    /// meeting an install's resume skipped because it was in flight,
-    /// starts the meeting again on the current pipeline, built from the
-    /// settings saved last, not on the retired one's dependencies (whose
-    /// engine here still refuses).
+    /// A refused run on a retired pipeline is started again on the current
+    /// one, built from the latest settings.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_run_on_a_retired_pipeline_starts_its_meeting_again_on_the_current_one() {
         let (dir, store) = temp_store();
@@ -2437,9 +2265,7 @@ mod tests {
         assert_eq!(current.model_waits.waiting(), Vec::<Uuid>::new());
     }
 
-    /// An install's resume starts only the meetings a run left waiting for
-    /// models: a queued meeting no run refused stays queued for the
-    /// launch's recovery, which then processes it.
+    /// An install's resume starts only meetings left waiting for models.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_install_resumes_no_queued_meeting_a_run_did_not_leave_waiting() {
         let (dir, store) = temp_store();
@@ -2464,8 +2290,7 @@ mod tests {
         assert_eq!(meeting_state(&store, meeting.id), MeetingState::Ready);
     }
 
-    /// The fake engine, its first warm-up held until `open`: the run's
-    /// first write (`processing`) comes right after.
+    /// The fake engine, its first warm-up held until `open`.
     #[derive(Default)]
     struct HeldWarmUp {
         used: AtomicBool,
@@ -2501,8 +2326,7 @@ mod tests {
         }
     }
 
-    /// Another process's write lock on the store in `dir`, until it is
-    /// dropped.
+    /// Another process's write lock on the store in `dir`.
     fn write_lock(dir: &std::path::Path) -> steno_core::testing::WriteLockHold {
         steno_core::testing::WriteLockHold::new(&dir.join("steno.sqlite"))
     }
@@ -2513,8 +2337,6 @@ mod tests {
         longest: Duration::from_millis(80),
     };
 
-    /// A current pipeline over `store` with `engine`, trying the store
-    /// again on `retry`.
     fn retrying(
         store: &Arc<Store>,
         engine: Arc<dyn SpeechEngine>,
@@ -2536,10 +2358,8 @@ mod tests {
         )
     }
 
-    /// A run whose first write meets another process's lock for longer
-    /// than the store's five-second busy timeout leaves the meeting
-    /// `queued`, never `failed`, and the store's retry, which keeps trying
-    /// while the lock is held, processes it once the lock is let go.
+    /// A run that meets a lock past the busy timeout leaves the meeting
+    /// `queued`, and the retry processes it once the lock goes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_meeting_the_store_kept_locked_is_processed_by_the_retry_once_let_go() {
         let (dir, store) = temp_store();
@@ -2561,8 +2381,7 @@ mod tests {
         })
         .await
         .expect("the run left the meeting waiting for the store");
-        // The retries meet the lock too while it is held: nothing is
-        // written.
+        // The retries meet the lock too.
         assert_eq!(meeting_state(&store, meeting), MeetingState::Queued);
 
         drop(lock);
@@ -2576,11 +2395,8 @@ mod tests {
         assert_eq!(current.model_waits.waiting_for_store(), Vec::<Uuid>::new());
     }
 
-    /// An install's resume the store refuses is tried again by the store's
-    /// retry: the meeting it took, waiting for its models until then, is
-    /// processed once the lock is let go, without another install or a
-    /// launch. The resume meets the lock at its write that fails an older
-    /// waiting meeting whose asset row is gone.
+    /// A resume the store refuses is retried, and the meeting processed once
+    /// the lock goes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_install_resume_the_store_refuses_is_tried_again() {
         let (dir, store) = temp_store();
@@ -2618,9 +2434,7 @@ mod tests {
 
         current.resume_waiting();
         assert_eq!(current.model_waits.waiting(), Vec::<Uuid>::new());
-        // The resume met the lock before the meeting ran. The retry's
-        // first try mostly comes after the lock is let go below; one that
-        // comes before meets the lock and tries again.
+        // The resume met the lock before the meeting ran.
         assert_eq!(meeting_state(&store, later.id), MeetingState::Queued);
         drop(lock);
         eventually("the retry processed the meeting", || {
@@ -2634,9 +2448,8 @@ mod tests {
         ));
     }
 
-    /// "Process again" from a stale detail on a meeting waiting for the
-    /// store says what its card says, not "already being processed", and
-    /// leaves it waiting.
+    /// "Process again" on a meeting waiting for the store says what its card
+    /// says and leaves it waiting.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_on_a_meeting_waiting_for_the_store_says_so() {
         let (dir, store) = temp_store();
@@ -2676,9 +2489,8 @@ mod tests {
         assert_eq!(meeting_state(&store, meeting), MeetingState::Queued);
     }
 
-    /// The store's retry waits `first` before its first try, twice as
-    /// long before each next one up to `longest`, and `first` again after
-    /// a quiet spell longer than `longest`.
+    /// The retry's waits double up to `longest` and start over after a quiet
+    /// spell.
     #[test]
     fn the_store_retry_doubles_its_wait_and_starts_over_after_a_quiet_spell() {
         let retry = StoreRetry::APP;
@@ -2695,12 +2507,8 @@ mod tests {
         assert_eq!(retry.next_wait(Some((secs(240), secs(241)))), secs(15));
     }
 
-    /// While the lock keeps refusing it, the retry backs off. Each try
-    /// starts the meeting, whose run meets the lock and posts `StoreBusy`
-    /// again, so the events count the tries: with `first` at 20 ms, doubling,
-    /// at most 7 fit in the 4 s after the first park (20 + 40 + ... + 1280
-    /// ms, plus each run's time), while a loop that starts again from
-    /// `first` on every try makes dozens.
+    /// The retry backs off while the lock holds: at most 7 tries fit in 4 s
+    /// with `first` at 20 ms, where no backoff makes dozens.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_store_retry_backs_off_while_the_lock_refuses_it() {
         let (dir, store) = temp_store();

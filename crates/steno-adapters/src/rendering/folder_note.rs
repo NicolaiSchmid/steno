@@ -1,6 +1,5 @@
-//! The meeting's folder note: the file Obsidian opens when the folder is
+//! The meeting's folder note, which Obsidian opens when the folder is
 //! clicked.
-//! Swift: `Sources/StenoAdapters/Rendering/FolderNoteRenderer.swift`.
 
 use steno_core::{MeetingExport, MeetingSource, Platform, summary};
 
@@ -71,8 +70,7 @@ impl FolderNoteRenderer<'_> {
                 .participants(),
             ),
         );
-        // Sanitised to Obsidian's tag grammar here, quoted by the emitter so a
-        // tag of `2026` or `true` stays a string.
+        // Sanitised to Obsidian's tag grammar; the emitter quotes them.
         let tags = std::iter::once("meeting")
             .chain(meeting.tags.iter().map(String::as_str))
             .filter_map(markdown_text::tag)
@@ -99,16 +97,12 @@ impl FolderNoteRenderer<'_> {
         frontmatter
     }
 
-    /// `2026-09-24 14:00–15:30 · 1 h 30 min · Mac call · [[slug - Transcript|Transcript]] · [[slug - Tasks|Tasks]]`,
-    /// with "Windows call" or "Linux call" when [`RenderOptions::platform`] is
-    /// Windows or Linux.
+    /// `2026-09-24 14:00–15:30 · 1 h 30 min · Mac call · [[slug - Transcript|Transcript]] · [[slug - Tasks|Tasks]]`.
     pub fn info_line(&self) -> String {
         let meeting = &self.export.meeting;
         let start = meeting.started_at;
-        // The raw seconds, as Swift's `addingTimeInterval(max(0, duration))`:
-        // rounding to milliseconds first would move an end a hair under a
-        // minute boundary onto it. Negative, NaN and absurd durations add
-        // nothing.
+        // Raw seconds: rounding first would move an end just under a minute
+        // onto it. Negative, NaN and absurd durations add nothing.
         let end = start
             + std::time::Duration::try_from_secs_f64(meeting.duration)
                 .ok()
@@ -154,8 +148,7 @@ impl FolderNoteRenderer<'_> {
         .join(" · ")
     }
 
-    /// Core renders sections as `## heading`; under `## Summary` they become
-    /// `### heading`, the offset `summary::render` leaves to adapters.
+    /// Core's `## heading` sections become `### heading` under `## Summary`.
     pub fn demoted(summary: &str) -> String {
         summary
             .split('\n')
@@ -193,10 +186,8 @@ impl FolderNoteRenderer<'_> {
         }
     }
 
-    /// The frontmatter's `source`: a stable data key that vault queries
-    /// match on, so a call is `mac-call` whichever platform recorded it;
-    /// only the info line's [`source_label`](Self::source_label) names the
-    /// platform.
+    /// The frontmatter's `source`, a stable key for vault queries: a call
+    /// is `mac-call` whichever platform recorded it.
     pub fn source_key(source: MeetingSource) -> &'static str {
         match source {
             MeetingSource::MacCall => "mac-call",
@@ -205,8 +196,7 @@ impl FolderNoteRenderer<'_> {
         }
     }
 
-    /// The info line's word for the source; a call names the platform it
-    /// was recorded on. Swift: `sourceLabel`, always the Mac's.
+    /// The info line's word for the source, naming a call's platform.
     pub fn source_label(source: MeetingSource, platform: Platform) -> &'static str {
         match source {
             MeetingSource::MacCall => match platform {

@@ -1,24 +1,8 @@
-//! The models directory, the speech settings and the speech engine per
-//! platform behind `SpeechEngine`, the ONNX diarizer in the speech
-//! sidecar, and the host's
-//! `SpeechModels` over the installed models. [`SpeechSetup`] gathers what
-//! the engine is built from; [`SpeechSetup::runtime`] applies
-//! `steno_speech`'s platform policy ([`steno_speech::SpeechRuntime`]): on
-//! Linux and Windows Parakeet runs in the speech sidecar, never in this
-//! process; on the Mac it runs on `CoreML` in this process, with the
-//! sidecar as the fallback the speech settings can choose, and the one
-//! the app turns to once `CoreML` ended it ([`SpeechFallback`], until the
-//! user turns `CoreML` back on in Settings); every engine id other than
-//! `parakeet-v3` runs in the sidecar on every platform.
-//! On Windows the speech setting `directmlOnWindows` lets the sidecar run
-//! the encoder on `DirectML` ([`SpeechSetup::sidecar`]). [`SpeechEngines`]
-//! keeps the engines and the diarizer the pipelines run on, so a pipeline
-//! reload keeps its engine and diarizer and the app never runs two speech
-//! sidecars at once: the diarizer runs its models in the child of the one
-//! sidecar engine ([`diarizer_in`]), on the Mac too, where speech may run
-//! on `CoreML` in this process.
-//! Swift: `makeSpeechEngine`, `makeDiarizer`, `ModelStore`,
-//! `Sources/StenoSpeech/Engines/SpeechEngineID.swift`.
+//! The models directory, the speech settings, the speech engine per
+//! platform ([`SpeechSetup::runtime`]: `CoreML` in this process on the Mac,
+//! the speech sidecar elsewhere and as the Mac's fallback), the ONNX
+//! diarizer in the sidecar's child, and the host's `SpeechModels`.
+//! [`SpeechEngines`] keeps the engines so the app never runs two sidecars.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -39,21 +23,17 @@ use steno_speech::{
 use crate::model_gate::{GatedDiarizer, GatedSpeechEngine, InstalledCheck};
 use crate::pipeline::ModelsInstalled;
 
-/// Threads for one ONNX operator; the plan measured at four.
+/// Threads for one ONNX operator.
 pub const ONNX_THREADS: usize = 4;
 
 /// The speech settings' file in the support directory. Not a row of the
 /// `setting` table: the Swift app rewrites that table whole on every save
-/// and would drop rows it does not know. Nothing writes the file; the
-/// settings are configuration, without a place in the Settings window.
-/// The app reads it once, at launch: an edit takes effect at the next
-/// start, not at a Settings save.
+/// and would drop rows it does not know. Read once, at launch.
 pub const SPEECH_SETTINGS_FILE: &str = "speech.json";
 
-/// The speech settings: [`SPEECH_SETTINGS_FILE`] in the support directory
-/// (absent or unreadable: the defaults, the latter with a warning), its
-/// mirror replaced by `STENO_MODELS_MIRROR` when that is set, as
-/// [`ModelStore::from_environment`] reads it.
+/// The speech settings from [`SPEECH_SETTINGS_FILE`] (absent or
+/// unreadable: the defaults), its mirror replaced by `STENO_MODELS_MIRROR`
+/// when that is set.
 #[must_use]
 pub fn speech_settings(paths: &StenoPaths) -> SpeechSettings {
     speech_settings_with(
@@ -62,7 +42,6 @@ pub fn speech_settings(paths: &StenoPaths) -> SpeechSettings {
     )
 }
 
-/// [`speech_settings`] with the variable's value passed in.
 fn speech_settings_with(file: &Path, mirror: Option<String>) -> SpeechSettings {
     let mut settings = match std::fs::read(file) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
@@ -82,25 +61,17 @@ fn speech_settings_with(file: &Path, mirror: Option<String>) -> SpeechSettings {
     settings
 }
 
-/// The speech sidecar binary beside the running executable
-/// ([`SidecarConfig::beside_current_exe`]), its sessions on
-/// [`ONNX_THREADS`]. The release bundles carry it there (`WP9a` of
-/// `.plans/2026-10-02-rust-core-and-tauri-shell.md`); a bundle built
-/// without the release configuration does not, and its `prepare` fails
-/// with "could not start". In a
-/// development build, `cargo build` at the workspace root (or
-/// `cargo build -p steno-speech-sidecar`) puts it beside `steno` and
-/// `steno-desktop` in the target directory. If the executable's path
-/// cannot be read, the config holds the bare file name, which the client
-/// never looks up on `PATH`: `prepare` fails with "could not start".
+/// The speech sidecar binary beside the running executable, its sessions
+/// on [`ONNX_THREADS`]. Where it is missing (a bundle built without the
+/// release configuration, or an unreadable executable path) `prepare`
+/// fails with "could not start"; the client never looks it up on `PATH`.
 #[must_use]
 pub fn sidecar_config() -> SidecarConfig {
     let mut config = SidecarConfig::beside_current_exe().unwrap_or_else(|error| {
         tracing::warn!(kind = ?error.kind(), "the running executable's path could not be read; the speech sidecar cannot start");
         SidecarConfig::new(steno_speech::sidecar::SIDECAR_BINARY)
     });
-    // `OnnxOptions::default()` uses four threads too; set here so the
-    // app's count stays the measured one whatever that default becomes.
+    // Set here so the app's count stays whatever that default becomes.
     config.options.intra_threads = ONNX_THREADS;
     config
 }
@@ -125,33 +96,28 @@ pub struct SpeechSetup {
     pub models_directory: PathBuf,
     /// The speech settings ([`speech_settings`]), not the app's `Settings`.
     pub speech_settings: SpeechSettings,
-    /// How the speech sidecar starts ([`sidecar_config`]), its encoder on
-    /// `DirectML` when the speech settings ask for it on Windows
-    /// ([`SpeechSettings::directml_on_windows`]). It never downloads a
-    /// missing model ([`Install::Never`], the default); the `steno`
-    /// command turns that on in its own setup.
+    /// How the speech sidecar starts, its encoder on `DirectML` when the
+    /// speech settings ask for it on Windows. It never downloads a missing
+    /// model unless the `steno` command turns that on.
     pub sidecar: SidecarConfig,
     /// Whether the speech sidecar stands in for `CoreML`, which ended the
-    /// app: off from [`Self::new`], the launch's from
-    /// [`Self::with_fallback`]. The `steno` command keeps it off.
+    /// app; off from [`Self::new`].
     pub fallback: Arc<SpeechFallback>,
 }
 
 impl SpeechSetup {
     /// The app's: [`models_directory`], [`speech_settings`] and
-    /// [`sidecar_config`] with the settings' `DirectML` choice.
+    /// [`sidecar_config`].
     #[must_use]
     pub fn new(settings: &Settings, paths: &StenoPaths) -> Self {
         Self::in_models_directory(models_directory(settings, paths), paths)
     }
 
-    /// [`SpeechSetup::new`] over a models directory resolved elsewhere (the
-    /// CLI's, from `--models-dir` or [`models_directory`]).
+    /// [`SpeechSetup::new`] over a models directory resolved elsewhere.
     #[must_use]
     pub fn in_models_directory(models_directory: PathBuf, paths: &StenoPaths) -> Self {
         let speech_settings = speech_settings(paths);
         let mut sidecar = sidecar_config();
-        // The client asks for it on Windows only.
         sidecar.options.directml = speech_settings.directml_on_windows;
         sidecar.crash_log_directory = Some(paths.support_directory.clone());
         SpeechSetup {
@@ -162,39 +128,32 @@ impl SpeechSetup {
         }
     }
 
-    /// This setup with `fallback`, the one the app's launch read.
     #[must_use]
     pub fn with_fallback(mut self, fallback: Arc<SpeechFallback>) -> Self {
         self.fallback = fallback;
         self
     }
 
-    /// Where the engine `engine_id` runs. `parakeet-v3` runs on `CoreML` in
-    /// this process on the Mac, unless the speech settings choose the
-    /// sidecar there or the fallback is on ([`Self::fallback`]); it runs in
-    /// the speech sidecar everywhere else. Every other id runs in the
-    /// speech sidecar on every platform; the app stores none, as
-    /// `Store::retire_speech_engine` moves one the Swift app left to
-    /// `parakeet-v3` at launch. Read at each pipeline build, so the user's
-    /// end of the fallback takes effect at the reload that follows it.
+    /// Where the engine `engine_id` runs: `parakeet-v3` on `CoreML` in this
+    /// process on the Mac, unless the settings choose the sidecar or the
+    /// fallback is on; every other case in the speech sidecar. Read at each
+    /// pipeline build, so ending the fallback takes effect at the next reload.
     #[must_use]
     pub fn runtime(&self, engine_id: &str) -> SpeechRuntime {
         unless_falling_back(engine_id, &self.speech_settings, &self.fallback)
     }
 
-    /// The ONNX store: the models directory's `onnx/` folder, with the
-    /// speech settings' mirror.
+    /// The ONNX store in the models directory's `onnx/`, with the mirror.
     #[must_use]
     pub fn model_store(&self) -> ModelStore {
         self.speech_settings.model_store(&self.models_directory)
     }
 }
 
-/// The id both Parakeet v3 engines report (ONNX and `CoreML`).
 const PARAKEET_V3: &str = OnnxSpeechEngine::ID;
 
 /// [`SpeechSetup::runtime`] over the speech settings alone, for the model
-/// service, which keeps no models directory of its own.
+/// service.
 pub(crate) fn engine_runtime(engine_id: &str, speech_settings: &SpeechSettings) -> SpeechRuntime {
     if engine_id == PARAKEET_V3 {
         speech_settings.runtime()
@@ -203,9 +162,8 @@ pub(crate) fn engine_runtime(engine_id: &str, speech_settings: &SpeechSettings) 
     }
 }
 
-/// Where `engine_id` runs: in the speech sidecar while `fallback` is on,
-/// else as [`engine_runtime`] says. The one rule behind
-/// [`SpeechSetup::runtime`] and the model service's rows.
+/// Where `engine_id` runs: in the sidecar while `fallback` is on, else as
+/// [`engine_runtime`] says.
 fn unless_falling_back(
     engine_id: &str,
     speech_settings: &SpeechSettings,
@@ -219,11 +177,8 @@ fn unless_falling_back(
 }
 
 /// The directory every engine's models live under:
-/// `settings.models_directory` when set, else `STENO_MODELS_DIR` (a
-/// relative path is taken from the working directory), else `Models` in
-/// the support directory. The ONNX models sit in its `onnx/`, the `CoreML`
-/// Parakeet in `fluidaudio/parakeet-tdt-0.6b-v3/` (where the Swift app's
-/// `ModelStore` installs it).
+/// `settings.models_directory` when set, else `STENO_MODELS_DIR`, else
+/// `Models` in the support directory.
 #[must_use]
 pub fn models_directory(settings: &Settings, paths: &StenoPaths) -> PathBuf {
     models_directory_with(
@@ -233,9 +188,7 @@ pub fn models_directory(settings: &Settings, paths: &StenoPaths) -> PathBuf {
     )
 }
 
-/// [`models_directory`] with the variable's value passed in. The variable
-/// is read by `steno_speech`'s rule, which the `transcribe` example and the
-/// FLEURS test use too.
+/// [`models_directory`] with the variable's value passed in.
 fn models_directory_with(
     settings: &Settings,
     paths: &StenoPaths,
@@ -257,19 +210,16 @@ pub fn coreml_model_directory(models_directory: &Path) -> PathBuf {
 }
 
 /// The engine `engine_id` names, where [`SpeechSetup::runtime`] runs it:
-/// on the Mac, by default, the `CoreML` Parakeet v3 on the Neural Engine;
-/// otherwise [`sidecar_engine`], the fp32 ONNX export of the same model.
-/// Both report the id `parakeet-v3`. It decides by
-/// [`SpeechSetup::runtime`] alone; [`BuiltEngine`](crate::pipeline::BuiltEngine)
-/// relies on that.
+/// the `CoreML` Parakeet v3 or [`sidecar_engine`], the ONNX export of the
+/// same model; both report `parakeet-v3`. It decides by the runtime
+/// alone, which [`BuiltEngine`](crate::pipeline::BuiltEngine) relies on.
 #[must_use]
 pub fn speech_engine(engine_id: &str, setup: &SpeechSetup) -> Arc<dyn SpeechEngine> {
     speech_engine_in(engine_id, setup, &Arc::new(sidecar_engine(setup)))
 }
 
-/// [`speech_engine`] with `sidecar` as the engine where Parakeet runs in
-/// the speech sidecar, so a diarizer over the same engine
-/// ([`diarizer_in`]) shares its child.
+/// [`speech_engine`] with `sidecar` as the sidecar engine, so a diarizer
+/// over it ([`diarizer_in`]) shares its child.
 #[must_use]
 pub fn speech_engine_in(
     engine_id: &str,
@@ -279,8 +229,7 @@ pub fn speech_engine_in(
     engine_on(setup.runtime(engine_id), setup, sidecar)
 }
 
-/// The engine that runs on `runtime` over `setup`, `sidecar` where that is
-/// the speech sidecar; off the Mac every runtime is the speech sidecar.
+/// The engine on `runtime` over `setup`, `sidecar` for the speech sidecar.
 fn engine_on(
     runtime: SpeechRuntime,
     setup: &SpeechSetup,
@@ -299,36 +248,18 @@ fn engine_on(
     sidecar.clone()
 }
 
-/// Builds the engine for a runtime; [`engine_on`] over the setup in the
-/// app, a fake in the tests.
+/// Builds the engine for a runtime; a fake in the tests.
 pub(crate) type BuildEngine = Box<dyn Fn(SpeechRuntime) -> Arc<dyn SpeechEngine> + Send + Sync>;
 
 /// The speech engines and the diarizer the app's pipelines share, so a
-/// pipeline reload (a Settings save of the engine or of the summaries)
-/// keeps the current engine with its claims ([`SharedSpeechEngine`]) and
-/// the diarizer: the `CoreML` model a recording's warm-up loaded stays
-/// loaded (the diarizer's warm-up only checks its files), and a job the
-/// reload retired and a job on the new pipeline share one speech sidecar
-/// child. Swift:
-/// none; `reloadPipeline` built a new engine and diarizer every time.
+/// pipeline reload keeps the current engine with its claims
+/// ([`SharedSpeechEngine`]) and the diarizer, and a retired job and a new
+/// one share one sidecar child. The setup is read once at launch.
 ///
-/// The setup (the models directory, the speech settings, how the sidecar
-/// starts) is read once at launch and belongs to this value, so two
-/// engine ids share an engine exactly when [`SpeechSetup::runtime`] puts
-/// them in the same place. A changed setup takes a new value, at the next
-/// launch.
-///
-/// The sidecar engine is built with this value and kept for the app's
-/// run. It holds a child only while a job needs one, and as the only
-/// sidecar engine it never runs two at once, also when a reload on the
-/// Mac goes to `CoreML` and back while a retired pipeline still
-/// transcribes. The in-process engine (`CoreML` on the Mac) is kept only
-/// while a pipeline runs on it ([`WeakSpeechEngine`]): a reload back to it
-/// while a retired pipeline still transcribes gets the same engine, and
-/// its model is freed once no pipeline holds it. The diarizer is built with
-/// this value over the sidecar engine ([`diarizer_in`]), so its models load
-/// into the child speech runs in, or into a child of its own while none
-/// runs, which stops after the call; the app never runs two children.
+/// The sidecar engine is kept for the app's run and never runs two
+/// children. The in-process engine is kept only while a pipeline holds it
+/// ([`WeakSpeechEngine`]). The diarizer runs over the sidecar engine
+/// ([`diarizer_in`]), in its child or in one of its own while none runs.
 ///
 /// ```no_run
 /// use steno_core::{Settings, StenoPaths};
@@ -346,14 +277,11 @@ pub struct SpeechEngines {
     build: BuildEngine,
     diarizer: Arc<dyn Diarizer>,
     kept: std::sync::Mutex<KeptEngines>,
-    /// The gates' checks, together ([`Self::models_installed`]).
     installed: ModelsInstalled,
-    /// The sidecar engine [`Self::with_checks`] built, for the tests.
     #[cfg(test)]
     sidecar: Option<Arc<SidecarSpeechEngine>>,
 }
 
-/// The engines [`SpeechEngines`] hands out again.
 #[derive(Default)]
 struct KeptEngines {
     /// For the app's run, once built.
@@ -363,10 +291,9 @@ struct KeptEngines {
 }
 
 impl SpeechEngines {
-    /// The engines [`speech_engine`] builds over `setup`, and the diarizer,
-    /// each behind a gate that refuses a call while its models are not
-    /// installed, with the speech sidecar's own install turned off: no
-    /// pipeline run downloads a model ([`crate::model_gate`]).
+    /// The engines over `setup` and the diarizer, each behind a gate that
+    /// refuses a call while its models are not installed; no pipeline run
+    /// downloads a model ([`crate::model_gate`]).
     #[must_use]
     pub fn new(setup: SpeechSetup) -> Self {
         let speech = ModelStoreSpeechModels::new(&setup);
@@ -378,15 +305,14 @@ impl SpeechEngines {
         )
     }
 
-    /// [`Self::new`] with the gates' checks passed in, for the tests: the
-    /// speech engine's for the runtime it runs on, and the diarizer's.
+    /// [`Self::new`] with the gates' checks passed in, for the tests.
     pub(crate) fn with_checks(
         mut setup: SpeechSetup,
         speech_installed: ModelsInstalled,
         diarizer_installed: InstalledCheck,
     ) -> Self {
-        // The default already; set so a setup that allows downloads (the
-        // CLI's) never reaches the app's engines or `setup()`.
+        // So a setup that allows downloads (the CLI's) never reaches the app's
+        // engines.
         setup.sidecar.install = Install::Never;
         let sidecar = Arc::new(sidecar_engine(&setup));
         #[cfg(test)]
@@ -414,18 +340,16 @@ impl SpeechEngines {
         }
     }
 
-    /// Engines from `build` instead, with no gates, for the tests; the
-    /// diarizer runs in a sidecar engine of its own over the setup.
+    /// Engines from `build`, with no gates, for the tests.
     #[cfg(test)]
     pub(crate) fn with_builder(setup: SpeechSetup, build: BuildEngine) -> Self {
         let diarizer = Self::app_diarizer(Arc::new(sidecar_engine(&setup)));
         Self::with_parts(setup, build, diarizer, Arc::new(|_| true))
     }
 
-    /// The app's diarizer over `sidecar`. Never downloads: a missing file
-    /// is `NotInstalled`, which the gate takes as the models-missing
-    /// refusal, so the meeting waits with its audio instead of ending with
-    /// one room speaker (S1 of `.plans/2026-10-07-stable-promotion.md`).
+    /// The app's diarizer over `sidecar`. Never downloads: a missing file is
+    /// the models-missing refusal, so the meeting waits with its audio
+    /// instead of ending with one room speaker.
     fn app_diarizer(sidecar: Arc<SidecarSpeechEngine>) -> Arc<dyn Diarizer> {
         diarizer_in(sidecar, Install::Never)
     }
@@ -447,12 +371,9 @@ impl SpeechEngines {
         }
     }
 
-    /// Whether the gates would let a pipeline whose speech engine runs on
-    /// `runtime` through now: its speech models and the diarizer's are
-    /// installed. Always, for the tests' engines without gates
-    /// (`with_builder`). What the app asks before an install or a reload
-    /// resumes the meetings waiting for models
-    /// ([`CurrentPipeline::resuming_when`](crate::pipeline::CurrentPipeline::resuming_when)).
+    /// Whether the gates would let a pipeline on `runtime` through now: its
+    /// speech models and the diarizer's are installed. Always for the tests'
+    /// ungated engines.
     #[must_use]
     pub fn models_installed(&self, runtime: SpeechRuntime) -> bool {
         (self.installed)(runtime)
@@ -464,8 +385,8 @@ impl SpeechEngines {
         &self.setup
     }
 
-    /// The engine on `runtime` with its claims: the kept one, else a new
-    /// one, which is kept.
+    /// The engine on `runtime` with its claims: the kept one, else a new one,
+    /// which is kept.
     #[must_use]
     pub fn engine(&self, runtime: SpeechRuntime) -> SharedSpeechEngine {
         let mut kept = self
@@ -487,28 +408,23 @@ impl SpeechEngines {
         }
     }
 
-    /// The diarizer every pipeline runs, in the child of this value's
-    /// sidecar engine ([`diarizer_in`]).
+    /// The diarizer every pipeline runs.
     #[must_use]
     pub fn diarizer(&self) -> Arc<dyn Diarizer> {
         self.diarizer.clone()
     }
 }
 
-/// Parakeet v3 in the speech sidecar: the models installed into
-/// [`SpeechSetup::model_store`] in this process, the child started from
-/// [`SpeechSetup::sidecar`].
+/// Parakeet v3 in the speech sidecar.
 #[must_use]
 pub fn sidecar_engine(setup: &SpeechSetup) -> SidecarSpeechEngine {
     SidecarSpeechEngine::new(setup.model_store(), setup.sidecar.clone())
 }
 
-/// An engine whose calls do long synchronous model work without yielding
-/// (the `CoreML` Parakeet loads and transcribes that way): one call at a
-/// time, as Swift's `AsrManager` actor ran them, each off the runtime's
-/// workers (`block_in_place` on a multi-thread runtime), so two meetings
-/// processing at once queue on the model instead of parking two workers
-/// for minutes.
+/// An engine whose calls do long synchronous model work (the `CoreML`
+/// Parakeet): one call at a time, each off the runtime's workers, so two
+/// meetings queue on the model instead of parking two workers for
+/// minutes.
 pub struct OneCallAtATime {
     inner: Arc<dyn SpeechEngine>,
     turn: tokio::sync::Mutex<()>,
@@ -554,11 +470,9 @@ impl SpeechEngine for OneCallAtATime {
     }
 }
 
-/// Awaits `future`, which does long synchronous work without yielding (a
-/// `CoreML` load or transcription): on a multi-thread runtime the worker
-/// hands its queued tasks to the others first (`block_in_place`) and then
-/// blocks on it, so a long call parks one thread rather than everything
-/// queued behind it; elsewhere it is awaited as it is.
+/// Awaits `future`, which does long synchronous work: on a multi-thread
+/// runtime via `block_in_place`, so it parks one thread rather than the
+/// tasks queued behind it.
 async fn off_the_workers<T>(future: impl std::future::Future<Output = T>) -> T {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -568,46 +482,29 @@ async fn off_the_workers<T>(future: impl std::future::Future<Output = T>) -> T {
     }
 }
 
-/// The ONNX diarizer in the child of `sidecar` (`SidecarDiarizer`), its
-/// sessions on [`ONNX_THREADS`]: it installs its two models into
-/// `<store root>/diarization/` of the engine's store (in the app,
-/// `<models directory>/onnx/diarization/`) and the child loads them there.
-/// `install` says whether a missing file is downloaded first
-/// (`Install::Allowed`) or fails the call with
-/// `DiarizeError::NotInstalled` and no request (`Install::Never`, the
-/// app's pipelines through [`SpeechEngines`];
-/// `steno_diarize::models::installed` is the same check). A call that
-/// fails fails that call only; the next call tries again, resuming a
-/// cut-off download where downloads are allowed, in a new child if the
-/// last one died.
+/// The ONNX diarizer in the child of `sidecar`, its sessions on
+/// [`ONNX_THREADS`], its two models under the store's `diarization/`.
+/// `install` says whether a missing file is downloaded first or fails the
+/// call with `DiarizeError::NotInstalled`. A failed call fails that call
+/// only; the next tries again, in a new child if the last one died.
 #[must_use]
 pub fn diarizer_in(sidecar: Arc<SidecarSpeechEngine>, install: Install) -> Arc<dyn Diarizer> {
     Arc::new(SidecarDiarizer::new(sidecar, install, ONNX_THREADS))
 }
 
 /// The host's model service over the models under one directory.
-/// Parakeet v3 is the model the engine runs: on the Mac by default the
-/// `CoreML` model (installed by the Swift app); elsewhere, and on the Mac
-/// with the sidecar chosen, the ONNX export with Silero VAD in front.
 pub struct ModelStoreSpeechModels {
-    /// The ONNX store, with the speech settings' mirror: the speech models
-    /// and the diarizer's.
+    /// The ONNX store: the speech models and the diarizer's.
     pub speech: ModelStore,
-    /// The `CoreML` store, the models directory's `fluidaudio/`, with the
-    /// speech settings' mirror: Settings installs the `CoreML` Parakeet
-    /// through it, into [`Self::coreml_directory`].
+    /// The `CoreML` store, the models directory's `fluidaudio/`.
     pub coreml_store: ModelStore,
-    /// The speech settings, which decide where [`speech_engine`] runs
-    /// each engine id.
     speech_settings: SpeechSettings,
-    /// While on, Parakeet v3 is the speech sidecar's model
-    /// ([`SpeechSetup::fallback`]).
+    /// While on, Parakeet v3 is the speech sidecar's model.
     fallback: Arc<SpeechFallback>,
 }
 
 impl ModelStoreSpeechModels {
-    /// The model service over `setup`'s models directory and speech
-    /// settings.
+    /// The model service over `setup`.
     #[must_use]
     pub fn new(setup: &SpeechSetup) -> Self {
         ModelStoreSpeechModels {
@@ -618,16 +515,14 @@ impl ModelStoreSpeechModels {
         }
     }
 
-    /// The `CoreML` Parakeet's directory, where the engine loads it.
     #[must_use]
     pub fn coreml_directory(&self) -> PathBuf {
         self.coreml_store
             .directory(&steno_speech::ModelAsset::parakeet_v3_coreml())
     }
 
-    /// Whether every model file the engine on `runtime` loads is on disk
-    /// at its manifest size: the `CoreML` Parakeet's 23, or every model
-    /// the speech sidecar loads (the VAD and the fp32 Parakeet).
+    /// Whether every model file the engine on `runtime` loads is on disk at
+    /// its manifest size.
     pub(crate) fn installed_on(&self, runtime: SpeechRuntime) -> bool {
         match runtime {
             SpeechRuntime::CoreMlInProcess => self
@@ -639,23 +534,19 @@ impl ModelStoreSpeechModels {
         }
     }
 
-    /// Whether `engine_id` runs on the `CoreML` model.
     fn runs_on_coreml(&self, engine_id: &str) -> bool {
         self.runtime(engine_id) == SpeechRuntime::CoreMlInProcess
     }
 
-    /// Where `engine_id` runs ([`SpeechSetup::runtime`]).
     fn runtime(&self, engine_id: &str) -> SpeechRuntime {
         unless_falling_back(engine_id, &self.speech_settings, &self.fallback)
     }
 
-    /// Whether Parakeet v3 is the `CoreML` model.
     fn parakeet_on_coreml(&self) -> bool {
         self.runs_on_coreml(PARAKEET_V3)
     }
 
-    /// The asset of the ONNX store behind a row: the fp32 Parakeet export,
-    /// or the diarizer's two models.
+    /// The ONNX store's asset behind a row.
     fn onnx_asset(asset: ModelAsset) -> Option<steno_speech::ModelAsset> {
         match asset {
             ModelAsset::ParakeetV3 => Some(steno_speech::ModelAsset::parakeet_v3_fp32()),
@@ -683,23 +574,20 @@ impl ModelStoreSpeechModels {
 }
 
 impl SpeechModels for ModelStoreSpeechModels {
-    /// The engine [`speech_engine`] builds for `engine_id`
-    /// ([`SpeechSetup::runtime`]): the `CoreML` Parakeet's files, or every
-    /// model the speech sidecar loads (the VAD and the fp32 Parakeet).
+    /// Whether the models of the engine for `engine_id` are installed.
     fn engine_installed(&self, engine_id: &str) -> bool {
         self.installed_on(self.runtime(engine_id))
     }
 
     fn is_installed(&self, asset: ModelAsset) -> bool {
         match asset {
-            // The `CoreML` model, or the export with Silero VAD.
             ModelAsset::ParakeetV3 => self.engine_installed(PARAKEET_V3),
             other => Self::onnx_asset(other).is_some_and(|asset| self.speech.is_installed(&asset)),
         }
     }
 
-    /// Where the speech sidecar runs Parakeet v3, its size counts the
-    /// export only, not the 640 KB of Silero VAD its row also needs.
+    /// Where the sidecar runs Parakeet v3, its size counts the export only,
+    /// not Silero VAD.
     fn installed_size(&self, asset: ModelAsset) -> Option<i64> {
         if !self.is_installed(asset) {
             return None;
@@ -727,8 +615,7 @@ impl SpeechModels for ModelStoreSpeechModels {
                 &[steno_speech::ModelAsset::parakeet_v3_coreml()],
                 progress,
             ),
-            // Silero VAD (640 KB) too, so the ONNX engine is ready offline
-            // once the row says Installed.
+            // Silero VAD too, so the ONNX engine is ready offline.
             ModelAsset::ParakeetV3 => {
                 install_with_progress(&self.speech, &steno_speech::ModelAsset::onnx(), progress)
             }
@@ -736,9 +623,8 @@ impl SpeechModels for ModelStoreSpeechModels {
         }
     }
 
-    /// Where the speech sidecar runs Parakeet v3, removing it removes the
-    /// export and keeps Silero VAD, which is small; the row reads Not
-    /// downloaded either way.
+    /// Where the sidecar runs Parakeet v3, removing it keeps Silero VAD,
+    /// which is small.
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()> {
         match asset {
             ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Ok(self
@@ -751,10 +637,8 @@ impl SpeechModels for ModelStoreSpeechModels {
         }
     }
 
-    /// Where the speech sidecar runs Parakeet v3 (off the Mac, and on the
-    /// Mac with the fallback chosen), it is the fp32 ONNX export of
-    /// NVIDIA's model, not the Swift app's `CoreML` int8 build; where
-    /// `CoreML` runs it, it is that build, under the Swift app's name.
+    /// Parakeet v3 is the fp32 ONNX export where the sidecar runs it, the
+    /// `CoreML` int8 build where `CoreML` does.
     fn display_name(&self, asset: ModelAsset) -> &'static str {
         match asset {
             ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => "Parakeet TDT 0.6B v3 (fp32)",
@@ -763,8 +647,6 @@ impl SpeechModels for ModelStoreSpeechModels {
         }
     }
 
-    /// Where the speech sidecar runs Parakeet v3, the model the ONNX
-    /// export was converted from.
     fn source_repo(&self, asset: ModelAsset) -> &'static str {
         match asset {
             ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => "nvidia/parakeet-tdt-0.6b-v3",
@@ -773,9 +655,8 @@ impl SpeechModels for ModelStoreSpeechModels {
         }
     }
 
-    /// The diarizer's two ONNX models each have a line with their own
-    /// licence and attribution (`ONNX_DIARIZER_NOTICES`); every other
-    /// asset has the default one.
+    /// The diarizer's two models each have their own licence line; every
+    /// other asset has the default one.
     fn notices(&self, asset: ModelAsset) -> Vec<ModelNotice> {
         match asset {
             ModelAsset::OfflineDiarizer => ONNX_DIARIZER_NOTICES
@@ -794,9 +675,7 @@ impl SpeechModels for ModelStoreSpeechModels {
         }
     }
 
-    /// The manifest size of the model behind the row: the `CoreML`
-    /// Parakeet's or, where the speech sidecar runs it, the fp32 export's,
-    /// and the diarizer's two ONNX files.
+    /// The manifest size of the model behind the row.
     fn expected_bytes(&self, asset: ModelAsset) -> i64 {
         let bytes = match asset {
             ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
@@ -820,9 +699,8 @@ impl SpeechModels for ModelStoreSpeechModels {
 }
 
 /// The diarizer's two acknowledgement lines, `(name with attribution,
-/// licence, source)`: the models `steno_diarize::models` fetches,
-/// converted to ONNX from their originals, whose licences
-/// `steno_diarize::models::LICENCE` joins (a test pins it).
+/// licence, source)`, whose licences `steno_diarize::models::LICENCE`
+/// joins.
 const ONNX_DIARIZER_NOTICES: [(&str, &str, &str); 2] = [
     (
         "pyannote segmentation 3.0 by pyannote.audio, converted to ONNX",
@@ -836,11 +714,10 @@ const ONNX_DIARIZER_NOTICES: [(&str, &str, &str); 2] = [
     ),
 ];
 
-/// Installs `assets` into `store` one after another, reporting the
-/// fraction of all their bytes and the file under way (at most once per
-/// whole percent or file), then `(1.0, "Installed")`. A file inside a
-/// bundle (`Encoder.mlmodelc/weights/weight.bin`) is reported as the
-/// bundle, `Encoder.mlmodelc`.
+/// Installs `assets` into `store` in turn, reporting the fraction of all
+/// their bytes and the file under way (at most once per percent or file),
+/// then `(1.0, "Installed")`. A file inside a bundle is reported as the
+/// bundle.
 fn install_with_progress(
     store: &ModelStore,
     assets: &[steno_speech::ModelAsset],
@@ -876,9 +753,8 @@ fn install_with_progress(
     Ok(())
 }
 
-/// Lets a download report through only when its whole percent or its file
-/// changes: the store reports every 64 KB read, and the host publishes a
-/// Settings snapshot for each report it gets.
+/// Lets a report through only when its whole percent or its file changes:
+/// the host publishes a snapshot for each.
 #[derive(Default)]
 struct ProgressThrottle {
     last: Option<(i64, String)>,
@@ -900,11 +776,9 @@ impl ProgressThrottle {
     }
 }
 
-/// Model files on disk for the tests, so no test downloads one. Every
-/// writer here panics outside the temp directory or inside the directory
-/// `STENO_MODELS_DIR` names ([`testing::is_scratch`]), so none writes into
-/// a models directory a developer keeps for the real-model tests, even one
-/// that lies inside the temp directory.
+/// Model files on disk for the tests. Every writer panics outside the
+/// temp directory or inside the directory `STENO_MODELS_DIR` names
+/// ([`testing::is_scratch`]), so none overwrites real models.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::collections::BTreeSet;
@@ -914,8 +788,8 @@ pub(crate) mod testing {
 
     use super::{ModelStoreSpeechModels, SpeechSetup};
 
-    /// A setup over `models_directory` with `speech_settings` and a sidecar
-    /// binary that does not exist, so nothing starts one.
+    /// A setup over `models_directory` with a sidecar binary that does not
+    /// exist.
     pub fn setup(models_directory: &Path, speech_settings: SpeechSettings) -> SpeechSetup {
         SpeechSetup {
             models_directory: models_directory.to_path_buf(),
@@ -933,14 +807,11 @@ pub(crate) mod testing {
         }
     }
 
-    /// The model service over `models_directory` with the default speech
-    /// settings.
     pub fn models_in(models_directory: &Path) -> ModelStoreSpeechModels {
         ModelStoreSpeechModels::new(&setup(models_directory, SpeechSettings::default()))
     }
 
-    /// The `CoreML` Parakeet in its store, complete: each of its files a
-    /// sparse file of its manifest size.
+    /// The complete `CoreML` Parakeet, as sparse files of manifest size.
     pub fn install_coreml_parakeet(models: &ModelStoreSpeechModels) {
         install_in(
             &models.coreml_store,
@@ -948,14 +819,12 @@ pub(crate) mod testing {
         );
     }
 
-    /// The two ONNX diarizer models, each a sparse file of its manifest
-    /// size.
+    /// The two ONNX diarizer models, as sparse files of manifest size.
     pub fn install_onnx_diarizer(models: &ModelStoreSpeechModels) {
         install_speech_asset(models, &steno_diarize::models::asset());
     }
 
-    /// Every model the app's engines load: the `CoreML` Parakeet, the
-    /// speech sidecar's ONNX models and the diarizer's.
+    /// Every model the app's engines load.
     pub fn install_every_model(models: &ModelStoreSpeechModels) {
         install_coreml_parakeet(models);
         for asset in steno_speech::ModelAsset::onnx() {
@@ -964,13 +833,11 @@ pub(crate) mod testing {
         install_onnx_diarizer(models);
     }
 
-    /// `asset`'s files in the speech store, each a sparse file of its
-    /// manifest size.
+    /// `asset`'s files in the speech store, as sparse files.
     pub fn install_speech_asset(models: &ModelStoreSpeechModels, asset: &steno_speech::ModelAsset) {
         install_in(&models.speech, asset);
     }
 
-    /// `asset`'s files in `store`, each a sparse file of its manifest size.
     fn install_in(store: &steno_speech::ModelStore, asset: &steno_speech::ModelAsset) {
         let directory = store.directory(asset);
         assert!(
@@ -994,8 +861,7 @@ pub(crate) mod testing {
         }
     }
 
-    /// [`is_scratch_in`] the process's temp directory and the models
-    /// directory `STENO_MODELS_DIR` names.
+    /// [`is_scratch_in`] the temp directory, outside `STENO_MODELS_DIR`.
     pub fn is_scratch(path: &Path) -> bool {
         is_scratch_in(
             path,
@@ -1004,12 +870,8 @@ pub(crate) mod testing {
         )
     }
 
-    /// Whether `path` lies inside `temp` and outside `named`, compared as
-    /// the file system resolves them (the temp directory is a link on the
-    /// Mac), so a test writing placeholder models never overwrites real
-    /// ones, wherever its models directory was resolved from: `named` is
-    /// the models directory the environment names, which may itself lie
-    /// inside the temp directory. A path with a `..` component is not
+    /// Whether `path` lies inside `temp` and outside `named`, compared as the
+    /// file system resolves them. A path with a `..` component is not
     /// scratch, and neither is any path while `named` cannot be resolved.
     pub fn is_scratch_in(path: &Path, temp: &Path, named: Option<&Path>) -> bool {
         if path.components().any(|part| part == Component::ParentDir) {
@@ -1023,8 +885,7 @@ pub(crate) mod testing {
                 .is_none_or(|named| resolved(named).is_some_and(|named| !path.starts_with(named)))
     }
 
-    /// `path` with its deepest existing ancestor canonicalised and the
-    /// rest, which does not exist yet, appended.
+    /// `path` with its deepest existing ancestor canonicalised.
     fn resolved(path: &Path) -> Option<PathBuf> {
         let mut existing = path;
         let mut missing = Vec::new();
@@ -1061,10 +922,8 @@ mod tests {
 
     use super::*;
 
-    /// The model writers' guard takes paths inside the temp directory,
-    /// existing or not, and refuses the file system's root, a sibling
-    /// whose name only starts like the temp directory's, and a path that
-    /// climbs out of it.
+    /// The guard takes paths inside the temp directory and refuses the root,
+    /// a look-alike sibling and a path that climbs out.
     #[test]
     fn the_model_writers_write_only_inside_the_temp_directory() {
         let temp = std::env::temp_dir();
@@ -1081,12 +940,9 @@ mod tests {
         assert!(!testing::is_scratch(&dir.path().join("../../steno-models")));
     }
 
-    /// The guard refuses the models directory `STENO_MODELS_DIR` names,
-    /// and anything inside it, even where that directory lies inside the
-    /// temp directory (a developer's `TMPDIR` may hold their real models),
-    /// existing or not, and on Unix where the variable names a link to it;
-    /// a sibling whose name only starts like it is still scratch, and a
-    /// named directory that cannot be resolved refuses every path.
+    /// The guard refuses the directory `STENO_MODELS_DIR` names and anything
+    /// in it, even inside the temp directory or through a link; an
+    /// unresolvable named directory refuses every path.
     #[test]
     fn the_model_writers_never_write_inside_the_models_directory_the_environment_names() {
         let root = tempfile::tempdir().unwrap();
@@ -1129,9 +985,7 @@ mod tests {
         ));
     }
 
-    /// The model writers ask the guard: an install into a models directory
-    /// that climbs with `..` panics (without the guard it would land in
-    /// the test's own directory, so the check is harmless).
+    /// An install into a models directory that climbs with `..` panics.
     #[test]
     #[should_panic(expected = "a test writes models only into a temp directory it owns")]
     fn the_model_writers_panic_where_the_guard_refuses() {
@@ -1139,14 +993,12 @@ mod tests {
         testing::install_onnx_diarizer(&testing::models_in(&dir.path().join("x/..")));
     }
 
-    /// The same runtime gets the same engine and claims; another runtime a
-    /// new one. The sidecar engine is kept for the app's run, the
-    /// in-process one only while something holds it.
+    /// The same runtime gets the same engine; the sidecar engine is kept for
+    /// the run, the in-process one only while something holds it.
     #[test]
     fn each_runtime_gets_the_engine_it_got_before_and_the_sidecar_engine_is_kept_for_the_run() {
         use SpeechRuntime::{CoreMlInProcess, OnnxSidecar};
 
-        // The runtime of each build, in order.
         let builds = Arc::new(std::sync::Mutex::new(Vec::new()));
         let engines = SpeechEngines::with_builder(
             testing::setup(Path::new("/models"), SpeechSettings::default()),
@@ -1168,14 +1020,12 @@ mod tests {
         assert!(in_process.ptr_eq(&engines.engine(CoreMlInProcess)));
         assert_eq!(built(), [OnnxSidecar, CoreMlInProcess]);
 
-        // Back to the sidecar and to the in-process engine while a retired
-        // pipeline still holds it: the same engines.
+        // Back to each while a retired pipeline holds it: the same engines.
         assert!(sidecar.ptr_eq(&engines.engine(OnnxSidecar)));
         assert!(in_process.ptr_eq(&engines.engine(CoreMlInProcess)));
         assert_eq!(built(), [OnnxSidecar, CoreMlInProcess]);
 
-        // Once nothing holds the in-process engine it is gone, and asking
-        // for it builds a new one; the sidecar's stays.
+        // Once nothing holds the in-process engine it is rebuilt.
         drop(in_process);
         let _again = engines.engine(CoreMlInProcess);
         assert!(sidecar.ptr_eq(&engines.engine(OnnxSidecar)));
@@ -1222,10 +1072,8 @@ mod tests {
         );
     }
 
-    /// The `CoreML` Parakeet counts as installed only with each of its 23
-    /// files at its manifest size: a short weight file, as a download cut
-    /// short would leave, is not installed, so the engine is never asked
-    /// to load a partial tree.
+    /// The `CoreML` Parakeet counts as installed only with all 23 files at
+    /// their manifest size.
     #[test]
     fn the_coreml_parakeet_counts_as_installed_only_when_complete() {
         let dir = tempfile::tempdir().unwrap();
@@ -1273,10 +1121,8 @@ mod tests {
         }
     }
 
-    /// On the ONNX export (off the Mac, or the sidecar chosen on it), the
-    /// Parakeet v3 row counts as installed only with Silero VAD next to the
-    /// export, as the engine needs both; removing the row removes the
-    /// export and keeps the VAD.
+    /// On the ONNX export, Parakeet v3 is installed only with Silero VAD
+    /// beside it; removing it keeps the VAD.
     #[test]
     fn on_the_onnx_export_parakeet_v3_needs_the_export_and_the_vad() {
         let dir = tempfile::tempdir().unwrap();
@@ -1297,9 +1143,7 @@ mod tests {
         );
     }
 
-    /// The diarizer's row reads its asset in the ONNX store,
-    /// `onnx/diarization/`: installed only once both files have their
-    /// manifest size (a file cut short does not count), its size theirs,
+    /// The diarizer's row is installed only once both files are complete,
     /// and removing it deletes the folder.
     #[test]
     fn the_diarizer_row_reads_its_asset_in_the_onnx_store() {
@@ -1328,11 +1172,8 @@ mod tests {
         assert!(!folder.exists());
     }
 
-    /// The diarizer's download in Settings goes through the ONNX store
-    /// with the speech settings' mirror, reporting the file under way: here
-    /// a mirror that serves junk of the first file's size, which fails its
-    /// checksum and installs nothing. The earlier store's `.part` files are
-    /// deleted first.
+    /// The diarizer's download goes through the mirror and fails a junk file
+    /// at its checksum, installing nothing; earlier `.part` files go first.
     #[test]
     fn the_diarizer_download_goes_through_the_mirror() {
         let dir = tempfile::tempdir().unwrap();
@@ -1371,11 +1212,9 @@ mod tests {
         assert!(!old_part.exists(), "the earlier store's partial is deleted");
     }
 
-    /// The diarizer every pipeline runs never downloads its models: past
-    /// a gate that lets everything through, over an empty models directory
-    /// and a mirror, its `prepare` is the models-missing refusal for the
-    /// diarize stage (`DiarizeError::NotInstalled` from `Install::Never`)
-    /// and the mirror gets no request.
+    /// The pipelines' diarizer never downloads: over an empty directory its
+    /// `prepare` is the models-missing refusal and the mirror gets no
+    /// request.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_apps_diarizer_never_downloads_its_models() {
         let dir = tempfile::tempdir().unwrap();
@@ -1402,18 +1241,13 @@ mod tests {
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
-    /// The app's speech engine and diarizer share one sidecar engine, so
-    /// one child: over the real `steno-speech-sidecar` binary's fake
-    /// engine (in the target directory, which `cargo test --workspace`
-    /// builds) and sparse model files, speech's prepare starts the child,
-    /// the diarization runs in it, and once speech released it the
-    /// diarizer's own child is the same engine's second.
+    /// The app's speech engine and diarizer share one sidecar child, over the
+    /// real sidecar binary's fake engine.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_apps_speech_engine_and_diarizer_share_one_sidecar_child() {
         let dir = tempfile::tempdir().unwrap();
         let mut setup = testing::setup(dir.path(), SpeechSettings::default());
-        // The test binary sits in the target directory's `deps/`, the
-        // binaries one folder up.
+        // The binaries sit one folder above the test binary's `deps/`.
         let exe = std::env::current_exe().unwrap();
         setup.sidecar.program = exe
             .parent()
@@ -1455,9 +1289,7 @@ mod tests {
         assert_eq!(sidecar.pid(), None, "and stopped after the call");
     }
 
-    /// `models_installed` holds only while both gates would let a run
-    /// through: the speech engine's models on the runtime and the
-    /// diarizer's.
+    /// `models_installed` holds only while both gates would let a run through.
     #[test]
     fn models_installed_needs_the_speech_models_and_the_diarizers() {
         let dir = tempfile::tempdir().unwrap();
@@ -1475,9 +1307,8 @@ mod tests {
         }
     }
 
-    /// The diarizer's acknowledgement lines carry the licences
-    /// `steno_diarize::models::LICENCE` joins, and the host's default line
-    /// gives that licence too.
+    /// The diarizer's lines carry the licences `LICENCE` joins, and so does
+    /// the host's default line.
     #[test]
     fn the_diarizer_notices_carry_the_models_licences() {
         let licences: Vec<&str> = ONNX_DIARIZER_NOTICES
@@ -1491,13 +1322,11 @@ mod tests {
         );
     }
 
-    /// A mirror on 127.0.0.1 that answers every request with `len` bytes
-    /// of junk, which fail any checksum.
+    /// A loopback mirror that answers every request with `len` junk bytes.
     fn junk_mirror(len: usize) -> String {
         counting_junk_mirror(len).0
     }
 
-    /// [`junk_mirror`] and the number of requests it has answered.
     fn counting_junk_mirror(len: usize) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1523,8 +1352,7 @@ mod tests {
     }
 
     /// On the ONNX export, the Parakeet v3 download fetches Silero VAD too,
-    /// ends with Installed and counts every byte of both models in its
-    /// fraction.
+    /// counting both in its fraction.
     #[test]
     fn on_the_onnx_export_the_parakeet_v3_download_installs_the_vad_and_counts_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1574,8 +1402,7 @@ mod tests {
             (vad.total_size() + export.total_size()) as f64,
             tokens.size as f64,
         );
-        // Every other byte of both models counts as received: the reports
-        // start at (total - tokens.txt) / total, below 1.0.
+        // The reports start at (total - tokens.txt) / total, below 1.0.
         assert!(
             reports.first().is_some_and(|(fraction, _)| *fraction < 1.0),
             "{reports:?}"
@@ -1588,12 +1415,8 @@ mod tests {
         );
     }
 
-    /// Settings downloads the `CoreML` Parakeet into the models
-    /// directory's `fluidaudio/parakeet-tdt-0.6b-v3/`, through the mirror
-    /// when one is set (`<mirror>/parakeet-tdt-0.6b-v3/<file>`), with the
-    /// progress of the file under way; here the mirror serves junk of the
-    /// first file's size, which fails its checksum and installs nothing.
-    /// On the Mac that is the Parakeet v3 row's download.
+    /// Settings downloads the `CoreML` Parakeet into `fluidaudio/` through the
+    /// mirror, with progress; the junk file fails its checksum.
     #[test]
     fn the_coreml_parakeet_downloads_into_the_fluidaudio_folder_with_progress() {
         let dir = tempfile::tempdir().unwrap();
@@ -1670,9 +1493,8 @@ mod tests {
         );
     }
 
-    /// The warm-up's question: with the `CoreML` Parakeet on disk, only
-    /// `parakeet-v3` on the Mac runs on it; any other id, and every id off
-    /// the Mac, needs the ONNX models, which are missing.
+    /// With the `CoreML` Parakeet on disk, only `parakeet-v3` on the Mac
+    /// counts as installed for the warm-up.
     #[test]
     fn the_configured_engine_is_installed_only_when_the_model_it_loads_is() {
         let dir = tempfile::tempdir().unwrap();
@@ -1695,8 +1517,7 @@ mod tests {
             coreml_model_directory(&support.join("Models")),
             steno_speech_coreml::engine::model_directory(support)
         );
-        // The gate's manifest holds every file the backend opens: each
-        // bundle's `coremldata.bin` and the vocabulary.
+        // The manifest holds every file the backend opens.
         let names: Vec<String> = steno_speech::ModelAsset::parakeet_v3_coreml()
             .files
             .into_iter()
@@ -1715,11 +1536,8 @@ mod tests {
         assert!(names.contains(&vocabulary), "{vocabulary}");
     }
 
-    /// On the Mac `parakeet-v3` is the `CoreML` engine, and with the
-    /// fallback chosen the sidecar's. Both report the same id, so what
-    /// `prepare` misses in an empty models directory tells them apart:
-    /// the `CoreML` bundles, or the ONNX models, which a mirror nobody
-    /// serves (a closed loopback port) cannot deliver. No network.
+    /// On the Mac `parakeet-v3` is `CoreML`, or the sidecar's with the
+    /// fallback chosen; what `prepare` misses tells them apart. No network.
     #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
     async fn parakeet_v3_is_the_coreml_engine_on_the_mac_unless_the_sidecar_is_chosen() {
@@ -1748,10 +1566,7 @@ mod tests {
         assert!(!error.contains(&coreml), "the sidecar engine: {error}");
     }
 
-    /// The platform policy per engine id: `CoreML` in this process only
-    /// for `parakeet-v3` on the Mac with the defaults; the sidecar for
-    /// every other id, on every platform with the Mac's fallback chosen,
-    /// and for every id off the Mac.
+    /// The platform policy per engine id.
     #[test]
     fn parakeet_runs_in_the_sidecar_except_on_the_mac_by_default() {
         let default = testing::setup(Path::new("/tmp/steno-models"), SpeechSettings::default());
@@ -1770,9 +1585,8 @@ mod tests {
         }
     }
 
-    /// The sidecar engine installs into the models directory's `onnx/`
-    /// folder with the speech settings' mirror, and starts the binary the
-    /// setup names.
+    /// The sidecar engine installs into `onnx/` with the mirror and starts
+    /// the binary the setup names.
     #[test]
     fn the_sidecar_engine_takes_its_store_mirror_and_binary_from_the_setup() {
         let models = Path::new("/tmp/steno-models");
@@ -1821,8 +1635,7 @@ mod tests {
         }
     }
 
-    /// The sidecar leaves its crash logs beside the app's, in the support
-    /// directory.
+    /// The sidecar's crash logs go into the support directory.
     #[test]
     fn the_sidecar_writes_its_crash_logs_into_the_support_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -1891,10 +1704,8 @@ mod tests {
         assert_eq!(speech_settings_with(&file, None), SpeechSettings::default());
     }
 
-    /// With the sidecar chosen on the Mac (and always elsewhere), Parakeet
-    /// v3 is the ONNX export: the `CoreML` model on disk does not count, so
-    /// a recording's warm-up does not start a download it thinks it skips,
-    /// and Settings acknowledges the fp32 export and shows its size.
+    /// With the sidecar chosen, Parakeet v3 is the ONNX export: the `CoreML`
+    /// model on disk does not count.
     #[test]
     fn with_the_sidecar_chosen_parakeet_v3_is_the_onnx_export() {
         let dir = tempfile::tempdir().unwrap();
@@ -1914,10 +1725,8 @@ mod tests {
         assert_eq!(parakeet_size_text(&models), fp32_size_text());
     }
 
-    /// While the fallback is on (a `CoreML` abort on record), Parakeet v3
-    /// runs in the speech sidecar with the default settings too, and its
-    /// row is the ONNX export; the user's end of it puts both back where
-    /// the platform runs them, at once (A19).
+    /// While the fallback is on, Parakeet v3 runs in the sidecar and its row
+    /// is the export; ending it puts both back at once.
     #[test]
     fn while_the_fallback_is_on_parakeet_v3_is_the_onnx_export() {
         let dir = tempfile::tempdir().unwrap();
@@ -1954,9 +1763,8 @@ mod tests {
         );
     }
 
-    /// A row this version does not offer (a Swift app's model) is refused
-    /// by Download and Remove alike, with the one wording, and nothing is
-    /// fetched or touched.
+    /// A row this version does not offer is refused by Download and Remove,
+    /// and nothing is touched.
     #[test]
     fn download_and_remove_refuse_a_retired_row_with_the_same_words() {
         let dir = tempfile::tempdir().unwrap();
@@ -1974,8 +1782,7 @@ mod tests {
         }
     }
 
-    /// The Parakeet v3 row of Settings > Transcription before a download,
-    /// "Not downloaded" and the size `models` expects.
+    /// The Parakeet v3 row's "Not downloaded" text with its size.
     fn parakeet_size_text(models: &ModelStoreSpeechModels) -> String {
         let speech = steno_host::settings::transcription::SpeechSettingsViewModel::new();
         let snapshot = steno_host::settings::snapshots::transcription(&speech, models, "");
@@ -1983,7 +1790,6 @@ mod tests {
         snapshot.assets[0].detail.clone()
     }
 
-    /// "Not downloaded" and the fp32 export's size, from its manifest.
     fn fp32_size_text() -> String {
         let bytes = steno_speech::ModelAsset::parakeet_v3_fp32().total_size();
         format!(
@@ -1992,10 +1798,7 @@ mod tests {
         )
     }
 
-    /// Settings shows the size of the model the platform runs: the
-    /// `CoreML` build's manifest on the Mac by default (about 483 MB), the
-    /// fp32 export's (about 2.6 GB) elsewhere, and the two ONNX diarizer
-    /// files' (about 33 MB) everywhere.
+    /// Settings shows the size of the model the platform runs.
     #[test]
     fn the_expected_size_is_that_of_the_model_the_platform_runs() {
         let models = testing::models_in(Path::new("/tmp/steno-models"));
@@ -2015,19 +1818,15 @@ mod tests {
         );
     }
 
-    /// The first acknowledgement row, Parakeet v3, as Settings > General
-    /// shows it over this platform's model store.
+    /// The first acknowledgement row, Parakeet v3.
     fn parakeet_acknowledgement() -> (String, String) {
         let models = testing::models_in(Path::new("/tmp/steno-models"));
         let rows = steno_host::settings::snapshots::acknowledgements(&models);
         (rows[0].name.clone(), rows[0].source.clone())
     }
 
-    /// Settings > General acknowledges the two models the Rust app offers:
-    /// Parakeet v3, then the diarizer's two ONNX models, each with its
-    /// licence and who made it (the `WeSpeaker` model's CC-BY-4.0 asks for the
-    /// attribution); no row for Whisper, Ultra or the German Parakeet, and
-    /// `steno models` lists the ONNX models by name.
+    /// Settings acknowledges Parakeet v3 and the diarizer's two models, each
+    /// with its licence and author; `steno models` lists the ONNX models.
     #[test]
     fn the_diarizer_is_acknowledged_as_its_two_onnx_models() {
         let models = testing::models_in(Path::new("/tmp/steno-models"));
@@ -2091,8 +1890,8 @@ mod tests {
         );
     }
 
-    /// An engine that transcribes synchronously, without yielding, until
-    /// `go` lets it, and counts how many calls run at once.
+    /// An engine that transcribes synchronously until `go` lets it, counting
+    /// concurrent calls.
     struct BlockingEngine {
         languages: BTreeSet<LanguageTag>,
         go: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
@@ -2132,9 +1931,8 @@ mod tests {
         }
     }
 
-    /// Two transcriptions on a runtime with one worker: they run one after
-    /// the other, and while one blocks, the task that releases it still
-    /// runs, because the blocked call left the worker first.
+    /// Two transcriptions on one worker run one after the other, and the
+    /// releasing task still runs while one blocks.
     #[test]
     fn coreml_style_calls_run_one_at_a_time_off_the_workers() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -2158,7 +1956,6 @@ mod tests {
                 tokio::spawn(async move { engine.transcribe(&audio, None).await.unwrap() })
             });
             let calls: Vec<_> = calls.collect();
-            // The releasing task needs a worker while a call blocks.
             tokio::spawn(async move {
                 for _ in 0..2 {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -2179,8 +1976,7 @@ mod tests {
         );
     }
 
-    /// The pipeline releases the engine it holds, which on the Mac is the
-    /// `CoreML` engine inside the wrapper: it passes the call on.
+    /// Releasing the wrapper passes the call on to the inner engine.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_wrapper_passes_a_release_on_to_the_engine_it_wraps() {
         let inner = Arc::new(FakeSpeechEngine::default());

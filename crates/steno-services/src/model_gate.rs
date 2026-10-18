@@ -1,26 +1,8 @@
-//! No download inside a pipeline run: the speech engine and the diarizer
-//! the app's pipelines run, each behind a gate that refuses a call while
-//! its models are not installed. The refusal is
-//! [`PipelineFailure::models_missing`], so the meeting stays `queued` with
-//! no failure reason on its row and is processed once Settings or
-//! onboarding installed the models ([`ResumingSpeechModels`] then resumes
-//! it), or at the next pipeline reload or launch when the `steno` command
-//! installed them ([`CurrentPipeline::resume_waiting`], which starts the
-//! waiting meetings only once every model the gates check is installed).
-//! The speech sidecar and the diarizer never download either
-//! ([`Install::Never`](steno_speech::Install::Never)), so a file removed
-//! between the gate's check and the load is refused too, never fetched; an
-//! engine's error while its models are gone is the same refusal. The
-//! `steno` command's engines (`crates/steno-cli/src/wiring.rs`) are built
-//! with `Install::Allowed` and download on first use, for a command a user
-//! runs. Rust only: the Swift pipeline downloaded inside the run.
-//!
-//! | Item | What it does |
-//! |------|--------------|
-//! | [`InstalledCheck`] | Whether a boundary's models are on disk now |
-//! | [`GatedSpeechEngine`] | A speech engine that refuses while its models are missing |
-//! | [`GatedDiarizer`] | The same for the diarizer |
-//! | [`ResumingSpeechModels`] | The model service that resumes the waiting meetings after an install |
+//! No download inside a pipeline run: the app's speech engine and diarizer
+//! each sit behind a gate that refuses a call while its models are not
+//! installed, with [`PipelineFailure::models_missing`], so the meeting stays
+//! `queued` until the models are installed ([`ResumingSpeechModels`], or
+//! [`CurrentPipeline::resume_waiting`] at the next reload or launch).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -55,14 +37,10 @@ async fn gated<T>(
         .map_err(|error| refusing(installed, stage, error))
 }
 
-/// An error of the boundary behind the gate as the refusal for `stage`
-/// when it says the models are not installed: the speech sidecar's
-/// `NotInstalled` (its install turned off) or the diarizer's (it never
-/// downloads, and deletes a file that fails its checksum after a failed
-/// load), as the boundary boxes it; or when `installed` no longer holds:
-/// the models went between the gate's check and the load (Remove in
-/// Settings), and the `CoreML` engine's failed load says so in its own
-/// words. Any other error as it is.
+/// An error of the boundary behind the gate as the refusal for `stage` when
+/// it says the models are not installed, or when `installed` no longer
+/// holds (the models went between the check and the load). Any other error
+/// as it is.
 fn refusing(installed: &InstalledCheck, stage: PipelineStage, error: BoxError) -> BoxError {
     let not_installed = matches!(
         error.downcast_ref::<SpeechError>(),
@@ -159,11 +137,9 @@ impl Diarizer for GatedDiarizer {
     }
 }
 
-/// The host's model service with one addition: once a download from
-/// Settings or onboarding installed its models, `resume` runs, so the
-/// meetings a run left `queued` for them are processed (the app's, once
-/// every model is installed: [`CurrentPipeline::resume_waiting`]). Every
-/// other call goes to `inner` as it is.
+/// The host's model service, which also runs `resume` once a download
+/// from Settings or onboarding installed its models. Every other call goes
+/// to `inner` as it is.
 pub struct ResumingSpeechModels<M> {
     inner: M,
     resume: Box<dyn Fn() + Send + Sync>,
@@ -175,8 +151,7 @@ impl<M: SpeechModels> ResumingSpeechModels<M> {
         ResumingSpeechModels { inner, resume }
     }
 
-    /// The app's: an install resumes, on `pipeline`'s current pipeline,
-    /// the meetings its pipelines left waiting
+    /// The app's: an install resumes the meetings its pipelines left waiting
     /// ([`CurrentPipeline::resume_waiting`]).
     #[must_use]
     pub fn resuming(inner: M, pipeline: Arc<CurrentPipeline>) -> Self {
@@ -317,9 +292,8 @@ mod tests {
         assert_eq!(engine.releases.count(), 1);
     }
 
-    /// The sidecar's own `NotInstalled` (its install turned off) is the
-    /// same refusal; any other error passes as it is while the models are
-    /// installed.
+    /// The sidecar's own `NotInstalled` is the same refusal; any other error
+    /// passes as it is while the models are installed.
     #[test]
     fn a_not_installed_from_the_engine_is_the_refusal() {
         let (_, installed) = flag(true);
@@ -342,11 +316,8 @@ mod tests {
         assert_eq!(passed.to_string(), "the child died");
     }
 
-    /// The diarizer's `NotInstalled` (it never downloads, or its load
-    /// deleted a file that failed its checksum), boxed as `SidecarDiarizer`
-    /// returns it, is the refusal for the diarize stage while the gate's
-    /// check still holds, so the pipeline's diarizer fallback passes it
-    /// on and the meeting waits.
+    /// The diarizer's `NotInstalled`, boxed as `SidecarDiarizer` returns it, is
+    /// the refusal for the diarize stage while the gate's check still holds.
     #[test]
     fn a_not_installed_from_the_diarizer_is_the_refusal() {
         let (_, installed) = flag(true);
@@ -366,11 +337,8 @@ mod tests {
         );
     }
 
-    /// A speech engine or diarizer whose load fails because its models
-    /// went after the gate let the call through (Remove in Settings), in
-    /// its own words as the `CoreML` engine and the diarizer's loader put
-    /// it: the call is the refusal, so the meeting waits instead of
-    /// failing.
+    /// A load that fails because the models went after the gate let the call
+    /// through is the refusal, so the meeting waits instead of failing.
     #[tokio::test]
     async fn a_load_that_fails_once_the_models_are_gone_is_the_refusal() {
         struct Removing {
@@ -471,8 +439,7 @@ mod tests {
     }
 
     /// The fallback's state and its end pass through to the model service
-    /// behind, the app's wrapper of it: the Settings row and the waiting
-    /// title read it there, and "Use again" ends it there (A19).
+    /// behind.
     #[test]
     fn the_speech_fallback_passes_through() {
         let models = ResumingSpeechModels::new(
@@ -490,12 +457,10 @@ mod tests {
         assert!(!models.inner.speech_fallback.load(Ordering::SeqCst));
     }
 
-    /// The speech sidecar behind a gate that lets every call through,
-    /// over an empty models directory and a mirror on a closed port, from
-    /// a setup that allows downloads (as the CLI's does): the app's engines
-    /// turn the sidecar's install off, also in the setup they hand out, so
-    /// the child's load is refused for the missing models before any
-    /// download starts, and nothing is written.
+    /// The speech sidecar behind an open gate over an empty models directory,
+    /// from a setup that allows downloads: the app's engines turn the install
+    /// off, so the load is refused before any download, and nothing is
+    /// written.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_apps_sidecar_refuses_missing_models_past_its_gate() {
         use crate::speech::{SpeechEngines, testing};
@@ -524,10 +489,8 @@ mod tests {
         assert!(testing::files_under(dir.path()).is_empty());
     }
 
-    /// The app's engines over an empty models directory, with a mirror
-    /// that counts its requests: the speech engine on either runtime and
-    /// the diarizer refuse for missing models, and nothing asks the mirror
-    /// for a file. The speech sidecar's install is off in them.
+    /// The app's engines over an empty models directory: every engine refuses
+    /// for missing models, and nothing asks the mirror for a file.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_apps_engines_refuse_missing_models_and_download_nothing() {
         use crate::speech::{SpeechEngines, testing};

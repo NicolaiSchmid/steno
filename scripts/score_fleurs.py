@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Score engine transcripts against FLEURS references with one normaliser (spike F).
+"""Score engine transcripts against FLEURS references with one normaliser.
 
 Sources (any mix, each becomes a column):
   --bakeoff <dir> <engine>   `steno dev bakeoff` output: <name>.<engine>.json (segments with "text")

@@ -7,7 +7,7 @@ import SwiftUI
 /// the raised card, the status dot and the message row. Every state swap
 /// runs over `Motion.functional` and holds still under Reduce Motion. The
 /// fields, nav rows, tabs and empty states left with the windows the web UI
-/// renders (plan `2026-09-29-macos-webview-ui.md`).
+/// renders.
 
 extension LinearGradient {
   /// The achromatic CTA fill: `accent-from` over `accent-to`, top to bottom.

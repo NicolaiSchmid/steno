@@ -29,8 +29,7 @@ pub fn upward_crossings(samples: &[f32]) -> usize {
         .count()
 }
 
-/// A tone's frequency in hertz from its upward crossings over `samples`
-/// at `sample_rate`.
+/// A tone's frequency in hertz from its upward crossings.
 pub fn frequency(samples: &[f32], sample_rate: f64) -> f64 {
     upward_crossings(samples) as f64 / (samples.len() as f64 / sample_rate)
 }

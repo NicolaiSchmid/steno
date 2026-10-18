@@ -6,10 +6,6 @@
 //! <inbox>/<recordingID>.metadata.json.tmp  the metadata while it is written
 //! <inbox>/<recordingID>.<ext>              verified, waiting for the intake
 //! ```
-//!
-//! The intake deletes the verified file once the meeting is enqueued; the
-//! inbox removes the metadata. The sweep removes what no receipt accounts
-//! for. Swift: `Upload/Inbox.swift`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -66,10 +62,9 @@ impl Inbox {
         std::fs::create_dir_all(&self.directory)
     }
 
-    /// Starts a recording: an empty partial file, unless one is there (it
-    /// is kept, never truncated), and the metadata sidecar beside it,
-    /// written over any sidecar there. The engine calls it only under its
-    /// files lock (`Engine::open_files`, `Engine::reopen_missing_files`).
+    /// Starts a recording: an empty partial file unless one is there (never
+    /// truncated), and the metadata sidecar beside it. Called only under the
+    /// engine's files lock.
     pub fn begin(&self, metadata: &RecordingMetadata) -> std::io::Result<()> {
         self.prepare()?;
         receiving_file::create(&self.partial(metadata.recording_id))?;
@@ -97,13 +92,9 @@ impl Inbox {
         self.verified(recording_id, format).exists()
     }
 
-    /// Renames the complete partial to its final name. On Windows the
-    /// removal of a verified file there and the rename are tried again
-    /// while another handle (a sync or antivirus client) holds a file for a
-    /// moment (`steno_core::busy_file`); on every platform a verified file
-    /// already gone counts as removed. A failure leaves the partial in
-    /// place, and `complete` answers 500, so the phone keeps its copy and
-    /// tries again.
+    /// Renames the complete partial to its final name, retried on Windows while
+    /// another handle briefly holds a file. A failure leaves the partial in
+    /// place and `complete` answers 500, so the phone keeps its copy.
     pub fn promote(&self, recording_id: Uuid, format: AudioFormat) -> std::io::Result<PathBuf> {
         let destination = self.verified(recording_id, format);
         if destination.exists() {
@@ -149,10 +140,8 @@ impl Inbox {
     }
 }
 
-/// Write to `temporary`, then rename it over `path`, tried again on
-/// Windows while another handle holds a file for a moment
-/// (`steno_core::busy_file`). A failure fails the announce, which answers
-/// 500.
+/// Write to `temporary`, then rename it over `path`, retried on Windows
+/// while another handle briefly holds a file.
 fn write_atomically(path: &Path, temporary: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(temporary, bytes)?;
     busy_file::rename(temporary, path)
@@ -242,10 +231,8 @@ mod tests {
         assert!(!inbox.has_verified(id, AudioFormat::M4aAac));
     }
 
-    /// On Windows a partial another handle holds without sharing its
-    /// deletion (a sync or antivirus client) refuses the rename past its
-    /// retries: `promote` fails, so `complete` answers 500 and the phone
-    /// keeps its copy, and the partial keeps every byte for the retry.
+    /// On Windows a partial held without delete sharing refuses the rename past
+    /// its retries: `promote` fails and the partial keeps every byte.
     #[cfg(windows)]
     #[test]
     fn a_partial_held_past_the_retries_is_not_promoted_and_stays() {

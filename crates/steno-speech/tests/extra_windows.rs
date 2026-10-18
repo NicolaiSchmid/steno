@@ -1,10 +1,7 @@
-//! The ONNX engine's settings ([`pipeline_config`]) over the crafted cases
-//! of `tests/common/crafted.rs`: quiet speech the detector does not hear,
-//! which the first chunk keeps in the lead-in and the tail's extra window
-//! keeps in the tail, and silence and room noise, which must add no word.
-//! They need the model files and FLEURS German, so they skip with a
-//! message unless `STENO_MODELS_DIR` and `STENO_FLEURS_DIR` point at them;
-//! CI never has them.
+//! The ONNX engine's settings ([`pipeline_config`]) over the crafted cases of
+//! `tests/common/crafted.rs`: quiet speech must be kept, silence and room noise
+//! must add no word. They skip unless `STENO_MODELS_DIR` and `STENO_FLEURS_DIR`
+//! point at the models and FLEURS German.
 //!
 //! ```text
 //! STENO_MODELS_DIR=... STENO_FLEURS_DIR=... \
@@ -28,11 +25,9 @@ use steno_speech::{
 
 const MODELS: &str = "the fp32 export and Silero VAD";
 
-/// Words the quiet lead-in and tail keep, at -20 and at -26 dB (on atlas,
-/// A16b in `.plans/2026-10-07-stable-promotion.md`); the defaults kept 12
-/// and 0 of the lead-in and none of the tail. A quiet stretch in a long
-/// pause between two loud ones keeps none, as before: the engine skips
-/// long pauses (the 6.65 s and 9.1 s gaps, `gap6` and `gap9`).
+/// Words the quiet lead-in and tail keep, at -20 and at -26 dB. A quiet stretch
+/// in a long pause between two loud ones keeps none: the engine skips long
+/// pauses.
 const AT_LEAST: [(&str, usize); 2] = [("lead", 15), ("tail", 14)];
 
 fn transcriber() -> Option<&'static Mutex<Transcriber<OnnxBackend>>> {

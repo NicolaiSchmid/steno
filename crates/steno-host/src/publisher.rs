@@ -1,17 +1,8 @@
-//! The one publishing loop behind the host, after `Web/TopicPublisher.swift`:
-//! owns the page's readiness and the coalescing. A command asks for the
-//! topics it changed ([`TopicPublisher::schedule`]); asks before the host
-//! publishes fold into one publish per topic, in the order the window
-//! publishes them. Nothing is sent before `page.ready`: the page has no
-//! `window.steno` yet, so the host builds nothing and `page.ready` then
-//! publishes every topic once. The `recording` topic and its 20 Hz
-//! throttle are not here: the host's
-//! [`recording_feed`](crate::recording_feed) sends it.
-//!
-//! Where Swift re-published through observation tracking (a change to
-//! anything a snapshot read), the Rust host names the topics each command
-//! changes; the snapshots stay full states, so arrival order only decides
-//! which full state the page shows last.
+//! The one publishing loop behind the host: the page's readiness and the
+//! coalescing. A command schedules the topics it changed; asks before the
+//! publish fold into one per topic, in the window's order. Nothing is sent
+//! before `page.ready`, which then publishes every topic once. `recording`
+//! is the [`recording_feed`](crate::recording_feed)'s.
 
 use std::collections::BTreeSet;
 
@@ -41,7 +32,6 @@ impl TopicPublisher {
         &self.topics
     }
 
-    /// True from `page.ready`.
     #[must_use]
     pub fn is_page_ready(&self) -> bool {
         self.page_ready
@@ -74,7 +64,6 @@ impl TopicPublisher {
         &self.pending
     }
 
-    /// The pending topics in publish order, no longer pending.
     pub fn take_due(&mut self) -> Vec<BridgeTopic> {
         let due: Vec<BridgeTopic> = self
             .topics

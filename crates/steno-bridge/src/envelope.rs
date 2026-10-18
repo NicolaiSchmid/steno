@@ -1,5 +1,4 @@
-//! Topics, methods and the four envelopes, after
-//! `Sources/StenoBridge/BridgeEnvelope.swift`. Snapshots flow host to page as
+//! Topics, methods and the four envelopes. Snapshots flow host to page as
 //! events; commands flow page to host as method calls with a reply.
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +7,6 @@ use steno_core::{MeetingStateKind, StoreError, string_enum};
 
 string_enum! {
     /// Topics the host publishes; every publish carries a full snapshot.
-    /// Swift: `BridgeTopic`.
     pub enum BridgeTopic {
         App = "app",
         Recording = "recording",
@@ -26,8 +24,7 @@ string_enum! {
 }
 
 string_enum! {
-    /// Methods the page may call; the params and reply types are named in
-    /// `commands.rs` and routed in `dispatcher.rs`. Swift: `BridgeMethod`.
+    /// Methods the page may call; params and replies are in `commands.rs`.
     pub enum BridgeMethod {
         PageReady = "page.ready",
         PageLayout = "page.layout",
@@ -81,9 +78,7 @@ string_enum! {
         SettingsTranscriptionSetEngine = "settings.transcription.setEngine",
         SettingsTranscriptionDownload = "settings.transcription.download",
         SettingsTranscriptionRemove = "settings.transcription.remove",
-        /// The Neural Engine again, after the speech sidecar stood in for
-        /// it ([`TranscriptionSettingsSnapshot::neural_engine_off`](crate::settings::TranscriptionSettingsSnapshot::neural_engine_off)).
-        /// Rust only.
+        /// The Neural Engine again, after the speech sidecar stood in for it.
         SettingsTranscriptionUseNeuralEngine = "settings.transcription.useNeuralEngine",
         SettingsSummariesSelectPreset = "settings.summaries.selectPreset",
         SettingsSummariesUpdate = "settings.summaries.update",
@@ -102,15 +97,11 @@ string_enum! {
         SettingsPhoneBeginPairing = "settings.iphone.beginPairing",
         SettingsPhoneCancelPairing = "settings.iphone.cancelPairing",
         SettingsPhoneRevoke = "settings.iphone.revoke",
-        /// Try again while phone handover waits
-        /// ([`PhoneSettingsSnapshot::waiting`](crate::PhoneSettingsSnapshot::waiting)):
-        /// reads this computer's pairing again, and on the Mac, while the
-        /// previous version's pairing has not come over, asks macOS for it
-        /// again. Rust only: the Swift app never waits.
+        /// Try again while phone handover waits: reads this computer's
+        /// pairing again, and on the Mac asks for the previous version's.
         SettingsPhoneTryAgain = "settings.iphone.tryAgain",
-        /// Pair again while phone handover waits: after the host's warning
-        /// that every phone must pair again, removes the paired phones and
-        /// makes a new pairing. Replies `ConfirmReply`. Rust only.
+        /// Pair again while phone handover waits: removes the paired phones
+        /// and makes a new pairing. Replies `ConfirmReply`.
         SettingsPhonePairAgain = "settings.iphone.pairAgain",
 
         OnboardingRequest = "onboarding.request",
@@ -130,16 +121,13 @@ string_enum! {
         OnboardingSkipSetup = "onboarding.skipSetup",
         OnboardingFinish = "onboarding.finish",
         /// The import step (Mac, after an update from the Swift app): reads
-        /// the old app's API key and exports its handover identity, each
-        /// behind one keychain prompt. Also the step's Try again, which
-        /// repeats the export. Rust only: the Swift app never imports.
+        /// the old app's API key and handover identity; also its Try again.
         OnboardingImport = "onboarding.import",
         /// The import step's Not now: no prompt comes up, phone handover
         /// waits, and the step returns at the next launch.
         OnboardingSkipImport = "onboarding.skipImport",
-        /// The vault row's Open System Settings when the write was refused:
-        /// Privacy & Security > Files and Folders on the Mac, nothing
-        /// elsewhere. Rust only.
+        /// The vault row's Open System Settings when the write was refused
+        /// (Mac only).
         OnboardingOpenFilesAndFolders = "onboarding.openFilesAndFolders",
 
         UpdatesCheck = "updates.check",
@@ -153,7 +141,6 @@ string_enum! {
 
 /// One call from the page. `id` is echoed in the reply so the page can match
 /// promises; `params` is the method's params type, or absent / `null`.
-/// Swift: `BridgeRequest`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BridgeRequest {
     pub id: String,
@@ -173,7 +160,7 @@ impl BridgeRequest {
 }
 
 /// The host's answer. At most one of `result` and `error` is set; neither for
-/// a method without a reply value. Swift: `BridgeReply`.
+/// a method without a reply value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BridgeReply {
     pub id: String,
@@ -184,7 +171,7 @@ pub struct BridgeReply {
 }
 
 impl BridgeReply {
-    /// A reply without a value (Swift's `BridgeReply(id:)`).
+    /// A reply without a value.
     pub fn empty(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -211,7 +198,6 @@ impl BridgeReply {
 }
 
 string_enum! {
-    /// Swift: `BridgeError.Code`.
     pub enum BridgeErrorCode {
         UnknownMethod = "unknownMethod",
         InvalidParams = "invalidParams",
@@ -222,7 +208,6 @@ string_enum! {
 }
 
 /// A contract or host error the page receives in the reply envelope.
-/// Swift: `BridgeError`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct BridgeError {
@@ -258,23 +243,17 @@ impl BridgeError {
         Self::new(BridgeErrorCode::Cancelled, message)
     }
 
-    /// What the Swift window hosts throw for a method they do not route
-    /// ("The main window does not answer meeting.setTab."); the
-    /// `BridgeHost` default implementations return it.
+    /// The error for a method a host does not route; the `BridgeHost`
+    /// defaults return it.
     pub fn not_answered(method: BridgeMethod) -> Self {
         Self::unknown_method(format!("The host does not answer {method}."))
     }
 }
 
 /// The store's errors on the contract's codes, so a host returns them with
-/// `?`. The not-found and still-busy messages are the Swift host's
-/// (`apps/macos/Steno/Web/MainWindowBridge.swift`), not the store's text
-/// with an id in it; the lock message is new here, since the Swift app
-/// never surfaces a lock. A lock held past the busy timeout
-/// ([`StoreError::is_busy`]) is `failed` but retryable: nothing is wrong
-/// with the call. Everything else is `failed` with the store's own
-/// description, as `BridgeDispatcher.swift` replies with a bare
-/// `"\(error)"` for an error a host method did not phrase itself.
+/// `?`. Not-found and still-busy get fixed user-facing messages; a lock past
+/// the busy timeout ([`StoreError::is_busy`]) is a retryable `failed`;
+/// everything else is `failed` with the store's own description.
 impl From<StoreError> for BridgeError {
     fn from(error: StoreError) -> Self {
         if error.is_busy() {
@@ -292,7 +271,7 @@ impl From<StoreError> for BridgeError {
 }
 
 /// One publish from the host. The page dispatches on `topic` and decodes
-/// `payload` as that topic's snapshot type. Swift: `BridgeEvent`.
+/// `payload` as that topic's snapshot type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BridgeEvent {
     pub topic: BridgeTopic,
@@ -304,7 +283,7 @@ impl BridgeEvent {
         Self { topic, payload }
     }
 
-    /// A snapshot as an event (Swift's `BridgeEvent(topic:snapshot:)`).
+    /// A snapshot as an event.
     pub fn snapshot<T: Serialize + ?Sized>(
         topic: BridgeTopic,
         snapshot: &T,
@@ -319,7 +298,6 @@ impl BridgeEvent {
 // Shared vocabulary.
 
 string_enum! {
-    /// Swift: `BridgePermissionKind`.
     pub enum PermissionKind {
         Microphone = "microphone",
         SystemAudio = "systemAudio",
@@ -329,14 +307,9 @@ string_enum! {
 }
 
 impl PermissionKind {
-    /// The permissions `platform` has, in onboarding's order. The Mac has
-    /// all four. Windows has the microphone privacy switch and the firewall
-    /// prompt for the phone's connection; it records system audio without
-    /// a permission and Steno reads no calendar there. Linux has the
-    /// microphone (the portal asks inside a sandbox) and nothing else.
-    /// `READS_CALENDAR` in `apps/macos/web/src/lib/platform.tsx` says
-    /// whether the list has the calendar, for the General section's
-    /// calendar row; `tests/fixtures.rs` compares the two.
+    /// The permissions `platform` has, in onboarding's order: all four on
+    /// the Mac, the microphone and the firewall on Windows, the microphone
+    /// on Linux. The web UI's `READS_CALENDAR` must agree (`tests/fixtures.rs`).
     #[must_use]
     pub const fn for_platform(platform: Platform) -> &'static [PermissionKind] {
         match platform {
@@ -348,7 +321,6 @@ impl PermissionKind {
 }
 
 string_enum! {
-    /// Swift: `BridgePermissionState`.
     pub enum PermissionState {
         Unknown = "unknown",
         Granted = "granted",
@@ -357,7 +329,6 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `BridgeSettingsSection`.
     pub enum SettingsSection {
         General = "general",
         Recording = "recording",
@@ -369,7 +340,6 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `BridgeWindow`.
     pub enum BridgeWindow {
         Main = "main",
         Settings = "settings",
@@ -378,7 +348,6 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `BridgeMeetingSource`.
     pub enum MeetingSource {
         Call = "call",
         InPerson = "inPerson",
@@ -387,7 +356,6 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `BridgeMeetingState`, an alias of `StenoCore.MeetingState.Kind`.
     pub enum MeetingState {
         Recording = "recording",
         Queued = "queued",
@@ -398,18 +366,14 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `BridgeCaptureMode`.
     pub enum CaptureMode {
         Call = "call",
         InPerson = "inPerson",
     }
 }
 
-/// Swift: none; the Swift app is the Mac. `steno_core`'s type, re-exported:
-/// the Tauri shell sets its raw value as `window.__STENO_PLATFORM__` before
-/// the page's scripts run, and a page with nothing set is the Swift app's.
-/// [`PermissionKind::for_platform`] lists its permissions.
-///
+/// `steno_core`'s type, re-exported: the Tauri shell sets its raw value as
+/// `window.__STENO_PLATFORM__`; a page with nothing set is the Swift app's.
 pub use steno_core::Platform;
 
 #[cfg(test)]
@@ -516,11 +480,7 @@ mod tests {
         assert_eq!(decoded.error.unwrap().code, BridgeErrorCode::Cancelled);
     }
 
-    /// Each arm of the `From<StoreError>` mapping against the Swift host's
-    /// literal text where there is one, so an edit to a message fails here
-    /// rather than drifting from `MainWindowBridge.swift`. Which SQLite
-    /// codes count as busy is the store's test
-    /// (`is_busy_names_the_lock_errors`).
+    /// Each arm of the `From<StoreError>` mapping, with its literal message.
     #[test]
     fn store_errors_land_on_the_contract_codes() {
         let busy = StoreError::Sqlite(rusqlite::Error::SqliteFailure(

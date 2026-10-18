@@ -1,56 +1,17 @@
-//! The host side of a call, after `apps/macos/Steno/Web/BridgeDispatcher.swift`
-//! and `BridgeRequestParams.swift`: a method and its params in, the typed
-//! handler's outcome out. [`BridgeHost`] has one typed method per
-//! [`BridgeMethod`]; the [`Dispatcher`] reads the params as the method's
-//! contract type, calls the host and wraps the outcome. Two entry points for
-//! the two transports: [`Dispatcher::call`] takes a method and its params,
-//! which is what the Tauri `bridge_call` command receives (the Tauri
-//! transport, `apps/macos/web/src/bridge/tauri-transport.ts`, sends
-//! `{ method, params }` and no id);
-//! [`Dispatcher::dispatch`] takes the request envelope with its `id` and
-//! always answers with a reply envelope, never a rejection, as
-//! `webkit-transport.ts` expects.
+//! The host side of a call: a method and its params in, the typed handler's
+//! outcome out. [`BridgeHost`] has one typed method per [`BridgeMethod`].
+//! [`Dispatcher::call`] serves the Tauri transport (`{ method, params }`, no
+//! id); [`Dispatcher::dispatch`] takes a request envelope and always answers
+//! with a reply envelope. Hosts run blocking, on the shell's blocking pool.
 //!
-//! The params reader is more lenient than Swift's in one place, in the
-//! direction of accepting what the page never sends: serde reads a params
-//! struct from a positional array as well as from an object (`["abc"]` for
-//! `{ "meetingId": "abc" }`), where Swift's keyed decoder rejects the array.
-//! Not pinned either way. The UUID codec goes the other way and is strict:
-//! `steno_core::json::parse_uuid` reads the hyphenated form only, as
-//! `UUID(uuidString:)` does; ids on the wire come from the host's own
-//! snapshots.
+//! Events and replies are not ordered with respect to each other: every
+//! command publishes the topics it changed before it returns, and every
+//! snapshot is a full state, so arrival order only decides which full state
+//! the page shows last.
 //!
-//! Hosts run blocking. Every method takes `&self` and returns when the work
-//! is done, including a method that waits on a dialog; the host uses interior
-//! mutability for its view models, which is what the Swift `@MainActor` host
-//! amounts to. The Tauri shell runs the dispatcher on Tauri's blocking pool:
-//! the `bridge_call` command is `async` and awaits a `spawn_blocking`
-//! (`call_blocking` in `apps/desktop/src-tauri/src/host.rs`), so a call that
-//! waits holds neither a command worker nor the main thread. It shows the
-//! folder panels itself before it calls the host (`dialogs.rs`), and the
-//! destructive alert, which the host asks for from inside the method, blocks
-//! that pool thread while the dialog plugin shows it on the main thread.
-//!
-//! Events and replies are not ordered with respect to each other. A host
-//! method that publishes a snapshot and then returns sends the snapshot
-//! through the [`EventSink`] (the window's event channel) and the reply
-//! through the command's future, two paths the `spawn_blocking` hop can
-//! reorder; the page must not read a reply as "the snapshots this call caused
-//! have arrived", nor the reverse. The Swift host has the same property
-//! (`evaluateJavaScript` for events, the message handler's reply for
-//! results). The convention, settled in `steno_host::host`: every command
-//! publishes the topics it changed before it returns, and every snapshot is
-//! a full state, so arrival order only decides which full state the page
-//! shows last.
-//!
-//! [`BridgeHost`] and [`EventSink`] are separate traits because they have
-//! different owners: the shell implements the sink (it owns the windows the
-//! events go to) and hands it to the host, which only holds it, as an
-//! `Arc<dyn EventSink>`. That trait object needs `EventSink` object safe, so
-//! `emit` takes a built [`BridgeEvent`] and the generic `publish` lives on
-//! the [`EventSinkExt`] extension. A host behind an `Arc` is a host too
-//! ([`BridgeHost`] is implemented for `Arc<T: BridgeHost + ?Sized>`), so the
-//! shell can share one host between the dispatcher and the event publisher.
+//! [`EventSink`] is separate from [`BridgeHost`] because the shell owns it
+//! and hands it to the host as an `Arc<dyn EventSink>`, so it must stay
+//! object safe; the generic `publish` lives on [`EventSinkExt`].
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -68,7 +29,7 @@ use crate::envelope::{BridgeError, BridgeEvent, BridgeMethod, BridgeReply, Bridg
 use crate::json;
 use crate::snapshots::Snapshot;
 
-/// Where a host publishes snapshots. Swift: `BridgeEventSink`.
+/// Where a host publishes snapshots.
 pub trait EventSink: Send + Sync {
     fn emit(&self, event: BridgeEvent);
 }
@@ -90,7 +51,7 @@ impl<T: EventSink + ?Sized> EventSinkExt for T {}
 pub type Outcome<T> = Result<T, BridgeError>;
 
 /// How a method's reply lands in the envelope: nothing for `()`, the JSON
-/// value for a typed reply. Swift: `BridgeReplies.value`.
+/// value for a typed reply.
 trait IntoResult {
     fn into_result(self) -> Outcome<Option<Value>>;
 }
@@ -116,20 +77,15 @@ macro_rules! typed_replies {
 
 typed_replies!(ConfirmReply, ChosenPathReply, SpeakerOptionsReply);
 
-/// Writes [`BridgeHost`], the delegating `impl BridgeHost for Arc<T>` and
-/// [`Dispatcher::call`] from one list of `Variant => fn name(params) ->
-/// Reply;` lines, so a method is spelt once and the route over
-/// [`BridgeMethod`] stays exhaustive: a variant without a line here does
-/// not compile.
+/// Writes [`BridgeHost`], its `Arc<T>` impl and [`Dispatcher::call`] from
+/// one list of lines, so the route over [`BridgeMethod`] stays exhaustive.
 macro_rules! bridge_host {
     ($(
         $variant:ident => fn $method:ident($($param:ident: $params:ty)?) -> $reply:ty;
     )+) => {
-        /// What answers the page's commands: one method per [`BridgeMethod`], params
-        /// and reply typed per `commands.rs`. Every method defaults to the error the
-        /// Swift window hosts throw for a method they do not route (`unknownMethod`,
-        /// "The host does not answer `<method>`."), so a host implements what its
-        /// window answers and nothing else. Swift: `BridgeHost`.
+        /// What answers the page's commands: one method per [`BridgeMethod`].
+        /// Every method defaults to `unknownMethod`, so a host implements only
+        /// what its window answers.
         pub trait BridgeHost: Send + Sync {
             $(
                 #[allow(unused_variables)]
@@ -149,10 +105,8 @@ macro_rules! bridge_host {
 
         impl<H: BridgeHost> Dispatcher<H> {
             /// One method call: the params read as the method's contract type
-            /// (a missing, `null` or unreadable value is `invalidParams`), the
-            /// host's typed handler, and its reply as the envelope's `result`,
-            /// `None` for a method without one. The Tauri `bridge_call` command
-            /// maps this straight onto its own `Result`.
+            /// (else `invalidParams`), the host's handler, and its reply as the
+            /// envelope's `result`, `None` for a method without one.
             pub fn call(&self, method: BridgeMethod, params: Option<Value>) -> Outcome<Option<Value>> {
                 match method {
                     $(
@@ -260,8 +214,7 @@ bridge_host! {
     UiConfirmDestructive => fn ui_confirm_destructive(params: ConfirmDestructiveParams) -> ConfirmReply;
 }
 
-/// Routes a method to the host's typed handler and wraps the outcome; see
-/// [`Dispatcher::call`] and [`Dispatcher::dispatch`]. Swift: `BridgeDispatcher`.
+/// Routes a method to the host's typed handler and wraps the outcome.
 pub struct Dispatcher<H: BridgeHost> {
     host: H,
 }
@@ -271,11 +224,9 @@ impl<H: BridgeHost> Dispatcher<H> {
         Self { host }
     }
 
-    /// One envelope end to end: read the request, [`call`](Self::call),
-    /// wrap. Never fails, so the page's promise resolves with an envelope in
-    /// every case: a method name outside the contract is `unknownMethod`,
-    /// a body that is not a request is `invalidParams`, with the body's `id`
-    /// when it was readable.
+    /// One envelope end to end. Never fails: an unknown method is
+    /// `unknownMethod`, a body that is not a request `invalidParams`, with
+    /// the body's `id` when it was readable.
     pub fn dispatch(&self, body: &str) -> BridgeReply {
         let request = match decode_request(body) {
             Ok(request) => request,
@@ -318,7 +269,7 @@ impl<H: BridgeHost> Dispatcher<H> {
 }
 
 /// The envelope before the method name is checked, so an unknown method and
-/// a malformed request are told apart by one read. Swift: `RawRequest`.
+/// a malformed request are told apart by one read.
 #[derive(serde::Deserialize)]
 struct RawRequest {
     id: String,
@@ -327,8 +278,7 @@ struct RawRequest {
     params: Option<Value>,
 }
 
-/// Reads a request body, or the reply to send instead. Swift:
-/// `BridgeDispatcher.decode`.
+/// Reads a request body, or the reply to send instead.
 fn decode_request(body: &str) -> Result<BridgeRequest, BridgeReply> {
     let invalid =
         |id: &str, message: &str| Err(BridgeReply::error(id, BridgeError::invalid_params(message)));
@@ -352,10 +302,8 @@ fn decode_request(body: &str) -> Result<BridgeRequest, BridgeReply> {
 }
 
 /// The method's params as its contract type; a missing, `null` or unreadable
-/// value is `invalidParams`. Swift: `BridgeRequest.params(_:)`. Public so a
-/// shell that answers `window.*` and `system.openURL` itself, before the
-/// dispatcher, reads their params with the same errors (`"<method> needs
-/// params."`) the dispatcher would give.
+/// value is `invalidParams`. Public so a shell that answers some methods
+/// itself reads their params with the dispatcher's errors.
 pub fn decode<T: DeserializeOwned>(method: BridgeMethod, params: Option<Value>) -> Outcome<T> {
     match params {
         None | Some(Value::Null) => Err(BridgeError::invalid_params(format!(

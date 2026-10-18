@@ -1,6 +1,5 @@
 //! The trust boundary: only TLS 1.3, and only the exact leaf fingerprint
-//! from the pairing completes a handshake, with the rule the phone's
-//! `PinnedTrustEvaluator.swift` applies.
+//! from the pairing completes a handshake, as the phone pins it.
 
 #![allow(
     clippy::assert_is_empty,
@@ -66,9 +65,8 @@ async fn another_minted_certificate_is_rejected() {
 
 #[tokio::test]
 async fn the_verifier_computes_the_fingerprint_the_qr_carries() {
-    // Decision 3: SHA-256 of the leaf DER on both sides. The phone hashes
-    // the presented leaf; the computer hashes the DER it minted and puts it
-    // in the QR as `fp`.
+    // SHA-256 of the leaf DER on both sides; the computer puts it in the QR
+    // as `fp`.
     let test = TestService::start().await;
     let identity = &test.service.identity;
     let payload = test.service.begin_pairing();
@@ -87,8 +85,8 @@ async fn the_verifier_computes_the_fingerprint_the_qr_carries() {
 
 #[tokio::test]
 async fn plaintext_http_to_the_listener_never_reaches_the_router() {
-    // The phone builds `https://` origins only; a stray `http://` client
-    // meets the TLS handshake and no request line is ever parsed.
+    // A stray `http://` client meets the TLS handshake; no request line is
+    // parsed.
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let test = TestService::with(common::Options {
         read_timeout: Duration::from_millis(500),
@@ -178,8 +176,8 @@ async fn handshake_offering(
 
 #[tokio::test]
 async fn a_client_offering_only_tls_1_2_is_refused_with_a_protocol_version_alert() {
-    // The workspace builds rustls with TLS 1.2 for the LLM client; the
-    // listener's own configuration is what keeps it out.
+    // The workspace's rustls has TLS 1.2 for the LLM client; the listener's
+    // configuration keeps it out.
     let test = TestService::start().await;
     handshake_offering(&test, &rustls::version::TLS13)
         .await

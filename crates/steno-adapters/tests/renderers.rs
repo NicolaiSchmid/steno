@@ -1,7 +1,5 @@
-//! The renderers against the Swift goldens in `Tests/Fixtures/snapshots/obsidian`
-//! and the behaviour tests of `FolderNoteRendererTests`,
-//! `TranscriptMarkdownRendererTests`, `TasksMarkdownRendererTests`,
-//! `WebVTTRendererTests` and `MeetingJSONRendererTests`.
+//! The renderers against the goldens in `Tests/Fixtures/snapshots/obsidian`,
+//! and their behaviour.
 
 mod common;
 

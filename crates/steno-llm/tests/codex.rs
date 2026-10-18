@@ -1,8 +1,6 @@
 //! The Codex client against a stub backend and a temporary Codex home: the
-//! Responses wire format and the backend's quirks (no `max_output_tokens`
-//! or `temperature`, `client_version` on the model list, `originator`), the
-//! 401 refresh, the plan limit, streams and redaction.
-//! Swift: `CodexClientTests`, `CodexClientReviewTests`.
+//! Responses wire format, the backend's quirks, the 401 refresh, the plan
+//! limit, streams and redaction.
 
 mod common;
 
@@ -250,7 +248,6 @@ async fn no_sign_in_fails_before_any_request() {
     );
     assert_eq!(error, CodexCredentialError::NotSignedIn);
     assert_eq!(harness.backend.requests().len(), 0);
-    // Through the trait, the same error downcasts from the boxed form.
     let boxed = steno_core::LanguageModel::complete(&harness.client, &json_request())
         .await
         .unwrap_err();
@@ -515,8 +512,7 @@ fn endpoint_from_settings_needs_confirmation_and_a_model() {
         endpoint.models_url().as_str(),
         "https://chatgpt.com/backend-api/codex/models"
     );
-    // The endpoint provider's fields do not leak into the Codex endpoint and
-    // switching back finds them untouched.
+    // The endpoint provider's fields survive a switch to Codex and back.
     settings.llm_base_url = Some("http://127.0.0.1:1234/v1".to_owned());
     settings.llm_model = Some("local".to_owned());
     assert_eq!(
@@ -528,8 +524,7 @@ fn endpoint_from_settings_needs_confirmation_and_a_model() {
     assert_eq!(local.model, "local");
     assert!(!local.is_codex_backend());
 
-    // The confirmation gate cannot be walked around by pasting the
-    // backend's address as a server: that stays an endpoint.
+    // Pasting the backend's address as a server stays an endpoint.
     settings.llm_base_url = Some(LlmEndpoint::CODEX_BACKEND_URL.to_owned());
     let pasted = LlmEndpoint::from_settings(&settings).unwrap();
     assert!(!pasted.is_codex_backend());
@@ -707,9 +702,8 @@ async fn a_four_hundred_that_does_not_name_the_format_is_not_downgraded() {
     );
 }
 
-/// Two chunks in flight under `JsonSchema` both draw the 400: one
-/// `ModeDowngraded` per step, and the late second 400 cannot move the mode
-/// back up.
+/// Two concurrent 400s under `JsonSchema`: one `ModeDowngraded` per step,
+/// and the late one cannot move the mode back up.
 #[tokio::test]
 async fn concurrent_rejections_downgrade_the_mode_once_per_step() {
     let harness = CodexHarness::new().await;
@@ -1034,9 +1028,7 @@ async fn data_only_streams_and_plain_json_replies_are_parsed() {
     assert_eq!(harness.clock.pending_sleepers(), 0);
 }
 
-/// A plan limit delivered inside the stream is as final as one on the
-/// status line: no backoff. An overload is retried like a dropped
-/// connection.
+/// A plan limit inside the stream is final; an overload is retried.
 #[tokio::test]
 async fn a_plan_limit_inside_the_stream_is_final() {
     let harness = CodexHarness::new().await;
@@ -1077,8 +1069,8 @@ async fn a_plan_limit_inside_the_stream_is_final() {
     assert_eq!(overloaded.backend.request_count(), 2);
 }
 
-/// A 5xx from the token endpoint is a transport failure: one backoff, then
-/// the refresh is tried again. A spent token stays final.
+/// A 5xx from the token endpoint is retried after one backoff; a spent
+/// token stays final.
 #[tokio::test]
 async fn a_token_endpoint_hiccup_backs_off_like_a_transport_error() {
     let harness = CodexHarness::new().await;
@@ -1133,8 +1125,8 @@ async fn a_token_endpoint_hiccup_backs_off_like_a_transport_error() {
     assert_eq!(expired.backend.requests().len(), 0);
 }
 
-/// A 401 when the CLI has rotated the file meanwhile: the file's token goes
-/// out next, the token endpoint is not called.
+/// A 401 after the CLI rotated the file sends the file's token, with no
+/// token endpoint call.
 #[tokio::test]
 async fn unauthorized_with_a_rotated_file_rereads_instead_of_refreshing() {
     let harness = CodexHarness::new().await;
@@ -1170,9 +1162,7 @@ async fn unauthorized_with_a_rotated_file_rereads_instead_of_refreshing() {
     assert_eq!(harness.home.server.requests().len(), 0);
 }
 
-/// A 401 whose refresh hiccups backs off, and the next attempt's 401 may
-/// refresh again: only a refresh that went through uses up the one
-/// refresh a completion gets.
+/// A 401 whose refresh hiccups backs off, and the next 401 may refresh again.
 #[tokio::test]
 async fn a_failed_refresh_after_a_401_does_not_use_up_the_refresh() {
     let harness = CodexHarness::new().await;
@@ -1213,7 +1203,6 @@ async fn expiring_sign_in_without_retries() -> CodexHarness {
     harness
 }
 
-/// Sixty-four text completions started at once.
 async fn sixty_four_completions(
     harness: &CodexHarness,
 ) -> Vec<Result<steno_core::LlmResponse, CodexError>> {
@@ -1221,8 +1210,7 @@ async fn sixty_four_completions(
     futures_util::future::join_all((0..64).map(|_| harness.client.complete_llm(&request))).await
 }
 
-/// Sixty-four completions on a sign-in inside its expiry window: one token
-/// POST between them, and every request goes out with the new token.
+/// Sixty-four completions inside the expiry window share one token POST.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn sixty_four_completions_on_an_expiring_sign_in_share_one_refresh() {
     let harness = expiring_sign_in_without_retries().await;
@@ -1253,9 +1241,8 @@ async fn sixty_four_completions_on_an_expiring_sign_in_share_one_refresh() {
     );
 }
 
-/// Sixty-four completions on a sign-in the token endpoint refuses for good:
-/// the dead refresh token is posted once, every completion gets
-/// `SignInExpired`, and nothing reaches the backend.
+/// Sixty-four completions on a refused sign-in post the dead token once and
+/// all get `SignInExpired`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn sixty_four_completions_on_a_refused_sign_in_post_the_dead_token_once() {
     let harness = expiring_sign_in_without_retries().await;

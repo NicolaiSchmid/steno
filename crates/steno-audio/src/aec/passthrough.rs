@@ -1,5 +1,4 @@
 //! Copies the near-end to the output unchanged.
-//! Swift: `Sources/StenoAudio/AEC/PassthroughEchoCanceller.swift`.
 
 use steno_core::EchoCanceller;
 

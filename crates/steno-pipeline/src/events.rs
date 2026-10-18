@@ -1,8 +1,6 @@
-//! The bus the pipeline posts [`MeetingEvent`]s on and the app subscribes
-//! to. Swift: `MeetingEventBus`. A `tokio` broadcast channel: every
-//! subscriber sees every event posted after it subscribed; a subscriber
-//! that falls behind by more than the capacity skips the oldest events,
-//! which the progress model tolerates (every event is a full state).
+//! The bus the pipeline posts [`MeetingEvent`]s on: a `tokio` broadcast
+//! channel. A subscriber that falls behind past the capacity skips the
+//! oldest events, which is fine since every event is a full state.
 
 use steno_core::MeetingEvent;
 use tokio::sync::broadcast;

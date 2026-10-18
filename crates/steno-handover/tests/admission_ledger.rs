@@ -1,15 +1,6 @@
-//! The admission ledger (schema v5) over the wire: a recording the computer
-//! admitted is answered delivered when it is announced again, whatever
-//! happened to its receipt (a revoke, a meeting delete, Pair again, a line
-//! save after the intake's commit, a restart); other bytes under a recording id are a
-//! new recording; the same bytes in another split restart the partial; the
-//! same bytes from another device take the receipt over, and admitted
-//! twice are one meeting; and a late `complete` of replaced bytes never
-//! completes the new upload. The intake
-//! commits like the real one ([`StoreIntake`]), so the ledger row exists
-//! exactly when an admission committed. The design is
-//! `.plans/2026-10-08-handover-admission-ledger.md`. Swift:
-//! `AdmissionLedgerTests`.
+//! The admission ledger over the wire: an admitted recording announced again
+//! is answered delivered whatever happened to its receipt; other bytes under
+//! its id are a new recording; the same bytes are one meeting.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -41,15 +32,13 @@ async fn service(store: &Arc<Store>, intake: &Arc<StoreIntake>) -> TestService {
     .await
 }
 
-/// A fresh in-memory store and an intake over it.
 fn store_and_intake() -> (Arc<Store>, Arc<StoreIntake>) {
     let store = Arc::new(Store::in_memory().unwrap());
     let intake = StoreIntake::new(&store);
     (store, intake)
 }
 
-/// Pairs `device_id` again against `test`, as the phone does after an
-/// unpair, with the name it had.
+/// Pairs `device_id` again against `test` under the name it had.
 async fn pair_again(test: &TestService, phone: &Phone) -> Phone {
     let payload = test.service.begin_pairing();
     let response =
@@ -70,8 +59,7 @@ async fn completed(phone: &Phone, recording_id: Uuid) -> Uuid {
     response.json::<wire::CompleteResponse>().meeting_id
 }
 
-/// The announce of `metadata` answers 200 `complete` with every chunk of
-/// its split, and opens no file.
+/// The announce of `metadata` answers 200 `complete` and opens no file.
 async fn delivered(test: &TestService, phone: &Phone, metadata: &RecordingMetadata) {
     let announced = phone.announce(metadata).await;
     assert_eq!(announced.status, 200, "announce");
@@ -99,14 +87,8 @@ fn under(phone: &Phone, recording_id: Uuid, bytes: &[u8], chunk_size: i64) -> Re
 
 #[tokio::test]
 async fn a_lost_answer_then_an_unpair_is_answered_delivered_after_pairing_again() {
-    // The computer admitted the recording, but the 200 of `complete` never
-    // reached the phone, so it still holds the row and the file. Then it
-    // unpairs, which deletes the receipt with the device. After a restart
-    // it pairs again under the same device id and announces the recording:
-    // the ledger answers delivered, the phone's `complete` gets the first
-    // meeting and deletes its copy, and nothing is admitted twice. A phone
-    // under a new device id (an install of the app again) is answered the
-    // same once the old one is revoked.
+    // A phone that lost the 200, unpaired and paired again after a restart is
+    // answered delivered with the first meeting, also under a new device id.
     let (store, intake) = store_and_intake();
     let test = service(&store, &intake).await;
     let phone = Phone::pair(&test).await;
@@ -151,12 +133,8 @@ async fn a_lost_answer_then_an_unpair_is_answered_delivered_after_pairing_again(
 
 #[tokio::test]
 async fn a_deleted_meetings_recording_is_answered_delivered() {
-    // The user deleted the meeting, which deletes its receipt; the phone
-    // never got the 200 and announces the recording again. The ledger
-    // answers delivered with the deleted meeting's id, so the phone deletes
-    // its copy instead of uploading it as a new meeting (Nicolai,
-    // 2026-10-07). After a restart, the stored `complete` receipt whose
-    // meeting is gone still reads as admitted.
+    // After the user deleted the meeting, a re-announce is answered delivered
+    // with its id, also after a restart.
     let (store, intake) = store_and_intake();
     let test = service(&store, &intake).await;
     let phone = Phone::pair(&test).await;
@@ -198,11 +176,8 @@ async fn a_deleted_meetings_recording_is_answered_delivered() {
 
 #[tokio::test]
 async fn a_receipt_a_late_save_put_back_reads_admitted_after_a_restart() {
-    // A line save asked for before the intake's commit (a chunk, a
-    // re-announce) landed after it and put the stored receipt back to
-    // `verifying`, and the app stopped before the engine's own `complete`
-    // save. After the restart the ledger shows the bytes admitted, so the
-    // phone's retried `complete` gets the first meeting, not a second.
+    // A line save that put the receipt back to `verifying` after the commit:
+    // after a restart the retried `complete` gets the first meeting.
     let (store, intake) = store_and_intake();
     let test = service(&store, &intake).await;
     let phone = Phone::pair(&test).await;
@@ -228,13 +203,8 @@ async fn a_receipt_a_late_save_put_back_reads_admitted_after_a_restart() {
 
 #[tokio::test]
 async fn other_bytes_under_an_admitted_id_are_taken_in_as_a_new_recording() {
-    // The phone announces another file under a recording id the computer
-    // admitted (its crash recovery replaced the file). The computer takes
-    // it in as a new recording under the same id: a fresh receipt, an
-    // empty partial, its own meeting. While its admission has not
-    // committed, nothing says `complete`; the phone's `complete` answers
-    // 200 only once the new meeting committed, and the ledger then holds
-    // both admissions.
+    // Another file under an admitted id is a new recording with its own meeting;
+    // its `complete` answers 200 only once that meeting committed.
     let (store, intake) = store_and_intake();
     let test = service(&store, &intake).await;
     let phone = Phone::pair(&test).await;
@@ -297,8 +267,7 @@ async fn other_bytes_under_an_admitted_id_are_taken_in_as_a_new_recording() {
     );
     assert_eq!(intake.meetings().len(), 3);
 
-    // The first file announced again (a stale request) is answered from
-    // the ledger: both were admitted.
+    // The first file announced again is answered from the ledger.
     delivered(&test, &phone, &metadata).await;
     assert_eq!(completed(&phone, id).await, first_meeting);
     assert_eq!(intake.meetings().len(), 3);
@@ -307,9 +276,7 @@ async fn other_bytes_under_an_admitted_id_are_taken_in_as_a_new_recording() {
 
 #[tokio::test]
 async fn another_chunk_size_restarts_an_unfinished_partial() {
-    // The phone announces the same bytes in another split before the
-    // receipt is `complete`: the partial starts over under the new split,
-    // no chunk listed, and the upload completes in it.
+    // The same bytes in another split restart the partial under the new split.
     let (store, intake) = store_and_intake();
     let test = service(&store, &intake).await;
     let phone = Phone::pair(&test).await;
@@ -355,12 +322,8 @@ async fn another_chunk_size_restarts_an_unfinished_partial() {
 
 #[tokio::test]
 async fn another_device_takes_over_an_unfinished_upload_of_the_same_bytes() {
-    // The receipt belongs to an older device id of the same phone (it
-    // paired again while the computer still held the old pairing). The new
-    // device announces the same bytes: it takes the receipt over with the
-    // chunks received, and its upload completes. The older device's
-    // requests then find no receipt of theirs; its announce of the same
-    // bytes takes the `complete` receipt back and is answered delivered.
+    // A newer device id announcing the same bytes takes the receipt over; the
+    // older device's announce later is answered delivered.
     let (store, intake) = store_and_intake();
     let test = service(&store, &intake).await;
     let older = Phone::pair(&test).await;
@@ -402,14 +365,8 @@ async fn another_device_takes_over_an_unfinished_upload_of_the_same_bytes() {
 
 #[tokio::test]
 async fn a_takeover_during_the_first_admission_completes_with_its_meeting() {
-    // The older device's `complete` is in the intake, past its commit,
-    // when the newer device announces the same bytes and takes the receipt
-    // over: its save puts the newer device's unfinished receipt over the
-    // `complete` one. The partial went to the intake, so the newer
-    // device's `complete` finds none and its upload starts over. When it
-    // reaches the intake, the ledger holds those bytes, and its `complete`
-    // answers the first meeting: the same bytes are one recording, and a
-    // second meeting would be a duplicate.
+    // The newer device takes the receipt over after the older one's commit;
+    // its `complete` answers the first meeting, not a duplicate.
     let (store, intake) = store_and_intake();
     let test = service(&store, &intake).await;
     let older = Phone::pair(&test).await;
@@ -447,12 +404,8 @@ async fn a_takeover_during_the_first_admission_completes_with_its_meeting() {
 
 #[tokio::test]
 async fn admitted_bytes_over_another_devices_unfinished_upload_are_refused() {
-    // The phone's first file under the id was admitted. Another device
-    // then announced other bytes under the id, a new recording, and its
-    // upload is under way. The phone announces its admitted file again:
-    // answered `complete`, it would replace the receipt of that upload,
-    // whose file is still on its way. It is answered 409 instead, that
-    // upload is left alone, and it completes as a meeting of its own.
+    // An admitted file announced again during another device's new recording
+    // under the id answers 409, and that upload completes on its own.
     let (store, intake) = store_and_intake();
     let test = service(&store, &intake).await;
     let phone = Phone::pair(&test).await;
@@ -498,16 +451,8 @@ async fn admitted_bytes_over_another_devices_unfinished_upload_are_refused() {
 
 #[tokio::test]
 async fn a_late_complete_of_replaced_bytes_leaves_the_new_upload_unfinished() {
-    // The phone's `complete` of the first file is in the intake when it
-    // announces another file under the id (a new recording). Either the
-    // intake refuses the first file, whose receipt is gone, or it committed
-    // the first file before the announce. Either way the `complete` write
-    // then finds the new upload's receipt in memory and leaves it alone:
-    // written into it, the new receipt would read `complete` with the first
-    // file's meeting, and the phone would delete a file the computer does
-    // not have. A refused first file's verified copy goes too, so the new
-    // upload's `complete` cannot admit it unhashed. The new upload then
-    // completes as a meeting of its own.
+    // A `complete` in the intake when another file is announced under the id
+    // leaves the new receipt alone, whether the intake refuses or commits.
     for hold in [Hold::BeforeTheCommit, Hold::AfterTheCommit] {
         let (store, intake) = store_and_intake();
         let test = service(&store, &intake).await;
@@ -581,12 +526,8 @@ async fn a_late_complete_of_replaced_bytes_leaves_the_new_upload_unfinished() {
 
 #[tokio::test]
 async fn a_recording_an_older_app_admitted_is_answered_delivered_after_the_backfill() {
-    // An older app (the Swift `v0.10.0-rc.2`, or a Rust build before v5)
-    // admitted the recording: a meeting and a `complete` receipt, no
-    // ledger row. This build's store open backfills the row, so after an
-    // unpair and a pairing again the phone's retry is answered delivered,
-    // with no second meeting; before it, the retried `complete` is
-    // answered from the receipt.
+    // An older build admitted the recording without a ledger row; the store
+    // open backfills it, so the retry is answered delivered.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("steno.sqlite");
     let store = Arc::new(Store::open(&path).unwrap());
@@ -601,8 +542,7 @@ async fn a_recording_an_older_app_admitted_is_answered_delivered_after_the_backf
     let metadata = phone.metadata(&bytes, CHUNK_SIZE);
     let id = metadata.recording_id;
     phone.upload_all(&metadata, &bytes).await;
-    // The fake intake writes no row; the engine saves the `complete`
-    // receipt itself, and the meeting row is the older intake's.
+    // The fake intake writes no row; the meeting row is the older intake's.
     let meeting_id = completed(&phone, id).await;
     common::save_admitted_meeting(&store, meeting_id);
     assert_eq!(
@@ -639,14 +579,8 @@ async fn a_recording_an_older_app_admitted_is_answered_delivered_after_the_backf
 
 #[tokio::test]
 async fn a_resend_after_pair_again_is_delivered_with_the_first_meeting_unchanged() {
-    // The phone's recording became meeting M, which the user renamed and
-    // whose speaker they named. Pair again (`HandoverIdentity::mint_anew`)
-    // removes the phone, and its receipts with it, and mints a new
-    // identity. The phone pairs with the new identity and sends the same
-    // recording again, under the same device id and once more as a new
-    // install: the admission ledger answers delivered with M, nothing is
-    // admitted (so no transcript run), and M, its title and its speakers
-    // stay as the user left them.
+    // After Pair again, a renamed meeting's recording sent again is answered
+    // delivered and the meeting stays as the user left it.
     let (store, intake) = store_and_intake();
     let secrets = steno_core::testing::InMemorySecretStore::default();
     let record = common::MemoryRecord::default();

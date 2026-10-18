@@ -1,20 +1,8 @@
 //! One accepted connection: HTTP/1.1 over the TLS stream, one request at a
-//! time. Per request the route is matched, the auth gate runs on the head
-//! (the body is not read while the gate is pending, so an unauthenticated
-//! body is never buffered), the body limit is enforced (413 and close), the
-//! body is collected and the complete request handed to the engine.
-//! Rejections are answered at once with `Connection: close`; what the
-//! client still sends is discarded up to a limit, then the connection
-//! closes. A body that ends early (a parse error, a client gone mid-body,
-//! the read timeout) is not answered: the connection closes, as the Swift
-//! handler's `errorCaught` does. A connection that stays silent for the
-//! read timeout while the computer waits on the client is closed; the
-//! silence is not counted while the engine is handling a request. When the
-//! server stops, an idle connection closes at once and one mid-request
-//! closes after its response. The drain of a rejected body and the linger
-//! after a close run in the connection's own task set, so they end with
-//! the connection's slot in the server's set and never outlive `stop`.
-//! Swift: `Routing/HTTPHandler.swift`.
+//! time. The auth gate runs on the head before the body is read, so an
+//! unauthenticated body is never buffered. Rejections are answered at once
+//! with `Connection: close` and the rest of the body is drained up to a
+//! limit; a body that ends early is not answered.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,19 +40,17 @@ struct Shared {
     metrics: Arc<ServerMetrics>,
     configuration: Arc<HandoverConfiguration>,
     /// True from dispatch until the response is written: the silence is the
-    /// engine's (a long verify), not the client's, so the read timeout does
-    /// not apply.
+    /// engine's, so the read timeout does not apply.
     handling: AtomicBool,
     /// Set once the server decided to close this connection.
     closing: AtomicBool,
-    /// The drain and the linger this connection started; [`serve`] waits
-    /// for them, and dropping the set aborts them.
+    /// The drain and the linger this connection started; dropping the set
+    /// aborts them.
     tasks: Mutex<JoinSet<()>>,
 }
 
 impl Shared {
-    /// Runs `task` in this connection's set. Nothing runs once the runtime
-    /// is gone.
+    /// Runs `task` in this connection's set.
     fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             self.tasks
@@ -75,10 +61,8 @@ impl Shared {
     }
 }
 
-/// Serves `tls` until the client goes away, the server closes it, the
-/// server stops (`stopping` turns true) or an error ends it; then waits for
-/// the drain and the linger, which end on their own within [`CLOSE_GRACE`]
-/// or at once when the server stops.
+/// Serves `tls` until the client goes away, the server closes it or stops,
+/// or an error ends it; then waits for the drain and the linger.
 pub async fn serve(
     tls: TlsStream<TcpStream>,
     engine: Arc<dyn RequestHandling>,
@@ -110,8 +94,8 @@ pub async fn serve(
     }
 }
 
-/// HTTP/1.1 over `tls`; the connection, and with it the stream, is dropped
-/// on return, which starts the linger.
+/// HTTP/1.1 over `tls`; dropping the connection on return starts the
+/// linger.
 async fn run(
     tls: TlsStream<TcpStream>,
     shared: &Arc<Shared>,
@@ -135,8 +119,8 @@ async fn run(
     tokio::select! {
         served = connection.as_mut() => served,
         () = super::stopped(stopping) => {
-            // hyper finishes the response in flight, if any, with
-            // `Connection: close`, and closes an idle connection now.
+            // hyper finishes the response in flight with `Connection: close` and closes
+            // an idle connection now.
             shared.closing.store(true, Ordering::SeqCst);
             connection.as_mut().graceful_shutdown();
             connection.await
@@ -144,8 +128,8 @@ async fn run(
     }
 }
 
-/// The body ended before its declared end. Returned to hyper as the
-/// service's error, which ends the connection without a response.
+/// The body ended before its declared end; ends the connection without a
+/// response.
 #[derive(Debug, Error)]
 #[error("the request body ended early")]
 struct TornBody;
@@ -229,15 +213,13 @@ fn too_large(limit: usize) -> HandoverResponse {
     )
 }
 
-/// Answers now, then discards whatever body still arrives (up to
-/// [`REJECTED_BODY_DRAIN`]) so the client reads the status instead of a
-/// reset, then closes.
+/// Answers now, then discards up to [`REJECTED_BODY_DRAIN`] of the body so
+/// the client reads the status instead of a reset, then closes.
 fn reject(
     shared: &Shared,
     response: HandoverResponse,
     mut body: Incoming,
 ) -> Response<Full<Bytes>> {
-    // The metrics only: the set holding this task lives in `shared`.
     let metrics = shared.metrics.clone();
     shared.spawn(async move {
         let mut remaining = REJECTED_BODY_DRAIN;
@@ -254,8 +236,7 @@ fn reject(
     respond_and_close(shared, response)
 }
 
-/// Anything that still arrives while the response flushes is dropped; the
-/// connection closes once the response is out.
+/// Answers, then closes the connection once the response is out.
 fn respond_and_close(shared: &Shared, response: HandoverResponse) -> Response<Full<Bytes>> {
     shared.closing.store(true, Ordering::SeqCst);
     respond(shared, response, true)
@@ -280,12 +261,10 @@ fn respond(shared: &Shared, response: HandoverResponse, close: bool) -> Response
         .unwrap_or_else(|_| Response::new(Full::new(Bytes::new())))
 }
 
-/// The TLS stream with the read timeout: a `Sleep` armed when the server
-/// waits for the client and cleared by every byte that arrives; not armed
-/// while the engine is handling. When the server decided to close, the
-/// shutdown half-closes the output and the stream lingers for
-/// [`CLOSE_GRACE`] (FIN after the data, so the client reads the status
-/// instead of a reset) before it is dropped.
+/// The TLS stream with the read timeout, armed while the server waits for
+/// the client and cleared by every byte. On a server close it half-closes
+/// the output and lingers for [`CLOSE_GRACE`], so the client reads the
+/// status instead of a reset.
 struct TimedStream {
     inner: Option<TlsStream<TcpStream>>,
     shared: Arc<Shared>,
@@ -380,10 +359,8 @@ impl Drop for TimedStream {
         if !self.shut_down {
             return;
         }
-        // The output is half-closed (tokio-rustls sent close_notify and
-        // shut the write side); keep the input open for the grace period,
-        // reading and discarding what the client still sends, so the close
-        // that follows carries no unread data and sends no reset.
+        // The write side is shut; keep reading and discarding for the grace period
+        // so the close sends no reset.
         self.shared.spawn(async move {
             let mut stream = stream;
             let mut sink = vec![0u8; 16 * 1024];

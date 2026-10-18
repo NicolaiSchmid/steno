@@ -1,43 +1,8 @@
-//! Salvage of a phone recording whose recorder was killed mid-recording: a
-//! crash, a jetsam kill or a force-quit of the iOS app. Swift: none;
-//! `AVAudioFile` fails on such a file ("missing moov atom"), as symphonia
-//! does.
-//!
-//! `AVAudioRecorder` writes the `ftyp`, reserves the space the `moov` and
-//! the `mdat` header take at the stop, and appends the AAC packets after
-//! it; only the stop writes the index. A killed recorder leaves `ftyp`,
-//! zeros, then the raw packets, with no `moov`, no `mdat` header and no
-//! sample table, so nothing says where a packet ends. Measured on macOS 26
-//! (`AVAudioRecorder` with the phone's settings killed after 4 and 30 s,
-//! and `AVAudioFile`, the same encoder and file writer, killed mid-encode):
-//! the 28-byte `ftyp` (`M4A `, then `M4A `, `mp42`, `isom`), zeros to byte
-//! 57 344, where a finished file's `mdat` body starts, then whole packets,
-//! byte for byte the finished file's. iOS was not measured.
-//!
-//! The salvage reads such a file as the phone's recorder wrote it, from its
-//! fixed settings (`mobile/src/features/recorder/recording-options.ts`):
-//! AAC-LC, mono, 44.1 kHz, 1 024 samples a packet. Each packet's length
-//! comes from its own bits ([`packet_length`]), which matched the sample
-//! table of every finished file of Apple's encoder at those settings
-//! (101 375 packets). The bits say nothing of the rate (a 48 kHz stream
-//! parses the same), so the rate is the preset's ([`SAMPLE_RATE`]); a
-//! stream of more than one channel does not parse. Only a file in the
-//! recorder's layout is salvaged: a `ftyp` with major brand `M4A ` and
-//! `mp42` among its compatible brands (the brands [`super::priming`]
-//! checks), no `moov` among the first 16 top-level boxes, and packets that
-//! parse from the first; any other file stays failed. Where the packets
-//! start is found, not assumed: past the zeros, or from the body of an
-//! `mdat` box should a writer leave one (else past the zeros in it), at the
-//! offset from which [`START_RUN`] packets parse in a row. In the app only
-//! the phone's uploads are `.m4a` masters, so only they reach the salvage.
-//!
-//! A packet that does not parse ends the salvage there, and so does the end
-//! of the file, inside a packet cut off by the kill or after the last whole
-//! one; the file itself is never written. Zeros from there to the end of the
-//! file are space no packet was written to, not a part of the recording. A
-//! salvage that reads less than half of the other bytes after the start is
-//! no salvage ([`SalvagedPackets::too_little`]), as a file with more than
-//! half of its packets damaged is none ([`super::MAX_DAMAGED_SHARE`]).
+//! Salvage of a phone recording whose recorder was killed mid-recording.
+//! `AVAudioRecorder` leaves `ftyp`, a zeroed reserve, then raw AAC-LC
+//! packets with no `moov` or sample table; each packet's length is read
+//! from its own bits ([`packet_length`]) at the phone's fixed settings.
+//! Any file not in that layout stays failed; the file is never written.
 
 pub mod packet;
 mod tables;
@@ -55,15 +20,10 @@ pub use packet::{MAX_PACKET_BYTES, PacketError, packet_length};
 
 use super::priming::recorder_brands;
 
-/// The phone recorder's rate, in hertz: `sampleRate` in the phone's
-/// preset, `mobile/src/features/recorder/recording-options.ts`, which is
-/// mono (`numberOfChannels: 1`). The packets cannot confirm it (see the
-/// module doc). The preset is pinned by
-/// `the_salvage_assumes_the_phones_preset` (`tests/codec_salvage.rs`): it
-/// fails unless the file holds exactly one `sampleRate:` and one
-/// `numberOfChannels:`, reading `44_100` and `1`, and Rust CI runs it on a
-/// change to that file (`.github/workflows/rust-ci.yml`). A change there
-/// must change the salvage too.
+/// The phone recorder's rate, in hertz: `sampleRate` in
+/// `mobile/src/features/recorder/recording-options.ts` (mono). The packets
+/// cannot confirm it; `the_salvage_assumes_the_phones_preset` pins the
+/// preset, and a change there must change the salvage too.
 pub const SAMPLE_RATE: u32 = 44_100;
 
 /// Samples in one AAC-LC packet.
@@ -81,12 +41,9 @@ const AUDIO_SPECIFIC_CONFIG: [u8; 2] = [0x12, 0x08];
 /// 57 316 bytes; a megabyte leaves room for another writer's reserve.
 const MAX_RESERVE: u64 = 1 << 20;
 
-/// The top-level boxes looked at, before the packets and after an `mdat`
-/// or an unknown box: the recorder writes a few at most. A `moov` past
-/// them is not found.
+/// The top-level boxes looked at; a `moov` past them is not found.
 const MAX_BOXES: usize = 16;
 
-/// The bytes read from the file at a time.
 const READ_BLOCK: usize = 64 * 1024;
 
 /// The track id the packets carry.
@@ -97,20 +54,15 @@ pub const TRACK_ID: u32 = 0;
 #[derive(Debug)]
 pub struct SalvagedPackets {
     file: File,
-    /// Bytes from the file not yet handed out, from `buffer[at..]`.
     buffer: Vec<u8>,
     at: usize,
-    /// The file offset of `buffer[0]`.
     buffer_offset: u64,
-    /// Where the packets start, and where they end: the file's length,
-    /// or, once the salvage meets zeros that run to the end of the file,
-    /// where those start.
+    /// Where the packets start, and where they end: the file's length, or
+    /// where zeros that run to its end start.
     start: u64,
     end: u64,
-    /// The packets handed out, and their bytes.
     packets: u64,
     read: u64,
-    /// Set at the end: why the salvage stopped.
     stopped: Option<Stop>,
 }
 
@@ -125,9 +77,8 @@ pub enum Stop {
 }
 
 impl SalvagedPackets {
-    /// The packets of the file at `path` when it is laid out as the phone's
-    /// recorder leaves a recording it was killed in (see the module doc);
-    /// `None` for any other file, and for one with no packet at all.
+    /// The packets of the file at `path` when it is laid out as a killed
+    /// phone recording; `None` for any other file or one with no packet.
     pub fn open(path: &Path) -> std::io::Result<Option<Self>> {
         let mut file = File::open(path)?;
         let end = file.metadata()?.len();
@@ -150,9 +101,8 @@ impl SalvagedPackets {
         }))
     }
 
-    /// The codec parameters of the phone's recorder: AAC-LC, mono,
-    /// 44.1 kHz, its `AudioSpecificConfig`, timestamps in samples. The
-    /// frame count is not known.
+    /// The codec parameters of the phone's recorder; the frame count is not
+    /// known.
     #[must_use]
     pub fn codec_params() -> CodecParameters {
         let mut params = CodecParameters::new();
@@ -181,9 +131,8 @@ impl SalvagedPackets {
                 return Ok(None);
             }
             Err(PacketError::Invalid(why)) => {
-                // Zeros to the end are space no packet was written to, so
-                // not counted as unread; anything else is a part of the
-                // recording not read.
+                // Zeros to the end are no part of the recording; anything
+                // else is unread.
                 if self.zeros_to_end()? {
                     self.end = offset;
                     self.stopped = Some(Stop::End);
@@ -212,21 +161,18 @@ impl SalvagedPackets {
         Ok(Some(packet))
     }
 
-    /// Why the salvage stopped, once it has.
     #[must_use]
     pub fn stopped(&self) -> Option<Stop> {
         self.stopped
     }
 
-    /// The packets handed out so far.
     #[must_use]
     pub fn packets(&self) -> u64 {
         self.packets
     }
 
-    /// Whether the packets read hold less than half of the bytes from the
-    /// first packet to the end of the file (less any zeros after the last
-    /// packet, which no packet was written to): then this is no salvage.
+    /// Whether the packets hold less than half of the bytes from the first
+    /// packet to the end (trailing zeros aside): then this is no salvage.
     #[must_use]
     pub fn too_little(&self) -> bool {
         self.read.saturating_mul(2) < self.end - self.start
@@ -252,20 +198,15 @@ impl SalvagedPackets {
         Ok(())
     }
 
-    /// Whether every byte from the current one to the end of the file is
-    /// zero.
     fn zeros_to_end(&mut self) -> std::io::Result<bool> {
         let offset = self.buffer_offset + self.at as u64;
         Ok(first_non_zero(&mut self.file, offset, self.end)?.is_none())
     }
 }
 
-/// Where the packets of a file in the recorder's layout may start, from
-/// its top-level boxes: past the `ftyp` and any `free`, `skip` or `wide`,
-/// either the body of an `mdat` or, where the boxes stop, the zeros of the
-/// reserve. `None` when the `ftyp` is not the recorder's or a `moov` is
-/// among the boxes, before the `mdat` or after it, or after the first box
-/// of another type.
+/// Where the packets may start: past the `ftyp` and any `free`, `skip` or
+/// `wide`, an `mdat` body or the reserve's zeros. `None` when the `ftyp`
+/// is not the recorder's or a `moov` is among the boxes.
 fn packet_region(file: &mut File, end: u64) -> std::io::Result<Option<Region>> {
     if end < 8 {
         return Ok(None);
@@ -304,10 +245,9 @@ fn packet_region(file: &mut File, end: u64) -> std::io::Result<Option<Region>> {
     Ok(None)
 }
 
-/// The body's offset and the whole size of the box at `at` whose 32-bit
-/// size field is `size`: a size of 1 is followed by the 64-bit size, and a
-/// size of 0 runs to the end of the file. `None` for a size that cannot be
-/// a box's (2 to 7, or one whose 64-bit size is under 16).
+/// The body's offset and whole size of the box at `at` with 32-bit size
+/// field `size` (1: a 64-bit size follows, 0: to the end). `None` for a
+/// size no box can have.
 fn box_extent(
     file: &mut File,
     at: u64,
@@ -328,9 +268,8 @@ fn box_extent(
     })
 }
 
-/// Whether a `moov` is among the top-level boxes from `at` to the end of
-/// the file, walking at most [`MAX_BOXES`] of them; a box whose size cannot
-/// be read ends the walk, as nothing after it can be found.
+/// Whether a `moov` is among the top-level boxes from `at`, walking at most
+/// [`MAX_BOXES`]; an unreadable size ends the walk.
 fn moov_after(file: &mut File, mut at: u64, end: u64) -> std::io::Result<bool> {
     for _ in 0..MAX_BOXES {
         if at.saturating_add(8) > end {
@@ -348,7 +287,6 @@ fn moov_after(file: &mut File, mut at: u64, end: u64) -> std::io::Result<bool> {
     Ok(false)
 }
 
-/// Where a file's packets may start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Region {
     /// The body of an `mdat`: the packets start there.
@@ -358,12 +296,10 @@ enum Region {
 }
 
 /// The offset of a file's first packet: an `mdat`'s body if its packets
-/// parse from there; else, in the reserve (or in that body: a writer may
-/// leave a placeholder `mdat` header before zeros), the first byte that is
-/// not zero or one of the three before it (a packet may start with zero
-/// bytes: Apple's first one does), whichever [`START_RUN`] packets parse
-/// from first: one byte before it first (Apple's first packet starts with a
-/// zero byte), then the byte, then two and three before.
+/// parse from there; else, past the zeros, the first offset from which
+/// [`START_RUN`] packets parse, trying one byte before the first non-zero
+/// byte first (Apple's first packet starts with a zero), then the byte,
+/// then two and three before.
 fn first_packet(file: &mut File, region: Region, end: u64) -> std::io::Result<Option<u64>> {
     let reserve = match region {
         Region::Mdat(body) if packets_parse_from(file, body, end)? => return Ok(Some(body)),
@@ -385,7 +321,7 @@ fn first_packet(file: &mut File, region: Region, end: u64) -> std::io::Result<Op
 }
 
 /// Whether [`START_RUN`] packets parse in a row from `start`, or at least
-/// one and then every packet to the end of the file.
+/// one and then every packet to the end.
 fn packets_parse_from(file: &mut File, start: u64, end: u64) -> std::io::Result<bool> {
     let length =
         usize::try_from((end - start).min((START_RUN * MAX_PACKET_BYTES) as u64)).unwrap_or(0);
@@ -408,8 +344,6 @@ fn packets_parse_from(file: &mut File, start: u64, end: u64) -> std::io::Result<
     Ok(true)
 }
 
-/// The offset of the first byte from `from` to `limit` that is not zero,
-/// `None` when they all are.
 fn first_non_zero(file: &mut File, from: u64, limit: u64) -> std::io::Result<Option<u64>> {
     let mut block = vec![0u8; READ_BLOCK];
     let mut offset = from;
@@ -447,7 +381,6 @@ mod tests {
     /// Apple's silent packet: a long window with no bands, then `END`.
     const SILENT: [u8; 4] = [0x00, 0xd0, 0x00, 0x07];
 
-    /// The region `packet_region` finds in `bytes`.
     fn region_of(bytes: &[u8]) -> Option<Region> {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("boxes.m4a");
@@ -462,10 +395,8 @@ mod tests {
         [size.to_be_bytes().as_slice(), &kind, body].concat()
     }
 
-    /// A box the walk does not know (a `uuid`) ends it where the reserve
-    /// would start, but a `moov` after it still refuses the file: `ftyp,
-    /// uuid, mdat` is `Reserve` at the `uuid`, and the same with a `moov`
-    /// (one symphonia cannot read) after the `mdat` is `None`.
+    /// An unknown box ends the walk where the reserve would start, but a
+    /// `moov` after it still refuses the file.
     #[test]
     fn a_moov_after_an_unknown_box_refuses_the_file() {
         let ftyp = mp4_box(*b"ftyp", b"M4A \0\0\0\0M4A mp42isom");
@@ -491,10 +422,8 @@ mod tests {
         packets_parse_from(&mut file, 0, bytes.len() as u64).unwrap()
     }
 
-    /// A start needs eight packets in a row ([`START_RUN`]), so an alignment that
-    /// parses a few packets by chance is not taken; a short file needs
-    /// every packet to its end, a last one cut off included, and at least
-    /// one.
+    /// A start needs [`START_RUN`] packets in a row; a short file needs
+    /// every packet to its end, and at least one.
     #[test]
     fn a_start_needs_a_run_of_packets_or_the_end_of_the_file() {
         let junk = [0xff; 64];

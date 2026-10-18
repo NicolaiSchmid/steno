@@ -1,16 +1,8 @@
-//! `SpeechEngine` over the CoreML models and the shared pipeline:
-//! `steno_speech`'s [`Transcriber`] (the VAD layout, the decode loop, the
-//! merge, the segmentation and the language tagger) over four [`Backend`]
-//! workers. Models load on the first `prepare` (or the first `transcribe`)
-//! from the Swift app's model directory and stay loaded for the engine's
-//! lifetime, unless a model call raises an Objective-C exception
-//! ([`SpeechError::Exception`]): then they load again on the next call.
-//! Swift: `Sources/StenoSpeech/Engines/ParakeetEngine.swift`.
-//!
-//! `transcribe` runs the pipeline on the calling thread: it takes seconds
-//! and the boundary is documented as such (`steno_core::protocols`); the
-//! pipeline host runs it on a blocking thread when it has an async
-//! runtime to protect.
+//! `SpeechEngine` over the CoreML models: `steno_speech`'s [`Transcriber`]
+//! over four [`Backend`] workers. Models load on the first `prepare` or
+//! `transcribe` and stay loaded, unless a model call raises an Objective-C
+//! exception ([`SpeechError::Exception`]); then they load again on the next
+//! call. `transcribe` blocks the calling thread for seconds.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -30,41 +22,24 @@ use crate::backend::{Backend, MAX_WINDOW_SAMPLES, Models};
 /// The engine id, the ONNX engine's: the same model and setting.
 pub const ENGINE_ID: &str = PARAKEET_V3_ID;
 
-/// Chunks decoded at once (`ASRConfig.parallelChunkConcurrency`).
+/// Chunks decoded at once.
 pub const WORKERS: usize = 4;
 
 /// The shared pipeline's defaults with three chunker settings of the
-/// engine's own, measured on FLEURS German `cat/` (A2 in
-/// `.plans/2026-10-07-stable-promotion.md`):
+/// engine's own, measured on FLEURS German:
 ///
 /// - the clamp is the models' 15 s window;
-/// - no pause is long enough to be skipped: with the energy detector a
-///   chunk that began just before speech after a long pause lost words
-///   (5.86 % mean WER against 5.09 % without the skip);
-/// - the gaps, the audio the chunks leave out, are decoded too, in extra
-///   windows ([`steno_speech::chunker::partition`]): the chunks still
-///   start 0.25 s before the first speech the detector finds, a chunk that
-///   starts inside a pause still moves to 0.25 s before the speech after
-///   it, and the last chunk still ends 0.25 s after the last speech, and
-///   each gap those leave is decoded in windows of at most 15 s that stay
-///   inside it. A gap's windows keep their whole decodes and merge with
-///   each other as the chunks do, and the chunks and a gap's windows are
-///   joined in order ([`steno_speech::pipeline`]). Quiet speech the
-///   detector takes for silence there is kept. Where a chunk meets a gap's
-///   window, a copy of a word both heard falls away when the two start
-///   within two frames, and the copy with more pieces stays, so the
-///   chunk's copy can give way to the window's. A word sounding across
-///   the end of a gap into a chunk comes out twice when the chunk hears its
-///   rest as a word of its own, and so does one sounding across a chunk's
-///   end into a gap when the two copies start more than two frames apart:
-///   the join cannot tell it from the word said again.
+/// - no pause is skipped: skipping one lost words at the start of the
+///   next chunk;
+/// - the gaps the chunks leave out are decoded too, in windows of at most
+///   15 s inside each gap ([`steno_speech::chunker::partition`]), so quiet
+///   speech the detector takes for silence is kept. Where a chunk meets a
+///   gap's window, a word both heard is kept once when the two copies start
+///   within two frames; one sounding across the boundary can come out twice.
 ///
-/// The limit: a gap shorter than 2.5 s
+/// A gap shorter than 2.5 s
 /// ([`MIN_GAP_SECONDS`](steno_speech::chunker::MIN_GAP_SECONDS)) is not
-/// decoded, even where it is the uncovered edge of a longer pause, because
-/// windows that short insert words. Quiet speech the detector misses there
-/// is lost. Laying the chunks out over all of that audio instead moved
-/// every later cut and cost more on FLEURS than it recovered.
+/// decoded, because windows that short insert words.
 #[must_use]
 pub fn pipeline_config() -> PipelineConfig {
     // 240,000 samples is exactly 15 s, so the clamp is the window.
@@ -81,8 +56,8 @@ pub fn pipeline_config() -> PipelineConfig {
     }
 }
 
-/// `Models/fluidaudio/parakeet-tdt-0.6b-v3` under the support directory:
-/// where `StenoSpeech.ModelStore` installs the asset the Swift app uses.
+/// `Models/fluidaudio/parakeet-tdt-0.6b-v3` under the support directory,
+/// where the model store installs the asset.
 #[must_use]
 pub fn default_model_directory() -> PathBuf {
     model_directory(&StenoPaths::default_support_directory())
@@ -124,8 +99,8 @@ impl CoreMlParakeetEngine {
     }
 
     /// With `config` and `workers` windows decoded at once (at least one).
-    /// The detector is not part of `config`: the engine always runs the
-    /// adaptive energy detector with [`VadConfig::default`].
+    /// The engine always runs the adaptive energy detector with
+    /// [`VadConfig::default`].
     #[must_use]
     pub fn with_config(
         model_directory: impl Into<PathBuf>,
@@ -161,17 +136,14 @@ impl CoreMlParakeetEngine {
         self.transcriber.lock().is_ok_and(|t| t.is_some())
     }
 
-    /// Runs `work` on the transcriber, loading the models on first use.
-    /// `loadLocal` in Swift never touches the network and neither does
-    /// this: a missing model directory is an error, not a download (the
-    /// model store owns downloads).
+    /// Runs `work` on the transcriber, loading the models on first use. A
+    /// missing model directory is an error, never a download.
     fn with_transcriber<T>(
         &self,
         work: impl FnOnce(&mut Transcriber<Backend>) -> Result<T, SpeechError>,
     ) -> Result<T, SpeechError> {
-        // A panic in a transcription poisons the lock; the backends may
-        // have stopped inside a model call, so they go and the models load
-        // again.
+        // A panic poisons the lock; the backends may have stopped inside a model
+        // call, so they go and the models load again.
         let mut slot = self.transcriber.lock().unwrap_or_else(|poisoned| {
             let mut slot = poisoned.into_inner();
             *slot = None;
@@ -198,14 +170,9 @@ impl CoreMlParakeetEngine {
         }
         let transcriber = slot.as_mut().expect("loaded above");
         let result = work(transcriber);
-        // An Objective-C exception stopped a model call midway, so the
-        // models go, as after a panic, and the next call loads them again.
-        // That reload is best effort: Cocoa is not exception safe, so
-        // nothing promises what a framework holds after one. Only real
-        // models exercise this branch (measured on the Mac with CoreML's
-        // own allocation exception: the process lived on, and each later
-        // call loaded the models again); the tests' synthetic exceptions
-        // never reach a loaded engine.
+        // An Objective-C exception stopped a model call midway, so the models go
+        // and the next call loads them again. Best effort: Cocoa is not exception
+        // safe, so nothing promises what a framework holds after one.
         if result.as_ref().is_err_and(SpeechError::is_exception) {
             *slot = None;
         }
@@ -255,10 +222,8 @@ impl SpeechEngine for CoreMlParakeetEngine {
         Ok(())
     }
 
-    /// `hint` is never sent to the model: Parakeet runs unpinned, as the
-    /// Swift engine does (its `Language` parameter only separates Latin
-    /// from Cyrillic script), so Denglish comes out mixed. It steers the
-    /// language tagger.
+    /// `hint` is never sent to the model: Parakeet runs unpinned, so Denglish
+    /// comes out mixed. It steers the language tagger.
     async fn transcribe(
         &self,
         audio: &AudioBuffer16k,

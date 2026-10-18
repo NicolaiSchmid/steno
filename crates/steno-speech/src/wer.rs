@@ -1,15 +1,9 @@
-//! The word error rate of one transcript against another, and the
-//! agreement of word start times where the words match: the FLEURS gate,
-//! the `CoreML` parity harness against the Swift transcripts and the
-//! CLI's `dev bakeoff` all score with it. The normaliser is spike F's
-//! (`spikes/onnx-speech/fleurs/score_fleurs.py`), so the gate is measured
-//! the way the spike table was.
-//! Swift: `Sources/StenoSpeech/Bakeoff/WordErrorRate.swift`, whose
-//! normaliser also folds umlauts.
+//! The word error rate of one transcript against another, and the agreement of
+//! word start times where the words match. The normaliser is that of
+//! `scripts/score_fleurs.py`, so the FLEURS gate is measured the same way.
 
-/// Spike F's normaliser: lower case, `%` to `prozent`, `€` to `euro`, `$`
-/// to `dollar`, every run of characters that are not letters or digits a
-/// word boundary.
+/// The FLEURS normaliser: lower case, `%` to `prozent`, `€` to `euro`, `$` to
+/// `dollar`, every run of non-alphanumeric characters a word boundary.
 #[must_use]
 pub fn normalise(text: &str) -> Vec<String> {
     let text = text
@@ -37,7 +31,7 @@ pub enum Edit {
 }
 
 /// Levenshtein alignment over words, matches first on ties so timing
-/// comparisons pair as many words as the distance allows.
+/// comparisons pair as many words as possible.
 #[must_use]
 pub fn align<T: PartialEq>(reference: &[T], hypothesis: &[T]) -> Vec<Edit> {
     let (n, m) = (reference.len(), hypothesis.len());
@@ -100,8 +94,8 @@ impl WordErrors {
         self.substitutions + self.deletions + self.insertions
     }
 
-    /// Edits over reference words; `0` for two empty texts, `1` for an
-    /// empty reference against a non-empty hypothesis.
+    /// Edits over reference words; `0` for two empty texts, `1` for an empty
+    /// reference against a non-empty hypothesis.
     #[must_use]
     pub fn rate(&self) -> f64 {
         if self.reference_words == 0 {
@@ -160,9 +154,8 @@ pub struct TimingAgreement {
     pub within_100ms: usize,
     /// Mean absolute start difference over matched words, in seconds.
     pub mean_abs_seconds: f64,
-    /// Mean signed start difference over matched words, the hypothesis's
-    /// start minus the reference's, in seconds: positive when the
-    /// hypothesis starts later.
+    /// Mean signed start difference over matched words, hypothesis minus
+    /// reference, in seconds.
     pub mean_offset_seconds: f64,
 }
 
@@ -177,8 +170,8 @@ impl TimingAgreement {
     }
 }
 
-/// Aligns the words (one normalised key per word; words that normalise to
-/// nothing are skipped) and compares start times where they match.
+/// Aligns the words (words that normalise to nothing are skipped) and compares
+/// start times where they match.
 #[must_use]
 pub fn timing_agreement(reference: &[TimedText], hypothesis: &[TimedText]) -> TimingAgreement {
     fn keyed(words: &[TimedText]) -> Vec<(String, f64)> {
@@ -281,8 +274,8 @@ mod tests {
             word: word.to_owned(),
             start,
         };
-        // "hallo" on the inclusive 10 ms edge (plus the rounding
-        // allowance), "gut" 15 ms late, "welt" 50 ms late.
+        // "hallo" on the inclusive 10 ms edge, "gut" 15 ms late, "welt" 50 ms
+        // late.
         let reference = [
             timed("Hallo", 0.0),
             timed("Welt.", 0.5),

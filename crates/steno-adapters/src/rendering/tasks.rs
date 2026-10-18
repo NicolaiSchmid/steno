@@ -1,13 +1,11 @@
 //! The tasks note in Obsidian Tasks syntax.
-//! Swift: `Sources/StenoAdapters/Rendering/TasksMarkdownRenderer.swift`.
 
 use steno_core::{MeetingExport, MeetingTask, TaskPriority};
 
 use super::{ArtifactRenderer, Names, RenderOptions, date_text, markdown_text};
 
-/// The plugin reads its fields from the end of the line, so the order is
-/// fixed: description, assignee link, tag, priority, due date. Emoji are
-/// bare code points: U+FE0F and NBSP break recognition.
+/// The plugin reads fields from the line's end, so the order is fixed.
+/// Emoji are bare code points: U+FE0F and NBSP break recognition.
 pub(crate) struct TasksMarkdownRenderer<'a> {
     pub export: &'a MeetingExport,
     pub options: &'a RenderOptions,

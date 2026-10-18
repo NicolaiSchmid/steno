@@ -1,13 +1,11 @@
 //! The structured summary the LLM returns.
-//! Swift: `Sources/StenoCore/Model/Summary.swift`.
 
 use serde::{Deserialize, Serialize};
 
 use super::LanguageTag;
 
-/// The structured summary the LLM returns for one template. Stored as JSON
-/// in `meeting.summary`; its `plain_text` fills `meeting.summaryText` for
-/// full-text search.
+/// The structured summary for one template, stored as JSON in
+/// `meeting.summary`; `plain_text` fills `meeting.summaryText` for search.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SummaryDocument {

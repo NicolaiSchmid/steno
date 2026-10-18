@@ -1,6 +1,5 @@
 //! The Settings window's six section view models, the sidebar overview and
-//! their snapshots, after `apps/macos/Steno/Settings/` and
-//! `Web/SettingsSnapshots.swift`.
+//! their snapshots.
 
 pub mod audio;
 pub mod general;
@@ -21,7 +20,7 @@ pub use phones::PhonesSettingsViewModel;
 pub use transcription::{AssetState, SpeechSettingsViewModel};
 
 /// The error pair every section renders: a plain sentence in `error` with
-/// the original text in `details`. Swift: `SettingsSectionModel`.
+/// the original text in `details`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SectionError {
     pub error: Option<String>,
@@ -41,7 +40,6 @@ impl SectionError {
 }
 
 /// Load, mutate, save: every settings edit goes through here.
-/// Swift: `AppEnvironment.updateSettings`.
 pub fn update_settings(
     store: &Store,
     mutate: impl FnOnce(&mut Settings),

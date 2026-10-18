@@ -1,7 +1,6 @@
 //! `pairedDevice`, `handoverReceipt` and `handoverAdmission` rows: the
 //! phones paired with this computer, where each phone recording's handover
 //! stands, and the ledger of the recordings admitted.
-//! Swift: `Sources/StenoCore/Storage/MeetingStore+Handover.swift`.
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -57,7 +56,7 @@ fn receipt_from_row(row: &Row<'_>) -> rusqlite::Result<HandoverReceipt> {
 }
 
 /// What an admission's commit wrote ([`Store::commit_admission_durably`],
-/// [`Store::adopt_upload_durably`]). Rust only.
+/// [`Store::adopt_upload_durably`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionCommit {
     /// The meeting, its asset and the ledger row.
@@ -65,15 +64,13 @@ pub enum AdmissionCommit {
     /// None of them: the ledger already held the bytes, as `meeting_id`.
     Earlier {
         meeting_id: Uuid,
-        /// The user deleted that meeting: it has no row, read in the same
-        /// transaction. Only the launch's adoption answers so; an
-        /// admission's commit answers only with a meeting that exists.
+        /// The user deleted that meeting. Only the launch's adoption
+        /// answers so.
         deleted: bool,
     },
 }
 
 impl Store {
-    /// Every paired phone, oldest pairing first.
     pub fn paired_devices(&self) -> Result<Vec<PairedDevice>> {
         self.read(|connection| {
             query_all(
@@ -85,11 +82,10 @@ impl Store {
         })
     }
 
-    /// Inserts or replaces the device (GRDB's `save`). `token_hash` is the
-    /// SHA-256 of the bearer token; the token itself is never stored. On
-    /// the disk when it returns ([`Store::write_durably`]): the phone keeps
-    /// the token from the answer that follows, and a pairing a power loss
-    /// rolled back would unpair it.
+    /// Inserts or replaces the device. `token_hash` is the SHA-256 of the
+    /// bearer token, never the token. Durable: the phone keeps the token
+    /// from the answer that follows, and a rolled-back pairing would unpair
+    /// it.
     pub fn save_paired_device(&self, device: &PairedDevice, token_hash: &[u8]) -> Result<()> {
         self.write_durably(|transaction| {
             transaction.execute(
@@ -107,10 +103,8 @@ impl Store {
     }
 
     /// Refreshes `lastSeenAt` of the device that still holds `token_hash`.
-    /// An `UPDATE`, not a save: the engine reads the device and touches it
-    /// after a yield, and a revoke in between must stay a revoke. A row that
-    /// is gone, or whose token changed, is left alone. Swift:
-    /// `MeetingStore.touchPairedDevice`.
+    /// An `UPDATE`, not a save, so a revoke between the read and the touch
+    /// stays a revoke.
     pub fn touch_paired_device(
         &self,
         id: Uuid,
@@ -126,19 +120,16 @@ impl Store {
         })
     }
 
-    /// The device whose bearer token hashes to `token_hash`.
     pub fn paired_device_for_token_hash(&self, token_hash: &[u8]) -> Result<Option<PairedDevice>> {
         self.read(|connection| device_where(connection, "tokenHash = ?1", token_hash))
     }
 
-    /// The device with `id`.
     pub fn paired_device(&self, id: Uuid) -> Result<Option<PairedDevice>> {
         self.read(|connection| device_where(connection, "id = ?1", DbUuid(id)))
     }
 
-    /// Revokes the phone; its handover receipts go with it (the foreign key
-    /// cascades). On the disk when it returns ([`Store::write_durably`]), so
-    /// a power loss cannot bring a revoked phone back.
+    /// Revokes the phone; its receipts cascade. Durable, so a power loss
+    /// cannot bring a revoked phone back.
     pub fn delete_paired_device(&self, id: Uuid) -> Result<()> {
         self.write_durably(|transaction| {
             transaction.execute("DELETE FROM pairedDevice WHERE id = ?1", [DbUuid(id)])?;
@@ -146,7 +137,6 @@ impl Store {
         })
     }
 
-    /// The receipt of `recording_id`.
     pub fn handover_receipt(&self, recording_id: Uuid) -> Result<Option<HandoverReceipt>> {
         self.read(|connection| {
             Ok(connection
@@ -161,46 +151,33 @@ impl Store {
         })
     }
 
-    /// Inserts or replaces the receipt (GRDB's `save`).
     pub fn save_handover_receipt(&self, receipt: &HandoverReceipt) -> Result<()> {
         self.write(|transaction| save_receipt(transaction, receipt))
     }
 
-    /// [`Store::save_handover_receipt`], on the disk when it returns
-    /// ([`Store::write_durably`]): the phone intake's `failed` receipt
-    /// after a failed admission commit, whose frames may still sit in the
-    /// WAL for recovery to replay. This commit writes over them, or voids
-    /// them when the WAL restarts, so once it returns no restart brings
-    /// the admission back. Swift: `MeetingStore.saveDurably(_:)`.
+    /// [`Store::save_handover_receipt`], durable: the intake's `failed`
+    /// receipt after a failed admission commit, whose frames may still sit
+    /// in the WAL. This commit writes over them, so no restart brings the
+    /// admission back.
     pub fn save_handover_receipt_durably(&self, receipt: &HandoverReceipt) -> Result<()> {
         self.write_durably(|transaction| save_receipt(transaction, receipt))
     }
 
     /// The phone intake's admission: the `complete` receipt, the meeting,
-    /// its asset and the admission's ledger row (see
-    /// [`Store::admitted_meeting`]) in one transaction, on the disk when it
-    /// returns ([`Store::write_durably`]). It returns the meeting the
-    /// receipt was completed with. The phone deletes its copy once
-    /// `complete` answers 200, so no commit may hold the receipt without
-    /// the meeting, and a power loss must not roll either back.
+    /// its asset and the ledger row ([`Store::admitted_meeting`]) in one
+    /// durable transaction. Returns the meeting the receipt was completed
+    /// with. The phone deletes its copy once `complete` answers 200, so no
+    /// commit may hold the receipt without the meeting.
     ///
-    /// When the ledger already holds these bytes (the same recording id,
-    /// size and SHA-256) and their meeting still exists, the receipt is
-    /// completed with that meeting, `meeting` and `asset` are not written,
-    /// and that meeting's id comes back: the same bytes are one recording.
-    /// Another device's upload of them can reach the intake after the
-    /// first admission committed (it took the receipt over during that
-    /// intake), and a second meeting would be a duplicate. When the
-    /// user deleted the row's meeting, the admission writes `meeting` and
-    /// the row moves to it, so a later upload of the same bytes finds that
-    /// meeting instead of writing a third.
+    /// When the ledger already holds these bytes (recording id, size and
+    /// SHA-256) and their meeting exists, the receipt is completed with
+    /// that meeting and nothing else is written: the same bytes are one
+    /// recording. When the user deleted that meeting, `meeting` is written
+    /// and the ledger row moves to it.
     ///
     /// Fails with [`StoreError::ReceiptOfAnotherUpload`], writing nothing,
-    /// when the stored receipt belongs to another device than `receipt` or
-    /// holds another size or SHA-256: completed, it would answer that
-    /// device's `complete`, or the `complete` of the other bytes, with this
-    /// meeting, and the phone would delete a recording never admitted.
-    /// Swift: `MeetingStore.saveDurably(_:meeting:asset:)`.
+    /// when the stored receipt belongs to another device or holds other
+    /// bytes: the phone would otherwise delete a recording never admitted.
     pub fn save_admission_durably(
         &self,
         receipt: &HandoverReceipt,
@@ -216,15 +193,10 @@ impl Store {
     }
 
     /// [`Store::save_admission_durably`], saying whether it wrote `meeting`
-    /// or the ledger answered: the phone intake's, whose meeting can share
-    /// its id with the ledger's when it admits into the noted copy an
-    /// earlier admission left (`RecordingIntake`), which the launch may
-    /// have adopted meanwhile ([`Store::adopt_upload_durably`]). Fails with
-    /// [`StoreError::MeetingExists`], writing nothing, when the ledger does
-    /// not answer and `meeting` already has a row: the launch adopted that
-    /// copy without the ledger row (its read of the noted uploads failed),
-    /// and an upsert would give the one master a second asset row under
-    /// another retention. Rust only.
+    /// or the ledger answered. Fails with [`StoreError::MeetingExists`],
+    /// writing nothing, when the ledger does not answer and `meeting`
+    /// already has a row (the launch adopted the copy without its ledger
+    /// row): an upsert would give the one master a second asset row.
     pub fn commit_admission_durably(
         &self,
         receipt: &HandoverReceipt,
@@ -298,24 +270,14 @@ impl Store {
         })
     }
 
-    /// The launch's adoption of the copy a phone admission left with no
-    /// meeting (a commit and its `failed` save that both gave up), when
-    /// the copy holds the upload it was noted for (`steno_services`'
-    /// recovery): `meeting` and `asset` inserted with the ledger row of the
-    /// recording `recording_id` of `byte_count` bytes hashing to `sha256`,
-    /// in one transaction, on the disk when it returns
-    /// ([`Store::write_durably`]). The phone's retry is then answered with
-    /// this meeting from that row, as any admission's. When the ledger
-    /// already holds those bytes, with a meeting or with one the user
-    /// deleted, nothing is written and the row's meeting id comes back,
-    /// with whether that meeting is gone, read in this transaction: the
-    /// phone's retry is answered from that row anyway. The caller removes
-    /// the copy when the meeting is gone: a ledger row is written in the
-    /// transaction that writes its meeting, so a row whose meeting is gone
-    /// means the user deleted those bytes. Fails with
-    /// [`StoreError::MeetingExists`], writing nothing, when `meeting` has
-    /// a row (the phone's retry admitted into the copy meanwhile). The
-    /// receipt is left as it is. Rust only: Swift had no recovery.
+    /// The launch's adoption of a copy a phone admission left with no
+    /// meeting: `meeting`, `asset` and the ledger row in one durable
+    /// transaction, so the phone's retry is answered from that row. When
+    /// the ledger already holds those bytes, nothing is written and the
+    /// row's meeting id comes back with whether that meeting is gone; the
+    /// caller then removes the copy, since the user deleted those bytes.
+    /// Fails with [`StoreError::MeetingExists`] when `meeting` has a row.
+    /// The receipt is left as it is.
     pub fn adopt_upload_durably(
         &self,
         meeting: &Meeting,
@@ -357,15 +319,10 @@ impl Store {
     }
 
     /// The meeting the phone recording `recording_id` of `byte_count` bytes
-    /// hashing to `sha256` was admitted as, from the admission ledger
-    /// (`handoverAdmission`, schema v5). A row is written in the
-    /// admission's own transaction ([`Store::save_admission_durably`]), or
-    /// in the launch's adoption ([`Store::adopt_upload_durably`]), and
-    /// never deleted: not by a revoke, whose cascade takes the receipts,
-    /// nor by a meeting delete, so the meeting may be gone. The handover
-    /// answers a phone that announces those bytes again "delivered" from
-    /// it, so the phone deletes its copy instead of uploading it as a
-    /// second meeting. Swift: `MeetingStore.admittedMeeting`.
+    /// hashing to `sha256` was admitted as, from the ledger. A row is never
+    /// deleted (not by a revoke, nor a meeting delete), so the meeting may
+    /// be gone. The handover answers a phone announcing those bytes again
+    /// "delivered", so it does not upload a second meeting.
     pub fn admitted_meeting(
         &self,
         recording_id: Uuid,
@@ -384,11 +341,10 @@ impl Store {
         })
     }
 
-    /// Writes the ledger row of every `complete` receipt whose meeting row
-    /// exists and that has none yet: the admissions before schema v5, and
-    /// those an older app committed during a rollback, since it ignores v5
-    /// and writes no row. [`Store::open`] runs it every time. Swift: the
-    /// backfill in `MeetingStore.init`.
+    /// Writes the ledger row of every `complete` receipt whose meeting
+    /// exists and that has none yet: admissions before schema v5, and
+    /// those an older app committed during a rollback (it ignores v5).
+    /// [`Store::open`] runs it every time.
     pub(crate) fn backfill_handover_admissions(&self) -> Result<()> {
         self.write(|transaction| {
             transaction.execute_batch(BACKFILL_ADMISSIONS)?;
@@ -397,8 +353,8 @@ impl Store {
     }
 }
 
-/// [`Store::backfill_handover_admissions`]; the Swift backfill runs the same
-/// text.
+/// [`Store::backfill_handover_admissions`]; the Swift store's backfill runs
+/// the same text.
 const BACKFILL_ADMISSIONS: &str = "INSERT OR IGNORE INTO \"handoverAdmission\" \
      (\"recordingID\", \"byteCount\", \"sha256\", \"meetingID\", \"admittedAt\") \
      SELECT \"recordingID\", \"byteCount\", \"sha256\", \"meetingID\", \"updatedAt\" \
@@ -406,9 +362,8 @@ const BACKFILL_ADMISSIONS: &str = "INSERT OR IGNORE INTO \"handoverAdmission\" \
      WHERE \"state\" = 'complete' \
      AND \"meetingID\" IN (SELECT \"id\" FROM \"meeting\")";
 
-/// The ledger row of the recording `recording_id` of `byte_count` bytes
-/// hashing to `sha256`, as admitted as `meeting_id` at `at`. A row of a
-/// meeting that still exists stays; one whose meeting is gone moves.
+/// The ledger row of the given bytes, admitted as `meeting_id` at `at`. A
+/// row whose meeting still exists stays; one whose meeting is gone moves.
 fn save_admission_row(
     connection: &Connection,
     recording_id: Uuid,
@@ -468,11 +423,7 @@ mod tests {
 
     use super::*;
 
-    /// A pairing and a revoke commit under `synchronous = FULL` (2): the phone
-    /// keeps the token from the pairing's answer, so a power loss must not
-    /// forget the pairing, nor bring a revoked phone back. That the commit then
-    /// survives a power loss is SQLite's and cannot be tested. Swift:
-    /// `aPairingAndARevokeCommitDurably`.
+    /// A pairing and a revoke commit under `synchronous = FULL`.
     #[test]
     fn a_pairing_and_a_revoke_commit_durably() {
         let directory = tempfile::tempdir().unwrap();

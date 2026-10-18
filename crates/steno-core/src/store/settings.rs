@@ -1,22 +1,9 @@
 //! `Settings` as one row per property in the `setting` table, each value a
-//! one-line `StenoJSON` fragment. A property missing from the table loads
-//! as its default. A row this build does not know (a newer build's or the
-//! Swift app's, which share the file until the Mac cutover) is ignored on
-//! load and kept on save. A `handoverPort` row that is not a port (users
-//! type it by hand) loads as unset with a warning, and the next save
-//! removes it. Rust only.
-//! Swift: `Sources/StenoCore/Storage/SettingsStore.swift`, which still
-//! deletes and rewrites every row.
-//!
-//! A row that cannot be read as its setting fails the load with
-//! [`StoreError::UndecodableSetting`], which names the row's key and what is
-//! wrong with it and leaves the value out. Rust only: the Swift app's
-//! decoding error named a coding path.
-//!
-//! Parakeet v3 ([`PARAKEET_V3_ENGINE_ID`]) is the one engine the Rust app
-//! runs; [`Store::retire_speech_engine`] moves any other stored engine id
-//! (Whisper, Parakeet Ultra and the German Parakeet the Swift app offered)
-//! to it. Rust only.
+//! one-line `StenoJSON` fragment. A missing property loads as its default.
+//! A row this build does not know (a newer build's, or the Swift app's,
+//! which shares the file until the Mac cutover) is ignored on load and kept
+//! on save. A row that cannot be read fails the load with
+//! [`StoreError::UndecodableSetting`], naming the key but not the value.
 
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::Deserialize;
@@ -27,32 +14,25 @@ use super::{Result, Store, StoreError, execute_cached, query_all};
 use crate::json;
 use crate::model::{AudioRetention, Settings};
 
-/// The one engine the Rust app runs, a Swift engine too: what
-/// [`Store::retire_speech_engine`] stores in place of any other id.
-/// Swift: `SpeechEngineID.parakeetV3`
-/// (`Sources/StenoSpeech/Engines/SpeechEngineID.swift`).
+/// The one engine the app runs: what [`Store::retire_speech_engine`]
+/// stores in place of any other id. The Swift app reads the same id.
 pub const PARAKEET_V3_ENGINE_ID: &str = "parakeet-v3";
 
-/// The key [`Settings::speech_engine_id`] is stored under.
 const SPEECH_ENGINE_KEY: &str = "speechEngineID";
 
-/// The key [`Settings::handover_port`] is stored under, the one users type
-/// by hand (`apps/desktop/README.md`).
+/// The key [`Settings::handover_port`] is stored under, which users type
+/// by hand.
 const HANDOVER_PORT_KEY: &str = "handoverPort";
 
-/// The key [`Settings::default_retention`] is stored under.
 const DEFAULT_RETENTION_KEY: &str = "defaultRetention";
 
-/// What is wrong with a stored setting
-/// ([`StoreError::UndecodableSetting`]), in words that never quote the
-/// value. Rust only.
+/// What is wrong with a stored setting, in words that never quote the
+/// value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingProblem {
     /// The row's text is not JSON.
     NotJson,
-    /// The row is JSON, but not of the shape the setting has in this
-    /// build (a string where a number belongs, a name this build does not
-    /// know).
+    /// The row is JSON, but not of the shape the setting has in this build.
     WrongShape,
 }
 
@@ -65,15 +45,14 @@ impl std::fmt::Display for SettingProblem {
     }
 }
 
-/// `settings` as a JSON object. Through text, not `to_value`, so an `f32`
-/// keeps its shortest form (`0.6`) as in [`json::to_column_string`].
+/// `settings` as a JSON object. Through text, so an `f32` keeps its
+/// shortest form (`0.6`) as in [`json::to_column_string`].
 fn object(settings: &Settings) -> Result<serde_json::Map<String, Value>> {
     Ok(serde_json::from_str(&serde_json::to_string(settings)?)?)
 }
 
-/// Every key `Settings` reads and writes, the `None` ones included: the
-/// field names its derived `Deserialize` hands to `deserialize_struct`, so
-/// a new field is a known key without a list to keep in step.
+/// Every key `Settings` reads and writes, the `None` ones included, from
+/// its derived `Deserialize`, so a new field needs no list kept in step.
 fn known_keys() -> &'static [&'static str] {
     let mut fields = None;
     // Always an error: the deserializer stops at the field list.
@@ -110,18 +89,15 @@ impl<'de> Deserializer<'de> for FieldNames<'_> {
 }
 
 /// `merged` (the defaults with every stored row over them) as `Settings`.
-/// A failure never carries serde's message, which quotes the value it
-/// choked on: it names the first row that fails on its own
-/// ([`StoreError::UndecodableSetting`]), or, when every row decodes on its
-/// own (two rows that only fail together), none
+/// A failure never carries serde's message, which quotes the value: it
+/// names the first row that fails on its own, or none
 /// ([`StoreError::UndecodableSettings`]).
 fn decode(defaults: &Settings, merged: &Value) -> Result<Settings> {
     Settings::deserialize(merged)
         .map_err(|_| undecodable_row(defaults, merged).unwrap_or(StoreError::UndecodableSettings))
 }
 
-/// The first stored key whose value alone over `defaults` does not decode
-/// as `Settings`, as the error that names it; `None` when there is none.
+/// The first stored key whose value alone over `defaults` does not decode.
 fn undecodable_row(defaults: &Settings, merged: &Value) -> Option<StoreError> {
     let defaults = object(defaults).ok()?;
     merged
@@ -139,14 +115,12 @@ fn undecodable_row(defaults: &Settings, merged: &Value) -> Option<StoreError> {
         })
 }
 
-/// Every stored setting row, as key and JSON text.
 fn stored_rows(connection: &Connection) -> Result<Vec<(String, String)>> {
     query_all(connection, "SELECT key, value FROM setting", [], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })
 }
 
-/// `defaults` overlaid with `rows` ([`Store::settings_with_defaults`]).
 fn overlaid(defaults: &Settings, rows: Vec<(String, String)>) -> Result<Settings> {
     let mut merged = object(defaults)?;
     for (key, value) in rows {
@@ -168,13 +142,10 @@ fn overlaid(defaults: &Settings, rows: Vec<(String, String)>) -> Result<Settings
     decode(defaults, &Value::Object(merged))
 }
 
-/// The default retention as stored, read on `connection` from its own row
-/// alone: inside the stop's save ([`Store::save_stopped_recording`]), so
-/// the save needs no reader and no other setting can fail it. A missing
-/// row is [`Settings::default`]'s. A row that cannot be read as a
-/// retention rule is [`AudioRetention::KeepForever`], which deletes
-/// nothing, with a warning that names the key and never the value. Rust
-/// only: the Swift app loaded every setting and failed on any of them.
+/// The default retention from its own row alone, inside the stop's save,
+/// so no other setting can fail it. A missing row is the default's; an
+/// unreadable one is [`AudioRetention::KeepForever`], which deletes
+/// nothing, with a warning that names the key only.
 pub(super) fn default_retention(connection: &Connection) -> Result<AudioRetention> {
     let stored: Option<String> = connection
         .query_row(
@@ -196,13 +167,11 @@ pub(super) fn default_retention(connection: &Connection) -> Result<AudioRetentio
 }
 
 impl Store {
-    /// The defaults overlaid with every stored row.
     pub fn settings(&self) -> Result<Settings> {
         self.settings_with_defaults(&Settings::default())
     }
 
-    /// [`Store::settings`] over explicit defaults (tests pass one with a
-    /// known audio folder).
+    /// [`Store::settings`] over explicit defaults.
     pub fn settings_with_defaults(&self, defaults: &Settings) -> Result<Settings> {
         let rows = self.read(stored_rows)?;
         overlaid(defaults, rows)
@@ -237,16 +206,12 @@ impl Store {
         })
     }
 
-    /// When an engine id other than [`PARAKEET_V3_ENGINE_ID`] is stored
-    /// (an engine the Swift app offered and the Rust app does not run),
-    /// calls `before_rewrite`, then stores `parakeet-v3` in its place, in
-    /// one transaction; returns whether it did. No id, `parakeet-v3`, or a
-    /// row that is not a JSON string (which [`Store::settings`] refuses as
-    /// [`StoreError::UndecodableSetting`]) changes nothing and calls
-    /// nothing. The app calls it at launch, before anything reads the
-    /// engine, and records the one-time notice in `before_rewrite`, so a
-    /// crash between the two shows the notice once too often rather than
-    /// switching the engine without a word.
+    /// When an engine id other than [`PARAKEET_V3_ENGINE_ID`] is stored,
+    /// calls `before_rewrite`, then stores `parakeet-v3` in one
+    /// transaction; returns whether it did. A row that is not a JSON string
+    /// changes nothing (the load refuses it). The app records its one-time
+    /// notice in `before_rewrite`, so a crash between the two shows the
+    /// notice once too often rather than switching silently.
     pub fn retire_speech_engine(&self, before_rewrite: impl FnOnce()) -> Result<bool> {
         self.write(|transaction| {
             let stored: Option<String> = transaction
@@ -256,8 +221,7 @@ impl Store {
                     |row| row.get(0),
                 )
                 .optional()?;
-            // A row that is not a JSON string is no engine id: the settings
-            // load refuses it by its key, so it is left as it is.
+            // Not a JSON string: the settings load refuses it by its key.
             let Some(Value::String(id)) =
                 stored.and_then(|stored| json::from_column_str(&stored).ok())
             else {
@@ -312,8 +276,7 @@ mod tests {
         assert_eq!(known, serialized);
     }
 
-    /// Stores `value` as the row of `key`, as another build or a hand edit
-    /// would, past `save_settings`.
+    /// Stores `value` as the row of `key`, past `save_settings`.
     fn store_with_row(key: &str, value: &str) -> Store {
         let store = Store::in_memory().unwrap();
         store.save_settings(&Settings::default()).unwrap();
@@ -331,10 +294,8 @@ mod tests {
         store
     }
 
-    /// One row that cannot be read stops the load (no silent default for
-    /// a vault path or a retention rule), and the error names that row's
-    /// key and what is wrong, never its value: a row that is not JSON, a
-    /// row of the wrong type, an enum this build does not know.
+    /// One unreadable row stops the load, and the error names its key and
+    /// what is wrong, never its value.
     #[test]
     fn an_undecodable_row_is_named_by_its_key_without_its_value() {
         for (key, value, problem) in [
@@ -369,7 +330,6 @@ mod tests {
             assert!(!text.contains("sk-secret"), "{text}");
             assert!(!format!("{error:?}").contains("sk-secret"), "{error:?}");
         }
-        // Words for whoever fixes the row, not a parser's.
         assert_eq!(
             SettingProblem::NotJson.to_string(),
             "is not in a form Steno can read"
@@ -380,9 +340,8 @@ mod tests {
         );
     }
 
-    /// Settings that fail as a whole while no row fails on its own (no
-    /// such pair exists today; a value that is not an object stands in)
-    /// give an error without serde's message, which would quote the value.
+    /// Settings that fail as a whole while no row fails alone give an error
+    /// without serde's message.
     #[test]
     fn settings_that_fail_together_name_no_value() {
         let error = decode(&Settings::default(), &Value::from("sk-secret")).unwrap_err();
@@ -397,9 +356,8 @@ mod tests {
         assert!(!format!("{error:?}").contains("sk-secret"));
     }
 
-    /// A speech engine id that is not a string is the load's to refuse: the
-    /// retirement leaves it and calls nothing, so it is never quietly
-    /// replaced by Parakeet v3.
+    /// A speech engine id that is not a string is left for the load to
+    /// refuse, never quietly replaced.
     #[test]
     fn a_speech_engine_id_that_is_not_a_string_is_refused_not_replaced() {
         for (value, problem) in [
@@ -433,8 +391,7 @@ mod tests {
         }
     }
 
-    /// A row this build does not know, and every row this build wrote,
-    /// load as before.
+    /// An unknown row, and every row this build wrote, load as before.
     #[test]
     fn unknown_and_well_formed_rows_still_load() {
         let store = store_with_row("someLaterSetting", "{\"any\":1}");

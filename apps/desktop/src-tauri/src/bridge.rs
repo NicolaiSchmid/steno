@@ -1,17 +1,8 @@
-//! The `bridge_call` command: the Tauri side of
-//! `apps/macos/web/src/bridge/tauri-transport.ts`. The page sends
-//! `{ method, params }` and gets the result or a `BridgeError` with the
-//! contract's error codes (`Sources/StenoBridge`, `envelope.error.json`).
+//! The `bridge_call` command, the Tauri side of the page's transport.
 //! Window and URL methods are the shell's own; everything else goes to the
-//! host, on Tauri's blocking pool ([`host_command`]): a host call can wait
-//! for seconds (the store behind another process's write lock, a stop), and
-//! on a command worker it would hold that worker, so a few such calls would
-//! leave the page's other commands unanswered. The commands stay concurrent
-//! on that pool, each awaited by its own command, and do not take the
-//! tray's ordered lane (`host::call_in_order`): a command behind a Stop
-//! whose save waits would wait too, as every one did on a held worker.
-//!
-//! Swift: `BridgeRequestParams.swift`, `WindowRequests.swift`.
+//! host on Tauri's blocking pool ([`host_command`]), since a host call can
+//! wait for seconds and would otherwise hold a command worker. Commands
+//! stay concurrent there rather than taking the tray's ordered lane.
 
 use std::fmt;
 
@@ -34,30 +25,22 @@ use crate::{
     tray, windows,
 };
 
-/// The event every snapshot travels on; the page listens for it scoped to
-/// its own window.
+/// The event every snapshot travels on, scoped to its window.
 pub const EVENT_NAME: &str = "steno:event";
 
-/// A shell-side failure (a window call, the opener, a plugin) as the
-/// contract's `failed`, for `map_err`.
+/// A shell-side failure as the contract's `failed`, for `map_err`.
 pub fn failed(error: impl fmt::Display) -> BridgeError {
     BridgeError::failed(error.to_string())
 }
 
-/// `invalidParams` for a method whose params did not decode, named after
-/// the method so the page's log says which.
+/// `invalidParams` naming the method whose params did not decode.
 fn invalid_params_for(method: &str, error: impl fmt::Display) -> BridgeError {
     BridgeError::invalid_params(format!("{method}: {error}"))
 }
 
-/// Publishes one topic's snapshot to one window, and to that window only;
-/// the smoke run counts what reaches main. An `onboarding` snapshot that
-/// says `finished` also closes the onboarding window: the page shows what
-/// the host says and the host ends the window. A `recording` snapshot to
-/// the main window is also what the tray and the floating panels follow.
-///
-/// Swift: `OnboardingWindow.swift` (`onChange(of: finished)`),
-/// `FloatingPanelPresenter.observe` and `MenuBarLabel`.
+/// Publishes one topic's snapshot to one window only. A finished
+/// `onboarding` snapshot also closes the onboarding window; a `recording`
+/// snapshot to main is what the tray and the panels follow.
 pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), BridgeError> {
     let topic: BridgeTopic = topic.parse().map_err(failed)?;
     let finished = finishes_onboarding(topic, &payload);
@@ -84,10 +67,8 @@ pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), B
     Ok(())
 }
 
-/// The recorder state the shell follows: the `recording` topic as published
-/// to the main window (the window the host drives the recorder through);
-/// the same topic reaching another window, or any other topic, moves
-/// nothing.
+/// The recorder state the shell follows: the `recording` topic as
+/// published to the main window; anything else moves nothing.
 pub fn recording_state_for_shell(
     label: &str,
     topic: BridgeTopic,
@@ -98,16 +79,12 @@ pub fn recording_state_for_shell(
         .flatten()
 }
 
-/// Whether a snapshot ends onboarding: the `onboarding` topic with
-/// `finished` true.
 pub fn finishes_onboarding(topic: BridgeTopic, payload: &Value) -> bool {
     topic == BridgeTopic::Onboarding && payload["finished"] == Value::Bool(true)
 }
 
-/// The URLs a page may open: `https:` and `mailto:` links, so a page cannot
+/// The URLs a page may open: `https:` and `mailto:` only, so a page cannot
 /// open files or run scripts; anything else is `invalidParams`.
-///
-/// Swift: `BridgeSystemCommands.openURL` in `BridgeRequestParams.swift`.
 pub fn openable_url(text: &str) -> Result<Url, BridgeError> {
     Url::parse(text)
         .ok()
@@ -118,8 +95,7 @@ pub fn openable_url(text: &str) -> Result<Url, BridgeError> {
 }
 
 steno_core::string_enum! {
-    /// What a panel asks of the shell through `panel_call` (`PanelAction`
-    /// in `panel-shell.ts`).
+    /// What a panel asks of the shell through `panel_call`.
     pub enum PanelAction {
         Resize = "resize",
         DismissPrompt = "dismissPrompt",
@@ -127,16 +103,13 @@ steno_core::string_enum! {
     }
 }
 
-/// The action a panel named, or `unknownMethod`, as the bridge answers a
-/// method it does not know.
+/// The action a panel named, or `unknownMethod`.
 pub fn panel_action(text: &str) -> Result<PanelAction, BridgeError> {
     text.parse()
         .map_err(|_| BridgeError::unknown_method(format!("The panels do not answer {text}.")))
 }
 
-/// `panel_call("resize")`: the page's measured size in device pixels (CSS
-/// pixels times `devicePixelRatio`, `deviceSize` in `panel-shell.ts`).
-/// Exactly the two fields, as an object.
+/// `panel_call("resize")`: the page's measured size in device pixels.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResizeParams {
@@ -147,16 +120,14 @@ struct ResizeParams {
 impl ResizeParams {
     /// The size in logical points for a window of `scale`. CSS pixels are
     /// not points everywhere: `WebKitGTK` takes its pixel ratio from the X
-    /// resolution (1.25 at 120 dpi) while the window's scale stays 1.
+    /// resolution while the window's scale stays 1.
     fn logical(&self, scale: f64) -> (f64, f64) {
         (self.width / scale, self.height / scale)
     }
 }
 
-/// `panel_call("dismissPrompt")` and `panel_call("recordFromPrompt")`:
-/// the number of the prompt whose X or Record was clicked (`raised` in
-/// its route); `null` params or no `raised` for a prompt shown
-/// unnumbered.
+/// `panel_call("dismissPrompt")` and `panel_call("recordFromPrompt")`: the
+/// number of the prompt clicked, none for an unnumbered prompt.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PromptParams {
@@ -167,8 +138,8 @@ fn parse<T: for<'de> Deserialize<'de>>(method: &str, params: Value) -> Result<T,
     serde_json::from_value(params).map_err(|error| invalid_params_for(method, error))
 }
 
-/// A panel's params: a JSON object (serde would also read a struct from
-/// an array, `[300, 40]`), with no field the action does not name.
+/// A panel's params: a JSON object (serde would also read a struct from an
+/// array), with no unknown field.
 fn panel_params<T: for<'de> Deserialize<'de>>(
     action: PanelAction,
     params: Value,
@@ -182,8 +153,7 @@ fn panel_params<T: for<'de> Deserialize<'de>>(
     parse(action.as_str(), params)
 }
 
-/// The X's and Record's params: none (`null`) names whatever shows, as
-/// `{}` does.
+/// The X's and Record's params; `null` names whatever shows, as `{}` does.
 fn prompt_params(action: PanelAction, params: Value) -> Result<PromptParams, BridgeError> {
     if params.is_null() {
         Ok(PromptParams::default())
@@ -192,17 +162,13 @@ fn prompt_params(action: PanelAction, params: Value) -> Result<PromptParams, Bri
     }
 }
 
-/// Which window a `window.close` from `caller` may close: the onboarding
-/// window, and only on its own request. The main and Settings windows do
-/// not answer the method (`unknownMethod`, as their Swift hosts route it,
-/// `MainWindowBridge.swift` and `SettingsBridge.swift`); the onboarding
-/// window closes nothing but itself (`invalidParams`,
-/// `OnboardingBridge.swift`). The messages are the Swift hosts' verbatim.
-/// The page does not send the method today: the host closes the window on
-/// a finished `onboarding` snapshot (`emit`).
+/// Which window a `window.close` from `caller` may close: only onboarding,
+/// on its own request. Main and Settings answer `unknownMethod`, and
+/// onboarding closing another window is `invalidParams`, with the
+/// contract's messages.
 pub fn close_target(caller: &str, request: &WindowParams) -> Result<BridgeWindow, BridgeError> {
     if caller != BridgeWindow::Onboarding.as_str() {
-        // The Swift hosts name the Settings window with its title case.
+        // The Settings window is named in title case.
         let name = if caller == BridgeWindow::Settings.as_str() {
             "Settings"
         } else {
@@ -251,10 +217,8 @@ pub async fn bridge_call(
             dialogs::open_url(&app, url.as_str())?;
             Ok(Value::Null)
         }
-        // The OS plumbing the Swift host did inside its view models and
-        // the shell does here: settings panes, the login item, the update
-        // check and the folder panels. See each module for the seam
-        // towards the host.
+        // The OS plumbing: settings panes, the login item, the update check
+        // and the folder panels.
         "system.openSystemSettings" => {
             let request: PermissionKindParams = parse(&method, params)?;
             if let Some(url) = permissions::system_settings_url(request.kind) {
@@ -288,13 +252,7 @@ pub async fn bridge_call(
 
 /// What `bridge_call` hands the host, on Tauri's blocking pool
 /// ([`call_blocking`]), so the command worker is free while the host
-/// works: `page.ready`, `settings.general.setLaunchAtLogin` (the login item
-/// first, then the host hears of it, `actions::set_launch_at_login`), and
-/// every method the shell does not answer itself. Among them are the
-/// permission requests (`onboarding.request`,
-/// `settings.recording.requestPermission`,
-/// `settings.general.requestCalendar`), which wait for the user's answer
-/// to the system prompt, or for the Mac's system audio test, up to 30 s.
+/// works; permission requests among them wait up to 30 s for the user.
 pub async fn host_command<H: ShellHost>(
     host: H,
     window: H::Window,
@@ -313,21 +271,14 @@ pub async fn host_command<H: ShellHost>(
     .await
 }
 
-/// The panels' own command, beside the bridge: the page reports its
-/// measured size (`resize`), the prompt's X dismisses the prompt
-/// (`dismissPrompt`) and its Record records the call it announced
-/// (`recordFromPrompt`, which the detection controller attributes to the
-/// prompt's app, as no bridge method could). Only a panel window may call
-/// it; the three bridge windows get `unknownMethod`, as they would for a
-/// method they do not answer.
+/// The panels' own command: the page reports its size (`resize`), and the
+/// prompt's X dismisses it (`dismissPrompt`) and its Record records the
+/// call it announced (`recordFromPrompt`). Bridge windows get
+/// `unknownMethod`.
 ///
-/// A synchronous command: Tauri runs it on the main thread, in the order
-/// the page sent its calls, so a burst of size reports applies in order
-/// and the last one sent is the size the window keeps. Nothing in it waits
-/// on the main thread (there the window getters answer at once), and it
-/// builds no window, which would deadlock a synchronous command on
-/// Windows: a dismissal's refresh runs later (`panels::dismiss_prompt`).
-// Tauri hands a command its arguments by value.
+/// Synchronous, so Tauri runs it on the main thread in the page's order
+/// and the last size reported wins. It must not wait on the main thread or
+/// build a window, which would deadlock on Windows.
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub fn panel_call(
@@ -380,11 +331,8 @@ mod tests {
         parse("window.open", serde_json::from_str(json).unwrap())
     }
 
-    /// While one command's host call is held (a Stop whose save waits on
-    /// the store), another command on the same one-worker runtime answers:
-    /// the held call waits on the blocking pool, not on the worker the
-    /// commands run on. Then the held one answers too. A login item switch
-    /// from Settings goes the same way.
+    /// A held host call does not block another command on a one-worker
+    /// runtime: it waits on the blocking pool.
     #[test]
     fn a_held_host_call_leaves_the_command_workers_free() {
         use std::time::Duration;
@@ -438,10 +386,8 @@ mod tests {
         runtime.shutdown_background();
     }
 
-    /// Each permission request runs where it may block: on the blocking
-    /// pool, not on the async worker its command runs on. Blocking on
-    /// another runtime there, as a request waiting for the user stands in
-    /// for, panics on a bare worker.
+    /// Each permission request runs on the blocking pool, where blocking
+    /// on another runtime does not panic.
     #[test]
     fn a_permission_request_leaves_the_async_worker() {
         use crate::host::gated::GatedHost;
@@ -475,7 +421,6 @@ mod tests {
                 Value::Null,
             )));
             assert_eq!(answer.unwrap(), Ok(Value::from(method)), "{method}");
-            // A runtime is dropped outside an async context.
             drop(host);
             drop(other);
         }
@@ -488,7 +433,7 @@ mod tests {
         assert_eq!(github.host_str(), Some("github.com"));
         let mail = openable_url("mailto:hello@example.com").unwrap();
         assert_eq!(mail.path(), "hello@example.com");
-        // The scheme is matched case-insensitively, as the Swift host does.
+        // The scheme is matched case-insensitively.
         assert!(openable_url("HTTPS://example.com/").is_ok());
     }
 
@@ -522,7 +467,6 @@ mod tests {
         let json = serde_json::to_value(&error).unwrap();
         assert_eq!(json["code"], "invalidParams");
         assert_eq!(json["message"], "window.open: missing field `window`");
-        // `Display` spells the code as the wire does.
         assert_eq!(
             error.to_string(),
             "invalidParams: window.open: missing field `window`"
@@ -577,13 +521,13 @@ mod tests {
             assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{json}");
             assert!(error.message.starts_with("window.open: "), "{json}");
         }
-        // Unknown keys are ignored, as the Swift `Decodable` ignores them.
+        // Unknown keys are ignored.
         let params = window_params(r#"{"window":"main","extra":true}"#).unwrap();
         assert_eq!(params.window, BridgeWindow::Main);
     }
 
-    /// `UUID(uuidString:)` reads either case of the hyphenated form and
-    /// nothing else; `null` and a missing key are no meeting.
+    /// Either case of the hyphenated UUID form; `null` and a missing key
+    /// are no meeting.
     #[test]
     fn a_meeting_id_must_be_a_hyphenated_uuid() {
         let id: Uuid = "00000000-0000-0000-0000-00000000000c".parse().unwrap();
@@ -634,7 +578,6 @@ mod tests {
         let other = close_target("onboarding", &settings).unwrap_err();
         assert_eq!(other.code, BridgeErrorCode::InvalidParams);
         assert_eq!(other.message, "The onboarding window closes only itself.");
-        // Verbatim from `MainWindowBridge.swift` and `SettingsBridge.swift`.
         for (caller, name) in [("main", "main"), ("settings", "Settings")] {
             let error = close_target(caller, &onboarding).unwrap_err();
             assert_eq!(error.code, BridgeErrorCode::UnknownMethod, "{caller}");
@@ -701,8 +644,7 @@ mod tests {
         .unwrap();
         assert_eq!((size.width, size.height), (244.5, 40.0));
         assert_eq!(size.logical(1.0), (244.5, 40.0));
-        // Device pixels at a ratio of 1.25 (120 dpi) on a window of scale 1,
-        // and on a Retina window, where the page's ratio is the scale.
+        // A 1.25 ratio on a window of scale 1, and a Retina window.
         let large: ResizeParams = parse(
             "resize",
             serde_json::json!({ "width": 100.0, "height": 52.5 }),
@@ -734,9 +676,7 @@ mod tests {
             assert_eq!(named.raised, Some(3));
             let none: PromptParams = panel_params(action, serde_json::json!({})).unwrap();
             assert_eq!(none.raised, None);
-            // A click with no params at all (the page sends none for a
-            // prompt shown unnumbered) counts too; `panel_params` alone
-            // refuses it.
+            // No params at all counts too; `panel_params` alone refuses it.
             assert_eq!(prompt_params(action, Value::Null).unwrap().raised, None);
             assert_eq!(
                 prompt_params(action, serde_json::json!({ "raised": 3 }))
@@ -792,9 +732,8 @@ mod tests {
         assert!(!finishes_onboarding(BridgeTopic::Onboarding, &Value::Null));
     }
 
-    /// A panic in a host call resumes in the command that awaits it
-    /// (`host::call_blocking`), where Tauri reports it, rather than
-    /// turning into a `failed` answer as if the host had refused.
+    /// A panic in a host call resumes in the awaiting command rather than
+    /// turning into a `failed` answer.
     #[test]
     fn a_panic_in_a_host_call_resumes_in_the_awaiting_command() {
         let runtime = tokio::runtime::Builder::new_current_thread()

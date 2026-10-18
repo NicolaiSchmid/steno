@@ -1,37 +1,8 @@
-//! Launch at login: on macOS `SMAppService.mainApp`, as the Swift app
-//! registers (`main_app`, which also removes the Launch Agent a build under
-//! the earlier identifier left behind); on Linux and Windows over
-//! `tauri-plugin-autostart`, the `autostart` desktop entry and the Run
-//! registry key. The status is the host's `LoginItemStatus`, and
-//! `ShellLoginItem` is the host's `LoginItem` over this module (`WP6b`), so
-//! the General section reads and switches the real registration.
-//!
-//! On Linux, with the systemd side in `stop_timeout`:
-//!
-//! - **The entry** (`enable`): outside an `AppImage` the shell writes it
-//!   itself, in the plugin's form and file, naming a path that outlives an
-//!   upgrade (`packaged::write_entry`).
-//! - **Managed** (`STENO_LOGIN_ITEM=managed`, `packaged`): the status is
-//!   `Managed` and the switch changes nothing; an entry an earlier build
-//!   wrote goes at launch, or after the exit's save while the app runs as
-//!   the unit made from it (`remove_earlier_entry`, `at_exit`). That unit
-//!   gets its drop-in while it runs (`managed_login_item`), and loses it
-//!   with the entry.
-//! - **The drop-ins** follow the entry (`set_enabled`, `sync_at_launch`,
-//!   both through `stop_timeout`).
-//! - **The deferral**: Launch at login turned off while the app runs as
-//!   the autostart unit only sets the mark (`OFF_AT_EXIT`, `defers_off`);
-//!   removing the entry then would let any reload of the user manager
-//!   unload the running unit, and the session's end would stop the app
-//!   without the SIGTERM that saves its recording. Turned on again, it
-//!   clears the mark and leaves the entry unwritten (`switch_entry`).
-//! - **The exit** removes a marked entry after the save (`at_exit`),
-//!   except at an update's relaunch (`relaunching`).
-//! - **The launch** (`sync_at_launch`, `LaunchStep`) applies a mark a kill
-//!   left, puts back an entry missing while the app runs as the unit, and
-//!   syncs the drop-ins.
-//!
-//! Swift: `LoginItemController.swift`, `LoginItemStatus` in `AppProtocols.swift`.
+//! Launch at login: `SMAppService.mainApp` on macOS, `tauri-plugin-autostart`
+//! (the autostart desktop entry, the Run registry key) on Linux and Windows.
+//! `ShellLoginItem` is the host's `LoginItem` over this module. On Linux,
+//! turning it off while the app runs as the autostart unit only sets a mark
+//! and removes the entry at the exit, after the recording is saved.
 
 mod main_app;
 
@@ -46,8 +17,7 @@ use crate::packaged;
 #[cfg(target_os = "linux")]
 use crate::stop_timeout;
 
-/// The status from the plugin's answer; a registration the plugin could
-/// not read is `NotFound`, its reason logged.
+/// The status from the plugin's answer; an unreadable one is `NotFound`.
 #[cfg(not(target_os = "macos"))]
 pub fn status_from_plugin(result: Result<bool, impl std::fmt::Display>) -> LoginItemStatus {
     match result {
@@ -60,16 +30,14 @@ pub fn status_from_plugin(result: Result<bool, impl std::fmt::Display>) -> Login
     }
 }
 
-/// The plugin, with no launch arguments. It runs on Linux and Windows
-/// only, so its macOS launcher is never used.
+/// The plugin, with no launch arguments (Linux and Windows only).
 #[cfg(not(target_os = "macos"))]
 pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None)
 }
 
 /// The login item as the user set it: `Managed` while the system starts
-/// the app at login; on Linux, an entry that goes at the exit
-/// (`OFF_AT_EXIT`) is already off.
+/// the app at login; an entry marked to go at the exit is already off.
 pub fn status(app: &AppHandle) -> LoginItemStatus {
     let mark = off_at_exit().filter(|_| cfg!(target_os = "linux"));
     with_off_at_exit(
@@ -88,8 +56,6 @@ pub fn status(app: &AppHandle) -> LoginItemStatus {
     )
 }
 
-/// `Managed` when `managed`, without asking the system; else `read`'s
-/// answer.
 fn status_unless_managed(managed: bool, read: impl FnOnce() -> LoginItemStatus) -> LoginItemStatus {
     if managed {
         return LoginItemStatus::Managed;
@@ -97,18 +63,13 @@ fn status_unless_managed(managed: bool, read: impl FnOnce() -> LoginItemStatus) 
     read()
 }
 
-/// Whether the tray's item may switch the login item: not one the system
-/// manages, which shows checked and disabled.
+/// Whether the tray's item may switch the login item (not a managed one).
 pub fn switchable(status: LoginItemStatus) -> bool {
     status != LoginItemStatus::Managed
 }
 
-/// Registers or removes the login item; a plugin failure is `failed`,
-/// which the page shows as it would any other refused command. Changes
-/// nothing while the system manages the login item. On Linux the switch
-/// goes through `switch_entry`, and the drop-ins follow the entry as it
-/// then stands (`stop_timeout::sync`) unless turning it off waits for the
-/// exit.
+/// Registers or removes the login item; a plugin failure is `failed`.
+/// Changes nothing while the system manages the login item.
 pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
     change_unless_managed(packaged::login_item_is_managed(), || {
         #[cfg(target_os = "linux")]
@@ -138,7 +99,6 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
     })
 }
 
-/// `change` unless `managed`.
 fn change_unless_managed(
     managed: bool,
     change: impl FnOnce() -> Result<(), BridgeError>,
@@ -150,8 +110,8 @@ fn change_unless_managed(
     change()
 }
 
-/// Writes the login item: on Linux outside an `AppImage` the entry that
-/// names a stable path (`packaged::write_entry`), elsewhere the plugin's.
+/// Writes the login item: on Linux outside an `AppImage` the shell's own
+/// entry with a stable path, elsewhere the plugin's.
 #[cfg(not(target_os = "macos"))]
 fn enable(app: &AppHandle) -> Result<(), tauri_plugin_autostart::Error> {
     #[cfg(target_os = "linux")]
@@ -161,29 +121,25 @@ fn enable(app: &AppHandle) -> Result<(), tauri_plugin_autostart::Error> {
     app.autolaunch().enable()
 }
 
-/// Whether the shell writes the Linux entry itself: outside an `AppImage`
-/// (`appimage`, its `$APPIMAGE`), whose plugin entry already names a
-/// stable path.
+/// Whether the shell writes the Linux entry itself: outside an `AppImage`,
+/// whose plugin entry already names a stable path.
 #[cfg(target_os = "linux")]
 fn writes_own_entry(appimage: Option<&std::ffi::OsStr>) -> bool {
     appimage.is_none()
 }
 
-/// At launch, on Linux: while the system manages the login item, an
-/// entry an earlier build wrote goes, now or at the exit
-/// (`packaged::remove_earlier_entry`).
+/// At launch, on Linux, while the system manages the login item: an entry
+/// an earlier build wrote goes, now or at the exit.
 #[cfg(target_os = "linux")]
 pub fn remove_earlier_entry(app: &AppHandle) {
     packaged::remove_earlier_entry(&app.package_info().name);
 }
 
-/// The result of an `Entry` call.
 #[cfg(target_os = "linux")]
 type EntryResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-/// The autostart entry as the switch and the launch change and read it
-/// (`enable`, and the plugin's `disable` and `is_enabled`): a trait, so
-/// the tests drive both over a fake.
+/// The autostart entry as the switch and the launch use it; a trait so the
+/// tests drive it over a fake.
 #[cfg(target_os = "linux")]
 trait Entry {
     fn enable(&self) -> EntryResult<()>;
@@ -206,15 +162,10 @@ impl Entry for AppHandle {
     }
 }
 
-/// Switches `entry` to `enabled` with the mark at `mark`, for an app that
-/// runs as the autostart unit or not (`as_unit`). False when turning it
-/// off only set the mark and waits for the exit (`defers_off`), true when
-/// the entry is now as asked. Turning it on clears the mark, which calls
-/// off a removal still waiting for the exit; as the unit, an entry that is
-/// still there is left as it is, since the plugin rewrites an entry by
-/// emptying it first, and a reload that read it empty would unload the
-/// running unit. A mark or entry that could not be changed is `failed`,
-/// and the switch stays where it was.
+/// Switches `entry` to `enabled`. False when turning it off as the
+/// autostart unit only set the mark and waits for the exit. As the unit, a
+/// standing entry is not rewritten: the plugin empties an entry first, and
+/// a reload that read it empty would unload the running unit.
 #[cfg(target_os = "linux")]
 fn switch_entry(
     entry: &impl Entry,
@@ -240,10 +191,7 @@ fn switch_entry(
     Ok(true)
 }
 
-/// `switch_entry`, then `sync` with the entry as it now stands (`Entry`'s
-/// `is_enabled`, `None` when it cannot be read), which only `Some(true)`
-/// lets reload as the autostart unit. Nothing to sync when turning it off
-/// waits for the exit.
+/// `switch_entry`, then `sync` with the entry as it now reads.
 #[cfg(target_os = "linux")]
 fn switch_then_sync(
     entry: &impl Entry,
@@ -260,24 +208,19 @@ fn switch_then_sync(
     Ok(())
 }
 
-/// Whether switching Launch at login to `enabled` waits for the exit: only
-/// turning it off while the app runs as the autostart unit
-/// (`as_autostart_unit`), whose entry the unit needs until it has stopped.
+/// Whether switching to `enabled` waits for the exit: only turning it off
+/// as the autostart unit, which needs its entry until it has stopped.
 #[cfg(target_os = "linux")]
 fn defers_off(enabled: bool, as_autostart_unit: bool) -> bool {
     !enabled && as_autostart_unit
 }
 
-/// The file that marks Launch at login to go off at the exit, in the
-/// support directory (`marks_directory`). A file rather than a flag, so
-/// the choice outlives a kill or a crash before the exit (`launch_step`).
-/// Read only on Linux.
+/// The file that marks Launch at login to go off at the exit; a file so the
+/// choice outlives a kill or a crash. Read only on Linux.
 const OFF_AT_EXIT: &str = "launch-at-login-off-at-exit";
 
-/// The support directory (`StenoPaths`), which holds the marks
-/// (`OFF_AT_EXIT`, and `stop_timeout`'s owed reload); no identifier names
-/// it, so a new one keeps them. `None` without a home, where the support
-/// directory would be relative.
+/// The support directory, which holds the marks; no identifier names it.
+/// `None` without a home.
 fn marks_directory() -> Option<std::path::PathBuf> {
     Some(steno_core::StenoPaths::default_support_directory())
         .filter(|directory| directory.is_absolute())
@@ -303,8 +246,7 @@ pub fn set_mark(mark: &std::path::Path, on: bool) -> std::io::Result<()> {
     }
 }
 
-/// The plugin's status with the mark at `mark`, if any: an entry marked
-/// to go is off.
+/// The plugin's status with the mark applied: a marked entry is off.
 fn with_off_at_exit(status: LoginItemStatus, mark: Option<&std::path::Path>) -> LoginItemStatus {
     match status {
         LoginItemStatus::Enabled if mark.is_some_and(std::path::Path::exists) => {
@@ -314,16 +256,10 @@ fn with_off_at_exit(status: LoginItemStatus, mark: Option<&std::path::Path>) -> 
     }
 }
 
-/// At launch, on macOS, once the database is open and before the host's
-/// first-launch registration: the Launch Agent a build under the earlier
-/// identifier left behind goes (`main_app::remove_earlier_agent`), also
-/// while the system manages the login item. Nothing goes in a smoke run, a
-/// `fixture-host` build or a run from outside an installed app bundle,
-/// such as a plain binary under `target/` or one from the mounted disk image
-/// (`main_app::removes_earlier_agent`), which would remove the agent an
-/// installed Steno still starts. Linux's `remove_earlier_entry` does the
-/// same for its autostart entry, but only while the system manages the
-/// login item.
+/// At launch, on macOS: removes the Launch Agent a build under the earlier
+/// identifier left behind. Nothing goes in a smoke run, a `fixture-host`
+/// build or a run from outside an installed bundle, which would remove the
+/// agent an installed Steno still starts.
 #[cfg(target_os = "macos")]
 pub fn remove_earlier_agent() {
     let exe = std::env::current_exe().ok();
@@ -336,51 +272,34 @@ pub fn remove_earlier_agent() {
     ));
 }
 
-/// Whether this app runs from an installed app bundle
-/// (`main_app::installed_bundle`), which the shell passes to the host
-/// (`HostConfig::installed_bundle`): on the Mac a plain binary under
-/// `target/`, a run from the mounted disk image or one translocated by
-/// Gatekeeper registers no login item at its first launch and leaves that
-/// launch to the installed copy; a bundle built under `target/` counts as
-/// installed.
-/// Off the Mac the host does not read it.
+/// Whether this app runs from an installed app bundle. On the Mac, a run
+/// from elsewhere registers no login item at its first launch; a bundle
+/// built under `target/` counts as installed. Off the Mac it is unused.
 #[cfg(not(feature = "fixture-host"))]
 pub fn installed_bundle() -> bool {
     std::env::current_exe().is_ok_and(|exe| main_app::installed_bundle(&exe))
 }
 
-/// An update's relaunch is about to exit (`updater`): the next process
-/// runs on in the same unit, so the mark, and an earlier build's entry
-/// that waits for the exit, stay for it.
+/// An update's relaunch is about to exit: the next process runs on in the
+/// same unit, so the mark and a waiting entry stay for it.
 #[cfg(target_os = "linux")]
 static RELAUNCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Called before an update's relaunch runs the shutdown
-/// (`main::shut_down_for_relaunch`).
+/// Called before an update's relaunch runs the shutdown.
 #[cfg(target_os = "linux")]
 pub fn relaunching() {
     RELAUNCHING.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Whether this exit is an update's relaunch (`relaunching`), for
-/// `at_exit`.
 #[cfg(target_os = "linux")]
 pub fn relaunching_now() -> bool {
     RELAUNCHING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// After the shutdown of an exit, on Linux, unless it is an update's
-/// relaunch (`relaunching`), whose next process runs on in the same unit:
-/// while the system manages the login item, an earlier build's entry that
-/// waited for the exit goes (`packaged::remove_earlier_entry_at_exit`);
-/// otherwise an entry marked to go goes. Either way the autostart unit's
-/// drop-in goes with the entry, and there is no reload, so the unit stays
-/// as it is until it has stopped. The one save that may not end the
-/// process is the one at an Xfce query on Wayland, which relaunches the
-/// app when the session goes on (`session_end::SaveAndQuit::of`);
-/// xfce4-session starts autostart entries itself, so that app is not the
-/// autostart unit, and a relaunch that did run as the unit would put the
-/// entry back (`LaunchStep::Restore`).
+/// After the shutdown of an exit on Linux, unless it is an update's
+/// relaunch: removes an earlier build's waiting entry (while managed) or a
+/// marked entry, with the unit's drop-in and without a reload, so the unit
+/// stays as it is until it has stopped.
 #[cfg(target_os = "linux")]
 pub fn at_exit(app: &AppHandle, relaunching: bool) {
     if packaged::login_item_is_managed() {
@@ -406,15 +325,12 @@ pub fn at_exit(app: &AppHandle, relaunching: bool) {
     clear_mark(&mark);
 }
 
-/// Whether the exit removes the entry: when it is `marked` to go, unless
-/// the exit is an update's relaunch (`relaunching`), whose next process
-/// runs on in the same unit.
+/// Whether the exit removes the entry: when marked, unless relaunching.
 #[cfg(target_os = "linux")]
 fn exit_turns_off(marked: bool, relaunching: bool) -> bool {
     marked && !relaunching
 }
 
-/// Removes the mark at `mark`; a failure is logged.
 #[cfg(target_os = "linux")]
 fn clear_mark(mark: &std::path::Path) {
     if let Err(error) = set_mark(mark, false) {
@@ -426,25 +342,21 @@ fn clear_mark(mark: &std::path::Path) {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchStep {
-    /// The entry stands, marked or not: its drop-in is installed.
+    /// The entry stands: its drop-in is installed.
     Keep,
-    /// An entry marked to go at an exit that never came (a kill, a crash),
-    /// and the app no longer runs as its unit: it goes now.
+    /// A marked entry whose exit never came, outside its unit: it goes now.
     TurnOff,
-    /// No entry while the app runs as the autostart unit (an older release
-    /// removed it at once, or the user did, and then an update relaunched
-    /// in the unit). The entry comes back, marked to go at the exit, so the
-    /// unit gets its drop-in and the reload that applies it, and outlives
-    /// any other reload until it has stopped.
+    /// No entry while running as the autostart unit: it comes back, marked
+    /// to go at the exit, so the unit outlives any reload until it stops.
     Restore,
-    /// No entry: its drop-in goes, and so does a mark left behind.
+    /// No entry: its drop-in and any mark go.
     Gone,
     /// The entry could not be read: only GNOME's drop-in is installed.
     Unread,
 }
 
-/// The step for the plugin's `status`, whether the entry is `marked` to go
-/// at the exit, and whether the app runs as the autostart unit.
+/// The step for the plugin's `status`, the mark, and whether the app runs
+/// as the autostart unit.
 #[cfg(target_os = "linux")]
 fn launch_step(status: LoginItemStatus, marked: bool, as_autostart_unit: bool) -> LaunchStep {
     match status {
@@ -456,10 +368,8 @@ fn launch_step(status: LoginItemStatus, marked: bool, as_autostart_unit: bool) -
     }
 }
 
-/// The login item the drop-ins follow after the launch's `step`
-/// (`stop_timeout::sync`). `switch` removes the entry for `TurnOff`
-/// (`false`) and restores it for `Restore` (`true`), and says whether that
-/// worked; an entry it could not change stays as it was.
+/// The login item the drop-ins follow after the launch's `step`; `switch`
+/// changes the entry and says whether that worked.
 #[cfg(target_os = "linux")]
 fn login_item_after(step: LaunchStep, switch: impl FnOnce(bool) -> bool) -> Option<bool> {
     match step {
@@ -471,12 +381,8 @@ fn login_item_after(step: LaunchStep, switch: impl FnOnce(bool) -> bool) -> Opti
     }
 }
 
-/// At launch, on Linux: the drop-ins follow the login item as it stands
-/// (`launch_step`), so an entry written before the drop-ins existed, or by
-/// an older release, gets them too, and one the user removed loses its
-/// own, unless the app runs as its unit (`LaunchStep::Restore`). While the
-/// system manages the login item, the launch changes no entry, and the
-/// drop-ins follow `managed_login_item`.
+/// At launch, on Linux: the drop-ins follow the login item as it stands.
+/// While the system manages it, no entry changes.
 #[cfg(target_os = "linux")]
 pub fn sync_at_launch(app: &AppHandle) {
     let as_unit = stop_timeout::runs_as_autostart_unit();
@@ -488,22 +394,16 @@ pub fn sync_at_launch(app: &AppHandle) {
     stop_timeout::sync(login_item, marks_directory().as_deref());
 }
 
-/// The login item the drop-ins follow while the system manages it:
-/// `Some(true)` for an app that runs as the autostart unit (`as_unit`)
-/// while that unit's `entry` stands (one an earlier build wrote, which
-/// goes at the exit, or the user's own), so the unit gets its 20 s and
-/// the reload that applies them, which is safe while the entry stands
-/// (`stop_timeout::may_reload`); `None` otherwise, an `entry` that could
-/// not be read (`None`) included: GNOME's drop-in alone.
+/// The login item the drop-ins follow while managed: `Some(true)` for the
+/// autostart unit while its entry stands, so the unit gets its 20 s and the
+/// reload; `None` otherwise (GNOME's drop-in alone).
 #[cfg(target_os = "linux")]
 fn managed_login_item(as_unit: bool, entry: Option<bool>) -> Option<bool> {
     (as_unit && entry == Some(true)).then_some(true)
 }
 
-/// The launch's step (`launch_step`) on `entry`, with the mark at `mark`,
-/// for an app that runs as the autostart unit or not (`as_unit`): the
-/// login item the drop-ins then follow (`login_item_after`). A mark left
-/// where no entry is is cleared.
+/// The launch's step on `entry`, returning the login item the drop-ins then
+/// follow. A mark left where no entry is is cleared.
 #[cfg(target_os = "linux")]
 fn launch(entry: &impl Entry, mark: Option<&std::path::Path>, as_unit: bool) -> Option<bool> {
     let step = launch_step(
@@ -529,7 +429,6 @@ fn launch(entry: &impl Entry, mark: Option<&std::path::Path>, as_unit: bool) -> 
         tracing::debug!(%error, on, "the login item at launch");
         false
     });
-    // No entry is left: a mark has nothing more to turn off.
     if login_item == Some(false)
         && let Some(mark) = mark
     {
@@ -538,11 +437,8 @@ fn launch(entry: &impl Entry, mark: Option<&std::path::Path>, as_unit: bool) -> 
     login_item
 }
 
-/// Puts the entry back for `LaunchStep::Restore`, with the mark at `mark`
-/// set first: a restored entry without its mark would stay. An `enable`
-/// that reports success while `is_enabled` finds no entry is a failure,
-/// so the drop-ins and the reload never follow an entry that is not
-/// there.
+/// Puts the entry back for `LaunchStep::Restore`, the mark set first so a
+/// restored entry cannot stay. An `enable` that wrote nothing is a failure.
 #[cfg(target_os = "linux")]
 fn restore(entry: &impl Entry, mark: Option<&std::path::Path>) -> EntryResult<()> {
     let mark = mark.ok_or("the app has no support directory")?;
@@ -555,15 +451,13 @@ fn restore(entry: &impl Entry, mark: Option<&std::path::Path>) -> EntryResult<()
     Ok(())
 }
 
-/// Whether Launch at login is marked to go at the exit (`OFF_AT_EXIT`),
-/// for the smoke run as the autostart unit (`smoke`).
+/// Whether Launch at login is marked to go at the exit (for the smoke run).
 #[cfg(target_os = "linux")]
 pub fn marked_off_at_exit() -> bool {
     off_at_exit().is_some_and(|mark| mark.exists())
 }
 
-/// Where the user manages login items; `None` where there is no such
-/// pane to open (Linux desktops differ).
+/// Where the user manages login items; `None` on Linux.
 pub fn system_settings_url() -> Option<&'static str> {
     if cfg!(target_os = "macos") {
         Some("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
@@ -574,10 +468,8 @@ pub fn system_settings_url() -> Option<&'static str> {
     }
 }
 
-/// The host's login item: the plugin's registration, and the pane where
-/// the user manages login items. Called with the host's lock held, so it
-/// leaves the tray's check mark to its callers (`actions`, and `main.rs`
-/// after the launch sequence), which run on the main thread.
+/// The host's login item. Called with the host's lock held, so the tray's
+/// check mark is left to its callers on the main thread.
 pub struct ShellLoginItem {
     pub app: AppHandle,
 }
@@ -604,9 +496,7 @@ impl steno_host::services::LoginItem for ShellLoginItem {
 mod tests {
     use super::*;
 
-    /// macOS registers with `SMAppService` only: `tauri-plugin-autostart`
-    /// is a dependency only off macOS, so its Launch Agent cannot come
-    /// back there, and `main.rs` registers its plugin only off macOS.
+    /// macOS registers with `SMAppService` only; the plugin is off macOS.
     #[test]
     fn the_autostart_plugin_is_neither_built_nor_registered_on_macos() {
         let manifest = include_str!("../Cargo.toml");
@@ -624,7 +514,6 @@ mod tests {
             ["[target.'cfg(not(target_os = \"macos\"))'.dependencies]"]
         );
 
-        // Without the carriage returns a Windows checkout may add.
         let main = include_str!("main.rs").replace("\r\n", "\n");
         assert_eq!(main.matches("autostart::plugin()").count(), 1);
         assert!(main.contains(
@@ -651,8 +540,7 @@ mod tests {
         assert!(!status_from_plugin(Ok::<bool, String>(false)).is_on());
     }
 
-    /// While the system manages the login item, the plugin is neither
-    /// asked nor changed, and the tray's item cannot switch it.
+    /// While managed, the plugin is neither asked nor changed.
     #[test]
     fn a_managed_login_item_asks_and_changes_nothing() {
         let asked = || -> LoginItemStatus { panic!("the system was asked") };
@@ -670,8 +558,7 @@ mod tests {
         assert!(switchable(LoginItemStatus::NotRegistered));
     }
 
-    /// On Linux the shell writes the entry itself, except in an
-    /// `AppImage`, where the plugin's names `$APPIMAGE`.
+    /// The shell writes the Linux entry itself, except in an `AppImage`.
     #[cfg(target_os = "linux")]
     #[test]
     fn an_appimage_keeps_the_plugins_entry() {
@@ -691,8 +578,7 @@ mod tests {
         }
     }
 
-    /// An entry marked to go at the exit reads as off; nothing else
-    /// changes, and a mark path with no file is no mark.
+    /// A marked entry reads as off; a mark path with no file is no mark.
     #[test]
     fn a_marked_entry_reads_as_off() {
         use LoginItemStatus::{Enabled, NotFound, NotRegistered};
@@ -712,8 +598,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// Only turning Launch at login off as the autostart unit waits for
-    /// the exit; turning it on, or off outside the unit, applies at once.
+    /// Only turning it off as the autostart unit waits for the exit.
     #[cfg(target_os = "linux")]
     #[test]
     fn only_off_as_the_autostart_unit_waits_for_the_exit() {
@@ -733,11 +618,7 @@ mod tests {
         assert!(!exit_turns_off(false, true));
     }
 
-    /// The launch keeps a standing entry's drop-in, also for a marked
-    /// entry while the app runs as its unit; turns a marked entry off once
-    /// it does not; restores a missing entry while it does, and drops the
-    /// drop-in without an entry otherwise; and changes nothing for an
-    /// entry it could not read.
+    /// The launch step for every combination of entry, mark and unit.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_launch_follows_the_entry_and_its_mark() {
@@ -759,8 +640,7 @@ mod tests {
         assert_eq!(launch_step(Enabled, true, false), LaunchStep::TurnOff);
     }
 
-    /// Only `TurnOff` removes the entry and only `Restore` brings it back;
-    /// an entry the launch could not change keeps the drop-in it had.
+    /// Only `TurnOff` removes the entry and only `Restore` brings it back.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_launch_changes_the_entry_only_to_turn_off_or_restore() {
@@ -776,11 +656,8 @@ mod tests {
         }
     }
 
-    /// An entry in memory: whether it stands, whether `enable` writes it
-    /// (`writes`; otherwise it reports success and writes nothing, as an
-    /// install the system manages may), whether `enable` and `disable`
-    /// fail (`refuses`) or `is_enabled` does (`unreadable`), and the
-    /// changes asked for, each with whether the mark at `mark` was there.
+    /// An entry in memory that records the changes asked of it, each with
+    /// whether the mark was there.
     #[cfg(target_os = "linux")]
     struct FakeEntry {
         stands: std::cell::Cell<bool>,
@@ -845,10 +722,8 @@ mod tests {
         }
     }
 
-    /// As the autostart unit, turning Launch at login off only sets the
-    /// mark, and turning it on again clears it without rewriting the entry
-    /// (an emptied entry, read by a reload, would unload the unit). Without
-    /// an entry, or outside the unit, the switch changes the entry at once.
+    /// As the unit, off only sets the mark and on clears it without
+    /// rewriting the entry; otherwise the switch changes the entry at once.
     #[cfg(target_os = "linux")]
     #[test]
     fn on_again_as_the_unit_calls_off_the_removal_and_keeps_the_entry() {
@@ -887,10 +762,7 @@ mod tests {
     }
 
     /// After a switch the drop-ins follow the entry as it then reads, not
-    /// the value asked for: on is `Some(true)` only once the entry stands,
-    /// off is `Some(false)`, an entry that cannot be read is `None`, and a
-    /// deferred off syncs nothing. As the unit, an entry that cannot be
-    /// read is written, not taken as standing.
+    /// the value asked for.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_switch_syncs_the_entry_it_reads_back() {
@@ -940,9 +812,8 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// While managed, only the app running as the autostart unit with its
-    /// entry standing gets the unit's drop-in; anything else leaves it
-    /// (GNOME's alone).
+    /// While managed, only the autostart unit with its entry standing gets
+    /// the unit's drop-in.
     #[cfg(target_os = "linux")]
     #[test]
     fn managed_only_the_unit_with_its_entry_gets_the_drop_in() {
@@ -963,11 +834,8 @@ mod tests {
         assert!(relaunching_now());
     }
 
-    /// The launch on the plugin's calls: a restore marks the entry before
-    /// it enables it, and counts only an entry it reads back, so an
-    /// `enable` that wrote nothing leaves no entry, no mark, and no reload
-    /// for the drop-ins; a marked entry outside the unit goes; an entry it
-    /// cannot read or change stays as it was.
+    /// A restore marks the entry before enabling it and counts only an
+    /// entry it reads back; an unreadable entry stays as it was.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_launch_restores_only_an_entry_it_reads_back() {
@@ -1021,8 +889,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// The marks are in the support directory the rest of the app uses,
-    /// which no identifier names, so a new identifier keeps them.
+    /// The marks live in the support directory, which no identifier names.
     #[test]
     fn the_marks_are_in_the_support_directory() {
         let config: serde_json::Value =

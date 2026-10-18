@@ -7,12 +7,9 @@ mod common;
 use serde_json::{Map, Value};
 use steno_bridge::json::{to_canonical_string, to_compact_string};
 
-/// Every line of `tests/fixtures/foundation-doubles.txt` (its header says
-/// how it was measured and trimmed): both styles write the string Foundation
-/// wrote, and the string reads back to the same bits. The ties between two
-/// shortest candidates are the lines that matter most: Rust's own `Display`
-/// rounds them up, Foundation to the even digit, and the printer must follow
-/// Foundation at every digit count.
+/// Every line of `tests/fixtures/foundation-doubles.txt`: both styles write
+/// the string Foundation wrote, which reads back to the same bits. Ties
+/// round to the even digit, as Foundation does, unlike Rust's `Display`.
 #[test]
 fn foundation_corpus() {
     let corpus = common::crate_fixture("foundation-doubles.txt");
@@ -34,9 +31,7 @@ fn foundation_corpus() {
 }
 
 /// `parse(print(v)) == v` and `print(parse(print(v))) == print(v)` for
-/// 20,000 values of every shape, in both styles. The seed is fixed so a
-/// failure reproduces; the generator is a xorshift so the test needs no
-/// crate.
+/// 20,000 values of every shape, in both styles, from a fixed seed.
 #[test]
 fn printing_round_trips_through_serde_json() {
     type Print = fn(&Value) -> Result<String, serde_json::Error>;
@@ -60,9 +55,8 @@ fn printing_round_trips_through_serde_json() {
     }
 }
 
-/// Equality that reads `1200` and `1200.0` as the same number: the printer
-/// writes an integral double without a fraction, so it reads back as an
-/// integer. Doubles compare by bits, so `-0` stays distinct from `0`.
+/// Equality that reads `1200` and `1200.0` as the same number; doubles
+/// compare by bits, so `-0` stays distinct from `0`.
 fn same_value(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Number(l), Value::Number(r)) => match (l.as_f64(), r.as_f64()) {

@@ -1,6 +1,5 @@
 //! General: launch at login, meeting detection, the calendar permission
 //! that names meetings, the default template, and the update status.
-//! Swift: `Settings/GeneralSettingsViewModel.swift`.
 
 use steno_bridge::{PermissionKind, PermissionState};
 use steno_core::{Store, SummaryTemplate};
@@ -50,7 +49,6 @@ impl GeneralSettingsViewModel {
 
     /// The login item and the setting together; neither changes while the
     /// system manages the login item (`LoginItemStatus::Managed`).
-    /// Swift: `AppEnvironment.setLaunchAtLogin`.
     pub fn set_launch_at_login(&mut self, enabled: bool, store: &Store, services: &Services) {
         self.login_item = services.login_item.status();
         if self.login_item == LoginItemStatus::Managed {

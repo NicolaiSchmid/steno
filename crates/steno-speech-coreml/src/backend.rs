@@ -1,27 +1,8 @@
 //! The four model calls of Parakeet TDT v3 on CoreML behind
-//! `steno_speech`'s [`SpeechBackend`]: [`Models`] holds the loaded
-//! `.mlmodelc` bundles and the vocabulary, shared by every worker;
-//! [`Backend`] is one worker's view of them, which the shared pipeline
-//! drives (chunker, decode loop, merge, segmentation).
-//! Swift: `FluidAudio`'s `AsrModels` and `TdtModelInference`.
-//!
-//! Model contract (FluidAudio 0.17.4, `parakeet-tdt-0.6b-v3`):
-//!
-//! | Model | Inputs | Outputs |
-//! |---|---|---|
-//! | `Preprocessor` | `audio_signal [1, 240000] f32`, `audio_length [1] i32` | `mel [1, 128, 1501] f32`, `mel_length [1] i32` |
-//! | `Encoder` | `mel`, `mel_length` | `encoder [1, 1024, 188] f32` (strided), `encoder_length [1] i32` |
-//! | `Decoder` | `targets [1, 1] i32`, `target_length [1] i32`, `h_in`, `c_in [2, 1, 640] f32` | `decoder [1, 640, 1] f32`, `h_out`, `c_out` |
-//! | `JointDecisionv3` | `encoder_step [1, 1024, 1]`, `decoder_step [1, 640, 1]` | `token_id [1,1,1] i32`, `token_prob [1,1,1] f32`, `duration [1,1,1] i32` |
-//!
-//! The joint already holds the argmax over tokens and over duration bins,
-//! so no logits leave the model. The models take one fixed window of
-//! 15 s ([`MAX_WINDOW_SAMPLES`]); the engine clamps the chunker to it.
-//! Every call allocates its own input arrays, so a [`Backend`] holds no
-//! CoreML object of its own and moves to a worker thread as it is. Each
-//! call, and each model load, runs inside [`contained`]: one autorelease
-//! pool, and an Objective-C exception turned into
-//! [`SpeechError::Exception`].
+//! `steno_speech`'s [`SpeechBackend`]: [`Models`] holds the loaded bundles
+//! and vocabulary, shared by every worker; [`Backend`] is one worker's view.
+//! The joint returns the argmax over tokens and duration bins, so no logits
+//! leave the model. Every call and load runs inside [`contained`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -51,31 +32,24 @@ pub const DECODER_LAYERS: usize = 2;
 /// `TdtConfig.durationBins`: the joint's bin index maps to this many frames.
 pub const DURATION_BINS: [usize; 5] = [0, 1, 2, 3, 4];
 
-/// File names inside the model directory (`AsrModels.Names`, v3 with the
-/// `int8` encoder precision Steno's `ParakeetEngine` requests).
+/// File names inside the model directory (v3, `int8` encoder).
 pub const PREPROCESSOR_FILE: &str = "Preprocessor.mlmodelc";
 pub const ENCODER_FILE: &str = "Encoder.mlmodelc";
 pub const DECODER_FILE: &str = "Decoder.mlmodelc";
 pub const JOINT_FILE: &str = "JointDecisionv3.mlmodelc";
-/// Vocabulary file (`ModelNames.ASR.vocabularyFile`, the name Steno's
-/// `ModelAsset` requires).
+/// Vocabulary file name.
 pub const VOCABULARY_FILE: &str = "parakeet_vocab.json";
 /// The model repository's name for the same bytes; read when
 /// [`VOCABULARY_FILE`] is absent.
 pub const VOCABULARY_FILE_V3: &str = "parakeet_v3_vocab.json";
 
-/// Compute units per model, as `AsrModels.loadLocal` assigns them from
-/// `defaultConfiguration()` (`.cpuAndNeuralEngine`; the preprocessor is
-/// pinned to the CPU because all of its ops map there anyway).
+/// Compute units per model (CPU and Neural Engine; the preprocessor is
+/// pinned to the CPU).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComputeUnitsPlan {
-    /// `Preprocessor.mlmodelc`.
     pub preprocessor: ComputeUnits,
-    /// `Encoder.mlmodelc`.
     pub encoder: ComputeUnits,
-    /// `Decoder.mlmodelc`.
     pub decoder: ComputeUnits,
-    /// `JointDecisionv3.mlmodelc`.
     pub joint: ComputeUnits,
 }
 
@@ -90,9 +64,8 @@ impl Default for ComputeUnitsPlan {
     }
 }
 
-/// The four loaded models and the vocabulary beside them; `Sync`, so
-/// every worker's [`Backend`] shares one set, as `FluidAudio`'s chunk
-/// workers share one `AsrModels` (`AsrManager.makeWorkerClone`).
+/// The four loaded models and the vocabulary; `Sync`, so every worker's
+/// [`Backend`] shares one set.
 #[derive(Debug)]
 pub struct Models {
     preprocessor: Model,
@@ -137,8 +110,7 @@ fn scalar_i32(shape: &[usize], value: i32) -> Result<Array, SpeechError> {
 }
 
 impl Models {
-    /// Loads the four bundles and the vocabulary from `directory` with the
-    /// default compute units.
+    /// Loads the bundles and vocabulary from `directory` with default units.
     pub fn load(directory: &Path) -> Result<Models, SpeechError> {
         Models::load_with(directory, ComputeUnitsPlan::default())
     }
@@ -204,9 +176,8 @@ impl Models {
         self.load_seconds
     }
 
-    /// The mel spectrogram of `samples` (at most one window), zero padded
-    /// to the window with the real length declared; only the valid frames
-    /// are kept (`AsrManager.runInference`, the default length policy).
+    /// The mel spectrogram of `samples` (at most one window), zero padded to
+    /// the window with the real length declared; only valid frames are kept.
     fn preprocess(&self, samples: &[f32]) -> Result<Features, SpeechError> {
         if samples.len() > MAX_WINDOW_SAMPLES {
             return Err(SpeechError::Shape {
@@ -242,9 +213,8 @@ impl Models {
         })
     }
 
-    /// The encoder frames of `features`, padded back to the window with
-    /// zeros, which is what the preprocessor writes past the declared
-    /// length; frame-major and only the frames the encoder marks valid.
+    /// The encoder frames of `features`, padded back to the window with zeros;
+    /// frame-major and only the frames the encoder marks valid.
     fn encode(&self, features: &Features) -> Result<EncoderOutput, SpeechError> {
         if features.mels != MEL_BINS
             || features.frames > MEL_FRAMES
@@ -290,8 +260,7 @@ impl Models {
         })
     }
 
-    /// Feeds `token` to the prediction network from `state`
-    /// (`TdtModelInference.runDecoder`).
+    /// Feeds `token` to the prediction network from `state`.
     fn decoder_step(&self, token: u32, state: &DecoderState) -> Result<DecoderStep, SpeechError> {
         let lstm = [DECODER_LAYERS, 1, DECODER_HIDDEN];
         let targets = scalar_i32(&[1, 1], int32("token", token as usize)?)?;
@@ -313,8 +282,7 @@ impl Models {
         })
     }
 
-    /// The joint's decision for one encoder frame and one projection
-    /// (`TdtModelInference.runJointPrepared`).
+    /// The joint's decision for one encoder frame and one projection.
     fn joint_step(
         &self,
         encoder_frame: &[f32],
@@ -338,8 +306,7 @@ impl Models {
     }
 }
 
-/// One worker's [`SpeechBackend`] over the shared [`Models`]; cloning it
-/// gives another worker over the same models.
+/// One worker's [`SpeechBackend`] over the shared [`Models`].
 #[derive(Debug, Clone)]
 pub struct Backend {
     models: Arc<Models>,

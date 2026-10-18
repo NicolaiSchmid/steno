@@ -1,8 +1,6 @@
-//! Two connections on one file, as when the Swift app and this store, or
-//! two copies of this store, hold the database at the same time: a write
-//! waits on the busy timeout instead of failing, a fresh database is
-//! migrated once, an export reads past a held write lock, and an export
-//! sees a concurrent commit whole or not at all.
+//! Two connections on one file: a write waits on the busy timeout instead of
+//! failing, a fresh database is migrated once, and an export reads past a
+//! held write lock and sees a concurrent commit whole or not at all.
 
 mod common;
 
@@ -16,29 +14,15 @@ use steno_core::Store;
 
 use common::populate;
 
-/// Writes each worker makes: enough that a deferred transaction fails,
+/// Writes each worker makes: enough that a deferred transaction would fail,
 /// few enough that one worker's whole run fits inside the busy timeout.
-/// SQLite's busy handler sleeps and retries, so waiters do not take
-/// turns: the worker that takes the write lock first usually makes all
-/// of its writes back to back while the other waits once, for that
-/// whole run.
 const WRITES_PER_WORKER: usize = 40;
 
-/// Past this a worker stops and the test fails on its count, so a stuck
-/// lock shows up as a failure rather than a hang.
+/// Past this a worker stops, so a stuck lock fails instead of hanging.
 const GUARD: Duration = Duration::from_secs(60);
 
-/// Each store on its own connection, each writer reading the row and
-/// writing it back in one transaction (the shape that made a deferred
-/// transaction fail with `database is locked` once the other side had
-/// written in between), a fixed number of times each. A barrier starts
-/// both workers together so they almost always collide. The stores open
-/// on this thread, so a failed open fails the test before either worker
-/// waits at the barrier.
-///
-/// One worker's run fits inside the busy timeout because the store commits
-/// with `synchronous = NORMAL`, as the Swift app does: in WAL mode only the
-/// first commit after a checkpoint holds the write lock through an fsync.
+/// Two stores each read a row and write it back in one transaction, started
+/// together by a barrier; neither fails with `database is locked`.
 #[test]
 fn two_stores_write_the_same_file_without_errors() {
     let directory = tempfile::tempdir().unwrap();
@@ -104,16 +88,10 @@ fn two_stores_write_the_same_file_without_errors() {
     );
 }
 
-/// How long the holder keeps the write lock in
-/// `a_write_waits_for_the_other_stores_transaction`: well inside the
-/// five-second busy timeout, far longer than a commit.
+/// How long the holder keeps the write lock: well inside the busy timeout.
 const HOLD: Duration = Duration::from_secs(1);
 
-/// A write waits out the other store's transaction instead of failing: one
-/// store holds the write lock for `HOLD` while the other begins a write,
-/// which asks for the write lock up front and so waits on the busy timeout.
-/// Fails when the busy timeout is shorter than the hold, or when the write
-/// does not wait for the lock.
+/// A write waits out the other store's transaction instead of failing.
 #[test]
 fn a_write_waits_for_the_other_stores_transaction() {
     let directory = tempfile::tempdir().unwrap();
@@ -143,8 +121,7 @@ fn a_write_waits_for_the_other_stores_transaction() {
     );
 }
 
-/// Both opens succeed and each migration is recorded once, whichever
-/// process got to the file first.
+/// Both opens succeed and each migration is recorded once.
 #[test]
 fn two_stores_open_a_fresh_file_at_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -171,11 +148,8 @@ fn two_stores_open_a_fresh_file_at_once() {
     assert_eq!(identifiers, ["v1", "v2", "v3", "v4", "v5"]);
 }
 
-/// `Store::export` takes no write lock: it returns while the other store
-/// holds one. An immediate transaction (or `Store::write`) would queue on
-/// the busy timeout instead and fail with `database is locked` once it ran
-/// out. A plain read passes this too; the snapshot is checked by
-/// `an_export_never_sees_half_of_a_concurrent_commit`.
+/// `Store::export` takes no write lock: it returns while the other store holds
+/// one.
 #[test]
 fn an_export_reads_while_the_other_store_holds_the_write_lock() {
     let directory = tempfile::tempdir().unwrap();
@@ -192,19 +166,13 @@ fn an_export_reads_while_the_other_store_holds_the_write_lock() {
         .unwrap();
 }
 
-/// Exports the race test checks: enough for a torn export to show up many
-/// times over without the transaction (most exports tear then), few enough
-/// to finish in well under a second.
+/// Enough exports for a torn one to show up, few enough to finish quickly.
 const RACE_EXPORTS: u64 = 300;
 
-/// Commits that must land while those exports run, so they overlap the
-/// writer rather than finishing before it starts.
+/// Commits that must land while those exports run.
 const RACE_COMMITS: u64 = 300;
 
-/// A second connection commits the meeting's title, its decision and its
-/// tasks together, in a loop; every export must see all three from one
-/// commit. Without the export's transaction each query reads the latest
-/// commit, so the title and the decision come from different ones.
+/// Every export sees the title, decision and tasks from one commit.
 #[test]
 fn an_export_never_sees_half_of_a_concurrent_commit() {
     let directory = tempfile::tempdir().unwrap();

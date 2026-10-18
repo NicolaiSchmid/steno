@@ -1,19 +1,8 @@
-//! The protocol core behind the listener: the auth gate and every route.
-//! Independent of the connection and of TLS, so [`Engine::handle`] is driven
-//! directly by the tests. Owned by the service; one lock around the pairing
-//! session, the live receipts, the completions in flight, the revoked
-//! devices and the line of store writes, held for synchronous sections
-//! only, never across a store, file or intake call, so another request runs
-//! while one awaits. Even so, the store commits the engine's writes in the
-//! order they were asked for (`Engine::in_order`). A second lock, `files`,
-//! serialises the creation of a recording's inbox files with the check and
-//! discard that leave another device's upload alone (`Engine::discard_own`),
-//! so no announce opens its files between the two. A first announce holds
-//! it from its `change` through its own discard and opening
-//! (`Engine::open_files`). It is held across synchronous calls only, never
-//! across a yield, and taken before the state lock, never inside it. The
-//! recording routes live in `recording.rs`.
-//! Swift: `Routing/HandoverEngine.swift`, `Routing/HTTPMessages.swift`.
+//! The protocol core behind the listener: the auth gate and every route,
+//! independent of the connection and of TLS. One state lock, held for
+//! synchronous sections only, never across a store, file or intake call; the
+//! `files` lock serialises creating a recording's inbox files with discards
+//! and is taken before the state lock, never inside it.
 
 mod recording;
 
@@ -42,24 +31,21 @@ use crate::wire;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Principal {
     Anonymous,
-    /// The secret matched the pairing window with this number (the engine
-    /// bumps it on every open and every cancel); `/v1/pair` pairs only
+    /// The secret matched pairing window number this; `/v1/pair` pairs only
     /// while that window is still the open one.
     Pairing(u64),
     Device(PairedDevice),
 }
 
-/// The outcome of the auth gate. A rejection carries the answer the
-/// connection writes before it reads the body, so every status decision of
-/// the wire is the engine's.
+/// The outcome of the auth gate; a rejection carries the answer the
+/// connection writes before it reads the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthOutcome {
     Allowed(Principal),
     Rejected(HandoverResponse),
 }
 
-/// One complete, authenticated request handed from the connection to the
-/// engine.
+/// One complete, authenticated request.
 #[derive(Clone)]
 pub struct HandoverRequest {
     pub route: Route,
@@ -68,8 +54,7 @@ pub struct HandoverRequest {
     pub body: Bytes,
 }
 
-/// The `Authorization` header carries the pairing secret or the bearer
-/// token, so headers show as their names; the body (audio, or JSON) shows
+/// Headers show as their names (`Authorization` carries secrets); the body
 /// as its length.
 impl std::fmt::Debug for HandoverRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -124,8 +109,8 @@ pub struct HandoverResponse {
     pub body: Bytes,
 }
 
-/// The body of a `/v1/pair` answer carries the bearer token, so the body
-/// shows as its length.
+/// The body of a `/v1/pair` answer carries the bearer token, so it shows as
+/// its length.
 impl std::fmt::Debug for HandoverResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HandoverResponse")
@@ -161,11 +146,9 @@ impl HandoverResponse {
         Self::json(status, &wire::Problem::new(message))
     }
 
-    /// A 500 whose body names the step and nothing else. The error itself
-    /// (a failing write, hash, promote, intake or store call) carries the
-    /// inbox path, and with it the user's home directory, so it goes to the
-    /// local log through `tracing` for whoever subscribes (the shell, the
-    /// CLI) and never to the phone or the receipt. Swift: `HandoverLog.swift`.
+    /// A 500 whose body names the step only. The error carries the inbox path
+    /// (the user's home directory), so it goes to the local log, never to the
+    /// phone.
     pub fn internal_error(what: &str, error: &dyn std::fmt::Display) -> Self {
         tracing::error!(target: "steno::handover", "{what} failed: {error}");
         Self::problem(
@@ -180,8 +163,8 @@ impl HandoverResponse {
     }
 }
 
-/// The engine as the connection sees it: an auth gate that runs before the
-/// body, and a request handler that runs after it.
+/// The engine as the connection sees it: a gate before the body, a handler
+/// after it.
 #[steno_core::async_trait]
 pub trait RequestHandling: Send + Sync {
     async fn authenticate(&self, route: Route, authorization: Option<&str>) -> AuthOutcome;
@@ -191,37 +174,27 @@ pub trait RequestHandling: Send + Sync {
 #[derive(Default)]
 struct State {
     pairing: Option<PairingSession>,
-    /// The pairing window's number, bumped on every open and every cancel.
-    /// A head authorised against an earlier window whose body arrives after
-    /// a cancel and a reopen must not pair against the new one, and a
-    /// failed save gives its session back only if the number is unchanged.
+    /// Bumped on every open and cancel, so a head authorised against an earlier
+    /// window never pairs against a new one.
     window: u64,
-    /// Receipts touched since start, by recording id; what the receipt
-    /// stream carries.
+    /// Receipts touched since start, by recording id.
     active_receipts: BTreeMap<Uuid, HandoverReceipt>,
-    /// Recordings whose `complete` is between the `verifying` write and the
-    /// end of its admission, which a dropped request does not cut short
-    /// ([`Completing`]). The verify and the admit yield, so a retried
-    /// `complete` must not start a second verify or admission.
+    /// Recordings between the `verifying` write and the end of their
+    /// admission, so a retried `complete` starts no second verify or admission.
     completing: BTreeSet<Uuid>,
-    /// Devices revoked since start and not paired again: their receipts
-    /// stay out of `active_receipts` and the stream, also when a request
-    /// that read one before the revoke writes it back, and their recording
-    /// routes answer 401 before they read, also while the device is still
-    /// in the store (a failed delete, or one not committed yet).
+    /// Devices revoked since start and not paired again: their receipts stay
+    /// out of memory and their recording routes answer 401, also while the
+    /// device is still in the store.
     revoked: BTreeSet<Uuid>,
-    /// Revokes per device since start. A pairing never resets the count,
-    /// so a `complete` from before the revoke still sees it after the phone
-    /// pairs again under the same device id.
+    /// Revokes per device since start; a pairing never resets the count, so a
+    /// `complete` from before the revoke still sees it.
     revocations: BTreeMap<Uuid, u64>,
-    /// Closes once the store write asked for last has returned
-    /// ([`Engine::in_order`]).
+    /// Closes once the store write asked for last has returned.
     last_write: Option<oneshot::Receiver<()>>,
 }
 
-/// A store write's place in line ([`State::next_write`]): `previous`
-/// closes once the write asked for before it has returned, and dropping
-/// `done` once this write has returned lets the next one go.
+/// A store write's place in line: `previous` closes once the write before
+/// has returned; dropping `done` lets the next one go.
 #[must_use = "a place dropped before `Engine::in_order` lets the write behind it go at once"]
 struct InOrder {
     previous: Option<oneshot::Receiver<()>>,
@@ -234,11 +207,8 @@ impl State {
         self.revocations.get(&device_id).copied().unwrap_or(0)
     }
 
-    /// Whether memory holds a receipt of `recording_id` that belongs to a
-    /// device other than `device_id`: another phone announced the same
-    /// recording id after this device's receipt left memory (a revoke, a
-    /// refusal). A discard or forget by recording id on behalf of
-    /// `device_id` leaves that phone's upload alone then.
+    /// Whether memory holds a receipt of `recording_id` from a device other
+    /// than `device_id`; discards on behalf of `device_id` leave it alone.
     fn holds_another_devices(&self, recording_id: Uuid, device_id: Uuid) -> bool {
         self.active_receipts
             .get(&recording_id)
@@ -252,9 +222,8 @@ impl State {
         receipts
     }
 
-    /// Drops the receipt of `recording_id` on behalf of `device_id`; false,
-    /// with nothing dropped, when memory holds another device's receipt of
-    /// it ([`State::holds_another_devices`]).
+    /// Drops the receipt on behalf of `device_id`; false, with nothing dropped,
+    /// when memory holds another device's receipt of it.
     fn forget_own(&mut self, recording_id: Uuid, device_id: Uuid) -> bool {
         if self.holds_another_devices(recording_id, device_id) {
             return false;
@@ -271,13 +240,10 @@ impl State {
         }
     }
 
-    /// The next place in the line of store writes ([`Engine::in_order`]).
-    /// Taken under the same guard as the memory the write stands for (the
-    /// revoke count it bumps or reads, the receipt it saves), so the store
-    /// commits the writes in the order memory changed. The place must reach
-    /// [`Engine::in_order`] before any yield or panic: dropped on the way,
-    /// it lets the write behind it go at once, before the writes ahead of
-    /// it have returned.
+    /// The next place in the line of store writes, taken under the same guard
+    /// as the memory change it stands for, so the store commits in the order
+    /// memory changed. It must reach [`Engine::in_order`] before any yield or
+    /// panic, or the write behind it goes at once.
     fn next_write(&mut self) -> InOrder {
         let (done, last) = oneshot::channel();
         InOrder {
@@ -296,17 +262,11 @@ pub struct Engine {
     pub inbox: Inbox,
     receipts: watch::Sender<Vec<HandoverReceipt>>,
     state: Mutex<State>,
-    /// Held while a recording's inbox files are created
-    /// ([`Engine::open_files`], from a first announce's `change`;
-    /// [`Engine::reopen_missing_files`]) and while [`Engine::discard_own`],
-    /// [`Engine::discard_own_while_revoked`] and
-    /// [`Engine::discard_and_forget_own`] check memory and discard; see
-    /// there. Swift: none; the actor runs the check, `begin` and the
-    /// receipt in one step.
+    /// Held while a recording's inbox files are created and while the
+    /// `discard_*` methods check memory and discard.
     files: Mutex<()>,
-    /// A weak handle on the engine's own `Arc`, upgraded for the
-    /// admission's task, which keeps the engine and the `completing` mark
-    /// until the admission ends ([`Completing`]). Rust only.
+    /// A weak handle on the engine's own `Arc`, upgraded for the admission's
+    /// task so it outlives a dropped request.
     me: Weak<Engine>,
 }
 
@@ -321,21 +281,17 @@ impl std::fmt::Debug for Engine {
 impl Engine {
     /// `lastSeenAt` is written at most this often per device.
     pub const LAST_SEEN_RESOLUTION_SECONDS: i64 = 60;
-    /// A partial whose receipt has not moved for this long is abandoned:
-    /// the phone that announced it is not coming back, and the sweep
-    /// reclaims the space. The receipt stays; a late re-announce starts the
-    /// upload over.
+    /// A partial whose receipt has not moved for this long is abandoned and
+    /// swept; the receipt stays, and a late re-announce starts over.
     pub const ABANDONED_AFTER_SECONDS: i64 = 14 * 24 * 60 * 60;
     /// The `failed` reason after the intake refused; the detail is logged.
     pub const INTAKE_REFUSED: &'static str = "the intake refused the file";
-    /// The `failed` reason a stored `complete` receipt reads as when its
-    /// meeting is missing (`stored_receipt`). Swift:
-    /// `HandoverEngine.meetingMissing`.
+    /// The `failed` reason of a stored `complete` receipt whose meeting is
+    /// missing.
     pub const MEETING_MISSING: &'static str = "the admitted meeting is missing";
 
-    /// The two answers of the gate. `unauthorized` is the phone's "the
-    /// computer revoked me" signal; `pairing_rejected` a bad, used or
-    /// expired secret.
+    /// The two answers of the gate. `unauthorized` tells the phone it was
+    /// revoked; `pairing_rejected` means a bad, used or expired secret.
     #[must_use]
     pub fn unauthorized() -> HandoverResponse {
         HandoverResponse::problem(StatusCode::UNAUTHORIZED, "unknown or revoked token")
@@ -377,8 +333,7 @@ impl Engine {
         self.files.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// A store read on the blocking pool. Writes go through
-    /// [`Engine::in_order`].
+    /// A store read on the blocking pool; writes go through [`Engine::in_order`].
     pub(crate) async fn with_store<T: Send + 'static>(
         &self,
         body: impl FnOnce(&Store) -> store::Result<T> + Send + 'static,
@@ -386,16 +341,12 @@ impl Engine {
         unless_it_panics(self.store.reading(body)).await
     }
 
-    /// Runs `write` on the blocking pool once the write asked for before it
-    /// has returned (`place`, from [`State::next_write`]). The pool runs
-    /// its calls in any order, so without the line an older receipt could
-    /// commit over a newer one, and a revoke's delete could remove the
-    /// pairing asked for after it or commit before the pairing's save asked
-    /// for before it, which leaves the revoked phone in the store. The
-    /// write runs in a task of its own, so it keeps its place, and the
-    /// writes behind it wait for it, also when the request that asked for
-    /// it is dropped. A failed write does not hold up the next; reads do
-    /// not wait. Swift: `HandoverEngine.inOrder`.
+    /// Runs `write` on the blocking pool once the write before it has returned.
+    /// The pool runs calls in any order, so without the line an older receipt
+    /// could commit over a newer one, or a revoke's delete race a pairing's
+    /// save. The write runs in its own task, so it keeps its place when the
+    /// request is dropped. A failed write does not hold up the next; reads do
+    /// not wait.
     async fn in_order<T: Send + 'static>(
         &self,
         place: InOrder,
@@ -405,7 +356,6 @@ impl Engine {
         tokio::spawn(async move {
             let InOrder { previous, done } = place;
             if let Some(previous) = previous {
-                // Closed, not sent: the write before has returned.
                 let _ = previous.await;
             }
             let written = unless_it_panics(store.writing(write)).await;
@@ -416,15 +366,11 @@ impl Engine {
         .map_err(|error| join_error(&error))?
     }
 
-    /// On start, drop inbox files no receipt accounts for (a crash between
-    /// announce and the first save, a device revoked while offline), that a
-    /// completed intake left behind (it copied the file before writing
-    /// `complete`), or whose receipt has not moved in
-    /// [`Engine::ABANDONED_AFTER_SECONDS`]. A `complete` receipt whose
-    /// meeting is missing counts as not admitted (`stored_receipt`), so
-    /// its verified file stays for the phone's retry. Best effort: a
-    /// receipt the store cannot read keeps its files, which a later start
-    /// sweeps.
+    /// On start, drops inbox files no receipt accounts for, those a completed
+    /// intake left behind, and those whose receipt has not moved in
+    /// [`Engine::ABANDONED_AFTER_SECONDS`]. A `complete` receipt whose meeting
+    /// is missing keeps its verified file for the phone's retry. Best effort:
+    /// an unreadable receipt keeps its files.
     pub async fn sweep_orphans(&self) {
         let _ = self.inbox.prepare();
         let cutoff = (self.now)() - Duration::seconds(Self::ABANDONED_AFTER_SECONDS);
@@ -450,8 +396,7 @@ impl Engine {
 
     // Pairing session
 
-    /// Opens a window and returns the payload for the QR code, replacing
-    /// any open window.
+    /// Opens a window, replacing any open one, and returns the QR payload.
     pub fn begin_pairing(&self) -> PairingPayload {
         let session = PairingSession::open(
             self.identity.mac_id(),
@@ -481,32 +426,21 @@ impl Engine {
             .is_some_and(PairingSession::is_open)
     }
 
-    /// Forgets the device and drops what it was uploading: the files of its
-    /// receipts in memory, unless another phone announced the same
-    /// recording id once they left memory (`Engine::discard_own`). A
-    /// `complete` in flight that has not reached the intake answers 401
-    /// when it sees the revoke, and discards the files when its receipt was
-    /// only in the store, where the revoke does not look. An admission past
-    /// that check may still finish; the revoke's discard can also make it
-    /// fail. Its `complete` receipt stays out of memory while the device is
-    /// revoked and out of the store while the device is gone from it; once
-    /// the phone paired again it is written like any other. Files of a
-    /// receipt only in the store (not read since start) wait for the next
-    /// start's sweep.
+    /// Forgets the device and drops the files of its receipts in memory
+    /// (unless another phone announced the same recording id since). A
+    /// `complete` in flight answers 401 when it sees the revoke; an admission
+    /// past that check may still finish. Files of receipts only in the store
+    /// wait for the next start's sweep.
     ///
-    /// A failed store delete leaves the device paired in the store but
-    /// revoked in memory: its recording routes answer 401 until it pairs
-    /// again, a retried revoke finishes or the app restarts, and the
-    /// receipts are published without its own. A half-revoked phone that
-    /// cannot hand over is safer than one that can.
+    /// A failed store delete leaves the device paired in the store but revoked
+    /// in memory: its recording routes answer 401 until it pairs again or the
+    /// app restarts. A half-revoked phone that cannot hand over is safer than
+    /// one that can.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         let mut unfinished = Vec::new();
         let place = {
-            // Before the first yield: a `complete` that starts or checks
-            // while the store delete runs must already see this revoke. The
-            // delete's place in line goes with the count, so a pairing that
-            // read the count before the bump saves before the delete, and
-            // one that read it after saves after it.
+            // Before the first yield, so a `complete` running alongside the delete
+            // sees this revoke. The delete's place in line goes with the count bump.
             let mut state = self.state();
             state.revoked.insert(device_id);
             *state.revocations.entry(device_id).or_default() += 1;
@@ -531,12 +465,9 @@ impl Engine {
 
     // Auth gate
 
-    /// Refreshes `last_seen_at`, at most once a minute, in line with the
-    /// other store writes. The gate read `device` before a yield, so the
-    /// write is an `UPDATE` of the row that still holds `token_hash`: a
-    /// revoke that landed in between is not undone, and the device is not
-    /// re-inserted. Public for the tests, which run it against a device
-    /// revoked after its read.
+    /// Refreshes `last_seen_at`, at most once a minute, in line with the other
+    /// writes. An `UPDATE` of the row that still holds `token_hash`, so a revoke
+    /// in between is not undone. Public for the tests.
     pub async fn touch(&self, device: PairedDevice, token_hash: Vec<u8>) -> PairedDevice {
         let timestamp = (self.now)();
         if let Some(seen) = device.last_seen_at
@@ -556,8 +487,8 @@ impl Engine {
         seen
     }
 
-    /// The credential after `<scheme> ` in an `Authorization` header, case
-    /// insensitive on the scheme.
+    /// The credential after `<scheme> ` in an `Authorization` header; the
+    /// scheme is case insensitive.
     #[must_use]
     pub fn credential<'a>(scheme: &str, authorization: Option<&'a str>) -> Option<&'a str> {
         let authorization = authorization?;
@@ -575,13 +506,9 @@ impl Engine {
         let Principal::Pairing(window) = request.principal else {
             return Self::pairing_rejected();
         };
-        // The gate passed at the head; the window may have closed, or been
-        // replaced, since. Single use: one guard from the check to the
-        // take, so two connections on two worker threads that both passed
-        // the gate cannot both find the session open. Nothing in between
-        // yields; a second request with the same secret that arrives while
-        // the save runs finds no session and is 403. A failed save reopens
-        // the window, unless it was cancelled or replaced while the save ran.
+        // The window may have closed or been replaced since the gate. One guard
+        // from check to take, so two connections with the same secret cannot both
+        // pair. A failed save reopens the window unless it changed meanwhile.
         let (session, device_id, name) = {
             let mut state = self.state();
             match &state.pairing {
@@ -613,9 +540,8 @@ impl Engine {
             last_seen_at: Some(timestamp),
         };
         let hash = DeviceTokens::hash(&token);
-        // The count and the save's place in line under one guard: a revoke
-        // counted here deletes before the save, one that starts later
-        // deletes after it and keeps the device revoked.
+        // The count and the save's place in line under one guard, so a revoke is
+        // ordered either before or after the save.
         let (revocation, place) = {
             let mut state = self.state();
             (state.revocation_count(device_id), state.next_write())
@@ -630,8 +556,7 @@ impl Engine {
             }
             return HandoverResponse::internal_error("saving the device", &error);
         }
-        // A revoke that started during the save deletes the device after
-        // it and keeps it revoked; the next pairing clears it.
+        // A revoke during the save deletes after it and keeps the device revoked.
         {
             let mut state = self.state();
             if state.revocation_count(device_id) == revocation {
@@ -663,19 +588,16 @@ impl Engine {
         self.state().receipts_snapshot()
     }
 
-    /// Sends the receipts memory holds to the observers. The snapshot and
-    /// the send are one step under the state lock, so a publisher whose
-    /// snapshot is older never sends after a newer one.
+    /// Sends the receipts to the observers; snapshot and send under one lock,
+    /// so an older snapshot is never sent after a newer one.
     fn publish_receipts(&self) {
         let state = self.state();
         self.receipts.send_replace(state.receipts_snapshot());
     }
 
-    /// Drops the receipt of `recording_id` from memory on behalf of
-    /// `device_id` and tells the observers, unless memory holds another
-    /// device's receipt of it ([`State::holds_another_devices`]); the store
-    /// row, if any, stays. Swift: `HandoverEngine.forget`, which goes by the
-    /// recording id alone.
+    /// Drops the receipt from memory on behalf of `device_id` and tells the
+    /// observers, unless memory holds another device's receipt of it; the store
+    /// row stays.
     pub(crate) fn forget_own(&self, recording_id: Uuid, device_id: Uuid) {
         let forgot = self.state().forget_own(recording_id, device_id);
         if forgot {
@@ -683,37 +605,17 @@ impl Engine {
         }
     }
 
-    /// Discards every inbox file of `recording_id` on behalf of
-    /// `device_id`, unless memory holds another device's receipt of it
-    /// ([`State::holds_another_devices`]): those files are that phone's
-    /// upload. Every discard of the engine goes through here,
-    /// [`Engine::discard_own_while_revoked`] or
-    /// [`Engine::discard_and_forget_own`], except the sweep before the
-    /// listener starts and the first announce's ([`Engine::open_files`]).
+    /// Discards every inbox file of `recording_id` on behalf of `device_id`,
+    /// unless memory holds another device's receipt of it (those files are that
+    /// phone's upload). Every discard except the start sweep and
+    /// [`Engine::open_files`] goes through here or its two siblings.
     ///
-    /// The check and the discard are one step under the files lock. Files
-    /// are created only under the same lock: by a first announce, whose
-    /// `change` and opening are one step under it and which opens only
-    /// while memory holds its receipt ([`Engine::open_files`]), or by a
-    /// re-announce of the receipt's owner, for a device that `revoked` does
-    /// not hold ([`Engine::files_for`]). So another phone's announce that
-    /// opened its files made its receipt before the check, and its files
-    /// stay, or opens them once the discard is over. Two stretches with no
-    /// yield in them, on other threads, leave files whose receipt memory
-    /// does not hold at the check:
-    ///
-    /// - A pairing again after the read of a re-announce and before its
-    ///   opening. The re-announce's write puts the receipt in memory right
-    ///   after.
-    /// - A second revoke between [`Engine::reopen_missing_files`] and the
-    ///   re-announce's write, which then keeps the receipt out of memory:
-    ///   the reopened partial and sidecar belong to no receipt in memory or
-    ///   the store until the next start's sweep, or until a first announce
-    ///   of the recording id discards them ([`Engine::open_files`]).
-    ///
-    /// Swift: `inbox.discard` in `RecordingHandler`, by the recording id
-    /// alone; the "Files by recording id" parity note in
-    /// `.plans/2026-10-02-rust-core-and-tauri-shell.md` says where it differs.
+    /// Check and discard are one step under the files lock, and files are only
+    /// created under that lock while memory holds their receipt, so another
+    /// phone's files either made their receipt before the check or open after
+    /// the discard. A pairing again or a second revoke racing a re-announce can
+    /// leave files with no receipt in memory; the next start's sweep or a first
+    /// announce takes them.
     pub(crate) fn discard_own(&self, recording_id: Uuid, device_id: Uuid) {
         let _files = self.files();
         if !self.state().holds_another_devices(recording_id, device_id) {
@@ -721,12 +623,8 @@ impl Engine {
         }
     }
 
-    /// [`Engine::discard_own`] while `revoked` holds `device_id`, with that
-    /// check in the same step under the files lock: a check outside it
-    /// would let the device pair again and its new pairing's announce open
-    /// its files in between, and the discard would take them. Swift: the
-    /// `refusal` after the verify in `RecordingHandler.complete`, which
-    /// discards by the recording id alone, revoked or not.
+    /// [`Engine::discard_own`] while `revoked` holds `device_id`, checked under
+    /// the files lock so a new pairing's announce cannot open files in between.
     pub(crate) fn discard_own_while_revoked(&self, recording_id: Uuid, device_id: Uuid) {
         let _files = self.files();
         let discard = {
@@ -739,12 +637,8 @@ impl Engine {
         }
     }
 
-    /// [`Engine::discard_own`], and the receipt of `recording_id` leaves
-    /// memory too, as [`Engine::forget_own`] drops it, in the same step
-    /// under the files lock: a check, a forget and a discard in two steps
-    /// would let another phone's announce make its receipt in between, and
-    /// its files would then be discarded or opened over the old partial.
-    /// Swift: `inbox.discard` and `forget` in `RecordingHandler.refusal`.
+    /// [`Engine::discard_own`] plus [`Engine::forget_own`] in one step under the
+    /// files lock, so no other phone's announce makes its receipt in between.
     pub(crate) fn discard_and_forget_own(&self, recording_id: Uuid, device_id: Uuid) {
         {
             let _files = self.files();
@@ -757,54 +651,28 @@ impl Engine {
         self.publish_receipts();
     }
 
-    /// The files lock for creating a recording's files on behalf of
-    /// `device_id`; `None` while `revoked` holds the device. Its receipts
-    /// stay out of memory then, so files made for it would belong to no
-    /// receipt there, and a discard on behalf of another device would take
-    /// them. Swift: none; the actor runs the check, `begin` and the receipt
-    /// in one step.
+    /// The files lock for creating files on behalf of `device_id`; `None` while
+    /// the device is revoked, as files made then would belong to no receipt in
+    /// memory.
     fn files_for(&self, device_id: Uuid) -> Option<MutexGuard<'_, ()>> {
         let files = self.files();
         let revoked = self.state().revoked.contains(&device_id);
         (!revoked).then_some(files)
     }
 
-    /// Opens the files of the receipt an announce just made for
-    /// `device_id` (a first announce, whose read found no receipt in memory
-    /// or the store, or one that replaced the receipt it read): an empty
-    /// partial and the metadata sidecar of `begin`, or none when `begin` is
-    /// `None` (a receipt answered `complete` from the admission ledger).
-    /// `_files` is the caller's guard of the files lock, passed so the
-    /// signature proves the lock is held; the caller holds it from before
-    /// that `change` until this returns, so no file is created or discarded
-    /// in between ([`Engine::discard_own`]). `None`, with nothing opened,
-    /// when memory no longer holds this device's receipt: the device was
-    /// revoked since its receipt read, and memory holds none or, once it
-    /// paired again, another device's receipt.
+    /// Opens the files of the receipt an announce just made for `device_id`:
+    /// an empty partial and the metadata sidecar of `begin`, or none when
+    /// `begin` is `None` (answered from the admission ledger). `_files` proves
+    /// the caller holds the files lock, from before its `change` until this
+    /// returns. `None`, with nothing opened, when memory no longer holds this
+    /// device's receipt (revoked since).
     ///
-    /// Every file of the recording id goes first. After a first announce
-    /// whatever is there belongs to no receipt: a verified file left by an
-    /// intake failure whose receipt a revoke deleted after a restart, or a
-    /// partial a refusal or a second revoke left. Kept, `begin` would add
-    /// this upload's chunks to an old partial, and `complete` would hand an
-    /// old verified file to the intake without hashing it. After a
-    /// replacement they are the replaced upload's: of other bytes, of the
-    /// same bytes in another split, or of bytes the ledger shows admitted.
-    ///
-    /// No live upload of another device the computer could still admit is
-    /// in those files. A device's recording routes read its receipt into
-    /// memory before they touch a file, and memory drops it only when that
-    /// device is revoked. `change` made this receipt only because memory
-    /// held none, or the very receipt the announce decided to replace, so
-    /// only a revoked device's request, or one of the replaced upload, can
-    /// still be at work on them. Such a request answers a refusal, an error,
-    /// a 404 or a re-announce's status, and the phone deletes its copy only
-    /// on a 200 from `complete`, so it keeps its recording; or it answers
-    /// the 200 of an admission whose intake opened the verified file before
-    /// the discard and copies it whole (the open file outlives its name).
-    ///
-    /// Swift: `inbox.discard` and `inbox.begin` in
-    /// `RecordingHandler.announce`.
+    /// Every file of the recording id goes first: they belong to no live
+    /// receipt, or to the replaced upload. Kept, `begin` would append to an old
+    /// partial, or `complete` would hand an old verified file to the intake
+    /// unhashed. No upload another device could still admit is lost: only a
+    /// revoked or replaced request can still be at work on them, and the phone
+    /// deletes its copy only on a 200 from `complete`.
     pub(crate) fn open_files(
         &self,
         _files: &MutexGuard<'_, ()>,
@@ -824,16 +692,10 @@ impl Engine {
         Some(begin.map_or(Ok(()), |metadata| self.inbox.begin(metadata)))
     }
 
-    /// Opens the files of a known recording of `device_id` again when the
-    /// partial or the sidecar is gone (a sweep, a crash before the first
-    /// chunk, a refusal) and no verified file waits for a second intake
-    /// attempt; true when it opened them. `None`, with nothing opened, when
-    /// the device was revoked since its receipt read ([`Engine::files_for`]).
-    /// The check and the creation are one step under the files lock, so two
-    /// re-announces, or a re-announce and the announce that made the
-    /// receipt, never write the sidecar over a partial another one opened.
-    /// Swift: the `inbox.begin` of a known recording in
-    /// `RecordingHandler.announce`.
+    /// Opens a known recording's files again when the partial or sidecar is
+    /// gone and no verified file waits for a second intake; true when it opened
+    /// them, `None` when the device was revoked. Check and creation are one
+    /// step under the files lock.
     pub(crate) fn reopen_missing_files(
         &self,
         metadata: &RecordingMetadata,
@@ -850,13 +712,9 @@ impl Engine {
         Some(self.inbox.begin(metadata).map(|()| true))
     }
 
-    /// One state change through [`Engine::update`]: the state and, when
-    /// given, the chunk set, then the save. Callers that answer the phone
-    /// whatever the write did ignore the result deliberately: memory
-    /// already holds the change, or the newer receipt that declined it, and
-    /// the phone's next request re-reads.
-    /// Swift: `HandoverEngine.transition`, where the actor makes the read
-    /// and the write one step.
+    /// One state change through [`Engine::update`]: the state, optionally the
+    /// chunk set, then the save. Callers that answer the phone regardless ignore
+    /// the result: memory already holds the change, and the phone re-reads.
     pub(crate) async fn transition(
         &self,
         receipt: &mut HandoverReceipt,
@@ -866,25 +724,13 @@ impl Engine {
         self.update(receipt, Some(state), received_chunks).await
     }
 
-    /// A change of the receipt a request read, through [`Engine::change`]:
-    /// `state` and `received_chunks`, when given, change the copy memory
-    /// holds, or `receipt` when memory holds none (a revoked device), and
-    /// `receipt` comes back as changed. When memory holds another upload
-    /// ([`same_upload`]: another phone announced or took over the
-    /// recording id, or the phone announced other bytes under it), nothing
-    /// changes, `receipt` included: a late `complete` of the replaced bytes
-    /// would otherwise mark the new upload `complete` with their meeting,
-    /// and the phone would delete a recording the computer does not have.
-    /// A receipt memory holds as `complete` stays as it is, nothing is
-    /// saved and `receipt` comes back as memory holds it: a request that
-    /// read it before the phone's `complete` admitted the recording must
-    /// not put it back, or the phone's next `complete` would start over and
-    /// admit it again. A chunk set is one split's, so it is not written
-    /// over a receipt memory holds in another chunk size (the phone has
-    /// since announced the same bytes in another split): a late `complete`
-    /// of the earlier split would empty the new split's chunks, and the
-    /// phone would send them again. Nothing changes then, `receipt`
-    /// included.
+    /// Changes the receipt a request read: `state` and `received_chunks` apply
+    /// to memory's copy, or to `receipt` when memory holds none (a revoked
+    /// device). Nothing changes when memory holds another upload
+    /// ([`same_upload`]), or holds the receipt in another chunk size (a chunk
+    /// set is one split's). A receipt memory holds as `complete` stays as it
+    /// is and comes back unsaved, so a stale request cannot make the phone
+    /// admit it again.
     async fn update(
         &self,
         receipt: &mut HandoverReceipt,
@@ -925,14 +771,10 @@ impl Engine {
         }
     }
 
-    /// Folds chunk `index` into the receipt as memory holds it, sets it to
-    /// `receiving` and saves it. `None`, with nothing changed, when memory
-    /// holds no receipt of the upload `read` stands for, in the same split
-    /// (revoked, forgotten, taken over by another device, replaced by other
-    /// bytes or restarted under another chunk size): the chunk was written
-    /// at an offset of that split. A receipt memory holds as `complete`
-    /// stays as it is, as in [`Engine::update`], and the chunk counts as
-    /// received: `Some(Ok(()))` with nothing saved.
+    /// Folds chunk `index` into memory's receipt, sets it to `receiving` and
+    /// saves it. `None` when memory holds no receipt of the same upload and
+    /// split as `read`. A `complete` receipt stays as it is and the chunk counts
+    /// as received.
     pub(crate) async fn add_chunk(
         &self,
         read: &HandoverReceipt,
@@ -960,15 +802,11 @@ impl Engine {
         }
     }
 
-    /// Runs `edit` on the copy `pick` makes of the receipt memory holds for
-    /// `recording_id` (`pick` gets `None` when memory holds none), moves
-    /// `updated_at`, keeps the result in memory and takes the save's place
-    /// in line, all under one guard. When `pick` declines, nothing changes,
-    /// no place is taken and its `Err` comes back. If the read and the
-    /// write were two steps, two requests on two threads could start from
-    /// the same copy, and the later one would drop the other's change in
-    /// memory and in the store. The clock is read before the state guard,
-    /// so a slow clock never holds the state lock.
+    /// Runs `edit` on the copy `pick` makes of memory's receipt, moves
+    /// `updated_at`, keeps the result and takes the save's place in line, all
+    /// under one guard, so two requests never start from the same copy. When
+    /// `pick` declines, nothing changes and its `Err` comes back. The clock is
+    /// read before the guard.
     fn change<Declined>(
         &self,
         recording_id: Uuid,
@@ -993,13 +831,9 @@ impl Engine {
         result
     }
 
-    /// The receipt from memory or the store ([`stored_receipt`], so a
-    /// `complete` one whose meeting is missing comes back not admitted).
-    /// Another request may have loaded and advanced it while the store read
-    /// ran; memory wins then. A failed read is an error, not "no receipt":
-    /// taken for a new recording, it would let an announce overwrite a
-    /// `complete` receipt and the next `complete` admit the meeting a
-    /// second time.
+    /// The receipt from memory or the store (via [`stored_receipt`]); memory
+    /// wins when both have it. A failed read is an error, not "no receipt",
+    /// or an announce could overwrite a `complete` receipt.
     pub(crate) async fn receipt(
         &self,
         recording_id: Uuid,
@@ -1021,8 +855,8 @@ impl Engine {
         Ok(Some(stored))
     }
 
-    /// The receipt when it belongs to the requesting device; the answer
-    /// for the phone when there is none (404) or the read failed (500).
+    /// The receipt when it belongs to the requesting device; otherwise the
+    /// answer for the phone (404, or 500 on a failed read).
     pub(crate) async fn owned_receipt(
         &self,
         recording_id: Uuid,
@@ -1040,9 +874,8 @@ impl Engine {
 
     /// Marks `recording_id` as completing; `None` when it already is.
     pub(crate) fn begin_completing(&self, recording_id: Uuid) -> Option<Completing> {
-        // The guard is built only once the lock is released: its `Drop`
-        // takes the same lock, and `then_some` would build (and drop) it
-        // eagerly.
+        // Build the guard after the lock is released: its `Drop` takes the same
+        // lock, and `then_some` would build it eagerly.
         let inserted = self.state().completing.insert(recording_id);
         inserted.then(|| Completing {
             engine: self
@@ -1055,22 +888,13 @@ impl Engine {
 }
 
 /// The stored receipt of `recording_id` as admitted or not. A `complete`
-/// one whose meeting row exists comes back as it is. Otherwise the
-/// admission ledger decides ([`Store::admitted_meeting`]): when it holds
-/// the receipt's recording id, size and SHA-256, the receipt reads as
-/// `complete` with the ledger's meeting id, whatever its state. That is a
-/// `complete` receipt whose meeting the user deleted (the phone's retry is
-/// answered delivered), or one a line save asked for before the intake's
-/// commit put back to `verifying` or `receiving` (the retry gets the first
-/// meeting, not a second admission). A `complete` receipt with neither a
-/// meeting row nor a ledger row reads as `failed`
-/// ([`Engine::MEETING_MISSING`]): not admitted. Only an admission whose
-/// meeting never committed leaves one behind (the separate receipt and
-/// meeting commits of earlier releases, a crash or a full disk between
-/// them). Its phone never got the 200 and still holds the recording, so the
-/// receipt must neither answer 200 nor let the sweep take the verified
-/// file; the phone's retried `complete` admits that file again. Swift:
-/// `HandoverEngine.storedReceipt`.
+/// receipt whose meeting exists comes back as it is. Otherwise, when the
+/// admission ledger holds its recording id, size and SHA-256, it reads as
+/// `complete` with the ledger's meeting id, so a retry gets the first
+/// meeting rather than a second admission. A `complete` receipt with
+/// neither reads as `failed` ([`Engine::MEETING_MISSING`]): its phone never
+/// got the 200, so the receipt must not answer 200 and the sweep must keep
+/// the verified file.
 fn stored_receipt(store: &Store, recording_id: Uuid) -> store::Result<Option<HandoverReceipt>> {
     let Some(mut receipt) = store.handover_receipt(recording_id)? else {
         return Ok(None);
@@ -1090,22 +914,16 @@ fn stored_receipt(store: &Store, recording_id: Uuid) -> store::Result<Option<Han
     Ok(Some(receipt))
 }
 
-/// Whether `held` is the upload `read` stands for: the same device and the
-/// same bytes. A receipt of another device (another phone announced the
-/// recording id, or took it over), or of other bytes (the phone announced
-/// another file under the id), is another upload, and a write a request
-/// computed from `read` must not land on it. The chunk size is not part of
-/// it: only the writes of a chunk set check it ([`Engine::update`],
-/// [`Engine::add_chunk`]). Swift: `HandoverEngine.sameUpload`.
+/// Whether `held` is the upload `read` stands for: same device, same bytes.
+/// The chunk size is not part of it; only chunk-set writes check that.
 fn same_upload(held: &HandoverReceipt, read: &HandoverReceipt) -> bool {
     held.device_id == read.device_id
         && held.byte_count == read.byte_count
         && held.sha256 == read.sha256
 }
 
-/// A store call through the store's facade, whose panic is an I/O error,
-/// as a failed write is: the request it served answers with a server
-/// error, and the connection lives on.
+/// A store call whose panic becomes an I/O error, so the request answers a
+/// server error and the connection lives on.
 async fn unless_it_panics<T>(
     call: impl std::future::Future<Output = store::Result<T>>,
 ) -> store::Result<T> {
@@ -1125,10 +943,8 @@ fn join_error(error: &tokio::task::JoinError) -> store::StoreError {
     store::StoreError::Io(std::io::Error::other(error.to_string()))
 }
 
-/// The `completing` mark, removed when the `complete` call returns, or,
-/// once the verified file went to the intake, when the admission's task
-/// ends ([`Completing::admit`]), whether or not the request still waits.
-/// Swift: `completing` and its `defer` in `RecordingHandler.complete`.
+/// The `completing` mark, removed when `complete` returns or, once the
+/// verified file went to the intake, when the admission's task ends.
 pub(crate) struct Completing {
     engine: Arc<Engine>,
     recording_id: Uuid,
@@ -1142,8 +958,7 @@ impl Drop for Completing {
 
 #[steno_core::async_trait]
 impl RequestHandling for Engine {
-    /// Runs at the request head, before the body; a rejection carries the
-    /// answer the connection writes.
+    /// Runs at the request head, before the body.
     async fn authenticate(&self, route: Route, authorization: Option<&str>) -> AuthOutcome {
         match route.auth() {
             AuthRequirement::None => AuthOutcome::Allowed(Principal::Anonymous),
@@ -1192,10 +1007,8 @@ impl RequestHandling for Engine {
             (Route::Pair, _) => self.pair(&request).await,
             (_, None) => Self::unauthorized(),
             (Route::Unpair, Some(device)) => self.unpair(device).await,
-            // A device revoked in memory may still pass the gate: its store
-            // delete failed or has not committed yet. Its recording routes
-            // stop here; unpair stays open so the phone can still drop its
-            // pairing.
+            // A revoked device may still pass the gate (its store delete failed or is
+            // pending); its recording routes stop here, unpair stays open.
             (_, Some(device)) if self.state().revoked.contains(&device.id) => Self::unauthorized(),
             (Route::Announce(recording_id), Some(device)) => {
                 self.announce(recording_id, device, &request.body).await

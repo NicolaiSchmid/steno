@@ -1,5 +1,4 @@
 //! Who spoke when, for one lane.
-//! Swift: `Sources/StenoCore/Protocols/Diarizer.swift`.
 
 use async_trait::async_trait;
 
@@ -10,8 +9,7 @@ use crate::{AudioBuffer16k, DiarizationResult};
 /// the cluster confidence and the diarizer-chosen sample clip range.
 #[async_trait]
 pub trait Diarizer: Send + Sync {
-    /// Downloads or loads models; idempotent like
-    /// [`SpeechEngine::prepare`](super::SpeechEngine::prepare).
+    /// Downloads or loads models; idempotent.
     async fn prepare(&self) -> BoundaryResult<()>;
 
     async fn diarize(&self, audio: &AudioBuffer16k) -> BoundaryResult<DiarizationResult>;

@@ -1,20 +1,8 @@
-//! Durable file writes: replacing a file in one step (the secrets file,
-//! `preferences.json`, the CLI's `meeting.json`; Swift:
-//! `Data.write(to:options: .atomic)`), copying a recording so it survives a
-//! power loss (the phone intake), creating folders whose entries survive
-//! one (a new meeting folder among them), removing a file so the removal
-//! survives one (the warm-up mark), and reading and writing a JSON
-//! file this process owns, set aside when it does not parse
-//! (`preferences.json`, `export-retries.json`; `damaged-audio.json` is
-//! left in place instead, see [`DamagedAudio`](crate::DamagedAudio)). The
-//! services and the CLI use these too, so there is one implementation. On
-//! Windows a folder flush alone does not make a rename durable (the FAT
-//! driver treats a flush of a folder other than the drive's root as a
-//! no-op), so the renames are written through and the renamed file is
-//! flushed as well as the folders (`windows`). [`may_lose_recent_writes`]
-//! tells Settings about a folder whose writes may still be lost: a Windows
-//! drive where that is not enough, or a network drive or mount (`windows`,
-//! `mount`).
+//! Durable file writes: replacing a file in one step, copying a recording
+//! so it survives a power loss, creating and removing durably, and reading
+//! and writing a JSON file this process owns, set aside when it does not
+//! parse. On Windows a folder flush alone does not make a rename durable, so
+//! renames are written through and the renamed file is flushed too.
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 mod mount;
@@ -34,26 +22,21 @@ use serde::de::DeserializeOwned;
 use steno_core::busy_file::{self, is_busy};
 use uuid::Uuid;
 
-/// The syncs a durable write makes, and its waits before it tries a busy
-/// file again ([`retried`]); the disk and the clock in the product, a
-/// recorder in the tests, which check what is synced and when.
+/// The syncs a durable write makes and its waits before a retry: the disk
+/// and the clock in the product, a recorder in the tests.
 pub(crate) trait Syncs {
     /// Flushes `file`, written at `path`, to the disk.
     fn file(&self, file: &File, path: &Path) -> std::io::Result<()>;
-    /// Makes the entries of `directory` (a rename, a new folder) durable.
-    /// Best effort on Linux and macOS (a failed sync is ignored). On
-    /// Windows a folder that does not open, or a flush that fails to write,
-    /// is an error, so the phone intake answers 500 and the phone keeps its
-    /// copy; a drive that refuses to flush a folder is logged and passed
-    /// over, since the flush of the renamed file carries the entries there.
+    /// Makes the entries of `directory` durable. Best effort on Linux and
+    /// macOS. On Windows a failed open or flush is an error, so the phone
+    /// intake answers 500 and the phone keeps its copy; a drive that refuses
+    /// to flush a folder is logged and passed over.
     fn directory(&self, directory: &Path) -> std::io::Result<()>;
-    /// Waits `delay` before [`retried`] tries again.
     fn wait(&self, delay: Duration) {
         std::thread::sleep(delay);
     }
 }
 
-/// The product's syncs.
 pub(crate) struct Disk;
 
 impl Syncs for Disk {
@@ -77,12 +60,9 @@ impl Syncs for Disk {
 }
 
 /// Whether a power cut may lose a recording just written into `folder`, for
-/// the warning in Settings: true on Windows for a folder on a drive that is
-/// neither NTFS nor `ReFS` (FAT32, exFAT), whose folder entries the durable
-/// writes cannot be sure to flush, and on Windows, Linux and macOS for one
-/// on a network drive or mount, whose server may acknowledge a flush
-/// without writing it (`windows`, `mount`); false elsewhere, and where its
-/// file system cannot be read.
+/// the warning in Settings: true on a Windows drive that is neither NTFS nor
+/// `ReFS`, and on a network drive or mount anywhere; false elsewhere and
+/// where the file system cannot be read.
 pub fn may_lose_recent_writes(folder: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -106,28 +86,21 @@ pub fn may_lose_recent_writes(folder: &Path) -> bool {
 pub enum Access {
     /// Mode 0600 where the platform has modes: the secrets file.
     OwnerOnly,
-    /// The mode any new file gets (0666 less the umask), as Swift's atomic
-    /// write gave `meeting.json`.
+    /// The mode any new file gets (0666 less the umask).
     Default,
 }
 
-/// The suffix of the temporary files [`replace_file`] writes.
 const TEMPORARY_SUFFIX: &str = ".partial";
 
 /// How old a temporary must be before a later write removes it as one a
-/// killed writer left behind; a live writer's lives for milliseconds.
+/// killed writer left behind.
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
-/// Replaces `path` with `data`. The bytes go to a temporary file of this
-/// writer's own beside `path` (`.<name>.<random>.partial`), are synced, and
-/// a rename puts them in place, so a reader, a crash or a full disk sees the
-/// old file or the new one, never a torn one, and two writers into one
-/// folder never share a temporary. The sync comes before the rename, so a
-/// crash cannot leave the new name over empty or partly written data; the
-/// folder is synced after it (on Windows the rename is written through and
-/// the renamed file flushed), so the rename itself survives a crash. A
-/// failure removes the temporary; temporaries a killed writer left behind
-/// are removed by a later write once they are a minute old.
+/// Replaces `path` with `data`: a temporary of this writer's own beside
+/// `path` is written, synced and renamed into place, then the folder is
+/// synced, so a reader or a crash sees the old file or the new one, never a
+/// torn one. Temporaries a killed writer left behind are removed by a later
+/// write once they are a minute old.
 pub fn replace_file(path: &Path, data: &[u8], access: Access) -> std::io::Result<()> {
     replace_file_with(&Disk, path, data, access)
 }
@@ -142,13 +115,10 @@ pub(crate) fn replace_file_with(
     write_durably(syncs, path, access, |file| file.write_all(data))
 }
 
-/// Copies `source` to `destination` the way [`replace_file`] writes: into a
-/// temporary of its own beside `destination`, synced, renamed into place,
-/// the folder synced, so once this returns the copy survives a power loss.
-/// The phone intake copies an upload with it before it marks the receipt
-/// complete, since the phone deletes its own copy then; Swift's
-/// `RecordingIntake` syncs its `copyItem` copy and folders instead
-/// (`RecordingIntake.Syncs`).
+/// Copies `source` to `destination` the way [`replace_file`] writes, so once
+/// this returns the copy survives a power loss. The phone intake needs that
+/// before it marks the receipt complete, since the phone then deletes its
+/// copy.
 pub fn copy_durably(source: &Path, destination: &Path) -> std::io::Result<()> {
     copy_durably_with(&Disk, source, destination)
 }
@@ -160,10 +130,8 @@ fn copy_durably_with(syncs: &dyn Syncs, source: &Path, destination: &Path) -> st
     })
 }
 
-/// Removes the file at `path` and syncs its folder, so the removal survives
-/// a power loss too; a file that is not there is removed already. On
-/// Windows a file another handle holds for a moment (an antivirus scan) is
-/// tried again, as [`replace_file`]'s rename is.
+/// Removes the file at `path` and syncs its folder; a file that is not there
+/// is removed already. On Windows a busy file is tried again.
 pub fn remove_durably(path: &Path) -> std::io::Result<()> {
     remove_durably_with(&Disk, path)
 }
@@ -177,20 +145,16 @@ pub(crate) fn remove_durably_with(syncs: &dyn Syncs, path: &Path) -> std::io::Re
 }
 
 /// `std::fs::create_dir_all`, with the parent of every folder it creates
-/// synced, so the new folders themselves survive a power loss. On Windows a
-/// failed folder flush is an error, and on a FAT drive the folders are on
-/// the disk only once a file written into them is flushed
-/// ([`copy_durably`]).
+/// synced. On Windows a failed folder flush is an error.
 pub fn create_dir_all_durably(directory: &Path) -> std::io::Result<()> {
     create_dir_all_durably_with(&Disk, directory)
 }
 
 /// Creates the folder `directory`, which must not exist yet, with its
-/// missing parents, syncing the parent of every folder it creates as
-/// [`create_dir_all_durably`] does. A folder or file already at `directory`
-/// fails with `AlreadyExists` before the folder is made, so a caller that
-/// removes the folder after a later failure removes only what it made; a
-/// sync that fails after the folder was made removes the folder again.
+/// missing parents, synced as [`create_dir_all_durably`] does. An existing
+/// entry fails with `AlreadyExists` before anything is made, so a caller
+/// that cleans up after a later failure removes only what it made; a failed
+/// sync removes the new folder again.
 pub fn create_new_dir_durably(directory: &Path) -> std::io::Result<()> {
     create_new_dir_durably_with(&Disk, directory)
 }
@@ -204,7 +168,6 @@ fn create_new_dir_durably_with(syncs: &dyn Syncs, directory: &Path) -> std::io::
     })
 }
 
-/// The folder that holds `path`: its parent, or `.` for a bare name.
 fn folder_of(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -227,10 +190,9 @@ pub(crate) fn create_dir_all_durably_with(
     Ok(())
 }
 
-/// The one durable write: `write` fills a temporary of this writer's own
-/// beside `path`, which is synced, renamed onto `path` ([`rename_over`]),
-/// and the folder synced. Dropping the temporary on an error removes it; a
-/// folder sync that fails is an error with the new file in place.
+/// The one durable write: `write` fills a temporary beside `path`, which is
+/// synced, renamed onto `path` and its folder synced. A folder sync that
+/// fails is an error with the new file in place.
 fn write_durably(
     syncs: &dyn Syncs,
     path: &Path,
@@ -261,9 +223,8 @@ fn write_durably(
     let mut temporary = builder.tempfile_in(directory)?;
     write(temporary.as_file_mut())?;
     syncs.file(temporary.as_file(), temporary.path())?;
-    // From here the temporary is renamed with `rename_over` rather than
-    // `persist`: written through on Windows, and std's fallback replaces a
-    // target another handle has open.
+    // `rename_over` rather than `persist`: written through on Windows, and
+    // std's fallback replaces a target another handle has open.
     let (file, temporary) = temporary.keep().map_err(|error| error.error)?;
     drop(file);
     if let Err(error) = rename_over(syncs, &temporary, path) {
@@ -279,27 +240,16 @@ enum Renamed {
     /// `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`.
     #[cfg(windows)]
     WrittenThrough,
-    /// `std::fs::rename`.
     WithStd,
 }
 
-/// Renames `from` onto `to`. Elsewhere the caller's folder sync makes the
-/// rename durable; on Windows, where a folder flush does not cover a
-/// rename on every drive, the rename is written through and the renamed
-/// file then flushed through `syncs`, with std's rename before the same
-/// flush where the written-through one fails ([`windows`]). The renamed
-/// file is reopened for the flush. Windows refuses a file another handle
-/// holds for a moment ([`is_busy`]), so std's rename and the reopen are
-/// retried ([`retried`]). Two writers of `to` (spelled the same; the
-/// retries cover other spellings) in this process rename and flush one
-/// after the other (`windows::lock_path`): on Windows one writer's flush
-/// holds the file the other replaces, which sends that rename to std's,
-/// and the reopen of a file another writer is replacing that instant fails
-/// with "access denied"; the retries ride that out, the lock keeps it from
-/// happening. A flush that fails after the rename is an error with the new
-/// file already in place: the phone intake answers 500 and removes the
-/// meeting folder it made, and [`replace_file`] reports a write that
-/// happened.
+/// Renames `from` onto `to`. On Windows, where a folder flush does not cover
+/// a rename on every drive, the rename is written through and the renamed
+/// file reopened and flushed, falling back to std's rename where the
+/// written-through one fails. Busy files are retried, and two writers of
+/// one path in this process take turns (`windows::lock_path`), since one
+/// writer's flush would otherwise make the other's reopen fail. A flush that
+/// fails after the rename is an error with the new file already in place.
 fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Renamed> {
     #[cfg(windows)]
     {
@@ -321,15 +271,13 @@ fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Ren
     }
 }
 
-/// `std::fs::rename`, retried on Windows while the file is busy
-/// ([`retried`]); elsewhere tried once.
+/// `std::fs::rename`, retried on Windows while the file is busy.
 fn rename_with_std(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<()> {
     retried(syncs, || std::fs::rename(from, to))
 }
 
-/// `busy_file::retried`, waiting through `syncs`: `attempt` runs, and on
-/// Windows a busy file ([`is_busy`]) is tried again [`busy_file::RETRIES`]
-/// times after waits of 5 ms doubling to 200 ms, about 0.9 s in all;
+/// `busy_file::retried`, waiting through `syncs`: on Windows a busy file is
+/// tried again after waits of 5 ms doubling to 200 ms, about 0.9 s in all;
 /// elsewhere `attempt` runs once.
 fn retried<T>(
     syncs: &dyn Syncs,
@@ -343,7 +291,7 @@ fn retried<T>(
     )
 }
 
-/// Removes this file's temporaries in `directory` that are older than
+/// Removes this file's temporaries in `directory` older than
 /// [`STALE_AFTER`]; best effort.
 fn remove_stale_temporaries(directory: &Path, prefix: &str) {
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -369,23 +317,17 @@ fn remove_stale_temporaries(directory: &Path, prefix: &str) {
     }
 }
 
-/// Moves `path` aside to `<name>.corrupt-<UTC time>` beside it, with `-2`,
-/// `-3` and so on added when that name is taken, so an earlier copy set
-/// aside is never replaced; the folder is synced after the move, best
-/// effort, since a move lost in a power cut is made again. A reader
-/// that cannot parse a file it owns calls this before it starts empty, so
-/// the next write cannot replace bytes nobody has looked at. Returns the
-/// new path.
+/// Moves `path` aside to `<name>.corrupt-<UTC time>` beside it (`-2`, `-3`
+/// and so on when taken) and syncs the folder, best effort. A reader that
+/// cannot parse a file it owns calls this before it starts empty, so the
+/// next write cannot replace bytes nobody has looked at. Returns the new
+/// path.
 ///
-/// The new name is claimed with a hard link, which fails when the name is
-/// taken, so a copy another process sets aside in the same second is never
-/// replaced; the old name is removed after. Where no hard link can be made
-/// the move is a rename, which replaces a taken name, so a check that the
-/// name is free comes first and is all that guards it there. If the old
-/// name cannot be removed after the link, the error is returned and both
-/// names hold the bytes; on every platform an old name already gone is
-/// no error. On Windows that removal and the rename are tried again while
-/// the file is busy (`steno_core::busy_file`).
+/// The new name is claimed with a hard link, which fails when taken, so a
+/// copy another process sets aside in the same second is never replaced.
+/// Where no hard link can be made the move is a rename after a check that
+/// the name is free. If the old name cannot be removed after the link, the
+/// error is returned and both names hold the bytes.
 pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
@@ -404,16 +346,14 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
         };
         match std::fs::hard_link(path, &candidate) {
             Ok(()) => match busy_file::retried(|| std::fs::remove_file(path)) {
-                // The old name already gone (another `set_aside` removed
-                // it in between) still leaves the bytes at the link.
+                // Another `set_aside` removed the old name; the bytes are at
+                // the link.
                 Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
                 _ => break candidate,
             },
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
-            // No hard link here (FAT, some network shares, a Linux that
-            // protects links to files of other users), so fall back to a
-            // rename; where the link failed for another reason (a
-            // read-only folder), the rename fails the same way.
+            // No hard link here (FAT, some network shares), so rename; a
+            // read-only folder fails the rename the same way.
             Err(_) => match candidate.symlink_metadata() {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     busy_file::rename(path, &candidate)?;
@@ -430,13 +370,11 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
     Ok(aside)
 }
 
-/// The JSON in `path`, a file this process alone writes, and whether it
-/// may be written. A missing file reads as the default. A file that does
-/// not parse is moved aside ([`set_aside`]) and logged before the default
-/// is used; a file that cannot be read for another reason, or that cannot
-/// be moved aside, is left alone, logged, and must never be written
-/// (`false`). `preferences.json` and `export-retries.json` read through
-/// this.
+/// The JSON in `path`, a file this process alone writes, and whether it may
+/// be written. A missing file reads as the default; one that does not parse
+/// is set aside and logged first. A file that cannot be read for another
+/// reason, or cannot be set aside, is logged and must never be written
+/// (`false`).
 pub fn read_json<T: DeserializeOwned + Default>(path: &Path) -> (T, bool) {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -475,8 +413,8 @@ pub fn read_json<T: DeserializeOwned + Default>(path: &Path) -> (T, bool) {
     }
 }
 
-/// Replaces `path` with `value` as pretty-printed JSON ([`replace_file`],
-/// [`Access::Default`]), creating its folder first.
+/// Replaces `path` with `value` as pretty-printed JSON, creating its folder
+/// first.
 pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> std::io::Result<()> {
     let data = serde_json::to_vec_pretty(value)?;
     if let Some(parent) = path.parent() {
@@ -485,31 +423,25 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> std::io::Res
     replace_file(path, &data, Access::Default)
 }
 
-/// A value per meeting in a JSON file this process owns (meeting id to
-/// value): [`ExportRetries`](crate::ExportRetries)'s counts and
-/// [`DamagedAudio`](crate::DamagedAudio)'s damage, read with [`read_json`]
-/// or as the owner reads it, and replaced with [`write_json`] on every
-/// change; a file that may not be written keeps the values of this run in
-/// memory only.
+/// A value per meeting in a JSON file this process owns, replaced with
+/// [`write_json`] on every change; a file that may not be written keeps the
+/// values of this run in memory only.
 #[derive(Debug)]
 pub(crate) struct MeetingValues<V> {
     path: PathBuf,
     values: Mutex<BTreeMap<Uuid, V>>,
-    /// False for [`in_memory`](Self::in_memory), and when the file on disk
+    /// False for [`in_memory`](Self::in_memory) and when the file on disk
     /// could not be read or set aside.
     writable: bool,
 }
 
 impl<V: Serialize + DeserializeOwned + Clone> MeetingValues<V> {
-    /// The values in `path`, read now with [`read_json`]: a missing or
-    /// corrupt file holds none.
+    /// The values in `path`: a missing or corrupt file holds none.
     pub(crate) fn new(path: PathBuf) -> Self {
         let (values, writable) = read_json(&path);
         Self::from_read(path, values, writable)
     }
 
-    /// `values`, as read from `path`, written there on a change when
-    /// `writable`.
     pub(crate) fn from_read(path: PathBuf, values: BTreeMap<Uuid, V>, writable: bool) -> Self {
         MeetingValues {
             path,
@@ -518,20 +450,17 @@ impl<V: Serialize + DeserializeOwned + Clone> MeetingValues<V> {
         }
     }
 
-    /// Values that live in memory only and are never written.
     pub(crate) fn in_memory() -> Self {
         Self::from_read(PathBuf::new(), BTreeMap::new(), false)
     }
 
-    /// `meeting_id`'s value, if it has one.
     pub(crate) fn get(&self, meeting_id: Uuid) -> Option<V> {
         self.lock().get(&meeting_id).cloned()
     }
 
     /// Runs `change` over the values and replaces the file when it says it
-    /// changed them. A failed write is logged and returned; the values of
-    /// this run stay in memory then, as they do when the file may not be
-    /// written, which is no error.
+    /// changed them. A failed write is logged and returned; the values stay
+    /// in memory.
     pub(crate) fn change(
         &self,
         change: impl FnOnce(&mut BTreeMap<Uuid, V>) -> bool,
@@ -546,7 +475,7 @@ impl<V: Serialize + DeserializeOwned + Clone> MeetingValues<V> {
     }
 
     /// Keeps only the values of the meetings `keep` accepts, replacing the
-    /// file when that drops any; a failed write is logged.
+    /// file when that drops any.
     pub(crate) fn retain(&self, mut keep: impl FnMut(Uuid) -> bool) {
         let _ = self.change(|values| {
             let before = values.len();
@@ -580,8 +509,7 @@ mod tests {
 
     use super::*;
 
-    /// A second file set aside gets a name of its own; the first copy
-    /// keeps its bytes.
+    /// A second file set aside gets a name of its own.
     #[test]
     fn set_aside_never_replaces_an_earlier_copy() {
         let directory = tempfile::tempdir().unwrap();
@@ -605,8 +533,7 @@ mod tests {
         );
     }
 
-    /// A file already gone is not set aside: the error says so and no
-    /// copy appears.
+    /// A file already gone is not set aside and no copy appears.
     #[test]
     fn a_missing_file_is_not_set_aside() {
         let directory = tempfile::tempdir().unwrap();
@@ -625,13 +552,8 @@ mod tests {
             .collect()
     }
 
-    /// Writers into one folder, two files, all at once: every write lands,
-    /// each file holds one writer's whole payload, and no temporary is
-    /// left. With one shared temporary name this lost writes and tore a
-    /// file. On Windows, without the path lock, a writer's reopen of the
-    /// file for its flush could land on the file another writer was
-    /// replacing that instant and fail with "access denied" after its
-    /// rename had landed (about one write in 8,000 on CI's runner).
+    /// Concurrent writers into one folder: every write lands whole and no
+    /// temporary is left.
     #[test]
     fn parallel_writers_into_one_folder_never_lose_or_tear_a_file() {
         const WRITERS: usize = 8;
@@ -693,8 +615,7 @@ mod tests {
         assert_eq!(mode(&export) & 0o044, 0o044, "readable as a new file is");
     }
 
-    /// A temporary a killed writer left behind goes with the next write
-    /// once it is a minute old; a fresh one, a live writer's, stays.
+    /// A stale temporary goes with the next write; a fresh one stays.
     #[test]
     fn a_stale_temporary_is_removed_by_the_next_write() {
         let dir = tempfile::tempdir().unwrap();
@@ -723,10 +644,8 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{}");
     }
 
-    /// What a test's syncs saw, in order: `file`, with whether the
-    /// destination existed yet, and `directory`, with the same; and the
-    /// waits before a retry, which do not wait but run `on_first_wait`
-    /// once.
+    /// What a test's syncs saw, in order, with whether the destination
+    /// existed yet; waits do not wait but run `on_first_wait` once.
     struct Recorded {
         destination: std::path::PathBuf,
         events: std::sync::Mutex<Vec<(String, bool)>>,
@@ -794,10 +713,8 @@ mod tests {
         }
     }
 
-    /// The copy is synced before the rename and the folder after it (on
-    /// Windows the renamed file too), so a complete copy is on the disk
-    /// when it returns: the content is the source's and no temporary is
-    /// left.
+    /// The copy is synced before the rename and the folder after it, and
+    /// holds the source's content with no temporary left.
     #[test]
     fn a_durable_copy_syncs_the_file_then_renames_then_syncs_the_folder() {
         let dir = tempfile::tempdir().unwrap();
@@ -823,9 +740,8 @@ mod tests {
         );
     }
 
-    /// The product's copy replaces a file at the destination with the
-    /// source's bytes, leaves the source and no temporary; on Windows its
-    /// rename is the written-through one.
+    /// The product's copy replaces a file at the destination and leaves no
+    /// temporary.
     #[test]
     fn a_durable_copy_replaces_the_destination_and_leaves_no_temporary() {
         let dir = tempfile::tempdir().unwrap();
@@ -843,9 +759,7 @@ mod tests {
         );
     }
 
-    /// A file another handle holds open is still replaced: on Windows the
-    /// written-through rename refuses it, and std's rename takes over
-    /// (`a_held_open_target_is_renamed_with_std_and_flushed`).
+    /// A file another handle holds open is still replaced.
     #[test]
     fn a_file_held_open_is_replaced() {
         let dir = tempfile::tempdir().unwrap();
@@ -858,8 +772,7 @@ mod tests {
         assert_eq!(temporaries(dir.path()), Vec::<String>::new());
     }
 
-    /// A failure before the rename leaves no destination and no
-    /// temporary, so nothing half copied is ever taken for the recording.
+    /// A failure before the rename leaves no destination and no temporary.
     #[test]
     fn a_copy_that_fails_before_the_rename_leaves_no_destination() {
         let dir = tempfile::tempdir().unwrap();
@@ -875,8 +788,8 @@ mod tests {
         assert!(!destination.exists());
     }
 
-    /// Every folder created is made durable by syncing its parent; folders
-    /// that existed are left alone.
+    /// Every folder created is synced into its parent; existing ones are
+    /// left alone.
     #[test]
     fn new_folders_are_synced_into_their_parents() {
         let dir = tempfile::tempdir().unwrap();
@@ -897,10 +810,8 @@ mod tests {
         assert_eq!(again.events(), Vec::<(String, bool)>::new());
     }
 
-    /// A new folder is made after its missing parents, each synced into its
-    /// parent, so the parents are durable before the new folder exists; a
-    /// folder already there fails with `AlreadyExists`, syncs nothing, and
-    /// keeps what it holds.
+    /// Missing parents are made and synced first; an existing folder fails
+    /// with `AlreadyExists` and syncs nothing.
     #[test]
     fn a_new_folder_is_synced_and_an_existing_one_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -927,9 +838,7 @@ mod tests {
         );
     }
 
-    /// A sync that fails once the new folder is made removes that folder
-    /// alone, so the call leaves nothing it made and keeps the recordings
-    /// beside it.
+    /// A failed sync removes only the new folder.
     #[test]
     fn a_new_folder_whose_sync_fails_is_removed() {
         let dir = tempfile::tempdir().unwrap();
@@ -945,8 +854,7 @@ mod tests {
         assert_eq!(std::fs::read(&earlier).unwrap(), b"an earlier recording");
     }
 
-    /// A removal is synced into its folder once the file is gone, and a
-    /// file that is not there is removed already, with nothing synced.
+    /// A removal is synced into its folder; a missing file syncs nothing.
     #[test]
     fn a_removal_syncs_the_folder_after_the_file_is_gone() {
         let dir = tempfile::tempdir().unwrap();
@@ -964,8 +872,7 @@ mod tests {
         assert_eq!(again.events(), Vec::<(String, bool)>::new());
     }
 
-    /// A folder sync that fails fails the folder creation and the copy, so
-    /// the phone intake answers 500 and the phone keeps its copy.
+    /// A failed folder sync fails the folder creation and the copy.
     #[test]
     fn a_failed_folder_sync_fails_the_folders_and_the_copy() {
         let dir = tempfile::tempdir().unwrap();
@@ -982,9 +889,7 @@ mod tests {
         assert_eq!(temporaries(&meeting), Vec::<String>::new());
     }
 
-    /// Only a Windows drive that is neither NTFS nor `ReFS`, or a network
-    /// drive or mount, warns; the test folders of every CI runner are on a
-    /// local drive that does not warn.
+    /// CI's test folders are on local drives that do not warn.
     #[test]
     fn a_test_folder_is_not_on_a_drive_that_may_lose_recent_writes() {
         let dir = tempfile::tempdir().unwrap();
@@ -992,8 +897,7 @@ mod tests {
         assert!(!may_lose_recent_writes(&dir.path().join("audio")));
     }
 
-    /// On Windows a plain rename is written through, and the renamed file
-    /// is flushed after it.
+    /// On Windows a plain rename is written through and the file flushed.
     #[cfg(windows)]
     #[test]
     fn a_rename_is_written_through_and_flushed() {
@@ -1011,9 +915,8 @@ mod tests {
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
     }
 
-    /// On Windows a target another handle holds open makes the
-    /// written-through rename fail; std's rename replaces it, and the
-    /// renamed file is flushed after it.
+    /// On Windows a target held open falls back to std's rename, then the
+    /// flush.
     #[cfg(windows)]
     #[test]
     fn a_held_open_target_is_renamed_with_std_and_flushed() {
@@ -1030,10 +933,8 @@ mod tests {
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
     }
 
-    /// On Windows a target another handle holds without sharing its
-    /// deletion (a sync or antivirus client) refuses both renames; the
-    /// replace waits and tries again, and lands once the handle lets go
-    /// (here at the first wait).
+    /// On Windows a target held without delete sharing refuses both
+    /// renames; the replace waits and lands once the handle lets go.
     #[cfg(windows)]
     #[test]
     fn a_target_another_handle_holds_is_replaced_once_it_lets_go() {
@@ -1059,9 +960,7 @@ mod tests {
         assert_eq!(temporaries(dir.path()), Vec::<String>::new());
     }
 
-    /// On Windows the renamed file is flushed under its path's lock, so a
-    /// second writer of the path cannot replace it between the rename and
-    /// the reopen for the flush.
+    /// On Windows the renamed file is flushed under its path's lock.
     #[cfg(windows)]
     #[test]
     fn a_rename_and_its_flush_hold_the_path_lock() {
@@ -1090,14 +989,9 @@ mod tests {
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
     }
 
-    /// The product's folder creation and copy on a FAT32 or an exFAT
-    /// drive: both succeed (on FAT32 the driver treats a flush of a folder
-    /// other than the drive's root as a no-op, and flushes the renamed file
-    /// with its folders; on exFAT CI shows the same), a folder made at the
-    /// drive's root flushes the root, and Settings warns. So the intake does
-    /// not answer 500 there. CI's Windows job mounts both drives and names
-    /// them in `STENO_FAT32_VOLUME` and `STENO_EXFAT_VOLUME`; without one
-    /// the test for it skips.
+    /// Folder creation and copy succeed on FAT32 and exFAT drives and
+    /// Settings warns. CI names the drives in `STENO_FAT32_VOLUME` and
+    /// `STENO_EXFAT_VOLUME`; without one the test skips.
     #[cfg(windows)]
     fn the_intake_writes_succeed_and_settings_warn(variable: &str, file_system: &str) {
         let Some(volume) = std::env::var_os(variable) else {

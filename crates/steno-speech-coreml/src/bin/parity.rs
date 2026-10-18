@@ -1,16 +1,11 @@
-//! The parity harness: the calibration corpus through the CoreML
-//! pipeline, scored against the Swift app's transcripts.
+//! The parity harness: the calibration corpus through the CoreML pipeline,
+//! scored against the Swift app's transcripts.
 //!
 //! ```text
 //! steno-coreml-parity [--models DIR] [--out DIR] [--workers N] <corpus-dir> <baseline-dir>
 //! ```
-//!
-//! `corpus-dir` holds `<name>.wav` (16 kHz mono), `baseline-dir` holds
-//! `<name>.parakeet-v3.json` (the Swift `RawSegment` array the bake-off
-//! wrote). Prints the per-file table and writes `<name>.rust.json` into
-//! `--out` when given. macOS only; elsewhere the binary says so and exits.
 
-// The crate's lib allows the same: the docs name CoreML and FluidAudio.
+// The docs name CoreML and FluidAudio.
 #![allow(clippy::doc_markdown)]
 
 #[cfg(target_os = "macos")]

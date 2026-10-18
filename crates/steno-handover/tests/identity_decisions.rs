@@ -1,13 +1,6 @@
-//! The handover identity's decision against its truth table,
-//! `crates/steno-handover/tests/fixtures/identity-decisions.json` (its
-//! `about` says how a row reads), a check of the runner's own refusals, a
-//! check that the table has a row for every kind of decision the input
-//! space reaches, and properties over that space:
-//! - nothing mints silently;
-//! - no pairing the phones know is lost;
-//! - no decision destroys a stored identity;
-//! - a stop after any write decides the same at the next read;
-//! - the order the identities were found in never decides.
+//! The handover identity's decision against its truth table
+//! (`tests/fixtures/identity-decisions.json`), the runner's refusals, row
+//! coverage, and properties over the input space.
 
 #![allow(clippy::too_many_lines)]
 
@@ -26,8 +19,7 @@ fn now() -> DateTime<Utc> {
     DateTime::from_timestamp(1_790_000_000, 0).unwrap()
 }
 
-/// An offset from [`now`]: a sign, a whole number and a unit (`ms`, `s`,
-/// `m`, `h` or `d`).
+/// An offset from [`now`]: a sign, a number and a unit (`ms`, `s`, `m`, `h`, `d`).
 fn offset(text: &str) -> DateTime<Utc> {
     let (sign, rest) = match text.as_bytes().first() {
         Some(b'-') => (-1, &text[1..]),
@@ -52,9 +44,8 @@ fn offset(text: &str) -> DateTime<Utc> {
     now() + delta * sign
 }
 
-/// A JSON value as `serde_json` reads it, except that an object naming a
-/// key twice is refused: `serde_json` keeps the last, so a row could
-/// silently state a field twice.
+/// A JSON value as `serde_json` reads it, except that a key named twice is
+/// refused (`serde_json` keeps the last).
 struct Strict(Value);
 
 impl<'de> Deserialize<'de> for Strict {
@@ -306,8 +297,7 @@ fn orders(found: &[Found]) -> Vec<Vec<Found>> {
     orders
 }
 
-/// Every row decides as the table says, whatever the order the
-/// identities were found in.
+/// Every row decides as the table says, in any order of the found identities.
 #[test]
 fn every_row_of_the_table_decides_as_it_says() {
     let rows = rows();
@@ -336,9 +326,7 @@ fn every_row_of_the_table_decides_as_it_says() {
     }
 }
 
-/// The runner refuses what would let a row say less than it seems to: a
-/// key twice, an offset without a sign, a start for a name not found, and
-/// a key beside the table's two.
+/// The runner refuses what would let a row say less than it seems to.
 #[test]
 fn the_runner_refuses_a_key_twice_an_unsigned_offset_a_stray_start_and_a_stray_key() {
     use std::panic::catch_unwind;
@@ -375,8 +363,7 @@ fn the_runner_refuses_a_key_twice_an_unsigned_offset_a_stray_start_and_a_stray_k
     assert!(table(br#"{"about": [], "rows": []}"#).is_empty());
 }
 
-/// The kind of a decision for `caller`: its outcome (the reason of a
-/// wait) and its writes, with the names served and recorded left out.
+/// The kind of a decision for `caller`: its outcome and its writes.
 fn signature(caller: Caller, decided: &Decision) -> String {
     let outcome = match &decided.outcome {
         Outcome::Serve(_) => "serve".to_owned(),
@@ -394,10 +381,8 @@ fn signature(caller: Caller, decided: &Decision) -> String {
     format!("{caller:?} {outcome} [{}]", writes.join(", "))
 }
 
-/// Every kind of decision the input space reaches, for each caller, has a
-/// row, except two that no caller observes: the import and the move never
-/// pass identities that could not be read (the import reads certificates
-/// it found, the move the file it moves).
+/// Every reachable kind of decision has a row, except two no caller
+/// observes.
 #[test]
 fn the_table_has_a_row_for_every_kind_of_decision_reached() {
     let unobserved = [
@@ -427,12 +412,8 @@ fn the_table_has_a_row_for_every_kind_of_decision_reached() {
     }
 }
 
-/// The input space the properties run over: every caller; identities that
-/// cannot be read, do not parse, none, one or two of three fingerprints
-/// (a copy included), each starting long before, before, at a second
-/// after now, after now, or unreadable; every record; phones that cannot
-/// be read, none, or paired at times around the starts, at a start, and
-/// within the clock's slack after now.
+/// The input space: every caller, and identities, records and phones in
+/// every readable and unreadable state around now.
 fn every_observation() -> Vec<Observations> {
     let starts = [
         Some(offset("-30d")),
@@ -523,9 +504,8 @@ fn pending(record: &Record) -> Option<&str> {
     }
 }
 
-/// Nothing mints silently: only the load mints, and only with no identity,
-/// nothing recorded, no phone paired and a record it could read; a note
-/// beside it (a Pair again that wrote nothing) is dropped first.
+/// Only the load mints, and only with no identity, nothing recorded, no
+/// phone paired and a readable record; a note beside it is dropped first.
 #[test]
 fn nothing_mints_silently() {
     for observed in every_observation() {
@@ -556,10 +536,8 @@ fn nothing_mints_silently() {
     }
 }
 
-/// No pairing the phones know is lost: the phones go only where the load
-/// finishes a Pair again, the stored identity being the noted pending one,
-/// and a fingerprint is recorded only for the identity served, never over
-/// a record that cannot be read.
+/// The phones go only where the load finishes a Pair again, and a
+/// fingerprint is recorded only for the served identity.
 #[test]
 fn no_pairing_the_phones_know_is_lost() {
     for observed in every_observation() {
@@ -595,8 +573,7 @@ fn no_pairing_the_phones_know_is_lost() {
                 Write::DropNote => assert!(pending(&observed.record).is_some(), "{observed:?}"),
             }
         }
-        // A served identity is one that was found, or for the move the one
-        // already recorded.
+        // A served identity was found, or for the move is the recorded one.
         if let Outcome::Serve(served) = &decided.outcome {
             let recorded = matches!(
                 &observed.record,
@@ -613,18 +590,8 @@ fn no_pairing_the_phones_know_is_lost() {
     }
 }
 
-/// No decision destroys a stored identity. A [`Write`] has no write of an
-/// identity, by design; a mint is decided only where no identity was found
-/// ([`nothing_mints_silently`]) and the phones go only in the load's
-/// finished Pair again ([`no_pairing_the_phones_know_is_lost`]). On top of
-/// those, the import writes nothing, and the move records at most the one
-/// identity it found (the file's) and drops no note and no phone. Two
-/// writes outside the decision replace a stored identity, and are the
-/// named exceptions: Pair again's own mint (the user's confirmed choice,
-/// which removes every phone) and the Mac import's store over a desktop-id
-/// build's identity (S6 of `.plans/2026-10-07-stable-promotion.md`).
-/// `steno-services`' `no_identity_is_ever_destroyed_by_the_move` runs the
-/// move itself over a fake Secret Service.
+/// No decision destroys a stored identity: a [`Write`] cannot write one, a
+/// mint needs no identity found, and the import writes nothing.
 #[test]
 fn no_decision_destroys_a_stored_identity() {
     for observed in every_observation() {
@@ -659,11 +626,8 @@ fn after(observed: &Observations, writes: &[Write]) -> Observations {
     observed
 }
 
-/// A stop after any prefix of the writes decides the same at the next
-/// read, and its writes end where the whole list ends. The callers' own
-/// writes after the decision (the mint's secret, then its record; the
-/// import's store, marker and flag; Pair again's steps) are outside it:
-/// `tests/identity.rs` and `steno-services`' tests stop each of them.
+/// A stop after any prefix of the writes decides the same at the next read,
+/// and ends where the whole list ends.
 #[test]
 fn a_stop_after_any_write_decides_the_same_next_time() {
     for observed in every_observation() {
@@ -680,8 +644,7 @@ fn a_stop_after_any_write_decides_the_same_next_time() {
                 "{landed} of {observed:?}"
             );
         }
-        // And the end decides the same, with nothing more to write except
-        // the finished Pair again's own (idempotent) writes.
+        // And the end decides the same.
         let settled = decide(&end);
         assert_eq!(settled.outcome, decided.outcome, "{observed:?}");
         assert_eq!(after(&end, &settled.writes), end, "{observed:?}");

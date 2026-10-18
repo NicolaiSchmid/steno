@@ -1,6 +1,5 @@
 //! `meeting` rows and the transactions that write a meeting together with
 //! what hangs off it.
-//! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -48,7 +47,7 @@ pub(super) fn from_row(row: &Row<'_>) -> rusqlite::Result<Meeting> {
     })
 }
 
-/// GRDB's `save`; `summaryText` is derived from `summary` on every write.
+/// Inserts or replaces the row; `summaryText` is derived from `summary`.
 pub(super) fn save(connection: &Connection, meeting: &Meeting) -> Result<()> {
     connection.execute(
         &upsert_sql("meeting", COLUMNS),
@@ -91,8 +90,7 @@ pub(super) fn fetch(connection: &Connection, id: Uuid) -> Result<Option<Meeting>
         .optional()?)
 }
 
-/// Saves `participants` for the meeting `meeting_id`, each re-pointed at
-/// it.
+/// Saves `participants` for `meeting_id`, each re-pointed at it.
 fn save_participants(
     connection: &Connection,
     meeting_id: Uuid,
@@ -106,7 +104,6 @@ fn save_participants(
     Ok(())
 }
 
-/// Whether a row has the meeting id `id`.
 pub(super) fn has_row(connection: &Connection, id: Uuid) -> Result<bool> {
     Ok(connection
         .query_row("SELECT 1 FROM meeting WHERE id = ?1", [DbUuid(id)], |_| {
@@ -116,13 +113,12 @@ pub(super) fn has_row(connection: &Connection, id: Uuid) -> Result<bool> {
         .is_some())
 }
 
-/// The row as it is now, for a read-modify-write inside a transaction;
-/// `MeetingNotFound` when there is none, since every caller needs one.
+/// The row as it is now, for a read-modify-write; `MeetingNotFound` when
+/// there is none.
 pub(super) fn current(connection: &Connection, id: Uuid) -> Result<Meeting> {
     fetch(connection, id)?.ok_or(StoreError::MeetingNotFound(id))
 }
 
-/// Writes `meeting` back `failed(reason)` with `updatedAt = now`.
 fn save_failed(
     connection: &Connection,
     meeting: &mut Meeting,
@@ -146,8 +142,7 @@ fn write_processing_results(connection: &Connection, results: &Meeting) -> Resul
 }
 
 /// What `delete_meeting` leaves for the caller: the files the rows pointed
-/// at, which the caller removes once the transaction has committed, through
-/// [`DeletedMeeting::files_to_remove`].
+/// at, removed once the transaction has committed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletedMeeting {
     pub assets: Vec<AudioAsset>,
@@ -156,10 +151,8 @@ pub struct DeletedMeeting {
 }
 
 impl DeletedMeeting {
-    /// The meeting folder when an asset lives in one (the folder named
-    /// after the meeting id, as the recording layout lays it out), else
-    /// every file the rows name, each once, in asset then clip order.
-    /// Swift: `MeetingStore.filesToRemove`.
+    /// The meeting folder when an asset lives in one, else every file the
+    /// rows name, each once, in asset then clip order.
     #[must_use]
     pub fn files_to_remove(&self, meeting_id: Uuid) -> Vec<PathBuf> {
         let folder_name = crate::json::uuid_string(meeting_id);
@@ -188,13 +181,13 @@ impl DeletedMeeting {
 }
 
 impl Store {
-    /// Inserts or replaces the meeting row (GRDB's `save`); `summaryText`
-    /// is derived from `summary`.
+    /// Inserts or replaces the meeting row; `summaryText` is derived from
+    /// `summary`.
     pub fn save_meeting(&self, meeting: &Meeting) -> Result<()> {
         self.write(|transaction| save(transaction, meeting))
     }
 
-    /// The meeting and its asset in one transaction (`enqueue`).
+    /// The meeting and its asset in one transaction.
     pub fn save_meeting_with_asset(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
         self.write(|transaction| {
             save(transaction, meeting)?;
@@ -203,11 +196,9 @@ impl Store {
     }
 
     /// A meeting with its asset, in one transaction, only while no row has
-    /// the meeting's id: the launch's adoption of a recording that has no
-    /// meeting (`steno_services`' recovery). A row written meanwhile (a
-    /// phone admission that committed) fails with
-    /// [`StoreError::MeetingExists`] and nothing is written, so it is never
-    /// overwritten and gets no second asset. Rust only.
+    /// its id: the launch's adoption of a recording with no meeting. A row
+    /// written meanwhile fails with [`StoreError::MeetingExists`] and
+    /// nothing is written.
     pub fn insert_meeting_with_asset(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
         self.write(|transaction| {
             if has_row(transaction, meeting.id)? {
@@ -218,29 +209,17 @@ impl Store {
         })
     }
 
-    /// A stopped recording's commit (`LocalRecordingIntake::complete`,
-    /// through `ProcessingPipeline::enqueue_stopped_recording`), in one
-    /// transaction on the writer. Its reads, the row and the default
-    /// retention, run in that same transaction, so the save never waits
-    /// for a read in flight on a reader.
+    /// A stopped recording's commit, in one transaction on the writer, its
+    /// reads included, so it never waits for a reader.
     ///
-    /// It writes only while the stored row is still `recording`. The row
-    /// turns `queued` with `duration`, `end_reason` and `now` as its
-    /// `updatedAt`, and keeps the rest as stored (a title or notes saved
-    /// since the recording began). `asset` is saved for `meeting_id` with
-    /// the retention `retention`, else the settings' default as stored
-    /// now, and no `expires_at`. Returns the row as saved.
-    ///
-    /// No settings row fails the save: it reads only the default
-    /// retention's row, and one that cannot be read gives keep-forever,
-    /// which deletes nothing, with a warning that names the key. A row
-    /// that moved on fails with [`StoreError::NotRecording`] and one that
-    /// is gone with [`StoreError::MeetingNotFound`], and nothing is
-    /// written, so a recording deleted or failed meanwhile is not brought
-    /// back. Rust only: Swift's `LocalRecordingIntake.complete` read the
-    /// settings, wrote the duration and end reason in one update, and
-    /// `ProcessingPipeline.enqueue` saved the returned row with the asset
-    /// in a second commit.
+    /// Writes only while the row is still `recording`: it turns `queued`
+    /// with `duration`, `end_reason` and `now`, keeping the rest as stored.
+    /// `asset` is saved with `retention`, else the settings' default as
+    /// stored now (keep-forever, with a warning naming the key, when that
+    /// row cannot be read), and no `expires_at`. Returns the row as saved.
+    /// A row that moved on fails with [`StoreError::NotRecording`], one
+    /// that is gone with [`StoreError::MeetingNotFound`], and nothing is
+    /// written.
     pub fn save_stopped_recording(
         &self,
         meeting_id: Uuid,
@@ -277,8 +256,8 @@ impl Store {
         })
     }
 
-    /// The meeting and its participants in one transaction (recording
-    /// start); every participant is re-pointed at the meeting.
+    /// The meeting and its participants in one transaction; every
+    /// participant is re-pointed at the meeting.
     pub fn save_meeting_with_participants(
         &self,
         meeting: &Meeting,
@@ -291,21 +270,16 @@ impl Store {
     }
 
     /// Names a recording after its calendar event once the event is known,
-    /// which may be after the recording started. This is the one rule for
-    /// a late calendar answer; it names the row `id` only:
+    /// which may be after the recording started. Names the row `id` only:
     ///
-    /// - while that row still records (state `recording`, not stopped);
-    /// - under its default title (the user has not renamed it);
+    /// - while that row still records;
+    /// - under its default title;
     /// - before any event named it.
     ///
-    /// Then, in one transaction, the row takes `calendar_event_id`, and
-    /// `title` with the origin `calendar` when there is one, and
-    /// `participants` are saved for it. Returns whether it wrote; a row
-    /// the rule leaves alone answers `false`, and one that is gone is
-    /// [`StoreError::MeetingNotFound`]. The caller passes the id of the
-    /// recording that asked, never another. Rust only: Swift named the row
-    /// when it wrote it (`LocalRecordingIntake.begin`), after waiting for
-    /// the calendar.
+    /// Then, in one transaction, the row takes `calendar_event_id`, `title`
+    /// with origin `calendar` when there is one, and `participants`.
+    /// Returns whether it wrote; a row that is gone is
+    /// [`StoreError::MeetingNotFound`].
     pub fn name_recording_after_event(
         &self,
         id: Uuid,
@@ -334,14 +308,11 @@ impl Store {
         })
     }
 
-    /// The meeting with `id`.
     pub fn meeting(&self, id: Uuid) -> Result<Option<Meeting>> {
         self.read(|connection| fetch(connection, id))
     }
 
-    /// Every meeting's id, in no particular order, without reading the
-    /// rows: the launch's check for recordings that have no meeting. Rust
-    /// only.
+    /// Every meeting's id, without reading the rows.
     pub fn meeting_ids(&self) -> Result<Vec<Uuid>> {
         self.read(|connection| {
             query_all(connection, "SELECT id FROM meeting", [], |row| {
@@ -362,7 +333,6 @@ impl Store {
         })
     }
 
-    /// Newest first by `startedAt`.
     pub fn meetings(&self, limit: i64, offset: i64) -> Result<Vec<Meeting>> {
         self.read(|connection| {
             query_all(
@@ -376,8 +346,7 @@ impl Store {
         })
     }
 
-    /// Every meeting in one of `kinds`, oldest first by `startedAt`: the
-    /// order a queue is worked off in.
+    /// Every meeting in one of `kinds`, oldest first by `startedAt`.
     pub fn meetings_in_states(&self, kinds: &[MeetingStateKind]) -> Result<Vec<Meeting>> {
         if kinds.is_empty() {
             return Ok(Vec::new());
@@ -396,24 +365,15 @@ impl Store {
         })
     }
 
-    /// The reason a launch gives a recording that a process left
-    /// `recording`. Swift: the default `reason` of
-    /// `MeetingStore.failInterruptedRecordings` in
-    /// `Sources/StenoCore/Storage/MeetingStore.swift`.
+    /// The reason a launch gives a recording a process left `recording`.
     pub const INTERRUPTED_RECORDING_REASON: &'static str =
         "Recording was interrupted before it finished.";
 
     /// Launch reconciliation's failing half: marks the meetings in `ids`
-    /// `failed(reason)` with `updatedAt = now`, each only while it is still
-    /// `recording`, in one transaction, and returns the ones it marked, in
-    /// `ids` order. The launch recovers what it can first and passes the
-    /// rows it could not salvage, with
-    /// [`Self::INTERRUPTED_RECORDING_REASON`], so a row it left alone (a
-    /// recording another process is still writing) and a recording started
-    /// since it listed them stay `recording`. Swift:
-    /// `MeetingStore.failInterruptedRecordings` in
-    /// `Sources/StenoCore/Storage/MeetingStore.swift`, which failed every
-    /// `recording` row.
+    /// `failed(reason)`, each only while still `recording`, in one
+    /// transaction, and returns the ones it marked in `ids` order. A
+    /// recording another process still writes, or one started since, is
+    /// left alone.
     pub fn fail_recordings(
         &self,
         ids: &[Uuid],
@@ -437,8 +397,7 @@ impl Store {
     }
 
     /// Read-modify-write in one transaction: `mutate` sees the row as it is
-    /// now, not as a caller read it earlier. `updatedAt` is set to `now`.
-    /// Returns the meeting as written.
+    /// now. `updatedAt` is set to `now`. Returns the meeting as written.
     pub fn update_meeting(
         &self,
         id: Uuid,
@@ -454,7 +413,6 @@ impl Store {
         })
     }
 
-    /// `update_meeting` for the one field the pipeline changes most.
     pub fn set_state(&self, id: Uuid, state: MeetingState, now: DateTime<Utc>) -> Result<()> {
         self.update_meeting(id, now, |meeting| {
             meeting.state = state;
@@ -479,35 +437,19 @@ impl Store {
     }
 
     /// One transaction: the meeting's processing columns plus every speaker
-    /// and segment of the meeting, replaced. The merge stage calls this.
+    /// and segment, replaced. The merge stage calls this.
     ///
-    /// A speaker the user confirmed keeps its confirmation when its id
-    /// comes back (speaker ids derive from the meeting id and the cluster
-    /// label, so a re-run produces the same ids), and so does the model's
-    /// name suggestion for it; every person who had a confirmed speaker
-    /// here has their voice recomputed from the speakers now stored. A
-    /// first write recomputes nothing, as in Swift. Rust only: Swift's
-    /// `replaceTranscript` replaces the assignments and drops the suggestions
-    /// (`.plans/2026-09-29-speaker-calibration.md`, decision 5).
+    /// A confirmed speaker keeps its confirmation and its name suggestion
+    /// when its id comes back (ids derive from the meeting id and the
+    /// cluster label), and every person with a confirmed speaker here has
+    /// their voice recomputed. A kept confirmation whose new row has no
+    /// clip keeps the stored `sampleClipURL` and `sampleClipRange`, so the
+    /// clip the user confirmed stays playable and is not swept.
     ///
-    /// The `sampleClipURL`s of `speakers` are written in the same
-    /// transaction, so a kept confirmation and the clip of the run that
-    /// produced the row switch together. A kept confirmation whose new row
-    /// has no clip keeps the earlier `sampleClipURL` and its
-    /// `sampleClipRange` when its stored row names one (an extension of
-    /// decision 5), so the clip the user confirmed stays playable and no
-    /// sweep or retention pass takes it for a leftover; that clip can come
-    /// from an earlier run than the row's embedding (the "me" row has none).
-    /// The kept clip follows the confirmation, not the cluster: a re-run
-    /// that maps another cluster onto the confirmed id keeps the clip the
-    /// user confirmed. Every call commits so that the commit is on the disk
-    /// when it returns ([`Store::write_durably`], one WAL sync per
-    /// processing run): the pipeline removes the clips the earlier rows
-    /// named once it has returned, and a power loss must not bring those
-    /// rows back. Returns the rows it replaced, as that transaction read
-    /// them, for that removal. Rust only: Swift commits with `synchronous =
-    /// NORMAL`, writes its clips in place and writes each new row's clip as
-    /// the run gave it, none included.
+    /// Commits durably ([`Store::write_durably`]): the pipeline removes the
+    /// clips the earlier rows named once this returns, and a power loss
+    /// must not bring those rows back. Returns the replaced rows for that
+    /// removal.
     pub fn replace_transcript(
         &self,
         meeting: &Meeting,
@@ -517,10 +459,9 @@ impl Store {
         self.write_durably(|transaction| {
             write_processing_results(transaction, meeting)?;
             let replaced = people::speakers_of_meeting(transaction, meeting.id)?;
-            // The stored confirmed rows, by id. A row this run writes under
-            // one of their ids takes the stored confirmation, and the stored
-            // clip and range only when this run gives it none and the stored
-            // row names one.
+            // The stored confirmed rows, by id: a row this run writes under
+            // one of their ids takes the confirmation, and the stored clip
+            // only when this run gives none.
             let confirmed: BTreeMap<Uuid, &Speaker> = replaced
                 .iter()
                 .filter(|speaker| speaker.assignment.is_confirmed())
@@ -565,11 +506,9 @@ impl Store {
         })
     }
 
-    /// One transaction: the meeting's processing columns plus the `text` of
-    /// each of `segments` that is still stored, by id. Speakers and the
-    /// segments' other columns stay as they are, so a speaker the user
-    /// named while the cleanup pass ran keeps its name. The cleanup stage
-    /// calls this. Rust only: Swift's cleanup replaces the whole transcript.
+    /// One transaction: the processing columns plus the `text` of each of
+    /// `segments` still stored. Speakers and other columns stay, so a
+    /// speaker named while the cleanup ran keeps its name.
     pub fn update_segment_texts(
         &self,
         meeting: &Meeting,
@@ -585,21 +524,17 @@ impl Store {
     }
 
     /// One transaction: the columns [`Meeting::apply_processing_results`]
-    /// copies, over the row as it is now, and nothing else. The summarize
-    /// stage calls this when no summarizer is set up, so the summary, tasks,
-    /// decisions and name suggestions an earlier run wrote stay. Rust only:
-    /// Swift's summarize stage without an LLM clears the summary.
+    /// copies, over the row as it is now. For a summarize stage with no
+    /// summarizer, so an earlier summary stays.
     pub fn save_processing_results(&self, meeting: &Meeting) -> Result<()> {
         self.write(|transaction| write_processing_results(transaction, meeting))
     }
 
-    /// One transaction: the meeting's processing columns plus its tasks,
-    /// decisions and speaker name suggestions, replaced. Decision ids derive
-    /// from the meeting id so re-runs are stable. Of `speaker_names`, only
-    /// suggestions that carry a name and point at one of the meeting's
-    /// speakers are kept, the strongest per speaker. The stored template
-    /// stays: the user picks it, and the summary's `template_id` records
-    /// which template made it (see [`Meeting::apply_processing_results`]).
+    /// One transaction: the processing columns plus the tasks, decisions
+    /// and name suggestions, replaced. Decision ids derive from the meeting
+    /// id. Of `speaker_names`, only named suggestions for one of the
+    /// meeting's speakers are kept, the strongest per speaker. The stored
+    /// template stays (see [`Meeting::apply_processing_results`]).
     pub fn replace_summary(
         &self,
         meeting: &Meeting,
@@ -636,29 +571,20 @@ impl Store {
     }
 
     /// Removes the meeting and everything that hangs off it through the
-    /// cascades (participants, speakers, segments, tasks, decisions, assets,
-    /// deliveries, their FTS rows through the triggers) and the handover
-    /// receipt that admitted it. Persons stay. Fails with `MeetingBusy`
-    /// while the meeting is `recording` or `processing`. Returns the files
-    /// the rows named, for the caller to remove.
+    /// cascades, and the handover receipt that admitted it. Persons stay.
+    /// Fails with `MeetingBusy` while `recording` or `processing`. Returns
+    /// the files the rows named, for the caller to remove.
     ///
-    /// The store commits with `synchronous = NORMAL`, so the delete need
-    /// not be on the disk when this returns: a power loss or OS crash can
-    /// roll it back after the caller removed the files, as in the Swift
-    /// app. A delete that must be on the disk first would commit through
-    /// [`Store::write_durably`].
+    /// Not durable: a power loss can roll the delete back after the caller
+    /// removed the files.
     pub fn delete_meeting(&self, id: Uuid) -> Result<DeletedMeeting> {
         self.delete(id, false)
     }
 
     /// [`Self::delete_meeting`] that also removes a meeting left
     /// `recording`, for a caller that knows no capture of its own writes it
-    /// (the host, while its recorder is idle): a recording whose save
-    /// failed, or one the launch's recovery keeps for a folder that is gone
-    /// for good, so the user can remove the row. Still refuses a meeting
-    /// that is `processing`. The rows name no master for such a meeting;
-    /// the caller removes its folder. Rust only: Swift's list refused a
-    /// recording row.
+    /// (a failed save, a recovery whose folder is gone). Still refuses one
+    /// `processing`. The caller removes its folder.
     pub fn delete_meeting_left_recording(&self, id: Uuid) -> Result<DeletedMeeting> {
         self.delete(id, true)
     }
@@ -712,7 +638,6 @@ mod tests {
         }
     }
 
-    /// Swift: `MeetingStoreTests.testFilesToRemove`.
     #[test]
     fn a_meeting_folder_is_removed_whole_and_loose_files_once_each() {
         let id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
@@ -747,10 +672,8 @@ mod tests {
     }
 
     /// The merge's write switches a kept confirmation and its new clip in
-    /// one commit, under `synchronous = FULL` (2), and returns the row it
-    /// replaced: the pipeline removes the earlier clip once it returns, so a
-    /// power loss must not bring back the row that named it. That the commit
-    /// then survives a power loss is SQLite's and cannot be tested.
+    /// one commit under `synchronous = FULL`, and returns the row it
+    /// replaced.
     #[test]
     fn replacing_the_transcript_switches_the_clips_with_the_confirmations_durably() {
         use std::sync::{Arc, Mutex};
@@ -758,8 +681,7 @@ mod tests {
         use crate::testing::sample_data;
         use crate::{Speaker, SpeakerAssignment};
 
-        /// What one commit wrote: its `synchronous` level, the speaker's
-        /// assignment and its clip.
+        /// One commit's `synchronous` level, assignment and clip.
         type Commit = (i64, String, Option<String>);
 
         let directory = tempfile::tempdir().unwrap();
@@ -821,8 +743,7 @@ mod tests {
         store.meeting(meeting.id).unwrap().unwrap()
     }
 
-    /// Stores `value` as the setting row of `key`, past `save_settings`,
-    /// as another build or a hand edit would.
+    /// Stores `value` as the setting row of `key`, past `save_settings`.
     fn store_setting_row(store: &Store, key: &str, value: &str) {
         store
             .write(|transaction| {
@@ -835,8 +756,7 @@ mod tests {
             .unwrap();
     }
 
-    /// The stop's save of a fresh recording row with no named retention,
-    /// and the asset it wrote.
+    /// The stop's save of a fresh recording row with no named retention.
     fn save_a_stop(store: &Store) -> (Meeting, AudioAsset) {
         let meeting = a_recording_row(store);
         let saved = store
@@ -879,12 +799,9 @@ mod tests {
         (value, text)
     }
 
-    /// The stop's save writes each column it owns. The row turns `queued`
-    /// with the duration, the end reason and `now`; the asset is saved for
-    /// the meeting, takes the settings' default retention as stored at the
-    /// commit unless the caller names one, and never keeps an
-    /// `expires_at`. A second save of the same row is refused and writes
-    /// nothing.
+    /// The stop's save writes each column it owns, takes the default
+    /// retention at the commit unless named, never keeps `expires_at`, and
+    /// refuses a second save.
     #[test]
     fn the_stopped_recordings_save_writes_its_columns() {
         let directory = tempfile::tempdir().unwrap();
@@ -943,12 +860,8 @@ mod tests {
         }
     }
 
-    /// Another connection's write (the Swift app, the CLI) that holds the
-    /// lock for less than the busy timeout and then commits makes the
-    /// stop's save wait, not fail, and the save reads what it committed:
-    /// its transaction begins `IMMEDIATE`. A deferred one would read
-    /// first, and its write would then be refused at once, its snapshot
-    /// stale.
+    /// Another connection's short write lock makes the stop's save wait,
+    /// not fail, and the save reads what it committed.
     #[test]
     fn the_stopped_recordings_save_waits_out_another_writer() {
         let directory = tempfile::tempdir().unwrap();
@@ -989,10 +902,8 @@ mod tests {
         );
     }
 
-    /// A default retention row that cannot be read, not JSON or of the
-    /// wrong shape, does not fail the stop's save: the meeting is saved
-    /// `queued` and its audio kept forever, which deletes nothing, and the
-    /// warning names the key, never the value.
+    /// An unreadable default retention row does not fail the stop's save:
+    /// the audio is kept forever and the warning names the key only.
     #[test]
     fn an_unreadable_default_retention_saves_the_stop_kept_forever() {
         for value in ["sk-secret-rule", "\"sk-secret-rule\""] {
@@ -1008,9 +919,7 @@ mod tests {
         }
     }
 
-    /// Another setting that cannot be read leaves the stop's save alone:
-    /// the meeting is saved with the stored default retention, though the
-    /// settings' load refuses the row.
+    /// Another unreadable setting leaves the stop's save alone.
     #[test]
     fn an_unrelated_unreadable_setting_does_not_touch_the_stops_save() {
         for (key, value) in [("llmContextTokens", "not json"), ("audioFolder", "123")] {
@@ -1027,8 +936,7 @@ mod tests {
         }
     }
 
-    /// With no default retention row the stop's save gives the asset the
-    /// settings' default.
+    /// With no default retention row the asset gets the settings' default.
     #[test]
     fn a_missing_default_retention_saves_the_stop_with_the_default() {
         let directory = tempfile::tempdir().unwrap();

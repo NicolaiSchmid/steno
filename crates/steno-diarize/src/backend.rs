@@ -5,11 +5,9 @@ use crate::to_f64;
 /// Any error a backend raises; printed for the user.
 pub type BackendError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// What the segmentation model's output frames mean in samples. The
-/// numbers are pyannote segmentation 3.0's: a ten-second window yields 589
-/// frames, each the model's receptive field of 991 samples advanced by 270
-/// samples (16.875 ms). The ONNX backend reads them from the model's
-/// metadata; the `CoreML` backend uses the constants.
+/// What the segmentation model's output frames mean in samples. pyannote
+/// segmentation 3.0: a ten-second window yields 589 frames, each 991 samples
+/// advanced by 270 (16.875 ms).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentationGeometry {
     pub sample_rate: usize,
@@ -57,23 +55,21 @@ impl SegmentationGeometry {
         self.seconds(self.window_samples)
     }
 
-    /// The time at the centre of `frame` counted from the start of the
-    /// window (or recording) it belongs to.
+    /// The time at the centre of `frame` from the start of its window.
     #[must_use]
     pub fn frame_centre_seconds(&self, frame: usize) -> f64 {
         self.seconds(frame * self.receptive_field_shift + self.receptive_field_size / 2)
     }
 
-    /// The first global frame of a window at `offset` samples: the window's
-    /// frame 0 lands on the global grid rounded to the nearest frame.
+    /// The first global frame of a window at `offset` samples, rounded to the
+    /// nearest frame.
     #[must_use]
     pub fn global_frame(&self, offset_samples: usize) -> usize {
         (offset_samples + self.receptive_field_shift / 2) / self.receptive_field_shift
     }
 
-    /// Frames whose centre lies inside `samples` samples of audio starting
-    /// at the window's start; the rest of a padded window is silence the
-    /// model never heard.
+    /// Frames whose centre lies inside `samples` samples from the window's
+    /// start; the rest of a padded window is silence.
     #[must_use]
     pub fn valid_frames(&self, samples: usize) -> usize {
         if samples <= self.receptive_field_size / 2 {
@@ -91,15 +87,12 @@ pub trait DiarizationBackend: Send {
     fn geometry(&self) -> &SegmentationGeometry;
 
     /// Segmentation logits for one window of exactly
-    /// [`SegmentationGeometry::window_samples`] samples:
-    /// `frames_per_window × num_classes` values, row-major, one row per
-    /// frame.
+    /// [`SegmentationGeometry::window_samples`] samples, row-major
+    /// `frames_per_window × num_classes`.
     fn segment(&mut self, window: &[f32]) -> Result<Vec<f32>, BackendError>;
 
-    /// The embedding of the speech `weights` marks in `window`: one weight
-    /// per segmentation frame, 1 where the speaker is active and 0
-    /// elsewhere. `None` when too little speech is marked for the model to
-    /// say anything.
+    /// The embedding of the speech `weights` marks in `window` (one weight per
+    /// segmentation frame); `None` when too little speech is marked.
     fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError>;
 }
 

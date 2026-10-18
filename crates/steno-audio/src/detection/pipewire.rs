@@ -1,55 +1,8 @@
 //! The Linux [process-activity source](super::ProcessAudioActivitySource):
-//! the PipeWire registry's stream nodes, their links and their clients, kept
-//! up to date by one long-lived PipeWire thread. No Swift counterpart (the
-//! Swift app is macOS-only); the macOS counterpart reads the HAL's process
-//! objects, the Windows one the audio sessions (`super::live`).
-//!
-//! # What counts
-//!
-//! A process holds the microphone while one of its `Stream/Input/Audio`
-//! nodes is linked from a source (an `Audio/Source` node, a virtual one
-//! included, or an `Audio/Duplex` device other than through its monitor
-//! ports, which carry what it plays) and the node's state is not idle,
-//! suspended or failed. The link, not the state alone, decides because the
-//! registry reports links with both ends on the global, and because a
-//! capture stream linked from a sink's monitor (a screen recorder taking the
-//! desktop's sound) runs as well but holds no microphone. The state comes
-//! from each stream node's info, which needs a bind; a node whose info has
-//! not arrived yet counts as running. A process has running output while
-//! one of its `Stream/Output/Audio` nodes is linked and running.
-//!
-//! Left out: Steno's own capture stream (its `node.name`, whatever process
-//! runs it, so a `steno record` beside the app is no call), the halves of a
-//! filter or loopback (a node with a `node.link-group`: an echo canceller's
-//! or noise filter's capture stream holds the real microphone for as long
-//! as the filter exists), and level meters (`stream.monitor`, which the
-//! desktop's sound settings open on every source).
-//!
-//! # Who
-//!
-//! The pid is the stream node's `application.process.id` (streams of
-//! PulseAudio clients carry it), else its client's, else the client's
-//! `pipewire.sec.pid` (the socket's credentials). The "bundle id" is the
-//! best stable identifier there is: `application.process.binary` (the
-//! node's, else the client's), else `application.name`. A native PipeWire
-//! client reports its own binary; a browser reports the browser's binary,
-//! so a call in a browser tab names the browser, not the call service.
-//!
-//! # Threads
-//!
-//! PipeWire's objects are single-threaded: one `steno-pw-detect` thread
-//! per source owns the connection, binds the stream nodes and the clients
-//! for their info, and writes what it learns into a shared view under a
-//! mutex. It starts with the first
-//! [`snapshot`](ProcessAudioActivitySource::snapshot) or `changes()` call
-//! and ends when the source drops, while it connects too. Every `changes()`
-//! receiver hears from that one thread: a message whenever a node, link
-//! or client appears or goes, or a stream node's or client's info changes,
-//! and one right away; a dropped receiver is forgotten at the next
-//! message. A lost connection ends the thread; the next call after
-//! [`RETRY_AFTER`] connects afresh, and the calls before it answer the
-//! error. A thread that ended without saying why (a panic) is started again
-//! by the next call.
+//! a process holds the microphone while one of its capture stream nodes is
+//! linked from a source (not a monitor port) and not idle, Steno's own
+//! capture, filters' halves and level meters left out. One long-lived
+//! `steno-pw-detect` thread owns the connection and serves every caller.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -99,13 +52,10 @@ fn is_running(state: &pw::node::NodeState<'_>) -> bool {
 /// values, once read, replace the global's.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Who {
-    /// `application.process.id`.
     pid: Option<i32>,
     /// `pipewire.sec.pid`, a client's socket credentials.
     sec_pid: Option<i32>,
-    /// `application.process.binary`.
     binary: Option<String>,
-    /// `application.name`.
     name: Option<String>,
 }
 
@@ -125,7 +75,6 @@ impl Who {
         }
     }
 
-    /// `newer`'s values where it has them, `self`'s elsewhere.
     fn merge(&mut self, newer: Who) {
         self.pid = newer.pid.or(self.pid);
         self.sec_pid = newer.sec_pid.or(self.sec_pid);
@@ -137,9 +86,7 @@ impl Who {
 /// One `Stream/Input/Audio` or `Stream/Output/Audio` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StreamNode {
-    /// A capture stream (`Stream/Input/Audio`).
     input: bool,
-    /// `client.id`.
     client: Option<u32>,
     /// Steno's own capture, a filter's half or a level meter.
     left_out: bool,
@@ -160,12 +107,10 @@ pub(crate) struct StreamGraph {
     /// Every monitor port (`port.monitor`).
     monitor_ports: BTreeSet<u32>,
     streams: BTreeMap<u32, StreamNode>,
-    /// Each link's output node, output port (when it says) and input node.
     links: BTreeMap<u32, Link>,
     clients: BTreeMap<u32, Who>,
 }
 
-/// One link's ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Link {
     output: u32,
@@ -233,7 +178,6 @@ impl StreamGraph {
         }
     }
 
-    /// A client global or a client's info.
     fn client<'a>(&mut self, id: u32, props: impl Fn(&str) -> Option<&'a str>) {
         self.clients.entry(id).or_default().merge(Who::read(&props));
     }
@@ -247,7 +191,6 @@ impl StreamGraph {
         monitor
     }
 
-    /// A link global.
     fn add_link<'a>(&mut self, id: u32, props: impl Fn(&str) -> Option<&'a str>) {
         let id_of = |key| props(key).and_then(|v| v.parse().ok());
         if let (Some(output), Some(input)) = (id_of("link.output.node"), id_of("link.input.node")) {
@@ -285,7 +228,10 @@ impl StreamGraph {
             | self.clients.remove(&id).is_some()
     }
 
-    /// Every process with a stream node, in pid order; see the module doc.
+    /// Every process with a stream node, in pid order. The pid is the
+    /// node's `application.process.id`, else its client's, else the
+    /// client's socket credentials; the "bundle id" is the binary, else the
+    /// application name.
     fn processes(&self) -> Vec<ProcessAudioActivity> {
         let mut processes: BTreeMap<i32, ProcessAudioActivity> = BTreeMap::new();
         for (&id, stream) in &self.streams {
@@ -330,18 +276,13 @@ impl StreamGraph {
     }
 }
 
-/// Where the thread is.
 #[derive(Debug, Clone)]
 enum Phase {
-    /// Connecting and reading the first view.
     Connecting,
-    /// The view is current.
     Ready,
-    /// The connection failed or was lost, at `at`.
     Ended { error: String, at: Instant },
 }
 
-/// What the thread and the callers share.
 struct State {
     graph: StreamGraph,
     phase: Phase,
@@ -355,7 +296,6 @@ impl State {
         self.subscribers.retain(|s| s.send(()).is_ok());
     }
 
-    /// [`Self::notify`] once the view is current.
     fn changed(&mut self) {
         if matches!(self.phase, Phase::Ready) {
             self.notify();
@@ -365,7 +305,6 @@ impl State {
 
 struct Shared {
     state: Mutex<State>,
-    /// Notified when the phase changes.
     phase_changed: Condvar,
 }
 
@@ -414,14 +353,10 @@ enum Bound {
     },
 }
 
-/// What the PipeWire callbacks share on the thread.
 #[derive(Default)]
 struct Local {
-    /// The bound stream nodes and clients by global id.
     bound: RefCell<BTreeMap<u32, Bound>>,
-    /// The last `done` of a core roundtrip.
     done: Cell<Option<pw::spa::utils::result::AsyncSeq>>,
-    /// Why the connection failed, once it did.
     failed: RefCell<Option<String>>,
 }
 
@@ -637,7 +572,6 @@ fn run(shared: &Arc<Shared>, quit: pw::channel::Receiver<()>) {
     }
 }
 
-/// The running thread as the source keeps it.
 struct Watch {
     quit: pw::channel::Sender<()>,
     /// Disconnected once the thread is done, its teardown included.
@@ -681,11 +615,9 @@ impl Watch {
     }
 }
 
-/// The PipeWire-backed source: a process holds the microphone while one
-/// of its capture streams is linked from a source and running, Steno's own
-/// capture, filters and level meters left out. One PipeWire thread per
-/// source, started by the first call and ended by the drop, serves every
-/// `changes()` receiver, because PipeWire's objects are single-threaded.
+/// The PipeWire-backed source. One PipeWire thread per source, started by
+/// the first call and ended by the drop, serves every `changes()`
+/// receiver, because PipeWire's objects are single-threaded.
 pub struct LiveProcessAudioActivity {
     shared: Arc<Shared>,
     watch: Mutex<Option<Watch>>,
@@ -705,7 +637,6 @@ impl std::fmt::Debug for LiveProcessAudioActivity {
 }
 
 impl LiveProcessAudioActivity {
-    /// No connection until the first `snapshot()` or `changes()`.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -722,8 +653,8 @@ impl LiveProcessAudioActivity {
     }
 
     /// Starts the thread unless it runs, or ended less than
-    /// [`RETRY_AFTER`] ago; a thread that ended is joined first, one that
-    /// finished without ending its phase (it panicked) included.
+    /// [`RETRY_AFTER`] ago; a thread that ended (or panicked) is joined
+    /// first.
     fn ensure_watching(&self) {
         let mut watch = self.watch.lock().unwrap_or_else(PoisonError::into_inner);
         let ended = match &self.shared.lock().phase {
@@ -773,8 +704,8 @@ impl ProcessAudioActivitySource for LiveProcessAudioActivity {
         }
     }
 
-    /// One message right away, then one per change the thread sees; see
-    /// the module doc. All receivers share the source's one thread.
+    /// One message right away, then one whenever a node, link or client
+    /// appears, goes or changes its info.
     fn changes(&self) -> Receiver<()> {
         self.ensure_watching();
         let (sender, receiver) = channel();
@@ -808,9 +739,8 @@ mod tests {
     const MIC: u32 = 10;
     const SINK: u32 = 11;
 
-    /// A built-in microphone, a sink, and the clients of a native
-    /// recorder (pid 500) and of the sound server's compatibility layer
-    /// (pid 300).
+    /// A built-in microphone, a sink, and the clients of a native recorder
+    /// (pid 500) and of the compatibility layer (pid 300).
     fn desktop() -> StreamGraph {
         let mut graph = StreamGraph::default();
         assert!(!graph.add_node(MIC, props(&[("media.class", "Audio/Source")])));
@@ -855,7 +785,6 @@ mod tests {
         );
     }
 
-    /// Each process's pid and its input and output flags.
     fn running(graph: &StreamGraph) -> Vec<(i32, bool, bool)> {
         graph
             .processes()
@@ -864,7 +793,6 @@ mod tests {
             .collect()
     }
 
-    /// No properties in a node's info.
     const NO_PROPS: Option<fn(&str) -> Option<&'static str>> = None;
 
     #[test]
@@ -921,9 +849,8 @@ mod tests {
         assert!(processes[0].is_running_input);
     }
 
-    /// A browser call: Firefox's input stream reaches PipeWire through the
-    /// compatibility layer, so the node names the browser and its pid, and
-    /// the process holds the microphone while it runs linked.
+    /// A browser call through the compatibility layer names the browser
+    /// and its pid, and holds the microphone while it runs linked.
     #[test]
     fn a_browser_s_compatibility_stream_names_the_browser() {
         let mut graph = desktop();

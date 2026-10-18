@@ -1,16 +1,8 @@
-//! The session over the synthetic backend: state machine, level stream,
-//! files, drop accounting, device changes and loss. Everything runs as fast
-//! as the rings accept and the rebuild's backoff runs on a `ManualClock`;
-//! no wall-clock sleeps in the code under test.
-//! Swift: `Tests/StenoAudioTests/CaptureSessionTests.swift`,
-//! `LiveAECPathTests.swift`.
-//!
-//! A wait for real work (a notice, a state, a level, a frame, a thread
-//! that sleeps on the clock, a stop or a finalise) takes [`HANG_GUARD`],
-//! a bound that only turns a hang into a failure. Only a claim that
-//! nothing arrives waits a short window ([`settle`]), which fails only by
-//! an extra event and so stays short; a claim about when something
-//! happens steps the `ManualClock` or counts.
+//! The session over the synthetic backend: state machine, levels, files,
+//! drop accounting, device changes and loss, with the rebuild's backoff on
+//! a `ManualClock`. Waits for real work take [`HANG_GUARD`], which only
+//! turns a hang into a failure; only claims that nothing arrives wait the
+//! short [`settle`] window.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -100,8 +92,7 @@ fn sidecar_of(result: &steno_audio::capture::CaptureResult, lane: AudioLane) -> 
     WavFile::read_16k_mono(&file_url_path(&result.asset.sidecars_16k[&lane]).unwrap()).unwrap()
 }
 
-/// The next message on `receiver`, failing the test as hung once nothing
-/// came within [`HANG_GUARD`].
+/// The next message on `receiver`, failing as hung after [`HANG_GUARD`].
 #[track_caller]
 fn recv<T>(receiver: &Receiver<T>) -> T {
     match receiver.recv_timeout(HANG_GUARD) {
@@ -111,8 +102,8 @@ fn recv<T>(receiver: &Receiver<T>) -> T {
     }
 }
 
-/// Collects states until the predicate matches, failing the test as hung
-/// once the next state did not come within [`HANG_GUARD`].
+/// Collects states until the predicate matches, failing as hung after
+/// [`HANG_GUARD`].
 #[track_caller]
 fn collect_states(
     states: &Receiver<CaptureState>,
@@ -155,8 +146,6 @@ fn until_idle_again() -> impl FnMut(&CaptureState) -> bool {
     }
 }
 
-/// Advances `clock` through the first `count` backoff sleeps of a rebuild,
-/// each once the sleeper is registered.
 fn advance_through_sleeps(clock: &ManualClock, count: usize) {
     for step in CaptureSession::RESTART_BACKOFF.iter().take(count) {
         assert!(
@@ -168,9 +157,7 @@ fn advance_through_sleeps(clock: &ManualClock, count: usize) {
 }
 
 /// Gives every thread a chance to run before asserting nothing further
-/// happened: the one short window, for the claims that nothing arrives.
-/// Such a claim fails only by an extra event, never by a slow host, so
-/// lengthening this only slows every run.
+/// happened. Such a claim fails only by an extra event, so this stays short.
 fn settle() {
     std::thread::sleep(Duration::from_millis(100));
 }
@@ -179,8 +166,8 @@ fn settle() {
 fn idle_starting_recording_stopping_idle_over_the_synthetic_backend() {
     let directory = tempfile::tempdir().unwrap();
     let backend = Arc::new(SyntheticCaptureBackend::new(tones(&call(), 3.0)));
-    // Ten seconds of writer headroom: the backend delivers three seconds of
-    // audio in milliseconds, far faster than a debug-build writer.
+    // Ten seconds of writer headroom: the backend delivers faster than a
+    // debug-build writer.
     let session = CaptureSession::with_backend(
         configuration(CaptureMode::Call, directory.path(), false),
         backend.clone(),
@@ -197,8 +184,7 @@ fn idle_starting_recording_stopping_idle_over_the_synthetic_backend() {
     session.start(meeting_id).unwrap();
     assert!(matches!(session.state(), CaptureState::Recording { .. }));
 
-    // The level stream carries the injected tone level (amplitude 0.5 sines
-    // are -9.03 dBFS).
+    // Amplitude 0.5 sines are -9.03 dBFS.
     let first = recv(&levels);
     assert!((first.mic.rms - -9.03).abs() < 0.2);
     assert!((first.system.unwrap().rms - -9.03).abs() < 0.2);
@@ -239,9 +225,8 @@ fn idle_starting_recording_stopping_idle_over_the_synthetic_backend() {
     assert!((mic.len() as f64 / 16_000.0 - 3.0).abs() < 0.02);
 }
 
-/// A device that changes and never comes back: four restarts fail across
-/// the backoff ladder and the recording ends in `DeviceLost`, finalised and
-/// readable to its last frame, with its [`Playback`] hold released.
+/// A device that never comes back: four restarts fail and the recording
+/// ends in `DeviceLost`, readable, with its [`Playback`] hold released.
 #[test]
 fn device_lost_stops_cleanly_with_a_readable_master() {
     let directory = tempfile::tempdir().unwrap();
@@ -281,8 +266,6 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
         "the device loss released the hold before the state said Failed"
     );
 
-    // The state carries the finalised partial recording; `stop()` returns
-    // the same one, with what ended it.
     let result = session.stop().unwrap();
     assert_eq!(result.failure, Some(CaptureError::DeviceLost));
     assert_eq!(
@@ -301,8 +284,7 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
     assert_eq!(master.frame_count(), 48_000);
     assert_eq!(backend.starts(), 1 + CaptureSession::RESTART_ATTEMPTS);
 
-    // A failed session starts again; this backend's one change is spent, so
-    // the second recording sees no change and no rebuild.
+    // This backend's one change is spent, so the second recording sees none.
     session.start(Uuid::new_v4()).unwrap();
     backend.wait_until_finished();
     let second = session.stop().unwrap();
@@ -315,10 +297,8 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
     assert_eq!(second.statistics.device_changes, 0);
 }
 
-/// A rebuild that panics (here the restarted backend's `start`) ends the
-/// recording as a device that stayed lost does: `Failed(DeviceLost)` with
-/// the recording up to the change, rather than `Recording` over a session
-/// that writes nothing any more.
+/// A rebuild that panics ends the recording in `Failed(DeviceLost)` with
+/// the recording up to the change.
 #[test]
 fn a_rebuild_that_panics_ends_in_device_lost_with_the_recording() {
     let directory = tempfile::tempdir().unwrap();
@@ -337,8 +317,6 @@ fn a_rebuild_that_panics_ends_in_device_lost_with_the_recording() {
     .unwrap();
     let states = session.states();
     session.start(Uuid::new_v4()).unwrap();
-    // The session sends `Stopping`, then `Failed` once the finalise is
-    // done, in that order.
     let seen = collect_states(&states, until_failed);
     assert!(seen.contains(&CaptureState::Stopping), "{seen:?}");
     let result = session.stop().unwrap();
@@ -358,16 +336,14 @@ fn a_rebuild_that_panics_ends_in_device_lost_with_the_recording() {
         "the start and the restart that panicked"
     );
 
-    // The session starts again after it.
     session.start(Uuid::new_v4()).unwrap();
     backend.wait_until_finished();
     session.stop().unwrap();
     assert_eq!(session.state(), CaptureState::Idle);
 }
 
-/// A tap that never delivers anything (permission denied, a muted mix) is
-/// reported through `system_lane_silent` and the level stream's floor,
-/// while the recording itself completes.
+/// A tap that never delivers is reported through `system_lane_silent` and
+/// the level floor, while the recording completes.
 #[test]
 fn a_silent_system_lane_is_reported_in_statistics_and_levels() {
     let directory = tempfile::tempdir().unwrap();
@@ -402,9 +378,8 @@ fn a_silent_system_lane_is_reported_in_statistics_and_levels() {
     assert!(master.channels[0].iter().any(|s| *s != 0.0));
 }
 
-/// The default relay rides out a writer stalled for 20 s: every frame of
-/// three channels (two lanes and the raw microphone) fits with nothing
-/// draining it, so a slow sync or a sleeping disk drops nothing.
+/// The default relay rides out a writer stalled for 20 s with nothing
+/// dropped.
 #[test]
 fn the_default_relay_holds_twenty_seconds_with_the_writer_stalled() {
     let relay = FrameRelay::new(
@@ -423,9 +398,8 @@ fn the_default_relay_holds_twenty_seconds_with_the_writer_stalled() {
     assert_eq!(relay.dropped_frames(), [0, 0, 0]);
 }
 
-/// The real writer on a filesystem where every periodic sync fails, the
-/// plain `fsync` the Mac falls back to as well; with `close_too` the
-/// close's sync fails too, after the real close has written everything.
+/// The real writer on a filesystem where every periodic sync fails; with
+/// `close_too` the close's sync fails too.
 struct SyncRefused {
     writer: RecordingWriter,
     close_too: bool,
@@ -450,7 +424,6 @@ impl RecordingWriting for SyncRefused {
     }
 }
 
-/// A session over [`SyncRefused`] writers.
 fn sync_refused_session(
     mode: CaptureMode,
     directory: &Path,
@@ -474,11 +447,9 @@ fn sync_refused_session(
     .unwrap()
 }
 
-/// A sync that always fails cuts nothing short: 8 s delivered (past the
-/// first sync, at 5 s) are all in the master, and the stop hands the
-/// recording back. With nothing else ending the recording it ends `Failed`
-/// with that recording on the first sync's error, since what was written
-/// may not be on disk; a close that fails as well comes first.
+/// A sync that always fails cuts nothing short: all 8 s are in the master,
+/// and the recording ends `Failed` on the sync's error (a failed close
+/// ranks first).
 #[test]
 fn a_failing_sync_keeps_the_whole_recording_and_says_so() {
     for (close_too, expected) in [(false, "unsupported"), (true, "the close's sync failed")] {
@@ -518,9 +489,8 @@ fn a_failing_sync_keeps_the_whole_recording_and_says_so() {
     }
 }
 
-/// A failed sync never stands in for what ended the recording: syncs
-/// refused from the first one, at 5 s, then a device lost for good at 6 s
-/// end `DeviceLost`, with all 6 s in the master.
+/// A failed sync never stands in for what ended the recording: a later
+/// device loss ends it `DeviceLost`.
 #[test]
 fn refused_syncs_then_a_device_loss_end_device_lost() {
     let directory = tempfile::tempdir().unwrap();
@@ -558,9 +528,8 @@ fn refused_syncs_then_a_device_loss_end_device_lost() {
     assert_eq!(master_of(&result).frame_count(), 600 * FRAME_SIZE);
 }
 
-/// One frame of relay headroom against a backend that delivers two seconds
-/// in milliseconds: the writer falls behind, and every frame it missed is
-/// counted against the master that was written, on every lane alike.
+/// One frame of relay headroom: every frame the writer missed is counted,
+/// on every lane alike.
 #[test]
 fn dropped_frames_account_for_every_frame_the_writer_missed() {
     let directory = tempfile::tempdir().unwrap();
@@ -737,9 +706,7 @@ fn start_while_recording_and_stop_while_idle_fail() {
     session.stop().unwrap();
 }
 
-/// Fifty start/stop cycles on one session: every cycle ends idle with a
-/// readable master and nothing carries over (rings cleared, threads
-/// joined).
+/// Fifty start/stop cycles on one session: nothing carries over.
 #[test]
 fn repeated_start_stop_cycles_stay_clean() {
     let directory = tempfile::tempdir().unwrap();
@@ -791,18 +758,12 @@ impl CaptureBackend for OnceThenFailing {
 }
 
 /// A backend that keeps the live backends' promise for a chosen
-/// microphone (`CaptureBackend::start`): while `connected` it records the
-/// one asked for, otherwise the default input in its place, saying so in
-/// the stream. A chosen one that is connected but not `opens` fails the
-/// start, as a device still settling or held elsewhere does, with
-/// [`Self::chosen_failure`] (or, when it `stalls`, as one linked that never
-/// runs); the default fails while not `default_opens`, with
-/// [`Self::default_failure`]. With `default_is_chosen` the default input is
-/// the chosen microphone itself. Every UID it was asked for is kept. With
-/// `probes` it can ask a microphone on a stream of its own, as the Linux
-/// backend does: the chosen one delivers there while connected and
-/// `opens`; every probe is counted. With `ask_hold` set, the next probe
-/// reports that it began and waits until the test releases it.
+/// microphone: while `connected` it records it, otherwise the default,
+/// saying so in the stream. A connected one that does not `opens` fails the
+/// start with [`Self::chosen_failure`]; the default fails while not
+/// `default_opens`. Every UID asked for is kept. With `probes` it can probe
+/// a microphone on a stream of its own; `ask_hold` holds the next probe
+/// until the test releases it.
 struct ChosenOrDefault {
     inner: SyntheticCaptureBackend,
     connected: AtomicBool,
@@ -823,8 +784,7 @@ impl ChosenOrDefault {
         Self::over(tones(&[AudioLane::Mixed], seconds))
     }
 
-    /// Delivering at wall-clock speed and watched by the session, as a
-    /// live backend is.
+    /// Delivering at wall-clock speed and watched, as a live backend is.
     fn watched(seconds: f64) -> Self {
         Self::over(
             tones(&[AudioLane::Mixed], seconds)
@@ -856,17 +816,15 @@ impl ChosenOrDefault {
         CaptureError::BackendFailed("the default input did not open".into())
     }
 
-    /// The chosen microphone and, after the first start on it, every UID
-    /// asked for: `restarts` more for it, then the default.
+    /// The UIDs asked for: the chosen one `restarts + 1` times, then the
+    /// default.
     fn chosen_then_default(restarts: usize) -> Vec<Option<String>> {
         let mut asked = vec![Some(Self::CHOSEN.to_owned()); 1 + restarts];
         asked.push(None);
         asked
     }
 
-    /// A session asking this backend for [`Self::CHOSEN`]. The relay holds
-    /// 10 s, so a gap written on a manual clock leaves room for what the
-    /// restarted backend delivered at once.
+    /// A session asking this backend for [`Self::CHOSEN`], with a 10 s relay.
     fn session(self: &Arc<Self>, directory: &Path, clock: Arc<dyn Clock>) -> CaptureSession {
         let mut configuration = configuration(CaptureMode::InPerson, directory, false);
         configuration.input_device_uid = Some(Self::CHOSEN.to_owned());
@@ -885,12 +843,10 @@ impl ChosenOrDefault {
         })
     }
 
-    /// The stream's input on the chosen microphone.
     fn chosen() -> Option<CaptureInput> {
         Self::input(Self::CHOSEN, "USB Microphone", false)
     }
 
-    /// The stream's input on the default input, recorded as the fallback.
     fn fallback() -> Option<CaptureInput> {
         Self::input("built-in", "Built-in Microphone", true)
     }
@@ -941,8 +897,7 @@ impl CaptureBackend for ChosenOrDefault {
         let hold = self.ask_hold.lock().unwrap().take();
         if let Some((began, release)) = hold {
             let _ = began.send(());
-            // The test's sender drops before its session, so a failed
-            // test does not hold its session's drop here.
+            // The test's sender drops before its session.
             let _ = release.recv();
         }
         let delivers = self.connected.load(Ordering::Relaxed) && self.opens.load(Ordering::Relaxed);
@@ -951,10 +906,8 @@ impl CaptureBackend for ChosenOrDefault {
     }
 }
 
-/// A chosen microphone that goes during a recording: the rebuild asks for
-/// it again, the backend records the default input in its place, and the
-/// recording goes on, without `DeviceLost`, its stream naming the fallback;
-/// once the microphone is back, the next change returns to it.
+/// A chosen microphone that goes during a recording is replaced by the
+/// default without `DeviceLost`; once it is back, the next change returns.
 #[test]
 fn a_chosen_microphone_that_goes_and_comes_back_keeps_the_recording() {
     let directory = tempfile::tempdir().unwrap();
@@ -1009,11 +962,8 @@ fn a_chosen_microphone_that_goes_and_comes_back_keeps_the_recording() {
     );
 }
 
-/// The chosen microphone comes back (a change) while the recording is on
-/// the fallback, but does not open: the default worked a moment ago, so it
-/// is tried right after the first failed restart, not after the last, and
-/// the recording goes on there, marked as the fallback, after a gap of one
-/// restart rather than four.
+/// On the fallback, a chosen microphone that comes back but does not open:
+/// the default is tried after the first failed restart, not the last.
 #[test]
 fn a_chosen_microphone_that_comes_back_but_does_not_open_keeps_the_recording() {
     let directory = tempfile::tempdir().unwrap();
@@ -1050,9 +1000,8 @@ fn a_chosen_microphone_that_comes_back_but_does_not_open_keeps_the_recording() {
     assert_eq!(result.statistics.device_changes, 1);
 }
 
-/// The chosen microphone records, then stops opening at a rebuild: it is
-/// asked for through every restart, since a device back within the backoff
-/// keeps its place, and only after the last is the default started.
+/// A chosen microphone that stops opening at a rebuild is asked for
+/// through every restart; only after the last is the default started.
 #[test]
 fn a_chosen_microphone_that_stops_opening_is_retried_before_the_default() {
     let directory = tempfile::tempdir().unwrap();
@@ -1086,11 +1035,8 @@ fn a_chosen_microphone_that_stops_opening_is_retried_before_the_default() {
     assert!(!result.statistics.ended_on_device_loss);
 }
 
-/// A chosen microphone that is linked but does not run
-/// ([`CaptureError::DidNotRun`]) at a rebuild: each such restart waits out
-/// the backend's start deadline, so the default is tried after the first.
-/// When the default does not open either, the restarts go on, and the last
-/// one tries the default again.
+/// A chosen microphone that does not run at a rebuild: the default is tried
+/// after the first restart, and the restarts go on when it fails too.
 #[test]
 fn a_chosen_microphone_that_does_not_run_is_replaced_after_one_restart() {
     let directory = tempfile::tempdir().unwrap();
@@ -1140,9 +1086,8 @@ fn a_chosen_microphone_that_does_not_run_is_replaced_after_one_restart() {
     assert_eq!(result.statistics.device_changes, 2);
 }
 
-/// A chosen microphone whose first restart fails to open and whose second
-/// does not run ([`CaptureError::DidNotRun`]): the default is tried right
-/// after the second, not only after a first.
+/// A first restart that fails to open and a second that does not run: the
+/// default is tried right after the second.
 #[test]
 fn a_chosen_microphone_that_does_not_run_at_a_later_restart_is_replaced_there() {
     let directory = tempfile::tempdir().unwrap();
@@ -1175,10 +1120,8 @@ fn a_chosen_microphone_that_does_not_run_at_a_later_restart_is_replaced_there() 
     assert!(!result.statistics.ended_on_device_loss);
 }
 
-/// A chosen microphone that is connected but does not open at the start:
-/// the recording starts on the default input, marked as the fallback. Only
-/// when the default does not open either does the start fail, with the
-/// chosen one's error.
+/// A chosen microphone that does not open at the start: the recording runs
+/// on the default, marked as the fallback, or fails with the chosen error.
 #[test]
 fn a_chosen_microphone_that_does_not_open_at_the_start_records_the_default() {
     let directory = tempfile::tempdir().unwrap();
@@ -1209,9 +1152,8 @@ fn a_chosen_microphone_that_does_not_open_at_the_start_records_the_default() {
     ));
 }
 
-/// A chosen microphone that is also the default input, whose start by its
-/// UID failed: the start without a UID records it, and it is not marked as
-/// the fallback, so no warning says it is missing.
+/// A chosen microphone that is also the default is not marked as the
+/// fallback.
 #[test]
 fn a_chosen_microphone_that_is_the_default_is_not_its_own_fallback() {
     let directory = tempfile::tempdir().unwrap();
@@ -1229,9 +1171,8 @@ fn a_chosen_microphone_that_is_the_default_is_not_its_own_fallback() {
     assert!(!session.stop().unwrap().statistics.ended_on_device_loss);
 }
 
-/// Meeting A records and stops; meeting B's start fails in the backend.
-/// `stop()` after that failure must fail, not hand out A's asset under B's
-/// meeting (the app would enqueue A twice).
+/// After a failed start, `stop()` fails instead of handing out the previous
+/// meeting's asset.
 #[test]
 fn a_failed_start_does_not_return_the_previous_meetings_recording() {
     let directory = tempfile::tempdir().unwrap();
@@ -1274,7 +1215,6 @@ fn a_failed_start_does_not_return_the_previous_meetings_recording() {
     );
 }
 
-/// Logs `reset` and `process` calls in order.
 struct ResetLoggingCanceller {
     log: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -1293,9 +1233,7 @@ impl EchoCanceller for ResetLoggingCanceller {
     }
 }
 
-/// One canceller serves every recording of a session, so each start resets
-/// it before the first frame: meeting two on headphones must not begin with
-/// the filter meeting one converged on the loudspeakers.
+/// Each start resets the shared canceller before the first frame.
 #[test]
 fn every_start_resets_the_echo_canceller_before_the_first_frame() {
     let directory = tempfile::tempdir().unwrap();
@@ -1320,9 +1258,8 @@ fn every_start_resets_the_echo_canceller_before_the_first_frame() {
     );
 }
 
-/// Frame counts move between rates rounded down: a device's to 48 kHz,
-/// and a microphone on its own clock to the stream's; a rate that could
-/// not be read leaves the count alone.
+/// Frame counts move between rates rounded down; an unread rate leaves the
+/// count alone.
 #[test]
 fn frame_counts_are_rescaled_between_rates_rounding_down() {
     let hands_free = CaptureStream {
@@ -1344,7 +1281,7 @@ fn frame_counts_are_rescaled_between_rates_rounding_down() {
 }
 
 /// The far-end is delayed by both device paths whenever their sum reaches
-/// one processing frame; the Speex tail keeps the room.
+/// one processing frame.
 #[test]
 fn far_end_delay_covers_input_and_output_paths_from_one_frame_up() {
     assert_eq!(CaptureSession::far_end_delay_frames(0, 0), 0);
@@ -1388,8 +1325,8 @@ fn the_session_exposes_the_backends_stream_while_recording() {
     assert_eq!(session.stream(), None);
 }
 
-/// Wraps the real writer and fails where a full disk would: every `write`
-/// after `fail_after_frames`, and `finish()` itself when asked.
+/// Wraps the real writer and fails every `write` after
+/// `fail_after_frames`, and `finish()` when asked.
 struct FaultyWriter {
     inner: RecordingWriter,
     fail_after_frames: Option<usize>,
@@ -1447,8 +1384,8 @@ fn faulty_session(
     .unwrap()
 }
 
-/// The disk fills while closing the files: `stop()` still returns the
-/// asset and the state, not an error, carries the failure.
+/// A disk that fills while closing: `stop()` returns the asset and the
+/// state carries the failure.
 #[test]
 fn a_failing_finish_still_returns_the_asset_and_ends_failed() {
     let directory = tempfile::tempdir().unwrap();
@@ -1491,8 +1428,7 @@ fn a_failing_finish_still_returns_the_asset_and_ends_failed() {
     );
 }
 
-/// The disk fills mid-recording: the first write error stops the writes,
-/// the session finalises, and `stop()` returns what was written.
+/// A disk that fills mid-recording: `stop()` returns what was written.
 #[test]
 fn a_failing_write_mid_recording_finalises_what_was_written() {
     let directory = tempfile::tempdir().unwrap();
@@ -1525,9 +1461,8 @@ fn a_failing_write_mid_recording_finalises_what_was_written() {
     assert_eq!(master_of(&result).frame_count(), 30 * 480);
 }
 
-/// A writer failure names its cause once from each place the session
-/// reports one: a writer that cannot open its folder, a failed close and a
-/// failed write, each read as `Display`.
+/// A writer failure names its cause once in its `Display`, from each place
+/// the session reports one.
 #[test]
 fn a_writer_failure_says_writing_the_recording_failed_once() {
     let once = |error: &CaptureError| {
@@ -1609,9 +1544,8 @@ fn a_writer_failure_says_writing_the_recording_failed_once() {
     );
 }
 
-/// The writer thread panics on its tenth frame and takes the writer with
-/// it: `stop()` fails with `WriterFailed` instead of leaving the session
-/// stuck in `Stopping`, and the next recording starts.
+/// A writer thread that panics: `stop()` fails with `WriterFailed` instead
+/// of hanging in `Stopping`, and the next recording starts.
 #[test]
 fn a_writer_thread_that_died_ends_failed_and_the_session_starts_again() {
     struct Panicking(RecordingWriter, usize);
@@ -1670,11 +1604,8 @@ fn a_writer_thread_that_died_ends_failed_and_the_session_starts_again() {
     assert_eq!(session.state(), CaptureState::Idle);
 }
 
-/// A write fails and no thread can be spawned to end the recording on
-/// (refused here, as when the system has none to give): the state stays
-/// `Recording` over a writer that drops every frame, `write_failed` says
-/// so for a watcher to stop it, and `stop()` returns the recording with
-/// the write's failure in it.
+/// A failed write with no thread to end the recording on: the state stays
+/// `Recording`, `write_failed` says so, and `stop()` returns the failure.
 #[test]
 fn a_failed_write_with_no_thread_to_end_it_shows_through_write_failed() {
     let directory = tempfile::tempdir().unwrap();
@@ -1709,10 +1640,8 @@ fn a_failed_write_with_no_thread_to_end_it_shows_through_write_failed() {
     assert!(!session.write_failed());
 }
 
-/// A start that panics part way (here its writer factory; in the product a
-/// writer or a processing thread the system cannot spawn) leaves `Failed`
-/// with no recording rather than `Starting` for good, and the next start
-/// records.
+/// A start that panics part way leaves `Failed`, not `Starting`, and the
+/// next start records.
 #[test]
 fn a_start_that_panics_ends_failed_and_the_session_starts_again() {
     let directory = tempfile::tempdir().unwrap();
@@ -1758,9 +1687,8 @@ fn a_start_that_panics_ends_failed_and_the_session_starts_again() {
     assert_eq!(session.state(), CaptureState::Idle);
 }
 
-/// A start that panics once the backend runs (here the backend's own
-/// `start`, its producer thread already spawned) stops the backend on the
-/// way to `Failed`: the next start finds it free and records.
+/// A start that panics once the backend runs stops the backend, so the next
+/// start records.
 #[test]
 fn a_start_that_panics_once_the_backend_runs_stops_it() {
     let directory = tempfile::tempdir().unwrap();
@@ -1797,10 +1725,8 @@ fn a_start_that_panics_once_the_backend_runs_stops_it() {
     assert_eq!(master_of(&session.stop().unwrap()).frame_count(), 24_000);
 }
 
-/// The meeting's folder is deleted while recording. On Unix the open files
-/// keep writing and close without an error, so only the missing master
-/// tells: `stop()` fails with `WriterFailed` rather than returning an asset
-/// whose files are gone.
+/// A meeting folder deleted while recording: `stop()` fails with
+/// `WriterFailed` rather than returning an asset whose files are gone.
 #[cfg(unix)]
 #[test]
 fn a_folder_deleted_while_recording_ends_writer_failed() {
@@ -1835,12 +1761,10 @@ fn a_folder_deleted_while_recording_ends_writer_failed() {
     );
 }
 
-/// Stands in for the IOProc: the test pushes callbacks into the sink the
-/// session handed over.
+/// Stands in for the IOProc: the test pushes callbacks into the sink.
 struct HandsOverTheSink {
     sink: Mutex<Option<Arc<LaneFrameSink>>>,
     stream: CaptureStream,
-    /// What every start after the first reports, when it should differ.
     stream_after_restart: Option<CaptureStream>,
 }
 
@@ -1870,8 +1794,8 @@ impl CaptureBackend for HandsOverTheSink {
     fn stop(&self) {}
 }
 
-/// Passes the near end through once the gate opens; until then the
-/// processing thread is stuck in its first frame.
+/// Passes the near end through once the gate opens; until then processing
+/// is stuck in its first frame.
 struct GatedCanceller {
     open: Arc<(Mutex<bool>, Condvar)>,
 }
@@ -1889,22 +1813,19 @@ impl EchoCanceller for GatedCanceller {
     fn reset(&mut self) {}
 }
 
-/// Three seconds of callbacks while the processing thread is stuck: the
-/// two-second rings take what fits (plus what the thread read before it
-/// stuck), refuse the rest and count it, and those overruns reach
-/// `dropped_frames`.
+/// Callbacks while processing is stuck: the rings refuse what does not fit,
+/// and the overruns reach `dropped_frames`.
 #[test]
 fn ring_overruns_are_reported_in_dropped_frames() {
     ring_overruns_are_reported(SAMPLE_RATE);
 }
 
-/// The same at 24 kHz: a refused 480-sample callback is two 48 kHz frames.
+/// The same at 24 kHz.
 #[test]
 fn ring_overruns_at_24_khz_are_reported_in_48_khz_frames() {
     ring_overruns_are_reported(24_000.0);
 }
 
-/// The two tests above, with the rings at `rate`.
 fn ring_overruns_are_reported(rate: f64) {
     let directory = tempfile::tempdir().unwrap();
     let backend = Arc::new(HandsOverTheSink::new(CaptureStream {
@@ -1940,8 +1861,7 @@ fn ring_overruns_are_reported(rate: f64) {
         refused > 0 && accepted >= 200,
         "the rings hold two seconds: {accepted} accepted"
     );
-    // 48 kHz frames per callback; at 24 kHz half a converter window is held
-    // back, one frame less in the master.
+    // At 24 kHz half a converter window is held back, one frame less.
     let frames = (SAMPLE_RATE / rate) as usize;
     let held = usize::from(rate != SAMPLE_RATE);
     assert_eq!(
@@ -1955,9 +1875,8 @@ fn ring_overruns_are_reported(rate: f64) {
     );
 }
 
-/// Overruns at 48 kHz, then a headset that switches to 16 kHz mid-call:
-/// the overruns are counted at the rate of the stream they happened on, not
-/// the rate the recording ends at (which would read them three times over).
+/// Overruns are counted at the rate of the stream they happened on, not
+/// the one the recording ends at.
 #[test]
 fn ring_overruns_before_a_rate_change_keep_their_rate() {
     let directory = tempfile::tempdir().unwrap();
@@ -2012,10 +1931,8 @@ fn ring_overruns_before_a_rate_change_keep_their_rate() {
     );
 }
 
-/// A backend that reports a rate the converter cannot take (the live
-/// backends refuse one at `start`) is recorded unconverted, sample for
-/// sample, instead of panicking with the session's lock held. 1.2 s at
-/// 4 kHz is ten whole frames, so no remainder is left in the rings.
+/// A rate the converter cannot take is recorded unconverted instead of
+/// panicking. 1.2 s at 4 kHz is ten whole frames.
 #[test]
 fn a_stream_at_a_rate_the_converter_cannot_take_is_recorded_unconverted() {
     let directory = tempfile::tempdir().unwrap();
@@ -2056,7 +1973,6 @@ impl CaptureBackend for Failing {
     fn stop(&self) {}
 }
 
-/// Every file under `folder`, by path, with its bytes.
 fn tree(folder: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
     let mut files = BTreeMap::new();
     for entry in std::fs::read_dir(folder).unwrap() {
@@ -2070,8 +1986,8 @@ fn tree(folder: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
     files
 }
 
-/// `audio` holds another meeting's folder with a master and a sidecar,
-/// and a file of its own; the meeting's id.
+/// Fills `audio` with another meeting's folder and a file of its own;
+/// returns that meeting's id.
 fn audio_folder_with_a_meeting(audio: &Path) -> Uuid {
     let id = Uuid::new_v4();
     let other = RecordingLayout::new(audio, id);
@@ -2082,8 +1998,7 @@ fn audio_folder_with_a_meeting(audio: &Path) -> Uuid {
     id
 }
 
-/// A start whose devices do not open removes the folder it made and
-/// nothing else: another meeting's folder and the audio folder stay.
+/// A start whose devices do not open removes only the folder it made.
 #[test]
 fn a_failing_backend_leaves_the_session_failed_and_no_folder() {
     let directory = tempfile::tempdir().unwrap();
@@ -2116,8 +2031,8 @@ fn a_failing_backend_leaves_the_session_failed_and_no_folder() {
     assert!(matches!(session.stop(), Err(CaptureError::InvalidState(_))));
 }
 
-/// A start with the id of a meeting whose folder exists is refused before
-/// any device opens, and every file in it stays as it was.
+/// A start for a meeting whose folder exists is refused before any device
+/// opens, leaving every file as it was.
 #[test]
 fn a_start_into_a_meeting_folder_that_exists_is_refused_and_writes_nothing() {
     let directory = tempfile::tempdir().unwrap();
@@ -2150,7 +2065,6 @@ fn a_start_into_a_meeting_folder_that_exists_is_refused_and_writes_nothing() {
     }
 }
 
-/// The real writer, which does not say it created the folder.
 struct Unclaimed(RecordingWriter);
 
 impl RecordingWriting for Unclaimed {
@@ -2168,7 +2082,6 @@ impl RecordingWriting for Unclaimed {
     }
 }
 
-/// A failed start removes a folder only when its writer says it made it.
 #[test]
 fn a_failed_start_keeps_a_folder_its_writer_does_not_claim() {
     let directory = tempfile::tempdir().unwrap();
@@ -2197,11 +2110,8 @@ fn a_failed_start_keeps_a_folder_its_writer_does_not_claim() {
 
 // Device changes
 
-/// A device change rebuilds the backend in place: the state never leaves
-/// `Recording`, the notices say what happened, the master keeps growing on
-/// the same files with every frame of both starts and nothing dropped, the
-/// echo canceller starts cold again, and no silence is needed when the
-/// restart succeeds at once.
+/// A device change rebuilds the backend in place: `Recording` throughout,
+/// every frame of both starts on the same files, the canceller cold again.
 #[test]
 fn a_device_change_keeps_recording_on_the_same_files() {
     let directory = tempfile::tempdir().unwrap();
@@ -2224,7 +2134,7 @@ fn a_device_change_keeps_recording_on_the_same_files() {
     let notices = session.notices();
     let meeting_id = Uuid::new_v4();
     session.start(meeting_id).unwrap();
-    // No read of the first stream: the change's rebuild can already have replaced it.
+    // The rebuild may already have replaced the first stream.
     assert_eq!(
         recv(&notices),
         CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
@@ -2285,8 +2195,7 @@ fn a_device_change_keeps_recording_on_the_same_files() {
     assert_eq!(clock.pending_sleepers(), 0);
 }
 
-/// Keeps every far-end sample it is handed and passes the microphone
-/// through.
+/// Keeps every far-end sample and passes the microphone through.
 struct FarEndRecorder {
     far_end: Arc<Mutex<Vec<f32>>>,
 }
@@ -2299,11 +2208,8 @@ impl EchoCanceller for FarEndRecorder {
     }
 }
 
-/// A headset in the hands-free profile keeps the Mac's aggregate at
-/// 24 kHz: the recording still starts, the master and the sidecars are 48
-/// and 16 kHz with the tones at their frequencies and levels, and the far
-/// end reaches the canceller delayed by the device latencies in 48 kHz
-/// frames.
+/// A 24 kHz aggregate (a hands-free headset) still records 48 and 16 kHz
+/// files, with the far end delayed by the latencies in 48 kHz frames.
 #[test]
 fn a_device_at_24_khz_records_the_usual_files() {
     let directory = tempfile::tempdir().unwrap();
@@ -2359,9 +2265,8 @@ fn a_device_at_24_khz_records_the_usual_files() {
     assert_eq!(&far_end[10_080..], &system[..system.len() - 10_080]);
 }
 
-/// The call starts and the headset enters the hands-free profile while
-/// recording: the rebuilt backend comes back at 24 kHz and the recording
-/// carries on instead of ending as a lost device.
+/// A headset that enters the hands-free profile while recording: the
+/// rebuilt 24 kHz backend carries on.
 #[test]
 fn a_change_to_24_khz_resumes_the_recording() {
     let directory = tempfile::tempdir().unwrap();
@@ -2418,12 +2323,8 @@ fn a_change_to_24_khz_resumes_the_recording() {
     );
 }
 
-/// The contiguity claim: a gap longer than the two seconds the sink's rings
-/// hold is written in full as silence through the relay, so the master runs
-/// to wall time with nothing truncated into `dropped_frames`. Three restarts
-/// fail, the clock advances 0.25, 0.5 and then 2.5 s, the fourth succeeds,
-/// and 3.25 s of zeros sit between the old device's last frame and the new
-/// device's first.
+/// A gap longer than the sink's 2 s rings is written in full as silence:
+/// three failed restarts leave 3.25 s of zeros between the two devices.
 #[test]
 fn a_gap_longer_than_the_ring_is_written_in_full() {
     let directory = tempfile::tempdir().unwrap();
@@ -2509,8 +2410,8 @@ fn a_gap_longer_than_the_ring_is_written_in_full() {
     );
 }
 
-/// The shape a Bluetooth headset produces (out of the profile and back):
-/// two changes, two rebuilds, four notices in order, one master.
+/// A Bluetooth headset's two changes: two rebuilds, four notices, one
+/// master.
 #[test]
 fn two_device_changes_rebuild_twice() {
     let directory = tempfile::tempdir().unwrap();
@@ -2557,9 +2458,8 @@ fn two_device_changes_rebuild_twice() {
     assert_eq!(master_of(&result).frame_count(), backend.frames_delivered());
 }
 
-/// Four failed restarts end the recording in `DeviceLost` after the summed
-/// backoff on the manual clock, with what was recorded before the change
-/// and nothing rebuilt.
+/// Four failed restarts end in `DeviceLost` after the summed backoff, with
+/// what was recorded before.
 #[test]
 fn a_restart_that_keeps_failing_ends_in_device_lost() {
     let directory = tempfile::tempdir().unwrap();
@@ -2607,8 +2507,7 @@ fn a_restart_that_keeps_failing_ends_in_device_lost() {
     );
 }
 
-/// A backend whose `stop()` reports a change on the sink it was given, the
-/// way a HAL listener can fire while the session tears down.
+/// A backend whose `stop()` reports a change, as a HAL listener can.
 struct ReportingOnStop {
     inner: Arc<SyntheticCaptureBackend>,
     sink: Mutex<Option<Arc<LaneFrameSink>>>,
@@ -2632,8 +2531,7 @@ impl CaptureBackend for ReportingOnStop {
     }
 }
 
-/// A report before `start` and one from inside `stop()` produce no notice
-/// and leave the state as it was.
+/// Reports before `start` and from inside `stop()` change nothing.
 #[test]
 fn a_device_change_while_idle_or_after_stop_is_ignored() {
     let directory = tempfile::tempdir().unwrap();
@@ -2668,9 +2566,7 @@ fn a_device_change_while_idle_or_after_stop_is_ignored() {
     assert_eq!(inner.starts(), 1, "nothing was restarted");
 }
 
-/// A report the first recording's backend sends once the second recording
-/// started, as one left in its handler past the first's stop: the second
-/// recording is not rebuilt.
+/// A report from the first recording's backend does not rebuild the second.
 #[test]
 fn a_report_from_an_earlier_recordings_backend_is_ignored() {
     let directory = tempfile::tempdir().unwrap();
@@ -2699,10 +2595,8 @@ fn a_report_from_an_earlier_recordings_backend_is_ignored() {
     assert_eq!(result.statistics.device_changes, 0);
 }
 
-/// The writer fails while a rebuild is under way (on the first frame of gap
-/// silence, the 51st frame written): the session ends `Failed(WriterFailed)`
-/// with what was written, not `DeviceLost`, and the rebuild does not
-/// resurrect it.
+/// The writer fails during a rebuild's gap: `Failed(WriterFailed)`, not
+/// `DeviceLost`, and the rebuild does not resurrect it.
 #[test]
 fn a_writer_failure_during_a_rebuild_ends_writer_failed() {
     let directory = tempfile::tempdir().unwrap();
@@ -2753,9 +2647,8 @@ fn a_writer_failure_during_a_rebuild_ends_writer_failed() {
     assert!(clock.wait_for_sleepers(0));
 }
 
-/// `stop()` while the rebuild waits out a backoff abandons it: the
-/// recording is finalised once, ends `Idle`, the cancelled sleep is gone,
-/// and nothing the clock does afterwards changes the outcome.
+/// `stop()` during a backoff abandons the rebuild: one finalise, `Idle`,
+/// and the clock changes nothing afterwards.
 #[test]
 fn stop_during_a_rebuild_finalises_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -2811,15 +2704,11 @@ fn stop_during_a_rebuild_finalises_once() {
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
-/// The live backend's shape during a device transition: a producer of 0.25
-/// on every lane every 10 ms that runs on until `stop()` has torn it down.
-/// `stop()` call number `gated_call` (counted from 1) reports itself on
-/// `at_gate` and then waits for the test to open the gate, with the
-/// producer still running if one is; it takes the producer first, so a
-/// second `stop()` meanwhile returns at once, as a backend whose teardown
-/// is already under way does. `change_after` reports one device change
-/// after that many callbacks of the first start; with `restarts_fail`
-/// every later start fails as an absent device does.
+/// The live backend's shape during a device transition: a producer that
+/// runs until `stop()` has torn it down. `stop()` call number `gated_call`
+/// reports on `at_gate` and waits for the gate; a second `stop()` returns
+/// at once. `change_after` reports one change after that many callbacks;
+/// with `restarts_fail` every later start fails.
 struct GatedStop {
     gated_call: usize,
     change_after: Option<usize>,
@@ -2834,8 +2723,6 @@ struct GatedStop {
 }
 
 impl GatedStop {
-    /// The backend, the receiver `at_gate` reports on and the gate's
-    /// sender.
     fn new(
         gated_call: usize,
         change_after: Option<usize>,
@@ -2919,17 +2806,10 @@ impl CaptureBackend for GatedStop {
     }
 }
 
-/// Calls `stop()` on its own thread while another thread (a finalise, or a
-/// rebuild's teardown) waits at `backend`'s gate, and opens the gate once
-/// the call has returned (a `stop()` that does not wait returns at once) or
-/// once 200 ms have passed and the state reads `Stopping`. A rebuild's
-/// teardown runs while `Recording`, so the gate stays shut until the
-/// `stop()` has set `Stopping`, which every later rebuild step checks,
-/// however late its thread runs. A finalise holds `Stopping` throughout,
-/// and a `stop()` that arrives after it ends gets the same answer. After
-/// [`HANG_GUARD`] the gate opens regardless and the caller's assertions
-/// fail.
-/// Returns what `stop()` returned and the producers alive at that moment.
+/// Calls `stop()` on its own thread while another thread waits at
+/// `backend`'s gate, and opens the gate once the call returned or the state
+/// reads `Stopping` (or after [`HANG_GUARD`]). Returns what `stop()`
+/// returned and the producers alive then.
 fn stop_at_the_gate(
     session: &CaptureSession,
     backend: &GatedStop,
@@ -2953,11 +2833,8 @@ fn stop_at_the_gate(
     })
 }
 
-/// `stop()` while the rebuild is inside a slow backend teardown waits for
-/// that teardown instead of clearing the rings under a running producer and
-/// the old processing thread: when `stop()` returns nothing produces any
-/// more, every frame delivered is in the master, nothing was dropped, the
-/// abandoned rebuild started nothing, and the session records again.
+/// `stop()` during a slow rebuild teardown waits for it: nothing produces
+/// after, every frame is in the master, and the session records again.
 #[test]
 fn stop_during_a_rebuilds_teardown_waits_for_it() {
     let directory = tempfile::tempdir().unwrap();
@@ -3004,13 +2881,8 @@ fn stop_during_a_rebuilds_teardown_waits_for_it() {
     assert!(again.statistics.dropped_frames.is_empty());
 }
 
-/// The disk fills while recording and a user's `stop()` arrives while that
-/// failure is still finalising. It waits for the finalise, as Swift's actor
-/// ordered the two, and returns the recording the failure carries: no
-/// error, and no producer running when it returns. Whether this `stop()`
-/// waited or arrived after the finalise is not observable here; the unit
-/// tests in `src/capture/session.rs` force the wait's window, and a
-/// `start()` that overtakes it, deterministically.
+/// A `stop()` while a disk-full failure finalises waits for it and returns
+/// the recording the failure carries.
 #[test]
 fn stop_during_a_writer_failures_finalise_returns_its_recording() {
     let directory = tempfile::tempdir().unwrap();
@@ -3044,9 +2916,8 @@ fn stop_during_a_writer_failures_finalise_returns_its_recording() {
     }
 }
 
-/// Every restart fails and a `stop()` arrives while the device loss is
-/// finalising: it waits and returns the recording `Failed(DeviceLost)`
-/// carries, every delivered frame in it.
+/// A `stop()` while a device loss finalises returns the recording
+/// `Failed(DeviceLost)` carries.
 #[test]
 fn stop_during_the_device_loss_finalise_returns_its_recording() {
     let directory = tempfile::tempdir().unwrap();
@@ -3088,8 +2959,7 @@ fn stop_during_the_device_loss_finalise_returns_its_recording() {
     );
 }
 
-/// Runs `f` on its own thread and fails the test when it has not returned
-/// within [`HANG_GUARD`], rather than hanging the test binary.
+/// Runs `f` on its own thread and fails after [`HANG_GUARD`].
 fn within_deadline<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
     let (done, finished) = channel();
     std::thread::spawn(move || {
@@ -3103,8 +2973,7 @@ fn within_deadline<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send +
 }
 
 /// The synthetic backend, except that the `stop()` calls numbered in
-/// `panicking` (counted from 1) stop the producer and then panic, as a
-/// backend with a bug would.
+/// `panicking` panic after stopping the producer.
 struct PanicsOnStop {
     inner: SyntheticCaptureBackend,
     panicking: Vec<usize>,
@@ -3132,10 +3001,8 @@ impl CaptureBackend for PanicsOnStop {
     }
 }
 
-/// A finalise that panics leaves `Stopping` for `Failed` with no recording
-/// rather than holding it forever: a later `stop()` returns at once, and the
-/// session records again. Both finalisers are covered: a writer failure's,
-/// on its own thread, and the caller's `stop()`, which passes the panic on.
+/// A finalise that panics leaves `Failed` with no recording, not
+/// `Stopping`, for both the writer failure's finalise and `stop()`'s.
 #[test]
 fn a_panicking_finalise_ends_failed_and_the_session_starts_again() {
     let directory = tempfile::tempdir().unwrap();
@@ -3204,8 +3071,7 @@ fn a_panicking_finalise_ends_failed_and_the_session_starts_again() {
     assert_eq!(session.state(), CaptureState::Idle);
 }
 
-/// A session over `backend` whose first recording's writer fails after
-/// five frames, as a full disk does; every later one writes normally.
+/// A session whose first recording's writer fails after five frames.
 fn first_writer_fails(
     directory: &Path,
     backend: Arc<dyn CaptureBackend>,
@@ -3235,7 +3101,6 @@ fn first_writer_fails(
     .unwrap()
 }
 
-/// Fails every write once `full` is set, as a disk that fills does.
 struct FullFrom(RecordingWriter, Arc<AtomicBool>);
 
 impl RecordingWriting for FullFrom {
@@ -3259,10 +3124,8 @@ impl RecordingWriting for FullFrom {
     }
 }
 
-/// The disk fills during `stop()`'s own drain: the backend delivers on
-/// while its teardown runs, and those frames fail to write. `stop()` still
-/// returns the recording, and the state carries the failure instead of
-/// reading `Idle` over a master shorter than what was delivered.
+/// The disk fills during `stop()`'s own drain: `stop()` returns the
+/// recording and the state carries the failure.
 #[test]
 fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
     let directory = tempfile::tempdir().unwrap();
@@ -3290,8 +3153,7 @@ fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
             .recv_timeout(HANG_GUARD)
             .expect("stop() is tearing the backend down");
         full.store(true, Ordering::SeqCst);
-        // Asserted once the gate is open: a panic while `stopper` waits at
-        // the gate would leave the scope joining it forever.
+        // Asserted once the gate is open, so a panic cannot hang the scope.
         let before = backend.delivered();
         let deadline = Instant::now() + HANG_GUARD;
         while backend.delivered() == before && Instant::now() < deadline {
@@ -3325,13 +3187,8 @@ fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
     }
 }
 
-/// A gap wider than the relay waits for the writer in 5 ms steps on the
-/// clock, and every frame of silence still arrives: 1.75 s of gap through
-/// a one-second relay (production's holds 20 s, more than `MAXIMUM_GAP`,
-/// so there only a stalled writer makes a gap wait). The old
-/// device's half second fits the relay however late the writer runs; only
-/// a writer stalled for longer than the relay could refuse the new
-/// device's frames, and those are counted as dropped.
+/// A gap wider than the relay waits for the writer in 5 ms steps, and every
+/// frame of silence still arrives: 1.75 s through a one-second relay.
 #[test]
 fn a_gap_wider_than_the_relay_waits_for_the_writer_and_writes_all_its_silence() {
     let directory = tempfile::tempdir().unwrap();
@@ -3352,9 +3209,8 @@ fn a_gap_wider_than_the_relay_waits_for_the_writer_and_writes_all_its_silence() 
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     advance_through_sleeps(&clock, 3);
-    // The rebuilt backend delivers its second at machine speed into the
-    // rings while the gap waits on the clock; the writer drains the relay
-    // in real time, so the gap's 5 ms waits are driven as they appear.
+    // The restarted backend fills the rings at machine speed while the gap
+    // waits on the clock, so the gap's 5 ms waits are driven as they come.
     let mut seen = vec![recv(&notices)];
     let deadline = Instant::now() + HANG_GUARD;
     while seen.len() < 2 {
@@ -3414,28 +3270,20 @@ fn a_gap_wider_than_the_relay_waits_for_the_writer_and_writes_all_its_silence() 
 }
 
 /// `stop()` while the gap waits for room in a 30-frame relay: the silence
-/// already written stays in the master and is reported in `gap_seconds`,
-/// though the rebuild never resumed, so `device_changes` stays 0, and what
-/// the restarted backend delivered meanwhile counts as dropped. The relay
-/// may still hold the old device's last audio when the gap starts, so the
-/// silence written can be anything from none to a whole relay; a writer
-/// that stalls while the old device delivers fills the relay, and the
-/// frames it refuses are dropped too (see
-/// `a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it`).
+/// written stays and is reported in `gap_seconds`, `device_changes` stays
+/// 0, and what the restarted backend delivered counts as dropped.
 #[test]
 fn stop_while_the_gap_waits_for_the_relay_reports_the_silence_written() {
     stop_while_the_gap_waits_for_the_relay(SAMPLE_RATE);
 }
 
-/// The same with the restarted device at 24 kHz: what it left in the rings
-/// is counted in 48 kHz frames, at its own rate and not the stream's the
-/// stop replaced.
+/// The same with the restarted device at 24 kHz, its leftovers counted at
+/// its own rate.
 #[test]
 fn stop_while_the_gap_waits_counts_a_restarted_24_khz_device_in_48_khz_frames() {
     stop_while_the_gap_waits_for_the_relay(24_000.0);
 }
 
-/// The two tests above, with the restarted backend at `restarted_rate`.
 fn stop_while_the_gap_waits_for_the_relay(restarted_rate: f64) {
     let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(ManualClock::new());
@@ -3472,8 +3320,7 @@ fn stop_while_the_gap_waits_for_the_relay(restarted_rate: f64) {
     let result = session.stop().unwrap();
     assert_eq!(session.state(), CaptureState::Idle);
     let master = master_of(&result);
-    // The master is the old device's audio the relay took, then the
-    // silence `gap_seconds` reports.
+    // The master is the old device's audio, then the reported silence.
     let silence = (result.statistics.gap_seconds * SAMPLE_RATE).round() as usize;
     let audio = master
         .frame_count()
@@ -3485,9 +3332,8 @@ fn stop_while_the_gap_waits_for_the_relay(restarted_rate: f64) {
     );
     assert!(master.channels[0][audio..].iter().all(|s| *s == 0.0));
     assert_eq!(result.statistics.device_changes, 0);
-    // The old device's frames the relay refused, and what the restarted
-    // backend delivered into the rings with no processing thread to drain
-    // it: dropped, and counted.
+    // Old frames the relay refused and the restarted backend's undrained
+    // rings: dropped, and counted.
     let refused = (24_000 - audio) / 480;
     // The restarted device's samples, in 48 kHz frames.
     let undrained =
@@ -3508,7 +3354,6 @@ fn stop_while_the_gap_waits_for_the_relay(restarted_rate: f64) {
     assert!(clock.wait_for_sleepers(0));
 }
 
-/// Where [`HeldWrites`] holds the writer.
 #[derive(Debug, PartialEq)]
 enum Held {
     FirstWrite,
@@ -3516,8 +3361,7 @@ enum Held {
 }
 
 /// The production writer, held on its first write and on the first frame
-/// of silence after it until the test lets each go, as a stalled disk
-/// holds it.
+/// of silence after it until the test lets each go.
 struct HeldWrites {
     inner: RecordingWriter,
     next: Option<Held>,
@@ -3541,8 +3385,7 @@ impl RecordingWriting for HeldWrites {
         };
         if let Some(hold) = hold {
             let _ = self.at_hold.send(hold);
-            // The test's sender drops before its session, so a failed
-            // test does not hold its session's drop here; bounded besides.
+            // The test's sender drops before its session; bounded besides.
             let _ = self.release.recv_timeout(HANG_GUARD);
         }
         self.inner.write(frames)
@@ -3555,13 +3398,9 @@ impl RecordingWriting for HeldWrites {
     }
 }
 
-/// A writer stalled while the old device delivers: the 30-frame relay
-/// (34 frames once rounded) fills, and the old device's last frames are
-/// refused and counted as dropped. The gap then starts behind a full relay
-/// and waits on the clock; once the writer reaches its first frame of
-/// silence and stalls again, the gap fills the relay with silence and
-/// waits again, where `stop()` finds it. The master holds what the relay
-/// took: the old audio less what it refused, then 35 frames of silence.
+/// A writer stalled while the old device delivers: the relay fills, the
+/// old device's last frames are refused and dropped, and the gap waits
+/// behind it until `stop()` finds it.
 #[test]
 fn a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it() {
     let directory = tempfile::tempdir().unwrap();
@@ -3592,8 +3431,8 @@ fn a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it() {
         }),
     )
     .unwrap();
-    // Declared after the session, so a failing test drops the sender
-    // first and a held write lets go before the session's drop waits.
+    // Declared after the session, so a held write lets go before the
+    // session's drop waits.
     let release = release;
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
@@ -3608,8 +3447,6 @@ fn a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it() {
         "the gap waits behind the old device's audio"
     );
     release.send(()).unwrap();
-    // The writer drains the old audio while the gap's waits are stepped,
-    // until it holds the first frame of silence.
     let deadline = Instant::now() + HANG_GUARD;
     loop {
         assert!(
@@ -3629,8 +3466,6 @@ fn a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it() {
             Err(RecvTimeoutError::Disconnected) => panic!("the writer is gone"),
         }
     }
-    // One more step: the gap fills the relay behind the held frame and
-    // waits again.
     assert!(clock.wait_for_sleepers(1));
     clock.advance(Duration::from_millis(5));
     assert!(clock.wait_for_sleepers(1), "the relay is full of silence");
@@ -3644,8 +3479,8 @@ fn a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it() {
     assert_eq!(silence, 35 * 480, "the held frame and a full relay");
     let audio = master.frame_count() - silence;
     assert!(master.channels[0][audio..].iter().all(|s| *s == 0.0));
-    // Normally the held frame and a full relay: 35 frames, 15 refused. A
-    // writer thread that first runs after the whole half second takes 34.
+    // Normally the held frame and a full relay: 35 frames, 15 refused; 34 if
+    // the writer first runs after the whole half second.
     let refused = (24_000 - audio) / 480;
     assert!(
         audio.is_multiple_of(480) && (15..=16).contains(&refused),
@@ -3665,8 +3500,8 @@ fn a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it() {
     assert!(clock.wait_for_sleepers(0));
 }
 
-/// `MAXIMUM_GAP`: an outage of 30 s on the clock fills 10 s of silence, and
-/// `gap_seconds` reports the capped value the master actually holds.
+/// A 30 s outage fills `MAXIMUM_GAP` (10 s) of silence, and `gap_seconds`
+/// reports that.
 #[test]
 fn a_gap_is_capped_at_ten_seconds() {
     let directory = tempfile::tempdir().unwrap();
@@ -3710,9 +3545,7 @@ fn a_gap_is_capped_at_ten_seconds() {
     assert_eq!(result.statistics.duration, 13.0);
 }
 
-/// A change reported while a rebuild is under way is not lost: `resume`
-/// starts the next rebuild from it, so the notices come in pairs and the
-/// second rebuild runs at once.
+/// A change reported during a rebuild starts the next rebuild at once.
 #[test]
 fn a_change_reported_during_a_rebuild_starts_the_next_one() {
     let directory = tempfile::tempdir().unwrap();
@@ -3771,8 +3604,8 @@ fn a_change_reported_during_a_rebuild_starts_the_next_one() {
         4,
         "start, failed restart, restart, restart"
     );
-    // The second rebuild stopped its backend mid-callback, so only the
-    // sub-frame residue is missing from the master.
+    // The second rebuild stopped mid-callback: only a sub-frame residue is
+    // missing.
     let frames = master_of(&result).frame_count();
     let expected = backend.frames_delivered() + 12_000;
     assert!(
@@ -3783,10 +3616,9 @@ fn a_change_reported_during_a_rebuild_starts_the_next_one() {
 }
 
 // The stall watchdog, the retry of a graph that does not run, and the ask
-// for a chosen microphone the session replaced (Rust only)
+// for a chosen microphone the session replaced
 
-/// An in-person session over `backend` on `clock`, with 30 s of relay, so
-/// a gap of `MAXIMUM_GAP` never waits for the writer on the manual clock.
+/// An in-person session over `backend` on `clock`, with 30 s of relay.
 fn in_person_session(
     directory: &Path,
     backend: Arc<dyn CaptureBackend>,
@@ -3814,10 +3646,7 @@ fn advance_watch(clock: &ManualClock, by: Duration) {
 }
 
 /// As [`advance_watch`], once `delivered` moved twice after the watch
-/// thread's last sample, so that sample's successor sees a stream that
-/// delivers. Twice: the count moves after its callback, so the first move
-/// may belong to a callback the sink counted before a rebuild's resume
-/// read it, which the watch thread would not see move.
+/// thread's last sample (the first move may predate a rebuild's resume).
 fn advance_while_delivering(clock: &ManualClock, delivered: impl Fn() -> usize, by: Duration) {
     assert!(clock.wait_for_sleepers(1), "the watch thread sleeps");
     let deadline = Instant::now() + HANG_GUARD;
@@ -3831,16 +3660,13 @@ fn advance_while_delivering(clock: &ManualClock, delivered: impl Fn() -> usize, 
     clock.advance(by);
 }
 
-/// Asserts that no notice came, once every thread had a chance to run.
 fn assert_no_notice(notices: &Receiver<CaptureNotice>, context: &str) {
     settle();
     assert_eq!(notices.try_recv().ok(), None, "{context}");
 }
 
-/// Drives the watch thread over a backend that stalled after delivering:
-/// it sees the frames at the first sample, then none for exactly
-/// `STALL_TIMEOUT` (no stall yet), then one sample longer, and reports the
-/// stall.
+/// Drives the watch thread over a stalled backend to just under
+/// `STALL_TIMEOUT` (no stall yet), then one sample on, to the stall.
 fn drive_into_a_stall(clock: &ManualClock, notices: &Receiver<CaptureNotice>) {
     advance_watch(clock, CaptureSession::STALL_CHECK_INTERVAL);
     advance_watch(clock, CaptureSession::STALL_TIMEOUT);
@@ -3856,10 +3682,7 @@ fn drive_into_a_stall(clock: &ManualClock, notices: &Receiver<CaptureNotice>) {
     );
 }
 
-/// Moves the watch thread on, a sample at a time, until it reports a
-/// stall, within `STALL_TIMEOUT` and a few samples. The watch thread sends
-/// a sample's notice before it sleeps again, so once a sleep is pending
-/// after the advance, that sample's notice is there or none came.
+/// Moves the watch thread on, a sample at a time, until it reports a stall.
 fn advance_until_stalled(clock: &ManualClock, notices: &Receiver<CaptureNotice>) {
     for _ in 0..30 {
         advance_watch(clock, CaptureSession::STALL_CHECK_INTERVAL);
@@ -3884,12 +3707,9 @@ fn gap_seconds(gap: Duration) -> f64 {
     CaptureSession::gap_frames(gap) as f64 * FRAME_SIZE as f64 / SAMPLE_RATE
 }
 
-/// A device that stops delivering mid-recording, with no notification (a
-/// source's owner that hangs): once nothing came for longer than
-/// `STALL_TIMEOUT` the watch thread reports the stall, the rebuild
-/// restarts the backend, the gap from the last frame it saw arrive is
-/// written as silence, and the recording goes on with what the restarted
-/// backend delivers.
+/// A device that stops delivering without notification: the watch thread
+/// reports the stall, the rebuild restarts, and the gap from the last frame
+/// is written as silence.
 #[test]
 fn a_stall_past_the_timeout_rebuilds_and_fills_the_gap() {
     let directory = tempfile::tempdir().unwrap();
@@ -3925,8 +3745,7 @@ fn a_stall_past_the_timeout_rebuilds_and_fills_the_gap() {
     );
 }
 
-/// A stall shorter than `STALL_TIMEOUT` that ends on its own costs no
-/// rebuild.
+/// A stall shorter than `STALL_TIMEOUT` costs no rebuild.
 #[test]
 fn a_short_stall_rebuilds_nothing() {
     let directory = tempfile::tempdir().unwrap();
@@ -3954,10 +3773,8 @@ fn a_short_stall_rebuilds_nothing() {
     assert_eq!(result.statistics.duration, 1.0);
 }
 
-/// A stream that delivers nothing from its start is stalled once
-/// `STALL_TIMEOUT` passed, as one that stopped is, on every backend that is
-/// watched: a Mac call capture too, whose silent output drives the tap
-/// from the start (A10 of `.plans/2026-10-07-stable-promotion.md`).
+/// A stream that delivers nothing from its start is stalled after
+/// `STALL_TIMEOUT`, as one that stopped is.
 #[test]
 fn a_stream_that_never_delivered_is_stalled_too() {
     let directory = tempfile::tempdir().unwrap();
@@ -3984,9 +3801,8 @@ fn a_stream_that_never_delivered_is_stalled_too() {
     session.stop().unwrap();
 }
 
-/// Once the watch thread and a rebuild's backoff sleep, moves the clock to
-/// just short of the backoff's `wait` (no restart yet), then the rest, and
-/// waits for the restart it lets through.
+/// Moves the clock to just short of a rebuild's backoff `wait`, then the
+/// rest, and waits for the restart it lets through.
 fn advance_the_backoff(clock: &ManualClock, backend: &SyntheticCaptureBackend, wait: Duration) {
     let starts = backend.starts();
     assert!(
@@ -4005,8 +3821,6 @@ fn advance_the_backoff(clock: &ManualClock, backend: &SyntheticCaptureBackend, w
     }
 }
 
-/// Lets `backend`'s stalled producer deliver again, and waits for its
-/// first frame.
 fn resume_delivery_until_a_frame(backend: &SyntheticCaptureBackend) {
     let before = backend.frames_delivered();
     backend.resume_delivery();
@@ -4017,9 +3831,8 @@ fn resume_delivery_until_a_frame(backend: &SyntheticCaptureBackend) {
     }
 }
 
-/// Restarts that start but never offer a frame back off between their
-/// waits for one: each try waits `STALL_TIMEOUT`, then the backoff, which
-/// doubles up to `RESTART_BACKOFF_LONGEST` and stays there.
+/// Restarts that never offer a frame each wait `STALL_TIMEOUT`, then the
+/// doubling backoff.
 #[test]
 fn restarts_that_never_offer_a_frame_back_off_up_to_the_longest_wait() {
     let directory = tempfile::tempdir().unwrap();
@@ -4032,8 +3845,7 @@ fn restarts_that_never_offer_a_frame_back_off_up_to_the_longest_wait() {
     session.start(Uuid::new_v4()).unwrap();
     backend.wait_until_finished();
     drive_into_a_stall(&clock, &notices);
-    // Every wait is a multiple of 50 ms, so stepping by it lands on each
-    // restart's start.
+    // Every wait is a multiple of 50 ms.
     let step = Duration::from_millis(50);
     assert!(clock.wait_for_sleepers(2), "the first restart's wait");
     let mut seen = backend.starts();
@@ -4074,11 +3886,8 @@ fn restarts_that_never_offer_a_frame_back_off_up_to_the_longest_wait() {
     assert!(clock.wait_for_sleepers(0));
 }
 
-/// A stop while a restart waits for its first frame, or while the rebuild
-/// waits out the backoff, cancels the wait and returns the recording
-/// without a further start, leaving nothing asleep. The clock stands still
-/// meanwhile, so a wait the stop did not cancel would keep it from
-/// returning; the starts are counted rather than the stop timed.
+/// A stop while a restart waits for a first frame, or during the backoff,
+/// cancels the wait and returns the recording with no further start.
 #[test]
 fn a_stop_during_the_wait_for_a_first_frame_or_the_backoff_returns_at_once() {
     for in_the_backoff in [false, true] {
@@ -4099,8 +3908,6 @@ fn a_stop_during_the_wait_for_a_first_frame_or_the_backoff_returns_at_once() {
         assert!(clock.wait_for_sleepers(2), "the first restart's wait");
         assert_eq!(backend.starts(), 2);
         if in_the_backoff {
-            // The wait gives up `STALL_TIMEOUT` after the start; the
-            // backoff follows.
             for _ in 0..CaptureSession::STALL_TIMEOUT.as_millis()
                 / CaptureSession::STALL_CHECK_INTERVAL.as_millis()
             {
@@ -4124,7 +3931,7 @@ fn a_stop_during_the_wait_for_a_first_frame_or_the_backoff_returns_at_once() {
 }
 
 /// Moves the clock a sample at a time while the watch thread and the
-/// rebuild both sleep on it, until `done`; panics after `limit` samples.
+/// rebuild sleep, until `done`; panics after `limit` samples.
 fn advance_the_rebuild_until(clock: &ManualClock, limit: usize, mut done: impl FnMut() -> bool) {
     for _ in 0..limit {
         if done() {
@@ -4139,13 +3946,9 @@ fn advance_the_rebuild_until(clock: &ManualClock, limit: usize, mut done: impl F
     assert!(done(), "not within {limit} samples");
 }
 
-/// A stall whose restarts start but deliver nothing, with no chosen
-/// microphone to fall back from (a clock master that hangs on the Mac or
-/// on Windows, where such a device still starts): each restart that offers
-/// no frame within `STALL_TIMEOUT` of its start is stopped and counts as
-/// one whose graph did not run, so the restarts take the backoff, go on
-/// past `RESTART_ATTEMPTS` with `StillRestarting` (the recorder's warning),
-/// and resume on the first one that delivers, the gap written once.
+/// Restarts that start but deliver nothing count as not run: they back
+/// off, go on past `RESTART_ATTEMPTS` with `StillRestarting`, and resume
+/// on the first that delivers, the gap written once.
 #[test]
 fn restarts_that_start_but_deliver_nothing_are_retried_until_one_does() {
     let directory = tempfile::tempdir().unwrap();
@@ -4202,8 +4005,7 @@ fn restarts_that_start_but_deliver_nothing_are_retried_until_one_does() {
     );
 }
 
-/// The attempt and gap of the next `DeviceResumed`, past the notices
-/// before it.
+/// The attempt and gap of the next `DeviceResumed`.
 fn next_resume(notices: &Receiver<CaptureNotice>) -> (usize, f64) {
     loop {
         if let CaptureNotice::DeviceResumed {
@@ -4216,9 +4018,8 @@ fn next_resume(notices: &Receiver<CaptureNotice>) -> (usize, f64) {
     }
 }
 
-/// A restart whose stream delivers during its wait for a first frame ends
-/// the gap at the wait's last sample that saw nothing, not at the start's
-/// return: the gap is the time no audio came, to within a sample.
+/// A restart that delivers during its wait ends the gap at the wait's last
+/// empty sample, not at the start's return.
 #[test]
 fn a_restart_that_delivers_during_its_wait_ends_the_gap_at_its_last_empty_sample() {
     let directory = tempfile::tempdir().unwrap();
@@ -4250,9 +4051,8 @@ fn a_restart_that_delivers_during_its_wait_ends_the_gap_at_its_last_empty_sample
     assert_eq!(result.statistics.gap_seconds, gap);
 }
 
-/// A change reported while a restart waits for a first frame it never
-/// gets is dropped with that start, since the next start reads the devices
-/// as they are: the restart after it resumes, and no rebuild follows.
+/// A change reported while a restart waits for a frame it never gets is
+/// dropped with that start; no rebuild follows.
 #[test]
 fn a_change_during_a_restart_that_delivers_nothing_costs_no_extra_rebuild() {
     let directory = tempfile::tempdir().unwrap();
@@ -4281,10 +4081,8 @@ fn a_change_during_a_restart_that_delivers_nothing_costs_no_extra_rebuild() {
 }
 
 /// The synthetic backend, whose restarts return `start_takes` on `clock`
-/// after their first callback, as a PipeWire start reads its latency after
-/// the first cycle; with `until_its_stall`, once a restart's producer has
-/// delivered up to its stall (`restarts_stall_after`), so the frames that
-/// came during the start are known.
+/// after their first callback, as a PipeWire start does; with
+/// `until_its_stall`, once the producer has delivered up to its stall.
 struct SlowRestart {
     inner: SyntheticCaptureBackend,
     clock: Arc<ManualClock>,
@@ -4318,10 +4116,8 @@ impl CaptureBackend for SlowRestart {
     }
 }
 
-/// Frames that arrive while a restart's `start` runs end the gap at the
-/// clock's reading before that start, not at its return: the gap is the
-/// time no audio came, and the master does not hold the start's latency
-/// twice.
+/// Frames during a restart's `start` end the gap at the reading before the
+/// start, so the master does not hold the start's latency twice.
 #[test]
 fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
     let directory = tempfile::tempdir().unwrap();
@@ -4337,8 +4133,8 @@ fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
     session.start(Uuid::new_v4()).unwrap();
     backend.inner.wait_until_finished();
     drive_into_a_stall(&clock, &notices);
-    // The restart starts at once, at the stall's report one sample past
-    // `STALL_TIMEOUT` after the last frame, which the first sample saw.
+    // The stall is reported one sample past `STALL_TIMEOUT` after the last
+    // frame; the restart starts at once.
     let gap = gap_seconds(CaptureSession::STALL_TIMEOUT + CaptureSession::STALL_CHECK_INTERVAL);
     assert_eq!(next_resume(&notices).1, gap, "not the start's 0.3 s on top");
     backend.inner.wait_until_finished();
@@ -4347,9 +4143,8 @@ fn frames_during_a_slow_restart_end_the_gap_where_they_began() {
     assert_eq!(result.statistics.duration, 0.5 + gap + 1.0);
 }
 
-/// The time from the reading before a slow restart's start to its first
-/// frame is audio the restart lost: a start of 0.3 s that delivered 0.1 s
-/// counts 0.2 s missed and not filled, on every lane, beside the gap.
+/// A 0.3 s restart that delivered 0.1 s counts 0.2 s missed and unfilled on
+/// every lane, beside the gap.
 #[test]
 fn a_slow_restart_counts_the_time_before_its_first_frame() {
     let directory = tempfile::tempdir().unwrap();
@@ -4380,13 +4175,9 @@ fn a_slow_restart_counts_the_time_before_its_first_frame() {
     );
 }
 
-/// A stall whose restarts fail with an error that is not `DidNotRun` (a
-/// Mac start while `coreaudiod` is still gone, a Bluetooth device still
-/// switching): the watchdog caught an outage the backend did not report,
-/// so the restarts go on past the last attempt, with `StillRestarting`,
-/// and the recording resumes once one starts, never ending `DeviceLost`.
-/// Restarts that never start are cancelled by the stop, which returns the
-/// recording.
+/// A stall whose restarts fail with another error than `DidNotRun`: the
+/// restarts go on with `StillRestarting` until one starts, never ending
+/// `DeviceLost`, and the stop cancels them.
 #[test]
 fn a_stall_whose_restarts_fail_goes_on_until_one_starts() {
     let directory = tempfile::tempdir().unwrap();
@@ -4447,8 +4238,7 @@ fn a_stall_whose_restarts_fail_goes_on_until_one_starts() {
     assert!(clock.wait_for_sleepers(0), "the stop cancelled the backoff");
 }
 
-/// Silence is delivery: a lane of zeros that keeps arriving is never
-/// taken for a stall, however long the recording runs.
+/// Silence is delivery: zeros that keep arriving are never a stall.
 #[test]
 fn a_silent_lane_that_delivers_is_never_a_stall() {
     let directory = tempfile::tempdir().unwrap();
@@ -4477,16 +4267,15 @@ fn a_silent_lane_that_delivers_is_never_a_stall() {
 }
 
 /// The waits after the first `RESTART_BACKOFF.len() + extra` failed
-/// restarts of a rebuild, from `CaptureSession::restart_backoff`.
+/// restarts.
 fn backoff_past_the_attempts(extra: usize) -> Vec<Duration> {
     (1..=CaptureSession::RESTART_BACKOFF.len() + extra)
         .map(CaptureSession::restart_backoff)
         .collect()
 }
 
-/// The backoff between restarts: `RESTART_BACKOFF` between the first
-/// `RESTART_ATTEMPTS`, then twice its last step, then
-/// `RESTART_BACKOFF_LONGEST` every time, however long the restarts go on.
+/// The backoff: `RESTART_BACKOFF`, then doubling to
+/// `RESTART_BACKOFF_LONGEST` for good.
 #[test]
 fn the_backoff_doubles_up_to_four_seconds_and_stays_there() {
     let ms = Duration::from_millis;
@@ -4509,11 +4298,8 @@ fn the_backoff_doubles_up_to_four_seconds_and_stays_there() {
     );
 }
 
-/// A stall whose graph never runs again (every restart fails with
-/// `DidNotRun`): the restarts go on past `RESTART_ATTEMPTS`, backing off
-/// up to `RESTART_BACKOFF_LONGEST`, `notices` says so once, the recording stays
-/// `Recording` instead of ending `DeviceLost`, and the stop returns it
-/// with everything delivered before the stall.
+/// A graph that never runs again: restarts go on past `RESTART_ATTEMPTS`,
+/// `notices` says so once, and the stop returns the recording.
 #[test]
 fn a_stall_that_never_resumes_keeps_retrying_until_the_stop() {
     let directory = tempfile::tempdir().unwrap();
@@ -4557,8 +4343,8 @@ fn a_stall_that_never_resumes_keeps_retrying_until_the_stop() {
     assert!(clock.wait_for_sleepers(0));
 }
 
-/// A device change whose restarts keep failing with `DidNotRun` past the
-/// last attempt is retried until one runs, then resumes there.
+/// A device change whose restarts keep failing with `DidNotRun` is retried
+/// until one runs.
 #[test]
 fn a_graph_that_does_not_run_at_the_last_restart_is_retried_until_it_runs() {
     let directory = tempfile::tempdir().unwrap();
@@ -4597,10 +4383,8 @@ fn a_graph_that_does_not_run_at_the_last_restart_is_retried_until_it_runs() {
     assert_eq!(result.statistics.device_changes, 1);
 }
 
-/// After a restart of the audio service (`coreaudiod` on the Mac, which
-/// takes a while to come back) every failure is retried, not only
-/// `DidNotRun`: restarts that fail past the last attempt go on until one
-/// runs. The same failures after another change end the recording.
+/// After an audio service restart every failure is retried; after another
+/// change the same failures end the recording.
 #[test]
 fn a_restart_of_the_audio_service_is_retried_until_it_runs() {
     let directory = tempfile::tempdir().unwrap();
@@ -4635,9 +4419,8 @@ fn a_restart_of_the_audio_service_is_retried_until_it_runs() {
     assert!(!result.statistics.ended_on_device_loss);
 }
 
-/// The watch thread judges nothing while a rebuild runs: restarts that
-/// take longer than `STALL_TIMEOUT` are no second stall, and the
-/// recording resumes once, with no rebuild after it.
+/// Restarts longer than `STALL_TIMEOUT` are no second stall: one resume,
+/// no rebuild after.
 #[test]
 fn a_rebuild_longer_than_the_stall_timeout_is_not_taken_for_a_stall() {
     let directory = tempfile::tempdir().unwrap();
@@ -4672,8 +4455,7 @@ fn a_rebuild_longer_than_the_stall_timeout_is_not_taken_for_a_stall() {
     ));
     backend.wait_until_finished();
     settle();
-    // The watch thread may have sampled the restarted stream's frames
-    // after the resume, which ends the warning.
+    // The watch thread may already have ended the warning.
     let rest: Vec<CaptureNotice> = notices.try_iter().collect();
     assert!(
         rest.iter()
@@ -4685,10 +4467,8 @@ fn a_rebuild_longer_than_the_stall_timeout_is_not_taken_for_a_stall() {
     assert_eq!(backend.starts(), 1 + failures + 1);
 }
 
-/// The gap of a rebuild runs from the last frame the watch thread saw
-/// arrive, not from the report: a change reported 0.5 s after the frames
-/// stopped (a backend's coalescing delay) leaves no 0.5 s hole in the
-/// master's timeline.
+/// The gap runs from the last frame the watch thread saw, not from the
+/// report, so a coalescing delay leaves no hole.
 #[test]
 fn a_gap_runs_from_the_last_frame_the_watch_thread_saw() {
     let directory = tempfile::tempdir().unwrap();
@@ -4719,9 +4499,8 @@ fn a_gap_runs_from_the_last_frame_the_watch_thread_saw() {
     assert_eq!(result.statistics.duration, 2.0);
 }
 
-/// A chosen microphone that stalls again soon after the rebuild resumed
-/// on it is not restarted once more, to stall again: the next rebuild
-/// records the default input in its place, marked as the fallback.
+/// A chosen microphone that stalls again soon after a resume is replaced by
+/// the default at the next rebuild.
 #[test]
 fn a_chosen_microphone_that_stalls_again_soon_is_replaced_by_the_default() {
     let directory = tempfile::tempdir().unwrap();
@@ -4744,7 +4523,7 @@ fn a_chosen_microphone_that_stalls_again_soon_is_replaced_by_the_default() {
     assert_eq!(input(), ChosenOrDefault::chosen(), "restarted once");
     backend.inner.wait_until_finished();
     advance_until_stalled(&clock, &notices);
-    // The streak goes on: its second restart, after the first backoff step.
+    // The streak's second restart, after the first backoff step.
     advance_the_backoff(&clock, &backend.inner, CaptureSession::RESTART_BACKOFF[0]);
     assert!(matches!(
         recv(&notices),
@@ -4772,9 +4551,8 @@ fn wait_for_probes(backend: &ChosenOrDefault, count: usize) {
     }
 }
 
-/// Asserts that the asks cost the recording nothing: the chosen microphone
-/// was asked for once and never restarted, and the master has no device
-/// change, no gap, no drop and exactly the whole frames delivered.
+/// Asserts that the asks cost the recording nothing: one ask for the chosen
+/// microphone, no restart, no gap, no drop, every whole frame delivered.
 fn assert_cost_nothing(backend: &ChosenOrDefault, result: &CaptureResult) {
     assert_eq!(
         backend.asked(),
@@ -4801,15 +4579,9 @@ fn assert_cost_nothing(backend: &ChosenOrDefault, result: &CaptureResult) {
     );
 }
 
-/// A chosen microphone that did not open at the start, over a backend
-/// that can ask one on a stream of its own: the session records the
-/// default in its place and asks after `CHOSEN_INPUT_RECHECK`, then twice
-/// as long after each ask. Asks that find it still not delivering cost the
-/// recording nothing (no restart, no gap, no drop, the master holding
-/// exactly the whole frames delivered); nothing else is asked of the
-/// backend. The master is checked by its frames, not wall time: the backend
-/// paces itself on a thread the asks cannot hold, and every clock step
-/// waits for delivery.
+/// A chosen microphone that did not open, over a backend that probes: the
+/// session asks after `CHOSEN_INPUT_RECHECK`, then twice as long each time,
+/// and asks that find nothing cost the recording nothing.
 #[test]
 fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing() {
     let directory = tempfile::tempdir().unwrap();
@@ -4827,7 +4599,6 @@ fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing(
     );
     let step = CaptureSession::STALL_CHECK_INTERVAL;
     let mut wait = CaptureSession::CHOSEN_INPUT_RECHECK;
-    // How far the clock already is past the latest ask.
     let mut past_the_ask = Duration::ZERO;
     for ask in 1..=3 {
         advance_while_delivering(&clock, delivered, wait.saturating_sub(step + past_the_ask));
@@ -4847,11 +4618,7 @@ fn asks_that_find_the_chosen_microphone_still_silent_cost_the_recording_nothing(
     assert_cost_nothing(&backend, &session.stop().unwrap());
 }
 
-/// A slow ask holds neither the watch thread's sampling nor the recording:
-/// held for longer than `STALL_TIMEOUT` on the clock, it costs no stall
-/// and no frame, and once let go it finds the chosen microphone still
-/// silent. The ask runs on a `steno-probe` thread of its own, so the watch
-/// thread goes back to sleep after every sample while it is held.
+/// A slow ask holds neither the watch thread's sampling nor the recording.
 #[test]
 fn sampling_goes_on_while_an_ask_is_held() {
     let directory = tempfile::tempdir().unwrap();
@@ -4863,17 +4630,15 @@ fn sampling_goes_on_while_an_ask_is_held() {
     let notices = session.notices();
     let delivered = || backend.inner.frames_delivered();
     session.start(Uuid::new_v4()).unwrap();
-    // Declared after the session, so a failing test drops the sender
-    // first and a held probe lets go before the session's drop waits.
-    // Armed after the start, so a probe within the start cannot block on
-    // it; nothing asks before the clock moves.
+    // Declared after the session, so a held probe lets go before the
+    // session's drop waits; armed after the start.
     let (release, released) = channel();
     let (began, asks) = channel();
     *backend.ask_hold.lock().unwrap() = Some((began, released));
     advance_while_delivering(&clock, delivered, CaptureSession::CHOSEN_INPUT_RECHECK);
     recv(&asks);
-    // A second longer than STALL_TIMEOUT on the clock: every step waits
-    // for the watch thread asleep, so it samples while the ask is held.
+    // Every step waits for the watch thread asleep, so it samples while the
+    // ask is held.
     let step = CaptureSession::STALL_CHECK_INTERVAL;
     let held = CaptureSession::STALL_TIMEOUT + Duration::from_secs(1);
     for _ in 0..held.as_millis() / step.as_millis() {
@@ -4893,8 +4658,7 @@ fn sampling_goes_on_while_an_ask_is_held() {
     assert_cost_nothing(&backend, &session.stop().unwrap());
 }
 
-/// The ask that finds the chosen microphone delivering reports
-/// `ChosenInputRecheck`, whose rebuild returns to it; on the chosen one
+/// An ask that finds the chosen microphone delivering returns to it, and
 /// nothing asks again.
 #[test]
 fn an_ask_that_finds_the_chosen_microphone_delivering_returns_to_it() {
@@ -4943,9 +4707,8 @@ fn an_ask_that_finds_the_chosen_microphone_delivering_returns_to_it() {
     assert_eq!(statistics.device_changes, 1);
     assert!(!statistics.ended_on_device_loss);
     assert!(statistics.dropped_frames.is_empty());
-    // The rebuild's dead time passes in wall time but not on the manual
-    // clock the gap is measured on, so the master is checked against what
-    // both starts delivered, plus the gap's silence.
+    // The rebuild's dead time is not on the manual clock, so the master is
+    // checked against both starts' frames plus the gap.
     let delivered = backend.inner.frames_delivered();
     let gap = (statistics.gap_seconds * SAMPLE_RATE).round() as usize;
     assert_eq!(
@@ -4955,10 +4718,7 @@ fn an_ask_that_finds_the_chosen_microphone_delivering_returns_to_it() {
     );
 }
 
-/// Over a backend that cannot ask a microphone without touching the
-/// recording (the Mac's and Windows'), the session never asks on a timer:
-/// the chosen microphone it replaced is asked for again only by the rebuild
-/// of a device change.
+/// Over a backend that cannot probe, the session never asks on a timer.
 #[test]
 fn a_backend_that_cannot_probe_is_never_asked_on_a_timer() {
     let directory = tempfile::tempdir().unwrap();
@@ -4998,7 +4758,7 @@ fn a_backend_that_cannot_probe_is_never_asked_on_a_timer() {
     session.stop().unwrap();
 }
 
-// Echo cancellation in the real processing path (LiveAECPathTests)
+// Echo cancellation in the real processing path
 
 fn record(
     signals: BTreeMap<AudioLane, SyntheticLane>,
@@ -5084,10 +4844,8 @@ fn the_independent_tone_survives_within_three_decibels() {
     assert!(erle >= 15.0, "echo tone ERLE {erle} dB under double talk");
 }
 
-/// The backend as the session drives it, noting whether the session's
-/// [`Playback`] gate is held at each `start` and `stop`: the hold must be
-/// taken before the backend (on macOS its tap) exists and kept until the
-/// backend has stopped.
+/// The backend as the session drives it, noting whether the [`Playback`]
+/// gate is held at each `start` and `stop`.
 struct GateWatch {
     inner: SyntheticCaptureBackend,
     playback: Playback,
@@ -5141,9 +4899,8 @@ impl CaptureBackend for GateWatch {
     }
 }
 
-/// No in-app playback while recording: the session holds the gate from
-/// before its backend starts, across a rebuild, until the backend has
-/// stopped; playback is refused meanwhile and allowed again after.
+/// The session holds the playback gate from before its backend starts,
+/// across a rebuild, until the backend has stopped.
 #[test]
 fn playback_is_refused_while_the_session_records_and_across_a_rebuild() {
     let directory = tempfile::tempdir().unwrap();
@@ -5182,8 +4939,7 @@ fn playback_is_refused_while_the_session_records_and_across_a_rebuild() {
     );
 }
 
-/// Playback that runs when a recording starts is stopped before the
-/// backend starts.
+/// Playback running at the start is stopped before the backend starts.
 #[test]
 fn playback_that_runs_is_stopped_when_the_session_starts() {
     let directory = tempfile::tempdir().unwrap();
@@ -5201,8 +4957,7 @@ fn playback_that_runs_is_stopped_when_the_session_starts() {
     session.stop().unwrap();
 }
 
-/// A start that fails, or panics once the backend runs, releases the gate:
-/// playback is allowed again, and the failed state is no reason to refuse.
+/// A start that fails, or panics once the backend runs, releases the gate.
 #[test]
 fn a_start_that_fails_or_panics_releases_the_gate() {
     let directory = tempfile::tempdir().unwrap();
@@ -5234,9 +4989,8 @@ fn a_start_that_fails_or_panics_releases_the_gate() {
     assert!(playback.begin(|| {}).is_ok());
 }
 
-/// A session made without `with_playback` holds the process's gate, the
-/// one every player asks ([`Playback::global`]), while it records. Only
-/// the held state is asserted: the other tests' sessions share that gate.
+/// A default session holds [`Playback::global`] while it records (only the
+/// held state is asserted: other tests share that gate).
 #[test]
 fn a_session_holds_the_process_gate_while_it_records() {
     let directory = tempfile::tempdir().unwrap();
@@ -5274,8 +5028,7 @@ fn two_recording_sessions_keep_the_gate_shut_until_both_stop() {
 }
 
 /// The backend alone over a sink nothing drains, `options` held, until it
-/// delivered past the frame its outage was due at (100 ms in): the ring
-/// fills, and it waits for room.
+/// delivered past the frame its outage was due at.
 fn held_past_its_frame(
     options: SyntheticOptions,
 ) -> (
@@ -5304,13 +5057,10 @@ fn held_past_its_frame(
     (backend, sink, reports)
 }
 
-/// The frame 100 ms in, where [`held_past_its_frame`]'s outage is due.
 const HELD_AT: usize = 4_800;
 
-/// A held device change waits for the test's release, the producer
-/// delivering on past its frame meanwhile, and goes once released; a
-/// release before the next change lets that one go at its frame. Rust
-/// only.
+/// A held device change waits for the test's release, delivering on
+/// meanwhile; an early release lets the next one go at its frame.
 #[test]
 fn a_held_change_waits_for_its_release() {
     let (backend, sink, reports) = held_past_its_frame(
@@ -5338,8 +5088,7 @@ fn a_held_change_waits_for_its_release() {
     backend.stop();
 }
 
-/// One release lets one held change go: the next start's change stays
-/// held past its frame until its own release. Rust only.
+/// One release lets one held change go.
 #[test]
 fn one_release_lets_only_one_change_go() {
     let (backend, sink, reports) = held_past_its_frame(
@@ -5371,8 +5120,7 @@ fn one_release_lets_only_one_change_go() {
     backend.stop();
 }
 
-/// A held stall goes on delivering until the test releases it, and then
-/// stalls. Rust only.
+/// A held stall delivers until released, then stalls.
 #[test]
 fn a_held_stall_waits_for_its_release() {
     let (backend, sink, _) = held_past_its_frame(stalling(10.0, 0.1));
@@ -5387,8 +5135,7 @@ fn a_held_stall_waits_for_its_release() {
 }
 
 /// The runs of at least `shortest` exact zeros in `samples`, as (start,
-/// length): a 440 Hz or 1 kHz tone at amplitude 0.5 touches zero at single
-/// samples only.
+/// length); the test tones touch zero at single samples only.
 fn zero_runs(samples: &[f32], shortest: usize) -> Vec<(usize, usize)> {
     let mut runs = Vec::new();
     let mut start = None;
@@ -5407,7 +5154,6 @@ fn zero_runs(samples: &[f32], shortest: usize) -> Vec<(usize, usize)> {
     runs
 }
 
-/// A log line's bytes, shared with the subscriber that writes them.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
 
@@ -5422,9 +5168,8 @@ impl std::io::Write for Captured {
     }
 }
 
-/// Every line this test binary logged at `warn` and above so far, from
-/// any thread and any test: a subscriber of its own for one test misses
-/// lines whose call site another test's thread registered first.
+/// Every line this test binary logged at `warn` and above, from any thread
+/// (a per-test subscriber misses call sites another test registered first).
 fn warnings() -> String {
     static CAPTURED: OnceLock<Captured> = OnceLock::new();
     let captured = CAPTURED.get_or_init(|| {
@@ -5444,14 +5189,9 @@ fn warnings() -> String {
     String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned()
 }
 
-/// A capture thread that misses cycles (A18 of
-/// `.plans/2026-10-07-stable-promotion.md`): the synthetic producer skips
-/// 100 ms one second in, which its clock reports and the sink fills with
-/// zeros on both lanes at the same frames, and 2.5 s two seconds in, past
-/// the fill limit and the session's stall timeout, which is counted and
-/// left out. The master holds the five seconds less the 2.5 s, both lanes
-/// alike; the frames written count as filled, the rest as unfilled, neither
-/// as dropped or as a gap, and the stop logs both at `warn`.
+/// A capture thread that misses 100 ms (filled with zeros) and 2.5 s (past
+/// the fill limit, left out): filled and unfilled are counted apart, never
+/// as dropped or a gap, and the stop logs both at `warn`.
 #[test]
 fn missed_cycles_are_written_as_silence_on_every_lane_and_counted() {
     let directory = tempfile::tempdir().unwrap();
@@ -5508,9 +5248,8 @@ fn missed_cycles_are_written_as_silence_on_every_lane_and_counted() {
     }
 }
 
-/// What a stream's thread missed counts at that stream's rate when a
-/// rebuild moves the recording to another: 2 400 frames missed at 48 kHz
-/// are 50 ms, not the 100 ms they would be at the restarted 24 kHz.
+/// Missed frames count at the rate of the stream that missed them, across
+/// a rebuild to 24 kHz.
 #[test]
 fn missed_cycles_before_a_rebuild_count_at_the_old_streams_rate() {
     let directory = tempfile::tempdir().unwrap();
@@ -5550,13 +5289,9 @@ fn missed_cycles_before_a_rebuild_count_at_the_old_streams_rate() {
     assert_eq!(result.statistics.filled_seconds, 0.05);
 }
 
-/// A stalled stream whose thread wakes once the watch thread reported the
-/// stall and counts the stall as a jump too long to fill before the
-/// rebuild's stop closes it: the synthetic backend, whose first `stop()`
-/// first counts `late` unfilled frames on the sink, as that thread's last
-/// callback does. The first start counts `early` unfilled frames, a jump
-/// from before the stall. With [`Self::stop_taking`], that first `stop()`
-/// moves the manual clock on first, as a stop that takes that long.
+/// The synthetic backend, whose first `stop()` first counts `late` unfilled
+/// frames, as a stalled thread waking before the stop does; the first start
+/// counts `early` ones. [`Self::stop_taking`] moves the clock in that stop.
 struct WakesBeforeTheStop {
     inner: Arc<SyntheticCaptureBackend>,
     sink: Mutex<Option<Arc<LaneFrameSink>>>,
@@ -5625,16 +5360,9 @@ impl CaptureBackend for WakesBeforeTheStop {
     }
 }
 
-/// A stall the watch thread reported, whose thread then wakes and counts
-/// it as an unfilled jump before the rebuild's stop (a process stopped
-/// for longer than `STALL_TIMEOUT`, A18 of
-/// `.plans/2026-10-07-stable-promotion.md`): the rebuild's gap, which
-/// writes silence from the last frame the watch thread saw, counts that
-/// time, and once it is written the late count is taken back, at most the
-/// gap's length of it, so the time counts once (the session's module doc,
-/// "Missed audio"). A jump counted before the stall still counts. The late
-/// count of 2 s is shorter than the 2.1 s gap, which also runs through the
-/// restart; one longer than its gap is tested past `MAXIMUM_GAP` below.
+/// A stalled thread that wakes and counts an unfilled jump before the
+/// rebuild's stop: once the gap is written, the late count is taken back
+/// up to the gap's length, so the time counts once; an earlier jump stays.
 #[test]
 fn a_stall_counted_by_its_thread_before_the_rebuilds_stop_counts_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -5666,9 +5394,8 @@ fn a_stall_counted_by_its_thread_before_the_rebuilds_stop_counts_once() {
     );
 }
 
-/// As above, but `stop()` comes while the restart waits for its first
-/// frame, so no gap is written: the late count stays whole, and the note
-/// says the 2.5 s are missing however long the recording ran.
+/// As above, but `stop()` comes before the gap is written: the late count
+/// stays whole.
 #[test]
 fn a_late_count_stays_counted_when_a_stop_abandons_the_restart() {
     let directory = tempfile::tempdir().unwrap();
@@ -5696,9 +5423,8 @@ fn a_late_count_stays_counted_when_a_stop_abandons_the_restart() {
     assert_eq!(statistics.unfilled_seconds, 2.5, "the late count, whole");
 }
 
-/// A stall whose rebuild's stop takes 12 s and whose thread counted 14 s
-/// unfilled before it: the gap is written for `MAXIMUM_GAP`, 10 s, and the
-/// 4 s it did not write stay unfilled.
+/// A 14 s late count against a 12 s stop: the gap writes `MAXIMUM_GAP` and
+/// the 4 s it did not write stay unfilled.
 #[test]
 fn a_late_count_past_the_maximum_gap_keeps_what_the_gap_did_not_write() {
     let directory = tempfile::tempdir().unwrap();
@@ -5726,10 +5452,8 @@ fn a_late_count_past_the_maximum_gap_keeps_what_the_gap_did_not_write() {
     assert_eq!(result.statistics.unfilled_seconds, 4.0);
 }
 
-/// A device change reported while the stream delivers, whose rebuild's
-/// stop takes a second, and whose thread counted a 2.5 s unfilled jump
-/// before that stop: the gap starts at the change, not at a last frame,
-/// so the jump is from before it and stays counted beside the gap.
+/// A gap that starts at a device change, not a last frame: a jump counted
+/// before the stop stays beside the gap.
 #[test]
 fn a_late_count_before_a_device_changes_rebuild_stays_counted() {
     let directory = tempfile::tempdir().unwrap();
@@ -5763,9 +5487,8 @@ fn a_late_count_before_a_device_changes_rebuild_stays_counted() {
     );
 }
 
-/// A backend whose stop of the recording's first start hands on what its
-/// stream missed before its first frame (`before_first` frames), as the
-/// WASAPI and Core Audio backends' stops do, whatever that stop is for.
+/// A backend whose first stop hands on what its stream missed before its
+/// first frame, as the WASAPI and Core Audio backends do.
 struct MissesBeforeItsFirstFrame {
     inner: Arc<SyntheticCaptureBackend>,
     sink: Mutex<Option<Arc<LaneFrameSink>>>,
@@ -5804,12 +5527,8 @@ impl CaptureBackend for MissesBeforeItsFirstFrame {
     }
 }
 
-/// A first frame 1.5 s late, counted at the first start's stop, then a
-/// stall whose rebuild is that stop: its gap runs from the last frame the
-/// watch thread saw to the restart, never over the time before the first
-/// frame, so the 1.5 s stays counted beside the 2.1 s gap (A18 of
-/// `.plans/2026-10-07-stable-promotion.md`; the rule in
-/// `realtime::missed`, "Before the first callback").
+/// A first frame 1.5 s late, then a stall whose rebuild is that stop: the
+/// gap never covers the time before the first frame, which stays counted.
 #[test]
 fn a_loss_before_the_first_frame_survives_a_stall_rebuild_at_the_first_stop() {
     let directory = tempfile::tempdir().unwrap();
@@ -5835,9 +5554,8 @@ fn a_loss_before_the_first_frame_survives_a_stall_rebuild_at_the_first_stop() {
     );
 }
 
-/// The same loss with the first stop a device change's rebuild while the
-/// stream delivers, and with the user's stop as the first stop: counted
-/// whole both times.
+/// The same with a device change's rebuild and with the user's stop as the
+/// first stop.
 #[test]
 fn a_loss_before_the_first_frame_counts_at_a_device_changes_rebuild_and_a_plain_stop() {
     for change in [true, false] {

@@ -1,8 +1,7 @@
 //! Summaries: the preset, the OpenAI-compatible base URL, model, context
 //! tokens, and the API key in the secret store (never in `Settings`); or,
-//! for the `ChatGPT` preset, the confirmation that Steno may use the Codex
-//! sign-in and the model picked from the backend's list.
-//! Swift: `Settings/LLMSettingsViewModel.swift`.
+//! for the `ChatGPT` preset, the consent to use the Codex sign-in and the
+//! model picked from the backend's list.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -16,7 +15,7 @@ use crate::services::{CodexModel, CodexModelsError, Services};
 use crate::setup::llm_configured;
 
 string_enum! {
-    /// The services the Summaries section offers by name. Swift: `LLMPreset`.
+    /// The services the Summaries section offers by name.
     pub enum LlmPreset {
         LmStudio = "lmStudio",
         Ollama = "ollama",
@@ -133,7 +132,6 @@ fn normalize(url: &str) -> String {
 }
 
 /// A base URL as typed, validated: http or https with a host.
-/// Swift: `LLMSettingsViewModel.baseURL`.
 #[must_use]
 pub fn valid_base_url(text: &str) -> Option<String> {
     let trimmed = text.trim();
@@ -144,7 +142,6 @@ pub fn valid_base_url(text: &str) -> Option<String> {
     url_host(trimmed).map(|_| trimmed.to_owned())
 }
 
-/// The host of a valid base URL ("127.0.0.1").
 #[must_use]
 pub fn url_host(url: &str) -> Option<String> {
     let (_, rest) = url.split_once("://")?;
@@ -153,7 +150,7 @@ pub fn url_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_owned())
 }
 
-/// What the `ChatGPT` card knows about the sign-in. Swift: `CodexStatus`.
+/// What the `ChatGPT` card knows about the sign-in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexStatus {
     NotChecked,
@@ -161,15 +158,13 @@ pub enum CodexStatus {
     Unavailable(String),
 }
 
-/// The stored API key as a read of the secret store found it. A read that
-/// failed (a locked keyring) is not an absent key: the form starts empty,
+/// The stored API key as a read of the secret store found it. A failed
+/// read (a locked keyring) is not an absent key: the form starts empty,
 /// says why, and a save leaves the stored key alone unless the user typed
-/// one. No Swift counterpart (`LLMSettingsViewModel.load` failed whole).
+/// one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyRead {
-    /// The stored key.
     Present(String),
-    /// No key is stored.
     Absent,
     /// Why the read failed.
     Unreadable(String),
@@ -180,7 +175,6 @@ impl KeyRead {
     pub const UNREADABLE: &'static str =
         "The API key could not be read. Saving other changes keeps it.";
 
-    /// The key, and why it could not be read.
     fn split(self) -> (Option<String>, Option<String>) {
         match self {
             KeyRead::Present(key) => (Some(key), None),
@@ -206,22 +200,20 @@ fn next_key_version() -> u64 {
     LAST.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// Swift: `LLMSettingsViewModel.TestResult`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestResult {
     Success(String),
     Failure(String),
 }
 
-/// What one probe needs, taken out from under the host's lock: the draft
-/// as settings and the key. Swift probed inside the model's `await`.
+/// What one probe needs, taken out from under the host's lock.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Probe {
     pub settings: Settings,
     pub api_key: Option<String>,
 }
 
-/// The stored values, for `commit` to compare against. Swift: `Stored`.
+/// The stored values, for `commit` to compare against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Stored {
     provider: LlmProvider,
@@ -256,17 +248,15 @@ pub struct LlmSettingsViewModel {
     /// Which load or write of the key `stored` holds
     /// ([`Self::key_version`]).
     key_version: u64,
-    /// Where the secret store keeps the key, as it said at the last load
-    /// or [`Self::reload_key`].
+    /// Where the secret store keeps the key, as it said last.
     pub key_store: Option<SecretPlace>,
     /// Why the last load could not read the stored key; `None` once read.
     key_unreadable: Option<String>,
-    /// A probe asked for (by Test, or by a save of a configured endpoint)
-    /// and not yet begun; the host takes it with [`Self::begin_pending_probe`]
-    /// and runs it outside its lock.
+    /// A probe asked for and not yet begun; the host takes it with
+    /// [`Self::begin_pending_probe`] and runs it outside its lock.
     probe_pending: bool,
     /// A save rebuilt the pipeline since the host last took it
-    /// ([`Self::take_pipeline_rebuilt`]). Rust only.
+    /// ([`Self::take_pipeline_rebuilt`]).
     pipeline_rebuilt: bool,
 }
 
@@ -358,21 +348,17 @@ impl LlmSettingsViewModel {
     }
 
     /// Which load or write of the key the form holds; the host reads it
-    /// before it reads the key outside its lock and hands it to
-    /// [`Self::reload_key`]. Counted across every model, so a model made
-    /// later never matches an older one's.
+    /// before reading the key outside its lock and hands it to
+    /// [`Self::reload_key`]. Counted process-wide, so versions never repeat.
     #[must_use]
     pub fn key_version(&self) -> u64 {
         self.key_version
     }
 
-    /// The key read again after the secret store could not be read: the
-    /// field, the stored key and the read error follow `key` unless the
-    /// field holds an unsaved edit, or a load or save of the key came
-    /// after the read began (the form's `key_version` is no longer
-    /// `read_at`, so `key` may be older than what it holds). The rest of
-    /// the form stays as it is, typed or not. Nothing changes before the
-    /// first load.
+    /// The key read again after the secret store could not be read. The
+    /// field, stored key and error follow `key` unless the field holds an
+    /// unsaved edit or the key was loaded or saved since `read_at`. The rest
+    /// of the form stays. Nothing changes before the first load.
     pub fn reload_key(&mut self, services: &Services, key: KeyRead, read_at: u64) {
         let typed = self.draft().api_key;
         let Some(stored) = self.stored.as_mut() else {
@@ -389,8 +375,7 @@ impl LlmSettingsViewModel {
         self.show_unreadable_key();
     }
 
-    /// The read failure, as the section's error, while the key is unread;
-    /// gone once it reads.
+    /// The read failure as the section's error while the key is unread.
     fn show_unreadable_key(&mut self) {
         match &self.key_unreadable {
             Some(reason) => {
@@ -404,15 +389,12 @@ impl LlmSettingsViewModel {
         }
     }
 
-    // ChatGPT (Codex)
-
     /// Reads the sign-in, never the network.
     pub fn refresh_codex_status(&mut self, services: &Services) {
         self.apply_codex_account(services.llm.codex_account());
     }
 
-    /// The sign-in as the service read it; the host reads it outside its
-    /// lock for the explicit refresh.
+    /// The sign-in as the service read it outside the lock.
     pub fn apply_codex_account(&mut self, account: BoundaryResult<String>) {
         self.codex_status = match account {
             Ok(account) => CodexStatus::SignedIn(account),
@@ -420,11 +402,10 @@ impl LlmSettingsViewModel {
         };
     }
 
-    /// The consent card's primary button, first half: the provider and the
-    /// confirmation are saved (no model yet, so nothing is probed). True
-    /// when the model list is to be fetched next (the save went through),
-    /// with the list marked loading; the host fetches it with its lock
-    /// released and hands it to [`Self::finish_confirm_codex`].
+    /// The consent card's button, first half: saves the provider and the
+    /// confirmation. True when the model list is to be fetched next, marked
+    /// loading; the host fetches it with its lock released and calls
+    /// [`Self::finish_confirm_codex`].
     pub fn begin_confirm_codex(
         &mut self,
         store: &Store,
@@ -437,8 +418,8 @@ impl LlmSettingsViewModel {
         self.errors.error.is_none() && self.begin_codex_models()
     }
 
-    /// The second half: the fetched list applied, the first listed model
-    /// picked when none was, and the result saved and probed.
+    /// The second half: the fetched list applied, the first model picked
+    /// when none was, saved and probed.
     pub fn finish_confirm_codex(
         &mut self,
         account: BoundaryResult<String>,
@@ -460,7 +441,7 @@ impl LlmSettingsViewModel {
     }
 
     /// "Stop using ChatGPT": clears the confirmation and returns to the
-    /// endpoint provider with whatever it had.
+    /// endpoint provider.
     pub fn stop_using_codex(&mut self, store: &Store, services: &Services, now: DateTime<Utc>) {
         self.codex_confirmed = false;
         self.codex_models = Vec::new();
@@ -471,9 +452,8 @@ impl LlmSettingsViewModel {
         self.commit(store, services, now);
     }
 
-    /// Marks the list as loading; false before confirmation, when there is
-    /// nothing to fetch. The host fetches outside its lock and calls
-    /// [`Self::finish_codex_models`].
+    /// Marks the list as loading; false before confirmation. The host
+    /// fetches outside its lock and calls [`Self::finish_codex_models`].
     pub fn begin_codex_models(&mut self) -> bool {
         if !self.codex_confirmed {
             return false;
@@ -482,8 +462,8 @@ impl LlmSettingsViewModel {
         true
     }
 
-    /// The sign-in and the list as fetched: a credential failure goes on
-    /// the card, any other on the list's own error line.
+    /// The fetched list: a credential failure goes on the card, any other
+    /// on the list's error line.
     pub fn finish_codex_models(
         &mut self,
         account: BoundaryResult<String>,
@@ -526,15 +506,12 @@ impl LlmSettingsViewModel {
         self.commit(store, services, now);
     }
 
-    /// The context window the backend lists for `slug`, when it lists one.
     fn listed_context_window(&self, slug: &str) -> Option<i64> {
         self.codex_models
             .iter()
             .find(|model| model.slug == slug)
             .and_then(|model| model.context_window)
     }
-
-    // Draft
 
     /// The picker's rows: the listed models plus the stored slug when the
     /// list does not carry it.
@@ -553,7 +530,6 @@ impl LlmSettingsViewModel {
         choices
     }
 
-    /// The URL as typed, validated.
     #[must_use]
     pub fn base_url(&self) -> Option<String> {
         valid_base_url(&self.base_url_text)
@@ -586,7 +562,7 @@ impl LlmSettingsViewModel {
         let key = self.api_key.trim();
         Stored {
             provider: self.preset.provider(),
-            // Under ChatGPT the server field is off screen; whatever it held stays.
+            // Under ChatGPT the server field is off screen; it stays as typed.
             base_url: if self.preset == LlmPreset::Codex {
                 self.base_url().or_else(|| {
                     self.stored
@@ -607,7 +583,6 @@ impl LlmSettingsViewModel {
         }
     }
 
-    /// A `Settings` with this draft's LLM fields, for the probe.
     fn settings_from(draft: &Stored, now: DateTime<Utc>) -> Settings {
         Settings {
             llm_provider: draft.provider,
@@ -621,11 +596,8 @@ impl LlmSettingsViewModel {
         }
     }
 
-    // Actions
-
     /// Fills the address for the preset (Custom keeps what is typed) and
-    /// stores it right away. `ChatGPT` stores nothing until the consent
-    /// card's button.
+    /// stores it. `ChatGPT` stores nothing until the consent button.
     pub fn select_preset(
         &mut self,
         preset: LlmPreset,
@@ -649,8 +621,8 @@ impl LlmSettingsViewModel {
     }
 
     /// Saves when the form differs from what is stored and validates, then
-    /// probes the endpoint when it is configured. Invalid input stays on
-    /// screen as the validation message and saves nothing.
+    /// probes a configured endpoint. Invalid input shows its message and
+    /// saves nothing.
     pub fn commit(&mut self, store: &Store, services: &Services, now: DateTime<Utc>) {
         if self.validation_message().is_some() {
             return;
@@ -691,9 +663,9 @@ impl LlmSettingsViewModel {
         }
     }
 
-    /// Whether a save writes the key: the field differs from the key the
-    /// last load read or the last save wrote. Over a key that could not be
-    /// read that is a typed key only, so an empty field never removes it.
+    /// Whether a save writes the key: the field differs from the key last
+    /// read or written. Over an unreadable key only a typed key counts, so
+    /// an empty field never removes it.
     fn writes_key(&self, draft: &Stored) -> bool {
         let held = self
             .stored
@@ -702,12 +674,9 @@ impl LlmSettingsViewModel {
         draft.api_key.as_ref() != held
     }
 
-    /// The settings, the key in the secret store when `write_key`
-    /// ([`Self::writes_key`]), then the pipeline rebuilt on them; the
-    /// settings as written. Swift wrote the key on every save; an
-    /// unchanged field is not a reason to write, and over a key that could
-    /// not be read it would delete it. The write may wait on the user, as
-    /// a keyring may ask to confirm or unlock it.
+    /// Stores the settings, the key when `write_key`, then rebuilds the
+    /// pipeline; returns the settings as written. The key write may wait on
+    /// a keyring prompt.
     fn store(
         draft: &Stored,
         write_key: bool,
@@ -741,30 +710,25 @@ impl LlmSettingsViewModel {
         Ok(settings)
     }
 
-    /// Whether a save rebuilt the pipeline since the last call; the host
-    /// hands it to the Transcription section
+    /// Whether a save rebuilt the pipeline since the last call
     /// ([`SpeechSettingsViewModel::pipeline_rebuilt`](crate::settings::SpeechSettingsViewModel::pipeline_rebuilt)).
-    /// Rust only.
     pub fn take_pipeline_rebuilt(&mut self) -> bool {
         std::mem::take(&mut self.pipeline_rebuilt)
     }
 
-    /// Asks for a probe; the host begins it once the command's lock is
-    /// released.
+    /// Asks for a probe; the host begins it once its lock is released.
     pub fn request_probe(&mut self) {
         self.probe_pending = true;
     }
 
-    /// Whether a probe was asked for and not begun.
     #[must_use]
     pub fn probe_pending(&self) -> bool {
         self.probe_pending
     }
 
-    /// The pending probe, if any, marked as running (`isTesting`): what the
-    /// host hands to the service outside its lock. `None` when nothing is
-    /// pending or the form is not ready to be probed, in which case the
-    /// result already says what is missing.
+    /// The pending probe, marked running (`isTesting`), for the host to run
+    /// outside its lock. `None` when nothing is pending or the form is not
+    /// ready, in which case the result already says what is missing.
     pub fn begin_pending_probe(&mut self, now: DateTime<Utc>) -> Option<Probe> {
         if !std::mem::take(&mut self.probe_pending) {
             return None;
@@ -805,7 +769,7 @@ impl LlmSettingsViewModel {
         self.is_testing = false;
     }
 
-    /// `settings.summaries.update`: the fields the page sent, as typed.
+    /// `settings.summaries.update`: the fields as typed.
     pub fn apply_update(&mut self, update: &steno_bridge::SummariesUpdateParams) {
         if let Some(base_url) = &update.base_url {
             self.base_url_text.clone_from(base_url);
@@ -832,7 +796,6 @@ impl Default for LlmSettingsViewModel {
 mod tests {
     use super::*;
 
-    /// Swift: `SettingsSectionTests.testPresetsInferFromTheStoredAddress`.
     #[test]
     fn presets_infer_from_the_stored_address() {
         assert_eq!(LlmPreset::infer_from_url(None), LlmPreset::LmStudio);

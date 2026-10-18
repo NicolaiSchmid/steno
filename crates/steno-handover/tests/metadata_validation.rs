@@ -148,9 +148,8 @@ fn device_name_is_one_to_128_characters_after_trimming() {
 
 #[test]
 fn device_names_are_counted_in_graphemes_and_trimmed_as_foundation_trims() {
-    // What the eye sees as one character, as Swift's `String.count` counts:
-    // a decomposed accent is two scalars, the family emoji seven scalars
-    // and 25 bytes, a precomposed accent two bytes.
+    // Characters as the phone counts them, grapheme clusters: a decomposed
+    // accent, a family emoji and a precomposed accent are one each.
     for (what, grapheme) in [
         ("decomposed accent", "e\u{301}"),
         (
@@ -172,8 +171,7 @@ fn device_names_are_counted_in_graphemes_and_trimmed_as_foundation_trims() {
             "129 of {what}"
         );
     }
-    // Foundation's `whitespacesAndNewlines` holds U+200B; Unicode's
-    // `White_Space` does not.
+    // The phone's whitespace set holds U+200B; Unicode's `White_Space` does not.
     assert!(mentions(
         problem(|m| m.device_name = "\u{200B}\u{200B}".to_owned()),
         "deviceName"
@@ -186,8 +184,7 @@ fn device_names_are_counted_in_graphemes_and_trimmed_as_foundation_trims() {
         problem(|m| m.device_name = format!("\u{200B}{}\u{200B}", "x".repeat(128))),
         None
     );
-    // Neither U+200C nor U+FEFF is in the set: such a name is one
-    // character, not empty.
+    // U+200C and U+FEFF are not whitespace: such a name is not empty.
     assert_eq!(problem(|m| m.device_name = "\u{200C}".to_owned()), None);
     assert_eq!(problem(|m| m.device_name = "\u{FEFF}".to_owned()), None);
 }
@@ -204,9 +201,8 @@ fn only_phone_and_fixture_formats_are_accepted() {
 
 #[test]
 fn the_first_problem_wins_and_the_disk_is_never_touched() {
-    // Two problems: byteCount reports first, the order the phone can rely
-    // on in logs. The inbox directory does not exist, so nothing was
-    // created.
+    // Two problems: byteCount reports first. No inbox directory exists, so
+    // nothing was created.
     let problem = problem(|m| {
         m.byte_count = 0;
         m.format = AudioFormat::Caf48kFloat32;

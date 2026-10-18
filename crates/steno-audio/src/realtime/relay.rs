@@ -1,10 +1,6 @@
-//! The bounded hand-off from the processing thread to the writer thread.
-//! Swift: `Sources/StenoAudio/RealTime/FrameRelay.swift`.
-//!
-//! [`LaneRings`] with one channel per written channel (the lanes, plus the
-//! raw mic when kept) and a fixed frame size. The processing thread never
-//! blocks on it: when a frame does not fit, every channel of that frame is
-//! refused and counted.
+//! The bounded hand-off from the processing thread to the writer thread:
+//! [`LaneRings`] with one channel per written channel and a fixed frame
+//! size. A frame that does not fit is refused on every channel and counted.
 
 use super::rings::LaneRings;
 use super::wake::Wake;
@@ -19,7 +15,6 @@ pub struct FrameRelay {
 }
 
 impl FrameRelay {
-    /// `capacity_frames` whole frames of headroom per channel.
     #[must_use]
     pub fn new(channels: usize, frame_size: usize, capacity_frames: usize) -> Self {
         Self {
@@ -30,13 +25,11 @@ impl FrameRelay {
         }
     }
 
-    /// Channels per frame.
     #[must_use]
     pub fn channels(&self) -> usize {
         self.channels
     }
 
-    /// Samples per channel per frame.
     #[must_use]
     pub fn frame_size(&self) -> usize {
         self.frame_size
@@ -55,7 +48,6 @@ impl FrameRelay {
         self.rings.ring(0).capacity() / self.frame_size
     }
 
-    /// The rings underneath.
     #[must_use]
     pub fn rings(&self) -> &LaneRings {
         &self.rings
@@ -99,7 +91,6 @@ impl FrameRelay {
 
     // Consumer (writer thread)
 
-    /// Whole frames every channel has queued.
     #[must_use]
     pub fn available_frames(&self) -> usize {
         self.rings.available_to_read() / self.frame_size
@@ -113,7 +104,6 @@ impl FrameRelay {
             .read(&mut destination[..self.frame_size])
     }
 
-    /// Frames refused per channel.
     #[must_use]
     pub fn dropped_frames(&self) -> Vec<usize> {
         self.rings

@@ -1,6 +1,5 @@
-//! Limits on what a phone may announce. Everything here is checked before a
-//! partial file is created, so a bad announce costs nothing on disk.
-//! Swift: `Upload/MetadataValidation.swift`.
+//! Limits on what a phone may announce, checked before a partial file is
+//! created, so a bad announce costs nothing on disk.
 
 use steno_core::{AudioFormat, RecordingMetadata};
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -60,12 +59,9 @@ impl MetadataValidation {
         None
     }
 
-    /// `name` trimmed, or the problem with it. One rule for the announce
-    /// and the pairing request; Swift spells it twice
-    /// (`Upload/MetadataValidation.swift`, `HandoverEngine.pair`). Trimmed of
-    /// [`is_foundation_whitespace`] and counted in grapheme clusters, as
-    /// `trimmingCharacters(in: .whitespacesAndNewlines)` and `String.count`
-    /// do.
+    /// `name` trimmed of [`is_foundation_whitespace`], or the problem with it;
+    /// one rule for the announce and the pairing request. Length counts
+    /// grapheme clusters.
     pub(crate) fn device_name(name: &str) -> Result<&str, String> {
         let name = name.trim_matches(is_foundation_whitespace);
         if name.is_empty() || name.graphemes(true).count() > Self::MAX_DEVICE_NAME_LENGTH {
@@ -77,8 +73,7 @@ impl MetadataValidation {
         Ok(name)
     }
 
-    /// How many chunks a recording of `byte_count` bytes has at
-    /// `chunk_size`.
+    /// How many chunks a recording of `byte_count` bytes has at `chunk_size`.
     #[must_use]
     pub fn chunk_count(byte_count: i64, chunk_size: i64) -> i64 {
         (byte_count + chunk_size - 1) / chunk_size
@@ -92,10 +87,8 @@ impl MetadataValidation {
     }
 }
 
-/// Foundation's `CharacterSet.whitespacesAndNewlines`, as measured on macOS
-/// and in swift-corelibs-foundation 6.1: Unicode's `White_Space` (what
-/// `char::is_whitespace` tests) and U+200B ZERO WIDTH SPACE, so a name of
-/// zero-width spaces only is empty here too.
+/// Foundation's `CharacterSet.whitespacesAndNewlines`: Unicode's
+/// `White_Space` plus U+200B ZERO WIDTH SPACE.
 #[must_use]
 pub fn is_foundation_whitespace(character: char) -> bool {
     character.is_whitespace() || character == '\u{200B}'

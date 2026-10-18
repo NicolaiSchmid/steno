@@ -1,14 +1,12 @@
-//! The OpenAI chat completions wire format, the one shape every supported
-//! server speaks: `POST {base}/chat/completions` and `GET {base}/models`.
-//! Swift: `Sources/StenoLLM/Wire/ChatCompletion.swift`.
+//! The OpenAI chat completions wire format: `POST {base}/chat/completions`
+//! and `GET {base}/models`.
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use steno_core::LlmMessage;
 
-/// The request body of `POST /chat/completions`. `max_tokens` is the field
-/// every compatible server takes; `max_completion_tokens` is OpenAI's
-/// successor, sent instead once a server has rejected `max_tokens` by name.
+/// The request body of `POST /chat/completions`. `max_completion_tokens` is
+/// sent instead of `max_tokens` once a server rejected the latter by name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
@@ -77,8 +75,7 @@ impl ChatResponseFormat {
     }
 }
 
-/// The response body of `POST /chat/completions`. Only the fields Steno
-/// reads.
+/// The response body of `POST /chat/completions`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ChatCompletionResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,9 +96,8 @@ pub struct ChatChoice {
     pub finish_reason: Option<String>,
 }
 
-/// `content` is a string on every server Steno targets; a few return an
-/// array of `{"type": "text", "text": ...}` parts, which decode to their
-/// concatenated text. `refusal` is OpenAI's structured-output refusal.
+/// `content` is a string or an array of text parts, decoded to their
+/// concatenation. `refusal` is OpenAI's structured-output refusal.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChatChoiceMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,8 +160,7 @@ impl<'de> Deserialize<'de> for ChatChoiceMessage {
     }
 }
 
-/// Every count is optional: proxies and some local servers send a partial
-/// or null `usage`, and a good answer must never fail on its bookkeeping.
+/// Every count is optional, so a partial `usage` never fails a good answer.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ChatUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,10 +171,8 @@ pub struct ChatUsage {
     pub total_tokens: Option<i64>,
 }
 
-/// `{"error": {"message": ..., "type": ..., "param": ..., "code": ...}}`;
-/// `code` is a string on OpenAI and an integer on some servers, so it is
-/// read as any JSON value. `param` names the rejected request field on a
-/// 400.
+/// The error envelope. `code` is a string or an integer, so it is any JSON
+/// value; `param` names the rejected request field on a 400.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatErrorEnvelope {
     pub error: ChatErrorDetail,
@@ -208,7 +201,6 @@ impl ChatErrorEnvelope {
     }
 }
 
-/// The response body of `GET /models`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelList {
     pub data: Vec<ModelListEntry>,

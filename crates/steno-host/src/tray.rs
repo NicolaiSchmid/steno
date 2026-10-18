@@ -1,7 +1,6 @@
 //! The tray's meeting rows: the processing queue, the five recent meetings
 //! and the meetings whose speakers wait for a review, which the shell's
 //! tray draws as menu items and a badge ([`Host::on_tray`](crate::host::Host::on_tray)).
-//! Swift: `MenuBarViewModel` and `AppController.pendingReviews`.
 
 use std::collections::BTreeSet;
 
@@ -10,7 +9,6 @@ use uuid::Uuid;
 
 use crate::main_window::{MeetingListViewModel, ProcessingProgressModel};
 
-/// How many finished meetings the tray lists.
 pub const RECENT: usize = 5;
 
 /// One meeting row: the meeting it opens and its text.
@@ -20,7 +18,6 @@ pub struct TrayRow {
     pub text: String,
 }
 
-/// What the tray shows below its Record rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrayMeetings {
     /// Queued and processing meetings, oldest first: "Weekly sync —

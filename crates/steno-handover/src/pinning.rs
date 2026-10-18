@@ -1,12 +1,8 @@
 //! The one place that decides whether a TLS server is the paired computer:
-//! the SHA-256 of the leaf certificate's DER bytes, compared in constant
-//! time against the fingerprint learned from the pairing QR code. No system
-//! trust evaluation is consulted: the certificate is self-signed and
-//! rotation is a non-goal.
-//!
-//! The phone runs `mobile/modules/steno-link/ios/PinnedTrustEvaluator.swift`
-//! (symlinked into the Swift tests); this is the same rule as a rustls
-//! [`ServerCertVerifier`], for every Rust client of the listener.
+//! the SHA-256 of the leaf certificate's DER, compared in constant time
+//! against the fingerprint from the pairing QR code. No system trust
+//! evaluation: the certificate is self-signed. The phone applies the same
+//! rule (`PinnedTrustEvaluator.swift`).
 
 use std::sync::Arc;
 
@@ -100,8 +96,7 @@ impl ServerCertVerifier for PinnedVerifier {
     }
 }
 
-/// A rustls client configuration that speaks TLS 1.3 to the listener and
-/// trusts only the pinned leaf.
+/// A rustls client configuration: TLS 1.3, trusting only the pinned leaf.
 pub fn pinned_client_config(fingerprint: &[u8]) -> Result<Arc<ClientConfig>, Error> {
     let verifier = PinnedVerifier::new(fingerprint);
     let config = ClientConfig::builder_with_provider(verifier.provider.clone())
@@ -112,8 +107,7 @@ pub fn pinned_client_config(fingerprint: &[u8]) -> Result<Arc<ClientConfig>, Err
     Ok(Arc::new(config))
 }
 
-/// Equal length and equal bytes, without an early exit on the first
-/// difference.
+/// Equal length and equal bytes, without an early exit.
 #[must_use]
 pub fn constant_time_equals(lhs: &[u8], rhs: &[u8]) -> bool {
     if lhs.len() != rhs.len() {

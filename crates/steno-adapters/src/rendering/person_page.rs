@@ -1,6 +1,5 @@
 //! Person pages: created whole when missing, otherwise only the managed
 //! block is Steno's.
-//! Swift: `Sources/StenoAdapters/Rendering/PersonPageRenderer.swift`.
 
 use steno_core::{MeetingExport, Person};
 
@@ -17,10 +16,8 @@ pub(crate) struct PersonPageRenderer<'a> {
 }
 
 impl PersonPageRenderer<'_> {
-    /// The page as created from scratch plus this meeting's line. The file is
-    /// named after the display name, sanitised the way
-    /// [`markdown_text::wikilink`] sanitises its target, so `[[Anna Müller]]`
-    /// resolves to it.
+    /// The new page plus this meeting's line, named as
+    /// [`markdown_text::wikilink`] sanitises its target.
     pub fn page(&self, person: &Person) -> PersonPage {
         let line = self.line();
         let mut frontmatter = Frontmatter::new(self.options.time_zone);
@@ -45,8 +42,7 @@ impl PersonPageRenderer<'_> {
         }
     }
 
-    /// `- 2026-09-24 [[2026-09-24-slug|Title]] %%steno:<meeting uuid>%%`, or
-    /// with a root-absolute Markdown link to the folder note in `None` style.
+    /// `- 2026-09-24 [[2026-09-24-slug|Title]] %%steno:<meeting uuid>%%`.
     pub fn line(&self) -> String {
         let meeting = &self.export.meeting;
         let link = match self.options.link_style {

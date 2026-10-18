@@ -1,20 +1,7 @@
-//! The export through `steno_core::Store` equals what the Swift CLI writes.
-//!
-//! `Tests/Fixtures/meetings/produktstrategie.json` is the `StenoJSON`
-//! encoding of the fixture meeting as `steno export` writes it (the Swift
-//! `MeetingJSONRendererTests` pins `StenoJSON.encode(export) == data`,
-//! "byte-identical to steno export"). This test writes the same meeting into
-//! a Rust store the way the pipeline does, reads it back through
-//! `Store::export`, and renders `meeting.json` and every Markdown artifact
-//! against the Swift goldens.
-//!
-//! One normalisation: both stores return decisions by id (GRDB's
-//! `.order(DecisionRow.Columns.id)` and the Rust `ORDER BY id`), while the
-//! fixture file lists them in extraction order, so the expected
-//! `meeting.json` is the fixture with its two decisions in id order. The
-//! printer's fidelity to Foundation is pinned separately by
-//! `renderers::meeting_json_matches_the_golden_and_the_fixture_file`, which
-//! compares the fixture bytes with no normalisation.
+//! The export through `steno_core::Store` renders `meeting.json` and every
+//! Markdown artifact as the goldens. The stores return decisions by id, the
+//! fixture lists them in extraction order, so the expected `meeting.json`
+//! has its two decisions in id order.
 
 mod common;
 
@@ -24,8 +11,7 @@ use steno_adapters::rendering::{ArtifactRenderer, RenderedArtifactKind};
 use steno_core::Store;
 use steno_core::json::uuid_string;
 
-/// The fixture `meeting.json` with `decisions` in id order, as both CLIs'
-/// store export lists them.
+/// The fixture `meeting.json` with `decisions` in id order.
 fn fixture_in_store_order() -> String {
     let mut value: Value =
         serde_json::from_str(&fixture_text("meetings/produktstrategie.json")).unwrap();
@@ -69,8 +55,7 @@ fn a_meeting_written_through_the_store_exports_byte_identically_to_the_swift_cli
         )
         .unwrap()
     };
-    // The folder note lists decisions in export order, so the store path
-    // swaps the two lines of the golden's `## Decisions` section.
+    // The store path swaps the golden's two decision lines.
     let golden = fixture_text("snapshots/obsidian/folder-note-wikilink-berlin.md").replace(
         "- 90/10-Aufteilung wird umgesetzt.\n- Roadmap-Review am 15. Oktober.\n",
         "- Roadmap-Review am 15. Oktober.\n- 90/10-Aufteilung wird umgesetzt.\n",

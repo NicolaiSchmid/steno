@@ -1,13 +1,8 @@
-//! Gate G1 of the speech-stack plan on the ONNX path with our own decode
-//! loop: mean WER on the FLEURS German `cat/` set (ten 7-minute files, the
-//! chunker in the loop) within 0.5 points of spike F's 5.3 % for the fp32
-//! export through sherpa-onnx. Also the logits-split check the Rust port
-//! plan lists as WP4's first test, and the stable plan's A9 comparison:
-//! the same speech at 44.1 kHz through the decoder's resamplers gives a
-//! WER at most a tenth of a point over the same speech at 48 kHz. They
-//! need the model files and the data, so they skip with a message unless
-//! `STENO_MODELS_DIR` and `STENO_FLEURS_DIR` point at them (`.plans/spikes/2026-10-01-spike-fleurs-wer.md`
-//! has the recipe); CI never has them.
+//! The FLEURS gate on the ONNX path: mean WER on the FLEURS German `cat/` set
+//! (ten 7-minute files) at most 5.8 %; the logits-split check; and 44.1 kHz
+//! speech through the decoder's resampler within a tenth of a point of 48 kHz.
+//! They skip with a message unless `STENO_MODELS_DIR` and `STENO_FLEURS_DIR`
+//! point at the models and the data; CI never has them.
 
 #![allow(
     clippy::cast_precision_loss,
@@ -126,7 +121,7 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
         mean * 100.0,
         pooled * 100.0
     );
-    // One-sided on purpose: a better mean than spike F's is not a failure.
+    // One-sided on purpose: a better mean is not a failure.
     assert!(
         mean <= SPIKE_F_MEAN_WER + TOLERANCE,
         "mean WER {:.2}% is more than {:.1} points over spike F's {:.1}%",
@@ -136,11 +131,11 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
     );
 }
 
-/// The A9 bound: a tenth of a point of WER.
+/// The resampler bound: a tenth of a point of WER.
 const RATE_TOLERANCE: f64 = 0.001;
 
-/// `samples` at 16 kHz to `rate` through the capture's converter: its
-/// last half window flushed with zeros, then cut to the exact length.
+/// `samples` at 16 kHz to `rate` through the capture's converter, flushed and
+/// cut to the exact length.
 fn upsample(samples: &[f32], rate: f64) -> Vec<f32> {
     const BLOCK: usize = 1_600;
     let length = (samples.len() as f64 * rate / 16_000.0).round() as usize;
@@ -156,20 +151,12 @@ fn upsample(samples: &[f32], rate: f64) -> Vec<f32> {
     output
 }
 
-/// Stable plan A9: speech recorded at 48 kHz and the same speech at
-/// 44.1 kHz (the phone's rate) give the same transcript quality. Each
-/// FLEURS file is brought up to both rates by the capture's converter and
-/// back to 16 kHz by the decoder's path for that rate (the exact 3:1 FIR
-/// from 48 kHz, the windowed sinc from 44.1 kHz), then transcribed; the
-/// 44.1 kHz mean is at most a tenth of a point over the 48 kHz one.
-/// One-sided, as the G1 gate above is: the two lanes differ only at the
-/// resamplers' passband edges, yet that flips single words either way,
-/// so a file's WER moves by up to two points between them and the means
-/// by half a point (measured on atlas at the engine's settings: 5.40 %
-/// from 48 kHz, 5.05 % from 44.1 kHz; 5.51 and 5.02 % before A16b of
-/// `.plans/2026-10-07-stable-promotion.md`). FLEURS is 16 kHz speech, so
-/// this measures the two passbands and phases on real speech; the aliasing
-/// of content above 8 kHz is `steno-audio`'s `tests/resampler_sweep.rs`.
+/// Speech at 48 kHz and at 44.1 kHz (the phone's rate) give the same transcript
+/// quality: each FLEURS file goes up to both rates through the capture's
+/// converter and back to 16 kHz through the decoder's path, then is
+/// transcribed; the 44.1 kHz mean is at most a tenth of a point over the 48 kHz
+/// one. One-sided: the passband edges flip single words either way, so the
+/// means differ by up to half a point.
 #[test]
 fn fleurs_wer_from_44k1_is_at_most_a_tenth_of_a_point_over_48k() {
     let Some(models) = common::installed_store() else {

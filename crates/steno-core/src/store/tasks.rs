@@ -1,6 +1,4 @@
 //! `meetingTask` and `decision` rows.
-//! Swift: the task and decision methods of
-//! `Sources/StenoCore/Storage/MeetingStore.swift`.
 
 use rusqlite::{Connection, Row, params};
 use uuid::Uuid;
@@ -64,7 +62,6 @@ pub(super) fn insert_decision(connection: &Connection, decision: &Decision) -> R
     )
 }
 
-/// The meeting's tasks in id order.
 pub(super) fn tasks_of_meeting(
     connection: &Connection,
     meeting_id: Uuid,
@@ -77,7 +74,6 @@ pub(super) fn tasks_of_meeting(
     )
 }
 
-/// The meeting's decisions in id order.
 pub(super) fn decisions_of_meeting(
     connection: &Connection,
     meeting_id: Uuid,

@@ -1,8 +1,6 @@
-//! `MeetingDetector` on `FakeProcessAudioActivity` and `ManualClock`: no
-//! real sleeping in the code under test. `wait_for_sleepers` synchronises
-//! with the detector's timers (the poll is one sleeper, an armed debounce a
-//! second one).
-//! Swift: `Tests/StenoAudioTests/MeetingDetectorTests.swift`.
+//! `MeetingDetector` on `FakeProcessAudioActivity` and `ManualClock`;
+//! `wait_for_sleepers` synchronises with the detector's timers (the poll is
+//! one sleeper, an armed debounce a second).
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
 // rates compare exactly on purpose.
@@ -199,8 +197,7 @@ fn a_failing_snapshot_fails_start_and_is_tolerated_later() {
     source.set_failure(Some("broken"));
     source.set(vec![]);
     clock.advance(Duration::from_secs(2));
-    // The failed re-read changed nothing; the debounce still fires on what
-    // was last seen.
+    // The failed re-read changed nothing; the debounce still fires.
     assert_eq!(
         next(&events),
         MeetingEvent::MicrophoneOpened {
@@ -212,8 +209,8 @@ fn a_failing_snapshot_fails_start_and_is_tolerated_later() {
     detector.stop();
 }
 
-/// A source whose poll thread, once armed, stops right after it read its
-/// snapshot and waits to be let go before the detector applies it.
+/// A source whose poll thread, once armed, is held after reading its
+/// snapshot until let go.
 struct HeldPoll {
     inner: FakeProcessAudioActivity,
     armed: AtomicBool,
@@ -238,9 +235,8 @@ impl ProcessAudioActivitySource for HeldPoll {
     }
 }
 
-/// A poll snapshot read while the call was still on, applied after the
-/// listener saw it end, must not cancel the release debounce the listener
-/// armed: the release fires one debounce later all the same.
+/// A stale poll snapshot applied after the listener saw the call end does
+/// not cancel the release debounce.
 #[test]
 fn a_stale_poll_snapshot_does_not_cancel_a_pending_release() {
     let clock = Arc::new(ManualClock::new());
@@ -288,9 +284,8 @@ fn a_stale_poll_snapshot_does_not_cancel_a_pending_release() {
     detector.stop();
 }
 
-/// A poll in flight while `stop()` runs finishes before the stop resets the
-/// state, and a poll that waits for it applies nothing: no debounce
-/// outlives the stop, and a stopped detector reports no holder.
+/// A poll in flight during `stop()` finishes first, and one that waits for
+/// it applies nothing: no debounce outlives the stop.
 #[test]
 fn a_poll_in_flight_during_stop_leaves_no_holder() {
     let clock = Arc::new(ManualClock::new());
@@ -327,8 +322,7 @@ fn a_poll_in_flight_during_stop_leaves_no_holder() {
     release.send(()).unwrap();
     stopper.join().unwrap();
     assert!(!detector.is_running());
-    // Give a thread the late poll might have spawned time to reach its
-    // timer, then run the clock past any debounce.
+    // Let a late poll's thread reach its timer, then pass any debounce.
     std::thread::sleep(Duration::from_millis(300));
     let sleepers_after_stop = clock.pending_sleepers();
     clock.advance(Duration::from_secs(10));
@@ -340,8 +334,7 @@ fn a_poll_in_flight_during_stop_leaves_no_holder() {
     );
 }
 
-/// A source whose first `changes()`, which `start()` calls after its
-/// first snapshot, waits to be let go; later calls do not.
+/// A source whose first `changes()` waits to be let go.
 struct HeldStart {
     inner: FakeProcessAudioActivity,
     entered: Sender<()>,
@@ -383,9 +376,8 @@ fn held_detector(source: HeldStart, clock: &Arc<ManualClock>) -> Arc<MeetingDete
     ))
 }
 
-/// A `stop()` while `start()` is between its first snapshot and its
-/// threads waits for the start, then stops what it started: the detector
-/// is not left running with no `stop()` to come.
+/// A `stop()` while `start()` is mid-way waits for the start, then stops
+/// what it started.
 #[test]
 fn a_stop_during_start_waits_for_it_and_stops_it() {
     let clock = Arc::new(ManualClock::new());
@@ -425,17 +417,15 @@ fn a_stop_during_start_waits_for_it_and_stops_it() {
     );
 }
 
-/// A second `start()` while the first is between its first snapshot and
-/// its threads waits for it, then finds the detector running and starts
-/// nothing: one poll timer, which `stop()` takes down.
+/// A second `start()` while the first is mid-way waits, then starts
+/// nothing: one poll timer.
 #[test]
 fn a_second_start_during_start_waits_for_it_and_starts_nothing() {
     let clock = Arc::new(ManualClock::new());
     let (entered, entered_receiver) = channel();
     let (release, release_receiver) = channel();
     let detector = held_detector(HeldStart::new(entered, release_receiver), &clock);
-    // Never dropped: a poller no `stop()` reaches would hang `Drop`, which
-    // joins it, instead of failing the test.
+    // Never dropped: a poller no `stop()` reaches would hang `Drop`.
     std::mem::forget(Arc::clone(&detector));
     let first = {
         let detector = Arc::clone(&detector);

@@ -1,24 +1,17 @@
 //! How async code reaches the store (feature `tokio`): one store step
-//! through [`Store::reading`] or [`Store::writing`], run on tokio's blocking
-//! pool, so a step that waits on SQLite (another process holding the write
-//! lock, up to the busy timeout) never holds a runtime worker, which the
-//! pipeline's runs, the handover and the timers share. Synchronous callers
-//! on threads of their own (the recorder's start and stop, the CLI's
-//! commands) keep calling the store directly. Decision 1 of
-//! `.plans/2026-10-12-store-off-the-workers.md`. Rust only: the Swift
-//! store's `async` calls ran on GRDB's own queues.
+//! through [`Store::reading`] or [`Store::writing`] on tokio's blocking
+//! pool, so a step that waits on SQLite's busy timeout never holds a
+//! runtime worker. Callers on threads of their own call the store directly.
 
 use std::sync::Arc;
 
 use super::{Result, Store, StoreError};
 
 impl Store {
-    /// Runs `body`, a step that only reads, on tokio's blocking pool with
-    /// this handle, and returns its value. One call per logical step, not
-    /// per method: a step's reads go in one body. A panic in `body` resumes
-    /// in the caller, as it would have inline. The body owns what it takes,
-    /// so the step runs on whichever thread the pool gives it, and a dropped
-    /// future does not cancel it: the step still runs to its end.
+    /// Runs `body`, a step that only reads, on tokio's blocking pool and
+    /// returns its value. One call per logical step, not per method. A
+    /// panic in `body` resumes in the caller; a dropped future does not
+    /// cancel the step.
     ///
     /// ```
     /// # #[tokio::main(flavor = "current_thread")]
@@ -39,11 +32,9 @@ impl Store {
         self.on_the_blocking_pool(body).await
     }
 
-    /// Runs `body`, a step that writes, on tokio's blocking pool with this
-    /// handle, and returns its value: the step's reads and its write in one
-    /// body, so nothing else of the caller's runs between them. The rest is
-    /// as [`Store::reading`]. Kept apart from it so a step that writes can
-    /// move to a writer thread of its own without touching a caller.
+    /// Runs `body`, a step that writes, as [`Store::reading`] does: the
+    /// step's reads and its write in one body, so nothing of the caller's
+    /// runs between them.
     pub async fn writing<T: Send + 'static>(
         self: &Arc<Self>,
         body: impl FnOnce(&Store) -> Result<T> + Send + 'static,
@@ -51,8 +42,8 @@ impl Store {
         self.on_the_blocking_pool(body).await
     }
 
-    /// `body` on the blocking pool. A runtime that shuts down before the
-    /// pool ran it cancels it, which surfaces as an I/O error.
+    /// `body` on the blocking pool. A runtime that shuts down first cancels
+    /// it, which surfaces as an I/O error.
     async fn on_the_blocking_pool<T: Send + 'static>(
         self: &Arc<Self>,
         body: impl FnOnce(&Store) -> Result<T> + Send + 'static,
@@ -78,9 +69,8 @@ mod tests {
     use crate::store::StoreError;
     use crate::testing::WriteLockHold;
 
-    /// A write that waits out another connection's lock waits on the
-    /// blocking pool, so another task on the runtime's one worker still
-    /// runs, and the write commits once the lock goes.
+    /// A write waiting out another connection's lock waits on the blocking
+    /// pool, so another task on the runtime's one worker still runs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_waiting_write_leaves_the_worker_free() {
         let directory = tempfile::tempdir().unwrap();
@@ -107,8 +97,8 @@ mod tests {
         write.await.unwrap().unwrap();
     }
 
-    /// A step the pool never ran, because its runtime shut down first, is
-    /// an I/O error, not a panic, and its body never runs.
+    /// A step the pool never ran because its runtime shut down is an I/O
+    /// error, and its body never runs.
     #[test]
     fn a_step_the_pool_never_ran_is_an_io_error() {
         let runtime = tokio::runtime::Builder::new_current_thread()

@@ -1,39 +1,31 @@
 //! What the pipeline tells the UI beyond row changes.
-//! Swift: `Sources/StenoCore/Events/MeetingEvent.swift` and
-//! `Sources/StenoCore/Pipeline/ProcessingProgress.swift`.
 
 use uuid::Uuid;
 
 use crate::PipelineStage;
 
-/// What a `progress` event carries: one fraction weighted by how long each
-/// stage is expected to take on this machine, and the time the run is
-/// expected to still need. Computed by the pipeline from its run; nothing
-/// else computes a fraction or a pace.
+/// What a `progress` event carries: one fraction weighted by each stage's
+/// expected time, and the time still needed. Only the pipeline computes it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessingProgress {
     pub stage: PipelineStage,
-    /// elapsed / (elapsed + expected remaining) at the moment of posting,
-    /// clamped so it never decreases within one run.
+    /// elapsed / (elapsed + expected remaining), never decreasing within a run.
     pub fraction: f64,
-    /// Where the next progress event is expected to land: the end of the
-    /// stage's share, or the lane boundary inside transcribe. At most 1,
-    /// never below `fraction`.
+    /// Where the next progress event is expected to land; at most 1, never below
+    /// `fraction`.
     pub next_fraction: f64,
     /// Wall clock the run is expected to still take.
     pub estimated_remaining_seconds: f64,
     /// True while any rate behind the estimate is still a seed.
     pub is_estimate_seeded: bool,
-    /// The lane this event starts inside `transcribe`, zero based; 0 for
-    /// every other stage.
+    /// The lane this event starts inside `transcribe`; 0 for other stages.
     pub lane: usize,
     /// How many lanes `transcribe` runs over; 1 for every other stage.
     pub lane_count: usize,
 }
 
 impl ProcessingProgress {
-    /// `(next_fraction - fraction) / (1 - fraction)` of the remaining time,
-    /// so no presenter divides.
+    /// The share of the remaining time until `next_fraction`.
     #[must_use]
     pub fn expected_seconds_to_next_event(&self) -> f64 {
         if self.fraction >= 1.0 {
@@ -45,7 +37,6 @@ impl ProcessingProgress {
 }
 
 /// What the pipeline and the store tell the UI beyond row changes.
-/// Swift: `MeetingEvent`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MeetingEvent {
     /// Posted as each stage starts, once per lane inside `transcribe`.
@@ -58,35 +49,21 @@ pub enum MeetingEvent {
         meeting_id: Uuid,
         speaker_ids: Vec<Uuid>,
     },
-    /// Posted once the `retention` stage has written the asset's expiry
-    /// (`None` for keep forever): the run is over and the files may be due.
-    /// Not posted while any delivery of the meeting is pending or failed.
+    /// Posted once retention has written the asset's expiry; not while a delivery
+    /// is pending or failed.
     RetentionApplied { meeting_id: Uuid },
     /// Posted once a meeting's rows are gone.
     Deleted { meeting_id: Uuid },
-    /// Posted when a run is refused because a model it needs is not
-    /// installed: the meeting stays `queued` with no failure reason on its
-    /// row and is processed once the models are installed. Rust only: the Swift
-    /// pipeline downloaded the model inside the run.
+    /// A model the run needs is not installed: the meeting stays `queued`.
     ModelsMissing { meeting_id: Uuid },
-    /// Posted when a run meets the store locked by another process (the
-    /// other app, another program) past its busy timeout: the meeting
-    /// stays `queued` with what the run committed and is processed again
-    /// once the store lets the run through. Rust only: the Swift pipeline
-    /// failed the meeting.
+    /// Another process held the store past its busy timeout: the meeting stays
+    /// `queued` and is processed again later.
     StoreBusy { meeting_id: Uuid },
-    /// Posted when a job waits to run an in-process speech engine (`CoreML`
-    /// on the Mac) until the recording under way has stopped: an abort in
-    /// the engine would end the recording too. The meeting stays `queued`
-    /// or `processing`, and the job goes on once the recorder is idle. Rust
-    /// only: the Swift pipeline ran `CoreML` beside a recording.
+    /// A job waits for the recording to stop before running an in-process speech
+    /// engine, whose abort would end the recording too.
     WaitingForRecording { meeting_id: Uuid },
-    /// Posted when a summary re-run or a re-export fails after the
-    /// pipeline accepted it. The services start both in the background and
-    /// return at once, so this is how the failure reaches the detail's
-    /// error line; a refusal (meeting busy, no summarizer) is returned to
-    /// the caller instead. Swift had no event: `MeetingDetailViewModel`
-    /// awaited the call and showed its error.
+    /// A background summary re-run or re-export failed after the pipeline
+    /// accepted it.
     OperationFailed {
         meeting_id: Uuid,
         operation: MeetingOperation,
@@ -105,8 +82,7 @@ pub enum MeetingOperation {
 }
 
 impl MeetingOperation {
-    /// The words the detail puts before `failed: <reason>`, as
-    /// `MeetingDetailViewModel` names the operation.
+    /// The words the detail puts before `failed: <reason>`.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {

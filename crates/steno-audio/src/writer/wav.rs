@@ -1,7 +1,6 @@
 //! RIFF/WAVE: the streaming 16 kHz mono Int16 sidecar writer and a reader
 //! for any PCM WAV (16-bit integer or 32-bit float, any rate, any channel
-//! count). Swift: `Sources/StenoAudio/Writer/WAVStreamWriter.swift` and
-//! `WAVFile.swift`.
+//! count).
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -13,9 +12,8 @@ use super::io_error;
 use crate::capture::CaptureError;
 
 /// Streams 16 kHz mono Int16 PCM into a RIFF/WAVE file: header with zero
-/// sizes first, samples appended per frame, sizes patched by `finish()`.
-/// A file whose process died before `finish` has zero sizes; the master
-/// CAF is the recoverable copy, and the decoder rebuilds the lane from it.
+/// sizes first, samples appended, sizes patched by `finish()` (or by
+/// [`Self::recover`] after a crash).
 pub struct WavStreamWriter {
     path: PathBuf,
     sample_rate: u32,
@@ -41,7 +39,6 @@ impl WavStreamWriter {
     /// The RIFF size field counts everything after itself: the header minus
     /// the 8-byte `RIFF` chunk header, plus the samples.
     pub const RIFF_SIZE_BEFORE_DATA: usize = Self::HEADER_SIZE - 8;
-    /// Int16.
     pub const BYTES_PER_SAMPLE: usize = 2;
     /// Every sidecar's rate in hertz, which [`WavFile::read_16k_mono`]
     /// demands and [`Self::recover`] checks.
@@ -62,26 +59,22 @@ impl WavStreamWriter {
         })
     }
 
-    /// The writer, its syncs made through `syncs`.
     #[cfg(test)]
     fn syncing_through(mut self, syncs: FullSyncs) -> Self {
         self.syncs = syncs;
         self
     }
 
-    /// Where it writes.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Samples written so far.
     #[must_use]
     pub fn samples_written(&self) -> usize {
         self.samples_written
     }
 
-    /// Appends `samples`.
     pub fn write(&mut self, samples: &[i16]) -> Result<(), CaptureError> {
         let Some(file) = self.file.as_mut() else {
             return Ok(());
@@ -107,10 +100,8 @@ impl WavStreamWriter {
         Ok(())
     }
 
-    /// Makes every sample written so far durable with `File::sync_data`,
-    /// as [`CafStreamWriter::sync`](super::CafStreamWriter::sync) does for
-    /// the master. Nothing after `finish`. Rust only: Swift synced at the
-    /// close alone.
+    /// Makes every sample written so far durable with `File::sync_data`.
+    /// Nothing after `finish`.
     pub fn sync(&mut self) -> std::io::Result<()> {
         self.file
             .as_ref()
@@ -130,7 +121,6 @@ impl WavStreamWriter {
         Ok(())
     }
 
-    /// Seconds written.
     #[must_use]
     pub fn duration(&self) -> f64 {
         let samples = self.samples_written as f64;
@@ -138,13 +128,10 @@ impl WavStreamWriter {
     }
 
     /// Finishes a sidecar whose writer died before [`Self::finish`]: the
-    /// sizes come from the file's length, whole samples only (a sample cut
-    /// short at the end is cut off), and the file is synced. Only a file
-    /// whose header is this writer's at [`Self::SIDECAR_SAMPLE_RATE`],
-    /// sizes aside, is touched; a finished one is written back as it was.
-    /// Returns the samples it holds. Crash recovery calls it, so the lane
-    /// reads from its sidecar rather than being rebuilt from the master.
-    /// Rust only: Swift had no recovery.
+    /// sizes come from the file's length, whole samples only, and the file
+    /// is synced. Only a file whose header is this writer's at
+    /// [`Self::SIDECAR_SAMPLE_RATE`], sizes aside, is touched. Returns the
+    /// samples it holds.
     pub fn recover(path: &Path) -> Result<usize, WavReadError> {
         let io = |e: std::io::Error| WavReadError::Io(format!("{}: {e}", path.display()));
         let mut file = OpenOptions::new()
@@ -204,7 +191,6 @@ impl WavStreamWriter {
     }
 }
 
-/// Why a WAV could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WavReadError {
     /// Not 16-bit integer or 32-bit float PCM.
@@ -213,7 +199,6 @@ pub enum WavReadError {
     /// Not a RIFF/WAVE file, or a chunk is truncated.
     #[error("malformed WAV file: {0}")]
     Malformed(String),
-    /// A read failed: the path and the error.
     #[error("{0}")]
     Io(String),
 }
@@ -222,7 +207,6 @@ pub enum WavReadError {
 /// and common recorders produce.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WavFile {
-    /// Hertz.
     pub sample_rate: u32,
     /// 16 or 32.
     pub bits_per_sample: u16,
@@ -233,27 +217,23 @@ pub struct WavFile {
 }
 
 impl WavFile {
-    /// Frames per channel.
     #[must_use]
     pub fn frame_count(&self) -> usize {
         self.channels.first().map_or(0, Vec::len)
     }
 
-    /// Seconds.
     #[must_use]
     pub fn duration(&self) -> f64 {
         let frames = self.frame_count() as f64;
         frames / f64::from(self.sample_rate)
     }
 
-    /// Reads the whole file.
     pub fn read(path: &Path) -> Result<Self, WavReadError> {
         let data = std::fs::read(path)
             .map_err(|e| WavReadError::Io(format!("{}: {e}", path.display())))?;
         Self::read_bytes(&data)
     }
 
-    /// Parses `data` as RIFF/WAVE.
     pub fn read_bytes(mut data: &[u8]) -> Result<Self, WavReadError> {
         let layout = WavLayout::read(&mut data)?;
         let bytes_per_sample = layout.bytes_per_sample();
@@ -273,9 +253,8 @@ impl WavFile {
         })
     }
 
-    /// The strict sidecar reader: 16 kHz mono, as core's `WAVAudioDecoder`.
-    /// Reads a block at a time into a buffer of the lane's length, so
-    /// nothing but the lane is held.
+    /// The strict sidecar reader: 16 kHz mono, read a block at a time into
+    /// a buffer of the lane's length.
     pub fn read_16k_mono(path: &Path) -> Result<Vec<f32>, WavReadError> {
         let io = |e: std::io::Error| WavReadError::Io(e.to_string());
         let mut file = WindowedFile::open(path).map_err(io)?;
@@ -313,7 +292,6 @@ impl WavFile {
         Ok(layout.frames as f64 / f64::from(layout.sample_rate.max(1)))
     }
 
-    /// Frames per read in `read_16k_mono`.
     const BLOCK_FRAMES: usize = 32_768;
 }
 
@@ -324,16 +302,13 @@ struct WavLayout {
     sample_rate: u32,
     bits_per_sample: u16,
     is_float: bool,
-    /// At least one.
     channels: usize,
-    /// The file offset of the first sample.
     start: usize,
     /// Whole frames from `start`.
     frames: usize,
 }
 
 impl WavLayout {
-    /// Walks the chunks of `source`.
     fn read(source: &mut impl ReadAt) -> Result<Self, WavReadError> {
         let len = source.len();
         let mut read = |offset: usize, buffer: &mut [u8]| {
@@ -383,8 +358,7 @@ impl WavLayout {
                     ));
                 }
                 b"data" => samples = Some(body..body + size),
-                // Symphonia reads every header after it out of step, as
-                // `codec::sizes` says, and refuses the same file.
+                // Symphonia would read every header after it out of step.
                 b"LIST" if size % 2 == 1 && samples.is_none() => {
                     return Err(WavReadError::Malformed(
                         "a LIST chunk of odd size before the audio".into(),
@@ -453,9 +427,8 @@ mod tests {
 
     use super::*;
 
-    /// As the master's: every `sync` is one full sync of the data, through
-    /// `durable`'s fallback, and `finish` one of everything; nothing syncs
-    /// after `finish`.
+    /// As the master's: every `sync` is one full sync of the data, and
+    /// `finish` one of everything; nothing syncs after `finish`.
     #[test]
     fn each_sync_is_one_full_sync_and_the_finish_one_more() {
         static PERIODIC: AtomicUsize = AtomicUsize::new(0);

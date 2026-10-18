@@ -1,84 +1,14 @@
 //! The real backend on macOS: process tap + private aggregate device + one
 //! IOProc, with device-change listeners, coalescing and the report that
-//! makes the session rebuild.
-//! Swift: `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`.
-//!
-//! `System` comes from the tap, `Mic` and `Mixed` from the first channel of
-//! the chosen input device, which the aggregate resamples to the output
-//! device's clock. That clock is 48 kHz where the output device accepts it;
-//! a Bluetooth headset in the hands-free profile keeps 24, 16 or 8 kHz,
-//! and the stream then reports that rate for the processing thread to
-//! convert.
-//! A chosen device that is not connected records the default input
-//! instead (`chosen_or_default_input`), and the device list is watched so
-//! the rebuild returns to it once it is back; Swift fails the start with
-//! `InputDeviceUnavailable` there (a deliberate parity change: no recording
-//! is lost to a missing microphone).
-//!
-//! Device notifications (a default device moving, a sub-device dying, the
-//! aggregate changing rate) arrive on the HAL's notification thread and
-//! are coalesced for [`LiveCaptureBackend::COALESCE_DELAY`] on a watcher
-//! thread, then the devices are resolved again and compared with what the
-//! capture started on ([`DeviceSnapshot::difference`]); a capture on the
-//! fallback also resolves them every
-//! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification and
-//! looks only for another microphone
-//! ([`DeviceSnapshot::input_difference`]). A burst that holds
-//! `kAudioHardwarePropertyServiceRestarted` (`coreaudiod` restarted, and
-//! the aggregate with it) is reported as
-//! [`DeviceChangeReason::AudioServiceRestarted`] whatever the devices read
-//! (Rust only: Swift does not listen for it). Nothing changed means the burst
-//! is logged and ignored; otherwise the sink gets one
-//! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
-//! `start` again. Nothing here runs on the IO thread except `io_proc`,
-//! which only calls [`deliver`], marks the first callback's host time
-//! ([`FirstCallback`]) and writes the audio the IO thread missed as
-//! silence first (below), and `silent_io_proc` (below), which only zeroes
-//! its output; `stop()` logs that callback's offset from the start
-//! at `info`, so a call recording shows whether the IOProc ran at once
-//! (at `debug` while the session's restarts go on, `start_log`).
+//! makes the session rebuild. A call capture also runs a silent output
+//! IOProc on the aggregate's clock master, since a tap aggregate runs only
+//! while a process the tap includes plays.
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,
 //! `AudioDeviceDestroyIOProcID`, the callback context, listeners,
 //! `AudioHardwareDestroyAggregateDevice`, `AudioHardwareDestroyProcessTap`,
-//! and last the silent output IOProc (below), which starts before the
-//! aggregate's IOProc. A `start` that fails part way drops what it built in
-//! the same order.
-//!
-//! Call mode is its own output client (A10 of
-//! `.plans/2026-10-07-stable-promotion.md`). An aggregate with a process
-//! tap runs only while a process the tap includes drives the output: with
-//! nothing playing, `AudioDeviceStart` succeeds and the IOProc is never
-//! called, so neither the tap nor the microphone delivered until some app
-//! played (0 callbacks on a Mac over SSH; a silent `afplay` already
-//! playing gave the first at 67 ms). So the tap includes Steno's own
-//! process, and a call capture starts a silent IOProc of its own
-//! (`silent_io_proc`) on the aggregate's clock master, the system output,
-//! read from the aggregate once it is built, and before the aggregate's
-//! IOProc: the first callback then comes within 100 ms of `start`
-//! returning. On a Mac whose default output was another device than the
-//! system output, the tap aggregate ran with the silent IOProc on the
-//! clock master alone, the default output never started. The silent
-//! IOProc's input streams are off. It is rebuilt with the capture, so a
-//! change of the system output moves it to the new clock master; one that
-//! does not start is logged, and the capture then records only while
-//! another app plays, as before A10: the session restarts it on its
-//! backoff until one runs, on the microphone it recorded, and logs that
-//! about once a minute (`CaptureSession`). No in-app playback while recording,
-//! enforced by [`Playback`](crate::playback::Playback): Steno's own output
-//! would land in the system lane, and the capture session holds that gate
-//! while it records. In-person mode has no tap and needs no output client.
-//!
-//! An IO thread the scheduler holds up past its deadline misses cycles:
-//! the HAL reports an overload, and the next input time stamp's sample time
-//! sits past where the last buffer ended (A18; the design is in
-//! [`realtime::missed`](crate::realtime::missed)). `io_proc` reads that
-//! sample time and writes what was missed as zeros before the callback's
-//! own frames; `stop()` reads `AudioDeviceGetCurrentTime` before the IOProc
-//! stops. A time stamp without a valid sample time resets the clock. A
-//! first callback that came later than the start allows
-//! ([`FirstCallback::missed`]) counts the time before it unfilled at the
-//! stop of a recording's first start.
+//! and last the silent output IOProc. A `start` that fails part way drops
+//! what it built in the same order.
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -121,11 +51,10 @@ struct CallbackContext {
     sources: Vec<LaneSource>,
     first_callback: FirstCallback,
     /// Where the delivered audio ends in the aggregate's input sample time,
-    /// and how far the IO cycle's own sample time (`now`) ran ahead of the
-    /// input's in the last callback, for `stop()`'s reading. `Cell`s: only
-    /// the IO thread touches them, one callback at a time, and only through
-    /// the shared reference `io_proc` makes; `stop()` reads them once the
-    /// IOProc is destroyed.
+    /// and how far the IO cycle's own sample time ran ahead of the input's
+    /// in the last callback. `Cell`s: only the IO thread touches them, one
+    /// callback at a time, through the shared reference `io_proc` makes;
+    /// `stop()` reads them once the IOProc is destroyed.
     clock: Cell<CycleClock>,
     input_lag: Cell<f64>,
 }
@@ -156,9 +85,7 @@ fn missed_before(clock: &Cell<CycleClock>, time: &AudioTimeStamp, frames: usize)
 }
 
 /// What the IO thread missed after its last callback, for a device whose
-/// sample time read `now` at the stop ([`sample_time`]):
-/// [`CycleClock::missed_until`] at the input sample time that matches it,
-/// nothing for one before the first.
+/// sample time read `now` at the stop.
 fn missed_at_stop(clock: CycleClock, input_lag: f64, now: Option<f64>) -> Missed {
     now.map(|now| now - input_lag)
         .filter(|input| *input >= 0.0)
@@ -169,9 +96,9 @@ fn missed_at_stop(clock: CycleClock, input_lag: f64, now: Option<f64>) -> Missed
 
 /// The IOProc. Builds a stack array of [`BufferView`]s from the HAL's
 /// buffer list and hands it to [`deliver`], after marking the first
-/// callback's host time and writing the frames the IO thread missed before
-/// it as zeros ([`missed_before`]): no allocation, no lock, no syscall;
-/// behind [`hal::abort_on_panic`].
+/// callback's host time and writing the frames the IO thread missed as
+/// zeros: no allocation, no lock, no syscall; behind
+/// [`hal::abort_on_panic`].
 unsafe extern "C-unwind" fn io_proc(
     _device: Id,
     now: NonNull<AudioTimeStamp>,
@@ -223,10 +150,9 @@ unsafe extern "C-unwind" fn io_proc(
 }
 
 /// The call capture's silent output IOProc on the aggregate's clock
-/// master: writes zeros over its output buffers ([`silence_output`]; the
-/// HAL has zeroed them already) and reads nothing, so the capture is a
-/// client of the output that the tap includes. No allocation, no lock, no
-/// syscall; behind [`hal::abort_on_panic`]. See the module doc.
+/// master: zeroes its output buffers and reads nothing, so the capture is
+/// a client of the output that the tap includes. No allocation, no lock,
+/// no syscall; behind [`hal::abort_on_panic`].
 unsafe extern "C-unwind" fn silent_io_proc(
     _device: Id,
     _now: NonNull<AudioTimeStamp>,
@@ -245,13 +171,8 @@ unsafe extern "C-unwind" fn silent_io_proc(
 }
 
 /// Starts [`silent_io_proc`], output only, on the aggregate's clock master
-/// as the aggregate reports it, read once; on `requested`, the device the
-/// aggregate was built with as its main sub-device, when that read fails.
-/// The device it runs on is logged at `info` (its name read for the line
-/// alone), and a failure to start at `warn`: the capture then goes on
-/// without it, as it did before A10; both at `debug` while the session's
-/// restarts go on (`start_log`), so a call whose silent output keeps
-/// failing logs it once a streak, not at every restart.
+/// as the aggregate reports it; on `requested` when that read fails. A
+/// failure to start is logged and the capture goes on without it.
 fn start_silent_output(aggregate: &AggregateDevice, requested: Id) -> Option<IoProc> {
     let device = aggregate.main_sub_device().unwrap_or_else(|error| {
         start_log!(
@@ -282,10 +203,9 @@ fn start_silent_output(aggregate: &AggregateDevice, requested: Id) -> Option<IoP
     }
 }
 
-/// The input a capture asked for `uid` records now ([`chosen_or_default`]):
-/// the chosen device while it is connected and has input channels, else
-/// the default input, with `true` beside it. `None` when no input resolves
-/// at all.
+/// The input a capture asked for `uid` records now: the chosen device
+/// while it is connected and has input channels, else the default input,
+/// with `true` beside it. `None` when no input resolves at all.
 fn chosen_or_default_input(uid: Option<&str>) -> Option<(AudioDeviceInfo, bool)> {
     chosen_or_default(
         uid,
@@ -306,10 +226,9 @@ struct DeviceProbe {
 }
 
 impl DeviceProbe {
-    /// The devices as they are now: the defaults resolved again (the input
-    /// as [`chosen_or_default_input`] picks it, so a chosen device coming
-    /// back reads as a change), the started devices' `DeviceIsAlive`, the
-    /// aggregate's rate (0 once it is gone).
+    /// The devices as they are now: the defaults resolved again, the
+    /// started devices' `DeviceIsAlive`, the aggregate's rate (0 once it is
+    /// gone).
     fn resolve(&self) -> DeviceSnapshot {
         let output = AudioDevices::default_system_output().ok();
         let input = self
@@ -328,7 +247,6 @@ impl DeviceProbe {
     }
 }
 
-/// What the listeners share with the watcher thread.
 #[derive(Default)]
 struct WatchState {
     /// The last notification's selector (a service restart's kept over
@@ -357,9 +275,8 @@ impl Watcher {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// One notification for the watch loop: the latest of its burst,
-    /// judged once the burst settles. A service restart outranks the
-    /// notifications that follow it in the same burst.
+    /// One notification for the watch loop, judged once the burst settles.
+    /// A service restart outranks the notifications that follow it.
     fn notify(&self, selector: AudioObjectPropertySelector) {
         let mut state = self.lock();
         let kept = match state.pending {
@@ -385,16 +302,12 @@ struct Active {
     watcher: Arc<Watcher>,
     watcher_thread: Option<JoinHandle<()>>,
     /// The host time just before the device started, and the same moment
-    /// on the monotonic clock: where the first callback is measured from.
+    /// on the monotonic clock.
     started: (u64, Instant),
-    /// The stream's rate, for what came before the first callback.
     sample_rate: f64,
-    /// The recording's first start on the sink, not a rebuild's restart
-    /// ([`LaneFrameSink::first_start`]).
     first_start: bool,
 }
 
-/// The macOS capture backend; see the module doc.
 pub struct LiveCaptureBackend {
     active: Mutex<Option<Active>>,
 }
@@ -417,11 +330,8 @@ impl LiveCaptureBackend {
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
     /// How often a capture that records the fallback resolves the devices
-    /// without a notification. A chosen device can come back with no
-    /// notification of its own: one that read no input channels for a
-    /// moment while the device list changed, one that settled after its
-    /// `Devices` notification, or one that came back before the
-    /// listeners were registered. Rust only: Swift has no fallback.
+    /// without a notification: a chosen device can come back with no
+    /// notification of its own.
     pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
 
     #[must_use]
@@ -440,10 +350,8 @@ impl LiveCaptureBackend {
     /// The watcher thread: waits for a notification, lets the burst settle
     /// for `COALESCE_DELAY` after the last one, then hands it to `judge`,
     /// outside the lock; with `recheck`, also each time that long passes
-    /// without a notification. It belongs to one `start`: `stop()` raises
-    /// `WatchState::stop` and joins it before the backend can start again,
-    /// so a report never reaches a later capture (Swift compared a
-    /// generation counter instead; the join makes that unnecessary here).
+    /// without a notification. `stop()` joins it before the backend can
+    /// start again, so a report never reaches a later capture.
     fn watch(watcher: &Watcher, recheck: Option<Duration>, mut judge: impl FnMut(Judged)) {
         let mut state = watcher.lock();
         loop {
@@ -488,22 +396,14 @@ impl LiveCaptureBackend {
     }
 
     /// The notification the aggregate's rate, read again once the
-    /// listeners are in place, stands for: a rate notification when it is
-    /// no longer the rate the capture started at, none otherwise. A device
-    /// that relocks after [`NominalSampleRate::settle`] gave up, but before
-    /// the rate listener was registered, fires no notification of its own,
-    /// and the stream would keep the old rate's label for the whole
-    /// recording.
+    /// listeners are in place, stands for: a device that relocked before
+    /// the rate listener was registered fires none of its own.
     fn late_rate_notification(started: f64, now: f64) -> Option<AudioObjectPropertySelector> {
         (now != started).then_some(kAudioDevicePropertyNominalSampleRate)
     }
 
-    /// The same for the system output, read again once the listeners are
-    /// in place (`now`, `None` when none resolves): a system output
-    /// notification when it is not the one the capture was built on. Its
-    /// listener reports only a switch after it was added, so a switch while
-    /// the aggregate was built would leave the capture and its silent
-    /// output on the old clock master.
+    /// The same for the system output: a switch while the aggregate was
+    /// built would otherwise leave the capture on the old clock master.
     fn late_output_notification(
         started: &str,
         now: Option<&str>,
@@ -511,10 +411,8 @@ impl LiveCaptureBackend {
         (now != Some(started)).then_some(kAudioHardwarePropertyDefaultSystemOutputDevice)
     }
 
-    /// The microphone's latency of `frames` in the stream's frames: as it
-    /// is when the microphone is the clock master, rescaled from its own
-    /// `mic_rate` to `stream_rate` otherwise (rounded down; an unreadable
-    /// rate leaves it as it is).
+    /// The microphone's latency of `frames` in the stream's frames,
+    /// rescaled from its own `mic_rate` when it is not the clock master.
     fn mic_latency_frames(
         frames: usize,
         on_clock_master: bool,
@@ -536,9 +434,8 @@ impl LiveCaptureBackend {
 
     /// What a judgement reports of the devices `resolved` now: after a
     /// notification their first difference from `baseline`, on a re-check
-    /// only another microphone ([`DeviceSnapshot::input_difference`]).
-    /// A restart of the audio service is a change whatever they read: the
-    /// aggregate is gone, and the devices may resolve as before.
+    /// only another microphone. A restart of the audio service is a change
+    /// whatever they read.
     fn judgement(
         judged: Judged,
         resolved: &DeviceSnapshot,
@@ -555,8 +452,6 @@ impl LiveCaptureBackend {
         }
     }
 
-    /// Resolves the devices (the HAL reads, outside the watcher's lock)
-    /// and reports what [`Self::judgement`] finds.
     fn judge(judged: Judged, probe: &DeviceProbe, baseline: &DeviceSnapshot, sink: &LaneFrameSink) {
         let what = match judged {
             Judged::Notification(selector) => {
@@ -565,7 +460,6 @@ impl LiveCaptureBackend {
             Judged::Recheck => "fallback re-check".to_owned(),
         };
         match Self::judgement(judged, &probe.resolve(), baseline) {
-            // Every `FALLBACK_RECHECK`, so not logged.
             None if judged == Judged::Recheck => {}
             None => tracing::info!("ignored {what}"),
             Some(reason) => {
@@ -579,8 +473,7 @@ impl LiveCaptureBackend {
 impl CaptureBackend for LiveCaptureBackend {
     /// Returns the stream it opened: the confirmed rate, both device
     /// latencies for the far-end delay, and the resolved [`StreamLayout`].
-    /// One long function on purpose: it is the Swift `start` step for
-    /// step, and every early return tears down what was created by drop.
+    /// Every early return tears down what was created by drop.
     #[allow(clippy::too_many_lines)]
     fn start(
         &self,
@@ -623,8 +516,6 @@ impl CaptureBackend for LiveCaptureBackend {
             None
         };
 
-        // Sub-devices in aggregate order: the output device (clock master),
-        // then the microphone unless it is the same physical device.
         let mut sub_device_uids = vec![output.uid.clone()];
         let mut sub_device_counts = vec![hal::channel_counts(
             output.id,
@@ -644,13 +535,9 @@ impl CaptureBackend for LiveCaptureBackend {
         let aggregate =
             AggregateDevice::new("Steno capture", &output.uid, &sub_device_uids, &tap_uids)?;
 
-        // The aggregate inherits the clock master's rate. Ask for 48 kHz,
-        // then read it back: the HAL applies the change asynchronously, and
-        // a device that cannot run at 48 kHz (a headset in the hands-free
-        // profile) keeps its own. The stream then reports that rate, which
-        // the processing thread converts; labelling it 48 kHz would leave a
-        // pitch-shifted master. A rate that settles only after this gave up
-        // is caught once the listeners are in place (below).
+        // Ask for 48 kHz, then read it back: the HAL applies it
+        // asynchronously, and a device that cannot (a hands-free headset)
+        // keeps its own rate, which the processing thread converts.
         if aggregate.nominal_sample_rate() != SAMPLE_RATE {
             let _ = aggregate.set_nominal_sample_rate(SAMPLE_RATE);
         }
@@ -661,7 +548,6 @@ impl CaptureBackend for LiveCaptureBackend {
             || std::thread::sleep(NominalSampleRate::INTERVAL),
         );
         if !RateConverter::supports(sample_rate) {
-            // Whole hertz.
             return Err(CaptureError::UnsupportedSampleRate {
                 actual: sample_rate as u32,
             });
@@ -677,10 +563,8 @@ impl CaptureBackend for LiveCaptureBackend {
             mic_sub_device,
         )?;
 
-        // The call capture's own output client, started once the aggregate
-        // is built (building it over a running output device took about
-        // 300 ms longer on a Mac) and before the aggregate's IOProc; see the
-        // module doc.
+        // Started once the aggregate is built and before the aggregate's
+        // IOProc.
         silent_output = if needs_tap {
             start_silent_output(&aggregate, output.id)
         } else {
@@ -708,14 +592,9 @@ impl CaptureBackend for LiveCaptureBackend {
             )?
         };
 
-        // Device changes: the default devices moving, a sub-device dying,
-        // the aggregate changing rate. The tap mirrors the default output
-        // device (where the call plays), the clock follows the system
-        // output device (alerts); a change of either moves the far-end
-        // alignment, so both are watched. The listener carries no value,
-        // so every notification is judged by resolving the devices again
-        // after the burst settles. A restart of `coreaudiod` destroys the
-        // aggregate and the tap, which no device property tells.
+        // Device changes are judged by resolving the devices again after
+        // the burst settles. Both default and system output are watched:
+        // either moves the far-end alignment.
         let mut selectors: Vec<(Id, AudioObjectPropertySelector)> = vec![
             (SYSTEM, kAudioHardwarePropertyServiceRestarted),
             (SYSTEM, kAudioHardwarePropertyDefaultSystemOutputDevice),
@@ -723,9 +602,6 @@ impl CaptureBackend for LiveCaptureBackend {
             (output.id, kAudioDevicePropertyDeviceIsAlive),
             (aggregate.id, kAudioDevicePropertyNominalSampleRate),
         ];
-        // The default input matters while it is what the microphone lane
-        // records; the device list while a chosen device could come back
-        // (or go: its own `DeviceIsAlive` covers that).
         if let Some(mic) = &mic {
             selectors.push((mic.id, kAudioDevicePropertyDeviceIsAlive));
             if input_device_uid.is_none() || is_fallback {
@@ -760,9 +636,8 @@ impl CaptureBackend for LiveCaptureBackend {
                 .ok()
             })
             .collect();
-        // Any change from here on notifies; one before its listener was in
-        // place (the rate, or the system output the aggregate and its silent
-        // output were built on) is judged as if it had.
+        // A change before its listener was in place is judged as if it
+        // had notified.
         let late = [
             Self::late_rate_notification(sample_rate, aggregate.nominal_sample_rate()),
             Self::late_output_notification(
@@ -774,13 +649,9 @@ impl CaptureBackend for LiveCaptureBackend {
             watcher.notify(selector);
         }
 
-        // The far-end delay: the microphone's input path plus the
-        // loudspeaker's output path, each latency plus safety offset, read
-        // on the devices themselves rather than the aggregate, so each is in
-        // its own device's frames. The output device is the clock master,
-        // at `sample_rate`; a microphone on another device keeps its own
-        // rate (a 48 kHz built-in microphone beside a headset at 24 kHz) and
-        // is rescaled to the stream's.
+        // The far-end delay: microphone input path plus loudspeaker output
+        // path, read on the devices themselves, the microphone rescaled to
+        // the stream's rate.
         let input_latency = mic.as_ref().map_or(0, |m| {
             Self::mic_latency_frames(
                 hal::latency_frames(m.id, kAudioObjectPropertyScopeInput),
@@ -873,10 +744,8 @@ impl CaptureBackend for LiveCaptureBackend {
         } = active;
         let now = io_proc.current_time();
         drop(io_proc);
-        // The IOProc is destroyed: nothing writes the context any more, so
-        // what the IO thread missed after its last callback goes into the
-        // sink from here, unless the session stops for a rebuild, whose gap
-        // covers that time.
+        // The IOProc is destroyed: what the IO thread missed after its last
+        // callback goes into the sink, unless the stop is for a rebuild.
         if !context.sink.device_change_reported() {
             context.sink.write_missed(missed_at_stop(
                 context.clock.get(),
@@ -884,9 +753,8 @@ impl CaptureBackend for LiveCaptureBackend {
                 now.as_ref().and_then(sample_time),
             ));
         }
-        // What came before the first callback, past the start's allowance,
-        // after the recording's first start only, whatever the stop is for
-        // (the rule: `realtime::missed`, "Before the first callback").
+        // What came before the first callback, after the recording's first
+        // start only.
         if first_start {
             context.sink.count_before_first(
                 context
@@ -913,22 +781,16 @@ impl CaptureBackend for LiveCaptureBackend {
         drop(silent_output);
     }
 
-    /// The IOProc runs on the aggregate's clock, silence included: in call
-    /// mode from the start, its silent output driving the tap (A10; see the
-    /// module doc). A call capture whose silent output did not start runs
-    /// only while another app plays, and is restarted as one that stalled,
-    /// on the microphone it recorded (`stall_may_be_the_microphone`).
+    /// The IOProc runs on the aggregate's clock, silence included. A call
+    /// capture whose silent output did not start runs only while another
+    /// app plays, and is restarted as one that stalled.
     fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
         true
     }
 
-    /// Only without the system lane: an in-person capture runs on the
-    /// microphone's clock, a call capture on the output's (the aggregate's
-    /// clock master), so a call capture that stops delivering says nothing
-    /// of the microphone, and one whose silent output did not start stops
-    /// until another app plays. The session then keeps a chosen
-    /// microphone through the restarts rather than giving it up for the
-    /// default input. Rust only.
+    /// Only without the system lane: a call capture runs on the output's
+    /// clock, so its stall says nothing of the microphone, and the session
+    /// keeps a chosen microphone through the restarts.
     fn stall_may_be_the_microphone(&self, lanes: &[AudioLane]) -> bool {
         !lanes.contains(&AudioLane::System)
     }
@@ -950,8 +812,7 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
 
-    /// At the stop, the device's sample time less how far the IO cycle's
-    /// own ran ahead of the input's is read against where the delivered
+    /// At the stop, the missed frames are read against where the delivered
     /// audio ends, the callback in flight aside.
     #[test]
     fn the_stop_reads_the_device_time_at_the_input_time() {
@@ -1007,8 +868,7 @@ mod tests {
     }
 
     /// A capture on the fallback judges the devices again with no
-    /// notification, so a chosen device that came back unannounced is
-    /// found; one on the device it asked for waits for a notification.
+    /// notification; one on the device it asked for waits for one.
     #[test]
     fn only_a_capture_on_the_fallback_rechecks_without_a_notification() {
         let (watcher, thread, judgements) = watching(Some(Duration::from_millis(50)));
@@ -1027,10 +887,8 @@ mod tests {
         stop(&watcher, thread);
     }
 
-    /// A rate that settled after `settle` gave up, before the rate listener
-    /// was registered, is judged as a rate notification and reported, so
-    /// the session rebuilds at the rate the device runs at; an unchanged
-    /// rate raises nothing.
+    /// A rate that settled before the rate listener was registered is
+    /// reported; an unchanged rate raises nothing.
     #[test]
     fn a_rate_that_settled_before_its_listener_is_judged_as_a_change() {
         assert_eq!(
@@ -1067,10 +925,8 @@ mod tests {
         );
     }
 
-    /// A system output that switched while the aggregate was built, before
-    /// its listener was registered, is judged as a system output
-    /// notification and reported, so the session rebuilds on the new clock
-    /// master; the same device, read again, raises nothing.
+    /// A system output that switched before its listener was registered is
+    /// reported; the same device raises nothing.
     #[test]
     fn a_system_output_that_switched_before_its_listener_is_judged_as_a_change() {
         assert_eq!(
@@ -1119,9 +975,8 @@ mod tests {
         );
     }
 
-    /// A 48 kHz built-in microphone beside a headset at 24 kHz: its
-    /// latency is halved into the stream's frames, never doubled, while a
-    /// microphone on the clock master keeps its own count.
+    /// A microphone beside a headset at half its rate has its latency
+    /// halved into the stream's frames.
     #[test]
     fn a_microphone_on_its_own_clock_has_its_latency_rescaled() {
         assert_eq!(
@@ -1139,8 +994,7 @@ mod tests {
     }
 
     /// The silent output IOProc zeroes the output list it is handed and
-    /// returns 0. The buffer cases (a null `mData`, a size of 0, the last
-    /// buffer) are `tests/realtime.rs`' `the_silent_output_allocates_nothing`.
+    /// returns 0.
     #[test]
     fn the_silent_output_writes_only_zeros() {
         use objc2_core_audio_types::AudioBuffer;
@@ -1187,9 +1041,7 @@ mod tests {
     }
 
     /// A notification reports the first difference; a re-check only
-    /// another microphone, so a bad read of the outputs, or a microphone
-    /// that did not resolve, costs no rebuild. A restart of the audio
-    /// service is a change with the devices as they were.
+    /// another microphone. A restart of the audio service is a change.
     #[test]
     fn a_recheck_reports_another_microphone_alone() {
         let baseline = DeviceSnapshot {

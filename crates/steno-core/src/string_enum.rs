@@ -1,17 +1,11 @@
-//! `string_enum!`, the one way Steno's Rust crates spell a Swift `String`
-//! enum, and the error its `FromStr` returns.
-//!
-//! A macro rather than `strum`: the case names live next to the variants,
-//! and the macro gives a `const fn as_str` and a `const ALL` slice (Swift's
-//! `CaseIterable`) that routing tables and contract tests use at compile
-//! time. The enums are deliberately not `#[non_exhaustive]`: a case Swift
-//! adds fails to compile here until every match handles it.
+//! `string_enum!`, the one way Steno spells a string-backed enum, and the
+//! error its `FromStr` returns. Not `#[non_exhaustive]`, so a new case fails to
+//! compile until every match handles it.
 
 use thiserror::Error;
 
-/// A case name neither Swift nor Rust knows (Swift's `init?(rawValue:)`
-/// returning nil); an unreadable row or message fails instead of becoming
-/// a default case.
+/// An unknown case name; an unreadable row or message fails instead of
+/// becoming a default case.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("unknown {type_name} case {value:?}")]
 pub struct UnknownCase {
@@ -19,9 +13,8 @@ pub struct UnknownCase {
     pub value: String,
 }
 
-/// A string-backed enum: the case names Swift writes to JSON and to the
-/// database, with `ALL`, `as_str`, `FromStr`, `Display` and serde in that
-/// form.
+/// A string-backed enum: the case names written to JSON and to the database,
+/// with `ALL`, `as_str`, `FromStr`, `Display` and serde in that form.
 #[macro_export]
 macro_rules! string_enum {
     (
@@ -37,10 +30,10 @@ macro_rules! string_enum {
         }
 
         impl $name {
-            /// Every case, in declaration order (Swift's `allCases`).
+            /// Every case, in declaration order.
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
 
-            /// The case name Swift writes to JSON and to the database.
+            /// The case name written to JSON and to the database.
             #[must_use]
             pub const fn as_str(self) -> &'static str {
                 match self { $(Self::$variant => $text),+ }

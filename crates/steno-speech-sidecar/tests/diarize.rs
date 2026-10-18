@@ -1,27 +1,9 @@
 //! The diarizer in the sidecar: [`SidecarSpeechEngine::diarize`] and
-//! `steno_diarize::SidecarDiarizer` against the real binary. The fake
-//! engine's tests need no models: the clusters cross bit for bit, a child
-//! started only to diarize is stopped after the call, one that holds
-//! speech's models is kept, a child that dies, aborts, hangs or overruns
-//! the memory ceiling while it diarizes fails that call, leaves `DirectML`
-//! alone and is replaced by the next, one that failed while idle is
-//! replaced before the diarization, and a refused load keeps a child that
-//! holds speech. A child that aborts, hangs or overruns the ceiling in the
-//! diarizer's load is killed and fails the call as a failed load, which
-//! `SidecarDiarizer` checks against the manifest: files of the right size
-//! that fail their checksum are deleted and the call is not installed,
-//! two such calls at once included, while an abort in the diarization
-//! itself stays the sidecar's crash. The kill warning names the failure in
-//! fixed words, its crash report at debug only. The real engine refuses
-//! model files it cannot load without dying.
-//!
-//! The ignored tests run the real models: set `STENO_MODELS_DIR` to a
-//! models directory holding `onnx/diarization/`. They compare the sidecar's
-//! result with the in-process pipeline's on the repository's two-voice
-//! fixture (exactly: the same code on the same ops), kill a child
-//! mid-diarization of ten minutes of it, and fail loads over a copy of the
-//! models: intact files are kept, and only one that fails its checksum is
-//! deleted.
+//! `steno_diarize::SidecarDiarizer` against the real binary. The fake engine's
+//! tests cover the bit-exact round trip, child lifetime, crashes, hangs and
+//! overruns in the load and the run, and the checksum check after a failed
+//! load. The ignored tests run the real models from `STENO_MODELS_DIR` and
+//! compare them with the in-process pipeline.
 
 mod common;
 
@@ -39,8 +21,7 @@ use steno_diarize::{DiarizeError, DiarizerConfig, Install, Pipeline, SidecarDiar
 use steno_speech::sidecar::{DiarizerModels, directml_switched_off};
 use steno_speech::{ModelStore, SidecarConfig, SidecarError, SidecarSpeechEngine, SpeechError};
 
-/// The pid the `--fault-once` marker in `dir` holds, once the faulting
-/// child has written it.
+/// The pid the `--fault-once` marker in `dir` holds, once written.
 fn faulted(dir: &tempfile::TempDir) -> Option<u32> {
     std::fs::read_to_string(dir.path().join("faulted"))
         .ok()?
@@ -57,8 +38,8 @@ fn fake_models() -> DiarizerModels {
     }
 }
 
-/// Whether `error` is a diarizer load the child refused, reporting it
-/// itself, rather than one it died or hung in.
+/// Whether `error` is a diarizer load the child refused itself, rather than one
+/// it died or hung in.
 fn refused_load(error: &SidecarError) -> bool {
     match error {
         SidecarError::DiarizerLoad(load) => matches!(**load, SidecarError::Remote(_)),
@@ -106,8 +87,8 @@ async fn a_child_started_to_diarize_is_stopped_after_the_call_and_one_with_speec
     assert_eq!(engine.spawns(), 2);
     assert_eq!(engine.pid(), None);
 
-    // With speech's models loaded, the diarizer uses that child and
-    // leaves it for speech, which still answers in it.
+    // With speech's models loaded, the diarizer uses that child and leaves it
+    // for speech.
     engine.prepare().await.unwrap();
     let pid = engine.pid().unwrap();
     assert_diarizes(&engine, &tone(1.5)).await;
@@ -135,8 +116,7 @@ async fn a_child_killed_mid_diarization_fails_the_call_and_the_next_call_recover
                 .map_err(|e| e.to_string())
         })
     };
-    // The diarization is in flight once the child has read it and written
-    // its marker (a blocking wait: the runtime has other workers).
+    // The diarization is in flight once the child has written its marker.
     let pid = within_ten_seconds(|| faulted(&dir)).expect("the child faulted");
     assert_eq!(engine.pid(), Some(pid));
     assert!(!running.is_finished());
@@ -148,10 +128,8 @@ async fn a_child_killed_mid_diarization_fails_the_call_and_the_next_call_recover
     assert_eq!(engine.spawns(), 2);
 }
 
-/// An abort inside a diarization, with speech loaded on `DirectML` where
-/// that is asked for: the call fails as a crash, the child is gone, and
-/// `DirectML` stays on, as the diarizer runs on the CPU; the next calls
-/// load speech on it again and diarize.
+/// An abort inside a diarization fails the call as a crash, and `DirectML`
+/// stays on, as the diarizer runs on the CPU; the next calls work again.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_abort_while_diarizing_is_a_crash_that_leaves_directml_on() {
     let (engine, _dir) = engine_with_fault("abort-diarizing", |config| {
@@ -195,8 +173,8 @@ async fn a_diarization_the_child_fails_keeps_a_child_that_holds_speech() {
     assert_eq!(engine.spawns(), 1);
 }
 
-/// A diarization that never answers is killed at its deadline (the floor,
-/// for a second of audio); the next call diarizes in a new child.
+/// A diarization that never answers is killed at its deadline; the next call
+/// diarizes in a new child.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hung_diarization_is_killed_at_the_deadline() {
     let (engine, _dir) = engine_with_fault("hang", |c| {
@@ -213,15 +191,15 @@ async fn a_hung_diarization_is_killed_at_the_deadline() {
     assert_eq!(engine.pid(), None);
 }
 
-/// A hang in a child that holds speech ends that child too; speech and the
-/// diarizer both work again in a new one.
+/// A hang in a child that holds speech ends that child too; both work again in
+/// a new one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hung_diarization_in_a_child_with_speech_ends_it_and_both_recover() {
     let (engine, _dir) = engine_with_fault("hang", |c| {
         c.transcribe_timeout_floor = Duration::from_secs(2);
     });
-    // The hang is the first transcription's or diarization's, so speech
-    // is only loaded here.
+    // The hang is the first transcription's or diarization's, so speech is only
+    // loaded here.
     engine.prepare().await.unwrap();
     let pid = engine.pid().unwrap();
     let error = engine.diarize(fake_models(), &tone(1.0)).await.unwrap_err();
@@ -258,7 +236,7 @@ async fn a_diarization_over_the_memory_ceiling_is_killed() {
 }
 
 /// A child that died between requests is replaced before the diarization,
-/// without an error; the new one holds no speech, so it stops after.
+/// without an error, and stops after.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_died_idle_is_replaced_before_a_diarization() {
     let dir = tempfile::tempdir().unwrap();
@@ -270,9 +248,8 @@ async fn a_child_that_died_idle_is_replaced_before_a_diarization() {
     assert_eq!(engine.spawns(), 2);
 }
 
-/// A child over the ceiling while idle, after speech asked for `DirectML`
-/// where that is asked for, is replaced before the diarization, without an
-/// error; found by a diarization, the overrun leaves `DirectML` on.
+/// A child over the ceiling while idle is replaced before the diarization,
+/// without an error; found by a diarization, the overrun leaves `DirectML` on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_over_the_ceiling_while_idle_is_replaced_before_a_diarization() {
     let (engine, _dir) = engine_with_fault("swell", |config| {
@@ -290,9 +267,8 @@ async fn a_child_over_the_ceiling_while_idle_is_replaced_before_a_diarization() 
     assert!(!directml_switched_off());
 }
 
-/// A load the child refuses, in a child that holds speech for another
-/// job: the call fails as a refused load and the child stays, speech and
-/// all.
+/// A load the child refuses fails the call as a refused load; the child stays,
+/// speech and all.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_load_keeps_a_child_that_holds_speech() {
     let (engine, _dir) = engine_with_fault("refuse-diarizer", |_| {});
@@ -307,12 +283,10 @@ async fn a_refused_load_keeps_a_child_that_holds_speech() {
     assert_eq!(engine.spawns(), 1);
 }
 
-/// An abort inside the diarizer's load, in a child that holds speech on
-/// `DirectML` where that is asked for: the call fails as a failed load
-/// over the crash, so the caller checks the files; the child is killed,
-/// `DirectML` stays on, and the next calls load speech and the diarizer
-/// in a new child. The `DirectML` assertion has power only on Windows,
-/// the one place the fake engine's speech runs on `DirectML`.
+/// An abort inside the diarizer's load fails the call as a failed load, so the
+/// caller checks the files; the child is killed, `DirectML` stays on, and the
+/// next calls work in a new child. The `DirectML` assertion has power only on
+/// Windows.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_abort_in_the_diarizer_load_is_a_failed_load_that_ends_the_child() {
     let (engine, _dir) = engine_with_fault("abort-on-diarizer-load", |config| {
@@ -336,10 +310,8 @@ async fn an_abort_in_the_diarizer_load_is_a_failed_load_that_ends_the_child() {
     assert_eq!(engine.spawns(), 2);
 }
 
-/// What this test binary logs at debug and above, from the first call on:
-/// the process-wide subscriber, so a line is captured whichever thread
-/// writes it. Every test in the binary logs into it, so a test picks its
-/// own lines out by its child's pid.
+/// What this test binary logs at debug and above, through the process-wide
+/// subscriber; each test picks its own lines out by its child's pid.
 #[derive(Clone, Default)]
 struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -377,9 +349,8 @@ impl std::io::Write for CapturedLog {
     }
 }
 
-/// The warning for a child killed in the diarizer's load names the kind of
-/// failure in fixed words; the crash report, which carries the child's
-/// stderr, is logged at debug only.
+/// The warning for a child killed in the diarizer's load names the failure in
+/// fixed words; the crash report is logged at debug only.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_kill_warning_names_the_failure_and_the_crash_report_stays_at_debug() {
     let log = CapturedLog::installed();
@@ -411,9 +382,8 @@ async fn the_kill_warning_names_the_failure_and_the_crash_report_stays_at_debug(
     assert!(reported.iter().all(|line| line.contains("DEBUG")), "{text}");
 }
 
-/// A diarizer load that never answers is killed at the load timeout and
-/// fails the call as a failed load over the timeout; the next call
-/// diarizes in a new child.
+/// A diarizer load that never answers is killed at the load timeout and fails
+/// the call as a failed load.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hung_diarizer_load_is_killed_at_the_load_timeout() {
     let (engine, _dir) = engine_with_fault("hang-on-diarizer-load", |config| {
@@ -432,10 +402,8 @@ async fn a_hung_diarizer_load_is_killed_at_the_load_timeout() {
     assert_eq!(engine.spawns(), 2);
 }
 
-/// A child over the memory ceiling while it loads the diarizer's models
-/// (a ceiling under its idle resident set, and a load that never answers,
-/// so the first heartbeat ends it there): killed, and the call fails as a
-/// failed load over the overrun, so the caller checks the files.
+/// A child over the memory ceiling while it loads the diarizer's models is
+/// killed, and the call fails as a failed load.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_diarizer_load_over_the_memory_ceiling_is_a_failed_load() {
     let dir = tempfile::tempdir().unwrap();
@@ -454,10 +422,9 @@ async fn a_diarizer_load_over_the_memory_ceiling_is_a_failed_load() {
     assert_eq!(engine.spawns(), 1);
 }
 
-/// The diarizer the app runs over an engine with `fault` (in its first
-/// child only, see `engine_with_fault`) and model files of the manifest's
-/// sizes in its store, all zeros, which the fake never opens and which
-/// fail their checksums; the models' folder.
+/// The diarizer the app runs over an engine with `fault` (first child only) and
+/// all-zero model files of the manifest's sizes, which fail their checksums;
+/// the models' folder.
 fn diarizer_over_junk(
     fault: &str,
     adjust: impl FnOnce(&mut SidecarConfig),
@@ -475,11 +442,9 @@ fn diarizer_over_junk(
     (diarizer, folder, dir)
 }
 
-/// A child that aborts or hangs while it loads files of the right size
-/// that are not the models: the files fail their checksum and are
-/// deleted, and the call is not installed, so the app's gate parks the
-/// meeting until a download replaces them, rather than giving it the
-/// fallback's speakers.
+/// A child that aborts or hangs while loading corrupt files of the right size:
+/// they fail their checksum and are deleted, and the call is not installed, so
+/// the app parks the meeting until a download replaces them.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_load_that_aborts_or_hangs_on_corrupt_files_deletes_them_and_is_not_installed() {
     for fault in ["abort-on-diarizer-load", "hang-on-diarizer-load"] {
@@ -503,10 +468,8 @@ async fn a_load_that_aborts_or_hangs_on_corrupt_files_deletes_them_and_is_not_in
     }
 }
 
-/// Two diarizations over the same corrupt files whose loads both fail (a
-/// reload's new job beside the job it retired): both are not installed,
-/// whichever check deletes a file first, so neither meeting falls back.
-/// The checks run outside the engine's lock and race each other.
+/// Two diarizations over the same corrupt files whose loads both fail: both are
+/// not installed, whichever check deletes a file first.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_failed_loads_over_the_same_corrupt_files_are_both_not_installed() {
     for round in 0..20 {
@@ -533,8 +496,8 @@ async fn two_failed_loads_over_the_same_corrupt_files_are_both_not_installed() {
     }
 }
 
-/// An abort in the diarization itself, over the same files: the sidecar's
-/// crash, with no checksum check, and the files stay.
+/// An abort in the diarization itself: the sidecar's crash, no checksum check,
+/// and the files stay.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_abort_while_diarizing_corrupt_files_is_the_crash_and_keeps_them() {
     let (diarizer, folder, _dir) = diarizer_over_junk("abort-diarizing", |_| {});
@@ -553,8 +516,8 @@ async fn an_abort_while_diarizing_corrupt_files_is_the_crash_and_keeps_them() {
     }
 }
 
-/// The real engine handed files it cannot load: the call fails as a
-/// refused load, reported by a child that is then stopped, not killed.
+/// The real engine handed files it cannot load: a refused load, reported by a
+/// child that is then stopped.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_real_engine_refuses_model_files_it_cannot_load_and_keeps_running() {
     let dir = tempfile::tempdir().unwrap();
@@ -573,8 +536,7 @@ async fn the_real_engine_refuses_model_files_it_cannot_load_and_keeps_running() 
     assert_eq!(engine.spawns(), 1);
 }
 
-/// The diarizer the app runs, over the fake engine and model files of the
-/// manifest's sizes, which the fake never opens: a lane under a second
+/// Over the fake engine and model files it never opens: a lane under a second
 /// needs no child, and `prepare` starts none.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sidecar_diarizer_starts_a_child_only_to_diarize() {
@@ -633,9 +595,8 @@ fn real_diarizer(store: ModelStore) -> (Arc<SidecarSpeechEngine>, SidecarDiarize
     (engine, diarizer)
 }
 
-/// The fixture once (under thirty seconds a voice, so no refinement) and
-/// eight times over (75 s, so each voice is refined): the child's clusters
-/// are the in-process pipeline's, every bit of every float included.
+/// The fixture once and eight times over (so each voice is refined): the
+/// child's clusters are the in-process pipeline's, bit for bit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the ONNX diarizer models (STENO_MODELS_DIR)"]
 async fn the_sidecar_diarizes_exactly_as_the_pipeline_in_this_process() {
@@ -688,9 +649,8 @@ async fn the_sidecar_diarizes_exactly_as_the_pipeline_in_this_process() {
     }
 }
 
-/// Ten minutes of the fixture: the child is killed while it diarizes, the
-/// call fails with the crash, and the next call diarizes in a new child,
-/// as in this process.
+/// Ten minutes of the fixture: the child is killed mid-diarization, the call
+/// fails with the crash, and the next call diarizes in a new child.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the ONNX diarizer models (STENO_MODELS_DIR)"]
 async fn a_child_killed_mid_diarization_of_real_audio_fails_the_call_and_the_next_succeeds() {
@@ -708,7 +668,6 @@ async fn a_child_killed_mid_diarization_of_real_audio_fails_the_call_and_the_nex
     };
     let pid = within_ten_seconds(|| engine.pid()).expect("a child started");
     // Past the load of two small models, well inside the diarization.
-    // (A blocking wait: the runtime has other workers.)
     std::thread::sleep(Duration::from_secs(3));
     assert!(!running.is_finished(), "ten minutes take longer");
     assert!(kill(pid));
@@ -725,9 +684,8 @@ async fn a_child_killed_mid_diarization_of_real_audio_fails_the_call_and_the_nex
     assert_eq!(engine.spawns(), 2);
 }
 
-/// A writable store in `dir` holding a copy of the models in
-/// `STENO_MODELS_DIR`, verified; the copy's folder. The tests below delete
-/// files, so they never run over the originals.
+/// A writable store in `dir` holding a verified copy of the models in
+/// `STENO_MODELS_DIR`; the copy's folder.
 fn copy_of_real_models(dir: &Path) -> PathBuf {
     let asset = steno_diarize::models::asset();
     let from = real_store().directory(&asset);
@@ -741,8 +699,7 @@ fn copy_of_real_models(dir: &Path) -> PathBuf {
     to
 }
 
-/// The inner error of a failed diarizer load, as `SidecarDiarizer`
-/// returns it, if `error` is one.
+/// The inner error of a failed diarizer load, if `error` is one.
 fn failed_load<'a>(
     error: &'a (dyn std::error::Error + Send + Sync + 'static),
 ) -> Option<&'a SidecarError> {
@@ -754,10 +711,8 @@ fn failed_load<'a>(
     }
 }
 
-/// The fake engine aborting or hanging in its load over a copy of the
-/// real, intact models: the files are hashed and kept byte for byte, the
-/// call keeps the load's error (so the job falls back), and the next call
-/// diarizes over the same files.
+/// A failed load over intact models: the files are kept byte for byte, the call
+/// keeps the load's error, and the next call diarizes over them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the ONNX diarizer models (STENO_MODELS_DIR)"]
 async fn a_crash_or_hang_in_the_load_keeps_the_real_models() {
@@ -785,9 +740,8 @@ async fn a_crash_or_hang_in_the_load_keeps_the_real_models() {
     }
 }
 
-/// One byte flipped in the copied embedding model, and a load that
-/// aborts: only that file is deleted and named, and the segmentation model
-/// keeps its checksum.
+/// One byte flipped in the embedding model and an aborting load: only that file
+/// is deleted and named.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the ONNX diarizer models (STENO_MODELS_DIR)"]
 async fn only_the_real_model_that_fails_its_checksum_is_deleted() {
@@ -812,15 +766,14 @@ async fn only_the_real_model_that_fails_its_checksum_is_deleted() {
     );
 }
 
-/// The real engine over a copy of the real models, failing its load the
-/// way a starved machine does (a load timeout of 1 ms) and over memory
-/// ceilings its load overruns: the child is gone and the files are kept
-/// every time, and at least one ceiling ends the load itself.
+/// The real engine failing its load as a starved machine does (a 1 ms load
+/// timeout, low memory ceilings): the child is gone and the files are kept
+/// every time.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the ONNX diarizer models (STENO_MODELS_DIR)"]
 async fn the_real_engine_failing_its_load_keeps_the_real_models() {
-    // A new copy of the models, the real child over it, `adjust`ed, and
-    // the diarizer the app builds over that child.
+    // A new copy of the models, the real child over it, and the diarizer the
+    // app builds over that child.
     let over_a_copy = |adjust: &dyn Fn(&mut SidecarConfig)| {
         let dir = tempfile::tempdir().unwrap();
         copy_of_real_models(dir.path());

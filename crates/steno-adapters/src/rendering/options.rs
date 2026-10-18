@@ -1,5 +1,4 @@
 //! What a destination tells the renderers.
-//! Swift: `Sources/StenoAdapters/Rendering/RenderOptions.swift`.
 
 use chrono_tz::Tz;
 use steno_core::Platform;
@@ -13,34 +12,26 @@ pub enum LinkStyle {
     Wikilink,
 }
 
-/// What a destination tells the renderers. Nothing here changes per meeting
-/// and nothing renders the current time, so equal options and an equal
-/// export always produce equal bytes.
+/// What a destination tells the renderers. Nothing here changes per
+/// meeting, so equal options and export give equal bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderOptions {
     pub link_style: LinkStyle,
-    /// Whether per-person pages are rendered (the destination places them in
-    /// its people folder). With `Wikilink` this also links every person's
-    /// name to that page; a link to a page that does not exist is never
-    /// written.
+    /// Whether per-person pages are rendered; with `Wikilink` names then
+    /// link to them.
     pub person_pages: bool,
     /// Tag appended to every task line, for vaults with a Tasks global filter.
     pub task_tag: Option<String>,
     /// Time zone of dates in frontmatter, the info line and person lines.
     pub time_zone: Tz,
-    /// The platform a call was recorded on, which the folder note's info
-    /// line names ("Mac call", "Windows call", "Linux call"). The meeting row
-    /// does not store it; the app records every call on the machine it runs
-    /// on (`steno process` takes a file as recorded here), so
-    /// [`ObsidianFolderDestination`](crate::ObsidianFolderDestination) passes
-    /// [`Platform::CURRENT`]. Swift: none; the Swift app is the Mac.
+    /// The platform the folder note's info line names a call by. The row
+    /// does not store it; the destination passes [`Platform::CURRENT`].
     pub platform: Platform,
 }
 
 impl RenderOptions {
-    /// Plain names, no people, no tag, UTC, the Mac, so the bytes are the
-    /// same on every machine and equal the Swift renderer's. A destination
-    /// sets `platform` from [`Platform::CURRENT`] itself.
+    /// Plain names, no people, no tag, UTC, the Mac: the same bytes on every
+    /// machine.
     pub const PLAIN: RenderOptions = RenderOptions {
         link_style: LinkStyle::None,
         person_pages: false,
@@ -49,8 +40,7 @@ impl RenderOptions {
         platform: Platform::Macos,
     };
 
-    /// A person's name becomes `[[Name]]` only when there is a page to land
-    /// on and links are wikilinks.
+    /// `[[Name]]` only when there is a page and links are wikilinks.
     #[must_use]
     pub fn links_people(&self) -> bool {
         self.link_style == LinkStyle::Wikilink && self.person_pages

@@ -1,18 +1,15 @@
 //! The digest delivery receipts and handover manifests carry.
-//! Swift: `Sources/StenoCore/Support/ContentHash.swift`.
 
 use sha2::Digest as _;
 
 /// SHA-256 of `data` as the 32 raw bytes a `DeliveredFile` or a handover
-/// manifest stores. One definition, so the adapters, the handover intake
-/// and the fakes agree on what a receipt's hash is.
+/// manifest stores.
 #[must_use]
 pub fn sha256(data: &[u8]) -> Vec<u8> {
     sha2::Sha256::digest(data).to_vec()
 }
 
-/// [`sha256`] of the file at `path`, read in pieces: the check that a noted
-/// copy holds its upload (`NotedUpload::is_held_by`). Rust only.
+/// [`sha256`] of the file at `path`, read in pieces.
 pub fn sha256_of_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     let mut hasher = sha2::Sha256::new();
     std::io::copy(&mut std::fs::File::open(path)?, &mut hasher)?;

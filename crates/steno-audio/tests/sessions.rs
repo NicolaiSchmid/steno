@@ -1,10 +1,8 @@
 //! Audio sessions to process activity, the mapping under the Windows
-//! `LiveProcessAudioActivity` (WP10a), over synthetic sessions: which
-//! process counts as holding the microphone, what its "bundle id" is, and
-//! that the result drives `MeetingDetector` as the macOS HAL's does. Runs
-//! on every OS. No Swift counterpart.
+//! `LiveProcessAudioActivity`, over synthetic sessions: which process holds
+//! the microphone, its "bundle id", and that it drives `MeetingDetector`.
 
-// Plan package names (WP10a) are not code.
+// Windows API names in the docs are not code.
 #![allow(clippy::doc_markdown)]
 
 use std::collections::BTreeSet;

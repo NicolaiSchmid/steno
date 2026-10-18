@@ -1,5 +1,4 @@
 //! A clock the test advances by hand.
-//! Swift: `Sources/StenoCore/Testing/ManualClock.swift`.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -10,10 +9,8 @@ use tokio::sync::{Notify, oneshot};
 use crate::Clock;
 
 /// A [`Clock`] that only moves when a test calls [`advance`](Self::advance).
-/// Sleepers register their deadline and wake when the clock passes it; a
-/// dropped sleep (a cancelled attempt) unregisters itself, so
-/// [`pending_sleepers`](Self::pending_sleepers) counts exactly the waits in
-/// progress.
+/// A dropped sleep unregisters itself, so
+/// [`pending_sleepers`](Self::pending_sleepers) counts the waits in progress.
 #[derive(Default)]
 pub struct ManualClock {
     state: Mutex<State>,
@@ -43,8 +40,7 @@ impl ManualClock {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Moves the clock forward and wakes every sleeper whose deadline has
-    /// passed.
+    /// Moves the clock forward and wakes every sleeper now due.
     pub fn advance(&self, by: Duration) {
         let due: Vec<Sleeper> = {
             let mut state = self.state();
@@ -62,7 +58,6 @@ impl ManualClock {
         self.sleepers_changed.notify_waiters();
     }
 
-    /// The offset since the clock was created.
     #[must_use]
     pub fn offset(&self) -> Duration {
         self.state().now
@@ -74,8 +69,8 @@ impl ManualClock {
         self.state().sleepers.len()
     }
 
-    /// Waits until at least `count` sleepers are registered; `false` when
-    /// that has not happened within `timeout` of wall time.
+    /// Waits until `count` sleepers are registered; `false` after `timeout`
+    /// of wall time.
     pub async fn wait_for_sleepers(&self, count: usize, timeout: Duration) -> bool {
         let wait = super::wait_until(&self.sleepers_changed, || self.pending_sleepers() >= count);
         tokio::time::timeout(timeout, wait).await.is_ok()

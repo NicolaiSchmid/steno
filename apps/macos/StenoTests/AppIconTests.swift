@@ -7,7 +7,7 @@ import XCTest
 /// beside this file, the built `Steno.app` beside the test bundle. The trap
 /// this guards: a valid `Contents.json` with no image files compiles silently
 /// and macOS shows the generic icon, which is exactly how the repository
-/// shipped before `.plans/2026-09-28-app-icon.md`.
+/// shipped before the app icon was added.
 final class AppIconTests: XCTestCase {
   private static var resources: URL {
     TestSupport.appRoot.appendingPathComponent("Steno/Resources", isDirectory: true)

@@ -1,8 +1,6 @@
 //! In-recording offsets as text.
-//! Swift: `Sources/StenoAdapters/Rendering/Timecode.swift`.
 
-/// Integer arithmetic over milliseconds, so the output never depends on a
-/// locale or a platform's number formatting.
+/// Integer arithmetic over milliseconds, independent of locale.
 pub struct Timecode;
 
 impl Timecode {
@@ -32,8 +30,8 @@ impl Timecode {
         )
     }
 
-    /// Whole milliseconds, rounded half away from zero as Swift's
-    /// `rounded()`; zero for anything not finite and positive.
+    /// Whole milliseconds, rounded half away from zero; zero unless finite
+    /// and positive.
     #[must_use]
     pub fn milliseconds(offset: f64) -> i64 {
         if !offset.is_finite() || offset <= 0.0 {
@@ -45,7 +43,6 @@ impl Timecode {
         total
     }
 
-    /// `value` zero-padded on the left to at least `width` digits.
     #[must_use]
     pub fn pad(value: i64, width: usize) -> String {
         format!("{value:0width$}")

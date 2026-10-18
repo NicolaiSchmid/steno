@@ -1,17 +1,7 @@
 //! Revoking a phone mid-upload: its partial and receipt are gone, every
-//! bearer route answers 401 at the gate (the phone's "unpaired" signal),
-//! and another phone's upload is untouched. Both ways in: `revoke` from
-//! the computer and `DELETE /v1/pairing` from the phone. A request that
-//! read its device or receipt before the revoke brings neither back, and a
-//! `complete` that had not reached the intake yet admits nothing, also when
-//! the phone paired again meanwhile. A recording already admitted answers
-//! its meeting. A revoke and a pairing of the same phone commit in the
-//! order they were asked for: a revoke during a pairing's save leaves the
-//! device revoked, in the store too, and a pairing during a revoke's
-//! discards or its delete stays paired. A touch or a receipt save does
-//! not commit ahead of a revoke asked for before it. A revoke whose store
-//! delete fails still refuses the device, and a partial created again
-//! during a verify is never promoted.
+//! bearer route answers 401, and other phones' uploads are untouched.
+//! Covers `revoke` and `DELETE /v1/pairing`, and revokes that race a read,
+//! a `complete`, a pairing, a touch or a receipt save.
 
 #![allow(
     clippy::assert_is_empty,
@@ -100,10 +90,8 @@ async fn uploaded(
 
 #[tokio::test]
 async fn a_revoke_between_the_gate_read_and_the_touch_stays_a_revoke() {
-    // The gate reads the device, yields, then refreshes `last_seen_at`. A
-    // revoke that lands in that gap must not be undone by the refresh: the
-    // touch is an `UPDATE` of the row that still holds the token, never a
-    // save that would re-insert the device and its token hash.
+    // A revoke between the gate's read and its `last_seen_at` refresh stays:
+    // the touch is an `UPDATE`, never a re-insert.
     let test = TestService::with_chunk_size(CHUNK_SIZE).await;
     let phone = Phone::pair(&test).await;
     let read_at_the_gate = test
@@ -187,8 +175,7 @@ async fn revoke_and_unpair_drop_the_upload_and_make_every_bearer_route_401() {
     );
     assert!(inbox.has_partial(b.id()), "B's upload is untouched");
 
-    // Every bearer route rejects A at the gate; the engine never sees them
-    // and the chunk body is not read.
+    // Every bearer route rejects A at the gate, before the engine.
     let handled = test.metrics().handled_requests;
     assert_eq!(a.phone.announce(&a.metadata).await.status, 401);
     assert_eq!(a.phone.status(a.id()).await.status, 401);
@@ -309,10 +296,8 @@ async fn unpair_mid_upload_discards_the_partial_and_the_receipt() {
 
 #[tokio::test]
 async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stream() {
-    // `complete` read the receipt before the revoke and writes it back
-    // after the intake answers; the store refuses the write (the device is
-    // gone), and memory must not keep it either, or the receipt stream
-    // shows an upload of a revoked phone until restart.
+    // `complete` read the receipt before the revoke; its write-back must not
+    // bring the receipt back into memory or the stream.
     let intake = ScriptedIntake::gated(Uuid::new_v4(), false);
     let (test, phone, metadata, _) = uploaded(Some(intake.clone()), 97).await;
     let id = metadata.recording_id;
@@ -389,8 +374,7 @@ impl Restarted {
         self.metadata.recording_id
     }
 
-    /// Nothing reached the intake, and nothing of the upload is left in
-    /// memory or the store.
+    /// Nothing reached the intake, memory or the store.
     fn assert_nothing_admitted(&self) {
         assert_eq!(self.intake.count(), 0, "the intake never sees the file");
         assert!(self.service.engine.receipts_snapshot().is_empty());
@@ -406,10 +390,8 @@ impl Restarted {
             && inbox.load_metadata(id).is_none()
     }
 
-    /// `complete` on the restarted engine with a revoke that lands while it
-    /// reads the receipt from the store. With `pairs_again`, the phone pairs
-    /// again under the same device id before `complete` goes on; the new
-    /// pairing's view comes back with the answer.
+    /// `complete` with a revoke during its receipt read; with `pairs_again`
+    /// the phone pairs again first and that pairing comes back.
     async fn complete_with_a_revoke_during_the_read(
         &self,
         pairs_again: bool,
@@ -418,12 +400,8 @@ impl Restarted {
         (completing.await, again)
     }
 
-    /// Runs `complete` to just after its store read
-    /// ([`past_the_store_read`]), then revokes the device (and pairs it
-    /// again with `pairs_again`), and hands back the `complete`, not polled
-    /// since its read returned. An await added before the read would leave
-    /// it for after the revoke, and the tests fail with a 404 (the row is
-    /// gone) instead of a 401.
+    /// Runs `complete` past its store read, revokes (and with `pairs_again`
+    /// pairs again), and hands back the unpolled `complete`.
     async fn revoke_during_the_read(
         &self,
         pairs_again: bool,
@@ -443,12 +421,9 @@ impl Restarted {
     }
 }
 
-/// Runs `request` to its first store read and waits there until the read
-/// has returned, then hands it back, not polled since. The store is held,
-/// so the read cannot finish before the first poll returns; this takes the
-/// store read to be the first point where `request` waits. The future runs
-/// unconstrained, so a wake means the read returned, never that tokio's
-/// budget ran out.
+/// Runs `request` to its first store read, with the store held, and hands
+/// it back once the read returned. Unconstrained, so a wake means the read
+/// returned, not that tokio's budget ran out.
 async fn past_the_store_read<F: Future>(
     store: &Arc<Store>,
     request: F,
@@ -462,9 +437,8 @@ async fn past_the_store_read<F: Future>(
     request
 }
 
-/// A revoke that lands while `complete` reads the store finds nothing in
-/// memory to discard, so the files are still there for the verify; the
-/// engine itself must keep a revoked device's recording from the intake.
+/// A revoke during `complete`'s store read finds nothing in memory; the
+/// engine must still keep the recording from the intake.
 async fn a_revoke_during_the_read_admits_nothing(pairs_again: bool) {
     let restarted = Restarted::new().await;
     let (response, again) = restarted
@@ -500,12 +474,9 @@ async fn a_phone_that_paired_again_does_not_let_the_old_complete_through() {
 
 #[tokio::test]
 async fn an_admitted_recording_answers_its_meeting_after_a_revoke_during_the_read() {
-    // The recording was admitted before the restart; the phone lost the
-    // answer and asks again. A 401 would make it keep the recording, and
-    // its upload after pairing again would become a second meeting. The
-    // phone pairs again before `complete` goes on, so the read puts the
-    // receipt back into memory; the receipt is gone from the store, so it
-    // must not stay in the stream either.
+    // An admitted recording answers its meeting after a revoke during the
+    // read, or the phone's re-upload would become a second meeting; the receipt
+    // must not come back into the stream.
     let restarted = Restarted::new().await;
     let before = EngineDevice {
         service: restarted.first.service.clone(),
@@ -530,10 +501,8 @@ async fn an_admitted_recording_answers_its_meeting_after_a_revoke_during_the_rea
 
 #[tokio::test]
 async fn a_complete_during_a_revokes_store_delete_admits_nothing() {
-    // A `complete` that starts while the revoke's store delete is pending
-    // takes the count the revoke already bumped, and its read may still be
-    // served before the delete. It is refused before it reads: with the
-    // store held, any answer on the first poll comes from the entry check.
+    // A `complete` during the revoke's pending delete is refused before it
+    // reads: with the store held, a first-poll answer comes from the entry check.
     let restarted = Restarted::new().await;
     let hold = StoreHold::new(&restarted.first.store);
     let woken = Woken::new();
@@ -548,26 +517,22 @@ async fn a_complete_during_a_revokes_store_delete_admits_nothing() {
     revoking.await.unwrap();
 
     restarted.assert_nothing_admitted();
-    // Neither the refused `complete` nor the revoke knew the receipt; the
-    // next start's sweep takes its files.
+    // The next start's sweep takes the files.
     restarted.service.engine.sweep_orphans().await;
     assert!(restarted.files_are_gone(), "the sweep takes the files");
 }
 
 #[tokio::test]
 async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
-    // The revoke lands while `complete` writes `verifying`; it finds the
-    // receipt in memory and discards the files. The phone pairs again and
-    // announces anew before the old `complete` goes on, which creates the
-    // partial again. The old `complete` must neither discard that partial,
-    // write `failed` over the new receipt nor promote it.
+    // A revoke during the `verifying` write discards the files; the phone
+    // pairs again and announces anew. The old `complete` must not discard, fail
+    // or promote the new partial.
     let intake = ScriptedIntake::new(Uuid::new_v4(), 0);
     let (test, phone, metadata, bytes) = uploaded(Some(intake.clone()), 96).await;
     let id = metadata.recording_id;
     let inbox = test.inbox();
 
-    // `complete` waits on its `verifying` write, which the held store keeps
-    // from returning.
+    // `complete` waits on its `verifying` write behind the held store.
     let hold = StoreHold::new(&test.store);
     let saved = Woken::new();
     let mut completing = pin!(unconstrained(phone.complete(id)));
@@ -576,14 +541,11 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     Woken::new().pending(revoking.as_mut(), "the revoke waits on its store delete");
     assert!(!inbox.has_partial(id), "the revoke discarded the partial");
     hold.release();
-    // The delete waits in line behind the `verifying` write, which returns
-    // on its own: the old `complete` is not polled until the end.
+    // The delete waits behind the `verifying` write.
     common::signalled("the revoke returns", revoking)
         .await
         .unwrap();
-    // The delete ran after the `verifying` write, so no row is left; a
-    // write after the pairing's save would put the row back for the new
-    // pairing.
+    // The delete ran after the `verifying` write, so no row is left.
     saved.wait("the verifying write returns").await;
     let again = phone.pair_again().await;
 
@@ -616,13 +578,8 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
 
 #[tokio::test]
 async fn a_revoke_during_the_verify_leaves_another_phones_upload_alone() {
-    // The revoke lands while `complete` writes `verifying`; it finds the
-    // receipt in memory and discards the files. Another phone announces the
-    // same recording id before the old `complete` goes on, which opens a
-    // partial and a sidecar. The old `complete` then sees the revoke after
-    // its hash while `revoked` still holds the device, and the files there
-    // are not the revoked phone's: memory holds the other phone's receipt,
-    // so they stay.
+    // As above, but another phone announces the same recording id: memory
+    // holds its receipt, so the old `complete`'s refusal leaves its files.
     let intake = ScriptedIntake::new(Uuid::new_v4(), 0);
     let (test, phone, metadata, bytes) = uploaded(Some(intake.clone()), 97).await;
     let id = metadata.recording_id;
@@ -658,13 +615,9 @@ async fn a_revoke_during_the_verify_leaves_another_phones_upload_alone() {
 
 #[tokio::test]
 async fn a_refused_complete_leaves_another_phones_announce_alone() {
-    // After a restart the receipt is only in the store, and a revoke lands
-    // while `complete` reads it. Another phone announces the same recording
-    // id, and its announce is held at its clock read, after its receipt
-    // read found nothing, while the old `complete` goes on and is refused:
-    // the refusal discards the files the revoke missed and forgets the
-    // receipt. The announce makes its receipt and opens its files only
-    // after that, so both stay.
+    // After a restart, a revoke during `complete`'s read; another phone's
+    // announce of the same id, held at its clock read, opens its files only
+    // after the refusal's discard, so they stay.
     let restarted = Restarted::new().await;
     let id = restarted.id();
     let (completing, _) = restarted.revoke_during_the_read(false).await;
@@ -695,11 +648,8 @@ async fn a_refused_complete_leaves_another_phones_announce_alone() {
 
 #[tokio::test]
 async fn a_reannounce_of_a_phone_revoked_during_its_read_opens_no_files() {
-    // After a restart the receipt is only in the store, and its files are
-    // gone (a sweep). A revoke lands while the phone's re-announce reads the
-    // receipt, so the receipt stays out of memory. The re-announce is
-    // refused before it opens files: files with no receipt in memory would
-    // be no device's, and another phone's discard would take them.
+    // A re-announce revoked during its receipt read is refused before it opens
+    // files, which no receipt in memory would own.
     let restarted = Restarted::new().await;
     let id = restarted.id();
     restarted.first.inbox().discard(id);
@@ -721,10 +671,8 @@ async fn a_reannounce_of_a_phone_revoked_during_its_read_opens_no_files() {
 
 #[tokio::test]
 async fn a_first_announce_of_a_phone_revoked_during_its_read_opens_no_files() {
-    // A revoke whose store delete fails lands while the phone's first
-    // announce of a recording reads the store: the device stays in the
-    // store, so the receipt's save goes through, but memory keeps it out.
-    // The announce opens no files and is answered 401.
+    // A revoke whose store delete fails, during a first announce's read: the
+    // receipt saves, but the announce opens no files and answers 401.
     let test = TestService::with(common::Options {
         chunk_size: DIRECT_CHUNK_SIZE,
         start: false,
@@ -758,8 +706,7 @@ async fn a_first_announce_of_a_phone_revoked_during_its_read_opens_no_files() {
     );
 }
 
-/// What the bearer gate of the computer, started again over `test`'s
-/// store, makes of `token`. Memory starts empty, so only the store decides.
+/// The bearer gate's answer for `token` after a restart over `test`'s store.
 async fn gate_after_a_restart(test: &TestService, token: &str) -> AuthOutcome {
     let restarted = HandoverService::new(
         test.service.configuration.clone(),
@@ -788,19 +735,15 @@ async fn paired_with_a_window_open() -> (TestService, EngineDevice, Principal) {
     (test, phone, principal)
 }
 
-/// `first` and `second` run to the end together, bounded by
-/// [`common::signalled`]; `what` names them.
+/// Runs `first` and `second` together, bounded by `common::signalled`.
 async fn both<A: Future, B: Future>(what: &str, first: A, second: B) -> (A::Output, B::Output) {
     common::signalled(what, async { tokio::join!(first, second) }).await
 }
 
 #[test]
 fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
-    // The phone pairs again while the computer revokes it. The revoke
-    // started after the pairing read the count, and its delete is asked
-    // for after the save, so it commits after it: the device stays
-    // revoked until the next pairing, in memory and in the store, so a
-    // restart does not let it back in.
+    // A revoke during a pairing's save commits after it: the device stays
+    // revoked, in memory and in the store, until the next pairing.
     common::on_one_worker(async {
         let (test, phone, principal) = paired_with_a_window_open().await;
         let woken = Woken::new();
@@ -845,12 +788,8 @@ fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
 
 #[test]
 fn a_pairing_during_a_revokes_delete_stays_paired() {
-    // The computer revokes the phone, and the phone, told so, pairs again
-    // before the delete has returned. The pairing read the count after the
-    // revoke's bump, and its save is asked for after the delete, so it
-    // commits after it: the new pairing stays, in the store and after a
-    // restart, and its recording routes answer instead of a 401 that
-    // would make the phone unpair itself.
+    // A pairing during a revoke's delete commits after it: the new pairing
+    // stays, in the store and after a restart.
     common::on_one_worker(async {
         let (test, phone, principal) = paired_with_a_window_open().await;
         let woken = Woken::new();
@@ -892,15 +831,8 @@ fn a_pairing_during_a_revokes_delete_stays_paired() {
 
 #[test]
 fn a_touch_does_not_overtake_a_revoke_asked_for_before_it() {
-    // The gate refreshes `last_seen_at` of a device whose revoke is already
-    // on its way to the store. The touch takes its place in line behind the
-    // delete: a read asked for after both, which skips the line, finds
-    // neither committed, where a touch sent straight to the pool would have
-    // committed ahead of it. That the touch then waits for the delete is
-    // the order tests' part: the read reaches the pool before either task
-    // runs, so a line that does not wait passes here too. The read in
-    // between holds only on `on_one_worker`, where neither task runs before
-    // this one yields.
+    // A touch queued behind a revoke's delete does not commit ahead of it.
+    // The read in between holds only on `on_one_worker`.
     common::on_one_worker(async {
         let test = TestService::with(common::Options {
             start: false,
@@ -938,14 +870,8 @@ fn a_touch_does_not_overtake_a_revoke_asked_for_before_it() {
 
 #[test]
 fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
-    // The computer revokes one phone while another announces its recording
-    // again. The announce finds the receipt in memory and goes to its save
-    // without a yield, so the save takes its place in line behind the
-    // delete: a read asked for after both, which skips the line, finds
-    // neither committed, where a save sent straight to the pool would have
-    // committed ahead of it. That the save then waits for the delete is the
-    // order tests' part. The task count and the read in between hold only
-    // on `on_one_worker`, where neither task runs before this one yields.
+    // A receipt save queued behind another phone's revoke does not commit
+    // ahead of it. The task count and the read hold only on `on_one_worker`.
     common::on_one_worker(async {
         let test = TestService::with(common::Options {
             chunk_size: DIRECT_CHUNK_SIZE,
@@ -978,9 +904,7 @@ fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
             3,
             "the delete and the save wait in their own tasks"
         );
-        // One read on the pool, asked for before either task ran: the one
-        // blocking thread runs it ahead of the delete and the save, and
-        // behind a save sent straight to the pool.
+        // A read on the one blocking thread runs ahead of the queued delete and save.
         let store = test.store.clone();
         let (devices, receipt) = tokio::task::spawn_blocking(move || {
             (
@@ -1008,17 +932,9 @@ fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
 
 #[test]
 fn a_pairing_during_a_revokes_discards_stays_paired() {
-    // The phone pairs again while the computer's revoke, past its count
-    // bump, discards the phone's unfinished uploads. The revoke took the
-    // delete's place in line under the same guard as the bump, so the
-    // pairing, which reads the bumped count, saves after the delete and
-    // stays. A place taken after the discards would let the save commit
-    // first and the delete remove the new pairing. The discards do not
-    // yield, so on `on_one_worker` nothing could run among them. Here the
-    // pairing spins on a second worker until the first partial is gone, so
-    // it usually lands among the discards. It always starts after the
-    // bump, so the test cannot fail on the fixed code however the threads
-    // run.
+    // A pairing during the revoke's discards saves after its delete and stays.
+    // The pairing spins on a second worker until the first partial is gone, so
+    // it usually lands among the discards.
     const UNFINISHED: u64 = 200;
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -1081,14 +997,9 @@ fn a_pairing_during_a_revokes_discards_stays_paired() {
 
 #[tokio::test]
 async fn a_partial_created_again_during_the_verify_is_not_promoted() {
-    // An old `complete` waits right after its store read while the phone
-    // is revoked, pairs again, uploads anew and completes. While the new
-    // `complete` writes `verifying`, the old one goes on: refused, it
-    // discards the new partial. The phone's retried announce creates the
-    // partial again, empty. The new `complete` hashes the file it opened,
-    // the discarded one, and must not promote the empty partial in its
-    // place: the intake would admit an empty file and the phone delete its
-    // recording.
+    // A stale `complete` refused during a new `complete`'s verify discards the
+    // partial, and a retried announce creates it again empty: the new
+    // `complete` must not promote the empty file.
     let restarted = Restarted::new().await;
     let id = restarted.id();
     let inbox = restarted.first.inbox();
@@ -1117,9 +1028,8 @@ async fn a_partial_created_again_during_the_verify_is_not_promoted() {
     assert_eq!(refused.status.as_u16(), 401);
     assert!(!inbox.has_partial(id), "the refusal discarded the partial");
 
-    // The retried announce reads the receipt the refusal forgot from the
-    // store, creates the partial, then waits on its receipt save, in line
-    // behind the new `complete`'s `verifying` write.
+    // The retried announce creates the partial, then waits on its receipt
+    // save behind the `verifying` write.
     let announced = Woken::new();
     let mut announcing = pin!(unconstrained(again.announce(&restarted.metadata)));
     announced.pending(announcing.as_mut(), "the announce waits on its store read");
@@ -1154,10 +1064,7 @@ async fn a_partial_created_again_during_the_verify_is_not_promoted() {
 
 #[tokio::test]
 async fn a_partial_gone_during_the_verify_lists_no_chunk() {
-    // As above, without the retried announce: the refusal discarded the
-    // partial the new `complete` hashes, and nothing is at its path when the
-    // hash returns. The 409 lists no chunk, so the phone announces and sends
-    // every chunk again.
+    // As above without the retried announce: the 409 lists no chunk.
     let restarted = Restarted::new().await;
     let id = restarted.id();
     let inbox = restarted.first.inbox();
@@ -1200,12 +1107,8 @@ async fn a_partial_gone_during_the_verify_lists_no_chunk() {
 
 #[tokio::test]
 async fn a_revoked_phones_partial_created_during_the_verify_is_discarded() {
-    // The revoke lands while `complete` writes `verifying` and discards the
-    // files. An announce of the revoked phone that passed the gate before
-    // the revoke creates the partial again (here straight through the
-    // inbox, as its `Inbox::begin` does). No pairing followed, so the
-    // partial can only be the revoked phone's: the refused `complete`
-    // discards it.
+    // A revoked phone's partial created again during the verify (straight
+    // through the inbox) is discarded by the refused `complete`.
     let intake = ScriptedIntake::new(Uuid::new_v4(), 0);
     let (test, phone, metadata, _) = uploaded(Some(intake.clone()), 94).await;
     let id = metadata.recording_id;
@@ -1230,10 +1133,8 @@ async fn a_revoked_phones_partial_created_during_the_verify_is_discarded() {
 
 #[tokio::test]
 async fn a_failed_revoke_delete_publishes_the_receipts_and_refuses_the_device() {
-    // The store refuses the delete. The device stays in the store, so its
-    // token still passes the gate; in memory it is revoked: its receipt
-    // leaves the stream and every recording route answers 401, until it
-    // pairs again.
+    // A failed revoke delete keeps the device in the store, but in memory it
+    // is revoked until it pairs again.
     let (test, phone, metadata, bytes) = uploaded(None, 95).await;
     let id = metadata.recording_id;
     let receipts = test.service.receipts();

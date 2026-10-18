@@ -1,35 +1,8 @@
-//! The parity harness as an ignored test, for Forge:
-//!
-//! ```text
-//! STENO_CALIBRATION_CORPUS=~/steno-spikes/corpus \
-//! STENO_CALIBRATION_BASELINE=~/steno-spikes/baseline-bakeoff \
-//! cargo test --release -p steno-speech-coreml --test parity -- --ignored --nocapture
-//! ```
-//!
-//! `STENO_CALIBRATION_BASELINE` defaults to `<corpus>/../baseline-bakeoff`.
-//!
-//! The test tracks drift from the old Swift output; it is not the accuracy
-//! gate. FLEURS, which has references, is the accuracy gate
-//! (`crates/steno-speech/tests/fleurs.rs`, and the `CoreML` run in
-//! `scripts/coreml-parity-forge.sh`). The Swift transcripts are another
-//! engine's output, not references, and the engine runs the shared
-//! pipeline, whose windows are not `FluidAudio`'s, so its text is no
-//! longer the Swift app's word for word: 8.46 % on the corpus when A2 of
-//! `.plans/2026-10-07-stable-promotion.md` landed, from 0.00 % before,
-//! while FLEURS German improved from 5.46 % to 4.87 %. Two limits:
-//!
-//! - `STENO_PARITY_MAX_WER` (percent, default 10) on the mean of the
-//!   per-file WERs against the Swift text;
-//! - `STENO_PARITY_MAX_START_OFFSET_MS` (default 15) on the mean signed
-//!   word-start offset from Swift's starts over the matched words. The
-//!   shared pipeline times words from each chunk's exact start (A13), and
-//!   its chunks start anywhere while Swift's sit on the frame grid: +4.2 ms
-//!   on the corpus when A2 landed, with a wider spread than Swift's grid
-//!   (p10 -56 ms, p90 +56 ms); a start counted from the frame below the
-//!   chunk's, as before A13, is about -30 ms.
-//!
-//! Without the corpus variable the test passes and says so, so `--ignored`
-//! runs elsewhere do not fail for the wrong reason.
+//! The parity harness as an ignored test (`STENO_CALIBRATION_CORPUS`,
+//! `STENO_CALIBRATION_BASELINE`). It tracks drift from the Swift output; the
+//! accuracy gate is FLEURS (`crates/steno-speech/tests/fleurs.rs`). Limits:
+//! `STENO_PARITY_MAX_WER` (percent, default 10) on the mean WER and
+//! `STENO_PARITY_MAX_START_OFFSET_MS` (default 15) on the mean word-start offset.
 
 #![cfg(target_os = "macos")]
 

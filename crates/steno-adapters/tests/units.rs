@@ -1,4 +1,4 @@
-//! `SlugTests`, `TimecodeTests`, `FrontmatterTests` and `MeetingFolderTests`.
+//! Slugs, timecodes, frontmatter and the meeting folder.
 
 mod common;
 

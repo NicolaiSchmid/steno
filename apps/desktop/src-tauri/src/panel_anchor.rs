@@ -1,29 +1,8 @@
 //! Where the panels' anchor is kept: `panel-anchor.json` in the support
-//! directory (`steno_core::StenoPaths`), which no identifier names (D5 of
-//! `.plans/2026-10-07-stable-promotion.md`: decouple, move nothing).
-//!
-//! A build under the earlier identifier (`identifier::EARLIER`) kept it
-//! in that identifier's app config directory: on macOS
-//! `~/Library/Application Support/uno.schmid.steno.desktop`, on Linux
-//! `$XDG_CONFIG_HOME` (else `~/.config`) and the identifier, on Windows
-//! `%APPDATA%\uno.schmid.steno.desktop`. While the new file is missing,
-//! that one is read once and written to the new place, so from then on
-//! only the new file counts; the earlier file stays where it is, for a
-//! rollback.
-//!
-//! Every write replaces the whole file (`files::write_json`, atomic and
-//! durable). A drag's saves run off the main thread, the latest anchor of
-//! a drag winning ([`AnchorFile::save_in_background`]), and the exit waits
-//! for the last one ([`AnchorFile::flush`]); the one-time copy is written
-//! when the anchor loads ([`AnchorFile::load`]). A new file that does not parse is set aside
-//! (`files::set_aside`, `panel-anchor.json.corrupt-<time>`) before
-//! anything is written, and the panels open at the default place in that
-//! run; until a drag saves a new file, the next launch reads the earlier
-//! build's file again, as when the new one was missing. One that cannot
-//! be read, or set aside, is never written in this run.
-//!
-//! Swift: `FloatingPanelModel.anchorKey` (`steno.floatingPanel.anchor` in
-//! the Swift app's defaults, which nothing imports).
+//! directory. While it is missing, the file a build under the earlier
+//! identifier kept in its config directory is read once and copied over,
+//! and left in place for a rollback. Saves run off the main thread and
+//! the exit waits for the last one ([`AnchorFile::flush`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -36,43 +15,35 @@ use steno_services::files;
 use crate::identifier;
 use crate::panel_geometry::PanelAnchor;
 
-/// The file's name, in the support directory and in the earlier config
-/// directory alike.
+/// The file's name, in the support and the earlier config directory alike.
 const FILE_NAME: &str = "panel-anchor.json";
 
-/// The anchor's file, and the earlier one to read once.
 pub struct AnchorFile {
     path: PathBuf,
     earlier: Option<PathBuf>,
-    /// False once the file turned out unreadable, or could not be set
-    /// aside: the anchor then lives in memory for this run.
+    /// False once the file turned out unreadable or could not be set aside:
+    /// the anchor then lives in memory for this run.
     writable: AtomicBool,
-    /// The background writer ([`Self::save_in_background`]), started with
-    /// the first save.
+    /// The background writer, started with the first save.
     writer: OnceLock<Sender<Write>>,
 }
 
-/// What the background writer is asked.
 enum Write {
     Save(PanelAnchor),
     /// Answer once every anchor queued before is on disk.
     Flush(Sender<()>),
 }
 
-/// How long the exit waits for the writer ([`AnchorFile::flush`]): far
-/// above one save (about 150 ms on a slow disk), and short beside the
-/// time the system gives a quitting app.
+/// How long the exit waits for the writer: far above one save, short beside
+/// the time the system gives a quitting app.
 const FLUSH_PATIENCE: Duration = Duration::from_secs(2);
 
-// A patience under a second would let the exit go before a slow disk's
-// save, and a zero one would make the flush wait for nothing.
+// Under a second, the exit could go before a slow disk's save.
 const _: () = assert!(FLUSH_PATIENCE.as_millis() >= 1000);
 
 impl AnchorFile {
-    /// The file in `support_directory`, and the earlier build's under
-    /// `config_directory`, the platform's base config directory (Tauri's
-    /// `PathResolver::config_dir`, which the earlier build's app config
-    /// directory hung from), when there is one.
+    /// The file in `support_directory`, and the earlier build's under the
+    /// platform's base `config_directory`, when there is one.
     pub fn new(support_directory: &Path, config_directory: Option<&Path>) -> Self {
         AnchorFile {
             path: support_directory.join(FILE_NAME),
@@ -82,10 +53,9 @@ impl AnchorFile {
         }
     }
 
-    /// The saved anchor. The new file when it is there: its anchor, or none
-    /// when it does not parse (it is set aside first) or cannot be read.
-    /// Without it, the earlier build's anchor, written to the new place at
-    /// once; none when neither holds one.
+    /// The saved anchor: the new file's, none when it does not parse (it
+    /// is set aside first) or cannot be read; without it, the earlier
+    /// build's, copied to the new place at once.
     pub fn load(&self) -> Option<PanelAnchor> {
         match self.path.symlink_metadata() {
             Ok(_) => {
@@ -115,7 +85,6 @@ impl AnchorFile {
         }
     }
 
-    /// Replaces the file with `anchor`, unless it may not be written.
     pub fn save(&self, anchor: PanelAnchor) {
         if !self.writable.load(Ordering::Relaxed) {
             tracing::debug!("the panels' anchor is kept in memory only");
@@ -126,9 +95,8 @@ impl AnchorFile {
         }
     }
 
-    /// [`Self::save`] on a thread of its own, so a drag's moves never wait
-    /// for the disk: each write takes the latest anchor queued by then. If
-    /// the thread cannot start, the save runs here.
+    /// [`Self::save`] on a thread of its own, each write taking the latest
+    /// anchor queued; runs here if the thread cannot start.
     pub fn save_in_background(&'static self, anchor: PanelAnchor) {
         let writer = self.writer.get_or_init(|| {
             let (writer, requests) = channel();
@@ -145,10 +113,8 @@ impl AnchorFile {
         }
     }
 
-    /// Waits until every anchor queued so far is on disk, at most
-    /// [`FLUSH_PATIENCE`]; at once when nothing was ever queued. The exit
-    /// calls it after the shutdown, so a drag just before a quit or a
-    /// logout is not lost.
+    /// Waits up to [`FLUSH_PATIENCE`] until every queued anchor is on
+    /// disk, so a drag just before a quit is not lost.
     pub fn flush(&self) {
         self.flush_within(FLUSH_PATIENCE);
     }
@@ -163,9 +129,8 @@ impl AnchorFile {
         }
     }
 
-    /// The writer thread: each write takes the latest anchor queued by then
-    /// ([`batch`]), and a flush is answered once the anchors before it are
-    /// written.
+    /// The writer thread: writes the latest anchor of each batch, then
+    /// answers the flushes in it.
     fn write_all(&self, requests: &Receiver<Write>) {
         while let Ok(first) = requests.recv() {
             let (anchor, flushes) = batch(first, requests);
@@ -179,15 +144,14 @@ impl AnchorFile {
     }
 }
 
-/// The anchor in the earlier build's file at `path`; none when it is
-/// missing, unreadable or does not parse. That file is never changed.
+/// The anchor in the earlier build's file at `path`, which is never
+/// changed; none when missing, unreadable or unparsable.
 fn read_earlier(path: &Path) -> Option<PanelAnchor> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// `first` and the requests queued after it: the last anchor among them,
-/// none when only flushes came, and the flushes, which wait for that
-/// anchor's write.
+/// `first` and the requests queued after it: the last anchor, and the
+/// flushes waiting for its write.
 fn batch(first: Write, queued: &Receiver<Write>) -> (Option<PanelAnchor>, Vec<Sender<()>>) {
     let mut anchor = None;
     let mut flushes = Vec::new();
@@ -261,7 +225,6 @@ mod tests {
         }
     }
 
-    /// The new file wins over the earlier one, which is not read.
     #[test]
     fn the_new_file_is_read_when_it_is_there() {
         let dirs = Dirs::new();
@@ -270,8 +233,7 @@ mod tests {
         assert_eq!(dirs.file().load(), Some(anchor(200.0)));
     }
 
-    /// Only the earlier file: read once, written to the new place, and left
-    /// where it was; the next launch reads the new file.
+    /// The earlier file is copied once and left in place.
     #[test]
     fn the_earlier_file_is_read_once_and_saved_to_the_new_place() {
         let dirs = Dirs::new();
@@ -296,8 +258,6 @@ mod tests {
         assert_eq!(AnchorFile::new(&dirs.support, None).load(), None);
     }
 
-    /// An earlier file that does not parse is no anchor, and stays as it
-    /// is.
     #[test]
     fn a_damaged_earlier_file_is_no_anchor_and_stays() {
         let dirs = Dirs::new();
@@ -310,10 +270,8 @@ mod tests {
         assert!(!dirs.new_path().exists());
     }
 
-    /// A new file that does not parse is set aside, byte for byte, before
-    /// anything is written; the panels open at the default place, not at
-    /// the earlier build's anchor, and the next save writes a new file
-    /// beside the copy.
+    /// A new file that does not parse is set aside before anything is
+    /// written, and the panels open at the default place.
     #[test]
     fn a_corrupt_new_file_is_set_aside_and_the_default_place_used() {
         let dirs = Dirs::new();
@@ -331,8 +289,7 @@ mod tests {
         assert_eq!(std::fs::read(&aside[0]).unwrap(), b"not json");
     }
 
-    /// A new file that cannot be read (here a folder in its place) is never
-    /// written in this run.
+    /// A new file that cannot be read is never written in this run.
     #[test]
     fn an_unreadable_new_file_is_never_written() {
         let dirs = Dirs::new();
@@ -344,9 +301,8 @@ mod tests {
         assert_eq!(dirs.set_aside(), Vec::<PathBuf>::new());
     }
 
-    /// A new file this user may not read (mode 000) is neither set aside
-    /// nor replaced by a save in this run, though the folder would take a
-    /// write. Skipped as root, who reads it anyway.
+    /// An unreadable new file (mode 000) is neither set aside nor replaced.
+    /// Skipped as root.
     #[cfg(unix)]
     #[test]
     fn a_new_file_without_read_permission_is_never_written() {
@@ -401,11 +357,7 @@ mod tests {
         assert_eq!((no_anchor, flushes.len()), (None, 1));
     }
 
-    /// A drag of 60 moves saved in the background, then a flush: once it
-    /// returns the file holds the last move, never an earlier one. The drag's
-    /// wait has a minute's patience, so a slow runner's disk cannot fail the
-    /// test; the last move's wait is the exit's own [`AnchorFile::flush`],
-    /// whose patience one write fits.
+    /// After background saves and a flush, the file holds the last move.
     #[test]
     fn the_flush_returns_once_the_last_anchor_of_a_drag_is_on_disk() {
         let patience = Duration::from_secs(60);

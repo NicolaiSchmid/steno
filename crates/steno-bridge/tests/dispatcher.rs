@@ -1,7 +1,5 @@
-//! Host behaviour as `BridgeDispatcher.swift` defines it and as the web
-//! transports expect it (`apps/macos/web/src/bridge/webkit-transport.test.ts`):
-//! a request envelope in, a reply envelope out, typed errors for every way a
-//! call can go wrong.
+//! The dispatcher as the web transports expect it: a request envelope in, a
+//! reply envelope out, typed errors for every way a call can go wrong.
 
 use std::sync::{Arc, Mutex};
 
@@ -9,9 +7,7 @@ use serde_json::{Value, json};
 use steno_bridge::*;
 use uuid::Uuid;
 
-/// A spy host: answers a handful of methods across the three windows, with
-/// and without params, with and without a reply value, with a host error and
-/// with a cancelled dialog, and records what it was asked.
+/// A spy host that answers a handful of methods and records what it was asked.
 #[derive(Default)]
 struct SpyHost {
     calls: Mutex<Vec<String>>,
@@ -97,10 +93,8 @@ fn routes_a_method_without_params_and_replies_with_the_id_only() {
     assert_eq!(host.calls(), ["page.ready"]);
 }
 
-/// "Process again" takes no params and acts on the selected meeting, as
-/// "Re-run summary" does. Its request envelope decodes and prints back byte
-/// for byte as the Swift encoder writes it (`BridgeFixturesTests`'
-/// `processAgainRequestRoundTrips` holds the same text).
+/// "Process again" takes no params, and its request envelope prints back
+/// byte for byte.
 #[test]
 fn process_again_routes_without_params() {
     let (host, dispatcher) = dispatcher();

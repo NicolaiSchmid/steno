@@ -1,19 +1,8 @@
-//! Writes the master and the sidecars of one recording.
-//! Swift: `Sources/StenoAudio/Writer/RecordingWriter.swift`.
-//!
-//! The master is `recording.caf` (48 kHz Float32, one channel per lane),
-//! plus one 16 kHz Int16 WAV sidecar per lane through
-//! [`Resampler48kTo16k`], plus `mic.raw.caf` when asked, all into
-//! `RecordingLayout`'s directory, which `new` creates and never reuses.
-//! Owned by the writer thread; one `write` per 10 ms frame, `finish()`
-//! patches sizes and returns the files. All scratch buffers are allocated
-//! in `new`.
-//!
-//! The sidecars lag the master by the resampler's group delay: the 192-tap
-//! linear-phase FIR delays by 95.5 input samples, so every sidecar sample
-//! sits 2.0 ms (32 samples at 16 kHz) after the master sample it belongs
-//! to. Harmless for transcripts, and deliberate, so do not "fix" a 2 ms
-//! offset by hand.
+//! Writes one recording: the master `recording.caf` (48 kHz Float32, one
+//! channel per lane), a 16 kHz Int16 WAV sidecar per lane through
+//! [`Resampler48kTo16k`], and `mic.raw.caf` when asked. The sidecars lag
+//! the master by the FIR's group delay, 2.0 ms; this is deliberate, so do
+//! not "fix" it by hand.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -26,12 +15,10 @@ use super::wav::WavStreamWriter;
 use crate::capture::CaptureError;
 use crate::{FRAME_SIZE, SAMPLE_RATE};
 
-/// One processed frame handed to the writer: `frame_count` samples per lane
-/// in the session's lane order, plus the raw microphone when kept. A view
-/// over the writer thread's buffers, valid for the duration of `write`.
+/// One processed frame handed to the writer, a view over the writer
+/// thread's buffers valid for the duration of `write`.
 #[derive(Debug)]
 pub struct LaneFrames<'a> {
-    /// Samples per lane.
     pub frame_count: usize,
     /// One slice per lane, in the session's lane order.
     pub lanes: &'a [&'a [f32]],
@@ -42,48 +29,35 @@ pub struct LaneFrames<'a> {
 /// The files one recording produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordingFiles {
-    /// The 48 kHz CAF.
     pub master: PathBuf,
-    /// One 16 kHz WAV per lane.
     pub sidecars_16k: BTreeMap<AudioLane, PathBuf>,
-    /// `mic.raw.caf`, when kept.
     pub raw_mic: Option<PathBuf>,
     /// Seconds in the master.
     pub duration: f64,
 }
 
-/// What the writer thread and the session need from the file writer.
-/// [`RecordingWriter`] is the production implementation; tests wrap it to
-/// inject the I/O failures a full disk produces.
+/// What the writer thread and the session need from the file writer; tests
+/// wrap [`RecordingWriter`] to inject I/O failures.
 pub trait RecordingWriting: Send {
     /// The files and the duration written so far; valid before `finish()`
     /// and after a failed one, so the session can still hand out the asset.
     fn files(&self) -> RecordingFiles;
-    /// One frame for every lane.
     fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError>;
-    /// Makes what the files hold so far durable (`File::sync_data`, see
-    /// [`CafStreamWriter::sync`]), so a power loss keeps it; the writer
-    /// thread calls it every
-    /// [`SYNC_INTERVAL_FRAMES`](super::writer_thread::SYNC_INTERVAL_FRAMES)
-    /// frames. A failure is logged once and handed back at the stop, and
-    /// the recording goes on; only a failed write ends it, and a sync
-    /// failure is reported only when nothing else ended the recording. Rust
-    /// only: Swift synced at the close alone.
+    /// Makes what the files hold so far durable (see
+    /// [`CafStreamWriter::sync`]); the writer thread calls it periodically.
+    /// A failure does not end the recording; it is reported at the stop.
     fn sync(&mut self) -> std::io::Result<()>;
-    /// Patches the headers, syncs and closes the files; once. A sync that
-    /// fails here, the Mac's `fsync` fallback too, is a failure: the audio
-    /// may not be on disk.
+    /// Patches the headers, syncs and closes the files; once. A failed
+    /// sync here is a failure: the audio may not be on disk.
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError>;
-    /// Whether this writer created the meeting's folder, so a start that
-    /// fails after it may remove the folder. `false` unless the writer
-    /// says so: a folder no writer claims is never removed. Rust only.
+    /// Whether this writer created the meeting's folder, so a failed start
+    /// may remove it; a folder no writer claims is never removed.
     fn created_directory(&self) -> bool {
         false
     }
 }
 
-/// The production writer: the master CAF, one sidecar per lane through the
-/// 3:1 FIR, the raw microphone when kept; see the module doc.
+/// The production writer.
 pub struct RecordingWriter {
     layout: RecordingLayout,
     lanes: Vec<AudioLane>,
@@ -106,12 +80,10 @@ impl std::fmt::Debug for RecordingWriter {
 }
 
 impl RecordingWriter {
-    /// Creates `layout.directory`, its parents when needed, and refuses
-    /// one that exists ([`CaptureError::RecordingExists`]): a meeting's
-    /// folder holds one recording, and `File::create` would empty its
-    /// files. A file that cannot be created removes the folder again, so
-    /// a retry with the meeting's id finds none. Rust only: Swift created
-    /// the folder if needed.
+    /// Creates `layout.directory` and refuses one that exists
+    /// ([`CaptureError::RecordingExists`]), since `File::create` would
+    /// empty its files. A file that cannot be created removes the folder
+    /// again, so a retry finds none.
     pub fn new(
         layout: &RecordingLayout,
         lanes: &[AudioLane],
@@ -179,7 +151,6 @@ impl RecordingWriter {
         })
     }
 
-    /// The folder layout it writes into.
     #[must_use]
     pub fn layout(&self) -> &RecordingLayout {
         &self.layout
@@ -239,13 +210,8 @@ impl RecordingWriting for RecordingWriter {
         Ok(())
     }
 
-    /// Syncs every file, the master first, so after a power loss a
-    /// recovered recording's sidecars, which its transcript is decoded
-    /// from, are as long as its master. A sidecar costs little beside the
-    /// master: 16 kHz Int16 is about a sixth of a lane's bytes in it. A
-    /// failure on one file still syncs the others, and the first is
-    /// returned. That the real sync reaches the disk is the manual
-    /// power-loss check's; the tests count the calls.
+    /// Syncs every file, the master first. A failure on one file still
+    /// syncs the others, and the first is returned.
     fn sync(&mut self) -> std::io::Result<()> {
         let mut result = self.master.sync();
         for sidecar in &mut self.sidecars {

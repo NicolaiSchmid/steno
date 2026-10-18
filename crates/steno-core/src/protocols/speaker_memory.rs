@@ -1,5 +1,4 @@
 //! Known voices across meetings.
-//! Swift: `Sources/StenoCore/Protocols/SpeakerMemory.swift`.
 
 use async_trait::async_trait;
 
@@ -10,26 +9,20 @@ use crate::{Embedding, SpeakerMatch};
 /// candidate must lead the runner-up by this much.
 pub const DEFAULT_MATCH_MARGIN: f32 = 0.05;
 
-/// Known voices across meetings: pure math over the store's persons. A
-/// person's voice (`Person::embedding` and `sample_count`) is written by
-/// the store on confirm and merge; this trait only reads it.
+/// Known voices across meetings: pure math over the store's persons, whose
+/// voices the store writes on confirm and merge.
 #[async_trait]
 pub trait SpeakerMemory: Send + Sync {
-    /// Candidates ranked by cosine similarity, best first; feeds
-    /// `match_voice` and the speaker picker.
+    /// Candidates ranked by cosine similarity, best first.
     async fn candidates(
         &self,
         embedding: &Embedding,
         limit: usize,
     ) -> BoundaryResult<Vec<SpeakerMatch>>;
 
-    /// The best candidate at or above `threshold` that is at least `margin`
-    /// above the runner-up; `None` otherwise. Exactly Swift's arithmetic: a
-    /// NaN best never matches (Swift's `>=` rejects it, Rust's `<` would
-    /// not, hence the explicit check), while a non-finite runner-up does
-    /// not block the match, because `best - NaN < margin` is false in both
-    /// languages. A NaN threshold matches nobody, as Swift's `>=` does.
-    /// Swift's default `margin` is [`DEFAULT_MATCH_MARGIN`].
+    /// The best candidate at or above `threshold` that leads the runner-up by at
+    /// least `margin`; `None` otherwise. A NaN best or threshold never matches; a
+    /// non-finite runner-up does not block the match.
     async fn match_voice(
         &self,
         embedding: &Embedding,
@@ -57,8 +50,7 @@ mod tests {
     use super::*;
     use crate::testing::sample_data;
 
-    /// A memory that answers with a fixed ranking, so the default
-    /// `match_voice` is tested on its own.
+    /// A memory with a fixed ranking, so the default `match_voice` is tested alone.
     struct Fixed(Vec<SpeakerMatch>);
 
     #[async_trait]
@@ -127,13 +119,13 @@ mod tests {
 
     #[tokio::test]
     async fn non_finite_values_elsewhere_decide_as_in_swift() {
-        // `inf >= threshold` holds in Swift, so an infinite best matches.
+        // An infinite best matches.
         assert_eq!(
             matched(&ranked(&[f32::INFINITY]), 0.0, 0.0).await,
             Some(f32::INFINITY)
         );
         assert_eq!(matched(&ranked(&[f32::NEG_INFINITY]), 0.0, 0.0).await, None);
-        // `best - NaN < margin` is false in both languages: no block.
+        // A NaN runner-up does not block.
         assert_eq!(
             matched(&ranked(&[0.9, f32::NAN]), 0.0, DEFAULT_MATCH_MARGIN).await,
             Some(0.9)

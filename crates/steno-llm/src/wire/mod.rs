@@ -1,9 +1,5 @@
 //! The wire formats: OpenAI chat completions, the Responses API as the
-//! Codex backend speaks it, and server-sent events. Keys are spelled as the
-//! APIs spell them; nothing here is stored and callers see
-//! [`LlmRequest`](steno_core::LlmRequest) and
-//! [`LlmResponse`](steno_core::LlmResponse).
-//! Swift: `Sources/StenoLLM/Wire/`.
+//! Codex backend speaks it, and server-sent events. Nothing here is stored.
 
 mod chat;
 mod responses;
@@ -24,24 +20,21 @@ pub use sse::{ServerSentEvent, looks_like_event_stream, parse_event_stream};
 
 use serde::{Serialize, de::DeserializeOwned};
 
-/// One JSON encoder for the wire: sorted keys and whole doubles as
-/// integers (`steno_core::json::to_column_string`), so recorded request
-/// bodies are byte-stable in tests and match what Swift's encoder wrote.
+/// The wire JSON encoder: sorted keys and whole doubles as integers, so
+/// request bodies are byte-stable.
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
     steno_core::json::to_column_string(value).map(String::into_bytes)
 }
 
-/// The one JSON decoder for the wire, the counterpart of [`encode`].
+/// The wire JSON decoder.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, serde_json::Error> {
     serde_json::from_slice(bytes)
 }
 
-/// `value` as Swift's `JSONEncoder` prints it with `.prettyPrinted`,
-/// `.sortedKeys` and `.withoutEscapingSlashes`: two-space indent, `" : "`
-/// between key and value, and an empty container as an open and a close
-/// bracket around a blank line. The reduce prompt carries the chunk notes
-/// in this form, pinned by the golden. Keys and numbers are normalised by
-/// the one-line encoder first, so both forms agree on them.
+/// `value` pretty-printed with sorted keys and unescaped slashes: two-space
+/// indent, `" : "` between key and value, an empty container as brackets
+/// around a blank line. The reduce prompt carries the chunk notes in this
+/// form, pinned by the golden.
 #[must_use]
 pub fn swift_pretty(value: &serde_json::Value) -> String {
     let normalised: serde_json::Value = steno_core::json::to_column_string(value)

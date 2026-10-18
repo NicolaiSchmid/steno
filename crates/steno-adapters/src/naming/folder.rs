@@ -1,5 +1,4 @@
-//! The scope's fixed meeting folder and the one spelling of every file in it.
-//! Swift: `Sources/StenoAdapters/Naming/MeetingFolder.swift`.
+//! The meeting folder and the one spelling of every file in it.
 
 use chrono_tz::Tz;
 use steno_core::Meeting;
@@ -19,7 +18,7 @@ impl Note {
     pub const ALL: [Note; 3] = [Note::Folder, Note::Transcript, Note::Tasks];
 }
 
-/// The scope's fixed meeting folder and the one spelling of every file in it:
+/// The meeting folder and the one spelling of every file in it:
 ///
 /// ```text
 /// <root>/Meetings/<yyyy-MM-dd>-<slug>/
@@ -31,9 +30,7 @@ impl Note {
 ///   audio.<ext>                           only with includeAudio
 /// ```
 ///
-/// The date is `started_at` in the given time zone; the folder's basename is
-/// the slug every note inside it is named after. Renderers name notes and
-/// links through it, destinations place files by it.
+/// The date is `started_at` in the given time zone.
 pub struct MeetingFolder;
 
 impl MeetingFolder {
@@ -57,8 +54,7 @@ impl MeetingFolder {
         format!("{}/{}", Self::ROOT, Self::basename(meeting, time_zone))
     }
 
-    /// The note's name without extension, which is what a wikilink targets:
-    /// `"<slug>"`, `"<slug> - Transcript"`, `"<slug> - Tasks"`.
+    /// The note's name without extension, the wikilink target.
     #[must_use]
     pub fn note_name(note: Note, slug: &str) -> String {
         match note {
@@ -74,8 +70,7 @@ impl MeetingFolder {
         format!("{}.md", Self::note_name(note, slug))
     }
 
-    /// `"audio.m4a"` for the AAC mixdown; the extension follows the mixdown
-    /// file so the bytes and the name never disagree.
+    /// `"audio.m4a"` for the AAC mixdown; the extension follows the file.
     #[must_use]
     pub fn audio_file(file_extension: &str) -> String {
         if file_extension.is_empty() {

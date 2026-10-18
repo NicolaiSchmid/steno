@@ -1,37 +1,8 @@
 //! A meeting processed while the diarizer's models are missing, through the
-//! diarizer the app builds (`steno_services::speech::diarizer_in` over a
-//! `sidecar_engine`) with a loopback mirror, in the real
-//! `steno-speech-sidecar` binary from the target directory (`cargo test
-//! --workspace` builds it). The speech engine
-//! is core's fake. No network beyond 127.0.0.1.
-//!
-//! - Under `Install::Allowed` (what `steno process` builds), a download
-//!   cut off mid-file, then refused, ends the job `ready` with the one room
-//!   speaker. The recording's files stay byte for byte, the
-//!   cut-off download stays as a partial in `onnx/diarization/`, and
-//!   processing the meeting again resumes it rather than repeating a
-//!   cached failure.
-//! - Under `Install::Never` with no gate in front, the job falls back
-//!   the same way and the mirror sees no request; files of the right size
-//!   in the folder Settings installs that fail to load and fail their
-//!   checksum are deleted, so Settings offers Download.
-//! - The app's diarizer (`SpeechEngines::diarizer`: `Install::Never`
-//!   behind the models-missing gate of `steno_services::model_gate`)
-//!   leaves the job `queued`, waiting for the models with its recording,
-//!   instead: when the models are missing, and when the child refuses
-//!   files of the right size that then fail their checksum, or aborts
-//!   while it loads them. The mirror sees no request either way.
-//!
-//! The test's recordings are kept forever (`KeepForever`). Under
-//! `DeleteAfterProcessing`, a meeting that ends `ready` without its
-//! speakers loses its audio, and the speakers can never be computed again;
-//! deferring that meeting's retention is the pipeline's change (item P14
-//! of `.plans/2026-10-07-stable-promotion.md`), not this crate's.
-//!
-//! With `STENO_MODEL_TESTS=1` and `STENO_MODELS_DIR` holding
-//! `onnx/diarization/`, the mirror then serves the real files: the job run
-//! again resumes the partial and diarizes, and the pipeline's diarizer
-//! under `Install::Never` loads what Settings downloaded without a request.
+//! diarizer the app builds in the real `steno-speech-sidecar` binary, with
+//! a loopback mirror (no network beyond 127.0.0.1). Under `Install::Allowed`
+//! a failed download falls back to the room speaker and resumes later;
+//! under the app's models-missing gate the job waits `queued` instead.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -65,10 +36,9 @@ const CUT_AFTER: usize = 256 * 1024;
 /// One request the mirror saw: its path and `Range` header.
 type Seen = (String, Option<String>);
 
-/// A loopback mirror. Until [`Mirror::recover`] it cuts the first
-/// response off after [`CUT_AFTER`] bytes (a dropped connection
-/// mid-download) and answers 404 to every request after it (the mirror is
-/// gone). Then it serves `<served>/<path>`, honouring `Range`.
+/// A loopback mirror. Until [`Mirror::recover`] it cuts the first response
+/// off after [`CUT_AFTER`] bytes and answers 404 after it; then it serves
+/// `<served>/<path>`, honouring `Range`.
 struct Mirror {
     url: String,
     seen: Arc<Mutex<Vec<Seen>>>,
@@ -139,8 +109,8 @@ fn answer(
     }
     let bytes = served.and_then(|root| std::fs::read(root.join(&path)).ok());
     if !healthy {
-        // The size the manifest declares, so the store takes the cut for
-        // a dropped connection, not for a short file.
+        // The size the manifest declares, so the store takes the cut for a
+        // dropped connection.
         let size = models::asset()
             .files
             .iter()
@@ -199,10 +169,8 @@ fn contents(directory: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-/// The store, the pipeline over the diarizer [`world_with`] was given,
-/// the recording's folder and its asset, the setup and the
-/// model store the diarizer reads, in an empty models directory. The
-/// meeting is enqueued by [`World::start`].
+/// The store, the pipeline over the given diarizer, the recording and its
+/// asset, and the model store, in an empty models directory.
 struct World {
     store: Arc<Store>,
     pipeline: ProcessingPipeline,
@@ -225,18 +193,16 @@ fn world(mirror: &Mirror, install: Install) -> World {
     })
 }
 
-/// [`world_with`] over the diarizer the app's pipelines run
-/// (`SpeechEngines::new(..).diarizer()`), its child started with
-/// `sidecar_args`.
+/// [`world_with`] over the diarizer the app's pipelines run, its child
+/// started with `sidecar_args`.
 fn app_world(mirror: &Mirror, sidecar_args: &[&str]) -> World {
     world_with(mirror, sidecar_args, |setup| {
         SpeechEngines::new(setup.clone()).diarizer()
     })
 }
 
-/// A six-second call, kept forever (see the module doc), processed with
-/// the diarizer `diarizer` builds over the world's setup, whose sidecar
-/// child starts with `sidecar_args`.
+/// A six-second call, kept forever, processed with the diarizer
+/// `diarizer` builds, whose sidecar child starts with `sidecar_args`.
 fn world_with(
     mirror: &Mirror,
     sidecar_args: &[&str],
@@ -310,8 +276,7 @@ fn world_with(
 }
 
 impl World {
-    /// Enqueues the meeting and waits for its job; the recording as it
-    /// was before.
+    /// Enqueues the meeting and waits for its job; the recording as it was.
     async fn run_the_job(&self) -> BTreeMap<PathBuf, Vec<u8>> {
         let before = contents(&self.audio);
         assert!(!before.is_empty());
@@ -343,9 +308,8 @@ impl World {
         assert_eq!(labels, ["Me", "Speaker 1"]);
     }
 
-    /// The meeting is `queued` and waits for the models: the run stopped
-    /// at the diarize stage with the models-missing refusal (a failed run
-    /// would be `failed`, the fallback `ready`) and stored no speakers.
+    /// The meeting is `queued`, its run stopped at the diarize stage with the
+    /// models-missing refusal, and no speakers stored.
     fn assert_waiting_for_the_models(&self) {
         let meeting_id = self.asset.meeting_id;
         assert_eq!(self.state(), MeetingState::Queued);
@@ -357,9 +321,8 @@ impl World {
         assert!(speakers.is_empty(), "{speakers:?}");
     }
 
-    /// The meeting is `ready` and diarized: a speaker carries the
-    /// diarizer's embedding and sample clip, which the fallback never
-    /// stores.
+    /// The meeting is `ready` and a speaker carries the diarizer's embedding
+    /// and sample clip.
     fn assert_diarized(&self) {
         assert_eq!(self.state(), MeetingState::Ready);
         let speakers = self.store.speakers(self.asset.meeting_id).unwrap();
@@ -371,9 +334,8 @@ impl World {
         );
     }
 
-    /// Nothing of the recording is gone or changed (a finished run adds
-    /// its mixdown beside it), and nothing marks it for deletion: the asset
-    /// has no expiry, and a sweep a year from now removes nothing.
+    /// Nothing of the recording is gone or changed, and nothing marks it for
+    /// deletion.
     fn assert_recording_kept(&self, before: &BTreeMap<PathBuf, Vec<u8>>) {
         let after = contents(&self.audio);
         for (path, bytes) in before {
@@ -388,13 +350,10 @@ impl World {
         assert!(removed.is_empty(), "{removed:?}");
     }
 
-    /// The first job under `Install::Allowed`, against a mirror that cuts
-    /// the first download off and then refuses: it ends `ready` with the
-    /// room speaker, keeps the recording and leaves the cut-off download's
-    /// bytes in `onnx/diarization/` for the next attempt. The mirror sees
-    /// three requests for `diarization/<segmentation file>`: the cut, the
-    /// resume the store tries at once, and the diarize stage's own try after
-    /// the warm-up's. Returns the recording as it was.
+    /// The first job under `Install::Allowed`, against a mirror that cuts the
+    /// first download off and then refuses: it ends `ready` with the room
+    /// speaker and leaves the partial download for the next attempt. Returns
+    /// the recording as it was.
     async fn fall_back_on_the_cut_off_download(
         &self,
         mirror: &Mirror,
@@ -433,9 +392,7 @@ async fn a_diarizer_download_cut_off_mid_job_falls_back_and_keeps_the_recording(
     let world = world(&mirror, Install::Allowed);
     let before = world.fall_back_on_the_cut_off_download(&mirror).await;
 
-    // Processing the meeting again asks the mirror again: the failed load
-    // is not cached, the download resumes where it was cut, and the
-    // recording is still all there.
+    // Processing again resumes the download where it was cut.
     world.pipeline.process(world.asset.id).await.unwrap();
     world.assert_ready_with_the_room_speaker();
     let seen = mirror.seen();
@@ -486,8 +443,7 @@ async fn once_the_models_arrive_the_meeting_is_diarized_when_processed_again() {
 }
 
 /// Under `Install::Never` a job without the models falls back to the room
-/// speaker, keeps the recording and makes no request; it does not even
-/// create the models folder.
+/// speaker and makes no request.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pipeline_that_may_not_download_falls_back_without_a_request() {
     let mirror = Mirror::start(None);
@@ -500,11 +456,8 @@ async fn a_pipeline_that_may_not_download_falls_back_without_a_request() {
     assert!(!world.models.directory(&models::asset()).exists());
 }
 
-/// Files of the right size where Settings installs the diarizer's models
-/// (`ModelStoreSpeechModels`) are the files the pipeline's diarizer and
-/// `models::installed` read. When they fail to load and fail their
-/// checksum, the job falls back, the files are deleted and Settings' row
-/// reads Not downloaded, so it offers Download; no request is made.
+/// Files of the right size where Settings installs the models that fail to
+/// load and their checksum are deleted, so Settings offers Download.
 #[tokio::test(flavor = "multi_thread")]
 async fn junk_where_settings_installs_is_deleted_so_settings_offers_download() {
     let mirror = Mirror::start(None);
@@ -537,8 +490,7 @@ async fn junk_where_settings_installs_is_deleted_so_settings_offers_download() {
 }
 
 /// The app's diarizer over an empty models directory: the job waits for
-/// the models with its recording, rather than ending with the room
-/// speaker, and nothing is downloaded or written to the models folder.
+/// the models with its recording, and nothing is downloaded.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_apps_diarizer_without_its_models_parks_the_job_and_fetches_nothing() {
     let mirror = Mirror::start(None);
@@ -550,21 +502,15 @@ async fn the_apps_diarizer_without_its_models_parks_the_job_and_fetches_nothing(
     assert!(!world.models.directory(&models::asset()).exists());
 }
 
-/// Files of the right size pass the gate's check, so the app's diarizer
-/// hands them to the real child, which cannot load them. They fail their
-/// checksum and are deleted, which is `DiarizeError::NotInstalled`, and
-/// the gate takes that as the models-missing refusal: the job waits with
-/// its recording, and no request is made.
+/// Files of the right size that the child cannot load fail their checksum
+/// and are deleted; the gate takes that as the models-missing refusal.
 #[tokio::test(flavor = "multi_thread")]
 async fn files_the_apps_diarizer_cannot_load_in_its_child_park_the_job() {
     park_the_job_over_files_that_do_not_load(&[]).await;
 }
 
-/// The same files, in a child that aborts while it loads them, as ONNX
-/// Runtime may on a corrupt file (the fake engine's
-/// `abort-on-diarizer-load`): the crash in the load is checked like a
-/// refusal, so the files are deleted and the job waits for the models,
-/// rather than ending with the room speaker.
+/// The same files in a child that aborts while it loads them: the crash is
+/// checked like a refusal, and the job waits for the models.
 #[tokio::test(flavor = "multi_thread")]
 async fn files_whose_load_aborts_the_apps_diarizer_child_park_the_job() {
     park_the_job_over_files_that_do_not_load(&[
@@ -575,9 +521,8 @@ async fn files_whose_load_aborts_the_apps_diarizer_child_park_the_job() {
     .await;
 }
 
-/// The app's diarizer, its child started with `sidecar_args`, over files
-/// of the right size that fail their checksum: the job waits with its
-/// recording, the files are deleted, and no request is made.
+/// The app's diarizer over files that fail their checksum: the job waits,
+/// the files are deleted, and no request is made.
 async fn park_the_job_over_files_that_do_not_load(sidecar_args: &[&str]) {
     let mirror = Mirror::start(None);
     let world = app_world(&mirror, sidecar_args);
@@ -602,8 +547,7 @@ async fn park_the_job_over_files_that_do_not_load(sidecar_args: &[&str]) {
 }
 
 /// Settings downloads the models through the mirror; the pipeline's
-/// diarizer under `Install::Never` then loads them from that folder
-/// without a request, and the job diarizes.
+/// diarizer under `Install::Never` then loads them without a request.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_pipelines_diarizer_loads_what_settings_downloaded_without_a_request() {
     let Some(installed) = real_models() else {

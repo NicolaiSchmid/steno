@@ -1,5 +1,4 @@
-//! A `SecretStore` over a map, for tests and the CLI's dry runs. The Swift
-//! package has a 0600 file store instead; that one belongs to the CLI crate.
+//! A `SecretStore` over a map, for tests and the CLI's dry runs.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -36,8 +35,7 @@ impl InMemorySecretStore {
         }
     }
 
-    /// Makes every read fail with `message` (`None` ends it); writes still
-    /// land.
+    /// Makes every read fail with `message` (`None` ends it); writes still land.
     pub fn fail_reads(&self, message: Option<&str>) {
         *lock(&self.read_failure) = message.map(str::to_owned);
     }

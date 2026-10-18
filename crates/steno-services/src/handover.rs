@@ -1,37 +1,9 @@
 //! The host's `Handover` over the phone handover listener
 //! ([`ListenerHandover`], and [`GatedHandover`] behind the Swift import's
-//! gate), where the identity is read and made anew ([`IdentitySource`]),
-//! the file the identity's fingerprint is recorded in ([`FingerprintFile`]),
-//! and the listener's port ([`listener_port`], [`PORT_VARIABLE`]; Rust
-//! only). Swift: the handover block of `AppEnvironment.live` in
-//! `apps/macos/Steno/AppEnvironment.swift`.
-//!
-//! While the identity the paired phones know cannot be read, or the guard
-//! refuses it, the handover waits with the reason ([`Handover::waiting`])
-//! and never mints over it; Try again reads it again and Pair again makes
-//! a new one, the import's marker written first (stable plan S6).
-//!
-//! The waiting state, one row per event. A plain handover
-//! ([`ListenerHandover`]) has its listener or waits with a reason; a gated
-//! one ([`GatedHandover`]) has no listener until the Swift import's gate
-//! opens, then adopts a [`ListenerHandover`], which may itself wait.
-//!
-//! | Event | Plain handover | Gated handover | Read or written |
-//! |-------|----------------|----------------|-----------------|
-//! | Launch | the listener, or waiting with the reason | nothing until the gate opens | the identity read and decided: served, minted or waiting, after the decision's writes |
-//! | Try again while waiting | the listener once the read succeeds, else the new reason | the gate waits: the import's step runs again; a listener adopted: its Try again | the identity read (or the import's export) |
-//! | Try again with a listener | nothing | the adopted listener's: nothing | nothing |
-//! | Pair again while waiting | the listener over a new identity | the gate waits: the import ends with a new identity and the gate opens; a listener adopted: its Pair again | the marker, then the next fingerprint noted (a record that does not parse set aside first), then the new identity, then the paired phones removed, then its fingerprint recorded (dropping the note); a stop leaves the note |
-//! | Launch, Try again or gate ready after an unfinished Pair again | as Launch: finished over the new identity with no phones, or waiting | the gate waits: Try again runs the import, whose store brings the Swift pairing back and drops the note; at gate ready: as plain | as Launch |
-//! | The keyring answered after asking at the launch (`App::launch`) | as Try again | nothing: Try again reads it | as Try again |
-//! | Gate ready | | the listener built and adopted | the identity read, as at the launch |
-//! | A failed build (the store's checkpoint) | | no listener; built again at the next gate change | nothing |
-//! | Shutdown | no listener handed over from now on | no listener built or adopted from now on | nothing |
-//!
-//! Every case of the identity's read, an unfinished Pair again's
-//! included, is a row of the decision's truth table
-//! ([`decide`](steno_handover::identity::decision::decide),
-//! `crates/steno-handover/tests/fixtures/identity-decisions.json`).
+//! gate), the identity's source ([`IdentitySource`]) and fingerprint
+//! record ([`FingerprintFile`]), and the listener's port. While the
+//! identity the paired phones know cannot be read, the handover waits with
+//! the reason and never mints over it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -53,59 +25,27 @@ use crate::secrets::KeyringUnavailable;
 use crate::swift_import::{HandoverGate, ImportMarker};
 
 /// The handover identity's fingerprint in `handover-identity.json` under
-/// the support directory. The format, for every reader and writer:
-/// - A JSON object of string values. It is written pretty-printed with
-///   sorted keys and no trailing newline (`serde_json::to_vec_pretty` of a
-///   `BTreeMap`), and replaced atomically ([`replace_file`]).
-/// - `steno.handoverIdentityFingerprint` ([`Self::KEY`]): the recorded
-///   fingerprint.
-/// - `steno.handoverIdentityNextFingerprint` ([`Self::NEXT_KEY`]): the
-///   note of an unfinished Pair again, present only while one is
-///   unfinished.
-/// - No file means nothing recorded and no note. A record with neither key
-///   is removed, not written.
-/// - A file that does not parse is an error for both reads, never "nothing
-///   recorded"; that includes a value that is not a string. Keys other
-///   than these two are ignored only when their values are strings, and
-///   the next write drops them.
+/// the support directory:
+/// - A JSON object of string values, pretty-printed with sorted keys and
+///   no trailing newline, replaced atomically ([`replace_file`]).
+/// - [`Self::KEY`] holds the recorded fingerprint; [`Self::NEXT_KEY`] the
+///   note of an unfinished Pair again, present only while one is.
+/// - No file means nothing recorded and no note; a record with neither key
+///   is removed. Unknown string keys are ignored and dropped at the next
+///   write.
+/// - A file that does not parse, a non-string value included, is an error
+///   for every read, never "nothing recorded", and no read replaces it.
+///   Only Pair again's note and `record` replace it, after moving it aside
+///   as `handover-identity.json.corrupt-<time>` ([`files::set_aside`]); a
+///   move that fails stops the write. A file that cannot be opened is
+///   never moved or replaced.
 /// - [`FingerprintRecord::record`] writes `KEY` alone, so a finished Pair
-///   again leaves exactly the bytes a build from before `NEXT_KEY` wrote.
-/// - `note_next(Some)` keeps `KEY` and sets `NEXT_KEY`. `note_next(None)`
-///   keeps `KEY`, or removes the file when nothing is recorded.
-/// - A file that does not parse is never overwritten without a kept copy.
-///   The writes that may meet one, Pair again's `note_next(Some)` and
-///   `record` (which the Swift import's [`HandoverIdentity::store`]
-///   reaches), first move it aside as
-///   `handover-identity.json.corrupt-<time>` ([`files::set_aside`]), which
-///   is kept, then write as over nothing recorded; a move that fails stops
-///   the write. `note_next(None)` leaves it and fails. A file that cannot
-///   be opened stays an error for every read and write, and is never moved
-///   or replaced. No read ever replaces
-///   the file: a read that meets one that does not parse waits as
-///   unreadable, and one that cannot open it waits as
-///   [`PhoneWaitingReason::FileNotOpened`].
-/// - Only the load's decision interprets the note
-///   ([`HandoverIdentity::load_or_create`]). Anything that only needs the
-///   pinned fingerprint reads `KEY`, as before.
-/// - Writes are not serialised between instances. The writers outside a
-///   load and Pair again are the Swift import's store, which runs only
-///   while the import's marker is absent and so meets no note (every Pair
-///   again writes the marker first), and the Secret Service move's pin
-///   (`pin_file_identity`), which meets a note only in the window named
-///   beside it.
+///   again leaves the bytes an older build wrote; an older build reads only
+///   `KEY` and drops `NEXT_KEY`.
+/// - Only the load's decision ([`HandoverIdentity::load_or_create`])
+///   interprets the note. Writes are not serialised between instances.
 ///
-/// An older build reads only `KEY` and drops `NEXT_KEY` at its next
-/// record. Over an unfinished Pair again whose new identity was written,
-/// it waits as replaced where a fingerprint was recorded before; where
-/// none was, it adopts the new identity with phones listed that cannot
-/// send until they pair again. Over one whose new identity was not written
-/// (a stop before the write, or a refused write), it reads as if no Pair
-/// again ran.
-///
-/// Not `preferences.json`: that file holds only flags, is rewritten in
-/// place, and a build that reads it as flags would drop every flag over a
-/// text value. The Swift app never reads or writes this file, so a
-/// rollback to it leaves the record alone.
+/// Not `preferences.json`, which holds only flags.
 #[derive(Debug, Clone)]
 pub struct FingerprintFile {
     path: PathBuf,
@@ -118,7 +58,6 @@ impl FingerprintFile {
     /// unfinished.
     pub const NEXT_KEY: &'static str = "steno.handoverIdentityNextFingerprint";
 
-    /// The record under `support_directory`.
     #[must_use]
     pub fn in_support_directory(support_directory: &Path) -> Self {
         FingerprintFile {
@@ -126,14 +65,14 @@ impl FingerprintFile {
         }
     }
 
-    /// The file's keys: none when it is missing; one that does not parse
-    /// is an error, never "nothing recorded".
+    /// The file's keys: none when it is missing; one that does not parse is
+    /// an error.
     fn values(&self) -> BoundaryResult<BTreeMap<String, String>> {
         Ok(self.parsed()??)
     }
 
     /// The file's keys, or why it does not parse; a file that cannot be
-    /// opened is the outer error, so the writes tell the two apart.
+    /// opened is the outer error.
     fn parsed(&self) -> std::io::Result<serde_json::Result<BTreeMap<String, String>>> {
         match std::fs::read(&self.path) {
             Ok(bytes) => Ok(serde_json::from_slice(&bytes)),
@@ -142,9 +81,8 @@ impl FingerprintFile {
         }
     }
 
-    /// Moves a file that does not parse aside as
-    /// `handover-identity.json.corrupt-<time>` ([`files::set_aside`]), kept,
-    /// before `writer` replaces it; an error stops the write.
+    /// Moves a file that does not parse aside before `writer` replaces it;
+    /// an error stops the write.
     fn set_aside(&self, writer: &str) -> BoundaryResult<()> {
         let aside = files::set_aside(&self.path)?;
         tracing::warn!(
@@ -154,8 +92,8 @@ impl FingerprintFile {
         Ok(())
     }
 
-    /// Replaces the file with `fingerprint` and `next`, each only when
-    /// set; with neither the file goes, as before the first record.
+    /// Replaces the file with `fingerprint` and `next`, each only when set;
+    /// with neither the file goes.
     fn write(&self, fingerprint: Option<&str>, next: Option<&str>) -> BoundaryResult<()> {
         let values: BTreeMap<&str, &str> = [(Self::KEY, fingerprint), (Self::NEXT_KEY, next)]
             .into_iter()
@@ -184,11 +122,8 @@ impl FingerprintRecord for FingerprintFile {
         Ok(self.values()?.remove(Self::KEY))
     }
 
-    /// Over a file that does not parse (the Swift import's store meets
-    /// one), it sets the file aside first, as Pair again's note does. A
-    /// file that cannot be opened is neither moved nor replaced: the record
-    /// fails, and the read after it waits as
-    /// [`PhoneWaitingReason::FileNotOpened`].
+    /// Over a file that does not parse it sets the file aside first. A file
+    /// that cannot be opened is neither moved nor replaced: the record fails.
     fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
         if self.parsed()?.is_err() {
             self.set_aside("a record")?;
@@ -203,8 +138,8 @@ impl FingerprintRecord for FingerprintFile {
     fn note_next(&self, fingerprint: Option<&str>) -> BoundaryResult<()> {
         let recorded = match (self.parsed()?, fingerprint) {
             (Ok(mut values), _) => values.remove(Self::KEY),
-            // Pair again replaces a file that does not parse, kept aside
-            // first; dropping a note never does.
+            // Pair again replaces an unparsable file, set aside first; dropping a
+            // note never does.
             (Err(_), Some(_)) => {
                 self.set_aside("Pair again")?;
                 None
@@ -215,14 +150,13 @@ impl FingerprintRecord for FingerprintFile {
     }
 }
 
-/// The variable that sets the handover's port, over the stored setting:
-/// the NixOS module sets it to the port it opens in the firewall.
+/// The variable that sets the handover's port over the stored setting.
 pub const PORT_VARIABLE: &str = "STENO_HANDOVER_PORT";
 
-/// The port the app's listener binds (stable plan X4): [`PORT_VARIABLE`]
-/// from the environment, else the stored [`Settings::handover_port`], else
+/// The port the app's listener binds: [`PORT_VARIABLE`] from the
+/// environment, else the stored [`Settings::handover_port`], else
 /// [`HandoverConfiguration::platform_port`]. An empty variable counts as
-/// unset; one that is not a port is ignored with a warning. Rust only.
+/// unset; one that is not a port is ignored with a warning.
 ///
 /// [`Settings::handover_port`]: steno_core::Settings::handover_port
 #[must_use]
@@ -243,7 +177,7 @@ pub fn listener_port(environment: Option<&str>, stored: Option<u16>) -> u16 {
 }
 
 /// The stored [`Settings::handover_port`]; `None` when there is none or
-/// the settings cannot be read, with a warning. Rust only.
+/// the settings cannot be read, with a warning.
 ///
 /// [`Settings::handover_port`]: steno_core::Settings::handover_port
 pub(crate) fn stored_port(store: &Store) -> Option<u16> {
@@ -257,8 +191,7 @@ pub(crate) fn stored_port(store: &Store) -> Option<u16> {
         .and_then(|settings| settings.handover_port)
 }
 
-/// The default listener configuration on the port [`listener_port`] picks
-/// from `environment` (the value of [`PORT_VARIABLE`]) and [`stored_port`].
+/// The default listener configuration on the port [`listener_port`] picks.
 pub(crate) fn configuration(store: &Store, environment: Option<&str>) -> HandoverConfiguration {
     HandoverConfiguration {
         port: listener_port(environment, stored_port(store)),
@@ -286,22 +219,17 @@ pub(crate) async fn start_if_paired(handover: &HandoverService) {
     }
 }
 
-/// Builds the listener over a loaded or minted identity (the intake, the
-/// configuration and the service; `App`'s build supplies it).
+/// Builds the listener over a loaded or minted identity.
 pub type Listen = Box<dyn Fn(HandoverIdentity) -> Arc<HandoverService> + Send + Sync>;
 
-/// Where a handover reads its identity and makes a new one: the secret
-/// store, the fingerprint record, the database's paired phones, the
-/// import's marker Pair again writes first, and the listener's build.
-/// Every read and every mint of the identity in the app goes through
-/// here. Rust only.
+/// Where a handover reads its identity and makes a new one. Every read
+/// and every mint of the identity in the app goes through here.
 pub struct IdentitySource {
     pub store: Arc<Store>,
     pub secrets: Arc<dyn SecretStore>,
     pub record: Arc<dyn FingerprintRecord>,
-    /// Where Pair again writes the import's `swift-import-done` marker
-    /// before it mints (the Mac's login keychain); `None` where no import
-    /// can run.
+    /// Where Pair again writes the import's `swift-import-done` marker before
+    /// it mints; `None` where no import can run.
     pub marker: Option<Arc<dyn ImportMarker>>,
     /// The new identity's common name (`Steno on <computer name>`).
     pub common_name: String,
@@ -310,9 +238,8 @@ pub struct IdentitySource {
 }
 
 impl IdentitySource {
-    /// The listener over the stored identity, or over one minted where
-    /// the guard allows ([`HandoverIdentity::load_or_create`]), with the
-    /// identity's computer id.
+    /// The listener over the stored identity, or over one minted where the
+    /// guard allows, with the identity's computer id.
     pub fn read(&self) -> Result<(Arc<HandoverService>, Uuid), IdentityError> {
         let identity = block_on(
             &self.runtime,
@@ -327,12 +254,9 @@ impl IdentitySource {
         Ok(self.listener_over(identity))
     }
 
-    /// Pair again: the import's marker first, so a later launch never
-    /// brings the Swift identity back over the new one; a marker that
-    /// cannot be written stops here, before anything is removed. Then
-    /// [`Self::mint_anew`] (the next fingerprint noted, the new identity,
-    /// the phones removed, its fingerprint recorded) and the listener over
-    /// the new identity.
+    /// Pair again: the import's marker first, so a later launch never brings
+    /// the Swift identity back; a marker that cannot be written stops here.
+    /// Then [`Self::mint_anew`] and the listener over the new identity.
     pub fn pair_again(&self) -> Result<(Arc<HandoverService>, Uuid), String> {
         if let Some(marker) = &self.marker {
             marker
@@ -343,12 +267,10 @@ impl IdentitySource {
         Ok(self.listener_over(identity))
     }
 
-    /// Pair again's mint alone ([`HandoverIdentity::mint_anew`]): the new
-    /// identity's fingerprint is noted as the next one (a record that does
-    /// not parse set aside first), the identity written to the secret
-    /// store, the paired phones removed, then its fingerprint recorded,
-    /// which drops the note; a stop leaves the note, and the next read
-    /// decides it. Whoever calls it writes the marker first.
+    /// Pair again's mint alone: the next fingerprint noted, the identity
+    /// written, the paired phones removed, then its fingerprint recorded,
+    /// which drops the note; a stop leaves the note for the next read to
+    /// decide. The caller writes the marker first.
     pub fn mint_anew(&self) -> Result<HandoverIdentity, String> {
         block_on(
             &self.runtime,
@@ -367,11 +289,9 @@ impl IdentitySource {
                 IdentityError::Store(_) | IdentityError::Record(_) => {
                     format!("{} {CHOOSE_PAIR_AGAIN}", unfinished())
                 }
-                // The note stops before anything was written, and only a
-                // fix outside the app helps, which its sentence names.
+                // The note stops before anything was written; only a fix outside the
+                // app helps.
                 error @ IdentityError::Note(_) => identity_failure(&error),
-                // The secret's write and the mint stop before anything the
-                // phones rely on changed.
                 error => format!("{} {CHOOSE_PAIR_AGAIN}", identity_failure(&error)),
             }
         })
@@ -383,19 +303,16 @@ impl IdentitySource {
     }
 }
 
-/// Pair again's answer when the import's marker could not be written
-/// (only on the Mac, whose login keychain holds it); the error goes to the
-/// log.
+/// Pair again's answer when the import's marker could not be written;
+/// the error goes to the log.
 pub(crate) fn marker_not_written(error: &str) -> String {
     tracing::warn!(%error, "the import's marker was not written, so Pair again stopped");
     MARKER_NOT_WRITTEN.to_owned()
 }
 
-/// What [`marker_not_written`] answers.
 pub(crate) const MARKER_NOT_WRITTEN: &str = "Steno made no new pairing, as macOS did not let it save to the login keychain. Choose Pair again, and unlock the keychain if macOS asks.";
 
-/// What Pair again's answers end with where choosing it again may help;
-/// the section's line says only that it did not finish.
+/// What Pair again's answers end with where choosing it again may help.
 const CHOOSE_PAIR_AGAIN: &str = "Choose Pair again.";
 
 /// The word for this computer in the handover's answers.
@@ -405,14 +322,8 @@ const COMPUTER: &str = if cfg!(target_os = "macos") {
     "computer"
 };
 
-/// Why the identity is not available, for the iPhone section's details,
-/// in plain words: the keyring's own sentence when it was not opened at
-/// start, as that one already names the pairing; the waiting card's first
-/// sentence when the guard refused the identity or the record could not be
-/// opened, as the card below it says what to do; a sentence of its own when
-/// the database failed or the record does not parse, and when Pair again
-/// could not note the next fingerprint (the caller logs the error); the
-/// read's error otherwise.
+/// Why the identity is not available, in plain words, for the iPhone
+/// section's details.
 pub(crate) fn identity_failure(error: &IdentityError) -> String {
     match error {
         IdentityError::Unavailable(Unavailability::Missing) => {
@@ -463,13 +374,11 @@ pub(crate) fn identity_failure(error: &IdentityError) -> String {
     }
 }
 
-/// The record could not be opened (its permissions, a disk error), which
-/// is no record that does not parse: Pair again cannot get past it.
+/// The record could not be opened, which Pair again cannot get past.
 fn file_not_opened(error: &IdentityError) -> bool {
     matches!(error, IdentityError::Record(source) if source.is::<std::io::Error>())
 }
 
-/// The keyring's reason when the identity could not be read from it.
 fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
     match error {
         IdentityError::Unavailable(Unavailability::Unreadable(source)) => source.downcast_ref(),
@@ -478,17 +387,14 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
 }
 
 /// What Pair again answers when it stopped after the new identity was
-/// written (the phones' removal or the record failed): what happened;
-/// [`IdentitySource::mint_anew`] adds what to do.
+/// written.
 fn unfinished() -> String {
     format!("Steno saved a new phone pairing on this {COMPUTER} but did not finish setting it up.")
 }
 
-/// What the iPhone section says the handover waits for, by why the
-/// identity was not available: a stored identity that does not parse, a
-/// record that does not, and a write that failed read as "could not be
-/// read" too, as Try again may get past each; a record that cannot be
-/// opened needs a fix outside the app first.
+/// What the iPhone section says the handover waits for: everything Try
+/// again may get past reads as "could not be read"; a record that cannot
+/// be opened needs a fix outside the app.
 fn wait_reason(error: &IdentityError) -> PhoneWaitingReason {
     match error {
         error if file_not_opened(error) => PhoneWaitingReason::FileNotOpened,
@@ -503,40 +409,29 @@ fn wait_reason(error: &IdentityError) -> PhoneWaitingReason {
 }
 
 /// The host's `Handover` over the listener; blocks on the runtime for the
-/// few async calls (paired devices, start, stop, revoke).
+/// few async calls.
 ///
-/// The listener is there from the start, or comes later: while the
-/// identity cannot be read or the guard refuses it
-/// ([`HandoverIdentity::load_or_create`]), the handover waits
-/// ([`Handover::waiting`]), mints nothing, and reads the identity again
-/// at Try again ([`Handover::try_again`]) or once a keyring that was
-/// asking the user answered (`App::launch`); Pair again
-/// ([`Handover::pair_again`]) makes a new identity. Until then the
-/// handover reads as failed with the reason, the paired phones come from
-/// the database, and every other call that needs the listener fails or
-/// does nothing. Once the app shuts down ([`ListenerHandover::close`]) no
-/// listener is handed over.
+/// The listener is there from the start or comes later: while the
+/// identity cannot be read, the handover waits ([`Handover::waiting`]),
+/// mints nothing, and reads again at Try again or once the keyring
+/// answered; Pair again makes a new identity. Meanwhile the paired phones
+/// come from the database. After [`ListenerHandover::close`] no listener
+/// is handed over.
 pub struct ListenerHandover {
     listener: OnceLock<(Arc<HandoverService>, Uuid)>,
-    /// Why there is no listener yet, and whether the app shut down; `set`
-    /// and `close` hold it throughout.
+    /// Why there is no listener yet, and whether the app shut down.
     pending: Mutex<Pending>,
-    /// Where Try again and Pair again read and mint; `None` for a
-    /// handover made over a listener alone.
+    /// Where Try again and Pair again read and mint.
     source: Option<Arc<IdentitySource>>,
-    /// Held by a read or a mint, one at a time.
     attempt: Mutex<()>,
     store: Arc<Store>,
     runtime: tokio::runtime::Handle,
 }
 
-/// Why a [`ListenerHandover`] has no listener yet, and whether the app
-/// shut down.
 struct Pending {
     /// The failure the listener state shows.
     failure: String,
-    /// Why the handover waits, for the iPhone section; `None` with a
-    /// listener.
+    /// Why the handover waits; `None` with a listener.
     reason: Option<PhoneWaitingReason>,
     closed: bool,
 }
@@ -549,8 +444,7 @@ pub(crate) const NOT_WAITING: &str = "Your phones can already send recordings.";
 const SHUT_DOWN: &str = "Steno is quitting.";
 
 impl ListenerHandover {
-    /// The handover over `service`, whose identity's computer id is
-    /// `mac_id`.
+    /// The handover over `service`, whose computer id is `mac_id`.
     #[must_use]
     pub fn over(
         service: Arc<HandoverService>,
@@ -563,9 +457,8 @@ impl ListenerHandover {
         handover
     }
 
-    /// The handover over the identity `source` reads: its listener when
-    /// the read succeeds, else one that waits with the reason and reads
-    /// again at Try again. Logs why it waits.
+    /// The handover over the identity `source` reads, or one that waits with
+    /// the reason.
     #[must_use]
     pub fn read(source: Arc<IdentitySource>) -> Self {
         let (store, runtime) = (source.store.clone(), source.runtime.clone());
@@ -608,10 +501,9 @@ impl ListenerHandover {
         self.listener.get().map(|(service, _)| service)
     }
 
-    /// Hands over the listener a waiting handover lacked and starts it
-    /// when a phone is paired; false (and `service` unused) when it has one
-    /// or the app shut down. The start runs under the lock `close` takes,
-    /// so a shutdown either stops the started listener or comes first and
+    /// Hands over the listener a waiting handover lacked and starts it when a
+    /// phone is paired; false when it has one or the app shut down. The start
+    /// runs under the lock `close` takes, so a shutdown either stops it or
     /// keeps it from starting.
     fn set(&self, service: Arc<HandoverService>, mac_id: Uuid) -> bool {
         let mut pending = self.lock();
@@ -638,11 +530,8 @@ impl ListenerHandover {
     }
 
     /// Reads the identity again while the handover waits and hands the
-    /// listener over when the read succeeds; the failure's reason, kept
-    /// for the iPhone section, when it does not. Nothing to do with a
-    /// listener; `ATTEMPT_UNDER_WAY` while another read or mint runs,
-    /// as the handover still waits. Try again, and the launch's reread
-    /// once a keyring that was asking the user answered.
+    /// listener over on success; the failure's reason otherwise.
+    /// `ATTEMPT_UNDER_WAY` while another read or mint runs.
     pub fn read_again(&self) -> Result<(), String> {
         if self.listener().is_some() {
             return Ok(());
@@ -668,15 +557,12 @@ impl ListenerHandover {
         }
     }
 
-    /// Why the identity is not available, as the listener state and the
-    /// iPhone section show it.
     fn wait_for(&self, error: &IdentityError) {
         let mut pending = self.lock();
         pending.failure = identity_failure(error);
         pending.reason = Some(wait_reason(error));
     }
 
-    /// Held for a read or a mint; `None` while another one runs.
     fn one_at_a_time(&self) -> Option<MutexGuard<'_, ()>> {
         match self.attempt.try_lock() {
             Ok(guard) => Some(guard),
@@ -732,8 +618,7 @@ impl Handover for ListenerHandover {
         }
     }
 
-    /// Without the listener (which the host never meets, as it opens a
-    /// pairing only after `start` succeeded), a code that has run out.
+    /// Without the listener, a code that has run out.
     fn begin_pairing(&self) -> PairingCode {
         let Some(service) = self.listener() else {
             return PairingCode {
@@ -776,11 +661,8 @@ impl Handover for ListenerHandover {
         Ok(self.read_again()?)
     }
 
-    /// Only while the handover waits, and never after the shutdown: the
-    /// marker, the mint ([`IdentitySource::pair_again`]), then the
-    /// listener over the new identity. Checked again once the attempt is
-    /// this one's, as a read that just ended may have handed a listener
-    /// over.
+    /// Only while the handover waits and before the shutdown: the marker, the
+    /// mint, then the listener. Checked again once the attempt is this one's.
     fn pair_again(&self) -> BoundaryResult<()> {
         if self.listener().is_some() {
             return Err(NOT_WAITING.into());
@@ -799,33 +681,26 @@ impl Handover for ListenerHandover {
     }
 }
 
-/// What `start` and `revoke` answer while the import waits, before a
-/// listener build failed.
 pub const WAITING_FOR_IMPORT: &str = "Your phones can send recordings again once Steno has brought over this Mac's phone pairing from the previous version, in the welcome step or with Try again in Settings > iPhone.";
 
-/// The Swift import's step as the gated handover drives it while the
-/// import's gate waits (`crate::swift_import::ImportStep`).
+/// The Swift import's step as the gated handover drives it.
 pub trait WaitingImport: Send + Sync {
-    /// Try again: the step runs again (the export and its prompt); its line
-    /// when the identity still did not come over.
+    /// Try again: the step runs again; its line when the identity still did
+    /// not come over.
     fn try_again(&self) -> Result<(), String>;
-    /// Pair again ends the import: the marker first (one that cannot be
-    /// written stops it), then `mint`, then the gate opens.
+    /// Pair again ends the import: the marker first, then `mint`, then the
+    /// gate opens.
     fn pair_again(&self, mint: &dyn Fn() -> Result<(), String>) -> Result<(), String>;
 }
 
-/// Pair again's mint while the import waits ([`IdentitySource::mint_anew`]).
 pub type MintAnew = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
 
-/// The host's `Handover` while the Swift import is pending
-/// (`crate::swift_import`): no listener and no identity read until the
-/// gate opens, then the listener built once the gate opens, which every
-/// call goes to. Until then the paired phones come from the store, the
-/// listener reads as stopped, and starting it or revoking a phone says
-/// that it waits. While the gate waits after the step, Try again runs the
-/// step again and Pair again ends the import with a new identity
-/// ([`WaitingImport`]). Once the app shuts down ([`GatedHandover::close`])
-/// no listener is adopted.
+/// The host's `Handover` while the Swift import is pending: no listener
+/// and no identity read until the gate opens, then the listener built
+/// then. Until then the paired phones come from the store and starting or
+/// revoking says that it waits; Try again and Pair again go to the
+/// [`WaitingImport`]. After [`GatedHandover::close`] no listener is
+/// adopted.
 pub struct GatedHandover {
     store: Arc<Store>,
     gate: tokio::sync::watch::Receiver<HandoverGate>,
@@ -837,13 +712,11 @@ pub struct GatedHandover {
     failure: tokio::sync::watch::Sender<Option<String>>,
     /// Try again after a failed build: `follow` builds again.
     retry: tokio::sync::Notify,
-    /// Set once the app shut down; held while a built listener is adopted
-    /// and started.
+    /// Set once the app shut down; held while a listener is adopted.
     closed: Mutex<bool>,
 }
 
-/// Builds the listener once the gate opened: loads the identity the
-/// import stored, as the graph's build does without an import.
+/// Builds the listener once the gate opened.
 pub type MakeListener = Box<dyn Fn() -> Result<Arc<ListenerHandover>, String> + Send + Sync>;
 
 impl GatedHandover {
@@ -868,27 +741,22 @@ impl GatedHandover {
         }
     }
 
-    /// Why the last build of the listener failed (the store's checkpoint),
-    /// `None` before the first build and once one succeeded.
+    /// Why the last build of the listener failed, `None` otherwise.
     #[must_use]
     pub fn failure(&self) -> tokio::sync::watch::Receiver<Option<String>> {
         self.failure.subscribe()
     }
 
     /// Waits for the gate to say [`HandoverGate::Ready`], then builds the
-    /// listener, starts it when a phone is paired (as the launch does) and
-    /// calls `changed`. Never builds a listener while the gate waits, so
-    /// no identity is read or minted before the import put one in place.
-    /// A build that fails waits for the gate to say ready again, or for Try
-    /// again, and builds again. Returns once the listener is adopted (it
-    /// may itself wait for its identity, [`ListenerHandover::read`]), when
-    /// the gate is gone, or after the shutdown, which adopts nothing and
-    /// calls no `changed`.
+    /// listener, starts it when a phone is paired and calls `changed`. No
+    /// identity is read or minted while the gate waits. A failed build waits
+    /// for the next ready or Try again. Returns once a listener is adopted,
+    /// the gate is gone, or after the shutdown, which calls no `changed`.
     pub async fn follow(self: Arc<Self>, changed: impl FnOnce() + Send + 'static) {
         let mut gate = self.gate.clone();
         loop {
-            // `wait_for` marks the value it accepted as seen, so the
-            // `changed` below waits for the next one.
+            // `wait_for` marks the value as seen, so `changed` below waits for the
+            // next one.
             if gate.wait_for(|gate| gate.opens_listener()).await.is_err() {
                 return;
             }
@@ -913,13 +781,9 @@ impl GatedHandover {
         changed();
     }
 
-    /// Builds the listener, then adopts it and starts it when a phone is
-    /// paired, under the latch [`Self::close`] takes: `false`, with nothing
-    /// adopted or started, once the app shut down.
-    ///
-    /// The latch is checked before the build too, so a shutdown that came
-    /// first reads no identity; it is not held during the build, which may
-    /// wait on a keychain prompt that the shutdown must not wait for.
+    /// Builds the listener, then adopts and starts it under the latch
+    /// [`Self::close`] takes: `false` once the app shut down. The latch is not
+    /// held during the build, which may wait on a keychain prompt.
     fn build_and_adopt(&self) -> Result<bool, String> {
         if *self.lock_closed() {
             return Ok(false);
@@ -935,8 +799,8 @@ impl GatedHandover {
         Ok(true)
     }
 
-    /// The app shuts down: no listener is adopted from now on, and the
-    /// adopted one hands over none; the listener there, to stop.
+    /// The app shuts down: no listener is adopted from now on; the one there,
+    /// to stop.
     pub fn close(&self) -> Option<Arc<HandoverService>> {
         *self.lock_closed() = true;
         self.listener
@@ -957,9 +821,7 @@ impl GatedHandover {
     }
 
     /// What `start` and `revoke` answer without a listener: why the last
-    /// build failed, once the gate opened and the build failed (the
-    /// import is over by then), else that the handover waits for the
-    /// import.
+    /// build failed, else that the handover waits for the import.
     fn waiting_error(&self) -> steno_core::BoxError {
         self.failure
             .borrow()
@@ -1006,8 +868,7 @@ impl Handover for GatedHandover {
     fn begin_pairing(&self) -> PairingCode {
         match self.listener.get() {
             Some(listener) => listener.begin_pairing(),
-            // Unreachable from the Phones section, which starts the
-            // listener first: a code that has already run out.
+            // Unreachable from the Phones section, which starts the listener first.
             None => PairingCode {
                 expires_at: chrono::DateTime::UNIX_EPOCH,
                 url_string: String::new(),
@@ -1035,9 +896,8 @@ impl Handover for GatedHandover {
             .unwrap_or_default()
     }
 
-    /// The adopted listener's reason; before one, the import's while its
-    /// gate waits after the step. Not while the step is pending: the
-    /// onboarding window shows it.
+    /// The adopted listener's reason; before one, the import's while its gate
+    /// waits after the step.
     fn waiting(&self) -> Option<PhoneWaitingReason> {
         if let Some(listener) = self.listener.get() {
             return listener.waiting();
@@ -1048,17 +908,14 @@ impl Handover for GatedHandover {
         }
     }
 
-    /// The adopted listener reads its identity again, so a listener left
-    /// waiting on the keyring gets past an unlock; before one, while the
-    /// gate waits, the step runs again. Once the gate opened and a build
-    /// failed, `follow` builds again; Settings never offers Try again
-    /// then, as [`Handover::waiting`] has no reason to show.
+    /// The adopted listener reads its identity again; before one, while the
+    /// gate waits, the step runs again; after a failed build, `follow` builds
+    /// again.
     fn try_again(&self) -> BoundaryResult<()> {
         if let Some(listener) = self.listener.get() {
             return listener.try_again();
         }
-        // Copied out: the step sets the gate, which a held borrow would
-        // block.
+        // Copied out: the step sets the gate, which a held borrow would block.
         let gate = *self.gate.borrow();
         match gate {
             HandoverGate::Waiting(_) => Ok(self.import.try_again()?),
@@ -1070,9 +927,7 @@ impl Handover for GatedHandover {
         }
     }
 
-    /// The adopted listener's Pair again; before one, while the gate
-    /// waits, the import's ([`WaitingImport::pair_again`]), whose open gate
-    /// brings the listener over the new identity.
+    /// The adopted listener's Pair again; before one, the import's.
     fn pair_again(&self) -> BoundaryResult<()> {
         if let Some(listener) = self.listener.get() {
             return listener.pair_again();
@@ -1193,10 +1048,8 @@ mod tests {
         assert!(file.next().is_err(), "nor a record without a note");
     }
 
-    /// A key the app does not know is ignored while its value is a string,
-    /// and the next write drops it. A value that is not a string, under
-    /// any key, makes the file one that does not parse: an error for both
-    /// reads, never "nothing recorded".
+    /// Unknown keys with string values are ignored and dropped at the next
+    /// write; a non-string value makes the file unparsable for both reads.
     #[test]
     fn only_string_values_are_read_and_any_other_value_does_not_parse() {
         let dir = tempfile::tempdir().unwrap();
@@ -1229,10 +1082,8 @@ mod tests {
     /// The bytes a build from before the next fingerprint wrote, exactly.
     const OLDER_FILE: &[u8] = b"{\n  \"steno.handoverIdentityFingerprint\": \"cd34\"\n}";
 
-    /// A file from before the next fingerprint reads as before, with no
-    /// note. The note is written beside the recorded fingerprint and kept
-    /// by it; recording drops it, which leaves exactly the older bytes, and
-    /// dropping it leaves them too, or no file where nothing was recorded.
+    /// An older file reads as before; the note is written beside the
+    /// fingerprint, and recording or dropping it leaves the older bytes.
     #[test]
     fn an_older_fingerprint_file_reads_and_a_finished_pair_again_writes_its_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1259,7 +1110,7 @@ mod tests {
         assert_eq!(file.next().unwrap(), None, "the record drops the note");
         assert_eq!(std::fs::read(&path).unwrap(), OLDER_FILE, "the older bytes");
 
-        // Nothing recorded, as on the first launch after the Swift app.
+        // Nothing recorded.
         std::fs::remove_file(&path).unwrap();
         file.note_next(Some("ef56")).unwrap();
         assert_eq!(file.recorded().unwrap(), None);
@@ -1272,12 +1123,9 @@ mod tests {
         file.note_next(None).unwrap();
     }
 
-    /// Pair again's note and a record (the Swift import's store) replace a
-    /// file that does not parse only after setting it aside as
-    /// `handover-identity.json.corrupt-<time>` with its bytes, then write
-    /// as over nothing recorded. Dropping a note replaces nothing, and a
-    /// file that cannot be opened is no file that does not parse: it stays
-    /// an error and is never moved.
+    /// The note and a record replace an unparsable file only after setting it
+    /// aside with its bytes. Dropping a note replaces nothing, and an
+    /// unopenable file stays an error and is never moved.
     #[test]
     fn a_write_over_a_file_that_does_not_parse_sets_it_aside_first() {
         let dir = tempfile::tempdir().unwrap();
@@ -1330,12 +1178,8 @@ mod tests {
         assert_eq!(set_aside().len(), 2);
     }
 
-    /// A record over a file that cannot be opened but could be replaced
-    /// (here one without read permission in a folder Steno may write) is
-    /// refused, as the Swift import's store would otherwise replace it
-    /// without a kept copy: the error is the file's, so the read after it
-    /// waits as [`PhoneWaitingReason::FileNotOpened`], and the bytes stay,
-    /// unmoved.
+    /// A record over an unreadable but replaceable file is refused, and the
+    /// bytes stay, unmoved.
     #[cfg(unix)]
     #[test]
     fn a_record_over_a_file_that_cannot_be_opened_is_refused() {
@@ -1361,11 +1205,8 @@ mod tests {
         );
     }
 
-    /// With nothing recorded, an identity some paired phones predate and
-    /// others do not waits with the mixed words and its own reason, whose
-    /// card in Settings offers Pair again first, and a Try again that still
-    /// waits says only what the card does not; Pair again reconnects every
-    /// phone over a new identity.
+    /// An identity some paired phones predate and others do not waits with
+    /// its own reason; Pair again reconnects every phone.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_identity_some_phones_predate_waits_with_the_mixed_words_until_pair_again() {
         let paired = Paired::new(true).await;
@@ -1412,10 +1253,8 @@ mod tests {
         assert_eq!(phones, 0, "every phone pairs again");
     }
 
-    /// With nothing recorded, a phone paired after now on this computer's
-    /// clock (the clock went back since) waits for the clock with its own
-    /// reason and words, writes nothing, and its words do not ask for Pair
-    /// again.
+    /// A phone paired after now on this clock waits for the clock, writes
+    /// nothing, and does not ask for Pair again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_identity_with_a_pairing_after_now_waits_for_the_clock() {
         let paired = Paired::new(true).await;
@@ -1445,12 +1284,9 @@ mod tests {
         assert_eq!(paired.listens.load(Ordering::SeqCst), 0);
     }
 
-    /// A set-aside that fails stops the write: here the support folder's
-    /// path is 4050 bytes long, so the record (+23 bytes) and the write's
-    /// temporary (+39) fit under Linux's 4095, and
-    /// `<name>.corrupt-<time>` (+48) does not. Pair again stops at the
-    /// note before any write, and the import's record fails; the bytes
-    /// stay, no secret is written and the phone stays paired.
+    /// A set-aside that fails stops the write: the path is long enough that
+    /// the record fits under Linux's 4095 bytes and the `.corrupt-<time>`
+    /// name does not. Nothing is written and the phone stays paired.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_set_aside_that_fails_stops_the_write() {
@@ -1493,10 +1329,8 @@ mod tests {
         assert_eq!(store.paired_devices().unwrap().len(), 1);
     }
 
-    /// The answers Try again and Pair again give, pinned as text, as the
-    /// tests compare against the constants: each in plain words, with no
-    /// developer word in it, and each identity reason's details line
-    /// opening with its waiting card's first sentence.
+    /// The answers Try again and Pair again give, pinned as text, in plain
+    /// words.
     #[test]
     fn the_handover_s_answers_are_plain_sentences() {
         assert_eq!(
@@ -1568,8 +1402,7 @@ mod tests {
         assert!(!HandoverGate::Waiting(WaitReason::ImportDenied).opens_listener());
     }
 
-    /// A loopback-free test listener: unadvertised, on a port the system
-    /// chooses, its inbox in `dir`.
+    /// A test listener: unadvertised, on any port, its inbox in `dir`.
     fn test_service(store: &Arc<Store>, dir: &Path, identity: HandoverIdentity) -> HandoverService {
         service(
             HandoverConfiguration {
@@ -1599,12 +1432,8 @@ mod tests {
         ))
     }
 
-    /// A build that fails is tried again at the next ready, and at Try
-    /// again, not dropped: whatever puts the identity in place opens the
-    /// listener by setting the gate once more, and Try again builds again
-    /// after a failure that was not the import's. Until then starting the
-    /// listener or revoking a phone answers why the build failed, not that
-    /// the import waits.
+    /// A failed build is tried again at the next ready and at Try again;
+    /// until then start and revoke answer why it failed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_build_is_tried_again_at_the_next_ready_and_at_try_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1643,7 +1472,6 @@ mod tests {
         let mut failure = gated.failure();
         failure.wait_for(Option::is_some).await.unwrap();
         assert!(gated.service().is_none());
-        // The import is over: the answer is why the build failed.
         let failed = "the store could not be synced";
         assert_eq!(gated.start().unwrap_err().to_string(), failed);
         assert_eq!(gated.revoke(Uuid::nil()).unwrap_err().to_string(), failed);
@@ -1664,12 +1492,9 @@ mod tests {
         assert_eq!(*gated.failure().borrow(), None);
     }
 
-    /// A secret store in memory that refuses every read of the identity
-    /// while `refuse` is set, as a denied keychain prompt does, and every
-    /// write while `refuse_writes` is; while `keep_and_refuse` is, it takes
-    /// a write and then reports it refused, as a reply lost after the item
-    /// was saved does. Counts the identity's reads and logs every write it
-    /// took into `log`.
+    /// An in-memory secret store that refuses identity reads while `refuse`
+    /// is set, writes while `refuse_writes` is, and keeps a write but reports
+    /// it refused while `keep_and_refuse` is. Counts reads and logs writes.
     #[derive(Default)]
     struct Keychain {
         inner: steno_core::testing::InMemorySecretStore,
@@ -1712,8 +1537,8 @@ mod tests {
         }
     }
 
-    /// The import's marker: logs every write into the keychain's log, and
-    /// fails while `fail` is set.
+    /// The import's marker: logs writes into the keychain's log, and fails
+    /// while `fail` is set.
     #[derive(Default)]
     struct Marker {
         log: Arc<Mutex<Vec<String>>>,
@@ -1732,9 +1557,7 @@ mod tests {
         }
     }
 
-    /// A computer whose phone paired with `identity`, recorded under
-    /// `dir`; `stored` puts the identity in the keychain too. `listens`
-    /// counts the listeners its source built.
+    /// A computer whose phone paired with `identity`, recorded under `dir`.
     struct Paired {
         dir: tempfile::TempDir,
         store: Arc<Store>,
@@ -1795,14 +1618,11 @@ mod tests {
             })
         }
 
-        /// The phone's id.
         fn phone(&self) -> Uuid {
             self.store.paired_devices().unwrap()[0].id
         }
 
-        /// A recording the phone is still sending (its receipt `receiving`,
-        /// its chunks in the inbox) and one already admitted as a meeting
-        /// (its receipt `complete`, its row in the admission ledger).
+        /// A recording still being sent and one already admitted.
         fn seed_recordings(&self) -> Recordings {
             let now = chrono::Utc::now();
             let receiving = Uuid::new_v4();
@@ -1830,14 +1650,13 @@ mod tests {
             }
         }
 
-        /// No fingerprint recorded, as on the first launch after the Swift
-        /// app, whose phones come from the shared database.
+        /// No fingerprint recorded.
         fn forget_the_record(&self) {
             self.record.file.write(None, None).unwrap();
         }
 
-        /// The stored identity, the recorded fingerprint, the next one and
-        /// the paired phones, as they stand.
+        /// The stored identity, the fingerprint, the next one and the paired
+        /// phones.
         async fn places(&self) -> (Option<String>, Option<String>, Option<String>, usize) {
             (
                 self.keychain
@@ -1851,7 +1670,6 @@ mod tests {
             )
         }
 
-        /// The identity's fingerprint as recorded, in hex.
         fn fingerprint_of(stored: Option<&String>) -> Option<String> {
             stored.map(|pem| {
                 steno_handover::identity::hex(
@@ -1865,11 +1683,9 @@ mod tests {
         }
     }
 
-    /// A read the keychain refuses mints nothing: the stored identity, the
-    /// recorded fingerprint and the paired phone stay as they were, at the
-    /// launch and at a Try again that is refused too. Once the keychain
-    /// answers, Try again hands the listener over without a restart, on
-    /// the identity the phone knows, and starts it for the paired phone.
+    /// A refused read mints nothing and changes nothing, at launch and at
+    /// Try again; once the keychain answers, Try again hands the listener
+    /// over on the identity the phone knows.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_read_mints_nothing_and_try_again_starts_the_listener_once_it_reads() {
         let paired = Paired::new(true).await;
@@ -1883,8 +1699,7 @@ mod tests {
         };
         assert!(reason.contains("refused the keychain prompt"), "{reason}");
         {
-            // A Try again while another read or mint runs says so: the
-            // handover still waits.
+            // A Try again while another attempt runs says so.
             let _other = handover.attempt.lock().unwrap();
             let busy = tokio::task::block_in_place(|| handover.try_again()).unwrap_err();
             assert_eq!(busy.to_string(), ATTEMPT_UNDER_WAY);
@@ -1929,11 +1744,9 @@ mod tests {
         tokio::task::block_in_place(|| handover.stop());
     }
 
-    /// The identity the phone knows is gone, so the handover waits (and
-    /// says so) instead of minting. Pair again writes the import's marker
-    /// first, before the new identity is stored, and keeps it; the paired
-    /// phone and the old fingerprint go, and the listener comes up on the
-    /// new identity.
+    /// A missing identity waits instead of minting. Pair again writes the
+    /// marker first; the phone and the old fingerprint go, and the listener
+    /// comes up on the new identity.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pair_again_writes_the_marker_before_the_new_identity_and_keeps_it() {
         let paired = Paired::new(false).await;
@@ -1974,8 +1787,7 @@ mod tests {
         );
     }
 
-    /// A marker that cannot be written stops Pair again before anything
-    /// goes: no identity is minted, and the phone and the fingerprint stay.
+    /// A marker that cannot be written stops Pair again before anything goes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_marker_that_cannot_be_written_stops_pair_again() {
         let paired = Paired::new(false).await;
@@ -1997,12 +1809,8 @@ mod tests {
     }
 
     impl Recordings {
-        /// Neither recording was marked delivered or dropped on this
-        /// computer: the admitted one keeps its ledger row and its meeting,
-        /// the one still being sent has no ledger row, and while the phone
-        /// is paired (`phone`) both receipts and the chunks stay. Without
-        /// the phone the receipts went with it, and the phone, which keeps
-        /// its copy, sends the recording again once it paired again.
+        /// Neither recording was marked delivered or dropped: while the phone is
+        /// paired (`phone`) the ledger row, the receipts and the chunks stay.
         fn assert_kept(&self, store: &Store, phone: bool, when: &str) {
             assert!(
                 self.admitted.is_unchanged(store),
@@ -2034,14 +1842,9 @@ mod tests {
         }
     }
 
-    /// A Pair again whose new identity the keychain refuses to write
-    /// changes nothing the phones rely on, whichever reason the handover
-    /// waits for: the stored identity, the recorded fingerprint, the paired
-    /// phone and its recordings stay, the handover still waits for the
-    /// same reason, and so does the next launch. The note stays for the
-    /// next read to decide: that launch drops it where no identity is
-    /// stored (abandoned), and keeps it where the keychain still refuses
-    /// the read or holds another identity.
+    /// A Pair again whose identity write is refused changes nothing the
+    /// phones rely on, now or at the next launch; the note stays for the next
+    /// read to decide.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_write_leaves_pair_again_waiting_with_its_reason() {
         for reason in [
@@ -2106,13 +1909,9 @@ mod tests {
         }
     }
 
-    /// A write the keychain reports refused although it kept the item (a
-    /// reply lost after the save) leaves the note like any stop after the
-    /// write, so the next read finishes the Pair again, at the next launch
-    /// or at Try again in the same one: whether the handover waited as
-    /// missing or as unreadable, and whether or not a fingerprint was
-    /// recorded before, no phone is listed, the new fingerprint is
-    /// recorded, nothing is minted and the admission ledger is as it was.
+    /// A write reported refused although kept leaves the note, and the next
+    /// read finishes the Pair again: no phone listed, the new fingerprint
+    /// recorded, nothing minted.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_write_reported_refused_that_landed_is_finished_by_the_next_read() {
         for reason in [PhoneWaitingReason::Missing, PhoneWaitingReason::Unreadable] {
@@ -2191,14 +1990,9 @@ mod tests {
         }
     }
 
-    /// A `handover-identity.json` that does not parse (damaged, or a value
-    /// that is not a string) is never replaced by a read: the launch, Try
-    /// again and the next launch wait as unreadable and leave it byte for
-    /// byte, with nothing set aside. Pair again, the user's choice, sets it
-    /// aside as `handover-identity.json.corrupt-<time>` with the same bytes
-    /// and runs as over nothing recorded: no phone listed, the new
-    /// fingerprint recorded, no note, and the launch after it does not
-    /// wait. No loop: one Pair again is enough.
+    /// An unparsable `handover-identity.json` is never replaced by a read.
+    /// Pair again sets it aside and runs as over nothing recorded; one is
+    /// enough.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unparsable_record_waits_and_only_pair_again_sets_it_aside() {
         for bad in [
@@ -2275,13 +2069,9 @@ mod tests {
         }
     }
 
-    /// A `handover-identity.json` that cannot be opened (here a folder in
-    /// its place) is no record that does not parse: the launch waits with
-    /// a reason of its own, whose card names the fix outside the app (the
-    /// folder's permissions, then Try again). Try again, Pair again (which
-    /// stops at the note, before the write) and a revoke answer the same,
-    /// and none of them sends the user to Pair again, which cannot help.
-    /// Nothing is written or moved, and the phone stays.
+    /// An unopenable `handover-identity.json` waits with its own reason; Try
+    /// again, Pair again and revoke answer the same, and nothing is written
+    /// or moved.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_record_that_cannot_be_opened_waits_for_a_fix_outside_the_app() {
         let paired = Paired::new(true).await;
@@ -2321,14 +2111,9 @@ mod tests {
         assert_eq!(handover.waiting(), Some(PhoneWaitingReason::FileNotOpened));
     }
 
-    /// A Pair again that stops after the new identity was written (the
-    /// phone still paired, one of two removed, or every phone removed and
-    /// the record refused) is finished by the next read, at the next
-    /// launch or at Try again in the same one, whether or not a fingerprint
-    /// was recorded before (none is on the first launch after the Swift
-    /// app): the listener comes up over the new identity with no phone
-    /// listed, its fingerprint recorded and the note dropped, nothing
-    /// minted, and the recordings kept.
+    /// A Pair again that stopped after the identity was written is finished
+    /// by the next read, with or without a recorded fingerprint: no phone
+    /// listed, the note dropped, nothing minted, the recordings kept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_after_the_new_identity_is_finished_by_the_next_read() {
         for recorded_before in [true, false] {
@@ -2404,13 +2189,9 @@ mod tests {
         }
     }
 
-    /// The launch over the note of an unfinished Pair again whose identity
-    /// the secret store does not hold: the old identity (the note goes,
-    /// the listener comes up with the phone), no identity (the note goes,
-    /// it waits as missing), another identity (the note stays, it waits as
-    /// replaced) or a keychain that refuses the read (the note stays, it
-    /// waits as unreadable). None of them writes a secret or removes the
-    /// phone.
+    /// The launch over a note whose identity the store does not hold: the
+    /// old identity or none drops the note, another or a refused read keeps
+    /// it. None writes a secret or removes the phone.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unfinished_pair_again_is_decided_at_the_launch() {
         let next = steno_handover::identity::hex(
@@ -2458,12 +2239,9 @@ mod tests {
         }
     }
 
-    /// Through every stop of a Pair again and its end, nothing the phone
-    /// sent is marked delivered or dropped on this computer while the phone
-    /// is paired: the admitted recording keeps its ledger row, the one
-    /// still being sent never gets one, and its receipt and chunks stay
-    /// until the phone goes. The listener's start then clears the chunks no
-    /// receipt names, as the phone sends that recording again.
+    /// Through every stop of a Pair again, nothing the phone sent is marked
+    /// delivered or dropped while it is paired; the listener's start then
+    /// clears the chunks no receipt names.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pair_again_keeps_the_admission_ledger_and_marks_nothing_delivered() {
         let paired = Paired::new(false).await;
@@ -2498,8 +2276,7 @@ mod tests {
         tokio::task::block_in_place(|| handover.stop());
     }
 
-    /// The import's step as a test drives it: counts the runs and the
-    /// Pair agains, and answers `run` as set.
+    /// The import's step as a test drives it: counts runs and Pair agains.
     #[derive(Default)]
     struct FakeImport {
         runs: AtomicUsize,
@@ -2522,9 +2299,8 @@ mod tests {
         }
     }
 
-    /// While the import's gate waits, Try again runs the step again and
-    /// Pair again goes through the import with the mint; while the step is
-    /// pending neither does anything, as the onboarding window shows it.
+    /// While the gate waits, Try again runs the step and Pair again ends the
+    /// import; while the step is pending neither does anything.
     #[test]
     fn while_the_gate_waits_try_again_and_pair_again_go_to_the_import() {
         let store = Arc::new(Store::in_memory().unwrap());
@@ -2565,10 +2341,8 @@ mod tests {
         assert_eq!(mints.load(Ordering::SeqCst), 1);
     }
 
-    /// The listener built behind the gate may itself wait, on a keychain
-    /// that refused its read: the gated handover says so, and Try again
-    /// reads it again through the adopted listener, which an unlock alone
-    /// never did.
+    /// A listener built behind the gate may wait on a refused keychain read;
+    /// Try again reads it again through the adopted listener.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gated_listener_left_waiting_reads_again_at_try_again() {
         let paired = Paired::new(true).await;
@@ -2612,8 +2386,7 @@ mod tests {
         }
     }
 
-    /// A shutdown before the gate opened: `follow` builds nothing, so no
-    /// identity is read (nor a prompt brought up) during the quit, and ends
+    /// A shutdown before the gate opened: `follow` builds nothing and ends
     /// without `changed`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_shutdown_before_the_build_reads_no_identity() {
@@ -2639,9 +2412,8 @@ mod tests {
         assert!(gated.service().is_none());
     }
 
-    /// A shutdown while `follow` builds the listener: the build finishes
-    /// after the shutdown, and its listener is neither adopted nor started,
-    /// though a phone is paired; `follow` ends without `changed`.
+    /// A shutdown during the build: its listener is neither adopted nor
+    /// started, and `follow` ends without `changed`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_shutdown_while_the_listener_builds_adopts_and_starts_nothing() {
         let dir = tempfile::tempdir().unwrap();

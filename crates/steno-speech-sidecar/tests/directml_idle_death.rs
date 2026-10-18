@@ -1,9 +1,6 @@
-//! A child on `DirectML` that dies between requests (killed by the system
-//! for memory, say) is replaced on `DirectML` (the rule:
-//! `steno_speech::sidecar::client`'s module docs). Were that to regress,
-//! the switch-off would hold for the rest of the process's run, so this
-//! test runs in a binary of its own. Windows only: the client asks
-//! for `DirectML` nowhere else.
+//! A child on `DirectML` that dies between requests is replaced on `DirectML`.
+//! A regression would switch `DirectML` off for the whole process, so this runs
+//! in a binary of its own. Windows only.
 
 #![cfg(windows)]
 

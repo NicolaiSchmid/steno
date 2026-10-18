@@ -1,9 +1,7 @@
-//! The synthetic meeting every adapter golden is rendered from: the port of
-//! `Tests/StenoAdaptersTests/Support/FixtureMeeting.swift`. Sequential
+//! The synthetic meeting every adapter golden is rendered from (sequential
 //! UUIDs, fixed dates, invented text; `Tests/Fixtures/meetings/
-//! produktstrategie.json` is its `StenoJSON` encoding as the Swift CLI
-//! writes it; plus the golden, temp-folder and store helpers the test files
-//! share.
+//! produktstrategie.json` is its encoding), plus shared golden, temp-folder
+//! and store helpers.
 
 #![allow(dead_code)]
 
@@ -16,8 +14,7 @@ use steno_adapters::rendering::{LinkStyle, RenderOptions};
 use steno_core::*;
 use uuid::Uuid;
 
-/// `00000000-0000-0000-0000-000000000001` for `n == 1`; Swift's
-/// `SampleData.uuid`.
+/// `00000000-0000-0000-0000-000000000001` for `n == 1`.
 pub fn uuid(n: u32) -> Uuid {
     let mut bytes = [0u8; 16];
     let [_, _, high, low] = n.to_be_bytes();
@@ -66,8 +63,8 @@ pub fn created_at() -> DateTime<Utc> {
 pub fn updated_at() -> DateTime<Utc> {
     epoch(1_790_257_200)
 }
-/// 2026-10-01T12:00:00Z and 2026-10-15T12:00:00Z: noon, so the day is the
-/// same in Berlin and UTC.
+/// 2026-10-01T12:00:00Z and 2026-10-15T12:00:00Z: noon, the same day in
+/// Berlin and UTC.
 pub fn due_october_first() -> DateTime<Utc> {
     epoch(1_790_856_000)
 }
@@ -81,7 +78,7 @@ pub const FOLDER: &str = "Meetings/2026-09-24-produktstrategie-90-10-roadmap-fue
 
 pub const BERLIN: Tz = Tz::Europe__Berlin;
 
-/// Plain names, no people, no tag, UTC: the `PLAIN` preset.
+/// The `PLAIN` preset.
 pub fn plain() -> RenderOptions {
     RenderOptions::PLAIN
 }
@@ -91,8 +88,7 @@ pub fn plain_berlin() -> RenderOptions {
         ..RenderOptions::PLAIN
     }
 }
-/// What the Obsidian destination uses with a people folder, in Berlin, on
-/// the Mac.
+/// The Obsidian destination's options with a people folder, in Berlin.
 pub fn wikilink() -> RenderOptions {
     RenderOptions {
         link_style: LinkStyle::Wikilink,
@@ -287,10 +283,8 @@ pub fn speakers() -> Vec<Speaker> {
     ]
 }
 
-/// Fourteen segments over both lanes: consecutive turns, a gap of more than
-/// three seconds inside a turn, one zero-length segment, one without a
-/// speaker, and texts that start with `#`, `-`, `>` and `1.` or carry `<`,
-/// `&` and `-->`.
+/// Fourteen segments over both lanes, covering turns, a long gap, a
+/// zero-length and a speakerless segment, and text needing escapes.
 #[allow(clippy::too_many_lines)]
 pub fn segments() -> Vec<TranscriptSegment> {
     let segment =
@@ -419,7 +413,7 @@ pub fn segments() -> Vec<TranscriptSegment> {
 }
 
 /// Every priority, with and without due date and assignee, one done, one
-/// with a line break in its text.
+/// multi-line.
 pub fn tasks() -> Vec<MeetingTask> {
     vec![
         MeetingTask {
@@ -507,8 +501,7 @@ pub fn mixdown_bytes() -> Vec<u8> {
     (0..100).collect()
 }
 
-/// The export with its mixdown pointing at a fresh 100-byte file under
-/// `directory`, for delivery tests that copy audio.
+/// The export with its mixdown at a fresh 100-byte file under `directory`.
 pub fn export_with_audio_in(directory: &Path) -> MeetingExport {
     let mut export = export();
     let mixdown = directory.join("audio.m4a");
@@ -517,7 +510,6 @@ pub fn export_with_audio_in(directory: &Path) -> MeetingExport {
     export
 }
 
-/// The repository root, from the crate's manifest directory.
 pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -531,9 +523,8 @@ pub fn fixture(relative: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-/// The folder note golden `variant` (`plain-utc`, `wikilink-berlin`) for a
-/// call recorded on `platform`: the Mac's in `snapshots/obsidian`, shared
-/// with the Swift renderer; the others in `snapshots/platforms/<platform>`.
+/// The folder note golden `variant` for a call on `platform`: the Mac's in
+/// `snapshots/obsidian`, the others in `snapshots/platforms/<platform>`.
 pub fn folder_note_golden(platform: Platform, variant: &str) -> String {
     match platform {
         Platform::Macos => format!("snapshots/obsidian/folder-note-{variant}.md"),
@@ -547,8 +538,7 @@ pub fn fixture_text(relative: &str) -> String {
     String::from_utf8(fixture(relative)).unwrap()
 }
 
-/// `actual` equals the golden at `Tests/Fixtures/<relative>`, with a
-/// readable diff when it does not.
+/// Asserts `actual` equals the golden at `Tests/Fixtures/<relative>`.
 pub fn assert_matches_golden(actual: &str, relative: &str) {
     use std::fmt::Write as _;
     let expected = fixture_text(relative);
@@ -577,9 +567,7 @@ pub fn assert_matches_golden(actual: &str, relative: &str) {
     }
 }
 
-/// Writes the fixture meeting into `store` the way the pipeline does:
-/// persons, the meeting with its participants and asset, the transcript,
-/// the summary with its tasks and decisions.
+/// Writes the fixture meeting into `store` the way the pipeline does.
 pub fn populate(store: &Store) -> MeetingExport {
     let export = export();
     for person in &export.persons {
@@ -605,7 +593,6 @@ pub fn temp_dir(label: &str) -> tempfile::TempDir {
         .unwrap()
 }
 
-/// The names in a directory, sorted.
 pub fn list(path: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(path)
         .unwrap_or_else(|error| panic!("{}: {error}", path.display()))

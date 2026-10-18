@@ -29,7 +29,7 @@ const APPLE_TEAM_ID = "KQB68F43PW";
 // IMMUTABLE identifiers — decided once. Bundle id, EAS projectId, ascAppId and
 // slug can never change without losing testers, keychain-backed data and
 // server-side version codes. `com.nicolaischmid.steno` was chosen before the
-// first TestFlight build (.plans/2026-09-27-ios-bundle-id.md); the macOS app
+// first TestFlight build; the macOS app
 // keeps `uno.schmid.steno.mac`.
 export const VARIANTS = {
 	development: {
@@ -111,8 +111,7 @@ const config: ExpoConfig = {
 		supportsTablet: false,
 		bundleIdentifier: VARIANT.bundleId,
 		appleTeamId: APPLE_TEAM_ID,
-		// The dark plate is its own dark variant; no tinted variant in v1
-		// (.plans/2026-09-28-app-icon.md, open question 1).
+		// The dark plate is its own dark variant; no tinted variant in v1.
 		icon: { light: "./assets/icon.png", dark: "./assets/icon.png" },
 		infoPlist: {
 			ITSAppUsesNonExemptEncryption: false,

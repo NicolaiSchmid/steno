@@ -1,9 +1,6 @@
-//! Fakes for every service in [`services`](crate::services), after
-//! `Services/Fakes.swift` and the modules' `Testing/` fakes: each holds its
-//! state behind a mutex, answers what a test set, and records what the
-//! host asked, so the host runs without a shell on a real store. The product never
-//! constructs these; [`Services`] built from them is what the tests and the
-//! CLI's dry run use.
+//! Fakes for every service in [`services`](crate::services): each holds its
+//! state behind a mutex, answers what a test set, and records what the host
+//! asked. The tests and the CLI's dry run build [`Services`] from them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -29,19 +26,17 @@ use crate::services::{
 };
 use crate::speech::ModelAsset;
 
-/// A poisoned fake is still readable: a panic in one test thread must not
-/// hide the state the assertion wants to see.
+/// A poisoned fake stays readable, so one test's panic cannot hide state.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The hook a test installed, cloned out so the fake's lock is released
-/// before the hook runs: a hook may call its fake again.
+/// The installed hook, cloned out so the lock is released before it runs.
 fn hook_of<H: ?Sized>(slot: &Mutex<Option<Arc<H>>>) -> Option<Arc<H>> {
     lock(slot).clone()
 }
 
-/// A fixed `now`. Swift: the `now: { TestSupport.now }` closure.
+/// A fixed `now`.
 #[derive(Debug)]
 pub struct FakeClock {
     now: Mutex<DateTime<Utc>>,
@@ -66,7 +61,6 @@ impl Clock for FakeClock {
     }
 }
 
-/// Swift: `FakeLoginItem`.
 #[derive(Debug)]
 pub struct FakeLoginItem {
     status: Mutex<LoginItemStatus>,
@@ -122,14 +116,10 @@ impl LoginItem for FakeLoginItem {
     }
 }
 
-/// A hook a test installs to observe the host mid-request: the Swift view
-/// models published `isRequesting` while the system prompt was up, and a
-/// blocking host shows that state only to whoever the fake calls back.
-/// The fake calls it with none of its own locks held, so the hook may call
-/// the fake again.
+/// Runs inside a permission request, with none of the fake's locks held, so
+/// a test can see the host mid-request.
 pub type RequestHook = Arc<dyn Fn(PermissionKind) + Send + Sync>;
 
-/// Swift: `FakePermissions`.
 pub struct FakePermissions {
     pub states: Mutex<BTreeMap<PermissionKind, PermissionState>>,
     /// What `request` answers per kind; `granted` when unset.
@@ -214,7 +204,6 @@ impl Permissions for FakePermissions {
     }
 }
 
-/// Swift: `FakeUpdater`.
 #[derive(Debug)]
 pub struct FakeUpdater {
     pub can_check: Mutex<bool>,
@@ -280,12 +269,8 @@ impl Updater for FakeUpdater {
     }
 }
 
-/// A recorder that runs the state machine without a capture session: start
-/// goes straight to `recording` with a fresh meeting id, stop back to idle;
-/// levels, the auto-stop and the messages are whatever the test sets.
-/// A start under a [`StartHold`] is refused, as the capture recorder's is.
-/// Swift: the `RecordingController` over the synthetic backend, reduced to
-/// what the window reads.
+/// A recorder without a capture session: start goes straight to `recording`,
+/// stop back to idle; a start under a [`StartHold`] is refused.
 pub struct FakeRecorder {
     status: Arc<Mutex<RecorderStatus>>,
     /// The start holds alive.
@@ -305,15 +290,11 @@ pub struct FakeRecorder {
     pub asked: Mutex<Vec<Uuid>>,
     /// Every meeting `forget_recording` forgot, in order.
     pub forgotten: Mutex<Vec<Uuid>>,
-    /// The recorder's entries: `forget_recording` takes one out and
-    /// returns it, `restore_recording` puts it back.
+    /// The recorder's entries, for `forget_recording` and `restore_recording`.
     pub recorded: Mutex<BTreeMap<Uuid, PathBuf>>,
-    /// `forget_recording` fails, as the support folder can when it is
-    /// read-only or full.
+    /// `forget_recording` fails, as on a read-only or full support folder.
     pub forget_fails: Mutex<bool>,
-    /// Runs once inside the next `restore_recording`, before it records
-    /// the entry: a test's moment between the guard's read of the row and
-    /// its restore.
+    /// Runs once inside the next `restore_recording`, before it records.
     pub before_restore: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
@@ -387,7 +368,6 @@ impl Recorder for FakeRecorder {
     }
 
     fn hold_starts(&self) -> StartHold {
-        // The status's lock first, as `start` takes it.
         let _status = lock(&self.status);
         *lock(&self.holds) += 1;
         Box::new(FakeStartHold {
@@ -475,8 +455,7 @@ impl Recorder for FakeRecorder {
     }
 }
 
-/// [`FakeRecorder::hold_starts`]'s hold: the last one dropped clears the
-/// refusal's error.
+/// [`FakeRecorder::hold_starts`]'s hold; the last one dropped clears the refusal.
 struct FakeStartHold {
     status: Arc<Mutex<RecorderStatus>>,
     holds: Arc<Mutex<usize>>,
@@ -494,16 +473,13 @@ impl Drop for FakeStartHold {
 }
 
 /// Records every call; each operation fails with the text a test set.
-/// Swift: the preview pipeline's fakes, reduced to the calls the view models
-/// make.
 #[derive(Debug, Default)]
 pub struct FakePipeline {
     pub summary_reruns: Mutex<Vec<(Uuid, String)>>,
     pub redeliveries: Mutex<Vec<Uuid>>,
     /// Every meeting `process_again` was asked for, refused or not.
     pub processed_again: Mutex<Vec<Uuid>>,
-    /// The refusal `process_again` answers with; `None` lets it through
-    /// unless [`fail_calls`](Self::fail_calls) set a failure.
+    /// The refusal `process_again` answers with; `None` lets it through.
     pub process_again_refusal: Mutex<Option<ProcessAgainRefusal>>,
     pub retention: Mutex<Vec<(Uuid, AudioRetention)>>,
     pub reloads: Mutex<usize>,
@@ -585,14 +561,10 @@ impl Pipeline for FakePipeline {
     }
 }
 
-/// A hook a test installs to observe the host while a download runs on
-/// its thread: called once per download, before the first progress report,
-/// so a test can hold the download and look at what the host published.
-/// Called with none of the fake's locks held.
+/// Runs once per download, before its first progress report, unlocked.
 pub type DownloadHook = Arc<dyn Fn(ModelAsset) + Send + Sync>;
 
-/// Installed assets with their sizes; a download reports its `progress`
-/// steps and installs. Swift: `ModelStore` over `FakeModelDownloader`.
+/// Installed assets with their sizes; a download reports `progress` and installs.
 pub struct FakeSpeechModels {
     pub installed: Mutex<BTreeMap<ModelAsset, Option<i64>>>,
     pub downloads: Mutex<Vec<ModelAsset>>,
@@ -601,11 +573,9 @@ pub struct FakeSpeechModels {
     pub progress: Mutex<Vec<(f64, String)>>,
     pub download_failure: Mutex<Option<String>>,
     pub on_download: Mutex<Option<DownloadHook>>,
-    /// What [`SpeechModels::speech_fallback`] answers; ended by
-    /// [`SpeechModels::end_speech_fallback`].
+    /// What [`SpeechModels::speech_fallback`] answers.
     pub speech_fallback: std::sync::atomic::AtomicBool,
-    /// While set, [`SpeechModels::end_speech_fallback`] fails with it and
-    /// the fallback stays on, as an unwritable file leaves it.
+    /// While set, [`SpeechModels::end_speech_fallback`] fails with it.
     pub end_fallback_failure: Mutex<Option<String>>,
 }
 
@@ -710,10 +680,7 @@ impl SpeechModels for FakeSpeechModels {
     }
 }
 
-/// A hook a test installs to observe the host while a probe runs: the
-/// Swift view model published `isTesting` while the request was out, and
-/// a blocking host shows that state only to whoever the fake calls back.
-/// Called with none of the fake's locks held.
+/// Runs inside a probe, with none of the fake's locks held.
 pub type ProbeHook = Arc<dyn Fn(&Settings) + Send + Sync>;
 
 /// Answers the probe and the Codex sign-in with what a test set.
@@ -770,8 +737,7 @@ impl FakeLlmService {
         *lock(&self.on_probe) = Some(Arc::new(hook));
     }
 
-    /// Runs `hook` inside every model list fetch, before it answers; `None`
-    /// removes it.
+    /// Runs `hook` inside every model list fetch; `None` removes it.
     pub fn set_on_codex_models(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         *lock(&self.on_codex_models) = hook;
     }
@@ -798,9 +764,7 @@ impl LlmService for FakeLlmService {
     }
 }
 
-/// Accepts every vault unless a refusal is set.
-/// A hook a test installs to hold a vault check: called on the checking
-/// thread with none of the fake's locks held, before the check answers.
+/// Holds a vault check on the checking thread, unlocked, before it answers.
 pub type ValidateHook = Arc<dyn Fn(&ObsidianSettings) + Send + Sync>;
 
 #[derive(Default)]
@@ -820,8 +784,7 @@ impl std::fmt::Debug for FakeExportValidator {
 }
 
 impl FakeExportValidator {
-    /// Makes every validation fail with `text`, as for a vault that is not
-    /// there; `None` accepts again.
+    /// Makes every validation fail with `text`; `None` accepts again.
     pub fn fail_validation(&self, text: Option<&str>) {
         *lock(&self.failure) = text.map(|text| VaultRefusal {
             message: text.to_owned(),
@@ -829,8 +792,7 @@ impl FakeExportValidator {
         });
     }
 
-    /// Makes every validation fail with `text` as a folder that refused
-    /// the write (Files and Folders off on the Mac).
+    /// Makes every validation fail with `text` as a refused write.
     pub fn refuse_writes(&self, text: &str) {
         *lock(&self.failure) = Some(VaultRefusal {
             message: text.to_owned(),
@@ -988,8 +950,7 @@ impl Handover for FakeHandover {
     }
 }
 
-/// Returns the PNG a test set for every text. Swift: a placeholder in the
-/// shape of a code, as `BridgeSamples` records.
+/// Returns the PNG a test set for every text.
 #[derive(Debug)]
 pub struct FakeQrEncoder {
     pub png_base64: Mutex<Option<String>>,
@@ -1015,7 +976,7 @@ impl QrEncoder for FakeQrEncoder {
     }
 }
 
-/// The input devices a test lists. Swift: `listInputs`.
+/// The input devices a test lists.
 #[derive(Debug, Default)]
 pub struct FakeAudioDevices {
     pub devices: Mutex<Vec<InputDevice>>,
@@ -1042,8 +1003,7 @@ impl AudioDevices for FakeAudioDevices {
     }
 }
 
-/// The folder size a test sets, and whether the folder's drive may lose
-/// recent writes. Swift: `measureFolder`.
+/// The folder size a test sets, and whether its drive may lose recent writes.
 #[derive(Debug)]
 pub struct FakeFolderUsage {
     pub bytes: Mutex<Result<i64, String>>,
@@ -1078,8 +1038,7 @@ impl FolderUsage for FakeFolderUsage {
     }
 }
 
-/// The files that "exist", and what the host removed. Swift:
-/// `FileManager` over a temporary folder.
+/// The files that "exist", and what the host removed.
 #[derive(Debug, Default)]
 pub struct FakeFileSystem {
     pub existing: Mutex<BTreeSet<PathBuf>>,
@@ -1090,7 +1049,6 @@ pub struct FakeFileSystem {
 }
 
 impl FakeFileSystem {
-    /// Makes `path` exist.
     pub fn create(&self, path: impl Into<PathBuf>) {
         lock(&self.existing).insert(path.into());
     }
@@ -1106,7 +1064,6 @@ impl FileSystem for FakeFileSystem {
         lock(&self.existing).contains(path)
     }
 
-    /// The path and everything under it stop existing.
     fn remove(&self, path: &Path) -> BoundaryResult<()> {
         lock(&self.removed).push(path.to_path_buf());
         if let Some(failure) = lock(&self.removal_failure).clone() {
@@ -1117,8 +1074,7 @@ impl FileSystem for FakeFileSystem {
     }
 }
 
-/// Plays whatever file the file system says exists. Swift: `ClipPlayer`
-/// over a fake `AVAudioPlayer`.
+/// Plays whatever file the file system says exists.
 pub struct FakeClipPlayer {
     file_system: Arc<dyn FileSystem>,
     playing: Mutex<Option<PathBuf>>,
@@ -1156,8 +1112,7 @@ impl ClipPlayer for FakeClipPlayer {
     }
 }
 
-/// Records what the host asked to show. Swift: `NSWorkspace` and the
-/// window actions.
+/// Records what the host asked to show.
 #[derive(Debug, Default)]
 pub struct FakeOpener {
     pub revealed: Mutex<Vec<PathBuf>>,
@@ -1184,7 +1139,7 @@ impl Opener for FakeOpener {
     }
 }
 
-/// Flags in memory. Swift: a `UserDefaults` suite per test.
+/// Flags in memory.
 #[derive(Debug, Default)]
 pub struct FakePreferences {
     pub flags: Mutex<BTreeMap<String, bool>>,
@@ -1200,9 +1155,8 @@ impl Preferences for FakePreferences {
     }
 }
 
-/// The import step: `Pending` until a run or a skip, then the outcome a
-/// test set for runs (`Done` by default) or `Waiting` for a skip; counts
-/// the runs and the skips.
+/// The import step: `Pending` until a run (then the outcome a test set,
+/// `Done` by default) or a skip (`Waiting`); counts both.
 pub struct FakeSwiftImport {
     pub status: Mutex<SwiftImportStatus>,
     /// What [`SwiftImport::run`] moves to.
@@ -1273,8 +1227,7 @@ impl SwiftImport for FakeSwiftImport {
     }
 }
 
-/// A [`WithheldApiKey`] a test sets: withholds the key while `withheld`,
-/// whatever the settings.
+/// A [`WithheldApiKey`] that withholds the key while `withheld`.
 #[derive(Debug, Default)]
 pub struct FakeWithheldApiKey {
     pub withheld: Mutex<bool>,
@@ -1286,8 +1239,7 @@ impl WithheldApiKey for FakeWithheldApiKey {
     }
 }
 
-/// Every fake at once, with a handle on each: what a test without a shell builds
-/// its [`Services`] from. Swift: `AppEnvironment.preview()`.
+/// Every fake at once, with a handle on each, for building [`Services`].
 pub struct FakeServices {
     pub clock: Arc<FakeClock>,
     pub login_item: Arc<FakeLoginItem>,
@@ -1355,7 +1307,6 @@ impl FakeServices {
         self
     }
 
-    /// The trait objects the host takes.
     #[must_use]
     pub fn services(&self) -> Services {
         Services {
@@ -1396,9 +1347,7 @@ impl FakeServices {
 mod tests {
     use super::*;
 
-    /// A hook runs with none of the fake's locks held, so one that calls
-    /// back into its fake (here: replaces itself) returns instead of
-    /// deadlocking on the fake's own mutex.
+    /// A hook that calls back into its fake returns instead of deadlocking.
     #[test]
     fn a_hook_may_call_its_fake_again() {
         let permissions = Arc::new(FakePermissions::all_granted());

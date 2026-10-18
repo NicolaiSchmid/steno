@@ -1,26 +1,8 @@
-//! The noted copy of a phone admission at the edges: a kill at each step
-//! of the admission and of the launch's adoption, a retry that races the
-//! launch, and a record of uploads that is refused or does not parse
-//! (`.plans/2026-10-07-stable-promotion.md`, "P40 follow-up: the copy an
-//! admission left is one meeting").
-//!
-//! The kills are real: a phone admission, or the launch that adopts the
-//! noted copy, runs in a child process (this test binary, running
-//! [`child_admits_until_killed`] or [`child_launches_until_killed`]) and is
-//! killed at one gate, a test seam the product does not have ([`gate`]),
-//! or inside a commit, in the store's commit probe. A new app then
-//! launches over the same directory and the phone retries. Each ends with
-//! one meeting, one ledger row answering the phone with it, the upload's
-//! bytes in its master, and nothing left noted. The gates (all
-//! `#[cfg(test)]`): `after-upload-note` and `after-folder-note` in
-//! `AdmissionRecord::copying`, `before-settled` in
-//! `AdmissionRecord::settled`, and `after-adoption-commit` in the
-//! recovery's `adopt`, once the adoption's commit wrote and before the
-//! enqueue.
-//!
-//! The races hold the retry after its check that the noted copy has no
-//! meeting row (`steno_pipeline::intake::seams`, the pipeline's `testing`
-//! feature) and run a launch there. Rust only.
+//! The noted copy of a phone admission at the edges: a real kill at each
+//! step of the admission and of the launch's adoption (in a child process,
+//! held at a [`gate`] or inside a commit), a retry that races the launch,
+//! and a record of uploads that is refused or does not parse. Each ends
+//! with one meeting, one ledger row and nothing left noted.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -88,7 +70,7 @@ fn die_with_the_parent() {
 }
 
 /// In the child: holds inside the first commit that writes a meeting with
-/// a ledger row (the admission's, or the launch's adoption), before COMMIT.
+/// a ledger row, before COMMIT.
 fn hold_in_the_ledger_commit(store: &Store, directory: &Path) {
     let directory = directory.to_path_buf();
     store.probe_commits(move |connection| {
@@ -249,9 +231,8 @@ async fn fresh_admission_killed_at(point: &str) -> ((usize, usize), (usize, usiz
     (at_kill, after)
 }
 
-/// Killed after the upload's note, before the folder's: no copy, the
-/// retry copies afresh, and the next launch forgets the upload with no
-/// folder.
+/// Killed after the upload's note, before the folder's: the retry copies
+/// afresh, and the next launch forgets the upload with no folder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_after_the_upload_note_is_one_meeting() {
     let (at_kill, after) = fresh_admission_killed_at("after-upload-note").await;
@@ -323,9 +304,8 @@ async fn a_kill_after_the_adoptions_commit_is_one_meeting() {
     assert_eq!(after, (0, 0));
 }
 
-/// The folder's note fails on every retry (the record of folders is a
-/// folder): each refused retry forgets its upload again, so the record of
-/// uploads does not grow, and a retry once the note works is one meeting.
+/// The folder's note fails on every retry: each refused retry forgets its
+/// upload again, and a retry once the note works is one meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_folder_note_leaves_no_upload_entry() {
     let (world, app) = World::new();
@@ -344,8 +324,7 @@ async fn a_refused_folder_note_leaves_no_upload_entry() {
 }
 
 /// Holds the retry of `noted_id` after its check that the noted copy has
-/// no meeting row, until the test runs `between`: the order of a launch
-/// that runs while the retry is under way.
+/// no meeting row, until the test runs `between`.
 async fn retry_held_after_the_reuse_check<T>(
     world: &Arc<World>,
     app: App,
@@ -381,12 +360,9 @@ async fn retry_held_after_the_reuse_check<T>(
     (outcome, app, between)
 }
 
-/// The retry passed its check that the noted copy has no meeting row,
-/// then the launch adopts the copy without the ledger row (its read of the
-/// noted uploads found none: the file moved away for it), then the retry
-/// commits into the same meeting id. The commit is refused: one meeting,
-/// one asset row, kept forever as the adoption saved it, and the audio
-/// kept, so no sweep removes a master another row keeps.
+/// The retry passed its check, then the launch adopts the copy without the
+/// ledger row, then the retry commits into the same meeting id: the commit
+/// is refused, leaving one meeting and its audio kept.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retry_racing_a_plain_adoption_of_its_copy_writes_no_second_asset() {
     let (world, app) = World::new();
@@ -430,11 +406,9 @@ async fn a_retry_racing_a_plain_adoption_of_its_copy_writes_no_second_asset() {
     quit(app).await;
 }
 
-/// The launch and the retry at once: the retry passed its check of the
-/// noted copy, then the launch adopts the copy with the ledger row, then
-/// the retry commits. Its commit finds the ledger's row and writes
-/// nothing: one meeting, one asset, and the retry is answered with the
-/// adopted meeting.
+/// The retry passed its check, then the launch adopts the copy with the
+/// ledger row, then the retry commits: it writes nothing and is answered
+/// with the adopted meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retry_that_loses_to_the_launchs_adoption_writes_nothing() {
     let (world, app) = World::new();

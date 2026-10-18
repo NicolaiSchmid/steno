@@ -9,8 +9,7 @@ import StenoCore
 public struct FluidDiarizerConfig: Sendable, Equatable {
   /// Passed to `OfflineDiarizerConfig.clustering.threshold`: a Euclidean cut
   /// on unit embeddings, larger merges more. 0.8 instead of the community
-  /// 0.6 since the calibration on real calls
-  /// (`.plans/2026-09-29-speaker-calibration.md`): the same substantive
+  /// 0.6 since the calibration on real calls: the same substantive
   /// clusters on every call, fewer fragments for the refinement pass.
   public var clusteringThreshold: Double
   public var minSpeakers: Int?

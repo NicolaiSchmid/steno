@@ -1,4 +1,4 @@
-//! One run's progress state. Swift: `Sources/StenoCore/Pipeline/ProcessingRun.swift`.
+//! One run's progress state.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7,9 +7,8 @@ use steno_core::{PipelineStage, ProcessingProgress};
 
 use crate::estimator::{ProcessingEstimator, StageCost as _, StageSample};
 
-/// One run's progress state: the estimator with its rates and token count,
-/// the stages the run posts, the run's start on the monotonic clock, the
-/// last posted event and the stage timings.
+/// One run's progress state: the estimator, the stages posted, the start on
+/// the monotonic clock, the last event and the stage timings.
 #[derive(Debug, Clone)]
 pub struct ProcessingRun {
     pub estimator: ProcessingEstimator,
@@ -48,9 +47,8 @@ impl ProcessingRun {
     }
 
     /// The event for `stage` (lane `lane` inside transcribe) at `elapsed`
-    /// seconds, clamped: the fraction never falls below the previous
-    /// event's `next_fraction`, and `next_fraction` is rescaled with it so
-    /// the honest step keeps its share of the remaining time.
+    /// seconds, clamped so the fraction never falls below the previous
+    /// event's `next_fraction`.
     pub fn progress(
         &mut self,
         stage: PipelineStage,
@@ -75,11 +73,9 @@ impl ProcessingRun {
         event
     }
 
-    /// Adds a measured span of `stage` (lane `lane` inside transcribe);
-    /// `alone` false marks the stage shared. Returns the rate sample once
-    /// the stage is complete (its last lane for transcribe), or `None` when
-    /// it was shared, is never learned, had no units of work or measured a
-    /// span that is not a finite number.
+    /// Adds a measured span of `stage`; `alone` false marks it shared.
+    /// Returns the rate sample once the stage is complete, unless it was
+    /// shared, never learned, had no units or measured a non-finite span.
     pub fn measure(
         &mut self,
         stage: PipelineStage,

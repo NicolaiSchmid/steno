@@ -1,5 +1,4 @@
 //! Speaker and person names as the renderers write them.
-//! Swift: `Sources/StenoAdapters/Rendering/Names.swift`.
 
 use std::collections::HashSet;
 
@@ -9,9 +8,8 @@ use uuid::Uuid;
 use super::RenderOptions;
 use super::markdown_text;
 
-/// The current display name from the export, wikilinked only when the
-/// options link people and the name belongs to a `Person` (who has a page),
-/// never for a cluster label or a participant the app knows by name alone.
+/// Display names from the export, wikilinked only when the options link
+/// people and the name belongs to a `Person`.
 pub(crate) struct Names<'a> {
     pub export: &'a MeetingExport,
     pub options: &'a RenderOptions,
@@ -45,10 +43,8 @@ impl Names<'_> {
         }
     }
 
-    /// A task's assignee, linked when it resolves to a person: through
-    /// `assignee_person_id`, or through a speaker whose cluster label the
-    /// model used as the name (it sees labels, as the summary does), else the
-    /// name the model wrote, plain.
+    /// A task's assignee, linked when it resolves to a person by id or by a
+    /// speaker's cluster label, else the model's name, plain.
     pub fn assignee(&self, task: &MeetingTask) -> Option<String> {
         if let Some(person) = task
             .assignee_person_id
@@ -72,9 +68,8 @@ impl Names<'_> {
         Some(name.to_owned())
     }
 
-    /// Everybody in the meeting, once each: participants in export order
-    /// (linked when they are a person), then speakers that resolved to nobody
-    /// under their cluster label.
+    /// Everybody once: participants in export order, then speakers that
+    /// resolved to nobody, by cluster label.
     pub fn participants(&self) -> Vec<String> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut names = Vec::new();

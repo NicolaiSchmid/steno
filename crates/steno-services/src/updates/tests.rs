@@ -1,7 +1,5 @@
-//! The schedule against a fake clock, a scripted update source and
-//! dialogs, a gate over a recorder a test puts in any state and the
-//! processing a test starts and ends; then the app's gate over a recorder
-//! and a pipeline.
+//! The schedule against a fake clock, a scripted update source and a fake
+//! gate; then the app's gate over a recorder and a pipeline.
 
 use std::collections::VecDeque;
 use std::future::Future as _;
@@ -18,8 +16,7 @@ use uuid::Uuid;
 use super::*;
 use crate::platform::FilePreferences;
 
-/// `future`'s output; a future that would wait for good fails the test
-/// instead, on the paused clock these tests run on.
+/// `future`'s output; one that would wait for good fails the test.
 async fn at_once<F: std::future::Future>(future: F) -> F::Output {
     tokio::time::timeout(TICK, future)
         .await
@@ -30,22 +27,14 @@ fn launch_time() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 9, 8, 0, 0).unwrap()
 }
 
-/// Answers the checks a test queued (none left: up to date) and the
-/// dialogs' questions (none left: no), and records every call in order
-/// (`steps`). A check waits for `release` while `stalls` is set, and a
-/// download for `download_release` while `download_stalls` is, and an
-/// install for `install_release` while `install_stalls` is; a download
-/// with `busy_after_download` set starts a processing job, and one with
-/// `record_during_download` set starts a recording through the recorder
-/// (the user's Record meanwhile). The install and the relaunch each try a
-/// Record too and record whether it was refused (one that records is
-/// stopped at once), and whether the gate's hold was alive at the install.
-/// The installer is `installer`'s, in place when unset.
+/// Answers the queued checks (none left: up to date) and questions (none
+/// left: no), records every call in `steps`, and stalls a check, download
+/// or install while the matching flag is set. The install and the
+/// relaunch each probe a Record and whether the gate's hold was alive.
 #[derive(Default)]
 struct FakeSource {
     installer: Mutex<Option<Installer>>,
-    /// What `tell_relaunch_waits` was told: the version and what it waits
-    /// for.
+    /// What `tell_relaunch_waits` was told.
     relaunch_waits: Mutex<Vec<String>>,
     answers: Mutex<VecDeque<Result<Option<String>, String>>>,
     checks: AtomicUsize,
@@ -112,8 +101,7 @@ impl FakeSource {
     }
 
     /// A Record now, as a probe: whether it was refused for the install. A
-    /// recording it starts is stopped at once, so the app stays idle; one
-    /// under way is left alone.
+    /// recording it starts is stopped at once.
     fn record_refused_now(&self) -> bool {
         let recorder = self.recorder();
         if recorder.status().state != RecordingState::Idle {
@@ -126,8 +114,7 @@ impl FakeSource {
         refused
     }
 
-    /// The user's Record now: whether it was refused for the install. A
-    /// recording under way ignores it, as the recorder does.
+    /// The user's Record now: whether it was refused for the install.
     fn try_record(&self) -> bool {
         let recorder = self.recorder();
         if recorder.status().state != RecordingState::Idle {
@@ -241,10 +228,9 @@ impl UpdateSource for FakeSource {
     }
 }
 
-/// [`IdleGate`] over the world's recorder, the processing a test starts
-/// and ends (`processing`) and a shutdown it starts (`quitting`): idle
-/// while none runs; a hold holds recording starts off, one hold at a
-/// time. Counts the holds alive and the holds ever given.
+/// [`IdleGate`]'s stand-in over the world's recorder, the processing a
+/// test starts and ends and a shutdown: idle while none runs. Counts the
+/// holds alive and ever given.
 struct FakeGate {
     processing: AtomicBool,
     quitting: AtomicBool,
@@ -325,7 +311,6 @@ impl World {
         self.directory.path().join(LAST_CHECK_FILE)
     }
 
-    /// A schedule over this world, as a launch builds it.
     fn schedule(&self) -> Arc<UpdateSchedule> {
         self.schedule_with(self.preferences.clone(), self.gate.clone(), false)
     }
@@ -390,9 +375,8 @@ impl World {
     }
 }
 
-/// With no file, the first tick (the one at launch) checks and writes the
-/// time in RFC 3339 UTC under the named key; the host hears of the start
-/// and the end.
+/// With no file, the launch tick checks and writes the time; the host
+/// hears of the start and the end.
 #[tokio::test]
 async fn a_check_is_due_at_launch() {
     let world = World::new();
@@ -409,8 +393,7 @@ async fn a_check_is_due_at_launch() {
     assert_eq!(world.changes.load(Ordering::SeqCst), 2);
 }
 
-/// A check less than a day ago, read from the file at launch, skips the
-/// launch tick and every hourly one until the day is over.
+/// A check less than a day ago skips every tick until the day is over.
 #[tokio::test]
 async fn a_recent_check_is_skipped_until_a_day_has_passed() {
     let world = World::new();
@@ -433,8 +416,7 @@ async fn a_recent_check_is_skipped_until_a_day_has_passed() {
     );
 }
 
-/// After a check, the hourly ticks of the next day check nothing, and the
-/// first tick a day later checks again.
+/// After a check, the next check comes a day later.
 #[tokio::test]
 async fn the_hourly_tick_checks_again_a_day_later() {
     let world = World::new();
@@ -450,8 +432,7 @@ async fn the_hourly_tick_checks_again_a_day_later() {
     assert_eq!(world.checks(), 2);
 }
 
-/// A failed check records the failure and leaves the time alone (no file
-/// at all here), so the next hourly tick checks again.
+/// A failed check leaves the time alone, so the next tick checks again.
 #[tokio::test]
 async fn a_failed_check_is_retried_at_the_next_tick() {
     let world = World::new();
@@ -490,9 +471,8 @@ async fn a_failed_check_keeps_the_last_good_time() {
     assert!(schedule.is_due());
 }
 
-/// A found update counts as a successful check; with automatic downloads
-/// off it is announced once in a run, not at every later check of the
-/// same version, and nothing is downloaded or installed.
+/// With automatic downloads off a found update is announced once in a
+/// run, and nothing is downloaded or installed.
 #[tokio::test]
 async fn a_found_update_is_announced_once_per_version_in_a_run() {
     let world = World::new();
@@ -516,10 +496,8 @@ async fn a_found_update_is_announced_once_per_version_in_a_run() {
     assert_eq!(world.installs(), 0);
 }
 
-/// With automatic downloads on, nothing downloads while the app is busy,
-/// since a recording or a processing job has the disk and the network to
-/// itself: the user is told instead, and the first tick after the app is
-/// idle downloads and installs, without a second check.
+/// With automatic downloads on, nothing downloads while the app is busy;
+/// the first idle tick downloads and installs without a second check.
 #[tokio::test]
 async fn nothing_downloads_while_the_app_is_busy() {
     let world = World::new();
@@ -547,10 +525,8 @@ async fn nothing_downloads_while_the_app_is_busy() {
     assert_eq!(world.checks(), 1);
 }
 
-/// A processing job that starts during the download: the download never
-/// installs while it runs, and later ticks try the install again without
-/// a second download. Once the app is idle the next tick installs the kept
-/// package while it holds the gate, recording starts held off.
+/// A job that starts during the download blocks the install; once idle,
+/// the next tick installs the kept package without a second download.
 #[tokio::test]
 async fn a_download_never_installs_while_the_gate_says_busy() {
     let world = World::new();
@@ -600,9 +576,8 @@ async fn an_idle_app_installs_the_download_at_once() {
     assert_eq!(world.source.announced(), Vec::<String>::new());
 }
 
-/// Automatic downloads turned off while the download runs: the flag is
-/// read again when it ends, so the same tick keeps and installs nothing,
-/// and the found update is announced instead.
+/// Automatic downloads turned off during the download: the same tick
+/// keeps and installs nothing, and announces the update.
 #[tokio::test(start_paused = true)]
 async fn a_switch_turned_off_during_the_download_keeps_and_installs_nothing() {
     let world = World::new();
@@ -625,8 +600,7 @@ async fn a_switch_turned_off_during_the_download_keeps_and_installs_nothing() {
     assert_eq!(world.source.announced(), ["0.12.0"]);
 }
 
-/// Turning automatic downloads off frees the kept package, so an idle
-/// tick afterwards installs nothing.
+/// Turning automatic downloads off frees the kept package.
 #[tokio::test]
 async fn turning_automatic_downloads_off_frees_the_download() {
     let world = World::new();
@@ -650,8 +624,7 @@ async fn turning_automatic_downloads_off_frees_the_download() {
     assert_eq!(world.installs(), 0);
 }
 
-/// A check that finds no update forgets the download kept for the old
-/// one, so an idle tick afterwards does not install it.
+/// A check that finds no update forgets the kept download.
 #[tokio::test]
 async fn a_check_that_finds_no_update_forgets_the_download() {
     let world = World::new();
@@ -675,9 +648,8 @@ async fn a_check_that_finds_no_update_forgets_the_download() {
     assert_eq!(world.installs(), 0);
 }
 
-/// A check that finds another version forgets the package kept for the
-/// old one and downloads the new one; one that finds the kept version
-/// again downloads nothing.
+/// A check that finds another version replaces the kept package; one that
+/// finds the kept version downloads nothing.
 #[tokio::test]
 async fn a_check_that_finds_another_update_replaces_the_download() {
     let world = World::new();
@@ -708,8 +680,7 @@ async fn a_check_that_finds_another_update_replaces_the_download() {
     assert_eq!(schedule.state().to_download.as_deref(), Some("0.13.0"));
 }
 
-/// Busy at the check: a later check that finds no update forgets the
-/// version still to download, so the first idle tick downloads nothing.
+/// A later check that finds no update forgets the version to download.
 #[tokio::test]
 async fn a_check_that_finds_no_update_forgets_the_version_to_download() {
     let world = World::new();
@@ -730,10 +701,8 @@ async fn a_check_that_finds_no_update_forgets_the_version_to_download() {
     assert_eq!(world.downloads(), 0);
 }
 
-/// A yes while idle installs at once, without the second question: the
-/// download, then the install with processing jobs held off, then the
-/// relaunch with recording starts held off too. A Record at the install
-/// records; one at the relaunch is refused.
+/// A yes while idle installs at once: a Record at the install records,
+/// one at the relaunch is refused.
 #[tokio::test]
 async fn a_yes_while_idle_downloads_then_installs_and_holds_recording_off_to_relaunch() {
     let world = World::new();
@@ -765,10 +734,8 @@ async fn later_installs_nothing() {
     assert_eq!(world.source.announced(), ["0.12.0"]);
 }
 
-/// A dialog shown while idle and answered once a recording started: the
-/// yes asks whether to install once it ends, and after "Not Now" nothing
-/// downloads and the first idle tick announces the version again, the
-/// user's check included.
+/// A yes answered once a recording started asks whether to install after
+/// it ends; after "Not Now" the first idle tick announces it again.
 #[tokio::test]
 async fn a_yes_put_off_by_a_recording_is_announced_again() {
     let world = World::new();
@@ -806,8 +773,7 @@ async fn a_yes_put_off_by_a_recording_is_announced_again() {
     assert_eq!(world.source.announced(), ["0.12.0", "0.12.0", "0.12.0"]);
 }
 
-/// Announcing again names one version: another version's leaves the
-/// announced one alone, so the next idle tick asks nothing.
+/// Announcing again another version leaves the announced one alone.
 #[tokio::test]
 async fn announcing_another_version_again_leaves_the_announced_one() {
     let world = World::new();
@@ -829,11 +795,8 @@ fn offer_in_background(
     tokio::spawn(async move { schedule.offer(version).await })
 }
 
-/// A yes while a recording runs, in every state it can be in (starting,
-/// recording, stopping while it saves), and then "Install After It Ends":
-/// nothing downloads and nothing stops the recording; once it ends the
-/// update downloads, installs, and relaunches with recording starts held
-/// off.
+/// A yes while a recording starts, runs or stops, then "Install After It
+/// Ends": nothing stops the recording, and the update installs after it.
 #[tokio::test(start_paused = true)]
 async fn a_yes_while_recording_waits_for_it_to_end_then_installs() {
     for state in [
@@ -866,8 +829,7 @@ async fn a_yes_while_recording_waits_for_it_to_end_then_installs() {
     }
 }
 
-/// A yes while a meeting is processed asks whether to install once that
-/// is done, and waits: nothing downloads until the processing ended.
+/// A yes while a meeting is processed waits for the processing to end.
 #[tokio::test(start_paused = true)]
 async fn a_yes_while_processing_waits_for_it_to_end_then_installs() {
     let world = World::new();
@@ -889,10 +851,8 @@ async fn a_yes_while_processing_waits_for_it_to_end_then_installs() {
     assert_eq!(world.source.steps(), ["download", "install", "relaunch"]);
 }
 
-/// A yes given while idle, and a Record during the download: the
-/// recording is never stopped by a click given before it existed. The
-/// install waits for it to end, holding the package, and then installs
-/// without a second download or a second question.
+/// A Record during the download of a yes is never stopped: the install
+/// waits for it, then installs without a second download or question.
 #[tokio::test(start_paused = true)]
 async fn a_recording_started_during_the_download_is_waited_for() {
     let world = World::new();
@@ -917,9 +877,8 @@ async fn a_recording_started_during_the_download_is_waited_for() {
     assert_eq!(world.source.asked(), ["install 0.12.0"]);
 }
 
-/// A check during the wait for the hold that finds a newer version: the
-/// yes keeps for it, so the install downloads the newer one, without the
-/// hold, and installs it, with no error.
+/// A newer version found while waiting for the hold keeps the yes: the
+/// newer one is downloaded and installed.
 #[tokio::test(start_paused = true)]
 async fn a_newer_version_found_during_the_wait_keeps_the_yes() {
     let world = World::new();
@@ -946,8 +905,7 @@ async fn a_newer_version_found_during_the_wait_keeps_the_yes() {
     assert_eq!(*lock(&world.source.told), Vec::<String>::new());
 }
 
-/// A check during the wait for an idle app that finds a newer version:
-/// the yes keeps for it, and the download is of the newer one.
+/// A newer version found while waiting for idle keeps the yes.
 #[tokio::test(start_paused = true)]
 async fn a_newer_version_found_before_the_download_is_downloaded_instead() {
     let world = World::new();
@@ -967,8 +925,8 @@ async fn a_newer_version_found_before_the_download_is_downloaded_instead() {
     assert_eq!(*lock(&world.source.told), Vec::<String>::new());
 }
 
-/// While the user's install downloads, a tick downloads nothing and
-/// installs nothing, and takes no hold: the user's install runs, once.
+/// While the user's install downloads, a tick does nothing and takes no
+/// hold.
 #[tokio::test(start_paused = true)]
 async fn a_tick_during_the_users_install_downloads_and_installs_nothing() {
     let world = World::new();
@@ -998,10 +956,8 @@ async fn a_tick_during_the_users_install_downloads_and_installs_nothing() {
     assert_eq!(world.installs(), 1);
 }
 
-/// A tick while the user's install waits for an idle app, with a package
-/// kept: the one-install check comes before the gate's hold, so the tick
-/// takes no hold, and a Record at that moment is not refused. The user's
-/// install then takes the kept package.
+/// A tick while the user's install waits takes no hold, so a Record then
+/// is not refused; the user's install takes the kept package.
 #[tokio::test(start_paused = true)]
 async fn a_tick_while_the_users_install_waits_takes_no_hold() {
     let world = World::new();
@@ -1035,9 +991,8 @@ async fn a_tick_while_the_users_install_waits_takes_no_hold() {
     assert_eq!(world.source.steps(), ["download", "install", "relaunch"]);
 }
 
-/// The schedule's install holds processing jobs off while the updater
-/// waits: a yes given meanwhile neither waits for that hold nor installs a
-/// second time, and the schedule's install goes on.
+/// A yes during the schedule's install neither waits nor installs a
+/// second time.
 #[tokio::test(start_paused = true)]
 async fn a_yes_during_the_schedules_install_does_not_wait_for_its_hold() {
     let world = World::new();
@@ -1064,9 +1019,7 @@ async fn a_yes_during_the_schedules_install_does_not_wait_for_its_hold() {
     assert_eq!(world.gate.alive.load(Ordering::SeqCst), 0);
 }
 
-/// A hold taken elsewhere, as the schedule's install keeps one: the
-/// user's install, once downloaded, waits for it and installs once it is
-/// dropped.
+/// The user's install waits for a hold taken elsewhere.
 #[tokio::test(start_paused = true)]
 async fn the_users_install_waits_for_a_hold_held_elsewhere_then_installs() {
     let world = World::new();
@@ -1084,9 +1037,7 @@ async fn the_users_install_waits_for_a_hold_held_elsewhere_then_installs() {
     assert_eq!(world.source.steps(), ["download", "install", "relaunch"]);
 }
 
-/// Two dialogs answered yes: while the first one's install waits, the
-/// second installs nothing and downloads nothing, whatever its answers;
-/// the first installs once the recording started meanwhile ends.
+/// Of two yes dialogs, the second installs and downloads nothing.
 #[tokio::test(start_paused = true)]
 async fn a_second_yes_during_an_install_does_nothing() {
     for second_dialog in [[true, false], [true, true]] {
@@ -1118,9 +1069,8 @@ async fn a_second_yes_during_an_install_does_nothing() {
     }
 }
 
-/// The user's install takes the package kept for the version on offer,
-/// without a second download. A failed install is shown and told, and a
-/// Record after the failed install records.
+/// The user's install takes the kept package; a failed install is shown
+/// and told, and a Record afterwards records.
 #[tokio::test]
 async fn the_users_install_takes_the_package_kept_for_its_version() {
     let world = World::new();
@@ -1164,8 +1114,7 @@ async fn the_users_install_takes_the_package_kept_for_its_version() {
     assert_eq!(world.recorder.status().state, RecordingState::Recording);
 }
 
-/// A yes for a version no check found any more fails with a message, and
-/// downloads nothing.
+/// A yes for a version no longer found fails with a message.
 #[tokio::test]
 async fn a_yes_for_a_version_no_longer_found_is_refused() {
     let world = World::new();
@@ -1183,9 +1132,8 @@ async fn a_yes_for_a_version_no_longer_found_is_refused() {
     );
 }
 
-/// While a recording starts, runs or stops, a found update is not
-/// announced, since the dialog would offer to end the recording; the first
-/// tick after it ends announces it, once.
+/// A found update is not announced while a recording is under way; the
+/// first tick after it ends announces it, once.
 #[tokio::test]
 async fn a_found_update_waits_for_the_recording_to_end() {
     let world = World::new();
@@ -1214,8 +1162,8 @@ async fn a_found_update_waits_for_the_recording_to_end() {
     assert_eq!(world.checks(), 1);
 }
 
-/// The user's check shows its own dialog, so the schedule does not
-/// announce the version it found, not even at its next day's check.
+/// The user's check shows its own dialog, so the schedule never announces
+/// that version.
 #[tokio::test]
 async fn the_users_check_counts_as_the_announcement() {
     let world = World::new();
@@ -1230,9 +1178,8 @@ async fn the_users_check_counts_as_the_announcement() {
     assert_eq!(world.source.announced(), Vec::<String>::new());
 }
 
-/// A check that does not answer fails after [`CHECK_TIMEOUT`], on a
-/// paused clock: the tick ends, Settings' button comes back and the next check
-/// runs.
+/// A check that does not answer fails after [`CHECK_TIMEOUT`], and the
+/// next check runs.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_check_fails_after_a_minute_and_frees_the_next() {
     let world = World::new();
@@ -1259,8 +1206,7 @@ async fn a_stalled_check_fails_after_a_minute_and_frees_the_next() {
     assert_eq!(world.checks(), 2);
 }
 
-/// A tick that waited behind the user's check finds the check no longer
-/// due and does not ask the lanes a second time.
+/// A tick that waited behind the user's check does not check again.
 #[tokio::test]
 async fn a_tick_behind_the_users_check_does_not_check_again() {
     let world = World::new();
@@ -1283,8 +1229,8 @@ async fn a_tick_behind_the_users_check_does_not_check_again() {
     assert_eq!(world.checks(), 1);
 }
 
-/// Idle: a failed install is shown and not retried; a failed download
-/// leaves the update to the announcement.
+/// A failed install is not retried; a failed download leaves the update
+/// to the announcement.
 #[tokio::test]
 async fn failed_downloads_and_installs_fall_back_to_the_announcement() {
     let world = World::new();
@@ -1313,8 +1259,7 @@ async fn failed_downloads_and_installs_fall_back_to_the_announcement() {
     assert_eq!(world.source.announced(), ["0.12.0"]);
 }
 
-/// Automatic checks off: no tick checks, while the user's check still
-/// runs and records.
+/// Automatic checks off: no tick checks; the user's check still runs.
 #[tokio::test]
 async fn automatic_checks_off_leaves_only_the_users_check() {
     let world = World::new();
@@ -1327,8 +1272,8 @@ async fn automatic_checks_off_leaves_only_the_users_check() {
     assert_eq!(schedule.last_check_at(), Some(launch_time()));
 }
 
-/// A package manager's install: no tick checks, Settings cannot check, and
-/// the tray's check fails without a request.
+/// A package manager's install: no tick checks and the user's check fails
+/// without a request.
 #[tokio::test]
 async fn a_managed_install_never_checks() {
     let world = World::new();
@@ -1354,8 +1299,8 @@ fn the_environment_decides_a_managed_install_before_the_build() {
     assert!(!managed_by(Some("NIX"), None));
 }
 
-/// A binary in the Nix store is managed; one in `/Applications` is not, and
-/// neither is one in a folder whose name only starts like the store's.
+/// A binary in the Nix store is managed; one in `/Applications` or a
+/// look-alike folder is not.
 #[test]
 fn a_binary_in_the_nix_store_is_managed() {
     let folders = nix_folders(None);
@@ -1373,8 +1318,7 @@ fn a_binary_in_the_nix_store_is_managed() {
     ));
 }
 
-/// A bundle in a folder that stands in for nix-darwin's
-/// `/Applications/Nix Apps` is managed.
+/// A bundle in a stand-in for nix-darwin's folder is managed.
 #[test]
 fn a_bundle_nix_darwin_copied_is_managed() {
     assert!(nix_folders(None).contains(&PathBuf::from("/Applications/Nix Apps")));
@@ -1384,10 +1328,8 @@ fn a_bundle_nix_darwin_copied_is_managed() {
     assert!(runs_from(&binary, &[nix_apps]));
 }
 
-/// A bundle in home-manager's `Applications/Home Manager Apps` under a home
-/// folder that stands in for `$HOME` is managed; one in the home's own
-/// `Applications` is not, and an unset, empty or relative home adds no
-/// folder.
+/// A bundle in home-manager's folder under a stand-in home is managed;
+/// the home's own `Applications` is not, nor any unusable home.
 #[test]
 fn a_bundle_home_manager_copied_is_managed() {
     let home = tempfile::tempdir().unwrap();
@@ -1401,8 +1343,7 @@ fn a_bundle_home_manager_copied_is_managed() {
     assert_eq!(nix_folders(None).len(), 2);
 }
 
-/// A folder named like nix-darwin's or home-manager's elsewhere is not
-/// theirs.
+/// Look-alike folders elsewhere are not Nix's.
 #[test]
 fn a_folder_named_like_nix_apps_elsewhere_is_not_managed() {
     let folders = nix_folders(Some(OsStr::new("/Users/me")));
@@ -1415,8 +1356,7 @@ fn a_folder_named_like_nix_apps_elsewhere_is_not_managed() {
     }
 }
 
-/// The variable and the binary's folder together: either one makes the
-/// install managed, the folder whatever the variable says.
+/// Either the variable or the binary's folder makes the install managed.
 #[test]
 fn a_managed_install_is_the_variable_or_the_folder() {
     let folders = nix_folders(None);
@@ -1438,7 +1378,6 @@ fn a_managed_install_is_the_variable_or_the_folder() {
     assert!(!managed_install(None, None, None, &folders));
 }
 
-/// An empty `steno-desktop` in a `Steno.app` inside `folder`.
 fn copied_bundle(folder: &Path) -> PathBuf {
     let macos = folder.join("Steno.app/Contents/MacOS");
     std::fs::create_dir_all(&macos).unwrap();
@@ -1447,10 +1386,8 @@ fn copied_bundle(folder: &Path) -> PathBuf {
     binary
 }
 
-/// A link that resolves into the store counts as the store (an older
-/// nix-darwin linked the bundle into `/Applications/Nix Apps`), and the
-/// link itself lies outside it; a copy elsewhere does not. A folder
-/// reached through a link counts too.
+/// A link that resolves into the store counts as the store; a copy
+/// elsewhere does not. A folder reached through a link counts too.
 #[cfg(unix)]
 #[test]
 fn a_link_into_the_nix_store_is_managed() {
@@ -1476,9 +1413,8 @@ fn a_link_into_the_nix_store_is_managed() {
 #[cfg(unix)]
 const COPIED_CHILD: &str = "STENO_COPIED_TEST_CHILD";
 
-/// [`updates_are_managed`] reads the running binary and `HOME`: this test
-/// binary, linked or copied into home-manager's folder under a stand-in home and run
-/// there with `STENO_DISTRIBUTION` unset, is managed.
+/// This test binary, run from home-manager's folder under a stand-in home
+/// with `STENO_DISTRIBUTION` unset, is managed.
 #[cfg(unix)]
 #[test]
 fn a_binary_home_manager_copied_is_managed_when_it_runs() {
@@ -1512,8 +1448,7 @@ fn a_binary_home_manager_copied_is_managed_when_it_runs() {
     );
 }
 
-/// A time in the future (the clock was set back) is due, so a bad stored
-/// time cannot stop the checks.
+/// A stored time in the future is due.
 #[tokio::test]
 async fn a_check_time_in_the_future_is_due() {
     let world = World::new();
@@ -1536,8 +1471,8 @@ async fn a_time_with_an_offset_reads_as_utc() {
     );
 }
 
-/// A corrupt file, one without the key and one whose time does not parse
-/// read as no check yet: the launch tick checks and replaces the file.
+/// An unreadable file reads as no check yet: the launch tick checks and
+/// replaces it.
 #[tokio::test]
 async fn a_corrupt_file_reads_as_missing_and_is_replaced() {
     for corrupt in [
@@ -1560,8 +1495,7 @@ async fn a_corrupt_file_reads_as_missing_and_is_replaced() {
     }
 }
 
-/// The file is replaced, never written into: a second name for the old
-/// file keeps the old bytes, and no temporary is left beside it.
+/// The file is replaced, never written into, and no temporary is left.
 #[tokio::test]
 async fn the_time_is_written_atomically() {
     let world = World::new();
@@ -1583,10 +1517,8 @@ async fn the_time_is_written_atomically() {
     assert_eq!(names, ["old-name", LAST_CHECK_FILE]);
 }
 
-/// The flags are the two named booleans in `preferences.json`; missing,
-/// they read as a fresh Sparkle install (checks on, downloads off), and a
-/// value that is no boolean reads as missing. Settings writes booleans,
-/// which a build that reads the file as a map of booleans still parses.
+/// The flags are two booleans in `preferences.json`; missing or not
+/// boolean, they read as checks on, downloads off.
 #[tokio::test]
 async fn the_flags_are_booleans_under_their_keys_with_sparkles_defaults() {
     assert_eq!(AUTOMATIC_CHECKS_KEY, "steno.updates.automaticChecks");
@@ -1641,8 +1573,7 @@ async fn no_second_check_starts_while_one_runs() {
     assert!(schedule.can_check_for_updates());
 }
 
-/// The app's gate over a fake recorder and a pipeline over core's fakes,
-/// with a ready meeting a test can claim a re-export of.
+/// The app's gate over a fake recorder and a pipeline over core's fakes.
 struct AppGate {
     _directory: tempfile::TempDir,
     recorder: Arc<FakeRecorder>,
@@ -1673,8 +1604,7 @@ impl AppGate {
         }
     }
 
-    /// A re-export of the ready meeting, claimed now: a job in flight
-    /// until it ends or is dropped.
+    /// A re-export of the ready meeting, in flight until it ends or drops.
     fn claim_a_job(&self) -> steno_pipeline::Operation {
         self.pipeline
             .current()
@@ -1683,9 +1613,8 @@ impl AppGate {
     }
 }
 
-/// No hold while a recording starts, runs or stops (its save runs while
-/// it stops), and taking none leaves Record free: no start hold stays
-/// behind and no refusal shows. An idle recorder gives one.
+/// No hold while a recording starts, runs or stops, and Record stays free;
+/// an idle recorder gives one.
 #[tokio::test]
 async fn the_apps_gate_gives_no_hold_while_a_recording_is_under_way() {
     let app = AppGate::new();
@@ -1707,8 +1636,8 @@ async fn the_apps_gate_gives_no_hold_while_a_recording_is_under_way() {
     assert!(app.gate.try_hold().is_some());
 }
 
-/// No hold while a processing job is in flight, from its claim to its
-/// end, nor once the app shuts down; one hold at a time.
+/// No hold while a job is in flight or once the app shuts down; one hold
+/// at a time.
 #[tokio::test]
 async fn the_apps_gate_gives_no_hold_while_processing_or_shutting_down() {
     let app = AppGate::new();
@@ -1727,8 +1656,7 @@ async fn the_apps_gate_gives_no_hold_while_processing_or_shutting_down() {
     assert!(app.gate.try_hold().is_none());
 }
 
-/// The gate's hold refuses a recording start, with the message, until it
-/// is dropped; then a start records.
+/// The gate's hold refuses a recording start until it is dropped.
 #[tokio::test]
 async fn the_apps_gate_hold_refuses_a_start() {
     let app = AppGate::new();
@@ -1744,9 +1672,7 @@ async fn the_apps_gate_hold_refuses_a_start() {
     assert_eq!(app.recorder.status().state, RecordingState::Recording);
 }
 
-/// A processing job claimed while the gate's hold lives, as one for a
-/// phone recording that arrives during the install: it keeps its claim and
-/// waits, and runs once the hold is dropped.
+/// A job claimed while the hold lives waits and runs once it is dropped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_apps_gate_hold_keeps_a_queued_job_waiting() {
     let app = AppGate::new();
@@ -1764,10 +1690,8 @@ async fn the_apps_gate_hold_keeps_a_queued_job_waiting() {
     assert!(app.gate.is_idle_now());
 }
 
-/// An installer that never returns, as a password prompt nobody answers:
-/// a Record during it records at once, processing jobs are held off for
-/// [`JOB_HOLD_LIMIT`] only, and nothing relaunches or stops the
-/// recording, however long it waits.
+/// An installer that never returns: a Record records at once, jobs are
+/// held for [`JOB_HOLD_LIMIT`] only, and nothing relaunches.
 #[tokio::test(start_paused = true)]
 async fn an_installer_that_never_returns_never_keeps_recording_off() {
     for installer in [Installer::InPlace, Installer::AsksForAPassword] {
@@ -1797,9 +1721,8 @@ async fn an_installer_that_never_returns_never_keeps_recording_off() {
     }
 }
 
-/// An installer that returns after a Record started a recording: the
-/// relaunch waits for the recording to end, the user told so once, then
-/// takes the hold and relaunches with a Record refused.
+/// After a Record during the install, the relaunch waits for it to end,
+/// tells the user once, then relaunches with a Record refused.
 #[tokio::test(start_paused = true)]
 async fn an_install_that_ends_during_a_recording_relaunches_once_it_ends() {
     let world = World::new();
@@ -1823,8 +1746,7 @@ async fn an_install_that_ends_during_a_recording_relaunches_once_it_ends() {
     assert_eq!(world.gate.alive.load(Ordering::SeqCst), 0);
 }
 
-/// The user's install of 0.12.0, with an installer that waits until the
-/// test releases it, once the install is under way.
+/// The user's install of 0.12.0, held at the installer until released.
 async fn an_install_under_way(world: &World) -> (Arc<UpdateSchedule>, tokio::task::JoinHandle<()>) {
     world.source.install_stalls.store(true, Ordering::SeqCst);
     world.source.answer(Ok(Some("0.12.0")));
@@ -1838,8 +1760,7 @@ async fn an_install_under_way(world: &World) -> (Arc<UpdateSchedule>, tokio::tas
     (schedule, offer)
 }
 
-/// An installer that returns holds processing jobs off for a minute: they
-/// still wait at 59 seconds and go by 61.
+/// Jobs still wait at 59 seconds and go by 61.
 #[tokio::test(start_paused = true)]
 async fn jobs_wait_a_minute_for_an_installer_that_returns() {
     let world = World::new();
@@ -1851,8 +1772,8 @@ async fn jobs_wait_a_minute_for_an_installer_that_returns() {
     offer.abort();
 }
 
-/// An installer that returns long after the limit (a password typed
-/// late) still installs and relaunches, and nobody is told it failed.
+/// An installer that returns long after the limit still installs and
+/// relaunches.
 #[tokio::test(start_paused = true)]
 async fn an_install_that_returns_after_the_limit_relaunches() {
     let world = World::new();
@@ -1867,8 +1788,7 @@ async fn an_install_that_returns_after_the_limit_relaunches() {
     assert_eq!(*lock(&world.source.relaunch_waits), Vec::<String>::new());
 }
 
-/// A processing job that began during the install is what the relaunch
-/// says it waits for.
+/// A job that began during the install is what the relaunch waits for.
 #[tokio::test(start_paused = true)]
 async fn a_job_begun_during_the_install_is_what_the_relaunch_waits_for() {
     let world = World::new();
@@ -1886,10 +1806,8 @@ async fn a_job_begun_during_the_install_is_what_the_relaunch_waits_for() {
     assert_eq!(world.relaunches(), 1);
 }
 
-/// A yes while the relaunch waits for a recording (the tray's check runs
-/// against the version still running and finds the installed one) asks
-/// nothing and says the update is installed and what the relaunch waits
-/// for.
+/// A yes while the relaunch waits asks nothing and says the update is
+/// installed.
 #[tokio::test(start_paused = true)]
 async fn a_yes_while_the_relaunch_waits_says_the_update_is_installed() {
     let world = World::new();
@@ -1915,8 +1833,7 @@ async fn a_yes_while_the_relaunch_waits_says_the_update_is_installed() {
     assert_eq!(world.installs(), 1);
 }
 
-/// An install that returns while the app shuts down says nothing about a
-/// relaunch, which never comes: the app quits instead.
+/// An install that returns during shutdown says nothing about a relaunch.
 #[tokio::test(start_paused = true)]
 async fn an_install_that_returns_during_a_quit_tells_nothing() {
     let world = World::new();
@@ -1930,8 +1847,7 @@ async fn an_install_that_returns_during_a_quit_tells_nothing() {
     offer.abort();
 }
 
-/// A newer version a tick's check found while a recording ran, which the
-/// yes carried over to, is not announced by a tick during its install.
+/// A version the yes carried over to is not announced during its install.
 #[tokio::test(start_paused = true)]
 async fn a_carried_over_version_is_not_announced_during_its_install() {
     let world = World::new();
@@ -1960,9 +1876,7 @@ async fn a_carried_over_version_is_not_announced_during_its_install() {
     assert_eq!(*lock(&world.source.installed), ["0.13.0"]);
 }
 
-/// Where the install ends the app (Windows, the NSIS setup and the
-/// MSI), the hold is kept through the install as well: a Record at the
-/// install and at the relaunch is refused.
+/// Where the install ends the app, the hold is kept through the install.
 #[tokio::test]
 async fn an_installer_that_ends_the_app_keeps_recording_off_through_the_install() {
     for installer in [Installer::EndsTheApp, Installer::EndsTheAppThenAsks] {
@@ -1981,11 +1895,8 @@ async fn an_installer_that_ends_the_app_keeps_recording_off_through_the_install(
     }
 }
 
-/// With automatic downloads on, an installer that asks an administrator
-/// (a `.deb`'s password, the MSI's prompt after the app ended) is not
-/// run by the schedule, since nobody may be there to answer: the kept
-/// package is announced, and the user's yes installs it without a second
-/// download.
+/// The schedule does not run an installer that asks an administrator: the
+/// kept package is announced, and the user's yes installs it.
 #[tokio::test]
 async fn the_schedule_announces_a_package_whose_install_asks_an_administrator() {
     for installer in [Installer::AsksForAPassword, Installer::EndsTheAppThenAsks] {
@@ -2006,8 +1917,7 @@ async fn the_schedule_announces_a_package_whose_install_asks_an_administrator() 
     }
 }
 
-/// Which installers return, and which ask an administrator, so the
-/// schedule never runs them and a put-off yes asks again.
+/// Which installers return, and which ask an administrator.
 #[test]
 fn each_installer_returns_or_asks_as_it_does() {
     use Installer::{AsksForAPassword, EndsTheApp, EndsTheAppThenAsks, InPlace};
@@ -2021,11 +1931,9 @@ fn each_installer_returns_or_asks_as_it_does() {
     assert_eq!(asks, [false, true, false, true]);
 }
 
-/// A yes given while a recording ran, for an installer that asks an
-/// administrator: once the recording ends the user is asked again
-/// whether to install now, with no hold taken while that dialog is up,
-/// and only that yes installs. Installers that need nobody install
-/// without the third question.
+/// A yes while recording, for an installer that asks an administrator, is
+/// asked again once the recording ends, with no hold meanwhile; others
+/// install without asking.
 #[tokio::test(start_paused = true)]
 async fn a_put_off_yes_asks_again_before_an_installer_that_asks_an_administrator() {
     for installer in [
@@ -2056,8 +1964,7 @@ async fn a_put_off_yes_asks_again_before_an_installer_that_asks_an_administrator
     }
 }
 
-/// A yes to 0.12.0 while a job runs, "Install After It Ends", then
-/// "Later" when it is asked again once the job ended.
+/// A yes while a job runs, "Install After It Ends", then "Later".
 async fn later_when_asked_again(world: &World, schedule: &Arc<UpdateSchedule>) {
     world.processing(true);
     world.source.reply(&[true, true, false]);
@@ -2067,8 +1974,8 @@ async fn later_when_asked_again(world: &World, schedule: &Arc<UpdateSchedule>) {
     at_once(offer).await.unwrap();
 }
 
-/// "Later" when asked again installs nothing, takes no hold, and leaves
-/// the version to announce again at the next idle tick.
+/// "Later" installs nothing, takes no hold, and leaves the version to
+/// announce again.
 #[tokio::test(start_paused = true)]
 async fn later_when_asked_again_installs_nothing() {
     let world = World::new();
@@ -2092,11 +1999,8 @@ async fn later_when_asked_again_installs_nothing() {
     assert_eq!(world.source.announced(), ["0.12.0", "0.12.0"]);
 }
 
-/// A yes given while idle, for an installer that asks an administrator,
-/// with a Record during the download: the install waits for the
-/// recording, then asks again before it ends the app. A Record clicked
-/// while that dialog is up, before its yes, is waited for too, and the
-/// user is asked once more.
+/// An idle yes with a Record during the download waits for the recording
+/// and asks again; a Record while that dialog is up makes it ask once more.
 #[tokio::test(start_paused = true)]
 async fn an_installer_that_asks_is_asked_again_after_a_recording_during_the_download() {
     let world = World::new();
@@ -2139,9 +2043,8 @@ async fn an_installer_that_asks_is_asked_again_after_a_recording_during_the_down
     assert_eq!(world.source.steps(), ["download", "install", "relaunch"]);
 }
 
-/// A recorder whose `hold_starts` first runs `before`, as a start or a
-/// quit landing between the gate's first look and its start hold, and
-/// counts the start holds taken.
+/// A recorder whose `hold_starts` first runs `before`, and counts the
+/// start holds.
 struct RacingRecorder {
     inner: Arc<FakeRecorder>,
     before: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -2220,9 +2123,8 @@ impl AppGate {
     }
 }
 
-/// A Record that starts between the gate's first look and its start hold
-/// gets no hold over it: the gate reads the status again under the start
-/// hold, and the recording goes on with no refusal shown.
+/// A Record between the gate's first look and its start hold gets no hold
+/// over it.
 #[tokio::test]
 async fn a_start_between_the_gates_look_and_its_start_hold_gets_no_hold() {
     let app = AppGate::new();
@@ -2236,8 +2138,7 @@ async fn a_start_between_the_gates_look_and_its_start_hold_gets_no_hold() {
     assert_eq!(app.recorder.status().error, None);
 }
 
-/// A shutdown that begins between the gate's first look and its start
-/// hold gets no hold over it either.
+/// Neither does a shutdown in that gap.
 #[tokio::test]
 async fn a_quit_between_the_gates_look_and_its_start_hold_gets_no_hold() {
     let app = AppGate::new();
@@ -2247,8 +2148,7 @@ async fn a_quit_between_the_gates_look_and_its_start_hold_gets_no_hold() {
     assert!(gate.try_hold().is_none(), "the app quits");
 }
 
-/// A busy app is told apart before the start hold, so a Record while a
-/// job runs is never refused for an install that is not coming.
+/// A Record while a job runs is never refused.
 #[tokio::test]
 async fn a_busy_app_takes_no_start_hold() {
     let app = AppGate::new();
@@ -2261,8 +2161,7 @@ async fn a_busy_app_takes_no_start_hold() {
     assert_eq!(racing.holds.load(Ordering::SeqCst), 1);
 }
 
-/// A tick with no package kept takes no start hold, so a Record at that
-/// moment is not refused.
+/// A tick with nothing kept takes no start hold.
 #[tokio::test]
 async fn a_tick_with_nothing_kept_takes_no_start_hold() {
     let world = World::new();
@@ -2275,9 +2174,8 @@ async fn a_tick_with_nothing_kept_takes_no_start_hold() {
     assert_eq!(racing.holds.load(Ordering::SeqCst), 0);
 }
 
-/// Automatic downloads turned off during a download after which the app
-/// is busy: the flag read when the download ends keeps nothing, so no
-/// later tick installs it.
+/// Automatic downloads turned off during a download keeps nothing, even
+/// when the app is busy after it.
 #[tokio::test(start_paused = true)]
 async fn a_switch_turned_off_during_a_download_while_busy_keeps_nothing() {
     let world = World::new();
@@ -2302,9 +2200,8 @@ async fn a_switch_turned_off_during_a_download_while_busy_keeps_nothing() {
     assert!(schedule.state().staged.is_none(), "not kept");
 }
 
-/// A yes given while a recording ran, whose recording ended while the
-/// "after it ends" dialog was up, is still asked again before an installer
-/// that asks an administrator.
+/// A recording that ended while the "after it ends" dialog was up still
+/// asks again for an installer that asks an administrator.
 #[tokio::test(start_paused = true)]
 async fn a_busy_yes_whose_recording_ended_during_the_dialog_asks_again() {
     let world = World::new();
@@ -2329,8 +2226,7 @@ async fn a_busy_yes_whose_recording_ended_during_the_dialog_asks_again() {
     );
 }
 
-/// A newer version a tick found during the download of an idle yes is
-/// asked about again before an installer that asks an administrator.
+/// A newer version found during an idle yes's download asks again.
 #[tokio::test(start_paused = true)]
 async fn a_newer_version_found_during_the_download_asks_again() {
     let world = World::new();
@@ -2357,9 +2253,7 @@ async fn a_newer_version_found_during_the_download_asks_again() {
     assert_eq!(*lock(&world.source.installed), ["0.13.0"]);
 }
 
-/// A download that took longer than [`LONG_DOWNLOAD`] asks again before an
-/// installer that asks an administrator, since the user may have left; a
-/// shorter one installs on the yes.
+/// A download past [`LONG_DOWNLOAD`] asks again; a shorter one installs.
 #[tokio::test(start_paused = true)]
 async fn a_long_download_asks_again_before_an_installer_that_asks() {
     assert_eq!(LONG_DOWNLOAD, Duration::from_secs(30), "the plan's 30 s");
@@ -2394,8 +2288,7 @@ async fn a_long_download_asks_again_before_an_installer_that_asks() {
     }
 }
 
-/// "Later" when asked again keeps the package the schedule had kept, so
-/// the next yes installs it without downloading it again.
+/// "Later" keeps the schedule's package for the next yes.
 #[tokio::test(start_paused = true)]
 async fn later_when_asked_again_keeps_the_kept_package() {
     let world = World::new();
@@ -2413,8 +2306,7 @@ async fn later_when_asked_again_keeps_the_kept_package() {
     assert_eq!(world.downloads(), 1, "downloaded once");
 }
 
-/// "Later" when asked again keeps nothing once automatic downloads are
-/// off: the package was the user's download, not the schedule's.
+/// "Later" keeps nothing once automatic downloads are off.
 #[tokio::test(start_paused = true)]
 async fn later_when_asked_again_keeps_no_download_of_its_own() {
     let world = World::new();
@@ -2427,8 +2319,7 @@ async fn later_when_asked_again_keeps_no_download_of_its_own() {
     assert!(schedule.state().staged.is_none(), "not kept");
 }
 
-/// "Later" when asked again keeps nothing once automatic downloads were
-/// turned off while that dialog was up.
+/// "Later" keeps nothing once automatic downloads were turned off meanwhile.
 #[tokio::test(start_paused = true)]
 async fn later_after_the_switch_went_off_during_the_dialog_keeps_nothing() {
     let world = World::new();
@@ -2447,8 +2338,7 @@ async fn later_after_the_switch_went_off_during_the_dialog_keeps_nothing() {
     assert!(schedule.state().staged.is_none(), "not kept");
 }
 
-/// "Later" when asked again tells the user nothing failed, and the General
-/// section still shows the update.
+/// "Later" reports no failure, and the update still shows.
 #[tokio::test(start_paused = true)]
 async fn later_when_asked_again_tells_no_failure() {
     let world = World::new();
@@ -2474,8 +2364,7 @@ async fn the_apps_gate_says_when_it_shuts_down() {
     assert!(app.gate.is_shutting_down());
 }
 
-/// A yes during a Quit, while the relaunch waited for a recording, asks
-/// and says nothing more.
+/// A yes during a Quit, while the relaunch waited, says nothing more.
 #[tokio::test(start_paused = true)]
 async fn a_yes_during_a_quit_while_the_relaunch_waits_says_nothing() {
     let world = World::new();
@@ -2491,8 +2380,7 @@ async fn a_yes_during_a_quit_while_the_relaunch_waits_says_nothing() {
     offer.abort();
 }
 
-/// A yes while the install still runs is not told the update is
-/// installed: it is asked as any yes is.
+/// A yes while the install still runs is asked as any yes is.
 #[tokio::test(start_paused = true)]
 async fn a_yes_during_the_install_is_not_told_it_is_installed() {
     let world = World::new();

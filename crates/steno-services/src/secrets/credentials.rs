@@ -1,61 +1,8 @@
-//! The Windows credential store behind [`KeyringSecretStore`] on Windows:
-//! one generic credential per secret, filed as the `keyring` crate (3.x)
-//! filed it, so the credentials the app wrote through that crate read
-//! unchanged, but kept on this computer (`CRED_PERSIST_LOCAL_MACHINE`)
-//! where the crate kept them with the user's roaming profile
-//! (`CRED_PERSIST_ENTERPRISE`, its only choice). A roaming credential
-//! travels with a roaming profile, and on a domain computer the profile's
-//! sync can remove it or bring back an older one; losing the handover
-//! identity that way unpairs every phone.
-//!
-//! The format, as the crate wrote it: the target name `<key>.<service>`
-//! (`llm-api-key.uno.schmid.steno.mac`, [`target_name`]), the user name the
-//! key, the blob the value in UTF-16 little-endian without a terminating
-//! NUL. The target name and the type identify a credential, and
-//! `CredWriteW` replaces the credential of the same target name and type,
-//! so [`write_secret`] is one `CredWriteW` and never deletes first. An
-//! empty value removes the credential, as with the crate.
-//!
-//! Only a credential that does not exist (`ERROR_NOT_FOUND`) reads as none.
-//! Every other failed read, and a blob that is not UTF-16 text, is an
-//! error, so the handover identity's load reports it unreadable and never
-//! missing (#221).
-//!
-//! A credential kept any other way (the crate's roaming ones) moves on its
-//! first read in [`read_secret`], which is at launch for both secrets. Once
-//! the read succeeded, the credential is written again with local
-//! persistence and its user name and comment as read, under
-//! `CRED_PRESERVE_CREDENTIAL_BLOB`: the credential manager keeps the blob
-//! it holds. So the move carries no value and cannot write an old one over
-//! a newer one, and where the credential was removed since the read, it
-//! fails with `ERROR_NOT_FOUND` and writes nothing. The move is read back
-//! and logged, and nothing is written after it: the read-back reads the
-//! credential manager's set, so a credential it does not find was removed
-//! there, and writing it back would bring a removed credential back. That
-//! holds when the roaming profile's sync made the removal in that moment
-//! too: a removal wins, and for the identity #221's guard then reports the
-//! handover unavailable. A failed move is logged, the value read is still
-//! returned, and the next read tries again. Either persistence reads
-//! through the crate too, so a build from before the move still finds its
-//! secrets.
-//!
-//! Microsoft documents what `CredWriteW` replaces, not how or in which
-//! order the credential manager writes it to disk, and local and roaming
-//! credentials are kept in different folders of the profile. A power loss
-//! while it writes the move is therefore the one moment the move does not
-//! cover. Should the identity be gone after it, the next launch finds none
-//! and #221's guard reports the handover unavailable rather than minting a
-//! new identity.
-//!
-//! The rules above run over [`CredentialSet`], so they are tested on every
-//! platform over an in-memory set; the system's set, over `CredReadW`,
-//! `CredWriteW` and `CredDeleteW`, is the `windows` module, the one place
-//! in the crate allowed `unsafe`. Every call takes the set by `&mut`, and
-//! the system's set exists once per process behind a lock
-//! (`windows::credential_set`), so this process's reads, moves and writes
-//! run one after the other.
-//!
-//! No Swift counterpart: the Swift app runs on the Mac only.
+//! The Windows credential store behind [`KeyringSecretStore`]: one generic
+//! credential per secret, filed as the `keyring` crate filed it, but kept
+//! on this computer, not with the roaming profile whose sync can lose it.
+//! Only `ERROR_NOT_FOUND` reads as none. A roaming credential moves on its
+//! first read, under `CRED_PRESERVE_CREDENTIAL_BLOB`, so it carries no value.
 //!
 //! [`KeyringSecretStore`]: super::KeyringSecretStore
 
@@ -65,8 +12,8 @@ use steno_core::SecretKey;
 
 use super::KEYRING_SERVICE;
 
-// The crate's one `unsafe` module (AGENTS.md); every block in it carries a
-// SAFETY comment.
+// The crate's one `unsafe` module; every block in it carries a SAFETY
+// comment.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
@@ -81,9 +28,8 @@ pub(super) const LOCAL_MACHINE: u32 = 2;
 /// (`CRED_MAX_CREDENTIAL_BLOB_SIZE`): 1,280 UTF-16 code units.
 const MAX_BLOB_BYTES: usize = 2560;
 
-/// One generic credential, the fields Steno reads and writes. The target
-/// alias is empty and the credential carries no attributes, as the
-/// `keyring` crate wrote it.
+/// One generic credential, the fields Steno reads and writes, with no
+/// target alias and no attributes.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Credential {
     /// The name the credential is looked up by, with its type.
@@ -135,7 +81,7 @@ pub(super) fn target_name(key: &SecretKey) -> String {
 }
 
 /// The secret under `key`, `None` when there is none. A credential kept
-/// other than on this computer moves there first (the module's doc).
+/// other than on this computer moves there first.
 pub(super) fn read_secret(
     set: &mut impl CredentialSet,
     key: &SecretKey,
@@ -170,8 +116,7 @@ pub(super) fn write_secret(
 }
 
 /// Moves `stored` to this computer, keeping the blob the credential
-/// manager holds, and reads it back. Writes nothing else and only logs:
-/// the caller holds the value either way.
+/// manager holds, and reads it back. Only logs: the caller holds the value.
 fn keep_on_this_computer(set: &mut impl CredentialSet, stored: &Credential) {
     let target = &stored.target_name;
     match set.move_to_this_computer(stored) {
@@ -265,10 +210,9 @@ mod tests {
     /// Changes another program makes to the credentials.
     type Meddling = fn(&mut BTreeMap<String, Credential>);
 
-    /// An in-memory credential set, keyed by the target name as Windows
-    /// keys it (case-insensitively), that records every call, fails the
-    /// reads, writes and moves a test asks it to, and makes another
-    /// program's changes around a move.
+    /// An in-memory credential set, keyed case-insensitively as Windows keys
+    /// it, that records every call, fails what a test asks it to, and makes
+    /// another program's changes around a move.
     #[derive(Default)]
     struct FakeSet {
         credentials: BTreeMap<String, Credential>,
@@ -361,13 +305,10 @@ mod tests {
         }
     }
 
-    /// What every [`CredentialSet`] does, as Microsoft documents
-    /// `CredWriteW` with and without `CRED_PRESERVE_CREDENTIAL_BLOB`: a
-    /// move keeps the stored blob and takes the other fields it is given,
-    /// and once the credential is deleted it finds nothing to move and
-    /// does not bring it back. Run over [`FakeSet`] on every platform and
-    /// over the system's set on Windows, so the fake is held to the real
-    /// store.
+    /// What every [`CredentialSet`] does, as Microsoft documents `CredWriteW`
+    /// with `CRED_PRESERVE_CREDENTIAL_BLOB`: a move keeps the stored blob and
+    /// does not bring a deleted credential back. Run over [`FakeSet`] and over
+    /// the system's set on Windows, so the fake is held to the real store.
     pub(super) fn moves_as_the_credential_manager_documents(
         set: &mut impl CredentialSet,
         target_name: &str,
@@ -459,9 +400,8 @@ mod tests {
         );
     }
 
-    /// A roaming credential reads and moves to this computer with its
-    /// blob, user name and comment; nothing is deleted or written on the
-    /// way, and the next read finds it moved.
+    /// A roaming credential reads and moves to this computer with its blob,
+    /// user name and comment, deleting and writing nothing else.
     #[test]
     fn a_roaming_credential_reads_and_moves_to_this_computer_once() {
         let roaming = written_by_the_keyring_crate("sk-1");
@@ -524,8 +464,7 @@ mod tests {
     }
 
     /// A credential another program removes between the read and the move
-    /// stays removed; one it rewrites keeps the newer value, as the move
-    /// carries none. The value read is still returned.
+    /// stays removed; one it rewrites keeps the newer value.
     #[test]
     fn a_move_never_brings_back_or_overwrites_what_changed_since_the_read() {
         let mut set = FakeSet::with(written_by_the_keyring_crate("sk-1"));
@@ -552,9 +491,7 @@ mod tests {
         assert_eq!(stored.persist, LOCAL_MACHINE);
     }
 
-    /// Nothing is written after a move, whatever its read-back finds: a
-    /// credential removed right after it stays removed, a newer one stays,
-    /// and a failed read-back leaves the moved credential as it is.
+    /// Nothing is written after a move, whatever its read-back finds.
     #[test]
     fn nothing_is_written_after_a_move_whatever_its_read_back_finds() {
         let removed: Meddling = BTreeMap::clear;

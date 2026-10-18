@@ -1,5 +1,4 @@
 //! `audioAsset` rows.
-//! Swift: the asset methods of `Sources/StenoCore/Storage/MeetingStore.swift`.
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
@@ -97,12 +96,10 @@ fn keeper_of_master(
 }
 
 /// What [`Store::sweep_expired_asset`] hands its `remove`, read in the
-/// write that removes the files. Rust only.
+/// write that removes the files.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpiredAsset {
-    /// The asset as stored.
     pub asset: AudioAsset,
-    /// Every speaker of the asset's meeting.
     pub speakers: Vec<Speaker>,
     /// Every `sampleClipURL` a speaker row names, of every meeting
     /// ([`Store::sample_clip_urls`]).
@@ -110,9 +107,8 @@ pub struct ExpiredAsset {
 }
 
 impl ExpiredAsset {
-    /// The meeting's confirmed speakers that have a sample clip: their
-    /// clips go with the audio, and they lose `sampleClipURL`. Unconfirmed
-    /// speakers keep their clips until confirmation or deletion.
+    /// The meeting's confirmed speakers with a sample clip: their clips go
+    /// with the audio. Unconfirmed speakers keep theirs.
     pub fn confirmed_with_clips(&self) -> impl Iterator<Item = &Speaker> {
         self.speakers.iter().filter(|speaker| {
             speaker.assignment.is_confirmed() && speaker.sample_clip_url.is_some()
@@ -121,23 +117,16 @@ impl ExpiredAsset {
 }
 
 impl Store {
-    /// Inserts or replaces the asset (GRDB's `save`).
     pub fn save_asset(&self, asset: &AudioAsset) -> Result<()> {
         self.write(|transaction| save(transaction, asset))
     }
 
-    /// [`Store::save_asset`] committed under `synchronous = FULL` with
-    /// `fullfsync` ([`Store::write_durably`]). Every stamp and every keep
-    /// goes this way. A stamp: once it is on disk the sweep may delete the
-    /// recording, and a durable commit also syncs every commit before it,
-    /// the meeting's transcript and summary among them, so a power loss can
-    /// never leave the recording deleted and its results rolled back. A
-    /// cleared stamp: a power loss can never bring back the stamp the user's
-    /// keep removed, for the sweep to delete what they kept. The clears
-    /// before a re-run and in the crash-loop guard do not need it: a
-    /// rollback restores the stamped ready meeting with its old results, or
-    /// a `processing` row the sweep skips. Rust only: Swift writes
-    /// retention at its store's default level.
+    /// [`Store::save_asset`], durable ([`Store::write_durably`]). Every stamp
+    /// and every keep goes this way: once a stamp is on disk the sweep may
+    /// delete the recording, and the durable commit also syncs the results
+    /// before it, so a power loss never leaves the recording deleted and its
+    /// results rolled back; and a power loss never brings back a stamp the
+    /// user's keep removed.
     pub fn save_asset_durably(&self, asset: &AudioAsset) -> Result<()> {
         self.write_durably(|transaction| save(transaction, asset))
     }
@@ -157,8 +146,7 @@ impl Store {
         })
     }
 
-    /// Every asset, in id order; the retention sweep pairs them with the
-    /// files on disk.
+    /// Every asset, in id order.
     pub fn assets(&self) -> Result<Vec<AudioAsset>> {
         self.read(|connection| {
             query_all(
@@ -170,10 +158,8 @@ impl Store {
         })
     }
 
-    /// Every asset's `url`, each once and in order, without the rest of
-    /// the row: the launch's recovery looks for an interrupted recording
-    /// in every folder a master was written to. Rust only: Swift had no
-    /// recovery.
+    /// Every asset's `url`, each once and in order: the launch's recovery
+    /// looks in every folder a master was written to.
     pub fn asset_urls(&self) -> Result<Vec<String>> {
         self.read(|connection| {
             query_all(
@@ -187,7 +173,6 @@ impl Store {
 }
 
 impl Store {
-    /// The asset row by its own id, `None` when there is none.
     pub fn asset_by_id(&self, id: Uuid) -> Result<Option<AudioAsset>> {
         self.read(|connection| {
             Ok(connection
@@ -202,35 +187,22 @@ impl Store {
 
     /// Every asset whose `expiresAt` has passed and whose meeting is not
     /// recording, queued or processing, in expiry order.
-    /// Swift: `MeetingStore.expiredAssets(now:)`.
     pub fn expired_assets(&self, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<AudioAsset>> {
         self.read(|connection| query_all(connection, &expired_sql(""), [DbDate(now)], from_row))
     }
 
-    /// Sweeps one asset of [`Store::expired_assets`] in one write. When the
-    /// asset is still due at `now` (stamped, expired, and its meeting not
-    /// recording, queued or processing), `remove` gets the [`ExpiredAsset`]
-    /// as stored, removes the asset's files and the clips of
-    /// [`ExpiredAsset::confirmed_with_clips`], and returns whether every one
-    /// went; then those speakers lose `sampleClipURL` and the asset loses
-    /// `expiresAt`. Returns whether the asset was swept. An asset whose
-    /// master another asset row names and still needs (that row is not due
-    /// itself: kept forever, not stamped yet or not expired yet, or its
-    /// meeting recording, queued or processing) is not swept: `remove` is
-    /// not called, nothing changes, and the next sweep checks again, so the
-    /// master goes once every row naming it is due. A master known to be
-    /// gone needs no keeper: the asset is swept, so its other files go and
-    /// its stamp clears. One whose metadata cannot be read counts as there. Two rows name one master only after a fault, such as
-    /// (before [`Store::commit_admission_durably`] refused it) a phone
-    /// retry's commit into a copy the launch adopted without its ledger
-    /// row; the sweep still never deletes audio another row keeps. The
-    /// write lock is held from the check through the removal, so a run
-    /// that `enqueue` or `reprocess` saves `queued` in a write of its own
-    /// comes either before the check, and the asset is skipped, or after
-    /// the files are gone. The store waits on the removal, a few files on
-    /// the audio folder's disk.
-    /// Rust only: Swift's sweep acts on the list it read first, and Swift
-    /// has no `reprocess`.
+    /// Sweeps one asset of [`Store::expired_assets`] in one write. While it
+    /// is still due at `now`, `remove` gets the [`ExpiredAsset`], removes
+    /// its files and the clips of [`ExpiredAsset::confirmed_with_clips`],
+    /// and returns whether all went; then those speakers lose
+    /// `sampleClipURL` and the asset `expiresAt`. Returns whether the asset
+    /// was swept.
+    ///
+    /// An asset whose master another, not due, row names is skipped, so the
+    /// master goes once every row naming it is due; a master known to be
+    /// gone needs no keeper. The write lock is held from the check through
+    /// the removal, so a run saved `queued` meanwhile comes either before
+    /// the check or after the files are gone.
     pub fn sweep_expired_asset(
         &self,
         asset_id: Uuid,
@@ -249,8 +221,7 @@ impl Store {
                 return Ok(false);
             };
             // Only a master known to be gone skips the keeper check: one
-            // whose metadata cannot be read (an I/O error, a folder it
-            // cannot search) may still be there.
+            // whose metadata cannot be read may still be there.
             let master_not_gone = crate::paths::file_url_path(&asset.url)
                 .is_some_and(|master| !matches!(master.try_exists(), Ok(false)));
             if master_not_gone && let Some(keeper) = keeper_of_master(transaction, &asset, now)? {
@@ -281,9 +252,7 @@ impl Store {
     }
 
     /// Marks every listed asset `keepForever` with `expiresAt` cleared, in
-    /// one durable write ([`Store::write_durably`]), so a power loss never
-    /// brings back a stamp the sweep would act on. Swift:
-    /// `MeetingStore.keepForever(assetIDs:)`. Rust only: durable.
+    /// one durable write, so a power loss never brings back a stamp.
     pub fn keep_forever(&self, asset_ids: &[Uuid]) -> Result<()> {
         self.write_durably(|transaction| {
             for id in asset_ids {

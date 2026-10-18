@@ -1,9 +1,6 @@
-//! The recovery paths after the computer verified a file: the intake
-//! failing once, the phone retrying by `complete` or by announcing again,
-//! and a restart resuming from the stored receipt while the sweep removes
-//! only what no receipt accounts for; after a restart and a revoke, another
-//! phone's first announce of the same recording id starts from no file; a
-//! panic in the admission resumes in its `complete` and lets the retry in.
+//! Recovery after the computer verified a file: the intake failing once,
+//! the phone retrying, a restart resuming from the stored receipt while the
+//! sweep removes only orphans, and a panic in the admission.
 
 #![allow(
     clippy::assert_is_empty,
@@ -41,9 +38,7 @@ fn meeting_id() -> Uuid {
 }
 
 /// The computer comes back over `first`'s store and inbox with `intake`
-/// (behind [`common::taking`], as the real intake takes the file), and the
-/// phone resumes with the token it holds. The identity is new, so the
-/// phone pins the new fingerprint.
+/// and a new identity; the phone resumes with its token.
 async fn restart(
     first: &TestService,
     phone: &Phone,
@@ -162,8 +157,7 @@ async fn intake_failure_is_500_and_the_next_complete_admits_the_same_verified_fi
 
 #[tokio::test]
 async fn re_announce_after_an_intake_failure_keeps_the_chunk_set() {
-    // The phone's executor answers a 5xx at complete with a backoff and
-    // then starts the recording over at announce.
+    // A 5xx at complete makes the phone back off and start over at announce.
     let intake = ScriptedIntake::new(meeting_id(), 1);
     let test = TestService::with_intake(CHUNK_SIZE, intake.clone()).await;
     let phone = Phone::pair(&test).await;
@@ -227,9 +221,8 @@ async fn a_restarted_computer_resumes_from_the_stored_receipt_and_sweeps_only_or
     );
     let inbox = first.inbox().clone();
 
-    // Beside the live upload: an orphan nobody announced to the store, the
-    // leftover of a completed handover, and a verified file whose intake
-    // failed (its `failed` receipt keeps it for the retry).
+    // Beside the live upload: an orphan, a completed handover's leftover, and a
+    // verified file kept by its `failed` receipt.
     let seed = |id: Uuid| {
         let metadata = RecordingMetadata {
             recording_id: id,
@@ -307,8 +300,7 @@ async fn a_restarted_computer_resumes_from_the_stored_receipt_and_sweeps_only_or
         "the completed leftover is gone"
     );
 
-    // The phone resumes with the token it holds; the receipt comes from the
-    // store.
+    // The phone resumes with its token; the receipt comes from the store.
     let status = resumed.status(metadata.recording_id).await;
     assert_eq!(status.status, 200);
     assert_eq!(
@@ -341,13 +333,9 @@ async fn a_restarted_computer_resumes_from_the_stored_receipt_and_sweeps_only_or
 
 #[tokio::test]
 async fn another_phones_first_announce_after_a_restart_and_a_revoke_admits_its_own_bytes() {
-    // The intake refuses the verified file once, and the computer restarts:
-    // the receipt is only in the store, and the verified file waits for the
-    // phone's retry. The phone is revoked, which finds no receipt in memory
-    // to discard and deletes the row with the device. Another phone then
-    // announces the same recording id: its first announce discards the
-    // waiting file, so its `complete` hashes and admits its own bytes,
-    // never the old file unhashed.
+    // The intake refuses once, the computer restarts, and the phone is revoked.
+    // Another phone's first announce of the same id discards the waiting file,
+    // so its `complete` admits its own bytes, never the old file unhashed.
     const SIZE: i64 = 64 * 1024;
     let first = TestService::with(common::Options {
         chunk_size: SIZE,
@@ -407,14 +395,9 @@ async fn another_phones_first_announce_after_a_restart_and_a_revoke_admits_its_o
     );
 }
 
-/// A `complete` receipt whose meeting never committed (earlier releases
-/// committed the two separately, and a crash or a full disk could land in
-/// between) is not admitted. The phone never got the 200 and holds the
-/// recording, so after a restart the sweep keeps the verified file, a
-/// re-announce lists every chunk without saying `complete`, and `complete`,
-/// with or without that announce, admits the file again instead of answering
-/// the missing meeting. Swift:
-/// `aCompleteReceiptWithoutItsMeetingIsAdmittedAgainAfterARestart`.
+/// A `complete` receipt whose meeting never committed is not admitted:
+/// after a restart the sweep keeps the verified file, a re-announce lists
+/// every chunk, and `complete` admits the file again.
 #[tokio::test]
 async fn a_complete_receipt_without_its_meeting_is_admitted_again_after_a_restart() {
     let first = TestService::with_chunk_size(CHUNK_SIZE).await;
@@ -426,8 +409,7 @@ async fn a_complete_receipt_without_its_meeting_is_admitted_again_after_a_restar
         let bytes = seeded_bytes(2 * CHUNK_SIZE as usize, seed);
         let metadata = phone.metadata(&bytes, CHUNK_SIZE);
         phone.upload_all(&metadata, &bytes).await;
-        // Verified and handed to the intake, whose receipt committed and
-        // whose meeting did not.
+        // Handed to the intake: the receipt committed, the meeting did not.
         inbox
             .promote(metadata.recording_id, metadata.format)
             .unwrap();
@@ -481,7 +463,7 @@ async fn a_complete_receipt_without_its_meeting_is_admitted_again_after_a_restar
 }
 
 /// `inner`'s admission, then a panic, as a bug after the real intake's
-/// commit (in its enqueue, say) would: the verified file is gone by then.
+/// commit would.
 struct PanicsAfter(Arc<dyn HandoverIntake>);
 
 #[steno_core::async_trait]
@@ -497,14 +479,9 @@ impl HandoverIntake for PanicsAfter {
     }
 }
 
-/// A panic in the admission's task resumes in the `complete` that started
-/// it, not as a 500, and the task's unwind releases the `completing` mark.
-/// The retry is then not the 409 of a recording in flight, which lists
-/// every chunk, but goes on to the verify, which finds the verified file
-/// and the partial gone and asks for every chunk again: a 409 that lists
-/// none. The panicking intake sits outside [`common::taking`], so
-/// `taking` removes the verified file before the panic, as the real
-/// intake does once it committed.
+/// A panic in the admission resumes in its `complete`, not as a 500, and
+/// releases the `completing` mark: the retry's 409 lists no chunk, since the
+/// verified file and the partial are gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_panic_in_the_admission_resumes_in_its_complete_and_releases_the_mark() {
     let first = TestService::with(Options {

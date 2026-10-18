@@ -1,15 +1,8 @@
 //! The decoder's working set under a counting allocator: decoding a lane
-//! holds its 16 kHz output and a bounded working set, never the lane at
-//! the source rate or the file's bytes, and a mixdown holds neither. A
-//! regression to whole-file reads (a two-hour two-lane master is 2.8 GB
-//! on disk and 1.4 GB a lane at 48 kHz) fails here. Its own test binary,
-//! because the allocator is global; one test, because the bookkeeping is
-//! per thread and the harness runs tests on several.
-//!
-//! The lanes are a minute long by default; `STENO_CODEC_MEMORY_SECONDS`
-//! sets the master's length (7 200 for a two-hour master).
-//! Files go under the target dir's scratch directory and are deleted at
-//! the end.
+//! holds its 16 kHz output and a bounded working set, never the lane at the
+//! source rate or the file's bytes, and a mixdown holds neither. Its own
+//! binary, one test, as the allocator is global and the bookkeeping per
+//! thread. `STENO_CODEC_MEMORY_SECONDS` sets the master's length.
 
 #![allow(
     clippy::cast_precision_loss,
@@ -86,9 +79,8 @@ fn peak_during<T>(work: impl FnOnce() -> T) -> (T, usize) {
 }
 
 const MIB: usize = 1 << 20;
-/// What a decode may hold beyond its output: the block read from the
-/// file, its samples, the resampler's history and the reserve on the
-/// output. About 0.8 MiB for a two-lane master.
+/// What a decode may hold beyond its output: the block read, its samples,
+/// the resampler's history and the output's reserve.
 const WORKING_SET: usize = MIB;
 
 fn seconds() -> usize {

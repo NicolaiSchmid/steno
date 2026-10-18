@@ -1,9 +1,6 @@
-//! The sidecar protocol's readers under a counting allocator: a frame's
-//! length prefix alone must not make the reader reserve what it claims.
-//! A garbage prefix on the child's stdout, or on its stdin, would
-//! otherwise cost up to 64 MiB for a header and 5.5 GB for samples before
-//! a single byte of them arrived. Its own test binary, because the
-//! allocator is global.
+//! The sidecar protocol's readers under a counting allocator: a frame's length
+//! prefix alone must not make the reader reserve what it claims (up to 5.5 GB
+//! for samples). Its own test binary, because the allocator is global.
 
 #![allow(clippy::cast_precision_loss)]
 

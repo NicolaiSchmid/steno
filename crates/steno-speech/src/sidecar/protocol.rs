@@ -1,25 +1,9 @@
-//! The wire format between the parent (the app) and `steno-speech-sidecar`,
-//! over the child's stdin and stdout and nothing else: no socket, no file,
-//! so the audio stays inside the two processes.
-//!
-//! A message is one frame: the length of its JSON header as a
-//! little-endian `u32`, then the header, then the payload the header
-//! declares. Only [`Request::Transcribe`] and [`Request::Diarize`] have a
-//! payload: `sampleCount` samples of 16 kHz mono audio as little-endian
-//! `f32`, bit for bit what the engine or the diarizer was given. The
-//! header follows the bridge's JSON convention (`steno_core::json`: sorted
-//! keys, camelCase), with a `type` tag.
-//!
-//! The child sends [`Reply::Ready`] first, then [`Reply::Memory`] every
-//! heartbeat interval from a thread of its own, between and during
-//! requests, and one reply per request with the request's `id`. Speech
-//! ([`Request::Load`], [`Request::Transcribe`]) and the diarizer
-//! ([`Request::LoadDiarizer`], [`Request::Diarize`]) load and run
-//! independently in the one child. It exits
-//! with status 0 after [`Request::Shutdown`] and when its stdin or stdout
-//! closes, so a dead parent leaves no child behind. It exits with status
-//! 2, after a line on stderr, when it cannot read a frame, write a reply
-//! or start its heartbeat.
+//! The wire format between the parent and `steno-speech-sidecar`, over the
+//! child's stdin and stdout only, so the audio stays inside the two processes.
+//! A frame is the JSON header's length as a little-endian `u32`, the header,
+//! then the payload it declares: `sampleCount` 16 kHz mono `f32` samples for
+//! [`Request::Transcribe`] and [`Request::Diarize`]. The child exits when its
+//! stdin or stdout closes, so a dead parent leaves no child behind.
 //!
 //! ```
 //! use steno_speech::sidecar::protocol::{self, Request};
@@ -32,8 +16,6 @@
 //! let read: Request = protocol::read_header(&mut &frame[..]).unwrap().unwrap();
 //! assert_eq!(read, Request::Health { id: 1 });
 //! ```
-//!
-//! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -45,20 +27,17 @@ use thiserror::Error;
 
 use crate::onnx::EncoderProvider;
 
-/// Bumped on any change a peer of the old version would misread; the
-/// client refuses a child whose [`Reply::Ready`] names another. A field
-/// added with a default for its absence (`directml`, `provider`) is no such
-/// change; a new request is (version 2: the diarizer's two).
+/// Bumped on any change a peer of the old version would misread; the client
+/// refuses a child whose [`Reply::Ready`] names another. A field added with a
+/// default for its absence is no such change; a new request is.
 pub const PROTOCOL_VERSION: u32 = 2;
 
-/// The longest header either side accepts. A transcript of a long meeting
-/// is a few megabytes of JSON; one of 24 hours (see [`MAX_SAMPLES`]) stays
-/// under 20 MB with every word timed.
+/// The longest header either side accepts; a 24-hour transcript with every word
+/// timed stays under 20 MB.
 pub const MAX_HEADER_BYTES: u32 = 64 << 20;
 
-/// The most samples one request may carry: 24 hours of 16 kHz audio. A
-/// sanity bound on the header, far above any meeting; the memory ceiling
-/// is what limits a real request.
+/// The most samples one request may carry: 24 hours of 16 kHz audio, a sanity
+/// bound; the memory ceiling limits a real request.
 pub const MAX_SAMPLES: u64 = 16_000 * 60 * 60 * 24;
 
 /// What the parent asks of the child.
@@ -70,18 +49,18 @@ pub const MAX_SAMPLES: u64 = 16_000 * 60 * 60 * 24;
 )]
 pub enum Request {
     /// Load the models from `modelsRoot`, a [`ModelStore`](crate::ModelStore)
-    /// root the parent has installed them into; the child never downloads.
+    /// root the parent installed them into; the child never downloads.
     Load {
         id: u64,
         models_root: PathBuf,
-        /// `intraThreads`: ONNX Runtime's threads within one operator
-        /// ([`OnnxOptions::intra_threads`](crate::OnnxOptions::intra_threads)).
+        /// `intraThreads`:
+        /// [`OnnxOptions::intra_threads`](crate::OnnxOptions::intra_threads).
         intra_threads: usize,
-        /// `interThreads`: its threads across operators
-        /// ([`OnnxOptions::inter_threads`](crate::OnnxOptions::inter_threads)).
+        /// `interThreads`:
+        /// [`OnnxOptions::inter_threads`](crate::OnnxOptions::inter_threads).
         inter_threads: usize,
-        /// [`OnnxOptions::directml`](crate::OnnxOptions::directml); absent
-        /// is `false`, so a parent from before it still loads on the CPU.
+        /// [`OnnxOptions::directml`](crate::OnnxOptions::directml); absent is
+        /// `false`.
         #[serde(default)]
         directml: bool,
     },
@@ -95,20 +74,18 @@ pub enum Request {
         hint: Option<LanguageTag>,
     },
     /// Load the diarizer's two models from these files, which the parent
-    /// has installed (`steno_diarize::models`); the child never downloads.
-    /// Independent of [`Request::Load`]: a child may hold either or both.
+    /// installed; the child never downloads. Independent of [`Request::Load`].
     LoadDiarizer {
         id: u64,
         /// pyannote segmentation 3.0.
         segmentation: PathBuf,
         /// `WeSpeaker` ResNet34-LM.
         embedding: PathBuf,
-        /// `intraThreads`: ONNX Runtime's threads within one operator, for
-        /// both sessions; zero lets ONNX Runtime decide.
+        /// `intraThreads` for both sessions; zero lets ONNX Runtime decide.
         intra_threads: usize,
     },
-    /// Diarize the `sampleCount` samples that follow the header with the
-    /// diarizer's default configuration, after [`Request::LoadDiarizer`].
+    /// Diarize the `sampleCount` samples that follow the header, after
+    /// [`Request::LoadDiarizer`].
     Diarize { id: u64, sample_count: u64 },
     /// Answer with [`Reply::Bye`] and exit.
     Shutdown { id: u64 },
@@ -148,9 +125,8 @@ impl Request {
     rename_all_fields = "camelCase"
 )]
 pub enum Reply {
-    /// Sent once at start, before any other frame; by then a child on
-    /// Linux or macOS ignores SIGINT, SIGTERM and SIGHUP (the sidecar
-    /// crate's docs).
+    /// Sent once at start, before any other frame; by then a child on Linux or
+    /// macOS ignores SIGINT, SIGTERM and SIGHUP.
     Ready {
         /// The child's [`PROTOCOL_VERSION`].
         protocol: u32,
@@ -159,9 +135,7 @@ pub enum Reply {
     },
     /// The heartbeat: the child's resident set, for the parent's ceiling.
     Memory { rss_bytes: u64 },
-    /// The models are loaded, the encoder on `provider`
-    /// ([`OnnxBackend::provider`](crate::OnnxBackend::provider)); absent is
-    /// the CPU, which a child from before it always used.
+    /// The models are loaded, the encoder on `provider`; absent is the CPU.
     Loaded {
         id: u64,
         #[serde(default)]
@@ -173,15 +147,14 @@ pub enum Reply {
         pid: u32,
         rss_bytes: u64,
         loaded: bool,
-        /// Where the encoder runs now; a failed run on `DirectML` moves it
-        /// to the CPU after [`Reply::Loaded`]. Absent before a load and
-        /// from a child that does not say; the parent then keeps the
-        /// provider it last heard.
+        /// Where the encoder runs now; a failed `DirectML` run moves it to the
+        /// CPU. Absent when unknown; the parent then keeps the provider it last
+        /// heard.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<EncoderProvider>,
     },
     /// The answer to [`Request::Transcribe`], with `provider` as in
-    /// [`Reply::Health`], after the run.
+    /// [`Reply::Health`].
     Transcript {
         id: u64,
         segments: Vec<RawSegment>,
@@ -190,8 +163,8 @@ pub enum Reply {
     },
     /// The answer to [`Request::LoadDiarizer`]: both models are loaded.
     DiarizerLoaded { id: u64 },
-    /// The answer to [`Request::Diarize`]: the clusters in the order the
-    /// diarizer returned them.
+    /// The answer to [`Request::Diarize`], the clusters in the diarizer's
+    /// order.
     Diarization {
         id: u64,
         clusters: Vec<DiarizedCluster>,
@@ -219,12 +192,10 @@ impl Reply {
     }
 }
 
-/// A [`SpeakerCluster`] on the wire, its embedding included, which
-/// `SpeakerCluster`'s own serde form leaves out. The `f32` values travel
-/// widened to `f64`, which round-trips the JSON exactly
-/// (`serde_json`'s `float_roundtrip`, which `steno-core` turns on)
-/// whatever `serde_json`'s `f32` path does, and narrowing it back is
-/// exact, so the parent gets the child's clusters bit for bit.
+/// A [`SpeakerCluster`] on the wire, its embedding included, which its own
+/// serde form leaves out. The `f32` values travel widened to `f64`, which
+/// round-trips the JSON exactly, so the parent gets the child's clusters bit
+/// for bit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiarizedCluster {
@@ -253,8 +224,7 @@ impl From<&SpeakerCluster> for DiarizedCluster {
 }
 
 impl From<DiarizedCluster> for SpeakerCluster {
-    // Each value was an `f32` widened by the child, so narrowing it back
-    // is exact.
+    // Each value was an `f32` widened by the child, so narrowing is exact.
     #[allow(clippy::cast_possible_truncation)]
     fn from(cluster: DiarizedCluster) -> Self {
         SpeakerCluster {
@@ -282,8 +252,8 @@ pub enum FrameError {
     /// [`MAX_SAMPLES`].
     #[error("a frame of {0} bytes is over the limit")]
     TooLarge(u64),
-    /// A header that does not start with `{`, so it cannot be a JSON
-    /// object: binary garbage that only looked like a length prefix.
+    /// A header that does not start with `{`: binary garbage that only looked
+    /// like a length prefix.
     #[error("not a protocol message: the header starts with byte {0:#04x}")]
     NotAHeader(u8),
     /// A JSON header that is no message of the protocol.
@@ -291,8 +261,8 @@ pub enum FrameError {
     Json(#[from] serde_json::Error),
 }
 
-/// Writes `message` and `payload` as one frame and flushes. Callers that
-/// share a writer between threads hold its lock across the call.
+/// Writes `message` and `payload` as one frame and flushes. Callers sharing a
+/// writer between threads hold its lock across the call.
 pub fn write_frame<W: Write, T: Serialize>(
     out: &mut W,
     message: &T,
@@ -348,15 +318,14 @@ pub fn read_header<R: Read, T: DeserializeOwned>(input: &mut R) -> Result<Option
     Ok(Some(serde_json::from_slice(&header)?))
 }
 
-/// What a reader reserves before the bytes it was promised arrive, in
-/// bytes or samples: a frame's prefix may claim far more than ever comes.
+/// What a reader reserves before the promised bytes arrive: a prefix may claim
+/// far more than ever comes.
 const INITIAL_CAPACITY: usize = 1 << 16;
 
 /// The bytes of payload [`read_samples`] reads at a time.
 const READ_CHUNK: usize = 1 << 16;
 
-/// Reads the payload of a transcribe or diarize request: `sample_count`
-/// samples.
+/// Reads the `sample_count` samples of a transcribe or diarize payload.
 pub fn read_samples<R: Read>(input: &mut R, sample_count: u64) -> Result<Vec<f32>, FrameError> {
     if sample_count > MAX_SAMPLES {
         return Err(FrameError::TooLarge(sample_count.saturating_mul(4)));
@@ -673,8 +642,7 @@ mod tests {
             }
         );
 
-        // The live provider: by name when known, absent (not null) when
-        // not, and absent reads as unknown.
+        // The live provider: by name when known, absent (not null) when not.
         assert_eq!(
             header(&Reply::Health {
                 id: 2,
@@ -764,8 +732,8 @@ mod tests {
 
     #[test]
     fn binary_garbage_is_refused_before_its_claimed_length_is_awaited() {
-        // A real header is a JSON object; anything else fails at its first
-        // byte, whatever length the four bytes before it claimed.
+        // A header that is not a JSON object fails at its first byte, whatever
+        // its length prefix claimed.
         for (length, bytes) in [
             (MAX_HEADER_BYTES, &b"\x00\x01binary"[..]),
             (2, b"[]"),

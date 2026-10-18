@@ -1,21 +1,8 @@
-//! The import's keychain half against a real file keychain (macOS only,
-//! opt-in with `STENO_KEYCHAIN_TESTS=1`): a throwaway keychain opened by
-//! path with user interaction disabled holds the committed test identity,
-//! stored with the calls Swift's `IdentityKeychain.store` makes (the SEC1
-//! key through `SecItemImport`, the certificate, both relabelled with
-//! `SecItemUpdate`); the import finds it by label, exports it as PKCS#12
-//! through `kSecMatchSearchList` with that keychain as
-//! `SecIdentityCreateWithCertificate`'s search list, and decodes it to the
-//! fingerprint and Mac id `IdentityFixtureTests` (Swift) computes from the
-//! same fixture. A second test puts a second Swift identity into a second
-//! throwaway keychain, as an old login keychain added back beside a new one
-//! does: the lookup lists both certificates, and the export hands over the
-//! one asked for. Nothing touches the default keychain.
-//!
-//! With `STENO_WRITE_EXPORT_FIXTURE=<path>` the test also writes the
-//! export under the passphrase the platform-independent decode test uses
-//! (`swift_import::tests`), which is how
-//! `tests/fixtures/swift-import/test-identity.exported.p12` was made.
+//! The import's keychain half against a real throwaway file keychain
+//! (macOS only, opt-in with `STENO_KEYCHAIN_TESTS=1`): the committed test
+//! identity, stored as the Swift app stores it, is found by label, exported
+//! as PKCS#12 and decoded to the expected fingerprint and Mac id. Nothing
+//! touches the default keychain.
 
 #![cfg(target_os = "macos")]
 
@@ -34,11 +21,9 @@ use steno_services::swift_import::{
     SwiftKeychain, decode_pkcs12,
 };
 
-/// `HandoverIdentity.fingerprint` of `test-identity.der`, as
-/// `IdentityFixtureTests` computes it.
+/// `HandoverIdentity.fingerprint` of `test-identity.der`.
 const FINGERPRINT: &str = "76ac0c0b28f976f25589214d5b2c614d983df9de081b06ec1fe9247bf1e40d92";
-/// `HandoverIdentity.macID` of the same, as `IdentityFixtureTests`
-/// computes it.
+/// `HandoverIdentity.macID` of the same.
 const MAC_ID: &str = "FCF0D2A1-D2CE-48F7-BAFF-E17FD2E9C814";
 /// The passphrase of the committed export.
 const EXPORTED_PASSPHRASE: &str = "steno-export-fixture";
@@ -82,7 +67,7 @@ fn stored_certificate(keychain: &SecKeychain, der: &[u8]) -> SecCertificate {
         .expect("the certificate is in the test keychain")
 }
 
-/// What `IdentityKeychain.store` does, into `keychain`.
+/// Stores the identity into `keychain` as the Swift app does.
 fn store_as_swift_does(keychain: &SecKeychain, certificate_der: &[u8], sec1: &[u8]) {
     let key = fixture::import_sec1_private_key(sec1, keychain)
         .unwrap()
@@ -131,9 +116,8 @@ fn the_swift_identity_exports_from_a_keychain_and_keeps_its_fingerprint_and_mac_
         "no key item yet"
     );
     assert!(!swift.has_stored_identity().unwrap(), "no entry yet");
-    // The import's marker: added into the test's keychain (an item of this
-    // process's own, so nothing prompts), found by its attributes, and a
-    // second add leaves it as it is.
+    // The import's marker: added, found by its attributes, and a second add
+    // leaves it as it is.
     assert!(!swift.import_done().unwrap(), "no marker yet");
     swift.mark_import_done().unwrap();
     assert!(swift.import_done().unwrap(), "the marker is found");
@@ -157,9 +141,8 @@ fn the_swift_identity_exports_from_a_keychain_and_keeps_its_fingerprint_and_mac_
         std::fs::write(target, committed).unwrap();
     }
 
-    // The items a desktop-id build leaves (no label) and the Swift API
-    // key item (labelled): told apart by their attributes, without reading
-    // them, so no prompt comes up while user interaction is disabled.
+    // Items told apart by their attributes, without reading them, so no
+    // prompt comes up.
     let add_password = |account: &str, label: Option<&str>| {
         let mut item = ItemAddOptions::new(ItemAddValue::Data {
             class: ItemClass::generic_password(),
@@ -208,9 +191,7 @@ fn throwaway_keychain(path: &Path) -> (SecKeychain, Throwaway) {
 }
 
 /// The P-256 key of a minted identity as SEC1 (RFC 5915) DER with its
-/// curve named, the form `IdentityKeychain.store` imports: the private
-/// scalar and the public point taken from ring's PKCS#8, whose layout is
-/// fixed.
+/// curve named, taken from ring's PKCS#8, whose layout is fixed.
 fn sec1_of(identity: &steno_handover::HandoverIdentity) -> Vec<u8> {
     use base64::Engine as _;
     let pem = identity.to_pem().unwrap();
@@ -244,11 +225,9 @@ fn sec1_of(identity: &steno_handover::HandoverIdentity) -> Vec<u8> {
     sec1
 }
 
-/// Two Swift identities, one per keychain in the search list (an old
-/// login keychain added back beside a new one), in either order: the
-/// lookup lists both certificates, which the step chooses among
-/// (`swift_import::choose_certificate`), and the export of either hands
-/// over that one, with its key found in its own keychain.
+/// Two Swift identities, one per keychain in the search list, in either
+/// order: the lookup lists both certificates, and the export of either
+/// hands over that one.
 #[test]
 fn two_swift_identities_in_two_keychains_are_both_listed_and_each_exports() {
     if std::env::var("STENO_KEYCHAIN_TESTS").as_deref() != Ok("1") {

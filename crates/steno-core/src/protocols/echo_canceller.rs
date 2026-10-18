@@ -1,32 +1,17 @@
 //! Acoustic echo cancellation on the capture thread.
-//! Swift: `Sources/StenoCore/Protocols/EchoCanceller.swift`.
 
 /// Acoustic echo cancellation on the mic lane with the tap as far-end
-/// reference. `far_end` is the far-end signal captured at the same instant
-/// as `near_end`; implementations own delay handling.
+/// reference captured at the same instant; implementations own delay handling.
 ///
 /// The one synchronous boundary, because it runs on the audio thread:
-/// `process` **must not allocate and must not take a lock** (plan
-/// invariant 5, proven by the counting allocator in
-/// `steno_audio::testing::rt`, exercised by
-/// `crates/steno-audio/tests/realtime.rs`).
-/// Everything it needs (filter state, far-end history, scratch
-/// buffers) is allocated by the constructor, which is the backend's own
-/// `new(sample_rate, frame_size)` rather than a trait method so the trait
-/// stays dyn-compatible. The three slices have the same length, one frame:
-/// the capture session guarantees it, the signature cannot. An
-/// implementation may `debug_assert_eq!` the lengths and must process the
-/// shortest common length rather than panic on the audio thread.
-///
-/// `Send` without `Sync`: the capture session owns one canceller and calls
-/// it from one thread; the methods take `&mut self` because the filter
-/// adapts on every frame.
+/// `process` **must not allocate and must not take a lock**. Everything it
+/// needs is allocated by the backend's own constructor. The three slices are
+/// one frame of the same length; an implementation processes the shortest
+/// common length rather than panic on the audio thread.
 pub trait EchoCanceller: Send {
     fn process(&mut self, near_end: &[f32], far_end: &[f32], out: &mut [f32]);
 
-    /// Forgets every adapted state (the filter, the far-end history). The
-    /// capture session calls it on every start so a new recording, possibly
-    /// on other devices, never begins with the previous meeting's echo path.
-    /// Stateless cancellers keep the empty default.
+    /// Forgets every adapted state, so a new recording never begins with the
+    /// previous meeting's echo path.
     fn reset(&mut self) {}
 }

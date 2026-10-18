@@ -1,17 +1,8 @@
-//! The one sync every recording file goes through, the writer thread's
-//! periodic one, both closes and crash recovery's patch of a sidecar
-//! (`WavStreamWriter::recover`): the full sync first and, on the Mac, a
-//! plain `fsync` when the filesystem refuses it. `File::sync_data` and
-//! `File::sync_all` are `F_FULLFSYNC` there, which a network share can
-//! refuse (a WebDAV mount answers ENOTTY, an uncategorized error kind)
-//! while `fsync` succeeds; SQLite falls back the same way, on any error.
-//! The fallback retries an interrupted `fsync`. Only a failure of both is
-//! an error, and it is `fsync`'s. Elsewhere there is nothing to fall back
-//! to: `fdatasync`, `fsync` and `FlushFileBuffers` are the plain syncs, and
-//! a second try after a failed one proves nothing. Swift: `finish` in
-//! `Sources/StenoAudio/Writer/CAFFile.swift` and
-//! `Sources/StenoAudio/Writer/WAVStreamWriter.swift`, whose
-//! `FileHandle.synchronize` is a plain `fsync` alone.
+//! The one sync every recording file goes through: the full sync and, on
+//! the Mac, a plain `fsync` when the filesystem refuses `F_FULLFSYNC` (a
+//! WebDAV mount answers ENOTTY), as SQLite falls back. Only a failure of
+//! both is an error, and it is `fsync`'s. Elsewhere the plain sync is the
+//! full one, so there is nothing to fall back to.
 
 use std::fs::File;
 use std::io;
@@ -19,10 +10,9 @@ use std::io;
 /// A sync of an open file.
 pub(crate) type SyncFn = fn(&File) -> io::Result<()>;
 
-/// The full syncs a file writer passes to [`sync`]: `File::sync_data` for
-/// its periodic sync (the samples and the size), `File::sync_all` when it
-/// closes. The writers' tests swap in syncs that count, so a writer sync
-/// that skips its full sync fails a test.
+/// The full syncs a file writer passes to [`sync`]: `File::sync_data`
+/// periodically, `File::sync_all` at the close. Tests swap in counting
+/// syncs.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FullSyncs {
     pub(crate) periodic: SyncFn,
@@ -44,8 +34,7 @@ const FALLBACK: Option<SyncFn> =
 #[cfg(not(target_os = "macos"))]
 const FALLBACK: Option<SyncFn> = None;
 
-/// Makes `file` durable with `full` (`File::sync_data` or
-/// `File::sync_all`), falling back as the module doc says.
+/// Makes `file` durable with `full`, falling back as the module doc says.
 pub(crate) fn sync(file: &File, full: SyncFn) -> io::Result<()> {
     sync_with(file, full, FALLBACK)
 }
@@ -104,10 +93,8 @@ mod tests {
         assert_eq!(error.raw_os_error(), Some(25));
     }
 
-    /// The platform's order through [`sync`] itself: the full sync runs
-    /// once, and the fallback only after it fails. On the Mac the refused
-    /// full sync falls back to `fsync`, which succeeds on a temporary file;
-    /// elsewhere the refusal stands.
+    /// The platform's order through [`sync`]: the full sync once, the
+    /// fallback only after it fails (the Mac only).
     #[test]
     fn the_full_sync_runs_once_and_the_fallback_only_after_it_fails() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -133,8 +120,7 @@ mod tests {
         }
     }
 
-    /// The product's full syncs are the ones the module doc names: the
-    /// counting tests of the writers swap them, so this pins what they
+    /// Pins the product's full syncs, which the writers' counting tests
     /// stand in for.
     #[test]
     fn the_disks_full_syncs_are_sync_data_then_sync_all() {
@@ -148,8 +134,8 @@ mod tests {
         ));
     }
 
-    /// The syncs and the fallback this platform has, on a real file: on
-    /// the Mac this passes with the temporary directory on a WebDAV mount.
+    /// The platform's syncs on a real file (on the Mac this also passes on
+    /// a WebDAV mount).
     #[test]
     fn the_platforms_sync_works_on_a_temporary_file() {
         sync(&file(), File::sync_all).unwrap();

@@ -46,7 +46,6 @@
       ../docs
       ../mobile
       ../nix
-      ../spikes
       ../Tests
       ../flake.lock
       ../flake.nix

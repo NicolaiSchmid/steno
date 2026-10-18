@@ -1,8 +1,6 @@
 //! Where the import reads from: the Swift app's defaults domain and its
-//! keychain items, each behind a trait so the tests use fakes. The
-//! real keychain and defaults are the Mac's (`DefaultsCommand`,
-//! `LoginKeychain`); off the Mac nothing implements them, as nothing is
-//! imported there.
+//! keychain items, each behind a trait so the tests use fakes. Only the Mac
+//! implements them.
 
 /// The Swift app's `UserDefaults` domain.
 pub trait SwiftDefaults: Send + Sync {
@@ -12,50 +10,34 @@ pub trait SwiftDefaults: Send + Sync {
 }
 
 /// Where the import's own marker ([`IMPORT_DONE_ENTRY`](super::IMPORT_DONE_ENTRY))
-/// is written: the step writes it after the identity, Pair again before it
-/// mints a new one (`crate::handover::IdentitySource::pair_again`).
+/// is written.
 pub trait ImportMarker: Send + Sync {
-    /// Adds the marker, an item of this app's own, so macOS asks nothing;
+    /// Adds the marker (an item of this app's own, so macOS asks nothing);
     /// one already there is left as it is.
     fn mark_import_done(&self) -> Result<(), String>;
 }
 
-/// The keychain items the import reads in the login keychain: the Swift
-/// app's handover identity (a certificate and a key item,
-/// `IdentityKeychain`) and API key (a generic password,
-/// `KeychainSecretStore`), a desktop-id build's `handover-identity` entry,
-/// and the import's own marker ([`IMPORT_DONE_ENTRY`](super::IMPORT_DONE_ENTRY)),
-/// the one item it writes here ([`ImportMarker`]).
+/// The login keychain items the import reads: the Swift app's handover
+/// identity and API key, a desktop-id build's `handover-identity` entry, and
+/// the import's own marker.
 pub trait SwiftKeychain: ImportMarker {
     /// The DER of every certificate labelled
     /// [`SWIFT_IDENTITY_LABEL`](super::SWIFT_IDENTITY_LABEL), in the
-    /// keychain's order; empty when there is none. There may be several,
-    /// one per keychain in the search list (an old login keychain added
-    /// back beside a new one); the step chooses among them
-    /// ([`choose_certificate`](super::choose_certificate)). A certificate
-    /// query reads no secret, so macOS asks nothing.
+    /// keychain's order. There may be several, one per keychain in the
+    /// search list. Reads no secret, so macOS asks nothing.
     fn swift_certificates(&self) -> Result<Vec<Vec<u8>>, String>;
-    /// Whose API key item is filed under
-    /// [`KEYRING_SERVICE`](crate::secrets::KEYRING_SERVICE) and the key's
-    /// account: the Swift app's when it is labelled
-    /// [`SWIFT_API_KEY_LABEL`](super::SWIFT_API_KEY_LABEL). An attribute
-    /// query, which asks nothing.
+    /// Who owns the API key item under
+    /// [`KEYRING_SERVICE`](crate::secrets::KEYRING_SERVICE). Asks nothing.
     fn api_key_item(&self) -> Result<ApiKeyItem, String>;
-    /// Whether a `handover-identity` entry is filed under
-    /// [`KEYRING_SERVICE`](crate::secrets::KEYRING_SERVICE). An attribute
-    /// query, which asks nothing.
+    /// Whether a `handover-identity` entry exists. Asks nothing.
     fn has_stored_identity(&self) -> Result<bool, String>;
-    /// Whether the [`IMPORT_DONE_ENTRY`](super::IMPORT_DONE_ENTRY) marker
-    /// is filed under [`KEYRING_SERVICE`](crate::secrets::KEYRING_SERVICE).
-    /// An attribute query, which asks nothing.
+    /// Whether the import marker exists. Asks nothing.
     fn import_done(&self) -> Result<bool, String>;
-    /// The API key; macOS asks for the login password once unless this
-    /// app is already on the item's access list. `None` when the item is
-    /// gone.
+    /// The API key; macOS may ask for the login password once. `None` when
+    /// the item is gone.
     fn read_api_key(&self) -> Result<Option<String>, KeychainRefusal>;
-    /// The identity of the certificate whose DER is `certificate_der` (the
-    /// one the step chose of `swift_certificates`), as PKCS#12 under
-    /// `passphrase`; macOS asks for the login password once.
+    /// The identity of `certificate_der` as PKCS#12 under `passphrase`;
+    /// macOS asks for the login password once.
     fn export_identity(
         &self,
         certificate_der: &[u8],
@@ -68,16 +50,13 @@ pub trait SwiftKeychain: ImportMarker {
 pub enum ApiKeyItem {
     /// There is none.
     Missing,
-    /// The Swift app's, labelled
-    /// [`SWIFT_API_KEY_LABEL`](super::SWIFT_API_KEY_LABEL).
+    /// The Swift app's.
     Swift,
-    /// Another app's under the same service and account: a desktop-id
-    /// build's, whose read may prompt.
+    /// Another app's (a desktop-id build's), whose read may prompt.
     Other,
 }
 
-/// A keychain read that did not happen: the user chose Deny, or the item
-/// could not be read.
+/// A keychain read that did not happen: the user denied it, or it failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{}{}", if *.denied { "denied: " } else { "" }, .detail)]
 pub struct KeychainRefusal {
@@ -106,8 +85,7 @@ mod mac {
         IMPORT_DONE_ENTRY, SWIFT_API_KEY_LABEL, SWIFT_DEFAULTS_DOMAIN, SWIFT_IDENTITY_LABEL,
     };
 
-    /// `/usr/bin/defaults export uno.schmid.steno.mac -`: the domain read
-    /// by name, whatever this app's own identifier is.
+    /// `/usr/bin/defaults export uno.schmid.steno.mac -`.
     #[derive(Debug, Default)]
     pub struct DefaultsCommand;
 
@@ -126,12 +104,10 @@ mod mac {
         }
     }
 
-    /// The login keychain, or the keychains a test names, through
-    /// `security-framework`'s safe wrappers and `steno-macos`'s export.
+    /// The login keychain, or the keychains a test names.
     #[derive(Default)]
     pub struct LoginKeychain {
-        /// The search list; empty for the user's default list (the login
-        /// keychain), a throwaway keychain in the keychain test.
+        /// The search list; empty for the user's default list.
         pub keychains: Vec<SecKeychain>,
     }
 
@@ -152,11 +128,9 @@ mod mac {
             options
         }
 
-        /// The certificates labelled [`SWIFT_IDENTITY_LABEL`], in the
-        /// keychain's order. Certificate queries honour the label (identity
-        /// queries do not, #88), and a second, attribute-only query checks
-        /// the label of everything the first one could have returned, as
-        /// `IdentityKeychain` checks it on the returned attributes.
+        /// The certificates labelled [`SWIFT_IDENTITY_LABEL`]. Identity
+        /// queries ignore the label (#88), so a second attribute-only query
+        /// checks the label of everything returned.
         fn certificates(&self) -> Result<Vec<SecCertificate>, String> {
             let refs = match self
                 .search()
@@ -195,9 +169,8 @@ mod mac {
                 .collect())
         }
 
-        /// The attributes of the generic passwords filed under
-        /// [`KEYRING_SERVICE`] and `account`; no item's data is read, so
-        /// macOS asks nothing.
+        /// The attributes of the generic passwords under [`KEYRING_SERVICE`]
+        /// and `account`; no data is read, so macOS asks nothing.
         fn passwords(&self, account: &str) -> Result<Vec<SearchResult>, String> {
             match self
                 .search()
@@ -220,7 +193,6 @@ mod mac {
     /// `errSecDuplicateItem`.
     const DUPLICATE_ITEM: i32 = -25299;
 
-    /// The label (`labl`) of an attribute query's result.
     fn label(result: &SearchResult) -> Option<String> {
         result
             .simplify_dict()
@@ -275,8 +247,7 @@ mod mac {
                 Ok(key) => Ok(Some(key)),
                 Err(keyring::Error::NoEntry) => Ok(None),
                 Err(error) => Err(KeychainRefusal {
-                    // The keyring crate wraps the status in text only; a
-                    // refused read is what a failed one almost always is.
+                    // keyring wraps the status in text only; assume refusal.
                     denied: true,
                     detail: error.to_string(),
                 }),
@@ -298,8 +269,7 @@ mod mac {
                         "no certificate labelled \"{SWIFT_IDENTITY_LABEL}\" is the one chosen"
                     ))
                 })?;
-            // The first argument is the search list for the private key:
-            // the default list in the product, the test's keychain there.
+            // The search list for the private key.
             let identity =
                 SecIdentity::with_certificate(&self.keychains, &certificate).map_err(|error| {
                     failed(format!("SecIdentityCreateWithCertificate failed: {error}"))
@@ -315,8 +285,7 @@ mod mac {
 
     impl ImportMarker for LoginKeychain {
         fn mark_import_done(&self) -> Result<(), String> {
-            // Into the first keychain of the search list (the test's), else
-            // the default one, as `keyring` files the secrets.
+            // The search list's first keychain, else the default one.
             let keychain = match self.keychains.first() {
                 Some(keychain) => keychain.clone(),
                 None => SecKeychain::default()

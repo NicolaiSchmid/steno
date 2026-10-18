@@ -1,5 +1,4 @@
 //! The seven routes of the wire, matched from method and path.
-//! Swift: `Routing/Route.swift`.
 
 use http::Method;
 use steno_core::json::parse_uuid;
@@ -84,8 +83,7 @@ impl Route {
         }
     }
 
-    /// Chunk bodies may be a chunk plus 64 KiB; everything else is small
-    /// JSON.
+    /// Chunk bodies may be a chunk plus 64 KiB; everything else is small JSON.
     #[must_use]
     pub fn body_limit(self, configuration: &HandoverConfiguration) -> i64 {
         match self {

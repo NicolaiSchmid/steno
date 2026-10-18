@@ -1,6 +1,5 @@
 //! Transcription: the engine and the components it needs on this computer,
 //! with download progress. Changing the engine rebuilds the pipeline.
-//! Swift: `Settings/SpeechSettingsViewModel.swift`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,7 +24,6 @@ pub(crate) fn downloading_text(fraction: f64) -> String {
     }
 }
 
-/// Swift: `SpeechSettingsViewModel.AssetState`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssetState {
     Absent,
@@ -38,22 +36,17 @@ pub enum AssetState {
 pub struct SpeechSettingsViewModel {
     pub engine_id: SpeechEngineId,
     pub(crate) asset_states: BTreeMap<ModelAsset, AssetState>,
-    /// The assets whose download thread still runs. Its reports show while
-    /// the asset reads `downloading`; a remove marks it absent, which
-    /// detaches the one in flight, so its late progress cannot mark the
-    /// asset downloading again. A second download of the asset starts no
-    /// thread: it reattaches to the one still running, whose next report
-    /// shows. Swift: `downloads`.
+    /// The assets whose download thread still runs. A remove marks the
+    /// asset absent and detaches the thread, so its late progress cannot
+    /// mark it downloading again; a second download reattaches to it.
     downloads: BTreeSet<ModelAsset>,
-    /// The speech sidecar stands in for the Neural Engine, which ended the
-    /// app ([`SpeechModels::speech_fallback`]); the section offers to use
-    /// it again. Rust only.
+    /// The sidecar stands in for the Neural Engine, which ended the app
+    /// ([`SpeechModels::speech_fallback`]); the section offers to use it
+    /// again.
     pub speech_fallback: bool,
-    /// The fallback ended, but the pipeline's rebuild on the Neural Engine
-    /// failed: this run still transcribes in the speech sidecar, so the
-    /// section keeps the offer ([`Self::speech_fallback`]) until a reload
-    /// succeeds, from "Use again" or another section
-    /// ([`Self::pipeline_rebuilt`]). Rust only.
+    /// The fallback ended but the rebuild on the Neural Engine failed, so
+    /// the offer stays ([`Self::speech_fallback`]) until a reload succeeds
+    /// ([`Self::pipeline_rebuilt`]).
     rebuild_pending: bool,
     pub errors: SectionError,
 }
@@ -71,7 +64,6 @@ impl SpeechSettingsViewModel {
         }
     }
 
-    /// The engines the settings pane offers.
     #[must_use]
     pub fn engines() -> &'static [SpeechEngineId] {
         &SpeechEngineId::USER_SELECTABLE
@@ -170,8 +162,7 @@ impl SpeechSettingsViewModel {
     }
 
     /// "Installed · 485 MB", "Downloading… 40%" or "Not downloaded · 485 MB".
-    /// A size not read from disk (before a download, or of an installed
-    /// asset whose size could not be read) is the one `models` expects
+    /// A size not read from disk is the expected one
     /// ([`SpeechModels::expected_bytes`]).
     #[must_use]
     pub fn status_text(&self, asset: ModelAsset, models: &dyn SpeechModels) -> String {
@@ -213,19 +204,16 @@ impl SpeechSettingsViewModel {
         }
     }
 
-    /// Another section rebuilt the pipeline (a Summaries save, an engine
-    /// change): a rebuild that "Use again" left pending is done, so the
-    /// offer goes and the progress title follows it. Rust only.
+    /// Another section rebuilt the pipeline: a rebuild "Use again" left
+    /// pending is done, so the offer goes.
     pub fn pipeline_rebuilt(&mut self, services: &Services) {
         self.rebuild_pending = false;
         self.refresh_states(services);
     }
 
     /// Marks the download started: whether the caller should run it. When
-    /// one of the asset's still runs, nothing new starts; a remove had
-    /// detached it, so the asset reads `downloading` again and the running
-    /// thread's next report shows, as Swift's did. Swift: `download(_:)`'s
-    /// guard.
+    /// one still runs, nothing new starts; the asset reads `downloading`
+    /// again and the running thread's next report shows.
     pub fn begin_download(&mut self, asset: ModelAsset) -> bool {
         let starts = self.downloads.insert(asset);
         if starts || !self.shows_download(asset) {
@@ -253,9 +241,8 @@ impl SpeechSettingsViewModel {
         }
     }
 
-    /// Whether a running download still shows: only `begin_download` marks
-    /// an asset `downloading`, and while its thread runs only a remove
-    /// takes it out again.
+    /// Whether a running download still shows: only a remove takes it out
+    /// while its thread runs.
     fn shows_download(&self, asset: ModelAsset) -> bool {
         matches!(
             self.asset_states.get(&asset),
@@ -263,8 +250,8 @@ impl SpeechSettingsViewModel {
         )
     }
 
-    /// The download's thread ended (or never started): installed or failed;
-    /// a detached download leaves what the model store reports.
+    /// The download's thread ended (or never started); a detached download
+    /// leaves what the model store reports.
     pub fn finish_download(
         &mut self,
         asset: ModelAsset,
@@ -286,13 +273,10 @@ impl SpeechSettingsViewModel {
     }
 
     /// The user turned the Neural Engine back on: the fallback ends
-    /// ([`SpeechModels::end_speech_fallback`]) and the pipeline is built
-    /// again, on the Neural Engine; the rows then show its model. An end
-    /// that fails keeps the fallback and the pipeline as they are. An end
-    /// that succeeds with a rebuild that fails keeps the row until a reload
-    /// succeeds: a second press tries the rebuild again (the end is then a
-    /// no-op), and so does a save in another section. Either way the
-    /// section says why. Rust only.
+    /// ([`SpeechModels::end_speech_fallback`]) and the pipeline is rebuilt
+    /// on it. A failed end keeps everything; a failed rebuild keeps the row
+    /// until a reload succeeds (a second press or another section's save).
+    /// Either way the section says why.
     pub fn use_neural_engine(&mut self, services: &Services) {
         let ended = services.speech_models.end_speech_fallback();
         match ended.map(|()| services.pipeline.reload()) {
@@ -338,8 +322,8 @@ mod tests {
     use super::*;
     use crate::fakes::FakeServices;
 
-    /// The host's path when the download thread cannot start: the asset
-    /// leaves `downloading` for the failure, and may be downloaded again.
+    /// When the download thread cannot start, the asset leaves
+    /// `downloading` for the failure and may be downloaded again.
     #[test]
     fn a_download_that_never_ran_shows_its_failure_and_may_start_again() {
         let fakes = FakeServices::new(chrono::Utc::now());
@@ -360,9 +344,7 @@ mod tests {
     }
 
     /// Download, remove, Download again while the first thread runs: no
-    /// second thread, the asset reads `downloading` again and the running
-    /// thread's reports and its outcome show. Swift kept showing that
-    /// download's progress.
+    /// second thread, and the running thread's reports and outcome show.
     #[test]
     fn a_download_again_after_a_remove_reattaches_to_the_running_thread() {
         let fakes = FakeServices::new(chrono::Utc::now());

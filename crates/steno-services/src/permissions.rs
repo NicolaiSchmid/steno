@@ -1,32 +1,8 @@
-//! The host's `Permissions` over the shell's (stable plan S3,
-//! `.plans/2026-10-07-stable-promotion.md`). The shell answers what the
-//! system says (`apps/desktop/src-tauri/src/permissions.rs`: the
-//! microphone and calendar status and prompts on the Mac, `unknown`
-//! elsewhere); [`SystemPermissions`] adds the one answer the system does
-//! not give, the Mac's system audio permission, from the probe
-//! (`steno_audio::capture::permission`) and what it last found.
-//! Swift: `PermissionsService` in
-//! `apps/macos/Steno/Services/PermissionsService.swift`.
-//!
-//! | Platform | System audio's state | Its request |
-//! |----------|----------------------|-------------|
-//! | macOS | `granted` once a probe heard the tone ([`SYSTEM_AUDIO_GRANTED_KEY`]), else `unknown` | the probe, up to 30 s; its answer is remembered |
-//! | Linux, Windows | the shell's (`unknown`) | the shell's |
-//!
-//! What `unknown` means is the host's rule
-//! (`steno_host::services::permission_is_missing`): missing on the Mac,
-//! not required elsewhere. A probe that heard nothing answers `denied`
-//! and forgets an earlier grant, so the next read (Check again, or the
-//! next launch) is `unknown` again and offers the test recording. The
-//! flag lives in this app's `preferences.json` and is never copied from
-//! the Swift app: macOS keeps the grant per bundle identifier, so the new
-//! identifier starts without it.
-//!
-//! The probe plays a tone that a recording would pick up, so it runs only
-//! while the recorder is idle (`CaptureRecorder::run_tone_test`), and
-//! a start stops a probe under way before it opens a device. Either
-//! way the probe found nothing: the request answers the state as it was
-//! and the flag stays.
+//! The host's `Permissions` over the shell's: [`SystemPermissions`] adds
+//! the Mac's system audio permission, which the system does not report,
+//! from a probe that plays a tone and what it last found
+//! ([`SYSTEM_AUDIO_GRANTED_KEY`]). The probe runs only while the recorder
+//! is idle, and a start stops a probe under way.
 
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -37,9 +13,9 @@ use steno_host::services::{Permissions, Preferences};
 
 use crate::recorder::CaptureRecorder;
 
-/// The `preferences.json` flag set while the last system audio probe
-/// heard the tone. Swift: `PermissionsService.systemAudioGrantedKey` in
-/// `UserDefaults`.
+/// The `preferences.json` flag set while the last system audio probe heard
+/// the tone. Never copied from the Swift app: macOS keeps the grant per
+/// bundle identifier.
 pub const SYSTEM_AUDIO_GRANTED_KEY: &str = "steno.systemAudioGranted";
 
 /// Runs the system audio probe and answers what the tap heard; stops
@@ -83,9 +59,8 @@ impl SystemPermissions {
         }
     }
 
-    /// Runs the probe only while `recorder` is idle, and lets a start
-    /// stop it (see the module doc). The graph calls it once, right after
-    /// it built the recorder; a later call changes nothing.
+    /// Runs the probe only while `recorder` is idle, and lets a start stop it.
+    /// The graph calls it once; a later call changes nothing.
     pub fn keep_out_of_recordings(&self, recorder: &Arc<CaptureRecorder>) {
         let _ = self.recorder.set(Arc::downgrade(recorder));
     }
@@ -138,9 +113,8 @@ impl Permissions for SystemPermissions {
     }
 }
 
-/// The probe this platform has: the tap and a tone on the Mac, for
-/// [`PROBE_TIMEOUT`](steno_audio::capture::permission::PROBE_TIMEOUT);
-/// elsewhere none is ever run, and it answers that it heard nothing.
+/// The probe this platform has: the tap and a tone on the Mac; elsewhere
+/// it answers that it heard nothing.
 fn system_probe() -> SystemAudioProbe {
     #[cfg(target_os = "macos")]
     {

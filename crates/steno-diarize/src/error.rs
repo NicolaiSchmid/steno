@@ -1,8 +1,4 @@
-//! The crate's error type: one variant per way the diarizer can fail to
-//! run, so a log line tells a model file that could not be fetched from a
-//! model that loaded but is not the one expected from a backend that
-//! failed on a tensor call. `ModelDiarizer` boxes it into core's
-//! `BoundaryResult`.
+//! The crate's error type: one variant per way the diarizer can fail to run.
 
 use std::fmt;
 
@@ -11,14 +7,10 @@ use crate::backend::BackendError;
 /// What the diarizer reports when it cannot run.
 #[derive(Debug, thiserror::Error)]
 pub enum DiarizeError {
-    /// The ONNX models are not installed: a file is missing or has the
-    /// wrong size and this diarizer may not download it
-    /// ([`crate::Install::Never`]), or, under either `Install`, a file
-    /// failed its checksum after a failed load and was deleted. The fields
-    /// and message are `steno_speech`'s `SpeechError::NotInstalled`, which
-    /// converts into this variant. The variant survives boxing into core's
-    /// `BoxError`, so a caller tells it from a failed load with
-    /// `downcast_ref::<DiarizeError>()`.
+    /// The ONNX models are not installed: a file is missing or has the wrong
+    /// size and this diarizer may not download it, or a file failed its checksum
+    /// after a failed load and was deleted. It survives boxing, so a caller finds
+    /// it with `downcast_ref::<DiarizeError>()`.
     #[cfg(feature = "onnx")]
     #[error("model {asset} is not installed: {} missing in {}", missing.join(", "), directory.display())]
     NotInstalled {
@@ -27,21 +19,18 @@ pub enum DiarizeError {
         directory: std::path::PathBuf,
         missing: Vec<String>,
     },
-    /// The ONNX models could not be installed: a download that failed or
-    /// was cut off, a file that failed its checksum, a folder that could
-    /// not be written ([`crate::models::ensure`]).
+    /// The ONNX models could not be installed: a failed download, a bad
+    /// checksum, a folder that could not be written.
     #[cfg(feature = "onnx")]
     #[error(transparent)]
     Model(steno_speech::SpeechError),
     /// The speech sidecar failed to diarize: its child could not load the
-    /// models, died, hung or overran the memory ceiling
-    /// ([`crate::SidecarDiarizer`]).
+    /// models, died, hung or overran the memory ceiling.
     #[cfg(feature = "onnx")]
     #[error(transparent)]
     Sidecar(steno_speech::SpeechError),
-    /// A model loaded but is not the one the pipeline expects: its
-    /// metadata or its declared shapes disagree with what the pipeline
-    /// decodes.
+    /// A model loaded but its metadata or declared shapes are not what the
+    /// pipeline decodes.
     #[error("model metadata: {0}")]
     Metadata(String),
     /// The diarization backend failed to load or to run.

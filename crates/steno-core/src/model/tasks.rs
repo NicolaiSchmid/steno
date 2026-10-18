@@ -1,5 +1,4 @@
 //! Tasks and decisions extracted from a meeting.
-//! Swift: `Sources/StenoCore/Model/Tasks.swift`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -44,8 +43,8 @@ pub struct MeetingTask {
     pub done: bool,
 }
 
-/// A decision the LLM extracted from the meeting. Ids derive from the
-/// meeting id (`decision-<index>`) so re-runs are stable.
+/// A decision the LLM extracted; ids derive from the meeting id
+/// (`decision-<index>`) so re-runs are stable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Decision {

@@ -1,17 +1,7 @@
-//! The property behind the redaction claim of the crate doc's privacy
-//! paragraph: no secret, however often or wherever a server echoes it in a
-//! body that is not the model's answer, reaches an error, a `Debug` form or
-//! an observer event.
-//! Random secrets of the four kinds (API key, access token, refresh token,
-//! account id), 8 to 200 characters, some with multi-byte characters, go
-//! into random bodies that echo them one to four times, some copies across
-//! the 300- and 500-character cuts and byte 4 096, and every reply shape
-//! that can carry text into an error: plain and enveloped error bodies,
-//! undecodable 2xx bodies, refusals, stream errors, the model list, a 401
-//! whose refresh fails, and the token endpoint's refusals with the secret
-//! in the code. The seeds are fixed, so a failure always reproduces.
-//!
-//! Swift: no single suite; Rust-only.
+//! Property test for redaction: random secrets echoed into random bodies of
+//! every reply shape that can carry text into an error never reach an
+//! error, a `Debug` form or an observer event. Fixed seeds, so a failure
+//! always reproduces.
 
 mod common;
 
@@ -28,14 +18,11 @@ use steno_llm::{
 /// Cases per client and for the token refresh.
 const CASES: u64 = 200;
 
-/// How many endpoint clients, each with its own random key, the cases take
-/// turns on: building one loads the platform's root certificates, too slow
-/// to do two hundred times. The Codex client and the store read the
-/// secrets from the file on every call, so one of each serves every case.
+/// Endpoint clients the cases take turns on; building one loads the root
+/// certificates, too slow to do per case.
 const ENDPOINT_CLIENTS: u64 = 8;
 
-/// Fixed so a failure always reproduces; each run draws from its own range,
-/// `CASES + ENDPOINT_CLIENTS` wide.
+/// Each run draws from its own range, `CASES + ENDPOINT_CLIENTS` wide.
 const SEEDS: [u64; 3] = [1, 100_000, 200_000];
 
 /// xorshift64: deterministic and dependency-free.
@@ -77,8 +64,8 @@ const FILLER: &[char] = &[
     '0', '9',
 ];
 
-/// A secret of 8 to 200 characters: base64url, JWT-like with dots, or with
-/// a few multi-byte characters.
+/// A secret of 8 to 200 characters, sometimes with dots or multi-byte
+/// characters.
 fn secret(rng: &mut Rng) -> String {
     let length = match rng.below(4) {
         0 => rng.range(8, 12),
@@ -96,8 +83,7 @@ fn secret(rng: &mut Rng) -> String {
 }
 
 /// Up to `max` characters of filler holding one to four copies of the
-/// secrets, some placed across the 300- and 500-character cuts, and now
-/// and then padded so a copy straddles byte 4 096.
+/// secrets, some straddling the cuts.
 fn body_with(rng: &mut Rng, secrets: &[String], max: usize) -> String {
     let length = rng.below(max + 1);
     let mut chars: Vec<char> = (0..length).map(|_| rng.pick(FILLER)).collect();
@@ -135,8 +121,7 @@ fn body_with(rng: &mut Rng, secrets: &[String], max: usize) -> String {
     text
 }
 
-/// What `text` keeps of any secret: its first eight characters or more, in
-/// any case.
+/// What `text` keeps of any secret: eight characters or more, in any case.
 fn leaks(text: &str, secrets: &[String], what: &str) -> Vec<String> {
     let folded = text.to_lowercase();
     secrets
@@ -169,8 +154,7 @@ fn credential_leaks(error: &CodexCredentialError, secrets: &[String]) -> Vec<Str
     found
 }
 
-/// Two attempts without a wait, so the first error lands in a `Retrying`
-/// event.
+/// Two attempts without a wait, so the first error lands in `Retrying`.
 fn two_attempts() -> RetryPolicy {
     RetryPolicy::new(2, Duration::ZERO, Duration::ZERO)
 }
@@ -223,7 +207,6 @@ fn refresh_refusal(rng: &mut Rng, secrets: &[String]) -> StubResponse {
     }
 }
 
-/// The events `recorder` logged since `since` events.
 fn event_leaks(recorder: &EventRecorder, since: usize, secrets: &[String]) -> Vec<String> {
     recorder.events()[since..]
         .iter()

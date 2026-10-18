@@ -3,8 +3,8 @@ import Testing
 
 @testable import StenoAudio
 
-/// The streaming converter from a device's rate to 48 kHz
-/// (`.plans/2026-10-05-device-sample-rate.md`): chunking changes nothing, a
+/// The streaming converter from a device's rate to 48 kHz: chunking
+/// changes nothing, a
 /// tone keeps its level and frequency from every rate a Mac device runs at
 /// and leaves no spur, and the timing holds. Rust:
 /// `crates/steno-audio/tests/rate_converter.rs`, which also compares the

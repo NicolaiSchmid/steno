@@ -1,11 +1,6 @@
-//! A [`Clock`] the test advances by hand. Swift: `ManualClock` in
-//! `Sources/StenoCore/Testing`.
-//!
-//! `sleep` registers a sleeper at `now + duration` and parks until the
-//! clock has been advanced past it or the sleep is cancelled.
-//! `wait_for_sleepers(n)` lets a test synchronise with the code under test
-//! (the rebuild's backoff, the detector's poll and debounce) without wall
-//! time entering the assertions.
+//! A [`Clock`] the test advances by hand. `sleep` parks until the clock
+//! passes its deadline or the sleep is cancelled; `wait_for_sleepers(n)`
+//! lets a test synchronise with the code under test without wall time.
 
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -13,7 +8,7 @@ use std::time::{Duration, Instant};
 use super::HANG_GUARD;
 use crate::clock::{Cancel, Clock};
 
-/// A clock tests move by hand; see the module doc.
+/// A clock tests move by hand.
 #[derive(Debug, Default)]
 pub struct ManualClock {
     state: Mutex<State>,
@@ -24,9 +19,8 @@ pub struct ManualClock {
 struct State {
     now: Duration,
     /// The sleeps in progress: a ticket and the deadline. `advance` removes
-    /// every sleeper whose deadline has passed at once, so a test that
-    /// advanced the clock sees `pending_sleepers()` drop before the
-    /// sleeping thread has even woken, as Swift's `ManualClock` did.
+    /// passed sleepers at once, so `pending_sleepers()` drops before the
+    /// sleeping thread has woken.
     sleepers: Vec<(u64, Duration)>,
     next_ticket: u64,
 }
@@ -39,8 +33,7 @@ impl ManualClock {
     }
 
     /// Moves the clock forward and wakes every sleeper whose deadline has
-    /// passed (a sleeper wakes at its deadline however far the clock moves
-    /// past it).
+    /// passed.
     pub fn advance(&self, by: Duration) {
         let mut state = self.lock();
         state.now += by;
@@ -57,10 +50,8 @@ impl ManualClock {
     }
 
     /// Polls until exactly `count` sleeps are in progress and returns
-    /// `true`, so a caller can `assert!` it with a message that names the
-    /// sleeper. A loaded CI host can take seconds to schedule the thread
-    /// that arms a timer, so the poll lasts up to [`HANG_GUARD`] of wall
-    /// time.
+    /// `true`, for an `assert!` that names the sleeper. Waits up to
+    /// [`HANG_GUARD`] of wall time, since a loaded CI host is slow.
     ///
     /// # Panics
     ///

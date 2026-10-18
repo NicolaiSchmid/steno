@@ -1,5 +1,4 @@
 //! A loopback HTTP/1.1 server for tests.
-//! Swift: `Sources/StenoLLM/Testing/StubChatServer.swift`.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -16,12 +15,9 @@ use crate::wire::{self, ChatCompletionRequest, ChatErrorEnvelope, ResponsesReque
 /// One request the stub server accepted, parsed far enough for assertions.
 #[derive(Debug, Clone)]
 pub struct RecordedRequest {
-    /// Zero-based arrival order.
     pub index: usize,
     pub method: String,
-    /// Path and query as sent.
     pub path: String,
-    /// Header names lowercased.
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
     /// The body decoded as a chat completion request, when it is one.
@@ -30,7 +26,7 @@ pub struct RecordedRequest {
     pub responses: Option<ResponsesRequest>,
     /// The `X-Steno-Purpose` header the client sends with every completion.
     pub purpose: Option<String>,
-    /// Requests in flight (including this one) when it arrived.
+    /// Requests in flight, this one included, when it arrived.
     pub in_flight_on_arrival: usize,
 }
 
@@ -50,10 +46,9 @@ impl RecordedRequest {
 pub enum Behaviour {
     /// Write status, headers and body, then close.
     Respond,
-    /// Keep the connection open without answering until `stop()`; for
-    /// timeout and cancellation tests.
+    /// Keep the connection open without answering until `stop()`.
     Hang,
-    /// Close the connection without writing anything; a transport error.
+    /// Close the connection without writing anything.
     Drop,
 }
 
@@ -133,12 +128,9 @@ impl Inner {
     }
 }
 
-/// A loopback HTTP/1.1 server for tests: ephemeral port on 127.0.0.1,
-/// scripted responses consumed in arrival order, a fallback responder for
-/// path-dependent answers, every request recorded with the number of
-/// requests in flight on arrival, and a latch that holds responses so tests
-/// can observe concurrency. One tokio task per connection; no wall-clock
-/// waits anywhere a test can see.
+/// A loopback HTTP/1.1 server for tests on an ephemeral port: scripted
+/// responses in arrival order, a fallback responder, every request recorded,
+/// and a latch that holds responses so tests can observe concurrency.
 pub struct StubChatServer {
     inner: Arc<Inner>,
     port: u16,
@@ -147,7 +139,6 @@ pub struct StubChatServer {
 }
 
 impl StubChatServer {
-    /// Binds an ephemeral port and starts accepting.
     pub async fn start() -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
@@ -176,13 +167,10 @@ impl StubChatServer {
         self.port
     }
 
-    /// `http://127.0.0.1:<port>/v1`.
     #[must_use]
     pub fn base_url(&self) -> &Url {
         &self.base_url
     }
-
-    // Scripting
 
     /// Appends responses; the queue is consumed in arrival order.
     pub fn enqueue(&self, responses: impl IntoIterator<Item = StubResponse>) {
@@ -194,9 +182,8 @@ impl StubChatServer {
         self.inner.state().responder = Some(responder);
     }
 
-    /// While held, every request is recorded and then parked until
-    /// [`release`](Self::release); in-flight counts stay observable
-    /// meanwhile.
+    /// While held, requests are recorded and parked until
+    /// [`release`](Self::release).
     pub fn hold_responses(&self) {
         self.inner.state().holding = true;
     }
@@ -205,8 +192,6 @@ impl StubChatServer {
         self.inner.state().holding = false;
         self.inner.hold_changed.notify_waiters();
     }
-
-    // Observation
 
     #[must_use]
     pub fn requests(&self) -> Vec<RecordedRequest> {
@@ -229,8 +214,7 @@ impl StubChatServer {
         self.inner.state().max_in_flight
     }
 
-    /// Waits until at least `count` requests have been recorded, or the
-    /// server was stopped. Never polls.
+    /// Waits until `count` requests were recorded or the server stopped.
     pub async fn received(&self, count: usize) {
         let wait = super::wait_until(&self.inner.requests_changed, || {
             let state = self.inner.state();
@@ -245,8 +229,8 @@ impl StubChatServer {
         .await;
     }
 
-    /// Stops accepting, releases every parked or hanging connection and
-    /// wakes every waiter. Idempotent.
+    /// Stops accepting, releases every parked connection and wakes every
+    /// waiter. Idempotent.
     pub fn stop(&self) {
         {
             let mut state = self.inner.state();

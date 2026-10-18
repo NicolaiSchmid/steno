@@ -1,6 +1,5 @@
-//! One snapshot per Settings section, after
-//! `Sources/StenoBridge/SettingsSnapshots.swift`. Each carries the section's
-//! subtitle for the Settings sidebar so the page never derives status text.
+//! One snapshot per Settings section. Each carries the section's subtitle
+//! for the Settings sidebar so the page never derives status text.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,7 +13,6 @@ use crate::snapshots::Snapshot;
 // settings.general
 
 string_enum! {
-    /// Swift: `GeneralSettingsSnapshot.LoginItem`.
     pub enum GeneralLoginItem {
         NotRegistered = "notRegistered",
         Enabled = "enabled",
@@ -24,7 +22,6 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `GeneralSettingsSnapshot.Updates.Outcome`.
     pub enum GeneralUpdatesOutcome {
         NotChecked = "notChecked",
         UpToDate = "upToDate",
@@ -33,7 +30,6 @@ string_enum! {
     }
 }
 
-/// Swift: `GeneralSettingsSnapshot.Updates`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneralUpdates {
@@ -49,16 +45,13 @@ pub struct GeneralUpdates {
     pub outcome: GeneralUpdatesOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// Where updates come from when a package manager delivers them (stable
-    /// plan X5), which the Updates row shows instead of its check and its
-    /// switches. The Rust host sets it; the Swift app has no such field and
-    /// never sends it.
+    /// Where updates come from when a package manager delivers them, which
+    /// the Updates row shows instead of its check and its switches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_note: Option<String>,
 }
 
 /// A summary template with the sentence shown under the picker.
-/// Swift: `GeneralSettingsSnapshot.Template`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneralTemplate {
     pub id: String,
@@ -67,15 +60,13 @@ pub struct GeneralTemplate {
 }
 
 string_enum! {
-    /// Swift: `GeneralSettingsSnapshot.Acknowledgement.Group`.
     pub enum GeneralAcknowledgementGroup {
         SpeechModels = "speechModels",
         Libraries = "libraries",
     }
 }
 
-/// One line of the Acknowledgements dialog. Swift:
-/// `GeneralSettingsSnapshot.Acknowledgement`.
+/// One line of the Acknowledgements dialog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneralAcknowledgement {
     pub group: GeneralAcknowledgementGroup,
@@ -84,7 +75,6 @@ pub struct GeneralAcknowledgement {
     pub source: String,
 }
 
-/// Swift: `GeneralSettingsSnapshot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneralSettingsSnapshot {
@@ -92,9 +82,7 @@ pub struct GeneralSettingsSnapshot {
     pub version: String,
     pub login_item: GeneralLoginItem,
     /// The line under launch at login when the system starts the app and
-    /// owns the setting (stable plan X5); the page then shows the switch on
-    /// and locked. The Rust host sets it; the Swift app has no such field
-    /// and never sends it.
+    /// owns the setting; the page then shows the switch on and locked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_item_note: Option<String>,
     pub detection_enabled: bool,
@@ -117,7 +105,6 @@ impl Snapshot for GeneralSettingsSnapshot {
 
 // settings.recording
 
-/// Swift: `RecordingSettingsSnapshot.Device`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordingDevice {
     pub uid: String,
@@ -125,8 +112,6 @@ pub struct RecordingDevice {
 }
 
 string_enum! {
-    /// Swift: `RecordingSettingsSnapshot.Retention.Mode`, an alias of
-    /// `StenoCore.AudioRetention.Kind`; hence the core name, no topic word.
     pub enum RetentionMode {
         DeleteAfterProcessing = "deleteAfterProcessing",
         KeepDays = "keepDays",
@@ -134,14 +119,12 @@ string_enum! {
     }
 }
 
-/// Swift: `RecordingSettingsSnapshot.Retention`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordingRetention {
     pub mode: RetentionMode,
     pub days: i64,
 }
 
-/// Swift: `RecordingSettingsSnapshot.Permission`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingPermission {
@@ -149,17 +132,14 @@ pub struct RecordingPermission {
     pub state: PermissionState,
     pub is_requesting: bool,
     /// The system audio test was refused, or stopped, because a recording
-    /// is starting, running or stopping: its tone would be in the
-    /// recording. Cleared once the recorder is idle again. Left out when
-    /// false. Rust only: the Swift app ran the test whatever the recorder
-    /// did.
+    /// is under way: its tone would be in the recording. Left out when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub waits_for_recording: bool,
 }
 
 string_enum! {
     /// Whether `folder_usage_bytes` is a figure, still being measured, or
-    /// could not be measured. Swift: `RecordingSettingsSnapshot.FolderUsage`.
+    /// could not be measured.
     pub enum RecordingFolderUsage {
         Measuring = "measuring",
         Measured = "measured",
@@ -167,7 +147,6 @@ string_enum! {
     }
 }
 
-/// Swift: `RecordingSettingsSnapshot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingSettingsSnapshot {
@@ -183,9 +162,8 @@ pub struct RecordingSettingsSnapshot {
     pub audio_folder_path: String,
     pub audio_folder_name: String,
     /// The warning under the folder when a power cut may lose recent
-    /// recordings there: the Rust host sets it for a Windows drive that is
-    /// neither NTFS nor `ReFS`, or a network drive or mount. The Swift app
-    /// has no such field and never sends it.
+    /// recordings there: a Windows drive that is neither NTFS nor `ReFS`, or
+    /// a network drive or mount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_folder_warning: Option<String>,
     pub folder_usage: RecordingFolderUsage,
@@ -209,7 +187,6 @@ impl Snapshot for RecordingSettingsSnapshot {
 
 // settings.transcription
 
-/// Swift: `TranscriptionSettingsSnapshot.Engine`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptionEngine {
     pub id: String,
@@ -217,7 +194,6 @@ pub struct TranscriptionEngine {
 }
 
 string_enum! {
-    /// Swift: `TranscriptionSettingsSnapshot.Asset.State`.
     pub enum TranscriptionAssetState {
         Absent = "absent",
         Downloading = "downloading",
@@ -226,7 +202,6 @@ string_enum! {
     }
 }
 
-/// Swift: `TranscriptionSettingsSnapshot.Asset`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionAsset {
@@ -244,7 +219,6 @@ pub struct TranscriptionAsset {
     pub failure: Option<String>,
 }
 
-/// Swift: `TranscriptionSettingsSnapshot`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionSettingsSnapshot {
@@ -256,9 +230,8 @@ pub struct TranscriptionSettingsSnapshot {
     pub assets: Vec<TranscriptionAsset>,
     pub all_installed: bool,
     /// Steno closed while it was using the Neural Engine, so the speech
-    /// sidecar transcribes instead until the user turns the Neural Engine
-    /// back on ([`BridgeMethod::SettingsTranscriptionUseNeuralEngine`](crate::BridgeMethod::SettingsTranscriptionUseNeuralEngine)).
-    /// Left out when false. Rust only.
+    /// sidecar transcribes until the user turns it back on. Left out when
+    /// false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub neural_engine_off: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,7 +246,6 @@ impl Snapshot for TranscriptionSettingsSnapshot {
 
 // settings.summaries
 
-/// Swift: `SummariesSettingsSnapshot.Preset`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SummariesPreset {
@@ -285,7 +257,6 @@ pub struct SummariesPreset {
     pub model_placeholder: String,
 }
 
-/// Swift: `SummariesSettingsSnapshot.TestResult`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummariesTestResult {
     pub ok: bool,
@@ -296,7 +267,6 @@ string_enum! {
     /// Where the host keeps a saved API key: the platform keyring (the
     /// Keychain, the Windows credential store, the Secret Service) or the
     /// owner-only secrets file (Linux without a keyring).
-    /// Swift: `SummariesSettingsSnapshot.KeyStore`.
     pub enum SummariesKeyStore {
         Keyring = "keyring",
         File = "file",
@@ -304,7 +274,6 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `SummariesSettingsSnapshot.Codex.SignIn`.
     pub enum SummariesCodexSignIn {
         NotChecked = "notChecked",
         SignedIn = "signedIn",
@@ -312,7 +281,6 @@ string_enum! {
     }
 }
 
-/// Swift: `SummariesSettingsSnapshot.Codex.Model`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummariesCodexModel {
     pub slug: String,
@@ -322,7 +290,7 @@ pub struct SummariesCodexModel {
 /// The Codex preset, which summarises through the Codex sign-in on this Mac
 /// instead of an API key: what that sign-in looks like, whether the user has
 /// confirmed using it, and the model list once confirmed. Set only while
-/// that preset is selected. Swift: `SummariesSettingsSnapshot.Codex`.
+/// that preset is selected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SummariesCodex {
@@ -339,7 +307,6 @@ pub struct SummariesCodex {
     pub models_error: Option<String>,
 }
 
-/// Swift: `SummariesSettingsSnapshot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SummariesSettingsSnapshot {
@@ -366,9 +333,8 @@ pub struct SummariesSettingsSnapshot {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_details: Option<String>,
-    /// Where a saved key lives; absent when the host does not say (the
-    /// Swift app) or has not chosen yet (the Linux store, while it
-    /// connects or its keyring asks the user).
+    /// Where a saved key lives; absent when the host does not say or has not
+    /// chosen yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_store: Option<SummariesKeyStore>,
 }
@@ -379,7 +345,6 @@ impl Snapshot for SummariesSettingsSnapshot {
 
 // settings.export
 
-/// Swift: `ExportSettingsSnapshot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSettingsSnapshot {
@@ -407,7 +372,6 @@ impl Snapshot for ExportSettingsSnapshot {
 
 // settings.iphone
 
-/// Swift: `PhoneSettingsSnapshot.Device`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhoneDevice {
@@ -425,7 +389,6 @@ pub struct PhoneDevice {
 }
 
 string_enum! {
-    /// Swift: `PhoneSettingsSnapshot.Listener.State`.
     pub enum PhoneListenerState {
         Unavailable = "unavailable",
         Stopped = "stopped",
@@ -435,7 +398,6 @@ string_enum! {
     }
 }
 
-/// Swift: `PhoneSettingsSnapshot.Listener`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhoneListener {
     pub state: PhoneListenerState,
@@ -445,7 +407,6 @@ pub struct PhoneListener {
     pub failure: Option<String>,
 }
 
-/// Swift: `PhoneSettingsSnapshot.Pairing`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhonePairing {
@@ -456,7 +417,6 @@ pub struct PhonePairing {
     pub qr_png_base64: String,
 }
 
-/// Swift: `PhoneSettingsSnapshot.Receipt`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhoneReceipt {
@@ -470,9 +430,8 @@ pub struct PhoneReceipt {
 }
 
 string_enum! {
-    /// Why phone handover is off and waits for the user (stable plan S6):
-    /// Steno never makes a new pairing over the one the paired phones
-    /// know. Rust only.
+    /// Why phone handover is off and waits for the user: Steno never makes a
+    /// new pairing over the one the paired phones know.
     pub enum PhoneWaitingReason {
         /// The previous version's pairing did not come over: macOS refused
         /// its export, the export failed, or the step was put off.
@@ -487,22 +446,19 @@ string_enum! {
         /// none recorded, one no paired phone knows.
         Replaced = "replaced",
         /// With no pairing recorded, the paired phones do not all know one
-        /// pairing, but some know one: a reason of its own, because the
-        /// card's text comes from the reason alone.
+        /// pairing, but some know one.
         PartlyReplaced = "partlyReplaced",
-        /// A file in the folder Steno keeps its data in could not be
-        /// opened (its permissions, a disk error): only a fix outside the
-        /// app helps, then Try again.
+        /// A file in Steno's data folder could not be opened; only a fix
+        /// outside the app helps.
         FileNotOpened = "fileNotOpened",
-        /// With no pairing recorded, a phone's pairing or the pairing's
-        /// start is after now on this computer's clock, so which pairing
-        /// the phones know cannot be told until the clock is right.
+        /// With no pairing recorded, a pairing starts after now on this
+        /// computer's clock, so which one the phones know cannot be told.
         ClockBehind = "clockBehind",
     }
 }
 
 /// Phone handover waits: the section offers Try again and Pair again
-/// instead of a new pairing. Rust only.
+/// instead of a new pairing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhoneWaiting {
     pub reason: PhoneWaitingReason,
@@ -512,7 +468,6 @@ pub struct PhoneWaiting {
     pub busy: bool,
 }
 
-/// Swift: `PhoneSettingsSnapshot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhoneSettingsSnapshot {
@@ -524,9 +479,7 @@ pub struct PhoneSettingsSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing: Option<PhonePairing>,
     pub receipts: Vec<PhoneReceipt>,
-    /// Set while phone handover waits for Try again or Pair again. The
-    /// Rust host sets it; the Swift app has no such field and never sends
-    /// it.
+    /// Set while phone handover waits for Try again or Pair again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<PhoneWaiting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

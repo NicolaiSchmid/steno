@@ -1,14 +1,8 @@
-//! The salvage of a phone recording whose recorder was killed, so it has no
-//! `moov` (`steno_audio::codec::salvage`), on files from Apple's encoder
-//! with the phone's settings (`Tests/Fixtures/README.md` says how they were
-//! made): `speech-44k1-avaudiofile.m4a`, 1.6 s of synthetic speech, clicks
-//! and a tone through `AVAudioFile`, finished; the same written by a
-//! process killed after 49 152 frames, `speech-44k1-avaudiofile-killed.m4a`,
-//! whose 48 packets are the first 48 of the finished file byte for byte;
-//! and `silence-44k1-avaudiorecorder-killed.m4a`, `AVAudioRecorder` itself
-//! killed 4 s into a recording over SSH, where the microphone gives zeros.
-//! Variants (cut, moved, overwritten, other brands) are built from them.
-//! Swift: none; `AVAudioFile` cannot open such a file.
+//! The salvage of a phone recording whose recorder was killed (no `moov`),
+//! on Apple-encoded fixtures (`Tests/Fixtures/README.md`): a finished file,
+//! the same killed after 48 packets, and `AVAudioRecorder` killed over
+//! silence. Variants (cut, moved, overwritten, other brands) are built from
+//! them.
 
 #![allow(clippy::cast_precision_loss, clippy::float_cmp)]
 
@@ -56,7 +50,6 @@ fn written(directory: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
-/// The 32-bit big-endian number at `at`.
 fn be32(bytes: &[u8], at: usize) -> usize {
     u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize
 }
@@ -80,13 +73,9 @@ fn packet_offset(index: usize) -> usize {
     sample_sizes(&finished())[..index].iter().sum()
 }
 
-/// The killed recording's packets read from their own bits are the
-/// finished file's: the decode is the finished file's, sample for sample,
-/// up to the last packet the kill left, less the same 2 112 samples of
-/// priming (the finished file's gapless tag says 2 112; the salvage
-/// assumes `AVAudioRecorder`'s). The decode says it was salvaged and lost
-/// nothing; the finished file's says neither. At 16 kHz the lane is the
-/// one-pass resampling of those samples.
+/// The killed recording decodes as the finished file does, sample for
+/// sample up to the last packet, less the same priming, and says it was
+/// salvaged.
 #[tokio::test]
 async fn a_killed_recording_decodes_as_its_finished_twin_up_to_the_kill() {
     let killed_bytes = killed();
@@ -151,9 +140,7 @@ async fn a_killed_recording_decodes_as_its_finished_twin_up_to_the_kill() {
     );
 }
 
-/// `AVAudioRecorder` itself, killed 4 s into a recording: its 126 packets
-/// of silence (four bytes each) after the reserve read as 126 * 1 024
-/// samples less the priming, all zero.
+/// `AVAudioRecorder` killed over silence: its 126 packets read as zeros.
 #[test]
 fn the_recorders_own_killed_file_reads_as_its_silence() {
     let bytes = read("silence-44k1-avaudiorecorder-killed.m4a");
@@ -165,9 +152,7 @@ fn the_recorders_own_killed_file_reads_as_its_silence() {
     assert!(decoded.damage.salvaged);
 }
 
-/// The split the salvage relies on, against the sample table: every packet
-/// of the finished files from Apple's encoder ends where `stsz` says, from
-/// the first packet to the last.
+/// Every packet of the finished files ends where `stsz` says.
 #[test]
 fn every_packet_ends_where_the_sample_table_says() {
     for name in [
@@ -200,13 +185,9 @@ fn every_packet_ends_where_the_sample_table_says() {
     }
 }
 
-/// Only the recorder's layout is salvaged: the killed file with another
-/// major brand, without `mp42`, with a `moov` box in its reserve or after
-/// an `mdat` (of a 32- or a 64-bit size, next to it or after another box,
-/// or after a `uuid` box before the `mdat`), or that is no MP4 file at all
-/// stays failed with symphonia's error, as any file it cannot read; so does
-/// a file that holds only the `ftyp`, or the `ftyp` and the reserve. None of
-/// them is written to.
+/// Only the recorder's layout is salvaged: other brands, a `moov` anywhere,
+/// non-MP4 bytes, or a file with no packets stay failed with symphonia's
+/// error, and none is written to.
 #[test]
 fn only_the_recorders_layout_is_salvaged() {
     let directory = tempfile::tempdir().unwrap();
@@ -270,8 +251,6 @@ fn only_the_recorders_layout_is_salvaged() {
     variants.push(("only the reserve", bytes[..PACKETS_AT].to_vec()));
     for (name, variant) in variants {
         let path = written(directory.path(), &format!("{name}.m4a"), &variant);
-        // A file with no `ftyp` is no MP4 to symphonia either: refused
-        // plainly before it reads a byte.
         assert!(
             matches!(
                 decode(&path),
@@ -298,10 +277,7 @@ fn mdat_64(packets: &[u8]) -> Vec<u8> {
     .concat()
 }
 
-/// A stream of more than one channel is refused, as the phone's preset is
-/// mono (`salvage::SAMPLE_RATE`): packets of a channel pair, or of two
-/// single channels, in the recorder's layout stay failed, and the file is
-/// not written to.
+/// A stream of more than one channel is refused and not written to.
 #[test]
 fn a_stream_of_two_channels_is_not_salvaged() {
     let directory = tempfile::tempdir().unwrap();
@@ -332,9 +308,7 @@ fn a_stream_of_two_channels_is_not_salvaged() {
     }
 }
 
-/// A recording cut inside a packet (the kill came mid-write) decodes up
-/// to the cut: the packets before it, as the finished file decodes them;
-/// one cut between packets keeps all of them.
+/// A recording cut inside a packet decodes up to the cut.
 #[test]
 fn a_recording_cut_mid_packet_decodes_up_to_the_cut() {
     let directory = tempfile::tempdir().unwrap();
@@ -362,11 +336,8 @@ fn a_recording_cut_mid_packet_decodes_up_to_the_cut() {
     }
 }
 
-/// Where the packets start is found, not assumed: with a reserve of
-/// 1 000 bytes or of 70 000, or a longer `ftyp`, the decode is the same; an
-/// `mdat` header left in front of the packets (with a size of 0, to the end
-/// of the file, or a 64-bit size) is stepped over, and so is one left in
-/// front of the zeros (with a size of 0 or of 8, an empty box).
+/// Where the packets start is found, not assumed: other reserve sizes, a
+/// longer `ftyp` and leftover `mdat` headers decode the same.
 #[test]
 fn the_packets_are_found_wherever_the_reserve_ends() {
     let directory = tempfile::tempdir().unwrap();
@@ -404,11 +375,8 @@ fn the_packets_are_found_wherever_the_reserve_ends() {
     }
 }
 
-/// A stream whose first packet starts with a byte that is not zero (the
-/// killed file less its first packet, Apple's silent priming packet, whose
-/// first byte is zero): the first byte that is not zero is where the
-/// packets start, and an alignment a byte earlier, which may parse a packet
-/// or two by chance, is not taken.
+/// When the first packet starts with a non-zero byte, the packets start
+/// there, not at an earlier alignment that parses by chance.
 #[test]
 fn a_first_packet_that_starts_with_a_set_byte_is_found() {
     let directory = tempfile::tempdir().unwrap();
@@ -426,9 +394,8 @@ fn a_first_packet_that_starts_with_a_set_byte_is_found() {
     assert_eq!(decoded.damage.parts, 0);
 }
 
-/// A finished file whose `moov` is gone (its type overwritten) but whose
-/// `mdat` header is there reads from the `mdat`'s body: every packet, as
-/// the finished file decodes.
+/// A finished file whose `moov` was overwritten reads every packet from
+/// the `mdat` body.
 #[test]
 fn a_finished_file_that_lost_its_moov_is_read_from_its_mdat() {
     let directory = tempfile::tempdir().unwrap();
@@ -442,11 +409,8 @@ fn a_finished_file_that_lost_its_moov_is_read_from_its_mdat() {
     assert!(decoded.damage.salvaged);
 }
 
-/// Bytes that are not a packet end the salvage there: overwritten from
-/// packet 40, the first 40 packets decode, as the finished file decodes
-/// them; overwritten from packet 8, less than half of the bytes read as
-/// packets, and the file fails (its recording is kept). Zeros after the
-/// last packet are no part of the recording.
+/// Bytes that are not a packet end the salvage there; less than half
+/// readable fails the file. Trailing zeros are not part of the recording.
 #[test]
 fn bytes_that_are_not_packets_end_the_salvage() {
     let directory = tempfile::tempdir().unwrap();
@@ -479,10 +443,7 @@ fn bytes_that_are_not_packets_end_the_salvage() {
     );
 }
 
-/// A recording longer than one read of the file (64 KiB): the killed
-/// file's packets 24 times over, about 198 KB, read across three refills of
-/// the buffer to the last packet, its first copy as the killed file
-/// decodes.
+/// A recording longer than one 64 KiB read is salvaged across refills.
 #[test]
 fn a_salvage_reads_the_file_to_its_end_across_refills() {
     let directory = tempfile::tempdir().unwrap();
@@ -509,10 +470,8 @@ fn a_salvage_reads_the_file_to_its_end_across_refills() {
     assert!(same(&decoded.samples[..single.len()], &single));
 }
 
-/// The half rule ([`salvage::SalvagedPackets::too_little`]): bytes that
-/// are not packets from about 45 % of the packets' bytes fail the salvage;
-/// from about 55 %, it reads the packets before them. As many such bytes as
-/// the packets read, exactly half, still read: less than half fails.
+/// The half rule ([`salvage::SalvagedPackets::too_little`]): exactly half
+/// readable still salvages, less fails.
 #[test]
 fn a_salvage_reads_at_least_half_of_the_bytes() {
     let directory = tempfile::tempdir().unwrap();
@@ -543,11 +502,9 @@ fn a_salvage_reads_at_least_half_of_the_bytes() {
     assert_eq!(decoded.samples.len(), packet * 1_024 - PRIMING);
 }
 
-/// The salvage's rate and channels are the phone's preset's: the test fails
-/// unless `recording-options.ts` holds exactly one `sampleRate:` and one
-/// `numberOfChannels:`, asking for 44.1 kHz mono, so neither a changed
-/// value nor a second one (a per-platform override) gets past it; the
-/// salvage then has to follow ([`salvage::SAMPLE_RATE`]).
+/// The salvage's rate and channels match the phone's preset: exactly one
+/// `sampleRate:` and one `numberOfChannels:` in `recording-options.ts`,
+/// asking for 44.1 kHz mono.
 #[test]
 fn the_salvage_assumes_the_phones_preset() {
     let preset = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -573,12 +530,8 @@ fn the_salvage_assumes_the_phones_preset() {
     assert_eq!(salvage::SAMPLE_RATE, 44_100);
 }
 
-/// A packet that parses but that the decoder cannot read goes through the
-/// damaged-packet path (#264) inside a salvage too: silence of its 1 024
-/// samples in its place, counted, and the packets after it keep their
-/// time. The packet is a channel with one noise band whose energy is out of
-/// range (global gain 0, a first noise value of 0), which the split
-/// accepts and symphonia refuses.
+/// A packet that parses but does not decode becomes counted silence inside
+/// a salvage too, and later packets keep their time.
 #[test]
 fn a_packet_the_decoder_refuses_becomes_silence_in_a_salvage() {
     let directory = tempfile::tempdir().unwrap();
@@ -621,14 +574,9 @@ fn a_packet_the_decoder_refuses_becomes_silence_in_a_salvage() {
     assert!(decoded.damage.salvaged);
 }
 
-/// A file that makes symphonia's demuxer panic fails as one it refuses, with
-/// the file kept: symphonia 0.5.5's MP4 reader adds a box's size to its
-/// offset unchecked, so a `free` box whose 64-bit size is 2^64 - 1 after
-/// the `ftyp` overflows in a debug build (and is an error in a release
-/// one). With the phone's brands the salvage then refuses it too, as with
-/// another major brand. Neither file is written to. With the app's
-/// crash-log hook installed, the caught panics write no crash log and the
-/// one already in the folder stays.
+/// A file that makes symphonia's demuxer panic (a box size of 2^64 - 1
+/// overflows in a debug build) fails as one it refuses, unwritten, and the
+/// caught panic writes no crash log.
 #[test]
 fn a_file_the_demuxer_panics_on_fails_and_is_kept() {
     thread_local! {
@@ -688,7 +636,7 @@ fn the_salvage_decodes_with_the_phones_settings() {
     assert_eq!(params.extra_data.as_deref(), Some(&[0x12, 0x08][..]));
 }
 
-/// Whether two runs of samples are equal, without printing them when not.
+/// Whether two runs of samples are equal, without printing them.
 fn same(a: &[f32], b: &[f32]) -> bool {
     a == b
 }

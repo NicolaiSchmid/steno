@@ -1,5 +1,4 @@
 //! `person`, `participant`, `speaker` and `speakerNameSuggestion` rows.
-//! Swift: `Sources/StenoCore/Storage/MeetingStore+People.swift`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,8 +13,6 @@ use crate::model::{
     SpeakerNameSuggestion, TimeRange,
 };
 use crate::paths::file_url_path;
-
-// Persons
 
 const PERSON_COLUMNS: &str = "id, displayName, email, embedding, sampleCount, createdAt";
 
@@ -55,8 +52,6 @@ pub(super) fn save_person(connection: &Connection, person: &Person) -> Result<()
     Ok(())
 }
 
-// Participants
-
 const PARTICIPANT_COLUMNS: &str = "id, meetingID, personID, displayName, role, email";
 
 fn participant_from_row(row: &Row<'_>) -> rusqlite::Result<Participant> {
@@ -85,8 +80,6 @@ pub(super) fn save_participant(connection: &Connection, participant: &Participan
     )
 }
 
-// Speakers
-
 const SPEAKER_COLUMNS: &str = "id, meetingID, clusterLabel, assignment, personID, similarity, \
      embedding, sampleClipStart, sampleClipEnd, sampleClipURL, clusterConfidence";
 
@@ -97,8 +90,8 @@ fn speaker_from_row(row: &Row<'_>) -> rusqlite::Result<Speaker> {
     let clip_start: Option<f64> = row.get("sampleClipStart")?;
     let clip_end: Option<f64> = row.get("sampleClipEnd")?;
     let confidence: f64 = row.get("clusterConfidence")?;
-    // Float columns hold the Swift `Float` widened to `Double`; narrowing it
-    // back is exact for every value Swift wrote.
+    // Float columns hold an `f32` widened to `f64` (as the Swift app writes
+    // them); narrowing back is exact.
     #[allow(clippy::cast_possible_truncation)]
     let narrow = |value: f64| value as f32;
     Ok(Speaker {
@@ -154,20 +147,19 @@ fn fetch_speaker(connection: &Connection, id: Uuid) -> Result<Option<Speaker>> {
         .optional()?)
 }
 
-/// What a merge leaves for the caller: the clip file to remove once the
+/// What a merge leaves for the caller: the clip to remove once the
 /// transaction commits (`None` when it moved to the target) and the persons
-/// whose voices the merge touched. Swift: `MeetingStore.SpeakerMerge`.
+/// whose voices it touched.
 struct SpeakerMerge {
     clip_to_remove: Option<String>,
     person_ids: BTreeSet<Uuid>,
 }
 
 /// Two clusters inside one meeting: moves `source`'s segments to `target`,
-/// averages the embeddings, keeps `target`'s assignment (or takes
-/// `source`'s when `target` is unknown), deletes the `source` speaker.
-/// `source`'s sample clip moves to `target` when `target` has none and is
-/// returned for removal otherwise. Voices are not refreshed here.
-/// Swift: `MeetingStore.mergeSpeakerRows`.
+/// averages the embeddings, keeps `target`'s assignment (or `source`'s when
+/// `target` is unknown) and deletes `source`. `source`'s clip moves to
+/// `target` when it has none, else is returned for removal. Voices are not
+/// refreshed here.
 fn merge_speaker_rows(
     connection: &Connection,
     source: Uuid,
@@ -217,9 +209,7 @@ fn merge_speaker_rows(
 }
 
 /// Nulls a confirmed speaker's `sampleClipURL` and returns it for removal
-/// when the meeting's master recording no longer exists (or the meeting
-/// never had an asset); `None` otherwise.
-/// Swift: `MeetingStore.dropClipWhenAudioIsGone`.
+/// when the meeting's master no longer exists (or never did).
 fn drop_clip_when_audio_is_gone(
     connection: &Connection,
     speaker_id: Uuid,
@@ -245,10 +235,9 @@ fn drop_clip_when_audio_is_gone(
 /// How many confirmed speakers a person's voice is computed from.
 const VOICE_WINDOW: usize = 50;
 
-/// Recomputes a person's voice from the speakers confirmed to them: the
-/// normalised mean of the newest `VOICE_WINDOW` embeddings by
-/// `meeting.startedAt`, `sampleCount` their number; none and 0 without
-/// any. A missing person is ignored. Swift: `MeetingStore.refreshVoice`.
+/// Recomputes a person's voice: the normalised mean of the newest
+/// `VOICE_WINDOW` confirmed embeddings by `meeting.startedAt`, and their
+/// count. A missing person is ignored.
 pub(super) fn refresh_voice(connection: &Connection, person_id: Uuid) -> Result<()> {
     let Some(mut person) = fetch_person(connection, person_id)? else {
         return Ok(());
@@ -285,13 +274,11 @@ pub(super) fn speakers_of_meeting(
     )
 }
 
-// Speaker name suggestions
-
 const SUGGESTION_COLUMNS: &str = "speakerID, meetingID, name, confidence, evidence";
 
-/// Replaces the meeting's suggestions with those of `suggestions` that carry
-/// a name and point at one of the meeting's speakers; ascending by
-/// confidence, so a duplicate speaker ends with its strongest one.
+/// Replaces the meeting's suggestions with the named ones that point at
+/// one of its speakers; ascending by confidence, so a duplicate speaker
+/// ends with its strongest.
 pub(super) fn replace_name_suggestions(
     connection: &Connection,
     meeting_id: Uuid,
@@ -394,7 +381,6 @@ pub(super) fn persons_with_ids(connection: &Connection, ids: &[Uuid]) -> Result<
 }
 
 impl Store {
-    /// Every known person, by display name.
     pub fn persons(&self) -> Result<Vec<Person>> {
         self.read(|connection| {
             query_all(
@@ -406,7 +392,6 @@ impl Store {
         })
     }
 
-    /// The person with `id`.
     pub fn person(&self, id: Uuid) -> Result<Option<Person>> {
         self.read(|connection| {
             Ok(connection
@@ -419,18 +404,15 @@ impl Store {
         })
     }
 
-    /// Inserts or replaces the person (GRDB's `save`).
     pub fn save_person(&self, person: &Person) -> Result<()> {
         self.write(|transaction| save_person(transaction, person))
     }
 
-    /// Inserts or replaces the participant (GRDB's `save`).
     pub fn save_participant(&self, participant: &Participant) -> Result<()> {
         self.write(|transaction| save_participant(transaction, participant))
     }
 
-    /// Removes one participant; a missing id is not an error. Swift:
-    /// `MeetingStore.deleteParticipant(id:)`.
+    /// Removes one participant; a missing id is not an error.
     pub fn delete_participant(&self, id: Uuid) -> Result<()> {
         self.write(|transaction| {
             transaction.execute("DELETE FROM participant WHERE id = ?1", [DbUuid(id)])?;
@@ -448,16 +430,14 @@ impl Store {
         self.read(|connection| speakers_of_meeting(connection, meeting_id))
     }
 
-    /// Inserts or replaces the speaker (GRDB's `save`): the user's
-    /// confirmation of who a cluster is.
+    /// Inserts or replaces the speaker.
     pub fn save_speaker(&self, speaker: &Speaker) -> Result<()> {
         self.write(|transaction| save_speaker(transaction, speaker))
     }
 
-    /// The speakers of every meeting in `meeting_ids`, keyed by meeting, in
-    /// one read; a meeting without speakers has no key. Within a meeting
-    /// the order is [`Store::speakers`]'. The meeting list reads its speaker
-    /// chips through this once per list update instead of once per row.
+    /// The speakers of every meeting in `meeting_ids` in one read, keyed by
+    /// meeting; a meeting without speakers has no key. Within a meeting the
+    /// order is [`Store::speakers`]'.
     pub fn speakers_for_meetings(
         &self,
         meeting_ids: &[Uuid],
@@ -484,9 +464,8 @@ impl Store {
         })
     }
 
-    /// People who own a confirmed speaker, most recently met first (the
-    /// latest `meeting.startedAt` among their confirmed speakers), then by
-    /// name. What the speaker picker lists before anything is typed.
+    /// People who own a confirmed speaker, most recently met first, then by
+    /// name: what the speaker picker lists before anything is typed.
     pub fn recent_persons(&self) -> Result<Vec<Person>> {
         self.read(|connection| {
             query_all(
@@ -504,10 +483,9 @@ impl Store {
     }
 
     /// The person a typed or calendar name stands for: the stored person
-    /// whose display name matches ignoring case and diacritics ("jerome"
-    /// finds Jérôme), else a new, unsaved person with the trimmed name and
-    /// `email`. Nothing is written; [`Store::confirm_speaker`] saves a new
-    /// person. A blank name is [`StoreError::BlankPersonName`].
+    /// whose name matches ignoring case and diacritics ("jerome" finds
+    /// Jérôme), else a new, unsaved person. Nothing is written. A blank
+    /// name is [`StoreError::BlankPersonName`].
     pub fn resolve_person(
         &self,
         name: &str,
@@ -535,17 +513,13 @@ impl Store {
         })
     }
 
-    /// The one operation that sets `confirmed`. Saves the person when the
-    /// store does not know them and drops the speaker's name suggestion,
-    /// which the confirmation answered. Then: the same person again changes
+    /// The one operation that sets `confirmed`. Saves an unknown person and
+    /// drops the speaker's name suggestion. The same person again changes
     /// nothing else; a person who already owns another speaker of this
-    /// meeting takes this speaker over (a merge); otherwise the speaker
-    /// becomes `confirmed(person)`. The voices of the new person and of
-    /// whoever the speaker was confirmed to before are recomputed. The
-    /// sample clip stays while the meeting's master recording exists; once
-    /// the audio is gone the clip goes with the confirmation. Returns the
-    /// clip file URLs the caller removes once the transaction has committed.
-    /// Swift: `MeetingStore.confirm(speakerID:person:)`.
+    /// meeting takes this one over (a merge); otherwise the speaker becomes
+    /// `confirmed(person)`. The voices of the new and the previous person
+    /// are recomputed. The clip stays while the meeting's master exists.
+    /// Returns the clip URLs to remove once the transaction committed.
     pub fn confirm_speaker(&self, speaker_id: Uuid, person: &Person) -> Result<Vec<String>> {
         self.write(|transaction| {
             let mut speaker = fetch_speaker(transaction, speaker_id)?
@@ -610,22 +584,19 @@ impl Store {
 }
 
 impl Store {
-    /// Every `sampleClipURL` a speaker row names, of every meeting: the
-    /// clips a sweep of a meeting's clip folder keeps whatever their
-    /// speaker (`steno_pipeline`'s `sample_clips`). Rust only.
+    /// Every `sampleClipURL` a speaker row names, of every meeting: what a
+    /// clip folder sweep keeps.
     pub fn sample_clip_urls(&self) -> Result<Vec<String>> {
         self.read(sample_clip_urls)
     }
 
-    /// Clears `sampleClipURL` on the listed speakers of `meeting_id`, once
-    /// their clip files are gone.
-    /// Swift: `MeetingStore.clearSampleClips(meetingID:speakerIDs:)`.
+    /// Clears `sampleClipURL` on the listed speakers once their clips are
+    /// gone.
     pub fn clear_sample_clips(&self, meeting_id: Uuid, speaker_ids: &[Uuid]) -> Result<()> {
         self.write(|transaction| clear_sample_clips(transaction, meeting_id, speaker_ids))
     }
 }
 
-/// [`Store::sample_clip_urls`] on `connection`.
 pub(super) fn sample_clip_urls(connection: &Connection) -> Result<Vec<String>> {
     query_all(
         connection,

@@ -1,9 +1,6 @@
-//! The domain types, one for one with `Sources/StenoCore/Model` and the
-//! row encodings of `Sources/StenoCore/Storage/Records.swift`, plus the
-//! value types the pipeline boundaries exchange (`speech`, `stage_io`,
-//! `template`; the speech crate's intermediates come along from
-//! `Sources/StenoSpeech`), and the calendar events a recording is named
-//! after (`calendar`).
+//! The domain types and their row encodings, plus the value types the
+//! pipeline boundaries exchange and the calendar events a recording is named
+//! after.
 
 mod audio;
 mod audio_buffer;

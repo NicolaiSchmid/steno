@@ -1,20 +1,8 @@
-//! Which engine runs Parakeet where, the speech settings that choose it,
-//! and on Windows whether the encoder may use `DirectML`. On Linux and
-//! Windows the ONNX sidecar
-//! ([`SidecarSpeechEngine`](crate::SidecarSpeechEngine)) is the only
-//! speech engine the app runs: speech inference never shares the app's
-//! process there, and the diarizer's runs in the same child on every
-//! platform. An uncaught C++ exception in ONNX Runtime ends the process,
-//! and ONNX Runtime works in 2 to 3 GB; in a child such an end costs one
-//! request, and the memory goes back when the child exits.
-//! On macOS the in-process `CoreML` engine (`steno-speech-coreml`) is the
-//! default, so the Mac runs Parakeet in process and starts the sidecar only
-//! to diarize; the ONNX sidecar is a speech fallback behind
-//! [`SpeechSettings::onnx_sidecar_on_mac`], for a Mac where the Neural
-//! Engine path fails. The in-process [`OnnxSpeechEngine`](crate::OnnxSpeechEngine)
-//! is what the sidecar hosts and what the example and the FLEURS test
-//! drive; the app never runs it on its own thread.
-//! Swift: none; the Mac app runs `FluidAudio` in-process only.
+//! Which engine runs Parakeet where, and the speech settings that choose it. On
+//! Linux and Windows the ONNX sidecar is the only engine the app runs, so an
+//! abort or the 2 to 3 GB working set of ONNX Runtime stays in a child; on
+//! macOS the in-process `CoreML` engine is the default and the sidecar only
+//! diarizes, unless [`SpeechSettings::onnx_sidecar_on_mac`].
 
 use std::path::Path;
 
@@ -32,38 +20,31 @@ pub enum SpeechRuntime {
 }
 
 impl SpeechRuntime {
-    /// Whether the engine runs in the app's process, so an abort inside it
-    /// ends the app (the sidecar's ends only its child).
+    /// Whether the engine runs in the app's process, so an abort inside it ends
+    /// the app.
     #[must_use]
     pub fn runs_in_process(self) -> bool {
         self == Self::CoreMlInProcess
     }
 }
 
-/// The speech settings, which `steno-services` reads from `speech.json`
-/// in the support directory (not the database's `setting` table, which
-/// the Swift app rewrites whole). Absent keys take their defaults, so an
-/// empty object is the default.
+/// The speech settings, which `steno-services` reads from `speech.json` in the
+/// support directory (not the database's `setting` table, which the Swift app
+/// rewrites whole). Absent keys take their defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SpeechSettings {
-    /// macOS only: run the ONNX sidecar instead of `CoreML`. Ignored
-    /// elsewhere, where the sidecar is the only choice.
+    /// macOS only: run the ONNX sidecar instead of `CoreML`.
     pub onnx_sidecar_on_mac: bool,
-    /// Windows only: run the speech encoder on `DirectML` when a DirectX 12
-    /// GPU takes it, on the CPU otherwise
-    /// ([`OnnxOptions::directml`](crate::OnnxOptions::directml), the probe
-    /// in [`crate::onnx#directml`]). Off by default until gate G4 of the
-    /// speech-stack plan is measured: no Windows machine with a GPU has
-    /// run it, so its speed on an integrated GPU, its transcripts against
-    /// the CPU's and how its drivers fail are unknown. A driver that aborts
-    /// mid-run takes the sidecar and that job with it (one that aborts in
-    /// the probe costs no job), and the encoder runs on the CPU for the rest
-    /// of the app's run. Ignored elsewhere.
+    /// Windows only: run the speech encoder on `DirectML` when a DirectX 12 GPU
+    /// takes it, on the CPU otherwise
+    /// ([`OnnxOptions::directml`](crate::OnnxOptions::directml)). Off by
+    /// default: untested on a Windows GPU. A driver that aborts mid-run takes
+    /// that job with it, and the encoder then runs on the CPU for the rest of
+    /// the app's run.
     pub directml_on_windows: bool,
-    /// A mirror the ONNX models (Silero VAD, the Parakeet export and the
-    /// diarizer's two models) are fetched from instead of their hosts
-    /// ([`ModelStore::with_mirror`]). `None` uses the hosts.
+    /// A mirror the ONNX models are fetched from instead of their hosts
+    /// ([`ModelStore::with_mirror`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models_mirror: Option<String>,
 }
@@ -75,8 +56,8 @@ impl SpeechSettings {
         self.runtime_on(cfg!(target_os = "macos"))
     }
 
-    /// The runtime on a Mac (`macos`) or elsewhere; [`Self::runtime`]
-    /// for any platform, so the tests can check both.
+    /// The runtime on a Mac (`macos`) or elsewhere, so the tests can check
+    /// both.
     #[must_use]
     fn runtime_on(&self, macos: bool) -> SpeechRuntime {
         if macos && !self.onnx_sidecar_on_mac {
@@ -86,17 +67,16 @@ impl SpeechSettings {
         }
     }
 
-    /// The ONNX store of the models directory `models_directory` (its
-    /// `onnx/` folder, [`ModelStore::in_models_directory`]) with these
-    /// settings' mirror.
+    /// The ONNX store of `models_directory`
+    /// ([`ModelStore::in_models_directory`]) with these settings' mirror.
     #[must_use]
     pub fn model_store(&self, models_directory: &Path) -> ModelStore {
         ModelStore::in_models_directory(models_directory).with_mirror(self.models_mirror.clone())
     }
 
-    /// The `CoreML` store of the models directory `models_directory` (its
-    /// `fluidaudio/` folder, [`ModelStore::coreml_in_models_directory`])
-    /// with these settings' mirror.
+    /// The `CoreML` store of `models_directory`
+    /// ([`ModelStore::coreml_in_models_directory`]) with these settings'
+    /// mirror.
     #[must_use]
     pub fn coreml_store(&self, models_directory: &Path) -> ModelStore {
         ModelStore::coreml_in_models_directory(models_directory)

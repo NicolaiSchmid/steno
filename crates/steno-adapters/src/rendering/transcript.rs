@@ -1,14 +1,12 @@
 //! The transcript as reading Markdown.
-//! Swift: `Sources/StenoAdapters/Rendering/TranscriptMarkdownRenderer.swift`.
 
 use steno_core::{MeetingExport, TranscriptSegment};
 use uuid::Uuid;
 
 use super::{ArtifactRenderer, Names, RenderOptions, Timecode, markdown_text};
 
-/// One turn per run of consecutive segments by one speaker, a paragraph
-/// break inside a turn at gaps of [`TranscriptMarkdownRenderer::PARAGRAPH_GAP`]
-/// seconds or more.
+/// One turn per run of segments by one speaker, split into paragraphs at
+/// gaps of [`TranscriptMarkdownRenderer::PARAGRAPH_GAP`] seconds.
 pub(crate) struct TranscriptMarkdownRenderer<'a> {
     pub export: &'a MeetingExport,
     pub options: &'a RenderOptions,

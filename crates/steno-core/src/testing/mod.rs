@@ -1,39 +1,10 @@
-//! Deterministic implementations of every boundary, so the pipeline, the
-//! CLI and the shell test without models, a network or a keyring. Behind
-//! the `testing` cargo feature and always present in this crate's own
-//! tests. The boundary fakes of `Sources/StenoCore/Testing`, minus the
-//! dispatcher fake and `RecordingAudioDecoder` (`FakeAudio.swift`);
-//! `FileSecretStore`, `ManualClock`, `Gate` and the `on*` hooks are not
-//! ported either, and [`sample_data`] is not Swift's `SampleData` (own
-//! title, ids and dates).
-//!
-//! Every fake records what it was asked in a [`CallLog`] named for what it
-//! records (`transcriptions`, `summaries`, `admissions`), and a fake with a
-//! `failure: Option<String>` field fails every call with that message as a
-//! [`FakeFailure`]. The `on*` hooks that run inside a call (`onTranscribe`,
-//! `onPrepare`) are the pipeline crate's to add when its tests need them.
-//!
-//! - [`FakeSpeechEngine`]: one segment per `segment_seconds`.
-//! - [`FakeDiarizer`]: `cluster_count` speakers round-robin over
-//!   `turn_seconds` turns, or a closure's answer.
-//! - [`FakeLanguageModel`]: a queue of canned responses, [`Exhausted`]
-//!   when it runs dry.
-//! - [`PassthroughCleaner`]: the segments untouched, a fixed usage.
-//! - [`FakeSummarizer`]: one bullet per template section, or a canned
-//!   summary.
-//! - [`FakeDestination`]: `meeting.json` under a temporary root, with
-//!   `fail_until` transient failures first.
-//! - [`FakeHandoverIntake`]: admissions recorded, a fixed or fresh id.
-//! - [`InMemorySecretStore`]: a map.
-//! - [`InMemorySpeakerMemory`]: cosine ranking over a list of people.
-//! - [`sample_data`]: the meeting, person and export the fakes share.
-//! - [`database_one_version_behind`] and [`recorded_migrations`]: a
-//!   database an older build left, and its migrations, without the store.
-//! - [`WriteLockHold`]: another connection's write transaction, held.
+//! Deterministic implementations of every boundary, so the pipeline, the CLI
+//! and the shell test without models, a network or a keyring. Behind the
+//! `testing` feature. Every fake records its calls in a [`CallLog`], and one
+//! with a `failure: Option<String>` field fails every call as a
+//! [`FakeFailure`].
 //!
 //! # Example
-//!
-//! A fake answers like the real boundary and remembers what it was asked:
 //!
 //! ```
 //! use steno_core::testing::FakeLanguageModel;
@@ -95,8 +66,7 @@ pub use in_memory_speaker_memory::InMemorySpeakerMemory;
 pub struct FakeFailure(pub String);
 
 impl FakeFailure {
-    /// The `Err` a fake returns for `failure: Some(message)`, so a fake in
-    /// another crate fails the same way.
+    /// The `Err` a fake returns for `failure: Some(message)`.
     pub fn check(failure: Option<&String>) -> crate::BoundaryResult<()> {
         match failure {
             Some(message) => Err(Box::new(FakeFailure(message.clone()))),
@@ -105,8 +75,7 @@ impl FakeFailure {
     }
 }
 
-/// A poisoned fake is still a fake: a test that panicked mid-call keeps
-/// what the others recorded before.
+/// A fake whose test panicked mid-call keeps what it recorded before.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

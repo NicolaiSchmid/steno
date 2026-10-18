@@ -1,6 +1,4 @@
 //! The pairing QR payload, the open pairing window and the bearer tokens.
-//! Swift: `Pairing/PairingPayload.swift`, `Pairing/PairingSession.swift`,
-//! `Pairing/DeviceTokens.swift`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -22,18 +20,16 @@ use crate::pinning::constant_time_equals;
 /// steno://pair/v1?mac=<uuid>&name=<pct>&fp=<base64url>&secret=<base64url>&exp=<unix>
 /// ```
 ///
-/// `fp` is the SHA-256 of the computer's leaf certificate DER, `secret` the
-/// single-use pairing secret, both 32 bytes in base64url without padding
-/// (the one place the wire uses base64url; JSON and headers use standard
-/// base64). The phone's `pairing-payload.ts` parses exactly this.
+/// `fp` is the SHA-256 of the leaf certificate DER, `secret` the single-use
+/// pairing secret, both 32 bytes in unpadded base64url. The phone's
+/// `pairing-payload.ts` parses exactly this.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PairingPayload {
     pub mac_id: Uuid,
     pub mac_name: String,
     pub fingerprint: Vec<u8>,
     pub secret: Vec<u8>,
-    /// Whole seconds; the phone refuses a payload past this on its own
-    /// clock.
+    /// Whole seconds; the phone refuses a payload past this.
     pub expires_at: DateTime<Utc>,
 }
 
@@ -186,9 +182,8 @@ pub enum PairingPayloadError {
 }
 
 /// One open pairing window: the secret in the QR code, expiring on the
-/// injected wall clock. Single use because the engine drops the session
-/// before it saves the paired device; `begin_pairing` replaces any open
-/// session.
+/// injected clock. Single use: the engine drops the session before it saves
+/// the paired device.
 pub(crate) struct PairingSession {
     pub payload: PairingPayload,
     now: Clock,
@@ -220,10 +215,8 @@ impl PairingSession {
         (self.now)() < self.payload.expires_at
     }
 
-    /// Checks a presented credential without leaking timing: both sides are
-    /// hashed and the digests compared in constant time. The phone sends the
-    /// secret as standard base64 (`wire.ts` converts the QR's base64url);
-    /// both encodings are accepted.
+    /// Checks a presented credential in constant time over hashes of both
+    /// sides. Accepts standard base64 (what the phone sends) and base64url.
     pub fn matches(&self, presented: &str) -> bool {
         if !self.is_open() {
             return false;

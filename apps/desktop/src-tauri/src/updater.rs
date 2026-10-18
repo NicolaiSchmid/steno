@@ -1,33 +1,9 @@
-//! Updates over `tauri-plugin-updater`: a signed manifest per lane on the
-//! GitHub release, checked on request from the tray or from Settings
-//! (`updates.check`), and daily by the update schedule
-//! (`steno_services::updates`), which drives [`ShellUpdates`], records each
-//! check's outcome and time for the General section, and downloads and
-//! installs by itself only through its install gate (stable plan P25). The
-//! lane follows the installed version, as Sparkle's channel does in the
-//! Swift app: a pre-release build ("0.11.0-rc.1") reads the beta lane's
-//! manifest first and falls back to the stable one; a stable build reads
-//! the stable manifest only. No setting.
-//!
-//! Each lane is a rolling GitHub release that holds only its `latest.json`,
-//! which `.github/workflows/desktop-release.yml` replaces when it publishes
-//! a `desktop-v*` tag. The stable lane takes releases, the beta lane every
-//! version, and neither moves backwards (`apps/desktop/scripts/updater-lanes.sh`),
-//! so a beta build is offered the stable release that follows it. The
-//! manifest points at the installers on the versioned release. Neither
-//! lane is GitHub's "latest" release, which stays the Swift app's until the
-//! Mac cutover (`.plans/2026-10-04-mac-cutover.md`). `tauri.conf.json`
-//! carries the public key (`plugins.updater.pubkey`) and the stable
-//! endpoint. The matching private key is the `TAURI_SIGNING_PRIVATE_KEY`
-//! secret and lives nowhere in the repository.
-//!
-//! On Windows the app runs the installer under a watcher that starts the
-//! running version again when the installer does not install
-//! (`windows_setup`), in place of the plugin's install, which left Steno
-//! down after a declined consent prompt or a failed setup.
-//!
-//! Swift: `apps/macos/Steno/Services/UpdaterController.swift`,
-//! `apps/macos/Steno/Services/UpdateChannels.swift`.
+//! Updates over `tauri-plugin-updater`: a signed manifest per lane on a
+//! rolling GitHub release, checked on request and daily by the update
+//! schedule (`steno_services::updates`) through [`ShellUpdates`]. A
+//! pre-release build reads the beta lane first, then stable; a stable
+//! build reads stable only. On Windows the installer runs under a watcher
+//! (`windows_setup`) that restarts Steno when the install does not happen.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -45,22 +21,19 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 #[cfg(any(windows, test))]
 mod windows_setup;
 
-/// The stable lane: the rolling `desktop-stable` release, which carries the
-/// newest release's manifest.
+/// The stable lane's manifest, on the rolling `desktop-stable` release.
 pub const STABLE_ENDPOINT: &str =
     "https://github.com/NicolaiSchmid/steno/releases/download/desktop-stable/latest.json";
-/// The pre-release lane: the rolling `desktop-beta` release, which carries
-/// the manifest of the newest pre-release or release.
+/// The beta lane's manifest, on the rolling `desktop-beta` release: the
+/// newest pre-release or release.
 pub const BETA_ENDPOINT: &str =
     "https://github.com/NicolaiSchmid/steno/releases/download/desktop-beta/latest.json";
 
-/// The update alert's install button.
 const INSTALL: &str = "Install and Relaunch";
 /// The install button while a recording or a processing job runs.
 const INSTALL_AFTER: &str = "Install After It Ends";
 
-/// Whether a marketing version is a pre-release (`UpdateChannels.allowed`:
-/// a hyphen means the beta lane).
+/// Whether a marketing version is a pre-release (it has a hyphen).
 pub fn is_prerelease(version: &str) -> bool {
     version.contains('-')
 }
@@ -75,16 +48,13 @@ pub fn endpoints(version: &str) -> Vec<Url> {
     urls
 }
 
-/// The plugin; [`ShellUpdates`]'s `UpdateSource::check` supplies the lanes
-/// per build and `tauri.conf.json` the public key.
+/// The plugin; [`ShellUpdates`] supplies the lanes per build.
 pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry, tauri_plugin_updater::Config> {
     tauri_plugin_updater::Builder::new().build()
 }
 
 /// The update source the schedule drives, kept as Tauri managed state:
-/// the update the last check found, which the schedule's download and
-/// install name by version, and the dialogs. The schedule decides the
-/// order and keeps the downloaded package.
+/// the update the last check found, and the dialogs.
 pub struct ShellUpdates {
     app: AppHandle,
     found: Mutex<Option<Update>>,
@@ -98,13 +68,11 @@ impl ShellUpdates {
         }
     }
 
-    /// The found update when it is `version`; the error says why not.
     fn found(&self, version: &str) -> Result<Update, String> {
         on_offer(lock(&self.found).clone(), version, |update| &update.version)
     }
 }
 
-/// `found` when it is `version`; the error says why not.
 fn on_offer<T>(
     found: Option<T>,
     version: &str,
@@ -117,8 +85,7 @@ fn on_offer<T>(
 
 #[async_trait::async_trait]
 impl UpdateSource for ShellUpdates {
-    /// Asks the lanes. The update itself, when there is one, is kept for
-    /// the download and the install.
+    /// Asks the lanes and keeps the update found for download and install.
     async fn check(&self) -> Result<Option<String>, String> {
         let version = self.app.package_info().version.to_string();
         let update = self
@@ -143,8 +110,8 @@ impl UpdateSource for ShellUpdates {
             .map_err(|error| error.to_string())
     }
 
-    /// Installs the package on a blocking thread ([`install_update`]),
-    /// since the updater may wait on a password prompt.
+    /// Installs on a blocking thread, since the updater may wait on a
+    /// password prompt.
     async fn install(&self, version: &str, package: Vec<u8>) -> Result<(), String> {
         let (app, update) = (self.app.clone(), self.found(version)?);
         tauri::async_runtime::spawn_blocking(move || install_update(&app, &update, &package))
@@ -156,10 +123,8 @@ impl UpdateSource for ShellUpdates {
         this_installer()
     }
 
-    /// Runs the shutdown first (`shut_down_for_relaunch`), as Sparkle's
-    /// relaunch went through `applicationShouldTerminate`. The restart's
-    /// own exit request (`tauri::RESTART_EXIT_CODE`) then finds the exit
-    /// gate released and goes through (`main::exit_request`).
+    /// Runs the shutdown first; the restart's own exit request then finds
+    /// the exit gate released (`main::exit_request`).
     async fn relaunch(&self) {
         let handle = self.app.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || {
@@ -182,14 +147,10 @@ impl UpdateSource for ShellUpdates {
             .is_ok_and(|result| installs(&result, dialog.install))
     }
 
-    /// An install that failed after its own shutdown ran (Windows,
-    /// [`install_update`]: the watcher could not start, ended before it
-    /// ran, or said nothing in time) restarts the app at once, into the
-    /// version that runs, with the failure in the log. The recorder and the
-    /// pipelines start nothing after a shutdown, and on a scheduled install
-    /// nobody may be there to close a message. One that fails while the app
-    /// quits (a `.deb`'s pkexec ended with the session) is only logged,
-    /// since the app is ending. The next check offers the update again.
+    /// An install that failed after its own shutdown ran (Windows) restarts
+    /// the app at once into the running version, since nothing starts
+    /// after a shutdown and nobody may be there to close a message. One
+    /// that fails while the app quits is only logged.
     fn tell_install_failed(&self, message: &str) {
         if self.app.state::<steno_services::app::ExitGate>().released() {
             tracing::warn!(%message, "the update failed while Steno quits");
@@ -223,26 +184,18 @@ impl UpdateSource for ShellUpdates {
     }
 }
 
-/// Installs `package`, the verified download of `update`: through the
-/// plugin, except on Windows.
+/// Installs `package`, the verified download of `update`, through the
+/// plugin.
 #[cfg(not(windows))]
 fn install_update(_app: &AppHandle, update: &Update, package: &[u8]) -> Result<(), String> {
     update.install(package).map_err(|error| error.to_string())
 }
 
-/// Windows: writes the installer under the app's local data folder
-/// (`%LOCALAPPDATA%\uno.schmid.steno.desktop\update\`, which holds only
-/// the last update's), runs the shutdown, starts the watcher
-/// (`windows_setup`), waits up to [`WATCHER_START_LIMIT`] for it to say
-/// that it runs, lets go of the single-instance lock and ends the process;
-/// returns only when it failed before the shutdown. A start file the
-/// folder's removal left behind fails the install before the shutdown, so
-/// the user is told. After the shutdown, a watcher that cannot start (a
-/// job that forbids breakaway), ends before it ran (a policy that turns off
-/// the command prompt) or says nothing in time (which is ended) restarts
-/// the app, with the failure in the log. The watcher's current directory
-/// is the local data folder, not the install folder the installer
-/// replaces.
+/// Windows: writes the installer under the app's local data folder, runs
+/// the shutdown, starts the watcher (`windows_setup`), waits up to
+/// [`WATCHER_START_LIMIT`] for it to report, releases the single-instance
+/// lock and ends the process. Returns only when it failed before the
+/// shutdown; a watcher failing after the shutdown restarts the app.
 ///
 /// [`WATCHER_START_LIMIT`]: windows_setup::WATCHER_START_LIMIT
 #[cfg(windows)]
@@ -279,11 +232,10 @@ fn install_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<()
         .and_then(|mut watcher| wait_for_start(&mut watcher, &started, WATCHER_START_LIMIT));
     match ran {
         Ok(()) => {
-            // The single-instance mutex goes first: an installer that fails
-            // at once (msiexec 1618) has the watcher start this version
-            // within milliseconds, and that copy would hand itself to this
-            // ending process. `RunEvent::Exit` frees it on every other exit;
-            // `exit` skips that.
+            // Freed first: an installer that fails at once has the watcher
+            // start this version within milliseconds, which would otherwise
+            // hand itself to this ending process. `exit` skips the usual
+            // release on `RunEvent::Exit`.
             tauri_plugin_single_instance::destroy(app);
             std::process::exit(0)
         }
@@ -295,7 +247,6 @@ fn install_update(app: &AppHandle, update: &Update, package: &[u8]) -> Result<()
     }
 }
 
-/// [`installer_for`] this build's platform and bundle.
 fn this_installer() -> Installer {
     installer_for(
         cfg!(windows),
@@ -304,17 +255,11 @@ fn this_installer() -> Installer {
     )
 }
 
-/// How the updater installs on this platform (`windows` on Windows) for
-/// the bundle the binary came in (`bundle`). On Windows the install ends
-/// the process (`install_update`): the NSIS setup installs for the user
-/// alone (`bundle.windows.nsis.installMode` in `tauri.conf.json`), and the
-/// MSI for every user, after Windows' consent prompt. A `.deb` or an
-/// `.rpm` is installed through pkexec, then a zenity or kdialog password
-/// dialog, then `sudo`, each of which waits for an answer. The macOS
-/// bundle is replaced in place, after an administrator's password when the
-/// user cannot write it or its folder (`writable`, asked only then; the
-/// prompt holds the app's windows until it is answered). Anything else (an
-/// `AppImage`, or no bundle) is replaced in place.
+/// How the updater installs for the bundle the binary came in. On Windows
+/// the install ends the process; a `.deb` or `.rpm` asks for a password;
+/// a macOS bundle asks for one only when the user cannot write it or its
+/// folder (`writable`, asked only then); anything else is replaced in
+/// place.
 fn installer_for(
     windows: bool,
     bundle: Option<&BundleType>,
@@ -333,16 +278,13 @@ fn installer_for(
     }
 }
 
-/// Whether the user can write the running macOS bundle and its folder
-/// ([`bundle_is_writable_at`]).
 #[cfg(target_os = "macos")]
 fn bundle_is_writable() -> bool {
     std::env::current_exe().is_ok_and(|executable| bundle_is_writable_at(&executable))
 }
 
-/// Whether the user can write the bundle of `executable`
-/// (`Steno.app/Contents/MacOS/steno-desktop`) and its folder, which the
-/// updater renames the bundle out of.
+/// Whether the user can write the bundle of `executable` and its folder,
+/// which the updater renames the bundle out of.
 #[cfg(target_os = "macos")]
 fn bundle_is_writable_at(executable: &std::path::Path) -> bool {
     let writable =
@@ -353,15 +295,13 @@ fn bundle_is_writable_at(executable: &std::path::Path) -> bool {
     writable(bundle) && bundle.parent().is_some_and(writable)
 }
 
-/// No macOS bundle here.
 #[cfg(not(target_os = "macos"))]
 fn bundle_is_writable() -> bool {
     true
 }
 
-/// A question's dialog: its kind, its text and its buttons, the default
-/// first (macOS and Windows press the first button on Return, and GTK
-/// focuses it), and the label of the one that installs.
+/// A question's dialog: kind, text and buttons, the default first, and the
+/// label of the one that installs.
 struct Dialog {
     kind: MessageDialogKind,
     message: String,
@@ -378,8 +318,7 @@ impl Dialog {
                 buttons: MessageDialogButtons::OkCancelCustom(INSTALL.into(), "Later".into()),
                 install: INSTALL,
             },
-            // Installing after it ends is the default: neither button
-            // stops the recording or the processing (stable plan P25).
+            // Neither button stops the recording or the processing.
             Question::AfterItEnds(busy) => Dialog {
                 kind: MessageDialogKind::Info,
                 message: match busy {
@@ -403,8 +342,7 @@ impl Dialog {
     }
 }
 
-/// What the user is told when an update installed while a recording or a
-/// processing job began: Steno relaunches once that is done.
+/// Tells the user Steno relaunches once the recording or processing ends.
 fn relaunch_waits_message(version: &str, busy: Busy) -> String {
     match busy {
         Busy::Recording => format!(
@@ -416,9 +354,7 @@ fn relaunch_waits_message(version: &str, busy: Busy) -> String {
     }
 }
 
-/// Whether the button pressed installs: only the label `install`, the
-/// dialog's install button; the other button, Escape and closing the
-/// dialog do not.
+/// Whether the button pressed is the dialog's install button.
 fn installs(result: &MessageDialogResult, install: &str) -> bool {
     matches!(result, MessageDialogResult::Custom(label) if label == install)
 }
@@ -427,20 +363,18 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The shell's update source.
 fn source(app: &AppHandle) -> Arc<ShellUpdates> {
     app.state::<Arc<ShellUpdates>>().inner().clone()
 }
 
-/// The schedule that records each check and installs, when the host runs
-/// one (not for the fixture host, nor in a smoke run).
+/// The update schedule, when the host runs one (not for the fixture host,
+/// nor in a smoke run).
 fn schedule(app: &AppHandle) -> Option<Arc<UpdateSchedule>> {
     app.try_state::<crate::host::Host>()?.updates()
 }
 
-/// The user's check of the lanes; through the schedule when there is one,
-/// so the General section shows the outcome and the time and the schedule
-/// does not announce the same version again. Either way it gives up after
+/// The user's check of the lanes, through the schedule when there is one
+/// so the General section shows the outcome; gives up after
 /// [`CHECK_TIMEOUT`].
 async fn check_on_request(app: &AppHandle) -> Result<Option<String>, String> {
     match schedule(app) {
@@ -451,7 +385,6 @@ async fn check_on_request(app: &AppHandle) -> Result<Option<String>, String> {
     }
 }
 
-/// A message from the updater, one button unless the caller adds more.
 fn app_dialog(
     app: &AppHandle,
     kind: MessageDialogKind,
@@ -460,10 +393,9 @@ fn app_dialog(
     app.dialog().message(message).title("Steno").kind(kind)
 }
 
-/// The tray's Check for Updates: checks, then offers to install
-/// (`UpdateSchedule::offer`), as Sparkle's standard driver does. On a
-/// packaged install it says who delivers the updates instead. Without a
-/// schedule (the fixture host, a smoke run) it only says what it found.
+/// The tray's Check for Updates: checks, then offers to install. On a
+/// packaged install it says who delivers the updates instead; without a
+/// schedule it only says what it found.
 pub async fn check_and_offer(app: &AppHandle) {
     match check_on_request(app).await {
         Ok(Some(version)) => {
@@ -524,10 +456,8 @@ mod tests {
         }
     }
 
-    /// The update alert's default installs, as Sparkle's does; while the
-    /// app is busy the default installs once that ends, and the other
-    /// button is "Not Now". The busy dialog names what it waits for in
-    /// plain words.
+    /// The default button installs; while busy it installs once that ends,
+    /// and the other button is "Not Now".
     #[test]
     fn the_busy_dialogs_default_installs_once_it_ends() {
         let buttons = |question| {
@@ -555,7 +485,6 @@ mod tests {
         }
     }
 
-    /// The relaunch that waits names the version and what it waits for.
     #[test]
     fn the_relaunch_that_waits_says_what_for() {
         let recording = relaunch_waits_message("0.12.0", Busy::Recording);
@@ -568,8 +497,8 @@ mod tests {
         assert!(processing.contains("processed"), "{processing}");
     }
 
-    /// Asked again before an installer that needs an administrator, the
-    /// default installs now and the other button is "Later".
+    /// Asked again before an administrator's installer, "Later" is the
+    /// other button.
     #[test]
     fn asked_again_the_default_installs_now() {
         let dialog = Dialog::of(Question::InstallNow("0.12.0"));
@@ -582,10 +511,8 @@ mod tests {
         assert_eq!(dialog.install, INSTALL);
     }
 
-    /// Every platform and bundle: Windows ends the app, and its MSI asks
-    /// for consent after; a `.deb` or an `.rpm` asks for a password, and so
-    /// does a macOS bundle the user cannot write; the rest is replaced in
-    /// place. Writability is asked only of the macOS bundle.
+    /// The installer for every platform and bundle; writability is asked
+    /// only of the macOS bundle.
     #[test]
     fn the_installer_follows_the_platform_and_the_bundle() {
         use BundleType::{App, AppImage, Deb, Dmg, Msi, Nsis, Rpm};
@@ -616,8 +543,7 @@ mod tests {
         );
     }
 
-    /// Only the install button installs: Escape, closing the dialog and
-    /// any other result do not, nor the other dialog's install button.
+    /// Only the dialog's own install button installs.
     #[test]
     fn only_the_install_button_installs() {
         for result in [
@@ -636,8 +562,7 @@ mod tests {
         ));
     }
 
-    /// This build's installer: a test binary comes in no bundle, so Windows
-    /// ends the app and every other platform replaces it in place.
+    /// A test binary has no bundle.
     #[test]
     fn an_unbundled_build_installs_as_its_platform_does() {
         let expected = if cfg!(windows) {
@@ -648,9 +573,7 @@ mod tests {
         assert_eq!(this_installer(), expected);
     }
 
-    /// A bundle the user cannot write, or one in a folder the user cannot
-    /// write, asks for a password; one the user can write does not. Skipped
-    /// as root, who can write either.
+    /// An unwritable bundle or folder asks for a password. Skipped as root.
     #[cfg(target_os = "macos")]
     #[test]
     fn an_unwritable_bundle_or_folder_asks_for_a_password() {
@@ -680,8 +603,7 @@ mod tests {
         mode(folder.path(), 0o755);
     }
 
-    /// The download and the install name the update the last check found,
-    /// and only that one.
+    /// Download and install accept only the update the last check found.
     #[test]
     fn only_the_version_on_offer_installs() {
         let found = |version: &str| Some(version.to_owned());

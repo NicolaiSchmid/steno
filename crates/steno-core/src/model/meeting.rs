@@ -1,5 +1,4 @@
 //! The meeting: its source, state, end reason and title origin.
-//! Swift: `Sources/StenoCore/Model/Meeting.swift`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -19,11 +18,8 @@ string_enum! {
     /// Where a recording came from. Decides which lanes exist and which lane
     /// is diarized.
     pub enum MeetingSource {
-        /// Two lanes on the computer (the variant name and raw value are
-        /// Swift's): `mic` is "me", `system` is "them", unless the tap
-        /// carried no conversation (a phone on speaker next to the
-        /// computer); then the mic lane is diarized like a room
-        /// (`steno_pipeline::pipeline::diarized_lane_after_transcription`).
+        /// Two lanes on the computer: `mic` is "me", `system` is "them", unless the
+        /// tap carried no conversation; then the mic lane is diarized like a room.
         MacCall = "macCall",
         /// One `mixed` room lane from the computer's microphone, fully diarized.
         MacInPerson = "macInPerson",
@@ -131,9 +127,8 @@ string_enum! {
     }
 }
 
-/// Why a recording ended; `None` for meetings recorded before it was stored
-/// and for phone recordings. One `StenoJSON` text per row: `"manual"`,
-/// `{"callEnded":"Zen"}`; a nameless `callEnded` is the bare `"callEnded"`.
+/// Why a recording ended; `None` for older meetings and phone recordings.
+/// Stored as `StenoJSON` text: `"manual"`, `{"callEnded":"Zen"}`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RecordingEndReason {
     /// The user stopped it from any surface.
@@ -221,8 +216,8 @@ impl Default for TitleOrigin {
     }
 }
 
-/// One meeting: the row every other row hangs off. The JSON form omits
-/// `titleOrigin` when it is the default, as Swift does.
+/// One meeting: the row every other row hangs off. The JSON form omits a
+/// default `titleOrigin`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Meeting {
@@ -263,18 +258,12 @@ pub struct Meeting {
 }
 
 impl Meeting {
-    /// The id of the bundled default summary template.
     pub const DEFAULT_TEMPLATE_ID: &'static str = "default";
 
-    /// Copies the columns the pipeline owns from `results`: language,
-    /// state, summary, usage and `updatedAt`, plus the title and its origin
-    /// unless the stored origin is `user` (a rename during a run stays),
-    /// and the duration when the stored one is not positive (a phone
-    /// recording whose metadata announced none gets the length the run
-    /// decoded). The template is the user's alone: the summary's
-    /// `template_id` records which one made it. Rust only: Swift's
-    /// `writeProcessingResults` copies the template, title and origin, and
-    /// never the duration.
+    /// Copies the columns the pipeline owns from `results`: language, state,
+    /// summary, usage and `updatedAt`; the title and origin unless the stored
+    /// origin is `user`; the duration when the stored one is not positive. The
+    /// template stays the user's.
     pub fn apply_processing_results(&mut self, results: &Meeting) {
         if self.duration <= 0.0 {
             self.duration = results.duration;
@@ -290,17 +279,10 @@ impl Meeting {
         self.updated_at = results.updated_at;
     }
 
-    /// Whether the app offers "Process again" for this meeting, given its
-    /// recording is on disk: the one rule the meeting detail's button, the
-    /// host's guard, the pipeline's `process_again` and `steno process
-    /// --meeting` read. A failed meeting, and a ready one whose results
-    /// could still need its recording: [`results_need_the_audio`] over its
-    /// stored `speakers`, `segments` and `asset`, or `audio_may_be_damaged`
-    /// (the pipeline's damaged-audio record says parts of the recording
-    /// were replaced by silence, or cannot be read). That is the rule that
-    /// keeps the recording and that the detail's `keptIncomplete` line
-    /// names "Process again" for. Rust only: the Swift app refuses
-    /// "Process again".
+    /// Whether the app offers "Process again", given the recording is on disk: a
+    /// failed meeting, or a ready one whose results could still need the audio
+    /// ([`results_need_the_audio`] or `audio_may_be_damaged`). The one rule every
+    /// surface reads.
     #[must_use]
     pub fn offers_process_again(
         &self,

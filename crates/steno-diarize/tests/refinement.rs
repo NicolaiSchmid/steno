@@ -1,6 +1,5 @@
-//! `Tests/StenoSpeechTests/ClusterRefinementTests.swift` ported, in the
-//! same order as the Swift file: the merge order, the 30 s rule, the 0.30
-//! absorb rule, label survival. The tie case at the end is Rust's own.
+//! The cluster refinement tests: merge order, the 30 s rule, the 0.30 absorb
+//! rule, label survival and ties.
 
 mod common;
 
@@ -8,12 +7,9 @@ use common::{audio, cluster, range, sample_index};
 use steno_core::{AudioBuffer16k, BoxError, Embedding, SpeakerCluster, TimeRange};
 use steno_diarize::refinement::{Rules, SliceEmbedder, concatenated, refine};
 
-/// Reads the speaker off the samples: every range of one speaker in these
-/// tests is filled with one constant c, and the embedding of a slice is the
-/// unit vector whose axis c carries how many samples of c it holds. Two
-/// slices of the same constant have cosine 1, of different constants 0,
-/// and a mixed slice sits in between with the mix as weights. Records the
-/// duration of every slice it embedded.
+/// Reads the speaker off the samples: each speaker's ranges hold one
+/// constant c, and a slice embeds to the unit vector weighting axis c by its
+/// sample count. Records the duration of every slice it embedded.
 #[derive(Default)]
 struct FakeSliceEmbedder {
     embedded_durations: Vec<f64>,
@@ -53,9 +49,8 @@ fn labels(clusters: &[SpeakerCluster]) -> Vec<&str> {
     clusters.iter().map(|c| c.label.as_str()).collect()
 }
 
-/// One voice as a main cluster and a cluster of asides: re-embedded, both
-/// are the same constant, cosine 1, and they merge into one speaker with
-/// the union's ranges, the big cluster's clip and the re-embedded vector.
+/// One voice as a main cluster and asides merges into one speaker with the
+/// union's ranges, the big cluster's clip and the re-embedded vector.
 #[test]
 fn short_turns_of_one_voice_merge_into_the_main_cluster() {
     let main = [range(0.0, 60.0), range(100.0, 160.0)];
@@ -85,8 +80,7 @@ fn short_turns_of_one_voice_merge_into_the_main_cluster() {
     assert_eq!(embedder.embedded_durations.len(), 3);
 }
 
-/// Two people who each speak for long: different constants, cosine 0,
-/// nothing merges, and the labels follow the order of first speech.
+/// Two people who each speak long do not merge; labels follow first speech.
 #[test]
 fn different_voices_stay_apart_and_are_labelled_by_first_speech() {
     let anna = [range(40.0, 100.0)];
@@ -102,9 +96,8 @@ fn different_voices_stay_apart_and_are_labelled_by_first_speech() {
     assert_eq!(refined[1].ranges, anna.to_vec());
 }
 
-/// A cluster under thirty seconds is nobody on its own: it joins the
-/// substantive cluster it sounds like (the big cluster's embedding, clip
-/// and confidence stay), and one that sounds like nobody is dropped.
+/// A cluster under thirty seconds joins the substantive cluster it sounds
+/// like, and one that sounds like nobody is dropped.
 #[test]
 fn small_clusters_are_absorbed_or_dropped() {
     let anna = [range(0.0, 60.0)];
@@ -129,10 +122,7 @@ fn small_clusters_are_absorbed_or_dropped() {
     );
 }
 
-/// Three clusters of one voice with different admixtures: C first in the
-/// input with cosine 0.86 to A, but A and B at 0.92 are the closest pair,
-/// so their union is the first one embedded (110 s), not C's with A
-/// (100 s).
+/// The closest pair merges first, not the first cluster in the input.
 #[test]
 fn the_closest_pair_merges_first() {
     let buffer = audio(
@@ -162,8 +152,7 @@ fn the_closest_pair_merges_first() {
     );
 }
 
-/// Without a single substantive cluster (a nine-second fixture) nothing is
-/// re-embedded and the mapping's clusters come back untouched.
+/// Without a substantive cluster the mapping's clusters come back untouched.
 #[test]
 fn short_recordings_are_left_alone() {
     let clusters = [
@@ -175,9 +164,8 @@ fn short_recordings_are_left_alone() {
     assert_eq!(embedder.embedded_durations.len(), 0);
 }
 
-/// Merging is greedy by the highest cosine and re-embeds each union, so
-/// three fragments of one voice collapse into one cluster while a second
-/// voice survives; the embedder never sees more than the cap per slice.
+/// Fragments of one voice collapse greedily while a second voice survives;
+/// no slice exceeds the cap.
 #[test]
 fn merges_greedily_and_caps_the_embedded_speech() {
     let first_voice = [
@@ -218,8 +206,8 @@ fn merges_greedily_and_caps_the_embedded_speech() {
     assert!(longest <= 120.0 + 1e-6);
 }
 
-/// The concatenation keeps time order, clips to the buffer and stops at
-/// the cap.
+/// The concatenation keeps time order, clips to the buffer and stops at the
+/// cap.
 #[test]
 fn concatenation_orders_clips_and_caps() {
     let buffer = audio(&[(1.0, range(0.0, 10.0)), (2.0, range(10.0, 20.0))], 20.0);
@@ -237,8 +225,7 @@ fn concatenation_orders_clips_and_caps() {
     );
 }
 
-/// The plan's constants: 30 s to count as a speaker, 180 s embedded at
-/// most, merge at 0.60, absorb at 0.30.
+/// The refinement constants: 30 s, 180 s, merge at 0.60, absorb at 0.30.
 #[test]
 fn rules_default_to_the_plan_constants() {
     let rules = Rules::default();
@@ -267,10 +254,8 @@ fn thirty_seconds_of_speech_is_the_substantive_cut() {
     );
 }
 
-/// When the bigger half of a merge is the later cluster, the union keeps
-/// its label and clip, so the pass must hand labels out again: the union
-/// opens the recording and is "Speaker 1", the other voice moves up to
-/// "Speaker 2".
+/// Labels are handed out again after a merge: the union that opens the
+/// recording is "Speaker 1".
 #[test]
 fn labels_are_reassigned_when_a_merge_keeps_the_later_label() {
     let opening = [range(0.0, 35.0)];
@@ -302,8 +287,7 @@ fn labels_are_reassigned_when_a_merge_keeps_the_later_label() {
 }
 
 /// A small cluster joins the substantive cluster with the highest cosine,
-/// not the first one over the absorb cut: a ten-second aside that is
-/// mostly Ben with a little Anna ends up with Ben.
+/// not the first one over the absorb cut.
 #[test]
 fn a_small_cluster_joins_the_closest_speaker_not_the_first_over_the_cut() {
     let anna = [range(0.0, 60.0)];
@@ -335,9 +319,8 @@ fn a_small_cluster_joins_the_closest_speaker_not_the_first_over_the_cut() {
     );
 }
 
-/// The union of two merged clusters can embed to nothing (the one-speaker
-/// pipeline hears no speech in it); the merged cluster then keeps the
-/// embedding of the side with more speech instead of losing it.
+/// A union that embeds to nothing keeps the embedding of the side with more
+/// speech.
 #[test]
 fn a_union_that_embeds_to_nothing_keeps_the_larger_sides_embedding() {
     let big = c("Speaker 1", &[range(0.0, 90.0)], 4);
@@ -355,9 +338,8 @@ fn a_union_that_embeds_to_nothing_keeps_the_larger_sides_embedding() {
     assert!(embedder.embedded_durations.len() <= 3);
 }
 
-/// A substantive cluster that came without an embedding and whose speech
-/// the embedder hears nothing in stays a speaker of its own: the merge and
-/// the absorb skip it, nothing drops it.
+/// A substantive cluster without an embedding and no audible speech stays a
+/// speaker of its own.
 #[test]
 fn a_substantive_cluster_without_an_embedding_survives_on_its_own() {
     let anna = [range(0.0, 60.0)];
@@ -382,9 +364,8 @@ fn a_substantive_cluster_without_an_embedding_survives_on_its_own() {
     assert_eq!(refined[1].embedding, None);
 }
 
-/// With no substantive cluster carrying an embedding there is nothing to
-/// compare a small cluster against, so it is dropped rather than attached
-/// to an arbitrary speaker.
+/// With no substantive cluster carrying an embedding, a small cluster is
+/// dropped.
 #[test]
 fn small_clusters_are_dropped_when_no_speaker_has_an_embedding() {
     let silent = [range(0.0, 40.0)];
@@ -409,9 +390,8 @@ fn small_clusters_are_dropped_when_no_speaker_has_an_embedding() {
     assert_eq!(refined[0].embedding, None);
 }
 
-/// Ranges past the end of the lane (a mapping a little longer than the
-/// audio) yield no samples, and a slice without samples is never offered
-/// to the embedder; the cluster keeps the embedding it came with.
+/// Ranges past the end of the lane yield no samples and are never offered to
+/// the embedder.
 #[test]
 fn ranges_beyond_the_buffer_are_not_embedded() {
     let clusters = [c("Speaker 1", &[range(100.0, 140.0)], 1)];
@@ -420,8 +400,7 @@ fn ranges_beyond_the_buffer_are_not_embedded() {
     assert_eq!(embedder.embedded_durations.len(), 0);
 }
 
-/// A fragment equally close to two speakers joins the first of them, as
-/// Swift's `max(by:)` returns the first maximum.
+/// A fragment equally close to two speakers joins the first of them.
 #[test]
 fn a_fragment_tied_between_two_speakers_joins_the_first() {
     let anna = [range(0.0, 60.0)];

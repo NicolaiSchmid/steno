@@ -1,4 +1,4 @@
-//! `ManagedBlockTests`.
+//! The managed block on person pages.
 
 mod common;
 
@@ -152,8 +152,7 @@ fn remove_leaves_an_empty_block_with_its_markers() {
 #[test]
 fn a_page_without_an_end_marker_gets_a_fresh_block_and_keeps_its_lines() {
     let line = line();
-    // The user deleted the end marker; the start marker and the old line
-    // are left dangling above her notes.
+    // The user deleted the end marker.
     let dangling = format!(
         "# Anna\n\n<!-- steno:meetings:start -->\n{OLDER}\n\n## Notes\n\nFirst paragraph.\nSecond line.\n"
     );
@@ -166,9 +165,8 @@ fn a_page_without_an_end_marker_gets_a_fresh_block_and_keeps_its_lines() {
         ),
         "no end marker after the start: a fresh block is appended"
     );
-    // The next delivery sees a block from the dangling start to the far end
-    // marker. Her lines in between keep their order and their place; only
-    // the marker lines are sorted, where the first of them stood.
+    // The next block runs from the dangling start to the far end marker;
+    // only the marker lines are sorted.
     let again = ManagedBlock::merge(NEWER, uuid(8), &merged);
     assert_eq!(
         again,
@@ -227,9 +225,8 @@ fn an_end_marker_before_the_start_is_not_a_block() {
         reversed,
         "remove changes nothing"
     );
-    // The second merge finds a block from the orphan start marker to the
-    // new end marker: the blank line goes, the fresh start marker is an
-    // ordinary line, the user's text and the older line stay.
+    // The block now runs from the orphan start marker: the blank line goes,
+    // the fresh start marker is an ordinary line.
     let twice = ManagedBlock::merge(&line, meeting_id(), &once);
     assert_eq!(
         twice,

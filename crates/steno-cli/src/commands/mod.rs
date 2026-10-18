@@ -1,5 +1,4 @@
-//! The command tree. Swift: `Sources/steno/Steno.swift` and
-//! `Sources/steno/Commands/`.
+//! The command tree.
 
 pub mod deliver;
 pub mod dev;

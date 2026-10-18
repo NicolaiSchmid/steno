@@ -1,5 +1,4 @@
 //! A speech engine and a diarizer that need no models.
-//! Swift: `Sources/StenoCore/Testing/FakeSpeech.swift`.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -20,9 +19,7 @@ pub struct TranscribeCall {
 }
 
 /// A `SpeechEngine` that emits one segment per `segment_seconds` of audio,
-/// tagged with `language`, text `"<prefix> segment <n>"`. Deterministic and
-/// configurable; records every hint it was given, every `prepare` and
-/// every `release`.
+/// text `"<prefix> segment <n>"`, and records every call.
 #[derive(Debug)]
 pub struct FakeSpeechEngine {
     pub id: String,
@@ -32,12 +29,10 @@ pub struct FakeSpeechEngine {
     pub text_prefix: String,
     pub word_timings: bool,
     pub failure: Option<String>,
-    /// `prepare` fails with this after recording the call: a model load
-    /// that was refused, or that raised (`CoreML`'s exception, caught).
+    /// `prepare` fails with this after recording the call.
     pub prepare_failure: Option<String>,
-    /// A buffer whose peak stays below this is silence and yields no
-    /// segment, the way a real engine hears a tap that recorded nothing.
-    /// `None` (the default) transcribes every buffer.
+    /// A buffer whose peak stays below this is silence and yields no segment;
+    /// `None` transcribes every buffer.
     pub silent_below_peak: Option<f32>,
     pub transcriptions: CallLog<TranscribeCall>,
     pub preparations: CallLog<()>,
@@ -64,10 +59,8 @@ impl Default for FakeSpeechEngine {
 }
 
 impl FakeSpeechEngine {
-    /// The segments for `duration` seconds: one per `segment_seconds`, each
-    /// starting exactly where the previous one ended, the last one clipped
-    /// to the end; when asked, one word timing per word of the text, evenly
-    /// spaced, the last word ending exactly at the segment's `end`.
+    /// The segments for `duration` seconds, each starting where the previous one
+    /// ended; when asked, evenly spaced word timings, the last ending at `end`.
     #[must_use]
     pub fn segments(
         duration: f64,
@@ -84,9 +77,7 @@ impl FakeSpeechEngine {
         let count = (duration / segment_seconds).ceil() as usize;
         (0..count)
             .map(|index| {
-                // Exact: segment indexes are small. Both bounds come from
-                // the index so neighbouring segments share a boundary bit
-                // for bit.
+                // Both bounds come from the index so neighbours share a boundary bit for bit.
                 #[allow(clippy::cast_precision_loss)]
                 let start = index as f64 * segment_seconds;
                 #[allow(clippy::cast_precision_loss)]
@@ -106,9 +97,7 @@ impl FakeSpeechEngine {
                             WordTiming {
                                 word: (*word).to_owned(),
                                 start: start + offset * step,
-                                // `start + 3 * step` can miss `end` by an
-                                // ulp; the last word ends where the
-                                // segment does.
+                                // The last word ends where the segment does, not an ulp off.
                                 end: if index == last {
                                     end
                                 } else {
@@ -179,8 +168,7 @@ impl SpeechEngine for FakeSpeechEngine {
 pub type DiarizationFn = dyn Fn(&AudioBuffer16k) -> DiarizationResult + Send + Sync;
 
 /// A `Diarizer` that hands out `cluster_count` speakers round-robin over
-/// `turn_seconds` turns, with unit embeddings along successive axes and a
-/// sample clip range of at most ten seconds from the cluster's first turn.
+/// `turn_seconds` turns, with unit embeddings along successive axes.
 pub struct FakeDiarizer {
     pub cluster_count: usize,
     pub turn_seconds: f64,
@@ -340,8 +328,7 @@ mod tests {
 
     #[test]
     fn segments_share_their_boundaries_bit_for_bit() {
-        // 0.7 s steps over 10 s: a boundary summed from the previous end
-        // would drift by an ulp from one computed from the index.
+        // 0.7 s steps: a boundary summed from the previous end would drift.
         let segments = FakeSpeechEngine::segments(10.0, 0.7, None, "fake", true);
         assert_eq!(segments.len(), 15);
         assert_eq!(segments[0].start, 0.0);
@@ -357,8 +344,6 @@ mod tests {
 
     #[test]
     fn the_last_word_ends_where_its_segment_does() {
-        // Over 0.9 s steps `start + 3 * step` misses `end` by an ulp in two
-        // of the fourteen segments.
         let segments = FakeSpeechEngine::segments(12.0, 0.9, None, "fake", true);
         assert_eq!(segments.len(), 14);
         for segment in &segments {
@@ -416,7 +401,6 @@ mod tests {
         );
         assert_eq!(first.embedding.as_ref().unwrap().0[0], 1.0);
         assert_eq!(result.clusters[1].embedding.as_ref().unwrap().0[1], 1.0);
-        // Confidence falls by a tenth per cluster from 0.9, in `f32`.
         assert_eq!(first.cluster_confidence, 0.9);
         assert_eq!(result.clusters[1].cluster_confidence, 0.9_f32 - 0.1);
         assert_eq!(diarizer.diarizations.entries(), vec![40.0]);

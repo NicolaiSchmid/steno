@@ -1,27 +1,9 @@
 //! The consumer wake-up behind the rings and the level slot: a counting
-//! signal the producer raises without a lock and the consumer waits on
-//! with a timeout. Swift uses a `DispatchSemaphore`; this is the same
-//! shape over a futex-free `Mutex<u32>` and `Condvar`, taken only on the
-//! consumer side and in `signal` when a waiter is actually parked.
-//!
-//! The producer path (`signal`) is an atomic increment plus, when the
-//! consumer is parked, one `notify_one`. `notify_one` is the one call on
-//! the real-time path that is not a plain atomic; it takes no lock in the
-//! std implementation on macOS and Linux (a futex or `ulock` wake syscall),
-//! and the IOProc in Swift pays the same `DispatchSemaphore.signal` cost.
-//!
-//! The hand-off is the store/load pattern (producer: bump `pending`, then
-//! read `parked`; consumer: set `parked`, then read `pending`), which
-//! needs `SeqCst` on those four accesses so at least one side sees the
-//! other; `Release`/`Acquire` alone would let both miss. What remains is
-//! a `notify_one` that lands after the consumer's re-check and before its
-//! `wait_timeout`, since the producer takes no lock: that wake waits out
-//! the timeout (20 ms on the processing thread, 50 ms on the writer, 100 ms
-//! on the level publisher), and the rings hold the frames meanwhile (the
-//! level slot its latest levels). That same bounded cost is all a
-//! weaker ordering would add, so no test tells `SeqCst` from `Relaxed`
-//! here; `tests/ring.rs` pins the wake itself (a parked consumer is woken
-//! by `signal`, not by its timeout).
+//! signal the producer raises without a lock (an atomic increment, plus one
+//! `notify_one` when the consumer is parked) and the consumer waits on with
+//! a timeout. The hand-off needs `SeqCst` on `pending` and `parked` so at
+//! least one side sees the other; a wake that still slips past costs one
+//! timeout, while the rings hold the frames.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -43,7 +25,6 @@ impl Default for Wake {
 }
 
 impl Wake {
-    /// Nothing pending, nobody parked.
     #[must_use]
     pub fn new() -> Self {
         Self {

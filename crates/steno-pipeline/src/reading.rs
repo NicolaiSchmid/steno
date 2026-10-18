@@ -1,82 +1,8 @@
-//! The breaker for a recording that takes the app down while it is read
-//! (A17 of `.plans/2026-10-07-stable-promotion.md`). Symphonia sizes some
-//! allocations straight from a file's fields, and a failed allocation
-//! aborts the process, which no `catch_unwind` stops; on the Mac, `CoreML`
-//! runs in the app's process, and an abort inside it that no `@catch`
-//! stops ends the app too. Unguarded, such a file ends the app at every
-//! launch: recovery reads it again, and the launch resumes its meeting.
-//! Rust only: Swift had no recovery to loop through.
-//!
-//! - **The mark.** Before a read of a meeting's recording, a file in
-//!   [`ReadingMarks::FOLDER`] under the support directory names the
-//!   meeting, the asset, the file, the [`ReadStage`] and the attempt. It is
-//!   written durably (synced, renamed, the folder synced), so it is on disk
-//!   before the reader sees a byte, and removed the same way when the read
-//!   returns, with an error or a panic too. Each read has a file of its own
-//!   (a random name), so two reads never share one. The pipeline writes
-//!   and removes it off the async workers ([`ReadingMarks::marked`]), as
-//!   both sync the disk.
-//! - **What is marked.** Every read of a recording in the app's process:
-//!   the decode of each lane (for the transcript and the diarizer), the
-//!   persist stage's mixdown, recovery's read of an adopted recording's
-//!   declared length (`steno-services`); and, where the speech engine runs
-//!   in the app's process (`CoreML` on the Mac), the job's load of the
-//!   engine and each transcription; such a mark left over also turns the
-//!   speech sidecar on in the engine's place
-//!   ([`SpeechFallback`](crate::SpeechFallback)). Process again and the
-//!   CLI's `process` and `reprocess` run the same stages. The speech
-//!   sidecar and the diarizer run in a child, whose abort ends only the
-//!   child.
-//! - **An orderly exit** ([`ReadingMarks::exiting`], from
-//!   [`ProcessingPipeline::quit`]) removes the marks of the reads still
-//!   running, and those of a meeting Process again released, and writes no
-//!   more: the exit ended them, not the file. A run that finishes after
-//!   the quit began still reads through.
-//! - **The launch check** ([`ReadingMarks::at_launch`]): every mark left
-//!   in the folder is a read that ended with the app (the database lock
-//!   keeps a second process out). A force quit, a power loss or a restart
-//!   for an update ends a healthy read the same way, so the breaker
-//!   counts:
-//!   - a meeting's first read that ended with the app costs nothing: the
-//!     launch says so at `warn`, and the meeting is processed again as any
-//!     unfinished one is; its reads are marked as a second attempt;
-//!   - a second attempt that ended with the app quarantines the meeting:
-//!     it fails with [`READ_STOPPED`], its asset loses a retention stamp so
-//!     no sweep takes the file, and the launch logs it once at `warn`;
-//!   - a run of the meeting whose reads all returned starts the count
-//!     again ([`ReadingMarks::read_through`]). A read alone does not: a run
-//!     reads a recording several times, and an earlier read that returns
-//!     must not hide a later one that ends the app.
-//!
-//!   A mark whose meeting has no row yet (an orphan the launch was
-//!   adopting) counts the same for the adoption, which adopts a
-//!   quarantined recording failed and unread; one whose meeting and file
-//!   are both gone is removed. So is one beside a meeting that is ready, or
-//!   failed for another reason: only a run that returned writes those.
-//! - **Never touched again automatically.** A quarantined meeting's
-//!   marks stay on disk: they are the quarantine. The launch resume, the
-//!   resumes after a model install or a busy store, and the adoption skip
-//!   it ([`ReadingMarks::holds`]); the re-exports read no recording.
-//! - **Process again** (the app's, and `steno process --meeting` or
-//!   `steno reprocess`) releases the meeting ([`ReadingMarks::release`])
-//!   and tries once more, as a second attempt: a crash in it quarantines
-//!   the meeting again, a quit does not.
-//!
-//! The cost of a false alarm: two unclean ends in a row while the same
-//! recording is read fail that one meeting with Process again offered, and
-//! nothing is lost. Two more cases count a crash against a recording that
-//! did not cause it:
-//! - a `CoreML` abort in a recording's warm-up while this meeting's load
-//!   or transcription waits for the engine behind it (`OneCallAtATime` in
-//!   `steno-services`, which the pipeline cannot see): the Transcribe mark
-//!   spans that wait. The jobs take their turn at the engine before they
-//!   mark ([`crate::live_recording`]), so one job's abort no longer counts
-//!   against another waiting for its turn;
-//! - a crash in a resumed meeting's read while the launch reads an
-//!   orphan's length beside it: the adoption runs last, on a blocking
-//!   task, so a folder that is slow to answer delays no resume
-//!   (`reconcile_at_launch` in `steno-services`). Twice in a row, and the
-//!   orphan is listed failed and unread, its file kept.
+//! The breaker for a recording that takes the app down while it is read: a
+//! durable mark names each read before it starts and goes when it returns
+//! or the app quits ([`ProcessingPipeline::quit`]). A mark left at launch is
+//! a read that ended with the app; the first costs nothing, a second in a
+//! row quarantines the meeting with [`READ_STOPPED`] until Process again.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -98,7 +24,7 @@ use crate::pipeline::off_the_workers;
 #[cfg(doc)]
 use crate::ProcessingPipeline;
 
-/// The reason a quarantined meeting fails with: one sentence, as the list
+/// The reason a quarantined meeting fails with; one sentence, as the list
 /// shows only the first.
 pub const READ_STOPPED: &str = "Steno stopped while reading this recording; the recording is kept.";
 
@@ -125,8 +51,7 @@ struct Mark {
     path: PathBuf,
     stage: ReadStage,
     started_at: DateTime<Utc>,
-    /// 0 for a first attempt, 1 for one after a read that ended with the
-    /// app.
+    /// 0 for a first attempt, 1 for one after a read that ended with the app.
     #[serde(default)]
     attempt: u32,
 }
@@ -136,15 +61,12 @@ pub struct ReadingMarks {
     /// `None` in memory: nothing is written.
     folder: Option<PathBuf>,
     syncs: Arc<dyn Syncs + Send + Sync>,
-    /// What the launch found; never held across a sync, so
-    /// [`holds`](Self::holds) never waits on the disk.
+    /// What the launch found; never held across a sync.
     found: Mutex<Found>,
-    /// Every mark of this process that may be on disk: each write or
-    /// removal of one happens under this lock, so the exit, which takes
-    /// it, removes every one and no write follows.
+    /// Every mark of this process that may be on disk; each write or
+    /// removal happens under this lock, so the exit removes every one.
     open: Mutex<Open>,
-    /// Set by the exit, before it takes `found` or `open`: no read is
-    /// marked any more.
+    /// Set by the exit before it takes `found` or `open`.
     exit_begun: AtomicBool,
 }
 
@@ -161,12 +83,10 @@ impl std::fmt::Debug for ReadingMarks {
 struct Found {
     /// The meetings quarantined, with their marks' files.
     held: HashMap<Uuid, Vec<PathBuf>>,
-    /// The meetings on their second attempt, with the marks of the
-    /// first, which go once a run reads through.
+    /// The meetings on their second attempt, with the first attempt's marks.
     retrying: HashMap<Uuid, Retry>,
-    /// The names of the marks kept of an in-process speech engine's load
-    /// or transcription ([`ReadStage::Transcribe`]), for the fallback
-    /// ([`crate::SpeechFallback`]).
+    /// The kept marks of an in-process speech engine's load or
+    /// transcription, for the speech fallback.
     speech: BTreeSet<String>,
 }
 
@@ -175,8 +95,7 @@ struct Retry {
     files: Vec<PathBuf>,
     /// Whether a read of the second attempt began.
     read: bool,
-    /// Released by Process again: an orderly exit removes the marks too,
-    /// so a quit before the run reads through does not quarantine it again.
+    /// Released by Process again: an orderly exit removes the marks too.
     released: bool,
 }
 
@@ -205,12 +124,10 @@ impl ReadingMarks {
         }
     }
 
-    /// The launch check over the marks in `support_directory` (see the
-    /// module doc): a meeting with a mark of a second attempt left there
-    /// is quarantined in `store`, one with only a first attempt's is tried
-    /// once more. Call it once per launch, before anything reads a
-    /// recording. A store that refuses the write leaves the meeting as it
-    /// is, still held for this session, and the next launch tries again.
+    /// The launch check: a meeting with a second attempt's mark left is
+    /// quarantined in `store`, one with only a first attempt's is tried once
+    /// more. Call once per launch, before anything reads a recording. A
+    /// refused store write leaves the meeting held for this session only.
     pub fn at_launch(support_directory: &Path, store: &Store, now: DateTime<Utc>) -> Self {
         Self::at_launch_with(support_directory, store, now, Arc::new(Disk))
     }
@@ -241,8 +158,7 @@ impl ReadingMarks {
             let asset_id = left.iter().find_map(|mark| mark.asset_id);
             let started = left.iter().map(|mark| mark.started_at).min();
             match store.meeting(meeting_id) {
-                // A run that returned wrote this state: no read of it
-                // ended with the app, whatever an exit left on disk.
+                // Only a run that returned writes this state.
                 Ok(Some(meeting)) if finished(&meeting.state) => {
                     for file in files {
                         let _ = remove_durably_with(&*syncs, &file);
@@ -287,10 +203,7 @@ impl ReadingMarks {
     }
 
     /// The names of the marks the launch kept of an in-process speech
-    /// engine's load or transcription ([`ReadStage::Transcribe`]): each is
-    /// one that ended with the app, which turns the fallback on
-    /// ([`crate::SpeechFallback`]). The marks beside a finished meeting,
-    /// which the launch removed, are not among them.
+    /// engine's load or transcription; each turns the speech fallback on.
     #[must_use]
     pub fn speech_marks_left(&self) -> BTreeSet<String> {
         self.found().speech.clone()
@@ -302,16 +215,11 @@ impl ReadingMarks {
         self.found().held.contains_key(&meeting_id)
     }
 
-    /// Process again: `meeting_id` is no longer held, and its next run
-    /// reads the recording once more, as a second attempt. Its marks stay
-    /// on disk until that run reads through, so a crash before it reads
-    /// quarantines it again; an orderly exit removes them
-    /// ([`exiting`](Self::exiting)).
+    /// Process again: `meeting_id` is no longer held and its next run is a
+    /// second attempt. Its marks stay until that run reads through.
     ///
-    /// Writes nothing unless the exit has begun. Then the exit may already
-    /// have taken the released marks, and the run will not read, so this
-    /// removes them itself, syncing the disk on the caller's thread as
-    /// Process again's store writes do.
+    /// Writes nothing unless the exit has begun; then the exit may already
+    /// have taken the released marks, so this removes them itself.
     pub fn release(&self, meeting_id: Uuid) {
         {
             let mut found = self.found();
@@ -327,8 +235,8 @@ impl ReadingMarks {
                 },
             );
         }
-        // After the insert, as `exiting` sets the flag before it takes the
-        // released marks: one of the two takes these, never both.
+        // `exiting` sets the flag before it takes the released marks: one
+        // of the two takes these, never both.
         if !self.exit_begun.load(Ordering::SeqCst) {
             return;
         }
@@ -345,9 +253,8 @@ impl ReadingMarks {
         );
     }
 
-    /// A run of `meeting_id` ended with every read it began returned: the
-    /// count starts again, and the marks of an attempt that ended with
-    /// the app go. Syncs the disk for a meeting on its second attempt.
+    /// A run of `meeting_id` returned every read it began: the count starts
+    /// again and the earlier attempt's marks go.
     pub fn read_through(&self, meeting_id: Uuid) {
         let files = match self.found().retrying.entry(meeting_id) {
             Entry::Occupied(retry) if retry.get().read => retry.remove().files,
@@ -360,8 +267,7 @@ impl ReadingMarks {
         );
     }
 
-    /// Removes `files`, the marks of `meeting_id`, logging a failure at
-    /// `warn` as `what`.
+    /// Removes `files`, the marks of `meeting_id`, logging failures as `what`.
     fn remove_all(&self, meeting_id: Uuid, files: Vec<PathBuf>, what: &str) {
         for file in files {
             if let Err(error) = remove_durably_with(&*self.syncs, &file) {
@@ -370,12 +276,10 @@ impl ReadingMarks {
         }
     }
 
-    /// A read of `path`, the recording of `meeting_id` (`asset_id` once it
-    /// has one), in `stage`, begins: the mark is on disk before this
-    /// returns, and goes when the guard drops. Syncs the disk: the pipeline
-    /// calls [`marked`](Self::marked) instead. A mark that cannot be
-    /// written leaves the read unguarded, logged at `warn`; whatever of it
-    /// reached the disk still goes with the guard.
+    /// A read of `path`, the recording of `meeting_id`, in `stage` begins:
+    /// the mark is on disk before this returns and goes when the guard
+    /// drops. Syncs the disk; async callers use [`marked`](Self::marked). A
+    /// mark that cannot be written leaves the read unguarded.
     pub fn reading(
         self: &Arc<Self>,
         meeting_id: Uuid,
@@ -398,8 +302,7 @@ impl ReadingMarks {
                 retry.read = true;
                 1
             });
-        // Read under `open`: the exit sets the flag before it takes the
-        // lock, so a mark listed here is one the exit removes.
+        // The exit sets the flag before it takes this lock.
         let mut open = self.open();
         if self.exit_begun.load(Ordering::SeqCst) {
             return reading;
@@ -413,8 +316,7 @@ impl ReadingMarks {
             attempt,
         };
         let file = folder.join(format!("{}.json", Uuid::new_v4()));
-        // Listed before the write: a write that fails after its rename
-        // leaves the file, which the guard and the exit still remove.
+        // Listed before the write, so a file left by a failed write still goes.
         open.files.insert(file.clone());
         reading.file = Some(file.clone());
         let written = create_dir_all_durably_with(&*self.syncs, folder)
@@ -426,11 +328,9 @@ impl ReadingMarks {
         reading
     }
 
-    /// `read`, marked as [`reading`](Self::reading) marks it, with the
-    /// mark written and removed off the async workers. The guard is made
-    /// on the blocking pool and handed back, so a caller cancelled while
-    /// the write runs drops it there, and its mark goes. With the runtime
-    /// shutting down, `read` runs unmarked.
+    /// `read`, marked as [`reading`](Self::reading) marks it, with the mark
+    /// written and removed on the blocking pool. With the runtime shutting
+    /// down, `read` runs unmarked.
     pub async fn marked<T>(
         self: &Arc<Self>,
         meeting_id: Uuid,
@@ -449,13 +349,10 @@ impl ReadingMarks {
         value
     }
 
-    /// The orderly exit: the marks of the reads still running go, and so
-    /// do those of a meeting Process again released, and no read is marked
-    /// any more. Syncs the disk: the async callers run it on the blocking
-    /// pool and wait for it.
+    /// The orderly exit: the marks of running reads and released meetings
+    /// go, and no read is marked any more. Syncs the disk.
     pub fn exiting(&self) {
-        // Set before the released marks are taken, so a `release` that
-        // comes after the take sees it and removes its own.
+        // Before the take, so a later `release` removes its own.
         self.exit_begun.store(true, Ordering::SeqCst);
         let released: Vec<PathBuf> = self
             .found()
@@ -476,8 +373,8 @@ impl ReadingMarks {
         });
     }
 
-    /// The guard of `file` dropped: the read returned. A removal that fails
-    /// keeps the file listed, so the exit tries again.
+    /// The guard of `file` dropped. A failed removal keeps the file listed
+    /// for the exit.
     fn close(&self, file: &Path) {
         let mut open = self.open();
         if !open.files.contains(file) {
@@ -518,8 +415,8 @@ impl Drop for Reading {
     }
 }
 
-/// The marks in `folder` with their files; a file that does not parse
-/// (not one this module wrote) is logged and left.
+/// The marks in `folder` with their files; a file that does not parse is
+/// logged and left.
 fn read_folder(folder: &Path) -> Vec<(PathBuf, Mark)> {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Vec::new();
@@ -541,8 +438,7 @@ fn read_folder(folder: &Path) -> Vec<(PathBuf, Mark)> {
 }
 
 /// Whether `state` is one only a run that returned writes: `ready`, or
-/// `failed` for any reason but [`READ_STOPPED`]. A run's meeting is
-/// `queued` or `processing` before its first read, both written first.
+/// `failed` for any reason but [`READ_STOPPED`].
 fn finished(state: &MeetingState) -> bool {
     match state {
         MeetingState::Ready => true,
@@ -551,8 +447,8 @@ fn finished(state: &MeetingState) -> bool {
     }
 }
 
-/// Fails `meeting` with [`READ_STOPPED`] unless it already says so, and
-/// takes its asset's retention stamp, so no sweep removes the file.
+/// Fails `meeting` with [`READ_STOPPED`] and takes its asset's retention
+/// stamp, so no sweep removes the file.
 fn quarantine(store: &Store, meeting: &steno_core::Meeting, now: DateTime<Utc>) {
     let failed = MeetingState::Failed {
         reason: READ_STOPPED.to_owned(),
@@ -582,9 +478,8 @@ mod tests {
 
     use super::*;
 
-    /// A store with one meeting in processing, as while its recording is
-    /// read, whose asset carries a retention stamp, its master written
-    /// under `dir`.
+    /// A store with one meeting in processing whose asset carries a
+    /// retention stamp.
     fn store_with_meeting(dir: &Path) -> (Store, steno_core::Meeting, AudioAsset) {
         let store = Store::open(dir.join("steno.sqlite")).unwrap();
         let mut meeting = steno_core::testing::sample_data::meeting();
@@ -639,11 +534,8 @@ mod tests {
         assert!(!marks.holds(meeting.id));
     }
 
-    /// The first read that ended with the app costs nothing: the meeting
-    /// is read once more. The second in a row fails it with the plain
-    /// reason, takes the retention stamp off its asset and keeps the file;
-    /// it stays held, at the next launch too, until Process again releases
-    /// it, whose run is a second attempt again.
+    /// A first crash costs nothing; a second quarantines the meeting until
+    /// Process again releases it.
     #[test]
     fn the_second_read_in_a_row_that_ends_with_the_app_quarantines_its_meeting() {
         let dir = tempfile::tempdir().unwrap();
@@ -689,9 +581,8 @@ mod tests {
         assert!(!launch(dir.path(), &store).holds(meeting.id));
     }
 
-    /// A run that reads through starts the count again, so a later crash
-    /// is a first one; a run that read nothing (refused before it read)
-    /// keeps the count.
+    /// A run that reads through resets the count; one that read nothing
+    /// keeps it.
     #[test]
     fn a_run_that_reads_through_starts_the_count_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -711,9 +602,7 @@ mod tests {
         );
     }
 
-    /// An orphan the launch was adopting has no row: its marks count the
-    /// same, and stay held while the file is there; they go once the file
-    /// is gone too.
+    /// An orphan's marks count the same and stay while its file is there.
     #[test]
     fn an_orphans_marks_wait_for_the_adoption_and_go_with_its_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -733,8 +622,7 @@ mod tests {
         assert_eq!(on_disk(dir.path()), 0);
     }
 
-    /// The exit ended the reads still running, not their files: their
-    /// marks go, and a read after it is not marked.
+    /// The exit removes the running reads' marks and marks no later read.
     #[test]
     fn the_exit_removes_the_open_marks_and_marks_no_more() {
         let dir = tempfile::tempdir().unwrap();
@@ -753,10 +641,8 @@ mod tests {
         assert_eq!(on_disk(dir.path()), 0);
     }
 
-    /// A released meeting's marks go with an orderly exit, as an open
-    /// read's do, and the exit forgets every mark it removed: Process
-    /// again, then a quit before the run reads, holds nothing at the next
-    /// launch.
+    /// A released meeting's marks go with an orderly exit, so a quit before
+    /// its run reads holds nothing at the next launch.
     #[test]
     fn the_exit_removes_a_released_meetings_marks() {
         let dir = tempfile::tempdir().unwrap();
@@ -776,9 +662,7 @@ mod tests {
         assert!(!launch(dir.path(), &store).holds(meeting.id));
     }
 
-    /// Process again that races the quit, released after the exit took
-    /// the released marks: `release` removes them itself, as the run will
-    /// not read, so the next launch holds nothing.
+    /// A release after the exit took the released marks removes them itself.
     #[test]
     fn a_release_after_the_exit_removes_its_marks() {
         let dir = tempfile::tempdir().unwrap();
@@ -796,10 +680,8 @@ mod tests {
         assert!(!launch(dir.path(), &store).holds(meeting.id));
     }
 
-    /// Marks left beside a meeting that a run finished, ready or failed for
-    /// another reason, are no crash: the launch removes them and leaves the
-    /// meeting as it is. A meeting failed for a read that ended with the
-    /// app stays held.
+    /// Marks beside a finished meeting are removed and the meeting left as
+    /// it is; one failed with `READ_STOPPED` stays held.
     #[test]
     fn marks_beside_a_finished_meeting_are_removed() {
         let failed = |reason: &str| MeetingState::Failed {
@@ -829,10 +711,8 @@ mod tests {
         }
     }
 
-    /// The syncs of the tests below: the disk's, with the folder's sync
-    /// failing once `fail_folder` is set, and every file's sync waiting at
-    /// `gate` until it opens, or for five seconds (`timed_out`): a sync on
-    /// the one async worker would hold the test there.
+    /// The tests' syncs: the folder's fails once `fail_folder` is set, and
+    /// every file's waits at `gate` until it opens, or five seconds.
     #[derive(Default)]
     struct Gated {
         fail_folder: AtomicBool,
@@ -893,9 +773,7 @@ mod tests {
         ))
     }
 
-    /// A mark whose write fails after its rename (the folder's sync, as
-    /// on Windows) is on disk all the same, and goes with its guard: the
-    /// next launch finds nothing.
+    /// A mark whose write fails after its rename still goes with its guard.
     #[test]
     fn a_mark_whose_write_failed_after_the_rename_goes_with_its_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -913,9 +791,8 @@ mod tests {
         assert!(!launch(dir.path(), &store).holds(meeting.id));
     }
 
-    /// A slow sync of the mark keeps the one async worker free: another
-    /// task runs, and [`ReadingMarks::holds`] answers, while it waits; the
-    /// read begins once the mark is on disk, and the mark goes after.
+    /// A slow mark sync keeps the one async worker free; the read begins once
+    /// the mark is on disk.
     #[tokio::test(flavor = "current_thread")]
     async fn a_slow_mark_sync_does_not_hold_the_async_worker() {
         let dir = tempfile::tempdir().unwrap();

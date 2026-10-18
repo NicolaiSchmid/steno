@@ -1,5 +1,4 @@
 //! The cleanup pass.
-//! Swift: `TranscriptCleaner` in `Sources/StenoCore/Protocols/PipelineBoundaries.swift`.
 
 use async_trait::async_trait;
 

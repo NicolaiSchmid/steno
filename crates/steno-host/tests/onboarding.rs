@@ -1,7 +1,6 @@
-//! Onboarding through the host and the view model, ported from
-//! `OnboardingViewModelTests` and `OnboardingBridgeTests`.
+//! Onboarding through the host and the view model.
 
-// The ported suites keep one Swift test per function, long as some are.
+// Some tests are long.
 #![allow(clippy::too_many_lines)]
 
 mod common;
@@ -19,8 +18,7 @@ use steno_core::AudioRetention;
 use steno_host::onboarding::OnboardingViewModel;
 use steno_host::speech::ModelAsset;
 
-/// A harness whose speech models are installed, so onboarding shows no
-/// speech models row: every test here but the ones about that row.
+/// A harness with the speech models installed.
 fn builder() -> HarnessBuilder {
     Harness::builder().seed(|_, fakes| install_speech_models(fakes))
 }
@@ -44,7 +42,6 @@ fn permissions(
     }
 }
 
-/// Swift: `testRetentionSentenceFollowsTheStoredRule`.
 #[test]
 fn the_retention_sentence_follows_the_stored_rule() {
     let harness = builder().build();
@@ -77,8 +74,8 @@ fn the_retention_sentence_follows_the_stored_rule() {
     );
 }
 
-/// Swift: `testStepsRunInOrderAndRequiredOnesGateCompletion`, `testOptionalStepsCanBeSkippedRequiredCannot`,
-/// `testRequestUpdatesOnlyTheRequestedStep`, `pageReadyPublishesAndPermissionCommandsRepublish`.
+/// A request updates only its step; page ready and the permission commands
+/// republish.
 #[test]
 fn steps_run_in_order_required_ones_gate_completion_and_optional_ones_can_be_skipped() {
     let harness = builder()
@@ -212,8 +209,7 @@ fn steps_run_in_order_required_ones_gate_completion_and_optional_ones_can_be_ski
     assert_eq!(harness.snapshot(BridgeTopic::Onboarding)["page"], "setup");
 }
 
-/// Swift: `testAlreadyGrantedPermissionsOpenOnTheSetupPage`, `testSkippingBothRowsFinishesAndSetsTheFlag`,
-/// `testFinishWithRowsOpenSetsTheFlag`, `cancelledChooserSkipAndFinish`.
+/// Finishing with rows open or after a cancelled chooser sets the flag.
 #[test]
 fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
     let harness = builder().choose(None).build();
@@ -255,8 +251,7 @@ fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
             .preferences
             .flag(OnboardingViewModel::COMPLETED_KEY)
     );
-    // Finishing closes the window from the host, after the page saw
-    // `finished` (Swift: `OnboardingWindow.onChange(of: finished)`).
+    // Finishing closes the window from the host, after the page saw `finished`.
     assert_eq!(
         *harness.fakes.opener.windows_closed.lock().unwrap(),
         vec![BridgeWindow::Onboarding]
@@ -312,8 +307,7 @@ fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
         1,
         "a later command does not close it again"
     );
-    // The window closed; one opened again starts over (on the setup page,
-    // every permission being granted), as Swift built a model per window,
+    // The window closed; one opened again starts over on the setup page,
     // and its Finish closes it again.
     open_rows.host.onboarding_window_closed();
     let reopened = open_rows.sink.last(BridgeTopic::Onboarding).unwrap();
@@ -325,7 +319,6 @@ fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
     );
 
     // The window's own close button: the flag alone, no further rule.
-    // Swift: `OnboardingWindow.onDisappear`.
     let closed = builder().build();
     assert!(
         !closed
@@ -343,9 +336,7 @@ fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
     assert_eq!(closed.snapshot(BridgeTopic::Onboarding)["finished"], false);
 }
 
-/// The Summaries form sends the Settings window's method names from both
-/// windows; each answers on its own model. Swift: `SummariesCommands` on
-/// `OnboardingBridge.model.llm`.
+/// The Summaries form's commands answer on the calling window's model.
 #[test]
 fn the_summaries_form_commands_answer_on_the_calling_windows_model() {
     let harness = builder()
@@ -358,15 +349,13 @@ fn the_summaries_form_commands_answer_on_the_calling_windows_model() {
     let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
     assert_eq!(onboarding.window(), BridgeWindow::Onboarding);
     assert_eq!(harness.host.window(), BridgeWindow::Main);
-    // A draft typed in the Settings window must not be what onboarding
-    // commits.
+    // A draft typed in Settings must not be what onboarding commits.
     harness
         .host
         .settings_summaries_update(update(Some("settings-draft"), None))
         .unwrap();
 
-    // selectPreset: the radio moves on page 2 and only there; what is
-    // stored is onboarding's own draft (the address, no model yet).
+    // selectPreset: the radio moves on page 2 only.
     harness.sink.clear();
     onboarding
         .settings_summaries_select_preset(SetStringParams {
@@ -376,8 +365,8 @@ fn the_summaries_form_commands_answer_on_the_calling_windows_model() {
     let page = harness.snapshot(BridgeTopic::Onboarding);
     assert_eq!(page["summaries"]["presetID"], "openAI");
     assert_eq!(page["summaries"]["baseURL"], "https://api.openai.com/v1");
-    // The Settings section follows the store once another window wrote
-    // it, as a reopened Swift window would: its unsaved draft is gone.
+    // The Settings section follows the store once another window wrote it:
+    // its unsaved draft is gone.
     let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
     assert_eq!(summaries["presetID"], "openAI");
     assert_eq!(summaries["model"], "");
@@ -457,8 +446,7 @@ fn the_summaries_form_commands_answer_on_the_calling_windows_model() {
         harness.snapshot(BridgeTopic::Onboarding)["setup"][0]["state"],
         "saved"
     );
-    // The Settings section follows the store once onboarding wrote it, as
-    // a reopened Swift window would have.
+    // The Settings section follows the store once onboarding wrote it.
     let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
     assert_eq!(summaries["presetID"], "openAI");
     assert_eq!(summaries["model"], "gpt-4.1-mini");
@@ -520,7 +508,7 @@ fn a_vault_saved_by_onboarding_survives_the_export_sections_save() {
     );
 }
 
-/// Swift: `testSavingSummariesConfiguresTheEndpointAndRebuildsThePipeline`, `setupCommandsReachTheModelsAndFinish`.
+/// The setup commands reach the models and finish.
 #[test]
 fn saving_summaries_configures_the_endpoint_and_rebuilds_the_pipeline() {
     let harness = builder().choose(Some("/Users/nicolai/Notes")).build();
@@ -591,10 +579,7 @@ fn saving_summaries_configures_the_endpoint_and_rebuilds_the_pipeline() {
     );
 }
 
-/// Page 2's vault save checks the vault with the host's lock released, as
-/// the Export section's does: while the check is held, the recorder's
-/// level hook and another command reach the host within [`LIVE`]; once it
-/// answers, the row is saved. Rust only.
+/// While page 2's vault check is held, other calls reach the host within [`LIVE`].
 #[test]
 fn a_held_vault_check_on_page_two_leaves_the_host_live() {
     let harness = builder().choose(Some("/Users/nicolai/Notes")).build();
@@ -623,9 +608,6 @@ fn a_held_vault_check_on_page_two_leaves_the_host_live() {
     );
 }
 
-/// Page 2: vault A chosen and accepted, then vault B chosen and refused:
-/// the row does not say B is saved, since the second save began unsaved,
-/// and the store keeps A. Rust only.
 #[test]
 fn a_refused_vault_after_an_accepted_one_is_not_marked_saved() {
     let harness = builder()
@@ -664,9 +646,6 @@ fn a_refused_vault_after_an_accepted_one_is_not_marked_saved() {
     );
 }
 
-/// Page 2: another vault chosen, then the stored one again while the
-/// first choice's check runs: the stored vault stays, as the row shows.
-/// Rust only: Swift's checks ran one at a time.
 #[test]
 fn the_stored_vault_chosen_again_on_page_two_while_a_check_runs_stays_stored() {
     let harness = builder()
@@ -714,7 +693,7 @@ fn the_stored_vault_chosen_again_on_page_two_while_a_check_runs_stays_stored() {
     );
 }
 
-/// Swift: `testSavingTheVaultValidatesThroughTheDestination`, `vaultRowReadsTheObsidianModel`.
+/// The vault row reads the Obsidian model.
 #[test]
 fn saving_the_vault_validates_through_the_destination() {
     let harness = builder()
@@ -744,7 +723,6 @@ fn saving_the_vault_validates_through_the_destination() {
     assert!(harness.store.settings().unwrap().obsidian.is_some());
 }
 
-/// Swift: `testChatGPTChoiceOnTheSummariesRow`, `testAStoredCodexConfigurationCollapsesTheSummariesRow`.
 #[test]
 fn the_chatgpt_choice_collapses_the_summaries_row_once_confirmed() {
     let harness = builder()
@@ -771,9 +749,8 @@ fn the_chatgpt_choice_collapses_the_summaries_row_once_confirmed() {
         "the row's preset is not ChatGPT"
     );
 
-    // The onboarding form's own preset switch is the Settings method on the
-    // host's Summaries model; the onboarding model follows the store on its
-    // next load, as a stored Codex configuration collapses the row.
+    // The onboarding form's preset switch is the Settings method on the
+    // host's Summaries model; the onboarding model follows the store.
     let mut settings = harness.store.settings().unwrap();
     settings.llm_provider = steno_core::LlmProvider::Codex;
     settings.codex_model = Some("gpt-5.1-codex".to_owned());
@@ -800,7 +777,7 @@ fn the_chatgpt_choice_collapses_the_summaries_row_once_confirmed() {
     assert_eq!(onboarding["canSaveSummaries"], false, "ChatGPT has no Save");
 }
 
-/// Swift: `testShouldOpenFollowsTheFlagAndTheRequiredPermissions`, `testConfiguredInstallWithoutTheFlagDoesNotOpen`.
+/// A configured install without the flag does not open.
 #[test]
 fn should_open_follows_the_flag_and_the_required_permissions() {
     let harness = builder().build();
@@ -863,8 +840,7 @@ fn should_open_follows_the_flag_and_the_required_permissions() {
     );
 }
 
-/// Swift: `testCurrentIsDerivedForEveryPermissionCombination` and `testDeniedStepsStayCurrentAndOpenSettings`,
-/// on the model alone.
+/// Denied steps stay current and open Settings; on the model alone.
 #[test]
 fn current_is_the_first_unhandled_step() {
     let mut model = OnboardingViewModel::new(Platform::Macos);
@@ -891,9 +867,7 @@ fn current_is_the_first_unhandled_step() {
     );
 }
 
-/// The Swift import's step (Rust only): it comes before page 1 while the
-/// import has work left, whatever the copied flag says, shows the prompts
-/// while they are up, and moves on once the identity came over.
+/// It shows the prompts while they are up.
 #[test]
 fn the_import_step_comes_first_and_moves_on_once_the_identity_came_over() {
     let plain = builder().build();
@@ -944,10 +918,7 @@ fn the_import_step_comes_first_and_moves_on_once_the_identity_came_over() {
     );
 }
 
-/// After the handoff (stable plan S3): the import copied the Swift app's
-/// completed flag, but macOS keeps the grants per bundle identifier, so
-/// the new app has none. Onboarding opens, and once the import step is
-/// done it lands on its permissions page, not on page 2.
+/// The copied completed flag does not hide grants macOS keeps per bundle id.
 #[test]
 fn after_the_handoff_a_missing_grant_lands_on_the_permissions_page() {
     let harness = builder()
@@ -1010,9 +981,6 @@ fn closing_the_window_over_the_step_skips_it() {
     assert_eq!(*import.runs.lock().unwrap(), 0);
 }
 
-/// A second Continue or Try again while the first run's prompts are up
-/// runs nothing: no second prompt comes up, and the page keeps showing
-/// the prompts until the first run's outcome.
 #[test]
 fn a_second_import_while_one_runs_does_nothing() {
     let harness = builder().with_swift_import(2).build();
@@ -1038,9 +1006,7 @@ fn a_second_import_while_one_runs_does_nothing() {
     );
 }
 
-/// Not now while Continue's prompts are up does nothing: the run decides,
-/// and a run that leaves the identity behind stays on the step with Try
-/// again.
+/// Not now while Continue's prompts are up does nothing: the run decides.
 #[test]
 fn not_now_while_the_import_runs_leaves_the_step_to_the_run() {
     let harness = builder().with_swift_import(2).build();
@@ -1068,13 +1034,8 @@ fn not_now_while_the_import_runs_leaves_the_step_to_the_run() {
     assert_eq!(onboarding["swiftImport"]["state"], "waiting");
 }
 
-/// The system audio test plays a tone a recording would pick up. While a
-/// recording starts, runs or stops, neither onboarding nor Settings >
-/// Recording runs it: no request reaches the services, the row never
-/// shows Asking, and it says the test was refused for the recording.
-/// Once the recorder is idle the line goes, and the next press runs the
-/// test. A start during the test stops it (the services answer the state
-/// as it was), and the row says so too.
+/// Refused in onboarding and Settings alike, run again once idle; a start
+/// during the test stops it.
 #[test]
 fn the_system_audio_test_is_refused_while_recording() {
     use steno_bridge::RecordingState;
@@ -1126,8 +1087,7 @@ fn the_system_audio_test_is_refused_while_recording() {
         }
     }
 
-    // The recording ends: both rows drop the line before any press, at
-    // the reload owner's next pass, which the move asks for.
+    // The recording ends: both rows drop the line before any press.
     harness.fakes.recorder.set_status(RecorderStatus::idle());
     harness.sink.clear();
     harness.host.recorder_changed();
@@ -1146,8 +1106,7 @@ fn the_system_audio_test_is_refused_while_recording() {
     assert_eq!(row["state"], "granted");
     assert!(row.get("waitsForRecording").is_none(), "{row}");
 
-    // A start while the test runs: the services stop it and answer the
-    // state as it was.
+    // A start while the test runs: the services stop it.
     harness
         .fakes
         .permissions
@@ -1171,10 +1130,8 @@ fn the_system_audio_test_is_refused_while_recording() {
     assert_eq!(row["isRequesting"], false);
 }
 
-/// The Swift app's handoff as the new app finds it: the `CoreML` speech
-/// model in the Swift app's tree, so installed, but none of the speaker
-/// models the Rust diarizer runs; the import copied the completed flag and
-/// every grant is in place.
+/// The handoff as the new app finds it: the speech model installed, the
+/// speaker models missing, the flag copied, every grant in place.
 fn handoff_without_the_diarizer() -> HarnessBuilder {
     Harness::builder().seed(|_, fakes| {
         fakes
@@ -1186,11 +1143,7 @@ fn handoff_without_the_diarizer() -> HarnessBuilder {
     })
 }
 
-/// With only the speaker models missing, onboarding still opens at the
-/// first launch after the Swift app, on page 1 with the speech models row
-/// (not on page 2, though every permission is granted), and once this
-/// app's onboarding was closed, missing models open it no more: Settings
-/// and the meetings' own line say what is missing from then on.
+/// Once onboarding was closed, missing models open it no more.
 #[test]
 fn missing_speech_models_open_onboarding_on_page_one_until_it_offered_them() {
     let harness = handoff_without_the_diarizer().build();
@@ -1230,8 +1183,6 @@ fn missing_speech_models_open_onboarding_on_page_one_until_it_offered_them() {
     );
 }
 
-/// A fresh install misses every model: the row offers both, sized
-/// together.
 #[test]
 fn a_fresh_install_offers_every_model_on_one_row() {
     let harness = Harness::builder().build();
@@ -1245,9 +1196,7 @@ fn a_fresh_install_offers_every_model_on_one_row() {
     );
 }
 
-/// On a fresh install where the speech model came in and the speaker
-/// models failed, Retry starts only the speaker models, and the size is
-/// theirs alone.
+/// Speech model in, speaker models failed: Retry is sized for those alone.
 #[test]
 fn retry_after_a_partial_install_starts_only_the_missing_model() {
     let harness = Harness::builder().build();
@@ -1290,10 +1239,8 @@ fn retry_after_a_partial_install_starts_only_the_missing_model() {
     );
 }
 
-/// The row's Download is Settings' install (`settings.transcription.download`
-/// per id the row lists): the row follows its progress, reads installed
-/// afterwards and stays; a failed download offers Retry with the reason.
-/// Page 1 does not move on by itself while the row waits for a model.
+/// The row then reads installed or offers Retry with the reason; page 1 does
+/// not move on by itself while it waits.
 #[test]
 fn the_speech_models_row_downloads_through_settings_and_follows_it() {
     let harness = handoff_without_the_diarizer()
@@ -1347,8 +1294,7 @@ fn the_speech_models_row_downloads_through_settings_and_follows_it() {
             .all(|onboarding| onboarding["speechModels"]["assetIDs"] == json!([]))
     );
 
-    // Skipping the last open permission does not move on while the row
-    // waits; Continue still does.
+    // Skipping the last permission does not move on while the row waits.
     harness
         .host
         .onboarding_skip(PermissionKindParams {
@@ -1380,7 +1326,7 @@ fn the_speech_models_row_downloads_through_settings_and_follows_it() {
     );
 }
 
-/// The stored vault under Documents, as the Swift app left it.
+/// The stored vault under Documents.
 fn with_a_vault(store: &steno_core::Store, _: &steno_host::fakes::FakeServices) {
     store_vault(store, "/Users/nicolai/Documents/Work Vault");
 }
@@ -1405,10 +1351,7 @@ fn vault_row_is(state: &'static str) -> impl Fn(&Harness) -> bool {
     onboarding_row_is("vaultAccess", state)
 }
 
-/// Page 1 writes to the stored vault once, when the onboarding window's
-/// page is ready, so macOS asks for a protected folder there: the row
-/// reads checking, then writable. A second page ready and the page's
-/// commands check nothing more; the main window's page ready never checks.
+/// The row reads checking, then writable; nothing else checks again.
 #[test]
 fn the_stored_vault_is_checked_once_on_page_one() {
     let harness = builder()
@@ -1421,8 +1364,7 @@ fn the_stored_vault_is_checked_once_on_page_one() {
 
     let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
     onboarding.page_ready().unwrap();
-    // The row reads checking before the write starts, so that snapshot is
-    // out whether or not the write has ended by now.
+    // The row reads checking before the write starts.
     let checking = json!({ "name": "Work Vault", "state": "checking" });
     assert!(
         harness
@@ -1446,13 +1388,10 @@ fn the_stored_vault_is_checked_once_on_page_one() {
     );
 }
 
-/// The destination's refusal of a vault in Documents with Files and
-/// Folders off.
 const NOT_WRITABLE: &str =
     "The Obsidian vault at /Users/nicolai/Documents/Work Vault is not writable.";
 
-/// A refused write shows the destination's reason; Check again writes
-/// again, and Open System Settings opens Files and Folders.
+/// Open System Settings opens Files and Folders.
 #[test]
 fn a_refused_vault_says_why_and_check_again_checks_it_again() {
     let harness = builder()
@@ -1485,9 +1424,7 @@ fn a_refused_vault_says_why_and_check_again_checks_it_again() {
     assert_eq!(vault_checks(&harness), 2);
 }
 
-/// No vault stored, another platform, or a page other than page 1: no
-/// write, no row. The import step comes before page 1, so the check waits
-/// for the step to end.
+/// The check waits for the import step.
 #[test]
 fn no_vault_no_mac_or_not_on_page_one_checks_nothing() {
     let without = builder().seed(missing_microphone).build();
@@ -1552,11 +1489,7 @@ fn no_vault_no_mac_or_not_on_page_one_checks_nothing() {
     assert_eq!(vault_checks(&import), 1);
 }
 
-/// Nicolai's case (review M1 of the first launch): every grant in place,
-/// the models downloaded from the row after the vault was refused. Page 1
-/// does not move on by itself while the row is refused, and Check again
-/// writes to the vault again instead of leaving page 1 (or closing
-/// onboarding, with page 2 handled) without a new write.
+/// Every grant in place, the models downloaded after the vault was refused.
 #[test]
 fn check_again_with_everything_else_done_writes_again_and_stays_on_page_one() {
     let harness = handoff_without_the_diarizer()
@@ -1585,8 +1518,6 @@ fn check_again_with_everything_else_done_writes_again_and_stays_on_page_one() {
     assert_eq!(snapshot["finished"], false);
 }
 
-/// With the models in, the last permission granted while the vault row is
-/// refused leaves page 1 where it is; Continue still moves on.
 #[test]
 fn a_refused_vault_holds_page_one_until_continue() {
     let harness = builder()
@@ -1614,9 +1545,7 @@ fn a_refused_vault_holds_page_one_until_continue() {
     assert_eq!(harness.snapshot(BridgeTopic::Onboarding)["page"], "setup");
 }
 
-/// A vault that is not there (an unmounted disk) is not a Files and
-/// Folders refusal: the row reads unusable with the destination's words,
-/// and Check again checks again.
+/// A missing vault is not a Files and Folders refusal.
 #[test]
 fn a_missing_vault_reads_unusable_and_check_again_checks_it_again() {
     let missing = "The Obsidian vault at /Volumes/Disk/Work Vault does not exist.";
@@ -1638,7 +1567,6 @@ fn a_missing_vault_reads_unusable_and_check_again_checks_it_again() {
     assert_eq!(vault_checks(&harness), 2);
 }
 
-/// A stored vault whose path is blank is no vault: no write, no row.
 #[test]
 fn a_blank_vault_path_is_not_checked() {
     let harness = builder()

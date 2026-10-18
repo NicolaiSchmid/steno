@@ -5,8 +5,7 @@ name: Swift CI
 # on the GitHub-hosted macOS image; `ui-smoke` always runs hosted. Path-gated
 # so it does nothing for unrelated changes.
 #
-# What every run reports (see `.plans/2026-09-25-v1-program.md`, verification
-# standard): `swift format lint --strict`, `swift test --parallel
+# What every run reports: `swift format lint --strict`, `swift test --parallel
 # --xunit-output`, a step summary with totals and every skipped test's name and
 # message, and a failure when a skip message names none of the `STENO_*`
 # opt-in switches.

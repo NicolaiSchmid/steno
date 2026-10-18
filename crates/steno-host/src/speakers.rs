@@ -1,8 +1,7 @@
 //! The speakers of one meeting as the header row, the popover and the
-//! transcript pickers show them, after `Speakers/SpeakersViewModel.swift`
-//! and the core's `SpeakerOptions` and `SpeakerExcerpts`: one row per
-//! speaker from the current export, the ranked options a picker offers, the
-//! excerpt a row shows, and the one write, [`SpeakersViewModel::select`].
+//! transcript pickers show them: one row per speaker, the ranked options a
+//! picker offers, the excerpt a row shows, and the one write,
+//! [`SpeakersViewModel::select`].
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -16,8 +15,7 @@ use uuid::Uuid;
 
 use crate::services::{ClipPlayer, FileSystem};
 
-/// What choosing a row does. Swift: `SpeakerOptions.Option.Kind` in
-/// `Sources/StenoCore/Speakers/SpeakerOptions.swift`.
+/// What choosing a row does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OptionKind {
     /// Confirms the speaker as this person.
@@ -26,8 +24,7 @@ pub enum OptionKind {
     Create(String),
 }
 
-/// The trailing label that says why the row is offered. Swift:
-/// `SpeakerOptions.Option.Tag` in `Sources/StenoCore/Speakers/SpeakerOptions.swift`.
+/// The trailing label that says why the row is offered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionTag {
     SoundsLike,
@@ -48,7 +45,7 @@ impl OptionTag {
     }
 }
 
-/// One row of the picker. Swift: `SpeakerOptions.Option`.
+/// One row of the picker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeakerOption {
     pub kind: OptionKind,
@@ -74,7 +71,7 @@ impl SpeakerOption {
     }
 }
 
-/// Case- and diacritic-insensitive substring test. Swift: `SpeakerOptions.contains`.
+/// Case- and diacritic-insensitive substring test.
 #[must_use]
 pub fn name_contains(text: &str, query: &str) -> bool {
     fold_name(text).contains(&fold_name(query))
@@ -124,12 +121,11 @@ impl OptionList {
 }
 
 /// Builds the ranked list for `speaker`: the voice match ("Sounds like"),
-/// the LLM guess ("Mentioned"), unassigned calendar attendees ("Attendee"),
-/// persons owning another speaker of this meeting ("In this meeting"),
-/// recent persons, then, once the query is non-empty, every other person
-/// whose name contains it, and a Create row last. Each person appears at
-/// most once and a confirmed speaker's own person is never offered.
-/// Swift: `SpeakerOptions.build`.
+/// the LLM guess ("Mentioned"), unassigned attendees ("Attendee"), persons
+/// owning another speaker here ("In this meeting"), recent persons, then,
+/// for a non-empty query, every other matching person and a Create row.
+/// Each person appears once; a confirmed speaker's own person is never
+/// offered.
 #[must_use]
 pub fn build_options(
     speaker: &Speaker,
@@ -243,11 +239,10 @@ pub fn build_options(
 /// Characters kept before an excerpt is cut and "…" appended.
 pub const EXCERPT_MAX_LENGTH: usize = 160;
 
-/// What a speaker said in their sample clip: the speaker's segments
-/// overlapping the clip range joined with a space, else their longest
-/// segment; "" when no segment belongs to it. A leading "…" marks text
-/// that starts before the clip; text longer than [`EXCERPT_MAX_LENGTH`] is
-/// cut there and ends with "…". Swift: `SpeakerExcerpts.text`.
+/// What a speaker said in their sample clip: their segments overlapping
+/// the clip range, else their longest; "" without one. A leading "…" marks
+/// text that starts before the clip; text over [`EXCERPT_MAX_LENGTH`] is
+/// cut with "…".
 #[must_use]
 pub fn excerpt(speaker: &Speaker, segments: &[TranscriptSegment]) -> String {
     let own: Vec<&TranscriptSegment> = segments
@@ -295,7 +290,7 @@ pub fn excerpt(speaker: &Speaker, segments: &[TranscriptSegment]) -> String {
     text
 }
 
-/// One speaker as the rows show it. Swift: `SpeakersViewModel.Row`.
+/// One speaker as the rows show it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeakerRow {
     pub speaker: Speaker,
@@ -329,13 +324,11 @@ impl SpeakerRow {
     }
 }
 
-/// The clip file of a speaker, when it names one.
 #[must_use]
 pub fn clip_path(speaker: &Speaker) -> Option<PathBuf> {
     speaker.sample_clip_url.as_deref().and_then(file_url_path)
 }
 
-/// Swift: `SpeakersViewModel`.
 #[derive(Debug, Default)]
 pub struct SpeakersViewModel {
     pub rows: Vec<SpeakerRow>,
@@ -357,10 +350,8 @@ impl SpeakersViewModel {
         self.rows.iter().find(|row| row.id() == id)
     }
 
-    /// A new export from the store: rows are rebuilt and the name
-    /// suggestions, the recent people and the full people list reloaded.
-    /// Swift ran the three reads in a background task; here they are three
-    /// store reads in a row.
+    /// A new export: rows are rebuilt and the suggestions, the recent people
+    /// and the people list reloaded.
     pub fn update(&mut self, export: MeetingExport, store: &Store, files: &dyn FileSystem) {
         self.rows = export
             .speakers
@@ -398,8 +389,8 @@ impl SpeakersViewModel {
         }
     }
 
-    /// The suggested person's name for a `suggested` speaker, what the
-    /// field opens with; `None` otherwise.
+    /// The suggested person's name for a `suggested` speaker, which the
+    /// field opens with.
     #[must_use]
     pub fn prefill(&self, speaker_id: Uuid) -> Option<String> {
         let row = self.row(speaker_id)?;
@@ -449,12 +440,10 @@ impl SpeakersViewModel {
     }
 
     /// The one write: a person option confirms that person (merging when
-    /// they already own another speaker here); a create option resolves
-    /// the name to an existing or new person first, taking the email of a
-    /// calendar attendee of that name. Selecting the speaker's own person
-    /// again changes nothing. A speaker the export does not list is
-    /// ignored. Returns whether a speaker changed (the owner schedules the
-    /// re-export then).
+    /// they own another speaker here); a create option resolves the name
+    /// first, taking a same-named attendee's email. The speaker's own person
+    /// again changes nothing; an unlisted speaker is ignored. Returns
+    /// whether a speaker changed.
     pub fn select(
         &mut self,
         option: &SpeakerOption,
@@ -503,8 +492,6 @@ impl SpeakersViewModel {
             }
         }
     }
-
-    // Playback
 
     pub fn play(&mut self, id: Uuid, player: &dyn ClipPlayer) {
         let Some(path) = self.row(id).and_then(|row| clip_path(&row.speaker)) else {

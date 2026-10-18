@@ -1,7 +1,6 @@
-//! The Settings window's behaviour through the host, ported from
-//! `SettingsBridgeTests`, `SettingsViewModelTests` and `SettingsSectionTests`.
+//! The Settings window's behaviour through the host.
 
-// The ported suites keep one Swift test per function, long as some are.
+// Some tests are long.
 #![allow(clippy::too_many_lines)]
 
 mod common;
@@ -27,7 +26,7 @@ use steno_host::services::{CodexModel, LoginItemStatus, UpdateOutcome};
 use steno_host::settings::{KeyRead, LlmSettingsViewModel};
 use steno_host::speech::ModelAsset;
 
-/// Swift: `pageReadyPublishesEveryTopicOnce` and `testOverviewSubtitles`.
+/// Page ready publishes every topic once.
 #[test]
 fn the_sections_carry_their_sidebar_subtitles() {
     let harness = Harness::builder().build();
@@ -52,8 +51,6 @@ fn the_sections_carry_their_sidebar_subtitles() {
     );
 }
 
-/// Swift: `testGeneralSavesTemplateDetectionAndLoginItem`, `generalAndRecordingCommandsStoreAndRepublish`,
-/// `testGeneralShowsCalendarAndUpdates`.
 #[test]
 fn general_saves_template_detection_login_item_calendar_and_updates() {
     let harness = Harness::builder().build();
@@ -137,10 +134,8 @@ fn general_saves_template_detection_login_item_calendar_and_updates() {
     assert_eq!(*harness.fakes.login_item.opened.lock().unwrap(), 1);
 }
 
-/// A check that ended outside a command (the daily schedule, the tray's
-/// Check for Updates) reaches the General section and the overview's
-/// subtitle through `updates_changed`. Rust only: the Swift view model
-/// observed `UpdaterController`.
+/// A check that ended outside a command reaches the General section and the
+/// overview's subtitle through `updates_changed`.
 #[test]
 fn a_check_outside_a_command_republishes_the_general_section() {
     let harness = Harness::builder().build();
@@ -160,12 +155,10 @@ fn a_check_outside_a_command_republishes_the_general_section() {
     assert_eq!(general["subtitle"], "Update available: 0.12.0");
 }
 
-/// The desktop shell's refusal when no launcher of the build lies at a
-/// path that outlives an upgrade (`packaged::NO_STABLE_PATH` on Linux).
+/// The desktop shell's refusal when no launcher lies at a path that
+/// outlives an upgrade.
 const NO_STABLE_PATH: &str = "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager.";
 
-/// Whether the first launch on the Mac has been counted
-/// (`MAIN_APP_REGISTERED_KEY`).
 fn launch_counted(harness: &Harness) -> bool {
     flag(harness, MAIN_APP_REGISTERED_KEY)
 }
@@ -174,16 +167,13 @@ fn flag(harness: &Harness, key: &str) -> bool {
     harness.fakes.preferences.flag(key)
 }
 
-/// The stored `launch_at_login` setting on.
 fn seed_launch_at_login(store: &steno_core::Store, _: &steno_host::fakes::FakeServices) {
     let mut settings = store.settings().unwrap();
     settings.launch_at_login = true;
     store.save_settings(&settings).unwrap();
 }
 
-/// What the first-launch registration did on the Mac with the setting
-/// `on`, the login item reading `status` and the flags in `flags` set:
-/// the registrations it made, and whether it counted the launch.
+/// The registrations and the launch count after a first launch on the Mac.
 fn first_launch_on_mac(
     on: bool,
     status: LoginItemStatus,
@@ -194,8 +184,7 @@ fn first_launch_on_mac(
     (changes, launch_counted(&harness))
 }
 
-/// The host after two launches on the Mac from an installed bundle, as
-/// [`first_launch_on_mac`] sets them up.
+/// The host after two launches on the Mac from an installed bundle.
 fn launched_on_mac(on: bool, status: LoginItemStatus, flags: &'static [&'static str]) -> Harness {
     let harness = Harness::builder()
         .platform(Platform::Macos)
@@ -214,10 +203,9 @@ fn launched_on_mac(on: bool, status: LoginItemStatus, flags: &'static [&'static 
     harness
 }
 
-/// A desktop build under the earlier identifier set
-/// `steno.loginItemRegistered` for its Launch Agent; the main app was never
-/// registered, so the first launch on the new identifier registers it, once,
-/// under its own flag (stable plan S6). Rust only.
+/// A build under the earlier identifier set `steno.loginItemRegistered`; the
+/// first launch on the new identifier registers the main app once, under
+/// its own flag.
 #[test]
 fn the_earlier_builds_flag_does_not_stop_the_main_apps_first_registration() {
     let harness = launched_on_mac(
@@ -227,14 +215,11 @@ fn the_earlier_builds_flag_does_not_stop_the_main_apps_first_registration() {
     );
     assert_eq!(*harness.fakes.login_item.changes.lock().unwrap(), [true]);
     assert!(launch_counted(&harness));
-    // General shows the login item the launch registered.
     let general = harness.snapshot(BridgeTopic::SettingsGeneral);
     assert_eq!(general["loginItem"], "enabled");
 }
 
-/// After the first launch, a login item the user removed in System
-/// Settings (it reads `NotRegistered`, the setting still on) stays
-/// removed: only the switch in General registers it again. Rust only.
+/// Only the switch in General registers it again.
 #[test]
 fn a_login_item_removed_after_the_first_launch_is_not_added_back() {
     let (changes, counted) = first_launch_on_mac(
@@ -246,10 +231,8 @@ fn a_login_item_removed_after_the_first_launch_is_not_added_back() {
     assert!(counted);
 }
 
-/// With the setting off nothing registers and the launch is not counted.
-/// A login item already enabled or awaiting approval is left as it is and
-/// the launch counts, as Swift registers only a `notRegistered` one.
-/// Swift: `registerLoginItemOnFirstLaunch`.
+/// With the setting off nothing registers and the launch is not counted. A
+/// login item already enabled or awaiting approval is left as it is.
 #[test]
 fn the_first_launch_registers_only_a_not_registered_login_item_with_the_setting_on() {
     assert_eq!(
@@ -265,10 +248,7 @@ fn the_first_launch_registers_only_a_not_registered_login_item_with_the_setting_
     }
 }
 
-/// A run outside an app bundle, such as `cargo run`, reads `NotFound` on
-/// the Mac and shares the installed app's preferences: it registers
-/// nothing and does not count the launch, so the installed app still
-/// registers its login item at its own first launch. Rust only.
+/// A run outside an app bundle (`NotFound` on the Mac) registers nothing.
 #[test]
 fn a_login_item_the_mac_cannot_find_leaves_the_first_launch_uncounted() {
     assert_eq!(
@@ -277,11 +257,6 @@ fn a_login_item_the_mac_cannot_find_leaves_the_first_launch_uncounted() {
     );
 }
 
-/// On the Mac a launch from outside an installed bundle (a binary under
-/// `target/`, an app on a mounted disk image or translocated by
-/// Gatekeeper) registers nothing and counts nothing, so the installed
-/// copy, on the same preferences and login item, registers at its own
-/// first launch. Rust only.
 #[test]
 fn on_the_mac_only_an_installed_bundle_counts_the_first_launch() {
     let outside = Harness::builder()
@@ -306,10 +281,8 @@ fn on_the_mac_only_an_installed_bundle_counts_the_first_launch() {
     assert!(launch_counted(&outside));
 }
 
-/// Off the Mac the first launch keeps the Swift app's flag, and the Mac's
-/// own flag means nothing there, nor whether the shell runs from an
-/// installed bundle. A login item the plugin could not read (`NotFound`)
-/// counts there, as in Swift.
+/// Off the Mac the first launch keeps its own flag, whatever the Mac's flag
+/// or the bundle; a login item reading `NotFound` counts there.
 #[test]
 fn off_the_mac_the_first_launch_is_counted_under_the_swift_flag() {
     for platform in [Platform::Linux, Platform::Windows] {
@@ -337,9 +310,8 @@ fn off_the_mac_the_first_launch_is_counted_under_the_swift_flag() {
     assert_eq!(first_launch_key(Platform::Macos), MAIN_APP_REGISTERED_KEY);
 }
 
-/// The first launch registers the login item once when the setting says
-/// so; a login item the system manages (stable plan X5) is never touched,
-/// and that launch is not counted. Rust only.
+/// The first launch registers the login item once; one the system manages
+/// is never touched, and that launch is not counted.
 #[test]
 fn the_first_launch_registers_the_login_item_unless_the_system_manages_it() {
     let harness = Harness::builder().seed(seed_launch_at_login).build();
@@ -369,9 +341,6 @@ fn the_first_launch_registers_the_login_item_unless_the_system_manages_it() {
     assert!(launch_counted(&harness));
 }
 
-/// A login item the system manages shows on, with the line that says so,
-/// and the switch changes neither the login item nor the setting. Rust
-/// only (stable plan X5).
 #[test]
 fn a_login_item_the_system_manages_shows_on_and_does_not_switch() {
     let harness = Harness::builder()
@@ -404,8 +373,8 @@ fn a_login_item_the_system_manages_shows_on_and_does_not_switch() {
             .is_none()
     );
 
-    // The system takes the login item over after the section was read:
-    // the switch asks again before it changes anything.
+    // The system takes the login item over after the section was read: the
+    // switch asks again.
     plain.snapshot(BridgeTopic::SettingsGeneral);
     plain.fakes.login_item.set_status(LoginItemStatus::Managed);
     plain
@@ -416,9 +385,6 @@ fn a_login_item_the_system_manages_shows_on_and_does_not_switch() {
     assert!(!plain.store.settings().unwrap().launch_at_login);
 }
 
-/// A login item that cannot be registered (on Linux, no launcher at a
-/// path that outlives an upgrade) leaves the setting off and the section
-/// says why. Rust only (stable plan X5).
 #[test]
 fn a_login_item_that_cannot_be_registered_says_why_and_is_not_saved() {
     let harness = Harness::builder()
@@ -434,9 +400,7 @@ fn a_login_item_that_cannot_be_registered_says_why_and_is_not_saved() {
     assert_eq!(general["errorDetails"], NO_STABLE_PATH);
 }
 
-/// On a packaged install (stable plan X5) the Updates row says where
-/// updates come from, offers no check, and `updates.check` checks nothing.
-/// Rust only.
+/// The Updates row says where updates come from; `updates.check` checks nothing.
 #[test]
 fn a_packaged_install_offers_no_update_check() {
     let harness = Harness::builder().updates_managed().build();
@@ -455,8 +419,8 @@ fn a_packaged_install_offers_no_update_check() {
     assert!(updates.get("managedNote").is_none());
 }
 
-/// Swift: `testAudioSavesDeviceFolderAndRetention`, `testAudioSwitchingToForeverKeepsRecordingsOnDisk`,
-/// `chooseFolderAppliesThePanelsAnswer`, `testAudioShowsPermissionsAndFolderSize`.
+/// Switching to forever keeps recordings on disk; the section shows the
+/// permissions and the folder size.
 #[test]
 fn recording_saves_device_folder_and_retention_and_the_chooser_applies_its_answer() {
     let chosen = tempfile::tempdir().unwrap();
@@ -632,10 +596,7 @@ fn recording_saves_device_folder_and_retention_and_the_chooser_applies_its_answe
     );
 }
 
-/// A folder on a drive that may lose recent recordings in a power cut (a
-/// Windows drive that is neither NTFS nor `ReFS`, or a network drive or
-/// mount) shows the warning, and a folder chosen after is checked again.
-/// The Swift app has no such warning.
+/// The warning shows, and a folder chosen after it is checked again.
 #[test]
 fn a_folder_on_a_drive_that_may_lose_recent_writes_shows_the_warning() {
     let chosen = tempfile::tempdir().unwrap();
@@ -663,7 +624,7 @@ fn a_folder_on_a_drive_that_may_lose_recent_writes_shows_the_warning() {
     );
 }
 
-/// Swift: `testAudioReportsAnUnreadableFolderAsUnavailable`, `testErrorsAreSentencesWithDetailsApart`.
+/// An unreadable folder reads as unavailable.
 #[test]
 fn errors_are_sentences_with_the_details_apart() {
     let harness = Harness::builder()
@@ -680,8 +641,7 @@ fn errors_are_sentences_with_the_details_apart() {
     assert_eq!(recording["devices"], json!([]));
 }
 
-/// A harness whose speech sidecar stands in for the Neural Engine, which
-/// ended the app (A19).
+/// A harness whose speech sidecar stands in for the Neural Engine.
 fn falling_back() -> Harness {
     Harness::builder()
         .seed(|_, fakes| {
@@ -693,10 +653,7 @@ fn falling_back() -> Harness {
         .build()
 }
 
-/// While the speech sidecar stands in for the Neural Engine, which ended
-/// the app, Transcription says so and offers it again; the action ends the
-/// fallback and rebuilds the pipeline, and the offer goes. Rust only
-/// (A19).
+/// The offer ends the fallback, rebuilds the pipeline and goes.
 #[test]
 fn transcription_offers_the_neural_engine_again_after_the_fallback() {
     assert!(
@@ -730,10 +687,7 @@ fn transcription_offers_the_neural_engine_again_after_the_fallback() {
     assert!(transcription.get("error").is_none());
 }
 
-/// The fallback ends but the pipeline's rebuild fails: this run still
-/// transcribes in the speech sidecar, so Transcription keeps the offer and
-/// says why, also after the rows refresh, and a second press tries the
-/// rebuild again. Rust only (A19).
+/// It says why, also after a refresh, and a second press tries again.
 #[test]
 fn a_failed_rebuild_after_the_fallback_ended_keeps_the_offer() {
     let harness = falling_back();
@@ -779,9 +733,7 @@ fn a_failed_rebuild_after_the_fallback_ended_keeps_the_offer() {
     assert!(transcription.get("error").is_none());
 }
 
-/// A fallback that could not be ended (its file not written) stays on:
-/// Transcription says the Neural Engine could not be turned back on, keeps
-/// the offer, and the pipeline is not rebuilt. Rust only (A19).
+/// Transcription says so and the pipeline is not rebuilt.
 #[test]
 fn a_fallback_that_could_not_be_ended_stays_on() {
     let harness = falling_back();
@@ -800,7 +752,6 @@ fn a_fallback_that_could_not_be_ended_stays_on() {
     );
 }
 
-/// Swift: `testSpeechEngineChangeReloadsThePipeline`, `testSpeechDownloadStreamsProgressToInstalled`.
 #[test]
 fn transcription_switches_engines_and_downloads_assets() {
     let harness = Harness::builder().build();
@@ -898,8 +849,7 @@ fn transcription_switches_engines_and_downloads_assets() {
     assert_eq!(asset["failure"], "offline");
 }
 
-/// A harness whose downloads wait at their start, before any progress,
-/// until the returned closure releases them.
+/// A harness whose downloads wait at their start until the closure releases them.
 fn holding_downloads() -> (Harness, impl Fn()) {
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let harness = Harness::builder()
@@ -924,9 +874,6 @@ fn holding_downloads() -> (Harness, impl Fn()) {
     (harness, release)
 }
 
-/// `settings.transcription.download` replies at once; the download runs on
-/// its own thread and publishes as it goes (Swift: `SpeechSettingsViewModel
-/// .download`'s task).
 #[test]
 fn the_download_reply_returns_while_the_download_runs() {
     let (harness, release_downloads) = holding_downloads();
@@ -973,9 +920,7 @@ fn the_download_reply_returns_while_the_download_runs() {
     );
 }
 
-/// The diarizer's download replies at once, on a host clone under the five
-/// second guard: a download run inline would hang on the gate, so the
-/// test fails instead.
+/// Downloads the diarizer under the five second guard.
 fn download_diarizer(harness: &Harness) {
     let host = harness.host.clone();
     within_five_seconds("the download reply", move || {
@@ -999,9 +944,7 @@ fn diarizer_state(harness: &Harness) -> Value {
     harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1]["state"].clone()
 }
 
-/// A remove while the download runs detaches it: its late progress does
-/// not mark the asset downloading again, and the asset shows what the
-/// model store reports when the thread ends.
+/// Its late progress does not mark the asset downloading again.
 #[test]
 fn a_remove_detaches_the_download_in_flight() {
     let (harness, release_downloads) = holding_downloads();
@@ -1027,11 +970,7 @@ fn a_remove_detaches_the_download_in_flight() {
     );
 }
 
-/// Download again after a remove while the first thread still runs: no
-/// second thread starts; the asset reads `downloading` again and the
-/// running thread's progress shows, as Swift's `downloads` guard kept one
-/// task per asset and kept showing its progress. Once that thread has
-/// ended, the asset downloads again.
+/// No second thread starts; once the first ended, the asset downloads again.
 #[test]
 fn download_again_after_a_remove_reattaches_to_the_running_download() {
     let (harness, release_downloads) = holding_downloads();
@@ -1072,7 +1011,6 @@ fn download_again_after_a_remove_reattaches_to_the_running_download() {
     harness.wait_for_download(1);
 }
 
-/// `settings.recording.refreshDevices` re-reads the input list.
 #[test]
 fn refresh_devices_rereads_the_inputs() {
     let harness = Harness::builder().build();
@@ -1099,9 +1037,7 @@ fn refresh_devices_rereads_the_inputs() {
     );
 }
 
-/// A chosen microphone the list lacks (unplugged, or a UID from another
-/// computer) stays selected and is listed as not connected, unless the list
-/// itself failed; once it is back, its own name replaces that.
+/// It stays selected unless the list failed; once back, its own name shows.
 #[test]
 fn a_chosen_microphone_that_is_not_connected_is_listed_as_not_connected() {
     let harness = Harness::builder().build();
@@ -1158,9 +1094,8 @@ fn a_chosen_microphone_that_is_not_connected_is_listed_as_not_connected() {
     );
 }
 
-/// The page sees `isTesting` while the probe is out and `isRequesting`
-/// while the prompt is up: the host publishes before it calls the service,
-/// with its lock released. Swift: the awaited `test()` and `request`.
+/// `isTesting` and `isRequesting` go out with the lock released, before the
+/// service runs.
 #[test]
 fn busy_flags_are_published_before_the_service_runs() {
     let seen_testing = Arc::new(Mutex::new(None));
@@ -1215,10 +1150,7 @@ fn busy_flags_are_published_before_the_service_runs() {
     );
 }
 
-/// The consent card's model list comes over the network, so the host
-/// fetches it with its lock released: another call answers while the fetch
-/// runs, and sees the list loading. Swift awaited the fetch on the main
-/// actor, which blocked nothing else.
+/// Another call answers during the fetch and sees the list loading.
 #[test]
 fn confirming_codex_fetches_the_model_list_with_the_lock_released() {
     let harness = Harness::builder()
@@ -1239,8 +1171,7 @@ fn confirming_codex_fetches_the_model_list_with_the_lock_released() {
             value: "codex".to_owned(),
         })
         .unwrap();
-    // The hook reaches the host through a slot the test empties, so the
-    // fake does not keep the host alive.
+    // The hook reaches the host through a slot the test empties.
     let host = Arc::new(Mutex::new(Some(harness.host.clone())));
     let seen = Arc::new(Mutex::new(None));
     harness.fakes.llm.set_on_codex_models(Some(Arc::new({
@@ -1276,11 +1207,7 @@ fn confirming_codex_fetches_the_model_list_with_the_lock_released() {
     assert_eq!(summaries["isConfigured"], true);
 }
 
-/// The shell's `bridge_call` is an `async` Tauri command, so a host call
-/// can arrive inside a tokio runtime. The host awaits the secret store at
-/// construction, on Save and when the sections reload; from there that
-/// must block like any other call, not panic with "Cannot start a runtime
-/// from within a runtime".
+/// A host call can arrive inside a tokio runtime; blocking there must not panic.
 #[test]
 fn the_secret_store_is_awaited_from_inside_an_async_runtime() {
     let runtimes = [
@@ -1352,8 +1279,7 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
-/// A harness whose secret store holds `sk-stored` and fails every read
-/// with "the keyring is locked", as a locked keyring.
+/// A secret store holding `sk-stored` that fails every read, as a locked keyring.
 fn a_harness_whose_key_cannot_be_read() -> Harness {
     Harness::builder()
         .seed(|_, fakes| {
@@ -1368,9 +1294,8 @@ fn a_harness_whose_key_cannot_be_read() -> Harness {
         .build()
 }
 
-/// A key the secret store could not read (a locked keyring) shows as
-/// unreadable, a save of the other fields keeps it, and the section shows
-/// it once the store answers again (`Host::secrets_changed`).
+/// A key the store could not read shows as unreadable, a save of the other
+/// fields keeps it, and it shows once the store answers again.
 #[test]
 fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
     let harness = a_harness_whose_key_cannot_be_read();
@@ -1414,10 +1339,8 @@ fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
     assert!(summaries.get("error").is_none(), "{summaries}");
 }
 
-/// Over a key that could not be read, a field typed into and emptied
-/// again saves nothing over the key; a key typed before the store answered
-/// again stays in the field and is saved; a key typed and saved replaces
-/// it and the unreadable message goes.
+/// A field typed and emptied saves nothing over the unreadable key; a key
+/// typed, before or after the store answered, is saved.
 #[test]
 fn only_a_typed_key_replaces_one_that_could_not_be_read() {
     let harness = a_harness_whose_key_cannot_be_read();
@@ -1473,8 +1396,6 @@ fn only_a_typed_key_replaces_one_that_could_not_be_read() {
     assert!(summaries.get("error").is_none(), "{summaries}");
 }
 
-/// The store answering again while the form holds unsaved edits: the key
-/// shows, and every edit stays as typed for the save.
 #[test]
 fn a_reread_key_keeps_the_forms_unsaved_edits() {
     let harness = a_harness_whose_key_cannot_be_read();
@@ -1507,8 +1428,6 @@ fn a_reread_key_keeps_the_forms_unsaved_edits() {
     );
 }
 
-/// A save that wrote the key while the host read it again keeps the saved
-/// key: the read began before the save, so it may hold the older key.
 #[test]
 fn a_key_saved_while_it_was_read_again_keeps_the_saved_key() {
     let harness = a_harness_whose_key_cannot_be_read();
@@ -1533,10 +1452,6 @@ fn a_key_saved_while_it_was_read_again_keeps_the_saved_key() {
     );
 }
 
-/// A load of the key that lands while the host reads it again (a window
-/// opened meanwhile) holds the newer key, so the reread that began before
-/// it is dropped; a save that leaves the key alone (the model only) keeps
-/// the reread.
 #[test]
 fn a_reread_gives_way_to_a_later_load_but_not_to_a_model_only_save() {
     let harness = a_harness_whose_key_cannot_be_read();
@@ -1578,7 +1493,7 @@ fn a_reread_gives_way_to_a_later_load_but_not_to_a_model_only_save() {
 }
 
 /// A secret store whose next read, once armed, takes the value and then
-/// waits until it is released: a read the test can save over.
+/// waits until released.
 struct HeldReads {
     inner: Arc<dyn SecretStore>,
     hold: Arc<Hold>,
@@ -1590,7 +1505,6 @@ struct Hold {
     changed: Condvar,
 }
 
-/// Where the armed read is.
 #[derive(Default)]
 struct Phases {
     armed: bool,
@@ -1647,8 +1561,7 @@ impl SecretStore for HeldReads {
     }
 }
 
-/// The reread takes the form's version before it reads the key: a key
-/// saved while the read is under way stays, though the read saw none.
+/// The reread takes the form's version before it reads the key.
 #[test]
 fn a_key_saved_during_the_reads_own_read_stays() {
     let hold = Arc::new(Hold::default());
@@ -1705,8 +1618,7 @@ fn a_key_saved_during_the_reads_own_read_stays() {
     );
 }
 
-/// A stored key whose field is emptied is removed by the save, and a save
-/// that leaves the field alone keeps it.
+/// A save that leaves the field alone keeps it.
 #[test]
 fn emptying_the_key_field_removes_the_stored_key() {
     let harness = Harness::builder()
@@ -1749,9 +1661,7 @@ fn emptying_the_key_field_removes_the_stored_key() {
     );
 }
 
-/// Swift: `testLLMValidatesAndSavesSettingsAndKey`, `testLLMInvalidInputSavesNothing`,
-/// `testLLMCommitSavesOnlyChangesThenProbes`, `testLLMSelectPresetFillsAndStoresTheAddress`,
-/// `summariesAndExportDraftsStoreOnSave`.
+/// Invalid input saves nothing; a commit saves only changes and then probes.
 #[test]
 fn summaries_validate_save_the_key_apart_and_probe() {
     let harness = Harness::builder().build();
@@ -1857,8 +1767,8 @@ fn summaries_validate_save_the_key_apart_and_probe() {
     );
 }
 
-/// Swift: `testCodexPresetIsOffUntilConfirmed`, `testClosingThePaneWithTheConsentCardOnScreenStoresNothing`,
-/// `testConfirmingCodexWithoutASignInStaysUnconfigured`, `testCodexConfigurationRoundTripsAndKeepsTheEndpointFields`.
+/// Closing the consent card stores nothing, and the Codex configuration
+/// keeps the endpoint fields.
 #[test]
 fn the_codex_preset_stores_nothing_until_confirmed_and_picks_the_first_model() {
     let harness = Harness::builder()
@@ -1977,12 +1887,8 @@ fn the_codex_preset_stores_nothing_until_confirmed_and_picks_the_first_model() {
     );
 }
 
-/// The vault check writes and removes a probe file in the vault, which a
-/// slow folder or the Mac's Files and Folders prompt can hold, so the host
-/// runs it with its lock released: while a check is held, the recorder's
-/// level hook and another command reach the host within [`LIVE`] and the
-/// section reads unsaved; once the check answers, the vault is stored.
-/// Rust only: Swift validated on the main actor.
+/// While the vault check is held, other calls reach the host within [`LIVE`]
+/// and the section reads unsaved; once it answers, the vault is stored.
 #[test]
 fn a_held_vault_check_leaves_the_host_live() {
     let harness = Harness::builder()
@@ -2026,8 +1932,8 @@ fn a_held_vault_check_leaves_the_host_live() {
     assert_eq!(harness.snapshot(BridgeTopic::SettingsExport)["saved"], true);
 }
 
-/// Swift: `testObsidianValidationSurfacesTheDestinationMessageVerbatim`,
-/// `testObsidianDisabledSavesNilWithoutValidating`, `testObsidianCommitWaitsForAVaultAndSavesOnChoice`.
+/// The destination's message shows verbatim, and disabling saves without
+/// validating.
 #[test]
 fn export_waits_for_a_vault_validates_through_the_destination_and_saves() {
     let harness = Harness::builder()
@@ -2213,8 +2119,6 @@ fn setting_row(harness: &Harness, key: &str) -> Option<String> {
         .unwrap()
 }
 
-/// Rows and fields this build does not know (a newer build's, the Swift
-/// app's) outlive an edit of the export settings.
 #[test]
 fn an_export_edit_keeps_unknown_rows_and_obsidian_fields() {
     let harness = Harness::builder()
@@ -2270,9 +2174,7 @@ fn an_export_edit_keeps_unknown_rows_and_obsidian_fields() {
     );
 }
 
-/// Two vault saves whose checks overlap: only the later one stores,
-/// whichever check answers first, and a reload while a check runs keeps
-/// the form the user chose. Rust only: Swift's checks did not overlap.
+/// A reload while a check runs keeps the user's form.
 #[test]
 fn only_the_latest_of_two_vault_saves_stores() {
     let harness = Harness::builder().build();
@@ -2307,8 +2209,7 @@ fn only_the_latest_of_two_vault_saves_stores() {
     );
 }
 
-/// The stored export settings the undo tests start from: on, the vault
-/// at `/Vaults/Stored`, without the audio.
+/// The stored export settings the undo tests start from.
 const STORED_OBSIDIAN: &str = r#"{"includeAudio":false,"vaultPath":"/Vaults/Stored"}"#;
 
 /// Runs `edit` on another thread with its vault check held, runs `undo`
@@ -2340,10 +2241,7 @@ fn include_audio(host: &steno_host::Host, on: bool) {
     .unwrap();
 }
 
-/// Include audio turned on, then off again while the first save's vault
-/// check runs: the export stores off, as the form shows, and the first
-/// check, refused once the undo stored, shows no refusal: a stale save
-/// reports nothing. Rust only: Swift's checks ran one at a time.
+/// The stale save reports no refusal.
 #[test]
 fn audio_turned_off_while_its_check_runs_is_stored_off() {
     let harness = Harness::builder()
@@ -2369,8 +2267,6 @@ fn audio_turned_off_while_its_check_runs_is_stored_off() {
     );
 }
 
-/// The export turned on, then off again while its vault check runs: it
-/// stays off, as the form shows. Rust only.
 #[test]
 fn the_export_turned_off_while_its_check_runs_stays_off() {
     let harness = Harness::builder()
@@ -2403,9 +2299,6 @@ fn the_export_turned_off_while_its_check_runs_stays_off() {
     );
 }
 
-/// Another vault chosen, then the stored one again while the first
-/// choice's check runs: the stored vault stays, as the form shows. Rust
-/// only.
 #[test]
 fn the_stored_vault_chosen_again_while_a_check_runs_stays_stored() {
     let harness = Harness::builder()
@@ -2438,8 +2331,6 @@ fn the_stored_vault_chosen_again_while_a_check_runs_stays_stored() {
     );
 }
 
-/// Two overlapping vault saves whose checks answer in the order they began:
-/// the earlier one stores nothing, the later one stores. Rust only.
 #[test]
 fn the_later_vault_save_stores_when_the_earlier_check_answers_first() {
     let harness = Harness::builder().build();
@@ -2472,8 +2363,6 @@ fn the_later_vault_save_stores_when_the_earlier_check_answers_first() {
     assert!(model.saved);
 }
 
-/// A refused vault check ends the save: a later write by another window
-/// or process loads into the form again.
 #[test]
 fn after_a_refused_check_a_store_change_reloads_the_form() {
     let harness = Harness::builder()
@@ -2505,8 +2394,7 @@ fn after_a_refused_check_a_store_change_reloads_the_form() {
     assert_eq!(export["includeAudio"], false);
 }
 
-/// The unknown fields may belong to the vault, so choosing another vault
-/// stores the new one without them.
+/// The unknown fields may belong to the vault.
 #[test]
 fn another_vault_starts_without_the_unknown_obsidian_fields() {
     let harness = Harness::builder()
@@ -2520,8 +2408,7 @@ fn another_vault_starts_without_the_unknown_obsidian_fields() {
     );
 }
 
-/// A commit with nothing edited saves nothing, unknown fields or not: the
-/// draft carries the stored ones, so it equals what is stored.
+/// The draft carries the stored unknown fields, so it equals what is stored.
 #[test]
 fn a_commit_without_an_edit_saves_nothing_when_unknown_fields_are_stored() {
     let harness = Harness::builder()
@@ -2548,12 +2435,8 @@ fn a_commit_without_an_edit_saves_nothing_when_unknown_fields_are_stored() {
     );
 }
 
-/// Rust only (stable plan S6): while phone handover waits, the iPhone
-/// section says why in plain words, the sidebar says the phones wait, and
-/// Try again runs with the section busy (published before the call, as a
-/// keychain prompt may be up) and the host's lock released. A Try again
-/// that still waits says so with the reason in the details; one that reads
-/// the identity ends the wait.
+/// The iPhone section and the sidebar say why; Try again runs busy with the
+/// host's lock released.
 #[test]
 fn phones_waiting_try_again_until_the_pairing_reads() {
     let harness = Harness::builder()
@@ -2600,8 +2483,6 @@ fn phones_waiting_try_again_until_the_pairing_reads() {
     assert_eq!(*handover.tries.lock().unwrap(), 2);
 }
 
-/// The waiting reasons in the words of each platform, none of them a
-/// developer's.
 #[test]
 fn the_waiting_reasons_are_plain_sentences() {
     use steno_host::settings::snapshots::waiting_message;
@@ -2639,16 +2520,14 @@ fn the_waiting_reasons_are_plain_sentences() {
         waiting_message(PhoneWaitingReason::Missing, Platform::Linux),
         "This computer's phone pairing is no longer saved. Choose Pair again to start over."
     );
-    // A file Steno cannot open: the fix is outside the app, and Pair again
-    // cannot open it either.
+    // A file Steno cannot open: the fix is outside the app.
     assert_eq!(
         waiting_message(PhoneWaitingReason::FileNotOpened, Platform::Linux),
         "Steno cannot open a file in the folder it keeps its data in, so it cannot check this \
          computer's phone pairing. Check that folder's permissions and that the disk has space, \
          then choose Try again."
     );
-    // Some phones paired before the pairing changed: what to do, and Pair
-    // again, the button below, as it reads, is what reconnects them.
+    // Phones paired before the pairing changed: Pair again reconnects them.
     assert_eq!(
         waiting_message(PhoneWaitingReason::PartlyReplaced, Platform::Macos),
         "Some of your phones were paired before this Mac's pairing changed and can't connect. \
@@ -2679,10 +2558,8 @@ fn the_waiting_reasons_are_plain_sentences() {
     }
 }
 
-/// Pair again asks first, with the warning that every phone must pair
-/// again, while the section shows itself busy; a No changes nothing, a
-/// Yes removes the phones and ends the wait. A Pair again that fails says
-/// so.
+/// Pair again asks first while the section shows busy: No changes nothing,
+/// Yes removes the phones and ends the wait; a failure says so.
 #[test]
 fn phones_waiting_pair_again_after_the_warning() {
     let answer = Arc::new(Mutex::new(false));
@@ -2745,7 +2622,7 @@ fn phones_waiting_pair_again_after_the_warning() {
     assert_eq!(*handover.pairings_again.lock().unwrap(), 2);
 }
 
-/// Swift: `testPhonesPairingListsDevicesAndRevokes`, `testPhonesWithoutAHandoverServiceIsUnavailable`.
+/// Without a handover service the section is unavailable.
 #[test]
 fn phones_pair_list_and_revoke_devices() {
     let harness = Harness::builder()
@@ -2794,8 +2671,7 @@ fn phones_pair_list_and_revoke_devices() {
         "no phones, no listener"
     );
 
-    // Cancel while the code is up: the code and the listener go, nothing
-    // paired.
+    // Cancel while the code is up: the code and the listener go.
     harness.host.settings_phone_begin_pairing().unwrap();
     assert!(
         harness
@@ -2846,10 +2722,8 @@ fn phones_pair_list_and_revoke_devices() {
     assert_eq!(phone["errorDetails"], "port in use");
 }
 
-/// A failed rebuild after "Use again", then a reload that succeeds from
-/// another section (a Summaries save): the pipeline is on the Neural Engine
-/// again, so the offer goes, and a meeting waiting for its models no longer
-/// says the Neural Engine is off (A19).
+/// A failed rebuild, then a reload that succeeds from another section: the
+/// offer goes and a waiting meeting no longer says the Neural Engine is off.
 #[test]
 fn a_later_successful_reload_ends_a_failed_rebuilds_offer() {
     let harness = Harness::builder()

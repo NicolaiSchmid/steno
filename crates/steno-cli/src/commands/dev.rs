@@ -1,7 +1,6 @@
-//! `steno dev`: developer tools. Swift: `Sources/steno/Commands/Dev*.swift`.
-//! `capture-spike` and `audio-devices` need the platform's live capture and
-//! device enumeration (Core Audio, `PipeWire`, WASAPI); on other targets they
-//! parse their flags and report that the backend is not available.
+//! `steno dev`: developer tools. `capture-spike` and `audio-devices` need
+//! the platform's live capture; on other targets they report that the
+//! backend is not available.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -161,9 +160,7 @@ pub struct AudioDevices {
 
 impl AudioDevices {
     /// The input devices with their UIDs (what `--input-device` takes),
-    /// then every process with an audio stream and its flags. Swift prints
-    /// every HAL device, outputs included; the input list is what every
-    /// platform's backend gives.
+    /// then every process with an audio stream and its flags.
     fn run(self) -> Outcome {
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         {
@@ -357,9 +354,8 @@ impl CaptureSpike {
         configuration
             .input_device_uid
             .clone_from(&self.input_device_uid);
-        // The lanes as the devices delivered them, as Swift's spike records
-        // them: echo cancellation would take a click played through the
-        // speakers out of the microphone lane, and its onset with it.
+        // The lanes as the devices delivered them: echo cancellation would
+        // take a click through the speakers out of the microphone lane.
         configuration.echo_cancellation = false;
         configuration.lane_override = lane_override;
         let session = super::record::session(
@@ -395,9 +391,7 @@ impl CaptureSpike {
                 .join(", ")
         );
         println!("duration: {:.2} s", result.statistics.duration);
-        // Exact, from the master's Float32 samples (the sidecars' Int16
-        // rounds a whisper to 0): `nonzero system: 0 of N` is digital
-        // silence.
+        // From the master's Float32 samples (Int16 rounds a whisper to 0).
         if let Some(master) = file_url_path(&result.asset.url)
             && let Ok(master) = steno_audio::CafFile::read(&master)
         {
@@ -549,7 +543,7 @@ pub struct Models {
     pub command: ModelsCommand,
 }
 
-/// `parakeetV3`, `offlineDiarizer`, ...: the asset ids the Swift CLI took.
+/// `parakeetV3`, `offlineDiarizer`, ...: the asset ids.
 fn parse_asset(argument: &str) -> Result<ModelAsset, String> {
     argument.parse::<ModelAsset>().map_err(|_| {
         format!(
@@ -681,8 +675,7 @@ struct BakeoffRow {
 }
 
 impl Bakeoff {
-    // One pass per engine and file, with the report at the end: the loop
-    // body is the report row, split would scatter its columns.
+    // The loop body is the report row; split, it would scatter its columns.
     #[allow(clippy::too_many_lines)]
     async fn run(self) -> Outcome {
         for engine in &self.engines {
@@ -1176,8 +1169,7 @@ fn load_export(path: &Path) -> Result<MeetingExport, Failure> {
 }
 
 impl Llm {
-    // Three subcommands sharing one endpoint and one client setup; the
-    // text rendering of the summary is the bulk.
+    // Three subcommands sharing one endpoint and one client setup.
     #[allow(clippy::too_many_lines)]
     async fn run(self) -> Outcome {
         match self.command {
@@ -1422,8 +1414,7 @@ impl Handover {
             std::env::temp_dir().join(format!("steno-handover-{}", uuid::Uuid::new_v4()))
         });
         let store = Arc::new(steno_core::Store::in_memory().map_err(Failure::runtime)?);
-        // The app's launch checkpoint, so no listener starts without it;
-        // over this in-memory store it does nothing.
+        // The app's launch checkpoint, so no listener starts without it.
         steno_handover::HandoverService::checkpoint_store(&store).map_err(Failure::runtime)?;
         let intake = Arc::new(steno_core::testing::FakeHandoverIntake::default());
         let identity =
@@ -1477,8 +1468,7 @@ impl Handover {
     }
 }
 
-/// Renders the payload as a QR with `qrencode` when it is on PATH; the
-/// app draws the real QR.
+/// Renders the payload as a QR with `qrencode` when it is on PATH.
 fn print_qr(text: &str) {
     let hint = "(install qrencode to render a scannable QR in the terminal)";
     match std::process::Command::new("qrencode")

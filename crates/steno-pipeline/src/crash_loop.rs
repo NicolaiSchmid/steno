@@ -1,44 +1,8 @@
-//! Launch recovery's guard against a crash loop. Rust only: the Swift
-//! pipeline resumed an unfinished meeting at every launch, however often
-//! its processing had taken the app down.
-//!
-//! - **What is counted.** Each background run of a meeting adds one to a
-//!   count in the meeting's audio folder (`.processing-runs`,
-//!   [`RecordingLayout::processing_runs`]) before it starts
-//!   (`CountedRun`). A run that ends while the app lives (ready, failed
-//!   or panicked) clears the count, earlier crashes included. The exit
-//!   ([`QuitLatch::set`]) takes each open run back off, one each, on every
-//!   pipeline that shares the latch, so earlier crashes still count. What
-//!   is left is the runs that ended with the app: an abort, an
-//!   out-of-memory kill, a power loss. A panic the app survives already
-//!   fails the meeting through the pipeline's panic wrap, so it is not
-//!   counted as well.
-//! - **Who is charged.** Every run alive at a crash. So launch recovery
-//!   runs a meeting with a count alone, after the meetings without one
-//!   and oldest first, and counts it only when its turn comes: a meeting
-//!   that takes the app down is charged for its own crashes, and another
-//!   meeting at most once, for a run it shared with one before it had a
-//!   count. The price: a run started at once that never ends (a
-//!   destination on a share that does not answer, say; the language model
-//!   has a timeout) holds every meeting with a count back for the rest of
-//!   the session. Nothing is lost: those runs were never counted, so the
-//!   next launch resumes them.
-//! - **When it gives up.** Launch recovery resumes a meeting while fewer
-//!   than [`MAX_CRASHED_RUNS`] of its runs ended with the app, and after
-//!   that marks it failed with [`TOO_MANY_CRASHED_RUNS`], so a meeting
-//!   whose processing takes the app down is not retried at every launch
-//!   for ever.
-//! - **What the user sees.** The meeting, failed with that reason, and its
-//!   audio, which is kept.
-//! - **Starting over.** `enqueue` and `reprocess` (a new recording, or the
-//!   meeting processed again) clear the count before their run.
-//!
-//! A file and not a column: the count lives only while a meeting is
-//! processed, the Swift app (which shares the database until the Mac
-//! cutover) never sees it, and it needs no migration. Every write goes
-//! through [`replace_file`], so a crash leaves the old count or the new
-//! one. A folder that cannot be written, or a master outside a folder
-//! named after its meeting, leaves the meeting unguarded, as before.
+//! Launch recovery's guard against a crash loop. Each background run adds
+//! one to a count in the meeting's folder (`.processing-runs`); a run that
+//! ends while the app lives clears it and the exit takes open runs back, so
+//! what remains are runs that ended with the app. Launch recovery fails a
+//! meeting with [`TOO_MANY_CRASHED_RUNS`] at [`MAX_CRASHED_RUNS`].
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -49,20 +13,14 @@ use crate::QuitLatch;
 use crate::files::{Access, replace_file};
 
 /// Runs that may end with the app before launch recovery gives up on a
-/// meeting. One such end can be anything (another program's memory, a
-/// power loss, a forced restart for an update); a second on the same
-/// meeting is suspect; a third is a pattern. Each costs a launch's worth of
-/// processing and can take a live recording down with the app, so three
-/// bounds the damage at two more crashes without giving up on a meeting
-/// over one or two that were not its fault.
+/// meeting: one crash can be anything, a third is a pattern.
 pub const MAX_CRASHED_RUNS: u32 = 3;
 
 /// The failure reason launch recovery gives a meeting it stops resuming:
-/// one sentence, since the meeting list and the detail show only the
-/// first.
+/// one sentence, since the list shows only the first.
 pub const TOO_MANY_CRASHED_RUNS: &str = "Steno closed unexpectedly 3 times while processing this recording and stopped trying; the recording is kept.";
 
-/// One meeting's count; see the module doc.
+/// One meeting's count.
 #[derive(Debug, Clone)]
 pub(crate) struct RunCount {
     /// `None` when the master is not in a folder of its own.
@@ -70,10 +28,9 @@ pub(crate) struct RunCount {
 }
 
 impl RunCount {
-    /// The count in the master's folder when that folder is the meeting's
-    /// own ([`RecordingLayout::own_folder`]), so two meetings never share
-    /// one count. Any other folder (`files_to_remove` makes the same check)
-    /// leaves the meeting unguarded.
+    /// The count in the master's folder when that folder is the meeting's own
+    /// ([`RecordingLayout::own_folder`]), so two meetings never share one;
+    /// any other folder leaves the meeting unguarded.
     pub(crate) fn of(asset: &AudioAsset) -> Self {
         Self {
             path: RecordingLayout::own_folder(asset).map(|layout| layout.processing_runs()),
@@ -90,7 +47,6 @@ impl RunCount {
             .unwrap_or(0)
     }
 
-    /// A run starts.
     fn started(&self) {
         self.write(self.read().saturating_add(1));
     }
@@ -100,8 +56,6 @@ impl RunCount {
         self.write(self.read().saturating_sub(1));
     }
 
-    /// The meeting ended ready or failed, or is processed afresh: the
-    /// count goes.
     pub(crate) fn clear(&self) {
         if let Some(path) = &self.path
             && let Err(error) = std::fs::remove_file(path)
@@ -124,9 +78,8 @@ impl RunCount {
     }
 }
 
-/// The runs counted and still going, behind the [`QuitLatch`]'s lock with
-/// its flag, so a run is counted only before the exit and the exit takes
-/// back every run counted before it.
+/// The runs counted and still going, behind the [`QuitLatch`]'s lock, so a
+/// run is counted only before the exit and the exit takes back every one.
 #[derive(Debug, Default)]
 pub(crate) struct OpenRuns {
     next: u64,
@@ -134,7 +87,6 @@ pub(crate) struct OpenRuns {
 }
 
 impl OpenRuns {
-    /// Counts a run; returns its key.
     pub(crate) fn open(&mut self, count: RunCount) -> u64 {
         count.started();
         let key = self.next;
@@ -143,18 +95,15 @@ impl OpenRuns {
         key
     }
 
-    /// Ends the run under `key`, counted under `count`. If the run is still
-    /// open, it failed or panicked before the exit, which the pipeline
-    /// reports, and the count goes. If the exit took it back, the count
-    /// stays, so earlier crashes still count, unless the run made the
-    /// meeting ready.
+    /// Ends the run under `key`. A run still open failed before the exit and
+    /// its count goes; one the exit took back keeps its count unless it made
+    /// the meeting ready.
     pub(crate) fn close(&mut self, key: u64, count: &RunCount, succeeded: bool) {
         if self.runs.remove(&key).is_some() || succeeded {
             count.clear();
         }
     }
 
-    /// The exit: every open run is taken back.
     pub(crate) fn take_back_all(&mut self) {
         for (_, count) in self.runs.drain() {
             count.taken_back();
@@ -162,10 +111,8 @@ impl OpenRuns {
     }
 }
 
-/// A background run counted in its meeting's folder; see the module doc.
-/// Dropping it ends the run: every end the app lives through drops it,
-/// a return or a panic unwinding through the task. A run that ends with
-/// the app is never dropped and leaves its count.
+/// A background run counted in its meeting's folder. Every end the app
+/// lives through drops it; a run that ends with the app leaves its count.
 pub(crate) struct CountedRun {
     latch: QuitLatch,
     key: u64,
@@ -174,8 +121,7 @@ pub(crate) struct CountedRun {
 }
 
 impl CountedRun {
-    /// Counts a run of `count`'s meeting; `None` once the app is exiting,
-    /// when nothing starts.
+    /// Counts a run; `None` once the app is exiting.
     pub(crate) fn start(latch: &QuitLatch, count: RunCount) -> Option<Self> {
         let key = latch.open_run(count.clone())?;
         Some(Self {
@@ -224,8 +170,7 @@ mod tests {
         }
     }
 
-    /// The count lives only in a folder named after the meeting's id, so
-    /// two meetings whose masters share a folder share no count.
+    /// Two meetings whose masters share a folder share no count.
     #[test]
     fn a_master_outside_its_meetings_folder_is_not_counted() {
         let dir = tempfile::tempdir().unwrap();

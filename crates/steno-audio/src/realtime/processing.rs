@@ -1,14 +1,7 @@
-//! Drains the sink's rings in 10 ms frames on a dedicated thread.
-//! Swift: `Sources/StenoAudio/RealTime/ProcessingThread.swift`.
-//!
-//! The rings carry the device's rate. A device that does not run at
-//! [`SAMPLE_RATE`] has every lane converted to it by a [`RateConverter`]
-//! first, so everything below works at 48 kHz.
-//!
-//! Echo cancellation on the mic lane with the system lane of the same frame
-//! as far-end (optionally delayed by the device latency through a
-//! preallocated line), metering, and the hand-off to the writer through
-//! [`FrameRelay`]. Every buffer is allocated in `new`; the loop allocates
+//! Drains the sink's rings in 10 ms frames on a dedicated thread: rate
+//! conversion to [`SAMPLE_RATE`] when the device differs, echo cancellation
+//! on the mic lane with the system lane as far end, metering, and the
+//! hand-off to the writer through [`FrameRelay`]. The loop allocates
 //! nothing, takes no locks and never blocks on the writer.
 
 use std::sync::Arc;
@@ -29,18 +22,14 @@ use crate::{FRAME_SIZE, SAMPLE_RATE};
 pub struct ProcessingConfiguration {
     /// The lanes, in ring order.
     pub lanes: Vec<AudioLane>,
-    /// Samples per processing frame.
     pub frame_size: usize,
-    /// The rate the rings carry, the device's; anything but
-    /// [`SAMPLE_RATE`] is converted to it, so it must be a rate
-    /// [`RateConverter::supports`].
+    /// The rate the rings carry; must be one [`RateConverter::supports`].
     pub device_rate: f64,
     /// Applied to the microphone with the system lane as far end; `None`
     /// passes the microphone through.
     pub echo_canceller: Option<Box<dyn EchoCanceller>>,
     /// Samples the far-end is delayed by before cancellation (0: none).
     pub far_end_delay_frames: usize,
-    /// Also relay the microphone before cancellation.
     pub keep_raw_mic: bool,
     /// Frames per level publish: 10 frames is 100 ms, 10 Hz.
     pub frames_per_level: usize,
@@ -48,7 +37,7 @@ pub struct ProcessingConfiguration {
 
 impl ProcessingConfiguration {
     /// [`FRAME_SIZE`] frames at [`SAMPLE_RATE`], no far-end delay, no raw
-    /// microphone, levels every ten frames.
+    /// microphone, levels at 10 Hz.
     #[must_use]
     pub fn new(lanes: &[AudioLane], echo_canceller: Option<Box<dyn EchoCanceller>>) -> Self {
         Self {
@@ -72,9 +61,7 @@ struct Worker {
     keep_raw_mic: bool,
     mic_index: Option<usize>,
     system_index: Option<usize>,
-    /// What the rings deliver, one buffer per lane.
     lane_buffers: Vec<Vec<f32>>,
-    /// Set when the device does not run at [`SAMPLE_RATE`].
     conversion: Option<Conversion>,
     /// The canceller's output; the written mic channel while AEC runs.
     processed_mic: Vec<f32>,
@@ -104,9 +91,7 @@ struct Shared {
 }
 
 impl Worker {
-    /// Processes every whole frame the rings hold right now; with a
-    /// conversion, everything they hold, and the converted remainder of
-    /// less than a frame waits for the next drain.
+    /// Processes every whole frame the rings hold right now.
     #[inline(always)]
     fn drain(&mut self) {
         if let Some(mut conversion) = self.conversion.take() {
@@ -123,8 +108,6 @@ impl Worker {
         }
     }
 
-    /// Reads every lane in equal counts, converts them in step and
-    /// processes each whole 48 kHz frame.
     #[inline(always)]
     fn drain_converted(&mut self, conversion: &mut Conversion) {
         let frame_size = self.frame_size;
@@ -180,7 +163,6 @@ impl Worker {
             );
         }
 
-        // Metering on what is written.
         for (index, meter) in self.meters.iter_mut().enumerate() {
             meter.accumulate(output_of(
                 &self.lane_buffers,
@@ -261,10 +243,8 @@ impl Shared {
     }
 }
 
-/// The handle the session holds. `new` allocates everything; `start` spawns
-/// the loop; `stop` joins it and hands the echo canceller back so the
-/// session can `reset` it and give it to the next thread after a device
-/// change.
+/// The handle the session holds: `new` allocates everything, `start`
+/// spawns the loop, `stop` joins it.
 pub struct ProcessingThread {
     worker: Option<Worker>,
     thread: Option<JoinHandle<Worker>>,
@@ -274,9 +254,8 @@ pub struct ProcessingThread {
 }
 
 impl ProcessingThread {
-    /// `levels` `None` allocates a fresh slot; the session passes the
-    /// previous thread's slot when it rebuilds after a device change, so
-    /// the writer thread keeps reading the one it was given at start.
+    /// `levels` `None` allocates a fresh slot; a rebuild passes the
+    /// previous thread's, which the writer thread keeps reading.
     #[must_use]
     pub fn new(
         sink: Arc<LaneFrameSink>,
@@ -310,7 +289,6 @@ impl ProcessingThread {
             system_peak_bits: AtomicU32::new(0),
             stop_requested: AtomicBool::new(false),
         });
-        // One read is a frame's worth of device samples.
         let conversion = (configuration.device_rate != SAMPLE_RATE).then(|| {
             let read =
                 (frame_size as f64 * configuration.device_rate / SAMPLE_RATE).ceil() as usize;
@@ -401,16 +379,13 @@ impl ProcessingThread {
         self.thread = Some(handle);
     }
 
-    /// Asks the loop to stop, waits for it to drain every whole frame left
-    /// in the rings and exit. `frames_processed` and `system_peak` stay
-    /// readable afterwards.
+    /// Asks the loop to stop and waits for it to drain the rings and exit.
     pub fn stop(&mut self) {
         self.join();
     }
 
-    /// The echo canceller the thread was given, once stopped (or never
-    /// started), so the session can `reset` it and hand it to the next
-    /// thread after a device change. `None` while the loop runs.
+    /// The echo canceller, once stopped, for the next thread after a
+    /// device change. `None` while the loop runs.
     pub fn take_echo_canceller(&mut self) -> Option<Box<dyn EchoCanceller>> {
         self.worker.as_mut().and_then(|worker| worker.aec.take())
     }
@@ -425,9 +400,8 @@ impl ProcessingThread {
         }
     }
 
-    /// Runs the loop body on the calling thread (the real-time allocation
-    /// test, which must own the thread the hook watches). Only before
-    /// `start`.
+    /// Runs the loop body on the calling thread, for the real-time
+    /// allocation test. Only before `start`.
     pub fn drain_on_caller(&mut self) {
         if let Some(worker) = self.worker.as_mut() {
             worker.drain();

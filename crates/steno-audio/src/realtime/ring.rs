@@ -1,17 +1,8 @@
 //! A single-producer, single-consumer ring of `f32` samples for one lane.
-//! Swift: `Sources/StenoAudio/RealTime/LaneRingBuffer.swift`.
-//!
-//! The IOProc writes, the processing thread reads. Indices are monotonically
-//! increasing sample counts in atomics; the producer publishes with a
-//! `Release` store, the consumer observes with an `Acquire` load. No locks,
-//! no allocation after `new`.
-//!
-//! A write that does not fit is refused as a whole (the caller keeps lanes
-//! aligned by refusing every lane of that callback) and counted in
-//! `dropped_samples`. Beside it the ring counts what its producer reported
-//! of audio its thread missed (`filled_samples`, written as zeros;
-//! `unfilled_samples`, not written: [`CycleClock`](super::CycleClock)), so
-//! the audio missed is the filled plus the unfilled.
+//! The IOProc writes, the processing thread reads; no locks, no allocation
+//! after `new`. A write that does not fit is refused whole and counted in
+//! `dropped_samples`; the ring also counts the audio its producer missed
+//! (`filled_samples`, `unfilled_samples`).
 //!
 //! # Safety model
 //!
@@ -76,36 +67,29 @@ impl LaneRingBuffer {
         }
     }
 
-    /// Samples the ring holds; a power of two.
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
-    /// Samples the consumer may read right now.
     #[inline(always)]
     pub fn available_to_read(&self) -> usize {
         self.write_index.load(Ordering::Acquire) - self.read_index.load(Ordering::Acquire)
     }
 
-    /// Samples the producer may write right now.
     #[inline(always)]
     pub fn available_to_write(&self) -> usize {
         self.capacity - self.available_to_read()
     }
 
-    /// Samples refused because the ring was full.
     pub fn dropped_samples(&self) -> usize {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    /// Zeros written in place of audio the producer's thread missed.
     pub fn filled_samples(&self) -> usize {
         self.filled.load(Ordering::Relaxed)
     }
 
-    /// Audio the producer's thread missed and did not write: a jump past
-    /// [`MISSED_FILL_LIMIT`](super::MISSED_FILL_LIMIT).
     pub fn unfilled_samples(&self) -> usize {
         self.unfilled.load(Ordering::Relaxed)
     }
@@ -118,7 +102,6 @@ impl LaneRingBuffer {
         self.capacity - (write - read) >= count
     }
 
-    /// Producer side. Records `count` refused samples without writing.
     #[inline(always)]
     pub fn record_drop(&self, count: usize) {
         self.dropped.fetch_add(count, Ordering::Relaxed);
@@ -222,9 +205,7 @@ impl LaneRingBuffer {
         true
     }
 
-    /// Producer side. Copies a slice; the safe form of [`Self::write`] for
-    /// producers that own their buffers (the synthetic backend, the relay,
-    /// the far-end delay line).
+    /// Producer side. Copies a slice; the safe form of [`Self::write`].
     #[inline(always)]
     pub fn write_slice(&self, source: &[f32]) -> bool {
         // SAFETY: a slice is valid for `len()` reads at stride 1; the caller
@@ -232,9 +213,7 @@ impl LaneRingBuffer {
         unsafe { self.write(source.as_ptr(), source.len(), 1) }
     }
 
-    /// Producer side. Writes `count` zeros (a buffer the HAL delivered
-    /// without data keeps the lane aligned; the far-end delay line is primed
-    /// with them).
+    /// Producer side. Writes `count` zeros.
     #[inline(always)]
     pub fn write_zeros(&self, count: usize) -> bool {
         let zero: f32 = 0.0;
@@ -268,8 +247,7 @@ impl LaneRingBuffer {
     }
 
     /// Consumer side. Skips up to `count` queued samples without reading
-    /// them and returns how many it skipped: the follower lane's clock-drift
-    /// slip. Moves only the read index, which the consumer owns.
+    /// them and returns how many it skipped. Moves only the read index.
     #[inline(always)]
     pub fn discard(&self, count: usize) -> usize {
         let read = self.read_index.load(Ordering::Relaxed);
@@ -279,8 +257,7 @@ impl LaneRingBuffer {
         skipped
     }
 
-    /// Consumer side, not real-time: takes everything queued (the
-    /// permission probe inspects what the tap delivered).
+    /// Consumer side, not real-time: takes everything queued.
     pub fn drain_all(&self) -> Vec<f32> {
         let count = self.available_to_read();
         let mut samples = vec![0.0; count];
@@ -292,9 +269,7 @@ impl LaneRingBuffer {
 
     /// Empties the ring, zeroes its storage so a restart never replays
     /// stale frames, and zeroes its counts. Only while no producer and no
-    /// consumer runs; the `&mut` borrow is not required because the session
-    /// holds the ring in an `Arc`, so the contract is documented rather
-    /// than typed.
+    /// consumer runs (the ring sits in an `Arc`, so this is not typed).
     pub fn clear(&self) {
         for cell in &self.storage {
             // SAFETY: by contract nobody else touches the storage now.

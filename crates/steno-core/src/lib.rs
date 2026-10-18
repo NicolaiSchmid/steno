@@ -1,53 +1,7 @@
-//! Steno's core: the domain types, the pluggable boundaries and their
-//! fakes, the SQLite store that shares its file with the Swift app, and
-//! the settings. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
-//!
-//! - [`model`]: the domain types, one module per Swift file in
-//!   `Sources/StenoCore/Model`, plus the value types the boundaries
-//!   exchange (audio buffers, raw segments, diarization results, stage
-//!   inputs and outputs, templates).
-//! - [`protocols`]: the pluggable boundaries (`SpeechEngine`, `Diarizer`,
-//!   `EchoCanceller`, `LanguageModel`, `Destination`, `SecretStore`,
-//!   `SpeakerMemory` and the pipeline stage traits), one trait per file,
-//!   with the async-trait decision documented once in its module doc.
-//! - [`store`]: the SQLite store, its writer and reader connections, its
-//!   migrations, and its change mark (`Store::change_mark`), which the
-//!   host's reload pass compares; [`store::convert`] holds the column
-//!   codecs a query outside the crate uses. With the `tokio` feature,
-//!   `Store::reading` and `Store::writing` run a store step from async
-//!   code on tokio's blocking pool.
-//! - `testing` (feature `testing`): deterministic fakes for every
-//!   boundary, so the pipeline, the CLI and the shell test without models.
-//!   The feature also adds `Store::probe_commits`, which lets a test read
-//!   each write transaction's pragmas right before it commits, and
-//!   `Store::on_writer`, which lets it tune or read the writer's
-//!   connection outside a transaction.
-//! - [`json`]: the `StenoJSON` convention and the date and UUID codecs;
-//!   [`json::printer`] holds the Foundation-style printer `meeting.json` and
-//!   the bridge use.
-//! - [`summary`]: the summary document as Markdown, names substituted.
-//! - [`string_enum`](mod@string_enum): the macro every Swift `String` enum is spelled with.
-//! - [`paths`]: where the database lives on each platform, and the file URL
-//!   codec the store's audio paths use.
-//! - [`platform`]: the OS the app runs on, which is also the OS its
-//!   calls were recorded on.
-//! - [`content_hash`]: the SHA-256 every receipt carries.
-//! - [`busy_file`]: the retries of a file Windows reports another handle
-//!   holds for a moment, which Steno's durable writes and renames share.
-//! - [`crash_log`]: a file in the support directory for every panic, in
-//!   the app and in the speech sidecar.
-//! - [`database_lock`]: the lock that keeps one process per database.
-//! - [`recording_layout`]: where one meeting's audio files live.
-//!
-//! Two rules hold the crate together. It depends on nothing else of ours
-//! (every other crate depends on it), so the pipeline, the CLI and the
-//! shell share one definition of each type. And the database file is
-//! shared with the Swift app until cutover, so every encoding mirrors it:
-//! UUIDs as uppercase text, dates in GRDB's `yyyy-MM-dd HH:mm:ss.SSS` UTC
-//! form in columns and ISO 8601 in JSON, JSON columns in the `StenoJSON`
-//! convention (sorted keys, no escaped slashes), embeddings as
-//! little-endian `f32` blobs. A schema change is one PR touching both
-//! sides; `migrations/README.md` has the procedure.
+//! Steno's core: the domain types, the pluggable boundaries and their fakes,
+//! the SQLite store and the settings. Every other Steno crate depends on it.
+//! The database file is shared with the Swift app until cutover, so every
+//! encoding mirrors it; `migrations/README.md` has the schema change procedure.
 
 pub mod busy_file;
 pub mod content_hash;

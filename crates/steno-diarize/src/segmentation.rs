@@ -7,22 +7,17 @@ use crate::first_max_by;
 /// One window handed to the segmentation and embedding models.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Window {
-    /// Position in the window sequence.
     pub index: usize,
     /// First sample of the window in the recording.
     pub offset: usize,
     /// Exactly `window_samples` samples, zero-padded past the recording.
     pub samples: Vec<f32>,
-    /// Frames whose centre lies inside the recording.
     pub valid_frames: usize,
 }
 
-/// The first sample of every window when `audio` samples are windowed
-/// every `step`, as sherpa-onnx lays them out: audio up to one window long
-/// is one zero-padded window; otherwise every window that fits, then one
-/// padded window for the tail when samples remain and it starts inside
-/// the audio (a step longer than the window can step past the end). A
-/// step of zero reads as one sample.
+/// The first sample of every window at `step`, as sherpa-onnx lays them out:
+/// every full window, then one padded tail window when samples remain inside
+/// the audio. A step of zero reads as one sample.
 #[must_use]
 pub fn window_offsets(total: usize, geometry: &SegmentationGeometry, step: usize) -> Vec<usize> {
     let length = geometry.window_samples;
@@ -38,9 +33,8 @@ pub fn window_offsets(total: usize, geometry: &SegmentationGeometry, step: usize
     offsets
 }
 
-/// The windows at [`window_offsets`], built one at a time as the iterator
-/// advances: a padded window is 640 KB at pyannote's geometry and an hour
-/// holds 1 800 of them, so only the window being analysed is alive.
+/// The windows at [`window_offsets`], built one at a time so only the window
+/// being analysed is alive.
 pub fn windows<'a>(
     audio: &'a [f32],
     geometry: &'a SegmentationGeometry,
@@ -64,10 +58,8 @@ pub fn windows<'a>(
         })
 }
 
-/// The powerset classes of a segmentation model as speaker bit masks:
-/// nobody, each speaker alone, then every pair in order, as pyannote
-/// enumerates them (`[∅, {0}, {1}, {2}, {0,1}, {0,2}, {1,2}]` for three
-/// speakers and at most two at once).
+/// The powerset classes as speaker bit masks: nobody, each speaker alone,
+/// then every pair in order, as pyannote enumerates them.
 #[must_use]
 pub fn powerset(num_speakers: usize, max_simultaneous: usize) -> Vec<u8> {
     let mut classes = vec![0u8];
@@ -98,19 +90,16 @@ pub fn powerset(num_speakers: usize, max_simultaneous: usize) -> Vec<u8> {
 pub struct WindowActivity {
     pub window: usize,
     pub offset: usize,
-    /// One bit mask per valid frame; bit `s` set when local speaker `s`
-    /// speaks.
+    /// One bit mask per valid frame; bit `s` set when local speaker `s` speaks.
     pub frames: Vec<u8>,
 }
 
 impl WindowActivity {
-    /// Active speakers in `frame`.
     #[must_use]
     pub fn speaker_count(&self, frame: usize) -> u32 {
         self.frames.get(frame).map_or(0, |mask| mask.count_ones())
     }
 
-    /// Whether local speaker `speaker` is active in `frame`.
     #[must_use]
     pub fn is_active(&self, frame: usize, speaker: usize) -> bool {
         self.frames
@@ -118,7 +107,6 @@ impl WindowActivity {
             .is_some_and(|mask| mask & (1u8 << speaker) != 0)
     }
 
-    /// Frames in which `speaker` is active.
     #[must_use]
     pub fn active_frames(&self, speaker: usize) -> usize {
         self.frames
@@ -128,10 +116,8 @@ impl WindowActivity {
     }
 }
 
-/// Hard argmax per frame over the powerset classes (the first on a tie,
-/// as `argmax` has it), then the class's speaker mask, as pyannote and
-/// sherpa-onnx decode it. `logits` holds `num_classes` values per frame;
-/// frames past `valid_frames` are dropped.
+/// Hard argmax per frame over the powerset classes (the first on a tie),
+/// then the class's speaker mask. Frames past `valid_frames` are dropped.
 #[must_use]
 pub fn decode(logits: &[f32], classes: &[u8], num_classes: usize, valid_frames: usize) -> Vec<u8> {
     logits
@@ -145,9 +131,8 @@ pub fn decode(logits: &[f32], classes: &[u8], num_classes: usize, valid_frames: 
         .collect()
 }
 
-/// The time a run of frames `first..=last` in a window at `offset`
-/// covers: half a frame either side of the frame centres, clamped to the
-/// recording.
+/// The time frames `first..=last` of a window at `offset` cover: half a
+/// frame either side of the centres, clamped to the recording.
 #[must_use]
 pub fn frame_span(
     geometry: &SegmentationGeometry,
@@ -214,9 +199,8 @@ mod tests {
         assert_eq!(window_offsets(0, &GEOMETRY, 0), vec![0]);
     }
 
-    /// A step longer than the window leaves gaps between windows, and the
-    /// tail window would start past the end of the audio: 72.5 s at a
-    /// 12.5 s step has full windows up to 62.5 s and no tail at 75 s.
+    /// A step longer than the window leaves gaps, and no tail starts past the
+    /// end of the audio.
     #[test]
     fn a_step_longer_than_the_window_puts_no_window_past_the_audio() {
         let audio = vec![0.1f32; 1_160_012];

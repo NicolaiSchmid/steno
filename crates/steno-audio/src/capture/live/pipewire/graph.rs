@@ -1,35 +1,8 @@
-//! What the PipeWire backend knows about the graph: the nodes and ports the
-//! registry announced and the two defaults from the `default` metadata,
-//! and the decisions made from them: which ports feed which channel of
-//! Steno's capture stream, which lane each of Steno's links serves, the
-//! [`DeviceSnapshot`] a change is judged by, and a port's latency in
-//! frames. Pure, so the choices are unit-tested without a PipeWire daemon;
-//! `super` feeds it from the registry and metadata callbacks.
-//!
-//! Identities: a device's UID (what `Settings.input_device_uid` stores) is
-//! its `node.name`, stable across reboots for the same hardware, as the
-//! `default.audio.*` metadata names devices too. A UID that names no source
-//! the capture can record ([`Graph::known_source`]), a UID the input picker
-//! ([`Graph::inputs`]) would not list, records the default source instead,
-//! and the snapshot then follows the default until the chosen source is
-//! announced again ([`Graph::followed_source`]). The microphone is the
-//! first non-monitor output port (lowest `port.id`) of the input node, as
-//! the macOS backend takes the input device's first channel; a virtual
-//! source (a null sink with `media.class = Audio/Source/Virtual`) has only
-//! a monitor output, and that is taken then. The system lane is the default
-//! sink's monitor: its `FL` and `FR` monitor ports (folded to mono by the
-//! rings), or its only one for a mono sink, or the two lowest-numbered for
-//! a sink without front channels.
-//!
-//! PipeWire reuses the ids of removed globals, never their
-//! `object.serial`: a linked node or port is alive while its id still
-//! carries the serial it had at `resolve`, so a device destroyed and
-//! re-created under the same name and id still reads as gone.
-//!
-//! No Swift counterpart (the Swift app is macOS-only). The macOS analogue
-//! of [`Graph::snapshot`] is `LiveCaptureBackend.resolve` (Swift:
-//! `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`), which reads the
-//! same [`DeviceSnapshot`] from Core Audio.
+//! What the PipeWire backend knows about the graph (the registry's nodes
+//! and ports and the `default` metadata) and the decisions made from it:
+//! which ports feed which channel, which lane each link serves, and the
+//! [`DeviceSnapshot`] a change is judged by. A device's UID is its
+//! `node.name`; a node or port is alive while its id keeps its serial.
 
 use std::collections::BTreeMap;
 
@@ -46,12 +19,9 @@ pub(crate) const DEFAULT_SINK_KEY: &str = "default.audio.sink";
 /// The metadata key WirePlumber keeps the default source's name in.
 pub(crate) const DEFAULT_SOURCE_KEY: &str = "default.audio.source";
 
-/// A node the registry announced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodeEntry {
-    /// `node.name`: the UID.
     pub name: String,
-    /// `media.class`, `Audio/Sink`, `Audio/Source` and so on.
     pub media_class: String,
     /// `node.description`, else `node.nick`: the name a person reads.
     pub description: Option<String>,
@@ -69,27 +39,21 @@ pub(crate) fn is_source_class(media_class: &str) -> bool {
 }
 
 impl NodeEntry {
-    /// Something a microphone lane can record from.
     fn is_source(&self) -> bool {
         is_source_class(&self.media_class)
     }
 
-    /// Something whose monitor the system lane can record.
     fn is_sink(&self) -> bool {
         self.media_class.starts_with("Audio/Sink") || self.media_class == "Audio/Duplex"
     }
 }
 
-/// A port the registry announced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PortEntry {
-    /// The owning node's global id.
     pub node: u32,
-    /// `port.direction` is `out`.
     pub output: bool,
     /// `port.monitor` is `true`: a sink's copy of what it plays.
     pub monitor: bool,
-    /// `audio.channel`: `FL`, `MONO`, `AUX0` and so on.
     pub channel: String,
     /// `port.id`: the port's index on its node.
     pub index: u32,
@@ -97,15 +61,12 @@ pub(crate) struct PortEntry {
     pub serial: Option<u64>,
 }
 
-/// One end the capture stream is linked to: the node and the ports taken
-/// from it, in channel order.
+/// One end the capture stream is linked to: the node and its ports, in
+/// channel order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Endpoint {
-    /// The node's global id.
     pub node: u32,
-    /// Its `node.name`.
     pub name: String,
-    /// The ports linked from it, in stream channel order.
     pub ports: Vec<u32>,
     /// The port whose latency is the device path's: the microphone port
     /// itself, or the sink's first playback (input) port.
@@ -114,7 +75,6 @@ pub(crate) struct Endpoint {
     serials: Vec<Option<u64>>,
 }
 
-/// What a capture links and how the lanes sit in its interleaved buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Targets {
     /// The input device, for a `Mic` or `Mixed` lane.
@@ -123,21 +83,16 @@ pub(crate) struct Targets {
     pub output: Option<Endpoint>,
     /// `(node, port)` feeding each channel of the stream, in channel order.
     pub feeds: Vec<(u32, u32)>,
-    /// One interleaved buffer of `feeds.len()` channels.
     pub layout: StreamLayout,
 }
 
 impl Targets {
-    /// Channels in the capture stream's format.
     pub fn channels(&self) -> usize {
         self.feeds.len()
     }
 
-    /// What losing Steno's link from `port` of node `node` loses: the
-    /// microphone when the microphone endpoint takes that port, the output
-    /// when the output endpoint does (both for a port both take). A port
-    /// neither takes cannot be one of Steno's links; to be safe it loses
-    /// both.
+    /// What losing Steno's link from `port` of `node` loses: the lane whose
+    /// endpoint takes that port; both for a port neither takes.
     pub fn lost_with(&self, node: u32, port: u32) -> Lost {
         let takes = |endpoint: &Option<Endpoint>| {
             endpoint
@@ -153,9 +108,7 @@ impl Targets {
 }
 
 /// What a capture lost of its devices: Steno's links from the microphone,
-/// from the output, or both (what a lost connection or stream loses). The Mac
-/// reads each device's own liveness the same way (Swift:
-/// `LiveCaptureBackend.resolve`, `inputAlive` and `outputAlive`).
+/// the output, or both.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Lost {
     /// Steno's link from the microphone failed or went.
@@ -165,24 +118,21 @@ pub(crate) struct Lost {
 }
 
 impl Lost {
-    /// Nothing.
     pub const NONE: Self = Self {
         mic: false,
         output: false,
     };
 
-    /// Both: what a lost connection or stream loses.
+    /// What a lost connection or stream loses.
     pub const ALL: Self = Self {
         mic: true,
         output: true,
     };
 
-    /// Whether anything is lost.
     pub fn any(self) -> bool {
         self.mic || self.output
     }
 
-    /// What either lost.
     #[must_use]
     pub fn union(self, other: Self) -> Self {
         Self {
@@ -192,23 +142,20 @@ impl Lost {
     }
 }
 
-/// The registry and the defaults as last announced; see the module doc.
+/// The registry and the defaults as last announced.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Graph {
     nodes: BTreeMap<u32, NodeEntry>,
     ports: BTreeMap<u32, PortEntry>,
     default_sink: Option<String>,
     default_source: Option<String>,
-    /// The targets and the UID asked for by the capture whose snapshot the
-    /// graph serves, once [`Graph::track`] set them.
+    /// The targets and the UID asked for by the capture the graph serves.
     tracked: Option<(Targets, Option<String>)>,
 }
 
 impl Graph {
-    /// A node global, its properties read through `props`. Nodes without a
-    /// `node.name` are not kept: nothing can name them. True when it is the
-    /// node the tracked capture asked for, which may bring a chosen source
-    /// back (see [`Self::followed_source`]).
+    /// A node global. Nodes without a `node.name` are not kept. True when it
+    /// is the node the tracked capture asked for.
     pub fn add_node<'a>(&mut self, id: u32, props: impl Fn(&str) -> Option<&'a str>) -> bool {
         let Some(name) = props("node.name") else {
             return false;
@@ -230,10 +177,8 @@ impl Graph {
         chosen
     }
 
-    /// A port global, its properties read through `props`. Ports without
-    /// an owning node or a direction are not kept. True when it is a port of
-    /// the node the tracked capture asked for: a node's ports follow it,
-    /// and the capture needs one.
+    /// A port global. Ports without a node or a direction are not kept. True
+    /// when it is a port of the node the tracked capture asked for.
     pub fn add_port<'a>(&mut self, id: u32, props: impl Fn(&str) -> Option<&'a str>) -> bool {
         let Some(node) = props("node.id").and_then(|v| v.parse().ok()) else {
             return false;
@@ -263,7 +208,6 @@ impl Graph {
         chosen
     }
 
-    /// Whether `name` is the UID the tracked capture asked for.
     fn is_chosen(&self, name: &str) -> bool {
         self.tracked
             .as_ref()
@@ -271,19 +215,14 @@ impl Graph {
     }
 
     /// From now on a removal counts as a change only when the snapshot for
-    /// `targets` with `uid` (the UID asked for, not the fallback source)
-    /// reads what went; see [`Self::remove`].
+    /// `targets` with `uid` reads what went.
     pub fn track(&mut self, targets: &Targets, uid: Option<&str>) {
         self.tracked = Some((targets.clone(), uid.map(str::to_owned)));
     }
 
-    /// A global went away. True when it was a node or a port the capture
-    /// may have to react to: before [`Self::track`] any, after it a node
-    /// the snapshot reads (a linked node, the default sink for a system
-    /// lane, the source the microphone follows) or a port of one, so
-    /// another app's stream ending is no change. A port can go while its
-    /// node stays (the node's ports reconfigured), and Steno's link to it
-    /// dies with it.
+    /// A global went away. True when the capture may have to react: before
+    /// [`Self::track`] any node or port, after it a node the snapshot reads
+    /// or a port of one, so another app's stream ending is no change.
     pub fn remove(&mut self, id: u32) -> bool {
         let node = match self.ports.get(&id) {
             Some(port) => Some(port.node),
@@ -299,9 +238,8 @@ impl Graph {
         changed
     }
 
-    /// Whether the snapshot for `targets` with `uid` reads node `node`: a
-    /// linked node, the default sink for a system lane, or the source the
-    /// microphone follows.
+    /// Whether the snapshot reads node `node`: a linked node, the default
+    /// sink for a system lane, or the source the microphone follows.
     fn is_read(&self, node: u32, targets: &Targets, uid: Option<&str>) -> bool {
         let is = |found: Option<(u32, &NodeEntry)>| found.is_some_and(|(id, _)| id == node);
         [&targets.mic, &targets.output]
@@ -312,10 +250,9 @@ impl Graph {
             || targets.mic.is_some() && is(self.followed_source(uid))
     }
 
-    /// A property of the `default` metadata on subject 0. `key` `None`
-    /// clears every key; `value` `None` removes one. The value is JSON,
-    /// `{"name":"alsa_output…"}`. True when a default this module reads
-    /// changed.
+    /// A property of the `default` metadata on subject 0 (`key` `None`
+    /// clears all, `value` `None` removes one; values are JSON). True when
+    /// a default this module reads changed.
     pub fn set_default(&mut self, key: Option<&str>, value: Option<&str>) -> bool {
         let (sink, source) = match key {
             None => (true, true),
@@ -336,8 +273,7 @@ impl Graph {
         changed
     }
 
-    /// The `object.serial` of node `node`, then of each of its `ports`;
-    /// `None` when one of them is not in the graph (or not on that node).
+    /// The serials of node `node` and its `ports`; `None` when one is gone.
     fn serials(&self, node: u32, ports: &[u32]) -> Option<Vec<Option<u64>>> {
         let mut serials = vec![self.nodes.get(&node)?.serial];
         for port in ports {
@@ -346,9 +282,8 @@ impl Graph {
         Some(serials)
     }
 
-    /// Whether `endpoint` is still in the graph as `resolve` found it: its
-    /// node under the same name and every linked port, each with the same
-    /// `object.serial` (see the module doc).
+    /// Whether `endpoint` is still in the graph as `resolve` found it, by
+    /// name and serials.
     fn is_alive(&self, endpoint: &Endpoint) -> bool {
         self.nodes
             .get(&endpoint.node)
@@ -356,8 +291,7 @@ impl Graph {
             && self.serials(endpoint.node, &endpoint.ports).as_ref() == Some(&endpoint.serials)
     }
 
-    /// The source a microphone lane records: the node named `uid`, or the
-    /// default source.
+    /// The node named `uid`, or the default source.
     fn source_named(&self, uid: Option<&str>) -> Option<(u32, &NodeEntry)> {
         let name = uid.or(self.default_source.as_deref())?;
         self.nodes
@@ -366,7 +300,6 @@ impl Graph {
             .map(|(id, node)| (*id, node))
     }
 
-    /// The default sink.
     fn default_sink_node(&self) -> Option<(u32, &NodeEntry)> {
         let name = self.default_sink.as_deref()?;
         self.nodes
@@ -375,7 +308,6 @@ impl Graph {
             .map(|(id, node)| (*id, node))
     }
 
-    /// Node `node`'s ports matching `keep`, by `port.id`.
     fn ports_of(&self, node: u32, keep: impl Fn(&PortEntry) -> bool) -> Vec<(u32, &PortEntry)> {
         let mut ports: Vec<(u32, &PortEntry)> = self
             .ports
@@ -387,7 +319,6 @@ impl Graph {
         ports
     }
 
-    /// The microphone endpoint for `uid` (the default source when `None`).
     fn mic(&self, uid: Option<&str>) -> Result<Endpoint, CaptureError> {
         let (node, entry) = self
             .source_named(uid)
@@ -402,35 +333,28 @@ impl Graph {
         Ok(self.endpoint(node, entry, vec![port], Some(port)))
     }
 
-    /// `uid` when it names a source the microphone lane can record
-    /// ([`Self::inputs`] lists it), else `None`, the default source: a UID
-    /// saved on another computer (a Core Audio UID from a Mac) or a device
-    /// unplugged since it was chosen does not fail the capture.
+    /// `uid` when it names a source [`Self::inputs`] lists, else `None`
+    /// (the default): a stale UID does not fail the capture.
     pub fn known_source<'a>(&self, uid: Option<&'a str>) -> Option<&'a str> {
         uid.filter(|&uid| self.mic(Some(uid)).is_ok())
     }
 
-    /// Whether `uid` names a Bluetooth source, which a probe must not link
-    /// (`Capture::probe`).
+    /// Whether `uid` names a Bluetooth source, which a probe must not link.
     pub fn is_bluetooth_source(&self, uid: &str) -> bool {
         self.source_named(Some(uid))
             .is_some_and(|(_, node)| node.bluetooth)
     }
 
-    /// The source a capture asked for `uid` would record now: the chosen
-    /// one while it can be recorded, else the default. The snapshot reads
-    /// it, so a capture on the fallback follows default moves,
-    /// and the chosen source coming back reads as `DefaultInputChanged`,
-    /// whose rebuild records it again.
+    /// The source a capture asked for `uid` records now: the chosen one
+    /// while recordable, else the default. The chosen source coming back
+    /// reads as `DefaultInputChanged`, whose rebuild records it again.
     fn followed_source(&self, uid: Option<&str>) -> Option<(u32, &NodeEntry)> {
         self.source_named(self.known_source(uid))
     }
 
-    /// The microphone a capture that resolved `targets` asked for `uid`
-    /// records, named by its `node.description`, else `node.nick`, and
-    /// `None` without either ([`Self::inputs`] then lists it by its
-    /// `node.name`); a fallback when `uid` names no source the lane can
-    /// record.
+    /// The microphone a capture records, named by `node.description`, else
+    /// `node.nick`, else `None`; a fallback when `uid` names no recordable
+    /// source.
     pub fn input(&self, targets: &Targets, uid: Option<&str>) -> Option<CaptureInput> {
         let mic = targets.mic.as_ref()?;
         Some(CaptureInput {
@@ -443,8 +367,7 @@ impl Graph {
         })
     }
 
-    /// The input picker's devices, as `AudioDevices::inputs` describes
-    /// them (`super::devices`); channels are the ports the capture could
+    /// The input picker's devices; channels are the ports the capture could
     /// take.
     pub fn inputs(&self) -> Vec<AudioDeviceInfo> {
         self.nodes
@@ -477,7 +400,6 @@ impl Graph {
             .collect()
     }
 
-    /// An endpoint on node `node` linking `ports`, its serials as now.
     fn endpoint(
         &self,
         node: u32,
@@ -494,8 +416,8 @@ impl Graph {
         }
     }
 
-    /// The default sink's monitor endpoint: front left and right first,
-    /// at most two ports.
+    /// The default sink's monitor endpoint: front left and right first, at
+    /// most two ports.
     fn output(&self) -> Result<Endpoint, CaptureError> {
         let (node, entry) = self
             .default_sink_node()
@@ -522,10 +444,9 @@ impl Graph {
         Ok(self.endpoint(node, entry, ports, latency_port))
     }
 
-    /// What a capture of `lanes` links: the endpoints, the port feeding
-    /// each stream channel, and the layout of the interleaved buffer.
-    /// `InputDeviceUnavailable` or `OutputDeviceUnavailable` when a lane's
-    /// device does not resolve.
+    /// What a capture of `lanes` links: endpoints, the port feeding each
+    /// channel, and the buffer layout; an `…Unavailable` error when a
+    /// lane's device does not resolve.
     pub fn resolve(&self, lanes: &[AudioLane], uid: Option<&str>) -> Result<Targets, CaptureError> {
         if lanes.is_empty() {
             return Err(CaptureError::UnexpectedStreamLayout(
@@ -572,8 +493,8 @@ impl Graph {
         })
     }
 
-    /// The capture stream's input ports on node `stream`, one per channel
-    /// in channel order (`AUX0`, `AUX1`, …), once all `channels` exist.
+    /// The capture stream's input ports on node `stream`, in channel order,
+    /// once all `channels` exist.
     pub fn stream_ports(&self, stream: u32, channels: usize) -> Option<Vec<u32>> {
         let inputs = self.ports_of(stream, |p| !p.output);
         (0..channels)
@@ -587,13 +508,10 @@ impl Graph {
             .collect()
     }
 
-    /// The devices as they are now, for a capture that resolved `targets`
-    /// asked for `uid`; a lane in `lost` reads as its device gone. The
-    /// microphone is [`Self::followed_source`]. The default
-    /// sink stands for both of the snapshot's outputs (PipeWire has no
-    /// separate clock master: its adapter resamples to the stream's
-    /// 48 kHz), so `default_output_uid` stays `None` and `sample_rate`
-    /// stays [`SAMPLE_RATE`].
+    /// The devices as they are now for a capture of `targets` asked for
+    /// `uid`; a lane in `lost` reads as gone. The default sink stands for
+    /// both outputs (the adapter resamples), so `default_output_uid` stays
+    /// `None` and `sample_rate` [`SAMPLE_RATE`].
     pub fn snapshot(&self, targets: &Targets, uid: Option<&str>, lost: Lost) -> DeviceSnapshot {
         let alive = |endpoint: &Option<Endpoint>, lost: bool| {
             !lost && endpoint.as_ref().is_some_and(|e| self.is_alive(e))
@@ -617,19 +535,17 @@ impl Graph {
     }
 }
 
-/// A global's `object.serial`.
 fn serial<'a>(props: &impl Fn(&str) -> Option<&'a str>) -> Option<u64> {
     props("object.serial").and_then(|v| v.parse().ok())
 }
 
-/// The `name` of a `default` metadata value, `{"name":"…"}`.
+/// The `name` of a `default` metadata value.
 fn default_name(value: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(value).ok()?;
     json.get("name")?.as_str().map(str::to_owned)
 }
 
-/// The lower bound of a port's `SPA_PARAM_Latency` in one direction:
-/// graph quanta, samples at the graph rate and nanoseconds, summed.
+/// The lower bound of a port's `SPA_PARAM_Latency` in one direction.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) struct Latency {
     /// Multiples of the graph's quantum.
@@ -641,11 +557,9 @@ pub(crate) struct Latency {
 }
 
 impl Latency {
-    /// The latency in frames at [`SAMPLE_RATE`]. `cycle_frames` is one
-    /// graph cycle as the capture stream receives it (the quantum,
-    /// resampled to 48 kHz), `graph_rate` the graph's clock in hertz. The
-    /// lower bounds are used and the sum is rounded down: the far-end delay
-    /// must not overshoot (see `CaptureSession::far_end_delay_frames`).
+    /// The latency in frames at [`SAMPLE_RATE`] for a graph cycle of
+    /// `cycle_frames` (resampled to 48 kHz) at `graph_rate`. Rounded down:
+    /// the far-end delay must not overshoot.
     pub fn frames(&self, cycle_frames: usize, graph_rate: u32) -> usize {
         let graph_rate = if graph_rate == 0 {
             SAMPLE_RATE
@@ -673,7 +587,6 @@ mod tests {
 
     const BUILT_IN_MIC: &str = "alsa_input.pci.analog-stereo";
 
-    /// Node `id` named `name` of `class`, its `object.serial` `serial`.
     fn node(graph: &mut Graph, id: u32, serial: u64, name: &str, class: &str) {
         let serial = serial.to_string();
         graph.add_node(
@@ -713,9 +626,8 @@ mod tests {
         );
     }
 
-    /// A laptop: a stereo ALSA sink with monitors, a stereo built-in
-    /// microphone, a mono USB headset microphone, the defaults set. Every
-    /// global's serial is its id plus 1000.
+    /// A laptop: a stereo ALSA sink, a stereo built-in microphone, a mono
+    /// USB headset microphone, the defaults set; serials are ids plus 1000.
     fn laptop() -> Graph {
         let mut graph = Graph::default();
         let sink = "alsa_output.pci.analog-stereo";
@@ -730,8 +642,7 @@ mod tests {
         );
         port(&mut graph, 50, 1050, 40, "in", "FL");
         port(&mut graph, 51, 1051, 40, "in", "FR");
-        // The monitor ports announced right before left, as the registry
-        // may.
+        // Monitor right before left, as the registry may announce them.
         port(&mut graph, 52, 1052, 40, "out", "monitor_FR");
         port(&mut graph, 53, 1053, 40, "out", "monitor_FL");
         port(&mut graph, 54, 1054, 41, "out", "FR");

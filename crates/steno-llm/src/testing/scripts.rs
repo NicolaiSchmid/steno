@@ -1,5 +1,4 @@
 //! Ready-made [`StubResponse`]s for the situations the client must survive.
-//! Swift: `Sources/StenoLLM/Testing/Scripts.swift`.
 
 use std::sync::Arc;
 
@@ -15,16 +14,12 @@ use crate::wire::{
     ResponsesResponse, ResponsesStreamEvent, ResponsesUsage,
 };
 
-/// Answers a request the queue did not cover; `None` falls through to a
-/// 404.
+/// Answers a request the queue did not cover; `None` gives a 404.
 pub type Responder = Arc<dyn Fn(&RecordedRequest) -> Option<StubResponse> + Send + Sync>;
 
-/// The canned responses: a plain completion, a rate limit with
-/// `Retry-After`, a server error, a 400 rejecting `response_format`, fenced
-/// or invalid JSON, a truncated answer, a refusal, a model list, and the
-/// Codex backend's streams and token endpoint answers.
-/// [`StubResponse::hang`] and [`StubResponse::drop_connection`] cover a
-/// connection that never answers or closes early.
+/// The canned responses for the stub server: completions, rate limits,
+/// server errors, rejections, refusals, model lists, and the Codex
+/// backend's streams and token endpoint answers.
 #[allow(non_upper_case_globals)]
 pub const scripts: Scripts = Scripts;
 
@@ -69,8 +64,7 @@ impl Scripts {
         )
     }
 
-    /// [`Self::completion`] with `stop`, the default usage and the stub
-    /// model.
+    /// [`Self::completion`] with `stop`, the default usage and stub model.
     #[must_use]
     pub fn text(&self, text: &str) -> StubResponse {
         self.completion(text, Some("stop"), Some(default_usage()), "stub-model")
@@ -119,8 +113,7 @@ impl Scripts {
         )
     }
 
-    /// A 429 whose `Retry-After` header is `retry_after` verbatim, for the
-    /// values a client must survive (`inf`, `1e300`, an HTTP date).
+    /// A 429 whose `Retry-After` header is `retry_after` verbatim.
     #[must_use]
     pub fn rate_limited(&self, retry_after: Option<&str>) -> StubResponse {
         let response = StubResponse::json(
@@ -140,7 +133,7 @@ impl Scripts {
     }
 
     /// A completion body written verbatim, for shapes the wire types cannot
-    /// produce (a null or partial `usage`).
+    /// produce.
     #[must_use]
     pub fn raw_completion(&self, body: &str) -> StubResponse {
         StubResponse::new(200, body.as_bytes().to_vec())
@@ -169,8 +162,7 @@ impl Scripts {
         )
     }
 
-    /// The 400 Groq and OpenRouter send when a model lacks structured
-    /// output.
+    /// The 400 Groq and OpenRouter send when a model lacks structured output.
     #[must_use]
     pub fn rejects_response_format(&self) -> StubResponse {
         StubResponse::json(
@@ -193,9 +185,8 @@ impl Scripts {
         StubResponse::json(&ChatErrorEnvelope::message(message), 400)
     }
 
-    /// OpenAI's 400 for a request field a model does not take, the field
-    /// named in `error.param`: `max_tokens` and `temperature` on reasoning
-    /// models.
+    /// OpenAI's 400 for a request field the model does not take, named in
+    /// `error.param`.
     #[must_use]
     pub fn rejects_parameter(&self, param: &str) -> StubResponse {
         StubResponse::json(
@@ -213,9 +204,8 @@ impl Scripts {
         )
     }
 
-    /// A responder that plays an OpenAI reasoning model: it rejects
-    /// `max_tokens` (wanting `max_completion_tokens`) and any
-    /// `temperature`, each by name, and otherwise returns `completion`.
+    /// Plays an OpenAI reasoning model: rejects `max_tokens` and any
+    /// `temperature` by name, else returns `completion`.
     #[must_use]
     pub fn reasoning_model(&self, completion: StubResponse) -> Responder {
         Arc::new(move |request: &RecordedRequest| {
@@ -247,11 +237,8 @@ impl Scripts {
         )
     }
 
-    /// A responder that plays a perfect cleanup model: it reads the
-    /// numbered segments out of the request and answers with them, each
-    /// passed through `transform(index, text)`. Segments the transform
-    /// returns `None` for are dropped from the answer, which lets a test
-    /// script a wrong count.
+    /// Plays a perfect cleanup model, passing each segment through
+    /// `transform(index, text)`; `None` drops it from the answer.
     #[must_use]
     pub fn cleanup_echo(
         &self,
@@ -278,10 +265,8 @@ impl Scripts {
         })
     }
 
-    /// A responder that answers `GET /models` with `models`, rejects
-    /// `response_format` kinds in `rejecting` with a 400, and otherwise
-    /// returns `completion`. Models the servers that honour `json_object`
-    /// but not `json_schema`.
+    /// Answers `GET /models` with `models`, rejects `response_format` kinds
+    /// in `rejecting` with a 400, else returns `completion`.
     #[must_use]
     pub fn format_rejecting_server(
         &self,
@@ -308,11 +293,8 @@ impl Scripts {
         })
     }
 
-    // Codex backend
-
-    /// One `text/event-stream` body as the Codex backend streams a finished
-    /// response: created, one message item done, then `response.completed`
-    /// (or `response.incomplete` with `incomplete_reason`).
+    /// A Codex `text/event-stream` body: created, one message item, then
+    /// `response.completed` (or `response.incomplete`).
     #[must_use]
     pub fn responses_stream(
         &self,
@@ -349,8 +331,7 @@ impl Scripts {
         ])
     }
 
-    /// [`Self::responses_stream`] completed with the default usage and the
-    /// stub model.
+    /// [`Self::responses_stream`] with the default usage and stub model.
     #[must_use]
     pub fn stream(&self, text: &str) -> StubResponse {
         self.responses_stream(text, "completed", None, Some(default_usage()), "gpt-stub")
@@ -399,8 +380,7 @@ impl Scripts {
         ])
     }
 
-    /// A stream that ends in a top-level `error` event with `message`, the
-    /// shape the backend uses for a failure that has no response object.
+    /// A stream ending in a top-level `error` event with `message`.
     #[must_use]
     pub fn responses_error_event(&self, message: &str, code: &str) -> StubResponse {
         event_stream(&[
@@ -425,8 +405,7 @@ impl Scripts {
         ])
     }
 
-    /// A `text/event-stream` body written verbatim, for shapes the typed
-    /// events cannot produce (data-only events, `[DONE]`, unknown names).
+    /// A `text/event-stream` body written verbatim.
     #[must_use]
     pub fn raw_event_stream(&self, body: &str) -> StubResponse {
         StubResponse::new(200, body.as_bytes().to_vec())
@@ -457,8 +436,7 @@ impl Scripts {
         .with_header("Content-Type", "application/json")
     }
 
-    /// The plan's usage limit: a 429 whose `error.type` names it, which the
-    /// client must not retry.
+    /// The plan's usage limit, which the client must not retry.
     #[must_use]
     pub fn codex_usage_limit(&self) -> StubResponse {
         StubResponse::json(
@@ -480,9 +458,8 @@ impl Scripts {
         StubResponse::json(&CodexModelList { models }, 200)
     }
 
-    /// A refreshed token triple from the OAuth token endpoint. Every field
-    /// is optional there; `None` for `refresh` plays an endpoint that did
-    /// not rotate the refresh token.
+    /// A refreshed token triple from the token endpoint; `None` for
+    /// `refresh` plays an endpoint that did not rotate it.
     #[must_use]
     pub fn token_refresh(
         &self,
@@ -550,8 +527,7 @@ pub fn parse_segments(user_message: &str) -> Vec<(i64, String)> {
     segments
 }
 
-/// A `response.*` event with `kind` as its name; `item` only for
-/// `response.output_item.done`.
+/// A `response.*` event named `kind`.
 fn event(
     kind: &'static str,
     response: Option<ResponsesResponse>,

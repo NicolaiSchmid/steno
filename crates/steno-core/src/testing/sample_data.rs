@@ -1,13 +1,10 @@
-//! Fixed values the fakes and their tests share. After
-//! `Sources/StenoCore/Testing/SampleData.swift`, with its own title, ids
-//! and dates.
+//! Fixed values the fakes and their tests share.
 
 use chrono::{DateTime, TimeZone, Utc};
 use uuid::Uuid;
 
 use crate::{Embedding, Meeting, MeetingExport, MeetingSource, MeetingState, Person, TitleOrigin};
 
-/// The sample meeting's id.
 #[must_use]
 pub fn meeting_id() -> Uuid {
     Uuid::parse_str("516EADE8-40E5-4434-8AAF-9214A21A604E").unwrap()
@@ -19,8 +16,7 @@ pub fn started_at() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 29, 13, 49, 11).unwrap() + chrono::Duration::milliseconds(135)
 }
 
-/// A unit embedding along `axis` (modulo the dimension), so fakes hand out
-/// voices that are orthogonal to each other.
+/// A unit embedding along `axis`, so fakes hand out orthogonal voices.
 #[must_use]
 pub fn embedding(axis: usize) -> Embedding {
     let mut values = vec![0.0; Embedding::DIMENSION];

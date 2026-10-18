@@ -1,7 +1,5 @@
 //! The `stageRate` table: the learned seconds per unit of each pipeline
-//! stage. The seeds and the moving average live with the pipeline
-//! (`steno-pipeline`); the store only reads and writes rows.
-//! Swift: `Sources/StenoCore/Storage/MeetingStore+Timings.swift`.
+//! stage. The seeds and the moving average live in `steno-pipeline`.
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Row, params};
@@ -10,7 +8,6 @@ use super::convert::{DbDate, DbEnum, RowExt as _};
 use super::{Result, Store, query_all};
 use crate::model::{PipelineStage, StageRate};
 
-/// One row of `stageRate`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StageRateRow {
     pub stage: PipelineStage,
@@ -32,7 +29,6 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<StageRateRow> {
     })
 }
 
-/// The stored row for `stage` and `key`, `None` before the first sample.
 fn find(connection: &Connection, stage: PipelineStage, key: &str) -> Result<Option<StageRateRow>> {
     let rows = query_all(
         connection,
@@ -45,8 +41,8 @@ fn find(connection: &Connection, stage: PipelineStage, key: &str) -> Result<Opti
 }
 
 impl Store {
-    /// Every learned rate, stage order then key. A row whose stage the
-    /// enum does not know is skipped, not an error (a newer schema's stage).
+    /// Every learned rate, stage order then key. A row of an unknown stage
+    /// is skipped.
     pub fn stage_rates(&self) -> Result<Vec<StageRateRow>> {
         self.read(|connection| {
             let mut statement = connection.prepare(
@@ -67,9 +63,8 @@ impl Store {
         self.read(|connection| find(connection, stage, key))
     }
 
-    /// Folds one measurement into its row inside one write: `fold` sees
-    /// the stored rate (`None` before the first sample) and returns the
-    /// rate to keep. Swift: `MeetingStore.record`.
+    /// Folds one measurement into its row inside one write: `fold` sees the
+    /// stored rate (`None` before the first sample) and returns the new one.
     pub fn update_stage_rate(
         &self,
         stage: PipelineStage,

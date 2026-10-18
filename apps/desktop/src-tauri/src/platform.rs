@@ -1,20 +1,11 @@
-//! The platform the pages word themselves for. A plugin with no commands
-//! whose one job is an initialization script: every webview the shell
-//! opens (the three windows and both panels) runs
-//! `window.__STENO_PLATFORM__ = "linux";` (or `"macos"`, `"windows"`)
-//! before the page's own scripts, so the first render already says "Show
-//! in File Explorer" and "Ctrl+F" instead of Finder and ⌘F. The page reads
-//! it in `apps/macos/web/src/lib/platform.tsx`; the Swift app sets
-//! nothing, and a page with nothing set is the Mac's. The values are
-//! `steno_bridge::Platform`'s, which the contract's `platform` enum
-//! spells the same.
-//!
-//! Swift: none; the Swift app is the Mac.
+//! The platform the pages word themselves for: a plugin whose one job is
+//! an initialization script setting `window.__STENO_PLATFORM__` in every
+//! webview before the page's scripts, so the first render already says
+//! "File Explorer" or "Ctrl+F". A page with nothing set is the Mac's.
 
 use steno_bridge::Platform;
 use tauri::{Runtime, plugin::TauriPlugin};
 
-/// The script, for `platform`.
 pub fn init_script(platform: Platform) -> String {
     format!("window.__STENO_PLATFORM__ = \"{}\";", platform.as_str())
 }
@@ -30,8 +21,7 @@ pub fn plugin<R: Runtime>() -> TauriPlugin<R> {
 mod tests {
     use super::*;
 
-    /// The script assigns the raw value the page's `platform` enum
-    /// accepts, as a JavaScript string.
+    /// The script assigns the raw value as a JavaScript string.
     #[test]
     fn the_script_sets_the_raw_value() {
         assert_eq!(

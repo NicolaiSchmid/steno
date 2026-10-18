@@ -104,9 +104,7 @@ fn state_updates_touch_only_their_columns() {
     store.rename(meeting.id, "   ", now).unwrap();
     assert_eq!(store.meeting(meeting.id).unwrap().unwrap().title, "Kickoff");
 
-    // A stage that read the meeting earlier must not revert the user's
-    // edits, the title they typed included (Rust only: Swift writes the
-    // stage's title over it).
+    // A stage that read the meeting earlier must not revert the user's edits.
     let mut stale = meeting.clone();
     stale.state = MeetingState::Ready;
     stale.title = "From the model".to_owned();
@@ -129,9 +127,8 @@ fn state_updates_touch_only_their_columns() {
     ));
 }
 
-/// A calendar event that arrives after the recording started names it,
-/// with its attendees, only while the row still records under its default
-/// title and names no event; anything the user or a stage did first wins.
+/// A late calendar event names a recording only while it still has its default
+/// title and no event.
 #[test]
 fn a_late_calendar_event_names_only_an_unnamed_recording() {
     let store = Store::in_memory().unwrap();
@@ -235,8 +232,7 @@ fn a_late_calendar_event_names_only_an_unnamed_recording() {
     ));
 }
 
-/// A row an untitled event named keeps its event: a second answer finds
-/// the event id set and changes nothing, even under the default title.
+/// A row an untitled event named keeps its event on a second answer.
 #[test]
 fn an_event_id_already_set_blocks_a_second_answer() {
     let store = Store::in_memory().unwrap();
@@ -261,8 +257,7 @@ fn an_event_id_already_set_blocks_a_second_answer() {
     assert_eq!(read.title_origin, TitleOrigin::Default);
 }
 
-/// Only the rows named, and only while they still record: a recording
-/// left alone, or one started since, keeps recording.
+/// Only the rows named, and only while they still record.
 #[test]
 fn only_the_named_recordings_fail() {
     let store = Store::in_memory().unwrap();
@@ -299,8 +294,7 @@ fn only_the_named_recordings_fail() {
     assert_eq!(state(queued.id), MeetingState::Queued);
 }
 
-/// The reason is Swift's default, read from the Swift source so the two
-/// cannot drift apart.
+/// The reason matches the Swift source's default.
 #[test]
 fn the_interrupted_recording_reason_is_the_swift_default() {
     let swift = std::fs::read_to_string(
@@ -362,9 +356,7 @@ fn deleting_a_meeting_cascades_and_keeps_persons() {
     ));
 }
 
-/// The adoption's insert writes a meeting and its asset only while no row
-/// has the id: a row written meanwhile is neither overwritten nor given a
-/// second asset. `meeting_ids` lists every row's id.
+/// The adoption's insert writes nothing over a row that has the id.
 #[test]
 fn an_insert_never_overwrites_a_meeting() {
     let store = Store::in_memory().unwrap();
@@ -403,8 +395,8 @@ fn a_busy_meeting_cannot_be_deleted() {
     ));
     assert_eq!(count(&store, "meeting"), 1);
 
-    // A recording row: refused by the plain delete, removed by the one for
-    // a meeting left `recording` (Rust only).
+    // A recording row: refused by the plain delete, removed by the one for a
+    // meeting left `recording`.
     meeting.state = MeetingState::Recording;
     store.save_meeting(&meeting).unwrap();
     assert!(matches!(
@@ -489,8 +481,7 @@ fn put_setting_row(store: &Store, key: &str, value: &str) {
         .unwrap();
 }
 
-/// The Swift app and a newer build share the file: a key this build does
-/// not know is no reason to drop it.
+/// A settings key this build does not know survives a save.
 #[test]
 fn saving_settings_keeps_rows_for_unknown_keys() {
     let store = Store::in_memory().unwrap();
@@ -535,12 +526,8 @@ fn a_known_property_set_to_none_loses_its_row() {
     assert_eq!(store.settings_with_defaults(&defaults).unwrap(), settings);
 }
 
-/// The README's command stores `'23900'` under `handoverPort`, and the
-/// port loads. A value that is not a port (not JSON, a JSON string, out
-/// of range, negative) loads as unset with a warning rather than failing
-/// every settings read, and the next save removes its row. No other test
-/// here reaches the warning's callsite, which `tracing` caches when it is
-/// first hit.
+/// A `handoverPort` that is not a port loads as unset with a warning and the
+/// next save removes its row.
 #[test]
 fn a_stored_handover_port_loads_and_one_that_is_not_a_port_is_ignored() {
     const WARNING: &str = "the stored handoverPort is not a port from 0 to 65535";
@@ -564,8 +551,7 @@ fn a_stored_handover_port_loads_and_one_that_is_not_a_port_is_ignored() {
     }
 }
 
-/// A field inside the Obsidian value that this build does not know comes
-/// back on save, next to the edit.
+/// An unknown field inside the Obsidian value survives a save.
 #[test]
 fn an_unknown_obsidian_field_survives_a_load_edit_save() {
     let store = Store::in_memory().unwrap();
@@ -586,10 +572,8 @@ fn an_unknown_obsidian_field_survives_a_load_edit_save() {
     );
 }
 
-/// Every stored engine id but `parakeet-v3` becomes `parakeet-v3`, which
-/// Swift decodes too: the three the Swift app offered beyond it and one
-/// this build has never heard of. `before_rewrite` runs once and the move
-/// happens once; `parakeet-v3` or no row change nothing and call nothing.
+/// Every stored engine id but `parakeet-v3` becomes `parakeet-v3`, once;
+/// `before_rewrite` runs once.
 #[test]
 fn every_stored_engine_but_parakeet_v3_becomes_parakeet_v3_once() {
     for retired in [
@@ -634,9 +618,7 @@ fn every_stored_engine_but_parakeet_v3_becomes_parakeet_v3_once() {
     }
 }
 
-/// `before_rewrite` comes before the rewrite: when it does not return
-/// (the process ends there), the old id stays stored, so the next launch
-/// retires it and records the notice again.
+/// When `before_rewrite` does not return, the old id stays stored.
 #[test]
 fn an_engine_retirement_that_ends_in_before_rewrite_stores_nothing() {
     let store = Store::in_memory().unwrap();
@@ -705,8 +687,6 @@ fn is_busy_names_the_lock_errors() {
     assert!(!StoreError::MeetingNotFound(uuid(PERSON_ID)).is_busy());
 }
 
-/// The result code of an error SQLite raised, and none for the store's
-/// own errors or a row SQLite read but this build cannot decode.
 #[test]
 fn sqlite_code_names_what_sqlite_raised() {
     let dir = tempfile::tempdir().unwrap();
@@ -728,8 +708,7 @@ fn sqlite_code_names_what_sqlite_raised() {
     assert_eq!(undecodable.sqlite_code(), None);
 }
 
-/// A closure that returns `Err` leaves nothing behind: the transaction is
-/// rolled back, the lock released, and the next write goes through.
+/// A closure that returns `Err` rolls back and releases the lock.
 #[test]
 fn a_failed_write_rolls_back() {
     let store = Store::in_memory().unwrap();
@@ -755,9 +734,7 @@ fn a_failed_write_rolls_back() {
     assert_eq!(store.person(person.id).unwrap(), Some(person));
 }
 
-/// The same strictness on `speaker.embedding`: five bytes are not an
-/// `f32` vector, and the meeting's speakers fail to read rather than lose
-/// one embedding silently.
+/// A malformed `speaker.embedding` fails the read rather than drop the vector.
 #[test]
 fn a_malformed_speaker_embedding_is_a_read_error() {
     let (store, meeting) = populated();
@@ -781,9 +758,7 @@ fn a_malformed_speaker_embedding_is_a_read_error() {
     assert!(error.to_string().contains("out of 5 byte blob"), "{error}");
 }
 
-/// `Store::read` is one snapshot: a write landing on the file from another
-/// connection halfway through a read is not seen by the read's later
-/// queries, as GRDB's `reader.read` guaranteed.
+/// `Store::read` is one snapshot: another connection's write is not seen.
 #[test]
 fn a_read_sees_one_snapshot_while_another_store_writes() {
     let directory = tempfile::tempdir().unwrap();
@@ -812,8 +787,7 @@ fn a_read_sees_one_snapshot_while_another_store_writes() {
     );
 }
 
-/// A second sample replaces the stored rate, not only its count: the fold
-/// sees the first row and the upsert keeps what the fold returned.
+/// A second sample replaces the stored rate, not only its count.
 #[test]
 fn a_stage_rate_folds_every_sample_into_one_row() {
     let dir = tempfile::tempdir().unwrap();
@@ -862,10 +836,7 @@ fn a_stage_rate_folds_every_sample_into_one_row() {
     assert_eq!(count(&store, "stageRate"), 1);
 }
 
-/// A re-run's transcript keeps what the user confirmed: a speaker whose id
-/// comes back stays confirmed, with the re-run's embedding, and the voices
-/// of the persons involved are recomputed from what is stored now.
-/// `.plans/2026-09-29-speaker-calibration.md`, decision 5.
+/// A re-run keeps a returning speaker confirmed and recomputes the voices.
 #[test]
 fn replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices() {
     let (store, meeting) = populated();
@@ -875,7 +846,6 @@ fn replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices() {
     let voice = |store: &Store| store.person(jerome.id).unwrap().unwrap();
     assert_eq!(voice(&store).sample_count, 1);
 
-    // The re-run diarizes "Speaker 1" again with another voice, unconfirmed.
     let mut rerun = speakers.clone();
     rerun[0].assignment = SpeakerAssignment::Unknown;
     rerun[0].embedding = Some(Embedding(vec![1.0; Embedding::DIMENSION]));
@@ -897,8 +867,7 @@ fn replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices() {
     );
     assert_eq!(voice(&store).sample_count, 1);
 
-    // A re-run in which the speaker no longer appears drops it, and the
-    // person's voice no longer carries its embedding.
+    // A speaker no longer in the re-run is dropped from the person's voice.
     store
         .replace_transcript(&meeting, &[], &rerun[1..])
         .unwrap();
@@ -907,12 +876,8 @@ fn replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices() {
     assert_eq!(voice(&store).sample_count, 0);
 }
 
-/// A confirmed speaker whose id comes back without a clip keeps the clip
-/// and range its row named, so the voice the user confirmed stays
-/// playable and no sweep takes the file for a leftover; one that comes
-/// back with a clip takes the new one, and an unconfirmed speaker takes
-/// what the re-run gave it, so one given no clip loses its earlier clip and
-/// range.
+/// A confirmed speaker that comes back without a clip keeps its clip and
+/// range; an unconfirmed one takes what the re-run gave it.
 #[test]
 fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_none() {
     let (store, meeting) = populated();
@@ -920,8 +885,7 @@ fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_
     store
         .confirm_speaker(speakers[0].id, &common::person())
         .unwrap();
-    // The master is not on the disk, so the confirmation dropped the clip;
-    // name it again, as a confirmation does while the audio is there.
+    // Name the clip again, as a confirmation does while the audio is there.
     let mut confirmed = store.speakers(meeting.id).unwrap()[0].clone();
     confirmed
         .sample_clip_url
@@ -963,8 +927,7 @@ fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_
     assert_eq!(stored[0].sample_clip_range, rerun[0].sample_clip_range);
 }
 
-/// A confirmed speaker whose stored row names no clip keeps nothing of it:
-/// a re-run that gives it a range without a clip stores that range.
+/// A confirmed speaker whose row names no clip takes the re-run's range.
 #[test]
 fn a_confirmed_speaker_without_a_clip_takes_the_reruns_range() {
     let (store, meeting) = populated();
@@ -988,9 +951,7 @@ fn a_confirmed_speaker_without_a_clip_takes_the_reruns_range() {
     assert_eq!(stored[1].sample_clip_range, rerun[1].sample_clip_range);
 }
 
-/// A re-run's transcript keeps the model's name suggestion for a speaker
-/// whose id comes back, so a run without a summarizer keeps it too; a
-/// speaker that does not come back takes its suggestion with it.
+/// A re-run keeps a returning speaker's name suggestion.
 #[test]
 fn replacing_the_transcript_keeps_the_name_suggestions_of_returning_speakers() {
     let (store, meeting) = populated();
@@ -1013,8 +974,7 @@ fn replacing_the_transcript_keeps_the_name_suggestions_of_returning_speakers() {
     assert_eq!(store.name_suggestions(meeting.id).unwrap(), Vec::new());
 }
 
-/// The cleanup pass's write: the text of each stored segment by id, the
-/// speakers and every other column as they are.
+/// The cleanup write changes only each segment's text.
 #[test]
 fn updating_segment_texts_leaves_the_speakers_and_other_columns_alone() {
     let (store, meeting) = populated();
@@ -1026,7 +986,6 @@ fn updating_segment_texts_leaves_the_speakers_and_other_columns_alone() {
     let mut cleaned = common::segments(meeting.id, &speakers);
     for segment in &mut cleaned {
         segment.text = format!("{} (cleaned)", segment.raw_text);
-        // A stale copy's speaker is not written back.
         segment.speaker_id = None;
     }
     let mut gone = cleaned[0].clone();
@@ -1049,8 +1008,7 @@ fn updating_segment_texts_leaves_the_speakers_and_other_columns_alone() {
     }
 }
 
-/// Without a summarizer the summarize stage writes only the processing
-/// columns: the summary, tasks and decisions stay.
+/// Without a summarizer the summarize stage writes only the processing columns.
 #[test]
 fn saving_processing_results_keeps_the_summary_tasks_and_decisions() {
     let (store, meeting) = populated();
@@ -1067,9 +1025,7 @@ fn saving_processing_results_keeps_the_summary_tasks_and_decisions() {
     assert_eq!(store.decisions(meeting.id).unwrap(), decisions);
 }
 
-/// A stage that read the meeting before the user picked another template
-/// or typed a title does not write the old ones back: the template is the
-/// user's, and so is a title whose stored origin is `user`.
+/// A stale stage does not write back the user's template or title.
 #[test]
 fn processing_results_leave_the_template_and_a_typed_title_to_the_user() {
     let (store, meeting) = populated();
@@ -1097,9 +1053,7 @@ fn processing_results_leave_the_template_and_a_typed_title_to_the_user() {
     assert_eq!(stored.title_origin, TitleOrigin::User);
 }
 
-/// A checkpoint syncs with `F_FULLFSYNC` on Apple platforms, as Apple's
-/// system SQLite under GRDB does by default, so no checkpoint can undo a
-/// durable commit; the bundled SQLite defaults it off.
+/// A checkpoint syncs with `F_FULLFSYNC` on Apple platforms.
 #[test]
 fn an_opened_store_checkpoints_with_fullfsync() {
     let dir = tempfile::tempdir().unwrap();
@@ -1112,18 +1066,14 @@ fn an_opened_store_checkpoints_with_fullfsync() {
     assert!(checkpoint_fullfsync);
 }
 
-/// `synchronous` and `fullfsync` as the connection has them now.
 fn sync_levels(connection: &rusqlite::Transaction<'_>) -> steno_core::store::Result<(i64, bool)> {
     let synchronous = connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
     let fullfsync = connection.query_row("PRAGMA fullfsync", [], |row| row.get(0))?;
     Ok((synchronous, fullfsync))
 }
 
-/// A durable write commits under `FULL` with `fullfsync` (2, on), and the
-/// connection is back at `NORMAL` (1, off) after a commit, a failed body and a
-/// panic in the body; a plain write never sees `FULL`. That the commit then
-/// survives a power loss is SQLite's and cannot be tested. Swift:
-/// `aDurableWriteCommitsUnderFullAndSetsNormalBack`.
+/// A durable write commits under `FULL` with `fullfsync`, and the connection is
+/// back at `NORMAL` after a commit, a failure or a panic.
 #[test]
 fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
     let dir = tempfile::tempdir().unwrap();
@@ -1133,7 +1083,7 @@ fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
 
     let inside = store
         .write_durably(|transaction| {
-            // A change of a page, so the commit writes a frame to the WAL.
+            // A page change, so the commit writes a WAL frame.
             transaction.execute_batch("CREATE TABLE probe(x)")?;
             sync_levels(transaction)
         })
@@ -1165,10 +1115,8 @@ fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
     );
 }
 
-/// A durable checkpoint leaves every commit in the database file itself:
-/// a copy of that file without its WAL holds the last commit. It runs
-/// under `FULL` and sets `NORMAL` back, like a durable write. Swift:
-/// `aDurableCheckpointCopiesEveryCommitIntoTheDatabaseFile`.
+/// A durable checkpoint leaves every commit in the database file and sets
+/// `NORMAL` back.
 #[test]
 fn a_durable_checkpoint_copies_every_commit_into_the_database_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -1193,10 +1141,8 @@ fn a_durable_checkpoint_copies_every_commit_into_the_database_file() {
     assert_eq!(probed, 42);
 }
 
-/// A checkpoint another connection blocks past the busy timeout (here
-/// none, so the test does not wait) fails as busy, as GRDB's does, and
-/// sets `NORMAL` back; once the other connection lets go it succeeds.
-/// Swift: `aCheckpointAnotherConnectionBlocksThrowsBusy`.
+/// A checkpoint blocked past the busy timeout fails as busy and sets `NORMAL`
+/// back.
 #[test]
 fn a_checkpoint_another_connection_blocks_fails_as_busy() {
     let dir = tempfile::tempdir().unwrap();
@@ -1223,8 +1169,8 @@ fn wal_file(database: &std::path::Path) -> Vec<u8> {
     std::fs::read(wal).unwrap()
 }
 
-/// The salt in the WAL file's header (bytes 16 to 24), which every valid
-/// frame repeats: recovery replays only frames under the header's salt.
+/// The salt in the WAL header (bytes 16 to 24); recovery replays only frames
+/// under it.
 fn wal_salt(database: &std::path::Path) -> Vec<u8> {
     wal_file(database)
         .get(16..24)
@@ -1232,11 +1178,8 @@ fn wal_salt(database: &std::path::Path) -> Vec<u8> {
         .to_vec()
 }
 
-/// A durable checkpoint starts the WAL over: the file was truncated, so it
-/// holds only the frames written since, under a header with a new salt, and
-/// recovery after a power loss replays none of the frames before it. The
-/// write that restarts it leaves the schema and the applied migrations as
-/// they were. Swift: `aDurableCheckpointRestartsTheWAL`.
+/// A durable checkpoint restarts the WAL under a new salt and leaves the schema
+/// as it was.
 #[test]
 fn a_durable_checkpoint_restarts_the_wal() {
     let dir = tempfile::tempdir().unwrap();
@@ -1254,8 +1197,6 @@ fn a_durable_checkpoint_restarts_the_wal() {
     store.checkpoint_durably().unwrap();
 
     assert_ne!(wal_salt(&path), salt, "the WAL restarted");
-    // A passive checkpoint answers with the frames in the WAL and leaves
-    // the file as it is.
     let (frames, page_size): (i64, i64) = store
         .read(|connection| {
             let frames =
@@ -1273,11 +1214,7 @@ fn a_durable_checkpoint_restarts_the_wal() {
     assert_eq!(store.write(sync_levels).unwrap(), (1, false));
 }
 
-/// A reader still in the WAL blocks the checkpoint, on an older snapshot
-/// and on the newest one alike: the WAL cannot restart under it. The
-/// checkpoint fails as busy (no busy timeout here, so the test does not
-/// wait) and succeeds once the reader has ended. Swift:
-/// `aReaderInTheWALBlocksTheCheckpoint`.
+/// A reader still in the WAL blocks the checkpoint until it ends.
 #[test]
 fn a_reader_in_the_wal_blocks_the_checkpoint() {
     let dir = tempfile::tempdir().unwrap();

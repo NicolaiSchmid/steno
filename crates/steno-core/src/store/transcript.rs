@@ -1,5 +1,4 @@
 //! `transcriptSegment` rows.
-//! Swift: the segment methods of `Sources/StenoCore/Storage/MeetingStore.swift`.
 
 use rusqlite::{Connection, Row, params};
 use uuid::Uuid;
@@ -54,7 +53,6 @@ pub(super) fn update_text(
     )
 }
 
-/// The meeting's transcript by start, ties by id.
 pub(super) fn segments_of_meeting(
     connection: &Connection,
     meeting_id: Uuid,

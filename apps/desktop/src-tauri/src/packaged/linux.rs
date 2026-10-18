@@ -8,28 +8,22 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The variable a package's wrapper sets to the path the autostart
-/// entry names, for a launcher that is not beside the binary it runs
-/// (the AUR package's `/usr/bin` wrapper, stable plan X6).
+/// The variable a package's wrapper sets to the path the autostart entry
+/// names, when the launcher is not beside the binary (the AUR wrapper).
 pub const EXEC_PATH_VARIABLE: &str = "STENO_EXEC_PATH";
 
-/// Why turning Launch at login on fails when no launcher of this build
-/// lies at a path that outlives an upgrade ([`write_entry`]); the General
-/// section shows it under its error.
+/// Why turning Launch at login on fails when no launcher lies at a path
+/// that outlives an upgrade ([`write_entry`]).
 pub const NO_STABLE_PATH: &str = "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager.";
 
-/// The binary's name, in every package.
 const BINARY: &str = "steno-desktop";
 
 /// Where Nix keeps its builds, which a garbage collection removes.
 const STORE: &str = "/nix/store/";
 
-/// Where a package puts the app's launcher, in the order they are tried:
-/// `/usr/bin` (the `.deb`, and a package that installs the binary or a
-/// link to it there), `/usr/local/bin`, the NixOS system profile, the
-/// per-user profile NixOS and Home Manager fill (for `user`), the user's
-/// Nix profile (under `home`) and, with `use-xdg-base-directories`, the
-/// one under `state_home` (`$XDG_STATE_HOME`, else `~/.local/state`).
+/// Where a package puts the app's launcher, in the order tried:
+/// `/usr/bin`, `/usr/local/bin`, the NixOS system profile, the per-user
+/// profile, the user's Nix profile, and the one under `state_home`.
 fn candidates(user: Option<&str>, home: Option<&Path>, state_home: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = vec![
         Path::new("/usr/bin").join(BINARY),
@@ -53,7 +47,6 @@ fn candidates(user: Option<&str>, home: Option<&Path>, state_home: Option<&Path>
     paths
 }
 
-/// [`candidates`] for this process's user, `HOME` and `XDG_STATE_HOME`.
 fn candidates_here() -> Vec<PathBuf> {
     let user = std::env::var("USER").ok();
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -64,12 +57,10 @@ fn candidates_here() -> Vec<PathBuf> {
     candidates(user.as_deref(), home.as_deref(), state_home.as_deref())
 }
 
-/// The first of `candidates` that launches this build: one that exists
-/// and, with every link resolved, lies in the directory that
-/// `current_exe` resolves into. The candidate itself is returned, not
-/// where it resolves to. Once an upgrade has replaced the running binary
-/// in place, Linux appends ` (deleted)` to `current_exe`; the path
-/// without it is where the new build lies.
+/// The first of `candidates` that, with every link resolved, lies in the
+/// directory `current_exe` resolves into; the candidate itself is returned.
+/// A ` (deleted)` suffix on `current_exe`, left by an in-place upgrade, is
+/// ignored.
 fn stable_path(candidates: &[PathBuf], current_exe: &Path) -> Option<PathBuf> {
     let current_exe = current_exe
         .to_str()
@@ -87,11 +78,9 @@ fn stable_path(candidates: &[PathBuf], current_exe: &Path) -> Option<PathBuf> {
         .cloned()
 }
 
-/// Whether an `Exec` key may name `path`, by its text alone: absolute,
-/// outside the Nix store, UTF-8 with no control character (a newline
-/// would end the key), and with no `%` or `\`, which systemd's XDG
-/// autostart generator does not decode before it checks that the program
-/// exists, so it skips the entry.
+/// Whether an `Exec` key may name `path`: absolute, outside the Nix store,
+/// UTF-8 without control characters, and with no `%` or `\`, which the XDG
+/// autostart generator does not decode before checking the program exists.
 fn nameable(path: &Path) -> bool {
     path.is_absolute()
         && !path.starts_with(STORE)
@@ -102,17 +91,14 @@ fn nameable(path: &Path) -> bool {
         })
 }
 
-/// Whether `path` is a regular file, after its links, that someone may
-/// run (the generator skips one nobody may).
+/// Whether `path` is a regular file, after its links, that someone may run.
 fn runnable(path: &Path) -> bool {
     std::fs::metadata(path)
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
-/// The path the autostart entry names (see the module doc of `packaged`),
-/// from [`EXEC_PATH_VARIABLE`]'s value `named`, the `candidates` and the
-/// running binary; `None` when there is none. Never `current_exe`
-/// itself, and never a path in the Nix store.
+/// The path the autostart entry names: [`EXEC_PATH_VARIABLE`]'s value
+/// `named` or a candidate; never `current_exe` itself nor a store path.
 fn launcher_path_from(
     named: Option<&OsStr>,
     candidates: &[PathBuf],
@@ -131,7 +117,6 @@ fn launcher_path_from(
     stable_path(candidates, current_exe?).filter(|path| launchable(path))
 }
 
-/// [`launcher_path_from`] over this process's environment.
 fn launcher_path() -> Option<PathBuf> {
     launcher_path_from(
         std::env::var_os(EXEC_PATH_VARIABLE).as_deref(),
@@ -140,19 +125,17 @@ fn launcher_path() -> Option<PathBuf> {
     )
 }
 
-/// The autostart entry of `app_name` under `home`, where the plugin
-/// reads and removes it.
+/// The autostart entry of `app_name` under `home`, where the plugin reads
+/// it.
 fn entry_path(app_name: &str, home: &Path) -> PathBuf {
     home.join(".config/autostart")
         .join(format!("{app_name}.desktop"))
 }
 
-/// [`entry_path`] under `HOME`; `None` when it is not set.
 fn entry_path_here(app_name: &str) -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| entry_path(app_name, Path::new(&home)))
 }
 
-/// The entry the plugin writes, naming `exec` with no arguments.
 fn entry(app_name: &str, exec: &Path) -> String {
     format!(
         "[Desktop Entry]\nType=Application\nVersion=1.0\nName={app_name}\nComment={app_name} startup script\nExec={}\nStartupNotify=false\nTerminal=false\n",
@@ -160,12 +143,9 @@ fn entry(app_name: &str, exec: &Path) -> String {
     )
 }
 
-/// `path` as the program of an `Exec` key: as it is when it holds only
-/// plain characters, else quoted as the Desktop Entry Specification says
-/// (`"`, `` ` ``, `$` and `\` escaped inside the quotes, `%` doubled),
-/// then with `\` escaped once more for the string value. The app never
-/// names a path with `%` or `\` ([`nameable`]); the branches keep
-/// [`is_earlier_entry`]'s comparison exact for any candidate.
+/// `path` as the program of an `Exec` key: quoted and escaped as the
+/// Desktop Entry Specification says when it holds more than plain
+/// characters, so [`is_earlier_entry`]'s comparison stays exact.
 fn exec_value(path: &str) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+".contains(c);
     if path.chars().all(plain) {
@@ -187,11 +167,9 @@ fn exec_value(path: &str) -> String {
     quoted
 }
 
-/// Writes the autostart entry of `app_name` naming [`launcher_path`],
-/// atomically (`stop_timeout::install`), so a reload of the user manager
-/// never reads a half-written entry. With no such path it writes nothing
-/// and fails with [`NO_STABLE_PATH`], so the setting is not saved and the
-/// General section says why.
+/// Writes the autostart entry naming [`launcher_path`] atomically, so a
+/// reload of the user manager never reads half of it. Without such a path
+/// it fails with [`NO_STABLE_PATH`] and writes nothing.
 pub fn write_entry(app_name: &str) -> io::Result<()> {
     let path = entry_path_here(app_name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
@@ -208,7 +186,6 @@ fn write_entry_at(path: &Path, app_name: &str, exec: Option<&Path>) -> io::Resul
     crate::stop_timeout::install(path, &entry(app_name, exec)).map(|_| ())
 }
 
-/// An entry's `Exec` value, without the spaces around it.
 fn exec_of(entry: &str) -> Option<&str> {
     entry
         .lines()
@@ -216,9 +193,8 @@ fn exec_of(entry: &str) -> Option<&str> {
         .map(str::trim)
 }
 
-/// Whether `entry` is one an earlier build wrote: its `Exec` starts a
-/// program in the Nix store, or is one of the `candidates` as
-/// [`write_entry`] writes it.
+/// Whether `entry` is one an earlier build wrote: its `Exec` names a store
+/// program or one of the `candidates` as [`write_entry`] writes it.
 fn is_earlier_entry(entry: &str, candidates: &[PathBuf]) -> bool {
     exec_of(entry).is_some_and(|exec| {
         exec.trim_start_matches('"').starts_with(STORE)
@@ -228,22 +204,17 @@ fn is_earlier_entry(entry: &str, candidates: &[PathBuf]) -> bool {
     })
 }
 
-/// What happens to the autostart entry at launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Removal {
-    /// It stays: the system does not manage the login item, or the entry
-    /// is not an earlier build's.
+    /// It stays: unmanaged, or not an earlier build's entry.
     Keep,
     /// It goes now.
     Now,
-    /// It goes at the exit, after the save: the app runs as the unit the
-    /// generator made from it, which a reload without the entry would
-    /// leave loaded but outside the session, so a logout would not stop
-    /// it.
+    /// It goes at the exit: the app runs as the unit made from it, which a
+    /// reload without the entry would leave outside the session.
     AtExit,
 }
 
-/// What [`remove_or_defer`] does with the entry: see [`Removal`].
 fn removal(managed: bool, earlier: bool, as_autostart_unit: bool) -> Removal {
     match (managed && earlier, as_autostart_unit) {
         (false, _) => Removal::Keep,
@@ -252,16 +223,12 @@ fn removal(managed: bool, earlier: bool, as_autostart_unit: bool) -> Removal {
     }
 }
 
-/// Set at launch when an earlier build's entry waits for the exit
-/// ([`Removal::AtExit`]).
+/// Set at launch when an earlier build's entry waits for the exit.
 static EARLIER_ENTRY_AT_EXIT: AtomicBool = AtomicBool::new(false);
 
-/// At launch: while the system manages the login item
-/// (`packaged::login_item_is_managed`), the autostart entry of `app_name`
-/// an earlier build wrote ([`is_earlier_entry`]) goes, and only such an
-/// entry. While the app runs as the autostart unit
-/// (`stop_timeout::runs_as_autostart_unit`) it goes at the exit instead
-/// ([`remove_earlier_entry_at_exit`]).
+/// At launch, while the system manages the login item, removes the
+/// autostart entry an earlier build wrote, and only such an entry; as the
+/// autostart unit, at the exit instead ([`remove_earlier_entry_at_exit`]).
 pub fn remove_earlier_entry(app_name: &str) {
     let Some(path) = entry_path_here(app_name) else {
         return;
@@ -277,7 +244,6 @@ pub fn remove_earlier_entry(app_name: &str) {
     }
 }
 
-/// [`remove_earlier_entry`]'s launch step for the entry at `path`.
 fn remove_or_defer(
     path: &Path,
     managed: bool,
@@ -299,29 +265,21 @@ fn remove_or_defer(
     removal
 }
 
-/// After the shutdown of an exit: the entry [`remove_earlier_entry`] left
-/// for the exit goes, if it is still an earlier build's. Not for an
-/// update's relaunch (`relaunching`), whose next process runs on in the
-/// same unit. A kill before this leaves the entry for the next launch.
-/// The one save that may not end the process is the one at an Xfce query
-/// on Wayland, which relaunches the app when the session goes on
-/// (`session_end::SaveAndQuit::of`); xfce4-session starts autostart
-/// entries itself, so that app is not the autostart unit and never
-/// leaves the entry for the exit. True when the entry went.
+/// After the shutdown of an exit, removes the entry left for the exit if
+/// it is still an earlier build's; not for an update's relaunch, which
+/// runs on in the same unit. True when the entry went.
 pub fn remove_earlier_entry_at_exit(app_name: &str, relaunching: bool) -> bool {
     removes_at_exit(EARLIER_ENTRY_AT_EXIT.load(Ordering::Relaxed), relaunching)
         && entry_path_here(app_name)
             .is_some_and(|path| remove_if_earlier(&path, &candidates_here()))
 }
 
-/// Whether the exit removes the entry: it waited for the exit
-/// (`deferred`), and the exit is not an update's relaunch.
 fn removes_at_exit(deferred: bool, relaunching: bool) -> bool {
     deferred && !relaunching
 }
 
-/// Removes the entry at `path` when it is an earlier build's; true when
-/// it did.
+/// Removes the entry at `path` when it is an earlier build's; true when it
+/// did.
 fn remove_if_earlier(path: &Path, candidates: &[PathBuf]) -> bool {
     let Ok(entry) = std::fs::read_to_string(path) else {
         return false;
@@ -349,17 +307,13 @@ mod tests {
 
     use super::*;
 
-    /// Writes a file anyone may run.
     fn executable(path: &Path, text: &str) {
         std::fs::write(path, text).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// A store with this build and an older one, each a wrapper beside
-    /// the wrapped binary; the system profile links to the older build,
-    /// the per-user profile to this one, and the user's profile is a
-    /// linked tree whose `bin` is itself a link (as `buildEnv` makes for a
-    /// single package).
+    /// A Nix store with this build and an older one, wrapped, and profiles
+    /// linking to each, one through a linked `bin`.
     struct NixLayout {
         _dir: tempfile::TempDir,
         current_exe: PathBuf,
@@ -428,9 +382,8 @@ mod tests {
         assert_eq!(candidates(Some(""), None, None).len(), 3);
     }
 
-    /// The wrapped binary in the store finds the profile that links to
-    /// its own wrapper, skipping a profile that links to another build,
-    /// and the path returned is the profile's, never the store's.
+    /// The store binary finds the profile that links to its own wrapper,
+    /// and the profile's path is returned.
     #[test]
     fn a_nix_build_names_the_profile_that_links_to_it() {
         let layout = nix_layout();
@@ -446,7 +399,6 @@ mod tests {
         assert!(!found.unwrap().to_string_lossy().contains("/nix/store/"));
     }
 
-    /// A profile whose `bin` directory is itself a link counts too.
     #[test]
     fn a_profile_whose_bin_is_a_link_counts() {
         let layout = nix_layout();
@@ -457,8 +409,7 @@ mod tests {
         assert_eq!(found, Some(layout.user_profile));
     }
 
-    /// Only profiles that link to another build, or none at all: no
-    /// path, so no entry.
+    /// Profiles that link only to another build give no path.
     #[test]
     fn no_profile_of_this_build_means_no_path() {
         let layout = nix_layout();
@@ -475,8 +426,7 @@ mod tests {
         );
     }
 
-    /// The `.deb` and a package that installs the binary itself in
-    /// `/usr/bin`: the candidate is the running binary.
+    /// A binary installed in `/usr/bin` is its own candidate.
     #[test]
     fn a_binary_in_place_names_itself() {
         let dir = tempfile::tempdir().unwrap();
@@ -498,8 +448,7 @@ mod tests {
         assert_eq!(stable_path(&candidate, &replaced), Some(bin.join(BINARY)));
     }
 
-    /// What an `Exec` key may name, by its text: the store check holds
-    /// for a path that need not exist.
+    /// What an `Exec` key may name; the store check needs no file.
     #[test]
     fn a_nameable_path_is_absolute_outside_the_store_and_plain() {
         assert!(nameable(Path::new("/usr/bin/steno-desktop")));
@@ -528,10 +477,9 @@ mod tests {
         assert!(!runnable(&dir.path().join("missing")));
     }
 
-    /// The launcher path from the variable, the candidates and the
-    /// running binary: the variable wins when it names a runnable file
-    /// outside the store; else the candidate of this build; never the
-    /// running binary itself, nor a path in the store.
+    /// The variable wins when it names a runnable file outside the store,
+    /// else this build's candidate; never the running binary or a store
+    /// path.
     #[test]
     fn the_launcher_path_is_the_variable_then_a_candidate_never_the_binary() {
         let layout = nix_layout();
@@ -565,7 +513,6 @@ mod tests {
         );
         assert_eq!(launcher_path_from(None, &candidates, None), None);
 
-        // A candidate nobody may run is no launcher.
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -599,8 +546,7 @@ mod tests {
         );
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "[Desktop Entry]\n").unwrap();
-        // A hard link to the old entry keeps its bytes: the entry is
-        // written atomically, not rewritten in place.
+        // A hard link keeps the old bytes: the entry is written atomically.
         let old = dir.path().join("old");
         std::fs::hard_link(&path, &old).unwrap();
         write_entry_at(
@@ -615,8 +561,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&old).unwrap(), "[Desktop Entry]\n");
     }
 
-    /// With no launcher at a stable path nothing is written, and turning
-    /// Launch at login on fails with the words the General section shows.
+    /// With no launcher at a stable path nothing is written and Launch at
+    /// login fails.
     #[test]
     fn no_stable_path_is_an_error_that_says_so() {
         let dir = tempfile::tempdir().unwrap();
@@ -627,9 +573,7 @@ mod tests {
         assert!(!dir.path().join(".config").exists());
     }
 
-    /// An earlier build's entry starts a program in the store or names a
-    /// candidate as this build writes it; another entry, or any other
-    /// text, is not one.
+    /// Which entries count as an earlier build's.
     #[test]
     fn an_earlier_entry_starts_the_store_or_names_a_candidate() {
         let profile = PathBuf::from("/etc/profiles/per-user/ada/bin/steno-desktop");
@@ -656,8 +600,8 @@ mod tests {
         }
     }
 
-    /// Only while managed does an earlier entry go: now, or at the exit
-    /// while the app runs as the unit made from it.
+    /// An earlier entry goes only while managed: now, or at the exit as
+    /// the unit.
     #[test]
     fn an_earlier_entry_goes_only_while_managed_and_at_the_exit_as_the_unit() {
         assert_eq!(removal(true, true, false), Removal::Now);
@@ -675,10 +619,7 @@ mod tests {
         assert!(!removes_at_exit(false, false));
     }
 
-    /// The launch step on a real file: outside the unit a store entry
-    /// goes at once; as the unit it stays through the launch and goes at
-    /// the exit step; an entry no earlier build wrote, or an unmanaged
-    /// launch, keeps it.
+    /// The launch and exit steps on a real file.
     #[test]
     fn a_store_entry_waits_for_the_exit_as_the_autostart_unit() {
         let dir = tempfile::tempdir().unwrap();
@@ -711,15 +652,10 @@ mod tests {
         assert!(path.exists(), "an entry no earlier build wrote stays");
     }
 
-    /// Set in the child [`the_entry_steps_read_this_process_s_environment`]
-    /// runs.
     const ENVIRONMENT_CHILD: &str = "STENO_PACKAGED_TEST_CHILD";
 
-    /// The public steps over the environment: `USER`, `HOME`,
-    /// `XDG_STATE_HOME` (a relative one falls back to `~/.local/state`),
-    /// [`EXEC_PATH_VARIABLE`] and the managed variable, in a child of this
-    /// test binary run once managed and once not, with `HOME` in a temp
-    /// directory.
+    /// The public steps read the environment, in a child of this test
+    /// binary run managed and unmanaged.
     #[test]
     fn the_entry_steps_read_this_process_s_environment() {
         if std::env::var_os(ENVIRONMENT_CHILD).is_some() {
@@ -737,8 +673,7 @@ mod tests {
             if !managed {
                 return;
             }
-            // As the unit: the exit step re-reads the entry first, and an
-            // update's relaunch keeps it.
+            // The exit step re-reads the entry; a relaunch keeps it.
             EARLIER_ENTRY_AT_EXIT.store(true, Ordering::Relaxed);
             write_entry(BINARY).unwrap();
             assert!(!remove_earlier_entry_at_exit(BINARY, false));

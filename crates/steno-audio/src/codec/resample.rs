@@ -1,9 +1,7 @@
-//! One lane to 16 kHz as its samples arrive: the copy at 16 kHz, the
-//! writer's exact 3:1 FIR with its group delay dropped at 48 kHz, the
-//! windowed sinc ([`SincStream`]) at every other rate, and the exact-length
-//! rule. However the input is cut, the output is what one pass over the
-//! whole lane gives. No Swift counterpart (the AVFoundation codec handed
-//! `AVAudioConverter` 32 768-frame chunks).
+//! One lane to 16 kHz as its samples arrive: a copy at 16 kHz, the writer's
+//! 3:1 FIR with its group delay dropped at 48 kHz, the windowed sinc
+//! ([`SincStream`]) at every other rate. However the input is cut, the
+//! output is what one pass over the whole lane gives.
 
 use steno_core::AudioBuffer16k;
 
@@ -11,7 +9,7 @@ use super::sinc::{SincResampler, SincStream};
 use crate::writer::Resampler48kTo16k;
 use crate::{FRAME_SIZE, SAMPLE_RATE};
 
-/// Resamples one lane to 16 kHz; see the module doc.
+/// Resamples one lane to 16 kHz.
 ///
 /// ```
 /// use steno_audio::codec::LaneResampler;
@@ -28,9 +26,7 @@ use crate::{FRAME_SIZE, SAMPLE_RATE};
 pub struct LaneResampler {
     rate: u32,
     filter: Filter,
-    /// Input samples pushed so far.
     received: usize,
-    /// Output samples appended so far.
     produced: usize,
 }
 
@@ -80,17 +76,15 @@ impl LaneResampler {
         self.produced += output.len() - before;
     }
 
-    /// The lane's 16 kHz length so far: `round(len * 16000 / rate)`, so
-    /// the 16 kHz lane lasts exactly as long as the master and segment
-    /// counts stay stable.
+    /// The lane's 16 kHz length so far, `round(len * 16000 / rate)`, so it
+    /// lasts exactly as long as the master.
     #[must_use]
     pub fn expected_len(&self) -> usize {
         length_at_16k(self.received, self.rate)
     }
 
-    /// How many of the samples appended so far the finished lane keeps
-    /// whatever follows; a caller may hand those on (and drop them from
-    /// `output`) before `finish`, never more.
+    /// How many appended samples the finished lane keeps whatever follows;
+    /// a caller may hand those on before `finish`, never more.
     #[must_use]
     pub fn settled(&self) -> usize {
         self.produced.min(self.expected_len())
@@ -121,12 +115,9 @@ pub(super) fn length_at_16k(frames: usize, rate: u32) -> usize {
     (frames as f64 * AudioBuffer16k::SAMPLE_RATE / f64::from(rate.max(1))).round() as usize
 }
 
-/// The 48 kHz path: the sidecar writer's filter, frame by frame, compensated
-/// for its 95.5-sample group delay so the lane aligns with the master like
-/// a zero-phase conversion would. The live sidecar is the same filter run
-/// causally, so it lags this decode by 32 samples (2 ms); Swift's
-/// `AVAudioConverter` decode and causal sidecar writer had the same
-/// relationship.
+/// The 48 kHz path: the sidecar writer's filter, compensated for its group
+/// delay so the lane aligns with the master. The causal live sidecar lags
+/// this decode by 2 ms.
 #[derive(Debug, Clone)]
 struct Decimator {
     filter: Resampler48kTo16k,
@@ -143,8 +134,7 @@ impl Default for Decimator {
             filter: Resampler48kTo16k::new(FRAME_SIZE),
             frame: Vec::with_capacity(FRAME_SIZE),
             out_frame: vec![0i16; FRAME_SIZE / Resampler48kTo16k::FACTOR],
-            // 95.5 input samples is 31.83 output samples, so the onset
-            // lands within a sample of where the master has it.
+            // 95.5 input samples is 31.83 output samples.
             delay: Self::DELAY_IN.div_ceil(Resampler48kTo16k::FACTOR),
         }
     }

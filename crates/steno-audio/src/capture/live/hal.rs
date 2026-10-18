@@ -1,10 +1,6 @@
 //! The CoreAudio HAL calls behind the capture: property reads and writes,
-//! default devices, the process tap
-//! (`AudioHardwareCreateProcessTap` with a `CATapDescription`), the private
-//! aggregate device, one IOProc and property listeners.
-//! Swift: `Sources/StenoAudio/Capture/AudioObjectProperties.swift`,
-//! `ProcessTap.swift`, `AggregateDevice.swift`, the create/start/stop of
-//! `RealTime/IOProcRunner.swift`.
+//! default devices, the process tap, the private aggregate device, one
+//! IOProc and property listeners.
 //!
 //! Everything here runs off the audio thread except the IOProc callback
 //! the caller supplies to [`IoProc::start`]. The invariants each `unsafe`
@@ -64,11 +60,8 @@ pub const UNKNOWN: Id = kAudioObjectUnknown;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{operation} on audio object {object} failed: {status} ({})", four_char_code(*status))]
 pub struct CoreAudioError {
-    /// The property or function that failed.
     pub operation: String,
-    /// The audio object it was called on.
     pub object: Id,
-    /// The `OSStatus` it returned.
     pub status: OSStatus,
 }
 
@@ -258,8 +251,7 @@ pub fn write_f64(
 }
 
 /// Channel count per buffer of `kAudioDevicePropertyStreamConfiguration`
-/// in `scope`; empty when the device has no streams there or cannot be
-/// read.
+/// in `scope`; empty when unreadable.
 #[must_use]
 pub fn channel_counts(id: Id, scope: AudioObjectPropertyScope) -> Vec<usize> {
     let mut addr = address(kAudioDevicePropertyStreamConfiguration, scope);
@@ -345,12 +337,10 @@ pub fn is_alive(id: Id) -> bool {
 }
 
 /// A private, unmuted global process tap of everything the Mac plays,
-/// Steno's own process included: the call capture's silent output IOProc
-/// on the aggregate's clock master is what keeps the tap aggregate
-/// running, and the HAL counts only the output of a process the tap
-/// includes (A10 of `.plans/2026-10-07-stable-promotion.md`). So nothing
-/// else of Steno's may play while it records, which
-/// [`crate::playback::Playback`] enforces. Destroyed on drop.
+/// Steno's own process included: the HAL keeps the tap aggregate running
+/// only while a process the tap includes plays, which the call capture's
+/// silent output IOProc does. So nothing else of Steno's may play while it
+/// records, which [`crate::playback::Playback`] enforces. Destroyed on drop.
 pub struct ProcessTap {
     pub id: Id,
     /// The tap's UID as `kAudioSubTapUIDKey` wants it.
@@ -369,7 +359,6 @@ impl std::fmt::Debug for ProcessTap {
 
 impl ProcessTap {
     pub fn new(name: &str) -> Result<Self, CaptureError> {
-        // Excluding no process: the global tap of everything.
         let array: Retained<NSArray<NSNumber>> = NSArray::new();
         // SAFETY: Objective-C initialiser and setters on a freshly allocated
         // description; the array outlives the call.
@@ -566,9 +555,7 @@ impl AggregateDevice {
     }
 
     /// The aggregate's clock master as the HAL reports it: the active
-    /// sub-device whose UID is its main sub-device
-    /// (`kAudioAggregateDevicePropertyMainSubDevice`). Only ids and UIDs
-    /// are read.
+    /// sub-device whose UID is its main sub-device.
     pub fn main_sub_device(&self) -> Result<Id, CoreAudioError> {
         let main = read_string(
             self.id,
@@ -628,9 +615,8 @@ impl IoProc {
     }
 
     /// As [`Self::start`], for an output client that reads nothing: its
-    /// input streams are set off for its IOProc (read back as off), through
-    /// `kAudioDevicePropertyIOProcStreamUsage` before the start. A usage the
-    /// HAL refuses is logged and the IOProc starts over every stream.
+    /// input streams are set off for its IOProc before the start. A usage
+    /// the HAL refuses is logged and the IOProc starts over every stream.
     ///
     /// # Safety
     ///
@@ -684,10 +670,8 @@ impl IoProc {
         Ok(Self { device, proc_id })
     }
 
-    /// The device's time now, while the IOProc runs
-    /// (`AudioDeviceGetCurrentTime`), asked for its sample time; `None`
-    /// when the call fails. Whether the stamp carries a sample time is the
-    /// caller's to check, as for the IOProc's stamps.
+    /// The device's time now (`AudioDeviceGetCurrentTime`); `None` when the
+    /// call fails. The caller checks whether it carries a sample time.
     #[must_use]
     pub fn current_time(&self) -> Option<AudioTimeStamp> {
         // SAFETY: every field of `AudioTimeStamp` is an integer, a float or
@@ -731,7 +715,6 @@ impl IoProc {
     }
 }
 
-/// How many input streams `device` has.
 fn input_stream_count(device: Id) -> Result<usize, CoreAudioError> {
     Ok(read_array::<Id>(
         device,
@@ -777,7 +760,7 @@ fn streams_on(usage: &[u64], streams: usize) -> Vec<u32> {
 }
 
 /// Turns every input stream of `device` off for `proc_id`, before its
-/// start. A device without input streams has nothing to turn off.
+/// start.
 fn input_stream_usage_off(device: Id, proc_id: AudioDeviceIOProcID) -> Result<(), CoreAudioError> {
     let streams = input_stream_count(device)?;
     if streams == 0 {
@@ -859,10 +842,8 @@ pub fn host_time_to_nanos(ticks: u64) -> u64 {
     unsafe { AudioConvertHostTimeToNanos(ticks) }
 }
 
-/// The body of a callback the HAL makes into us (the IOProc, a property
-/// listener). A panic must not unwind into the HAL, so it aborts the
-/// process instead; the barrier costs nothing on the path that does not
-/// panic.
+/// The body of a callback the HAL makes into us. A panic must not unwind
+/// into the HAL, so it aborts the process instead.
 #[inline(always)]
 pub fn abort_on_panic(body: impl FnOnce()) {
     if std::panic::catch_unwind(AssertUnwindSafe(body)).is_err() {
@@ -965,8 +946,8 @@ mod tests {
         0
     }
 
-    /// The usage the silent output writes: its own proc, the stream count,
-    /// every stream off, sized to the array.
+    /// The silent output's usage: its own proc, every stream off, sized to
+    /// the array.
     #[test]
     fn a_stream_usage_names_its_proc_with_every_stream_off() {
         let proc_id: AudioDeviceIOProcID = Some(nothing);
@@ -990,9 +971,8 @@ mod tests {
         assert_eq!(streams, 3);
     }
 
-    /// On the default input, an IOProc started as the HAL does uses every
-    /// input stream; one started output-only uses none, read back from the
-    /// HAL.
+    /// An IOProc started as the HAL does uses every input stream; one
+    /// started output-only uses none.
     #[test]
     #[ignore = "needs a Mac with a microphone; run with -- --ignored"]
     fn an_output_only_io_proc_leaves_every_input_stream_off() {

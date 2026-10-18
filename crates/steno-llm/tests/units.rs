@@ -1,8 +1,5 @@
 //! The pure pieces: the structured output decoder, the SSE parser, the token
-//! budget, the chunker, the strict schema subset and the stub server
-//! itself. Swift: `StructuredDecoderTests`, `ServerSentEventsTests`,
-//! `TokenBudgetTests`, `TranscriptChunkerTests`, `ChunkerPropertyTests`,
-//! `JSONSchemaStrictTests`, `StubChatServerTests`, `LLMFixturesTests`.
+//! budget, the chunker, the strict schema subset and the stub server.
 
 mod common;
 
@@ -84,8 +81,7 @@ fn decodes_bare_json_and_strips_fences_and_prose() {
     assert_eq!(numbers, [1, 2, 3]);
 }
 
-/// A fence marker inside a JSON string (a bullet quoting a code block) is
-/// content, not a Markdown fence around the answer.
+/// A fence marker inside a JSON string is content, not a fence.
 #[test]
 fn a_fence_inside_the_json_is_not_a_fence() {
     let text = "{\"ok\": true, \"items\": [\"Use ```swift``` blocks\"]}";
@@ -331,12 +327,9 @@ fn incomplete_failed_refused_and_cut_streams() {
     );
 }
 
-/// The stream as the backend may vary it: `type` read from the JSON when no
-/// `event:` line names it, delta and unknown events skipped, a `reasoning`
-/// item skipped even when it carries text, a `[DONE]` sentinel skipped,
-/// several message items concatenated in order, the items from the events
-/// preferred over the terminal event's `output`, and a missing `usage`
-/// counted as one request of zero tokens.
+/// Stream variations: `type` from the JSON, unknown events, reasoning items
+/// and `[DONE]` skipped, message items concatenated, item events preferred
+/// over the terminal `output`, a missing `usage` counted as one request.
 #[test]
 fn data_only_unknown_reasoning_and_multi_item_streams() {
     let body = r#"data: {"type":"response.created","response":{"id":"r","status":"in_progress"}}
@@ -551,9 +544,8 @@ fn segment(index: u32, words: usize, speaker: uuid::Uuid) -> TranscriptSegment {
     }
 }
 
-/// The packing invariants over `chunks` of `segments`: order and
-/// completeness, sequential indices, the `max_tokens` bound (except for a
-/// single oversized segment), the close rule and the leading context.
+/// The packing invariants: order, completeness, sequential indices, the
+/// `max_tokens` bound, the close rule and the leading context.
 fn check_packing(
     chunks: &[TranscriptChunk],
     segments: &[TranscriptSegment],
@@ -692,8 +684,7 @@ fn empty_input_and_budget_initialiser() {
     assert_eq!(inverted.max_tokens, 100);
 }
 
-/// Packing invariants over the fixture under several chunker sizes and
-/// both languages, standing in for Swift's seeded generator.
+/// Packing invariants over the fixture under several sizes and languages.
 #[test]
 fn packing_invariants_hold_for_several_sizes() {
     let call = customer_call();
@@ -962,9 +953,7 @@ fn draft_and_notes_schemas_are_strict_and_use_the_templates_section_ids() {
 
 // Stub server
 
-/// The builder every `with_http` caller should start from leaves the TLS
-/// provider installed, which reqwest's `rustls-no-provider` build does not
-/// do on its own.
+/// `transport::http_client_builder` leaves the TLS provider installed.
 #[test]
 fn the_http_client_builder_installs_a_tls_provider() {
     let _client = steno_llm::transport::http_client_builder().build().unwrap();
@@ -1178,8 +1167,8 @@ fn the_fixtures_are_what_the_swift_generators_produced() {
     assert_eq!(other.template.id, "interview");
 }
 
-/// The mode is spelled as Swift's raw values in JSON and in text, and
-/// the chain order is the declaration order.
+/// The mode's JSON and text spelling, shared with the Swift app's settings,
+/// and the chain order.
 #[test]
 fn structured_output_mode_keeps_the_swift_spelling() {
     let modes = [

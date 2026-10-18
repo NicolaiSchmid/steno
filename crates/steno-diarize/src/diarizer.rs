@@ -1,8 +1,6 @@
 //! `steno_core::Diarizer` over a [`Pipeline`] whose backend loads on first
-//! use, in this process: for `steno dev diarize-sweep`, the calibration and
-//! the tests; the app and `steno process` diarize in the speech sidecar
-//! ([`crate::SidecarDiarizer`]). Swift:
-//! `Sources/StenoSpeech/Diarization/FluidDiarizer.swift`.
+//! use, in this process: for `steno dev diarize-sweep`, the calibration and the
+//! tests. The app diarizes in the sidecar ([`crate::SidecarDiarizer`]).
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -12,8 +10,8 @@ use crate::backend::DiarizationBackend;
 use crate::error::DiarizeError;
 use crate::pipeline::{DiarizerConfig, Pipeline};
 
-/// Builds the backend when the diarizer is first prepared or used;
-/// model loading, and downloads where they are allowed, happen here.
+/// Builds the backend on first use; model loading and allowed downloads
+/// happen here.
 pub type BackendLoader =
     Box<dyn Fn() -> Result<Box<dyn DiarizationBackend>, DiarizeError> + Send + Sync>;
 
@@ -36,25 +34,13 @@ impl Slot {
     }
 }
 
-/// A diarizer in this process, for `steno dev` and the tests; the meeting
-/// pipeline (WP6) holds a [`crate::SidecarDiarizer`] instead. Calls run one
-/// after another behind the lock, as `FluidDiarizer` runs
-/// its calls, so one backend instance serves every meeting it processes.
+/// A diarizer in this process, for `steno dev` and the tests. Calls run one
+/// after another behind the lock, so one backend serves every call.
 ///
-/// The work is minutes of model inference, so each call runs on one of
-/// tokio's blocking threads (`spawn_blocking`) and the lock is taken and
-/// released there, never across an `.await`; the executor keeps serving
-/// the shell while a lane is analysed. `prepare` and `diarize` must
-/// therefore be awaited inside a tokio runtime (any flavour, the
-/// current-thread one included); outside one, `spawn_blocking` panics.
-/// The audio is cloned onto the blocking thread (4 bytes a sample, 230 MB
-/// for an hour), the price of a `'static` task over a borrowed buffer;
-/// the analysis itself holds more.
-///
-/// A panic inside a call comes back as the call's error, not a crash, and
-/// leaves the pipeline as it was between calls (the backends keep no
-/// state from one call to the next), so the poisoned lock is reused as
-/// core's store reuses its connection.
+/// Each call runs on a tokio blocking thread (`spawn_blocking`), so `prepare`
+/// and `diarize` must be awaited inside a tokio runtime; the audio is cloned
+/// onto that thread. A panic inside a call comes back as the call's error and
+/// the poisoned lock is reused, as the backends keep no state between calls.
 pub struct ModelDiarizer {
     config: DiarizerConfig,
     slot: Arc<Mutex<Slot>>,
@@ -69,8 +55,7 @@ impl std::fmt::Debug for ModelDiarizer {
 }
 
 impl ModelDiarizer {
-    /// A diarizer whose backend `loader` builds on the first `prepare` or
-    /// `diarize`.
+    /// A diarizer whose backend `loader` builds on first use.
     #[must_use]
     pub fn new(config: DiarizerConfig, loader: BackendLoader) -> Self {
         ModelDiarizer {
@@ -88,17 +73,11 @@ impl ModelDiarizer {
         }
     }
 
-    /// The ONNX Runtime backend over `store`, `steno-speech`'s model store
-    /// (Steno's: the models directory's `onnx/` folder, with the speech
-    /// settings' mirror), loaded on first use. `install` says whether a
-    /// missing file is downloaded then ([`crate::Install::Allowed`],
-    /// [`crate::models::ensure`]) or fails the call with
-    /// [`DiarizeError::NotInstalled`] and no request
-    /// ([`crate::Install::Never`]). A file that fails its checksum after a
-    /// failed load is deleted and reported the same way. A load that fails
-    /// is tried again by the next call, which resumes a cut-off download
-    /// under `Allowed`. `threads` is the intra-op thread count of each
-    /// session; zero lets ONNX Runtime decide.
+    /// The ONNX Runtime backend over `store`, `steno-speech`'s model store,
+    /// loaded on first use. `install` says whether a missing file is downloaded
+    /// then or fails the call with [`DiarizeError::NotInstalled`]; a load that
+    /// fails is tried again by the next call. `threads` is the intra-op thread
+    /// count per session; zero lets ONNX Runtime decide.
     ///
     /// ```no_run
     /// use steno_diarize::{DiarizerConfig, Install, ModelDiarizer};
@@ -124,10 +103,8 @@ impl ModelDiarizer {
         )
     }
 
-    /// The `CoreML` backend over `FluidAudio`'s compiled models in
-    /// `models_dir` (`Segmentation.mlmodelc`, `FBank.mlmodelc`,
-    /// `Embedding.mlmodelc`), which is [`crate::coreml::model_directory`]
-    /// for the models the Swift app installed.
+    /// The `CoreML` backend over `FluidAudio`'s compiled models in `models_dir`
+    /// (see [`crate::coreml::model_directory`]).
     #[cfg(all(feature = "coreml", target_os = "macos"))]
     #[must_use]
     pub fn coreml(config: DiarizerConfig, models_dir: std::path::PathBuf) -> Self {
@@ -140,8 +117,8 @@ impl ModelDiarizer {
         )
     }
 
-    /// Runs `body` on the loaded pipeline on a blocking thread, loading
-    /// the pipeline there first when needed.
+    /// Runs `body` on the pipeline on a blocking thread, loading it first when
+    /// needed.
     async fn run<T>(
         &self,
         body: impl FnOnce(&mut Pipeline) -> Result<T, DiarizeError> + Send + 'static,

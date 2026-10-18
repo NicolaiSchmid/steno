@@ -1,26 +1,8 @@
-//! A file for every panic. A release build unwinds a panic, and an app
-//! opened from the Finder, the Dock or at login has its stderr thrown
-//! away, so a panic on the Mac left no trace at all. [`install_crash_log_hook`]
-//! installs a panic hook that writes `crash-<UTC time>.log` into a folder
-//! (the support directory) with the panic's message, its location, the
-//! thread and a backtrace, keeps the newest [`KEPT_CRASH_LOGS`] of them,
-//! and then runs the hook it replaced (the log queue's flush and the
-//! default message on stderr). The desktop shell installs it first thing;
-//! the speech sidecar installs it when its parent names the folder in
-//! [`DIRECTORY_VARIABLE`], and its files end in `-sidecar.log`. Rust only:
-//! the Swift app had the system's crash reporter.
-//!
-//! A panic raised inside [`expected`] is one its caller catches and
-//! reports itself (the decoder's, for a packet that panics symphonia), so
-//! the hook writes no file for it, prunes nothing and runs none of the
-//! hooks it replaced: the panics of one damaged recording must not push
-//! the real crash logs out of the folder.
-//!
-//! The file stays on the computer, as every log does; nothing sends it.
-//! The panic's message is written as it was raised, so it can hold text
-//! the panicking code was handling (a slice of a string in an
-//! out-of-bounds message, a path), unlike the log lines, which carry
-//! counts and kinds only.
+//! A file for every panic, since an app opened from the Finder or at login has
+//! no stderr. [`install_crash_log_hook`] writes `crash-<UTC time>.log` with the
+//! message, location, thread and backtrace, keeps the newest
+//! [`KEPT_CRASH_LOGS`], then runs the hook it replaced. A panic inside
+//! [`expected`] writes nothing. The file stays on the computer.
 
 use std::cell::Cell;
 use std::io::Write as _;
@@ -31,23 +13,18 @@ use chrono::{DateTime, Utc};
 /// How many crash logs the folder keeps; the oldest beyond go.
 pub const KEPT_CRASH_LOGS: usize = 20;
 
-/// Every crash log's name starts with this and ends in `.log`.
 const PREFIX: &str = "crash-";
 
-/// The environment variable a parent sets to the folder a child process
-/// writes its crash logs into: the speech sidecar's.
+/// The variable naming the folder a child process (the speech sidecar) writes
+/// its crash logs into.
 pub const DIRECTORY_VARIABLE: &str = "STENO_CRASH_LOG_DIRECTORY";
 
 thread_local! {
-    /// Whether this thread is inside [`expected`].
     static EXPECTED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Runs `body`, a panic inside it marked as expected on this thread: its
-/// caller catches it with `catch_unwind` and reports it, so the panic
-/// hooks leave it alone ([`is_expected`]). The mark is lifted when `body`
-/// returns or unwinds; the hooks run before the unwind, so they still see
-/// it.
+/// Runs `body` with its panics marked as expected on this thread: the caller
+/// catches and reports them, so the hooks leave them alone.
 ///
 /// ```
 /// let caught = std::panic::catch_unwind(|| {
@@ -57,7 +34,6 @@ thread_local! {
 /// assert!(!steno_core::crash_log::is_expected());
 /// ```
 pub fn expected<R>(body: impl FnOnce() -> R) -> R {
-    /// Puts back the mark found on entry, so a nested call keeps it.
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -68,19 +44,14 @@ pub fn expected<R>(body: impl FnOnce() -> R) -> R {
     body()
 }
 
-/// Whether a panic raised now on this thread is inside [`expected`]: a
-/// panic hook returns at once for one, without calling the hook it
-/// replaced.
+/// Whether a panic raised now on this thread is inside [`expected`].
 #[must_use]
 pub fn is_expected() -> bool {
     EXPECTED.with(Cell::get)
 }
 
-/// Installs the panic hook (see the module doc) over the one installed
-/// now, so the shell calls it after its log output, and trims `folder` to
-/// the newest [`KEPT_CRASH_LOGS`] files. `process` names a child process
-/// in the file name (`Some("sidecar")`); the app passes `None`. The folder
-/// is created at the first panic if it is missing.
+/// Installs the panic hook over the current one. `process` names a child
+/// process in the file name (`Some("sidecar")`).
 ///
 /// ```no_run
 /// steno_core::crash_log::install_crash_log_hook(
@@ -111,8 +82,7 @@ pub fn install_crash_log_hook(folder: PathBuf, process: Option<&'static str>) {
         );
         if let Ok(path) = written {
             prune(&folder, KEPT_CRASH_LOGS);
-            // Not `eprintln!`, which panics, and so aborts, once stderr is
-            // gone (the sidecar's parent may have closed it).
+            // Not `eprintln!`, which panics once stderr is gone.
             let _ = writeln!(
                 std::io::stderr(),
                 "steno: the crash is described in {}",
@@ -123,9 +93,7 @@ pub fn install_crash_log_hook(folder: PathBuf, process: Option<&'static str>) {
     }));
 }
 
-/// The text a panic was raised with, when it is a string: its message, or
-/// "a panic without a message". For a hook's report and for the caller of
-/// [`expected`] that caught it.
+/// The text a panic was raised with, or "a panic without a message".
 #[must_use]
 pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
@@ -137,8 +105,8 @@ pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// Writes one crash log into `folder`, created if missing, and returns its
-/// path. A second panic in the same millisecond gets a numbered name.
+/// Writes one crash log into `folder` and returns its path; a second panic in
+/// the same millisecond gets a numbered name.
 fn write_crash_log(
     folder: &Path,
     process: Option<&str>,
@@ -185,8 +153,8 @@ fn write_crash_log(
     }
 }
 
-/// Deletes the oldest crash logs in `folder` beyond the newest `keep`;
-/// the names sort by time. Anything that cannot be read or deleted stays.
+/// Deletes the oldest crash logs beyond the newest `keep`; anything that cannot
+/// be read or deleted stays.
 fn prune(folder: &Path, keep: usize) {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return;

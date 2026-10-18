@@ -1,5 +1,5 @@
-//! Mint, fingerprint, computer id, the committed Swift test identity and
-//! the secret store round trip: the values the phone pins and shows.
+//! Mint, fingerprint, computer id, the committed test identity and the
+//! secret store round trip: the values the phone pins and shows.
 
 #![allow(
     clippy::assert_is_empty,
@@ -59,8 +59,7 @@ fn mint_yields_a_self_signed_p256_certificate_for_ten_years() {
     let constraints = certificate.basic_constraints().unwrap().unwrap();
     assert!(constraints.critical);
     assert!(!constraints.value.ca);
-    // RFC 5480 §3: keyEncipherment is not a use an EC key has; a strict
-    // validator rejects a critical KeyUsage that claims it.
+    // An EC key has no keyEncipherment use (RFC 5480 §3).
     let usage = certificate.key_usage().unwrap().unwrap();
     assert!(usage.critical);
     assert!(usage.value.digital_signature());
@@ -102,9 +101,8 @@ fn mac_id_derives_from_the_fingerprint_deterministically() {
     assert_eq!(first.get_variant(), uuid::Variant::RFC4122);
 }
 
-/// The committed Swift test identity (`Tests/Fixtures/handover/`): the
-/// fingerprint recorded when it was generated, so the hashing here is the
-/// hashing the Swift tests and the phone do.
+/// The committed test identity's recorded fingerprint, so the hashing here
+/// is the hashing the phone does.
 #[test]
 fn the_swift_test_identity_hashes_to_its_recorded_fingerprint() {
     let der =
@@ -121,10 +119,8 @@ fn the_swift_test_identity_hashes_to_its_recorded_fingerprint() {
     );
 }
 
-/// A secret store in memory that refuses reads or writes while
-/// `refuse_reads` or `refuse_writes` is set; while `keep_and_refuse` is,
-/// it takes a write and then reports it refused, as a reply lost after the
-/// save does.
+/// An in-memory secret store that can refuse reads or writes, or keep a
+/// write and report it refused.
 #[derive(Default)]
 struct MemorySecrets {
     values: Mutex<Vec<(SecretKey, String)>>,
@@ -222,10 +218,8 @@ impl Places {
         }
     }
 
-    /// Keeps the last paired phone whatever deletes it, as a disk that
-    /// refuses the write would, until [`Places::let_the_last_phone_go`]:
-    /// Pair again stops right after the write with one phone paired, and
-    /// after the first phone with two.
+    /// Keeps the last paired phone whatever deletes it, as a refusing disk
+    /// would, until [`Places::let_the_last_phone_go`].
     fn keep_the_last_phone(&self) {
         common::execute_batch(
             self.store(),
@@ -240,8 +234,7 @@ impl Places {
         common::execute_batch(self.store(), "DROP TRIGGER keep_the_last_phone;");
     }
 
-    /// The stored identity, the recorded fingerprint, the next fingerprint
-    /// and the paired phones' ids, as they stand.
+    /// The stored identity, the fingerprints and the paired phones' ids.
     fn places(
         &self,
     ) -> (
@@ -309,8 +302,7 @@ async fn load_or_create_mints_once_and_reloads_the_same_identity() {
     assert_eq!(second.mac_id(), first.mac_id());
     assert_eq!(*places.secrets.reads.lock().unwrap(), 2);
 
-    // A stored secret that does not parse is an error, never a re-mint
-    // (which would re-pair every phone).
+    // A stored secret that does not parse is an error, never a re-mint.
     places
         .secrets
         .set_secret(&HandoverIdentity::secret_key(), Some("garbage"))
@@ -383,8 +375,7 @@ async fn an_identity_with_another_fingerprint_is_unavailable_and_both_stay() {
     assert_eq!(places.stored_pem(), Some(other_pem), "neither is replaced");
 }
 
-/// A rollback that lost the record keeps the paired phones and the
-/// identity: the next load keeps the identity and records it again.
+/// A rollback that lost the record keeps the phones and the identity.
 #[tokio::test]
 async fn an_identity_found_without_a_record_is_kept_and_recorded_again() {
     let places = Places::new();
@@ -406,8 +397,7 @@ async fn an_identity_found_without_a_record_is_kept_and_recorded_again() {
     );
 }
 
-/// A secret store that cannot be read (a locked keyring) is unavailable,
-/// and nothing is minted, whatever else holds.
+/// An unreadable secret store is unavailable, and nothing is minted.
 #[tokio::test]
 async fn an_unreadable_secret_store_is_unavailable_not_minted() {
     struct Locked;
@@ -454,9 +444,7 @@ async fn store_writes_the_identity_and_records_its_fingerprint() {
     assert_eq!(loaded.fingerprint(), identity.fingerprint());
 }
 
-/// `store` over another identity (an identity brought over from the Swift
-/// app replaces the minted one): the secret and the record both take the
-/// new one, and the next load finds it.
+/// `store` over an imported identity: the secret and the record take it.
 #[tokio::test]
 async fn store_replaces_an_identity_and_a_fingerprint_recorded_before() {
     let places = Places::new();
@@ -476,8 +464,7 @@ async fn store_replaces_an_identity_and_a_fingerprint_recorded_before() {
     assert_eq!(loaded.fingerprint(), replacement.fingerprint());
 }
 
-/// A record that cannot be read is an error, never "nothing recorded":
-/// nothing is minted over it.
+/// An unreadable record is an error, and nothing is minted over it.
 #[tokio::test]
 async fn a_record_that_cannot_be_read_mints_nothing() {
     struct Damaged;
@@ -509,8 +496,7 @@ async fn a_record_that_cannot_be_read_mints_nothing() {
     assert_eq!(places.stored_pem(), None, "nothing minted");
 }
 
-/// A mint whose write fails records nothing, so the next load may mint
-/// again instead of finding a fingerprint without its identity.
+/// A mint whose write fails records nothing.
 #[tokio::test]
 async fn a_mint_whose_write_fails_records_nothing() {
     struct Refusing;
@@ -537,9 +523,8 @@ async fn a_mint_whose_write_fails_records_nothing() {
     assert_eq!(places.record.get_recorded(), None);
 }
 
-/// Pair again replaces the identity the phones know, which a load never
-/// does: the new identity is written, the paired phones are removed, and
-/// its fingerprint replaces the old one; the next load finds it.
+/// Pair again writes a new identity, removes the paired phones and records
+/// the new fingerprint; the next load finds it.
 #[tokio::test]
 async fn pair_again_removes_the_phones_and_mints_a_new_identity() {
     let places = Places::new();
@@ -554,13 +539,8 @@ async fn pair_again_removes_the_phones_and_mints_a_new_identity() {
     assert_eq!(loaded.fingerprint(), new.fingerprint());
 }
 
-/// A Pair again whose write the secret store refuses changes nothing the
-/// phones rely on, for each reason a load refuses the identity: the paired
-/// phone, the recorded fingerprint and the stored identity stay, and the
-/// next load refuses it for the same reason. The note stays for that load
-/// to decide: it drops it where no identity is stored (abandoned) and
-/// keeps it where the read is refused (undecided) or another identity is
-/// stored (unknown).
+/// A Pair again whose write is refused changes nothing the phones rely on,
+/// for each reason a load refuses the identity.
 #[tokio::test]
 async fn a_refused_write_keeps_the_note_and_the_next_load_decides_it() {
     for reason in ["unreadable", "missing", "replaced"] {
@@ -611,10 +591,8 @@ async fn a_refused_write_keeps_the_note_and_the_next_load_decides_it() {
     }
 }
 
-/// A write the secret store reports refused although it kept the identity
-/// leaves the note, so the next load finishes the Pair again like any stop
-/// after the write, whether or not a fingerprint was recorded before: the
-/// phone goes, the new fingerprint is recorded and nothing is minted.
+/// A write reported refused although kept leaves the note, so the next
+/// load finishes the Pair again.
 #[tokio::test]
 async fn a_write_reported_refused_that_landed_is_finished_by_the_next_load() {
     for recorded_before in [true, false] {
@@ -648,13 +626,8 @@ async fn a_write_reported_refused_that_landed_is_finished_by_the_next_load() {
     }
 }
 
-/// A Pair again that stops after the new identity was written (the phones
-/// still paired, one of two removed, or all removed and the record
-/// refused) is finished by the next load, whether or not a fingerprint was
-/// recorded before (none is on the first launch after the Swift app): the
-/// phones go, the new fingerprint is recorded and the note dropped, and
-/// nothing is minted. No phone stays listed beside an identity it does not
-/// know.
+/// A Pair again that stops after the new identity was written is finished
+/// by the next load, and nothing is minted.
 #[tokio::test]
 async fn a_pair_again_stopped_after_the_write_is_finished_by_the_next_load() {
     for recorded_before in [true, false] {
@@ -698,11 +671,8 @@ async fn a_pair_again_stopped_after_the_write_is_finished_by_the_next_load() {
             assert_eq!(listed.len(), usize::from(!refuse_record), "{case}");
 
             if stop == "after the write" {
-                // The load finishing it removes the phones before it
-                // records: a removal refused there leaves the old record
-                // and the note, so the next load finishes it again rather
-                // than serving the new identity beside a phone that knew
-                // the old one.
+                // A removal refused while finishing leaves the old record and the note,
+                // so the next load finishes it again.
                 places.keep_the_last_phone();
                 let error = places.load("x").await.unwrap_err();
                 assert!(matches!(error, IdentityError::Store(_)), "{case}: {error}");
@@ -727,8 +697,7 @@ async fn a_pair_again_stopped_after_the_write_is_finished_by_the_next_load() {
     }
 }
 
-/// The next fingerprint is noted before the write, so a note that cannot
-/// be written stops Pair again with nothing written.
+/// A note that cannot be written stops Pair again with nothing written.
 #[tokio::test]
 async fn a_note_that_cannot_be_written_stops_pair_again_before_the_write() {
     let places = Places::new();
@@ -741,13 +710,8 @@ async fn a_note_that_cannot_be_written_stops_pair_again_before_the_write() {
     assert_eq!(places.places(), before, "nothing written");
 }
 
-/// What the load does with the note of an unfinished Pair again when the
-/// secret store does not hold the next identity, by what it holds: the
-/// recorded identity or none (the Pair again changed nothing, so the note
-/// goes and the load reads as without it), another identity (the note
-/// stays and the load waits as replaced, also with nothing recorded), or
-/// nothing it can read (the note stays and the load waits as unreadable).
-/// None of them mints or removes a phone.
+/// The note of an unfinished Pair again whose next identity is not stored
+/// goes or stays by what the store holds; none mints or removes a phone.
 #[tokio::test]
 async fn an_unfinished_pair_again_is_decided_by_what_the_secret_store_holds() {
     let next = hex(&HandoverIdentity::mint("y", Utc::now())
@@ -820,13 +784,11 @@ async fn an_unfinished_pair_again_is_decided_by_what_the_secret_store_holds() {
     }
 }
 
-/// The mint time of the identities below; their certificates start a
-/// minute before it.
+/// The mint time below; the certificates start a minute before it.
 const MINT: i64 = 1_790_000_000;
 
-/// An identity minted at [`MINT`] and stored with nothing recorded (an
-/// upgrade from a build without the record, or a lost record), with phones
-/// paired at `seconds` after the mint (negative: before).
+/// An identity minted at [`MINT`] with nothing recorded, and phones paired
+/// at `seconds` after the mint (negative: before).
 async fn unrecorded_identity_with_phones(seconds: &[i64]) -> (Places, HandoverIdentity) {
     let places = Places::new();
     let identity = HandoverIdentity::mint("x", common::date(MINT)).unwrap();
@@ -844,8 +806,8 @@ fn phone_ids(count: usize) -> Vec<uuid::Uuid> {
     (1..=count as u128).map(uuid::Uuid::from_u128).collect()
 }
 
-/// With nothing recorded, the identity found is recorded when every phone
-/// was paired after its certificate starts, and when no phone is paired.
+/// With nothing recorded, the identity is recorded when no phone predates
+/// its certificate.
 #[tokio::test]
 async fn an_unrecorded_identity_every_phone_knows_is_recorded() {
     for phones in [&[][..], &[0, 3600, 86_400][..]] {
@@ -865,10 +827,8 @@ async fn an_unrecorded_identity_every_phone_knows_is_recorded() {
     }
 }
 
-/// An identity every paired phone predates, as a silent mint after a
-/// keychain reset left it, is no identity they know: the load waits as
-/// replaced, records nothing and mints nothing, and the phones and the
-/// identity stay for the user's Pair again.
+/// An identity every paired phone predates waits as replaced, and nothing
+/// is recorded or minted.
 #[tokio::test]
 async fn an_unrecorded_identity_every_phone_predates_is_replaced() {
     let (places, identity) = unrecorded_identity_with_phones(&[-86_400, -3600]).await;
@@ -889,9 +849,7 @@ async fn an_unrecorded_identity_every_phone_predates_is_replaced() {
     );
 }
 
-/// Some phones paired before the identity and some after it, among them
-/// one a second before its start beside one at it: partly replaced,
-/// nothing recorded or minted.
+/// Some phones predating the identity: partly replaced.
 #[tokio::test]
 async fn an_unrecorded_identity_some_phones_predate_is_partly_replaced() {
     for phones in [[-86_400, 3600], [-61, -60]] {
@@ -910,9 +868,8 @@ async fn an_unrecorded_identity_some_phones_predate_is_partly_replaced() {
     }
 }
 
-/// A minted certificate starts a minute before its mint, so a phone paired
-/// 59 or 60 seconds before the mint counts as paired after the start and
-/// the identity is recorded, and one paired 61 seconds before predates it.
+/// A phone paired 59 or 60 seconds before the mint counts as after the
+/// certificate's start; one 61 seconds before predates it.
 #[tokio::test]
 async fn a_phone_paired_at_the_identity_s_start_counts_as_paired_after_it() {
     for (before_the_mint, recorded) in [(59, true), (60, true), (61, false)] {
@@ -946,9 +903,7 @@ async fn a_phone_paired_at_the_identity_s_start_counts_as_paired_after_it() {
     }
 }
 
-/// With nothing recorded, a certificate whose start cannot be read and a
-/// pairing time that cannot be read are no reason to record the identity,
-/// nor to mint: the load fails, and nothing is written.
+/// With nothing recorded, an unreadable start or pairing time fails the load.
 #[tokio::test]
 async fn an_unrecorded_identity_whose_times_cannot_be_read_is_not_recorded() {
     use base64::Engine as _;
@@ -986,10 +941,7 @@ async fn an_unrecorded_identity_whose_times_cannot_be_read_is_not_recorded() {
     assert_eq!(places.stored_pem(), Some(identity.to_pem().unwrap()));
 }
 
-/// A recorded identity is adopted without the pairing-time rule, even when
-/// every phone (or some) predates its start or a time is after now, as the
-/// Swift import records what it brings over: it loads, writes nothing and
-/// keeps the phones.
+/// A recorded identity is adopted without the pairing-time rule.
 #[tokio::test]
 async fn a_recorded_identity_the_phones_predate_loads_without_the_rule() {
     for (phones, now) in [
@@ -1016,11 +968,8 @@ async fn a_recorded_identity_the_phones_predate_loads_without_the_rule() {
     }
 }
 
-/// With nothing recorded, a certificate that starts after now, or a phone
-/// paired after now (by more than a second, the database's rounding),
-/// means this computer's clock went back: the load waits
-/// for the clock, with phones or without, records and mints nothing; once
-/// the clock has passed both, the rule decides.
+/// With nothing recorded, a certificate or pairing after now means the clock
+/// went back: the load waits until the clock is past both.
 #[tokio::test]
 async fn an_unrecorded_identity_or_pairing_after_now_waits_for_the_clock() {
     let start = MINT - 60;

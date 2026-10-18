@@ -1,14 +1,8 @@
 //! The `NeMo` `AudioToMelSpectrogramPreprocessor` of Parakeet TDT 0.6B v3 in
-//! Rust: pre-emphasis 0.97, a centred 512-point STFT with reflect padding
-//! and a 25 ms symmetric Hann window at a 10 ms hop, 128 Slaney mel bands
-//! from 0 to 8 kHz, the natural log with a `2^-24` guard, and per-feature
-//! normalisation over the window. The export's encoder was traced behind
-//! this preprocessor, so these are its training-time values; spike F
-//! showed sherpa-onnx's Kaldi-style settings scoring the same, so the
-//! differences sit below the model's sensitivity. The v3 configuration has
-//! `pad_to: 0` and dither only at training time, which is why neither
-//! appears here.
-//! Swift: none; `FluidAudio` ships this step as `Preprocessor.mlmodelc`.
+//! Rust: pre-emphasis 0.97, a centred 512-point STFT with a 25 ms symmetric
+//! Hann window at a 10 ms hop, 128 Slaney mel bands to 8 kHz, a guarded log and
+//! per-feature normalisation over the window. These are the values the export's
+//! encoder was trained behind.
 
 use std::sync::Arc;
 
@@ -28,8 +22,8 @@ const LOG_GUARD: f32 = 5.960_464_5e-8;
 const NORMALISATION_GUARD: f32 = 1e-5;
 const BINS: usize = N_FFT / 2 + 1;
 
-/// The preprocessor with its FFT plan, window and filterbank; one per
-/// backend, reused across windows.
+/// The preprocessor with its FFT plan, window and filterbank; reused across
+/// windows.
 pub struct MelExtractor {
     fft: Arc<dyn RealToComplex<f32>>,
     /// The Hann window zero-padded to `N_FFT`, as `torch.stft` pads it.
@@ -64,8 +58,8 @@ impl MelExtractor {
         }
     }
 
-    /// Frames for `samples` samples: one per hop plus one, as the centred
-    /// STFT yields (`NeMo`'s `get_seq_len`). Zero for no samples.
+    /// Frames for `samples` samples: one per hop plus one, as the centred STFT
+    /// yields. Zero for no samples.
     #[must_use]
     pub const fn frame_count(samples: usize) -> usize {
         if samples == 0 {
@@ -132,8 +126,8 @@ fn pre_emphasise(samples: &[f32]) -> Vec<f32> {
     out
 }
 
-/// `pad` samples of reflection (edge excluded, as `torch.nn.functional.pad`
-/// with `reflect`) on both sides; shorter inputs reflect repeatedly.
+/// `pad` samples of reflection (edge excluded) on both sides; shorter inputs
+/// reflect repeatedly.
 fn reflect_pad(samples: &[f32], pad: usize) -> Vec<f32> {
     let len = samples.len();
     let mut out = Vec::with_capacity(len + 2 * pad);
@@ -159,8 +153,7 @@ fn reflect_pad(samples: &[f32], pad: usize) -> Vec<f32> {
 }
 
 /// Per mel band over the window: subtract the mean, divide by the unbiased
-/// standard deviation plus the guard (`NeMo`'s `normalize_batch`,
-/// `per_feature`).
+/// standard deviation plus the guard (`NeMo`'s `per_feature`).
 fn normalise_per_feature(data: &mut [f32], frames: usize) {
     for row in data.chunks_exact_mut(frames) {
         let count = row.len() as f64;
@@ -220,7 +213,7 @@ fn mel_to_hz(mel: f64) -> f64 {
 }
 
 /// `librosa.filters.mel(sr=16000, n_fft=512, n_mels=128, fmin=0, fmax=8000)`
-/// with Slaney normalisation, in the row-major layout the extractor reads.
+/// with Slaney normalisation, row-major.
 fn mel_filters() -> Vec<f32> {
     let f_max = SAMPLE_RATE as f64 / 2.0;
     let (mel_low, mel_high) = (hz_to_mel(0.0), hz_to_mel(f_max));
@@ -265,10 +258,8 @@ mod tests {
     #[test]
     fn the_filterbank_is_slaney_normalised_and_covers_the_band() {
         let filters = mel_filters();
-        // Every band has weight; Slaney normalisation makes the area of a
-        // triangle 2 / width, so the sum over bins times the bin width is
-        // about 1 for every band once the band is wider than a few bins
-        // (the lowest bands are narrower than the 31 Hz bin spacing).
+        // Slaney normalisation makes each triangle's area about 1 once the band
+        // is wider than a few bins.
         for (m, row) in filters.as_chunks::<BINS>().0.iter().enumerate().skip(24) {
             let sum: f32 = row.iter().sum();
             let bin_width = SAMPLE_RATE as f32 / N_FFT as f32;
@@ -294,7 +285,7 @@ mod tests {
             assert!(mean.abs() < 1e-3);
         }
         // Before normalisation the band under 1 kHz has the energy; check
-        // through the filterbank directly.
+        // through the filterbank.
         let filters = mel_filters();
         let bin = (1_000.0 / (SAMPLE_RATE as f32 / N_FFT as f32)).round() as usize;
         let best = (0..N_MELS)

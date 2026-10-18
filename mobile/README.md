@@ -5,9 +5,7 @@ the device, and hand it to the paired Mac over the local network for
 processing. No account, no backend, no notes on the phone. Scope and the
 decisions behind it: [`.plans/2026-09-24-initial-scope.md`](../.plans/2026-09-24-initial-scope.md).
 
-Status: the phone side of
-[`.plans/2026-09-25-phone-handover.md`](../.plans/2026-09-25-phone-handover.md)
-is implemented; the Mac side is `Sources/StenoHandover`, used by the macOS
+Status: the phone side of the phone handover is implemented; the Mac side is `Sources/StenoHandover`, used by the macOS
 app's Phones settings and by `steno dev handover`. The app records AAC `.m4a`
 with expo-audio, keeps a JSON-indexed queue in `Documents/queue/`, pairs with
 the Mac by scanning its QR code, and uploads in 16 MiB chunks over a
@@ -106,7 +104,7 @@ merging such a change.
 
 ### Apple one-time setup
 
-Identifiers are fixed in [`.plans/2026-09-27-ios-bundle-id.md`](../.plans/2026-09-27-ios-bundle-id.md).
+The identifiers are fixed: they cannot change once a build ships.
 
 Done:
 

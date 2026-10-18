@@ -102,8 +102,7 @@ async fn start_sweeps_orphaned_inbox_files() {
 
 #[tokio::test]
 async fn start_sweeps_partials_abandoned_for_two_weeks() {
-    // A phone that announced, uploaded most of a recording and was never
-    // seen again would otherwise hold that space in the inbox for good.
+    // Otherwise an abandoned upload would hold inbox space for good.
     let test = TestService::with(common::Options {
         chunk_size: CHUNK_SIZE,
         start: false,

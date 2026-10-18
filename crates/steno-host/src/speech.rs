@@ -1,13 +1,11 @@
 //! The speech model catalogue the Transcription section shows: which
 //! engines the user may pick, which model each loads, and what every model
-//! bundle is called, weighs and is licensed under. Copied from
-//! `Sources/StenoSpeech/{Models/ModelAsset,Engines/SpeechEngineID}.swift`
-//! until `steno-speech` (WP4) owns the table; the host then imports it.
+//! bundle is called, weighs and is licensed under.
 
 use steno_core::string_enum;
 
 string_enum! {
-    /// One downloadable model bundle. Swift: `ModelAsset`.
+    /// One downloadable model bundle.
     pub enum ModelAsset {
         ParakeetV3 = "parakeetV3",
         ParakeetUltra = "parakeetUltra",
@@ -18,11 +16,9 @@ string_enum! {
 }
 
 impl ModelAsset {
-    /// The assets the Rust app offers: Parakeet v3 and the diarizer. The
-    /// Swift app's Ultra, German and Whisper models are not part of this
-    /// version (a stored one becomes Parakeet v3 at launch,
-    /// `steno_core::Store::retire_speech_engine`), so Settings shows no row
-    /// for them. Rust only.
+    /// The assets the app offers: Parakeet v3 and the diarizer. A stored
+    /// Swift engine id becomes Parakeet v3 at launch
+    /// (`steno_core::Store::retire_speech_engine`).
     pub const OFFERED: [ModelAsset; 2] = [ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer];
 
     /// The Hugging Face repository the files come from.
@@ -37,8 +33,8 @@ impl ModelAsset {
         }
     }
 
-    /// Size on disk after the download, measured from the repository trees
-    /// on 2026-09-25. Shown before a download, not asserted.
+    /// Size on disk after the download, measured from the repository trees.
+    /// Shown before a download, not asserted.
     #[must_use]
     pub fn approximate_bytes(self) -> i64 {
         match self {
@@ -50,15 +46,11 @@ impl ModelAsset {
         }
     }
 
-    /// The licence of the model behind the asset. The diarizer's is that
-    /// of the two ONNX models every Rust platform runs, pyannote
-    /// segmentation 3.0 (MIT) and `WeSpeaker` ResNet34-LM (CC-BY-4.0, from
-    /// its `VoxCeleb` training data): `steno_diarize::models::LICENCE`,
-    /// which a `steno-services` test pins it to. Swift's line named the
-    /// Apache-2.0 of its `CoreML` diarizer's upstream. The diarizer's
-    /// [`display_name`](Self::display_name) and
-    /// [`source_repo`](Self::source_repo) stay Swift's copy; the services
-    /// override all three with the ONNX models'.
+    /// The licence of the model behind the asset. The diarizer's is that of
+    /// its two ONNX models, pyannote segmentation 3.0 (MIT) and `WeSpeaker`
+    /// ResNet34-LM (CC-BY-4.0): `steno_diarize::models::LICENCE`, which a
+    /// `steno-services` test pins it to. The services override the name,
+    /// repository and licence with the ONNX models'.
     #[must_use]
     pub fn licence(self) -> &'static str {
         match self {
@@ -84,7 +76,7 @@ impl ModelAsset {
 
 string_enum! {
     /// The engines the speech module can build; the raw value is
-    /// `Settings::speech_engine_id`. Swift: `SpeechEngineID`.
+    /// `Settings::speech_engine_id`.
     pub enum SpeechEngineId {
         ParakeetV3 = "parakeet-v3",
         ParakeetUltra = "parakeet-ultra",
@@ -95,9 +87,7 @@ string_enum! {
 
 impl SpeechEngineId {
     /// The engines the settings pane offers: Parakeet v3 alone, so the
-    /// picker shows no row. The Swift app also offered Whisper; a stored
-    /// Whisper, Ultra or German id becomes Parakeet v3 at launch
-    /// (`Store::retire_speech_engine`). Rust only.
+    /// picker shows no row.
     pub const USER_SELECTABLE: [SpeechEngineId; 1] = [SpeechEngineId::ParakeetV3];
 
     /// The model the engine loads; the diarizer is separate.
@@ -111,8 +101,7 @@ impl SpeechEngineId {
         }
     }
 
-    /// How many languages the engine supports: Parakeet v3's 25 European
-    /// languages, the German fine-tune's one, Whisper's 99.
+    /// How many languages the engine supports.
     #[must_use]
     pub fn supported_language_count(self) -> usize {
         match self {

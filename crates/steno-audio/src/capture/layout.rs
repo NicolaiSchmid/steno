@@ -1,29 +1,21 @@
-//! Where each lane's samples sit in the aggregate's input `AudioBufferList`.
-//! Swift: `Sources/StenoAudio/Capture/StreamLayout.swift`.
-//!
-//! Resolved once at start from the channel count of every buffer, so the
-//! IOProc only follows precomputed indices. Pure, so the two possible HAL
-//! orderings (sub-devices then taps, or taps first) are tested on CI.
+//! Where each lane's samples sit in the aggregate's input `AudioBufferList`,
+//! resolved once at start so the IOProc only follows precomputed indices.
 
 use steno_core::AudioLane;
 
 use super::configuration::CaptureError;
 
-/// One channel in the buffer list: which buffer, the offset of the first
-/// sample in it, and the buffer's channel count as the sample stride (1
-/// for a non-interleaved channel).
+/// One channel in the buffer list: buffer, first sample's offset, and the
+/// buffer's channel count as stride.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelRef {
-    /// Index into the callback's buffer list.
     pub buffer: usize,
-    /// The first sample's offset inside a frame of that buffer.
     pub offset: usize,
     /// Samples between consecutive frames: the buffer's channel count.
     pub stride: usize,
 }
 
 impl ChannelRef {
-    /// A reference from its three indices.
     #[must_use]
     pub const fn new(buffer: usize, offset: usize, stride: usize) -> Self {
         Self {
@@ -38,9 +30,7 @@ impl ChannelRef {
 /// is folded to the mono system lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaneSource {
-    /// The lane this source feeds.
     pub lane: AudioLane,
-    /// Its channel.
     pub left: ChannelRef,
     /// A second channel folded in: a stereo tap to the mono system lane.
     pub right: Option<ChannelRef>,
@@ -49,20 +39,17 @@ pub struct LaneSource {
 /// Where every lane's samples sit in the aggregate's input buffers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamLayout {
-    /// One per lane, in lane order.
     pub sources: Vec<LaneSource>,
     /// True when the HAL placed the tap's streams before the sub-devices'.
     pub tap_first: bool,
 }
 
 impl StreamLayout {
-    /// `aggregate`: channel count per input buffer of the aggregate device.
-    /// `sub_devices`: the same per sub-device, in sub-device order (the
-    /// main output device first, then the microphone when it is a different
-    /// device). `tap`: the tap's buffers (`[2]` interleaved stereo, `[1, 1]`
-    /// non-interleaved, `[]` when there is no tap). `mic_sub_device` is the
-    /// index into `sub_devices` whose first channel is the microphone,
-    /// `None` when no lane needs it.
+    /// `aggregate`: channels per input buffer of the aggregate.
+    /// `sub_devices`: the same per sub-device, the main output first.
+    /// `tap`: the tap's buffers (`[2]`, `[1, 1]`, or `[]` without a tap).
+    /// `mic_sub_device`: the sub-device whose first channel is the
+    /// microphone, `None` when no lane needs it.
     pub fn resolve(
         lanes: &[AudioLane],
         aggregate: &[usize],

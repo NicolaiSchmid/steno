@@ -1,7 +1,6 @@
-//! Swift's `AutoStopTests`: the policy as a table over [`CallWatch`], then
-//! the recorder over the synthetic capture and a `ManualClock`, its
-//! meetings read from the store. No sleeps: the clock is advanced by hand
-//! and the tests wait for its sleepers.
+//! The auto-stop policy as a table over [`CallWatch`], then the recorder
+//! over the synthetic capture and a `ManualClock`. No sleeps: the clock is
+//! advanced by hand.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,8 +35,8 @@ enum Step {
     Wait(f64),
 }
 
-/// What a script leaves: the armed app (`Some(None)` for an unnamed one)
-/// and the seconds the status shows, or `None` when nothing is armed.
+/// The armed app (`Some(None)` for an unnamed one) and the seconds shown,
+/// or `None` when nothing is armed.
 type Armed = Option<(Option<&'static str>, f64)>;
 
 /// The status `script` leaves: the armed app and the seconds shown.
@@ -324,11 +323,8 @@ fn only_the_armed_countdown_ends_the_call_with_its_app() {
     );
 }
 
-/// The cap on the wait for a recovering capture: the release's countdown
-/// that runs out while the capture recovers is replaced by a fresh one,
-/// shown at once, and that one ends the call whether or not the capture
-/// still recovers; a countdown that runs out while the capture records
-/// ends the call as before.
+/// The release's countdown that runs out while the capture recovers is
+/// replaced by a fresh one, which ends the call either way.
 #[test]
 fn the_release_s_countdown_runs_out_into_one_fresh_grace_while_the_capture_recovers() {
     let grace = AUTO_STOP_GRACE;
@@ -369,10 +365,8 @@ fn the_release_s_countdown_runs_out_into_one_fresh_grace_while_the_capture_recov
     );
 }
 
-/// The end reason an auto-stop writes is one the Swift app decodes: the
-/// `meeting.endReason` column holds `{"callEnded":"Zen"}` or the bare
-/// `"callEnded"`, as `RecordingEndReason`'s coding in
-/// `Sources/StenoCore/Model/Meeting.swift` writes them; no new value.
+/// The end reason an auto-stop writes is one the Swift app decodes:
+/// `{"callEnded":"Zen"}` or the bare `"callEnded"`.
 #[test]
 fn the_end_reason_is_one_the_swift_app_decodes() {
     for (reason, column) in [
@@ -390,8 +384,6 @@ fn the_end_reason_is_one_the_swift_app_decodes() {
         assert_eq!(serde_json::to_string(&reason).unwrap(), column);
     }
 }
-
-// The recorder.
 
 /// A [`SyntheticRecorder`] whose auto-stop runs on a manual clock.
 struct Recording {
@@ -419,8 +411,7 @@ fn recording_over(capture: SyntheticRecorder) -> Recording {
 }
 
 impl Recording {
-    /// As [`SyntheticRecorder::start`], then checks that the recording is
-    /// under way.
+    /// As [`SyntheticRecorder::start`], checking the recording is under way.
     fn start(&self, mode: CaptureMode, call_app: Option<&str>) {
         self.capture.start(mode, call_app);
         assert_eq!(self.recorder.status().state, RecordingState::Recording);
@@ -438,8 +429,8 @@ impl Recording {
             .microphone_activity(MicrophoneActivity::Released);
     }
 
-    /// The capture is back, on a thread of its own, so a resume that
-    /// deadlocks fails the test rather than hangs it.
+    /// The capture is back, on a thread of its own, so a deadlock fails the
+    /// test.
     fn resume(&self) {
         let recorder = self.recorder.clone();
         on_own_thread(PATIENCE, "the resume returned", move || {
@@ -455,8 +446,7 @@ impl Recording {
             .map(|armed| (armed.app_name, armed.remaining_seconds))
     }
 
-    /// Waits until the countdown's thread sleeps on the clock (or until
-    /// none does), so an advance reaches it.
+    /// Waits until `count` countdown threads sleep on the clock.
     fn sleepers(&self, count: usize) {
         assert!(
             self.clock.wait_for_sleepers(count),
@@ -469,9 +459,7 @@ impl Recording {
         self.store.meetings(10, 0).unwrap()
     }
 
-    /// Records, through the change hook, the countdown the status shows
-    /// at every change while the recording is Stopping: what the bubble
-    /// shows while a stop saves.
+    /// Records the status at every change while the recording is Stopping.
     fn watch_stopping(&self) -> Arc<std::sync::Mutex<Vec<Option<AutoStopStatus>>>> {
         let while_stopping = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (seen, watched) = (while_stopping.clone(), Arc::downgrade(&self.recorder));
@@ -522,8 +510,7 @@ async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
         RecordingState::Recording,
         "still recording at 0:01"
     );
-    // The auto-stop goes through Stopping as Stop does, its countdown
-    // gone from the stop's start.
+    // The auto-stop goes through Stopping as Stop does, its countdown gone.
     let while_stopping = recording.watch_stopping();
     recording.sleepers(1);
     recording.clock.advance(Duration::from_secs(1));
@@ -541,8 +528,7 @@ async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
             app_name: Some("Zen".to_owned())
         })
     );
-    // Saved as Stop saves: the asset written, the duration set and the
-    // meeting handed to processing.
+    // Saved as Stop saves.
     assert!(
         !matches!(
             meeting.state,
@@ -563,11 +549,9 @@ async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
     );
 }
 
-/// P40 check 3 (`.plans/2026-10-12-store-off-the-workers.md`): a countdown
-/// that runs out while another process holds the write lock, and a write
-/// of this process waits behind it, shows `Stopping` live in the host,
-/// with a reload in flight as the poll runs one, and the meeting is saved
-/// within a second of the lock going.
+/// A countdown that runs out while another process holds the write lock
+/// shows `Stopping` live in the host, and the meeting is saved within a
+/// second of the lock going.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn an_auto_stop_under_a_held_lock_saves_once_the_lock_goes() {
     let recording = recording();
@@ -711,8 +695,7 @@ async fn a_stop_while_armed_keeps_its_own_reason_and_withdraws_the_countdown() {
         recording.opened(Some("Zen"));
         recording.released();
         recording.sleepers(1);
-        // The countdown is gone from the stop's start, as Swift's stop
-        // disarmed first.
+        // The countdown is gone from the stop's start.
         let while_stopping = recording.watch_stopping();
         if quit {
             let recorder = recording.recorder.clone();
@@ -781,8 +764,7 @@ async fn a_microphone_opened_while_starting_is_remembered() {
     assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 90.0)));
 }
 
-/// A recording whose device changes a second into it: the capture
-/// rebuilds on the new one and its notice thread calls the change hook.
+/// A recording whose device changes a second into it.
 fn recording_whose_device_changes() -> Recording {
     recording_over(synthetic_recorder_over(Arc::new(|configuration| {
         let options = crate::testing::synthetic_tone(&configuration).change_device_after(1.0);
@@ -802,18 +784,13 @@ fn on_the_notice_thread() -> bool {
     std::thread::current().name() == Some("steno-notices")
 }
 
-/// Swift's `testADeviceChangeNoticeLeavesTheCountdownRunning`, which
-/// differs in Rust: a device change during the countdown hides it until
-/// the capture resumes on the new device, and the resume arms a fresh
-/// 90 s (the capture recovered, [`CaptureRecorder::resume_auto_stop`])
-/// that still ends the call.
-///
-/// [`CaptureRecorder::resume_auto_stop`]: crate::recorder::CaptureRecorder::resume_auto_stop
+/// A device change during the countdown hides it until the capture
+/// resumes on the new device, and the resume arms a fresh 90 s that still
+/// ends the call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_device_change_rearms_the_countdown_at_its_resume() {
-    // Not dropped until the resume was seen: the change hook reads the
-    // status on the notice thread, so a notice handled under the outage's
-    // lock deadlocks there, and the drop's stop would wait on it.
+    // Not dropped until the resume was seen: a notice handled under the
+    // outage's lock deadlocks, and the drop's stop would wait on it.
     let recording = std::mem::ManuallyDrop::new(recording_whose_device_changes());
     let (changed, rebuilt) = std::sync::mpsc::channel();
     let watched = Arc::downgrade(&recording.recorder);
@@ -835,8 +812,7 @@ async fn a_device_change_rearms_the_countdown_at_its_resume() {
     recording.sleepers(1);
     recording.clock.advance(Duration::from_secs(10));
     assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 80.0)));
-    // The fresh countdown on a clock of its own, at the same time, so
-    // each clock's sleepers are its own countdown's.
+    // The fresh countdown on a clock of its own.
     let resumed = Arc::new(ManualClock::new());
     resumed.advance(Duration::from_secs(10));
     recording.recorder.count_down_on(resumed.clone());
@@ -878,9 +854,8 @@ async fn a_device_change_rearms_the_countdown_at_its_resume() {
     );
 }
 
-/// A recording whose audio service restarts a second into it (coreaudiod
-/// restarting, say): the restarts fail past the attempts, so the
-/// capture warns that it is still trying, and then one runs.
+/// A recording whose audio service restarts a second into it, the
+/// restarts failing past the attempts before one runs.
 fn recording_whose_audio_service_restarts() -> Recording {
     recording_over(synthetic_recorder_over(Arc::new(|configuration| {
         let options = crate::testing::synthetic_tone(&configuration)
@@ -906,10 +881,7 @@ struct AtNotice {
 }
 
 /// Holds the capture's notice thread in the change hook after each of its
-/// first `notices` notices, so the recorder's view of the capture stays
-/// there until the test lets it go on: each one sends the status and
-/// waits for the reply, under [`HANG_GUARD`], since a test may reply only
-/// after real capture work (a dropped reply ends the wait at once).
+/// first `notices` notices until the test replies, under [`HANG_GUARD`].
 fn hold_the_notices(
     recording: &Recording,
     notices: usize,
@@ -940,8 +912,7 @@ fn hold_the_notices(
     (seen, go)
 }
 
-/// Asserts the recording goes on for a moment: a countdown that ran out
-/// while the capture recovers ends nothing, however soon after it woke.
+/// Asserts the recording goes on for a moment.
 fn assert_still_recording(recording: &Recording) {
     let until = std::time::Instant::now() + Duration::from_millis(300);
     while std::time::Instant::now() < until {
@@ -950,13 +921,10 @@ fn assert_still_recording(recording: &Recording) {
     }
 }
 
-/// A restart of the audio service empties the call detector's process
-/// list, so the call app seems to let go of the microphone, before the
-/// capture's change (`released_before`) or during its recovery: a
+/// A restart of the audio service seems to release the call app's
+/// microphone, before the capture's change or during its recovery: a
 /// recovery shorter than the grace ends no recording and shows no
-/// countdown, the warning dismissed and the stream resumed included, and
-/// once audio is back with the app still holding no microphone a fresh
-/// 90 s countdown runs and then ends the call.
+/// countdown, and once audio is back a fresh 90 s runs and ends the call.
 async fn a_restarted_audio_service_ends_no_call(released_before: bool) {
     let recording = recording_whose_audio_service_restarts();
     let (seen, go) = hold_the_notices(&recording, 3);
@@ -989,14 +957,12 @@ async fn a_restarted_audio_service_ends_no_call(released_before: bool) {
     assert_eq!(recording.recorder.status().warning, None, "dismissed");
     go.send(()).unwrap();
     seen.recv_timeout(HANG_GUARD).expect("the capture resumed");
-    // Resumed after the restarts went on, so not yet back: still no
-    // countdown shown, and the recording goes on.
+    // Not yet back: still no countdown, and the recording goes on.
     recording.clock.advance(Duration::from_secs(60));
     recording.sleepers(1);
     assert_still_recording(&recording);
     assert_eq!(recording.armed(), None, "still none shown");
-    // The fresh countdown on a clock of its own, at the same time, so
-    // each clock's sleepers are its own countdown's.
+    // The fresh countdown on a clock of its own.
     let resumed = Arc::new(ManualClock::new());
     resumed.advance(Duration::from_secs(60));
     recording.recorder.count_down_on(resumed.clone());
@@ -1034,7 +1000,7 @@ async fn a_release_while_the_audio_service_restarts_ends_no_call() {
 }
 
 /// Asserts the one meeting was ended by the call app's release and saved
-/// as Stop saves it: handed to processing, its asset on disk.
+/// as Stop saves it.
 fn assert_saved_as_the_call_ended(recording: &Recording) {
     let meetings = recording.meetings();
     let meeting = &meetings[0];
@@ -1064,10 +1030,7 @@ fn assert_saved_as_the_call_ended(recording: &Recording) {
 }
 
 /// A recording whose capture stalls a second into it and whose restarts
-/// all fail until the stop: a Mac call capture whose silent output keeps
-/// failing once the hang-up stopped the call app's output, which
-/// delivers nothing until something plays. `StillRestarting`, and no
-/// `Delivering`.
+/// all fail until the stop: `StillRestarting`, no `Delivering`.
 fn recording_whose_capture_keeps_failing() -> Recording {
     recording_over(synthetic_recorder_over(Arc::new(|configuration| {
         let options = crate::testing::synthetic_tone(&configuration)
@@ -1085,12 +1048,9 @@ fn recording_whose_capture_keeps_failing() -> Recording {
     })))
 }
 
-/// The cap on the wait for a recovering capture: a call whose capture
-/// keeps failing after the call app let go is not kept recording for
-/// good. The release's countdown, not shown while the capture recovers,
-/// runs out into a fresh 90 s shown at once (never "Stops in 0:00"), and
-/// that one ends the call, saved, though the capture still recovers: two
-/// graces after the release.
+/// A call whose capture keeps failing after the call app let go: the
+/// hidden countdown runs out into a fresh 90 s shown at once, which ends
+/// the call two graces after the release.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_capture_that_keeps_failing_ends_the_call_two_graces_after_the_release() {
     let recording = recording_whose_capture_keeps_failing();
@@ -1131,12 +1091,8 @@ async fn a_capture_that_keeps_failing_ends_the_call_two_graces_after_the_release
     assert_saved_as_the_call_ended(&recording);
 }
 
-/// The cap on the wait, for a capture that recovers over and over without
-/// `StillRestarting` (a stream that stalls again within 10 s of each
-/// resume, or devices that change a minute apart): only the first resume
-/// puts a fresh 90 s in the place of the release's countdown, the later
-/// ones leave it, and it ends the call, saved, within two graces of the
-/// release (here at 150 s, the first recovery a minute in).
+/// A capture that recovers over and over: only the first resume puts a
+/// fresh 90 s in place, and it ends the call within two graces.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release() {
     let backend: Arc<std::sync::Mutex<Option<Arc<steno_audio::testing::SyntheticCaptureBackend>>>> =
@@ -1171,9 +1127,7 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
     recording.sleepers(1);
     let changed = seen.recv_timeout(HANG_GUARD).expect("the device changed");
     assert_eq!(changed.armed, None, "not shown while it recovers");
-    // The first recovery is a minute in on the countdown's clock. The
-    // fresh countdown on a clock of its own, at the same time, so each
-    // clock's sleepers are its own countdown's.
+    // The first recovery a minute in; the fresh countdown on its own clock.
     recording.clock.advance(Duration::from_secs(60));
     let resumed = Arc::new(ManualClock::new());
     resumed.advance(Duration::from_secs(60));
@@ -1210,13 +1164,9 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
     assert_saved_as_the_call_ended(&recording);
 }
 
-/// Where a test holds a rebuild's start: the backend says when the start
-/// is waiting, and goes on once the test opens it or after [`PATIENCE`],
-/// which it records, so a test that passed only once the gate gave up
-/// fails on [`SecondRebuild::stop`] instead. From that word on the test
-/// does only its own checks before it opens the gate, and times a claim
-/// against this patience; [`HANG_GUARD`] here would turn a notice thread
-/// that fell behind into a 120 s failure.
+/// Where a test holds a rebuild's start until it opens it or after
+/// [`PATIENCE`], which it records, so a test that passed only once the
+/// gate gave up fails on [`SecondRebuild::stop`].
 struct Gate {
     entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
     open: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
@@ -1251,10 +1201,8 @@ impl steno_audio::CaptureBackend for GatedRestart {
     }
 }
 
-/// A recording whose device changes twice for `reason`, a second into
-/// each start, and whose second rebuild's start waits at a gate. The
-/// second change waits until the test releases it, so the notice thread
-/// read the session for the first change before that start can hold it.
+/// A recording whose device changes twice for `reason`, whose second
+/// rebuild's start waits at a gate.
 struct SecondRebuild {
     recording: Recording,
     /// Hears when the second rebuild's start waits at the gate.
@@ -1266,9 +1214,7 @@ struct SecondRebuild {
 }
 
 impl SecondRebuild {
-    /// Stops the recording, ended by hand, and checks the test opened the
-    /// gate: one that gave up let the start go on its own, and the test
-    /// would have passed whatever it checked meanwhile.
+    /// Stops the recording and checks the test opened the gate.
     fn stop(&self) {
         self.recording.stop();
         assert_eq!(
@@ -1326,19 +1272,16 @@ fn recording_whose_second_rebuild_waits(reason: steno_audio::DeviceChangeReason)
     }
 }
 
-/// The notice thread reads the session with the outage's lock released:
-/// a rebuild's start holds the session's lock for seconds, and the
-/// status, the microphone's activity and the countdown's end, which take
-/// the outage's lock, do not wait for it. Here the thread handles a
-/// resume while the next rebuild's start waits at a gate.
+/// The notice thread reads the session with the outage's lock released,
+/// so the status, the microphone's activity and the countdown's end do not
+/// wait on a slow rebuild's start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
     let rebuild =
         recording_whose_second_rebuild_waits(steno_audio::DeviceChangeReason::DefaultInputChanged);
     let recording = &rebuild.recording;
-    // The first change's notice, once handled, lets the second change go
-    // and waits until the second rebuild's start holds the session, so the
-    // thread reads the session for the first resume while that start runs.
+    // The first change's notice lets the second go, so the thread reads the
+    // session for the first resume while the second rebuild's start runs.
     let (go, gone) = std::sync::mpsc::channel::<()>();
     let gone = std::sync::Mutex::new(gone);
     let once = AtomicBool::new(false);
@@ -1373,14 +1316,9 @@ async fn a_rebuild_s_start_holds_up_neither_the_status_nor_the_auto_stop() {
     rebuild.stop();
 }
 
-/// A device change begins the recovery before the notice thread reads the
-/// session for the stalled microphone, a read that waits behind the
-/// rebuild's start (a call on Windows runs on the microphone's clock, and
-/// a start there takes up to 10 s): a release's countdown that runs out
-/// meanwhile is not shown, ends nothing, and a fresh one takes its place
-/// (S2 in `.plans/2026-10-07-stable-promotion.md`). Elsewhere a call's
-/// change reads nothing, and the test pins the same outcome. Here the
-/// second stall's rebuild waits at a gate.
+/// A release's countdown that runs out while the notice thread's read of
+/// the session waits behind a rebuild's start is not shown, ends nothing,
+/// and a fresh one takes its place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call() {
     let rebuild =
@@ -1403,8 +1341,7 @@ async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call()
         .recv_timeout(HANG_GUARD)
         .expect("the second stall's rebuild starts");
     go.send(()).unwrap();
-    // Well inside the gate's own patience, so a read that came first
-    // fails here rather than once the gate gave up.
+    // Well inside the gate's own patience.
     eventually_within(PATIENCE / 2, "not shown from the second stall on", || {
         recording.armed().is_none()
     })
@@ -1420,15 +1357,11 @@ async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call()
 }
 
 /// Audio back after the capture recovered arms a fresh countdown when the
-/// call app let go and holds no microphone, since the detector does not
-/// report that release again; the earlier countdown is withdrawn, and the
-/// fresh one ends the call. The change hook reads the status, as the
-/// app's does, so a resume that notified under the recorder's lock would
-/// deadlock.
+/// call app holds no microphone; the earlier one is withdrawn. A resume
+/// that notified under the recorder's lock would deadlock here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audio_back_arms_a_fresh_countdown_once_the_call_app_let_go() {
-    // Not dropped until the resumes returned: a deadlocked resume holds
-    // the recorder's lock, and the drop's stop would wait on it.
+    // Not dropped until the resumes returned: a deadlock holds the lock.
     let recording = std::mem::ManuallyDrop::new(recording());
     let watched = Arc::downgrade(&recording.recorder);
     recording.recorder.on_change(Arc::new(move || {
@@ -1448,8 +1381,7 @@ async fn audio_back_arms_a_fresh_countdown_once_the_call_app_let_go() {
     recording.sleepers(1);
     recording.clock.advance(Duration::from_secs(30));
     assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 60.0)));
-    // The fresh countdown on a clock of its own, at the same time, so
-    // each clock's sleepers are its own countdown's.
+    // The fresh countdown on a clock of its own.
     let resumed = Arc::new(ManualClock::new());
     resumed.advance(Duration::from_secs(30));
     recording.recorder.count_down_on(resumed.clone());
@@ -1477,10 +1409,8 @@ async fn audio_back_arms_a_fresh_countdown_once_the_call_app_let_go() {
     );
 }
 
-/// The capture's notice thread may resume the auto-stop while a stop is
-/// on its way to joining that thread: the resume takes the recorder's
-/// lock only to arm and the stop does not hold it while it joins, so
-/// neither waits for the other, and a stopping recording arms nothing.
+/// A resume racing a stop that joins the notice thread: neither waits for
+/// the other, and a stopping recording arms nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_resume_on_the_notice_thread_during_a_stop_does_not_deadlock() {
     let recording = recording_whose_device_changes();

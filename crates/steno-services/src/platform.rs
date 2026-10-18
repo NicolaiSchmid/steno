@@ -1,9 +1,6 @@
 //! The platform services behind the host's small traits: the wall clock,
 //! the folder usage walk, the input device list, and the first-launch
-//! flags in `preferences.json`. Swift: `Date()`,
-//! `AudioSettingsViewModel.measureFolderUsage` in
-//! `apps/macos/Steno/Settings/AudioSettingsViewModel.swift`, the Core Audio
-//! device list, and `UserDefaults` in `apps/macos/Steno/AppController.swift`.
+//! flags in `preferences.json`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -56,11 +53,9 @@ impl FolderUsage for DiskFolderUsage {
     }
 }
 
-/// The input devices, from the audio crate's live backend: Core Audio on
-/// the Mac, the `PipeWire` registry on Linux, WASAPI on Windows; an empty
-/// list on other targets. A failed enumeration is logged and returned, so
-/// Settings shows Swift's "Microphones could not be listed." over an empty
-/// list and keeps working.
+/// The input devices from the audio crate's live backend; empty on other
+/// targets. A failed enumeration is logged and returned, so Settings shows
+/// its message over an empty list.
 #[derive(Debug, Default)]
 pub struct PlatformAudioDevices;
 
@@ -83,15 +78,11 @@ impl AudioDevices for PlatformAudioDevices {
     }
 }
 
-/// Boolean flags in `preferences.json` under the support directory
-/// (Swift: `UserDefaults`), for the first-launch markers. A write replaces
-/// the file in one durable step ([`write_json`]). A value that is not a
-/// flag (a newer build's) is kept as it is. The file is read with
-/// [`read_json`]: a file that does not parse is moved aside and logged
-/// before the flags start empty; a file that cannot be read for another
-/// reason, or that cannot be moved aside, is left alone and never written,
-/// and the flags of this run live in memory only: a first-launch marker
-/// shown again is better than a file replaced unread.
+/// Boolean flags in `preferences.json` under the support directory, for
+/// the first-launch markers. A write replaces the file in one durable step;
+/// a value that is not a flag is kept as it is. A file that does not parse
+/// is moved aside; one that cannot be read or moved aside is never written,
+/// and the run's flags live in memory only.
 #[derive(Debug)]
 pub struct FilePreferences {
     path: PathBuf,
@@ -101,11 +92,9 @@ pub struct FilePreferences {
 }
 
 impl FilePreferences {
-    /// Crate-only, as is [`Self::in_support_directory`]: every write
-    /// replaces the whole file from this instance's map, so a second
-    /// instance on the same file would drop the first one's later flags.
-    /// The graph builds the one instance (`crate::build_with_import`) and
-    /// hands it to the Swift import's launch half and to the host.
+    /// Crate-only: every write replaces the whole file from this instance's
+    /// map, so a second instance on the same file would drop the first one's
+    /// flags. The graph builds the one instance.
     #[must_use]
     pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
@@ -206,9 +195,8 @@ mod tests {
         assert!(FilePreferences::new(&path).flag("onboarded"));
     }
 
-    /// The write replaces the file rather than writing into it: a second
-    /// name for the old file still holds the old bytes, so a crash in the
-    /// middle of a write cannot leave a torn file under the real name.
+    /// The write replaces the file rather than writing into it, so a crash
+    /// cannot leave a torn file.
     #[test]
     fn set_flag_writes_a_new_file_instead_of_into_the_old_one() {
         let directory = tempfile::tempdir().unwrap();
@@ -286,8 +274,7 @@ mod tests {
             return;
         }
         let preferences = FilePreferences::new(&path);
-        // Writable again: only the failed move aside keeps the file from
-        // being written.
+        // Writable again: only the failed move aside keeps the file unwritten.
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
         preferences.set_flag("onboarded", true);
         assert!(preferences.flag("onboarded"), "the run still has its flag");
@@ -295,9 +282,8 @@ mod tests {
         assert_eq!(names(&folder), vec!["preferences.json"]);
     }
 
-    /// The disk's folder usage asks the durable writes about the folder's
-    /// drive: a test folder is not reported, and on Windows the FAT32 drive
-    /// CI mounts (`STENO_FAT32_VOLUME`) is.
+    /// The folder usage asks the durable writes about the folder's drive: a
+    /// test folder is not reported, and on Windows CI's FAT32 drive is.
     #[test]
     fn the_disk_folder_usage_reports_a_drive_that_may_lose_recent_writes() {
         let directory = tempfile::tempdir().unwrap();

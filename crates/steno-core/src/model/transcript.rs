@@ -1,5 +1,4 @@
 //! Transcript segments and the lane they came from.
-//! Swift: `Sources/StenoCore/Model/Transcript.swift`.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -19,8 +18,8 @@ string_enum! {
     }
 }
 
-/// One line of the transcript after merge and cleanup. `raw_text` keeps the
-/// STT output; `text` is the cleaned version shown and exported.
+/// One line of the transcript after merge and cleanup: `raw_text` from speech
+/// to text, `text` the cleaned version shown and exported.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptSegment {
