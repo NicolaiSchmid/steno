@@ -1,43 +1,9 @@
-//! The bridge host: what answers every method that is not the shell's own.
-//! By default it is [`steno_host::Host`] over the services graph
-//! (`steno_services::build`): the real store under the support directory,
-//! the pipeline, the recorder and the handover listener (plan: `WP6b`).
-//! Snapshots leave through [`crate::bridge::emit`] on every open window,
-//! which also ends onboarding on a finished `onboarding` snapshot and moves
-//! the tray and the panels on a `recording` one, so a host never closes a
-//! window itself. They go out from the main thread (`WindowSink`): the
-//! host emits under its `publishing` lock (from a command or a reload
-//! pass) and the `recording` feed from a thread of its own, and the
-//! tray's setters wait for the main thread when called from another, so
-//! a snapshot delivered on the emitting thread would hold the lock, or
-//! the feed, until the main thread is free. With the opt-in `fixture-host`
-//! feature every window gets the recorded snapshots on `page.ready` and
-//! commands are answered as `apps/macos/web/src/bridge/mock-transport.ts`
-//! answers them, so the UI runs without a database.
-//!
-//! The host reaches back into the shell through five seams, all wired here:
-//! the `Opener` (`ShellOpener`, over `dialogs` and `windows`), the login
-//! item (`autostart::ShellLoginItem`), the update source the services'
-//! update schedule drives (`updater::ShellUpdates`), the destructive alert
-//! (`dialogs::confirm_destructive`) and the folder chooser, whose panel the
-//! shell shows itself before it calls the host (`dialogs.rs`), so the
-//! host's `choose_folder` callback answers with the folder the call
-//! carries (`ChosenFolder`).
-//!
-//! Every call into the host can wait: on the store, for up to its 5 s busy
-//! timeout while another process holds the write lock, on a native prompt,
-//! on the recorder's stop. So none runs on the main thread, which `main`
-//! marks (`steno_host::mark_ui_thread`), nor on a Tauri command worker,
-//! and each goes through a [`ShellHost`]. A command awaits its call on
-//! Tauri's blocking pool ([`call_blocking`]), beside the page's other
-//! commands. A caller with no one to answer (the tray's actions, a window
-//! request, the onboarding window's close) queues it on the shell's one
-//! ordered lane ([`call_in_order`], [`Lane`]), so those run in the order
-//! they were made. [`Host::call`], [`Host::page_ready`],
-//! [`Host::publish_request`] and [`Host::onboarding_window_closed`] fail a
-//! debug build on the marked thread (`steno_host::assert_off_ui_thread`).
-//! The launch is the exemption: it runs during setup, before the event
-//! loop (`steno_host`'s `Threads` section).
+//! The bridge host: what answers every method that is not the shell's own,
+//! [`steno_host::Host`] over the services graph, or the recorded fixtures
+//! with the `fixture-host` feature. Every call into the host can wait, so
+//! none runs on the main thread: commands go to Tauri's blocking pool
+//! ([`call_blocking`]), callers with no one to answer to one ordered lane
+//! ([`call_in_order`]).
 #![cfg_attr(
     feature = "fixture-host",
     allow(clippy::unused_self, clippy::unnecessary_wraps)
@@ -53,21 +19,16 @@ use crate::bridge::BridgeError;
 /// A job for the [`Lane`].
 pub type Job = Box<dyn FnOnce() + Send>;
 
-/// The host as the shell reaches it off the main thread and the command
-/// workers: the app, through its managed [`Host`], or a test's fake. The
-/// calls into the host, and the login item's switch and read, can wait, so
-/// each runs inside [`call_blocking`] or [`call_in_order`];
-/// `refuse_starts`, `note_quitting`, `note_login_item` and `queue` never
-/// wait, and the main thread calls the first two.
+/// The host as the shell reaches it off the main thread: the app's managed
+/// [`Host`], or a test's fake. The calls can wait, so each runs inside
+/// [`call_blocking`] or [`call_in_order`]; `refuse_starts`,
+/// `note_quitting`, `note_login_item` and `queue` never wait.
 pub trait ShellHost: Clone + Send + Sync + 'static {
-    /// The window a call answers for.
     type Window: Clone + Send + Sync + 'static;
 
-    /// The page has mounted ([`Host::page_ready`]), and the request it was
-    /// owed goes out after its first snapshots (`windows::Pages`).
+    /// The page has mounted ([`Host::page_ready`]).
     fn page_ready(&self, window: &Self::Window) -> Result<(), BridgeError>;
 
-    /// A command the host answers ([`Host::call`]).
     fn call(
         &self,
         window: &Self::Window,
@@ -75,8 +36,7 @@ pub trait ShellHost: Clone + Send + Sync + 'static {
         params: Value,
     ) -> Result<Value, BridgeError>;
 
-    /// `window.open` names a meeting or a section for a window that
-    /// listens ([`Host::publish_request`]).
+    /// `window.open` names a meeting or a section ([`Host::publish_request`]).
     fn publish_request(
         &self,
         window: &Self::Window,
@@ -84,38 +44,28 @@ pub trait ShellHost: Clone + Send + Sync + 'static {
         value: &str,
     ) -> Result<(), BridgeError>;
 
-    /// The onboarding window is gone ([`Host::onboarding_window_closed`]).
     fn onboarding_window_closed(&self);
 
-    /// Whether the system's login item is on (`autostart::status`).
     fn login_item_on(&self) -> bool;
 
-    /// Switches the login item in the system (`autostart::set_enabled`).
     fn switch_login_item(&self, value: bool) -> Result<(), BridgeError>;
 
-    /// The tray's check mark follows the system's login item, `on` as the
-    /// caller read it ([`Self::login_item_on`]), on the main thread
-    /// (`tray::note_login_item`): posted there, never waited for.
-    /// The value is read on the calling worker, so two switches on
-    /// different threads (Settings on the blocking pool and the tray on the
-    /// lane, or two Settings calls) within microseconds can post in a
-    /// different order than they read. The check mark then shows the older
-    /// value until the next change; nothing is lost, and the Settings page
-    /// is unaffected.
+    /// The tray's check mark follows the login item, `on` as the caller
+    /// read it; posted to the main thread, never waited for. Two switches
+    /// on different threads may post out of order, leaving the mark stale
+    /// until the next change.
     fn note_login_item(&self, on: bool);
 
     /// The menus' Quit, on the main thread: every recording start is
-    /// refused from now on ([`Host::refuse_starts`]). It sets a flag and
-    /// returns; queued on the lane it would wait behind the Records
-    /// clicked before the Quit, which it must refuse.
+    /// refused from now on. Not on the lane, where it would wait behind the
+    /// Records clicked before the Quit, which it must refuse.
     fn refuse_starts(&self);
 
-    /// The menus' Quit, on the main thread: the tray reads quitting
-    /// (`tray::note_quitting`).
+    /// The menus' Quit, on the main thread: the tray reads quitting.
     fn note_quitting(&self);
 
-    /// Queues `job` on the shell's ordered lane ([`Lane::queue`]), as
-    /// `what` in the log; returns at once.
+    /// Queues `job` on the shell's ordered lane, as `what` in the log;
+    /// returns at once.
     fn queue(&self, what: &'static str, job: Job);
 }
 
@@ -172,7 +122,6 @@ impl ShellHost for AppHandle {
     }
 
     fn refuse_starts(&self) {
-        // Not managed in an app that refused to start.
         if let Some(host) = self.try_state::<Host>() {
             host.refuse_starts();
         }
@@ -188,10 +137,8 @@ impl ShellHost for AppHandle {
 }
 
 /// Runs `body` with `host` on Tauri's blocking pool and resolves to what it
-/// returned, so the caller's thread, a command worker or the main thread,
-/// never waits on the host. A panic in `body` resumes in the awaiting
-/// task; a pool that is already gone (the app is quitting) answers
-/// `failed`.
+/// returned, so the caller's thread never waits on the host. A panic
+/// resumes in the awaiting task; a pool already gone answers `failed`.
 pub async fn call_blocking<H, T>(
     host: H,
     body: impl FnOnce(&H) -> Result<T, BridgeError> + Send + 'static,
@@ -209,16 +156,11 @@ where
     }
 }
 
-/// Queues `body` with `host` on the shell's ordered lane ([`Lane`]) and
-/// returns at once, for a caller that has no one to answer: the tray's
-/// actions, a window request (a deep link's, or `window.open`'s) and the
-/// onboarding window's close. They reach the host one at a time, in the
-/// order they were queued, as they did when the main thread ran them: a
-/// Record clicked while a Stop's save waits on the store runs once that
-/// stop has ended, and starts a recording; a second Launch at login undoes
-/// the first; the later of two deep links is the one shown. The cost: a
-/// deep link's request waits behind a slow stop too. A failure is logged
-/// as `what`.
+/// Queues `body` with `host` on the shell's ordered lane and returns at
+/// once, for a caller with no one to answer: the tray's actions, a window
+/// request and the onboarding window's close. They reach the host in the
+/// order queued, so a Record clicked during a Stop's save runs after it. A
+/// failure is logged as `what`.
 pub fn call_in_order<H: ShellHost>(
     host: H,
     what: &'static str,
@@ -235,22 +177,16 @@ pub fn call_in_order<H: ShellHost>(
     );
 }
 
-/// One thread of the shell's own that runs the jobs queued on it one at a
-/// time, in the order they were queued ([`call_in_order`]). Tauri's pools
-/// cannot keep that order: tasks and blocking calls do not start in the
-/// order they were spawned, and a lock over them is not first come, first
-/// served. A job that panics is logged at error, as its `what` alone (the
-/// payload can name a path), and the next job runs. The thread ends when
-/// the lane is dropped; the exit never joins it, and a tray Quit waits only
-/// for the jobs queued before it, for a bounded time
-/// (`actions::exit_after_queued`). Managed state, and a test's fake owns
-/// one.
+/// One thread of the shell's own that runs its jobs in the order queued,
+/// which Tauri's pools cannot guarantee. A job that panics is logged at
+/// error as its `what` alone (the payload can name a path), and the next
+/// job runs. The thread ends when the lane is dropped; the exit never
+/// joins it.
 pub struct Lane {
     jobs: mpsc::Sender<(&'static str, Job)>,
 }
 
 impl Lane {
-    /// Starts the lane's thread.
     pub fn start() -> Self {
         let (jobs, queued) = mpsc::channel::<(&'static str, Job)>();
         std::thread::Builder::new()
@@ -289,10 +225,9 @@ pub(crate) mod real {
     use crate::bridge::BridgeError;
     use crate::windows::RequestField;
 
-    /// What [`WindowSink`] needs of the main thread: a task posted to it
-    /// runs there, at once when posted from it and in posting order
-    /// otherwise; `deliver` hands a snapshot to every open window, and
-    /// runs only there.
+    /// What [`WindowSink`] needs of the main thread: a task posted runs
+    /// there, at once when posted from it and in posting order otherwise;
+    /// `deliver` runs only there.
     pub trait MainThread: Clone + Send + Sync + 'static {
         fn post(&self, task: Box<dyn FnOnce() + Send>);
         fn deliver(&self, event: BridgeEvent);
@@ -316,21 +251,12 @@ pub(crate) mod real {
         }
     }
 
-    /// Snapshots go to every open window, from the main thread; each page
-    /// keeps the topics it shows, and the tray and the panels follow the
-    /// `recording` one (`bridge::emit`). `emit` queues the snapshot and
-    /// returns without waiting: the host emits under its `publishing` lock
-    /// (from a command or a reload pass) and the `recording` feed from a
-    /// thread of its own, and the tray's setters wait for the main thread
-    /// when called from another, so a delivery on the emitting thread
-    /// would hold the lock, or the feed, until the main thread is free.
-    /// One queue keeps the snapshots in emit order whichever thread emits
-    /// them, also when an emit on the main thread runs before a task posted
-    /// earlier, and one drain at a time empties it, so every window gets
-    /// them in that order.
-    ///
-    /// Swift: `WebBridge.emit`, `@MainActor`
-    /// (`apps/macos/Steno/Web/WebBridge.swift`).
+    /// Snapshots go to every open window, from the main thread. `emit`
+    /// queues and returns without waiting: the host emits under its
+    /// `publishing` lock and the tray's setters wait for the main thread, so
+    /// delivering on the emitting thread would hold the lock until the main
+    /// thread is free. One queue keeps emit order across threads, and one
+    /// drain at a time empties it.
     pub struct WindowSink<M = AppHandle> {
         main: M,
         queue: Arc<Mutex<VecDeque<BridgeEvent>>>,
@@ -355,13 +281,11 @@ pub(crate) mod real {
                 (self.main.clone(), self.queue.clone(), self.draining.clone());
             self.main.post(Box::new(move || {
                 // An emit from inside a delivery leaves its snapshot to the
-                // drain under way, which delivers it once every window has
-                // the one before.
+                // drain under way.
                 let Some(_draining) = Draining::begin(&draining) else {
                     return;
                 };
-                // The lock is released before each delivery: one may emit
-                // again on this thread.
+                // Released before each delivery: one may emit again.
                 loop {
                     let next = lock_queue(&pending).pop_front();
                     let Some(event) = next else { break };
@@ -371,7 +295,6 @@ pub(crate) mod real {
         }
     }
 
-    /// The drain under way; it ends when this is dropped.
     struct Draining<'a>(&'a AtomicBool);
 
     impl<'a> Draining<'a> {
@@ -393,17 +316,9 @@ pub(crate) mod real {
         queue.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The Finder, the browser and the shell's windows for the host:
-    /// `dialogs::reveal`, `dialogs::open_url`, `windows::open` and
-    /// `windows::close`. The page's own `system.openURL` and `window.*`
-    /// calls are the shell's (`bridge.rs`) and never reach the host, so in
-    /// practice the host reveals files (`meeting.revealRecording`,
-    /// `meeting.revealExport`, `settings.recording.revealFolder`). A
-    /// failure warns without its text, which can name the path or the URL
-    /// (a folder named after a meeting); the text goes to debug.
-    ///
-    /// Swift: `NSWorkspace.activateFileViewerSelecting` and
-    /// `NSWorkspace.open`.
+    /// The Finder, the browser and the shell's windows for the host. A
+    /// failure warns without its text, which can name a path or a URL; the
+    /// text goes to debug.
     pub struct ShellOpener {
         pub app: AppHandle,
     }
@@ -435,13 +350,9 @@ pub(crate) mod real {
         }
     }
 
-    /// The folder a chooser call carries to the host. The shell shows the
-    /// panel first and calls the host only with a choice (`dialogs.rs`);
-    /// the host's `choose_folder` callback takes it from here. One chooser
-    /// call at a time holds `calls`, so two windows choosing at once cannot
-    /// swap their folders.
-    ///
-    /// Swift: the `NSOpenPanel` inside `chooseFolder` (`SettingsBridge.swift`).
+    /// The folder a chooser call carries to the host: the shell shows the
+    /// panel first and calls the host only with a choice. One chooser call
+    /// at a time holds `calls`, so two windows cannot swap their folders.
     #[derive(Default)]
     pub struct ChosenFolder {
         calls: Mutex<()>,
@@ -456,7 +367,6 @@ pub(crate) mod real {
             Box::new(move |_current| folder.lock().unwrap_or_else(PoisonError::into_inner).take())
         }
 
-        /// Runs `call` with `folder` as the chooser's answer.
         pub fn answering<T>(&self, folder: PathBuf, call: impl FnOnce() -> T) -> T {
             let _one_at_a_time = self.calls.lock().unwrap_or_else(PoisonError::into_inner);
             *self.folder.lock().unwrap_or_else(PoisonError::into_inner) = Some(folder);
@@ -469,8 +379,8 @@ pub(crate) mod real {
         }
     }
 
-    /// The detection prompt's panel (`panels::set_prompt`): what the
-    /// host's detection controller raises and clears.
+    /// The detection prompt's panel, which the detection controller raises
+    /// and clears.
     pub struct ShellPromptPanel {
         pub app: AppHandle,
     }
@@ -490,10 +400,8 @@ pub(crate) mod real {
         }
     }
 
-    /// The name the prompt gives the app with `bundle_id`: on the Mac the
-    /// running app's localized name, as Swift's `liveAppName` read the
-    /// bundle's name; elsewhere, and for an app the Mac does not list,
-    /// `steno_services::detection::fallback_app_name`.
+    /// The name the prompt gives the app with `bundle_id`: the running
+    /// app's localized name on the Mac, else the services' fallback.
     pub fn app_name(bundle_id: Option<&str>) -> String {
         #[cfg(target_os = "macos")]
         if let Some(name) = bundle_id.and_then(running_app_name) {
@@ -502,9 +410,8 @@ pub(crate) mod real {
         steno_services::detection::fallback_app_name(bundle_id)
     }
 
-    /// In a pool of its own: the caller is the detector's long-lived
-    /// events thread, which has none, so what `AppKit` autoreleases here
-    /// would otherwise stay until the thread ends.
+    /// In a pool of its own: the detector's events thread has none, so what
+    /// `AppKit` autoreleases would stay until the thread ends.
     #[cfg(target_os = "macos")]
     fn running_app_name(bundle_id: &str) -> Option<String> {
         use objc2_app_kit::NSRunningApplication;
@@ -519,15 +426,12 @@ pub(crate) mod real {
         })
     }
 
-    /// The window a command came from, for `Host::for_window`: the
-    /// Summaries form answers on the calling window's view model. A
-    /// panel's label, or any other, answers on main.
+    /// The window a command came from, for `Host::for_window`; a panel's
+    /// label, or any other, answers on main.
     fn bridge_window(label: &str) -> BridgeWindow {
         label.parse().unwrap_or(BridgeWindow::Main)
     }
 
-    /// The services graph and the host over it, with the chosen folder the
-    /// folder commands answer through.
     pub struct RealHost {
         pub host: Arc<Host>,
         pub app: Arc<steno_services::App>,
@@ -535,14 +439,12 @@ pub(crate) mod real {
     }
 
     impl RealHost {
-        /// For the window whose page is ready: the onboarding window's
-        /// starts its vault check.
+        /// The onboarding window's ready page starts its vault check.
         pub fn page_ready(&self, label: &str) -> Result<(), BridgeError> {
             use steno_bridge::BridgeHost as _;
             self.host.for_window(bridge_window(label)).page_ready()
         }
 
-        /// A command from the window of `label`.
         pub fn call(&self, label: &str, method: &str, params: Value) -> Result<Value, BridgeError> {
             let parsed: BridgeMethod = method.parse().map_err(|_| {
                 BridgeError::unknown_method(format!("The host does not answer {method}."))
@@ -606,8 +508,7 @@ pub(crate) mod real {
         type Task = Box<dyn FnOnce() + Send>;
 
         /// A main thread the test drives: a task posted from it runs at
-        /// once, one posted from elsewhere waits its turn; `deliver` notes
-        /// each topic and whether it ran on that thread.
+        /// once, one posted from elsewhere waits its turn.
         #[derive(Clone)]
         struct TestMain {
             id: std::thread::ThreadId,
@@ -630,8 +531,6 @@ pub(crate) mod real {
             }
         }
 
-        /// The main thread, running what is posted to it until every
-        /// handle is gone.
         fn test_main() -> (TestMain, std::thread::JoinHandle<()>) {
             let (tasks, posted) = std::sync::mpsc::channel::<Task>();
             let thread = std::thread::spawn(move || {
@@ -651,10 +550,8 @@ pub(crate) mod real {
             BridgeEvent::new(topic, Value::Null)
         }
 
-        /// Runs a test's `body` on a thread of its own and fails the test
-        /// when it has not ended within five seconds, so a drain that
-        /// deadlocks (or a main thread that never ends) fails rather than
-        /// hangs.
+        /// Runs `body` on a thread of its own and fails the test after five
+        /// seconds, so a deadlock fails rather than hangs.
         fn bounded(body: impl FnOnce() + Send + 'static) {
             let (done, finished) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
@@ -670,12 +567,8 @@ pub(crate) mod real {
             }
         }
 
-        /// The tray's Stop: the main thread waits for another thread (it
-        /// joins the level thread) while the `recording` feed's thread
-        /// emits. The emit returns without the main thread, and the
-        /// snapshot is delivered there once it is free; an emit that
-        /// delivered on its own thread would have waited for the main
-        /// thread inside the tray's setters.
+        /// The tray's Stop: an emit while the main thread is blocked returns
+        /// at once and is delivered once the main thread is free.
         #[test]
         fn a_snapshot_is_delivered_on_the_main_thread_and_the_emit_never_waits_for_it() {
             bounded(|| {
@@ -710,9 +603,8 @@ pub(crate) mod real {
             });
         }
 
-        /// A snapshot emitted on the main thread is delivered at once, but
-        /// never ahead of one emitted earlier from another thread whose
-        /// task has not run yet.
+        /// A snapshot emitted on the main thread never overtakes one emitted
+        /// earlier from another thread.
         #[test]
         fn snapshots_are_delivered_in_emit_order_from_any_thread() {
             use steno_bridge::BridgeTopic;
@@ -739,10 +631,8 @@ pub(crate) mod real {
             });
         }
 
-        /// A main thread that runs every task where it is posted, the
-        /// test's own, over two windows; delivering `App` to the first one
-        /// emits `Recording` there, as a delivery that led to a publish
-        /// would.
+        /// A main thread that runs every task where it is posted; delivering
+        /// `App` to the first window emits `Recording` there.
         #[derive(Clone, Default)]
         struct NestingMain {
             sink: Arc<std::sync::OnceLock<Arc<WindowSink<NestingMain>>>>,
@@ -767,9 +657,8 @@ pub(crate) mod real {
             }
         }
 
-        /// A snapshot emitted while one is being delivered reaches every
-        /// window after that one: the inner drain leaves it to the outer.
-        /// Once that drain ended, the next emit drains again.
+        /// A snapshot emitted during a delivery reaches every window after
+        /// that one; the next emit drains again.
         #[test]
         fn a_snapshot_emitted_during_a_delivery_reaches_every_window_after_it() {
             use steno_bridge::BridgeTopic;
@@ -820,8 +709,8 @@ pub enum ShellHostError {
 
 #[cfg(not(feature = "fixture-host"))]
 impl ShellHostError {
-    /// Whether another process holds the database (`steno_core::DatabaseLock`):
-    /// another Steno app, or a `steno` command.
+    /// Whether another process (Steno or a `steno` command) holds the
+    /// database.
     pub fn is_database_held(&self) -> bool {
         matches!(
             self,
@@ -832,8 +721,7 @@ impl ShellHostError {
     }
 
     /// The stored settings the app cannot read: the store's error, which
-    /// names the key and the problem and never a value, and the database
-    /// ([`steno_services::BuildError::unreadable_settings`]).
+    /// never names a value, and the database.
     pub fn unreadable_settings(&self) -> Option<(&steno_core::StoreError, &std::path::Path)> {
         match self {
             Self::Build(error) => error.unreadable_settings(),
@@ -842,14 +730,12 @@ impl ShellHostError {
     }
 }
 
-/// The window a [`Host`] call answers for, as the host uses it: the real
-/// host answers on its label's view model, the fixtures emit their
-/// snapshots to it. A [`WebviewWindow`], or a test's stand-in.
+/// The window a [`Host`] call answers for: a [`WebviewWindow`], or a test's
+/// stand-in.
 pub trait HostWindow {
     #[cfg(not(feature = "fixture-host"))]
     fn label(&self) -> &str;
 
-    /// Hands the window a snapshot (`bridge::emit`).
     #[cfg(feature = "fixture-host")]
     fn emit(&self, topic: &str, payload: Value) -> Result<(), BridgeError>;
 }
@@ -873,10 +759,9 @@ pub struct Host {
 }
 
 impl Host {
-    /// Builds the services graph on `runtime` and the host over it, with
-    /// the shell's opener, login item and dialogs, then attaches the window
-    /// sink. The launch sequence (recovery, sweep, handover) runs once the
-    /// main window exists, see [`Host::launch`].
+    /// Builds the services graph on `runtime` and the host over it, then
+    /// attaches the window sink. The launch sequence runs later, in
+    /// [`Host::launch`].
     #[cfg(not(feature = "fixture-host"))]
     pub fn real(
         app: &AppHandle,
@@ -894,16 +779,14 @@ impl Host {
             app: app.clone(),
         }));
         options.installed_bundle = crate::autostart::installed_bundle();
-        // The system's permissions (the services add the Mac's system
-        // audio probe) and, on the Mac, the calendar that names a
-        // recording (stable plan S3).
+        // The system's permissions and, on the Mac, the calendar that names
+        // a recording.
         options.permissions = Some(Arc::new(crate::permissions::ShellPermissions {
             app: app.clone(),
         }));
         options.calendar = Some(steno_services::calendar::system_calendar());
-        // A smoke run checks for no update, so it neither reaches the
-        // network nor raises the update alert over the windows it shows,
-        // and detects no meeting, so no prompt comes up over them either.
+        // A smoke run checks for no update and detects no meeting, so
+        // nothing reaches the network or covers its windows.
         if std::env::var_os(crate::smoke::SECONDS_VARIABLE).is_none() {
             options.update_source = Some(
                 app.state::<Arc<crate::updater::ShellUpdates>>()
@@ -915,11 +798,10 @@ impl Host {
                 Arc::new(app_name),
             ));
         }
-        // Pair again writes the Swift import's marker here first (macOS).
         options.import_marker =
             steno_services::swift_import::marker_on_this_mac(crate::smoke::SECONDS_VARIABLE);
-        // The Swift import's launch half (macOS), under the database's
-        // lock and before the graph reads a preference or a secret.
+        // The Swift import's launch half (macOS), under the database's lock
+        // and before the graph reads a preference or a secret.
         let graph = runtime.block_on(async {
             steno_services::build_with_import(options, |preferences| {
                 steno_services::swift_import::launch_on_this_mac(
@@ -948,14 +830,12 @@ impl Host {
         })
     }
 
-    /// The fixture answerer (`fixture-host`).
     #[cfg(feature = "fixture-host")]
     pub fn fixtures() -> Self {
         Host {}
     }
 
-    /// The update schedule, which records every check; `None` for the
-    /// fixtures and in a smoke run.
+    /// The update schedule; `None` for the fixtures and in a smoke run.
     pub fn updates(&self) -> Option<std::sync::Arc<steno_services::updates::UpdateSchedule>> {
         #[cfg(not(feature = "fixture-host"))]
         {
@@ -967,7 +847,6 @@ impl Host {
         }
     }
 
-    /// Whether onboarding should open at launch.
     pub fn should_open_onboarding(&self) -> bool {
         #[cfg(not(feature = "fixture-host"))]
         {
@@ -979,9 +858,8 @@ impl Host {
         }
     }
 
-    /// The X of prompt `raised` took it down: the detection controller hears
-    /// of it (`steno_services::detection::DetectionController::dismissed`);
-    /// a no-op for the fixtures and without detection.
+    /// The X of prompt `raised` took it down: the detection controller
+    /// hears of it.
     #[cfg_attr(feature = "fixture-host", allow(unused_variables))]
     pub fn prompt_dismissed(&self, raised: Option<u64>) {
         #[cfg(not(feature = "fixture-host"))]
@@ -990,10 +868,8 @@ impl Host {
         }
     }
 
-    /// The Record of prompt `raised`, the prompt taken down: the detection
-    /// controller starts a call recording for the app it named
-    /// (`DetectionController::record`). Blocks for the start; a no-op for
-    /// the fixtures and without detection.
+    /// The Record of prompt `raised`: the detection controller starts a call
+    /// recording for the app it named. Blocks for the start.
     #[cfg_attr(feature = "fixture-host", allow(unused_variables))]
     pub fn record_from_prompt(&self, raised: Option<u64>) {
         #[cfg(not(feature = "fixture-host"))]
@@ -1002,10 +878,8 @@ impl Host {
         }
     }
 
-    /// Every recording start is refused from now on, the status saying
-    /// why (`steno_host::services::Recorder::refuse_starts`): the menus'
-    /// Quit, on the main thread, before its exit waits for the actions
-    /// clicked before it. Only sets a flag; a no-op for the fixtures.
+    /// Every recording start is refused from now on: the menus' Quit, before
+    /// its exit waits for the actions clicked before it. Only sets a flag.
     pub fn refuse_starts(&self) {
         #[cfg(not(feature = "fixture-host"))]
         {
@@ -1014,19 +888,16 @@ impl Host {
         }
     }
 
-    /// The onboarding window is gone, closed by the user or by Finish:
-    /// the host counts the pages as seen, as the Swift window's
-    /// `onDisappear` did. It reads the store, so not on the main thread.
+    /// The onboarding window is gone: the host counts the pages as seen.
+    /// It reads the store, so not on the main thread.
     pub fn onboarding_window_closed(&self) {
         steno_host::assert_off_ui_thread("the onboarding window's close");
         #[cfg(not(feature = "fixture-host"))]
         self.inner.host.onboarding_window_closed();
     }
 
-    /// What every exit runs first (`steno_services::App::shutdown`): the
-    /// pipelines quit, a start or a stop settles, a recording in progress
-    /// is stopped and saved, the handover listener stops; a no-op for the
-    /// fixtures.
+    /// What every exit runs first: the pipelines quit, a recording in
+    /// progress is stopped and saved, the handover listener stops.
     pub fn shutdown_action(&self) -> impl FnOnce() + Send + 'static + use<> {
         #[cfg(not(feature = "fixture-host"))]
         {
@@ -1039,18 +910,16 @@ impl Host {
         }
     }
 
-    /// Quits the pipelines (`steno_services::pipeline::CurrentPipeline::quit`)
-    /// ahead of the shutdown, which quits them again: an exit signal calls
-    /// it before its request waits for the main thread. A no-op for the
-    /// fixtures. Rust only: Swift had no signal handler.
+    /// Quits the pipelines ahead of the shutdown: an exit signal calls it
+    /// before its request waits for the main thread.
     #[cfg(unix)]
     pub fn quit_pipeline(&self) {
         #[cfg(not(feature = "fixture-host"))]
         self.inner.app.pipeline.quit();
     }
 
-    /// The launch sequence on the runtime, the tray (built by now) told
-    /// the meeting rows from here on; a no-op for the fixtures.
+    /// The launch sequence on the runtime, the tray told the meeting rows
+    /// from here on.
     pub fn launch(&self, app: &AppHandle, runtime: &tokio::runtime::Runtime) {
         #[cfg(not(feature = "fixture-host"))]
         {
@@ -1085,7 +954,6 @@ impl Host {
         }
     }
 
-    /// A command that is not one of the shell's own.
     pub fn call(
         &self,
         window: &impl HostWindow,
@@ -1104,16 +972,9 @@ impl Host {
         }
     }
 
-    /// `window.open` names a meeting or a section for a window that is
-    /// already open: the request rides on the `app` snapshot
-    /// (`requestedMeetingID`, `requestedSettingsSection`), and the clean
-    /// snapshot goes out right after, as the publish that carried the
-    /// request consumes it. The real host also selects the meeting
-    /// (`Host::request_meeting`); the fixture host only publishes the
-    /// request, so a meeting link changes nothing on screen there.
-    ///
-    /// Swift: `didPublish` in `MainWindowBridge.swift` and
-    /// `SettingsBridge.swift`, `MainWindowBridge.consumeMeetingRequest`.
+    /// `window.open` names a meeting or a section for an open window: the
+    /// request rides on the `app` snapshot, and the clean snapshot goes out
+    /// right after. The fixture host only publishes the request.
     pub fn publish_request(
         &self,
         window: &impl HostWindow,
@@ -1136,13 +997,12 @@ impl Host {
     }
 }
 
-/// The host the shell manages, from any handle.
 pub fn host(app: &AppHandle) -> tauri::State<'_, Host> {
     app.state::<Host>()
 }
 
-/// Whether the host is managed: false before `setup` built it, and for good
-/// in an app that refused to start (`refuse_to_start` in `main.rs`).
+/// Whether the host is managed: false before `setup` built it, and in an
+/// app that refused to start.
 pub fn is_running(app: &AppHandle) -> bool {
     app.try_state::<Host>().is_some()
 }
@@ -1152,7 +1012,7 @@ mod refusal_tests {
     use super::ShellHostError;
 
     /// Only a database another process holds makes the shell refuse to
-    /// start; any other build failure stays an error.
+    /// start.
     #[test]
     fn only_a_held_database_refuses_the_start() {
         let held = ShellHostError::Build(steno_services::BuildError::Lock(
@@ -1178,8 +1038,7 @@ mod lane_tests {
 
     use super::Lane;
 
-    /// The lane runs its jobs in the order they were queued, and a job
-    /// that panics is logged and leaves the lane running the next one.
+    /// The lane runs jobs in order, and a panicking job leaves it running.
     #[test]
     fn the_lane_runs_its_jobs_in_order_and_past_a_panic() {
         let lane = Lane::start();
@@ -1201,8 +1060,7 @@ mod lane_tests {
 }
 
 /// Each of the shell's host entry points fails a debug build on the
-/// marked UI thread, before it reaches the host: a command, a page load, a
-/// window request and the onboarding window's close.
+/// marked UI thread.
 #[cfg(all(test, feature = "fixture-host", debug_assertions))]
 mod ui_thread_tests {
     use serde_json::Value;
@@ -1210,7 +1068,6 @@ mod ui_thread_tests {
     use super::{Host, HostWindow};
     use crate::bridge::BridgeError;
 
-    /// A window the fixtures' snapshots reach and go no further.
     struct StandInWindow;
 
     impl HostWindow for StandInWindow {
@@ -1219,8 +1076,8 @@ mod ui_thread_tests {
         }
     }
 
-    /// Runs `call` on a thread of its own, marked as the UI thread, and
-    /// requires it to fail with the assert's message for `what`.
+    /// Runs `call` on a thread marked as the UI thread and requires it to
+    /// fail with the assert's message for `what`.
     fn asserts_on_the_ui_thread(what: &'static str, call: impl FnOnce(&Host) + Send + 'static) {
         std::thread::spawn(move || {
             steno_host::mark_ui_thread();
@@ -1282,22 +1139,16 @@ pub mod gated {
     use super::{Job, Lane, ShellHost};
     use crate::bridge::BridgeError;
 
-    /// A host whose calls of `held` wait at a gate until it opens; every
-    /// other call answers at once, or after its delay (`delaying`). It
-    /// notes each answered call (a window request as
-    /// `request <field>=<value>`, the onboarding close as
-    /// `onboarding.closed`, a `recording.start` after `refuse_starts` as
-    /// `recording.start refused`), each switch of the login item, which it
-    /// then reads back, each check mark it was asked to move, and what a
-    /// Quit asked of the main thread. `before_hold` runs inside a held call
-    /// before it waits, as the host publishes `Stopping` before the stop's
-    /// save. It owns a [`Lane`] of its own.
+    /// A host whose calls of `held` wait at a gate until it opens; other
+    /// calls answer at once or after their delay. It notes each answered
+    /// call, login item switch, check mark and Quit step. `before_hold` runs
+    /// inside a held call before it waits.
     #[derive(Clone)]
     pub struct GatedHost {
         held: &'static str,
         before_hold: Option<Arc<dyn Fn() + Send + Sync>>,
         delayed: Option<(&'static str, Duration)>,
-        /// Every switch of the login item fails, leaving it as it was.
+        /// Every switch of the login item fails.
         switch_fails: bool,
         state: Arc<(Mutex<State>, Condvar)>,
         lane: Arc<Lane>,
@@ -1327,8 +1178,7 @@ pub mod gated {
         }
     }
 
-    /// Runs `call` on a thread of its own, as a menu event or a window's
-    /// close runs on the main thread, and returns whether it returned
+    /// Runs `call` on a thread of its own and returns whether it returned
     /// within a second.
     pub fn returns_at_once(call: impl FnOnce() + Send + 'static) -> bool {
         let (returned, done) = std::sync::mpsc::channel();
@@ -1356,15 +1206,13 @@ pub mod gated {
             self
         }
 
-        /// Every call of `method` takes `delay` before it answers, as a
-        /// start that opens the devices does.
+        /// Every call of `method` takes `delay` before it answers.
         pub fn delaying(mut self, method: &'static str, delay: Duration) -> Self {
             self.delayed = Some((method, delay));
             self
         }
 
-        /// Every switch of the login item fails, as one the system
-        /// refuses does.
+        /// Every switch of the login item fails.
         pub fn failing_switch(mut self) -> Self {
             self.switch_fails = true;
             self
@@ -1374,7 +1222,6 @@ pub mod gated {
             self.state.0.lock().unwrap()
         }
 
-        /// The guard that opens the gate at the end of the test.
         pub fn opens_on_drop(&self) -> Opens {
             Opens(self.clone())
         }
@@ -1384,7 +1231,6 @@ pub mod gated {
             self.state.1.notify_all();
         }
 
-        /// Waits up to `patience` for `reached`; whether it was.
         fn wait_for(&self, patience: Duration, reached: impl Fn(&State) -> bool) -> bool {
             let (state, _) = self
                 .state
@@ -1394,23 +1240,18 @@ pub mod gated {
             reached(&state)
         }
 
-        /// Whether a held call reached the gate within `patience`.
         pub fn wait_held(&self, patience: Duration) -> bool {
             self.wait_for(patience, |state| state.waiting > 0)
         }
 
-        /// Whether `method` answered within `patience`.
         pub fn wait_answered(&self, method: &str, patience: Duration) -> bool {
             self.wait_for(patience, |state| state.answered.iter().any(|m| m == method))
         }
 
-        /// Whether `count` calls answered within `patience`.
         pub fn wait_answers(&self, count: usize, patience: Duration) -> bool {
             self.wait_for(patience, |state| state.answered.len() >= count)
         }
 
-        /// Whether the check mark was asked to move `times` times within
-        /// `patience`.
         pub fn wait_noted(&self, times: usize, patience: Duration) -> bool {
             self.wait_for(patience, |state| state.checked.len() == times)
         }

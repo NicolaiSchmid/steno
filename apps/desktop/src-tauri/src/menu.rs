@@ -1,17 +1,8 @@
-//! The menu bar's menu on macOS. Tauri's default menu ends in a predefined
-//! Quit that calls `terminate:` outright, with no `ExitRequested` for the
-//! shell to see, so the shell builds its own: the application menu (About,
-//! Settings…, Check for Updates…, Services, Hide, Hide Others, Show All,
-//! and Quit Steno as the tray's item, which quits through
-//! `actions::quit` and the run loop), the Edit menu whose predefined items
-//! give the webviews their undo, cut, copy, paste and select-all
-//! shortcuts, with Find Meetings (⌘F), the Record menu (Record, ⌘⇧R, and
-//! Record in person, retitled with the tray's rows, `RecordMenu`) and the
-//! Window menu. The items share the tray's ids, so the one handler
-//! `main.rs` registers (`actions::on_menu_event`) serves both menus.
-//! Linux and Windows show no menu bar; the tray carries the actions there.
-//!
-//! Swift: `AppCommands` in `StenoApp.swift`.
+//! The menu bar's menu on macOS. Tauri's default Quit skips
+//! `ExitRequested`, so the shell builds its own application, Edit, Record
+//! and Window menus. The items share the tray's ids, so
+//! `actions::on_menu_event` serves both menus. Linux and Windows show no
+//! menu bar.
 
 use tauri::{
     AppHandle, Manager, Wry,
@@ -20,14 +11,12 @@ use tauri::{
 
 use crate::actions::MenuAction;
 
-/// The Record menu's two items, which the tray retitles with its own
-/// Record rows (`tray::build`).
+/// The Record menu's two items, which the tray retitles with its own rows.
 pub struct RecordMenu {
     pub record: MenuItem<Wry>,
     pub in_person: MenuItem<Wry>,
 }
 
-/// The whole menu bar; `Builder::menu` installs it.
 pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let info = app.package_info();
     let about = AboutMetadata {

@@ -1,34 +1,9 @@
 //! The floating panels: the recording bubble and the detection prompt as
-//! two small webviews at the web app's `#/panel/bubble` and
-//! `#/panel/prompt` routes, undecorated, transparent, always on top, on
-//! every space, never focused. On macOS they become non-activating
-//! `NSPanel`s through `tauri-nspanel`, as the Swift `FloatingPanel` is; on
-//! Linux and Windows they are always-on-top windows.
-//!
-//! One rule decides what shows (`FloatingContent::resolve`): a busy
-//! recorder wins, else a prompt if one is pending, else nothing. The shell
-//! reads the recorder off the `recording` snapshots passing through
-//! `bridge::emit`; the host's detection controller raises and clears the
-//! prompt (`set_prompt`, through `host::ShellPromptPanel`), and hears of
-//! the prompt's X and Record (`dismiss_prompt`, `record_from_prompt`).
-//!
-//! Each panel's window is created once and then hidden and shown; the
-//! prompt's is navigated to the new request each time one is raised, so
-//! the page remounts and its countdown starts afresh.
-//!
-//! Both panels hang from one anchor, the top-centre point of the frame, so
-//! the prompt turns into the bubble without moving; the user drags a panel
-//! by its background (`data-tauri-drag-region` in the page), the anchor
-//! follows and is saved (`panel_anchor`). A saved anchor on a screen that
-//! is gone falls back to the default: top centre of the main screen, 8 pt
-//! under its top edge. The page measures itself and reports its size in
-//! device pixels through `panel_call("resize")`
-//! (`bridge::ResizeParams::logical` turns it into points); the shell sizes
-//! the window from that, as the Swift root reported through
-//! `contentSizeDidChange`. The geometry is `panel_geometry.rs`.
-//!
-//! Swift: `FloatingPanel.swift`, `FloatingPanelModel.swift`,
-//! `FloatingContent.swift`.
+//! two small undecorated, always-on-top, never-focused webviews at the
+//! `#/panel/bubble` and `#/panel/prompt` routes (non-activating `NSPanel`s
+//! on macOS). A busy recorder wins, else a pending prompt, else nothing.
+//! Both hang from one draggable, saved anchor; the geometry is
+//! `panel_geometry.rs`.
 
 use std::{
     collections::HashMap,
@@ -75,11 +50,8 @@ impl Panel {
     }
 
     /// The window's title. On Linux "Steno bubble" and "Steno prompt", so
-    /// a window manager's rules can match the panels and not the main
-    /// window ("Steno"); `linux/hyprland-steno.lua` does under Hyprland.
-    /// macOS and Windows keep "Steno".
-    ///
-    /// Swift: none; `FloatingPanel` sets no title.
+    /// window manager rules (`linux/hyprland-steno.lua`) can match the
+    /// panels and not the main window; elsewhere "Steno".
     pub const fn title(self) -> &'static str {
         if cfg!(target_os = "linux") {
             match self {
@@ -91,7 +63,6 @@ impl Panel {
         }
     }
 
-    /// The hash route without its `#`.
     pub const fn route(self) -> &'static str {
         match self {
             Self::Bubble => "/panel/bubble",
@@ -100,16 +71,13 @@ impl Panel {
     }
 
     /// Whether a new request reaches an existing window by navigating it:
-    /// the prompt carries its request in the route; the bubble reads the
-    /// recorder off the bridge and is only shown.
+    /// the prompt carries its request in the route.
     pub const fn navigates_per_request(self) -> bool {
         matches!(self, Self::Prompt)
     }
 
-    /// The size before the page has measured: the Swift maximum width
-    /// (`PanelMetrics.bubbleMaxWidth`, `promptMaxWidth`), so the pill lays
-    /// out at its intrinsic width and the window then shrinks to what the
-    /// page reports; the heights are the one-row bubble's and the prompt's.
+    /// The size before the page has measured: the maximum width, so the
+    /// pill lays out at its intrinsic width and the window then shrinks.
     pub const fn initial_size(self) -> (f64, f64) {
         match self {
             Self::Bubble => (480.0, 40.0),
@@ -117,19 +85,16 @@ impl Panel {
         }
     }
 
-    /// The document fragment: `/panel/<label>[?<query>]`.
     pub fn fragment(self, query: Option<&str>) -> String {
         windows::with_query(self.route(), query)
     }
 
-    /// `index.html#/panel/<label>?<query>`, for a new window.
     pub fn start_path(self, query: Option<&str>) -> String {
         format!("index.html#{}", self.fragment(query))
     }
 
-    /// The URL an existing window loads for a new request: the document it
-    /// already shows with the new fragment, so the origin (the app's or the
-    /// dev server's) is whatever the window has.
+    /// The URL an existing window loads for a new request: its document
+    /// with the new fragment, keeping whatever origin the window has.
     pub fn route_url(self, current: &Url, query: Option<&str>) -> Url {
         let mut url = current.clone();
         url.set_fragment(Some(&self.fragment(query)));
@@ -146,10 +111,9 @@ pub struct PromptRequest {
 }
 
 impl PromptRequest {
-    /// The prompt's query: `app=<name>&seconds=<n>`, form-encoded, plus
-    /// `raised=<n>` when the shell numbers the request: a new number
-    /// is a new document for the page, so an identical request raised
-    /// again still remounts the prompt and restarts its countdown.
+    /// The prompt's query, form-encoded, plus `raised=<n>` when numbered: a
+    /// new number remounts the page, so an identical request raised again
+    /// restarts its countdown.
     pub fn query(&self, raised: Option<u64>) -> String {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         query
@@ -163,10 +127,8 @@ impl PromptRequest {
 }
 
 /// A prompt the host raised, with the detection controller's number for
-/// it (`DetectionPrompt::number`): the `raised` in its query and in its X
-/// and Record. Each prompt raised is a new number, so a request raised
-/// again, even an identical one, is a new prompt; one shown again after
-/// the bubble keeps its number.
+/// it, which its query, X and Record carry. One shown again after the
+/// bubble keeps its number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RaisedPrompt {
     pub request: PromptRequest,
@@ -174,21 +136,18 @@ pub struct RaisedPrompt {
 }
 
 impl RaisedPrompt {
-    /// The prompt's query, numbered.
     pub fn query(&self) -> String {
         self.request.query(Some(self.raised))
     }
 }
 
-/// The prompt slot: the one pending, and the number of the latest one
-/// raised.
+/// The prompt slot: the one pending, and the latest number raised.
 #[derive(Debug, Default)]
 struct PromptSlot {
     pending: Option<RaisedPrompt>,
     last_raised: u64,
 }
 
-/// What the one floating surface shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FloatingContent {
     Prompt(RaisedPrompt),
@@ -212,11 +171,9 @@ impl FloatingContent {
     }
 }
 
-/// Where the shell last put a panel: the point it hangs from, the origin
-/// of the frame it was given, and the origins of the frames it gave
-/// before that the window has not reported yet (resizes still queued in
-/// the window system), so `Panels::dragged` tells the window reporting
-/// the shell's own moves from the user dragging it.
+/// Where the shell last put a panel: the point it hangs from, its frame's
+/// origin, and earlier origins the window has not reported yet, so
+/// `Panels::dragged` tells the shell's own moves from a drag.
 #[derive(Debug, Clone, PartialEq)]
 struct Placement {
     top_center: (f64, f64),
@@ -224,13 +181,11 @@ struct Placement {
     queued: Vec<(f64, f64)>,
 }
 
-/// How many queued origins a placement keeps; a window that falls further
-/// behind than this has dropped reports, not queued them.
+/// How many queued origins a placement keeps; a window further behind has
+/// dropped reports, not queued them.
 const QUEUED_ORIGINS: usize = 64;
 
 impl Placement {
-    /// `frame` hanging from `top_center`, nothing queued: the first
-    /// placement, or a drag.
     const fn new(top_center: (f64, f64), frame: Rect) -> Self {
         Self {
             top_center,
@@ -239,8 +194,6 @@ impl Placement {
         }
     }
 
-    /// `frame` hanging from `top_center` after `earlier`, whose origin is
-    /// queued until the window reports it.
     fn after(earlier: Option<Self>, top_center: (f64, f64), frame: Rect) -> Self {
         let mut next = Self::new(top_center, frame);
         if let Some(earlier) = earlier {
@@ -255,10 +208,9 @@ impl Placement {
     }
 
     /// Whether the window reporting `origin` is the shell's own move: the
-    /// latest frame's origin or a queued one. The queue empties only when
-    /// the window reports the latest frame: until then it may report the
-    /// earlier ones in any order (GTK applies a move and a resize on its
-    /// own schedule), and more than once.
+    /// latest frame's origin or a queued one. The queue empties only when the
+    /// latest frame is reported, since GTK may report earlier ones in any
+    /// order and more than once.
     fn reports_own(&mut self, origin: (f64, f64)) -> bool {
         if same_point(self.origin, origin) {
             self.queued.clear();
@@ -268,7 +220,6 @@ impl Placement {
     }
 }
 
-/// The saved anchor, read from disk on first use.
 #[derive(Debug, Default)]
 struct AnchorState {
     loaded: bool,
@@ -303,7 +254,6 @@ impl Default for Panels {
 }
 
 impl Panels {
-    /// The size the page last reported, if it has.
     fn measured(&self, panel: Panel) -> Option<(f64, f64)> {
         self.sizes
             .lock()
@@ -311,13 +261,11 @@ impl Panels {
             .and_then(|sizes| sizes.get(&panel).copied())
     }
 
-    /// The measured size, else the one to lay out with before measuring.
     fn size_of(&self, panel: Panel) -> (f64, f64) {
         self.measured(panel).unwrap_or(panel.initial_size())
     }
 
-    /// Records the size a page reported; `false` when the panel already
-    /// has it.
+    /// Records the size a page reported; `false` when it already has it.
     fn note_size(&self, panel: Panel, size: (f64, f64)) -> bool {
         self.sizes.lock().is_ok_and(|mut sizes| {
             if sizes.get(&panel).is_some_and(|last| same_size(*last, size)) {
@@ -354,8 +302,6 @@ impl Panels {
         })
     }
 
-    /// The host raised (`Some`) or cleared (`None`) the prompt; a raised
-    /// one's number becomes the latest.
     fn set_prompt(&self, raised: Option<RaisedPrompt>) {
         if let Ok(mut prompt) = self.prompt.lock() {
             if let Some(raised) = &raised {
@@ -365,13 +311,10 @@ impl Panels {
         }
     }
 
-    /// The prompt's X or Record: one that names a prompt (`raised`)
-    /// clears only the latest one raised, so a click that ran while the
-    /// window loaded the next prompt cannot clear it; one that names none
-    /// (a prompt shown unnumbered) clears whatever is pending. Checked and
-    /// cleared under one lock, so a prompt raised in between is never the
-    /// one cleared; `true` when it cleared. Swift: each
-    /// `DetectionPromptViewModel` closes only itself (`onClose`).
+    /// The prompt's X or Record: one that names a prompt clears only the
+    /// latest one raised, so a click during the next prompt's load cannot
+    /// clear it; one that names none clears whatever is pending. `true`
+    /// when it cleared.
     fn dismiss_prompt(&self, raised: Option<u64>) -> bool {
         self.prompt.lock().is_ok_and(|mut prompt| {
             let dismisses = raised.is_none_or(|raised| raised == prompt.last_raised);
@@ -382,9 +325,8 @@ impl Panels {
         })
     }
 
-    /// The anchor to lay out from: the saved one (`load` reads it on first
-    /// use) while a panel of `size` hanging from it fits one of `screens`,
-    /// else the default.
+    /// The anchor to lay out from: the saved one while a panel of `size`
+    /// hanging from it fits a screen, else the default.
     fn anchor_for(
         &self,
         size: (f64, f64),
@@ -405,9 +347,7 @@ impl Panels {
     }
 
     /// The frame `panel` takes at `size` hanging from `top_center`, moved
-    /// inside the screen that holds the point where it would overhang
-    /// (a saved anchor near an edge, a report as large as the screen), and
-    /// recorded as the panel's placement.
+    /// inside the screen, and recorded as the panel's placement.
     fn place(
         &self,
         panel: Panel,
@@ -424,7 +364,6 @@ impl Panels {
         frame
     }
 
-    /// The point `panel` hangs from, once the shell has placed it.
     fn hung_from(&self, panel: Panel) -> Option<(f64, f64)> {
         self.placed
             .lock()
@@ -432,15 +371,11 @@ impl Panels {
             .and_then(|placed| placed.get(&panel).map(|placement| placement.top_center))
     }
 
-    /// The window of `panel` reports it is at `frame`. A frame at the
-    /// origin the shell gave it, or at one it gave before that the window
-    /// reports late (quick resizes), is the shell's own move, and one with
-    /// another size than the page's is the window still taking that size;
-    /// neither moves the anchor (else each prompt, bubble and launch would
-    /// shift it by the rounding of a half point, and a burst of resizes by
-    /// more). Anything else is a drag: the panel hangs from the new point
-    /// and the anchor follows, returned when it changed so the caller
-    /// saves it.
+    /// The window of `panel` reports it is at `frame`. The shell's own move
+    /// (a given or queued origin) or a frame at another size than the page's
+    /// leaves the anchor, which would otherwise creep by rounding. Anything
+    /// else is a drag: the anchor follows, returned when it changed so the
+    /// caller saves it.
     fn dragged(&self, panel: Panel, frame: Rect, screens: &[Rect]) -> Option<PanelAnchor> {
         if !same_size((frame.width, frame.height), self.size_of(panel)) {
             return None;
@@ -464,8 +399,6 @@ impl Panels {
     }
 }
 
-/// The anchor's file in the support directory (`panel_anchor`), one per
-/// process.
 fn anchor_file(app: &AppHandle) -> &'static AnchorFile {
     static FILE: OnceLock<AnchorFile> = OnceLock::new();
     FILE.get_or_init(|| {
@@ -513,12 +446,11 @@ fn save_anchor(app: &AppHandle, anchor: PanelAnchor) {
     anchor_file(app).save_in_background(anchor);
 }
 
-/// The exit's wait for the anchor a drag queued (`AnchorFile::flush`).
+/// The exit's wait for the anchor a drag queued.
 pub fn flush_anchor(app: &AppHandle) {
     anchor_file(app).flush();
 }
 
-/// The window's inner size in logical points.
 pub fn logical_size(window: &WebviewWindow) -> tauri::Result<(f64, f64)> {
     let scale = window.scale_factor()?;
     let size = window.inner_size()?;
@@ -529,8 +461,7 @@ pub fn logical_size(window: &WebviewWindow) -> tauri::Result<(f64, f64)> {
 }
 
 /// The window's frame in logical points with its top-left corner at
-/// `position`, in pixels: where the window is (`outer_position`) or where
-/// a `Moved` event says it went.
+/// `position`, in pixels.
 fn logical_frame(window: &WebviewWindow, position: PhysicalPosition<i32>) -> tauri::Result<Rect> {
     let scale = window.scale_factor()?;
     let (width, height) = logical_size(window)?;
@@ -542,16 +473,13 @@ fn logical_frame(window: &WebviewWindow, position: PhysicalPosition<i32>) -> tau
     ))
 }
 
-/// The window's top-centre point in logical points.
 fn top_center_of(window: &WebviewWindow) -> tauri::Result<(f64, f64)> {
     Ok(logical_frame(window, window.outer_position()?)?.top_center())
 }
 
 /// Shows `panel` at the anchor, creating its window when needed. The
-/// anchor is validated with the size the page reported, or with
-/// `PROBE_SIZE` before it has, never with the pre-measure maximum. The
-/// screens are read before any lock is taken (off the main thread the
-/// query waits on it).
+/// anchor is validated with the measured size, or `PROBE_SIZE` before, never
+/// with the pre-measure maximum. Screens are read before any lock is taken.
 pub fn show(app: &AppHandle, panel: Panel, query: Option<&str>) -> tauri::Result<WebviewWindow> {
     let screens = screens(app);
     let panels = app.state::<Panels>();
@@ -562,8 +490,7 @@ pub fn show(app: &AppHandle, panel: Panel, query: Option<&str>) -> tauri::Result
     show_window(app, panel, query, frame)
 }
 
-/// `show` with the frame's top-left corner at `position` (the smoke run
-/// lays the panels out beside the windows).
+/// `show` with the frame's top-left corner at `position` (the smoke run).
 pub fn show_at(
     app: &AppHandle,
     panel: Panel,
@@ -579,14 +506,11 @@ pub fn show_at(
 }
 
 /// Whether a panel's window is resizable: on Linux only, where GTK holds
-/// a fixed window at its content's natural size (`show_window`). Elsewhere
-/// the user cannot resize a panel at all; the smoke checks each platform's
-/// way of keeping the page's size against this.
+/// a fixed window at its content's natural size.
 pub const RESIZABLE: bool = cfg!(target_os = "linux");
 
-/// Shows `panel` at `frame`. An existing window is reused: the prompt's
-/// is navigated to the new request first, unless it already shows it (the
-/// same prompt again after the bubble keeps its page and countdown).
+/// Shows `panel` at `frame`, reusing an existing window; the prompt's is
+/// navigated to the new request unless it already shows it.
 fn show_window(
     app: &AppHandle,
     panel: Panel,
@@ -620,15 +544,10 @@ fn show_window(
     .always_on_top(true)
     .visible_on_all_workspaces(true)
     .skip_taskbar(true)
-    // GTK holds a window it calls non-resizable at least at its content's
-    // natural size (480 by 200 for a webview), so on Linux the panel must
-    // be resizable to take the size its page reports. Tauri then gives an
-    // undecorated window a 5 px resize border; the size is pinned (minimum
-    // and maximum the frame's size here, the page's once it reports,
-    // `pin_size`), so the panel keeps its size. The border still shows a
-    // resize cursor and swallows a press, so a drag that starts on the
-    // outer 5 px does not move the panel; no control sits there. macOS and
-    // Windows honour `set_size` on a fixed window and have no such border.
+    // GTK holds a non-resizable window at least at its content's natural
+    // size, so on Linux the panel is resizable and its size pinned
+    // (`pin_size`). Tauri's 5 px resize border then swallows a press, so no
+    // control sits there.
     .resizable(RESIZABLE)
     .min_inner_size(frame.width, frame.height)
     .max_inner_size(frame.width, frame.height)
@@ -658,7 +577,7 @@ pub fn hide(app: &AppHandle, panel: Panel) -> tauri::Result<()> {
 }
 
 /// Shows what `content` says and hides the other panel; nothing when it
-/// is what already shows. Runs on the main thread (`refresh`).
+/// already shows. Runs on the main thread.
 fn apply(app: &AppHandle, content: Option<&FloatingContent>) {
     let panels = app.state::<Panels>();
     if !panels.note_showing(content) {
@@ -690,10 +609,8 @@ fn apply(app: &AppHandle, content: Option<&FloatingContent>) {
     }
 }
 
-/// Re-applies the one rule, on the main thread: every `apply` runs there
-/// one after another, so two threads can never interleave a show and a
-/// hide, and the window calls inside it (monitors, URLs, a new window)
-/// run at once instead of waiting on the main thread from a worker.
+/// Re-applies the one rule on the main thread, so a show and a hide never
+/// interleave and the window calls run at once.
 fn refresh(app: &AppHandle) {
     let handle = app.clone();
     let queued = app.run_on_main_thread(move || {
@@ -705,7 +622,6 @@ fn refresh(app: &AppHandle) {
     }
 }
 
-/// A `recording` snapshot reached the main window.
 pub fn note_recording(app: &AppHandle, state: RecordingState) {
     if let Ok(mut recording) = app.state::<Panels>().recording.lock() {
         if *recording == state {
@@ -716,28 +632,23 @@ pub fn note_recording(app: &AppHandle, state: RecordingState) {
     refresh(app);
 }
 
-/// [`refresh`] posted from the async runtime, to run on a later turn of
-/// the main loop: on the main thread `refresh` would run `apply` in place,
-/// and `apply` may build a window, which deadlocks a synchronous command
-/// on Windows.
+/// [`refresh`] posted to a later turn of the main loop: in place, `apply`
+/// may build a window, which deadlocks a synchronous command on Windows.
 fn post_refresh(app: &AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move { refresh(&handle) });
 }
 
-/// The host's detection controller raised (`Some`) or cleared (`None`)
-/// the detection prompt, a raised one with the controller's number. The
-/// slot changes at once, in the controller's order; the refresh is
-/// posted, so a caller on the main thread (a Record from the tray, whose
-/// start takes the prompt down) never builds a window in place.
+/// The host raised (`Some`) or cleared (`None`) the prompt. The slot changes
+/// at once; the refresh is posted, so a caller on the main thread never
+/// builds a window in place.
 #[cfg_attr(feature = "fixture-host", allow(dead_code))]
 pub fn set_prompt(app: &AppHandle, raised: Option<RaisedPrompt>) {
     app.state::<Panels>().set_prompt(raised);
     post_refresh(app);
 }
 
-/// The prompt's X or Record (`raised`, its number) reaches `answer`
-/// exactly when it takes the prompt down (`Panels::dismiss_prompt`): a
+/// Runs `answer` exactly when the X or Record takes the prompt down; a
 /// click aimed at an earlier prompt answers nothing. `true` when it
 /// answered.
 fn answer_prompt(panels: &Panels, raised: Option<u64>, answer: impl FnOnce()) -> bool {
@@ -748,11 +659,9 @@ fn answer_prompt(panels: &Panels, raised: Option<u64>, answer: impl FnOnce()) ->
     answers
 }
 
-/// The prompt's X: the prompt goes away, unless the X was another
-/// prompt's, and the host's detection controller hears of it with the
-/// prompt's number; the fixture host has no detection to tell. The
-/// caller is `bridge::panel_call`, a synchronous command on the main
-/// thread, so the refresh is posted.
+/// The prompt's X: the prompt goes and the detection controller hears of
+/// it. The caller is a synchronous command on the main thread, so the
+/// refresh is posted.
 pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
     if answer_prompt(&app.state::<Panels>(), raised, || {
         if crate::host::is_running(app) {
@@ -763,11 +672,9 @@ pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
     }
 }
 
-/// The prompt's Record: the prompt goes away as for its X, and the host's
-/// detection controller starts a call recording for the app it named, on
-/// a blocking thread, since a start opens the audio devices and the
-/// caller is the synchronous `bridge::panel_call`. A click aimed at an
-/// earlier prompt does nothing. Swift: `DetectionPromptViewModel.start`.
+/// The prompt's Record: as the X, and the detection controller starts a
+/// call recording for the named app on a blocking thread, since a start
+/// opens the audio devices.
 pub fn record_from_prompt(app: &AppHandle, raised: Option<u64>) {
     if answer_prompt(&app.state::<Panels>(), raised, || {
         if crate::host::is_running(app) {
@@ -782,16 +689,10 @@ pub fn record_from_prompt(app: &AppHandle, raised: Option<u64>) {
 }
 
 /// The page measured its content: the window takes that size around the
-/// top-centre point it hangs from (the anchor in the normal flow, wherever
-/// the smoke put it otherwise), so a change of content never moves the
-/// panel, short of moving it back inside the screen. A report that is not
-/// a size is `invalidParams`; one larger than the screen is clamped to its
-/// work area; a failed window call is `failed`.
-///
-/// Runs on the main thread, as `apply` does: `bridge::panel_call` is a
-/// synchronous command, so reports apply in the order the page sent them
-/// and the size recorded (`note_size`) is always the one the window took
-/// last.
+/// point it hangs from, so a change of content never moves the panel. A
+/// report that is not a size is `invalidParams`; one larger than the screen
+/// is clamped; a failed window call is `failed`. Runs on the main thread,
+/// so reports apply in the order sent.
 pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(), BridgeError> {
     if !is_size(reported) {
         return Err(not_a_size(reported));
@@ -799,9 +700,8 @@ pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(),
     take_size(app, panel, reported).map_err(failed)
 }
 
-/// `resize` for a report that is a size, on the main thread, where the
-/// screens and the window's getters answer at once; no lock is held
-/// across a window call.
+/// `resize` for a report that is a size; no lock is held across a window
+/// call.
 fn take_size(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> tauri::Result<()> {
     let screens = screens(app);
     let fallback = fallback_screen(&screens);
@@ -812,7 +712,6 @@ fn take_size(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> tauri::Resu
         None => window.as_ref().map(top_center_of).transpose()?,
     };
     let screen = top_center.map_or(fallback, |point| Rect::holding(&screens, point, fallback));
-    // `resize` refused anything that is not a size, so this clamps only.
     let Some(size) = accepted_size(reported, (screen.width, screen.height)) else {
         return Ok(());
     };
@@ -828,7 +727,7 @@ fn take_size(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> tauri::Resu
 }
 
 /// `invalidParams` for a report that is not a size, its numbers in their
-/// shortest form (`1e-300`, not three hundred digits).
+/// shortest form.
 fn not_a_size(reported: (f64, f64)) -> BridgeError {
     BridgeError::invalid_params(format!(
         "resize: {:?} by {:?} is not a size",
@@ -836,12 +735,9 @@ fn not_a_size(reported: (f64, f64)) -> BridgeError {
     ))
 }
 
-/// Gives a panel's window `size` and holds it there: the minimum and the
-/// maximum become the size (one request, so they never cross), then the
-/// size itself. On Linux, where the window is resizable, the pin is what
-/// keeps a drag on its border from resizing it. On macOS the minimum and
-/// maximum bound only the user's resizing, which a panel's style mask
-/// rules out anyway; a size set from code goes through whatever they say.
+/// Gives a panel's window `size` and holds it there: minimum and maximum
+/// in one request, so they never cross, then the size. On Linux the pin
+/// keeps a drag on the resize border from resizing it.
 fn pin_size(window: &WebviewWindow, size: (f64, f64)) -> tauri::Result<()> {
     let width = Some(PixelUnit::Logical(size.0.into()));
     let height = Some(PixelUnit::Logical(size.1.into()));
@@ -854,9 +750,8 @@ fn pin_size(window: &WebviewWindow, size: (f64, f64)) -> tauri::Result<()> {
     window.set_size(LogicalSize::new(size.0, size.1))
 }
 
-/// The window moved: a drag moves the anchor and saves it
-/// (`Panels::dragged` tells a drag from the shell's own moves). Runs on
-/// the main thread, the window event's.
+/// The window moved: a drag moves the anchor and saves it. Runs on the
+/// main thread.
 pub fn moved(app: &AppHandle, panel: Panel, position: PhysicalPosition<i32>) {
     let Some(window) = app.get_webview_window(panel.label()) else {
         return;
@@ -872,10 +767,9 @@ pub fn moved(app: &AppHandle, panel: Panel, position: PhysicalPosition<i32>) {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    //! The Swift `FloatingPanel`: a borderless non-activating `NSPanel` at
-    //! the floating level that joins every space, shows beside full-screen
-    //! apps, never becomes key or main, keeps showing when the app
-    //! deactivates, and moves by its background.
+    //! A borderless non-activating `NSPanel` at the floating level that
+    //! joins every space, never becomes key or main, and moves by its
+    //! background.
 
     use tauri::WebviewWindow;
     use tauri_nspanel::{
@@ -917,11 +811,8 @@ mod macos {
         Ok(())
     }
 
-    /// Borderless and non-activating: a click on the panel leaves the
-    /// meeting app frontmost. `borderless()` is the empty mask and clears
-    /// what came before it, so it goes first.
-    ///
-    /// Swift: the `styleMask` in `FloatingPanel.init`.
+    /// Borderless and non-activating: a click leaves the meeting app
+    /// frontmost. `borderless()` is the empty mask, so it goes first.
     fn style_mask() -> NSWindowStyleMask {
         StyleMask::empty()
             .borderless()
@@ -944,13 +835,10 @@ mod macos {
 mod tests {
     use super::*;
 
-    /// The anchor's file is the support directory's (`Steno/`, beside the
-    /// database), and the earlier build's anchor is read from the config
-    /// directory the earlier identifier's folder sits in
-    /// (`panel_anchor::AnchorFile::new`), not from this identifier's.
+    /// The anchor's file is the support directory's, and the earlier
+    /// build's anchor is read from the config directory.
     #[test]
     fn the_anchor_lives_in_the_support_directory() {
-        // Without the carriage returns a Windows checkout may add.
         let source = include_str!("panels.rs").replace("\r\n", "\n");
         assert!(source.contains(
             "        AnchorFile::new(\n            &steno_core::StenoPaths::default_support_directory(),\n            app.path().config_dir().ok().as_deref(),\n        )\n"
@@ -964,7 +852,6 @@ mod tests {
         }
     }
 
-    /// The controller's prompt `number` for `app_name`.
     fn raised(app_name: &str, number: u64) -> RaisedPrompt {
         RaisedPrompt {
             request: request(app_name),
@@ -972,11 +859,8 @@ mod tests {
         }
     }
 
-    /// On Linux each panel has a title of its own, the one the Hyprland
-    /// rules match; elsewhere both are "Steno", as the main window is. The
-    /// rule itself is pinned whole, outside the file's comments: its
-    /// class, its titles and every effect, with no long comment (`--[[`)
-    /// around it.
+    /// On Linux each panel has the title the Hyprland rules match;
+    /// elsewhere both are "Steno". The rule itself is pinned whole.
     #[test]
     fn the_panels_carry_the_titles_the_hyprland_rules_match() {
         let rules = include_str!("../linux/hyprland-steno.lua");
@@ -1045,10 +929,8 @@ mod tests {
         );
     }
 
-    /// The second prompt reuses the window: the prompt's window is
-    /// navigated, on whichever origin it already has, and each raised
-    /// request gets a new number so the page remounts even for the same
-    /// app; the bubble's window is only shown.
+    /// The second prompt navigates the prompt's window on its origin with a
+    /// new number; the bubble's window is only shown.
     #[test]
     fn a_second_prompt_reuses_the_window_by_navigating_it() {
         assert!(Panel::Prompt.navigates_per_request());
@@ -1079,7 +961,6 @@ mod tests {
         }
     }
 
-    /// The pending prompt's query.
     fn pending_query(panels: &Panels) -> String {
         match panels.content() {
             Some(FloatingContent::Prompt(prompt)) => prompt.query(),
@@ -1139,8 +1020,7 @@ mod tests {
     const PROMPT: (f64, f64) = (463.0, 56.0);
     const BUBBLE: (f64, f64) = (79.0, 42.0);
 
-    /// The window system reporting where a panel now is, at the size it
-    /// has.
+    /// The window system reporting where a panel now is.
     fn at(frame: Rect, size: (f64, f64)) -> Rect {
         Rect::new(frame.x, frame.y, size.0, size.1)
     }
@@ -1154,9 +1034,8 @@ mod tests {
         assert_eq!(panels.dragged(panel, at(frame, size), &[SCREEN]), None);
     }
 
-    /// The prompt (odd width) and the bubble (odd width) hang from a whole
-    /// point; each switch and each launch used to read the shell's own move
-    /// back as a drag and creep the anchor a point to the right.
+    /// Panels of odd width hang from a whole point: the shell's own move is
+    /// not read back as a drag.
     #[test]
     fn the_anchor_stays_put_through_prompts_bubbles_and_launches() {
         let saved = PanelAnchor::default_in(SCREEN);
@@ -1172,8 +1051,7 @@ mod tests {
         }
     }
 
-    /// A drag is a move away from where the shell put the panel: the anchor
-    /// and the point the panel hangs from follow it, once.
+    /// A drag moves the anchor and the hanging point, once.
     #[test]
     fn a_drag_moves_the_anchor_and_the_panel_hangs_from_it() {
         let panels = Panels::default();
@@ -1187,17 +1065,14 @@ mod tests {
         assert_eq!(panels.hung_from(Panel::Bubble), Some((539.5, 300.0)));
         // The same position reported again is not a second drag.
         assert_eq!(panels.dragged(Panel::Bubble, dragged, &[SCREEN]), None);
-        // The prompt now hangs from the dragged point.
         let prompt = panels.anchor_for(PROMPT, &[SCREEN], || None);
         assert_eq!(prompt, anchor);
         let frame = panels.place(Panel::Prompt, prompt.top_center, PROMPT, &[SCREEN]);
         assert_eq!((frame.x, frame.y), (308.0, 300.0));
     }
 
-    /// Quick resizes: the window reports the shell's earlier frames after
-    /// it was given the later ones, at the size it has by then. None of
-    /// them is a drag and the anchor stays; once the window has reported
-    /// the latest frame, a move back to an earlier origin is a drag.
+    /// Late reports of earlier frames are not drags; once the latest frame
+    /// is reported, a move back to an earlier origin is.
     #[test]
     fn frames_the_window_reports_late_are_the_shells_own() {
         let panels = Panels::default();
@@ -1226,9 +1101,8 @@ mod tests {
         );
     }
 
-    /// A placement keeps the origins the window has yet to report, once
-    /// each and at most `QUEUED_ORIGINS`, in any order, until the window
-    /// reports the latest frame.
+    /// A placement queues each unreported origin once, at most
+    /// `QUEUED_ORIGINS`, until the latest frame is reported.
     #[test]
     fn a_placement_queues_the_origins_not_reported_yet() {
         let frame = |x: f64| Rect::new(x, 8.0, 100.0, 40.0);
@@ -1236,7 +1110,6 @@ mod tests {
         for x in 1..=3 {
             placement = Placement::after(Some(placement), (1100.0, 8.0), frame(f64::from(x)));
         }
-        // The same origin again is not queued twice.
         placement = Placement::after(Some(placement), (1100.0, 8.0), frame(3.2));
         assert_eq!(placement.queued, [(0.0, 8.0), (1.0, 8.0), (2.0, 8.0)]);
         for x in [1.0, 0.0, 1.0, 2.0] {
@@ -1254,8 +1127,7 @@ mod tests {
         assert_eq!(placement.queued.last(), Some(&(980.0, 8.0)));
     }
 
-    /// A move at another size than the page reported is the window still
-    /// taking its size, not a drag.
+    /// A move at another size than the page reported is not a drag.
     #[test]
     fn a_move_while_the_window_takes_its_size_is_not_a_drag() {
         let panels = Panels::default();
@@ -1265,9 +1137,8 @@ mod tests {
         assert_eq!(panels.hung_from(Panel::Bubble), Some((1100.0, 8.0)));
     }
 
-    /// A saved anchor near the right edge passes the probe; the measured
-    /// prompt is then moved inside the screen, not left hanging off it,
-    /// and the anchor itself stays where the user put it.
+    /// A measured prompt near the edge is moved inside the screen, and the
+    /// saved anchor stays.
     #[test]
     fn a_panel_near_an_edge_is_moved_inside_the_screen() {
         let panels = Panels::default();
@@ -1281,7 +1152,6 @@ mod tests {
         assert_eq!(frame, Rect::new(1737.0, 100.0, PROMPT.0, PROMPT.1));
         assert!(SCREEN.contains(&frame));
         assert_eq!(panels.hung_from(Panel::Prompt), Some((2190.0, 100.0)));
-        // The shell's own move to the fitted frame is not a drag.
         panels.note_size(Panel::Prompt, PROMPT);
         assert_eq!(panels.dragged(Panel::Prompt, frame, &[SCREEN]), None);
         // A report as large as the screen fills it from its top-left corner.
@@ -1319,10 +1189,7 @@ mod tests {
         assert_eq!(panels.content(), None);
     }
 
-    /// The X and Record reach the detection controller exactly when they
-    /// take the prompt down: a click aimed at an earlier prompt answers
-    /// nothing, one on the prompt up answers once, as does an unnumbered
-    /// one.
+    /// The X and Record answer exactly when they take the prompt down.
     #[test]
     fn only_a_click_that_takes_the_prompt_down_reaches_the_controller() {
         let panels = Panels::default();
@@ -1341,9 +1208,8 @@ mod tests {
         assert_eq!(answers.get(), 2);
     }
 
-    /// The number is taken when the host raises the prompt, not when it
-    /// shows: an X from the old prompt that lands after the host raised a
-    /// new one, before the main thread showed it, leaves the new one up.
+    /// An X from the old prompt that lands after a new one was raised, but
+    /// before it showed, leaves the new one up.
     #[test]
     fn an_old_x_between_raising_and_showing_leaves_the_new_prompt() {
         let panels = Panels::default();
@@ -1351,13 +1217,11 @@ mod tests {
         let shown = pending_query(&panels);
         assert!(shown.ends_with("raised=1"));
         panels.set_prompt(Some(raised("Delta", 2)));
-        // Charlie's X, before Delta's `apply` ran.
         assert!(!panels.dismiss_prompt(Some(1)));
         assert_eq!(pending_query(&panels), "app=Delta&seconds=60&raised=2");
     }
 
-    /// A prompt raised after a clear has the controller's next number, so
-    /// the first one's X cannot dismiss it.
+    /// A prompt raised after a clear cannot be dismissed by the first's X.
     #[test]
     fn a_prompt_raised_after_a_clear_takes_the_next_number() {
         let panels = Panels::default();
@@ -1369,8 +1233,8 @@ mod tests {
         assert_eq!(pending_query(&panels), "app=Charlie&seconds=60&raised=2");
     }
 
-    /// An identical request raised again is a new prompt (it remounts);
-    /// the pending one shown again after the bubble is the same.
+    /// An identical request raised again is a new prompt; the pending one
+    /// shown again after the bubble is the same.
     #[test]
     fn a_request_raised_again_is_a_new_prompt() {
         let panels = Panels::default();
@@ -1384,9 +1248,7 @@ mod tests {
         assert!(panels.note_showing(panels.content().as_ref()));
     }
 
-    /// A snapshot that changes nothing leaves the panel alone; a prompt
-    /// shown after a dismissal is a change, as is the same request after
-    /// the bubble.
+    /// A snapshot that changes nothing leaves the panel alone.
     #[test]
     fn apply_moves_only_on_a_change_of_content() {
         let panels = Panels::default();

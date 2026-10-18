@@ -1,25 +1,8 @@
-//! The Windows install's watcher (`install_update` in `updater.rs`). The
-//! app runs no installer itself: a watcher, one `cmd.exe` the app leaves
-//! running when it ends, starts the installer as `tauri-plugin-updater`'s
-//! passive install does, waits for it, and starts the version that ran
-//! again when the installer did not install, so a declined consent prompt
-//! or a failed setup never leaves Steno down. On success the installer
-//! starts the new version itself (the MSI's `AUTOLAUNCHAPP`, the setup's
-//! `/R`). Neither relaunch passes the app's arguments on: a deep link the
-//! app was started with has been handled. A successful start does not
-//! prove that the watcher runs (a policy that turns the command prompt
-//! off ends it at once), so the watcher first creates a file, and the app
-//! ends only once it sees that file ([`wait_for_start`]).
-//!
-//! The paths reach `cmd.exe` in variables ([`SETUP_VARIABLE`],
-//! [`RELAUNCH_VARIABLE`], [`STARTED_VARIABLE`]), so its command line is
-//! the same for every user. `cmd.exe` expands each `%` once and never
-//! expands a value again, so a `%` in a path stays text. It then parses the
-//! expanded line, so `&`, `^`, `(` and `)` in a path stay text only because
-//! every path is in quotes, which no Windows path contains. `/v:off` keeps
-//! a `!` as text whatever `DelayedExpansion` says, `/e:on` keeps `start`
-//! and the bracketed `if` working whatever `EnableExtensions` says, and
-//! `/d` skips the `AutoRun` command.
+//! The Windows install's watcher: one `cmd.exe` the app leaves running
+//! that starts the installer, waits for it, and starts the running version
+//! again when it did not install, so a declined consent prompt or a failed
+//! setup never leaves Steno down. Paths reach `cmd.exe` only in quoted
+//! variables, so no character in a path is read as syntax.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -27,43 +10,36 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-/// The variable that holds the installer's command line ([`setup_command`]).
 pub const SETUP_VARIABLE: &str = "STENO_UPDATE_SETUP";
-/// The variable that holds the path of the binary that ran the install,
-/// which the watcher starts when the installer did not install.
+/// The variable that holds the binary the watcher starts when the
+/// installer did not install.
 pub const RELAUNCH_VARIABLE: &str = "STENO_UPDATE_RELAUNCH";
-/// The variable that holds the path of the file the watcher creates first,
-/// to say that it runs ([`wait_for_start`]).
+/// The variable that holds the file the watcher creates first, to say that
+/// it runs ([`wait_for_start`]).
 pub const STARTED_VARIABLE: &str = "STENO_UPDATE_STARTED";
-/// The name of that file, in the update's folder.
 pub const STARTED_FILE: &str = "watcher-started";
-/// How long the app waits for the watcher to say that it runs.
 pub const WATCHER_START_LIMIT: Duration = Duration::from_secs(10);
 
 /// The first bytes of a compound file, which an MSI is.
 const COMPOUND_FILE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
-/// Starts a console program without a window.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Starts a process outside the app's job, so it outlives the app.
 #[cfg(windows)]
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
-/// The installer a Windows update holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setup {
-    /// The MSI, run by `msiexec`, which asks for consent and installs for
-    /// every user.
+    /// The MSI, which asks for consent and installs for every user.
     Msi,
     /// The NSIS setup, which installs for the user alone.
     Nsis,
 }
 
 impl Setup {
-    /// The installer `package` holds, from its first bytes: an MSI is a
-    /// compound file, the setup an executable. `None` for anything else,
-    /// such as a zip, which this app's releases do not publish.
+    /// The installer `package` holds, from its first bytes; `None` for
+    /// anything else.
     pub fn of(package: &[u8]) -> Option<Setup> {
         if package.starts_with(&COMPOUND_FILE) {
             Some(Setup::Msi)
@@ -74,7 +50,6 @@ impl Setup {
         }
     }
 
-    /// The name the installer of `version` is written under.
     pub fn file_name(self, version: &str) -> String {
         match self {
             Setup::Msi => format!("Steno-{version}.msi"),
@@ -82,12 +57,8 @@ impl Setup {
         }
     }
 
-    /// The exit codes that mean the installer installed, and so started the
-    /// new version: `msiexec`'s success, and its success that needs a
-    /// restart (3010) or has started one (1641); the setup's 0. Anything
-    /// else, a declined consent prompt (1602 or 1223), another install
-    /// under way (1618), a failure (1603) or an aborted setup, starts the
-    /// version that ran again.
+    /// The exit codes that mean the installer installed and started the
+    /// new version itself; any other starts the version that ran again.
     pub fn installed(self) -> &'static [u32] {
         match self {
             Setup::Msi => &[0, 1641, 3010],
@@ -96,10 +67,8 @@ impl Setup {
     }
 }
 
-/// The installer's command line for `installer`, the written package, as
-/// `tauri-plugin-updater` 2.13's passive install with its restart builds
-/// it: `msiexec` (at `msiexec`) with `/passive /promptrestart
-/// AUTOLAUNCHAPP=True`, or the setup with `/P /UPDATE /R`.
+/// The installer's command line, as `tauri-plugin-updater`'s passive
+/// install with restart builds it.
 pub fn setup_command(setup: Setup, installer: &Path, msiexec: &Path) -> OsString {
     let quoted = |path: &Path| {
         let mut quoted = OsString::from("\"");
@@ -120,13 +89,9 @@ pub fn setup_command(setup: Setup, installer: &Path, msiexec: &Path) -> OsString
     command
 }
 
-/// The watcher's arguments to `cmd.exe`, as they stand on its command line
-/// (`/s` strips the outer quotes): create the file in [`STARTED_VARIABLE`]
-/// (or end, when it cannot), start the installer in [`SETUP_VARIABLE`] and
-/// wait for it; end when its exit code is one of [`Setup::installed`]
-/// (`errorlevel N` holds for N and above); otherwise clear the variables
-/// and start [`RELAUNCH_VARIABLE`], which `cmd.exe` expanded with the rest
-/// of the line before it ran any of it.
+/// The watcher's arguments to `cmd.exe`: create the start file (or end),
+/// run the installer and wait; end on one of [`Setup::installed`], else
+/// clear the variables and start [`RELAUNCH_VARIABLE`].
 pub fn watcher_arguments(setup: Setup) -> String {
     use std::fmt::Write as _;
     let mut line = format!(
@@ -146,20 +111,15 @@ pub fn watcher_arguments(setup: Setup) -> String {
     format!("/d /e:on /v:off /s /c \"{line}\"")
 }
 
-/// `C:\Windows\System32`, or wherever `SystemRoot` says Windows lies.
 #[cfg(windows)]
 pub fn system32() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()))
         .join("System32")
 }
 
-/// The watcher for `installer`, the written package of kind `setup`, run
-/// by `msiexec` when it is an MSI: `cmd.exe` from System32 with
-/// [`watcher_arguments`], the paths in their variables, no window, out of
-/// the app's job (so it outlives the app; a job that forbids breakaway
-/// makes the start fail), no standard streams, and `folder` as its current
-/// directory. `relaunch` is started when the installer does not install,
-/// and `started` is the file the watcher creates first.
+/// The watcher for `installer`: `cmd.exe` with [`watcher_arguments`], the
+/// paths in their variables, no window or streams, out of the app's job,
+/// in `folder`.
 #[cfg(windows)]
 pub fn watcher_command(
     setup: Setup,
@@ -186,10 +146,9 @@ pub fn watcher_command(
     watcher
 }
 
-/// Empties `folder`, the update's, before a new installer is written
-/// there: an earlier update's installer goes, and its start file with it.
-/// A start file left behind would pass [`wait_for_start`] at once, so one
-/// the removal could not take fails the install.
+/// Empties the update's `folder` before a new installer is written. A
+/// start file left behind would pass [`wait_for_start`] at once, so one
+/// that cannot be removed fails the install.
 pub fn empty_update_folder(folder: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(folder);
     if folder.join(STARTED_FILE).exists() {
@@ -201,11 +160,9 @@ pub fn empty_update_folder(folder: &Path) -> Result<(), String> {
     std::fs::create_dir_all(folder).map_err(|error| error.to_string())
 }
 
-/// Waits up to `limit` for `watcher` to create `started`, which says that
-/// it runs; `started` must not exist yet ([`empty_update_folder`] makes
-/// sure). A watcher that exits first fails the wait, and one still silent
-/// at the limit is ended. Either way it has started no installer, since it
-/// creates the file before anything else, so the app can start again.
+/// Waits up to `limit` for `watcher` to create `started`. A watcher that
+/// exits first fails the wait, and one silent at the limit is ended; either
+/// way it has started no installer, so the app can start again.
 pub fn wait_for_start(
     watcher: &mut std::process::Child,
     started: &Path,
@@ -257,8 +214,7 @@ mod tests {
         assert_eq!(Setup::Nsis.file_name("0.12.0"), "Steno-0.12.0-setup.exe");
     }
 
-    /// Paths with spaces stay one argument each, in quotes; the arguments
-    /// are the plugin's for a passive install that starts the new version.
+    /// Paths with spaces stay one quoted argument each.
     #[test]
     fn the_installer_runs_as_the_plugin_ran_it() {
         let msiexec = Path::new(r"C:\Windows\System32\msiexec.exe");
@@ -280,9 +236,7 @@ mod tests {
         );
     }
 
-    /// The watcher's line, whole: it says that it runs, waits for the
-    /// installer, ends on each exit code that installed, and otherwise
-    /// clears its variables and starts the version that ran.
+    /// The watcher's whole command line.
     #[test]
     fn the_watcher_relaunches_unless_the_installer_installed() {
         let start = concat!(
@@ -315,8 +269,7 @@ mod tests {
         );
     }
 
-    /// Which exit codes start the version that ran again: every one but
-    /// the installer's successes.
+    /// Every exit code but the installer's successes relaunches.
     #[test]
     fn a_declined_or_failed_install_starts_the_old_version() {
         let relaunches = |setup: Setup, code: u32| !setup.installed().contains(&code);
@@ -332,7 +285,6 @@ mod tests {
         }
     }
 
-    /// No path reaches the command line, so none can break its quoting.
     #[test]
     fn no_path_is_in_the_command_line() {
         for setup in [Setup::Msi, Setup::Nsis] {
@@ -342,21 +294,16 @@ mod tests {
         }
     }
 
-    /// The app waits ten seconds for the watcher to say that it runs.
     #[test]
     fn the_app_waits_ten_seconds_for_the_watcher() {
         assert_eq!(WATCHER_START_LIMIT, Duration::from_secs(10));
     }
 
-    /// The longest a watcher test waits: long enough that only a hang
-    /// reaches it, the value of `steno_audio::testing::HANG_GUARD`. A test
-    /// passes it as the wait's limit when the limit is not what it checks,
-    /// so a loaded machine that starts `sh` or `cmd.exe` late cannot fail
-    /// it; what it checks is why the wait ended, never how fast.
+    /// A limit only a hang reaches, for tests that check why the wait
+    /// ended rather than how fast.
     const HANG_GUARD: Duration = Duration::from_secs(120);
 
-    /// A watcher under `sh` that runs `script` with its start file, in a
-    /// new folder, as `$1`.
+    /// A watcher under `sh` running `script` with its start file as `$1`.
     #[cfg(unix)]
     fn sh(script: &str) -> (tempfile::TempDir, std::path::PathBuf, Watcher) {
         let folder = tempfile::tempdir().unwrap();
@@ -369,8 +316,7 @@ mod tests {
         (folder, started, Watcher(watcher))
     }
 
-    /// A test's watcher, ended and reaped when the test ends, a failed
-    /// assert included, so no `sleep` outlives the test.
+    /// A test's watcher, ended and reaped when the test ends.
     #[cfg(unix)]
     struct Watcher(std::process::Child);
 
@@ -382,8 +328,7 @@ mod tests {
         }
     }
 
-    /// A watcher that creates the file is running: the wait ends on the
-    /// file, while the watcher still runs, not at its exit or the limit.
+    /// The wait ends on the start file, while the watcher still runs.
     #[cfg(unix)]
     #[test]
     fn a_watcher_that_says_it_runs_ends_the_wait() {
@@ -393,8 +338,7 @@ mod tests {
         assert!(watcher.0.try_wait().unwrap().is_none(), "left running");
     }
 
-    /// A watcher that ends without the file (a policy that turns off the
-    /// command prompt) fails the wait at its exit, not at the limit.
+    /// A watcher that ends without the file fails the wait at its exit.
     #[cfg(unix)]
     #[test]
     fn a_watcher_that_ends_without_saying_so_fails_the_wait() {
@@ -418,7 +362,6 @@ mod tests {
         assert!(!started.exists());
     }
 
-    /// An earlier update's installer and start file go.
     #[test]
     fn an_earlier_update_is_emptied_out() {
         let data = tempfile::tempdir().unwrap();
@@ -433,8 +376,7 @@ mod tests {
         assert!(fresh.is_dir());
     }
 
-    /// A start file the removal cannot take fails the install, before the
-    /// shutdown, in words the user's dialog can show.
+    /// A start file that cannot be removed fails the install.
     #[cfg(unix)]
     #[test]
     fn a_start_file_left_behind_fails_the_install() {
@@ -457,15 +399,13 @@ mod tests {
                 ))
             );
         } else {
-            // Root removes the file whatever the folder's mode says.
             assert_eq!(result, Ok(()));
         }
     }
 
-    /// A stub for an installer or the app, built by the test: it writes
-    /// its current directory, the `STENO_UPDATE_*` variables it got and
-    /// its arguments, one per line, into `<name>.ran` beside itself, and
-    /// exits with `STENO_TEST_EXIT_CODE`. A window app, as Steno is.
+    /// A stub installer or app: writes its directory, `STENO_UPDATE_*`
+    /// variables and arguments into `<name>.ran` and exits with
+    /// `STENO_TEST_EXIT_CODE`.
     #[cfg(windows)]
     const STUB: &str = r#"
 #![windows_subsystem = "windows"]
@@ -487,8 +427,7 @@ fn main() {
 }
 "#;
 
-    /// [`STUB`], compiled into `folder` with the toolchain that runs the
-    /// tests.
+    /// [`STUB`], compiled into `folder`.
     #[cfg(windows)]
     fn stub(folder: &Path) -> std::path::PathBuf {
         let (source, exe) = (folder.join("stub.rs"), folder.join("stub.exe"));
@@ -505,8 +444,7 @@ fn main() {
         exe
     }
 
-    /// What a stub wrote: its current directory, the variables, the
-    /// arguments; `None` while it has not run.
+    /// What a stub wrote; `None` while it has not run.
     #[cfg(windows)]
     fn ran(stub: &Path) -> Option<(std::path::PathBuf, String, Vec<String>)> {
         let record = std::fs::read_to_string(stub.with_extension("ran")).ok()?;
@@ -516,8 +454,7 @@ fn main() {
         Some((directory, variables, lines.collect()))
     }
 
-    /// Spawns `watcher` with its own flags, or only hidden where the job
-    /// the tests run in (cargo's) forbids breakaway.
+    /// Spawns `watcher`, only hidden where cargo's job forbids breakaway.
     #[cfg(windows)]
     fn spawn(mut watcher: Command) -> std::process::Child {
         use std::os::windows::process::CommandExt;
@@ -531,7 +468,6 @@ fn main() {
         }
     }
 
-    /// Each path goes in its variable, and the folder is the watcher's.
     #[cfg(windows)]
     #[test]
     fn the_watcher_command_puts_each_path_in_its_variable() {
@@ -569,12 +505,8 @@ fn main() {
         );
     }
 
-    /// The real `cmd.exe` runs the watcher in a folder whose name holds
-    /// every character it could read as syntax, against stub installers
-    /// and a stub app: it says that it runs, starts the installer with its
-    /// arguments, and starts the app again, in the watcher's folder and
-    /// without the variables, unless the installer installed. A start file
-    /// it cannot create stops it before the installer.
+    /// The real `cmd.exe` in a folder named with every syntax character:
+    /// it starts the installer, and relaunches the app unless it installed.
     #[cfg(windows)]
     #[test]
     fn the_real_watcher_relaunches_unless_the_installer_installed() {

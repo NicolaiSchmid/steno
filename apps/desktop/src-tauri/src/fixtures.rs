@@ -1,14 +1,12 @@
-//! The recorded bridge fixtures (`apps/macos/web/fixtures/bridge/`), embedded
-//! with `include_str!` in `index.json` order, and the mock transport's rules
-//! for serving them: topic files become snapshots, `<method>.reply.json` and
-//! the two generic reply shapes answer commands, everything else is `null`.
-//! Temporary: WP6 wires the real host and deletes this module with the
-//! `fixture-host` feature.
+//! The recorded bridge fixtures, embedded in `index.json` order, and the
+//! mock transport's rules for serving them: topic files become snapshots,
+//! reply files answer commands, everything else is `null`. Only in the
+//! `fixture-host` build.
 
 use serde_json::Value;
 
-/// Embeds every listed fixture as a `(key, json)` pair; the test below keeps
-/// the list equal to `index.json`.
+/// Embeds every listed fixture as a `(key, json)` pair; a test keeps the
+/// list equal to `index.json`.
 macro_rules! fixtures {
     ($($key:literal),* $(,)?) => {
         /// Every recorded fixture by key, in `index.json` order.
@@ -77,9 +75,8 @@ fixtures![
     "onboarding.handoff",
 ];
 
-/// The contract's topics (`bridgeTopics` in `contract.ts`). The other
-/// snapshot-shaped fixtures (`recording.live`, `onboarding.setup`, ...) feed
-/// the mock's scenarios and are never emitted under their own names.
+/// The contract's topics. Other snapshot-shaped fixtures feed the mock's
+/// scenarios and are never emitted under their own names.
 pub const TOPICS: [&str; 12] = [
     "app",
     "recording",
@@ -95,9 +92,8 @@ pub const TOPICS: [&str; 12] = [
     "onboarding",
 ];
 
-/// The generic reply shapes and the methods they answer, as
-/// `REPLY_ALIASES` in `mock-transport.ts`: the native alerts and folder
-/// panels resolve as confirmed, with the recorded path.
+/// The generic reply shapes and the methods they answer, as in
+/// `mock-transport.ts`.
 const REPLY_ALIASES: &[(&str, &[&str])] = &[
     (
         "reply.confirm",
@@ -119,7 +115,6 @@ const REPLY_ALIASES: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// The recorded JSON for a fixture key.
 pub fn fixture(key: &str) -> Option<&'static str> {
     FIXTURES
         .iter()
@@ -151,10 +146,7 @@ pub fn reply(method: &str) -> Value {
 }
 
 /// The two `app` snapshots a deep link takes: the recorded one with the
-/// request field set (`requestedMeetingID` or `requestedSettingsSection`),
-/// which the page follows, then the recorded one unchanged, as the Swift
-/// host clears the request with the publish that carried it and publishes
-/// again.
+/// request field set, then the recorded one unchanged, clearing the request.
 pub fn app_snapshots_requesting(field: &str, value: &str) -> Vec<Value> {
     let Some(clean) = parsed("app") else {
         return Vec::new();

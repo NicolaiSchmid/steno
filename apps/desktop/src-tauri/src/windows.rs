@@ -1,23 +1,9 @@
-//! The three windows: the Swift app's routes, sizes and minimums. Main opens
-//! at start and is hidden, not destroyed, when the user closes it
-//! (`main.rs`), so the tray and the panels always have it; Settings and
-//! onboarding are created on `window.open` and focused when they already
-//! exist. A meeting or a section asked of a window whose page has not
-//! mounted yet waits in `Pages` and is published on its `page.ready`.
-//!
-//! On Linux a closed Settings or onboarding window is kept, not destroyed
-//! (`Kept`): every destroyed webview leaks a file descriptor (#160), so a
-//! long session that opens Settings often would run out of them. wry's IPC
-//! handler holds the webview it belongs to (`attach_ipc_handler` in wry
-//! 0.57's `src/webkitgtk/mod.rs`), a reference cycle through the view's
-//! user content manager, so the view is never finalised and `WebKitGTK`
-//! never frees its memfd. The kept window drops its page (`about:blank`)
-//! and hides; opened again, it loads its route as a new window would, with
-//! the query asked for, so the user sees a fresh window. macOS and Windows
-//! destroy the window as before.
-//!
-//! Swift: the sizes live in `StenoApp.swift` (main), `SettingsWindow.swift`
-//! and `OnboardingWindow.swift`, main's minimum in `MainWindow.swift`.
+//! The three windows: routes, sizes and minimums. Main is hidden, not
+//! destroyed, on close; Settings and onboarding are created on
+//! `window.open`. On Linux those two are kept hidden on `about:blank`
+//! instead of destroyed (`Kept`), since every destroyed `WebKitGTK` view
+//! leaks a file descriptor (#160). Requests for an unmounted page wait in
+//! `Pages`.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -38,8 +24,7 @@ use crate::{
     navigation,
 };
 
-/// One window as the Swift app sizes it, in logical points. Its label is
-/// the contract's `BridgeWindow::as_str`.
+/// One window's size in logical points.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Spec {
     pub title: &'static str,
@@ -50,8 +35,6 @@ pub struct Spec {
 }
 
 impl Spec {
-    /// The shell's own knowledge of a window, kept off the contract's
-    /// `BridgeWindow`.
     pub const fn of(window: BridgeWindow) -> Spec {
         match window {
             BridgeWindow::Main => Spec {
@@ -76,13 +59,11 @@ impl Spec {
     }
 }
 
-/// The document a window loads: `index.html` plus the hash route and its
-/// query, resolved against the app origin by Tauri.
+/// The document a window loads: `index.html` plus the hash route and query.
 pub fn start_path(window: BridgeWindow, query: Option<&str>) -> String {
     format!("index.html{}", with_query(Spec::of(window).route, query))
 }
 
-/// `route?query`, or the route alone for no query or an empty one.
 pub fn with_query(route: &str, query: Option<&str>) -> String {
     match query {
         Some(query) if !query.is_empty() => format!("{route}?{query}"),
@@ -90,9 +71,8 @@ pub fn with_query(route: &str, query: Option<&str>) -> String {
     }
 }
 
-/// Shows and focuses the window when it exists, creates it otherwise.
-/// `position` places a new window (the smoke run lays the three out side
-/// by side); the system places it when `None`.
+/// Shows and focuses the window when it exists, creates it otherwise, at
+/// `position` or where the system places it.
 pub fn open(
     app: &AppHandle,
     window: BridgeWindow,
@@ -102,8 +82,7 @@ pub fn open(
     let spec = Spec::of(window);
     if let Some(existing) = app.get_webview_window(window.as_str()) {
         let kept = app.state::<Kept>();
-        // Kept until the navigation went out, so a failed one leaves the
-        // next open to try again.
+        // Forgotten only once the navigation went out, so a failure retries.
         if let Some(document) = kept.document(window.as_str()) {
             existing.navigate(reopened(&document, window, query))?;
             kept.forget(window.as_str());
@@ -123,11 +102,8 @@ pub fn open(
     .inner_size(spec.size.0, spec.size.1)
     .resizable(spec.min_size.is_some())
     .on_navigation(move |url| navigation::allows(url, dev_server.as_ref()))
-    // A `target="_blank"` link or `window.open` from the page opens nothing:
-    // external links go through `system.openURL`. wry already opens no
-    // window when no handler is set (WebKitGTK's `create` signal unhandled,
-    // WKWebView's delegate answering nil); the explicit `Deny` pins that
-    // against a default change. Needs a webview to exercise, so no test.
+    // Links that open a new window open nothing: external links go through
+    // `system.openURL`. The explicit `Deny` pins wry's default.
     .on_new_window(|_url, _features| NewWindowResponse::Deny);
     if let Some((width, height)) = spec.min_size {
         builder = builder.min_inner_size(width, height);
@@ -135,11 +111,8 @@ pub fn open(
     if let Some((x, y)) = position {
         builder = builder.position(x, y);
     }
-    // The Swift windows hide their title bar and let the page paint up to the
-    // top edge, leaving the traffic lights their inset; the same look here.
-    // Linux and Windows keep their native title bar. The page's
-    // `TITLE_BAR_INSET` (`apps/macos/web/src/lib/platform.tsx`) follows this
-    // `cfg`.
+    // The page paints up to the top edge around the traffic lights; the
+    // page's `TITLE_BAR_INSET` follows this `cfg`.
     #[cfg(target_os = "macos")]
     {
         builder = builder
@@ -150,15 +123,11 @@ pub fn open(
 }
 
 /// `window.open` from a page, or a deep link: opens or focuses the window.
-/// A meeting for main, or a section for a Settings window that already
-/// exists, rides on the window's next `app` snapshot
-/// (`Host::publish_request`), once its page listens (`Pages`); a new
+/// A meeting, or a section for an existing Settings window, rides on the
+/// window's next `app` snapshot once its page listens (`Pages`); a new
 /// Settings window reads the section from its route.
-///
-/// Swift: `WindowRequests.swift`.
 pub fn open_requested(app: &AppHandle, params: &WindowParams) -> Result<(), BridgeError> {
     let pages = app.state::<Pages>();
-    // A kept window opens as a new one, its section in the route.
     let existed = app.get_webview_window(params.window.as_str()).is_some()
         && app
             .state::<Kept>()
@@ -192,17 +161,15 @@ pub fn open_requested(app: &AppHandle, params: &WindowParams) -> Result<(), Brid
 }
 
 steno_core::string_enum! {
-    /// The `app` snapshot's two request fields, as `steno_bridge`'s
-    /// `AppSnapshot` names them (`requested_meeting_id`,
-    /// `requested_settings_section`); a test pins the two together.
+    /// The `app` snapshot's two request fields; a test pins the names to
+    /// `AppSnapshot`'s.
     pub enum RequestField {
         MeetingId = "requestedMeetingID",
         SettingsSection = "requestedSettingsSection",
     }
 }
 
-/// A meeting or a section for a window, as the `app` snapshot carries it:
-/// the request field and its value.
+/// A meeting or a section for a window: the request field and its value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub field: RequestField,
@@ -226,15 +193,10 @@ impl Request {
 }
 
 /// Which pages have mounted (`page.ready`) and what each window is still
-/// owed. A request published before the page listens is lost (a deep link
-/// at a cold launch reaches the main window before its page mounts; a
-/// second instance's link can reach it the same way), so it waits here
-/// and goes out right after the page's first snapshots. One lock over
-/// both, so a `page.ready` on one thread and a request on another cannot
-/// leave a request owed to a page that already listens, and a request is
-/// handed to its publish ([`publish`], which only queues it) under that
-/// lock, so two requests are queued in the order they took it: an owed
-/// one before a later one. Managed state.
+/// owed. A request published before the page listens would be lost (a
+/// deep link at a cold launch), so it waits here. One lock covers both,
+/// and requests are handed to [`publish`] under it, so they are queued in
+/// the order they came, an owed one first. Managed state.
 #[derive(Debug, Default)]
 pub struct Pages {
     state: Mutex<PagesState>,
@@ -247,9 +209,8 @@ struct PagesState {
 }
 
 impl Pages {
-    /// The page of `label` sent `page.ready`: the request it was owed, if
-    /// any, goes to `publish` now, under the lock. A page that mounts again
-    /// (a reload) owes nothing new.
+    /// The page of `label` sent `page.ready`: its owed request, if any,
+    /// goes to `publish` under the lock.
     pub fn ready(&self, label: &str, publish: impl FnOnce(Request)) {
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -267,9 +228,8 @@ impl Pages {
             .is_ok_and(|state| state.ready.contains(label))
     }
 
-    /// `request` for the page of `label`: to `publish` now, under the
-    /// lock, when the page listens, else kept for its `page.ready` (a later
-    /// one replaces it).
+    /// Hands `request` to `publish` under the lock when the page listens,
+    /// else keeps it for its `page.ready`, replacing an earlier one.
     pub fn publish_or_owe(&self, label: &str, request: Request, publish: impl FnOnce(Request)) {
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -281,8 +241,7 @@ impl Pages {
         }
     }
 
-    /// The window of `label` was destroyed: its page is gone and so is
-    /// anything it was owed.
+    /// The window of `label` was destroyed, and with it what it was owed.
     pub fn gone(&self, label: &str) {
         if let Ok(mut state) = self.state.lock() {
             state.ready.remove(label);
@@ -291,8 +250,7 @@ impl Pages {
     }
 }
 
-/// Publishes `request` to `window`, of `label`, when its page listens,
-/// else owes it to the page for its `page.ready` ([`publish_owed`]).
+/// Publishes `request` to `window` when its page listens, else owes it.
 pub fn request<H: ShellHost>(
     host: &H,
     pages: &Pages,
@@ -303,20 +261,15 @@ pub fn request<H: ShellHost>(
     pages.publish_or_owe(label, request, |now| publish(host, window, now));
 }
 
-/// The page of `window`, of `label`, has mounted and has its first
-/// snapshots: the request it was owed, if any, is published now.
+/// The page of `window` has mounted: publishes its owed request, if any.
 pub fn publish_owed<H: ShellHost>(host: &H, pages: &Pages, label: &str, window: H::Window) {
     pages.ready(label, |owed| publish(host, window, owed));
 }
 
-/// Queues `request`'s publish to `window` on the shell's ordered lane and
-/// returns without waiting for it (`host::call_in_order`): it selects the
-/// meeting, which reads the store, and the caller is a command worker,
-/// the blocking pool's `page.ready` or, for a deep link, the main thread.
-/// On the lane requests go out in the order they were queued, and
-/// [`Pages`] queues them in the order they came, an owed one first, so
-/// the later of two deep links is the one shown; a request waits there
-/// behind a tray Stop whose save waits.
+/// Queues `request`'s publish on the shell's ordered lane and returns:
+/// selecting a meeting reads the store, and the caller may be the main
+/// thread. The lane keeps requests in order, so the later of two deep
+/// links is the one shown.
 pub fn publish<H: ShellHost>(host: &H, window: H::Window, request: Request) {
     host::call_in_order(host.clone(), "a window request", move |host| {
         host.publish_request(&window, request.field.as_str(), &request.value)
@@ -324,23 +277,19 @@ pub fn publish<H: ShellHost>(host: &H, window: H::Window, request: Request) {
 }
 
 /// Whether closing the window of `label` keeps it instead (`keep`):
-/// Settings and onboarding on Linux, against a destroyed webview's leak
-/// (#160). Main has its own rule (`hides_on_close` in `main.rs`); the
-/// panels only ever hide.
+/// Settings and onboarding on Linux.
 pub fn keeps_on_close(label: &str) -> bool {
     cfg!(target_os = "linux")
         && (label == BridgeWindow::Settings.as_str() || label == BridgeWindow::Onboarding.as_str())
 }
 
-/// The windows kept after a close (`keeps_on_close`), each with the app
-/// document it showed, for its next `open`. Managed state.
+/// The kept windows, each with the app document it showed. Managed state.
 #[derive(Debug, Default)]
 pub struct Kept(Mutex<HashMap<String, Url>>);
 
 impl Kept {
     /// Notes `label` as kept, showing `document`; false when it already
-    /// was, which keeps the document it showed then (a second close finds
-    /// `about:blank`).
+    /// was, which keeps the first document.
     fn note(&self, label: &str, document: Url) -> bool {
         let Ok(mut kept) = self.0.lock() else {
             return false;
@@ -352,14 +301,11 @@ impl Kept {
         true
     }
 
-    /// The document the kept window of `label` showed; none when it is not
-    /// kept.
     fn document(&self, label: &str) -> Option<Url> {
         self.0.lock().ok()?.get(label).cloned()
     }
 
-    /// The window of `label` is no longer kept: it opened again, or it was
-    /// destroyed. Whether it was kept.
+    /// Stops keeping `label`; whether it was kept.
     pub fn forget(&self, label: &str) -> bool {
         self.0
             .lock()
@@ -367,11 +313,9 @@ impl Kept {
     }
 }
 
-/// Keeps `window` after its close in the state a new window starts in
-/// (`Kept`): its page is gone (`Pages::gone`), it hides, and it shows
-/// `about:blank`, so its next `open` loads a fresh document. False when it
-/// was kept already (a second close), which changes nothing. On an error
-/// it is not kept, and the caller destroys it.
+/// Keeps `window` after its close: forgets its page, hides it and loads
+/// `about:blank`. False when it was kept already. On an error it is not
+/// kept, and the caller destroys it.
 pub fn keep(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<bool> {
     let label = window.label();
     let main = || {
@@ -395,10 +339,9 @@ pub fn keep(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<bool> {
     Ok(true)
 }
 
-/// The app document a window showing `shown` keeps: `shown` itself, or
-/// main's (`main`) when `shown` is the `about:blank` of a window closed
-/// again before its reopened page loaded; none when neither is one of the
-/// app's.
+/// The app document to remember for a window showing `shown`: `shown`
+/// itself, or main's when it shows `about:blank`; none when neither is
+/// the app's.
 fn app_document(shown: Url, main: impl FnOnce() -> Option<Url>) -> Option<Url> {
     let blank = |url: &Url| url.as_str() == "about:blank";
     if blank(&shown) {
@@ -408,10 +351,8 @@ fn app_document(shown: Url, main: impl FnOnce() -> Option<Url>) -> Option<Url> {
     }
 }
 
-/// What a kept window loads when it opens again: the document it showed
-/// (the app's origin or the dev server's) with `window`'s route and
-/// `query`. Another document than the `about:blank` it shows, so the page
-/// mounts afresh.
+/// What a kept window loads when reopened: its document with `window`'s
+/// route and `query`, so the page mounts afresh.
 fn reopened(document: &Url, window: BridgeWindow, query: Option<&str>) -> Url {
     let mut url = document.clone();
     let route = Spec::of(window).route.trim_start_matches('#');
@@ -419,7 +360,6 @@ fn reopened(document: &Url, window: BridgeWindow, query: Option<&str>) -> Url {
     url
 }
 
-/// Closes the window when it exists; nothing otherwise.
 pub fn close(app: &AppHandle, window: BridgeWindow) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(window.as_str()) {
         window.close()?;
@@ -457,8 +397,7 @@ mod tests {
         assert_eq!(Spec::of(BridgeWindow::Onboarding).min_size, None);
     }
 
-    /// The field names are the contract's: an `AppSnapshot` with both
-    /// requests set writes exactly these keys beside its own.
+    /// The field names match the keys `AppSnapshot` writes.
     #[test]
     fn the_request_fields_are_the_app_snapshots() {
         let id = steno_core::json::parse_uuid("00000000-0000-0000-0000-00000000000c").unwrap();
@@ -503,8 +442,7 @@ mod tests {
         }
     }
 
-    /// A kept window is noted once, keeps its document until it is
-    /// forgotten, and is kept anew after that.
+    /// A kept window is noted once and kept anew after it is forgotten.
     #[test]
     fn a_kept_window_is_noted_once_until_it_is_forgotten() {
         let kept = Kept::default();
@@ -524,8 +462,6 @@ mod tests {
         assert_eq!(kept.document("onboarding"), None);
     }
 
-    /// A window keeps the app document it shows; one closed while it still
-    /// shows `about:blank` takes main's, and none is kept without one.
     #[test]
     fn a_kept_window_keeps_an_app_document() {
         let url = |text: &str| Url::parse(text).unwrap();
@@ -544,8 +480,7 @@ mod tests {
         assert_eq!(app_document(blank.clone(), || Some(blank.clone())), None);
     }
 
-    /// A kept window loads its own route with the new query on the
-    /// document it showed, whatever route and query it showed last.
+    /// A reopened window loads its own route with the new query.
     #[test]
     fn a_kept_window_reopens_on_its_route_with_the_new_query() {
         let shown = Url::parse("tauri://localhost/index.html#/settings?section=export").unwrap();
@@ -564,23 +499,20 @@ mod tests {
         );
     }
 
-    /// What `ready` hands its publish, if anything.
     fn ready(pages: &Pages, label: &str) -> Option<Request> {
         let mut published = None;
         pages.ready(label, |owed| published = Some(owed));
         published
     }
 
-    /// What `publish_or_owe` hands its publish, if anything.
     fn publish_or_owe(pages: &Pages, label: &str, request: Request) -> Option<Request> {
         let mut published = None;
         pages.publish_or_owe(label, request, |now| published = Some(now));
         published
     }
 
-    /// A request for a page that has not mounted waits for its
-    /// `page.ready`; one for a page that has goes out at once; a destroyed
-    /// window forgets both.
+    /// A request waits for the page's `page.ready`, goes out at once once
+    /// it listens, and is dropped with a destroyed window.
     #[test]
     fn a_request_waits_for_the_page_then_goes_out() {
         let pages = Pages::default();
@@ -599,14 +531,10 @@ mod tests {
             })
         );
         assert!(pages.is_ready("main"));
-        // A reload mounts again and is owed nothing.
         assert_eq!(ready(&pages, "main"), None);
         assert!(pages.is_ready("main"));
-        // A page that listens gets the request back to publish at once,
-        // and owes nothing for its next mount.
         assert_eq!(publish_or_owe(&pages, "main", export.clone()), Some(export));
         assert_eq!(ready(&pages, "main"), None);
-        // The other windows are their own.
         assert!(!pages.is_ready("settings"));
         assert_eq!(ready(&pages, "settings"), None);
         assert_eq!(
@@ -625,11 +553,8 @@ mod tests {
         );
     }
 
-    /// A window request for a page that listens: the publish is queued on
-    /// the lane and the caller (a command worker, or the main thread for a
-    /// deep link) returns while it is held, as a meeting's selection that
-    /// waits on the store would be. A request for a page that does not
-    /// listen yet is owed instead, and reaches no host.
+    /// A request for a listening page is queued on the lane without
+    /// blocking the caller; one for an unmounted page reaches no host.
     #[test]
     fn a_window_request_is_published_off_the_callers_thread() {
         use std::time::Duration;
@@ -669,10 +594,7 @@ mod tests {
         assert_eq!(host.answered(), [held]);
     }
 
-    /// Two quick window requests (two deep links) reach the host in the
-    /// order they came, so the later one is the meeting shown. Each is a
-    /// job on the lane; spawned one per request, as on Tauri's pools,
-    /// some pairs land reversed.
+    /// Two quick window requests reach the host in the order they came.
     #[test]
     fn two_window_requests_reach_the_host_in_the_order_they_came() {
         use std::time::Duration;
@@ -702,13 +624,8 @@ mod tests {
         assert_eq!(reordered, 0, "{reordered} of {rounds} pairs were reordered");
     }
 
-    /// A request owed to a page that has not mounted, then the page's
-    /// `page.ready`, then a second request (a deep link at a cold launch,
-    /// then another), while the tray's Stop before them waits on the
-    /// store: the owed one is queued at the page's ready, before the later
-    /// one, so after the stop the later one is the meeting shown.
-    /// Published beside the lane, the owed one would reach the host first
-    /// here, and could land last.
+    /// An owed request is queued at `page.ready`, before a later request,
+    /// so the later one is the meeting shown.
     #[test]
     fn an_owed_request_goes_out_before_a_later_one() {
         use std::time::Duration;

@@ -1,16 +1,14 @@
-//! The recorder's state as the shell reads it off the `recording` snapshots
-//! that pass through `bridge::emit`: the tray's labels and the floating
-//! panels follow it. The shell never asks the host for the state; it
-//! observes what the host publishes to the main window, as the Swift menu
-//! bar item observes `RecordingController.recording`.
+//! The recorder's state as the shell reads it off the `recording`
+//! snapshots that pass through `bridge::emit`, for the tray and the
+//! panels. The shell never asks the host for it.
 
 use serde_json::Value;
 pub use steno_bridge::RecordingState;
 
 /// What the shell makes of the contract's `RecordingState`.
 pub trait RecorderState: Sized {
-    /// Reads the state off a `recording` snapshot; `None` when the payload
-    /// is not one (so a malformed snapshot changes nothing in the shell).
+    /// Reads the state off a `recording` snapshot; `None` for a malformed
+    /// one, which changes nothing.
     fn from_snapshot(payload: &Value) -> Option<Self>;
 
     /// Anything but idle: the recorder is busy and the bubble shows.

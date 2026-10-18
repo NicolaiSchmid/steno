@@ -1,48 +1,20 @@
-//! Launch at login on macOS: `SMAppService.mainApp`, the Mac's own login
-//! item and the one the Swift app registers (D4 of
-//! `.plans/2026-10-07-stable-promotion.md`), through the safe
-//! `smappservice-rs`. It is filed under the bundle id, so this app,
-//! `com.nicolaischmid.steno.desktop`, registers itself; the Swift app's
-//! entry is the system's to keep or drop, and nothing here touches it.
-//!
-//! At each launch, before the host's first-launch registration, the Launch
-//! Agent a build under the earlier identifier wrote through
-//! `tauri-plugin-autostart` (`~/Library/LaunchAgents/Steno.plist`,
-//! [`EARLIER_AGENT_LABEL`]) goes, whatever the preferences say: unloaded
-//! unless it is the job this process runs as, then deleted
-//! ([`remove_earlier_agent`]). The registration is the host's
-//! (`Host::register_login_item_on_first_launch` in `steno-host`): once, at
-//! the first launch with the stored `launch_at_login` setting on, under the
-//! preferences flag `steno.mainAppRegistered`; a failed registration tries
-//! again at the next launch, and after that only the switch in General
-//! registers or removes the login item ([`set_enabled`]).
-//!
-//! The rules run over two traits, [`MainApp`] and [`LaunchAgents`], which
-//! the tests fake; the system's are `SystemMainApp` and
-//! `UserLaunchAgents`, macOS only. A smoke run (`STENO_SMOKE_SECONDS`)
-//! registers and removes nothing. Only a run from an installed app bundle
-//! ([`installed_bundle`]: not a plain binary under `target/`, a mounted
-//! disk image or a copy Gatekeeper translocated; a bundle built under
-//! `target/` counts as installed) removes the agent, outside a
-//! `fixture-host` build ([`removes_earlier_agent`]), and only such a run
-//! lets the host count its first launch (`HostConfig::installed_bundle`).
-//!
-//! Swift: `LoginItemController.swift`.
+//! Launch at login on macOS through `SMAppService.mainApp`, filed under
+//! this app's bundle id. At each launch it also removes the Launch Agent
+//! that builds under the earlier identifier wrote ([`remove_earlier_agent`]),
+//! but only from an installed bundle ([`removes_earlier_agent`]). The rules
+//! run over the [`MainApp`] and [`LaunchAgents`] traits, which tests fake.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use steno_host::services::LoginItemStatus;
 
-/// The label `tauri-plugin-autostart` gave its Launch Agent, and the
-/// agent's file name before `.plist`: the product name (the plugin's
-/// default, `PackageInfo::name`), "Steno" on macOS. A build under the
-/// earlier identifier wrote it.
+/// The label, and file name before `.plist`, of the Launch Agent that
+/// `tauri-plugin-autostart` wrote for builds under the earlier identifier.
 pub const EARLIER_AGENT_LABEL: &str = "Steno";
 
-/// What the plugin's agent starts: this app's executable inside a bundle.
-/// A file under the label that starts anything else is not Steno's.
+/// What the plugin's agent starts; a file that starts anything else is not
+/// Steno's.
 const AGENT_PROGRAM_SUFFIX: &str = "/Contents/MacOS/steno-desktop</string>";
 
-/// `SMAppService.mainApp`.
 pub trait MainApp {
     fn status(&self) -> LoginItemStatus;
     fn register(&self) -> Result<(), String>;
@@ -86,24 +58,15 @@ pub enum EarlierAgent {
 pub enum Unloaded {
     NotLoaded,
     BootedOut,
-    /// The job is this process, which launchd started at login from that
-    /// file: booting it out would end the app. It stays loaded until the
-    /// user logs out, and with its file gone nothing starts it again.
+    /// The job is this process: booting it out would end the app, and
+    /// with its file gone nothing starts it again.
     RunsThisProcess,
     Failed(String),
 }
 
-/// Removes the earlier build's Launch Agent: its job unloaded, unless
-/// it is `own_pid`, then its file deleted.
-///
-/// The agent runs at load and is not kept alive, so a job loaded with no
-/// pid has exited and its boot-out ends nothing. When an earlier build
-/// that the agent started at login installs an update, the updater starts
-/// the new binary as its child and exits, and launchd ends the child with
-/// the job, because the agent sets no `AbandonProcessGroup` (probed on
-/// macOS 26). That is the earlier build's behaviour, which this one cannot
-/// change: Steno quits instead of relaunching, and opening it once
-/// removes the agent here.
+/// Removes the earlier build's Launch Agent: unloads its job, unless it is
+/// `own_pid`, then deletes its file. The agent runs at load and is not
+/// kept alive, so a loaded job with no pid has exited.
 pub fn remove_earlier_agent(agents: &dyn LaunchAgents, own_pid: u32) -> EarlierAgent {
     let label = EARLIER_AGENT_LABEL;
     let text = match agents.read(label) {
@@ -128,9 +91,8 @@ pub fn remove_earlier_agent(agents: &dyn LaunchAgents, own_pid: u32) -> EarlierA
     }
 }
 
-/// Logs what [`remove_earlier_agent`] did: each change and failure as a
-/// warning, which the default filter shows; nothing when there was no
-/// agent.
+/// Logs what [`remove_earlier_agent`] did as warnings; nothing when there
+/// was no agent.
 pub fn log(earlier_agent: &EarlierAgent) {
     match earlier_agent {
         EarlierAgent::None => {}
@@ -148,8 +110,7 @@ pub fn log(earlier_agent: &EarlierAgent) {
     }
 }
 
-/// The switch in General and the tray: register or unregister, as the
-/// Swift app's `setEnabled` does.
+/// The switch in General and the tray: register or unregister.
 pub fn set_enabled(main_app: &dyn MainApp, enabled: bool) -> Result<(), String> {
     if enabled {
         main_app.register()
@@ -158,8 +119,8 @@ pub fn set_enabled(main_app: &dyn MainApp, enabled: bool) -> Result<(), String> 
     }
 }
 
-/// The pid in `launchctl print`'s description of a job: its `pid = <n>`
-/// line, there while the job's process runs.
+/// The pid in `launchctl print`'s `pid = <n>` line, there while the job
+/// runs.
 pub fn pid_in(description: &str) -> Option<u32> {
     description
         .lines()
@@ -172,25 +133,18 @@ pub fn smoke_run() -> bool {
     std::env::var_os(crate::smoke::SECONDS_VARIABLE).is_some()
 }
 
-/// Whether the launch removes the earlier agent: not in a smoke run
-/// (`smoke`), nor in a `fixture-host` build, nor when the executable `exe`
-/// is not in an installed app bundle ([`installed_bundle`]). A plain
-/// `cargo run` binary under `target/`, or Steno opened from its disk
-/// image, shares the home folder with an installed Steno and must not
-/// remove the agent that Steno still starts at login.
+/// Whether the launch removes the earlier agent: not in a smoke run, a
+/// `fixture-host` build, or outside an installed bundle. A `cargo run`
+/// binary or Steno on its disk image must not remove the agent an
+/// installed Steno still starts at login.
 pub fn removes_earlier_agent(smoke: bool, exe: Option<&std::path::Path>) -> bool {
     !smoke && !cfg!(feature = "fixture-host") && exe.is_some_and(installed_bundle)
 }
 
-/// Whether `exe` runs from an installed app bundle: inside one
-/// ([`inside_app_bundle`]), and neither on a mounted disk image
-/// (`/Volumes/…`) nor in the copy Gatekeeper runs an app from that was
-/// opened where it was downloaded (`…/AppTranslocation/…`). Both paths go
-/// away, when the image is ejected or the app is moved, so such a run
-/// registers no login item and removes no agent; the copy in
-/// Applications does both at its own first launch. A bundle built under
-/// `target/` counts as installed: it registers that path and sets
-/// `steno.mainAppRegistered`, so open one only in a test account.
+/// Whether `exe` runs from an installed app bundle: inside one, and
+/// neither on a mounted disk image (`/Volumes/…`) nor translocated by
+/// Gatekeeper, since both paths go away. A bundle built under `target/`
+/// counts as installed, so open one only in a test account.
 pub fn installed_bundle(exe: &std::path::Path) -> bool {
     inside_app_bundle(exe)
         && !exe.starts_with("/Volumes")
@@ -228,8 +182,7 @@ mod system {
 
     use super::{Job, LaunchAgents, MainApp, pid_in, smoke_run};
 
-    /// The system's `SMAppService.mainApp`. A smoke run, whose binary is
-    /// no installed app, never registers or unregisters it.
+    /// The system's `SMAppService.mainApp`.
     pub struct SystemMainApp;
 
     impl MainApp for SystemMainApp {
@@ -261,8 +214,8 @@ mod system {
         }
     }
 
-    /// `$HOME/Library/LaunchAgents`, where the plugin wrote (it took the
-    /// home from `HOME`), and launchd's GUI domain of this user.
+    /// `$HOME/Library/LaunchAgents`, where the plugin wrote, and launchd's
+    /// GUI domain of this user.
     pub struct UserLaunchAgents {
         directory: Option<PathBuf>,
     }
@@ -281,8 +234,7 @@ mod system {
         }
     }
 
-    /// `gui/<uid>/<label>`, launchd's name for the job in this user's GUI
-    /// domain.
+    /// `gui/<uid>/<label>`, launchd's name for the job.
     fn service_target(label: &str) -> String {
         // SAFETY: `getuid` takes no arguments, touches no memory and
         // cannot fail (POSIX).
@@ -338,10 +290,8 @@ mod system {
     mod tests {
         use super::*;
 
-        /// The system's agents folder and launchd, under a label no job
-        /// has and in a folder of the test's own: the file is read and
-        /// deleted, and launchd answers that no such job is loaded. Nothing
-        /// is booted out or registered.
+        /// The real agents folder and launchd under an unused label: the
+        /// file is read and deleted, and nothing is booted out.
         #[test]
         fn the_system_agents_read_and_remove_by_label() {
             let folder = tempfile::tempdir().unwrap();
@@ -374,8 +324,7 @@ mod tests {
 
     use super::*;
 
-    /// The agent the plugin wrote for a build under the earlier
-    /// identifier (`auto-launch`'s template, `MacosLauncher::LaunchAgent`).
+    /// The agent the plugin wrote for a build under the earlier identifier.
     const EARLIER_AGENT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -393,8 +342,7 @@ mod tests {
 
     const OWN_PID: u32 = 4242;
 
-    /// A Launch Agents folder and launchd: one file and one job by label,
-    /// every call recorded.
+    /// A fake Launch Agents folder and launchd, every call recorded.
     #[derive(Default)]
     struct FakeAgents {
         file: RefCell<Option<String>>,
@@ -457,8 +405,7 @@ mod tests {
         }
     }
 
-    /// `SMAppService.mainApp`: a status, and what `register` turns it into
-    /// or the error it fails with.
+    /// A fake `SMAppService.mainApp`.
     struct FakeMainApp {
         status: Cell<LoginItemStatus>,
         registers_as: Result<LoginItemStatus, String>,
@@ -490,9 +437,7 @@ mod tests {
         }
     }
 
-    /// A build under the earlier identifier with launch at login on left
-    /// its agent loaded (the app was opened from the Finder, or quit): the
-    /// job is booted out and its file deleted.
+    /// A loaded leftover agent is booted out and its file deleted.
     #[test]
     fn a_leftover_agent_is_booted_out_and_deleted() {
         let agents = FakeAgents::with(EARLIER_AGENT, Job::Loaded { pid: None });
@@ -504,10 +449,8 @@ mod tests {
         assert!(agents.file.borrow().is_none());
     }
 
-    /// The first login after the update: launchd started this process from
-    /// the leftover agent. Booting it out would end the app, so only the
-    /// file goes, and the next login starts the app once, as the login
-    /// item.
+    /// When launchd started this process from the agent, only the file
+    /// goes.
     #[test]
     fn the_agent_this_process_runs_as_loses_its_file_only() {
         let agents = FakeAgents::with(EARLIER_AGENT, Job::Loaded { pid: Some(OWN_PID) });
@@ -519,8 +462,6 @@ mod tests {
         assert!(agents.file.borrow().is_none());
     }
 
-    /// An agent that is not loaded loses its file; no agent at all is
-    /// only read for.
     #[test]
     fn an_unloaded_agent_loses_its_file_and_none_is_nothing() {
         let agents = FakeAgents::with(EARLIER_AGENT, Job::NotLoaded);
@@ -534,8 +475,7 @@ mod tests {
         assert_eq!(none.calls(), ["read"]);
     }
 
-    /// A file under the label that starts another program is not Steno's
-    /// and stays; one that cannot be read is reported.
+    /// Another program's file stays; an unreadable one is reported.
     #[test]
     fn an_agent_that_is_not_stenos_stays() {
         let other = EARLIER_AGENT.replace("/Contents/MacOS/steno-desktop", "/Contents/MacOS/Steno");
@@ -557,13 +497,10 @@ mod tests {
         ));
     }
 
-    /// The leftover agent goes in `setup` before the host's launch, whose
-    /// first-launch registration (`Host::register_login_item_on_first_launch`)
-    /// would otherwise register the main app beside a Launch Agent that
-    /// still starts the same binary.
+    /// The leftover agent goes in `setup` before the host's first-launch
+    /// registration.
     #[test]
     fn the_leftover_agent_goes_before_the_hosts_launch() {
-        // Without the carriage returns a Windows checkout may add.
         let main = include_str!("../main.rs").replace("\r\n", "\n");
         let setup = &main[main.find("\nfn setup(").unwrap()..];
         let removal = setup
@@ -575,10 +512,9 @@ mod tests {
         assert!(removal < launch);
     }
 
-    /// Only an executable in an installed app bundle removes the earlier
-    /// agent, and never in a smoke run or a `fixture-host` build: a
-    /// `cargo run` binary does not, whatever it is named, nor does Steno
-    /// opened from its disk image or translocated by Gatekeeper.
+    /// Only an installed app bundle removes the earlier agent, never a
+    /// smoke run, a `fixture-host` build, a disk image or a translocated
+    /// copy.
     #[test]
     fn only_a_run_from_an_installed_bundle_removes_the_agent() {
         use std::path::Path;
@@ -626,15 +562,10 @@ mod tests {
         }
     }
 
-    /// The launch's removal asks the gate before it touches the agent
-    /// (`autostart::remove_earlier_agent`), and the shell tells the host
-    /// whether it runs from an installed bundle (`host::Host::real`,
-    /// through `autostart::installed_bundle`, which asks
-    /// `main_app::installed_bundle`), so neither is left to a plain binary
-    /// under `target/` or a disk image.
+    /// The removal and the host's installed flag both go through
+    /// `installed_bundle`.
     #[test]
     fn the_launch_asks_whether_it_runs_from_an_installed_bundle() {
-        // Without the carriage returns a Windows checkout may add.
         let autostart = include_str!("../autostart.rs").replace("\r\n", "\n");
         let removal = &autostart[autostart
             .find("\npub fn remove_earlier_agent() {")
@@ -655,8 +586,7 @@ mod tests {
         ));
     }
 
-    /// A boot-out that fails still deletes the file, so the next login
-    /// does not load the agent.
+    /// A failed boot-out still deletes the file.
     #[test]
     fn a_failed_bootout_still_deletes_the_file() {
         let agents = FakeAgents {
@@ -672,8 +602,7 @@ mod tests {
         assert!(agents.file.borrow().is_none());
     }
 
-    /// A file that cannot be deleted is a failure, not a removal, even
-    /// when its job was booted out.
+    /// A file that cannot be deleted is a failure.
     #[test]
     fn a_file_that_cannot_be_deleted_is_a_failure() {
         let agents = FakeAgents {
@@ -716,9 +645,7 @@ mod tests {
         assert_eq!(pid_in(idle), None);
     }
 
-    /// The real `SMAppService.mainApp` status of the test binary, read
-    /// without registering anything: an unbundled binary has no login
-    /// item, so it is not enabled.
+    /// The unbundled test binary's real login item is not enabled.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_system_status_reads_without_registering() {

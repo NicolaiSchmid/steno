@@ -1,52 +1,8 @@
-//! Linux: the systemd drop-ins that give Steno the time its save needs
-//! when the session stops the unit Steno runs in. systemd sends SIGTERM,
-//! and `SIGKILL` once the stop has waited out the unit's `TimeoutStopSec`:
-//! 5 s in both units below, while the save the app runs on SIGTERM may
-//! take up to `SHUTDOWN_PATIENCE` (ten seconds) and the process ends
-//! `EXIT_GRACE` (two) after it at the latest. Each drop-in raises the
-//! timeout to 20 s (`DropIn`):
-//!
-//! - **The autostart unit** (`DropIn::AUTOSTART`): a desktop that runs XDG
-//!   autostart through systemd (KDE Plasma, uwsm sessions such as
-//!   Omarchy's) runs Steno's entry in `~/.config/autostart` as the unit
-//!   `systemd-xdg-autostart-generator` makes from it, with
-//!   `TimeoutStopSec=5s`. Its drop-in follows Launch at login.
-//! - **GNOME's scope** (`DropIn::GNOME_SCOPE`): gnome-session starts
-//!   autostart entries, and gnome-shell apps from the dash and the app
-//!   grid, in a scope of their own, `app-gnome-<id>-<pid>.scope`, which
-//!   gnome-session's `app-gnome-.scope.d/override.conf` gives
-//!   `TimeoutStopSec=5s`. Its drop-in is installed at every launch,
-//!   whatever Launch at login says, and never removed.
-//!
-//! How they get in place:
-//!
-//! - **The `.deb`** installs both under `/usr/lib/systemd/user` (`files`
-//!   in `tauri.conf.json`). Its `postinst` reloads the user managers, so
-//!   an app already running when the package is upgraded gets the 20 s,
-//!   and skips a user whose entry is gone unless their autostart unit is
-//!   known to be stopped (`linux/deb-postinst.sh`).
-//! - **The user's copies**: the app writes the same files into the user's
-//!   own unit directory (`sync`, at each launch and at each switch of
-//!   Launch at login), for the `AppImage` and installs from before the
-//!   drop-ins. A write leaves a reload owed (`RELOAD_OWED`) until a reload
-//!   goes through, so one that failed, was skipped or was cut off by a
-//!   kill is made up for at the next `sync`. With nothing written and
-//!   nothing owed there is no reload: each one reruns every generator of
-//!   the user manager.
-//! - **Managed** (`STENO_LOGIN_ITEM=managed`): the switch of Launch at
-//!   login writes nothing, though it shows on. The autostart unit's
-//!   drop-in is written only while the app runs as that unit and its
-//!   entry stands (one an earlier build wrote, which goes at the exit, or
-//!   the user's own), and the exit that removes that entry removes the
-//!   drop-in with it (`autostart::at_exit`).
-//! - **The reload rule** (`may_reload`): as the autostart unit
-//!   (`runs_as_autostart_unit`) the app reloads only while the unit's
-//!   entry stands. Once the entry is gone, a reload unloads the unit, and
-//!   the session's end then stops the app without a SIGTERM. For the same
-//!   reason Launch at login, turned off while the app runs as that unit,
-//!   goes off at the exit (`autostart::set_enabled`).
-//!
-//! Rust only: the Swift app is a macOS login item.
+//! Linux: the systemd drop-ins that raise the stop timeout of the unit
+//! Steno runs in from 5 s to 20 s, so the save on SIGTERM
+//! (`SHUTDOWN_PATIENCE` plus `EXIT_GRACE`) finishes before `SIGKILL`. One
+//! is for the XDG autostart unit, one for GNOME's app scopes; the `.deb`
+//! ships both and `sync` writes the user's own copies.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -54,37 +10,29 @@ use std::path::{Path, PathBuf};
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 
-/// One drop-in: the unit it is for, its file name in the unit's `.d`
-/// directory, and its contents, byte for byte the file the `.deb`
-/// installs.
+/// One drop-in: its unit, its file name in the unit's `.d` directory, and
+/// its contents, byte for byte the file the `.deb` installs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DropIn {
-    /// The unit's name, or for GNOME's scopes the name systemd also reads
-    /// drop-ins under for every `app-gnome-steno\x2ddesktop-<pid>.scope`:
-    /// the name cut after its last `-`, plus `.scope`.
+    /// The unit's name; for GNOME's scopes, the prefix systemd also reads
+    /// drop-ins under (the name cut after its last `-`, plus `.scope`).
     unit: &'static str,
     file_name: &'static str,
     contents: &'static str,
 }
 
 impl DropIn {
-    /// For the unit the generator makes from the plugin's entry,
-    /// `steno-desktop.desktop` (the Linux product name in
-    /// `tauri.linux.conf.json`): `app-<name>@autostart.service`, the name
-    /// escaped as systemd escapes a unit name, `-` as `\x2d`. Named
-    /// `10-` so a drop-in of the user's own (`systemctl --user edit`,
-    /// `override.conf`) still wins.
+    /// The unit the generator makes from `steno-desktop.desktop`, with `-`
+    /// escaped as `\x2d`. Named `10-` so a user's own drop-in still wins.
     const AUTOSTART: Self = Self {
         unit: "app-steno\\x2ddesktop@autostart.service",
         file_name: "10-steno.conf",
         contents: include_str!("../linux/autostart-service-stop-timeout.conf"),
     };
 
-    /// For every `app-gnome-steno\x2ddesktop-<pid>.scope`, GNOME's scope
-    /// for the app id `steno-desktop`. Drop-ins apply in file name order
-    /// across the directories, so the name sorts after gnome-session's
-    /// `override.conf`; naming it `override.conf` would replace that file
-    /// and drop its `PartOf=graphical-session.target`.
+    /// GNOME's scope for the app id `steno-desktop`. The name sorts after
+    /// gnome-session's `override.conf` rather than replacing it, which
+    /// would drop its `PartOf=graphical-session.target`.
     const GNOME_SCOPE: Self = Self {
         unit: "app-gnome-steno\\x2ddesktop-.scope",
         file_name: "zz-steno.conf",
@@ -95,36 +43,27 @@ impl DropIn {
     #[cfg(test)]
     const ALL: [Self; 2] = [Self::AUTOSTART, Self::GNOME_SCOPE];
 
-    /// The drop-in's path below a unit directory: `<unit>.d/<file name>`.
     fn relative_path(&self) -> String {
         format!("{}.d/{}", self.unit, self.file_name)
     }
 
-    /// The user's own copy: `$HOME/.config/systemd/user/<unit>.d/<file
-    /// name>`, whatever `XDG_CONFIG_HOME` says. The plugin writes the
-    /// autostart entry to `$HOME/.config/autostart` (auto-launch), so the
-    /// generator sees it only in a user manager whose config home is
-    /// `$HOME/.config`, which is where that manager reads drop-ins; an
-    /// `XDG_CONFIG_HOME` the app sees may be set for the units alone
-    /// (`environment.d`, `systemctl --user set-environment`).
+    /// The user's own copy under `$HOME/.config/systemd/user`, whatever
+    /// `XDG_CONFIG_HOME` says: the generator sees the entry only in a
+    /// manager whose config home is `$HOME/.config`.
     fn user_path(&self, home: &Path) -> PathBuf {
         home.join(".config/systemd/user").join(self.relative_path())
     }
 }
 
-/// The mark of a reload the user manager owes, in the support directory:
-/// set when `sync` writes a drop-in, cleared only by a reload that went
-/// through (`settle`). A file, so the debt outlives a kill before the
-/// reload.
+/// The mark of a reload the user manager owes: set when `sync` writes a
+/// drop-in, cleared by a reload that went through. A file, so the debt
+/// outlives a kill.
 const RELOAD_OWED: &str = "systemd-reload-owed";
 
-/// Brings the user's copies in line with Launch at login: installs GNOME's
-/// scope drop-in, and the autostart unit's for `Some(true)`; removes the
-/// autostart unit's for `Some(false)`; leaves it for `None` (the entry
-/// could not be read). Has the user manager reload when it wrote a file or
-/// a reload is owed (`RELOAD_OWED` in `marks`, the support directory), as
-/// `may_reload` allows. A failure is logged and changes nothing else:
-/// Launch at login works without the drop-ins.
+/// Brings the user's copies in line with Launch at login (`None`: the
+/// entry could not be read, leave it) and reloads the user manager when
+/// a file was written or a reload is owed, as `may_reload` allows. A
+/// failure is logged: Launch at login works without the drop-ins.
 pub fn sync(login_item: Option<bool>, marks: Option<&Path>) {
     let Some(home) = home() else {
         tracing::warn!("no home directory for the stop timeout drop-ins");
@@ -140,10 +79,8 @@ pub fn sync(login_item: Option<bool>, marks: Option<&Path>) {
     );
 }
 
-/// `sync` under `home`, with the owed reload's mark at `owed`, for an app
-/// that runs as the autostart unit or not: a write sets the mark, and
-/// `reload` runs once when the mark is there (always, with no place for
-/// it), as `may_reload` allows. A removal alone owes no reload.
+/// `sync` under `home`, with the owed reload's mark at `owed`. A removal
+/// alone owes no reload.
 fn sync_in(
     home: &Path,
     owed: Option<&Path>,
@@ -168,39 +105,32 @@ fn sync_in(
     }
 }
 
-/// Sets (`on`) or clears the owed reload's mark at `owed`; a failure is
-/// logged.
 fn mark_owed(owed: &Path, on: bool) {
     if let Err(error) = crate::autostart::set_mark(owed, on) {
         tracing::debug!(%error, on, "the mark of an owed reload");
     }
 }
 
-/// Whether the user manager may reload its units: always when the app
-/// does not run as the autostart unit, and as that unit only while its
-/// entry stands (`Some(true)`). Without the entry, or with an entry that
-/// could not be read, a reload may unload the running unit, and the
-/// session's end then stops the app without a SIGTERM.
+/// Whether the user manager may reload: as the autostart unit only while
+/// its entry stands, since a reload without it unloads the running unit
+/// and the session's end then stops the app without a SIGTERM.
 fn may_reload(login_item: Option<bool>, as_autostart_unit: bool) -> bool {
     login_item == Some(true) || !as_autostart_unit
 }
 
-/// Removes the autostart unit's drop-in without a reload, at the exit
-/// that removes the unit's entry (`autostart::at_exit`).
+/// Removes the autostart unit's drop-in without a reload.
 pub fn remove_autostart() {
     if let Some(home) = home() {
         change(&DropIn::AUTOSTART, &home, false);
     }
 }
 
-/// The user's home directory, if it is an absolute path.
 fn home() -> Option<PathBuf> {
     std::env::home_dir().filter(|home| home.is_absolute())
 }
 
 /// Installs (`on`) or removes `drop_in`'s copy under `home`; true when it
-/// wrote the file. Logs the change, and a failure at `warn` with its kind,
-/// the path and the error's text at `debug` (`logs.rs`).
+/// wrote the file.
 fn change(drop_in: &DropIn, home: &Path, on: bool) -> bool {
     let path = drop_in.user_path(home);
     let changed = if on {
@@ -228,10 +158,8 @@ fn change(drop_in: &DropIn, home: &Path, on: bool) -> bool {
     }
 }
 
-/// Writes `contents` at `path` unless it already holds them; true when it
-/// wrote. Atomic: a temporary file in the same directory (`temporary`),
-/// renamed over the old one. The drop-ins and the autostart entry
-/// (`packaged::write_entry`) are written this way.
+/// Writes `contents` at `path` unless it already holds them, through a
+/// temporary file renamed over the old one; true when it wrote.
 pub(crate) fn install(path: &Path, contents: &str) -> io::Result<bool> {
     if std::fs::read(path).is_ok_and(|current| current == contents.as_bytes()) {
         return Ok(false);
@@ -249,16 +177,14 @@ pub(crate) fn install(path: &Path, contents: &str) -> io::Result<bool> {
     written.map(|()| true)
 }
 
-/// The temporary file `install` renames to `path`: beside it, hidden, and
-/// ending in `.tmp`, so systemd never reads it as a drop-in, nor its
-/// autostart generator as an entry.
+/// Beside `path`, hidden and ending in `.tmp`, so systemd never reads it
+/// as a drop-in or an autostart entry.
 fn temporary(path: &Path) -> PathBuf {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
-/// Removes the drop-in at `path`, and its directory when that is left
-/// empty; true when there was one.
+/// Removes the drop-in at `path`, and its directory when left empty.
 fn remove(path: &Path) -> io::Result<bool> {
     match std::fs::remove_file(path) {
         Ok(()) => {}
@@ -272,17 +198,14 @@ fn remove(path: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Whether this process runs in the autostart unit (`DropIn::AUTOSTART`):
-/// a component of its cgroup's path in `/proc/self/cgroup` is that unit.
-/// False when the file cannot be read.
+/// Whether this process runs in the autostart unit, by its cgroup path.
 pub fn runs_as_autostart_unit() -> bool {
     std::fs::read_to_string("/proc/self/cgroup")
         .is_ok_and(|cgroup| runs_in(&cgroup, DropIn::AUTOSTART.unit))
 }
 
-/// Whether a cgroup listing, as `/proc/<pid>/cgroup` holds it (one
-/// `<id>:<controllers>:<path>` line per hierarchy), puts the process in
-/// `unit` or below it.
+/// Whether a `/proc/<pid>/cgroup` listing puts the process in `unit` or
+/// below it.
 fn runs_in(cgroup: &str, unit: &str) -> bool {
     cgroup
         .lines()
@@ -290,9 +213,8 @@ fn runs_in(cgroup: &str, unit: &str) -> bool {
         .any(|path| path.split('/').any(|component| component == unit))
 }
 
-/// Asks the systemd user manager on the session bus to reload its units
-/// (`systemctl --user daemon-reload`), on a thread of its own so a slow
-/// bus holds nothing, then settles the owed reload at `owed` (`settle`).
+/// Has the user manager reload its units on a thread of its own, then
+/// settles the owed reload.
 fn reload_user_manager(owed: Option<PathBuf>) {
     crate::dbus::spawn_client(
         "steno-reload",
@@ -307,9 +229,8 @@ fn reload_user_manager(owed: Option<PathBuf>) {
     );
 }
 
-/// After a reload: one that went through clears the owed reload's mark at
-/// `owed`; one that failed is logged and sets it again (a reload that went
-/// through meanwhile may have cleared it), so the next `sync` asks again.
+/// Clears the owed mark after a reload that went through; sets it again
+/// after a failed one, so the next `sync` asks again.
 fn settle(owed: Option<&Path>, reloaded: &zbus::Result<()>) {
     match reloaded {
         Ok(()) => tracing::debug!("the systemd user manager reloaded its units"),
@@ -325,13 +246,10 @@ fn settle(owed: Option<&Path>, reloaded: &zbus::Result<()>) {
     }
 }
 
-// systemd's manager: its bus name, object path and interface.
 const SYSTEMD: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER: &str = "org.freedesktop.systemd1.Manager";
 
-/// The manager's `Reload` on `connection`, which answers once the reload
-/// is done.
 fn reload(connection: &Connection) -> zbus::Result<()> {
     connection.call_method(
         Some(SYSTEMD),
@@ -359,11 +277,7 @@ mod tests {
         root
     }
 
-    /// The unit names are the generator's for the entry the plugin writes
-    /// (`app-`, the desktop file's name without `.desktop`, escaped, `-`
-    /// as `\x2d`, `@autostart.service`) and gnome-session's for the app id
-    /// (`app-gnome-`, the same escaped name, `-<pid>.scope`). The name is
-    /// the Linux product name.
+    /// The unit names match the generator's and gnome-session's naming.
     #[test]
     fn the_units_are_the_ones_the_desktops_make_from_the_entry() {
         let config: serde_json::Value =
@@ -381,8 +295,7 @@ mod tests {
         );
     }
 
-    /// Each file sets the stop timeout in its unit type's section, at
-    /// least half again the save and the process's end.
+    /// Each file sets a stop timeout longer than the save and the exit.
     #[test]
     fn each_drop_in_raises_the_stop_timeout_above_the_save() {
         for (drop_in, section) in [
@@ -411,8 +324,7 @@ mod tests {
         }
     }
 
-    /// GNOME's file comes after gnome-session's `override.conf` without
-    /// replacing it; the autostart unit's comes before a user's own.
+    /// File names sort after gnome-session's and before a user's own.
     #[test]
     fn the_file_names_sort_where_their_values_win() {
         assert!(DropIn::GNOME_SCOPE.file_name > "override.conf");
@@ -425,8 +337,7 @@ mod tests {
         }
     }
 
-    /// The `.deb` installs each drop-in under `/usr/lib/systemd/user` from
-    /// the file its contents come from, and no other unit file.
+    /// The `.deb` installs exactly these drop-ins, from their source files.
     #[test]
     fn the_deb_installs_both_drop_ins() {
         let config: serde_json::Value =
@@ -449,9 +360,8 @@ mod tests {
         }
     }
 
-    /// A `systemctl` for the postinst: logs each call to `$FAKE/calls`,
-    /// lists `$FAKE/managers`, answers `is-active` with `$FAKE/<user>`
-    /// (`error`: a failed call, which prints nothing on stdout), and fails
+    /// A fake `systemctl`: logs calls to `$FAKE/calls`, lists
+    /// `$FAKE/managers`, answers `is-active` from `$FAKE/<user>` and fails
     /// the reload of the user `fails`.
     const FAKE_SYSTEMCTL: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE/calls"
@@ -476,14 +386,11 @@ esac
 [ "$1" = passwd ] && grep "^[^:]*:x:$2:" "$FAKE/passwd"
 "#;
 
-    /// The guard on systemd running, which the test points at `$FAKE`.
     const SYSTEMD_RUNNING: &str = "[ -d /run/systemd/system ]";
 
-    /// The `.deb`'s postinst (`postInstallScript` in `tauri.conf.json`),
-    /// with a fake `systemctl` and `getent` first on its `PATH`, the
-    /// running user managers' users as `(user, autostart entry, the unit's
-    /// state)`, and `$HOME` (root's) holding an entry of its own. Returns
-    /// the script's exit status and the `systemctl` calls.
+    /// Runs the `.deb`'s postinst with fake `systemctl` and `getent` and
+    /// the given `(user, entry, unit state)` managers. Returns the exit
+    /// status and the `systemctl` calls.
     fn run_postinst(
         name: &str,
         argument: Option<&str>,
@@ -531,7 +438,6 @@ esac
             std::fs::write(home.join(&entry), b"").unwrap();
         };
         let (mut managers, mut passwd) = (String::new(), String::new());
-        // One manager whose uid has no passwd entry, which is skipped.
         managers.push_str("user@999.service loaded active running User Manager for UID 999\n");
         for (uid, (user, has_entry, state)) in (1000..).zip(users) {
             let home = root.join("home").join(user);
@@ -568,14 +474,9 @@ esac
         (status, calls.lines().map(str::to_owned).collect())
     }
 
-    /// At `configure` the postinst reloads every running user manager
-    /// whose user has the autostart entry, or whose autostart unit is known
-    /// to be stopped (`inactive`, `failed`), without asking for the unit's
-    /// state where the entry stands. It skips a user whose unit runs, is
-    /// starting or stopping, or whose state the call could not read, since
-    /// without the entry the reload would unload a running unit; it reads
-    /// the user's home from `passwd`, not root's `$HOME`. A failed reload
-    /// fails nothing.
+    /// At `configure` the postinst reloads each user manager whose user
+    /// has the entry or whose unit is known stopped, skips the rest, reads
+    /// homes from `passwd`, and survives a failed reload.
     #[test]
     fn the_debs_postinst_reloads_only_where_the_unit_survives_it() {
         let users = [
@@ -608,7 +509,6 @@ esac
         assert_eq!(calls, expected);
     }
 
-    /// Only `configure` acts, and only where systemd runs.
     #[test]
     fn the_debs_postinst_acts_only_at_configure_under_systemd() {
         let users = [("stopped", false, "inactive")];
@@ -623,9 +523,7 @@ esac
         }
     }
 
-    /// Under `$HOME/.config` whatever `XDG_CONFIG_HOME` says: the second
-    /// half fails for a `user_path` that follows it, where the test runs
-    /// with it set elsewhere (a nix-shell, some desktops).
+    /// The path ignores `XDG_CONFIG_HOME`.
     #[test]
     fn the_user_copy_is_under_home_dot_config() {
         if let Some(home) = home() {
@@ -672,8 +570,7 @@ esac
         );
 
         std::fs::write(&file, "[Service]\nTimeoutStopSec=5s\n").unwrap();
-        // A hard link to the old file keeps its bytes: a new file was
-        // renamed over it, not the old one rewritten in place.
+        // A hard link keeps the old bytes: the file was renamed over.
         let old = root.join("old");
         std::fs::hard_link(&file, &old).unwrap();
         assert!(
@@ -692,9 +589,7 @@ esac
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// A rename that fails (a directory in the drop-in's place) is an
-    /// error, and the temporary file goes; the temporary file is one
-    /// systemd never reads.
+    /// A failed rename is an error and leaves no temporary file.
     #[test]
     fn a_failed_install_leaves_no_temporary_file() {
         let root = scratch("blocked");
@@ -736,7 +631,6 @@ esac
         let file = DropIn::AUTOSTART.user_path(&root);
         let result = install(&file, DropIn::AUTOSTART.contents);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        // Root ignores the mode, and there the write goes through.
         match result {
             Err(_) => assert!(!file.exists()),
             Ok(wrote) => assert!(wrote && file.exists()),
@@ -744,11 +638,8 @@ esac
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// `sync` installs GNOME's drop-in always and the autostart unit's
-    /// while Launch at login is on, and reloads once per write, never
-    /// after a removal alone: that reload would unload a running
-    /// autostarted Steno's unit. Each reload here goes through and clears
-    /// the mark.
+    /// `sync` installs GNOME's drop-in always and the autostart one while
+    /// Launch at login is on, and reloads per write, never after a removal.
     #[test]
     fn sync_follows_the_login_item_and_reloads_after_a_write() {
         let root = scratch("sync");
@@ -784,11 +675,8 @@ esac
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// A write owes a reload until one goes through: a reload that failed,
-    /// or one skipped as the autostart unit without its entry, is asked
-    /// for again at the next `sync`, though it writes nothing, under the
-    /// same rule (`may_reload`). With no place for the mark, every `sync`
-    /// reloads.
+    /// A failed or skipped reload stays owed until a later `sync`; with no
+    /// place for the mark, every `sync` reloads.
     #[test]
     fn an_owed_reload_is_asked_for_until_one_goes_through() {
         let root = scratch("owed");
@@ -827,10 +715,7 @@ esac
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// As the autostart unit, `sync` writes GNOME's drop-in (the first
-    /// launch of this build, a `.deb` install) but reloads only while the
-    /// entry stands: with the entry gone, or unread, the reload could
-    /// unload the unit the app runs in, and stays owed.
+    /// As the autostart unit, `sync` reloads only while the entry stands.
     #[test]
     fn as_the_autostart_unit_it_reloads_only_while_the_entry_stands() {
         for (login_item, reloaded) in [(Some(false), false), (None, false), (Some(true), true)] {
@@ -850,8 +735,6 @@ esac
         }
     }
 
-    /// A reload that went through clears the mark, and a failed one sets
-    /// it, also after a success cleared it meanwhile.
     #[test]
     fn a_reload_settles_the_owed_mark() {
         let root = scratch("settle");
@@ -894,8 +777,7 @@ esac
         assert!(!runs_in("", unit));
     }
 
-    /// On this process's real cgroup listing: its own innermost cgroup
-    /// counts, and the test runner is not the autostart unit.
+    /// The test runner's real cgroup is not the autostart unit.
     #[test]
     fn the_real_cgroup_names_its_own_unit() {
         let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") else {
@@ -912,8 +794,7 @@ esac
         assert!(!runs_as_autostart_unit(), "{cgroup}");
     }
 
-    /// systemd's manager as far as `Reload` goes: each call arrives on the
-    /// channel.
+    /// A fake systemd manager that reports each `Reload` on a channel.
     struct FakeSystemd {
         reloaded: mpsc::Sender<()>,
     }
@@ -925,7 +806,6 @@ esac
         }
     }
 
-    /// The reload is one `Reload` on systemd's manager.
     #[test]
     fn the_reload_calls_the_managers_reload() {
         let Some(daemon) = crate::dbus::tests::Daemon::start() else {

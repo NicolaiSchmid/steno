@@ -1,37 +1,8 @@
-//! The tray icon: the Swift menu bar item's menu as a native menu on every
-//! platform. On macOS it is the menu bar extra (a template icon, so it
-//! follows the bar's appearance); on Linux it is a status notifier item and
-//! on Windows a notification area icon, both with the app icon. The menu
-//! is the Swift popover's: Record (or Stop), Record in person, the
-//! meetings whose speakers wait for a review, the processing queue and the
-//! five recent meetings (each opens its meeting), Open Steno, Settings,
-//! Launch at login, Check for Updates, Quit (Exit on Windows). Pending
-//! reviews also count on the icon: a number beside it on macOS and where a
-//! Linux host shows a label, and in the tooltip everywhere. Only the Mac's
-//! menu shows shortcut hints (`shortcut`).
-//!
-//! Every action is in the menu (`MENU`), and a click on the icon does
-//! nothing the menu does not: macOS and Windows open the menu on a left
-//! click as on a right one, and on Linux the host decides what a left
-//! click does. KDE Plasma and GNOME's `AppIndicator` extension open the
-//! menu; a host that sends `Activate` instead, as Omarchy's bar may, gets
-//! an error back (libayatana-appindicator does not implement it), and
-//! there only a right click opens the menu.
-//!
-//! The tray also keeps the process alive: with it, closing the main window
-//! hides it and the process stays, as the Swift menu bar app stays; without
-//! a tray the window closes and the process quits with it, saving a
-//! recording in progress first (`main.rs`). On Linux a tray that was built
-//! still counts as none while nothing shows its icon (`has_host`).
-//!
-//! The items are `actions::MenuAction`s and their handler is
-//! `actions::on_menu_event`, registered once by `main.rs`: Tauri hands
-//! every menu event to the same listeners, whether from the tray's menu
-//! or, on macOS, the menu bar's (`menu.rs`), whose items carry the same
-//! ids.
-//!
-//! Swift: `MenuBarView.swift`, `MenuBarLabel` and `MenuBarLabelPresentation`
-//! in `StenoApp.swift` and `FloatingContent.swift`.
+//! The tray icon and its native menu on every platform: Record rows, the
+//! meetings awaiting review, the processing queue and recent meetings,
+//! then the app's items (`MENU`). Pending reviews also count on the icon.
+//! With a tray, closing the main window hides it and the process stays;
+//! on Linux a tray counts only while a host shows it (`has_host`).
 
 use std::sync::Mutex;
 
@@ -52,11 +23,9 @@ use crate::{
     recording::{RecorderState, RecordingState},
 };
 
-/// The tray's id, for `AppHandle::tray_by_id`.
 pub const TRAY_ID: &str = "steno";
 
-/// The Record item's text per recorder state: the same words as the
-/// sidebar's control (`RecordButton` in `sidebar.tsx`).
+/// The Record item's text per recorder state, the sidebar control's words.
 pub const fn record_label(state: RecordingState) -> &'static str {
     match state {
         RecordingState::Idle => "Record",
@@ -66,33 +35,27 @@ pub const fn record_label(state: RecordingState) -> &'static str {
     }
 }
 
-/// Whether the Record item does anything: not while the recorder is
-/// between states.
+/// Whether the Record item does anything: not between states.
 pub const fn record_enabled(state: RecordingState) -> bool {
     matches!(state, RecordingState::Idle | RecordingState::Recording)
 }
 
-/// "Record in person" is offered only to an idle recorder
-/// (`RecordingControlPresentation.offersInPerson`).
+/// "Record in person" is offered only to an idle recorder.
 pub const fn in_person_enabled(state: RecordingState) -> bool {
     matches!(state, RecordingState::Idle)
 }
 
-/// What both Record rows read once Quit was chosen (`note_quitting`).
 pub const QUITTING: &str = "Quitting…";
 
-/// The two Record rows: Record (or Stop) and "Record in person", each
-/// with its text and whether it is enabled.
+/// The two Record rows, each with its text and whether it is enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordRows {
     pub record: (&'static str, bool),
     pub in_person: (&'static str, bool),
 }
 
-/// The Record rows for the recorder's `state`: once quitting, both read
-/// "Quitting…", disabled, whatever the recorder does next, since a start
-/// is refused from then on (`Recorder::refuse_starts`; Rust only: the
-/// Swift app's Quit ended its menu).
+/// The Record rows for `state`; once quitting both read "Quitting…",
+/// disabled, since every start is refused from then on.
 pub const fn record_rows(state: RecordingState, quitting: bool) -> RecordRows {
     if quitting {
         RecordRows {
@@ -107,9 +70,8 @@ pub const fn record_rows(state: RecordingState, quitting: bool) -> RecordRows {
     }
 }
 
-/// The icon's tooltip, the Swift label's accessibility text, "Steno" or
-/// "Steno, recording" (the elapsed time is the bubble's, not the tray's),
-/// then the pending reviews: "Steno, 2 meetings to review".
+/// The icon's tooltip: "Steno", "Steno, recording", then the pending
+/// reviews ("Steno, 2 meetings to review").
 pub fn tooltip(state: RecordingState, reviews: usize) -> String {
     let base = if state.is_busy() {
         "Steno, recording"
@@ -123,13 +85,11 @@ pub fn tooltip(state: RecordingState, reviews: usize) -> String {
     }
 }
 
-/// The number beside the icon: the pending reviews, none at 0.
 fn badge(reviews: usize) -> Option<String> {
     (reviews > 0).then(|| reviews.to_string())
 }
 
-/// One line of the meeting block, which sits between the Record rows and
-/// Open Steno.
+/// One line of the meeting block, between the Record rows and Open Steno.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Line {
     Separator,
@@ -137,9 +97,8 @@ enum Line {
     Meeting(TrayRow),
 }
 
-/// The meeting block: the reviews, then "Processing" over the queue, then
-/// "Recent" over the recent meetings, each part that has rows after a
-/// separator.
+/// The meeting block: reviews, then "Processing" and "Recent", each part
+/// with rows after a separator.
 fn lines(meetings: &TrayMeetings) -> Vec<Line> {
     let mut lines = Vec::new();
     for (header, rows) in [
@@ -157,9 +116,8 @@ fn lines(meetings: &TrayMeetings) -> Vec<Line> {
     lines
 }
 
-/// Whether two blocks have the same items and differ at most in a
-/// meeting row's text, so the texts can be set in place; a progress event
-/// moves only the percentage.
+/// Whether two blocks differ at most in a row's text, so it can be set in
+/// place (a progress event moves only the percentage).
 fn same_items(shown: &[Line], next: &[Line]) -> bool {
     shown.len() == next.len()
         && shown.iter().zip(next).all(|pair| match pair {
@@ -168,10 +126,8 @@ fn same_items(shown: &[Line], next: &[Line]) -> bool {
         })
 }
 
-/// Where the meeting block starts in the menu: after the Record rows.
 const BLOCK_AT: usize = 2;
 
-/// A menu item of the meeting block.
 enum BlockItem {
     Separator(PredefinedMenuItem<Wry>),
     Text(MenuItem<Wry>),
@@ -202,7 +158,6 @@ impl BlockItem {
     }
 }
 
-/// The meeting block as shown, and what the icon's tooltip says.
 struct Block {
     lines: Vec<Line>,
     items: Vec<BlockItem>,
@@ -221,8 +176,6 @@ impl Default for Block {
     }
 }
 
-/// The rows that change while the app runs: the two Record rows, and
-/// whether Launch at login can be clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Rows {
     record: RecordRows,
@@ -230,16 +183,12 @@ struct Rows {
 }
 
 /// What the changing rows show, apart from the menu items so a test can
-/// drive it. The Record rows follow the recorder until Quit, then read
-/// "Quitting…" ([`record_rows`]); Launch at login, switchable or not from
-/// the build on, is disabled at Quit too, as a switch clicked then would
-/// land beside the exit's own (`autostart::at_exit`) or not at all. It
-/// remembers the rows last set, so a `recording` snapshot that moved only
-/// the levels (20 a second) sets nothing.
+/// drive it. At Quit both Record rows and Launch at login are disabled.
+/// It remembers the rows last set, so a snapshot that moved only the
+/// levels sets nothing.
 #[derive(Debug)]
 struct RowState {
-    /// Whether the system lets Launch at login be switched
-    /// (`autostart::switchable`).
+    /// Whether the system lets Launch at login be switched.
     switchable: bool,
     /// Set once, by [`Self::quit`].
     quitting: bool,
@@ -255,13 +204,12 @@ impl RowState {
         }
     }
 
-    /// A `recording` snapshot in `state`: the rows to set, none when they
-    /// already read so.
+    /// The rows to set for a `recording` snapshot, none when unchanged.
     fn recording(&mut self, state: RecordingState) -> Option<Rows> {
         self.show(state)
     }
 
-    /// Quit was chosen: the rows to set, none when they already read so.
+    /// The rows to set at Quit, none when unchanged.
     fn quit(&mut self) -> Option<Rows> {
         self.quitting = true;
         self.show(RecordingState::Idle)
@@ -277,8 +225,7 @@ impl RowState {
 }
 
 /// The live items, kept as managed state so a `recording` snapshot can
-/// retitle them. The Record rows are the tray's and, on macOS, the menu
-/// bar's Record menu's (`menu::RecordMenu`).
+/// retitle them, with the macOS menu bar's Record menu.
 pub struct Tray {
     menu: Menu<Wry>,
     record: Vec<MenuItem<Wry>>,
@@ -288,10 +235,7 @@ pub struct Tray {
     block: Mutex<Block>,
 }
 
-/// A menu item's shortcut hint, on the Mac only: the menu bar extra's
-/// menu shows one as the Swift menus did, while Windows' notification
-/// area menu and a Linux status notifier menu show none, and a key
-/// pressed there with the menu closed does nothing.
+/// A menu item's shortcut hint, on the Mac only; other trays show none.
 const fn shortcut(platform: Platform, action: MenuAction) -> Option<&'static str> {
     match (platform, action) {
         (Platform::Macos, MenuAction::Record) => Some("Cmd+Shift+R"),
@@ -301,18 +245,15 @@ const fn shortcut(platform: Platform, action: MenuAction) -> Option<&'static str
     }
 }
 
-/// One row of the tray's menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Row {
     Item(MenuAction),
     Separator,
 }
 
-/// The tray's menu, top to bottom, without the meeting block: every
-/// `MenuAction` but Find Meetings once, so nothing waits on a click the
-/// host may not pass on. Quit is the shell's own
-/// item, not muda's predefined Quit, which ends the process without
-/// `ExitRequested`, so the shell could not shut down cleanly.
+/// The tray's menu without the meeting block: every `MenuAction` but Find
+/// Meetings once, since some hosts pass no left click on. Quit is the
+/// shell's own item: muda's predefined one skips `ExitRequested`.
 const MENU: [Row; 10] = [
     Row::Item(MenuAction::Record),
     Row::Item(MenuAction::RecordInPerson),
@@ -326,13 +267,11 @@ const MENU: [Row; 10] = [
     Row::Item(MenuAction::Quit),
 ];
 
-/// Builds the menu and the icon and manages `Tray`.
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let platform = Platform::CURRENT;
     let record = MenuAction::Record.item(app, shortcut(platform, MenuAction::Record))?;
     let in_person = MenuAction::RecordInPerson.item(app, None)?;
-    // A login item the system manages shows checked and cannot be
-    // switched (`autostart`).
+    // A login item the system manages shows checked and cannot be switched.
     let login_item = autostart::status(app);
     let switchable = autostart::switchable(login_item);
     let launch_at_login = CheckMenuItem::with_id(
@@ -358,8 +297,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .tooltip(tooltip(RecordingState::Idle, 0));
     builder = if cfg!(target_os = "macos") {
-        // The four-bar mark as a template image: the menu bar draws it in
-        // its own colour, as it drew the SF Symbol.
+        // A template image, drawn in the menu bar's own colour.
         builder
             .icon(Image::from_bytes(include_bytes!(
                 "../icons/tray/mark@2x.png"
@@ -389,8 +327,8 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// The host's meeting rows changed (`Host::on_tray`), on the main thread:
-/// the meeting block and the badge follow.
+/// The host's meeting rows changed, on the main thread: the meeting block
+/// and the badge follow.
 pub fn note_meetings(app: &AppHandle, meetings: &TrayMeetings) {
     let Some(tray) = app.try_state::<Tray>() else {
         return;
@@ -436,7 +374,6 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// A `recording` snapshot reached the main window: retitle the items.
 pub fn note_recording(app: &AppHandle, state: RecordingState) {
     let Some(tray) = app.try_state::<Tray>() else {
         return;
@@ -452,10 +389,8 @@ pub fn note_recording(app: &AppHandle, state: RecordingState) {
     }
 }
 
-/// Quit was chosen: both Record rows read "Quitting…", disabled, from now
-/// on ([`record_rows`]), so a Record that would be refused is never
-/// clicked unseen, and Launch at login is disabled ([`RowState`]). On the
-/// main thread, before the exit.
+/// Quit was chosen: disables both Record rows and Launch at login, on the
+/// main thread before the exit.
 pub fn note_quitting(app: &AppHandle) {
     if let Some(tray) = app.try_state::<Tray>() {
         let change = tray.row_state().quit();
@@ -469,8 +404,8 @@ impl Tray {
     }
 }
 
-/// Sets the rows a change asked for; nothing for none. On the main thread,
-/// as every change is, so they land in the order they were made.
+/// Sets the rows a change asked for, on the main thread so changes land in
+/// order.
 fn set_rows(tray: &Tray, change: Option<Rows>) {
     let Some(Rows {
         record,
@@ -491,20 +426,16 @@ fn set_rows(tray: &Tray, change: Option<Rows>) {
     let _ = tray.launch_at_login.set_enabled(launch_at_login);
 }
 
-/// The login item changed (from the menu or from Settings): the check mark
-/// follows what the system says, `on`, read off the main thread by the
-/// job that switched it, not what was asked.
+/// The login item changed: the check mark follows `on`, what the system
+/// says, not what was asked.
 pub fn note_login_item(app: &AppHandle, on: bool) {
     if let Some(tray) = app.try_state::<Tray>() {
         let _ = tray.launch_at_login.set_checked(on);
     }
 }
 
-/// Whether something on the desktop shows the tray's icon. macOS and
-/// Windows always do. On Linux a status notifier host does, as the
-/// follower in `tray_host` last read it; until it has, and with no session
-/// bus, none does, the safe side: closing main then ends the app instead
-/// of leaving it running unseen. Reading it asks nothing of the bus.
+/// Whether something shows the tray's icon: always on macOS and Windows,
+/// on Linux as `tray_host` last read it (none before its first reading).
 pub fn has_host() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -538,9 +469,8 @@ mod tests {
         }
     }
 
-    /// Every action but Find Meetings is in the tray's menu once, so a
-    /// host that passes no left click on still reaches each; separators
-    /// only between items.
+    /// Every action but Find Meetings is in the menu once; separators only
+    /// between items.
     #[test]
     fn the_menu_holds_every_action_once() {
         for &action in MenuAction::ALL {
@@ -576,8 +506,7 @@ mod tests {
         assert!(!record_enabled(RecordingState::Stopping));
     }
 
-    /// Once quitting, the Record rows read "Quitting…", disabled, for
-    /// every state the recorder moves through on the way out.
+    /// Once quitting, the Record rows stay "Quitting…" in every state.
     #[test]
     fn the_record_rows_read_quitting_once_quit_was_chosen() {
         for state in [
@@ -598,9 +527,7 @@ mod tests {
         }
     }
 
-    /// A `recording` snapshot that moves nothing the rows show (the
-    /// levels, 20 a second) sets no row, and every one that does sets
-    /// them, back to the first rows set as well.
+    /// A snapshot that changes nothing the rows show sets no row.
     #[test]
     fn only_a_snapshot_that_moves_a_row_sets_the_rows() {
         use RecordingState::{Idle, Recording, Stopping};
@@ -618,11 +545,7 @@ mod tests {
         }
     }
 
-    /// Quit sets the quitting rows (`note_quitting`): both Record rows
-    /// read "Quitting…", disabled, and Launch at login is disabled; every
-    /// snapshot after it (`note_recording`) leaves them so, whatever the
-    /// recorder does on the way out. A login item the system manages
-    /// stays disabled throughout.
+    /// Quit disables the Record rows and Launch at login for good.
     #[test]
     fn quit_sets_the_quitting_rows_and_the_snapshots_after_it_keep_them() {
         use RecordingState::{Idle, Recording, Starting, Stopping};
@@ -682,8 +605,7 @@ mod tests {
         }
     }
 
-    /// Each part with rows comes after a separator, the queue and the
-    /// recent meetings under their header; a block with no rows is empty.
+    /// Each part with rows follows a separator; no rows, no block.
     #[test]
     fn the_meeting_block_lists_each_part_that_has_rows() {
         assert_eq!(lines(&TrayMeetings::default()), []);
@@ -707,8 +629,8 @@ mod tests {
         );
     }
 
-    /// A progress event moves a row's text only, which is set in place; a
-    /// meeting that joins or leaves rebuilds the block.
+    /// A progress event sets a row's text in place; a joining or leaving
+    /// meeting rebuilds the block.
     #[test]
     fn only_a_new_meeting_rebuilds_the_block() {
         let queued = |text| TrayMeetings {

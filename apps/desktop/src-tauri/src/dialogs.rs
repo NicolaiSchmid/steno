@@ -1,20 +1,8 @@
-//! The native dialogs the pages cannot draw: the folder panels for the
-//! recordings folder and the Obsidian vault, the destructive alert,
-//! revealing a file, opening a folder. The Swift hosts open `NSOpenPanel`
-//! themselves inside the view model call; the Rust host is headless, so
-//! the shell shows the panel and hands the host the choice.
-//!
-//! The three chooser methods keep their contract (no params in, a
-//! `chosenPath` reply out) towards the page. Towards the host the shell
-//! calls the same method with `{ "path": "<chosen>" }` when a folder was
-//! chosen, so the host saves it as the Swift view models do
-//! (`audio.setAudioFolder`, `obsidian.chooseVault`, `model.chooseVault`),
-//! and does not call the host at all when the panel was cancelled. The
-//! reply to the page is the shell's, built from the choice, never the
-//! host's.
-//!
-//! Swift: `chooseFolder` in `SettingsBridge.swift` and
-//! `OnboardingBridge.swift`; `presentAlert` in `MainWindowBridge.swift`.
+//! The native dialogs the pages cannot draw: folder panels, the
+//! destructive alert, revealing a file, opening a folder. The host is
+//! headless, so the shell shows a folder panel and calls the same method
+//! on the host with `{ "path": "<chosen>" }`, or not at all when cancelled;
+//! the page's reply is built from the choice, never the host's.
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +14,6 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::bridge::{BridgeError, failed};
 
-/// The bridge methods that open a folder panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FolderChooser {
     /// `settings.recording.chooseFolder`
@@ -47,8 +34,7 @@ impl FolderChooser {
         }
     }
 
-    /// The panel's title; the Swift panels have none, the GTK and Windows
-    /// ones need one.
+    /// The panel's title, which GTK and Windows need.
     pub const fn title(self) -> &'static str {
         match self {
             Self::RecordingsFolder => "Choose where recordings are kept",
@@ -57,9 +43,8 @@ impl FolderChooser {
     }
 }
 
-/// `reply.chosenPath`: `{ "path": … }`, or `{}` when the panel was
-/// cancelled (`ChosenPathReply(path: nil)` encodes without the key). The
-/// `Some` shape is also what the host is told.
+/// `reply.chosenPath`: `{ "path": … }`, or `{}` when cancelled. The `Some`
+/// shape is also what the host is told.
 pub fn chosen_path_reply(path: Option<&Path>) -> Value {
     match path {
         Some(path) => json!({ "path": path.to_string_lossy() }),
@@ -92,11 +77,8 @@ pub async fn choose_folder(
     }
 }
 
-/// The host's destructive confirmation (`ui.confirmDestructive`, and the
-/// prompts the host raises itself before a delete): a warning alert with
-/// the prompt's title and message, its confirm button and Cancel; true
-/// when the user confirmed. Blocks until answered, so it runs on the
-/// command's thread, never the main one (`bridge_call` is async).
+/// The host's destructive confirmation: a warning alert, true when the user
+/// confirmed. Blocks until answered, so never call it on the main thread.
 pub fn confirm_destructive(app: &AppHandle, prompt: &ConfirmDestructiveParams) -> bool {
     app.dialog()
         .message(&prompt.message)
@@ -106,21 +88,18 @@ pub fn confirm_destructive(app: &AppHandle, prompt: &ConfirmDestructiveParams) -
         .blocking_show()
 }
 
-/// The alert's buttons: the prompt's confirm title, then Cancel.
 fn confirm_buttons(prompt: &ConfirmDestructiveParams) -> MessageDialogButtons {
     MessageDialogButtons::OkCancelCustom(prompt.confirm_title.clone(), "Cancel".to_owned())
 }
 
-/// Shows a file or folder in the file manager, selected where the
-/// platform can. The reveal methods (`settings.recording.revealFolder`,
-/// `meeting.reveal*`) need a path only the host knows, so the host calls
-/// this through its `Opener` (`host::ShellOpener`).
+/// Shows a file or folder in the file manager, selected where the platform
+/// can; the host calls it through its `Opener`.
 pub fn reveal(app: &AppHandle, path: &Path) -> Result<(), BridgeError> {
     app.opener().reveal_item_in_dir(path).map_err(failed)
 }
 
-/// Opens a URL the shell itself composed (a settings pane); the page's own
-/// links go through `bridge::openable_url` first.
+/// Opens a URL the shell itself composed; the page's links go through
+/// `bridge::openable_url` first.
 pub fn open_url(app: &AppHandle, url: &str) -> Result<(), BridgeError> {
     app.opener().open_url(url, None::<&str>).map_err(failed)
 }

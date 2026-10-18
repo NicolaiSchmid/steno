@@ -1,37 +1,11 @@
-//! The `steno:` URL scheme. The Swift Mac app registers none (`project.yml`
-//! has no `CFBundleURLTypes`); `steno://pair/v1?…` is the iPhone app's,
-//! the link the pairing QR code doubles as (`PairingPayload.swift`). The
-//! shell registers the scheme on every platform (`plugins.deep-link` in
-//! `tauri.conf.json`) and answers two links of its own, which land as the
-//! `app` snapshot's requests, the way `window.open` does:
-//!
-//! | Link | Effect |
-//! |---|---|
-//! | `steno://meeting/<uuid>` | opens the main window on that meeting (`requestedMeetingID`) |
-//! | `steno://settings[/<section>]` | opens Settings on the section (`requestedSettingsSection`) |
-//!
-//! A pairing link is logged (by its scheme and host only: its query holds
-//! the pairing secret) and ignored: the Mac is the host, not the phone.
-//! Anything else is logged and ignored too. A second instance
-//! started with a link hands it to the first (`tauri-plugin-single-instance`
-//! with its `deep-link` feature) and exits. Scheme and host are read
-//! case-insensitively, as RFC 3986 has them; the path is read as written,
-//! so a Settings section must be spelled as the contract spells it, while
-//! a meeting id reads in either case, as `UUID(uuidString:)` does.
-//!
-//! On Linux the `.deb` registers the scheme through the desktop entry
-//! (`linux/steno-desktop.desktop`: `Exec=… %u` and the
-//! `x-scheme-handler/steno` MIME type). An `AppImage` carries the same
-//! entry, but no system reads it, so an `AppImage` registers itself at
-//! start, as a debug build does (`registers_itself`).
-//!
-//! Swift: `apps/macos/project.yml` (no `CFBundleURLTypes`: the Mac app
-//! registers no scheme), `Sources/StenoHandover/Pairing/PairingPayload.swift`
-//! (the phone's `steno://pair` link).
+//! The `steno:` URL scheme: `steno://meeting/<uuid>` opens the main window
+//! on a meeting, `steno://settings[/<section>]` opens Settings, landing as
+//! the `app` snapshot's requests as `window.open` does. The phone's
+//! pairing link is logged by scheme and host only (its query holds the
+//! secret) and ignored. A second instance hands its link to the first.
 
 use steno_bridge::{SettingsSection, WindowParams};
 use steno_core::json::parse_uuid;
-// `app.env()`, for the `AppImage` that registers its own scheme.
 #[cfg(target_os = "linux")]
 use tauri::Manager as _;
 use tauri::{AppHandle, Url};
@@ -51,9 +25,8 @@ pub enum DeepLink {
 }
 
 /// Why a URL is not a link the shell follows. Each names the link by its
-/// scheme and host (`describe`) or by its path, never by its query: a
-/// pairing link's query holds the pairing secret, and these end up in the
-/// log.
+/// scheme and host or its path, never its query, which may hold the
+/// pairing secret.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DeepLinkError {
     #[error("not a {SCHEME}: link: {0}")]
@@ -68,7 +41,6 @@ pub enum DeepLinkError {
     Unknown(String),
 }
 
-/// The link as the log may name it: scheme and host, nothing after.
 pub fn describe(url: &Url) -> String {
     match url.host_str() {
         Some(host) => format!("{}://{host}", url.scheme()),
@@ -76,8 +48,8 @@ pub fn describe(url: &Url) -> String {
     }
 }
 
-/// The path's one segment: `""` for no path or `/`, `"x"` for `/x` and
-/// `/x/`; `None` for anything else (an empty segment, a second one).
+/// The path's one segment: `""` for none or `/`, `"x"` for `/x` and `/x/`;
+/// `None` otherwise.
 fn single_segment(path: &str) -> Option<&str> {
     if matches!(path, "" | "/") {
         return Some("");
@@ -88,11 +60,9 @@ fn single_segment(path: &str) -> Option<&str> {
 }
 
 impl DeepLink {
-    /// Reads a link. The host part is the verb (`steno://meeting/…`), as
-    /// the pairing link is written; a path-only form (`steno:/meeting/…`)
-    /// is not accepted. A meeting or Settings link is the verb and at most
-    /// one path segment: a query, a fragment, a user, a port or an empty
-    /// segment (`//`) make it no link the shell follows.
+    /// Reads a link: the host is the verb, and a meeting or Settings link
+    /// takes at most one path segment and nothing else (query, fragment,
+    /// user, port). Scheme and host are case-insensitive; the path is not.
     pub fn parse(url: &Url) -> Result<Self, DeepLinkError> {
         if !url.scheme().eq_ignore_ascii_case(SCHEME) {
             return Err(DeepLinkError::OtherScheme(format!("{}:", url.scheme())));
@@ -114,8 +84,7 @@ impl DeepLink {
         let path = url.path();
         let segment = single_segment(path);
         if verb == "meeting" {
-            // The hyphenated 36-character form only, as `UUID(uuidString:)`
-            // and the `window.open` params read it.
+            // The hyphenated form only, in either case.
             return segment
                 .and_then(parse_uuid)
                 .map(Self::Meeting)
@@ -131,8 +100,7 @@ impl DeepLink {
         }
     }
 
-    /// The `window.open` request the link amounts to; `None` for the
-    /// phone's link.
+    /// The `window.open` request the link amounts to; `None` for pairing.
     pub fn window_request(&self) -> Option<WindowParams> {
         match self {
             Self::Meeting(id) => Some(WindowParams {
@@ -150,7 +118,6 @@ impl DeepLink {
     }
 }
 
-/// Follows every link in `urls` that the shell answers.
 pub fn handle(app: &AppHandle, urls: &[Url]) {
     for url in urls {
         match DeepLink::parse(url) {
@@ -167,8 +134,7 @@ pub fn handle(app: &AppHandle, urls: &[Url]) {
     }
 }
 
-/// The log line for the phone's pairing link, named by scheme and host
-/// alone: its query carries the pairing secret.
+/// The log line for the pairing link, without its secret-bearing query.
 fn pairing_notice(url: &Url) -> String {
     format!(
         "{} is the iPhone's pairing link; nothing to do here",
@@ -176,26 +142,20 @@ fn pairing_notice(url: &Url) -> String {
     )
 }
 
-/// The log line for a link whose window did not open, named by scheme and
-/// host alone.
 fn not_followed(url: &Url, error: &impl std::fmt::Display) -> String {
     format!("{}: {error}", describe(url))
 }
 
 /// Whether the running binary registers the scheme itself on Linux or
-/// Windows: a debug build, which no installer put in place, and an
-/// `AppImage`, whose embedded desktop entry no system reads (the plugin
-/// writes one to the data directory that runs the `AppImage`). An
-/// installed `.deb`, `.msi` or NSIS build has its desktop entry or
-/// registry key from the installer.
+/// Windows: a debug build or an `AppImage`, whose desktop entry no system
+/// reads. Installed builds get it from the installer.
 #[cfg(any(target_os = "linux", windows, test))]
 pub const fn registers_itself(debug_build: bool, appimage: bool) -> bool {
     debug_build || appimage
 }
 
-/// Listens for links while the app runs and follows the one it may have
-/// been started with, registering the scheme first where the binary must
-/// (`registers_itself`).
+/// Listens for links while the app runs and follows the one it was started
+/// with, registering the scheme first where needed.
 pub fn install(app: &AppHandle) {
     #[cfg(any(target_os = "linux", windows))]
     {
@@ -236,7 +196,7 @@ mod tests {
         assert_eq!(request.window, BridgeWindow::Main);
         assert_eq!(request.meeting_id, Some(id));
         assert_eq!(request.section, None);
-        // Either case, as `UUID(uuidString:)` reads it; a trailing slash is fine.
+        // Either case; a trailing slash is fine.
         assert_eq!(
             link("steno://meeting/00000000-0000-0000-0000-00000000000A/").unwrap(),
             DeepLink::Meeting("00000000-0000-0000-0000-00000000000a".parse().unwrap())
@@ -303,8 +263,8 @@ mod tests {
         );
     }
 
-    /// A meeting or Settings link is the verb and one segment: anything a
-    /// URL can carry beside that is refused, named without its query.
+    /// Anything beside the verb and one segment is refused, named without
+    /// its query.
     #[test]
     fn a_link_carries_nothing_beyond_its_verb_and_segment() {
         let id = "00000000-0000-0000-0000-000000000001";
@@ -355,8 +315,7 @@ mod tests {
         );
     }
 
-    /// The pairing link's secret is in its query; the log names the link
-    /// by its scheme and host alone.
+    /// The pairing link is logged by scheme and host alone.
     #[test]
     fn a_link_is_named_by_scheme_and_host_only() {
         let pair = Url::parse(
@@ -389,8 +348,7 @@ mod tests {
         assert!(!registers_itself(false, false));
     }
 
-    /// RFC 3986: the scheme and the host are case-insensitive; the path is
-    /// not, except that a UUID reads in either case.
+    /// Scheme and host are case-insensitive; the path is not, except a UUID.
     #[test]
     fn scheme_and_host_read_in_any_case_and_the_path_as_written() {
         let id: Uuid = "00000000-0000-0000-0000-00000000000a".parse().unwrap();
@@ -409,9 +367,8 @@ mod tests {
         );
     }
 
-    /// The desktop entry the Linux installers carry hands a `steno:` link
-    /// to the running binary (`%u`) and claims the scheme. Read by line, so
-    /// a checkout with CRLF endings (Windows CI) reads the same entry.
+    /// The Linux desktop entry hands the link to the binary (`%u`) and
+    /// claims the scheme.
     #[test]
     fn the_desktop_entry_claims_the_scheme_and_takes_the_link() {
         let entry = include_str!("../linux/steno-desktop.desktop");

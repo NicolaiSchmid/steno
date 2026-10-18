@@ -1,28 +1,9 @@
-//! The smoke run CI drives under `xvfb-run` on Linux and in the runner's
-//! session on macOS (`smoke-linux.sh`, `smoke-macos.sh`): with
-//! `STENO_SMOKE_SECONDS=<n>` the shell opens all three windows side by side
-//! and both floating panels under them, asks main for a meeting before its
-//! page has mounted (as a deep link at a cold launch does), waits that
-//! long, then checks the panels and closes main. It exits 0 when the main
-//! window sent `page.ready`, at least one snapshot reached it in reply,
-//! the meeting reached it after its `page.ready`, the tray was built, both
-//! panels were visible at the size their page reported and held it
-//! (`keeps_its_size`), a second prompt reached the prompt's window, both
-//! panels hid, closing main hid it rather than destroying it, and on Linux
-//! closing Settings kept it and opening it again on a section loaded a
-//! fresh page there, and closing onboarding kept it and told the host once
-//! (`windows::Kept`), and on Linux, in a run as the autostart unit,
-//! turning Launch at login off left the entry and set the mark, and on
-//! again cleared it without rewriting the entry, or, while the system
-//! manages the login item, turning it off changed nothing
-//! (`check_login_item_waits_for_the_exit`); 1 otherwise; a value that is
-//! not a positive number ends the run at once with 2. With
-//! `STENO_SMOKE_RELAUNCH` set, the run ends as an update's relaunch does,
-//! through `main::shut_down_for_relaunch`, without the restart.
-//! Screenshots of the Xvfb root during the wait are the review evidence;
-//! the windows carry what the host's database holds (nothing on a fresh
-//! runner, synthetic data with the fixture host), the prompts name
-//! made-up apps.
+//! The smoke run CI drives (`smoke-linux.sh`, `smoke-macos.sh`): with
+//! `STENO_SMOKE_SECONDS=<n>` the shell opens every window and both panels,
+//! asks main for a meeting before its page mounts, waits, then checks the
+//! page handshake, the tray, the panels, the window close rules and, on
+//! Linux, Launch at login. Exits 0 when all pass, 1 otherwise, 2 for an
+//! invalid value.
 
 use std::{
     collections::HashMap,
@@ -48,52 +29,43 @@ use crate::{
 
 pub const SECONDS_VARIABLE: &str = "STENO_SMOKE_SECONDS";
 
-/// Set, the run ends as an update's relaunch does (`arm`), so
-/// `smoke-linux.sh` can check what that exit keeps.
+/// Set, the run ends as an update's relaunch does, so `smoke-linux.sh`
+/// can check what that exit keeps.
 const RELAUNCH_VARIABLE: &str = "STENO_SMOKE_RELAUNCH";
 
 /// What the run has seen so far; managed state, read by the timer thread.
-/// Counts on every run, logs only on a smoke run.
 #[derive(Debug, Default)]
 pub struct Smoke {
     armed: AtomicBool,
     main_ready: AtomicBool,
     main_snapshots: AtomicUsize,
-    /// The meeting asked of main before its page mounted reached it after
-    /// its `page.ready` (`windows::Pages`).
+    /// The meeting asked of main reached it after its `page.ready`.
     request_delivered: AtomicBool,
-    /// How many times a Settings page sent `page.ready`: a kept window
-    /// opened again mounts a new one.
+    /// How many Settings pages sent `page.ready`.
     settings_ready: AtomicUsize,
-    /// How many times the host heard that onboarding closed
-    /// (`onboarding_closed` in `main.rs`).
+    /// How many times the host heard that onboarding closed.
     onboarding_closed: AtomicUsize,
     tray_built: AtomicBool,
-    /// The size each panel's page last reported, checked against the
-    /// window at the end.
+    /// The size each panel's page last reported.
     panel_sizes: Mutex<HashMap<Panel, (f64, f64)>>,
 }
 
 impl Smoke {
-    /// The tray was built (`main.rs`); the run asserts it where the
-    /// platform has one.
+    /// The tray was built.
     pub fn note_tray(&self) {
         self.tray_built.store(true, Ordering::SeqCst);
     }
 
-    /// The host heard that onboarding closed (`main.rs`).
+    /// The host heard that onboarding closed.
     pub fn note_onboarding_closed(&self) {
         self.onboarding_closed.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Whether this is a smoke run (`arm`).
     pub fn is_armed(&self) -> bool {
         self.armed.load(Ordering::SeqCst)
     }
 
-    /// A panel's page reported its size; logged on a smoke run so the
-    /// screenshots can be read against the numbers, and kept so the end of
-    /// the run can check the window took it.
+    /// A panel's page reported its size; logged and kept for the end check.
     pub fn note_panel_size(&self, panel: Panel, size: (f64, f64)) {
         if self.armed.load(Ordering::SeqCst) {
             stderr_line!(
@@ -115,8 +87,7 @@ impl Smoke {
             .and_then(|sizes| sizes.get(&panel).copied())
     }
 
-    /// Records a window's `page.ready`; the main window's is the one the
-    /// run waits for.
+    /// Records a window's `page.ready`.
     pub fn note_ready(&self, label: &str) {
         if self.armed.load(Ordering::SeqCst) {
             stderr_line!("[steno-desktop] smoke: page.ready from {label}");
@@ -129,10 +100,9 @@ impl Smoke {
         }
     }
 
-    /// Records a snapshot emitted to a window (`bridge::emit`); main's are
-    /// the proof that a host answered its `page.ready`, and an `app`
-    /// snapshot to main carrying `SMOKE_MEETING` after that `page.ready`
-    /// is the request the run asked for before it.
+    /// Records a snapshot emitted to a window: main's prove the host
+    /// answered, and an `app` snapshot carrying `SMOKE_MEETING` after its
+    /// `page.ready` is the delivered request.
     pub fn note_snapshot(&self, label: &str, topic: BridgeTopic, payload: &Value) {
         if label != BridgeWindow::Main.as_str() {
             return;
@@ -146,7 +116,7 @@ impl Smoke {
         }
     }
 
-    /// The run's verdict; `checks` is the panels' and the windows' (`arm`).
+    /// The run's verdict, given the panels' and windows' `checks`.
     fn outcome(&self, checks: Result<(), Outcome>) -> Outcome {
         match (
             self.main_ready.load(Ordering::SeqCst),
@@ -168,7 +138,6 @@ impl Smoke {
 /// The meeting the run asks main for before its page mounts.
 pub const SMOKE_MEETING: &str = "00000000-0000-0000-0000-00000000005E";
 
-/// How a smoke run ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Ok {
@@ -178,23 +147,15 @@ pub enum Outcome {
     NoPageReady,
     /// The page mounted but the host published nothing to it.
     NoSnapshot,
-    /// The meeting asked of main before its page mounted never reached it
-    /// after its `page.ready`: lost, or published before the page listened.
+    /// The early meeting request never reached main after `page.ready`.
     RequestLost,
-    /// `tray::build` failed (the error was logged at startup).
+    /// `tray::build` failed.
     NoTray,
-    /// A panel did not show, take its page's size, keep it, take a second
-    /// prompt or hide; the message says which.
+    /// A panel check failed; the message says which.
     PanelsFailed(String),
-    /// Main did not hide on close, or on Linux Settings or onboarding was
-    /// not kept on a close, or Settings did not open again on its section;
-    /// the message says which.
+    /// A window close check failed; the message says which.
     WindowsFailed(String),
-    /// On Linux, as the autostart unit: turning Launch at login off
-    /// changed the entry at once, set no mark, or still read as on, or
-    /// turning it on again kept the mark or rewrote the entry, or, while
-    /// the system manages the login item, turning it off changed the login
-    /// item at all; the message says which.
+    /// A Launch at login check failed; the message says which.
     #[cfg(target_os = "linux")]
     LoginItemFailed(String),
 }
@@ -227,13 +188,12 @@ impl Outcome {
     }
 }
 
-/// What `STENO_SMOKE_SECONDS` asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Wait {
     /// The variable is unset: an ordinary run.
     NotASmokeRun,
     Seconds(u64),
-    /// Set, but not a positive number; the raw value for the message.
+    /// Set, but not a positive number.
     Invalid(String),
 }
 
@@ -247,7 +207,6 @@ pub fn wait_from(value: Option<&str>) -> Wait {
     }
 }
 
-/// Arms the smoke run if `STENO_SMOKE_SECONDS` is set; a no-op otherwise.
 pub fn arm(app: &AppHandle) {
     let seconds = match wait_from(env::var(SECONDS_VARIABLE).ok().as_deref()) {
         Wait::NotASmokeRun => return,
@@ -262,7 +221,7 @@ pub fn arm(app: &AppHandle) {
     };
     app.state::<Smoke>().armed.store(true, Ordering::SeqCst);
     stderr_line!("[steno-desktop] smoke: waiting {seconds}s for page.ready and a snapshot on main");
-    // Side by side on the Xvfb screen so one root capture shows every window.
+    // Side by side so one root capture shows every window.
     let (main_width, main_height) = Spec::of(BridgeWindow::Main).size;
     let opened = windows::open(
         app,
@@ -281,8 +240,7 @@ pub fn arm(app: &AppHandle) {
     if let Err(error) = opened {
         stderr_line!("[steno-desktop] smoke: opening the other windows failed: {error}");
     }
-    // A meeting for main before its page has mounted, as a `steno:` link
-    // at a cold launch asks: it must wait for main's `page.ready`.
+    // Asked before main's page mounts, as a deep link at a cold launch.
     let meeting = WindowParams {
         window: BridgeWindow::Main,
         section: None,
@@ -291,8 +249,7 @@ pub fn arm(app: &AppHandle) {
     if let Err(error) = windows::open_requested(app, &meeting) {
         stderr_line!("[steno-desktop] smoke: asking main for a meeting failed: {error}");
     }
-    // Both panels at once, under Settings, which the one rule never does
-    // (`FloatingContent::resolve`); the run shows them to screenshot them.
+    // Both panels at once, which the app never does, to screenshot them.
     let prompt = PromptRequest {
         app_name: "Acme Meet".into(),
         seconds: 60,
@@ -333,17 +290,13 @@ pub fn arm(app: &AppHandle) {
     });
 }
 
-/// Where the smoke puts the panels: right of the main window, under
-/// Settings; `smoke-linux.sh` crops the same places.
+/// Where the smoke puts the panels; `smoke-linux.sh` crops the same places.
 pub const PANELS_X: f64 = 1160.0;
 pub const PANEL_PROMPT_Y: f64 = 700.0;
 pub const PANEL_BUBBLE_Y: f64 = 800.0;
 
-/// Both panels exist, are visible and have taken the size their page
-/// reported, hold it (`keeps_its_size`), the
-/// prompt's window takes a second prompt (`takes_a_second_prompt`), and
-/// both hide on request and report hidden: the same `show`, `resize` and
-/// `hide` the one rule drives, checked from outside.
+/// Both panels show at their page's size, hold it, the prompt takes a
+/// second request, and both hide on request.
 fn check_panels(app: &AppHandle) -> Result<(), String> {
     let smoke = app.state::<Smoke>();
     for panel in Panel::ALL {
@@ -382,8 +335,7 @@ fn check_panels(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// A second prompt reaches the prompt's existing window: it is navigated
-/// to the new request (`Panel::navigates_per_request`), not just shown.
+/// A second prompt navigates the prompt's existing window.
 fn takes_a_second_prompt(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
     let second = PromptRequest {
         app_name: "Acme Notes".into(),
@@ -405,8 +357,7 @@ fn takes_a_second_prompt(app: &AppHandle, window: &WebviewWindow) -> Result<(), 
     Ok(())
 }
 
-/// Closing the main window while a tray stands hides it and keeps it
-/// (`hides_on_close` in `main.rs`): the tray and the panels go through it.
+/// Closing main while a tray stands hides it rather than destroying it.
 fn check_main_hides(app: &AppHandle) -> Result<(), String> {
     let main = app
         .get_webview_window(BridgeWindow::Main.as_str())
@@ -423,10 +374,8 @@ fn check_main_hides(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// On Linux closing Settings keeps the window (`windows::Kept`), and
-/// opening it again on a section loads a fresh page on that section, as a
-/// new window would: the window is visible, shows the section's route and
-/// a new page sent `page.ready`. Elsewhere a close destroys it, as before.
+/// On Linux, a closed Settings window is kept and reopens on a section
+/// with a fresh page; elsewhere a close destroys it.
 fn check_settings_reopens(app: &AppHandle) -> Result<(), String> {
     let label = BridgeWindow::Settings.as_str();
     if !windows::keeps_on_close(label) {
@@ -442,8 +391,7 @@ fn check_settings_reopens(app: &AppHandle) -> Result<(), String> {
     };
     windows::open_requested(app, &params)
         .map_err(|error| format!("opening Settings again: {error}"))?;
-    // A page mounts within a second or two; a debug build on a busy
-    // machine may need longer.
+    // A slow debug build may take a while to mount the page.
     let smoke = app.state::<Smoke>();
     for _ in 0..50 {
         if smoke.settings_ready.load(Ordering::SeqCst) > mounted {
@@ -471,10 +419,8 @@ fn check_settings_reopens(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// On Linux closing onboarding keeps the window, hidden, and the host hears
-/// of the close once, as it did of a destroyed window (`onboarding_closed`
-/// in `main.rs`), so onboarding counts as seen; a second close of the kept
-/// window tells it nothing. Elsewhere a close destroys it, as before.
+/// On Linux, a closed onboarding window is kept and the host hears of the
+/// close once; elsewhere a close destroys it.
 fn check_onboarding_is_kept(app: &AppHandle) -> Result<(), String> {
     let label = BridgeWindow::Onboarding.as_str();
     if !windows::keeps_on_close(label) {
@@ -493,16 +439,10 @@ fn check_onboarding_is_kept(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// On Linux, in a run as the autostart unit (`smoke-linux.sh`'s runs in
-/// that unit), turns Launch at login off as the General section does: the
-/// entry stays as it was, marked to go at the exit, and reads as off
-/// (`autostart::set_enabled`). Where the entry stands, it turns it on
-/// again, which clears the mark and leaves the entry unwritten, and then
-/// off once more. The log line says whether the entry stands, which the
-/// script checks against what the launch should have left. While the
-/// system manages the login item, turning it off must change nothing:
-/// the entry as it was, no mark, and `Managed`. Nothing to check outside
-/// the unit.
+/// On Linux, as the autostart unit: turning Launch at login off leaves the
+/// entry marked to go at the exit and reads as off, and on again clears
+/// the mark without rewriting the entry. While the system manages the
+/// login item, turning it off changes nothing.
 #[cfg(target_os = "linux")]
 fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt as _;
@@ -548,7 +488,7 @@ fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
     };
     turn_off()?;
     if before {
-        // The plugin's file (auto-launch): $HOME/.config/autostart.
+        // The plugin's file under $HOME/.config/autostart.
         let written = || {
             std::env::home_dir()
                 .map(|home| {
@@ -578,9 +518,8 @@ fn check_login_item_waits_for_the_exit(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Closes the window of `label`, called `name` in the messages, and
-/// returns it once a close kept it (`windows::Kept`): still there, hidden.
-/// Then closes the kept window again, which changes nothing.
+/// Closes the window of `label` (`name` in messages) twice and returns it
+/// once kept, still there and hidden.
 fn close_twice(app: &AppHandle, label: &str, name: &str) -> Result<WebviewWindow, String> {
     let window = app
         .get_webview_window(label)
@@ -598,12 +537,8 @@ fn close_twice(app: &AppHandle, label: &str, name: &str) -> Result<WebviewWindow
     Ok(kept)
 }
 
-/// A panel's size is the page's alone, held each platform's way
-/// (`panels::RESIZABLE`). On Linux the window is resizable and pinned
-/// (`panels::pin_size`): a request for another size, as a drag on its
-/// resize border makes, leaves it as it is. Elsewhere it is not
-/// resizable, so no drag can change it, and no request is made: macOS
-/// takes a size set from code whatever the window's minimum and maximum.
+/// A panel keeps its page's size: on Linux a resize request is refused by
+/// the pin, elsewhere the window is not resizable.
 fn keeps_its_size(window: &WebviewWindow, label: &str, size: (f64, f64)) -> Result<(), String> {
     let resizable = window.is_resizable().map_err(|error| error.to_string())?;
     if resizable != panels::RESIZABLE {
@@ -669,8 +604,7 @@ mod tests {
         assert_eq!(smoke.outcome(Ok(())), Outcome::Ok { snapshots: 2 });
     }
 
-    /// The meeting counts only when it reaches main after its `page.ready`:
-    /// one published before the page listened is lost to it.
+    /// The meeting counts only when it reaches main after its `page.ready`.
     #[test]
     fn the_early_meeting_counts_only_after_page_ready() {
         let smoke = Smoke::default();
@@ -691,7 +625,6 @@ mod tests {
         );
         smoke.note_snapshot("main", BridgeTopic::App, &app_requesting(SMOKE_MEETING));
         assert_eq!(smoke.outcome(Ok(())), Outcome::Ok { snapshots: 4 });
-        // The meeting is the codec's form of the id the run asks for.
         let id = parse_uuid(SMOKE_MEETING).unwrap();
         assert_eq!(windows::Request::meeting(&id).value, SMOKE_MEETING);
     }

@@ -1,49 +1,9 @@
-//! Linux: whether something on the desktop shows the tray's icon. The icon
-//! is a status notifier item, which a host shows: KDE Plasma's panel,
-//! Waybar, Omarchy's bar, GNOME with the `AppIndicator` extension. Hosts
-//! register with a watcher, which owns `org.kde.StatusNotifierWatcher` on
-//! the session bus and says through its `IsStatusNotifierHostRegistered`
-//! property whether one did. Stock GNOME runs neither. A watcher can run
-//! with no host (Waybar's says none until its tray registers), so the shell
-//! asks whether a watcher runs and whether a host registered with it. KDE's
-//! watcher, in `kded`, always says one did and sends no host signal, so on
-//! Plasma only its name counts: while `kded` runs, a close hides the main
-//! window, also after the panel has gone.
-//!
-//! A thread follows them for the whole run (`follow`): it reads the
-//! watcher's owner and the property at launch, and again whenever the
-//! name changes owner (`NameOwnerChanged`) or the watcher says a host
-//! registered or went (`StatusNotifierHostRegistered`,
-//! `StatusNotifierHostUnregistered`). The answer is kept in `HOSTED`, which
-//! a close of the main window reads without asking the bus (`has_host` in
-//! `tray.rs`): with a host the window hides behind the tray, without one
-//! the close quits through Quit's path, which saves a recording in
-//! progress first (`main.rs`). Until the first reading, with no session
-//! bus, after a reading that failed and once the bus has closed, the
-//! shell counts no host: closing the main window then ends the app
-//! instead of leaving it running unseen, the safe side. A failed reading
-//! (a watcher that does not answer within five seconds, for one) is read
-//! again ten seconds later, three times at most before the next change; a
-//! watcher that serves no object yet waits for the next change (below).
-//! An `XEmbed`-only tray is not asked for and counts as none too.
-//!
-//! The property is asked of the watcher's unique name, so asking never
-//! starts a watcher the bus could activate. A watcher whose object says it
-//! has no such property (`UnknownProperty`, `InvalidArgs`,
-//! `UnknownInterface`) counts as a host: its name is all there is to go
-//! on. One that serves no object at the path yet (`UnknownObject`,
-//! `UnknownMethod`), as `kded` does between taking the name and exporting
-//! its watcher, counts as none and is not read again before the next
-//! change: the tray library registers the icon again only when the name
-//! changes owner, so a later reading would count a host that does not
-//! list it.
-//!
-//! When the host goes while the main window is hidden, nothing on the
-//! desktop shows the window: during a recording the bubble stays on
-//! screen, with Stop, and a click on it opens the main window; otherwise
-//! starting Steno again brings it forward (single instance).
-//!
-//! Swift: none needed; an `NSStatusItem` always shows in the menu bar.
+//! Linux: whether a status notifier host (Plasma's panel, Waybar, GNOME's
+//! `AppIndicator` extension) shows the tray's icon. A thread (`follow`)
+//! reads the watcher's owner and `IsStatusNotifierHostRegistered` at launch
+//! and on every change, and keeps the answer in `HOSTED` for the main
+//! window's close: with a host it hides, without one it quits. Until a
+//! reading succeeds the shell counts no host, the safe side.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -55,43 +15,36 @@ use zbus::message::Type;
 
 use crate::dbus::{owner_of, patient, proxy, spawn_client};
 
-/// The name a status notifier watcher owns on the session bus, and the
-/// interface it serves.
+/// The name a status notifier watcher owns, and the interface it serves.
 const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 
-/// The watcher's object.
 const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 
-/// The watcher's property that says whether a host registered.
 const HOST_REGISTERED: &str = "IsStatusNotifierHostRegistered";
 
-/// How long the follower waits to read again after a reading failed, other
-/// than one that found no object (`serves_nothing`), and how many times it
-/// does before the next change.
+/// How long the follower waits to read again after a failed reading (one
+/// that found an object), and how many times before the next change.
 const RETRY: Duration = Duration::from_secs(10);
 const RETRIES: u32 = 3;
 
-/// The watcher's signals that change `HOST_REGISTERED`: Waybar's watcher
-/// and GNOME's extension send both, KDE's neither (its property is always
-/// true); the specification names only the first.
+/// The watcher's signals that change `HOST_REGISTERED`. KDE's watcher
+/// sends neither; its property is always true.
 const HOST_SIGNALS: [&str; 2] = [
     "StatusNotifierHostRegistered",
     "StatusNotifierHostUnregistered",
 ];
 
-/// What the session bus says about the watcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Watcher {
     /// No peer owns `WATCHER`.
     Absent,
     /// A peer owns it; `host` is its `HOST_REGISTERED`, none when the
-    /// watcher has no such property.
+    /// watcher lacks the property.
     Present { host: Option<bool> },
 }
 
-/// Whether a host shows the icon, from a reading of the bus: a watcher
-/// that says a host registered, or one without the property; no watcher,
-/// a watcher with no host, or a failed reading is none.
+/// Whether a host shows the icon: a watcher that says a host registered,
+/// or one without the property.
 fn shows_icon(reading: &zbus::Result<Watcher>) -> bool {
     match reading {
         Ok(Watcher::Present {
@@ -102,11 +55,9 @@ fn shows_icon(reading: &zbus::Result<Watcher>) -> bool {
     }
 }
 
-/// One reading: the watcher's owner (`GetNameOwner`), then its
-/// `HOST_REGISTERED`, asked of that unique name. Only an answer that the
-/// watcher has no such property is `host: None`; any other failure (no
-/// answer in time, the owner gone, a value of another type) fails the
-/// reading.
+/// One reading: the watcher's owner, then its `HOST_REGISTERED` asked of
+/// that unique name, so asking never activates a watcher. Only a
+/// missing-property answer is `host: None`; other failures fail the reading.
 fn read(session: &Connection) -> zbus::Result<Watcher> {
     let Some(owner) = owner_of(session, WATCHER)? else {
         return Ok(Watcher::Absent);
@@ -124,12 +75,9 @@ fn read(session: &Connection) -> zbus::Result<Watcher> {
     Ok(Watcher::Present { host })
 }
 
-/// Whether `error`, a watcher's answer to the property's `Get`, says its
-/// object has no such property: zbus and sd-bus answer `UnknownProperty`,
-/// `GDBus` and older Qt `InvalidArgs`, and an object without the watcher's
-/// interface `UnknownInterface`. `UnknownObject` and `UnknownMethod` say
-/// nothing is served at the path (`serves_nothing`), so they are not this
-/// answer.
+/// Whether `error`, the answer to the property's `Get`, says the object
+/// lacks the property (`UnknownProperty`, `InvalidArgs` or
+/// `UnknownInterface`, depending on the bus library).
 fn lacks_the_property(error: &zbus::fdo::Error) -> bool {
     use zbus::fdo::Error::{InvalidArgs, UnknownInterface, UnknownProperty};
     matches!(
@@ -138,9 +86,9 @@ fn lacks_the_property(error: &zbus::fdo::Error) -> bool {
     )
 }
 
-/// Whether `error` says the watcher's name is owned but nothing is served
-/// at its path yet (zbus answers `UnknownObject`, `GDBus` `UnknownMethod`).
-/// Such a reading is not read again before the next change.
+/// Whether `error` says the name is owned but nothing is served at its
+/// path yet. Not read again before the next change: the tray library
+/// registers the icon again only when the name changes owner.
 fn serves_nothing(error: &zbus::Error) -> bool {
     use zbus::fdo::Error::{UnknownMethod, UnknownObject};
     let zbus::Error::FDO(error) = error else {
@@ -149,11 +97,9 @@ fn serves_nothing(error: &zbus::Error) -> bool {
     matches!(**error, UnknownObject(_) | UnknownMethod(_))
 }
 
-/// What the follower last found; no host until its first reading.
 #[derive(Debug, Default)]
 struct Hosted(AtomicU8);
 
-/// `Hosted`'s values.
 const UNREAD: u8 = 0;
 const NO_HOST: u8 = 1;
 const HOST: u8 = 2;
@@ -163,33 +109,29 @@ impl Hosted {
         Self(AtomicU8::new(UNREAD))
     }
 
-    /// Whether a host shows the icon, as last read.
     fn shown(&self) -> bool {
         self.0.load(Ordering::SeqCst) == HOST
     }
 
-    /// Keeps a reading; true when it changes what the shell counts, or is
-    /// the first.
+    /// Keeps a reading; true when it changes the answer or is the first.
     fn note(&self, shown: bool) -> bool {
         let value = if shown { HOST } else { NO_HOST };
         self.0.swap(value, Ordering::SeqCst) != value
     }
 }
 
-/// The shell's reading.
 static HOSTED: Hosted = Hosted::new();
 
-/// Whether a host shows the icon, as the follower last read it
-/// (`tray::has_host`); none until its first reading.
+/// Whether a host shows the icon, as last read; none before the first
+/// reading.
 pub fn shown() -> bool {
     HOSTED.shown()
 }
 
-/// What the log says when the follower cannot start.
 const UNFOLLOWED: &str = "no tray host is followed, so closing the main window quits Steno";
 
-/// Starts the follower on the session bus, when there is one; without
-/// one the shell counts no host.
+/// Starts the follower on the session bus; without one the shell counts
+/// no host.
 pub fn follow() {
     if !crate::session_bus_named() {
         tracing::warn!("no session bus, so no tray host; closing the main window quits Steno");
@@ -200,14 +142,11 @@ pub fn follow() {
     });
 }
 
-/// Keeps `hosted` up to date from `session` until the bus closes: a
-/// reading now, and one after every change of the watcher's owner or of
-/// its hosts; a reading that failed is read again `retry` later, `RETRIES`
-/// times at most before the next change, unless the watcher served no
-/// object (`serves_nothing`). Two threads forward the signals, so neither
-/// stream waits while a reading runs; the readings run here, one at a
-/// time, and a burst of signals makes one reading. An error is one setting
-/// the follower up; the bus closing ends it with `Ok`, logged here.
+/// Keeps `hosted` up to date from `session` until the bus closes: reads now
+/// and after every change of the watcher's owner or hosts, and retries a
+/// failed reading `retry` later up to `RETRIES` times. Two threads forward
+/// the signals; the readings run here one at a time, so a burst makes one
+/// reading.
 fn follow_on(session: &Connection, hosted: &Hosted, retry: Duration) -> zbus::Result<()> {
     let owners = zbus::MatchRule::builder()
         .msg_type(Type::Signal)
@@ -243,8 +182,8 @@ fn follow_on(session: &Connection, hosted: &Hosted, retry: Duration) -> zbus::Re
         std::thread::Builder::new()
             .name("steno-tray-owner".to_owned())
             .spawn_scoped(scope, forward(owners, |_| true))?;
-        // A failure here leaves the scope, which then waits on the owner
-        // forwarder until the bus closes, so it is logged now.
+        // Logged now: a failure leaves the scope waiting on the owner
+        // forwarder until the bus closes.
         std::thread::Builder::new()
             .name("steno-tray-hosts".to_owned())
             .spawn_scoped(scope, forward(hosts, is_host_signal))
@@ -286,7 +225,6 @@ fn follow_on(session: &Connection, hosted: &Hosted, retry: Duration) -> zbus::Re
     })
 }
 
-/// Whether `signal` is one of the watcher's `HOST_SIGNALS`.
 fn is_host_signal(signal: &zbus::Message) -> bool {
     signal
         .header()
@@ -303,8 +241,6 @@ mod tests {
     use super::*;
     use crate::dbus::tests::Daemon;
 
-    /// A watcher with a host, a watcher with none, one that does not say,
-    /// no watcher, and a failed reading.
     #[test]
     fn a_host_shows_the_icon_only_where_the_watcher_says_one_registered() {
         let present = |host| Ok(Watcher::Present { host });
@@ -315,9 +251,7 @@ mod tests {
         assert!(!shows_icon(&Err(zbus::Error::Failure("no bus".to_owned()))));
     }
 
-    /// Which answers to the property's `Get` say the watcher lacks it, so
-    /// it counts as a host; every other one, a timeout and a vanished peer
-    /// among them, fails the reading.
+    /// Which `Get` answers count as a missing property, hence a host.
     #[test]
     fn only_an_answer_without_the_property_counts_as_a_host() {
         use zbus::fdo::Error;
@@ -347,8 +281,6 @@ mod tests {
         }
     }
 
-    /// No host until the first reading; a reading is news when it is the
-    /// first or changes the answer.
     #[test]
     fn the_first_reading_and_each_change_are_news() {
         let hosted = Hosted::new();
@@ -362,10 +294,8 @@ mod tests {
         assert!(!hosted.shown());
     }
 
-    /// The watcher as the follower asks it: the property, and the signals
-    /// sent by hand (`Connection::emit_signal`). Its first `hangs` answers
-    /// come only after `HANG`, longer than `follow_slowly`'s calls wait;
-    /// `asked` counts the questions.
+    /// A fake watcher: the property, and signals sent by hand. Its first
+    /// `hangs` answers come only after `HANG`; `asked` counts the questions.
     #[derive(Default)]
     struct FakeWatcher {
         registered: bool,
@@ -382,8 +312,7 @@ mod tests {
         }
     }
 
-    /// How long `FakeWatcher` takes to answer while it hangs, and how long
-    /// `follow_slowly`'s calls wait.
+    /// How long `FakeWatcher` hangs; longer than `follow_slowly` waits.
     const HANG: Duration = Duration::from_millis(600);
     const SHORT_PATIENCE: Duration = Duration::from_millis(200);
 
@@ -402,8 +331,7 @@ mod tests {
         }
     }
 
-    /// A watcher without the host property: only the specification's
-    /// `ProtocolVersion`.
+    /// A watcher without the host property.
     struct BareWatcher {
         version: i32,
     }
@@ -420,7 +348,6 @@ mod tests {
         serve_at(daemon, WATCHER_PATH, watcher)
     }
 
-    /// A peer on `daemon` that owns `WATCHER` and serves `watcher` at `path`.
     fn serve_at(
         daemon: &Daemon,
         path: &str,
@@ -436,13 +363,11 @@ mod tests {
             .unwrap()
     }
 
-    /// The follower on `daemon`, its reading in the returned `Hosted`.
     fn follow_daemon(daemon: &Daemon) -> Arc<Hosted> {
         spawn_follower(daemon.connect(), RETRY)
     }
 
-    /// The follower on `daemon` over a connection whose calls wait
-    /// `SHORT_PATIENCE`, reading again `retry` after a failure.
+    /// The follower on `daemon` over a connection with short call timeouts.
     fn follow_slowly(daemon: &Daemon, retry: Duration) -> Arc<Hosted> {
         let session = daemon
             .builder()
@@ -452,8 +377,6 @@ mod tests {
         spawn_follower(session, retry)
     }
 
-    /// The follower on `session` on a thread of its own, reading again
-    /// `retry` after a failure.
     fn spawn_follower(session: Connection, retry: Duration) -> Arc<Hosted> {
         let hosted = Arc::new(Hosted::new());
         let kept = hosted.clone();
@@ -461,8 +384,7 @@ mod tests {
         hosted
     }
 
-    /// Waits until `hosted` reads `shown` after its first reading, ten
-    /// seconds at most.
+    /// Waits up to ten seconds until `hosted` reads `shown`.
     fn reads(hosted: &Hosted, shown: bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
         let wanted = if shown { HOST } else { NO_HOST };
@@ -473,8 +395,7 @@ mod tests {
         assert_ne!(hosted.0.load(Ordering::SeqCst), UNREAD);
     }
 
-    /// No watcher is no host; a watcher with a host that comes later is
-    /// one; it going is none again.
+    /// The host follows the watcher's arrival and departure.
     #[test]
     fn the_follower_sees_a_watcher_come_and_go() {
         let Some(daemon) = Daemon::start() else {
@@ -488,8 +409,7 @@ mod tests {
         reads(&hosted, false);
     }
 
-    /// A watcher with no host is none until a host registers, and none
-    /// again once the host goes.
+    /// A watcher with no host counts once a host registers, until it goes.
     #[test]
     fn a_watcher_without_a_host_shows_nothing_until_one_registers() {
         let Some(daemon) = Daemon::start() else {
@@ -525,9 +445,8 @@ mod tests {
         reads(&hosted, true);
     }
 
-    /// A watcher that owns the name but serves no object at its path is no
-    /// host, also once it exports one: zbus answers `UnknownObject`, and
-    /// only the next change reads again.
+    /// A watcher that serves no object yet is no host, until the next
+    /// change.
     #[test]
     fn a_watcher_without_its_object_is_no_host() {
         let Some(daemon) = Daemon::start() else {
@@ -544,7 +463,6 @@ mod tests {
             asked: Arc::clone(&asked),
         };
         assert!(watcher.object_server().at(WATCHER_PATH, exported).unwrap());
-        // Time for the readings again that a failed reading gets.
         std::thread::sleep(retry * 3);
         assert_eq!(asked.load(Ordering::SeqCst), 0);
         assert!(!hosted.shown());
@@ -554,9 +472,8 @@ mod tests {
         reads(&hosted, true);
     }
 
-    /// A watcher that does not answer in time is no host, also after the
-    /// readings again, although its late answer says one registered; a
-    /// host signal after the retries are spent gets as many again.
+    /// A watcher that never answers in time is no host, after the retries;
+    /// a host signal earns a fresh set of retries.
     #[test]
     fn a_watcher_that_does_not_answer_is_no_host() {
         let Some(daemon) = Daemon::start() else {
@@ -592,8 +509,7 @@ mod tests {
         settles_at(2 * round);
     }
 
-    /// A reading that failed is read again without a signal: a watcher
-    /// that hangs once and then answers is a host.
+    /// A failed reading is retried without a signal.
     #[test]
     fn a_failed_reading_is_read_again() {
         let Some(daemon) = Daemon::start() else {

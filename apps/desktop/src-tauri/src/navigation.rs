@@ -1,14 +1,10 @@
 //! Where a window may navigate: the app's own origin and, in a build that
 //! loads it, the Vite dev server. External links go through `system.openURL`.
-//!
-//! Swift: `WebNavigationPolicy.swift`.
 
 use tauri::{AppHandle, Url};
 
-/// The dev server a window may navigate to. `dev` is Tauri's alias for a
-/// build without `custom-protocol`: the one that loads `devUrl` instead
-/// of the embedded bundle, so the one that may navigate there; a release
-/// has none.
+/// The dev server a window may navigate to: only in a `dev` build, which
+/// loads `devUrl` instead of the embedded bundle.
 pub fn dev_server(app: &AppHandle) -> Option<Url> {
     if cfg!(dev) {
         app.config().build.dev_url.clone()
