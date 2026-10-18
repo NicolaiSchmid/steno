@@ -1095,16 +1095,10 @@ fn ref_chain(words: &[Placed], vocab: &Vocab, w: usize, head: usize) -> bool {
 }
 
 /// Which extra pieces [`RefTexts::holds`] allows: the boundaries' own
-/// ([`ref_losses`]), or, to count a word they flag, also one of a counted
-/// class's: a later piece of a placed word across chunks' owned
-/// boundaries that lie in no decoded window, with no decoded window
-/// wholly between ([`Losses::across_gap`]); the same for a place the old
-/// merge did not keep, in an accepted recovery's owned span, across that
-/// span's owned start alone, which the recovery's window holds
-/// ([`Losses::across_own_window`]); a piece of an orphan word the old
-/// merge dropped, inside the old merge's own glue after the same word
-/// ([`Losses::inside_glue`]); or a piece no placed word lies near
-/// ([`Losses::unplaced`]).
+/// ([`ref_losses`]), or, to count a word they flag, also those of one
+/// counted class, as its count defines them: [`Losses::across_gap`],
+/// [`Losses::across_own_window`], [`Losses::inside_glue`] or
+/// [`Losses::unplaced`].
 #[derive(Clone, Copy)]
 enum Extras {
     Check,
