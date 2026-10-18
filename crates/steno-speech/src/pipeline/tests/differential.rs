@@ -2043,13 +2043,13 @@ fn the_boundary_check_fails_each_planted_glue_and_passes_each_limit() {
 
     // The drain that counted only the chunk runs before the gap: the rest
     // of word 5, which the old merge kept whole, glued onto word 2 across
-    // the empty chunk; and a copy of it onto word 3, across only the owned
-    // start of word 3's chunk.
+    // the empty chunk; and a copy of its last piece onto word 3, across
+    // only the owned start of word 3's chunk.
     let (case, mut run) = ref_later_recovery_case(&random_config(2, true), (13.5, 3.2, 10), 0);
     let main = [(0, 0), (1, 0), (1, 1), (1, 2), (2, 0)];
     let later = [(0, 0), (1, 1), (1, 2), (1, 0), (1, 1), (1, 2), (2, 0)];
     assert!(check(&case, &mut run, &main, &later));
-    let copy = [(0, 0), (1, 0), (1, 1), (1, 2), (2, 0), (1, 1), (1, 2)];
+    let copy = [(0, 0), (1, 0), (1, 1), (1, 2), (2, 0), (1, 2)];
     assert!(check(&case, &mut run, &main, &copy));
 
     // Case 1411: the old merge's text begins with the orphan ".s40".
@@ -2067,6 +2067,23 @@ fn the_boundary_check_fails_each_planted_glue_and_passes_each_limit() {
     assert!(check(&case, &mut run, &main, &dropped));
     let moved = [&main[..3], &main[4..8], &main[3..4], &main[8..]].concat();
     assert!(check(&case, &mut run, &main, &moved));
+
+    // A full stop moved onto the next word, both in one gap's window, far
+    // from any chunk: no extra piece crosses, so the word that lost it
+    // fails, and it is no recovery's leading orphan.
+    let regions = vec![sample_count(10.0)..sample_count(13.0)];
+    let words = vec![
+        ref_placed(vec![5, 41], 1.0, 4),
+        ref_placed(vec![14], 2.0, 4),
+    ];
+    let case = ref_case(crafted(20.0, &regions, &[]), words, regions);
+    let mut run = ref_run(&case, &random_config(1, true), 130, Hearing::every_frame(0));
+    assert!(check(
+        &case,
+        &mut run,
+        &[(0, 0), (0, 1), (1, 0)],
+        &[(0, 0), (1, 0), (0, 1)]
+    ));
 
     // Limit E: the layout of `a_recovery_that_missed_a_words_start_...`
     // and case 855 pass as they come out, the second at E's exact
