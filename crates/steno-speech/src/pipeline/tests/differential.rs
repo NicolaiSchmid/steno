@@ -1111,25 +1111,25 @@ impl<'a> RefTexts<'a> {
     /// a word of the old merge's, under `extras`.
     fn extra(&self, &(place, at): &RefPiece, &(first, head): &RefPiece, extras: Extras) -> bool {
         let between = at.min(head)..at.max(head);
-        let cuts = |b: usize| between.start < b && b <= between.end;
-        let crosses = |s: &Span| s.chunk && (cuts(s.owned.start) || cuts(s.owned.end));
-        let decoded = |b: usize| self.windows.iter().any(|w| w.contains(&b));
-        let crosses_decoded = |s: &Span| {
-            s.chunk
-                && [s.owned.start, s.owned.end]
-                    .into_iter()
-                    .any(|b| cuts(b) && decoded(b))
+        // Whether a chunk's owned start or end lies between the two pieces,
+        // of all of them or only of those inside a decoded window.
+        let crosses = |decoded_only: bool| {
+            let cuts = |b: usize| {
+                between.start < b
+                    && b <= between.end
+                    && (!decoded_only || self.windows.iter().any(|w| w.contains(&b)))
+            };
+            let chunks = self.spans.iter().filter(|s| s.chunk);
+            chunks.flat_map(|s| [s.owned.start, s.owned.end]).any(cuts)
         };
         let follows = |(w, _): (usize, usize), (h, _): (usize, usize)| {
             self.glued.contains(&(h, w)) || ref_chain(&self.case.words, self.vocab, w, h)
         };
         place.zip(first).is_some_and(|(p, f)| follows(p, f))
-            || place.is_some() && !self.spans.iter().any(crosses)
+            || place.is_some() && !crosses(false)
             || match extras {
                 Extras::Check => false,
-                Extras::AcrossGap => {
-                    place.is_some_and(|(_, i)| i > 0) && !self.spans.iter().any(crosses_decoded)
-                }
+                Extras::AcrossGap => place.is_some_and(|(_, i)| i > 0) && !crosses(true),
                 Extras::Unplaced => place.is_none(),
             }
     }
