@@ -1064,9 +1064,10 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
             .map(|(_, _, case)| case)
             .find(|case| case.name == "tail-26dB")
             .expect("the quiet tail at -26 dB");
+        let fleurs = steno_speech::wav::read_pcm16(&clip).unwrap();
         let in_process = OnnxSpeechEngine::new(store, OnnxOptions::default());
         for (name, samples) in [
-            ("FLEURS cat-01", steno_speech::wav::read_pcm16(&clip).unwrap()),
+            ("FLEURS cat-01", fleurs),
             ("the quiet tail at -26 dB", tail.samples),
         ] {
             let audio = AudioBuffer16k::new(samples);
