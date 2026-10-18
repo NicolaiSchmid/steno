@@ -805,6 +805,65 @@ mod tests {
         );
     }
 
+    /// A mark that cannot be read stays out of the meetings: beside a
+    /// meeting's first stop it holds nothing, and the meeting's run that
+    /// reads through leaves it. Unix: a mode-000 file, which root reads.
+    #[cfg(unix)]
+    #[test]
+    fn a_mark_that_cannot_be_read_stays_out_of_a_meetings_marks() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (store, meeting, _) = store_with_meeting(dir.path());
+        let master = dir.path().join("recording.m4a");
+        killed_in_a_read(&launch(dir.path(), &store), meeting.id, &master);
+        let name = format!("{}.json", Uuid::new_v4());
+        let file = dir
+            .path()
+            .join("support")
+            .join(ReadingMarks::FOLDER)
+            .join(&name);
+        std::fs::write(&file, b"{}").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&file).is_ok() {
+            return;
+        }
+
+        let marks = launch(dir.path(), &store);
+        assert!(!marks.holds(meeting.id), "a first stop");
+        assert_eq!(marks.speech_marks_left(), on_the_mac(&name));
+        drop(marks.reading(meeting.id, None, &master, ReadStage::Decode));
+        marks.read_through(meeting.id);
+        assert!(file.exists(), "not the meeting's");
+        assert_eq!(on_disk(dir.path()), 1);
+    }
+
+    /// A folder of marks that cannot be listed counts once, under its own
+    /// name, as a mark of the speech engine's on the Mac; the launch says
+    /// so at `warn`. Unix: a file in the folder's place (`ENOTDIR`).
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_cannot_be_listed_counts_once() {
+        let log = crate::fixtures::CapturedLog::warnings();
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _, _) = store_with_meeting(dir.path());
+        let support = dir.path().join("support");
+        std::fs::create_dir_all(&support).unwrap();
+        let folder = support.join(ReadingMarks::FOLDER);
+        std::fs::write(&folder, b"").unwrap();
+
+        let marks = launch(dir.path(), &store);
+        assert_eq!(marks.speech_marks_left(), on_the_mac(ReadingMarks::FOLDER));
+        let path = folder.display().to_string();
+        let text = log.text();
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.contains(&path) && line.contains("could not be listed"))
+                .count(),
+            1,
+            "{text}"
+        );
+    }
+
     /// An orphan the launch was adopting has no row: its marks count the
     /// same, and stay held while the file is there; they go once the file
     /// is gone too.

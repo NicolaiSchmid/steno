@@ -415,6 +415,20 @@ mod tests {
         assert!(!launch(support.path()).is_on(), "the mark seen");
     }
 
+    /// A file in the reading marks' folder that does not parse is not one
+    /// of its marks: it turns nothing on.
+    #[test]
+    fn a_stranger_in_the_reading_marks_folder_turns_nothing_on() {
+        let support = tempfile::tempdir().unwrap();
+        let folder = support.path().join(ReadingMarks::FOLDER);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("x.json"), b"{}").unwrap();
+        let store = Store::in_memory().unwrap();
+        let marks = ReadingMarks::at_launch(support.path(), &store, chrono::Utc::now());
+        assert!(marks.speech_marks_left().is_empty());
+        assert!(!launch(support.path()).is_on());
+    }
+
     /// A file that cannot be written keeps it on, and says so.
     #[test]
     fn a_file_that_cannot_be_written_keeps_it_on() {

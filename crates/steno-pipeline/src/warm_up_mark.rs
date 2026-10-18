@@ -383,6 +383,20 @@ mod tests {
         assert_eq!(lines_of(&text, first, "is held off"), 0, "{text}");
     }
 
+    /// A mark whose presence cannot be checked counts as one that cannot
+    /// be read. Unix: a support path through a regular file (`ENOTDIR`).
+    #[cfg(unix)]
+    #[test]
+    fn a_mark_that_cannot_be_checked_counts_as_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("support");
+        std::fs::write(&file, b"").unwrap();
+        let mark = WarmUpMark::at_launch(&file);
+        assert!(mark.skipping());
+        let id = mark.left_over().unwrap();
+        assert!(id.starts_with("unreadable-"), "{id}");
+    }
+
     #[test]
     fn in_memory_it_writes_nothing() {
         let mark = Arc::new(WarmUpMark::in_memory());
