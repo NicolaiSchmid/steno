@@ -13,7 +13,7 @@ pub fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// `apps/macos/web/fixtures/bridge`: the contract fixtures Swift writes.
+/// `apps/macos/web/fixtures/bridge`: the contract fixtures.
 pub fn bridge_fixtures_dir() -> PathBuf {
     repository_root().join("apps/macos/web/fixtures/bridge")
 }

@@ -1,8 +1,5 @@
-//! The optional fields no fixture sets. The Swift fixtures omit them, so the
-//! round-trip test cannot pin their key or shape; these tests do, one per
-//! owning struct, with `contract.ts` as the reference for the shape: a
-//! `.optional()` string, number, uuid or enum that appears under its camelCase
-//! key when set and is absent when `None`.
+//! The optional fields no fixture sets: each appears under its camelCase key
+//! when set and is absent when `None`, as `contract.ts` declares.
 
 mod common;
 
@@ -160,7 +157,7 @@ fn general_settings_snapshot_error_details() {
     assert_eq!(json["errorDetails"], "SMAppService returned 1");
 }
 
-/// The packaged-install lines (stable plan X5) are absent unless set.
+/// The packaged-install lines are absent unless set.
 #[test]
 fn general_settings_snapshot_managed_notes() {
     let mut general: GeneralSettingsSnapshot = fixture("settings.general");
