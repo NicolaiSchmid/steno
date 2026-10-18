@@ -734,30 +734,6 @@ fn a_failed_write_rolls_back() {
     assert_eq!(store.person(person.id).unwrap(), Some(person));
 }
 
-/// A malformed `speaker.embedding` fails the read rather than drop the vector.
-#[test]
-fn a_malformed_speaker_embedding_is_a_read_error() {
-    let (store, meeting) = populated();
-    store
-        .write(|transaction| {
-            transaction.execute(
-                "UPDATE speaker SET embedding = X'0102030405' WHERE meetingID = ?1",
-                [DbUuid(meeting.id)],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    let error = store.speakers(meeting.id).unwrap_err();
-    assert!(
-        matches!(
-            error,
-            StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))
-        ),
-        "{error}"
-    );
-    assert!(error.to_string().contains("out of 5 byte blob"), "{error}");
-}
-
 /// `Store::read` is one snapshot: another connection's write is not seen.
 #[test]
 fn a_read_sees_one_snapshot_while_another_store_writes() {

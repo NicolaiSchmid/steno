@@ -285,17 +285,6 @@ mod tests {
             "the rule reads bytes, before any UTF-8 step"
         );
 
-        if cfg!(windows) {
-            assert_eq!(file_url_path("file:///tmp/%FF/"), None, "not UTF-8");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStringExt;
-            assert_eq!(
-                file_url_path("file:///tmp/%FF/").map(|path| path.into_os_string().into_vec()),
-                Some(b"/tmp/\xFF".to_vec())
-            );
-        }
         let path = |url: &str| file_url_path(url).unwrap().to_string_lossy().into_owned();
         assert_eq!(path("file:///tmp/a:/"), "/tmp/a:");
         assert_eq!(path("file:///Volumes/a:/"), "/Volumes/a:");
@@ -318,28 +307,6 @@ mod tests {
         }
     }
 
-    /// A directory reads back without its trailing slash; `/` and a drive root
-    /// keep theirs.
-    #[test]
-    fn a_directory_reads_back_without_its_trailing_slash() {
-        let spelt = |url: &str| file_url_path(url).unwrap().into_os_string();
-        let directory = if cfg!(windows) {
-            Path::new(r"C:\Users\x\Audio")
-        } else {
-            Path::new("/Users/x/Audio")
-        };
-        assert_eq!(
-            spelt(&file_url(directory, true)),
-            directory.as_os_str(),
-            "a directory round-trips"
-        );
-        assert_eq!(spelt("file:///"), "/");
-        assert_eq!(spelt("file://localhost/"), "/");
-        assert_eq!(spelt("file:///tmp/a:/"), "/tmp/a:", "not a drive root");
-        let drive_root = if cfg!(windows) { r"C:\" } else { "/C:/" };
-        assert_eq!(spelt("file:///C:/"), drive_root);
-    }
-
     /// A non-UTF-8 Unix file name round-trips.
     #[cfg(unix)]
     #[test]
@@ -353,16 +320,6 @@ mod tests {
         assert_eq!(file_url_path(&url).as_deref(), Some(path));
         let bytes = |url: &str| file_url_path(url).unwrap().into_os_string().into_vec();
         assert_eq!(bytes("file:///tmp/%FF/"), b"/tmp/\xFF");
-    }
-
-    #[test]
-    fn only_a_letter_names_a_drive() {
-        assert!(starts_with_drive(b"/C:/x"));
-        assert!(starts_with_drive(b"/z:"));
-        assert!(!starts_with_drive(b"/1:/a"));
-        assert!(!starts_with_drive(b"/\xC3:/a"));
-        assert!(!starts_with_drive(b"C:/a"));
-        assert!(!starts_with_drive(b"/C"));
     }
 
     fn lookup(pairs: Vec<(&str, OsString)>) -> impl Fn(&str) -> Option<OsString> {

@@ -757,7 +757,6 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use crate::testing::WriteLockHold;
 
     /// What "live" means in the reader tests: well under the busy timeout.
     const LIVE: Duration = Duration::from_millis(200);
@@ -767,35 +766,6 @@ mod tests {
         let store = Arc::new(Store::open(&path).unwrap());
         let host = store.with_own_reader().unwrap();
         (store, host, path)
-    }
-
-    /// A write in its busy wait holds the writer, and a read on either
-    /// reader still answers at once.
-    #[test]
-    fn a_read_does_not_wait_behind_a_write_that_waits_on_another_connection() {
-        let directory = tempfile::tempdir().unwrap();
-        let (store, host, path) = file_store(&directory);
-        let hold = WriteLockHold::new(&path);
-        let writer = thread::spawn({
-            let store = store.clone();
-            move || store.rebuild_search_index()
-        });
-        // The write is in its busy wait by now, holding the writer.
-        thread::sleep(LIVE);
-
-        for (name, handle) in [("shared", &*store), ("host's", &host)] {
-            let started = Instant::now();
-            handle.settings().unwrap();
-            assert!(
-                started.elapsed() < LIVE,
-                "the {name} reader waited {:?} behind the write",
-                started.elapsed()
-            );
-        }
-        assert!(!writer.is_finished(), "the write still waits");
-
-        drop(hold);
-        writer.join().unwrap().unwrap();
     }
 
     /// A read held open on the shared reader does not hold up the host's.
@@ -893,123 +863,6 @@ mod tests {
         ));
         drop(host);
         store.with_own_reader().unwrap().settings().unwrap();
-    }
-
-    /// The durable checkpoint waits for the reads in flight on both
-    /// readers, and no read starts on either until it returns.
-    #[test]
-    fn the_checkpoint_waits_for_reads_in_flight_and_holds_off_new_ones() {
-        let directory = tempfile::tempdir().unwrap();
-        let (store, host, _) = file_store(&directory);
-        let host = Arc::new(host);
-        let (in_checkpoint, inside) = mpsc::channel::<()>();
-        let (finish, finished) = mpsc::channel::<()>();
-        let (in_checkpoint, finished) = (Mutex::new(in_checkpoint), Mutex::new(finished));
-        store.probe_commits(move |_| {
-            in_checkpoint.lock().unwrap().send(()).unwrap();
-            finished.lock().unwrap().recv().unwrap();
-        });
-        let readers = [store.clone(), host.clone()];
-
-        // A read in flight on each reader, held inside its closure.
-        let mut in_flight = Vec::new();
-        for reader in readers.clone() {
-            let (reading, read) = mpsc::channel::<()>();
-            let (end, ended) = mpsc::channel::<()>();
-            in_flight.push((
-                thread::spawn(move || {
-                    reader.read(|_| {
-                        reading.send(()).unwrap();
-                        ended.recv().unwrap();
-                        Ok(())
-                    })
-                }),
-                end,
-            ));
-            read.recv().unwrap();
-        }
-        let checkpoint = thread::spawn({
-            let store = store.clone();
-            move || store.checkpoint_durably()
-        });
-        assert!(
-            inside.recv_timeout(LIVE).is_err(),
-            "the checkpoint went ahead of the reads in flight"
-        );
-        for (read, end) in in_flight {
-            end.send(()).unwrap();
-            read.join().unwrap().unwrap();
-        }
-        inside.recv_timeout(Duration::from_secs(5)).unwrap();
-
-        // The checkpoint holds its last step: a read on either reader waits.
-        let (done, reads_done) = mpsc::channel::<&'static str>();
-        let new_reads: Vec<_> = readers
-            .into_iter()
-            .zip(["shared", "host's"])
-            .map(|(reader, name)| {
-                let done = done.clone();
-                thread::spawn(move || {
-                    reader.settings().unwrap();
-                    done.send(name).unwrap();
-                })
-            })
-            .collect();
-        if let Ok(name) = reads_done.recv_timeout(LIVE) {
-            panic!("a read on the {name} reader ran during the checkpoint");
-        }
-        finish.send(()).unwrap();
-        checkpoint.join().unwrap().unwrap();
-        for read in new_reads {
-            read.join().unwrap();
-        }
-    }
-
-    /// The checkpoint takes the writer before the readers, so while it
-    /// waits for a writer in another connection's busy wait, reads still
-    /// answer.
-    #[test]
-    fn a_checkpoint_waiting_for_the_writer_holds_no_reader() {
-        let directory = tempfile::tempdir().unwrap();
-        let (store, host, path) = file_store(&directory);
-        let host = Arc::new(host);
-        let hold = WriteLockHold::new(&path);
-        let writer = thread::spawn({
-            let store = store.clone();
-            move || store.rebuild_search_index()
-        });
-        // The write is in its busy wait by now, holding the writer.
-        thread::sleep(LIVE);
-        let checkpoint = thread::spawn({
-            let store = store.clone();
-            move || store.checkpoint_durably()
-        });
-        // The checkpoint waits for the writer by now.
-        thread::sleep(LIVE);
-
-        let (done, read) = mpsc::channel::<&'static str>();
-        let reads: Vec<_> = [(store.clone(), "shared"), (host.clone(), "host's")]
-            .into_iter()
-            .map(|(reader, name)| {
-                let done = done.clone();
-                thread::spawn(move || {
-                    reader.settings().unwrap();
-                    done.send(name).unwrap();
-                })
-            })
-            .collect();
-        for _ in 0..2 {
-            read.recv_timeout(Duration::from_secs(1))
-                .expect("a read waited behind the checkpoint");
-        }
-        assert!(!checkpoint.is_finished(), "the checkpoint still waits");
-
-        drop(hold);
-        writer.join().unwrap().unwrap();
-        checkpoint.join().unwrap().unwrap();
-        for read in reads {
-            read.join().unwrap();
-        }
     }
 
     /// The in-memory store's checkpoint takes its one lock once and

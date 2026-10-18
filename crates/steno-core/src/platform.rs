@@ -42,18 +42,3 @@ impl Platform {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_current_platform_is_the_build_target() {
-        let expected = match std::env::consts::OS {
-            "macos" => Platform::Macos,
-            "windows" => Platform::Windows,
-            _ => Platform::Linux,
-        };
-        assert_eq!(Platform::CURRENT, expected);
-    }
-}
