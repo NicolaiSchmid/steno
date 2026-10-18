@@ -198,10 +198,7 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
         // A start inside a pause snaps forward to just before the next
         // speech, except the first chunk's with `from_start`.
         let snaps = !(config.from_start && chunks.is_empty());
-        if let Some(pause) = pauses
-            .iter()
-            .find(|p| snaps && p.start <= start && start < p.end)
-        {
+        if snaps && let Some(pause) = pauses.iter().find(|p| p.start <= start && start < p.end) {
             if pause.end >= total {
                 break;
             }
