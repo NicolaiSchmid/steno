@@ -14,11 +14,12 @@
 //!   over what the last process left: a warm-up mark
 //!   ([`WarmUpMark::left_over`]) or a reading mark of the engine's load or
 //!   a transcription ([`ReadingMarks::speech_marks_left`], which on the
-//!   Mac counts a reading mark that cannot be read among them). A force
-//!   quit, a power loss or a crash elsewhere while the engine runs leaves
-//!   the same marks, and turns it on too: the cost is the speech sidecar's
-//!   models to download (the meetings wait for them in Settings) and its
-//!   slower runs, never a meeting.
+//!   Mac counts among them a reading mark that cannot be read, and a
+//!   folder of them that cannot be listed). A force quit, a power loss or
+//!   a crash elsewhere while the engine runs leaves the same marks, and
+//!   turns it on too: the cost is the speech sidecar's models to download
+//!   (the meetings wait for them in Settings) and its slower runs, never a
+//!   meeting.
 //! - **The file.** [`SpeechFallback::FILE_NAME`] in the support directory
 //!   says whether the fallback is on, and lists the marks it has seen. It
 //!   is written durably, so the fallback stays on at every launch until
@@ -82,7 +83,8 @@ struct State {
 #[serde(rename_all = "camelCase")]
 struct Record {
     on: bool,
-    /// The marks the fallback has seen: the reading marks' file names and
+    /// The marks the fallback has seen: the reading marks' file names
+    /// (`reading` for a folder that could not be listed) and
     /// `warm-up:<id>` for a warm-up mark.
     seen: BTreeSet<String>,
 }
@@ -412,7 +414,10 @@ mod tests {
         let fallback = launch(support.path());
         assert_eq!(fallback.is_on(), cfg!(target_os = "macos"));
         fallback.turn_off().unwrap();
-        assert!(!launch(support.path()).is_on(), "the mark seen");
+        assert!(
+            !launch(support.path()).is_on(),
+            "the same mark does not turn it on again"
+        );
     }
 
     /// A file in the reading marks' folder that does not parse is not one

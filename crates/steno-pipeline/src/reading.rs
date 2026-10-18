@@ -53,12 +53,13 @@
 //!   quarantined recording failed and unread; one whose meeting and file
 //!   are both gone is removed. So is one beside a meeting that is ready, or
 //!   failed for another reason: only a run that returned writes those. A
-//!   mark that cannot be read names its meeting and stage only in its
-//!   body, so it counts no meeting: the launch says so at `warn`, leaves
-//!   it, and on the Mac counts it as a mark of the speech engine in this
-//!   process, which turns the fallback on. A folder that cannot be listed
-//!   counts the same, once, under the folder's name. A later launch that
-//!   reads the mark counts it as any other.
+//!   mark names its meeting and stage only in its body, so one that
+//!   cannot be read counts no meeting: the launch says so at `warn`,
+//!   leaves it, and on the Mac counts it as a mark of the speech engine in
+//!   this process, which turns the fallback on. A folder that cannot be
+//!   listed, or an entry in it, counts the same, once, under the folder's
+//!   name (`reading`). A later launch that reads the mark counts it as any
+//!   other.
 //! - **Never touched again automatically.** A quarantined meeting's
 //!   marks stay on disk: they are the quarantine. The launch resume, the
 //!   resumes after a model install or a busy store, and the adoption skip
@@ -233,9 +234,10 @@ impl ReadingMarks {
         for (file, mark) in read {
             marks.entry(mark.meeting_id).or_default().push((file, mark));
         }
-        // Its meeting and stage are unknown: on the safe side, a mark of
-        // the engine's, which counts no meeting. Only the Mac runs one in
-        // this process.
+        // A mark or a folder that could not be read: its meeting and stage
+        // are unknown, so on the safe side it counts as a mark of the
+        // speech engine's, and counts no meeting. Only the Mac runs that
+        // engine in this process.
         let mut found = Found::default();
         if cfg!(target_os = "macos") {
             found.speech = unread;
@@ -302,11 +304,11 @@ impl ReadingMarks {
     /// The names of the marks the launch kept of an in-process speech
     /// engine's load or transcription ([`ReadStage::Transcribe`]): each is
     /// one that ended with the app, which turns the fallback on
-    /// ([`crate::SpeechFallback`]). On the Mac, among them is each mark
-    /// the launch could not read, on the safe side, as only its body names
-    /// its stage, and [`ReadingMarks::FOLDER`] when the folder could not be
-    /// listed. The marks beside a finished meeting, which the launch
-    /// removed, are not among them.
+    /// ([`crate::SpeechFallback`]). On the Mac, among them are each mark
+    /// the launch could not read (only its body names its stage, so it
+    /// counts on the safe side) and [`ReadingMarks::FOLDER`] when the
+    /// folder could not be listed. The marks beside a finished meeting,
+    /// which the launch removed, are not among them.
     #[must_use]
     pub fn speech_marks_left(&self) -> BTreeSet<String> {
         self.found().speech.clone()
@@ -553,7 +555,7 @@ fn read_folder(folder: &Path) -> (Vec<(PathBuf, Mark)>, BTreeSet<String>) {
         let path = match entry {
             Ok(entry) => entry.path(),
             Err(error) => {
-                tracing::warn!(path = %folder.display(), %error, "the reading marks could not be listed; on the Mac they count as a mark of the speech engine in this process");
+                tracing::warn!(path = %folder.display(), %error, "the reading marks could not be listed; on the Mac the folder counts as a mark of the speech engine in this process");
                 unread.insert(ReadingMarks::FOLDER.to_owned());
                 continue;
             }
