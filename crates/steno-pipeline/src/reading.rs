@@ -771,7 +771,7 @@ mod tests {
     /// the launch says so at `warn` and leaves it as it is. A later launch
     /// that reads it counts its meeting's stop once.
     #[test]
-    fn a_mark_that_cannot_be_read_counts_as_a_speech_mark_and_stays() {
+    fn a_mark_that_cannot_be_read_is_listed_apart_and_stays() {
         let log = crate::fixtures::CapturedLog::warnings();
         let dir = tempfile::tempdir().unwrap();
         let (store, meeting, _) = store_with_meeting(dir.path());
