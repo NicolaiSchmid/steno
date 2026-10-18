@@ -15,7 +15,7 @@ use crate::error::SpeechError;
 use crate::language::LanguageTagger;
 use crate::model_store::{DownloadProgress, ModelAsset, ModelStore};
 use crate::onnx::{OnnxBackend, OnnxOptions};
-use crate::pipeline::{PipelineConfig, Transcriber};
+use crate::pipeline::{PipelineConfig, RecoveryConfig, Transcriber};
 use crate::vad::{SileroVad, VadConfig};
 
 /// The engine id of Parakeet TDT v3, whichever backend runs it: the
@@ -42,7 +42,13 @@ pub const PARAKEET_V3_LANGUAGES: [&str; 25] = [
 /// - the tail is decoded in extra windows ([`Gaps::Tail`]) once it is at
 ///   least [`MIN_GAP_SECONDS`](crate::chunker::MIN_GAP_SECONDS) long, so
 ///   quiet speech after the last speech the detector hears comes through;
-///   FLEURS and the corpus are unchanged by it.
+///   FLEURS and the corpus are unchanged by it;
+/// - the first chunk is also judged as it was before it started at 0
+///   ([`RecoveryConfig::first_chunk_as_before`]), so a short first chunk's
+///   recovery still keeps the words in the skipped pause after it: on the
+///   fake backend 134 of the 157 such words the earlier start lost come
+///   back, while FLEURS, the corpus and a meeting give the same text (the
+///   judgment never fires there) at one more decode of the first chunk.
 ///
 /// The long pauses stay skipped (`long_pause_seconds`, 3 s): extra windows
 /// over every gap ([`Gaps::All`], the `CoreML` engine's setting) inserted
@@ -56,6 +62,10 @@ pub fn pipeline_config() -> PipelineConfig {
             decode_gaps: Gaps::Tail,
             from_start: true,
             ..ChunkerConfig::default()
+        },
+        recovery: RecoveryConfig {
+            first_chunk_as_before: true,
+            ..RecoveryConfig::default()
         },
         ..PipelineConfig::default()
     }
@@ -263,11 +273,16 @@ mod tests {
         assert!(config.chunker.from_start);
         assert_eq!(config.chunker.decode_gaps, Gaps::Tail);
         assert_eq!(config.chunker.long_pause_seconds, 3.0);
+        assert!(config.recovery.first_chunk_as_before);
         let rest = PipelineConfig {
             chunker: ChunkerConfig {
                 decode_gaps: Gaps::Tail,
                 from_start: true,
                 ..ChunkerConfig::default()
+            },
+            recovery: RecoveryConfig {
+                first_chunk_as_before: true,
+                ..RecoveryConfig::default()
             },
             ..PipelineConfig::default()
         };

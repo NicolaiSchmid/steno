@@ -477,7 +477,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
 | A16a | The owned-span partition (Nicolai's decision 3, 2026-10-15): the recording split once into disjoint owned spans, the consecutive spans of one kind merged by the LCS as before, a gap's window keeping its whole decode and an accepted recovery what it kept before; CoreML replays identically on FLEURS, the corpus, the meeting and the crafted cases, ONNX stays byte-identical on FLEURS, and no word the old merge kept is lost on 1,500 random layouts with recovery on, half of them over a fake deaf at window edges | audio (#310) |
-| A16b | The ONNX engine's lead-in and tail: the extra windows over every gap missed all four gates on ONNX (FLEURS 5.198 %, the corpus 9.916 %, words where Swift has none, +27 to +41 % runtime), so the lead/tail switch: the first chunk from the recording's start and the tail's extra windows on the partition, the long-pause skip kept; FLEURS 4.865 % from 4.882 %, the corpus 9.735 % from 9.814 %, no word added where Swift has none, none from silence or room noise, +1.8 % runtime on the meeting | audio (#317) |
+| A16b | The ONNX engine's lead-in and tail: the extra windows over every gap missed all four gates on ONNX (FLEURS 5.198 %, the corpus 9.916 %, words where Swift has none, +27 to +41 % runtime), so the lead/tail switch: the first chunk from the recording's start and the tail's extra windows on the partition, the long-pause skip kept, and the first chunk also judged as before (option 2) so a short first chunk's recovery still keeps the words in the pause after it; FLEURS 4.865 % from 4.882 %, the corpus 9.735 % from 9.814 %, no word added where Swift has none, none from silence or room noise, +3.6 % runtime on the meeting | audio (#317) |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured (it aborts on Linux, not on the Mac); every read of a recording marked durably, the in-process CoreML stage included; a recording whose read ended with the app read once more, and quarantined the second time in a row ("Steno stopped while reading this recording") with the file kept and Process again offered; the allocations bounded by a walk of the boxes, chunks and tables before symphonia opens a file, its reader the one the file's first bytes name (MP4, CAF or WAV) and opened where the walk began, any other kind of file refused plainly; kill tests for one kill and for two | audio (#298) |
 | A18 | A capture thread that misses cycles never loses audio silently: on PipeWire, Core Audio and WASAPI the missed frames are written as silence on every lane (past a second only counted), counted in the statistics and in the note about missing audio; PipeWire's data-loop thread without real-time scheduling is a warning | audio (#297) |
 | A19 | No in-process speech beside a live recording, and the speech sidecar after a CoreML abort: a job waits to load or run CoreML while a recording starts, runs or stops ("Waiting for the recording to finish"); a warm-up mark or a CoreML reading mark left by a crash turns the speech sidecar on in CoreML's place, durably, until the user turns the Neural Engine back on in Settings ("Use again"), the meeting waiting for the sidecar's models with "Neural Engine off after a crash: download the speech models in Settings"; kill tests for a load killed in a job and in a warm-up | audio |
@@ -2002,6 +2002,22 @@ Each lands before `0.11.0-rc.1`.
       chunk's start from snapping forward inside a pause; that part stays
       out: it scored the corpus worse (9.794 % against 9.735 %) and changed
       no FLEURS word.
+    - Option 2 (Nicolai, 2026-10-18): on the differential's fake the switch
+      lost 157 real words against main in 3.2 % of the cases, in a skipped
+      pause past a short first chunk whose recovery main ran and the chunk
+      from 0 no longer did (limit (b)). With
+      `RecoveryConfig::first_chunk_as_before`, on in the ONNX engine's
+      settings only, the first chunk under `from_start` that ends at an
+      undecoded gap is also judged on its old window (from `pad_seconds`
+      before the first speech); if that looks empty, main's recovery runs
+      over the chunk's window extended from 0, and the chunk keeps its own
+      decode and gains the whole words only the recovery heard before the
+      next window. 134 of the 157 come back (all 26 over the exact fake),
+      0 words are lost against the switch, and FLEURS, the corpus and the
+      meeting give the same text (no recovery fires there) at one more
+      decode of the first chunk per lane: +3.6 % on the meeting against
+      main (8 pairs, Forge at load 14 to 32). The 23 left are deaf or
+      jitter cases, where the fake keys on the window's length.
     - Measured at main (bec97e8f7) with one probe binary whose settings
       switch at run time, FLEURS on atlas (ONNX threads 4), the corpus and
       the meeting on Forge, the same files as A16a's gates (FLEURS German
