@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use steno_core::{
-    AudioBuffer16k, RecordingLayout, Speaker, Store, StoreError, busy_file, paths::file_url_path,
+    AudioBuffer16k, RecordingLayout, Speaker, Store, StoreError, paths::file_url_path,
 };
 use uuid::Uuid;
 
@@ -123,7 +123,7 @@ pub(crate) fn sweep(
             continue;
         }
         let path = entry.path();
-        match busy_file::retried(|| std::fs::remove_file(&path)) {
+        match std::fs::remove_file(&path) {
             Ok(()) => {
                 let index = removed.len();
                 removed.push(path);

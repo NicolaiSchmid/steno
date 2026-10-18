@@ -18,8 +18,7 @@ use steno_core::{
     paths::{file_url, file_url_path},
 };
 use steno_pipeline::{
-    LocalRecordingIntake, LocalRecordingIntakeError, NotedUpload, READ_STOPPED, ReadStage,
-    ReadingMarks, RecordingResult,
+    LocalRecordingIntake, LocalRecordingIntakeError, NotedUpload, RecordingResult,
 };
 use uuid::Uuid;
 
@@ -712,20 +711,12 @@ fn first_ids(ids: &[Uuid]) -> String {
         .join(", ")
 }
 
-/// Saves an adopted recording's rows and processes it, or, `held`, saves
-/// them failed and leaves it.
+/// Saves an adopted recording's rows and processes it.
 fn save_adopted(
-    store: &Store,
     pipeline: &steno_pipeline::ProcessingPipeline,
     meeting: &Meeting,
     asset: &AudioAsset,
-    held: bool,
 ) -> Result<(), RecoveryError> {
-    if held {
-        return store
-            .insert_meeting_with_asset(meeting, asset)
-            .map_err(|error| RecoveryError::NotSaved(error.into()));
-    }
     pipeline
         .enqueue_new(meeting, asset)
         .map_err(|failure| RecoveryError::NotSaved(failure.into()))
@@ -735,15 +726,13 @@ fn save_adopted(
 /// as a call or in-person recording with end reason `failed`; an m4a or WAV
 /// is a phone recording with its declared length. It gets the default title,
 /// `queued`, and Keep forever (the master outlived its row, so the user kept
-/// it). A recording the launch quarantined ([`ReadingMarks`]) is adopted
-/// unread and failed with [`READ_STOPPED`], which the third value says.
+/// it).
 fn adopted(
     orphan: &Orphan,
     settings: &steno_core::Settings,
     zone: chrono::FixedOffset,
     now: chrono::DateTime<Utc>,
-    reading: &Arc<ReadingMarks>,
-) -> Result<(Meeting, AudioAsset, bool), RecoveryError> {
+) -> Result<(Meeting, AudioAsset), RecoveryError> {
     let Orphan {
         meeting_id,
         layout,
@@ -751,7 +740,6 @@ fn adopted(
         format,
         modified,
     } = orphan;
-    let held = reading.holds(*meeting_id);
     let (source, asset, duration, end_reason) = match format {
         AudioFormat::Caf48kFloat32 => {
             // One channel is in-person; the salvage as a call fails any
@@ -770,23 +758,13 @@ fn adopted(
         }
         AudioFormat::M4aAac | AudioFormat::Wav16kInt16 => {
             let asset_id = Uuid::new_v4();
-            let duration = if held {
-                0.0
-            } else {
-                let marked =
-                    reading.reading(*meeting_id, Some(asset_id), master, ReadStage::Duration);
-                let duration = steno_audio::SymphoniaAudioCodec::declared_duration(master)
-                    .inspect_err(|error| {
-                        tracing::debug!(%meeting_id, %error, "an adopted recording's length is not known");
-                    })
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0.0);
-                drop(marked);
-                // The adoption's one read returned.
-                reading.read_through(*meeting_id);
-                duration
-            };
+            let duration = steno_audio::SymphoniaAudioCodec::declared_duration(master)
+                .inspect_err(|error| {
+                    tracing::debug!(%meeting_id, %error, "an adopted recording's length is not known");
+                })
+                .ok()
+                .flatten()
+                .unwrap_or(0.0);
             let asset = AudioAsset {
                 id: asset_id,
                 meeting_id: *meeting_id,
@@ -816,13 +794,7 @@ fn adopted(
         source,
         calendar_event_id: None,
         tags: Vec::new(),
-        state: if held {
-            steno_core::MeetingState::Failed {
-                reason: READ_STOPPED.to_owned(),
-            }
-        } else {
-            steno_core::MeetingState::Queued
-        },
+        state: steno_core::MeetingState::Queued,
         end_reason,
         title_origin: steno_core::TitleOrigin::Default,
         template_id: settings.default_template_id.clone(),
@@ -832,7 +804,7 @@ fn adopted(
         created_at: now,
         updated_at: now,
     };
-    Ok((meeting, asset, held))
+    Ok((meeting, asset))
 }
 
 /// The launch's adoption of recordings with no meeting. A UUID-named meeting
@@ -911,18 +883,12 @@ pub(crate) fn adopt_orphans(
             tracing::warn!(%meeting_id, "a recording with no meeting is still written; the next launch looks again");
             continue;
         }
-        let reading = &pipeline.dependencies().reading_marks;
         let now = (pipeline.dependencies().now)();
-        let rows = adopted(orphan, &settings, zone, now, reading);
-        let held = matches!(rows, Ok((_, _, true)));
+        let rows = adopted(orphan, &settings, zone, now);
         let saved =
             rows.and_then(|rows| adopt(store, pipeline, orphan, uploads.get(&meeting_id), &rows));
         // Warn names the meeting; an error, which can name its folder, is debug.
         match saved {
-            // Listed failed, not among the adopted.
-            Ok(AdmissionCommit::Wrote) if held => {
-                tracing::warn!(%meeting_id, "a recording with no meeting was listed, failed and unread");
-            }
             Ok(AdmissionCommit::Wrote) => {
                 tracing::warn!(%meeting_id, "a recording with no meeting was recovered");
                 adopted_ids.push(meeting_id);
@@ -1025,8 +991,8 @@ fn answered_by_the_ledger(orphan: &Orphan, admitted: Uuid, deleted: bool) -> Led
     }
 }
 
-/// Saves `orphan` as `meeting` with `asset` and processes it (or, `held`,
-/// saves it failed), with `upload`'s ledger row when the orphan is a phone
+/// Saves `orphan` as `meeting` with `asset` and processes it, with
+/// `upload`'s ledger row when the orphan is a phone
 /// copy that holds it whole. A copy that cannot be read now is
 /// [`RecoveryError::Unreachable`].
 fn adopt(
@@ -1034,9 +1000,8 @@ fn adopt(
     pipeline: &steno_pipeline::ProcessingPipeline,
     orphan: &Orphan,
     upload: Option<&NotedUpload>,
-    (meeting, asset, held): &(Meeting, AudioAsset, bool),
+    (meeting, asset): &(Meeting, AudioAsset),
 ) -> Result<AdmissionCommit, RecoveryError> {
-    let held = *held;
     let upload = match upload {
         Some(upload) if meeting.source == MeetingSource::Phone => held_by(upload, orphan)
             .map_err(|error| {
@@ -1047,8 +1012,7 @@ fn adopt(
         _ => None,
     };
     let Some(upload) = upload else {
-        return save_adopted(store, pipeline, meeting, asset, held)
-            .map(|()| AdmissionCommit::Wrote);
+        return save_adopted(pipeline, meeting, asset).map(|()| AdmissionCommit::Wrote);
     };
     let committed = store
         .adopt_upload_durably(
@@ -1064,7 +1028,7 @@ fn adopt(
         crate::admission_kill_tests::gate("after-adoption-commit");
         // A pipeline that cannot take it now leaves it `queued` for the
         // next launch's resume.
-        if !held && let Err(failure) = pipeline.enqueue_saved(meeting, asset) {
+        if let Err(failure) = pipeline.enqueue_saved(meeting, asset) {
             tracing::warn!(meeting_id = %meeting.id, stage = failure.stage.as_str(), "an adopted phone recording not enqueued");
         }
     }
@@ -2048,126 +2012,6 @@ mod tests {
             harness.store.meeting(m4a).unwrap().unwrap().state,
             MeetingState::Ready
         );
-    }
-
-    /// The launches killed in the read of `master`'s length, `times` in a
-    /// row, then the next launch's marks.
-    fn killed_in_the_length_read(
-        harness: &Harness,
-        meeting_id: Uuid,
-        master: &Path,
-        times: usize,
-    ) -> Arc<ReadingMarks> {
-        let support = harness.dir.path().join("support");
-        for _ in 0..times {
-            let killed = Arc::new(ReadingMarks::at_launch(
-                &support,
-                &harness.store,
-                Utc::now(),
-            ));
-            std::mem::forget(killed.reading(meeting_id, None, master, ReadStage::Duration));
-        }
-        Arc::new(ReadingMarks::at_launch(
-            &support,
-            &harness.store,
-            Utc::now(),
-        ))
-    }
-
-    /// A phone master whose first length read ended with the app is read
-    /// again and processed.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_phone_master_whose_length_read_ended_with_the_app_once_is_adopted() {
-        let mut harness = Harness::new();
-        let m4a = phone_orphan(&harness, "tone-440-44k1-500ms.m4a", AudioFormat::M4aAac);
-        let master = RecordingLayout::new(&harness.audio_folder(), m4a).master(AudioFormat::M4aAac);
-        let marks = killed_in_the_length_read(&harness, m4a, &master, 1);
-        assert!(!marks.holds(m4a));
-        harness.pipeline = current_pipeline(
-            fake_dependencies(&harness.store, "fake-engine").with_reading_marks(marks),
-        );
-        let adopted = reconcile_at_launch(&harness, &[], &an_hour_later());
-        assert_eq!(adopted, [m4a]);
-        harness.pipeline.current().wait_until_idle().await;
-        assert_eq!(
-            harness.store.meeting(m4a).unwrap().unwrap().state,
-            MeetingState::Ready
-        );
-        let marks = harness
-            .dir
-            .path()
-            .join("support")
-            .join(ReadingMarks::FOLDER);
-        assert_eq!(std::fs::read_dir(marks).unwrap().count(), 0);
-    }
-
-    /// The adoption's length read is marked, and a returned read clears the
-    /// earlier crash's mark.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_adoptions_length_read_is_marked() {
-        let harness = Harness::new();
-        let m4a = phone_orphan(&harness, "tone-440-44k1-500ms.m4a", AudioFormat::M4aAac);
-        let layout = RecordingLayout::new(&harness.audio_folder(), m4a);
-        let master = layout.master(AudioFormat::M4aAac);
-        let marks = killed_in_the_length_read(&harness, m4a, &master, 1);
-        let orphan = Orphan {
-            meeting_id: m4a,
-            layout,
-            master,
-            format: AudioFormat::M4aAac,
-            modified: SystemTime::now(),
-        };
-        let settings = harness.store.settings().unwrap();
-        let zone = chrono::FixedOffset::east_opt(0).unwrap();
-        let (meeting, _, held) = adopted(&orphan, &settings, zone, Utc::now(), &marks).unwrap();
-        assert!(!held);
-        assert!(meeting.duration > 0.0, "its length was read");
-        let folder = harness
-            .dir
-            .path()
-            .join("support")
-            .join(ReadingMarks::FOLDER);
-        assert_eq!(
-            std::fs::read_dir(folder).unwrap().count(),
-            0,
-            "the first crash's mark went with the read"
-        );
-    }
-
-    /// A phone master whose length read ended with the app twice is listed
-    /// failed, unread and unprocessed; Process again reads and processes it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_phone_master_whose_length_read_ended_with_the_app_is_listed_failed_and_unread() {
-        let mut harness = Harness::new();
-        let m4a = phone_orphan(&harness, "tone-440-44k1-500ms.m4a", AudioFormat::M4aAac);
-        let master = RecordingLayout::new(&harness.audio_folder(), m4a).master(AudioFormat::M4aAac);
-        let before = std::fs::read(&master).unwrap();
-        let marks = killed_in_the_length_read(&harness, m4a, &master, 2);
-        assert!(marks.holds(m4a));
-        harness.pipeline = current_pipeline(
-            fake_dependencies(&harness.store, "fake-engine").with_reading_marks(marks.clone()),
-        );
-
-        let adopted = reconcile_at_launch(&harness, &[], &an_hour_later());
-        assert_eq!(adopted, Vec::<Uuid>::new());
-        harness.pipeline.current().wait_until_idle().await;
-        let meeting = harness.store.meeting(m4a).unwrap().unwrap();
-        assert_eq!(
-            meeting.state,
-            MeetingState::Failed {
-                reason: READ_STOPPED.to_owned()
-            }
-        );
-        assert_eq!(meeting.duration, 0.0, "its length was not read");
-        assert_eq!(std::fs::read(&master).unwrap(), before);
-
-        harness.pipeline.current().process_again(m4a).unwrap();
-        harness.pipeline.current().wait_until_idle().await;
-        assert_eq!(
-            harness.store.meeting(m4a).unwrap().unwrap().state,
-            MeetingState::Ready
-        );
-        assert!(!marks.holds(m4a));
     }
 
     /// Only a recorded rowless meeting folder with a master is adopted; empty

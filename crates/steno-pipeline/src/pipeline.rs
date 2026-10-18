@@ -18,35 +18,26 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use steno_core::{
     AudioAsset, AudioBuffer16k, AudioDamage, AudioDecoder, AudioLane, AudioRetention, CleanupInput,
-    Delivery, DeliveryDispatcher, DeliveryStatus, Diarizer, LanguageTag, LlmUsage, Meeting,
-    MeetingEvent, MeetingOperation, MeetingSource, MeetingState, MeetingStateKind,
-    MeetingSummarizer, Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout,
-    Settings, Speaker, SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError,
-    SummaryInput, SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment,
-    derived_uuid,
+    DeliveryDispatcher, DeliveryStatus, Diarizer, LanguageTag, LlmUsage, Meeting, MeetingEvent,
+    MeetingOperation, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer,
+    Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
+    SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
+    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid,
     paths::{file_url, file_url_path},
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
     room_speaker_id,
 };
-use tokio::sync::{
-    Mutex as AsyncMutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock as AsyncRwLock,
-    oneshot,
-};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::crash_loop::{CountedRun, MAX_CRASHED_RUNS, OpenRuns, RunCount, TOO_MANY_CRASHED_RUNS};
-use crate::damaged_audio::DamagedAudio;
 use crate::estimator::{ProcessingEstimator, StageRates, StageSample, absorbing};
 use crate::events::MeetingEventBus;
-use crate::export_retries::ExportRetries;
 use crate::intake::RecordingResult;
 use crate::lane_merger::{ClusterSpeaker, LaneMerger};
 use crate::live_recording::LiveRecording;
-use crate::reading::{READ_STOPPED, ReadStage, ReadingMarks};
 use crate::run::ProcessingRun;
 use crate::sample_clips::{self, ClipProbe, ClipStep};
-use crate::warm_up_mark::WarmUpMark;
 
 /// The one failure type: [`ProcessingPipeline::process`] marks the meeting
 /// failed with it in one place, unless it is
@@ -241,48 +232,20 @@ impl MonotonicClock for SystemClock {
 /// The app's exit as the pipelines see it; clones share it. Once set, no job
 /// starts, and a job that fails leaves its meeting for the next launch's
 /// resume instead of marking it `failed`: the exit can end a job, and that
-/// is no failure of the meeting's. Setting it also takes back the running
-/// runs from the crash-loop guard's count.
+/// is no failure of the meeting's.
 #[derive(Debug, Clone, Default)]
-pub struct QuitLatch(Arc<Latch>);
-
-/// The flag, and the runs counted while it was clear, under one lock.
-#[derive(Debug, Default)]
-struct Latch {
-    set: AtomicBool,
-    open: Mutex<OpenRuns>,
-}
+pub struct QuitLatch(Arc<AtomicBool>);
 
 impl QuitLatch {
-    /// Sets the latch for good and takes back every run still counted.
+    /// Sets the latch for good.
     pub fn set(&self) {
-        let mut open = self.open();
-        self.0.set.store(true, Ordering::SeqCst);
-        open.take_back_all();
+        self.0.store(true, Ordering::SeqCst);
     }
 
     /// Whether the latch is set: the app is exiting.
     #[must_use]
     pub fn is_set(&self) -> bool {
-        self.0.set.load(Ordering::SeqCst)
-    }
-
-    /// Counts a run under `count` unless the latch is set, in one step.
-    pub(crate) fn open_run(&self, count: RunCount) -> Option<u64> {
-        let mut open = self.open();
-        (!self.is_set()).then(|| open.open(count))
-    }
-
-    /// Ends the run under `key` under the lock that counts runs.
-    pub(crate) fn close_run(&self, key: u64, count: &RunCount, succeeded: bool) {
-        self.open().close(key, count, succeeded);
-    }
-
-    fn open(&self) -> MutexGuard<'_, OpenRuns> {
-        self.0
-            .open
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -698,19 +661,12 @@ pub struct PipelineDependencies {
     pub quit_latch: QuitLatch,
     /// Clones share it.
     pub in_flight: InFlight,
-    /// Where the decode stage records what of each recording was replaced
-    /// by silence; in memory from [`new`](Self::new).
-    pub damaged_audio: Arc<DamagedAudio>,
     /// Called at each step of a run's sample clips, for crash tests.
     clip_probe: Option<ClipProbe>,
     /// Clones share it.
     pub model_waits: ModelWaits,
-    /// The recorder's warm-up mark; in memory from [`new`](Self::new).
-    pub warm_up_mark: Arc<WarmUpMark>,
-    /// Every read of a recording, marked; in memory from [`new`](Self::new).
-    pub reading_marks: Arc<ReadingMarks>,
-    /// Whether the speech engine runs in this process, so its load and
-    /// transcriptions are marked as reads too.
+    /// Whether the speech engine runs in this process, so it waits for a
+    /// recording to end.
     pub speech_in_process: bool,
     /// Whether a recording is under way; no in-process engine runs
     /// meanwhile.
@@ -743,11 +699,8 @@ impl PipelineDependencies {
             clock: Arc::new(SystemClock::default()),
             quit_latch: QuitLatch::default(),
             in_flight: InFlight::default(),
-            damaged_audio: Arc::new(DamagedAudio::in_memory()),
             clip_probe: None,
             model_waits: ModelWaits::default(),
-            warm_up_mark: Arc::new(WarmUpMark::in_memory()),
-            reading_marks: Arc::new(ReadingMarks::in_memory()),
             speech_in_process: false,
             live_recording: LiveRecording::default(),
         }
@@ -798,13 +751,6 @@ impl PipelineDependencies {
         self
     }
 
-    /// Records the damage in `damaged_audio` instead of in memory.
-    #[must_use]
-    pub fn with_damaged_audio(mut self, damaged_audio: Arc<DamagedAudio>) -> Self {
-        self.damaged_audio = damaged_audio;
-        self
-    }
-
     /// Calls `probe` at each [`ClipStep`] of a run's sample clips.
     #[cfg(any(test, feature = "testing"))]
     #[must_use]
@@ -821,23 +767,7 @@ impl PipelineDependencies {
         self
     }
 
-    /// Guards the recordings' warm-ups with `mark`, cleared when a job
-    /// loads the speech engine.
-    #[must_use]
-    pub fn with_warm_up_mark(mut self, mark: Arc<WarmUpMark>) -> Self {
-        self.warm_up_mark = mark;
-        self
-    }
-
-    /// Marks every read of a recording in `marks`, and skips the meetings
-    /// they hold.
-    #[must_use]
-    pub fn with_reading_marks(mut self, marks: Arc<ReadingMarks>) -> Self {
-        self.reading_marks = marks;
-        self
-    }
-
-    /// Marks the speech engine's load and transcriptions as reads.
+    /// Runs the speech engine in this process: it waits for a recording.
     #[must_use]
     pub fn with_speech_in_process(mut self, in_process: bool) -> Self {
         self.speech_in_process = in_process;
@@ -1079,12 +1009,8 @@ async fn unless_it_panics<T>(
         .unwrap_or_else(|_| Err(PipelineFailure::new(stage(), OPERATION_PANICKED)))
 }
 
-/// Whether every row of `deliveries` went through.
-fn all_delivered(deliveries: &[Delivery]) -> bool {
-    deliveries
-        .iter()
-        .all(|delivery| delivery.status == DeliveryStatus::Delivered)
-}
+/// How long after its last attempt a failed export is retried at launch.
+pub const REDELIVER_AFTER: chrono::TimeDelta = chrono::TimeDelta::hours(24);
 
 /// The failure saved on a delivery an export left `pending` with no
 /// reason.
@@ -1149,52 +1075,14 @@ impl ProcessingPipeline {
         self.in_flight_set().meetings.iter().copied().collect()
     }
 
-    /// Sets the [`QuitLatch`] for the app's exit and removes the reading
-    /// marks it leaves; syncs the disk, so async callers use
-    /// `spawn_blocking`. `enqueue` still saves its meeting `queued`.
+    /// Sets the [`QuitLatch`] for the app's exit. `enqueue` still saves its
+    /// meeting `queued`.
     pub fn quit(&self) {
         self.inner.dependencies.quit_latch.set();
-        // The exit, not a recording, ends the reads still running.
-        self.inner.dependencies.reading_marks.exiting();
     }
 
     fn quitting(&self) -> bool {
         self.inner.dependencies.quit_latch.is_set()
-    }
-
-    /// `read` of `asset`'s recording, marked in `stage`; unmarked without
-    /// an asset.
-    async fn marked<T>(
-        &self,
-        asset: &AudioAsset,
-        stage: Option<ReadStage>,
-        read: impl Future<Output = T>,
-    ) -> T {
-        let Some(stage) = stage else {
-            return read.await;
-        };
-        let master = file_url_path(&asset.url).unwrap_or_default();
-        self.inner
-            .dependencies
-            .reading_marks
-            .marked(asset.meeting_id, Some(asset.id), master, stage, read)
-            .await
-    }
-
-    /// Every read of a run of `meeting_id` returned: the crash count starts
-    /// again ([`ReadingMarks::read_through`]).
-    async fn read_through(&self, meeting_id: Uuid) {
-        let marks = Arc::clone(&self.inner.dependencies.reading_marks);
-        let _ = off_the_workers(move || marks.read_through(meeting_id)).await;
-    }
-
-    /// The stage the speech engine's calls are marked in; none for an
-    /// out-of-process engine.
-    fn speech_stage(&self) -> Option<ReadStage> {
-        self.inner
-            .dependencies
-            .speech_in_process
-            .then_some(ReadStage::Transcribe)
     }
 
     /// For an in-process engine, the job's turn at it, taken once no
@@ -1289,7 +1177,7 @@ impl ProcessingPipeline {
     /// when the asset or meeting is in flight.
     pub fn enqueue_saved(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
         let claim = self.claim_or_refuse(meeting.id, asset)?;
-        self.start(asset, Turn::Now(None), claim);
+        self.start(asset, claim);
         Ok(())
     }
 
@@ -1318,14 +1206,12 @@ impl ProcessingPipeline {
             PipelineStage::Decode,
             save(self.store(), self.now(), &asset),
         )?;
-        // Processed afresh: earlier crashed runs no longer count.
-        RunCount::of(&asset).clear();
-        self.start(&asset, Turn::Now(None), claim);
+        self.start(&asset, claim);
         Ok(saved)
     }
 
     /// Processes a `ready` or `failed` meeting again from `decode`, with a
-    /// fresh crash-loop count. Refused with a [`ReprocessError`] when the
+    /// fresh run. Refused with a [`ReprocessError`] when the
     /// meeting, its asset or its master is missing, when it is not
     /// finished, when another operation holds it, and after a
     /// [quit](Self::quit). Clears the earlier retention stamp so a failed
@@ -1343,12 +1229,7 @@ impl ProcessingPipeline {
             let store = self.store();
             let speakers = attributing(PipelineStage::Decode, store.speakers(meeting.id))?;
             let segments = attributing(PipelineStage::Decode, store.segments(meeting.id))?;
-            let damaged = self
-                .inner
-                .dependencies
-                .damaged_audio
-                .may_be_damaged(meeting.id);
-            Ok(meeting.offers_process_again(&speakers, &segments, asset, damaged))
+            Ok(meeting.offers_process_again(&speakers, &segments, asset))
         })
     }
 
@@ -1395,8 +1276,6 @@ impl ProcessingPipeline {
             return Err(ReprocessError::AudioGone(meeting_id));
         }
         asset.expires_at = None;
-        // A quarantined recording is read once more, on the user's word.
-        self.inner.dependencies.reading_marks.release(meeting_id);
         self.enqueue_claimed(meeting_id, &asset, claim, |store, now, asset| {
             store.save_meeting_with_asset(&queued(&meeting, now), asset)
         })
@@ -1419,10 +1298,7 @@ impl ProcessingPipeline {
 
     /// Launch recovery: every meeting left `queued` or `processing` is
     /// processed again from `decode`, oldest first, in the background. A
-    /// meeting whose asset row is missing, or whose runs ended with the app
-    /// [`MAX_CRASHED_RUNS`] times, is marked failed with its audio kept; a
-    /// meeting with any crashed run runs alone, after the others. A meeting
-    /// the launch quarantined is not started. Counts as a resume of the
+    /// meeting whose asset row is missing is marked failed. Counts as a resume of the
     /// meetings waiting for models; one the busy store refuses is owed to
     /// [`resume_waiting_for_store`](Self::resume_waiting_for_store).
     /// Returns the meetings started.
@@ -1544,10 +1420,8 @@ impl ProcessingPipeline {
             self.store()
                 .meetings_in_states(&[MeetingStateKind::Queued, MeetingStateKind::Processing]),
         )?;
-        let turns = Arc::new(AsyncRwLock::new(()));
         let mut resumed = Vec::new();
         let mut busy = Vec::new();
-        let mut alone = Vec::new();
         for meeting in meetings {
             if among.is_some_and(|among| !among.contains(&meeting.id)) {
                 continue;
@@ -1558,19 +1432,7 @@ impl ProcessingPipeline {
                 busy.push(meeting.id);
                 continue;
             }
-            // Quarantined: left for the user, failed again in case the
-            // launch's write was refused.
-            if self.inner.dependencies.reading_marks.holds(meeting.id) {
-                let failed = MeetingState::Failed {
-                    reason: READ_STOPPED.to_owned(),
-                };
-                if let Err(error) = self.store().set_state(meeting.id, failed, self.now()) {
-                    tracing::debug!(meeting_id = %meeting.id, %error, "a quarantined meeting stays as it is");
-                }
-                continue;
-            }
-            let Some(mut asset) =
-                attributing(PipelineStage::Decode, self.store().asset(meeting.id))?
+            let Some(asset) = attributing(PipelineStage::Decode, self.store().asset(meeting.id))?
             else {
                 attributing(
                     PipelineStage::Decode,
@@ -1590,106 +1452,39 @@ impl ProcessingPipeline {
                 busy.push(meeting.id);
                 continue;
             };
-            let count = RunCount::of(&asset);
-            let crashed = count.read();
-            if crashed >= MAX_CRASHED_RUNS {
-                tracing::warn!(
-                    meeting_id = %meeting.id,
-                    runs = crashed,
-                    "processing ended with the app too often; marked failed"
-                );
-                // An earlier run's stamp must not let the sweep take it.
-                if asset.expires_at.take().is_some() {
-                    attributing(PipelineStage::Retention, self.store().save_asset(&asset))?;
-                }
-                attributing(
-                    PipelineStage::Decode,
-                    self.store().set_state(
-                        meeting.id,
-                        MeetingState::Failed {
-                            reason: TOO_MANY_CRASHED_RUNS.to_owned(),
-                        },
-                        self.now(),
-                    ),
-                )?;
-                count.clear();
-                continue;
-            }
-            if crashed > 0 {
-                alone.push((meeting.id, asset, claim));
-                continue;
-            }
-            // Never refused: no run asks to go alone before the loop ends.
-            let shared = turns.clone().try_read_owned().ok();
             self.leaving_the_wait(among, meeting.id);
-            self.start(&asset, Turn::Now(shared), claim);
+            self.start(&asset, claim);
             resumed.push(meeting.id);
-        }
-        let mut turns_alone = Vec::new();
-        for (meeting_id, asset, claim) in alone {
-            let (turn, waiting) = oneshot::channel();
-            turns_alone.push(turn);
-            self.leaving_the_wait(among, meeting_id);
-            self.start(&asset, Turn::Alone(waiting), claim);
-            resumed.push(meeting_id);
-        }
-        if !turns_alone.is_empty() {
-            // Oldest first: each write guard waits for the runs before it.
-            tokio::spawn(async move {
-                for turn in turns_alone {
-                    let _ = turn.send(turns.clone().write_owned().await);
-                }
-            });
         }
         Ok((resumed, busy))
     }
 
     /// Launch recovery for the exports: re-exports every ready meeting with
     /// a delivery left `pending`, never attempted, or `failed` more than
-    /// [`ExportRetries::INTERVAL`] ago.
-    ///
-    /// Each launch re-export is counted in `retries` before it runs and
-    /// reset once every row is delivered; after [`ExportRetries::LIMIT`] in
-    /// a row the meeting is left for the user. A row left `pending` is saved
-    /// failed, so the detail says the export keeps failing.
+    /// [`REDELIVER_AFTER`] ago.
     ///
     /// The meetings run one at a time in one background task, each claimed
     /// when its turn comes; one another operation holds, or no longer owed
     /// once claimed, is skipped. A failure is logged, not posted: the user
     /// did not ask for this export. Needs a `tokio` runtime.
-    pub fn redeliver_unfinished(&self, retries: &Arc<ExportRetries>) -> Result<Vec<Uuid>> {
+    pub fn redeliver_unfinished(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
         }
-        let store = self.store();
-        // A meeting delivered (or deleted) since starts again from 0.
-        retries.retain(|meeting_id| {
-            store
-                .deliveries(meeting_id)
-                .map_or(true, |rows| !all_delivered(&rows))
-        });
-        let found = attributing(
+        let owed = attributing(
             PipelineStage::Deliver,
-            store.meetings_with_unfinished_deliveries(self.now(), ExportRetries::INTERVAL),
+            self.store()
+                .meetings_with_unfinished_deliveries(self.now(), REDELIVER_AFTER),
         )?;
-        let (stopped, owed): (Vec<Uuid>, Vec<Uuid>) = found
-            .into_iter()
-            .partition(|meeting_id| retries.stopped(*meeting_id));
-        for meeting_id in stopped {
-            // Refused: the operation holding it saves its own rows.
-            if let Ok(_admitted) = self.admit(meeting_id, PipelineStage::Deliver) {
-                self.fail_pending_deliveries(meeting_id, EXPORT_INTERRUPTED);
-            }
-        }
         if !owed.is_empty() {
             let pipeline = self.clone();
-            let (meetings, retries) = (owed.clone(), retries.clone());
+            let meetings = owed.clone();
             self.spawn_tracked(Uuid::new_v4(), None, async move {
                 for meeting_id in meetings {
                     if pipeline.quitting() {
                         break;
                     }
-                    pipeline.redeliver_at_launch(meeting_id, &retries).await;
+                    pipeline.redeliver_at_launch(meeting_id).await;
                 }
                 None
             });
@@ -1698,10 +1493,9 @@ impl ProcessingPipeline {
     }
 
     /// One meeting of [`redeliver_unfinished`](Self::redeliver_unfinished):
-    /// claimed, counted, re-exported, and reset once every row is
-    /// delivered. A refused claim or a meeting no longer owed is not
-    /// counted.
-    async fn redeliver_at_launch(&self, meeting_id: Uuid, retries: &Arc<ExportRetries>) {
+    /// claimed and re-exported. A refused claim or a meeting no longer owed
+    /// is skipped.
+    async fn redeliver_at_launch(&self, meeting_id: Uuid) {
         // Refused: a meeting in flight exports at the end of its run.
         let Ok(admitted) = self.admit(meeting_id, PipelineStage::Deliver) else {
             return;
@@ -1710,12 +1504,7 @@ impl ProcessingPipeline {
         let Some(meeting) = self.still_owed(meeting_id).await else {
             return;
         };
-        let operation = self.deliver_again_claimed(meeting, admitted);
-        // Counted before the export writes its rows, so the reloaded detail
-        // already reads the count.
-        let counted = retries.clone();
-        let _ = tokio::task::spawn_blocking(move || counted.attempted(meeting_id)).await;
-        if let Err(failure) = operation.await {
+        if let Err(failure) = self.deliver_again_claimed(meeting, admitted).await {
             tracing::warn!(
                 target: BACKGROUND_RUN_LOG,
                 %meeting_id,
@@ -1723,16 +1512,6 @@ impl ProcessingPipeline {
                 "launch re-export failed"
             );
             tracing::debug!(target: BACKGROUND_RUN_LOG, %meeting_id, %failure, "launch re-export failure");
-        }
-        // Read once the claim is released; any reset ends the count at 0.
-        if self
-            .store()
-            .reading(move |store| store.deliveries(meeting_id))
-            .await
-            .is_ok_and(|rows| all_delivered(&rows))
-        {
-            let retries = retries.clone();
-            let _ = tokio::task::spawn_blocking(move || retries.reset(meeting_id)).await;
         }
     }
 
@@ -1790,40 +1569,19 @@ impl ProcessingPipeline {
     }
 
     /// Processes `asset` in the background under its [`AssetClaim`]; nothing
-    /// starts once the pipeline quits. The run is counted in the meeting's
-    /// folder before it starts ([`CountedRun`]) and cleared when it ends.
-    fn start(&self, asset: &AudioAsset, turn: Turn, claim: AssetClaim) {
+    /// starts once the pipeline quits.
+    fn start(&self, asset: &AudioAsset, claim: AssetClaim) {
         let asset_id = asset.id;
-        let latch = self.inner.dependencies.quit_latch.clone();
-        let count = RunCount::of(asset);
-        // A run that goes alone is counted when its turn comes.
-        let counted = match &turn {
-            Turn::Now(_) => {
-                let Some(counted) = CountedRun::start(&latch, count.clone()) else {
-                    not_started(asset_id);
-                    return;
-                };
-                Some(counted)
-            }
-            Turn::Alone(_) => None,
-        };
+        if self.quitting() {
+            not_started(asset_id);
+            return;
+        }
         let pipeline = self.clone();
         self.spawn_tracked(asset_id, Some(claim), async move {
-            let (_shared, _alone) = match turn {
-                Turn::Now(shared) => (shared, None),
-                Turn::Alone(waiting) => match waiting.await {
-                    Ok(alone) => (None, Some(alone)),
-                    Err(_) => return not_started(asset_id),
-                },
-            };
-            let Some(mut counted) = counted.or_else(|| CountedRun::start(&latch, count)) else {
+            if pipeline.quitting() {
                 return not_started(asset_id);
-            };
-            let (result, refused) = pipeline.process_held(asset_id).await;
-            if result.is_ok() {
-                counted.succeeded();
             }
-            drop(counted);
+            let (result, refused) = pipeline.process_held(asset_id).await;
             if let Err(failure) = result {
                 pipeline.log_run_failure(asset_id, &failure, refused.as_ref());
             }
@@ -1916,44 +1674,14 @@ impl ProcessingPipeline {
     /// [`warm_up`](Self::warm_up) for `meeting_id`'s job: a diarizer that
     /// does not load does not fail the job, which then falls back to
     /// [`diarization_without_diarizer`](Self::diarization_without_diarizer).
-    /// A loaded in-process engine clears a leftover [`WarmUpMark`].
     async fn warm_up_for_job(&self, meeting_id: Uuid) -> Result<()> {
         match self.warm_up().await {
-            Ok(()) => {
-                self.speech_engine_loaded().await;
-                Ok(())
-            }
             // The speech engine loaded before the diarizer failed.
             Err(failure) if failure.stage == PipelineStage::Diarize => {
-                self.speech_engine_loaded().await;
                 self.carry_on_after(&failure, meeting_id)
             }
-            failed => failed,
+            warmed => warmed,
         }
-    }
-
-    /// Clears a leftover [`WarmUpMark`] off the workers, only for an engine
-    /// in this process; the sidecar standing in for it proves nothing.
-    async fn speech_engine_loaded(&self) {
-        if !self.inner.dependencies.speech_in_process {
-            return;
-        }
-        let mark = Arc::clone(&self.inner.dependencies.warm_up_mark);
-        let _ = off_the_workers(move || mark.speech_engine_loaded()).await;
-    }
-
-    /// [`warm_up`](Self::warm_up) for a recording that just started, marked
-    /// on disk by the [`WarmUpMark`] while it runs, and skipped while a mark
-    /// left over from a warm-up that ended with the app turns it off.
-    pub async fn warm_up_while_recording(&self) -> Result<()> {
-        let mark = Arc::clone(&self.inner.dependencies.warm_up_mark);
-        // Off while skipping, or with the runtime shutting down.
-        let Ok(Some(warming)) = off_the_workers(move || mark.begin()).await else {
-            return Ok(());
-        };
-        let warmed = self.warm_up().await;
-        let _ = off_the_workers(move || drop(warming)).await;
-        warmed
     }
 
     /// [`warm_up`](Self::warm_up) for the diarizer alone, for a speech
@@ -2032,10 +1760,6 @@ impl ProcessingPipeline {
                     Box::pin(self.process_until_persist(&asset, meeting)),
                 )
                 .await;
-                // Ok: every stage ran, so every read returned, quit or not.
-                if until_persist.is_ok() || !self.quitting() {
-                    self.read_through(meeting_id).await;
-                }
                 let persisted = match until_persist {
                     Ok(asset) => asset,
                     Err(failure) if self.quitting() => return Err(failure),
@@ -2178,8 +1902,7 @@ impl ProcessingPipeline {
             let turn = self
                 .in_process_turn(meeting.id, PipelineStage::Decode)
                 .await?;
-            self.marked(asset, self.speech_stage(), self.warm_up_for_job(meeting.id))
-                .await?;
+            self.warm_up_for_job(meeting.id).await?;
             drop(turn);
             let (meeting_id, now) = (meeting.id, self.now());
             let settings = attributing(
@@ -2790,8 +2513,7 @@ impl ProcessingPipeline {
 
     /// Per lane: decode, then transcribe with the previous lane's dominant
     /// language as the hint; only the last buffer survives, for `diarize`.
-    /// The most any lane's decoder replaced by silence is recorded
-    /// ([`DamagedAudio`]); a record that cannot be written fails the stage.
+    /// What any lane's decoder replaced by silence is logged.
     async fn decode_and_transcribe(
         &self,
         asset: &AudioAsset,
@@ -2807,7 +2529,7 @@ impl ProcessingPipeline {
         for (index, lane) in ordered_lanes(&asset.lanes).into_iter().enumerate() {
             // Release the previous lane before decoding the next.
             drop(last.take());
-            let decode = self.marked(asset, Some(ReadStage::Decode), decoder.decode(asset, lane));
+            let decode = decoder.decode(asset, lane);
             let buffer = if index == 0 {
                 self.run(PipelineStage::Decode, 0, meeting_id, decode)
                     .await?
@@ -2820,11 +2542,7 @@ impl ProcessingPipeline {
             let turn = self
                 .in_process_turn(meeting_id, PipelineStage::Transcribe)
                 .await?;
-            let transcription = self.marked(
-                asset,
-                self.speech_stage(),
-                engine.transcribe(&buffer, lane_hint.as_ref()),
-            );
+            let transcription = engine.transcribe(&buffer, lane_hint.as_ref());
             let segments = self
                 .run(PipelineStage::Transcribe, index, meeting_id, transcription)
                 .await?;
@@ -2841,19 +2559,6 @@ impl ProcessingPipeline {
                 "parts of the recording did not decode and were replaced by silence"
             );
         }
-        attributing(
-            PipelineStage::Decode,
-            self.inner
-                .dependencies
-                .damaged_audio
-                .record(meeting_id, damage)
-                .map_err(|error| {
-                    format!(
-                        "the record of what could not be read in the recording could not be \
-                         saved: {error}"
-                    )
-                }),
-        )?;
         let language = elect_language(lanes.values().flatten());
         Ok((
             Transcription {
@@ -2887,11 +2592,7 @@ impl ProcessingPipeline {
             };
             let buffer = match handed {
                 Some(handed_lane) if handed_lane.lane == lane => handed_lane.buffer,
-                _ => attributing(
-                    PipelineStage::Diarize,
-                    self.marked(asset, Some(ReadStage::Decode), decoder.decode(asset, lane))
-                        .await,
-                )?,
+                _ => attributing(PipelineStage::Diarize, decoder.decode(asset, lane).await)?,
             };
             let result = attributing(PipelineStage::Diarize, diarizer.diarize(&buffer).await)?;
             if lane == AudioLane::Mic && result.clusters.len() < 2 {
@@ -3230,9 +2931,7 @@ impl ProcessingPipeline {
                 })?;
                 attributing(PipelineStage::Persist, layout.create_directories(false))?;
                 let path = layout.mixdown(decoder.mixdown_format());
-                let mixed = decoder.mixdown(asset, &path);
-                let mixed = self.marked(asset, Some(ReadStage::Mixdown), mixed).await;
-                attributing(PipelineStage::Persist, mixed)?;
+                attributing(PipelineStage::Persist, decoder.mixdown(asset, &path).await)?;
                 mixdown = Some(file_url(&path, false));
             }
             let (meeting_id, fallback) = (meeting.id, asset.clone());
@@ -3333,8 +3032,7 @@ impl ProcessingPipeline {
         .await
     }
 
-    /// [`steno_core::results_need_the_audio`] over the stored rows, or the
-    /// recording [may be damaged](DamagedAudio::may_be_damaged).
+    /// [`steno_core::results_need_the_audio`] over the stored rows.
     async fn stored_results_need_the_audio(&self, asset: &AudioAsset) -> Result<bool> {
         let meeting_id = asset.meeting_id;
         let stored = attributing(
@@ -3355,14 +3053,6 @@ impl ProcessingPipeline {
         let Some((meeting, speakers, segments)) = stored else {
             return Ok(false);
         };
-        if self
-            .inner
-            .dependencies
-            .damaged_audio
-            .may_be_damaged(meeting_id)
-        {
-            return Ok(true);
-        }
         Ok(steno_core::results_need_the_audio(
             &meeting, &speakers, &segments, asset,
         ))
@@ -3432,16 +3122,6 @@ impl Drop for SpeechClaim {
 }
 
 /// When a background run starts ([`ProcessingPipeline::start`]).
-enum Turn {
-    /// At once, holding a read guard of the launch's turns when launch
-    /// recovery started it.
-    Now(Option<OwnedRwLockReadGuard<()>>),
-    /// After every run the launch started at once, one at a time: a
-    /// meeting with crashed runs is counted only with the write guard, so a
-    /// crash is charged to the run that is running.
-    Alone(oneshot::Receiver<OwnedRwLockWriteGuard<()>>),
-}
-
 /// The debug line of a run the exit kept from starting.
 fn not_started(asset_id: Uuid) -> Option<Refused> {
     tracing::debug!(
@@ -3549,6 +3229,7 @@ pub fn write_wav_16k(path: &Path, buffer: &AudioBuffer16k) -> std::io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use steno_core::Delivery;
 
     /// A hold dropped between a waiting job's check and its wait still
     /// wakes the job.

@@ -31,8 +31,8 @@ pub enum RecordingStatus {
     /// A finite rule, no stamp, meeting failed: re-processing needs the audio.
     KeptProcessingFailed,
     /// A finite rule, no stamp, meeting ready and delivered, but its
-    /// results may be incomplete ([`steno_core::results_need_the_audio`])
-    /// or its recording damaged, so retention keeps the recording.
+    /// results may be incomplete ([`steno_core::results_need_the_audio`]),
+    /// so retention keeps the recording.
     KeptIncomplete,
     /// A finite rule, no stamp, meeting still on its way to the retention stage.
     KeptWhileProcessing,
@@ -54,15 +54,6 @@ pub struct MeetingDetailViewModel {
     /// is processed again.
     pub key_withheld: bool,
     pub vault_configured: bool,
-    /// The launch stopped re-exporting the meeting
-    /// ([`Pipeline::export_keeps_failing`]).
-    pub export_keeps_failing: bool,
-    /// What of the recording its last decode replaced by silence
-    /// ([`Pipeline::damaged_audio`]).
-    pub damaged_audio: steno_core::AudioDamage,
-    /// Whether the recording may have parts replaced by silence
-    /// ([`Pipeline::audio_may_be_damaged`]).
-    pub audio_may_be_damaged: bool,
     pub error: Option<String>,
     pub is_busy: bool,
     pub tab: DetailTab,
@@ -90,9 +81,6 @@ impl MeetingDetailViewModel {
             llm_configured: settings.is_some_and(llm_configured),
             key_withheld: false,
             vault_configured: settings.is_some_and(vault_configured),
-            export_keeps_failing: false,
-            damaged_audio: steno_core::AudioDamage::default(),
-            audio_may_be_damaged: false,
             error: None,
             is_busy: false,
             tab: DetailTab::Summary,
@@ -142,9 +130,6 @@ impl MeetingDetailViewModel {
             Ok(deliveries) => self.deliveries = deliveries,
             Err(error) => self.error = Some(format!("Deliveries could not be loaded: {error}")),
         }
-        self.export_keeps_failing = pipeline.export_keeps_failing(self.id);
-        self.damaged_audio = pipeline.damaged_audio(self.id);
-        self.audio_may_be_damaged = pipeline.audio_may_be_damaged(self.id);
     }
 
     /// The settings as stored now (the keep toggle, the rows and the
@@ -215,7 +200,6 @@ impl MeetingDetailViewModel {
                 &export.speakers,
                 &export.segments,
                 export.audio.as_ref(),
-                self.audio_may_be_damaged,
             )
         });
         if !offered {
@@ -363,14 +347,12 @@ impl MeetingDetailViewModel {
             MeetingStateKind::Ready => {
                 if !all_delivered(&self.deliveries) {
                     RecordingStatus::KeptUntilExportSucceeds
-                } else if self.audio_may_be_damaged
-                    || results_need_the_audio(
-                        &export.meeting,
-                        &export.speakers,
-                        &export.segments,
-                        asset,
-                    )
-                {
+                } else if results_need_the_audio(
+                    &export.meeting,
+                    &export.speakers,
+                    &export.segments,
+                    asset,
+                ) {
                     RecordingStatus::KeptIncomplete
                 } else {
                     RecordingStatus::KeptWhileProcessing

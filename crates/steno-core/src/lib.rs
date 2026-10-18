@@ -3,7 +3,6 @@
 //! The database file is shared with the Swift app until cutover, so every
 //! encoding mirrors it; `migrations/README.md` has the schema change procedure.
 
-pub mod busy_file;
 pub mod content_hash;
 pub mod crash_log;
 pub mod database_lock;

@@ -497,10 +497,7 @@ impl Host {
         onboarding.load(&own, &services, key);
         let mut list = MeetingListViewModel::new(config.zone);
         list.reload(&own);
-        let mut progress = ProcessingProgressModel {
-            speech_fallback: services.speech_models.speech_fallback(),
-            ..ProcessingProgressModel::default()
-        };
+        let mut progress = ProcessingProgressModel::default();
         progress.meetings_changed(&list.all, services.clock.now());
         let app = AppState {
             speech_engine_notice: services.preferences.flag(engine_notice::PENDING_KEY),
@@ -1236,32 +1233,10 @@ impl Host {
 
     /// After a command that may have written settings: re-reads them, and
     /// when `reload_sections` and they changed, reloads the Settings
-    /// sections. The subtitles and the speech fallback follow either way.
+    /// sections. The subtitles follow either way.
     fn follow_settings(&self, inner: &mut Inner, reload_sections: bool) {
         self.follow_stored_settings(inner, reload_sections);
-        self.follow_speech_fallback(inner);
         self.follow_key_and_subtitles(inner);
-    }
-
-    /// A Summaries save that rebuilt the pipeline ends a pending "Use
-    /// again" rebuild, and a meeting waiting for its models says the
-    /// Neural Engine is off exactly while Transcription does.
-    fn follow_speech_fallback(&self, inner: &mut Inner) {
-        let settings = inner.llm.take_pipeline_rebuilt();
-        let onboarding = inner.onboarding.llm.take_pipeline_rebuilt();
-        if settings || onboarding {
-            let offered = inner.speech.speech_fallback;
-            inner.speech.pipeline_rebuilt(&self.shared.services);
-            if inner.speech.speech_fallback != offered {
-                for topic in MODEL_TOPICS {
-                    inner.publisher.schedule(topic);
-                }
-            }
-        }
-        if inner.progress.speech_fallback != inner.speech.speech_fallback {
-            inner.progress.speech_fallback = inner.speech.speech_fallback;
-            inner.publisher.schedule(BridgeTopic::Progress);
-        }
     }
 
     fn follow_stored_settings(&self, inner: &mut Inner, reload_sections: bool) {
@@ -2329,14 +2304,6 @@ impl BridgeHost for Host {
     fn settings_transcription_remove(&self, params: AssetIdParams) -> Outcome<()> {
         let asset = parse_asset(&params)?;
         self.models_command(|inner| inner.speech.remove(asset, &self.shared.services));
-        Ok(())
-    }
-
-    /// Switches to the Neural Engine's model; a meeting waiting for the
-    /// sidecar's models stops saying the Neural Engine is off. A failed
-    /// rebuild leaves both until a reload succeeds.
-    fn settings_transcription_use_neural_engine(&self) -> Outcome<()> {
-        self.models_command(|inner| inner.speech.use_neural_engine(&self.shared.services));
         Ok(())
     }
 

@@ -326,20 +326,19 @@ mod tests {
         ] {
             meeting.state = state;
             assert!(
-                !meeting.offers_process_again(&room, &both, Some(&asset), true),
+                !meeting.offers_process_again(&room, &both, Some(&asset)),
                 "{:?}",
                 meeting.state
             );
         }
         meeting.state = MeetingState::Ready;
-        assert!(!meeting.offers_process_again(&[], &both, Some(&asset), false));
-        assert!(meeting.offers_process_again(&room, &both, Some(&asset), false));
-        assert!(meeting.offers_process_again(&[], &both, Some(&asset), true));
-        assert!(!meeting.offers_process_again(&room, &both, None, true));
+        assert!(!meeting.offers_process_again(&[], &both, Some(&asset)));
+        assert!(meeting.offers_process_again(&room, &both, Some(&asset)));
+        assert!(!meeting.offers_process_again(&room, &both, None));
         meeting.state = MeetingState::Failed {
             reason: "decode: unreadable".to_owned(),
         };
-        assert!(meeting.offers_process_again(&[], &both, None, false));
+        assert!(meeting.offers_process_again(&[], &both, None));
     }
 
     #[test]

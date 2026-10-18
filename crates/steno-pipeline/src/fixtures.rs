@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use steno_core::{AudioBuffer16k, AudioLane, busy_file};
+use steno_core::{AudioBuffer16k, AudioLane};
 #[cfg(feature = "testing")]
 pub use testing::{CapturedLog, two_lane_call};
 
@@ -209,13 +209,11 @@ pub fn write_wav(path: &Path, samples: &[i16]) -> std::io::Result<()> {
     write_atomically(path, &wav_data(samples, 16_000, 1))
 }
 
-/// Writes a `wav.part` temporary beside `path` and renames it over `path`,
-/// retried on Windows while an antivirus scan holds it. A failure removes
-/// the temporary and leaves `path` as it was.
+/// Writes a `wav.part` temporary beside `path` and renames it over `path`;
+/// a failure removes the temporary and leaves `path` as it was.
 fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let temporary = path.with_extension("wav.part");
-    let written =
-        std::fs::write(&temporary, data).and_then(|()| busy_file::rename(&temporary, path));
+    let written = std::fs::write(&temporary, data).and_then(|()| std::fs::rename(&temporary, path));
     if written.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }

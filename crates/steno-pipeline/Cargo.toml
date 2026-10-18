@@ -20,7 +20,7 @@ async-trait.workspace = true
 chrono.workspace = true
 # `catch_unwind` on a claimed operation, so a panic is reported.
 futures-util.workspace = true
-# The JSON files in `files`: `preferences.json` and `export-retries.json`.
+# The JSON files in `files`.
 serde.workspace = true
 serde_json.workspace = true
 # `Store::reading` and `Store::writing`, the store's facade for async code.
@@ -32,22 +32,6 @@ tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, optional = true }
 uuid.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-# Additive on the workspace line: `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`
-# for the durable renames in `files`, the folder flush's access flags,
-# `GetVolumeInformationByHandleW` for the drive's file system and
-# `GetDriveTypeW` for a network drive.
-windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_WindowsProgramming"] }
-
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-# `statfs` for the file system of the audio folder, whose network mounts
-# Settings warns about (`files::mount`).
-rustix.workspace = true
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-# Pins the Linux magic numbers `files::mount` names to libc's values.
-libc.workspace = true
 
 [dev-dependencies]
 # Builds the store's `SQLITE_BUSY` error a boundary over the store returns,

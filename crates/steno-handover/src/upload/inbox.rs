@@ -10,7 +10,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use steno_core::busy_file;
 use steno_core::json::parse_uuid;
 use steno_core::{AudioFormat, RecordingMetadata};
 use uuid::Uuid;
@@ -92,18 +91,17 @@ impl Inbox {
         self.verified(recording_id, format).exists()
     }
 
-    /// Renames the complete partial to its final name, retried on Windows while
-    /// another handle briefly holds a file. A failure leaves the partial in
-    /// place and `complete` answers 500, so the phone keeps its copy.
+    /// Renames the complete partial to its final name. A failure leaves the
+    /// partial in place and `complete` answers 500, so the phone keeps its copy.
     pub fn promote(&self, recording_id: Uuid, format: AudioFormat) -> std::io::Result<PathBuf> {
         let destination = self.verified(recording_id, format);
         if destination.exists() {
-            match busy_file::retried(|| std::fs::remove_file(&destination)) {
+            match std::fs::remove_file(&destination) {
                 Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
                 _ => {}
             }
         }
-        busy_file::rename(&self.partial(recording_id), &destination)?;
+        std::fs::rename(self.partial(recording_id), &destination)?;
         Ok(destination)
     }
 
@@ -140,11 +138,10 @@ impl Inbox {
     }
 }
 
-/// Write to `temporary`, then rename it over `path`, retried on Windows
-/// while another handle briefly holds a file.
+/// Write to `temporary`, then rename it over `path`.
 fn write_atomically(path: &Path, temporary: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(temporary, bytes)?;
-    busy_file::rename(temporary, path)
+    std::fs::rename(temporary, path)
 }
 
 #[cfg(test)]

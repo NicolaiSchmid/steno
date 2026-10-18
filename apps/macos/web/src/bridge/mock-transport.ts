@@ -153,7 +153,6 @@ export const scenarios = [
 	// Settings
 	"settings-error",
 	"download-failed",
-	"neural-engine-off",
 	"summaries-connected",
 	"summaries-failed",
 	"codex",
@@ -576,9 +575,7 @@ function applyOnboardingScenario(
 /**
  * The Settings states: `settings-error` (General with an error and its
  * details, a login item awaiting approval, an update available),
- * `download-failed` (the speech model's download failed), `neural-engine-off`
- * (Steno closed while it was using the Neural Engine, so the processor
- * transcribes), `summaries-connected`
+ * `download-failed` (the speech model's download failed), `summaries-connected`
  * and `summaries-failed` (a configured OpenAI endpoint with its test result),
  * `summaries-key-in-file` (a saved key the host keeps in the secrets file,
  * from `settings.summaries.fileKey`) and `summaries-key-in-keyring` (the
@@ -642,13 +639,6 @@ function applySettingsScenario(
 						}
 					: asset,
 			),
-		} satisfies TranscriptionSettingsSnapshot;
-	}
-
-	if (scenario === "neural-engine-off" && transcription) {
-		result["settings.transcription"] = {
-			...transcription,
-			neuralEngineOff: true,
 		} satisfies TranscriptionSettingsSnapshot;
 	}
 

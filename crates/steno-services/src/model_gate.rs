@@ -201,14 +201,6 @@ impl<M: SpeechModels> SpeechModels for ResumingSpeechModels<M> {
     fn expected_bytes(&self, asset: ModelAsset) -> i64 {
         self.inner.expected_bytes(asset)
     }
-
-    fn speech_fallback(&self) -> bool {
-        self.inner.speech_fallback()
-    }
-
-    fn end_speech_fallback(&self) -> BoundaryResult<()> {
-        self.inner.end_speech_fallback()
-    }
 }
 
 #[cfg(test)]
@@ -436,25 +428,6 @@ mod tests {
                 .is_err()
         );
         assert_eq!(resumed.load(Ordering::SeqCst), 1);
-    }
-
-    /// The fallback's state and its end pass through to the model service
-    /// behind.
-    #[test]
-    fn the_speech_fallback_passes_through() {
-        let models = ResumingSpeechModels::new(
-            steno_host::fakes::FakeSpeechModels::default(),
-            Box::new(|| {}),
-        );
-        assert!(!models.speech_fallback());
-        models.inner.speech_fallback.store(true, Ordering::SeqCst);
-        assert!(models.speech_fallback());
-        *models.inner.end_fallback_failure.lock().unwrap() = Some("read-only".to_owned());
-        assert!(models.end_speech_fallback().is_err());
-        assert!(models.speech_fallback());
-        *models.inner.end_fallback_failure.lock().unwrap() = None;
-        models.end_speech_fallback().unwrap();
-        assert!(!models.inner.speech_fallback.load(Ordering::SeqCst));
     }
 
     /// The speech sidecar behind an open gate over an empty models directory,

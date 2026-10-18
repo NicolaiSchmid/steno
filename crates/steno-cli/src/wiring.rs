@@ -63,33 +63,6 @@ impl DatabaseOptions {
         }
     }
 
-    /// The record of what the decoder replaced by silence
-    /// ([`steno_pipeline::DamagedAudio`]) beside the database, where the
-    /// app reads it.
-    pub fn damaged_audio(&self) -> Result<Arc<steno_pipeline::DamagedAudio>, Failure> {
-        let path = self.path()?;
-        let directory = path.parent().unwrap_or_else(|| Path::new(""));
-        Ok(Arc::new(steno_pipeline::DamagedAudio::in_directory(
-            directory,
-        )))
-    }
-
-    /// The reading marks beside the database ([`steno_pipeline::ReadingMarks`]),
-    /// read as a launch reads them: a mark a crash left quarantines its
-    /// meeting until `process --meeting`.
-    pub fn reading_marks(
-        &self,
-        store: &Store,
-    ) -> Result<Arc<steno_pipeline::ReadingMarks>, Failure> {
-        let path = self.path()?;
-        let directory = path.parent().unwrap_or_else(|| Path::new(""));
-        Ok(Arc::new(steno_pipeline::ReadingMarks::at_launch(
-            directory,
-            store,
-            chrono::Utc::now(),
-        )))
-    }
-
     /// Opens the database for a command that writes, holding its lock until
     /// the process ends; refused while the app or another steno command
     /// holds it.
@@ -400,30 +373,6 @@ pub fn sha256_hex(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The damage a command's pipeline records goes beside the database.
-    #[test]
-    fn the_damage_is_recorded_beside_the_database() {
-        let dir = tempfile::tempdir().unwrap();
-        let options = DatabaseOptions {
-            database_path: Some(dir.path().join("steno.sqlite")),
-        };
-        let meeting = Uuid::new_v4();
-        let damage = steno_core::AudioDamage {
-            parts: 2,
-            seconds: 0.05,
-            salvaged: false,
-        };
-        options
-            .damaged_audio()
-            .unwrap()
-            .record(meeting, damage)
-            .unwrap();
-        assert_eq!(
-            steno_pipeline::DamagedAudio::in_directory(dir.path()).damage(meeting),
-            damage
-        );
-    }
 
     /// A key moved to the keyring reads as none; any other failure stays one.
     #[test]

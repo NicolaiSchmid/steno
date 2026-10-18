@@ -5465,9 +5465,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
- "libc",
  "rusqlite",
- "rustix",
  "serde",
  "serde_json",
  "steno-core",
@@ -5478,7 +5476,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

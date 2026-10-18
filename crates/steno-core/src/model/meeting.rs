@@ -281,21 +281,18 @@ impl Meeting {
 
     /// Whether the app offers "Process again", given the recording is on disk: a
     /// failed meeting, or a ready one whose results could still need the audio
-    /// ([`results_need_the_audio`] or `audio_may_be_damaged`). The one rule every
-    /// surface reads.
+    /// ([`results_need_the_audio`]). The one rule every surface reads.
     #[must_use]
     pub fn offers_process_again(
         &self,
         speakers: &[Speaker],
         segments: &[TranscriptSegment],
         asset: Option<&AudioAsset>,
-        audio_may_be_damaged: bool,
     ) -> bool {
         self.state.is_failed()
             || (self.state == MeetingState::Ready
-                && asset.is_some_and(|asset| {
-                    audio_may_be_damaged || results_need_the_audio(self, speakers, segments, asset)
-                }))
+                && asset
+                    .is_some_and(|asset| results_need_the_audio(self, speakers, segments, asset)))
     }
 }
 

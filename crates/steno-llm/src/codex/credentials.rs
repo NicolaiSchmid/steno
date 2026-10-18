@@ -718,7 +718,7 @@ impl CodexCredentialStore {
     }
 
     /// Atomic write: a 0600 temp file beside the target, synced, renamed
-    /// (retried on Windows while busy), then the folder synced. A failed
+    /// then the folder synced. A failed
     /// rename leaves the temporary for a later write to remove.
     fn write(&self, document: &Map<String, Value>) -> Result<(), WriteFailure> {
         let text = crate::wire::swift_pretty(&Value::Object(document.clone()));
@@ -748,7 +748,7 @@ impl CodexCredentialStore {
         }
         // A `codex login` between the read and this rename is replaced; only
         // a file lock would close that window.
-        if let Err(error) = steno_core::busy_file::rename(&temporary, &self.file_path()) {
+        if let Err(error) = std::fs::rename(&temporary, self.file_path()) {
             return Err(WriteFailure {
                 detail: format!(
                     "could not replace the Codex sign-in file: {error}; the new sign-in is left in {}",

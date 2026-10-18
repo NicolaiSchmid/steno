@@ -321,25 +321,6 @@ impl World {
         bytes
     }
 
-    /// The read of `meeting_id`'s length ended with the app at two launches in
-    /// a row, so the next launch holds its copy. Call with the app quit.
-    fn length_read_ended_twice(&self, meeting_id: Uuid) {
-        let store = Store::open(self.database()).unwrap();
-        for _ in 0..2 {
-            let killed = Arc::new(steno_pipeline::ReadingMarks::at_launch(
-                &self.support(),
-                &store,
-                chrono::Utc::now(),
-            ));
-            std::mem::forget(killed.reading(
-                meeting_id,
-                None,
-                &self.master_of(meeting_id),
-                steno_pipeline::ReadStage::Duration,
-            ));
-        }
-    }
-
     /// The meeting the ledger answers the upload with, if any.
     fn ledger_row(&self, store: &Store) -> Option<Uuid> {
         store
@@ -374,72 +355,14 @@ impl World {
     }
 }
 
-/// A noted copy whose length read ended with the app twice is adopted with
-/// the upload's ledger row, failed with [`steno_pipeline::READ_STOPPED`]
-/// and unprocessed; the retry is answered with that meeting.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_noted_copy_whose_length_read_ended_with_the_app_is_adopted_failed_with_its_ledger_row() {
-    let (world, app) = World::new();
-    let (noted, hold) = world.gave_up(&app).await;
-    drop(hold);
-    quit(app).await;
-    world.length_read_ended_twice(noted);
-
-    let app = relaunch(&world).await;
-    world.assert_one_meeting(&app.store, noted);
-    let failed = steno_core::MeetingState::Failed {
-        reason: steno_pipeline::READ_STOPPED.to_owned(),
-    };
-    tokio::time::timeout(HANG_GUARD, app.pipeline.current().wait_until_idle())
-        .await
-        .expect("the runs end within the guard");
-    let meeting = app.store.meeting(noted).unwrap().unwrap();
-    assert_eq!(meeting.state, failed, "not processed");
-    assert_eq!(meeting.duration, 0.0, "its length was not read");
-
-    assert_eq!(world.admit(&app).await.unwrap(), noted, "the retry");
-    world.assert_one_meeting(&app.store, noted);
-    quit(app).await;
-}
-
-/// That held copy with other bytes of the same size gets no ledger row, so
-/// the retry admits the upload afresh.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_held_copy_holding_other_bytes_is_adopted_failed_with_no_ledger_row() {
-    let (world, app) = World::new();
-    let (noted, hold) = world.gave_up(&app).await;
-    drop(hold);
-    world.corrupt(noted);
-    quit(app).await;
-    world.length_read_ended_twice(noted);
-
-    let app = relaunch(&world).await;
-    let meeting = app.store.meeting(noted).unwrap().expect("adopted");
-    assert_eq!(
-        meeting.state,
-        steno_core::MeetingState::Failed {
-            reason: steno_pipeline::READ_STOPPED.to_owned()
-        }
-    );
-    assert_eq!(
-        world.ledger_row(&app.store),
-        None,
-        "no ledger row: the phone keeps retrying"
-    );
-    let retried = world.admit(&app).await.unwrap();
-    assert_ne!(retried, noted, "the phone's bytes admitted afresh");
-    quit(app).await;
-}
-
-/// The noted copy the launch holds cannot be read: it is neither adopted
+/// A noted copy that cannot be read is neither adopted
 /// nor given a ledger row, and keeps its notes for the next launch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_held_copy_that_cannot_be_read_is_kept_with_no_ledger_row() {
+async fn a_noted_copy_that_cannot_be_read_is_kept_with_no_ledger_row() {
     let (world, app) = World::new();
     let (noted, hold) = world.gave_up(&app).await;
     drop(hold);
     quit(app).await;
-    world.length_read_ended_twice(noted);
     crate::recovery::UNREADABLE_COPIES
         .lock()
         .unwrap()

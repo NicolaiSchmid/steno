@@ -1,6 +1,6 @@
 //! The models directory, the speech settings, the speech engine per
 //! platform ([`SpeechSetup::runtime`]: `CoreML` in this process on the Mac,
-//! the speech sidecar elsewhere and as the Mac's fallback), the ONNX
+//! the speech sidecar elsewhere and when the settings choose it), the ONNX
 //! diarizer in the sidecar's child, and the host's `SpeechModels`.
 //! [`SpeechEngines`] keeps the engines so the app never runs two sidecars.
 
@@ -15,7 +15,7 @@ use steno_core::{
 use steno_diarize::{Install, SidecarDiarizer};
 use steno_host::services::{ModelNotice, SpeechModels};
 use steno_host::speech::ModelAsset;
-use steno_pipeline::{SharedSpeechEngine, SpeechFallback, WeakSpeechEngine};
+use steno_pipeline::{SharedSpeechEngine, WeakSpeechEngine};
 use steno_speech::{
     ModelStore, OnnxSpeechEngine, SidecarConfig, SidecarSpeechEngine, SpeechRuntime, SpeechSettings,
 };
@@ -100,9 +100,6 @@ pub struct SpeechSetup {
     /// speech settings ask for it on Windows. It never downloads a missing
     /// model unless the `steno` command turns that on.
     pub sidecar: SidecarConfig,
-    /// Whether the speech sidecar stands in for `CoreML`, which ended the
-    /// app; off from [`Self::new`].
-    pub fallback: Arc<SpeechFallback>,
 }
 
 impl SpeechSetup {
@@ -124,23 +121,15 @@ impl SpeechSetup {
             models_directory,
             speech_settings,
             sidecar,
-            fallback: Arc::new(SpeechFallback::in_memory()),
         }
     }
 
-    #[must_use]
-    pub fn with_fallback(mut self, fallback: Arc<SpeechFallback>) -> Self {
-        self.fallback = fallback;
-        self
-    }
-
     /// Where the engine `engine_id` runs: `parakeet-v3` on `CoreML` in this
-    /// process on the Mac, unless the settings choose the sidecar or the
-    /// fallback is on; every other case in the speech sidecar. Read at each
-    /// pipeline build, so ending the fallback takes effect at the next reload.
+    /// process on the Mac, unless the settings choose the sidecar; every
+    /// other case in the speech sidecar.
     #[must_use]
     pub fn runtime(&self, engine_id: &str) -> SpeechRuntime {
-        unless_falling_back(engine_id, &self.speech_settings, &self.fallback)
+        engine_runtime(engine_id, &self.speech_settings)
     }
 
     /// The ONNX store in the models directory's `onnx/`, with the mirror.
@@ -159,20 +148,6 @@ pub(crate) fn engine_runtime(engine_id: &str, speech_settings: &SpeechSettings) 
         speech_settings.runtime()
     } else {
         SpeechRuntime::OnnxSidecar
-    }
-}
-
-/// Where `engine_id` runs: in the sidecar while `fallback` is on, else as
-/// [`engine_runtime`] says.
-fn unless_falling_back(
-    engine_id: &str,
-    speech_settings: &SpeechSettings,
-    fallback: &SpeechFallback,
-) -> SpeechRuntime {
-    if fallback.is_on() {
-        SpeechRuntime::OnnxSidecar
-    } else {
-        engine_runtime(engine_id, speech_settings)
     }
 }
 
@@ -499,8 +474,6 @@ pub struct ModelStoreSpeechModels {
     /// The `CoreML` store, the models directory's `fluidaudio/`.
     pub coreml_store: ModelStore,
     speech_settings: SpeechSettings,
-    /// While on, Parakeet v3 is the speech sidecar's model.
-    fallback: Arc<SpeechFallback>,
 }
 
 impl ModelStoreSpeechModels {
@@ -511,7 +484,6 @@ impl ModelStoreSpeechModels {
             speech: setup.model_store(),
             coreml_store: setup.speech_settings.coreml_store(&setup.models_directory),
             speech_settings: setup.speech_settings.clone(),
-            fallback: setup.fallback.clone(),
         }
     }
 
@@ -539,7 +511,7 @@ impl ModelStoreSpeechModels {
     }
 
     fn runtime(&self, engine_id: &str) -> SpeechRuntime {
-        unless_falling_back(engine_id, &self.speech_settings, &self.fallback)
+        engine_runtime(engine_id, &self.speech_settings)
     }
 
     fn parakeet_on_coreml(&self) -> bool {
@@ -687,15 +659,6 @@ impl SpeechModels for ModelStoreSpeechModels {
         };
         i64::try_from(bytes).unwrap_or(i64::MAX)
     }
-
-    fn speech_fallback(&self) -> bool {
-        self.fallback.is_on()
-    }
-
-    /// [`SpeechFallback::turn_off`], which syncs the disk.
-    fn end_speech_fallback(&self) -> BoundaryResult<()> {
-        Ok(self.fallback.turn_off()?)
-    }
 }
 
 /// The diarizer's two acknowledgement lines, `(name with attribution,
@@ -795,7 +758,6 @@ pub(crate) mod testing {
             models_directory: models_directory.to_path_buf(),
             speech_settings,
             sidecar: SidecarConfig::new(models_directory.join("no-such-sidecar")),
-            fallback: std::sync::Arc::new(steno_pipeline::SpeechFallback::in_memory()),
         }
     }
 
@@ -1723,44 +1685,6 @@ mod tests {
             "nvidia/parakeet-tdt-0.6b-v3"
         );
         assert_eq!(parakeet_size_text(&models), fp32_size_text());
-    }
-
-    /// While the fallback is on, Parakeet v3 runs in the sidecar and its row
-    /// is the export; ending it puts both back at once.
-    #[test]
-    fn while_the_fallback_is_on_parakeet_v3_is_the_onnx_export() {
-        let dir = tempfile::tempdir().unwrap();
-        let support = dir.path().join("support");
-        std::fs::create_dir_all(&support).unwrap();
-        std::fs::write(support.join(steno_pipeline::WarmUpMark::FILE_NAME), b"1\n").unwrap();
-        let store = steno_core::Store::in_memory().unwrap();
-        let fallback = Arc::new(SpeechFallback::at_launch(
-            &support,
-            Arc::new(steno_pipeline::WarmUpMark::at_launch(&support)),
-            &steno_pipeline::ReadingMarks::at_launch(&support, &store, chrono::Utc::now()),
-        ));
-        let setup = testing::setup(&dir.path().join("models"), SpeechSettings::default())
-            .with_fallback(fallback);
-        let models = ModelStoreSpeechModels::new(&setup);
-        testing::install_coreml_parakeet(&models);
-        assert!(models.speech_fallback());
-        assert_eq!(setup.runtime("parakeet-v3"), SpeechRuntime::OnnxSidecar);
-        assert!(!models.engine_installed("parakeet-v3"));
-        assert_eq!(
-            models.display_name(ModelAsset::ParakeetV3),
-            "Parakeet TDT 0.6B v3 (fp32)"
-        );
-        assert_eq!(parakeet_size_text(&models), fp32_size_text());
-
-        models.end_speech_fallback().unwrap();
-        assert!(!models.speech_fallback());
-        let platform = SpeechSettings::default().runtime();
-        assert_eq!(setup.runtime("parakeet-v3"), platform);
-        assert_eq!(
-            models.engine_installed("parakeet-v3"),
-            platform == SpeechRuntime::CoreMlInProcess,
-            "the CoreML model counts again where it runs"
-        );
     }
 
     /// A row this version does not offer is refused by Download and Remove,
