@@ -1,5 +1,4 @@
 //! The user's settings and their defaults.
-//! Swift: `Sources/StenoCore/Model/Settings.swift`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,9 +18,8 @@ string_enum! {
     }
 }
 
-/// The one settings type, persisted as one row per property in the
-/// `setting` table (`Store::settings`). API keys never live here. URLs are
-/// the `file://` strings Swift's `URL` encodes to.
+/// The one settings type, persisted as one row per property in the `setting`
+/// table (`Store::settings`). API keys never live here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -56,8 +54,8 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_model: Option<String>,
     pub codex_context_tokens: i64,
-    /// When the user confirmed that Steno may use the Codex sign-in stored
-    /// on this computer. `None` means never.
+    /// When the user allowed Steno to use the stored Codex sign-in; `None` means
+    /// never.
     #[serde(
         default,
         with = "json::iso_time_opt",
@@ -70,24 +68,16 @@ pub struct Settings {
     /// `None` means the Obsidian destination is not configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obsidian: Option<ObsidianSettings>,
-    /// The port the phone handover listens on, `0` for one the system
-    /// chooses; `None` means the platform's (`steno_handover`'s
-    /// `HandoverConfiguration::platform_port`: a fixed port on Linux, which
-    /// the packages open in the firewall). Settings does not show it: it is
-    /// set in the database, and `STENO_HANDOVER_PORT` wins over it (stable
-    /// plan X4). A stored value that is not a port loads as `None`
-    /// (`Store::settings`). Rust only: the Swift app's settings save drops
-    /// the row.
+    /// The phone handover port, `0` for one the system chooses; `None` means the
+    /// platform's. Not shown in Settings; `STENO_HANDOVER_PORT` wins over it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handover_port: Option<u16>,
 }
 
 impl Settings {
-    /// Until the model list has told us better.
     pub const DEFAULT_CODEX_CONTEXT_TOKENS: i64 = 128_000;
 
-    /// The defaults for a new install, with `audio_folder` under `paths`'
-    /// support directory (`<support>/Audio/`).
+    /// The defaults for a new install, with `audio_folder` at `<support>/Audio/`.
     #[must_use]
     pub fn defaults(paths: &StenoPaths) -> Self {
         Settings {
@@ -114,7 +104,6 @@ impl Settings {
 }
 
 impl Default for Settings {
-    /// [`Settings::defaults`] for the default support directory.
     fn default() -> Self {
         Settings::defaults(&StenoPaths::new(StenoPaths::default_support_directory()))
     }
@@ -133,10 +122,8 @@ pub struct ObsidianSettings {
     /// Tag appended to every task line; `None` for none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_tag: Option<String>,
-    /// Fields this build does not know (a newer build's), kept as stored
-    /// so a load, edit and save writes them back. Empty for settings made
-    /// here; an edit for the same vault starts from the stored value's
-    /// `extra`. Rust only: Swift's `Codable` drops them.
+    /// Fields this build does not know, kept so a load, edit and save writes them
+    /// back.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }

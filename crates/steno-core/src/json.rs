@@ -1,15 +1,7 @@
-//! The `StenoJSON` convention (`Sources/StenoCore/Model/StenoJSON.swift`):
-//! sorted keys, ISO 8601 dates with three fraction digits, `Data` as base64,
-//! slashes unescaped. JSON columns use [`to_column_string`] (`serde_json`'s
-//! number spelling, whole doubles as integers). Bytes that must match
-//! Foundation's (the bridge fixtures and replies, `meeting.json`) go through
-//! [`printer`]: [`to_canonical_string`] pretty, [`to_compact_string`]
-//! one-line. `steno-bridge` re-exports both.
-//!
-//! The date and UUID text codecs ([`format_date`], [`parse_date`],
-//! [`uuid_string`], [`parse_uuid`] and the `with` modules [`iso_time`],
-//! [`iso_time_opt`], [`uuid_text`] and [`uuid_text_opt`]) are the one
-//! implementation for every Steno crate, `steno-bridge`'s envelopes included.
+//! The `StenoJSON` convention: sorted keys, ISO 8601 dates with three fraction
+//! digits, `Data` as base64, slashes unescaped. JSON columns use
+//! [`to_column_string`]; bytes that must match Foundation's go through
+//! [`printer`]. The date and UUID codecs here serve every Steno crate.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -20,9 +12,8 @@ pub mod printer;
 pub use printer::{to_canonical_string, to_compact_string};
 
 /// `value` as the one-line JSON text a column holds: keys sorted, whole
-/// doubles written as integers the way Swift's `JSONEncoder` writes them.
-/// Serialised to text before sorting so an `f32` keeps its shortest form
-/// (`0.7`, not the widened `0.699999988079071` a `Value` would hold).
+/// doubles as integers. Serialised to text first so an `f32` keeps its
+/// shortest form.
 pub fn to_column_string<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
     let mut json: Value = serde_json::from_str(&serde_json::to_string(value)?)?;
     normalise(&mut json);
@@ -51,7 +42,7 @@ fn normalise(value: &mut Value) {
                 && float.fract() == 0.0
                 && float.abs() < 9_007_199_254_740_992.0
             {
-                // Exact: the magnitude is below 2^53 and the fraction is zero.
+                // Exact: below 2^53 with a zero fraction.
                 #[allow(clippy::cast_possible_truncation)]
                 let whole = float as i64;
                 *value = Value::from(whole);
@@ -61,8 +52,7 @@ fn normalise(value: &mut Value) {
     }
 }
 
-/// `2026-09-25T10:00:00.000Z`: always UTC, always three fraction digits,
-/// truncated like Swift's `StenoJSON.format` (see `store::convert`).
+/// `2026-09-25T10:00:00.000Z`: always UTC, always three fraction digits.
 #[must_use]
 pub fn format_date(date: DateTime<Utc>) -> String {
     date.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
@@ -76,8 +66,7 @@ pub fn parse_date(text: &str) -> Option<DateTime<Utc>> {
         .map(|date| date.with_timezone(&Utc))
 }
 
-/// The uppercase hyphenated form Swift's `UUID.uuidString` produces, which
-/// is what every id column and JSON id holds.
+/// The uppercase hyphenated form every id column and JSON id holds.
 #[must_use]
 pub fn uuid_string(id: Uuid) -> String {
     id.hyphenated()
@@ -85,10 +74,8 @@ pub fn uuid_string(id: Uuid) -> String {
         .to_owned()
 }
 
-/// The inverse of [`uuid_string`]: either case of the hyphenated
-/// 36-character form and nothing else, as `UUID(uuidString:)` reads it. The
-/// `uuid` crate alone would also take the 32-digit, braced and `urn:uuid:`
-/// forms, which Foundation rejects.
+/// The inverse of [`uuid_string`]: either case of the hyphenated 36-character
+/// form only, as Foundation reads it.
 #[must_use]
 pub fn parse_uuid(text: &str) -> Option<Uuid> {
     if text.len() != 36 {
@@ -97,7 +84,6 @@ pub fn parse_uuid(text: &str) -> Option<Uuid> {
     Uuid::try_parse(text).ok()
 }
 
-/// [`parse_uuid`] with serde's error, for the `with` modules.
 fn uuid_from_text<E: de::Error>(text: &str) -> Result<Uuid, E> {
     parse_uuid(text).ok_or_else(|| E::custom(format!("not a UUID: {text}")))
 }
@@ -116,8 +102,7 @@ pub mod uuid_text {
     }
 }
 
-/// `Option<Uuid>` as uppercase text; pair with `skip_serializing_if` and
-/// `default`.
+/// `Option<Uuid>` as uppercase text; pair with `skip_serializing_if` and `default`.
 pub mod uuid_text_opt {
     use super::{Deserialize, Deserializer, Serializer, Uuid};
 
@@ -182,7 +167,7 @@ pub mod iso_time_opt {
     }
 }
 
-/// Bytes as standard base64, Swift's `.base64` data strategy.
+/// Bytes as standard base64.
 pub mod base64_bytes {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
@@ -199,9 +184,8 @@ pub mod base64_bytes {
     }
 }
 
-/// The JSON shape of enums with payloads (`Model/CaseCoding.swift`): a bare
-/// string for a case without a payload (`"ready"`) and a one-key object for
-/// a case with one (`{"failed":"reason"}`, `{"keepDays":30}`).
+/// The JSON shape of enums with payloads: a bare string for a case without one
+/// (`"ready"`), a one-key object for a case with one (`{"keepDays":30}`).
 pub(crate) mod case_coding {
     use serde::ser::SerializeMap;
 
@@ -287,8 +271,7 @@ mod tests {
         assert_eq!(uuid_string(id), "516EADE8-40E5-4434-8AAF-9214A21A604E");
     }
 
-    /// Both `with` modules reject what [`parse_uuid`] rejects, naming the
-    /// text in serde's error.
+    /// Both `with` modules reject what [`parse_uuid`] rejects.
     #[test]
     fn uuids_read_only_the_hyphenated_form() {
         #[derive(Debug, PartialEq, Deserialize)]

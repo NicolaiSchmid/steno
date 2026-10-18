@@ -1,6 +1,5 @@
 //! The pipeline's stage boundaries: what the cleaner and the summarizer
 //! receive and return, and the export every destination receives.
-//! Swift: `Sources/StenoCore/Model/StageIO.swift`.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -10,8 +9,8 @@ use super::{
     Speaker, SpeakerNameSuggestion, SummaryDocument, SummaryTemplate, TranscriptSegment,
 };
 
-/// Input of the cleanup stage: the merged transcript plus everything that
-/// helps the model fix names.
+/// Input of the cleanup stage: the merged transcript plus what helps the model
+/// fix names.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CleanupInput {
     pub segments: Vec<TranscriptSegment>,
@@ -56,7 +55,7 @@ pub struct SummaryOutput {
 }
 
 /// Everything a destination receives; its `StenoJSON` encoding is
-/// `meeting.json` everywhere.
+/// `meeting.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingExport {
@@ -73,7 +72,6 @@ pub struct MeetingExport {
 }
 
 impl MeetingExport {
-    /// The `schemaVersion` this crate writes.
     pub const CURRENT_SCHEMA_VERSION: i64 = 1;
 
     #[must_use]

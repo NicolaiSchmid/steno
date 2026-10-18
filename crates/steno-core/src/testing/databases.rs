@@ -1,6 +1,5 @@
-//! Databases as another build left them, written and read without the
-//! store, which would migrate them, and another connection holding one.
-//! Rust only.
+//! Databases as an older build left them, written and read without the store
+//! (which would migrate them), and another connection holding a write lock.
 
 use std::path::Path;
 use std::sync::mpsc;
@@ -11,8 +10,7 @@ use rusqlite::Connection;
 use crate::Store;
 use crate::store::migrator;
 
-/// Writes at `path` a database every migration but the newest has reached,
-/// in WAL mode as the app leaves it: what an older app runs on.
+/// Writes at `path` a WAL database every migration but the newest has reached.
 pub fn database_one_version_behind(path: &Path) {
     let mut connection = Connection::open(path).unwrap();
     let _: String = connection
@@ -27,10 +25,8 @@ pub fn recorded_migrations(path: &Path) -> Vec<String> {
     migrator::applied(&Connection::open(path).unwrap()).unwrap()
 }
 
-/// Another connection's write transaction on the database at `path`, held
-/// from its own thread until the hold is dropped: a write on any other
-/// connection waits out its busy timeout meanwhile. The drop ends the
-/// transaction before it returns.
+/// Another connection's write transaction on the database at `path`, held from
+/// its own thread until the hold is dropped.
 pub struct WriteLockHold {
     release: Option<mpsc::Sender<()>>,
     holder: Option<JoinHandle<()>>,

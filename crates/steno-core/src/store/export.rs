@@ -1,5 +1,4 @@
 //! The export every adapter receives, read in one transaction.
-//! Swift: `Sources/StenoCore/Storage/MeetingStore+Export.swift`.
 
 use std::collections::BTreeSet;
 
@@ -9,12 +8,9 @@ use uuid::Uuid;
 use super::{Result, Store, StoreError, assets, meetings, people, tasks, transcript};
 use crate::model::{MeetingExport, Speaker};
 
-/// Everything an adapter receives: the meeting, its participants by display
-/// name, speakers by cluster label, the persons any of them or any task
-/// points at (by display name), segments by start, tasks and decisions by
-/// id, and the asset. `None` when there is no such meeting. Takes the
-/// transaction rather than the connection so no query can run outside
-/// one snapshot.
+/// Everything an adapter receives, each list in its stable order. `None`
+/// when there is no such meeting. Takes the transaction so no query can
+/// run outside one snapshot.
 pub(super) fn export_rows(
     transaction: &Transaction<'_>,
     meeting_id: Uuid,
@@ -57,10 +53,9 @@ pub(super) fn export_rows(
 }
 
 impl Store {
-    /// Everything an adapter receives, read in one deferred transaction as
-    /// Swift's `writer.read` does, so every query sees one snapshot while
-    /// the Swift app may be writing the same file. The `StenoJSON` pretty
-    /// form of the result is `meeting.json`.
+    /// Everything an adapter receives, read in one deferred transaction so
+    /// every query sees one snapshot while another process may be writing.
+    /// The `StenoJSON` pretty form of the result is `meeting.json`.
     ///
     /// ```no_run
     /// use steno_core::{StenoPaths, Store};

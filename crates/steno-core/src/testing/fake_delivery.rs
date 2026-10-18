@@ -1,5 +1,4 @@
 //! A destination and a handover intake over a temporary folder.
-//! Swift: `FakeDestination` and `FakeHandoverIntake` in `Sources/StenoCore/Testing/FakeDelivery.swift`.
 
 use std::path::{Path, PathBuf};
 
@@ -21,19 +20,15 @@ pub struct Transient {
     pub attempt: usize,
 }
 
-/// A `Destination` that writes `meeting.json` under `<root>/<meeting id>/`
-/// and records every export it received. The file holds the column form
-/// ([`crate::json::to_column_string`]), not the pretty
-/// [`crate::json::to_canonical_string`] form the adapters' `meeting.json`
-/// holds.
+/// A `Destination` that writes `meeting.json` in the column form under
+/// `<root>/<meeting id>/` and records every export it received.
 #[derive(Debug)]
 pub struct FakeDestination {
     pub id: String,
     pub root: PathBuf,
     pub validate_failure: Option<String>,
     pub deliver_failure: Option<String>,
-    /// The first `fail_until` deliveries fail with [`Transient`]; the rest
-    /// succeed.
+    /// The first `fail_until` deliveries fail with [`Transient`].
     pub fail_until: usize,
     pub deliveries: CallLog<MeetingExport>,
 }
@@ -184,8 +179,7 @@ mod tests {
         assert_eq!(destination.deliveries.count(), 3);
     }
 
-    /// Attempt numbers come from one atomic counter, so concurrent
-    /// deliveries see every number once, in no particular order.
+    /// Concurrent deliveries see every attempt number once.
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_deliveries_number_their_attempts_once_each() {
         const TASKS: usize = 8;
@@ -255,7 +249,7 @@ mod tests {
                 device: device.clone(),
             }]
         );
-        // Codable in Swift: the metadata round-trips through JSON.
+        // The metadata round-trips through JSON.
         let text = to_column_string(&metadata).unwrap();
         assert!(text.starts_with(r#"{"byteCount":1024,"chunkSize":512,"deviceName":"Phone","durationSeconds":12,"format":"m4aAAC","#));
         assert_eq!(

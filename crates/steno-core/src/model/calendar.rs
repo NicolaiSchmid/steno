@@ -1,11 +1,9 @@
 //! The calendar events a recording can be named after, and the rule that
-//! picks one. Swift: `CalendarEvent` and `CalendarAttendee` in
-//! `apps/macos/Steno/Services/AppProtocols.swift`, the rule `CalendarMatch`
-//! in `Sources/StenoCore/Model/Calendar.swift`.
+//! picks one.
 
 use chrono::{DateTime, TimeDelta, Utc};
 
-/// Someone invited to a [`CalendarEvent`]. Swift: `CalendarAttendee`.
+/// Someone invited to a [`CalendarEvent`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CalendarAttendee {
     /// The calendar's name for the person, or the email when it has none.
@@ -16,11 +14,10 @@ pub struct CalendarAttendee {
 }
 
 /// One timed event of a calendar day; all-day events are never listed.
-/// Swift: `CalendarEvent`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CalendarEvent {
-    /// The calendar's identifier for the event. The occurrences of a
-    /// repeating event share it.
+    /// The calendar's identifier for the event, shared by a repeating event's
+    /// occurrences.
     pub id: String,
     pub title: String,
     pub start: DateTime<Utc>,
@@ -28,19 +25,14 @@ pub struct CalendarEvent {
     pub attendees: Vec<CalendarAttendee>,
 }
 
-/// How far ahead [`pick_event`] looks for an event about to start: fifteen
-/// minutes, the end included, so an event 15:00 out counts and one 15:01
-/// out does not. Swift: `CalendarMatch.pick`'s `lookahead` default.
+/// How far ahead [`pick_event`] looks for an event about to start, end
+/// included.
 pub const CALENDAR_LOOKAHEAD: TimeDelta = TimeDelta::minutes(15);
 
-/// The event a recording starting at `now` most likely belongs to. An
-/// event under way wins (`start <= now < end`), the one that started most
-/// recently when several are; otherwise the next one that starts within
-/// `lookahead`, the soonest first. Ties go to the smaller `id`, so the
-/// choice never depends on the order of `events`. Swift:
-/// `CalendarMatch.pick`, which returns the id; the app then took the first
-/// event with that id, which is the same event unless a repeating event
-/// has two occurrences in one day.
+/// The event a recording starting at `now` most likely belongs to: the most
+/// recently started event under way, otherwise the soonest one starting within
+/// `lookahead`. Ties go to the smaller `id`, so the order of `events` never
+/// matters.
 #[must_use]
 pub fn pick_event(
     events: &[CalendarEvent],
@@ -63,12 +55,10 @@ pub fn pick_event(
 mod tests {
     use super::*;
 
-    /// Swift: `CalendarMatchTests.now`.
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_790_413_200, 0).unwrap()
     }
 
-    /// An event from `start` to `end` seconds after [`now`].
     fn event(id: &str, start: i64, end: i64) -> CalendarEvent {
         CalendarEvent {
             id: id.to_owned(),
@@ -83,9 +73,7 @@ mod tests {
         pick_event(events, now(), lookahead).map(|event| event.id.as_str())
     }
 
-    /// Swift's `CalendarMatchTests`, one row per expectation, each also
-    /// with the events in the other order: the choice must not depend on
-    /// it.
+    /// One row per expectation, each also with the events reversed.
     #[test]
     fn the_choice_follows_the_swift_rule() {
         let default = CALENDAR_LOOKAHEAD;

@@ -1,12 +1,6 @@
-//! Where one meeting's audio files live.
-//! Swift: `Sources/StenoCore/Audio/RecordingLayout.swift`.
-//!
-//! `<audio folder>/<MEETING-UUID>/recording.caf`, one `<lane>.wav` sidecar
-//! per lane, `audio.<ext>` for the mixdown, `speakers/<SPEAKER-UUID>.wav`
-//! for the sample clips (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav` for the
-//! clips the Rust pipeline writes), and, while a meeting is processed, the
-//! pipeline's `.processing-runs`. The UUID folder is spelled as Swift's
-//! `uuidString`: uppercase, hyphenated.
+//! Where one meeting's audio files live: `<audio folder>/<MEETING-UUID>/`
+//! with `recording.caf`, one `<lane>.wav` per lane, `audio.<ext>` for the
+//! mixdown, `speakers/` for the sample clips and `.processing-runs`.
 
 use std::path::{Path, PathBuf};
 
@@ -16,12 +10,10 @@ use crate::json::uuid_string;
 use crate::paths::file_url_path;
 use crate::{AudioAsset, AudioFormat, AudioLane};
 
-/// One meeting's audio folder; every file name is derived from it (see the
-/// module doc). Nothing touches the disk except
-/// [`Self::create_directories`].
+/// One meeting's audio folder; every file name is derived from it. Only
+/// [`Self::create_directories`] touches the disk.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RecordingLayout {
-    /// `<audio folder>/<MEETING-UUID>`.
     pub directory: PathBuf,
 }
 
@@ -34,9 +26,8 @@ impl RecordingLayout {
         }
     }
 
-    /// The meeting's folder under `audio_folder`, named by its id in
-    /// uppercase as Swift's `uuidString` spells it, so the Swift app and
-    /// this crate find the same files.
+    /// The meeting's folder under `audio_folder`, named by its uppercase id so the
+    /// Swift app finds the same files.
     #[must_use]
     pub fn new(audio_folder: &Path, meeting_id: Uuid) -> Self {
         Self::from_directory(audio_folder.join(uuid_string(meeting_id)))
@@ -49,10 +40,8 @@ impl RecordingLayout {
         Some(Self::from_directory(master.parent()?))
     }
 
-    /// [`Self::from_asset`] when that folder is named after the asset's
-    /// meeting, as [`Self::new`] names it; `None` for a master in any other
-    /// folder. It says nothing about the files in the folder: a master of
-    /// another meeting may lie there too. Rust only.
+    /// [`Self::from_asset`] when that folder is named after the asset's meeting;
+    /// `None` otherwise. It says nothing about the files in it.
     #[must_use]
     pub fn own_folder(asset: &AudioAsset) -> Option<Self> {
         let folder = uuid_string(asset.meeting_id);
@@ -97,11 +86,8 @@ impl RecordingLayout {
             .join(format!("{}.wav", uuid_string(speaker_id)))
     }
 
-    /// `speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`, the clip one pipeline run
-    /// writes for a speaker: a name no other run uses, so a run never
-    /// writes over a clip a speaker row names (`steno_pipeline`'s
-    /// `sample_clips`). Rust only: Swift writes [`Self::sample_clip`] in
-    /// place.
+    /// `speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`, one run's clip: a name no other
+    /// run uses, so a run never writes over a clip a speaker row names.
     #[must_use]
     pub fn run_sample_clip(&self, speaker_id: Uuid, run_id: Uuid) -> PathBuf {
         self.speakers_directory().join(format!(
@@ -111,9 +97,7 @@ impl RecordingLayout {
         ))
     }
 
-    /// `.processing-runs`, the pipeline's count of runs that ended with the
-    /// app while the meeting was processed (`steno_pipeline::crash_loop`).
-    /// Rust only.
+    /// `.processing-runs`, the count of runs that ended with the app mid-processing.
     #[must_use]
     pub fn processing_runs(&self) -> PathBuf {
         self.directory.join(".processing-runs")

@@ -1,5 +1,4 @@
 //! A language model, a cleaner and a summarizer that need no service.
-//! Swift: `Sources/StenoCore/Testing/FakeLLM.swift`.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -21,7 +20,7 @@ use crate::{
 pub struct Exhausted;
 
 /// A `LanguageModel` that answers from a queue of canned responses and
-/// records every request. Fails with [`Exhausted`] when the queue runs dry.
+/// records every request.
 #[derive(Debug, Default)]
 pub struct FakeLanguageModel {
     responses: Mutex<VecDeque<LlmResponse>>,
@@ -54,8 +53,7 @@ impl LanguageModel for FakeLanguageModel {
     }
 }
 
-/// A `TranscriptCleaner` that returns the segments untouched with a fixed
-/// usage, so pipeline tests can assert on usage sums.
+/// A `TranscriptCleaner` that returns the segments untouched with a fixed usage.
 #[derive(Debug)]
 pub struct PassthroughCleaner {
     pub usage: LlmUsage,
@@ -91,9 +89,8 @@ impl TranscriptCleaner for PassthroughCleaner {
     }
 }
 
-/// A `MeetingSummarizer` that builds a deterministic [`SummaryOutput`] from
-/// the template (one bullet per section quoting the first segment) or
-/// returns a canned one; records inputs and can fail.
+/// A `MeetingSummarizer` that builds a deterministic [`SummaryOutput`] from the
+/// template or returns a canned one.
 #[derive(Debug)]
 pub struct FakeSummarizer {
     pub canned: Option<SummaryOutput>,
@@ -332,7 +329,7 @@ mod tests {
         assert_eq!(output.usage, summarizer.usage);
         assert_eq!(output.language, Some("de".into()));
         assert_eq!(summarizer.summaries.entries(), vec!["default".to_owned()]);
-        // Codable in Swift: the output round-trips through JSON.
+        // The output round-trips through JSON.
         let text = crate::json::to_column_string(&output).unwrap();
         assert_eq!(
             serde_json::from_str::<SummaryOutput>(&text).unwrap(),

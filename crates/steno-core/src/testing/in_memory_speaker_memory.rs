@@ -1,5 +1,4 @@
 //! Known voices over an in-memory list of people.
-//! Swift: `Sources/StenoCore/Testing/InMemorySpeakerMemory.swift`.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -10,11 +9,8 @@ use uuid::Uuid;
 use super::lock;
 use crate::{BoundaryResult, Embedding, Person, SpeakerMatch, SpeakerMemory};
 
-/// A `SpeakerMemory` over an in-memory list of people: cosine ranking over
-/// the voices it was given, independent of any store. Ties rank by person
-/// id, the order Swift gets from the uppercase id text. A similarity that
-/// is not finite (an embedding holding `inf` or NaN) is dropped before
-/// ranking, so the default `match_voice` only ever sees numbers.
+/// A `SpeakerMemory` over an in-memory list of people: cosine ranking, ties by
+/// person id. A non-finite similarity is dropped before ranking.
 #[derive(Debug, Default)]
 pub struct InMemorySpeakerMemory {
     people: Mutex<BTreeMap<Uuid, Person>>,
@@ -33,7 +29,6 @@ impl InMemorySpeakerMemory {
         }
     }
 
-    /// Adds or replaces one person.
     pub fn insert(&self, person: Person) {
         lock(&self.people).insert(person.id, person);
     }
@@ -63,10 +58,8 @@ impl SpeakerMemory for InMemorySpeakerMemory {
                 })
             })
             .collect();
-        // Best first; ties broken by id, which orders like Swift's
-        // uppercase id text. `total_cmp` puts +0.0 before -0.0 whatever
-        // the ids, where Swift breaks that tie by id too; a zero similarity
-        // never passes a positive threshold, so no match differs.
+        // Best first, ties by id. `total_cmp` puts +0.0 before -0.0, but a zero
+        // similarity never passes a positive threshold.
         ranked.sort_by(|left, right| {
             right
                 .similarity
@@ -134,7 +127,6 @@ mod tests {
 
     #[tokio::test]
     async fn equal_similarities_rank_by_id_and_the_list_stops_at_the_limit() {
-        // Three people sharing one voice, inserted out of id order.
         let memory = InMemorySpeakerMemory::new([
             Person {
                 id: Uuid::from_u128(3),
@@ -157,7 +149,6 @@ mod tests {
                 .collect()
         };
         let all = memory.candidates(&voice, 10).await.unwrap();
-        // One shared voice: every similarity is the same bit pattern.
         assert!(
             all.iter()
                 .all(|found| found.similarity.to_bits() == all[0].similarity.to_bits())

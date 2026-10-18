@@ -1,18 +1,11 @@
-//! The summary as Markdown, at display and export time.
-//! Swift: `Sources/StenoCore/Summary/SummaryMarkdown.swift`.
-//!
-//! `## heading` per section, `- **lead**: text` per bullet, and every
-//! speaker cluster label ("Speaker 2") replaced by the speaker's current
-//! name in bold. Renaming a speaker is therefore a re-render, never an LLM
-//! re-run. [`sections`] is the structured form [`render`] joins; a UI that
-//! shows sections renders those and never parses the Markdown back.
-//! Adapters that need a heading offset shift the `##` themselves.
+//! The summary as Markdown: `## heading` per section, `- **lead**: text` per
+//! bullet, and every speaker cluster label replaced by the speaker's current
+//! name in bold, so a rename is a re-render, never an LLM run.
 
 use crate::model::MeetingExport;
 
 /// One summary section as rendered: the heading and its bullets as inline
-/// Markdown (`**lead**: text`) with every speaker cluster label already
-/// replaced by the speaker's current name.
+/// Markdown, names substituted.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RenderedSection {
     /// The `SummarySection.id` (a template section id).
@@ -23,8 +16,7 @@ pub struct RenderedSection {
 }
 
 impl RenderedSection {
-    /// The bullets as a Markdown list, one `- ` line each, no trailing
-    /// newline.
+    /// The bullets as a Markdown list, no trailing newline.
     #[must_use]
     pub fn body(&self) -> String {
         self.bullets
@@ -41,8 +33,7 @@ impl RenderedSection {
     }
 }
 
-/// Every section with at least one bullet, in document order, names
-/// substituted. Empty when the meeting has no summary yet.
+/// Every section with at least one bullet, in order, names substituted.
 #[must_use]
 pub fn sections(export: &MeetingExport) -> Vec<RenderedSection> {
     let Some(summary) = &export.meeting.summary else {
@@ -73,8 +64,7 @@ pub fn sections(export: &MeetingExport) -> Vec<RenderedSection> {
         .collect()
 }
 
-/// [`sections`] joined by blank lines, with one trailing newline; the empty
-/// string when there is nothing to render.
+/// [`sections`] joined by blank lines, with one trailing newline.
 #[must_use]
 pub fn render(export: &MeetingExport) -> String {
     let sections = sections(export);
@@ -90,9 +80,8 @@ pub fn render(export: &MeetingExport) -> String {
     text
 }
 
-/// Cluster label to current display name, for speakers that resolved to a
-/// person; unresolved labels stay as they are. Longest labels first so
-/// "Speaker 10" is never matched by "Speaker 1".
+/// Cluster label to display name for resolved speakers, longest labels first
+/// so "Speaker 10" is never matched by "Speaker 1".
 fn speaker_names(export: &MeetingExport) -> Vec<(String, String)> {
     let mut names: Vec<(String, String)> = export
         .speakers
@@ -115,9 +104,8 @@ fn speaker_names(export: &MeetingExport) -> Vec<(String, String)> {
     names
 }
 
-/// Replaces every label that stands as a whole word (no letter or digit
-/// touching it on either side), in one pass over `text`, so "Me" never
-/// matches inside "Meeting" and a name written in never gets matched again.
+/// Replaces every label that stands as a whole word, in one pass, so "Me"
+/// never matches inside "Meeting" and a substituted name is not matched again.
 fn substitute(text: &str, names: &[(String, String)], bold: bool) -> String {
     if names.is_empty() {
         return text.to_owned();

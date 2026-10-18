@@ -181,8 +181,7 @@ pub fn asset(meeting_id: Uuid) -> AudioAsset {
     }
 }
 
-/// Writes the whole sample into `store`: person, meeting with a participant
-/// and an asset, transcript, summary with tasks and decisions, a delivery.
+/// Writes the whole sample into `store` and returns the meeting.
 pub fn populate(store: &Store) -> Meeting {
     let meeting = meeting();
     store.save_person(&person()).unwrap();
@@ -238,8 +237,7 @@ pub fn populate(store: &Store) -> Meeting {
     meeting
 }
 
-/// A fresh in-memory store with the sample written: where the behaviour
-/// tests start.
+/// A fresh in-memory store with the sample written.
 pub fn populated() -> (Store, Meeting) {
     let store = Store::in_memory().unwrap();
     let meeting = populate(&store);

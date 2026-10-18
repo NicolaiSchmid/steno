@@ -1,6 +1,4 @@
 //! The pipeline's stages and the learned rate per stage.
-//! Swift: `Sources/StenoCore/Storage/Records.swift` and
-//! `Sources/StenoCore/Storage/MeetingStore+Timings.swift`.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,8 +20,8 @@ string_enum! {
     }
 }
 
-/// One learned rate of the `stageRate` table: seconds per unit of work and
-/// how many measurements it averages.
+/// One learned rate of the `stageRate` table: seconds per unit of work and how
+/// many measurements it averages.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StageRate {

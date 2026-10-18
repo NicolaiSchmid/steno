@@ -1,35 +1,19 @@
-//! A file another handle holds for a moment. On Windows a sync or
-//! antivirus client, a media player or another writer may open a file
-//! without sharing the access a rename or an open asks for, and Windows
-//! then refuses the call until that handle lets go, usually within
-//! milliseconds. Every rename of a file Steno writes, and a durable
-//! write's reopen for its flush, goes through [`retried`] (or [`rename`]),
-//! which tries such a call again for about 0.9 s before it reports the
-//! error; elsewhere, where no handle blocks a rename, the call runs once.
-//! `steno_pipeline::files`' durable writes and its `set_aside`, the vault
-//! writer, the handover inbox, the Codex sign-in file, the model downloads
-//! and the speaker clips share it, so their retries cannot drift apart.
-//! Rust only: the Swift app runs on macOS alone.
-//!
-//! [`is_busy`] names the errors of such a handle; [`retried_with`] takes
-//! the tries, the predicate and the wait as arguments, for the tests and
-//! for `steno_pipeline::files`, which waits through its `Syncs` so its
-//! tests can record the waits; [`RETRIES`], [`FIRST_WAIT`] and
-//! [`LONGEST_WAIT`] set the backoff.
+//! A file another handle holds for a moment. On Windows a sync or antivirus
+//! client may open a file without sharing, and a rename then fails until it
+//! lets go. Every rename of a file Steno writes goes through [`retried`] (or
+//! [`rename`]), which retries for about 0.9 s on Windows and runs once
+//! elsewhere.
 
 use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-/// How often [`retried`] tries a busy file again: nine times on Windows,
-/// never elsewhere.
+/// How often [`retried`] tries a busy file again.
 pub const RETRIES: u32 = if cfg!(windows) { 9 } else { 0 };
 
-/// The first wait before a busy file is tried again, which doubles with
-/// each retry up to [`LONGEST_WAIT`]: about 0.9 s over nine retries.
+/// The first wait before a retry, doubling up to [`LONGEST_WAIT`].
 pub const FIRST_WAIT: Duration = Duration::from_millis(5);
 
-/// The longest wait between two tries of a busy file.
 pub const LONGEST_WAIT: Duration = Duration::from_millis(200);
 
 /// `ERROR_ACCESS_DENIED`.
@@ -39,40 +23,30 @@ const SHARING_VIOLATION: i32 = 32;
 /// `ERROR_LOCK_VIOLATION`.
 const LOCK_VIOLATION: i32 = 33;
 
-/// Whether `error` is Windows refusing a file another handle holds, usually
-/// for a moment: a sharing violation (a sync or antivirus client opened it
-/// without sharing the access asked for), a lock violation (it locked a
-/// range of it), or "access denied" (a replace of a file such a handle
-/// holds open, or an open of a file being deleted or replaced that
-/// instant). Never elsewhere, where nothing is retried.
+/// Whether `error` is Windows refusing a file another handle holds: a sharing
+/// violation, a lock violation, or "access denied" (a replace or open of a file
+/// held or being deleted). Never elsewhere.
 #[must_use]
 pub fn is_busy(error: &io::Error) -> bool {
     cfg!(windows) && error.raw_os_error().is_some_and(names_a_busy_file)
 }
 
-/// Whether the Win32 error `code` is one of [`is_busy`]'s.
 fn names_a_busy_file(code: i32) -> bool {
     matches!(code, SHARING_VIOLATION | LOCK_VIOLATION | ACCESS_DENIED)
 }
 
-/// Runs `attempt`, and on Windows tries it again while it fails with a busy
-/// file ([`is_busy`]): [`RETRIES`] times, after waits of 5 ms doubling to
-/// 200 ms. Any other error, or a success, ends the tries.
+/// Runs `attempt`, retrying it on Windows while it fails with [`is_busy`].
 pub fn retried<T>(attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     retried_with(RETRIES, is_busy, std::thread::sleep, attempt)
 }
 
-/// `std::fs::rename`, tried again on Windows while a file is busy
-/// ([`retried`]). On a failure nothing was renamed.
+/// `std::fs::rename` through [`retried`]. On a failure nothing was renamed.
 pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
     retried(|| std::fs::rename(from, to))
 }
 
-/// [`retried`] with its parts given: `attempt` runs, and an error `busy`
-/// accepts is tried again up to `retries` times, after `wait`s of
-/// [`FIRST_WAIT`] doubling to [`LONGEST_WAIT`]. The tests give a predicate
-/// and a clock of their own; `steno_pipeline::files` waits through its
-/// `Syncs` so its tests can record the waits.
+/// [`retried`] with its parts given, for tests and for callers whose waits go
+/// through their own clock.
 pub fn retried_with<T>(
     retries: u32,
     busy: impl Fn(&io::Error) -> bool,
@@ -98,9 +72,8 @@ mod tests {
 
     use super::*;
 
-    /// Runs `retried_with` over an attempt that fails busy `failures`
-    /// times and then succeeds; returns the outcome, the tries and the
-    /// waits.
+    /// Runs `retried_with` over an attempt that fails busy `failures` times;
+    /// returns the outcome, the tries and the waits.
     fn run(retries: u32, failures: u32) -> (io::Result<u32>, u32, Vec<Duration>) {
         let tries = Cell::new(0);
         let waits = RefCell::new(Vec::new());
@@ -124,9 +97,7 @@ mod tests {
         waits.iter().copied().map(Duration::from_millis).collect()
     }
 
-    /// A file busy every time is tried ten times, after waits of 5 ms
-    /// doubling to 200 ms, under a second in all, and the last error is
-    /// returned.
+    /// A file busy every time is tried ten times in under a second.
     #[test]
     fn a_file_busy_every_time_is_tried_ten_times_within_a_second() {
         let (outcome, tries, waits) = run(9, u32::MAX);
@@ -140,8 +111,6 @@ mod tests {
         assert!(waits.iter().sum::<Duration>() < Duration::from_secs(1));
     }
 
-    /// A file that lets go after two busy tries succeeds on the third, and
-    /// nothing waits after it.
     #[test]
     fn a_file_that_lets_go_succeeds_on_the_next_try() {
         let (outcome, tries, waits) = run(9, 2);
@@ -176,15 +145,11 @@ mod tests {
         assert_eq!(waits, Vec::<Duration>::new());
     }
 
-    /// The product tries a busy file nine more times on Windows and never
-    /// elsewhere.
     #[test]
     fn only_windows_retries() {
         assert_eq!(RETRIES, if cfg!(windows) { 9 } else { 0 });
     }
 
-    /// Sharing, lock and access violations name a busy file; a missing
-    /// file (2), a full disk (112) and any other code do not.
     #[test]
     fn only_the_codes_of_a_held_file_are_busy() {
         for busy in [5, 32, 33] {
@@ -194,18 +159,14 @@ mod tests {
             assert!(!names_a_busy_file(other), "{other}");
         }
         assert!(!is_busy(&io::Error::other("not from the OS")));
-        // Elsewhere the same numbers are other errors (`EIO`, `EPIPE`,
-        // `EDOM` on Linux) and never busy.
         assert_eq!(
             is_busy(&io::Error::from_raw_os_error(SHARING_VIOLATION)),
             cfg!(windows)
         );
     }
 
-    /// On Windows a target another handle holds without sharing its
-    /// deletion refuses the rename with an error [`is_busy`] accepts; the
-    /// rename waits and tries again, and lands once the handle lets go
-    /// (here at the first wait).
+    /// A rename onto a target held without delete sharing waits and lands once the
+    /// handle lets go.
     #[cfg(windows)]
     #[test]
     fn a_held_target_is_renamed_onto_once_it_lets_go() {

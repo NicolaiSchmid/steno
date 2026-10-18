@@ -1,6 +1,5 @@
-//! The queries the windows ask for: the export, full-text search, the
-//! speaker picker's people lists, resolving a typed name, confirming a
-//! speaker (with the merge a second confirmation triggers) and removing a
+//! The queries the windows ask for: the export, full-text search, the people
+//! lists, resolving a typed name, confirming a speaker and removing a
 //! participant.
 
 mod common;
@@ -30,7 +29,6 @@ fn the_export_carries_the_meeting_and_the_persons_it_points_at() {
 }
 
 /// `delete_participant` removes one row; a missing id is not an error.
-/// Swift: `MeetingStore.deleteParticipant(id:)`.
 #[test]
 fn deleting_a_participant_removes_that_row_only() {
     let (store, meeting) = populated();

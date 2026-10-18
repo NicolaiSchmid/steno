@@ -1,17 +1,13 @@
-//! A database a newer build migrated opens as GRDB opens it: the
-//! migration this build does not know stays recorded, a warning in the log
-//! names it, and the store reads and writes. A test binary of its own, so
-//! no other test reaches the warning's callsite on another thread while
-//! this one listens: `tracing` caches whether a callsite is wanted when it
-//! is first hit. Swift: `AdmissionLedgerStoreTests.aMigrationThisBuildDoesNotKnowIsIgnored`.
+//! A database a newer build migrated opens: the unknown migration stays
+//! recorded, a warning names it, and the store reads and writes. A binary of
+//! its own because `tracing` caches a callsite's interest when first hit.
 
 mod common;
 
 use common::logged;
 use steno_core::Store;
 
-/// Here a v6 that adds a table: nothing is applied twice, and opening the
-/// database without migrating passes too.
+/// Here a v6 that adds a table; opening without migrating passes too.
 #[test]
 fn a_migration_this_build_does_not_know_is_ignored_with_a_warning() {
     let directory = tempfile::tempdir().unwrap();

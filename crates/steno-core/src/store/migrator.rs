@@ -1,17 +1,10 @@
-//! The GRDB migrations as SQL files, applied in order and recorded in
+//! The migrations as SQL files, applied in order and recorded in
 //! `grdb_migrations` exactly as GRDB's `DatabaseMigrator` records them, so
-//! either side considers the other's work applied. Append-only: a new
-//! version is a new file and a new entry below the last one, written once
-//! and applied by both sides until cutover.
-//! Swift: `Sources/StenoCore/Storage/Migrations.swift`.
-//!
-//! A new version is one PR that adds `migrations/00N_vN.sql`, its entry in
-//! [`MIGRATIONS`] and the Swift `Step` running the same SQL; neither side
-//! ships alone. Like GRDB, this module ignores an applied identifier it
-//! does not know, with a warning in the log: a newer
-//! build migrated the database, and since a migration only adds tables and
-//! columns and never changes existing ones, this build still reads and
-//! writes what it knows. `migrations/README.md` has the full procedure.
+//! the Swift app and this store each consider the other's work applied.
+//! Append-only: a new version adds `migrations/00N_vN.sql`, its entry in
+//! [`MIGRATIONS`] and the same SQL in `Migrations.swift`, in one PR.
+//! An applied identifier this build does not know is ignored with a
+//! warning (see `migrations/README.md`).
 
 use rusqlite::{Connection, TransactionBehavior};
 
@@ -24,7 +17,6 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// Every version in registration order.
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         identifier: "v1",
@@ -52,9 +44,7 @@ pub const MIGRATIONS: &[Migration] = &[
 const MIGRATIONS_TABLE: &str =
     "CREATE TABLE IF NOT EXISTS grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)";
 
-/// The identifiers recorded so far, in application order. A plain read:
-/// the table exists once [`migrate`] has run, which every `Store` does
-/// before handing out its connection.
+/// The identifiers recorded so far, in application order.
 pub(crate) fn applied(connection: &Connection) -> Result<Vec<String>> {
     query_all(
         connection,
@@ -65,26 +55,17 @@ pub(crate) fn applied(connection: &Connection) -> Result<Vec<String>> {
 }
 
 /// Applies every migration not yet recorded, each in its own `IMMEDIATE`
-/// transaction with foreign keys off and GRDB's check before the commit:
-/// a migration whose rows no longer satisfy their foreign keys rolls back
-/// and the open fails with [`StoreError::ForeignKeyViolations`]. An
-/// identifier this build does not know is left as it is
-/// ([`ignore_unknown`]).
-///
-/// The transaction also covers the read of what is applied, so two
-/// processes opening a fresh database at once (the Swift app and this one,
-/// or two copies of this one) cannot both apply the same version: the
-/// second waits on the busy timeout, then finds the identifier recorded
-/// and moves on.
+/// transaction with foreign keys off and a foreign key check before the
+/// commit: a violating migration rolls back with
+/// [`StoreError::ForeignKeyViolations`]. The transaction covers the read of
+/// what is applied, so two processes opening a fresh database at once
+/// cannot both apply the same version.
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     migrate_with(connection, MIGRATIONS)
 }
 
 /// Applies nothing: fails when the database lacks a migration this build
-/// would apply ([`StoreError::PendingMigration`], the first of them), and
-/// ignores one it does not know, as [`migrate`] does. For a process that
-/// must not migrate under another one; see
-/// [`Store::open_without_migrating`](super::Store::open_without_migrating).
+/// would apply ([`StoreError::PendingMigration`]) and ignores unknown ones.
 pub(crate) fn check(connection: &Connection) -> Result<()> {
     check_with(connection, MIGRATIONS)
 }
@@ -111,13 +92,9 @@ fn check_with(connection: &Connection, migrations: &[Migration]) -> Result<()> {
 }
 
 /// Logs a warning for each of `applied` that `migrations` lacks: a newer
-/// build migrated the database. GRDB's migrator ignores them too (it never
-/// reads an identifier it was not given), and the Swift app never asks
-/// `hasBeenSuperseded`. Ignoring them is safe while every migration only
-/// adds tables and columns, a new column with a default or allowing null,
-/// and never alters, drops or constrains an existing one
-/// (`.plans/2026-10-07-stable-promotion.md`, "Migrations add, never
-/// change").
+/// build migrated the database. Safe while every migration only adds
+/// tables and columns (with a default or allowing null) and never alters,
+/// drops or constrains an existing one.
 fn ignore_unknown(applied: &[String], migrations: &[Migration]) {
     let known = |identifier: &str| migrations.iter().any(|m| m.identifier == identifier);
     for identifier in applied.iter().filter(|identifier| !known(identifier)) {
@@ -129,8 +106,7 @@ fn ignore_unknown(applied: &[String], migrations: &[Migration]) {
     }
 }
 
-/// [`migrate`] over an explicit list; tests pass one with a bad migration,
-/// and `testing` the list without the newest.
+/// [`migrate`] over an explicit list, for tests.
 pub(crate) fn migrate_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
     connection.execute_batch(MIGRATIONS_TABLE)?;
     let applied = applied(connection)?;
@@ -189,8 +165,8 @@ fn apply(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// A version whose rows break a foreign key: GRDB rolls it back before
-    /// the commit, and so does this migrator.
+    /// A version whose rows break a foreign key, rolled back before the
+    /// commit.
     const BROKEN: &[Migration] = &[
         Migration {
             identifier: "v1",
@@ -204,7 +180,6 @@ mod tests {
         },
     ];
 
-    /// Two versions that apply cleanly.
     const GOOD: &[Migration] = &[
         Migration {
             identifier: "v1",
@@ -247,9 +222,8 @@ mod tests {
         );
     }
 
-    /// A version this build knows is applied also when the database records
-    /// one it does not know: the unknown one does not count towards what is
-    /// applied.
+    /// A known version counts as applied also when the database records an
+    /// unknown one.
     #[test]
     fn an_unknown_migration_does_not_stand_in_for_a_missing_one() {
         let mut connection = Connection::open_in_memory().unwrap();
@@ -270,8 +244,8 @@ mod tests {
     }
 
     /// Opening without migrating reads a database at this build's version,
-    /// refuses one an older build left (naming the version it lacks) and
-    /// changes it not; a missing file is not created.
+    /// refuses an older one (naming the version it lacks) without changing
+    /// it, and does not create a missing file.
     #[test]
     fn opening_without_migrating_applies_nothing() {
         use crate::Store;

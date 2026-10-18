@@ -1,6 +1,5 @@
-//! Paired devices and handover receipts: the rows the handover server
-//! reads and writes, the cascade from a revoked device, and the three
-//! column shapes of a receipt's state.
+//! Paired devices and handover receipts: the rows the handover server reads
+//! and writes, and the cascade from a revoked device.
 
 mod common;
 
@@ -65,7 +64,6 @@ fn devices_are_found_by_token_hash_and_listed_oldest_first() {
         vec![device(), later.clone()]
     );
 
-    // `save` replaces: a new token for the same device.
     let mut seen = device();
     seen.last_seen_at = Some(date("2026-09-27T09:00:00.000Z"));
     store.save_paired_device(&seen, &[3u8; 32]).unwrap();
@@ -104,8 +102,7 @@ fn touch_updates_the_live_row_and_resurrects_nothing() {
         Some(expected)
     );
 
-    // The engine's shape: the device was read, a revoke landed, the touch
-    // runs. The row stays gone and the token stays unknown.
+    // A revoke lands between the read and the touch: the row stays gone.
     store.delete_paired_device(uuid(DEVICE_ID)).unwrap();
     store
         .touch_paired_device(uuid(DEVICE_ID), &hash, seen)
@@ -169,8 +166,7 @@ fn a_receipt_needs_its_device() {
     assert!(error.to_string().contains("FOREIGN KEY"), "{error}");
 }
 
-/// The ledger rows the admissions' transactions wrote, as SQLite holds
-/// them: recording id, byte count, meeting id, admitted at.
+/// The ledger rows: recording id, byte count, meeting id, admitted at.
 fn ledger_rows(store: &Store) -> Vec<(String, i64, String, String)> {
     store
         .read(|connection| {
@@ -188,8 +184,6 @@ fn ledger_rows(store: &Store) -> Vec<(String, i64, String, String)> {
         .unwrap()
 }
 
-/// The meeting a receipt was admitted as, its asset, and the receipt
-/// `complete` with it.
 fn admission(meeting_id: &str, sha256: Vec<u8>) -> (HandoverReceipt, Meeting, AudioAsset) {
     let meeting = Meeting {
         id: uuid(meeting_id),
@@ -205,13 +199,9 @@ fn admission(meeting_id: &str, sha256: Vec<u8>) -> (HandoverReceipt, Meeting, Au
     (receipt, meeting, asset)
 }
 
-/// The admission's transaction writes the ledger row of the recording id,
-/// size and SHA-256 with its meeting. A revoke's cascade takes the receipt
-/// and a meeting delete takes the meeting and the receipt, and both leave
-/// the row. Other bytes under the same recording id are a second
-/// admission with a row of their own. The same bytes admitted again are
-/// the meeting the ledger holds while it exists, and once it is deleted a
-/// new meeting the row moves to. Swift: `anAdmissionWritesItsLedgerRow`.
+/// An admission writes its ledger row; revokes and meeting deletes leave it,
+/// other bytes under the same id get a row of their own, and the same bytes
+/// again resolve to the ledger's meeting.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave() {
@@ -255,9 +245,7 @@ fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave(
         "the receipt's ids, size and time, as GRDB writes them"
     );
 
-    // Over the stored receipt of other bytes the admission is refused and
-    // writes nothing: built from that receipt, it would say those bytes
-    // were admitted.
+    // Over the stored receipt of other bytes the admission writes nothing.
     let (other_bytes, second, second_asset) =
         admission("516EADE8-40E5-4434-8AAF-000000000002", vec![8; 32]);
     assert!(matches!(
@@ -266,7 +254,6 @@ fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave(
     ));
     assert_eq!(store.meeting(second.id).unwrap(), None);
     assert_eq!(ledger_rows(&store).len(), 1);
-    // The announce of the other bytes saved their receipt first.
     let unfinished = |admitted: &HandoverReceipt| HandoverReceipt {
         state: HandoverState::Receiving,
         ..admitted.clone()
@@ -304,8 +291,8 @@ fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave(
         "other bytes are an admission of their own"
     );
 
-    // Once the user deleted that meeting, the same bytes are admitted as a
-    // new one, and the row moves to it.
+    // Once the meeting is deleted, the same bytes are a new meeting and the row
+    // moves to it.
     store.delete_meeting(meeting.id).unwrap();
     assert_eq!(store.handover_receipt(recording_id).unwrap(), None);
     store
@@ -332,11 +319,8 @@ fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave(
     );
 }
 
-/// Bytes admitted again after the user deleted their meeting are one
-/// recording from then on: the ledger row moves to the new meeting, so
-/// another device that took the receipt over during that admission and
-/// uploads the same bytes completes with it instead of writing a third
-/// meeting. Swift: `aReadmissionAfterADeleteIsTheMeetingTheNextUploadFinds`.
+/// After a delete and readmission, another device uploading the same bytes
+/// completes with the new meeting instead of writing a third.
 #[test]
 fn a_readmission_after_a_delete_is_the_meeting_the_next_upload_finds() {
     let store = Store::in_memory().unwrap();
@@ -346,8 +330,6 @@ fn a_readmission_after_a_delete_is_the_meeting_the_next_upload_finds() {
     };
     store.save_paired_device(&device(), &[1; 32]).unwrap();
     store.save_paired_device(&other_device, &[2; 32]).unwrap();
-    // The device's announce saves the unfinished receipt, then the intake
-    // admits the bytes as the meeting `meeting_id`.
     let admit = |device_id: Uuid, meeting_id: &str| {
         let (admitted, meeting, asset) = admission(meeting_id, vec![7; 32]);
         let admitted = HandoverReceipt {
@@ -403,12 +385,8 @@ fn a_readmission_after_a_delete_is_the_meeting_the_next_upload_finds() {
     assert_eq!(ledger_rows(&store).len(), 1);
 }
 
-/// Every open backfills the ledger from the `complete` receipts whose
-/// meeting row exists: a database an older build left at v4 (with the
-/// rows the Swift `v0.10.0-rc.2` intake writes: a receipt and a meeting,
-/// no ledger), and an admission an older app committed after v5 (it
-/// ignores the table). A `complete` receipt whose meeting is missing and an
-/// unfinished one get no row. Swift: `everyOpenBackfillsTheLedger`.
+/// Every open backfills the ledger from `complete` receipts whose meeting
+/// exists, including those an older build wrote without a ledger.
 #[test]
 fn every_open_backfills_the_ledger_from_admitted_receipts() {
     let directory = tempfile::tempdir().unwrap();
@@ -416,7 +394,6 @@ fn every_open_backfills_the_ledger_from_admitted_receipts() {
     let store = Store::open(&path).unwrap();
     store.save_paired_device(&device(), &[1; 32]).unwrap();
     let (admitted, meeting, asset) = admission("516EADE8-40E5-4434-8AAF-000000000001", vec![7; 32]);
-    // The older intake's two commits, neither of which writes the ledger.
     store.save_meeting_with_asset(&meeting, &asset).unwrap();
     store.save_handover_receipt(&admitted).unwrap();
     let missing = HandoverReceipt {
@@ -431,7 +408,7 @@ fn every_open_backfills_the_ledger_from_admitted_receipts() {
         ..receipt(HandoverState::Receiving)
     };
     store.save_handover_receipt(&unfinished).unwrap();
-    // Back to v4: no table, no identifier, the rows the older build wrote.
+    // Back to v4: no table, the rows the older build wrote.
     store
         .write(|transaction| {
             transaction.execute_batch(
@@ -464,7 +441,6 @@ fn every_open_backfills_the_ledger_from_admitted_receipts() {
         "the admitted receipt only, admitted at its last update"
     );
 
-    // An older app on the v5 database: a receipt and a meeting, no row.
     let (later, later_meeting, later_asset) =
         admission("516EADE8-40E5-4434-8AAF-000000000004", vec![9; 32]);
     let later = HandoverReceipt {
@@ -493,13 +469,9 @@ fn every_open_backfills_the_ledger_from_admitted_receipts() {
     assert_eq!(ledger_rows(&store).len(), 2);
 }
 
-/// The launch's adoption of a phone copy writes the meeting, its asset and
-/// the upload's ledger row in one transaction and leaves the receipt as it
-/// is. Bytes the ledger already holds, with a meeting or with one the user
-/// deleted, write nothing and give the row's meeting and whether it is
-/// gone, and a meeting id with a row is refused. The intake's commit into
-/// the same meeting id afterwards is answered by the ledger, not written
-/// again. Rust only.
+/// The adoption of a phone copy writes the meeting, asset and ledger row in
+/// one transaction; bytes the ledger already holds write nothing, and the
+/// intake's later commit is answered by the ledger.
 #[test]
 fn an_adopted_copy_is_written_with_its_ledger_row_unless_the_ledger_holds_its_bytes() {
     let store = Store::in_memory().unwrap();
@@ -577,10 +549,8 @@ fn an_adopted_copy_is_written_with_its_ledger_row_unless_the_ledger_holds_its_by
     );
 }
 
-/// The intake's commit into a meeting id that already has a row and no
-/// ledger row (the launch adopted the noted copy without its upload's
-/// ledger row) is refused and writes nothing: an upsert would give the one
-/// master a second asset row under another retention. Rust only.
+/// The intake's commit into a meeting id that already has a row and no ledger
+/// row is refused: it would give the master a second asset row.
 #[test]
 fn an_admission_into_a_meeting_with_a_row_and_no_ledger_row_is_refused() {
     let store = Store::in_memory().unwrap();

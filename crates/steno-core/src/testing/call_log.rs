@@ -1,12 +1,10 @@
 //! What a fake was asked to do.
-//! Swift: `CallLog` in `Sources/StenoCore/Testing/FakeSpeech.swift`.
 
 use std::sync::Mutex;
 
 use super::lock;
 
-/// Records what a fake was asked to do, from any thread. Fakes expose one
-/// named for what it records (`transcriptions`, `summaries`, `admissions`).
+/// Records what a fake was asked to do, from any thread.
 #[derive(Debug)]
 pub struct CallLog<Entry> {
     entries: Mutex<Vec<Entry>>,
@@ -26,8 +24,8 @@ impl<Entry> CallLog<Entry> {
         Self::default()
     }
 
-    /// Appends `entry` and returns the count including it, so a fake that
-    /// numbers its calls reads the number from the same lock.
+    /// Appends `entry` and returns the count including it, read under the same
+    /// lock.
     pub fn record(&self, entry: Entry) -> usize {
         let mut entries = lock(&self.entries);
         entries.push(entry);
@@ -61,8 +59,7 @@ mod tests {
 
     use super::*;
 
-    /// Panics on its first clone, inside the lock `entries()` holds, and
-    /// clones quietly after that.
+    /// Panics on its first clone, inside the lock `entries()` holds.
     struct Volatile(Arc<AtomicBool>);
 
     impl Clone for Volatile {

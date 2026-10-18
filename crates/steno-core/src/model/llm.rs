@@ -1,6 +1,5 @@
-//! The language model boundary's value types: token accounting, the
-//! request and the response.
-//! Swift: `Sources/StenoCore/Model/LLM.swift`.
+//! The language model boundary's value types: token accounting, the request
+//! and the response.
 
 use std::ops::Add;
 

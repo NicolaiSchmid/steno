@@ -1,17 +1,11 @@
-//! The OS a Steno app runs on. Swift: none; the Swift app is the Mac.
+//! The OS a Steno app runs on.
 
 use crate::string_enum;
 
 string_enum! {
-    /// The OS the app runs on, which decides the words a user reads ("this
-    /// Mac" or "this computer", Finder or File Explorer, "Mac call" or
-    /// "Linux call"), the shortcut keys (⌘ or Ctrl) and the permissions
-    /// onboarding asks for. The app records every call on the machine it
-    /// runs on (a phone's arrives as [`MeetingSource::Phone`]; `steno
-    /// process` takes a file as recorded here), so this is also the
-    /// platform a call was recorded on.
-    ///
-    /// [`MeetingSource::Phone`]: crate::MeetingSource::Phone
+    /// The OS the app runs on, which decides the words a user reads ("this Mac"
+    /// or "this computer"), the shortcut keys and the permissions onboarding asks
+    /// for. It is also the platform a call was recorded on.
     pub enum Platform {
         Macos = "macos",
         Windows = "windows",

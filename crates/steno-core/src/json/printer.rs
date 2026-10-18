@@ -1,36 +1,16 @@
-//! The printer: the parent module's convention as `StenoJSON` and
-//! `BridgeDispatcher.encoder()` produce it, sorted keys, slashes unescaped,
-//! dates as `2026-09-29T12:48:00.000Z`, UUIDs upper case. Two styles:
-//! [`to_canonical_string`] is Foundation's `.prettyPrinted` (the bridge
-//! fixtures and `meeting.json`), [`to_compact_string`] is the one-line form
-//! the bridge dispatcher sends. The date and UUID codecs the fields use are
-//! the parent module's (`iso_time`, `uuid_text` and their `_opt` forms).
-//!
-//! The printer walks a [`serde_json::Value`] rather than trusting
-//! `serde_json::to_string_pretty`: Foundation puts a space on both sides of the
-//! colon, prints an empty container as an open bracket, a blank line and a
-//! closing bracket, and spells doubles its own way (see `write_number`).
-//!
-//! NaN and infinity: `serde_json::to_value` turns a non-finite `f64` into
-//! `null` before the printer sees it, so both styles here write `null`. Swift
-//! differs: `BridgeJSON.encode` (the fixtures) throws, and the dispatcher's
-//! compact encoder writes the strings `"NaN"`, `"Infinity"` and
-//! `"-Infinity"`. `StenoJSON.encoder()` throws as well, so where Swift fails
-//! a `meeting.json`, Rust writes `null`. Mirroring the strings would need a
-//! `serde::Serializer` of our own, since the `Value` tree cannot tell a
-//! `null` from a NaN after the fact; the page's schema (`z.number()`)
-//! rejects both spellings alike and treats the field as "no value", so
-//! `null` is the recorded choice until a plan says otherwise.
-//! `nan_and_infinity_are_null` pins it.
+//! The printer for the parent module's JSON convention: sorted keys, slashes
+//! unescaped, dates as `2026-09-29T12:48:00.000Z`, UUIDs upper case.
+//! It walks a [`serde_json::Value`] because Foundation's spacing, empty
+//! containers and doubles differ from `serde_json`'s. A non-finite `f64`
+//! prints as `null` (`nan_and_infinity_are_null`).
 
 use std::fmt::Write as _;
 
 use serde::Serialize;
 use serde_json::Value;
 
-/// `BridgeJSON.encode` and `StenoJSON.encoder()` (`meeting.json`): pretty
-/// printed, sorted keys, no trailing newline. The fixture files are this
-/// plus one `\n` (`BridgeFixture.fileData()`).
+/// Pretty printed with sorted keys and no trailing newline (the bridge fixtures
+/// and `meeting.json`; fixture files add one `\n`).
 ///
 /// ```
 /// use serde_json::json;
@@ -48,8 +28,7 @@ pub fn to_canonical_string<T: Serialize + ?Sized>(value: &T) -> Result<String, s
     Ok(out)
 }
 
-/// `BridgeDispatcher.encoder()`: the same bytes without whitespace, for
-/// replies and events that no person reads.
+/// The same bytes without whitespace, for replies and events no person reads.
 pub fn to_compact_string<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
     let mut out = String::new();
     write_value(&mut out, &serde_json::to_value(value)?, None);
@@ -108,8 +87,7 @@ fn write_container(
             }
         }
         Some(depth) => {
-            // Foundation prints `[\n\n  ]` for an empty container: the newline
-            // after the bracket, the (empty) item line, the closing line.
+            // Foundation prints `[\n\n  ]` for an empty container.
             out.push('\n');
             for i in 0..count {
                 if i > 0 {
@@ -125,26 +103,10 @@ fn write_container(
     out.push(close);
 }
 
-/// Integers as they are. Doubles as Foundation's `JSONEncoder` spells a
-/// `Double` (measured with `StenoJSON.encoder()` on macOS 26, Swift 6.4:
-/// the table in `numbers_print_like_foundation` and the corpus in
-/// `crates/steno-bridge/tests/fixtures/foundation-doubles.txt`): the
-/// shortest digits that round-trip, a tie between two shortest candidates
-/// broken to the even digit, in plain notation when the decimal exponent is
-/// at least -4 and `|f|` is at most 2^53 (`0.0001`, `1200`,
-/// `9007199254740992`), otherwise `d.ddde±XX` with a signed exponent of at
-/// least two digits (`1e-05`, `9.007199254740994e+15`,
-/// `1.7976931348623157e+308`). An integral double has no fraction and a
-/// negative zero keeps its sign (`-0`). An `f32` arrives widened to `f64`
-/// and prints that double's digits (`0.1f32` as `0.10000000149011612`,
-/// where Foundation writes a `Float` as `0.1`); no `f32` field reaches
-/// `meeting.json` or the bridge today.
-///
-/// The digits come from `zmij` (Schubfach: shortest round-trip digits, ties
-/// to even, as `SwiftDtoa` breaks them) and are re-spelt here. Rust's own
-/// `Display` and `LowerExp` take the upper candidate at a tie, at every digit
-/// count (`999999999999999.3` and `-3981.6287231445313` where Foundation
-/// writes `.2` and `…312`), which is why they are not the digit source.
+/// Integers as they are; doubles as Foundation's `JSONEncoder` spells them:
+/// the shortest round-trip digits with ties to even, plain when the exponent is
+/// at least -4 and `|f|` at most 2^53, otherwise `d.ddde±XX` (`1e-05`).
+/// The digits come from `zmij`, because Rust's `Display` breaks ties upwards.
 fn write_number(out: &mut String, number: &serde_json::Number) {
     if let Some(i) = number.as_i64() {
         let _ = write!(out, "{i}");
@@ -155,8 +117,7 @@ fn write_number(out: &mut String, number: &serde_json::Number) {
     }
 }
 
-/// `write_number` for a double. `f` is finite: a `serde_json::Number` holds
-/// no NaN or infinity (the module doc says where they went).
+/// `write_number` for a finite double.
 fn write_double(out: &mut String, f: f64) {
     const TWO_53: f64 = 9_007_199_254_740_992.0;
     if f.is_sign_negative() {
@@ -168,8 +129,7 @@ fn write_double(out: &mut String, f: f64) {
     }
     let (digits, exponent) = shortest_digits(f.abs());
     if exponent >= -4 && f.abs() <= TWO_53 {
-        // Plain: the point sits `exponent + 1` digits in, padded with zeros
-        // on whichever side runs out of digits.
+        // Plain: the point sits `exponent + 1` digits in, zero padded.
         if exponent < 0 {
             out.push_str("0.");
             for _ in exponent..-1 {
@@ -202,18 +162,14 @@ fn write_double(out: &mut String, f: f64) {
     }
 }
 
-/// The shortest digits that read back to a finite, positive `f`, without
-/// leading or trailing zeros, and the decimal exponent of the first one
-/// (`f = d.ddd × 10^exponent`). `zmij` spells the number its own way (a
-/// plain or an exponent form); this reads the digits back out of that.
+/// The shortest round-trip digits of a finite, positive `f`, without leading or
+/// trailing zeros, and the decimal exponent of the first one.
 fn shortest_digits(f: f64) -> (String, i32) {
     let mut buffer = zmij::Buffer::new();
     let printed = buffer.format_finite(f);
     let (mantissa, exponent) = printed.split_once('e').unwrap_or((printed, "0"));
     let exponent: i32 = exponent.parse().expect("zmij writes a decimal exponent");
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    // `point` is where the decimal point sits in `whole ++ fraction`; every
-    // leading zero dropped moves it one left.
     let mut point = i32::try_from(whole.len()).expect("at most 17 digits") + exponent;
     let mut digits = format!("{whole}{fraction}");
     while digits.starts_with('0') {
@@ -228,7 +184,7 @@ fn shortest_digits(f: f64) -> (String, i32) {
 }
 
 /// Foundation's escaping with `.withoutEscapingSlashes`: the quote, the
-/// backslash and the C0 controls; everything else, including non-ASCII, as is.
+/// backslash and the C0 controls; everything else as is.
 fn write_string(out: &mut String, string: &str) {
     out.push('"');
     for c in string.chars() {
@@ -273,44 +229,7 @@ mod tests {
         );
     }
 
-    /// The oracle: `StenoJSON.encoder().encode([value])` on macOS 26 (Swift
-    /// 6.4, Xcode 27), one `Double` per line as `input => output`.
-    ///
-    /// ```text
-    /// 0.0 => 0                        -0.0 => -0
-    /// 1.0 => 1                        -1.0 => -1
-    /// 1200.0 => 1200                  0.42 => 0.42
-    /// 0.62 => 0.62                    2.5 => 2.5
-    /// -3.25 => -3.25                  1234.5678 => 1234.5678
-    /// 0.1+0.2 => 0.30000000000000004  0.7307184925394371 => 0.7307184925394371
-    /// 0.001 => 0.001                  0.0001234 => 0.0001234
-    /// 1e-4 => 0.0001                  1e-5 => 1e-05
-    /// 0.00001234 => 1.234e-05         0.0000999 => 9.99e-05
-    /// 1e-6 => 1e-06                   1e-7 => 1e-07
-    /// 3.2e-5 => 3.2e-05               5.5e-9 => 5.5e-09
-    /// 1e14 => 100000000000000         1e15 => 1000000000000000
-    /// 9007199254740992.0 => 9007199254740992
-    /// 9007199254740993.0 => 9007199254740992
-    /// 9007199254740994.0 => 9.007199254740994e+15
-    /// 9.5e15 => 9.5e+15
-    /// 9999999999999998.0 => 9.999999999999998e+15
-    /// 99999999999999990.0 => 9.999999999999998e+16
-    /// bits 430c6bf52633fffa => 999999999999999.2
-    /// bits c30bde3eb7e97982 => -980523165757232.2
-    /// bits c0af1b41e8000000 => -3981.6287231445312
-    /// bits c050c2ca80000000 => -67.04360961914062
-    /// bits 3f8f010000000000 => 0.015138626098632812
-    /// bits beba000000000000 => -1.5497207641601562e-06
-    /// 1e16 => 1e+16                   1.234e16 => 1.234e+16
-    /// 1e17 => 1e+17                   4.5e17 => 4.5e+17
-    /// 123456789012345680.0 => 1.2345678901234568e+17
-    /// 12345678901234567890.0 => 1.2345678901234567e+19
-    /// 1.1e19 => 1.1e+19               1.1e20 => 1.1e+20
-    /// 1e21 => 1e+21                   1.5e300 => 1.5e+300
-    /// f64::MAX => 1.7976931348623157e+308
-    /// 1e-308 => 1e-308                f64::MIN_POSITIVE => 2.2250738585072014e-308
-    /// 5e-324 (smallest subnormal) => 5e-324
-    /// ```
+    /// Doubles print as `StenoJSON.encoder()` prints them on macOS 26.
     #[test]
     fn numbers_print_like_foundation() {
         let cases: &[(f64, &str)] = &[
@@ -344,8 +263,7 @@ mod tests {
             (9.5e15, "9.5e+15"),
             (9_999_999_999_999_998.0, "9.999999999999998e+15"),
             (99_999_999_999_999_990.0, "9.999999999999998e+16"),
-            // Ties between two shortest candidates go to the even digit, as
-            // measured; Rust's `Display` would write `.3`, `…313`, `…063`.
+            // Ties between two shortest candidates go to the even digit.
             (f64::from_bits(0x430c_6bf5_2633_fffa), "999999999999999.2"),
             (f64::from_bits(0xc30b_de3e_b7e9_7982), "-980523165757232.2"),
             (f64::from_bits(0xc0af_1b41_e800_0000), "-3981.6287231445312"),
@@ -382,15 +300,13 @@ mod tests {
                 "for {value:e}"
             );
         }
-        // Integers stay integers.
         assert_eq!(
             to_compact_string(&json!([42, -3, 9_007_199_254_740_993_i64])).unwrap(),
             "[42,-3,9007199254740993]"
         );
     }
 
-    /// The decision recorded in the module doc: a non-finite double is `null`
-    /// here, where Swift's compact encoder writes `"NaN"` and `"Infinity"`.
+    /// A non-finite double prints as `null`.
     #[test]
     fn nan_and_infinity_are_null() {
         let value = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.0];

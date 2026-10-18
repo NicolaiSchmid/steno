@@ -1,7 +1,5 @@
-//! The panic hook end to end, in a process of its own: a hook is global,
-//! so it would catch every other test's panics. A panic inside
-//! `crash_log::expected`, which its caller catches, leaves no file and
-//! does not reach the previous hook.
+//! The panic hook end to end, in a process of its own because a hook is
+//! global. A panic inside `crash_log::expected` leaves no file.
 
 #[test]
 fn a_panic_leaves_a_crash_log_and_still_reaches_the_previous_hook() {
@@ -46,7 +44,6 @@ fn a_panic_leaves_a_crash_log_and_still_reaches_the_previous_hook() {
     );
     let text = std::fs::read_to_string(&logs[0]).unwrap();
     assert!(text.contains("the meeting list ran out of rows"), "{text}");
-    // `tests\crash_log.rs` on Windows.
     assert!(text.contains("crash_log.rs:"), "{text}");
     assert!(text.contains("on thread 'steno-crash-test'"), "{text}");
     assert!(text.contains("backtrace:"), "{text}");

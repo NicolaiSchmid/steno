@@ -1,5 +1,4 @@
 //! Phone handover: the paired device, its state and the receipt.
-//! Swift: `Sources/StenoCore/Model/Handover.swift`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -12,8 +11,7 @@ use crate::json::{
 };
 use crate::string_enum;
 
-/// A phone paired with this computer. The bearer token itself is never
-/// stored; the store keeps its SHA-256.
+/// A phone paired with this computer; the store keeps only its token's SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairedDevice {
@@ -74,8 +72,8 @@ impl HandoverState {
         }
     }
 
-    /// The state from its three columns; a `complete` row without a meeting
-    /// id reads as a failure, as in Swift.
+    /// The state from its three columns; a `complete` row without a meeting id
+    /// reads as a failure.
     #[must_use]
     pub fn from_columns(
         kind: HandoverStateKind,
@@ -135,9 +133,8 @@ impl<'de> Deserialize<'de> for HandoverState {
     }
 }
 
-/// What the phone declares before uploading; the handover wire mirrors
-/// these names in `mobile/modules/steno-link/src/wire.ts`. `sha256` is the
-/// whole-file digest.
+/// What the phone declares before uploading, named as in
+/// `mobile/modules/steno-link/src/wire.ts`. `sha256` is the whole-file digest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingMetadata {
@@ -154,8 +151,8 @@ pub struct RecordingMetadata {
     pub device_name: String,
 }
 
-/// Progress of one phone recording being handed over; the idempotency key
-/// of the intake.
+/// Progress of one phone recording being handed over; the intake's
+/// idempotency key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HandoverReceipt {

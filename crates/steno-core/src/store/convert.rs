@@ -1,12 +1,9 @@
-//! Column encodings shared with GRDB: dates as `yyyy-MM-dd HH:mm:ss.SSS`
-//! UTC text, UUIDs as uppercase text, JSON columns through `StenoJSON`,
-//! string enums by case name, embeddings as little-endian `f32` blobs.
-//! Each wrapper is a `ToSql` for `params!` and a `FromSql` that
-//! [`RowExt::col`] unwraps again. This is the pattern for a query the
-//! `Store` does not have a method for: [`DbUuid`], [`DbDate`], [`DbJson`],
-//! [`DbEnum`] and [`DbEmbedding`] in the parameters, [`RowExt::col`] on the
-//! row, against the connection [`Store::read`](super::Store::read) or
-//! [`Store::write`](super::Store::write) hands out.
+//! Column encodings shared with the Swift app's GRDB store: dates as
+//! `yyyy-MM-dd HH:mm:ss.SSS` UTC text rounded to the nearest millisecond,
+//! UUIDs as uppercase text, JSON columns through `StenoJSON`, string enums
+//! by case name, embeddings as little-endian `f32` blobs. Each wrapper is a
+//! `ToSql` for `params!` and a `FromSql` that [`RowExt::col`] unwraps, for
+//! queries the `Store` has no method for:
 //!
 //! ```
 //! use rusqlite::params;
@@ -38,19 +35,9 @@
 //! # }
 //! ```
 //!
-//! Swift: `Sources/StenoCore/Storage/Records.swift` and GRDB's
-//! `DatabaseDateEncodingStrategy.deferredToDate`.
-//!
-//! GRDB writes a `Date` column through Foundation's `DateFormatter` with
-//! `yyyy-MM-dd HH:mm:ss.SSS` (GRDB `Date.swift`, not
-//! `DatabaseDateComponents`), which rounds to the nearest millisecond;
-//! [`date_text`] does the same, measured identical on 10,000 timestamps
-//! against the Swift CLI. Swift's `StenoJSON.format`
-//! (`Sources/StenoCore/Model/StenoJSON.swift`) truncates instead, so a
-//! Swift export of a date that is not on a whole millisecond can read one
-//! millisecond lower than the column text. `json::format_date` mirrors the
-//! Swift formatter until that is fixed on the Swift side (parity list in
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`).
+//! `json::format_date` truncates instead of rounding, as the Swift
+//! exporter does, so an export of a date off a whole millisecond can read
+//! one millisecond lower than the column text.
 
 use std::fmt::Display;
 use std::str::FromStr;
@@ -69,15 +56,15 @@ use crate::model::Embedding;
 pub const GRDB_DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 
 /// `2026-09-29 13:49:11.135`, UTC, rounded to the nearest millisecond
-/// (half up) as GRDB's formatter rounds.
+/// (half up).
 #[must_use]
 pub fn date_text(date: DateTime<Utc>) -> String {
     let rounded = date + TimeDelta::microseconds(500);
     rounded.format(GRDB_DATE_FORMAT).to_string()
 }
 
-/// GRDB's reading of a date column: the storage format first, then the
-/// other SQLite date forms with at least year, month and day.
+/// A date column read: the storage format first, then the other SQLite
+/// date forms with at least year, month and day.
 #[must_use]
 pub fn parse_date_text(text: &str) -> Option<DateTime<Utc>> {
     const FORMATS: &[&str] = &[
@@ -109,7 +96,7 @@ fn text_of(value: ValueRef<'_>) -> FromSqlResult<&str> {
     }
 }
 
-/// A `DATETIME` column; text both ways, which is all Swift ever writes.
+/// A `DATETIME` column, as text both ways.
 pub struct DbDate(pub DateTime<Utc>);
 
 impl ToSql for DbDate {
@@ -137,7 +124,7 @@ impl ToSql for DbUuid {
 
 impl FromSql for DbUuid {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        // The hyphenated form only, as GRDB's `UUID(uuidString:)` reads it.
+        // The hyphenated form only.
         json::parse_uuid(text_of(value)?)
             .map(DbUuid)
             .ok_or(FromSqlError::InvalidType)
@@ -259,8 +246,8 @@ impl<W: Wrapped> Wrapped for Option<W> {
     }
 }
 
-/// `row.col::<DbUuid>("id")?`, `row.col::<Option<DbDate>>("expiresAt")?`:
-/// a column read through its wrapper and handed back as the domain value.
+/// `row.col::<DbUuid>("id")?`: a column read through its wrapper and
+/// handed back as the domain value.
 pub trait RowExt {
     fn col<W: Wrapped>(&self, name: &str) -> rusqlite::Result<W::Inner>;
 }

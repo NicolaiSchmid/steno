@@ -1,6 +1,5 @@
-//! Opens a Steno database with the Rust store and prints row counts and
-//! the first meeting's fields. `scripts/verify-store-against-swift-db.sh`
-//! runs it on a copy of a database the Swift app wrote.
+//! Opens a Steno database with the Rust store and prints row counts and the
+//! first meeting's fields.
 
 use std::process::ExitCode;
 

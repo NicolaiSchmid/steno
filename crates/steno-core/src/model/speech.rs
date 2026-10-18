@@ -1,24 +1,18 @@
 //! What the speech engine and the diarizer return for one lane, and the
 //! intermediate pieces the speech crate builds them from.
-//! Swift: `RawSegment`, `WordTiming`, `DiarizationResult` and
-//! `SpeakerCluster` in `Sources/StenoCore/Model/Transcript.swift`,
-//! `TimedWord` in `Sources/StenoSpeech/Engines/TimedWord.swift` and
-//! `ClusterChunk` in `Sources/StenoSpeech/Diarization/ClusterChunk.swift`.
 
 use serde::{Deserialize, Serialize};
 
 use super::{Embedding, LanguageTag, TimeRange};
 
-/// What a `SpeechEngine` returns: untimed by speaker, tagged with the
-/// detected language when the engine knows it.
-/// Swift: `RawSegment` in `Sources/StenoCore/Model/Transcript.swift`.
+/// What a `SpeechEngine` returns, tagged with the detected language when the
+/// engine knows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawSegment {
     pub start: f64,
     pub end: f64,
     pub text: String,
-    /// The engine's detected language as a tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<LanguageTag>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,7 +27,6 @@ impl RawSegment {
 }
 
 /// One word of a [`RawSegment`] with its own timing.
-/// Swift: `WordTiming` in `Sources/StenoCore/Model/Transcript.swift`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WordTiming {
     pub word: String,
@@ -42,9 +35,7 @@ pub struct WordTiming {
 }
 
 /// One timed piece of text with the decoder's confidence, the unit the
-/// transcript segmenter works on. Parakeet's decoder tokens arrive as these
-/// and the token aggregator joins them.
-/// Swift: `Sources/StenoSpeech/Engines/TimedWord.swift`.
+/// transcript segmenter works on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimedWord {
     pub text: String,
@@ -67,27 +58,21 @@ impl TimedWord {
 }
 
 /// What a `Diarizer` returns for one lane.
-/// Swift: `DiarizationResult` in `Sources/StenoCore/Model/Transcript.swift`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DiarizationResult {
     pub clusters: Vec<SpeakerCluster>,
 }
 
 /// One diarization cluster before it becomes a `Speaker` row.
-/// Swift: `SpeakerCluster` in `Sources/StenoCore/Model/Transcript.swift`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeakerCluster {
     /// The diarizer's label, "Speaker 1" onwards in order of first speech.
     pub label: String,
     pub ranges: Vec<TimeRange>,
-    /// The cluster's voice: its chunk embeddings at unit length, summed
-    /// with duration as weight and L2-normalised (`ClusterEmbedding` in the
-    /// speech crate); `None` when no chunk carried a usable vector. Skipped
-    /// by serde like `Speaker::embedding` because the Rust `Embedding` has
-    /// no serde form yet; Swift's cluster is synthesized `Codable` with its
-    /// `Embedding`, and `Tests/StenoCoreTests/ModelCodableTests.swift`
-    /// round-trips it, so this side drops the vector that side keeps.
+    /// The cluster's voice: its chunk embeddings weighted by duration and
+    /// L2-normalised; `None` when no chunk had a usable vector. Skipped by serde:
+    /// `Embedding` has no serde form.
     #[serde(skip)]
     pub embedding: Option<Embedding>,
     pub cluster_confidence: f32,
@@ -97,7 +82,6 @@ pub struct SpeakerCluster {
 }
 
 /// One "who spoke when" turn from the diarizer, before ranges are merged.
-/// Swift: `SpeakerTurn` in `Sources/StenoSpeech/Diarization/ClusterChunk.swift`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeakerTurn {
     pub speaker_label: String,
@@ -113,11 +97,8 @@ impl SpeakerTurn {
     }
 }
 
-/// One embedding window of the offline diarizer after clustering: which
-/// speaker it was assigned to, when, and its 256-dim `WeSpeaker` vector.
-/// `quality` is not reported per chunk by the model; the mapping fills it
-/// from the turn the chunk overlaps most.
-/// Swift: `ClusterChunk` in `Sources/StenoSpeech/Diarization/ClusterChunk.swift`.
+/// One embedding window of the offline diarizer after clustering. `quality` is
+/// filled from the turn the chunk overlaps most.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClusterChunk {
     pub speaker_label: String,
