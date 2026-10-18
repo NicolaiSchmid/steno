@@ -56,10 +56,10 @@
 //!   mark names its meeting and stage only in its body, so one that
 //!   cannot be read counts no meeting: the launch says so at `warn`,
 //!   leaves it, and lists it ([`ReadingMarks::unread_marks`]); where the
-//!   speech engine runs in the app's process, the fallback counts it as
-//!   one of the engine's and turns on. A folder that cannot be
-//!   listed, or an entry in it, counts the same, once, under the folder's
-//!   name (`reading`). A later launch that reads the mark counts it as any
+//!   speech engine runs in the app's process, the fallback counts it as one
+//!   of the engine's and turns on. A folder that cannot be listed, or an
+//!   entry in it, is listed the same way, once, under the folder's name
+//!   (`reading`). A later launch that reads the mark counts it as any
 //!   other.
 //! - **Never touched again automatically.** A quarantined meeting's
 //!   marks stay on disk: they are the quarantine. The launch resume, the
@@ -549,7 +549,7 @@ impl Drop for Reading {
 /// The marks in `folder` with their files, and the names of the files
 /// that could not be read, each logged at `warn` and left (only a mark's
 /// body names its meeting and stage, so the launch counts them for no
-/// meeting). A folder or an entry that cannot be listed counts
+/// meeting). A folder or an entry that cannot be listed is listed
 /// once, under [`ReadingMarks::FOLDER`], logged at `warn`. A file that
 /// does not parse (not one this module wrote) is logged at `debug` and
 /// left.
@@ -565,7 +565,7 @@ fn read_folder(folder: &Path) -> (Vec<(PathBuf, Mark)>, BTreeSet<String>) {
         let path = match entry {
             Ok(entry) => entry.path(),
             Err(error) => {
-                tracing::warn!(path = %folder.display(), %error, "the reading marks could not be listed; the folder counts as a mark of the speech engine in this process, where one runs");
+                tracing::warn!(path = %folder.display(), %error, "the reading marks could not be listed; the folder counts no meeting, and counts as a mark of the speech engine if the settings run that in the app's process");
                 unread.insert(ReadingMarks::FOLDER.to_owned());
                 continue;
             }
@@ -579,7 +579,7 @@ fn read_folder(folder: &Path) -> (Vec<(PathBuf, Mark)>, BTreeSet<String>) {
                 tracing::debug!(path = %path.display(), "not a reading mark; left alone");
             }
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "a reading mark could not be read; it is left as it is and counts as a mark of the speech engine in this process, where one runs");
+                tracing::warn!(path = %path.display(), %error, "a reading mark could not be read; it is left as it is, counts no meeting, and counts as a mark of the speech engine if the settings run that in the app's process");
                 unread.extend(
                     path.file_name()
                         .map(|name| name.to_string_lossy().into_owned()),
@@ -849,7 +849,7 @@ mod tests {
     /// `warn`. Unix: a file in the folder's place (`ENOTDIR`).
     #[cfg(unix)]
     #[test]
-    fn a_folder_that_cannot_be_listed_counts_once() {
+    fn a_folder_that_cannot_be_listed_is_listed_once() {
         let log = crate::fixtures::CapturedLog::warnings();
         let dir = tempfile::tempdir().unwrap();
         let (store, _, _) = store_with_meeting(dir.path());

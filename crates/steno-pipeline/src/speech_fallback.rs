@@ -109,10 +109,10 @@ impl SpeechFallback {
     /// when either left a mark the file has not seen, which is then written
     /// down, or when the file cannot be read or parsed. A reading mark
     /// that could not be read ([`ReadingMarks::unread_marks`]) counts only
-    /// when `engine_in_process`: the speech engine the settings choose runs
-    /// in the app's process, so the mark may be one of its own. Call it
-    /// once per launch, before a pipeline is built, with the warm-up mark
-    /// the pipelines share.
+    /// when `engine_in_process`, that is when the speech engine the
+    /// settings choose, the fallback aside, runs in the app's process, so
+    /// the mark may be one of its own. Call it once per launch, before a
+    /// pipeline is built, with the warm-up mark the pipelines share.
     #[must_use]
     pub fn at_launch(
         support_directory: &Path,
