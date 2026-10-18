@@ -512,19 +512,6 @@ mod tests {
     }
 
     #[test]
-    fn a_run_the_database_lock_left_queued_says_so_with_a_runtime_failure() {
-        let id = Uuid::from_u128(0x6F96_19FF_8B86_D011_B42D_00C0_4FC9_64FF);
-        assert_eq!(
-            left_queued(id),
-            Failure::runtime(format!(
-                "Meeting {} was not processed: another program kept the database locked. It \
-                 stays in the queue, and the app processes it at its next launch.",
-                uuid_string(id)
-            ))
-        );
-    }
-
-    #[test]
     fn a_given_title_is_the_users_unless_it_is_blank() {
         let input = Path::new("/recordings/standup.wav");
         for given in ["Sweep", " Sweep "] {

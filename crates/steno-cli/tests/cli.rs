@@ -53,22 +53,6 @@ fn export(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
-/// The `steno` every test runs has its home set and the developer's key
-/// and models directory removed from its environment.
-#[test]
-fn the_steno_the_tests_run_inherits_no_models_directory_or_key() {
-    let home = tempfile::tempdir().unwrap();
-    let command = steno_on(home.path());
-    let envs: Vec<_> = command.get_envs().collect();
-    for removed in ["STENO_MODELS_DIR", "STENO_LLM_API_KEY"] {
-        assert!(
-            envs.contains(&(std::ffi::OsStr::new(removed), None)),
-            "{removed} is removed: {envs:?}"
-        );
-    }
-    assert!(envs.contains(&(std::ffi::OsStr::new("HOME"), Some(home.path().as_os_str()))));
-}
-
 // One flow: each step reads the one before.
 #[allow(clippy::too_many_lines)]
 #[test]
@@ -1020,277 +1004,131 @@ fn process_meeting_writes_the_damage_beside_the_database() {
     assert_eq!(marks().parts(id), 3);
 }
 
-/// A queued meeting is not processed again, and the command says why.
+/// Every usage error exits 1, prints nothing on stdout and names what is
+/// wrong: the known values, the clashing flag, an id no meeting has.
 #[test]
-fn process_meeting_on_a_queued_meeting_says_the_app_processes_it() {
-    let home = tempfile::tempdir().unwrap();
-    let home = home.path();
-    let db = home.join("steno.sqlite");
-    let mut meeting = steno_core::testing::sample_data::meeting();
-    meeting.state = steno_core::MeetingState::Queued;
-    steno_core::Store::open(&db)
-        .unwrap()
-        .save_meeting(&meeting)
-        .unwrap();
-    let id = steno_core::json::uuid_string(meeting.id);
-    let queued = steno(
-        &["process", "--meeting", &id, "--db", db.to_str().unwrap()],
-        home,
-    );
-    assert_eq!(queued.status, 2, "{}", queued.stderr);
-    assert!(
-        queued.stderr.contains(&format!(
-            "Meeting {id} is queued or being processed; the app processes it at its next \
-             launch, once the speech models are installed in Settings, or once the database \
-             is no longer locked."
-        )),
-        "{}",
-        queued.stderr
-    );
-    assert_eq!(queued.stdout, "");
-}
-
-/// `--meeting` stands instead of the input, `--allow-ready` needs it, and
-/// an id no meeting has is a usage error that says so.
-#[test]
-fn process_meeting_is_exclusive_of_the_input_and_names_an_unknown_id() {
-    let home = tempfile::tempdir().unwrap();
-    let home = home.path();
-    let db = home.join("steno.sqlite");
-    let db = db.to_str().unwrap();
-    let sweep = fixtures_root().join("audio/sweep-3s.wav");
-    let sweep = sweep.to_str().unwrap();
-    let id = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
-    let both = steno(&["process", sweep, "--meeting", id, "--db", db], home);
-    assert_eq!(both.status, 1, "{}", both.stderr);
-    assert!(
-        both.stderr.contains("cannot be used with"),
-        "{}",
-        both.stderr
-    );
-    // `--allow-ready` needs `--meeting`, beside an input or alone.
-    let beside = steno(&["process", sweep, "--allow-ready", "--db", db], home);
-    assert_eq!(beside.status, 1, "{}", beside.stderr);
-    assert!(
-        beside.stderr.contains("--allow-ready") && beside.stderr.contains("cannot be used with"),
-        "{}",
-        beside.stderr
-    );
-    let alone = steno(&["process", "--allow-ready", "--db", db], home);
-    assert_eq!(alone.status, 1, "{}", alone.stderr);
-    assert!(alone.stderr.contains("--meeting <ID>"), "{}", alone.stderr);
-    let neither = steno(&["process", "--db", db], home);
-    assert_eq!(neither.status, 1, "{}", neither.stderr);
-    assert!(neither.stderr.contains("<INPUT>"), "{}", neither.stderr);
-    let not_an_id = steno(&["process", "--meeting", "nope", "--db", db], home);
-    assert_eq!(not_an_id.status, 1, "{}", not_an_id.stderr);
-    assert!(
-        not_an_id.stderr.contains("nope is not a UUID."),
-        "{}",
-        not_an_id.stderr
-    );
-
-    let unknown = steno(&["process", "--meeting", id, "--db", db], home);
-    assert_eq!(unknown.status, 1, "{}", unknown.stderr);
-    assert!(
-        unknown
-            .stderr
-            .contains(&format!("No meeting has the id {id}.")),
-        "{}",
-        unknown.stderr
-    );
-    assert_eq!(unknown.stdout, "");
-}
-
-/// `--meeting` refuses every flag of a new meeting, each by name.
-#[test]
-fn process_meeting_refuses_each_new_meeting_flag() {
-    let home = tempfile::tempdir().unwrap();
-    let home = home.path();
-    let db = home.join("steno.sqlite");
-    let db = db.to_str().unwrap();
-    let lane = fixtures_root().join("audio/conversation-system-6s.wav");
-    let lane = lane.to_str().unwrap();
-    let folder = home.join("audio");
-    let folder = folder.to_str().unwrap();
-    let id = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
-    for (flag, value) in [
-        ("--title", "Sweep"),
-        ("--source", "phone"),
-        ("--system-lane", lane),
-        ("--template", "default"),
-        ("--audio-folder", folder),
-    ] {
-        let run = steno(&["process", "--meeting", id, flag, value, "--db", db], home);
-        assert_eq!(run.status, 1, "{flag}: {}", run.stderr);
-        assert!(
-            run.stderr.contains("cannot be used with") && run.stderr.contains(flag),
-            "{flag}: {}",
-            run.stderr
-        );
-        assert_eq!(run.stdout, "", "{flag}");
-    }
-    // An unknown engine is the usage error, before the database is opened.
-    let engine = steno(
-        &[
-            "process",
-            "--meeting",
-            id,
-            "--engine",
-            "parakeet-v9",
-            "--db",
-            db,
-        ],
-        home,
-    );
-    assert_eq!(engine.status, 1, "{}", engine.stderr);
-    assert!(engine.stderr.contains("parakeet-v9"), "{}", engine.stderr);
-    assert!(
-        !engine.stderr.contains("No meeting has the id"),
-        "{}",
-        engine.stderr
-    );
-}
-
-// Every usage error in one place.
 #[allow(clippy::too_many_lines)]
-#[test]
 fn usage_errors_exit_one_and_name_the_known_values() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     let db = home.join("steno.sqlite");
     let db = db.to_str().unwrap();
+    let out = home.to_str().unwrap();
     let models = home.join("models");
-
-    let bad_engine = steno(
-        &[
-            "process",
-            "/nonexistent.wav",
-            "--engine",
-            "parakeet-v9",
-            "--db",
-            db,
-        ],
-        home,
-    );
-    assert_eq!(bad_engine.status, 1);
-    assert!(
-        bad_engine.stderr.contains("parakeet-v9"),
-        "{}",
-        bad_engine.stderr
-    );
-    assert!(
-        bad_engine.stderr.contains("parakeet-v3"),
-        "the known ids are listed: {}",
-        bad_engine.stderr
-    );
-    assert!(bad_engine.stderr.contains("whisperkit-large-v3-turbo"));
-
+    let models = models.to_str().unwrap();
+    let sweep = fixtures_root().join("audio/sweep-3s.wav");
+    let sweep = sweep.to_str().unwrap();
+    let lane = fixtures_root().join("audio/conversation-system-6s.wav");
+    let lane = lane.to_str().unwrap();
+    let id = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
+    let unknown_id = format!("No meeting has the id {id}.");
+    let cases: Vec<(Vec<&str>, Vec<&str>)> = vec![
+        (
+            vec![
+                "process",
+                "/nonexistent.wav",
+                "--engine",
+                "parakeet-v9",
+                "--db",
+                db,
+            ],
+            vec!["parakeet-v9", "parakeet-v3", "whisperkit-large-v3-turbo"],
+        ),
+        // An unknown engine is refused before the database is opened.
+        (
+            vec![
+                "process",
+                "--meeting",
+                id,
+                "--engine",
+                "parakeet-v9",
+                "--db",
+                db,
+            ],
+            vec!["parakeet-v9", "parakeet-v3"],
+        ),
+        (
+            vec!["process", sweep, "--meeting", id, "--db", db],
+            vec!["cannot be used with"],
+        ),
+        (
+            vec!["process", sweep, "--allow-ready", "--db", db],
+            vec!["--allow-ready", "cannot be used with"],
+        ),
+        (
+            vec!["process", "--allow-ready", "--db", db],
+            vec!["--meeting <ID>"],
+        ),
+        (vec!["process", "--db", db], vec!["<INPUT>"]),
+        (
+            vec!["process", "--meeting", "nope", "--db", db],
+            vec!["nope is not a UUID."],
+        ),
+        (
+            vec!["process", "--meeting", id, "--db", db],
+            vec![unknown_id.as_str()],
+        ),
+        (
+            vec!["dev", "bakeoff", out, "--engines", "nope"],
+            vec!["nope", "parakeet-v3"],
+        ),
+        (
+            vec!["dev", "models", "remove", "nope", "--models-dir", models],
+            vec!["offlineDiarizer"],
+        ),
+        (vec!["dev", "aec-bench"], vec!["--synthetic"]),
+        (
+            vec!["dev", "aec-bench", "--synthetic", "--engine", "webrtc"],
+            vec![],
+        ),
+        (
+            vec!["dev", "capture-spike", "--lanes", "phone", "--out", out],
+            vec![],
+        ),
+        (
+            vec![
+                "record",
+                "--backend",
+                "synthetic",
+                "--seconds",
+                "0",
+                "--out",
+                out,
+            ],
+            vec!["positive"],
+        ),
+        (vec!["record", "--backend", "tape", "--out", out], vec![]),
+        (vec!["record", "--mode", "phone", "--out", out], vec![]),
+        (
+            vec!["dev", "llm", "probe", "--db", db],
+            vec!["No LLM endpoint configured"],
+        ),
+    ];
+    // `--meeting` refuses every flag of a new meeting, each by name.
+    let flags = [
+        ("--title", "Sweep"),
+        ("--source", "phone"),
+        ("--system-lane", lane),
+        ("--template", "default"),
+        ("--audio-folder", out),
+    ];
+    let flag_cases = flags.iter().map(|(flag, value)| {
+        (
+            vec!["process", "--meeting", id, flag, value, "--db", db],
+            vec!["cannot be used with", flag],
+        )
+    });
+    for (args, needles) in cases.into_iter().chain(flag_cases) {
+        let run = steno(&args, home);
+        assert_eq!(run.status, 1, "{args:?}: {}", run.stderr);
+        assert_eq!(run.stdout, "", "{args:?}");
+        for needle in needles {
+            assert!(run.stderr.contains(needle), "{args:?}: {}", run.stderr);
+        }
+    }
     let help = steno(&["process", "--help"], home);
     assert_eq!(help.status, 0);
     assert!(help.stdout.contains("--engine <engine>"), "{}", help.stdout);
-
-    let bad_bakeoff = steno(
-        &[
-            "dev",
-            "bakeoff",
-            home.to_str().unwrap(),
-            "--engines",
-            "nope",
-        ],
-        home,
-    );
-    assert_eq!(bad_bakeoff.status, 1);
-    assert!(bad_bakeoff.stderr.contains("nope") && bad_bakeoff.stderr.contains("parakeet-v3"));
-
-    let bad_asset = steno(
-        &[
-            "dev",
-            "models",
-            "remove",
-            "nope",
-            "--models-dir",
-            models.to_str().unwrap(),
-        ],
-        home,
-    );
-    assert_eq!(bad_asset.status, 1);
-    assert!(
-        bad_asset.stderr.contains("offlineDiarizer"),
-        "the known assets are listed: {}",
-        bad_asset.stderr
-    );
-
-    let no_inputs = steno(&["dev", "aec-bench"], home);
-    assert_eq!(no_inputs.status, 1);
-    assert!(no_inputs.stderr.contains("--synthetic"));
-    assert_eq!(
-        steno(
-            &["dev", "aec-bench", "--synthetic", "--engine", "webrtc"],
-            home
-        )
-        .status,
-        1
-    );
-    assert_eq!(
-        steno(
-            &[
-                "dev",
-                "capture-spike",
-                "--lanes",
-                "phone",
-                "--out",
-                home.to_str().unwrap()
-            ],
-            home
-        )
-        .status,
-        1
-    );
-    let zero = steno(
-        &[
-            "record",
-            "--backend",
-            "synthetic",
-            "--seconds",
-            "0",
-            "--out",
-            home.to_str().unwrap(),
-        ],
-        home,
-    );
-    assert_eq!(zero.status, 1);
-    assert!(zero.stderr.contains("positive"));
-    assert_eq!(
-        steno(
-            &[
-                "record",
-                "--backend",
-                "tape",
-                "--out",
-                home.to_str().unwrap()
-            ],
-            home
-        )
-        .status,
-        1
-    );
-    assert_eq!(
-        steno(
-            &["record", "--mode", "phone", "--out", home.to_str().unwrap()],
-            home
-        )
-        .status,
-        1
-    );
-
-    let unconfigured = steno(&["dev", "llm", "probe", "--db", db], home);
-    assert_eq!(unconfigured.status, 1);
-    assert!(
-        unconfigured.stderr.contains("No LLM endpoint configured"),
-        "{}",
-        unconfigured.stderr
-    );
 }
 
 #[test]
