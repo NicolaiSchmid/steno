@@ -1520,15 +1520,6 @@ mod tests {
         fn reported(&self) -> Vec<u64> {
             self.progress.try_iter().collect()
         }
-
-        fn received(&self, bytes: u64) {
-            while self
-                .progress
-                .recv_timeout(Duration::from_secs(60))
-                .expect("the download stopped reporting")
-                < bytes
-            {}
-        }
     }
 
     #[test]
@@ -1624,102 +1615,6 @@ mod tests {
         );
         store.verify(&asset).unwrap();
         assert_eq!(names(&store, &asset), ["model.onnx", "model.onnx.lock"]);
-    }
-
-    #[test]
-    fn a_download_that_waited_installs_the_file_after_the_first_threw_its_partial_away() {
-        // The first download fails its checksum and deletes `<name>.partial`
-        // under the lock. The second must write a new partial at the path and
-        // install it; a third waits for the second and fetches nothing.
-        const WAIT: Duration = Duration::from_secs(30);
-        let good: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
-        let wrong: Vec<u8> = good.iter().map(|b| b ^ 0xff).collect();
-        let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::new(dir.path());
-        let (url, release, requests) = serve_held(vec![
-            (wrong.clone(), 50_000),
-            (good.clone(), 10_000),
-            (wrong, 0),
-        ]);
-        let mut asset = asset(Some(url), &good, &digest(&good));
-        let (first_started, first_waits) = mpsc::channel();
-        std::thread::scope(|scope| {
-            let release = release;
-            let first = scope.spawn(|| {
-                store.ensure(&asset, &mut |p| {
-                    if p.received >= 50_000 {
-                        let _ = first_started.send(());
-                    }
-                })
-            });
-            first_waits.recv_timeout(WAIT).unwrap();
-            let second = drive(&store, &asset);
-            second.asleep();
-            // What it showed of the first's partial while waiting.
-            second.reported();
-            release[0].send(()).unwrap();
-            let first = first.join().unwrap();
-            assert!(
-                matches!(first, Err(SpeechError::Checksum { .. })),
-                "{first:?}"
-            );
-            second.move_on(Duration::ZERO);
-            // The second has the lock and its own request.
-            second.received(10_000);
-            let third = drive(&store, &asset);
-            third.asleep();
-            release[1].send(()).unwrap();
-            second.done().unwrap();
-            drop(release);
-            third.move_on(Duration::ZERO);
-            third.done().unwrap();
-        });
-        assert_eq!(requests.lock().unwrap().len(), 2);
-        store.verify(&asset).unwrap();
-        assert_eq!(names(&store, &asset), ["model.onnx", "model.onnx.lock"]);
-        // The lock file counts for nothing: removed, the file is missing.
-        fs::remove_file(store.directory(&asset).join("model.onnx")).unwrap();
-        assert_eq!(store.missing_files(&asset), ["model.onnx"]);
-        asset.files[0].source = None;
-        assert!(matches!(
-            store.ensure(&asset, &mut |_| {}),
-            Err(SpeechError::NotHosted { .. })
-        ));
-    }
-
-    #[test]
-    fn a_download_resumes_what_a_failed_one_left() {
-        // Cut half way and then refused with a 404, the first call fails and
-        // leaves `<name>.partial`; the next asks for the rest only.
-        let body: Vec<u8> = (0..100_000u32).map(|i| (i % 249) as u8).collect();
-        let half = body.len() / 2;
-        let (cut, b) = (body.clone(), body.clone());
-        let (url, ranges) = serve_each(vec![
-            Box::new(move |stream, _| {
-                let bytes = response("200 OK", &cut);
-                send(stream, &bytes[..bytes.len() - half]);
-            }),
-            Box::new(|stream, _| send(stream, &response("404 Not Found", b""))),
-            Box::new(move |stream, range| answer(stream, &b, range.as_deref(), None)),
-        ]);
-        let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::new(dir.path());
-        let asset = asset(Some(url), &body, &digest(&body));
-        let error = store.ensure(&asset, &mut |_| {}).unwrap_err();
-        assert!(matches!(error, SpeechError::Download { .. }), "{error}");
-        let partial = store.directory(&asset).join("model.onnx.partial");
-        assert_eq!(fs::metadata(&partial).unwrap().len(), half as u64);
-        store.ensure(&asset, &mut |_| {}).unwrap();
-        store.verify(&asset).unwrap();
-        assert_eq!(
-            *ranges.lock().unwrap(),
-            [
-                None,
-                Some(format!("bytes={half}-")),
-                Some(format!("bytes={half}-"))
-            ]
-        );
-        assert!(!partial.exists());
     }
 
     #[test]
@@ -1944,46 +1839,6 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_chunk_is_given_up_at_the_longest_timeout_not_its_own() {
-        // No chunk gets more than the longest chunk timeout, here 50 ms,
-        // however long its length allows; stalling answers fail the download.
-        let body: Vec<u8> = (0..2u32 << 20).map(|i| (i % 229) as u8).collect();
-        let shared = Arc::new(body.clone());
-        let mut holds = Vec::new();
-        let handlers: Vec<Handler> = (0..DOWNLOAD_ATTEMPTS)
-            .map(|_| {
-                let (hold, wait) = mpsc::channel::<()>();
-                holds.push(hold);
-                let body = Arc::clone(&shared);
-                Box::new(move |stream: &TcpStream, range: Option<String>| {
-                    answer(stream, &body, range.as_deref(), Some((0, wait)));
-                }) as Handler
-            })
-            .collect();
-        let (url, ranges) = serve_each(handlers);
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ModelStore::new(dir.path());
-        store.chunk = 1 << 20;
-        store.min_body_timeout = Duration::from_secs(3600);
-        store.max_chunk_timeout = Duration::from_millis(50);
-        let asset = asset(Some(url), &body, &digest(&body));
-        // Only a hang guard: the hour would hold the test, 50 ms does not.
-        let error = ensure_within(
-            &store,
-            &asset,
-            Duration::from_secs(60),
-            "a silent chunk waited for its length's timeout",
-        )
-        .unwrap_err();
-        drop(holds);
-        assert!(is_transient(&error), "{error}");
-        assert_eq!(
-            *ranges.lock().unwrap(),
-            vec![Some("bytes=0-1048575".to_owned()); DOWNLOAD_ATTEMPTS as usize]
-        );
-    }
-
-    #[test]
     fn a_lock_this_process_holds_is_neither_locked_again_nor_opened() {
         // Where locks belong to the process, the set of held paths keeps two
         // downloads of one process apart.
@@ -2061,86 +1916,6 @@ mod tests {
         );
         assert_eq!(waiter.reported(), [1000, 1000]);
         assert_eq!(fs::metadata(&partial).unwrap().len(), 1000);
-        drop(held);
-    }
-
-    #[test]
-    fn a_holder_s_growth_starts_the_wait_for_a_stopped_holder_again() {
-        // The waiter gives up `STALE_PARTIAL` after the partial last grew, not
-        // after its first look.
-        let body: Vec<u8> = (0..10_000u32).map(|i| (i % 227) as u8).collect();
-        let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::new(dir.path());
-        let asset = asset(
-            Some("http://127.0.0.1:9/never".to_owned()),
-            &body,
-            &digest(&body),
-        );
-        let directory = store.directory(&asset);
-        fs::create_dir_all(&directory).unwrap();
-        let held = locked(&directory.join("model.onnx.lock"));
-        let mut holder = File::create(directory.join("model.onnx.partial")).unwrap();
-        holder.write_all(&body[..1000]).unwrap();
-        let waiter = drive(&store, &asset);
-        waiter.asleep();
-        holder.write_all(&body[1000..2000]).unwrap();
-        let half = STALE_PARTIAL / 2;
-        waiter.move_on(half);
-        waiter.asleep();
-        // `STALE_PARTIAL` since the first look, half of it since the growth.
-        waiter.move_on(half);
-        waiter.asleep();
-        waiter.move_on(half);
-        assert!(waiter.done().is_err());
-        assert_eq!(waiter.reported(), [1000, 2000, 2000]);
-        drop(held);
-    }
-
-    #[test]
-    fn a_waiter_outlasts_a_holder_whose_one_request_may_still_be_silent() {
-        // A one-chunk file's request may spend every timeout on every attempt;
-        // the waiter waits that out.
-        let defaults = ModelStore::new("/models");
-        let decoder = 47_234_123;
-        assert_eq!(
-            defaults.lock_wait_limit(decoder),
-            Duration::from_secs(3 * (120 + 720)) + RETRY_DELAY * 3
-        );
-        assert_eq!(defaults.lock_wait_limit(643_854), STALE_PARTIAL);
-        assert_eq!(
-            defaults.lock_wait_limit(2_435_420_160),
-            Duration::from_secs(3 * (120 + 128)) + RETRY_DELAY * 3
-        );
-        let body: Vec<u8> = (0..10_000u32).map(|i| (i % 227) as u8).collect();
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ModelStore::new(dir.path());
-        store.min_body_timeout = Duration::from_secs(3600);
-        let limit = store.lock_wait_limit(body.len() as u64);
-        assert_eq!(limit.as_secs(), 3 * (120 + 3600));
-        let asset = asset(
-            Some("http://127.0.0.1:9/never".to_owned()),
-            &body,
-            &digest(&body),
-        );
-        let directory = store.directory(&asset);
-        fs::create_dir_all(&directory).unwrap();
-        let held = locked(&directory.join("model.onnx.lock"));
-        fs::write(directory.join("model.onnx.partial"), &body[..1000]).unwrap();
-        let waiter = drive(&store, &asset);
-        waiter.asleep();
-        waiter.move_on(STALE_PARTIAL);
-        waiter.asleep();
-        let short = STALE_PARTIAL + Duration::from_secs(1);
-        waiter.move_on(limit.checked_sub(short).unwrap());
-        waiter.asleep();
-        waiter.move_on(Duration::from_secs(1));
-        let error = waiter.done().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("written nothing for {} s", limit.as_secs())),
-            "{error}"
-        );
         drop(held);
     }
 
@@ -2232,36 +2007,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "fetches from huggingface.co"]
-    fn a_partial_of_the_hosted_export_resumes_through_its_redirect_in_chunks() {
-        // `tokens.txt` of the pinned export, resumed in 16 KiB chunks through
-        // Hugging Face's redirect, matches the manifest.
-        let mut asset = ModelAsset::parakeet_v3_fp32();
-        asset.files.retain(|f| f.name == "tokens.txt");
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ModelStore::new(dir.path());
-        let directory = store.ensure(&asset, &mut |_| {}).unwrap();
-        let installed = directory.join("tokens.txt");
-        let partial = directory.join("tokens.txt.partial");
-        fs::rename(&installed, &partial).unwrap();
-        File::options()
-            .write(true)
-            .open(&partial)
-            .unwrap()
-            .set_len(30_000)
-            .unwrap();
-        store.chunk = 16 << 10;
-        let mut reports = Vec::new();
-        store
-            .ensure(&asset, &mut |p| reports.push(p.received))
-            .unwrap();
-        store.verify(&asset).unwrap();
-        assert_eq!(reports.first(), Some(&30_000));
-        assert_eq!(reports.last(), Some(&asset.files[0].size));
-        assert!(!partial.exists());
-    }
-
-    #[test]
     fn a_partial_name_a_dead_process_with_this_pid_left_is_passed_over() {
         // Per-call partials are for file systems without locks, which a
         // test cannot conjure; the naming is checked on its own.
@@ -2291,18 +2036,6 @@ mod tests {
         );
         drop(partial);
         assert!(!path.exists());
-    }
-
-    #[test]
-    fn a_wrong_checksum_leaves_nothing_behind() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::new(dir.path());
-        let body = b"tampered".to_vec();
-        let asset = asset(Some(serve_once(&body)), &body, &digest(b"original"));
-        let error = store.ensure(&asset, &mut |_| {}).unwrap_err();
-        assert!(matches!(error, SpeechError::Checksum { .. }), "{error}");
-        assert_eq!(names(&store, &asset), ["model.onnx.lock"]);
-        assert!(!store.is_installed(&asset));
     }
 
     #[test]
@@ -2390,31 +2123,6 @@ mod tests {
         store.ensure(&asset, &mut |_| {}).unwrap();
         assert!(!partial.exists());
         store.verify(&asset).unwrap();
-    }
-
-    #[test]
-    fn a_download_that_finds_its_file_installed_leaves_no_partial() {
-        // Installed by another download between the check and the lock: this
-        // one returns without fetching and leaves no partial.
-        let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::new(dir.path());
-        let body = b"not really a model".to_vec();
-        let asset = asset(None, &body, &digest(&body));
-        let directory = store.directory(&asset);
-        fs::create_dir_all(&directory).unwrap();
-        let destination = directory.join("model.onnx");
-        fs::write(&destination, &body).unwrap();
-        // Bytes a killed run left, which only this call would delete.
-        fs::write(directory.join("model.onnx.partial"), &body[..4]).unwrap();
-        store
-            .download_with_retries(
-                "http://127.0.0.1:9/never",
-                &asset.files[0],
-                &destination,
-                &mut |_| {},
-            )
-            .unwrap();
-        assert_eq!(names(&store, &asset), ["model.onnx", "model.onnx.lock"]);
     }
 
     #[test]

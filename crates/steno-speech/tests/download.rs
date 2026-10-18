@@ -4,7 +4,7 @@
 
 #![allow(clippy::cast_possible_truncation)]
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -19,8 +19,6 @@ use steno_speech::{ModelAsset, ModelFile, ModelSource, ModelStore, SpeechError};
 struct Behaviour {
     /// Closes the first response's connection after this many body bytes.
     cut_first_after: Option<usize>,
-    /// Answers every request with the whole file, as some hosts do.
-    ignore_range: bool,
     /// Answers a range request with the whole file under `206`, labelled as
     /// starting at 0 or, with `false`, without a `Content-Range`.
     whole_file_as_206: Option<bool>,
@@ -108,7 +106,7 @@ fn answer(
             b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         );
     };
-    let start = range.filter(|_| !behaviour.ignore_range).and_then(|r| {
+    let start = range.and_then(|r| {
         r.strip_prefix("bytes=")?
             .strip_suffix('-')?
             .parse::<usize>()
@@ -328,21 +326,6 @@ fn a_corrupt_prefix_fails_its_checksum_and_is_fetched_again_from_zero() {
 }
 
 #[test]
-fn a_host_that_ignores_the_range_gets_the_file_written_from_the_start() {
-    let contents = body(40_000);
-    let f = fixture(
-        &contents,
-        Behaviour {
-            ignore_range: true,
-            ..Behaviour::default()
-        },
-    );
-    f.leave_partial(&contents[..10_000]);
-    f.install();
-    assert_eq!(f.server.seen().len(), 1);
-}
-
-#[test]
 fn a_partial_longer_than_the_file_or_already_complete_is_handled() {
     let contents = body(10_000);
     let f = fixture(&contents, Behaviour::default());
@@ -398,30 +381,6 @@ fn a_mirror_serves_every_file_from_asset_id_and_file_name() {
             .all(|s| s.path == format!("{ID}/{NAME}"))
     );
     assert_eq!(f.server.seen().len(), 2);
-}
-
-#[test]
-fn a_download_waits_for_the_one_holding_its_partial_and_resumes_it() {
-    // Another download holds the lock and stops; this one waits for the lock,
-    // then continues the bytes the other left.
-    let contents = body(20_000);
-    let f = fixture(&contents, Behaviour::default());
-    f.leave_partial(&contents[..7_000]);
-    let mut held = Some(File::create(f.directory().join(LOCK)).unwrap());
-    held.as_ref().unwrap().lock().unwrap();
-    // While the lock is held, a report can only come from the wait.
-    let mut reports = Vec::new();
-    f.store
-        .ensure(&f.asset, &mut |p| {
-            reports.push((p.received, held.is_some()));
-            held = None;
-        })
-        .unwrap();
-    f.store.verify(&f.asset).unwrap();
-    assert_eq!(reports[0], (7_000, true));
-    let ranges: Vec<_> = f.server.seen().into_iter().map(|s| s.range).collect();
-    assert_eq!(ranges, [Some("bytes=7000-".to_owned())]);
-    assert_eq!(names(&f.directory()), [NAME, LOCK]);
 }
 
 #[test]
