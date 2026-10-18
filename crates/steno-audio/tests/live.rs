@@ -1,7 +1,7 @@
 //! The macOS live backend against the real HAL, ignored by default: run on
 //! a Mac with `cargo test -p steno-audio --test live -- --ignored
 //! --nocapture`. Over SSH the lanes deliver silence; the tests assert that
-//! calls return within bounds, the IOProc runs from the start (nothing may
+//! calls return within bounds, the `IOProc` runs from the start (nothing may
 //! play meanwhile), and a UID naming no device records the default input.
 #![cfg(target_os = "macos")]
 // The docs name Core Audio's IOProc as the HAL spells it.
