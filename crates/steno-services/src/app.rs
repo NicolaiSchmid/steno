@@ -776,14 +776,17 @@ pub fn build_with_import(
             chrono::Utc::now(),
         )),
     };
+    // Where the chosen engine runs, the fallback aside: a reading mark
+    // that cannot be read may be its own only in the app's process.
+    let setup = SpeechSetup::new(&settings, &paths);
+    let engine_in_process = setup.runtime(&settings.speech_engine_id).runs_in_process();
     let fallback = Arc::new(SpeechFallback::at_launch(
         &paths.support_directory,
         support.warm_up_mark.clone(),
         &support.reading_marks,
+        engine_in_process,
     ));
-    let engines = Arc::new(SpeechEngines::new(
-        SpeechSetup::new(&settings, &paths).with_fallback(fallback),
-    ));
+    let engines = Arc::new(SpeechEngines::new(setup.with_fallback(fallback)));
     let speech = engines.setup();
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
@@ -4926,6 +4929,28 @@ mod tests {
         assert!(!skipping(&app), "no warm-up mark was left");
         app.services.speech_models.end_speech_fallback().unwrap();
         assert!(skipping(&app), "this run's warm-up is held off");
+        drop(app);
+    }
+
+    /// A reading mark that cannot be read turns the build's fallback on
+    /// only where the settings run the speech engine in the app's process:
+    /// with the default settings, on the Mac (`CoreML`), and nowhere else.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_reading_mark_turns_the_fallback_on_only_beside_an_in_process_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        // A folder in the mark's place fails the read on every platform.
+        std::fs::create_dir_all(
+            support
+                .join(ReadingMarks::FOLDER)
+                .join(format!("{}.json", uuid::Uuid::new_v4())),
+        )
+        .unwrap();
+        let app = build(options_under(&support)).unwrap();
+        assert_eq!(
+            app.services.speech_models.speech_fallback(),
+            cfg!(target_os = "macos")
+        );
         drop(app);
     }
 }

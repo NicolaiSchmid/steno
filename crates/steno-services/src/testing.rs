@@ -453,6 +453,7 @@ pub fn app_falling_back(
         &support,
         warm_up_mark.clone(),
         &reading_marks,
+        true,
     ));
     let setup = crate::speech::testing::setup(
         &root.join("models"),

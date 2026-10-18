@@ -1929,6 +1929,7 @@ mod tests {
             &support,
             Arc::new(steno_pipeline::WarmUpMark::at_launch(&support)),
             &steno_pipeline::ReadingMarks::at_launch(&support, &store, chrono::Utc::now()),
+            true,
         ));
         let setup = testing::setup(&dir.path().join("models"), SpeechSettings::default())
             .with_fallback(fallback);

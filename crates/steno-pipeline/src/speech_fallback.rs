@@ -13,9 +13,10 @@
 //! - **What turns it on.** The launch check ([`SpeechFallback::at_launch`])
 //!   over what the last process left: a warm-up mark
 //!   ([`WarmUpMark::left_over`]) or a reading mark of the engine's load or
-//!   a transcription ([`ReadingMarks::speech_marks_left`], which on the
-//!   Mac counts among them a reading mark that cannot be read, and a
-//!   folder of them that cannot be listed). A force quit, a power loss or
+//!   a transcription ([`ReadingMarks::speech_marks_left`]), and, while the
+//!   settings run the engine in the app's process, a reading mark that
+//!   cannot be read or a folder of them that cannot be listed
+//!   ([`ReadingMarks::unread_marks`]). A force quit, a power loss or
 //!   a crash elsewhere while the engine runs leaves the same marks, and
 //!   turns it on too: the cost is the speech sidecar's models to download
 //!   (the meetings wait for them in Settings) and its slower runs, never a
@@ -106,17 +107,24 @@ impl SpeechFallback {
     /// The launch check in `support_directory` (see the module doc), after
     /// the launch read `warm_up` and `marks`: on when the file says so, or
     /// when either left a mark the file has not seen, which is then written
-    /// down, or when the file cannot be read or parsed. Call it once per
-    /// launch, before a pipeline is built, with the warm-up mark the
-    /// pipelines share.
+    /// down, or when the file cannot be read or parsed. A reading mark
+    /// that could not be read ([`ReadingMarks::unread_marks`]) counts only
+    /// when `engine_in_process`: the speech engine the settings choose runs
+    /// in the app's process, so the mark may be one of its own. Call it
+    /// once per launch, before a pipeline is built, with the warm-up mark
+    /// the pipelines share.
     #[must_use]
     pub fn at_launch(
         support_directory: &Path,
         warm_up: Arc<WarmUpMark>,
         marks: &ReadingMarks,
+        engine_in_process: bool,
     ) -> Self {
         let path = support_directory.join(Self::FILE_NAME);
         let mut found = marks.speech_marks_left();
+        if engine_in_process {
+            found.extend(marks.unread_marks());
+        }
         found.extend(warm_up.left_over().map(warm_up_entry));
         let on = match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
@@ -251,12 +259,19 @@ mod tests {
         launched(support).1
     }
 
-    /// [`launch`], with the warm-up mark it read.
+    /// [`launch`], with the warm-up mark it read. The settings run the
+    /// engine in the app's process, as `CoreML` on the Mac.
     fn launched(support: &Path) -> (Arc<WarmUpMark>, SpeechFallback) {
+        launched_with(support, true)
+    }
+
+    /// [`launched`], with the engine in the app's process or not.
+    fn launched_with(support: &Path, engine_in_process: bool) -> (Arc<WarmUpMark>, SpeechFallback) {
         let store = Store::in_memory().unwrap();
         let warm_up = Arc::new(WarmUpMark::at_launch(support));
         let marks = ReadingMarks::at_launch(support, &store, chrono::Utc::now());
-        let fallback = SpeechFallback::at_launch(support, warm_up.clone(), &marks);
+        let fallback =
+            SpeechFallback::at_launch(support, warm_up.clone(), &marks, engine_in_process);
         (warm_up, fallback)
     }
 
@@ -392,10 +407,10 @@ mod tests {
         assert!(!warm_up.skipping(), "the load cleared it");
     }
 
-    /// On the Mac a reading mark that cannot be read turns it on, as it may
-    /// be one of the engine's; once the user turns it off, the same mark
-    /// does not turn it on again. Elsewhere no engine runs in the app's
-    /// process, and it stays off.
+    /// A reading mark that cannot be read turns it on while the engine
+    /// runs in the app's process, as it may be one of the engine's; once
+    /// the user turns it off, the same mark does not turn it on again.
+    /// With the engine in the sidecar it stays off.
     #[test]
     fn a_reading_mark_that_cannot_be_read_turns_it_on_once() {
         let support = tempfile::tempdir().unwrap();
@@ -411,8 +426,13 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
 
+        assert!(
+            !launched_with(support.path(), false).1.is_on(),
+            "in the sidecar"
+        );
+        assert_eq!(record(support.path()), None, "nothing written");
         let fallback = launch(support.path());
-        assert_eq!(fallback.is_on(), cfg!(target_os = "macos"));
+        assert!(fallback.is_on());
         fallback.turn_off().unwrap();
         assert!(
             !launch(support.path()).is_on(),
