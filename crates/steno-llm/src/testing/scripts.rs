@@ -76,15 +76,6 @@ impl Scripts {
         self.completion(&encoded(value), Some("stop"), usage, "stub-model")
     }
 
-    /// `value` as JSON inside a Markdown fence with a prose prefix.
-    #[must_use]
-    pub fn fenced<T: Serialize>(&self, value: &T) -> StubResponse {
-        self.text(&format!(
-            "Here is the JSON you asked for:\n```json\n{}\n```\n",
-            encoded(value)
-        ))
-    }
-
     /// A completion cut off by the server's token limit.
     #[must_use]
     pub fn truncated(&self, partial_text: &str) -> StubResponse {
@@ -405,13 +396,6 @@ impl Scripts {
         ])
     }
 
-    /// A `text/event-stream` body written verbatim.
-    #[must_use]
-    pub fn raw_event_stream(&self, body: &str) -> StubResponse {
-        StubResponse::new(200, body.as_bytes().to_vec())
-            .with_header("Content-Type", "text/event-stream")
-    }
-
     /// A stream cut before its terminal event.
     #[must_use]
     pub fn responses_truncated_stream(&self) -> StubResponse {
@@ -545,8 +529,7 @@ fn event(
 }
 
 /// `event: name\ndata: json\n\n` per event, as `text/event-stream`.
-#[must_use]
-pub fn event_stream(events: &[(&str, ResponsesStreamEvent)]) -> StubResponse {
+fn event_stream(events: &[(&str, ResponsesStreamEvent)]) -> StubResponse {
     use std::fmt::Write;
     let mut body = String::new();
     for (name, event) in events {

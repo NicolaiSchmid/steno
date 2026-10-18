@@ -6,7 +6,7 @@ mod scripts;
 mod server;
 
 pub use clock::ManualClock;
-pub use scripts::{Responder, Scripts, default_usage, event_stream, parse_segments, scripts};
+pub use scripts::{Responder, Scripts, default_usage, parse_segments, scripts};
 pub use server::{Behaviour, RecordedRequest, StubChatServer, StubResponse};
 
 /// Wall time before a hanging test double fails the test.
