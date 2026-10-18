@@ -243,6 +243,7 @@ mod tests {
         let path = dir.path().join(WarmUpMark::FILE_NAME);
         std::mem::forget(Arc::new(WarmUpMark::at_launch(dir.path())).begin());
         let id = std::fs::read_to_string(&path).unwrap().trim().to_owned();
+        assert!(uuid::Uuid::parse_str(&id).is_ok(), "{id}");
 
         let mark = Arc::new(WarmUpMark::at_launch(dir.path()));
         assert!(mark.skipping());
@@ -282,9 +283,8 @@ mod tests {
     /// test in the binary logs into the capture, and others find marks of
     /// their own left over, so only the id picks out this test's lines.
     fn lines_of(text: &str, id: &str, what: &str) -> usize {
-        let mark = format!("mark={id}");
         text.lines()
-            .filter(|line| line.contains(&mark) && line.contains(what))
+            .filter(|line| line.contains(id) && line.contains(what))
             .count()
     }
 
@@ -327,6 +327,7 @@ mod tests {
         assert!(next.skipping());
         let text = log.text();
         assert_eq!(lines_of(&text, &id, "is held off;"), 1, "{text}");
+        // Looser than the count above, so no wording of the line slips past.
         assert_eq!(lines_of(&text, &id, "ended with the app"), 0, "{text}");
     }
 
