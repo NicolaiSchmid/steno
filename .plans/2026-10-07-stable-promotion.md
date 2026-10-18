@@ -2601,28 +2601,32 @@ Each lands before `0.11.0-rc.1`.
     its turn is gone. A job whose load or transcription waits behind a
     recording's warm-up (`OneCallAtATime`) can still be counted for that
     warm-up's abort.
-  - The fallback (`steno_pipeline::SpeechFallback`,
-    `speech-fallback.json` in the support directory): the launch reads
-    A15's warm-up mark and A17's marks of the CoreML stage
-    (`ReadStage::Transcribe`, written only for an engine in the app's
-    process); one it has not seen turns the fallback on, durably, logged
-    at `warn`. On the Mac a reading mark that cannot be read counts as a
-    mark of the CoreML stage, on the safe side, since only its body names
-    its meeting and stage; so does a folder of marks that cannot be listed
-    (counted as `reading`). Logged at `warn` on every platform and left as
-    it is, such a mark counts no meeting, so that meeting's quarantine
-    comes one crash later, and on the Mac a decode, mixdown or length mark
-    that cannot be read turns the fallback on as a false alarm. Elsewhere
-    no engine runs in the app's process, and such a mark is only logged.
-    While the fallback is on, `SpeechSetup::runtime` puts Parakeet v3 in
-    the speech sidecar, where a repeated abort ends only the child and the
-    meeting stays retryable; the Parakeet row of Settings and onboarding is
-    then the sidecar's fp32 model, and a meeting whose models are missing
-    waits for them there ("Neural Engine off after a crash: download the
-    speech models in Settings"). A file that exists but cannot be read or
-    parsed keeps the fallback on, logged at `warn`: an unparseable one is
-    written again, on, with the marks found; an unreadable one is left as
-    it is. The sidecar is bundled on the Mac as everywhere
+  - The fallback (`steno_pipeline::SpeechFallback`, `speech-fallback.json`
+    in the support directory): the launch reads A15's warm-up mark and
+    A17's marks of the CoreML stage (`ReadStage::Transcribe`, written only
+    for an engine in the app's process); one it has not seen turns the
+    fallback on, durably, logged at `warn`. On the Mac a reading mark that
+    cannot be read counts as a mark of the CoreML stage, on the safe side,
+    since only its body names its meeting and stage; so does a folder of
+    marks that cannot be listed (counted as `reading`). Logged at `warn` on
+    every platform and left as it is, such a mark counts no meeting, so
+    that meeting's quarantine comes one crash later, and on the Mac a
+    decode, mixdown or length mark that cannot be read turns the fallback
+    on as a false alarm. Where the sidecar already runs speech on the Mac
+    (Whisper chosen, or the ONNX sidecar there), nothing changes at
+    runtime: such a mark shows the existing "Turned off after a crash" row
+    although CoreML never ran, and "Use again" leaves a held warm-up mark
+    that stays until a meeting loads CoreML. Elsewhere no engine runs in
+    the app's process, and such a mark is only logged. While the fallback
+    is on, `SpeechSetup::runtime` puts Parakeet v3 in the speech sidecar,
+    where a repeated abort ends only the child and the meeting stays
+    retryable; the Parakeet row of Settings and onboarding is then the
+    sidecar's fp32 model, and a meeting whose models are missing waits for
+    them there ("Neural Engine off after a crash: download the speech
+    models in Settings"). A file that exists but cannot be read or parsed
+    keeps the fallback on, logged at `warn`: an unparseable one is written
+    again, on, with the marks found; an unreadable one is left as it is.
+    The sidecar is bundled on the Mac as everywhere
     (`tauri.release.conf.json`'s `externalBin`, staged by
     `stage-sidecar.sh` in `desktop-release.yml` for every platform, checked
     beside the app binary by `check-bundle.sh`); the diarizer runs in it on
@@ -2636,18 +2640,20 @@ Each lands before `0.11.0-rc.1`.
     seen, so the same marks (a warm-up mark stays until a meeting loads
     CoreML; a quarantined meeting keeps its marks) do not turn it on again;
     a new one does, and so does every warm-up mark that cannot be read,
-    which the launch gives a fresh id (`unreadable-<uuid>`). After the
-    user's action, recordings skip the warm-up until a meeting's processing
-    has loaded CoreML, whichever mark turned the fallback on, so that first
-    load never runs beside a recording (`WarmUpMark::hold_off`, a mark of
-    its own, `held-<uuid>`, listed as seen; the launch that finds it says
-    the warm-up is held off, not that it ended with the app); a load in the
-    sidecar no longer clears the warm-up mark. A file or a warm-up mark
-    that cannot be written keeps the fallback on: Settings says "The Neural
-    Engine could not be turned back on." and the pipeline is not rebuilt. A
-    rebuild that fails after the file is written keeps the row and the
-    title until a reload succeeds ("Use again" again, or a save in another
-    section); the next launch runs CoreML either way.
+    which the launch gives a fresh id (`unreadable-<uuid>`), as it does on
+    the Mac to one whose presence cannot be checked; elsewhere, where no
+    warm-up mark is written, a failed check is no mark, logged at `warn`.
+    After the user's action, recordings skip the warm-up until a meeting's
+    processing has loaded CoreML, whichever mark turned the fallback on, so
+    that first load never runs beside a recording (`WarmUpMark::hold_off`,
+    a mark of its own, `held-<uuid>`, listed as seen; the launch that finds
+    it says the warm-up is held off, not that it ended with the app); a
+    load in the sidecar no longer clears the warm-up mark. A file or a
+    warm-up mark that cannot be written keeps the fallback on: Settings
+    says "The Neural Engine could not be turned back on." and the pipeline
+    is not rebuilt. A rebuild that fails after the file is written keeps
+    the row and the title until a reload succeeds ("Use again" again, or a
+    save in another section); the next launch runs CoreML either way.
   - False alarms: a force quit, a power loss or a crash elsewhere while
     CoreML loads or transcribes leaves the same marks and turns the
     fallback on too. The cost is the sidecar's models to download and its
@@ -2659,20 +2665,20 @@ Each lands before `0.11.0-rc.1`.
     recording started checks again at its turn, on an engine that runs one
     call at a time; a job in a child does not wait; a quit during the wait
     leaves the meeting queued; the recorder is live from `Starting` through
-    `Stopping`, and a notify that read a recording never sets the flag after
-    the stop that ended it; a reload shares the recorder's state with the
-    retired build and the new one; the fallback's file over every kind of
-    mark, the user's action, the marks it forgets, a file that does not
+    `Stopping`, and a notify that read a recording never sets the flag
+    after the stop that ended it; a reload shares the recorder's state with
+    the retired build and the new one; the fallback's file over every kind
+    of mark, the user's action, the marks it forgets, a file that does not
     parse, cannot be read (its bytes kept) or cannot be written, a warm-up
-    mark that cannot be written, and a warm-up mark that cannot be read or
-    whose presence cannot be checked, which turns it on once and a later
-    one again; a reading mark that cannot be read, which turns it on once
-    on the Mac, holds no other meeting and stays when another meeting's run
-    reads through, and counts its meeting's stop once when a later launch
-    reads it, a folder of marks that cannot be listed, and a stranger's
-    file there that does not parse, which turns nothing on; the warm-up
-    held off until a load, a running warm-up's mark kept through a load,
-    and the launch's line for a held mark; the app's build turns the
+    mark that cannot be written, and a warm-up mark that cannot be read or,
+    on the Mac, whose presence cannot be checked, which turns it on once
+    and a later one again; a reading mark that cannot be read, which turns
+    it on once on the Mac, counts no meeting's stop, stays when a meeting's
+    run reads through, and counts its meeting's stop once when a later
+    launch reads it; a folder of marks that cannot be listed, which counts
+    once; and a file there that does not parse, which turns nothing on; the
+    warm-up held off until a load, a running warm-up's mark kept through a
+    load, and the launch's line for a held mark; the app's build turns the
     fallback on from a mark and its end holds the warm-up off; the model
     service's wrapper passes the fallback through; the waiting and fallback
     titles in the host and the Settings action, which keeps the fallback on
