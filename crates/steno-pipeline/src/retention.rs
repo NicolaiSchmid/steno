@@ -123,6 +123,7 @@ fn known_gone(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::path::Path;
 
     use chrono::Duration;
