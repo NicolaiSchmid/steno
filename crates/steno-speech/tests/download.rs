@@ -1,9 +1,6 @@
-//! The model store against a local HTTP server that serves a temporary
-//! directory: resumable `.partial` downloads (a cut connection, a partial
-//! a killed run left, a corrupt prefix, a complete partial, a host that
-//! ignores `Range`, a `206` from the wrong offset or without
-//! `Content-Range`), the mirror layout and the checksum gate. No network
-//! beyond 127.0.0.1.
+//! The model store against a local HTTP server: resumable `.partial` downloads,
+//! hosts that mishandle `Range`, the mirror layout and the checksum gate. No
+//! network beyond 127.0.0.1.
 
 #![allow(clippy::cast_possible_truncation)]
 
@@ -24,8 +21,8 @@ struct Behaviour {
     cut_first_after: Option<usize>,
     /// Answers every request with the whole file, as some hosts do.
     ignore_range: bool,
-    /// Answers a range request with the whole file under `206`, labelled
-    /// as starting at 0 or, with `false`, without a `Content-Range`.
+    /// Answers a range request with the whole file under `206`, labelled as
+    /// starting at 0 or, with `false`, without a `Content-Range`.
     whole_file_as_206: Option<bool>,
 }
 
@@ -38,8 +35,8 @@ struct Seen {
     accept_encoding: Option<String>,
 }
 
-/// Serves the files under `root` at `http://127.0.0.1:<port>/<path>` until
-/// the test ends.
+/// Serves the files under `root` at `http://127.0.0.1:<port>/<path>` until the
+/// test ends.
 struct FileServer {
     base: String,
     seen: Arc<Mutex<Vec<Seen>>>,
@@ -175,8 +172,8 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// A body that is not periodic in any short stride, so a misplaced offset
-/// changes the checksum.
+/// A body not periodic in any short stride, so a misplaced offset changes the
+/// checksum.
 fn body(len: usize) -> Vec<u8> {
     (0..len).map(|i| ((i * 7919) % 251) as u8).collect()
 }
@@ -186,8 +183,8 @@ const NAME: &str = "model.onnx";
 const PARTIAL: &str = "model.onnx.partial";
 const LOCK: &str = "model.onnx.lock";
 
-/// A server over a directory holding a file at `<ID>/<NAME>`, an empty
-/// store and the asset of that one file.
+/// A server over a directory holding `<ID>/<NAME>`, an empty store and the
+/// asset of that file.
 struct Fixture {
     server: FileServer,
     store: ModelStore,
@@ -277,8 +274,8 @@ fn a_cut_connection_resumes_with_a_range_request() {
     let seen = f.server.seen();
     assert_eq!(seen.len(), 2, "{seen:?}");
     assert_eq!(seen[0].range, None);
-    // Whatever the first attempt wrote before the cut is kept: the second
-    // asks for the rest, and its progress starts there.
+    // What the first attempt wrote before the cut is kept: the second asks for
+    // the rest.
     let resumed_at: u64 = seen[1]
         .range
         .as_deref()
@@ -349,14 +346,11 @@ fn a_host_that_ignores_the_range_gets_the_file_written_from_the_start() {
 fn a_partial_longer_than_the_file_or_already_complete_is_handled() {
     let contents = body(10_000);
     let f = fixture(&contents, Behaviour::default());
-    // Longer than the manifest size: cannot be a prefix, so it is emptied
-    // and the whole file is requested.
+    // Longer than the manifest size: emptied, and the whole file is requested.
     f.leave_partial(&vec![1; 20_000]);
     f.install();
     assert_eq!(f.server.seen()[0].range, None);
-    // Complete but never renamed (killed between the sync and the rename,
-    // or a rename Windows refused): verified and installed without a
-    // request.
+    // Complete but never renamed: verified and installed without a request.
     f.store.remove(&f.asset).unwrap();
     f.leave_partial(&contents);
     f.install();
@@ -408,16 +402,14 @@ fn a_mirror_serves_every_file_from_asset_id_and_file_name() {
 
 #[test]
 fn a_download_waits_for_the_one_holding_its_partial_and_resumes_it() {
-    // Another download holds the lock and stops; this one waits for the
-    // lock instead of fetching a copy of its own, then continues the bytes
-    // the other left.
+    // Another download holds the lock and stops; this one waits for the lock,
+    // then continues the bytes the other left.
     let contents = body(20_000);
     let f = fixture(&contents, Behaviour::default());
     f.leave_partial(&contents[..7_000]);
     let mut held = Some(File::create(f.directory().join(LOCK)).unwrap());
     held.as_ref().unwrap().lock().unwrap();
-    // While the lock is held, a report can only come from the wait; the
-    // first one lets go of it.
+    // While the lock is held, a report can only come from the wait.
     let mut reports = Vec::new();
     f.store
         .ensure(&f.asset, &mut |p| {
@@ -434,8 +426,8 @@ fn a_download_waits_for_the_one_holding_its_partial_and_resumes_it() {
 
 #[test]
 fn a_206_from_the_wrong_offset_or_without_a_range_is_not_appended() {
-    // Both answers carry the whole file; appended to the partial they
-    // would overrun the manifest size. The download starts over instead.
+    // Both answers carry the whole file, which would overrun the manifest size
+    // appended; the download starts over.
     for labelled in [true, false] {
         let contents = body(30_000);
         let f = fixture(
@@ -480,10 +472,9 @@ fn tree(directory: &Path) -> Vec<String> {
     files
 }
 
-/// A bundle laid out in folders, as a `CoreML` `.mlmodelc` is: each file
-/// lands in its folder, with its lock and partial beside it there, from
-/// the mirror's `<asset id>/<folder>/<file>`; a cut connection on a file in
-/// a folder resumes there.
+/// A bundle laid out in folders, as a `CoreML` `.mlmodelc` is: each file lands
+/// in its folder with its lock and partial, from the mirror's `<asset
+/// id>/<folder>/<file>`, and resumes there.
 #[test]
 fn files_in_folders_of_the_asset_install_into_those_folders() {
     let hosted = tempfile::tempdir().unwrap();

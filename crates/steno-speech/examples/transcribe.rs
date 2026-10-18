@@ -1,12 +1,8 @@
-//! Transcribes 16 kHz mono PCM-16 WAV files with the ONNX backend and
-//! prints the text, the segments and the decode statistics; with
-//! `--range START-END` (seconds) it decodes that one window without the
-//! chunker, which is how the zero-token window of spike D is probed.
-//! With `--json DIR` it also writes each file's segments, word timings
-//! included, to `DIR/<name>.json`, the `RawSegment` array the Swift
-//! bake-off writes, so word starts can be compared across builds.
-//! `STENO_MODELS_DIR` names Steno's models directory, as for the app and
-//! the CLI: its `onnx/` holds `parakeet-tdt-0.6b-v3-fp32/` and `silero-vad/`.
+//! Transcribes 16 kHz mono PCM-16 WAV files with the ONNX backend and prints
+//! the text, segments and decode statistics. `--range START-END` (seconds)
+//! decodes one window without the chunker; `--json DIR` writes each file's
+//! segments to `DIR/<name>.json`. `STENO_MODELS_DIR` names the models
+//! directory, as for the app.
 //!
 //! ```sh
 //! STENO_MODELS_DIR=/path/to/models cargo run --release -p steno-speech --example transcribe -- file.wav

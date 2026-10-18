@@ -1,11 +1,7 @@
-//! The overlap merge: a time-tolerant longest common subsequence over the
-//! tokens two neighbouring windows share, with a midpoint cut when nothing
-//! matches, and the seam word owned by the left window unless that window
-//! ends inside it. Ported from
-//! `spikes/coreml-rs/src/pipeline.rs`, itself a port of `FluidAudio`'s
-//! `mergeChunks`; the spike D harness ran the same code on sherpa-onnx
-//! pieces (`spikes/onnx-speech/src/merge.rs`).
-//! Swift: `FluidAudio`'s `ChunkProcessor.mergeChunks`.
+//! The overlap merge, after `FluidAudio`'s `mergeChunks`: a time-tolerant
+//! longest common subsequence over the tokens two neighbouring windows share,
+//! with a midpoint cut when nothing matches, and the seam word owned by the
+//! left window unless that window ends inside it.
 
 use crate::backend::FRAME_SECONDS;
 use crate::decoder::Token;
@@ -22,9 +18,8 @@ pub fn merge_all(windows: &[Vec<Token>], overlap_seconds: f64, vocab: &Vocab) ->
     merged
 }
 
-/// Raises each token that starts before its predecessor to the
-/// predecessor's (frame, phase). The frames are the running maximum of the
-/// frames alone; the phase only orders tokens on one frame.
+/// Raises each token that starts before its predecessor to the predecessor's
+/// (frame, phase).
 fn enforce_monotonic(tokens: &mut [Token]) {
     let mut max = (0, 0);
     for token in tokens {
@@ -52,13 +47,13 @@ pub fn merge_windows(
     let right_start = seconds(first_right);
     let tolerance = (overlap_seconds / 2.0).max(0.5);
     // Windows further apart than the match tolerance share no token. Closer
-    // ones go through the LCS even with one token a side: a right window
-    // that starts with the left's last word one frame later is a copy.
+    // ones go through the LCS even with one token a side: a right window that
+    // starts with the left's last word one frame later is a copy.
     if right_start >= left_end + tolerance {
         return [left, right].concat();
     }
-    // The overlap reaches at least the tolerance, so a copy the LCS could
-    // match never falls outside it and through to the midpoint cut.
+    // The overlap reaches at least the tolerance, so a copy the LCS could match
+    // never falls through to the midpoint cut.
     let reach = overlap_seconds.max(tolerance);
     let overlap_left: Vec<usize> = (0..left.len())
         .filter(|&i| seconds(&left[i]) + FRAME_SECONDS > right_start - reach)
@@ -113,8 +108,8 @@ pub fn merge_windows(
     let tail = &right[last_right + 1..];
     let left_rest = &left[last_left + 1..];
     let next = tail.iter().position(|t| vocab.is_splice_safe(t.id));
-    // A left window that ends inside the seam word, as an Energy cut can,
-    // holds only part of it; a right that heard more of the word finishes it.
+    // A left window that ends inside the seam word holds only part of it; a
+    // right that heard more finishes it.
     if !left_rest.iter().any(|t| vocab.is_splice_safe(t.id))
         && next.unwrap_or(tail.len()) > left_rest.len()
     {
@@ -124,14 +119,12 @@ pub fn merge_windows(
     match next {
         Some(0) => out.extend_from_slice(tail),
         Some(next) => {
-            // The left window owns the seam word; the right resumes at its
-            // next splice point.
+            // The left owns the seam word; the right resumes at its next splice
+            // point.
             out.extend(left_rest.iter().take_while(|t| !vocab.is_splice_safe(t.id)));
             out.extend_from_slice(&tail[next..]);
         }
-        // Nothing past the seam word on the right, or only the rest of that
-        // word: its window ended inside the left one's span, so the left
-        // keeps the rest.
+        // Nothing past the seam word on the right: the left keeps the rest.
         None => out.extend_from_slice(left_rest),
     }
     out
@@ -144,8 +137,8 @@ fn merge_by_midpoint(
     right_start: f64,
     vocab: &Vocab,
 ) -> Vec<Token> {
-    // Without a shared token, windows that do not overlap in time join as
-    // they are.
+    // Without a shared token, windows that do not overlap in time join as they
+    // are.
     if right_start >= left_end {
         return [left, right].concat();
     }
@@ -158,17 +151,14 @@ fn merge_by_midpoint(
         .iter()
         .position(|t| seconds(t) >= cutoff)
         .unwrap_or(right.len());
-    // The right resumes at its first splice point (a word start or a
-    // punctuation piece) from the cutoff.
+    // The right resumes at its first splice point from the cutoff.
     let resume = right[right_start_index..]
         .iter()
         .position(|t| vocab.is_splice_safe(t.id));
     match (resume, left_end_index) {
-        // Without one the right adds no word of its own: its window ended
-        // inside the left's span, which keeps everything.
+        // Without one the right adds no word of its own.
         (None, 1..) => return left.to_vec(),
-        // A left with nothing before the cutoff keeps nothing, and the
-        // right everything from the cutoff.
+        // A left with nothing before the cutoff keeps nothing.
         (None, 0) => {}
         (Some(offset), _) => right_start_index += offset,
     }
@@ -323,16 +313,15 @@ mod tests {
 
     #[test]
     fn windows_close_in_time_without_a_shared_token_concatenate() {
-        // Right starts 0.16 s after left ends and opens with the rest of
-        // left's last word: no copy, no time overlap, nothing to cut.
+        // Right starts 0.16 s after left ends with the rest of left's last
+        // word: no copy, nothing to cut.
         let left = vec![token(0, 0), token(1, 9)];
         let right = vec![token(5, 12), token(2, 14)];
         assert_eq!(
             ids(&merge_windows(&left, &right, 1.5, &vocab())),
             ids(&[left, right].concat())
         );
-        // Touching: the right starts on the frame the left ends (frames
-        // 10 and 11, whose seconds are exact in `f64`).
+        // Touching: the right starts on the frame the left ends.
         let left = vec![token(0, 0), token(4, 10)];
         let right = vec![token(5, 11), token(1, 13)];
         assert_eq!(
@@ -343,17 +332,16 @@ mod tests {
 
     #[test]
     fn a_right_window_repeating_the_left_s_last_word_a_frame_later_keeps_one_copy() {
-        // Left ends with c on frame 24, right opens with c on frame 25: the
-        // windows touch, so a plain join would read "c c d".
+        // Left ends with c on frame 24, right opens with c on frame 25: a plain
+        // join would read "c c d".
         let left = vec![token(1, 20), token(2, 24)];
         let right = vec![token(2, 25), token(3, 30)];
         assert_eq!(
             ids(&merge_windows(&left, &right, 1.5, &vocab())),
             vec![(1, 20), (2, 24), (3, 30)]
         );
-        // With a 0.4 s overlap the 0.5 s tolerance reaches further than the
-        // overlap: the copy 0.4 s later is still matched, not cut at the
-        // midpoint and kept twice.
+        // With a 0.4 s overlap the 0.5 s tolerance still matches the copy, so
+        // it is not kept twice.
         let right = vec![token(2, 30), token(3, 40)];
         assert_eq!(
             ids(&merge_windows(&left, &right, 0.4, &vocab())),
@@ -363,8 +351,7 @@ mod tests {
 
     #[test]
     fn a_right_tail_without_a_word_start_leaves_the_left_its_words() {
-        // Pairs end at c; right only adds a continuation (x), left goes on
-        // with w, d and z.
+        // Pairs end at c; right only adds a continuation, left goes on.
         let left = vec![token(2, 24), token(7, 25), token(3, 28), token(6, 29)];
         let right = vec![token(2, 24), token(4, 25)];
         assert_eq!(
@@ -375,16 +362,15 @@ mod tests {
 
     #[test]
     fn a_midpoint_cut_with_no_word_start_on_the_right_keeps_the_left() {
-        // Cutoff at frame 24. Past it the right has only continuations (y
-        // z), which would glue onto the left's "a".
+        // Past cutoff 24 the right has only continuations, which would glue
+        // onto the left's "a".
         let left = vec![token(0, 10), token(1, 24), token(4, 27)];
         let right = vec![token(3, 20), token(5, 28), token(6, 29)];
         assert_eq!(
             ids(&merge_windows(&left, &right, 1.5, &vocab())),
             ids(&left)
         );
-        // Cutoff at frame 28. The right has nothing past it, the left has
-        // "c" there.
+        // Cutoff at frame 28: the right has nothing past it, the left has "c".
         let left = vec![token(0, 10), token(1, 26), token(2, 40)];
         let right = vec![token(3, 15), token(6, 27)];
         assert_eq!(
@@ -402,9 +388,8 @@ mod tests {
 
     #[test]
     fn a_midpoint_cut_without_a_splice_point_keeps_the_right_from_the_cutoff() {
-        // Cutoff at frame 25. Left's first token (x, frame 26) already lies
-        // past it, so left contributes nothing; right after the cutoff has
-        // no word start, so all of it is kept.
+        // Cutoff at frame 25: left contributes nothing; right has no word start
+        // after it, so all of it is kept.
         let left = vec![token(4, 26), token(5, 27), token(0, 29)];
         let right = vec![token(1, 21), token(6, 26), token(7, 27)];
         assert_eq!(
@@ -423,9 +408,8 @@ mod tests {
 
     #[test]
     fn starts_never_run_backwards_inside_a_frame_after_a_merge() {
-        // The left window started 900 samples into its first frame, the
-        // right 100 samples into its: the right's next token on frame 12
-        // would start 800 samples before the left's last one.
+        // The windows start 900 and 100 samples into their frames: the right's
+        // next token would start 800 samples before the left's last.
         let phased = |id, frame, phase| Token {
             phase,
             ..token(id, frame)
@@ -457,9 +441,8 @@ mod tests {
         }
     }
 
-    /// Random runs of overlapping or gapped windows at random starts: the
-    /// merge keeps the same tokens, frames and durations as with every
-    /// phase 0, and the merged tokens' samples and starts never decrease.
+    /// Random overlapping or gapped windows: the merge keeps the same tokens as
+    /// with every phase 0, and samples and starts never decrease.
     #[test]
     fn the_phase_changes_no_merge_decision_and_starts_never_decrease() {
         let vocab = vocab();

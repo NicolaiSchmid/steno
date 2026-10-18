@@ -1,10 +1,8 @@
 //! The `CoreML` Parakeet download from Hugging Face into an empty models
-//! directory gives the tree the Swift app installed on 2026-09-25: the
-//! same 23 files, sizes and SHA-256 (`tests/fixtures/parakeet-v3-coreml.sha256`),
-//! beside the store's `.lock` file per file. About 483 MB from the
-//! network, so it runs only with `STENO_COREML_DOWNLOAD=1`; set
-//! `STENO_COREML_DOWNLOAD_DIR` to keep the download (it must not hold one
-//! already), for the `CoreML` backend's FLEURS check. CI never runs it.
+//! directory gives the 23 files, sizes and SHA-256 of
+//! `tests/fixtures/parakeet-v3-coreml.sha256`, plus a `.lock` per file. About
+//! 483 MB, so it runs only with `STENO_COREML_DOWNLOAD=1`;
+//! `STENO_COREML_DOWNLOAD_DIR` keeps the download.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +10,7 @@ use std::path::{Path, PathBuf};
 use steno_speech::{ModelAsset, ModelStore, model_store::sha256_of};
 
 /// `(path, size, sha256)` of every file under `directory` but the locks,
-/// with `/`, sorted.
+/// sorted.
 fn tree(directory: &Path) -> Vec<(String, u64, String)> {
     let mut files = Vec::new();
     let mut pending = vec![directory.to_path_buf()];

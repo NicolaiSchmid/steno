@@ -1,52 +1,7 @@
-//! Linux only: the child in a systemd scope of its own (P6 of
-//! `.plans/2026-10-07-stable-promotion.md`).
-//!
-//! A desktop launched by a systemd user session runs in a unit of the
-//! user manager, a scope or a service under `app.slice`, and its child
-//! joins that unit's cgroup. `systemd-oomd`, which some distributions turn
-//! on for the cgroups of the user's session
-//! (`ManagedOOMMemoryPressure=kill`), kills a whole cgroup: under memory
-//! pressure from the child working through a long meeting, it would kill
-//! the app with it, and the recording in progress. So right after the
-//! spawn the client asks the user manager to start a transient scope
-//! beside the app's unit, in the same slice, holding only the child, and
-//! waits up to [`MOVE_TIMEOUT`] until the child's cgroup names that
-//! scope. A start the manager
-//! has not carried out by then is called off, and the child stays in the
-//! app's cgroup; a child that joined its scope just before the call-off
-//! stays in it. `systemd-oomd` then weighs the two cgroups apart and takes
-//! the child's first; the client sees a dead child as after any crash,
-//! and the next call starts another, in a scope of its own. Speaker
-//! diarization runs in the child too (`steno_diarize::SidecarDiarizer`),
-//! and a child started only to diarize gets its scope the same way, so
-//! the app's own cgroup is a candidate only under pressure that lasts
-//! after the child is gone.
-//!
-//! The scope is `PartOf` the app's unit, so stopping that unit stops the
-//! child too; the child also ends at the app's exit, as everywhere (the
-//! `steno-speech-sidecar` crate docs). A kernel OOM kill of the child does
-//! not count against the app's unit. An app outside a user unit (a
-//! system service, an ssh login, a container without a user manager, a
-//! distribution without systemd) keeps its child in its own cgroup, as
-//! does any failure here, but one that leaves unknown whether the manager
-//! moved the child, which leaves it where the manager put it. Every
-//! outcome is logged at info, and the app records either way.
-//!
-//! The request goes over the user bus's Unix socket in
-//! `$XDG_RUNTIME_DIR`, where the user manager listens, and carries the
-//! child's pid, the unit names and the scope's fixed settings, nothing
-//! else. The child itself still opens nothing.
-//!
-//! - [`move_to_own_scope`]: the one entry point, called by `client` right
-//!   after the spawn, with this process's [`System`].
-//! - [`move_within`]: the request on a thread of its own, waited for a
-//!   bounded time, one at a time.
-//! - [`start_scope_over_bus`]: the request itself: the scope's start, the
-//!   wait until the child's cgroup names it, and at the deadline the
-//!   start called off.
-//! - [`placement`]: the app's unit and slice from its cgroup.
-//!
-//! Swift: none; the Mac app runs `FluidAudio` in-process only.
+//! Linux only: the child in a systemd scope of its own beside the app's unit,
+//! so `systemd-oomd` under memory pressure kills the child, not the app and the
+//! recording with it. A move not done within [`MOVE_TIMEOUT`] is called off and
+//! the child stays in the app's cgroup.
 
 use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
@@ -59,9 +14,8 @@ use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::zvariant::{OwnedObjectPath, Value};
 
-/// How long the child has to be in its scope. The spawn waits
-/// [`POLL_INTERVAL`] and [`CALL_OFF_TIME`] longer, for the request's last
-/// read and the call-off.
+/// How long the child has to be in its scope. The spawn waits [`POLL_INTERVAL`]
+/// and [`CALL_OFF_TIME`] longer.
 const MOVE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often the child's cgroup is read while the manager's job runs.
@@ -70,8 +24,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// How long the spawn waits for the call-off at the deadline.
 const CALL_OFF_TIME: Duration = Duration::from_millis(100);
 
-/// Set while a request is under way, so a bus that never answers holds
-/// one thread and one socket at most, not one per spawn.
+/// Set while a request is under way, so a bus that never answers holds one
+/// thread and one socket at most.
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// What the move reads from the system; the tests supply their own.
@@ -88,8 +42,8 @@ struct System {
 }
 
 impl System {
-    /// The system with the app's `cgroup` file and `runtime_dir`, read
-    /// from `$XDG_RUNTIME_DIR`: `None` unless that is an absolute path.
+    /// The system with the app's `cgroup` file and `runtime_dir`: `None` unless
+    /// `$XDG_RUNTIME_DIR` is an absolute path.
     fn new(cgroup: String, runtime_dir: Option<OsString>) -> Option<Self> {
         let runtime_dir = runtime_dir
             .map(PathBuf::from)
@@ -114,8 +68,8 @@ impl System {
 #[cfg(test)]
 static TEST_SYSTEM: std::sync::Mutex<Option<System>> = std::sync::Mutex::new(None);
 
-/// The system the spawn reads: [`System::current`], or in the tests
-/// [`TEST_SYSTEM`] while set.
+/// The system the spawn reads: [`System::current`], or [`TEST_SYSTEM`] while
+/// set.
 fn system() -> Option<System> {
     #[cfg(test)]
     if let Some(system) = TEST_SYSTEM
@@ -133,9 +87,9 @@ fn proc_cgroup(pid: u32) -> std::io::Result<String> {
     std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
 }
 
-/// Whether process `pid` has ended and waits to be reaped: its state in
-/// `/proc/<pid>/stat`, after the command's closing parenthesis, is `Z` or
-/// `X`. A file that cannot be read says nothing.
+/// Whether process `pid` has ended and waits to be reaped: its
+/// `/proc/<pid>/stat` state is `Z` or `X`. A file that cannot be read says
+/// nothing.
 fn proc_ended(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
         stat.rsplit_once(')')
@@ -168,8 +122,7 @@ enum ScopeError {
     Thread(std::io::Error),
 }
 
-/// Where the app runs: its unit and the slice that holds it, as named in
-/// its cgroup's path.
+/// Where the app runs: its unit and the slice that holds it.
 #[derive(Debug, PartialEq, Eq)]
 struct Placement {
     unit: String,
@@ -181,10 +134,9 @@ fn unified(cgroup: &str) -> Option<&str> {
     cgroup.lines().find_map(|line| line.strip_prefix("0::"))
 }
 
-/// The app's unit and slice from `/proc/self/cgroup`, when the app runs
-/// in a scope or service of a systemd user manager (a path through
-/// `user@<uid>.service`) directly under a slice; `None` otherwise, and on
-/// cgroup v1, which has no `0::` line.
+/// The app's unit and slice from `/proc/self/cgroup`, when the app runs in a
+/// unit of a systemd user manager directly under a slice; `None` otherwise, and
+/// on cgroup v1.
 fn placement(cgroup: &str) -> Option<Placement> {
     let mut parts = unified(cgroup)?.rsplit('/');
     let unit = parts.next()?;
@@ -200,9 +152,8 @@ fn placement(cgroup: &str) -> Option<Placement> {
     })
 }
 
-/// A unit's type, the part of its name after the last dot. A name that
-/// starts with `_` is one systemd escaped for the cgroup tree, not the
-/// unit's, and has none.
+/// A unit's type, the part of its name after the last dot. A name starting with
+/// `_` is escaped for the cgroup tree and has none.
 fn kind(name: &str) -> Option<&str> {
     let (stem, kind) = name.rsplit_once('.')?;
     (!stem.is_empty() && !name.starts_with('_')).then_some(kind)
@@ -213,8 +164,8 @@ fn holds(cgroup: &str, scope: &str) -> bool {
     unified(cgroup).and_then(|path| path.rsplit('/').next()) == Some(scope)
 }
 
-/// The child's scope, named as the XDG convention for applications'
-/// units has it (`app-<id>-<random>.scope`), the pid as the random part.
+/// The child's scope, named `app-<id>-<pid>.scope` as the XDG convention has
+/// it.
 fn scope_name(pid: u32) -> String {
     format!("app-steno\\x2dspeech\\x2dsidecar-{pid}.scope")
 }
@@ -226,8 +177,7 @@ fn properties(pid: u32, placement: &Placement) -> Vec<(&'static str, Value<'_>)>
         ("PIDs", Value::from(vec![pid])),
         ("Slice", Value::from(placement.slice.as_str())),
         ("PartOf", Value::from(vec![placement.unit.as_str()])),
-        // A scope `systemd-oomd` killed ends failed; it is collected
-        // then, not kept for `systemctl --user --failed`.
+        // A scope `systemd-oomd` killed is collected, not kept as failed.
         ("CollectMode", Value::from("inactive-or-failed")),
     ]
 }
@@ -261,26 +211,17 @@ fn cancel(connection: &Connection, job: &OwnedObjectPath) -> zbus::Result<()> {
     Ok(())
 }
 
-/// Moves the child `pid` into a scope of its own beside the app's unit
-/// at `placement`, over `system`'s user bus; the scope's name once the
-/// child's cgroup names it. Every call waits at most the time left
-/// before `deadline` when the connection started. A bus that has not
-/// taken the connection by `deadline` is not asked: the spawn stopped
-/// waiting then, and a child that died since may be reaped and its pid
-/// reused.
+/// Moves the child `pid` into a scope of its own beside the app's unit; the
+/// scope's name once the child's cgroup names it. A bus that has not taken the
+/// connection by `deadline` is not asked: a child that died since may be reaped
+/// and its pid reused.
 ///
-/// `StartTransientUnit` answers once the manager queued the job, and the
-/// job moves the child later. A child not in its scope by `deadline`, or
-/// one that has ended first, has the start called off: the manager handles
-/// one call at a time, so a job it cancels never ran, and the child stays
-/// in the app's cgroup. A job whose cancel the manager answers with an
-/// error has run: a child in its scope then stays there, and a scope
-/// without it (the child had ended) is stopped. A cancel without an answer,
-/// or a child's cgroup that cannot be read then, proves nothing, so the
-/// scope is left as it is: one that holds the child is `PartOf` the app's
-/// unit. A start the manager answers only after `deadline` cannot
-/// be called off; it may still move the child, which then stays in its
-/// scope.
+/// `StartTransientUnit` answers once the job is queued; the job moves the child
+/// later. A child not in its scope by `deadline`, or one that ended first, has
+/// the start called off: a job the manager cancels never ran. A cancel answered
+/// with an error means the job ran: a child in its scope stays there, a scope
+/// without it is stopped. A cancel without an answer proves nothing, so the
+/// scope is left as it is.
 fn start_scope_over_bus(
     pid: u32,
     placement: &Placement,
@@ -324,8 +265,7 @@ fn start_scope_over_bus(
     Ok(name)
 }
 
-/// Clears the in-flight flag when the request's thread ends, panics
-/// included.
+/// Clears the in-flight flag when the request's thread ends, panics included.
 struct InFlight(&'static AtomicBool);
 
 impl Drop for InFlight {
@@ -334,15 +274,11 @@ impl Drop for InFlight {
     }
 }
 
-/// [`start_scope_over_bus`] on a thread of its own, with `timeout` until
-/// its deadline, when `system` places the app in a user unit; `None` when
-/// it does not and nothing was asked. The spawn waits [`POLL_INTERVAL`]
-/// and [`CALL_OFF_TIME`] past the deadline, for the request's last read
-/// and the call-off. The method timeout does not cover the connection's
-/// set-up, so a bus that accepts and never answers would otherwise hold
-/// the spawn. A thread still waiting then runs on until the bus answers
-/// or closes, and logs its outcome itself; while it does, `in_flight` is
-/// set and later spawns do not ask.
+/// [`start_scope_over_bus`] on its own thread, with `timeout` until its
+/// deadline; `None` when `system` places the app in no user unit. The method
+/// timeout does not cover the connection's set-up, so the spawn bounds the wait
+/// itself. A thread still waiting then runs on and logs its outcome; while it
+/// does, `in_flight` stays set and later spawns do not ask.
 fn move_within(
     pid: u32,
     system: System,
@@ -390,11 +326,9 @@ fn move_within(
         .map(Some)
 }
 
-/// Moves the just-spawned child `pid` into a scope of its own when the
-/// app runs in a systemd user unit (the module docs), waiting at most
-/// [`MOVE_TIMEOUT`] and the call-off. Called before the parent waits on the
-/// child, so `pid` cannot name another process yet. Never fails: the child
-/// stays in the app's cgroup otherwise.
+/// Moves the just-spawned child `pid` into a scope of its own when the app runs
+/// in a systemd user unit. Called before the parent waits on the child, so
+/// `pid` cannot name another process yet. Never fails.
 pub(super) fn move_to_own_scope(pid: u32) {
     let Some(system) = system() else {
         return;
@@ -449,7 +383,7 @@ mod tests {
         |_| Err(std::io::Error::other("unreadable"));
 
     /// The app in a uwsm-style scope, its user bus in `runtime_dir`, its
-    /// child running with the cgroup `child_cgroup` reads.
+    /// child's cgroup as `child_cgroup` reads.
     fn uwsm_system(runtime_dir: &Path, child_cgroup: fn(u32) -> std::io::Result<String>) -> System {
         System {
             cgroup: UWSM.to_owned(),
@@ -486,12 +420,11 @@ mod tests {
             "0::/user.slice/user-1000.slice/user@1000.service/init.scope",
             // Units below a system service that delegates its subtree.
             "0::/system.slice/runner.service/app.slice/job.scope",
-            // A scope below a delegated service, not a slice; a `user@`
-            // that is a slice, not the manager's service.
+            // A scope below a delegated service; a `user@` that is a slice.
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/x.service/y.scope",
             "0::/user.slice/user@1000.slice/app.slice/a.scope",
-            // A sub-cgroup inside a delegated unit, an escaped name, a
-            // name with nothing before its type.
+            // A sub-cgroup inside a delegated unit, an escaped name, an empty
+            // name.
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/vte.scope/tab-1",
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/_cgroup.scope",
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/.scope",
@@ -549,10 +482,8 @@ mod tests {
         assert!(!proc_ended(u32::MAX));
     }
 
-    /// A private bus: `dbus-daemon` on a socket named `bus` in a
-    /// directory of its own, as the user bus is in `$XDG_RUNTIME_DIR`,
-    /// with no service directories, so it starts nothing for a name no
-    /// one owns.
+    /// A private bus: `dbus-daemon` on a socket in a directory of its own, with
+    /// no service directories.
     struct Daemon {
         child: std::process::Child,
         dir: tempfile::TempDir,
@@ -560,7 +491,7 @@ mod tests {
 
     impl Daemon {
         /// None when `dbus-daemon` is not installed, unless
-        /// `STENO_REQUIRE_DBUS_TEST` asks for it (CI on Linux).
+        /// `STENO_REQUIRE_DBUS_TEST` asks for it.
         fn start() -> Option<Self> {
             let dir = tempfile::tempdir().unwrap();
             let config = dir.path().join("bus.conf");
@@ -610,8 +541,7 @@ mod tests {
         }
     }
 
-    /// One `StartTransientUnit` call: the name, the mode, the properties
-    /// and the auxiliary units.
+    /// One `StartTransientUnit` call.
     type Started = (
         String,
         String,
@@ -629,8 +559,8 @@ mod tests {
         Queued,
         /// Still queued, and cancelled after the delay given.
         SlowToCancel(Duration),
-        /// Has run: `Cancel` errs, as for any job that is gone, and first
-        /// sets the flag given, as the job's move would have.
+        /// Has run: `Cancel` errs and first sets the flag given, as the job's
+        /// move would have.
         Ran(Option<&'static AtomicBool>),
     }
 
@@ -657,8 +587,7 @@ mod tests {
     }
 
     impl FakeManager {
-        /// The fake on `daemon`'s bus under the manager's name, its job
-        /// answering as `job` says.
+        /// The fake on `daemon`'s bus, its job answering as `job` says.
         fn serve(daemon: &Daemon, job: Job) -> Asked {
             Self::serve_slow(daemon, job, Duration::ZERO)
         }
@@ -837,8 +766,7 @@ mod tests {
         };
         let asked = FakeManager::serve(&daemon, Job::Queued);
 
-        // The spawn waits for the call-off, so its outcome is the
-        // thread's.
+        // The spawn waits for the call-off, so its outcome is the thread's.
         for child_cgroup in [LEFT_BEHIND, UNREADABLE] {
             let error = move_within(
                 4242,
@@ -1048,8 +976,8 @@ mod tests {
         assert!(IN_FLIGHT.load(Ordering::SeqCst));
     }
 
-    /// A socket at `bus` in a directory of its own that forwards one
-    /// connection to `daemon`'s, holding back the daemon's side by `delay`.
+    /// A socket that forwards one connection to `daemon`'s, holding back the
+    /// daemon's side by `delay`.
     fn slow_bus(daemon: &Path, delay: Duration) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let listener = UnixListener::bind(dir.path().join("bus")).unwrap();
@@ -1098,8 +1026,7 @@ mod tests {
         );
     }
 
-    /// A socket that takes the connection and never answers: the wait
-    /// ends at its timeout, and once the socket closes the thread ends.
+    /// A socket that takes the connection and never answers.
     #[test]
     fn a_bus_that_never_answers_ends_the_wait_at_its_timeout() {
         static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -1128,9 +1055,7 @@ mod tests {
         wait_until_cleared(&IN_FLIGHT);
     }
 
-    /// A bus that takes the connection after the deadline is not asked,
-    /// whether the deadline passed before the connection or during its
-    /// set-up.
+    /// A bus that takes the connection after the deadline is not asked.
     #[test]
     fn a_bus_that_takes_the_connection_too_late_is_not_asked() {
         static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -1160,8 +1085,8 @@ mod tests {
         assert!(asked.started.try_recv().is_err());
     }
 
-    /// The spawn itself asks for the child's scope: `sh` stands in for
-    /// the sidecar, exits at once and never says it is ready.
+    /// The spawn itself asks for the child's scope; `sh` stands in for the
+    /// sidecar.
     #[tokio::test]
     async fn the_spawn_moves_its_child() {
         let Some(daemon) = Daemon::start() else {

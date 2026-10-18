@@ -1,62 +1,8 @@
 //! The ONNX Runtime backend over our fp32 export of Parakeet TDT 0.6B v3
-//! (`spikes/onnx-speech/export/`): `encoder.onnx` with its weights in
-//! `encoder.weights` next to it, `decoder.onnx`, `joiner.onnx` and
-//! `tokens.txt`. Sessions are opened from the file path, so ONNX Runtime
-//! resolves the external weights against the model's directory and no
-//! working-directory dance is needed. The model shape is read from the
-//! graphs: the vocabulary from `tokens.txt`, the duration bins as the
-//! joiner's output width minus the vocabulary (8198 - 8193 = 5), the
-//! prediction network from the decoder's state inputs; the export's
-//! `vocab_size` metadata (8192, without the blank) is checked against the
-//! vocabulary and never used as the blank id, the mistake behind the 64 %
-//! WER spike F measured for the spike E loop.
-//! Swift: none on this path; the Mac runs `FluidAudio`'s `CoreML` models.
-//!
-//! Privacy invariant: ONNX Runtime's telemetry is off in every process
-//! that opens a session, `steno-speech-sidecar` included. Every session
-//! opens after [`init_environment`], which configures the process-wide
-//! environment with telemetry disabled before the first one: here through
-//! `open_session`, in `steno-diarize` through its `session`. A
-//! Microsoft-built ONNX Runtime library would otherwise report model and
-//! usage details to Microsoft. That switch covers ONNX Runtime only: with
-//! `DirectML` on, `DirectML.dll` and Direct3D 12 may log to Windows' own
-//! diagnostic data, as for any program that uses them, under the system's
-//! diagnostic data settings. Steno opens nothing for it, and no audio or
-//! text is involved.
-//!
-//! # `DirectML`
-//!
-//! On Windows the encoder can run on `DirectML`, on any DirectX 12 GPU,
-//! integrated ones included, when [`OnnxOptions::directml`] asks for it
-//! (speech-stack decision 4). It is off by default
-//! ([`SpeechSettings::directml_on_windows`]): gate G4 (at least three
-//! times the CPU's speed on an integrated GPU) is open, because no
-//! Windows machine with a GPU has run this.
-//!
-//! The probe is the session itself. `DirectML` must be in the ONNX Runtime
-//! build, start on a hardware GPU (the default device filter leaves out
-//! software adapters such as WARP), take the session, and run the encoder
-//! once on a second of silence. If any step fails, the encoder opens on the
-//! CPU. A later run that fails on `DirectML` moves the encoder to the CPU
-//! for good and runs it again there, so a GPU that cannot do the work does
-//! not fail the job. An abort inside the driver still ends the process,
-//! which is why the app runs the engine in the sidecar; there, most ends of
-//! a child with `DirectML` in use switch it off for the rest of the app's
-//! run ([`crate::sidecar::directml_switched_off`] says which).
-//! [`OnnxBackend::provider`] reports the provider in force; it is logged at
-//! info level, without paths.
-//!
-//! The probe's second is about 100 feature frames, while the chunker's
-//! windows are around 25 s and up to 60 s. A failure that shows only at
-//! those lengths (out of GPU memory, a shape `DirectML` cannot take)
-//! surfaces at the first real window, where the fallback above catches it.
-//!
-//! Only the encoder moves. The decoder and the joiner run once per token
-//! on one frame, where a round trip to the GPU costs more than the step,
-//! and Silero runs on 32 ms frames. The diarizer stays on the CPU in the
-//! app's process (decision 5).
-//!
-//! [`SpeechSettings::directml_on_windows`]: crate::SpeechSettings::directml_on_windows
+//! (`encoder.onnx` and `encoder.weights`, `decoder.onnx`, `joiner.onnx`,
+//! `tokens.txt`); the model shape is read from the graphs. ONNX Runtime's
+//! telemetry is off in every process that opens a session: every session opens
+//! after [`init_environment`].
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -73,19 +19,20 @@ use crate::error::SpeechError;
 use crate::features::MelExtractor;
 use crate::vocab::Vocab;
 
-/// Session options shared by every model. Each of the four sessions
-/// (encoder, decoder, joiner, Silero) gets its own intra-op pool of this
-/// size, and ONNX Runtime spins its threads briefly after each run; only
-/// one session runs at a time, so the pools do not compete.
+/// Session options shared by every model. Each session gets its own intra-op
+/// pool of this size; only one session runs at a time, so the pools do not
+/// compete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnnxOptions {
-    /// Threads inside one operator; four, as the speech-stack plan measured
-    /// (decision 3).
+    /// Threads inside one operator; four by default.
     pub intra_threads: usize,
     /// Parallel operators; one, the graphs are sequential.
     pub inter_threads: usize,
-    /// Windows only: run the encoder on `DirectML` when the probe passes
-    /// (see [`DirectML`](self#directml)); ignored elsewhere. Off by default.
+    /// Windows only: try the encoder on `DirectML` (any DirectX 12 GPU), probed
+    /// with one run on a second of silence; any failure, then or later, moves
+    /// it to the CPU for good. Ignored elsewhere. Off by default. Only the
+    /// encoder moves: the decoder, joiner and Silero run per frame, where a GPU
+    /// round trip costs more than the step.
     pub directml: bool,
 }
 
@@ -100,14 +47,12 @@ impl Default for OnnxOptions {
 }
 
 steno_core::string_enum! {
-    /// Where ONNX Runtime runs the encoder. The sidecar protocol carries
-    /// it by name, and a peer that does not know a name fails to read the
-    /// whole reply, so a new variant bumps
+    /// Where ONNX Runtime runs the encoder. The sidecar protocol carries it by
+    /// name, so a new variant bumps
     /// [`PROTOCOL_VERSION`](crate::sidecar::protocol::PROTOCOL_VERSION).
     #[derive(Default)]
     pub enum EncoderProvider {
-        /// ONNX Runtime's CPU provider; every platform, and every model
-        /// but the encoder.
+        /// ONNX Runtime's CPU provider.
         #[default]
         Cpu = "cpu",
         /// `DirectML` on a DirectX 12 GPU; Windows only.
@@ -115,14 +60,11 @@ steno_core::string_enum! {
     }
 }
 
-/// Configures ONNX Runtime's process-wide environment once, before the
-/// first session: telemetry off (the privacy invariant in the module
-/// docs). The first configuration committed wins, so every session in a
-/// Steno process opens through here (`open_session`) or through
-/// `steno-diarize`'s `session`, which both call this first. Returns
-/// whether the environment in force is this one; `false` means a session
-/// opened, or another configuration was committed, before the first call,
-/// which is a bug (it is logged once).
+/// Configures ONNX Runtime's process-wide environment once, before the first
+/// session, with telemetry off; the first configuration committed wins. Every
+/// session in a Steno process opens through here or through `steno-diarize`'s
+/// `session`. Returns `false` when another configuration came first, a bug that
+/// is logged once.
 pub fn init_environment() -> bool {
     static COMMITTED: OnceLock<bool> = OnceLock::new();
     *COMMITTED.get_or_init(|| {
@@ -153,8 +95,7 @@ pub(crate) fn open_session(path: &Path, options: &OnnxOptions) -> Result<Session
     Ok(builder(options)?.commit_from_file(path)?)
 }
 
-/// Why the encoder did not open on `DirectML`, in words without paths or
-/// ONNX Runtime's text, for the log.
+/// Why the encoder did not open on `DirectML`, in fixed words for the log.
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fallback {
@@ -162,8 +103,8 @@ enum Fallback {
     NotInBuild,
     /// ONNX Runtime refused the session options `DirectML` needs.
     Options,
-    /// `DirectML` did not start: no DirectX 12 GPU, or a `DirectML.dll`
-    /// too old for ONNX Runtime.
+    /// `DirectML` did not start: no DirectX 12 GPU, or a `DirectML.dll` too
+    /// old.
     NoDevice,
     /// `DirectML` started and refused the model.
     Session,
@@ -185,10 +126,9 @@ impl Fallback {
     }
 }
 
-/// Opens `path` on `DirectML` (Windows only): the provider registered with
-/// `error_on_failure`, so a missing GPU is an error here and not a silent
-/// CPU session, and memory patterns off, which `DirectML` does not support.
-/// The default device filter takes hardware GPUs only.
+/// Opens `path` on `DirectML` (Windows only), with `error_on_failure` so a
+/// missing GPU is an error rather than a silent CPU session, and memory
+/// patterns off, which `DirectML` does not support.
 #[cfg(windows)]
 fn open_directml(path: &Path, options: &OnnxOptions) -> Result<Session, (Fallback, String)> {
     use ort::ep::ExecutionProvider as _;
@@ -208,11 +148,11 @@ fn open_directml(path: &Path, options: &OnnxOptions) -> Result<Session, (Fallbac
         .map_err(|e| refused(Fallback::Session, &e))
 }
 
-/// A session that runs on `DirectML` when [`OnnxOptions::directml`] asks
-/// for it and the probe passes, and on the CPU otherwise; the encoder's.
+/// The encoder's session: on `DirectML` when asked for and the probe passes, on
+/// the CPU otherwise.
 struct AcceleratedSession {
-    /// `None` only between dropping a failed `DirectML` session and the CPU
-    /// session that replaces it, or when that replacement failed to open.
+    /// `None` only between dropping a failed `DirectML` session and its CPU
+    /// replacement, or when that replacement failed to open.
     session: Option<Session>,
     provider: EncoderProvider,
     /// Why the session is not on `DirectML` though it was asked for.
@@ -223,8 +163,8 @@ struct AcceleratedSession {
 }
 
 impl AcceleratedSession {
-    /// Opens `path` on `DirectML` first when asked for on Windows, on the
-    /// CPU after any failure there and everywhere else.
+    /// Opens `path` on `DirectML` first when asked for on Windows, on the CPU
+    /// otherwise.
     fn open(path: &Path, options: &OnnxOptions) -> Result<Self, SpeechError> {
         let opened = |session, provider, fallback| AcceleratedSession {
             session: Some(session),
@@ -245,8 +185,8 @@ impl AcceleratedSession {
         #[cfg(not(windows))]
         let refused: Option<(Fallback, String)> = None;
         let session = open_session(path, options)?;
-        // Logged once the CPU took the model: for a model that opens
-        // nowhere, the CPU's error is the one that matters.
+        // Logged once the CPU took the model: for a model that opens nowhere,
+        // the CPU's error is the one that matters.
         let fallback = refused.map(|(reason, error)| {
             log_fallback(reason, &error);
             reason
@@ -258,9 +198,8 @@ impl AcceleratedSession {
         self.session.as_ref().ok_or(SpeechError::NotPrepared)
     }
 
-    /// Runs `work` on the session. On `DirectML` a failure reopens the model
-    /// on the CPU, for this and every later run, and runs `work` there
-    /// once more; on the CPU it is returned.
+    /// Runs `work` on the session. On `DirectML` a failure reopens the model on
+    /// the CPU for good and runs `work` there once more.
     fn run<T>(
         &mut self,
         mut work: impl FnMut(&mut Session) -> Result<T, SpeechError>,
@@ -269,8 +208,8 @@ impl AcceleratedSession {
         match work(session) {
             Err(error) if self.provider == EncoderProvider::DirectMl => {
                 log_fallback(Fallback::Run, &error.to_string());
-                // The DirectML session goes first, so the two never hold
-                // the weights at the same time.
+                // The `DirectML` session goes first, so the two never hold the
+                // weights at once.
                 self.session = None;
                 self.provider = EncoderProvider::Cpu;
                 self.fallback = Some(Fallback::Run);
@@ -284,8 +223,8 @@ impl AcceleratedSession {
     }
 }
 
-/// The fallback to the CPU, at warn level in fixed words; ONNX Runtime's
-/// text, which can hold the model's path, at debug level only.
+/// The fallback to the CPU, at warn level in fixed words; ONNX Runtime's text,
+/// which can hold a path, at debug only.
 fn log_fallback(fallback: Fallback, error: &str) {
     tracing::warn!(
         reason = fallback.describe(),
@@ -294,8 +233,8 @@ fn log_fallback(fallback: Fallback, error: &str) {
     tracing::debug!(error, "ONNX Runtime's DirectML error");
 }
 
-/// The element type and declared shape of a tensor outlet (`-1` for a
-/// dynamic axis); `None` for sequences and maps.
+/// The element type and declared shape of a tensor outlet (`-1` for a dynamic
+/// axis); `None` for sequences and maps.
 pub(crate) fn outlet_tensor(value: &ValueType) -> Option<(TensorElementType, Vec<i64>)> {
     match value {
         ValueType::Tensor { ty, shape, .. } => Some((*ty, shape.to_vec())),
@@ -491,9 +430,9 @@ impl OnnxBackend {
         };
         let mut mel = MelExtractor::new();
         if encoder.provider == EncoderProvider::DirectMl {
-            // The probe's last step: one run on a second of silence, so a
-            // GPU that takes the session but cannot run it falls back here
-            // rather than in the first meeting.
+            // The probe's last step: one run on a second of silence, so a GPU
+            // that cannot run the model falls back here rather than in a
+            // meeting.
             let silence = mel.features(&vec![0.0; SAMPLE_RATE]);
             encoder.run(|session| encode_on(session, &encoder_inputs, &silence))?;
         }
@@ -516,39 +455,31 @@ impl OnnxBackend {
         ))
     }
 
-    /// Where the encoder runs: [`EncoderProvider::DirectMl`] only when
-    /// [`OnnxOptions::directml`] asked for it on Windows and the probe
-    /// passed; a failed run on `DirectML` moves it to the CPU.
-    ///
-    /// `DirectMl` means the provider is registered for the encoder's
-    /// session. ONNX Runtime still places any node `DirectML` does not
-    /// support on the CPU, and does not tell the caller.
+    /// Where the encoder runs. `DirectMl` means the provider is registered for
+    /// the encoder's session; ONNX Runtime still places unsupported nodes on
+    /// the CPU without telling.
     #[must_use]
     pub fn provider(&self) -> EncoderProvider {
         self.encoder.provider
     }
 
-    /// Why the encoder is not on `DirectML` though
-    /// [`OnnxOptions::directml`] asked for it, in fixed words without
-    /// paths: the probe failed, or a later run did. `None` while it runs
-    /// there, and whenever it was not asked to (off Windows the request is
-    /// ignored).
+    /// Why the encoder is not on `DirectML` though [`OnnxOptions::directml`]
+    /// asked for it, in fixed words; `None` while it runs there or was not
+    /// asked to.
     #[must_use]
     pub fn fallback(&self) -> Option<&'static str> {
         self.encoder.fallback.map(Fallback::describe)
     }
 
-    /// Whether the encoder still has a session: `false` only after a run
-    /// failed on `DirectML` and the CPU could not reopen the model, after
-    /// which every run fails.
+    /// `false` only after a failed `DirectML` run whose CPU reopen failed too;
+    /// every run then fails.
     #[must_use]
     pub fn usable(&self) -> bool {
         self.encoder.session.is_some()
     }
 }
 
-/// One encoder run over a window of at least one frame, its output
-/// frame-major.
+/// One encoder run over a window of at least one frame, its output frame-major.
 fn encode_on(
     session: &mut Session,
     inputs: &Inputs,
@@ -686,9 +617,8 @@ mod tests {
 
     use super::*;
 
-    /// A model small enough to write by hand, `y = x · W + b` with `x` of
-    /// shape `[n, 3]`, as ONNX protobuf bytes (opset 13): enough for
-    /// ONNX Runtime, and `DirectML` where there is one, to open and run.
+    /// A model small enough to write by hand, `y = x · W + b` with `x` of shape
+    /// `[n, 3]`, as ONNX protobuf bytes (opset 13).
     fn affine_model() -> Vec<u8> {
         fn varint(mut value: u64, out: &mut Vec<u8>) {
             while value >= 0x80 {
@@ -794,10 +724,8 @@ mod tests {
         }
     }
 
-    /// The probe on this machine, with its findings printed: CI runs it
-    /// with `--nocapture` on Windows, where the runner has no GPU, so its
-    /// log records what `DirectML` makes of that. Whatever it decides, the
-    /// session's answer is correct; off Windows the request is ignored.
+    /// The probe on this machine, its findings printed for CI's Windows log.
+    /// Whatever it decides, the session's answer is correct.
     #[test]
     fn directml_probe_opens_a_working_session_on_whatever_this_machine_has() {
         let (_dir, path) = affine_model_file();
@@ -853,8 +781,8 @@ mod tests {
         }
     }
 
-    /// A session as `open` leaves it after the probe passed, without a GPU:
-    /// a CPU session labelled `DirectML`, so the fallback can be driven.
+    /// A CPU session labelled `DirectML`, so the fallback can be driven without
+    /// a GPU.
     fn as_if_on_directml(path: &Path) -> AcceleratedSession {
         let mut session = AcceleratedSession::open(path, &directml_options()).unwrap();
         session.provider = EncoderProvider::DirectMl;
@@ -916,8 +844,8 @@ mod tests {
 
     #[test]
     fn telemetry_is_switched_off_before_any_session() {
-        // A missing model still reaches ONNX Runtime, which would set up
-        // its default environment (telemetry on) had nothing come first.
+        // A missing model still reaches ONNX Runtime, which would set up its
+        // default environment (telemetry on) had nothing come first.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.onnx");
         assert!(open_session(&missing, &OnnxOptions::default()).is_err());
@@ -942,11 +870,9 @@ mod tests {
 
     #[test]
     fn the_workspace_configures_onnx_runtime_in_one_place_with_telemetry_off() {
-        // `ort` keeps the committed settings to itself and ONNX Runtime
-        // has no call that reads telemetry back, so the source is checked:
-        // one environment in the whole workspace, this one, with telemetry
-        // off, and sessions only where `init_environment` comes first.
-        // Unit test modules are left out.
+        // `ort` cannot read telemetry back, so the source is checked: one
+        // environment in the workspace, with telemetry off, and sessions only
+        // where `init_environment` comes first. Unit test modules are left out.
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let mut files = Vec::new();
         for entry in std::fs::read_dir(crates).unwrap() {

@@ -1,19 +1,14 @@
-//! The per-segment language tag. No engine can be forced per segment, so
-//! the tag comes from the text: `whatlang` constrained to the candidates,
-//! with a function-word count as the fallback for text it cannot judge.
-//! Segments under `minimum_words` inherit the previous segment's language
-//! (or the next tagged one at the start), because four words are not
-//! enough to tell German from English reliably.
-//! Swift: `Sources/StenoSpeech/Segmentation/LanguageTagger.swift`, whose
-//! `NLLanguageRecognizer` is replaced by `whatlang` here (no Foundation).
+//! The per-segment language tag, from the text: `whatlang` constrained to the
+//! candidates, with a function-word count as the fallback. Segments under
+//! `minimum_words` inherit a neighbour's language, as a few words cannot tell
+//! German from English reliably.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use steno_core::{LanguageTag, RawSegment};
 
-/// Decides the language of one piece of text among `candidates`. `hint` is
-/// the language expected for the meeting; a recogniser may lean on it for
-/// ambiguous text and returns `None` when it has no opinion.
+/// Decides the language of `text` among `candidates`. `hint` is the meeting's
+/// expected language; `None` when the recogniser has no opinion.
 pub trait LanguageRecognizer: Send + Sync {
     fn recognize(
         &self,
@@ -62,9 +57,7 @@ impl LanguageTagger {
     }
 
     /// Tags every segment. `hint` is the meeting language when the pipeline
-    /// knows it (from the other audio channel of the meeting, microphone or
-    /// system audio); it breaks ties and covers segments nothing else can
-    /// tag.
+    /// knows it; it breaks ties and covers segments nothing else can tag.
     #[must_use]
     pub fn tag(
         &self,
@@ -107,8 +100,8 @@ impl LanguageTagger {
         segments
     }
 
-    /// The language with the most seconds of tagged speech; `None` when
-    /// nothing is tagged.
+    /// The language with the most seconds of tagged speech; `None` when nothing
+    /// is tagged.
     #[must_use]
     pub fn dominant_language(&self, segments: &[RawSegment]) -> Option<LanguageTag> {
         dominant(
@@ -118,7 +111,7 @@ impl LanguageTagger {
         )
     }
 
-    /// Adjacent tagged segments with different languages. Untagged segments
+    /// Adjacent tagged segments with different languages; untagged segments
     /// neither flip nor break a run.
     #[must_use]
     pub fn language_flips(&self, segments: &[RawSegment]) -> usize {
@@ -149,8 +142,8 @@ fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
 }
 
-/// `whatlang` restricted to the candidates; unreliable detections and
-/// candidates it does not know fall back to [`StopwordRecognizer`].
+/// `whatlang` restricted to the candidates; unreliable detections and unknown
+/// candidates fall back to [`StopwordRecognizer`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WhatlangRecognizer;
 
@@ -180,8 +173,8 @@ impl LanguageRecognizer for WhatlangRecognizer {
     }
 }
 
-/// ISO 639-1 codes of the languages Parakeet v3 speaks, by `whatlang`'s
-/// ISO 639-3 code. Maltese is not in `whatlang`.
+/// ISO 639-1 codes of Parakeet v3's languages, by `whatlang`'s ISO 639-3 code.
+/// Maltese is not in `whatlang`.
 const CODES: [(&str, &str); 24] = [
     ("bul", "bg"),
     ("hrv", "hr"),
@@ -225,8 +218,8 @@ fn whatlang_lang(tag: &str) -> Option<whatlang::Lang> {
 }
 
 /// Counts German and English function words; a tie goes to the hint. The
-/// deterministic recogniser for tests and the fallback. Only knows `de`
-/// and `en`.
+/// deterministic recogniser for tests and the fallback; knows only `de` and
+/// `en`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StopwordRecognizer;
 

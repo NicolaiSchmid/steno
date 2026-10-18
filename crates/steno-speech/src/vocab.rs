@@ -1,15 +1,13 @@
 //! The `SentencePiece` vocabulary of the export: `tokens.txt` as sherpa-onnx
-//! writes it (`piece id` per line, ids in order, `<blk>` last), the word
-//! boundary marker and the splice-safe set the merge cuts at.
-//! Swift: `FluidAudio`'s `parakeet_vocab.json` plus the word-boundary rules of
-//! `Sources/StenoSpeech/Segmentation/TokenAggregator.swift`.
+//! writes it (`piece id` per line, `<blk>` last), the word boundary marker and
+//! the splice-safe set the merge cuts at.
 
 use std::path::Path;
 
 use crate::error::SpeechError;
 
-/// `SentencePiece`'s word-start marker. The `CoreML` vocabulary replaces it with
-/// a leading space; both are accepted everywhere.
+/// `SentencePiece`'s word-start marker. The `CoreML` vocabulary uses a leading
+/// space instead; both are accepted.
 pub const WORD_BOUNDARY: char = '\u{2581}';
 
 /// The pieces by id. The last id is the blank.
@@ -52,8 +50,8 @@ impl Vocab {
         Self::from_pieces(pieces)
     }
 
-    /// A vocabulary from pieces in id order, the last being the blank; it
-    /// needs at least one piece besides the blank.
+    /// A vocabulary from pieces in id order, the blank last; it needs at least
+    /// one other piece.
     pub fn from_pieces(pieces: Vec<String>) -> Result<Self, SpeechError> {
         if pieces.len() < 2 {
             return Err(SpeechError::Shape(format!(
@@ -97,16 +95,14 @@ impl Vocab {
         self.pieces.get(id as usize).map_or("", String::as_str)
     }
 
-    /// Whether a window may be cut before `id`: a word start or punctuation
-    /// (`FluidAudio`'s `mergeChunks` rule).
+    /// Whether a window may be cut before `id`: a word start or punctuation.
     #[must_use]
     pub fn is_splice_safe(&self, id: u32) -> bool {
         self.splice_safe.get(id as usize).copied().unwrap_or(false)
     }
 }
 
-/// Whether the piece begins a word: it carries the marker or a leading
-/// space.
+/// Whether the piece begins a word: it carries the marker or a leading space.
 #[must_use]
 pub fn starts_word(piece: &str) -> bool {
     piece.starts_with(WORD_BOUNDARY) || piece.starts_with(' ')
@@ -121,8 +117,8 @@ pub fn strip_boundary(piece: &str) -> &str {
         .unwrap_or(piece)
 }
 
-/// Whether the piece is punctuation only (after its boundary), so it glues
-/// to the word before it and a merge may cut at it.
+/// Whether the piece is punctuation only, so it glues to the word before it and
+/// a merge may cut at it.
 #[must_use]
 pub fn is_punctuation_piece(piece: &str) -> bool {
     let core = strip_boundary(piece).trim();

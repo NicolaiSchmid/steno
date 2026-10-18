@@ -1,11 +1,5 @@
-//! The crate's one WAV reader: 16 kHz PCM-16, channel 0 of a
-//! multi-channel file, which is what the FLEURS clips, the calibration
-//! corpus and the Swift writer's per-lane 16 kHz files (`<lane>.wav`) are.
-//! Promoted from the model-gated tests so the `transcribe` example, the
-//! FLEURS gate and the speech sidecar's parity test read audio the same
-//! way.
-//! Swift: `WAVAudioDecoder` in `Sources/StenoCore/Audio/WAVAudioDecoder.swift`,
-//! which also reads 32-bit float.
+//! The crate's one WAV reader: 16 kHz PCM-16, channel 0 of a multi-channel
+//! file, as the FLEURS clips and the per-lane recordings are.
 
 use std::path::Path;
 

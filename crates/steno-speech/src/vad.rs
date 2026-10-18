@@ -1,13 +1,7 @@
-//! Voice activity detection: Silero VAD through ONNX Runtime (the model
-//! file from the sherpa-onnx `asr-models` release, fetched by the model
-//! store) and an energy detector for tests. Both yield per-window speech
-//! probabilities that [`regions_from_probabilities`] turns into regions
-//! with Silero's own hysteresis: speech starts at the first window over the
-//! threshold and ends after `min_silence_seconds` under the negative
-//! threshold; regions shorter than `min_speech_seconds` are dropped and the
-//! rest padded by `pad_seconds`. Ported from `spikes/onnx-speech/src/vad.rs`,
-//! which went through the sherpa-onnx C API.
-//! Swift: none; the Swift app has no VAD in front of Parakeet.
+//! Voice activity detection: Silero VAD through ONNX Runtime and energy
+//! detectors. Both yield per-window speech probabilities that
+//! [`regions_from_probabilities`] turns into regions with Silero's hysteresis,
+//! dropping short regions and padding the rest.
 
 use std::ops::Range;
 use std::path::Path;
@@ -27,20 +21,18 @@ pub trait VoiceActivityDetector: Send {
     fn speech_regions(&mut self, samples: &[f32]) -> Result<Vec<Range<usize>>, SpeechError>;
 }
 
-/// The defaults are the sherpa-onnx configuration the spike D harness ran
-/// (`spikes/onnx-speech/src/vad.rs` and `main.rs`: threshold 0.5, minimum
-/// silence 0.25 s, minimum speech 0.1 s), not Silero's own 100 ms of
-/// silence and 250 ms of speech; the negative threshold and the padding
-/// are Silero's.
+/// Threshold 0.5, minimum silence 0.25 s and minimum speech 0.1 s, as
+/// sherpa-onnx configures Silero; the negative threshold and the padding are
+/// Silero's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VadConfig {
     /// A window at or over this probability is speech.
     pub threshold: f32,
-    /// Speech ends only when the probability falls under this
-    /// (Silero's `threshold - 0.15`).
+    /// Speech ends only when the probability falls under this (Silero's
+    /// `threshold - 0.15`).
     pub negative_threshold: f32,
-    /// How long the probability must stay under the negative threshold
-    /// before the region closes.
+    /// How long the probability must stay under the negative threshold before
+    /// the region closes.
     pub min_silence_seconds: f32,
     /// Regions shorter than this are dropped.
     pub min_speech_seconds: f32,
@@ -120,8 +112,8 @@ pub fn regions_from_probabilities(
 enum StateLayout {
     /// v4: `h` and `c`, `[2, 1, 64]` each.
     Separate { h: String, c: String, len: usize },
-    /// v5: one `state` of `[2, 1, 128]`, and 64 samples of context before
-    /// each window.
+    /// v5: one `state` of `[2, 1, 128]`, and 64 samples of context before each
+    /// window.
     Combined { name: String, len: usize },
 }
 
@@ -130,8 +122,8 @@ pub struct SileroVad {
     session: Session,
     config: VadConfig,
     input: String,
-    /// The `sr` input and whether it is a scalar; the k2-fsa re-export of
-    /// v4 (16 kHz branch only) has none.
+    /// The `sr` input and whether it is a scalar; the k2-fsa re-export of v4
+    /// has none.
     sample_rate: Option<(String, bool)>,
     state: StateLayout,
     context: usize,
@@ -268,8 +260,8 @@ impl SileroVad {
     }
 }
 
-/// Carries a state output into the next step; a length other than the
-/// declared one is a model-shape error, not a panic on the model path.
+/// Carries a state output into the next step; a wrong length is a model-shape
+/// error, not a panic.
 fn copy_state(state: &mut [f32], next: &[f32]) -> Result<(), SpeechError> {
     if next.len() != state.len() {
         return Err(SpeechError::Shape(format!(
@@ -312,9 +304,9 @@ impl Default for EnergyVad {
 }
 
 /// An [`EnergyVad`] whose threshold follows the recording's own level
-/// ([`adaptive_rms_threshold`]), so a quiet lane is not taken for
-/// silence. The `CoreML` engine runs it: Silero runs on ONNX Runtime,
-/// which the Mac app keeps out of its process (plan invariant 4).
+/// ([`adaptive_rms_threshold`]), so a quiet lane is not taken for silence. The
+/// `CoreML` engine runs it, as the Mac keeps ONNX Runtime out of the app's
+/// process.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AdaptiveEnergyVad {
     pub config: VadConfig,
@@ -330,18 +322,17 @@ impl VoiceActivityDetector for AdaptiveEnergyVad {
     }
 }
 
-/// [`adaptive_rms_threshold`]'s bounds and scale: about -66 and -42 dBFS,
-/// and 0.3 of the 75th percentile.
+/// [`adaptive_rms_threshold`]'s bounds and scale: about -66 and -42 dBFS, and
+/// 0.3 of the 75th percentile.
 const ADAPTIVE_RMS_FLOOR: f32 = 0.0005;
 const ADAPTIVE_RMS_CEILING: f32 = 0.008;
 const ADAPTIVE_RMS_SCALE: f32 = 0.3;
 const ADAPTIVE_RMS_PERCENTILE: f64 = 0.75;
 
-/// A speech threshold scaled to the recording's level: 0.3 of the 75th
-/// percentile of the per-frame (80 ms) RMS over the frames that are not
-/// digital silence, clamped to about -66 to -42 dBFS; the ceiling for a
-/// recording that is all silence.
-/// Swift: `FluidAudio`'s `ChunkProcessor.adaptiveSpeechRmsThreshold`.
+/// A speech threshold scaled to the recording's level, after `FluidAudio`'s:
+/// 0.3 of the 75th percentile of the per-frame (80 ms) RMS over frames that are
+/// not digital silence, clamped to about -66 to -42 dBFS; the ceiling for an
+/// all-silent recording.
 #[must_use]
 pub fn adaptive_rms_threshold(samples: &[f32]) -> f32 {
     let mut frame_rms: Vec<f32> = samples
@@ -457,8 +448,8 @@ mod tests {
 
     #[test]
     fn the_adaptive_threshold_follows_the_level_within_its_bounds() {
-        // Speech at 0.004 RMS (about -48 dBFS, under the fixed 0.01) over
-        // digital silence, which the percentile skips.
+        // Speech at about -48 dBFS, under the fixed 0.01, over digital silence
+        // the percentile skips.
         let mut quiet = vec![0.0f32; 16_000];
         for (i, x) in quiet[4_000..12_000].iter_mut().enumerate() {
             *x = if i % 2 == 0 { 0.004 } else { -0.004 };

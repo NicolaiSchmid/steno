@@ -1,104 +1,8 @@
-//! Where the models live and how they get there. The manifest names every
-//! file of an asset with its size and SHA-256; the store checks a directory
-//! against it, downloads what is missing into `<name>.partial` while
-//! hashing, and renames only a verified, synced file into place. Models
-//! are never committed (`.gitignore` covers `*.onnx`).
-//! Swift: `Sources/StenoSpeech/Models/ModelAsset.swift`,
-//! `ModelStore.swift` and `ModelDownloading.swift`, whose downloads go
-//! through `FluidAudio` and `WhisperKit` instead.
-//!
-//! A store's root holds one folder per asset id, `<root>/<asset id>/`;
-//! where Steno keeps it: the crate docs' Models section. The ONNX models
-//! have a store at the models directory's `onnx/`
-//! ([`ModelStore::in_models_directory`]), the Mac's `CoreML` Parakeet one
-//! at its `fluidaudio/` ([`ModelStore::coreml_in_models_directory`]).
-//!
-//! # Hosts
-//!
-//! A file's [`ModelSource`] is a plain URL or a file in a Hugging Face
-//! model repository at a pinned commit,
-//! `https://huggingface.co/<repo>/resolve/<revision>/<path>`. GitHub
-//! release assets cap at 2 GB per file, so the small file stays there
-//! (Silero VAD, from the sherpa-onnx `asr-models` release) and the fp32
-//! Parakeet export (2.6 GB, of which `encoder.weights` is 2.4 GB) goes to
-//! Hugging Face, uploaded by `scripts/upload-models.sh` into
-//! [`STENO_MODELS_REPO`] and fetched at the commit
-//! [`PARAKEET_V3_FP32_REVISION`]. The checksums are those of the export
-//! `spikes/onnx-speech/export/` produces with torch 2.14.1 and `NeMo`
-//! 3.0.0, and the hosted copy matches them; uploading a different export
-//! means changing them in the manifest too. `steno-diarize` describes its
-//! two models as an asset of this store, id `diarization`
-//! (`crates/steno-diarize/src/models.rs`), one file from a Hugging Face
-//! repository and one from a sherpa-onnx GitHub release, and installs
-//! them through it. Every file Steno ships has a source (a test checks
-//! it). Without a mirror, a file the manifest gives no source has to be
-//! put in place by hand: [`ModelStore::ensure`] reports
-//! [`SpeechError::NotHosted`] when it is missing.
-//!
-//! The Mac's `CoreML` Parakeet ([`ModelAsset::parakeet_v3_coreml`]) comes
-//! from the repository `FluidAudio` reads, [`PARAKEET_V3_COREML_REPO`], at
-//! the commit [`PARAKEET_V3_COREML_REVISION`]: 23 files, most of them in
-//! the four `.mlmodelc` bundles, about 483 MB. Their checksums are those
-//! of the tree the Swift app installed from it.
-//!
-//! A mirror ([`ModelStore::with_mirror`], the speech setting
-//! `modelsMirror`) replaces the hosts of every asset the store installs,
-//! the speech models (Parakeet, Silero VAD) and the diarizer's, with no
-//! fallback to the hosts. With one, a file is fetched from
-//! `<mirror>/<asset id>/<file name>`, the layout of a store root, so a
-//! whole store root (`parakeet-tdt-0.6b-v3-fp32/`, `silero-vad/`,
-//! `diarization/`) served over HTTP is a mirror. The Hugging Face
-//! repository [`STENO_MODELS_REPO`] holds only the Parakeet export, so a
-//! copy of it alone is not. The `CoreML` store takes the same mirror, so
-//! `<mirror>/parakeet-tdt-0.6b-v3/` serves the `CoreML` Parakeet. A mirror
-//! should answer `Range` requests (see Downloads).
-//!
-//! # On disk
-//!
-//! An asset's folder holds, for each file `<name>` of the manifest (a name
-//! may hold `/`, for a file in a folder of the asset, whose companions
-//! below then sit in that folder too):
-//!
-//! - `<name>`: the installed file, renamed into place only once verified
-//!   and synced. Only these count.
-//! - `<name>.lock`: empty. A download of `<name>` locks it while it runs,
-//!   and no download deletes it.
-//! - `<name>.partial`: an unfinished download's bytes, which the next
-//!   download resumes; deleted once `<name>` is installed.
-//! - `<name>.partial.<pid>.<call>`: only where the file system has no
-//!   locks. It belongs to one call and is deleted when that call ends, or
-//!   by a later call once it has been untouched for 10 minutes.
-//!
-//! With no download running, everything but the installed files can be
-//! deleted (a `.partial` only costs its bytes again). While one runs,
-//! deleting its `.lock` lets a second download write the same `.partial`.
-//! [`ModelStore::remove`] deletes the folder; do not call it during a
-//! download.
-//!
-//! # Downloads
-//!
-//! A download holds the lock on `<name>.lock` while it opens, writes and
-//! renames `<name>.partial`. A file over 64 MiB comes in `Range` requests
-//! of 64 MiB, each with a body timeout of at most 128 s, so a connection
-//! that goes silent costs minutes, not hours; a request cut short after it
-//! moved the file on is followed at once by one for the rest. A dropped
-//! connection resumes with a `Range` request on the next attempt, and a
-//! partial left by a killed process is picked up by the next run after its
-//! prefix is hashed again. A host that ignores the range is asked for the
-//! whole file, which is written from the start under a timeout for the
-//! whole size (10 h for 2.4 GB), so a mirror should answer `Range`
-//! requests. A resumed file whose checksum fails is downloaded once more
-//! from zero. A second download of the same file, in this process or
-//! another, waits for the lock and reports the first one's progress
-//! meanwhile: it then finds the file installed and returns, or resumes
-//! what the first left. It gives up once the first has written nothing for
-//! 10 minutes (a stopped process), or for longer where the first may still
-//! be waiting on its connection: each attempt may take the connect and
-//! response timeouts of both hops of the host's redirect and the body
-//! timeout of its longest request (about 42 minutes in all for the 47 MB
-//! decoder, which is one request, and about 12 minutes for a file of
-//! several chunks). Once a file is installed, by whatever path, the next
-//! call deletes its `<name>.partial`.
+//! Where the models live and how they get there. The manifest names every file
+//! of an asset with its size and SHA-256; the store checks a directory against
+//! it, downloads what is missing into `<name>.partial` under a lock on
+//! `<name>.lock`, resuming with `Range` requests, and renames only a verified,
+//! synced file into place. A store root holds one folder per asset id.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, TryLockError};
@@ -118,23 +22,20 @@ use crate::error::SpeechError;
 pub enum ModelSource {
     /// A plain HTTPS URL, such as a GitHub release asset (2 GB at most).
     Url(String),
-    /// A file in a Hugging Face model repository at one commit, so the
-    /// bytes behind the URL never change under the manifest's checksum.
+    /// A file in a Hugging Face repository at one commit, so its bytes never
+    /// change.
     HuggingFace {
         /// `<owner>/<name>`.
         repo: String,
         /// A full commit hash, not a branch.
         revision: String,
-        /// The file's path inside the repository.
         path: String,
     },
 }
 
 impl ModelSource {
-    /// Hugging Face's download host.
     pub const HUGGING_FACE: &'static str = "https://huggingface.co";
 
-    /// The URL a download fetches.
     #[must_use]
     pub fn url(&self) -> String {
         match self {
@@ -159,28 +60,23 @@ pub struct ModelFile {
     pub size: u64,
 }
 
-/// The Hugging Face repository that holds the fp32 export,
-/// <https://huggingface.co/nicolaischmid/steno-models>;
-/// `scripts/upload-models.sh` uploads to it.
+/// The Hugging Face repository `scripts/upload-models.sh` fills with the
+/// export.
 pub const STENO_MODELS_REPO: &str = "nicolaischmid/steno-models";
 
-/// The commit of [`STENO_MODELS_REPO`] that holds the export, as
-/// `scripts/upload-models.sh` printed it.
+/// The commit of [`STENO_MODELS_REPO`] that holds the export.
 pub const PARAKEET_V3_FP32_REVISION: Option<&str> =
     Some("4a133253481bfd2cb38dc3e77c3f748199562488");
 
-/// The Hugging Face repository `FluidAudio` downloads Parakeet v3 for
-/// `CoreML` from, <https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml>,
-/// where the Swift app's copy came from.
+/// The Hugging Face repository `FluidAudio` downloads Parakeet v3 for `CoreML`
+/// from.
 pub const PARAKEET_V3_COREML_REPO: &str = "FluidInference/parakeet-tdt-0.6b-v3-coreml";
 
-/// The commit of [`PARAKEET_V3_COREML_REPO`] the `CoreML` Parakeet is
-/// fetched at (2026-08-19). Its 23 files are those the Swift app installed
-/// on 2026-09-25, byte for byte (`crates/steno-speech/tests/fixtures/parakeet-v3-coreml.sha256`).
+/// The commit of [`PARAKEET_V3_COREML_REPO`] the `CoreML` Parakeet is fetched
+/// at; its 23 files match `tests/fixtures/parakeet-v3-coreml.sha256`.
 pub const PARAKEET_V3_COREML_REVISION: &str = "7dd20fe6b1797d35f5e3307e8b1732d9a178edfe";
 
-/// One downloadable model bundle; the settings pane shows the display
-/// name, the total size and the licence.
+/// One downloadable model bundle, as the settings pane lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelAsset {
     /// The directory name under the root.
@@ -211,8 +107,8 @@ impl ModelAsset {
     }
 
     /// Our fp32 ONNX export of Parakeet TDT 0.6B v3 with the 10000-frame
-    /// position table (decision 3 of the speech-stack plan), from
-    /// [`STENO_MODELS_REPO`] at [`PARAKEET_V3_FP32_REVISION`].
+    /// position table, from [`STENO_MODELS_REPO`] at
+    /// [`PARAKEET_V3_FP32_REVISION`].
     #[must_use]
     pub fn parakeet_v3_fp32() -> Self {
         match PARAKEET_V3_FP32_REVISION {
@@ -257,17 +153,11 @@ impl ModelAsset {
         }
     }
 
-    /// Parakeet TDT 0.6B v3 for `CoreML` as `FluidAudio` ships it, the
-    /// files the Mac's `CoreML` backend (`steno-speech-coreml`) and the
-    /// Swift app load: the four `.mlmodelc` bundles, the vocabulary under
-    /// both its names, and `config.json`, from [`PARAKEET_V3_COREML_REPO`]
-    /// at [`PARAKEET_V3_COREML_REVISION`]. Its id is the folder `FluidAudio`
-    /// gives it, so a store rooted at the models directory's `fluidaudio/`
-    /// ([`ModelStore::coreml_in_models_directory`]) installs it where the
-    /// Swift app does. The other bundles of the repository (the int4 and v2
-    /// encoders, the older joints, the `.mlpackage` sources) are not
-    /// fetched. Swift: `ModelAsset.modelFolder` and `requiredFiles` in
-    /// `Sources/StenoSpeech/Models/ModelAsset.swift`.
+    /// Parakeet TDT 0.6B v3 for `CoreML` as `FluidAudio` ships it: the four
+    /// `.mlmodelc` bundles, the vocabulary under both its names, and
+    /// `config.json`. Its id is the folder `FluidAudio` gives it, so the store
+    /// in the models directory's `fluidaudio/` installs it where the Swift app
+    /// reads it.
     #[must_use]
     pub fn parakeet_v3_coreml() -> Self {
         let file = |name: &str, sha256: &str, size: u64| ModelFile {
@@ -313,9 +203,7 @@ impl ModelAsset {
         }
     }
 
-    /// Every ONNX asset the crate knows: what the speech sidecar loads.
-    /// The `CoreML` Parakeet ([`Self::parakeet_v3_coreml`]) lives in its
-    /// own store and is not among them.
+    /// Every ONNX asset: what the speech sidecar loads (not the `CoreML` one).
     #[must_use]
     pub fn onnx() -> Vec<Self> {
         vec![Self::silero_vad(), Self::parakeet_v3_fp32()]
@@ -327,11 +215,9 @@ impl ModelAsset {
         self.files.iter().map(|f| f.size).sum()
     }
 
-    /// Refuses an id that is not exactly one normal path component (`..`,
-    /// an absolute path, an empty string, a slash), and a file name that
-    /// is not one or more of them joined by `/` (a file inside a folder of
-    /// the asset, as in a `CoreML` bundle), so the manifest can never name
-    /// a path outside the root.
+    /// Refuses an id that is not one normal path component and a file name that
+    /// is not normal components joined by `/`, so the manifest can never name a
+    /// path outside the root.
     pub fn validate(&self) -> Result<(), SpeechError> {
         let invalid = |name: &str| SpeechError::InvalidName {
             asset: self.id.clone(),
@@ -349,7 +235,6 @@ impl ModelAsset {
     }
 }
 
-/// True when `name` is one `Component::Normal` and nothing else.
 fn is_plain_name(name: &str) -> bool {
     let mut components = Path::new(name).components();
     matches!(
@@ -366,9 +251,7 @@ pub struct DownloadProgress<'a> {
     pub total: u64,
 }
 
-/// How long a download waits for its connection, the TLS handshake
-/// included; without a limit a stalled host would hang `prepare`, and every
-/// `transcribe` waiting behind it.
+/// How long a download waits for its connection, TLS included.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a download then waits for the response headers.
@@ -380,34 +263,20 @@ const MIN_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 /// The slowest average rate, in bytes per second, a body may arrive at.
 const MIN_BODY_RATE: u64 = 64 * 1024;
 
-/// The longest body timeout of a `Range` request. A chunk that takes
-/// longer is cut there and, since it moved the file on, the rest is asked
-/// for at once, so a slow link still finishes and a silent one is given up
-/// after a few minutes.
+/// The longest body timeout of a `Range` request; the rest follows at once.
 const MAX_CHUNK_TIMEOUT: Duration = Duration::from_secs(128);
 
-/// The most bytes one request asks for. A file of one chunk is fetched
-/// with a plain request; a larger one with `Range` requests, one chunk
-/// after another. Each request costs a round trip through the host's
-/// redirect (about 0.4 s to Hugging Face), so chunks are large: the 2.6 GB
-/// export takes about 40 requests.
+/// The most bytes one request asks for; large, as each costs a redirect.
 const CHUNK: u64 = 64 << 20;
 
-/// The read buffer of a download and of a hash.
 const READ_BUFFER: usize = 1 << 16;
 
-/// Whether a model's user may download it when a file is missing: the
-/// speech sidecar's ([`SidecarConfig::install`](crate::SidecarConfig::install))
-/// and `steno-diarize`'s, which re-exports it.
+/// Whether a model's user may download a missing file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Install {
-    /// A missing file is downloaded first ([`ModelStore::ensure`]): the
-    /// `steno` command's explicit commands, `steno process` among them.
+    /// A missing file is downloaded first ([`ModelStore::ensure`]).
     Allowed,
-    /// A missing file is [`SpeechError::NotInstalled`] and no request is
-    /// made ([`ModelStore::installed_directory`]): the app's pipelines,
-    /// which check for missing models before a job and never download
-    /// during one; Settings and onboarding install the models.
+    /// A missing file is [`SpeechError::NotInstalled`]; nothing is fetched.
     Never,
 }
 
@@ -422,22 +291,19 @@ pub struct ModelStore {
     chunk: u64,
     /// [`MIN_BODY_TIMEOUT`], changed only by the tests of a stalled body.
     min_body_timeout: Duration,
-    /// [`MAX_CHUNK_TIMEOUT`], likewise.
     max_chunk_timeout: Duration,
     /// What a download waiting for another one's lock goes by.
     clock: Clock,
 }
 
 impl ModelStore {
-    /// Names the models directory in place of the default one, for the app
-    /// (without one in its settings), the CLI, the example and the tests.
+    /// Names the models directory in place of the default one.
     pub const ENVIRONMENT_VARIABLE: &'static str = "STENO_MODELS_DIR";
 
     /// Names the mirror [`ModelStore::from_environment`] sets.
     pub const MIRROR_ENVIRONMENT_VARIABLE: &'static str = "STENO_MODELS_MIRROR";
 
-    /// The folder of the models directory the ONNX models live in, beside
-    /// the `CoreML` ones the Swift app keeps in `fluidaudio/`.
+    /// The folder of the models directory the ONNX models live in.
     pub const ONNX_FOLDER: &'static str = "onnx";
 
     #[must_use]
@@ -457,10 +323,9 @@ impl ModelStore {
         }
     }
 
-    /// Fetches every file from `<mirror>/<asset id>/<file name>` instead of
-    /// its source, unhosted files included; `None` or an empty string
-    /// restores the sources. Checksums and sizes still come from the
-    /// manifest, so a mirror cannot change what is installed.
+    /// Fetches every file from `<mirror>/<asset id>/<file name>` instead of its
+    /// source, unhosted files included; `None` or an empty string restores the
+    /// sources. Checksums and sizes still come from the manifest.
     #[must_use]
     pub fn with_mirror(mut self, mirror: Option<String>) -> Self {
         self.mirror = mirror
@@ -485,33 +350,24 @@ impl ModelStore {
         }
     }
 
-    /// The folder of the models directory the `CoreML` models live in, as
-    /// the Swift app's `FluidAudio` lays them out.
-    /// Swift: `ModelAsset.frameworkRoot`
-    /// (`Sources/StenoSpeech/Models/ModelAsset.swift`).
+    /// The folder of the models directory the `CoreML` models live in.
     pub const FLUIDAUDIO_FOLDER: &'static str = "fluidaudio";
 
-    /// The store in the models directory `models_directory`:
-    /// `<models directory>/onnx`.
+    /// The store in `<models directory>/onnx`.
     #[must_use]
     pub fn in_models_directory(models_directory: &Path) -> Self {
         Self::new(models_directory.join(Self::ONNX_FOLDER))
     }
 
-    /// The store of the `CoreML` models in the models directory
-    /// `models_directory`: `<models directory>/fluidaudio`, where
-    /// [`ModelAsset::parakeet_v3_coreml`] installs into
-    /// `fluidaudio/parakeet-tdt-0.6b-v3`, the Swift app's folder.
+    /// The store of the `CoreML` models, `<models directory>/fluidaudio`.
     #[must_use]
     pub fn coreml_in_models_directory(models_directory: &Path) -> Self {
         Self::new(models_directory.join(Self::FLUIDAUDIO_FOLDER))
     }
 
     /// For the `transcribe` example and the FLEURS test, which have no
-    /// settings: the store in the models directory `STENO_MODELS_DIR`
-    /// names, else in the default one, as the app and the CLI resolve it
-    /// without a models directory in the settings, with the mirror
-    /// `STENO_MODELS_MIRROR` names.
+    /// settings: the store in `STENO_MODELS_DIR` or the default models
+    /// directory, with the mirror `STENO_MODELS_MIRROR` names.
     #[must_use]
     pub fn from_environment() -> Self {
         Self::in_models_directory(
@@ -524,15 +380,13 @@ impl ModelStore {
         )
     }
 
-    /// The models directory `STENO_MODELS_DIR` names, made absolute
-    /// against the current directory when it is relative; `None` when unset
-    /// or empty.
+    /// The models directory `STENO_MODELS_DIR` names, made absolute; `None`
+    /// when unset or empty.
     #[must_use]
     pub fn environment_models_directory() -> Option<PathBuf> {
         Self::models_directory_named(std::env::var_os(Self::ENVIRONMENT_VARIABLE))
     }
 
-    /// [`Self::environment_models_directory`] for the variable's `value`.
     #[must_use]
     pub fn models_directory_named(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
         let path = PathBuf::from(value.filter(|v| !v.is_empty())?);
@@ -554,15 +408,13 @@ impl ModelStore {
         &self.root
     }
 
-    /// `<root>/<asset id>`.
     #[must_use]
     pub fn directory(&self, asset: &ModelAsset) -> PathBuf {
         self.root.join(&asset.id)
     }
 
-    /// Files absent or of the wrong size, by name; a file whose name
-    /// fails [`ModelAsset::validate`] is never looked up and counts as
-    /// missing.
+    /// Files absent or of the wrong size, by name; a file whose name fails
+    /// [`ModelAsset::validate`] counts as missing.
     #[must_use]
     pub fn missing_files(&self, asset: &ModelAsset) -> Vec<String> {
         let directory = self.directory(asset);
@@ -583,9 +435,8 @@ impl ModelStore {
     }
 
     /// The asset's directory when [`ModelStore::is_installed`], else
-    /// [`SpeechError::NotInstalled`] naming the missing files. It hashes
-    /// nothing and fetches nothing, so a loader that must not download
-    /// and a gate that asks whether a job can run give the same answer.
+    /// [`SpeechError::NotInstalled`] naming the missing files. Hashes and
+    /// fetches nothing.
     pub fn installed_directory(&self, asset: &ModelAsset) -> Result<PathBuf, SpeechError> {
         asset.validate()?;
         let directory = self.directory(asset);
@@ -611,18 +462,12 @@ impl ModelStore {
         Ok(())
     }
 
-    /// Installs the asset if needed and returns its directory. Missing
-    /// files with a URL ([`ModelStore::url_for`]) are downloaded and
-    /// verified, tried again when the host answers 5xx, the connection
-    /// drops or the body stalls, each attempt resuming where the last one
-    /// stopped, until [`DOWNLOAD_ATTEMPTS`] attempts in a row fetched
-    /// nothing. `progress` also reports a download of the same file that
-    /// this one waits for, which fails the call once that one has written
-    /// nothing for 10 minutes or more (see the module's Downloads section).
-    /// A missing file without a URL is [`SpeechError::NotHosted`]. Another
-    /// process's per-call partials that have gone stale are removed first;
-    /// `<name>.partial` stays and is resumed, unless its file is installed
-    /// already, when it is deleted.
+    /// Installs the asset if needed and returns its directory. Missing files
+    /// with a URL ([`ModelStore::url_for`]) are downloaded and verified,
+    /// retried after transient failures until [`DOWNLOAD_ATTEMPTS`] attempts in
+    /// a row fetch nothing. `progress` also reports a download of the same file
+    /// this one waits for. A missing file without a URL is
+    /// [`SpeechError::NotHosted`].
     ///
     /// ```no_run
     /// use steno_speech::{ModelAsset, ModelStore};
@@ -668,9 +513,9 @@ impl ModelStore {
         Ok(directory)
     }
 
-    /// Deletes the asset's directory, lock files included. Not while a
-    /// download of the asset runs: deleting the lock it holds lets a second
-    /// download write its partial too (see the module's On disk section).
+    /// Deletes the asset's directory, lock files included. Not while a download
+    /// of the asset runs: deleting its lock lets a second download write the
+    /// same partial.
     pub fn remove(&self, asset: &ModelAsset) -> Result<(), SpeechError> {
         asset.validate()?;
         let directory = self.directory(asset);
@@ -680,12 +525,9 @@ impl ModelStore {
         Ok(())
     }
 
-    /// [`ModelStore::download`], tried again after a transient failure.
-    /// Every attempt continues the one partial file. One that moved it on
-    /// is followed at once and starts the count of failures again, so a
-    /// long download over a poor or slow connection may break many times
-    /// and still finish. A resumed file whose checksum fails is truncated
-    /// and fetched once more from zero.
+    /// [`ModelStore::download`], tried again after a transient failure. An
+    /// attempt that moved the partial on resets the failure count; a resumed
+    /// file whose checksum fails is fetched once more from zero.
     fn download_with_retries(
         &self,
         url: &str,
@@ -735,8 +577,7 @@ impl ModelStore {
     }
 
     /// Streams the rest of `url` into `partial`, verifies and syncs it and
-    /// renames it into place while its lock is still held, so no other
-    /// download can pick the file up between the rename and the unlock.
+    /// renames it into place while its lock is still held.
     fn download(
         &self,
         url: &str,
@@ -767,22 +608,19 @@ impl ModelStore {
         Ok(())
     }
 
-    /// How long a response may take to deliver `size` bytes of body once
-    /// the headers are in: `max(MIN_BODY_TIMEOUT, size / MIN_BODY_RATE)`.
-    /// It bounds a stalled body without cutting one that keeps moving at
-    /// 64 KiB/s or more. `ureq` has no timeout between two reads, so this
-    /// is what ends a silent connection: 10 h for a whole 2.4 GB file,
-    /// which only a host that ignores `Range` is given.
+    /// How long a response may take to deliver `size` bytes of body:
+    /// `max(MIN_BODY_TIMEOUT, size / MIN_BODY_RATE)`. `ureq` has no timeout
+    /// between two reads, so this ends a silent connection without cutting one
+    /// that moves at 64 KiB/s or more.
     fn body_timeout(&self, size: u64) -> Duration {
         self.min_body_timeout
             .max(Duration::from_secs(size / MIN_BODY_RATE))
     }
 
-    /// The body timeout of a `Range` request for the bytes `offset..end`
-    /// of a file of `size` bytes: [`Self::body_timeout`] of their length,
-    /// at most [`MAX_CHUNK_TIMEOUT`]. A file of one chunk keeps the timeout
-    /// of its whole size, as its range request may be answered with the
-    /// whole file.
+    /// The body timeout of a `Range` request for `offset..end`:
+    /// [`Self::body_timeout`] of its length, at most [`MAX_CHUNK_TIMEOUT`]. A
+    /// file of one chunk keeps its whole size's timeout, as its range may be
+    /// answered with the whole file.
     fn range_timeout(&self, size: u64, offset: u64, end: u64) -> Duration {
         if size <= self.chunk {
             return self.body_timeout(size);
@@ -790,18 +628,11 @@ impl ModelStore {
         self.body_timeout(end - offset).min(self.max_chunk_timeout)
     }
 
-    /// How long a download waiting for the lock on a file of `size` bytes
-    /// lets the holder's partial stand still before it gives up on the
-    /// holder: [`STALE_PARTIAL`], or longer where a live holder can write
-    /// nothing for longer. Each of its [`DOWNLOAD_ATTEMPTS`] attempts may
-    /// spend the connect and response timeouts twice, as the host answers
-    /// through one redirect (as Hugging Face's does) and `ureq` times each
-    /// hop afresh, and the body timeout of its longest request without a
-    /// byte, with the retry waits between them: about 42 minutes for the
-    /// 47 MB decoder, which is one request, and about 12 minutes for a file
-    /// of several chunks. A holder whose host ignored `Range` for a larger
-    /// file waits out the whole file's body timeout and can stay silent
-    /// longer; a mirror should answer `Range`.
+    /// How long a download waiting for the lock on a file of `size` bytes lets
+    /// the holder's partial stand still before giving up: [`STALE_PARTIAL`], or
+    /// longer where a live holder can be silent longer, as each attempt may
+    /// spend the connect and response timeouts of both redirect hops and the
+    /// body timeout of its longest request.
     fn lock_wait_limit(&self, size: u64) -> Duration {
         let hop = CONNECT_TIMEOUT + RESPONSE_TIMEOUT;
         let attempt = 2 * hop + self.range_timeout(size, 0, size.min(self.chunk));
@@ -809,10 +640,9 @@ impl ModelStore {
         STALE_PARTIAL.max(attempt * DOWNLOAD_ATTEMPTS + waits)
     }
 
-    /// One `GET` of `url`, with a `Range` header when `range` is set and
-    /// `body` as its body timeout. It asks for the bytes uncompressed: the
-    /// client would otherwise offer gzip, and a range of a compressed body
-    /// is no range of the file.
+    /// One `GET` of `url`, with an optional `Range` header and `body` as its
+    /// body timeout. Asks for the bytes uncompressed: a range of a gzip body is
+    /// no range of the file.
     fn get(
         &self,
         url: &str,
@@ -835,17 +665,13 @@ impl ModelStore {
             })
     }
 
-    /// Requests the next bytes of `partial`, from its length up to
-    /// [`CHUNK`] more: a plain request when that is the whole file, else a
-    /// `Range` request, honoured only by a `206` that starts at its length.
-    /// A `200` whose length is not the file's (a sign-in page, say) is a
-    /// transient failure that keeps the partial. Another `200` (the host
-    /// ignored the range) restarts the file with that body when the file
-    /// is one chunk. Any other answer restarts it and asks for the whole
-    /// body under the whole file's timeout: a `200` to a larger file,
-    /// whose range request had at most [`MAX_CHUNK_TIMEOUT`], a `206`
-    /// elsewhere or a `416`. Returns the response and whether it carries
-    /// the whole file.
+    /// Requests the next bytes of `partial`, up to [`CHUNK`] more: a plain
+    /// request for a whole file, else a `Range` request honoured only by a
+    /// `206` that starts at its length. A `200` of the wrong length (a sign-in
+    /// page) is transient and keeps the partial; a `200` to a one-chunk file
+    /// restarts it with that body; any other answer restarts it and asks for
+    /// the whole file under the whole file's timeout. Returns the response and
+    /// whether it carries the whole file.
     fn request(
         &self,
         url: &str,
@@ -895,12 +721,10 @@ impl ModelStore {
         Ok((self.get(url, None, self.body_timeout(file.size))?, true))
     }
 
-    /// Streams the rest of the file into `partial` while hashing, one
-    /// response after another, and syncs it. A partial that is complete
-    /// already is not asked for again. Stops at the first byte over the
-    /// manifest size, so a misbehaving host cannot fill the disk; a `206`
-    /// shorter than asked for is followed by a request for the rest, and
-    /// one that brings nothing is a transient failure.
+    /// Streams the rest of the file into `partial` while hashing, one response
+    /// after another, and syncs it. Stops at the first byte over the manifest
+    /// size, so a host cannot fill the disk; a short `206` is followed by a
+    /// request for the rest.
     fn stream_to(
         &self,
         url: &str,
@@ -964,13 +788,11 @@ impl ModelStore {
     }
 }
 
-/// True when `path` is a file of the manifest size.
 fn is_complete(path: &Path, file: &ModelFile) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == file.size)
 }
 
-/// A response that ended before it brought what was asked: as transient
-/// as a dropped connection, so the partial stays for the next attempt.
+/// A response cut short: transient, so the partial stays for the next attempt.
 fn cut_short(url: &str, detail: String) -> SpeechError {
     SpeechError::Download {
         url: url.to_owned(),
@@ -981,7 +803,6 @@ fn cut_short(url: &str, detail: String) -> SpeechError {
     }
 }
 
-/// The `Content-Length` of a response, when it has one.
 fn content_length(response: &ureq::http::Response<ureq::Body>) -> Option<u64> {
     response
         .headers()
@@ -1000,19 +821,17 @@ fn content_range_start(response: &ureq::http::Response<ureq::Body>) -> Option<u6
     range.split_once('-')?.0.trim().parse().ok()
 }
 
-/// Attempts in a row that fetch nothing before a download fails; one that
-/// moves the file on starts the count again. A 5xx answer or a dropped
-/// connection is often gone a few seconds later.
+/// Attempts in a row that fetch nothing before a download fails; one that moves
+/// the file on starts the count again.
 pub const DOWNLOAD_ATTEMPTS: u32 = 3;
 
-/// The wait before the second attempt; each later one waits this much
-/// longer (10 ms under test).
+/// The wait before the second attempt, longer by as much each time (10 ms under
+/// test).
 const RETRY_DELAY: Duration = Duration::from_millis(if cfg!(test) { 10 } else { 1000 });
 
-/// Whether a failed download may succeed when tried again: a 5xx answer, a
-/// connection that could not be made, dropped or timed out, or a body that
-/// stalled past [`ModelStore::body_timeout`]. A wrong size or checksum, a
-/// 4xx answer and a disk error fail at once.
+/// Whether a failed download may succeed when tried again: a 5xx, a failed,
+/// dropped or timed-out connection, or a stalled body. A wrong size or
+/// checksum, a 4xx and a disk error fail at once.
 fn is_transient(error: &SpeechError) -> bool {
     let dropped = |error: &std::io::Error| {
         use std::io::ErrorKind::{
@@ -1043,28 +862,21 @@ fn is_transient(error: &SpeechError) -> bool {
     }
 }
 
-/// Another process's partial download nothing has written to for this long
-/// is stale; a live download writes it many times a second. A download
-/// waiting for a lock gives up on a holder whose partial has not changed
-/// for at least as long ([`ModelStore::lock_wait_limit`]).
+/// Another process's partial download nothing has written to for this long is
+/// stale. A lock waiter gives up on a holder silent at least this long.
 const STALE_PARTIAL: Duration = Duration::from_secs(10 * 60);
 
 /// Numbers this process's downloads, so each has a partial file of its own.
 static NEXT_CALL: AtomicU64 = AtomicU64::new(0);
 
-/// `<name>.partial.`, followed by `<pid>.<call>`.
 fn partial_prefix(name: &str) -> String {
     format!("{name}.partial.")
 }
 
-/// How often a download that waits for another one's lock tries it again
-/// and reports the other one's progress.
+/// How often a lock waiter retries and reports the holder's progress.
 const LOCK_POLL: Duration = Duration::from_millis(200);
 
-/// The time a download that waits for another one's lock goes by: the
-/// system's, or under test one the test moves on, so that a wait of
-/// [`STALE_PARTIAL`] or longer takes no time and no wait depends on how
-/// fast the machine runs the test.
+/// The time a lock waiter goes by: the system's, or a test's.
 #[derive(Debug, Clone)]
 enum Clock {
     System,
@@ -1091,9 +903,8 @@ impl Clock {
 }
 
 /// The file a download writes, with the bytes it holds and their hash.
-/// `<name>.partial`, opened under the lock on `<name>.lock`, survives a
-/// failed call for the next one to resume; a per-call partial is deleted
-/// with it. A partial that ends up wrong is deleted either way.
+/// `<name>.partial` survives a failed call for the next to resume; a per-call
+/// or wrong partial is deleted.
 struct Partial {
     path: PathBuf,
     file: File,
@@ -1106,21 +917,17 @@ struct Partial {
     resumed: bool,
     /// Renamed into place, or left to the download that did.
     done: bool,
-    /// `<name>.lock`, locked; `None` for a per-call partial. Declared last,
-    /// so it is closed, and the lock released, after the partial is
-    /// deleted or renamed.
+    /// `<name>.lock`, locked; `None` for a per-call partial. Declared last, so
+    /// the lock is released after the partial is deleted or renamed.
     _lock: Option<DownloadLock>,
 }
 
 impl Partial {
     /// `<name>.partial` beside `destination` with its bytes hashed, opened
-    /// once the lock on `<name>.lock` is held; `None` when `destination`
-    /// is installed by then. A download of the same file that holds the
-    /// lock is waited for on `clock`, `progress` reporting the bytes its
-    /// partial has, so its bytes are never fetched twice, until it has
-    /// written nothing for `limit`. Where the file system has no locks, a
-    /// per-call partial of its own. Blocking: the callers run on a blocking
-    /// thread.
+    /// under the lock on `<name>.lock`; `None` when `destination` is installed
+    /// by then. A holder of the lock is waited for on `clock` until it has
+    /// written nothing for `limit`, `progress` reporting its partial. Where the
+    /// file system has no locks, a per-call partial. Blocking.
     fn open(
         destination: &Path,
         file: &ModelFile,
@@ -1133,10 +940,7 @@ impl Partial {
             return Self::per_call(destination).map(Some);
         };
         if is_complete(destination, file) {
-            // Installed by the download this one waited for, or by another
-            // between `missing_files` and the lock. Nothing at
-            // `<name>.partial` is needed now, so it goes while the lock is
-            // held.
+            // Installed meanwhile; the partial goes while the lock is held.
             let _ = fs::remove_file(&path);
             return Ok(None);
         }
@@ -1184,10 +988,8 @@ impl Partial {
         Ok(())
     }
 
-    /// Creates this call's partial download beside `destination`,
-    /// `<name>.partial.<pid>.<call>`. A name that exists already, left by
-    /// a dead process that had the same pid, is passed over for the next
-    /// call number.
+    /// Creates this call's `<name>.partial.<pid>.<call>`, skipping a name a
+    /// dead process with the same pid left.
     fn per_call(destination: &Path) -> Result<Self, SpeechError> {
         loop {
             let path = beside(
@@ -1227,17 +1029,15 @@ impl Partial {
         Ok(())
     }
 
-    /// Marks the bytes as unwanted, so the file is deleted even if
-    /// resumable.
+    /// Marks the bytes as unwanted, so the file is deleted even if resumable.
     fn discard(&mut self) {
         self.resumable = false;
     }
 }
 
 impl Drop for Partial {
-    /// Deletes a per-call or discarded partial, and an empty one. Runs
-    /// before the fields drop, so `<name>.partial` goes while the lock is
-    /// still held.
+    /// Deletes a per-call, discarded or empty partial, before the fields drop
+    /// so the lock is still held.
     fn drop(&mut self) {
         if !self.done && (!self.resumable || self.len == 0) {
             let _ = fs::remove_file(&self.path);
@@ -1245,11 +1045,9 @@ impl Drop for Partial {
     }
 }
 
-/// The `<name>.lock` files this process's downloads hold. A file lock
-/// alone does not keep two downloads of one process apart where the file
-/// system emulates it with locks the process owns (NFS and CIFS on Linux),
-/// and closing any handle to the file there releases them; so a path in
-/// this set is neither locked again nor even opened.
+/// The `<name>.lock` files this process's downloads hold. Where file locks
+/// belong to the process (NFS and CIFS on Linux) and closing any handle
+/// releases them, a path in this set is neither locked again nor opened.
 static HELD: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
 /// `<name>.lock`, locked by a download of this process.
@@ -1300,14 +1098,10 @@ fn try_lock_download(path: &Path) -> Result<DownloadLock, NotLocked> {
     }
 }
 
-/// Takes the lock on `<name>.lock` beside `destination`, which every
-/// download of the file holds while it opens, writes and renames
-/// `partial`. The lock file stays when the download ends: were it deleted,
-/// a download waiting on it would wake holding a lock on a file no longer
-/// at the path, beside a third that locked a new one. A lock held by
-/// another download is tried again every [`LOCK_POLL`] of `clock`,
-/// `progress` reporting the length of `partial` meanwhile, until `partial`
-/// has not changed for `limit` (the holder was stopped, say), which is an
+/// Takes the lock on `<name>.lock` beside `destination`. The lock file is never
+/// deleted: a waiter would wake holding a lock on a file no longer at the path.
+/// A busy lock is retried every [`LOCK_POLL`] of `clock`, `progress` reporting
+/// the length of `partial`, until `partial` has not changed for `limit`, an
 /// error naming the lock. `None` where the file system has no locks.
 fn lock_download(
     destination: &Path,
@@ -1355,9 +1149,8 @@ fn lock_download(
             }
             Err(NotLocked::Open(error)) => return Err(SpeechError::io(&path, error)),
             Err(NotLocked::Lock(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            // Once another download was seen to hold the lock, a failure
-            // is not a file system without locks: going on without the
-            // lock would fetch the file a second time beside it.
+            // Once another download held the lock, a failure is not a file
+            // system without locks; going on would fetch the file twice.
             Err(NotLocked::Lock(error)) if waiting => {
                 return Err(SpeechError::io(&path, error));
             }
@@ -1369,16 +1162,14 @@ fn lock_download(
     }
 }
 
-/// `destination` with `suffix` after its file name, in the same folder:
-/// `<name>.lock`, `<name>.partial`, `<name>.partial.<pid>.<call>`.
+/// `destination` with `suffix` after its file name, in the same folder.
 fn beside(destination: &Path, suffix: &str) -> PathBuf {
     let mut path = destination.as_os_str().to_owned();
     path.push(suffix);
     PathBuf::from(path)
 }
 
-/// Opens `path` to read and write, creating it, keeping what it holds:
-/// `<name>.lock` and `<name>.partial`.
+/// Opens `path` to read and write, creating it, keeping what it holds.
 fn open_or_create(path: &Path) -> std::io::Result<File> {
     File::options()
         .read(true)
@@ -1388,11 +1179,9 @@ fn open_or_create(path: &Path) -> std::io::Result<File> {
         .open(path)
 }
 
-/// Deletes `<name>.partial` in `directory` once `<name>` is installed: a
-/// download killed before the file arrived another way (by hand, from a
-/// copy) leaves it behind, up to 2.4 GB. Only under the lock on
-/// `<name>.lock`, so a download still writing it keeps it. Best effort,
-/// like [`remove_stale_partials`].
+/// Deletes `<name>.partial` in `directory` once `<name>` was installed another
+/// way (by hand, from a copy). Only under the lock, so a running download keeps
+/// it. Best effort.
 fn remove_finished_partial(directory: &Path, name: &str) {
     let path = directory.join(format!("{name}.partial"));
     if !path.exists() {
@@ -1411,13 +1200,9 @@ fn partial_pid(file_name: &str, prefix: &str) -> Option<u32> {
     pid.parse().ok()
 }
 
-/// Removes the stale partial downloads of `name` in `directory`, which a
-/// killed process leaves behind (2.4 GB for `encoder.weights`). This
-/// process's own partials belong to downloads still running and are never
-/// removed. Another process's is removed after [`STALE_PARTIAL`] without a
-/// write; should that process still be alive, its rename then fails and
-/// nothing is installed. Best effort: a file that cannot be read or
-/// removed stays.
+/// Removes the stale partial downloads of `name` a killed process left. This
+/// process's own partials are never removed; another's after [`STALE_PARTIAL`]
+/// without a write. Best effort.
 fn remove_stale_partials(directory: &Path, name: &str) {
     // A file in a folder of the asset has its partials in that folder.
     let path = directory.join(name);
@@ -1449,10 +1234,8 @@ fn remove_stale_partials(directory: &Path, name: &str) {
 }
 
 /// Syncs the directory holding `path`, so the rename survives a power loss.
-/// Best effort: some FUSE and CIFS mounts refuse to sync a directory, and
-/// the file itself is synced already, so a failure is logged and the
-/// install stands. Not on Windows, which cannot open a directory as a file;
-/// NTFS journals the rename.
+/// Best effort (some FUSE and CIFS mounts refuse); not on Windows, where NTFS
+/// journals the rename.
 fn sync_parent(path: &Path) {
     if cfg!(unix)
         && let Some(parent) = path.parent()
@@ -1466,8 +1249,7 @@ fn sync_parent(path: &Path) {
     }
 }
 
-/// Compares `actual` with `file`'s manifest digest; `path` names the file
-/// in the error.
+/// Compares `actual` with `file`'s manifest digest.
 fn check_digest(file: &ModelFile, path: &Path, actual: String) -> Result<(), SpeechError> {
     if actual.eq_ignore_ascii_case(&file.sha256) {
         Ok(())
@@ -1480,7 +1262,6 @@ fn check_digest(file: &ModelFile, path: &Path, actual: String) -> Result<(), Spe
     }
 }
 
-/// Streams `input` into `hasher` and returns the bytes read.
 fn hash_into(hasher: &mut Sha256, input: impl Read) -> std::io::Result<u64> {
     std::io::copy(&mut BufReader::with_capacity(READ_BUFFER, input), hasher)
 }
@@ -1502,7 +1283,6 @@ mod tests {
 
     use super::*;
 
-    /// A whole HTTP response carrying `body`.
     fn response(status: &str, body: &[u8]) -> Vec<u8> {
         let head = format!(
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1511,9 +1291,7 @@ mod tests {
         [head.as_bytes(), body].concat()
     }
 
-    /// Answers one connection per entry of `responses`, in order, with
-    /// those bytes (none: the connection is closed unanswered), and returns
-    /// the URL.
+    /// Answers one connection per entry, in order (none: closed unanswered).
     fn serve(responses: Vec<Vec<u8>>) -> String {
         let handlers = responses
             .into_iter()
@@ -1522,21 +1300,18 @@ mod tests {
         serve_each(handlers).0
     }
 
-    /// Writes `bytes` to `stream`, whether or not the client still reads.
     fn send(mut stream: &TcpStream, bytes: &[u8]) {
         let _ = stream.write_all(bytes);
     }
 
-    /// Serves `body` once and returns the URL.
     fn serve_once(body: &[u8]) -> String {
         serve(vec![response("200 OK", body)])
     }
 
-    /// Answers one connection per entry of `bodies`, in order of arrival,
-    /// with a `200` carrying that body, whatever the range asked: the first
-    /// `head` bytes at once, the rest once the k-th sender returned fires
-    /// or is dropped. Returns the URL, the senders and the `Range` header
-    /// of every request so far.
+    /// Answers one connection per `(body, head)` in order with a `200` of that
+    /// body, whatever the range: `head` bytes at once, the rest once its sender
+    /// fires or drops. Returns the URL, the senders and every request's
+    /// `Range`.
     fn serve_held(bodies: Vec<(Vec<u8>, usize)>) -> (String, Vec<mpsc::Sender<()>>, Requests) {
         let (senders, handlers): (Vec<_>, Vec<Handler>) = bodies
             .into_iter()
@@ -1551,16 +1326,13 @@ mod tests {
         (url, senders, requests)
     }
 
-    /// What a connection of [`serve_each`] does: its stream and the
-    /// request's `Range` header.
+    /// What a connection of [`serve_each`] does.
     type Handler = Box<dyn FnOnce(&TcpStream, Option<String>) + Send>;
 
     /// The `Range` header of every request a test server has read.
     type Requests = Arc<Mutex<Vec<Option<String>>>>;
 
-    /// Answers one connection per handler, in order of arrival, each on a
-    /// thread of its own, and returns the URL and the `Range` header of
-    /// every request so far.
+    /// Answers one connection per handler, in order, each on its own thread.
     fn serve_each(handlers: Vec<Handler>) -> (String, Requests) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1577,9 +1349,7 @@ mod tests {
         (format!("http://{address}/model.onnx"), ranges)
     }
 
-    /// The reply to `range` (`bytes=<first>-[<last>]`): the part it asks
-    /// for under `206`, or `body` under `200` without one. Returns the
-    /// reply's bytes and the length of its body.
+    /// The reply to `range`: `206` with the part, or `200` with `body`.
     fn reply(body: &[u8], range: Option<&str>) -> (Vec<u8>, usize) {
         match range.and_then(bounds) {
             Some((first, last)) => {
@@ -1596,16 +1366,14 @@ mod tests {
         }
     }
 
-    /// The first byte of `range` (`bytes=<first>-[<last>]`) and its last,
-    /// when it names one.
+    /// The first and optional last byte of `range` (`bytes=<first>-[<last>]`).
     fn bounds(range: &str) -> Option<(usize, Option<usize>)> {
         let (first, last) = range.strip_prefix("bytes=")?.split_once('-')?;
         Some((first.parse().ok()?, last.parse().ok()))
     }
 
-    /// [`reply`] to `range`, all of it if `stall` is `None`, else that
-    /// many bytes of the body at once and the rest once `stall` fires or
-    /// is dropped.
+    /// [`reply`] to `range`, whole if `stall` is `None`, else that many body
+    /// bytes at once and the rest once `stall` fires or drops.
     fn answer(
         stream: &TcpStream,
         body: &[u8],
@@ -1625,8 +1393,7 @@ mod tests {
         send(stream, later);
     }
 
-    /// Reads a request up to the blank line that ends its head and
-    /// returns its `Range` header.
+    /// Reads a request head and returns its `Range` header.
     fn read_request_head(stream: &TcpStream) -> Option<String> {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
@@ -1684,8 +1451,7 @@ mod tests {
             *self.now.lock().unwrap()
         }
 
-        /// Panics once the test has gone, which ends the download's thread
-        /// rather than leave it polling.
+        /// Panics once the test has gone, ending the download's thread.
         pub(super) fn sleep(&self) {
             let gone = "the test stopped driving the clock";
             self.steps.send(Step::Asleep).expect(gone);
@@ -1701,8 +1467,7 @@ mod tests {
         progress: mpsc::Receiver<u64>,
     }
 
-    /// Runs `ensure` of `asset` on a thread of its own, on a copy of
-    /// `store` whose clock the test moves.
+    /// Runs `ensure` on its own thread, on a clock the test moves.
     fn drive(store: &ModelStore, asset: &ModelAsset) -> Driven {
         let (step, steps) = mpsc::channel();
         let (move_on, moves) = mpsc::channel();
@@ -1728,15 +1493,13 @@ mod tests {
     }
 
     impl Driven {
-        /// The next step. A minute without one fails the test instead of
-        /// hanging it; no step takes more than a moment.
+        /// The next step; a minute without one fails the test.
         fn next(&self) -> Step {
             self.steps
                 .recv_timeout(Duration::from_secs(60))
                 .expect("the download neither waited nor returned")
         }
 
-        /// Expects the download to wait for its lock.
         fn asleep(&self) {
             if let Step::Done(result) = self.next() {
                 panic!("the download returned instead of waiting: {result:?}");
@@ -1747,7 +1510,6 @@ mod tests {
             self.moves.send(by).unwrap();
         }
 
-        /// Expects `ensure` to return, without waiting again.
         fn done(&self) -> Result<PathBuf, SpeechError> {
             match self.next() {
                 Step::Done(result) => result,
@@ -1755,12 +1517,10 @@ mod tests {
             }
         }
 
-        /// The progress reported since the last call.
         fn reported(&self) -> Vec<u64> {
             self.progress.try_iter().collect()
         }
 
-        /// Waits for a report of at least `bytes`.
         fn received(&self, bytes: u64) {
             while self
                 .progress
@@ -1811,7 +1571,6 @@ mod tests {
         assert!(!directory.exists());
     }
 
-    /// The names in the asset's directory, sorted.
     fn names(store: &ModelStore, asset: &ModelAsset) -> Vec<String> {
         let mut names: Vec<_> = fs::read_dir(store.directory(asset))
             .unwrap()
@@ -1823,10 +1582,8 @@ mod tests {
 
     #[test]
     fn a_second_download_of_one_file_waits_for_the_first_and_fetches_nothing() {
-        // The second download starts while the first is half done. It
-        // waits for the lock, reporting the first one's progress, finds
-        // the file installed and returns without a request: the bytes cross
-        // the wire once.
+        // A second download waits for the lock and finds the file installed:
+        // the bytes cross the wire once.
         const WAIT: Duration = Duration::from_secs(30);
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
@@ -1836,8 +1593,7 @@ mod tests {
         let (first_started, first_waits) = mpsc::channel();
         let mut first_received = 0;
         std::thread::scope(|scope| {
-            // Owned here, so a failed assertion drops the senders and frees
-            // the held downloads instead of leaving the scope waiting.
+            // Owned here, so a failed assertion frees the held downloads.
             let release = release;
             let first = scope.spawn(|| {
                 store.ensure(&asset, &mut |p| {
@@ -1872,12 +1628,9 @@ mod tests {
 
     #[test]
     fn a_download_that_waited_installs_the_file_after_the_first_threw_its_partial_away() {
-        // The first download gets wrong bytes, fails its checksum and
-        // deletes `<name>.partial` while it holds the lock.
-        // The second, which waited, must write a partial at the path, not
-        // the deleted one, and install it; a third that arrives meanwhile
-        // waits for the second and fetches nothing (its connection would
-        // carry wrong bytes).
+        // The first download fails its checksum and deletes `<name>.partial`
+        // under the lock. The second must write a new partial at the path and
+        // install it; a third waits for the second and fetches nothing.
         const WAIT: Duration = Duration::from_secs(30);
         let good: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
         let wrong: Vec<u8> = good.iter().map(|b| b ^ 0xff).collect();
@@ -1936,9 +1689,8 @@ mod tests {
 
     #[test]
     fn a_download_resumes_what_a_failed_one_left() {
-        // The first call is cut half way and then refused (a 404 is no
-        // reason to try again): it fails and leaves `<name>.partial`. The
-        // next call asks for the rest only.
+        // Cut half way and then refused with a 404, the first call fails and
+        // leaves `<name>.partial`; the next asks for the rest only.
         let body: Vec<u8> = (0..100_000u32).map(|i| (i % 249) as u8).collect();
         let half = body.len() / 2;
         let (cut, b) = (body.clone(), body.clone());
@@ -2000,10 +1752,8 @@ mod tests {
 
     #[test]
     fn a_body_that_stalls_times_out_and_is_tried_again() {
-        // The first answer sends half the body and then nothing; the second
-        // sends it all. Without the body timeout the first read never ends.
-        // The timeout bounds the second, good answer too, so it is long
-        // enough for a slow machine to read 18 bytes.
+        // Half the body and then silence, then all of it: without the body
+        // timeout the first read never ends.
         let dir = tempfile::tempdir().unwrap();
         let mut store = ModelStore::new(dir.path());
         store.min_body_timeout = Duration::from_secs(2);
@@ -2024,8 +1774,7 @@ mod tests {
         store.verify(&asset).unwrap();
     }
 
-    /// `ensure` of `asset` on a thread of its own; fails the test with
-    /// `hung` when it has not returned after `limit`.
+    /// `ensure` on its own thread; fails the test with `hung` after `limit`.
     fn ensure_within(
         store: &ModelStore,
         asset: &ModelAsset,
@@ -2042,10 +1791,8 @@ mod tests {
 
     #[test]
     fn a_large_file_comes_in_chunks_and_a_chunk_cut_short_is_resumed_alone() {
-        // 64 chunks of 64 KiB. Three answers end the connection half way
-        // through their chunk, more often than `DOWNLOAD_ATTEMPTS`, but
-        // each cut follows progress, so the download goes on at once from
-        // where it stopped.
+        // Three answers cut half way, more than `DOWNLOAD_ATTEMPTS`, but each
+        // after progress.
         const CHUNK: u32 = 64 << 10;
         let body: Vec<u8> = (0..64 * CHUNK)
             .map(|i| (i.wrapping_mul(7919) % 251) as u8)
@@ -2079,15 +1826,13 @@ mod tests {
         assert_eq!(ranges.last().unwrap().as_deref(), Some("bytes=4161536-"));
     }
 
-    /// `range` (`bytes=<first>-[<last>]`) cut to at most `cap` bytes.
     fn capped(range: &str, cap: usize) -> String {
         let (first, last) = bounds(range).unwrap();
         let last = last.unwrap_or(usize::MAX);
         format!("bytes={first}-{}", last.min(first.saturating_add(cap - 1)))
     }
 
-    /// Answers each request with the part it asks for, at most `cap`
-    /// bytes of it.
+    /// Answers each request with the part it asks for, at most `cap` bytes.
     fn capping(body: &Arc<Vec<u8>>, cap: usize) -> Handler {
         let body = Arc::clone(body);
         Box::new(move |stream, range| {
@@ -2107,8 +1852,7 @@ mod tests {
 
     #[test]
     fn a_host_that_sends_less_than_a_range_asks_for_is_asked_for_the_rest() {
-        // Every answer stops after 40,000 bytes, the last one, to the
-        // open-ended request for the rest of the file, too.
+        // Every answer stops after 40,000 bytes, the last one too.
         let body: Vec<u8> = (0..4 * 65_536u32).map(|i| (i % 239) as u8).collect();
         let shared = Arc::new(body.clone());
         let (url, ranges) = serve_each((0..8).map(|_| capping(&shared, 40_000)).collect());
@@ -2155,10 +1899,8 @@ mod tests {
                 Some("bytes=131072-".to_owned()),
             ]
         );
-        // A host that keeps sending nothing fails the download after
-        // `DOWNLOAD_ATTEMPTS` attempts that fetch nothing, not never, and
-        // the chunk stays. The first attempt fetched the chunk, so its
-        // empty answer does not count.
+        // A host that keeps sending nothing fails the download; the fetched
+        // chunk stays.
         let mut handlers = vec![good()];
         handlers.extend((0..3 * DOWNLOAD_ATTEMPTS).map(|_| empty()));
         let (url, ranges) = serve_each(handlers);
@@ -2203,11 +1945,8 @@ mod tests {
 
     #[test]
     fn a_silent_chunk_is_given_up_at_the_longest_timeout_not_its_own() {
-        // 1 MiB chunks of a 2 MiB file and a shortest body timeout of an
-        // hour: by its length a chunk would have an hour, but none gets
-        // more than the longest chunk timeout, here 50 ms. Every answer
-        // sends its head and then nothing, so each attempt fetches nothing
-        // and the download fails after `DOWNLOAD_ATTEMPTS` of them.
+        // No chunk gets more than the longest chunk timeout, here 50 ms,
+        // however long its length allows; stalling answers fail the download.
         let body: Vec<u8> = (0..2u32 << 20).map(|i| (i % 229) as u8).collect();
         let shared = Arc::new(body.clone());
         let mut holds = Vec::new();
@@ -2246,10 +1985,8 @@ mod tests {
 
     #[test]
     fn a_lock_this_process_holds_is_neither_locked_again_nor_opened() {
-        // Where locks belong to the process (NFS, CIFS on Linux), the file
-        // lock cannot tell two downloads of one process apart; the set of
-        // held paths does. Shown here by deleting the lock file: a second
-        // attempt would lock a new one.
+        // Where locks belong to the process, the set of held paths keeps two
+        // downloads of one process apart.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("model.onnx.lock");
         let held = try_lock_download(&path).ok().unwrap();
@@ -2271,11 +2008,8 @@ mod tests {
 
     #[test]
     fn a_download_waits_while_the_holder_writes_and_gives_up_once_it_stops() {
-        // A holder that keeps writing is waited for however long it takes,
-        // here 30 polls five minutes apart, and its bytes are resumed; one
-        // that writes nothing (a stopped process) fails the waiter after
-        // `STALE_PARTIAL`, with an error naming the lock. The test writes
-        // the holder's bytes and moves the waiter's clock.
+        // A holder that keeps writing is waited for and resumed; a silent one
+        // fails the waiter after `STALE_PARTIAL`.
         let body: Vec<u8> = (0..60_000u32).map(|i| (i % 227) as u8).collect();
         let shared = Arc::new(body.clone());
         let (url, ranges) = serve_each(vec![capping(&shared, usize::MAX)]);
@@ -2332,9 +2066,8 @@ mod tests {
 
     #[test]
     fn a_holder_s_growth_starts_the_wait_for_a_stopped_holder_again() {
-        // 1000 bytes, then 1000 more at the first poll, then nothing: the
-        // waiter gives up `STALE_PARTIAL` after the growth, not after its
-        // first look.
+        // The waiter gives up `STALE_PARTIAL` after the partial last grew, not
+        // after its first look.
         let body: Vec<u8> = (0..10_000u32).map(|i| (i % 227) as u8).collect();
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
@@ -2365,11 +2098,8 @@ mod tests {
 
     #[test]
     fn a_waiter_outlasts_a_holder_whose_one_request_may_still_be_silent() {
-        // A file of one chunk comes in one request, which may spend the
-        // connect and response timeouts of both hops of a redirect and its
-        // body timeout without a byte, on every attempt. The waiter waits
-        // that out, and the retry waits between the attempts, before it
-        // gives up on the holder, on the clock the test moves.
+        // A one-chunk file's request may spend every timeout on every attempt;
+        // the waiter waits that out.
         let defaults = ModelStore::new("/models");
         let decoder = 47_234_123;
         assert_eq!(
@@ -2467,9 +2197,8 @@ mod tests {
 
     #[test]
     fn a_range_follows_a_redirect_to_another_host() {
-        // As at Hugging Face, whose download URL answers `302` with its
-        // CDN: the `Range` reaches the host the redirect names, and the
-        // partial a run left is resumed from there.
+        // As at Hugging Face, whose URL answers `302` to its CDN: the `Range`
+        // reaches the redirect's host and the partial is resumed.
         let body: Vec<u8> = (0..200_000u32).map(|i| (i % 223) as u8).collect();
         let shared = Arc::new(body.clone());
         let (target, served) = serve_each(vec![capping(&shared, usize::MAX)]);
@@ -2505,10 +2234,8 @@ mod tests {
     #[test]
     #[ignore = "fetches from huggingface.co"]
     fn a_partial_of_the_hosted_export_resumes_through_its_redirect_in_chunks() {
-        // `tokens.txt` (94 KB) of the pinned export, fetched once, cut back
-        // to a partial of 30,000 bytes and fetched again in 16 KiB chunks:
-        // every range goes through Hugging Face's redirect, and the file
-        // must still match the manifest.
+        // `tokens.txt` of the pinned export, resumed in 16 KiB chunks through
+        // Hugging Face's redirect, matches the manifest.
         let mut asset = ModelAsset::parakeet_v3_fp32();
         asset.files.retain(|f| f.name == "tokens.txt");
         let dir = tempfile::tempdir().unwrap();
@@ -2562,7 +2289,6 @@ mod tests {
             fs::read(dir.path().join(format!("model.onnx.partial.{own}.{next}"))).unwrap(),
             b"old"
         );
-        // Deleted with the call.
         drop(partial);
         assert!(!path.exists());
     }
@@ -2633,7 +2359,6 @@ mod tests {
         fs::write(directory.join("model.onnx"), &body).unwrap();
         assert_eq!(store.ensure(&asset, &mut |_| {}).unwrap(), directory);
         store.verify(&asset).unwrap();
-        // Lower-case, as the manifest writes it.
         assert_eq!(
             sha256_of(&directory.join("model.onnx")).unwrap(),
             digest(&body)
@@ -2669,9 +2394,8 @@ mod tests {
 
     #[test]
     fn a_download_that_finds_its_file_installed_leaves_no_partial() {
-        // Installed by another download between the check and the lock:
-        // this one returns at once (the URL is never fetched) and must not
-        // leave the partial it opened, whatever it held.
+        // Installed by another download between the check and the lock: this
+        // one returns without fetching and leaves no partial.
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
         let body = b"not really a model".to_vec();
@@ -2792,13 +2516,11 @@ mod tests {
         assert_eq!(in_bundle, ["model.onnx"]);
     }
 
-    /// The largest file a GitHub release takes.
     const GITHUB_RELEASE_ASSET_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 
     #[test]
     fn hosts_fit_their_limits_and_hugging_face_urls_pin_a_commit() {
-        // GitHub release assets cap at 2 GB a file, so a file that large
-        // can only come from Hugging Face.
+        // Only Hugging Face takes a file over 2 GB.
         let hosted = ModelAsset::parakeet_v3_fp32();
         for asset in ModelAsset::onnx() {
             for file in &asset.files {
@@ -2938,11 +2660,8 @@ mod tests {
         );
     }
 
-    /// The `CoreML` Parakeet's manifest is the tree the Swift app installed
-    /// on 2026-09-25 (the fixture, `<sha256>  <size>  <path>` per file, as
-    /// listed on the Mac it was installed on), every file fetched from the
-    /// `FluidAudio` repository at the pinned commit, into the folder the
-    /// Swift app and the `CoreML` backend read.
+    /// The `CoreML` Parakeet's manifest matches the fixture, fetched from the
+    /// pinned `FluidAudio` commit.
     #[test]
     fn the_coreml_parakeet_is_the_tree_the_swift_app_installed_at_the_pinned_commit() {
         let fixture = include_str!("../tests/fixtures/parakeet-v3-coreml.sha256");
