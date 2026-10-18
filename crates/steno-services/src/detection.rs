@@ -1,39 +1,8 @@
-//! Meeting detection: the prompt that offers to record when another app
-//! opens the microphone, and the events that feed the auto-stop after a
-//! call ([`crate::auto_stop`]).
-//!
-//! The [`DetectionController`] consumes the [`MeetingDetector`]'s events on
-//! every platform (the Mac's Core Audio processes, Linux's `PipeWire`
-//! streams, Windows' audio sessions) and shows one prompt at a time
-//! through the shell's [`PromptPanel`], for [`PROMPT_SECONDS`]:
-//!
-//! - an opened microphone raises the prompt only while detection is on in
-//!   Settings, nothing records and no prompt is up;
-//! - a released microphone, a recording starting, detection turned off and
-//!   its minute running out take it down, and so do the panel's own X
-//!   ([`DetectionController::dismissed`]) and Record
-//!   ([`DetectionController::record`]), which starts a call recording
-//!   attributed to the app the prompt named;
-//! - while a recording starts, runs or stops, both events go to the
-//!   recorder's auto-stop instead ([`CallRecorder::microphone_activity`]).
-//!
-//! The detector keeps running through Steno's own recordings (it ignores
-//! Steno's own capture), so a Stop during a call that still holds the
-//! microphone never prompts again: a restarted detector would report that
-//! microphone as newly opened. A detector that cannot start (`PipeWire`
-//! not up yet at login) is started again by the next
-//! [`DetectionController::follow_settings`], which [`DetectionController::run`]
-//! calls every two seconds along with the setting. So the switch in
-//! Settings takes effect within two seconds, and a prompt can still come
-//! up in that time; Swift observed the setting and followed it at once.
-//!
-//! Lives here rather than in `steno-host`: it drives the detector of
-//! `steno-audio` and the capture recorder, which this crate assembles, as
-//! the Swift `DetectionController` lived in the app beside
-//! `RecordingController`; the host only renders the recorder's status.
-//!
-//! Swift: `apps/macos/Steno/Detection/DetectionController.swift` and
-//! `DetectionPromptViewModel.swift`.
+//! Meeting detection: the [`DetectionController`] turns the
+//! [`MeetingDetector`]'s events into one prompt at a time through the
+//! shell's [`PromptPanel`] while detection is on and nothing records;
+//! while a recording is busy they feed the recorder's auto-stop instead.
+//! The detector keeps running through Steno's own recordings.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -49,8 +18,7 @@ use steno_host::services::Recorder as _;
 use crate::auto_stop::MicrophoneActivity;
 use crate::recorder::CaptureRecorder;
 
-/// How long a prompt stays up unanswered. Swift:
-/// `DetectionPromptViewModel`'s `timeout`.
+/// How long a prompt stays up unanswered.
 pub const PROMPT_SECONDS: u64 = 60;
 
 /// How often [`DetectionController::run`] reads the setting again and
@@ -58,39 +26,33 @@ pub const PROMPT_SECONDS: u64 = 60;
 pub const SETTINGS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// What the prompt asks: which app opened the microphone, and for how
-/// many seconds the prompt stays. Swift: `DetectionPromptViewModel`.
+/// many seconds the prompt stays.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectionPrompt {
     /// The app's name; "Another app" when it could not be named.
     pub app_name: String,
     /// How long the prompt stays up unanswered: [`PROMPT_SECONDS`].
     pub seconds: u64,
-    /// The controller's number for this prompt, one more for each raised.
-    /// The panel shows it (the shell's `raised`) and hands it back with
-    /// the X ([`DetectionController::dismissed`]) and Record
-    /// ([`DetectionController::record`]), so a click aimed at an earlier
-    /// prompt answers nothing.
+    /// The controller's number for this prompt, one more for each raised. The
+    /// panel hands it back with the X and Record, so a click aimed at an
+    /// earlier prompt answers nothing.
     pub number: u64,
 }
 
-/// Where the prompt shows: the shell's floating panel (`panels::set_prompt`
-/// in `apps/desktop`). Swift: the `FloatingPanelModel` that observed
-/// `DetectionController.prompt` (`apps/macos/Steno/Panels/`).
+/// Where the prompt shows: the shell's floating panel.
 pub trait PromptPanel: Send + Sync {
-    /// Raises `prompt`, or takes the prompt down for `None`. Called with
-    /// the controller's lock held, so the panel sees raises and clears in
-    /// the order the controller made them; it must return without calling
-    /// the controller or waiting on a thread that may.
+    /// Raises `prompt`, or takes it down for `None`. Called with the
+    /// controller's lock held; it must return without calling the controller
+    /// or waiting on a thread that may.
     fn show(&self, prompt: Option<&DetectionPrompt>);
 }
 
-/// What the controller needs of the recorder. [`CaptureRecorder`] in the
-/// app; a fake in tests.
+/// What the controller needs of the recorder.
 pub trait CallRecorder: Send + Sync {
     /// Whether a recording is starting, running or stopping.
     fn is_busy(&self) -> bool;
-    /// The prompt's Record: a call recording attributed to `call_app`. A
-    /// recording already in progress makes it do nothing.
+    /// The prompt's Record: a call recording attributed to `call_app`; nothing
+    /// while a recording is in progress.
     fn start_call(&self, call_app: Option<&str>);
     /// Another app's microphone activity while a recording is busy.
     fn microphone_activity(&self, activity: MicrophoneActivity);
@@ -111,14 +73,10 @@ impl CallRecorder for CaptureRecorder {
 }
 
 /// Names the app with a bundle id (`None` when the detector knows none).
-/// The shell resolves Mac bundle ids through `NSRunningApplication`;
-/// [`fallback_app_name`] elsewhere.
 pub type AppNames = Arc<dyn Fn(Option<&str>) -> String + Send + Sync>;
 
-/// "Another app" without a bundle id, else the id itself, as Swift's
-/// `liveAppName` falls back: on Linux the holder's binary name, on Windows
-/// its executable's file name without `.exe` ("Teams"), which the prompt
-/// and the stored end reason show.
+/// "Another app" without a bundle id, else the id itself: on Linux the
+/// holder's binary name, on Windows its executable's name without `.exe`.
 #[must_use]
 pub fn fallback_app_name(bundle_id: Option<&str>) -> String {
     let Some(id) = bundle_id else {
@@ -136,16 +94,13 @@ pub struct DetectionOptions {
     /// Where the prompt shows.
     pub panel: Arc<dyn PromptPanel>,
     pub app_names: AppNames,
-    /// Which processes hold the microphone: `LiveProcessAudioActivity` in
-    /// the app.
+    /// Which processes hold the microphone.
     pub activity: Arc<dyn ProcessAudioActivitySource>,
 }
 
 impl DetectionOptions {
     /// The live process list of this platform
-    /// ([`LiveProcessAudioActivity`](steno_audio::detection::LiveProcessAudioActivity)):
-    /// the Mac's Core Audio processes, Linux's `PipeWire` streams, Windows'
-    /// audio sessions.
+    /// ([`LiveProcessAudioActivity`](steno_audio::detection::LiveProcessAudioActivity)).
     #[must_use]
     pub fn live(panel: Arc<dyn PromptPanel>, app_names: AppNames) -> Self {
         Self {
@@ -155,9 +110,8 @@ impl DetectionOptions {
         }
     }
 
-    /// The controller over `recorder` and the setting in `store`, its
-    /// detector and countdown on the system clock with the detector's
-    /// default debounce and poll.
+    /// The controller over `recorder` and the setting in `store`, on the
+    /// system clock with the detector's default debounce and poll.
     #[must_use]
     pub fn controller(
         self,
@@ -197,8 +151,8 @@ pub struct DetectionParts {
 /// One prompt up.
 struct OpenPrompt {
     number: u64,
-    /// The app a recording from it is attributed to: its name when the
-    /// detector knew a bundle id, else `None`.
+    /// The app a recording from it is attributed to, when the detector knew a
+    /// bundle id.
     call_app: Option<String>,
     /// Raised when the prompt closes, which ends its countdown.
     countdown: Cancel,
@@ -211,13 +165,11 @@ struct State {
     raised: u64,
     /// Raised to stop [`DetectionController::run`]'s thread.
     running: Option<Cancel>,
-    /// [`DetectionController::stop`] ran: detection stays off, whatever
-    /// a read of the setting still under way finds.
+    /// [`DetectionController::stop`] ran: detection stays off.
     stopped: bool,
 }
 
-/// The meeting detection controller; see the module doc. Swift:
-/// `DetectionController`.
+/// The meeting detection controller; see the module doc.
 pub struct DetectionController {
     detector: MeetingDetector,
     recorder: Arc<dyn CallRecorder>,
@@ -226,12 +178,11 @@ pub struct DetectionController {
     clock: Arc<dyn Clock>,
     app_names: AppNames,
     state: Mutex<State>,
-    /// Serialises the detector's start and stop and owns the thread that
-    /// carries its events, apart from `state`: a start can wait seconds
-    /// for `PipeWire`, and `state` is taken by every recorder change.
+    /// Serialises the detector's start and stop and owns its events' thread,
+    /// apart from `state`: a start can wait seconds for `PipeWire`.
     detecting: Mutex<Option<JoinHandle<()>>>,
     /// The detector's last start failed, so the next failure is logged
-    /// quietly and a success says it recovered.
+    /// quietly.
     start_failed: AtomicBool,
     this: Weak<Self>,
 }
@@ -289,12 +240,9 @@ impl DetectionController {
         }
     }
 
-    /// Detection off for good: the setting is no longer followed and the
-    /// prompt goes at once, so no event raises another; then the detector
-    /// stops, which waits for a start or a snapshot under way (seconds,
-    /// while `PipeWire` reconnects or coreaudiod restarts). For the app's
-    /// shutdown, which runs it after the recording's quit save for that
-    /// reason.
+    /// Detection off for good: the prompt goes at once, then the detector
+    /// stops, which can wait seconds for a start under way. For the app's
+    /// shutdown, after the recording's quit save.
     pub fn stop(&self) {
         {
             let mut state = self.state();
@@ -308,9 +256,9 @@ impl DetectionController {
         self.set_enabled(false);
     }
 
-    /// Reads the setting and applies it; an unreadable setting leaves
-    /// detection as it is. While detection is on, a detector that did not
-    /// start is started again.
+    /// Reads the setting and applies it; an unreadable setting changes
+    /// nothing. While detection is on, a detector that did not start is
+    /// started again.
     pub fn follow_settings(&self) {
         match self.store.settings() {
             Ok(settings) => self.set_enabled(settings.meeting_detection_enabled),
@@ -336,9 +284,8 @@ impl DetectionController {
         self.state().prompt.is_some()
     }
 
-    /// Turns detection on (the detector starts, or is started again when
-    /// it did not) or off (the detector stops and the prompt goes). Once
-    /// [`Self::stop`] ran, it stays off.
+    /// Turns detection on or off (the detector stops and the prompt goes).
+    /// Once [`Self::stop`] ran, it stays off.
     pub fn set_enabled(&self, enabled: bool) {
         let mut detecting = self
             .detecting
@@ -358,8 +305,7 @@ impl DetectionController {
                 *detecting = self.start_detector(detecting.take());
             }
         } else if self.detector.is_running() || detecting.is_some() {
-            // The events' channel closes with the detector, which ends
-            // the thread that carries them.
+            // The events' channel closes with the detector, ending their thread.
             self.detector.stop();
             if let Some(thread) = detecting.take() {
                 let _ = thread.join();
@@ -368,8 +314,7 @@ impl DetectionController {
     }
 
     /// Starts the detector and the thread that hands its events to
-    /// [`Self::handle`]; `old`, the thread of an earlier start, is joined
-    /// first. `None` when the detector did not start.
+    /// [`Self::handle`], joining `old` first. `None` when it did not start.
     fn start_detector(&self, old: Option<JoinHandle<()>>) -> Option<JoinHandle<()>> {
         if let Some(old) = old {
             let _ = old.join();
@@ -403,14 +348,12 @@ impl DetectionController {
             .ok()
     }
 
-    /// One of the detector's events; see the module doc. The decision the
-    /// tests pin. Swift: `DetectionController.handle`.
+    /// One of the detector's events; see the module doc.
     pub fn handle(&self, event: MeetingEvent) {
         let forward = {
             let mut state = self.state();
-            // Read under the lock: a recording that starts meanwhile takes
-            // the lock in `recorder_changed` after this, and closes what
-            // this raised.
+            // Read under the lock: a recording that starts meanwhile closes what this
+            // raised in `recorder_changed`.
             let busy = self.recorder.is_busy();
             match event {
                 MeetingEvent::MicrophoneOpened { bundle_id, .. } => {
@@ -431,15 +374,13 @@ impl DetectionController {
                 }
             }
         };
-        // With the lock released: the recorder reports its change through
-        // `recorder_changed`, which takes it.
+        // With the lock released: `recorder_changed` takes it.
         if let Some(activity) = forward {
             self.recorder.microphone_activity(activity);
         }
     }
 
-    /// The recorder changed (its change hook): a recording starting takes
-    /// the prompt down. Swift: `DetectionController.recordingDidChange`.
+    /// The recorder changed: a recording starting takes the prompt down.
     pub fn recorder_changed(&self) {
         let mut state = self.state();
         if state.prompt.is_some() && self.recorder.is_busy() {
@@ -447,20 +388,15 @@ impl DetectionController {
         }
     }
 
-    /// The X of prompt `number` ([`DetectionPrompt::number`]; `None` for
-    /// a prompt shown unnumbered: whichever is up), the panel having taken
-    /// it down. Nothing when that prompt is no longer up: it closed, and
-    /// perhaps another came up, meanwhile.
+    /// The X of prompt `number` (`None`: whichever is up). Nothing when that
+    /// prompt is no longer up.
     pub fn dismissed(&self, number: Option<u64>) {
         self.answered(number);
     }
 
     /// The Record of prompt `number`, as for [`Self::dismissed`]: a call
-    /// recording attributed to the app it named. Nothing when that prompt
-    /// is no longer up; a recording already in progress makes the
-    /// recorder refuse it, so a prompt never starts a second one. Blocks
-    /// for the start, as the recorder's start does. Swift:
-    /// `DetectionPromptViewModel.start`.
+    /// recording attributed to the app it named. Blocks for the start; the
+    /// recorder refuses a second recording.
     pub fn record(&self, number: Option<u64>) {
         if let Some(prompt) = self.answered(number) {
             self.recorder.start_call(prompt.call_app.as_deref());

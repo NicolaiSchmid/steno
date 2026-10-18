@@ -1,9 +1,6 @@
-//! One models directory for one environment: the app and the CLI
-//! (`steno_services::speech`) and the `transcribe` example and the FLEURS
-//! test (`steno_speech::ModelStore::from_environment`) find the ONNX
-//! models in the same place, and `STENO_MODELS_MIRROR` reaches the app's
-//! speech setup. The environment is the process's, so each case runs in a
-//! child process of this test binary.
+//! One models directory for one environment: the app, the CLI and the
+//! `transcribe` example find the ONNX models in the same place. Each case
+//! runs in a child process, since the environment is the process's.
 
 use std::path::{Path, PathBuf};
 
@@ -68,9 +65,7 @@ fn the_app_the_cli_and_the_example_read_one_models_directory() {
     }
     let dir = tempfile::tempdir().unwrap();
     let (cwd, home) = (dir.path().join("work"), dir.path().join("home"));
-    // The roots exist, so they compare as the file system sees them: the
-    // working directory can come back resolved (`/private/var` on the Mac,
-    // a `\\?\` or long name on Windows).
+    // The roots exist, so compare them as the file system resolves them.
     let same = |left: &Path, right: &Path| {
         assert_eq!(
             left.canonicalize().unwrap(),

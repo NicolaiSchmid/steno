@@ -1,25 +1,21 @@
 //! The host's `QrEncoder`: the pairing URL drawn as a QR code, the PNG the
-//! Phones section shows. Swift: `QRCode.png(for:)` in
-//! `apps/macos/Steno/Services/QRCode.swift`, which draws it with Core
-//! Image's `CIQRCodeGenerator`.
+//! Phones section shows.
 
 use base64::Engine as _;
 use qrcode::{Color, EcLevel, QrCode};
 use steno_host::services::QrEncoder;
 
-/// Pixels per module, as Swift's `scale`; the page scales the image
-/// further with nearest-neighbour sampling.
+/// Pixels per module; the page scales the image further with
+/// nearest-neighbour sampling.
 pub const MODULE_PIXELS: usize = 8;
 
 /// White modules around the code. The page's white frame widens it to the
 /// quiet zone a scanner needs.
 pub const MARGIN_MODULES: usize = 1;
 
-/// Draws the text as a QR code at error correction level M, as Swift set
-/// `correctionLevel`: black modules on white, [`MODULE_PIXELS`] pixels
-/// each, [`MARGIN_MODULES`] white modules around, written as an 8-bit
-/// greyscale PNG in standard base64. `None` when the text is too long for a
-/// QR code, as Swift answered nil.
+/// Draws the text as a QR code at error correction level M: black modules
+/// on white, [`MODULE_PIXELS`] pixels each, [`MARGIN_MODULES`] around, as an
+/// 8-bit greyscale PNG in standard base64. `None` when the text is too long.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PngQrEncoder;
 
@@ -109,9 +105,8 @@ mod tests {
         )
     }
 
-    /// The image decodes back to the exact pairing URL, which parses into
-    /// the payload it came from, also with a name that needs
-    /// percent-encoding and one outside ASCII.
+    /// The image decodes back to the exact pairing URL, also with a name that
+    /// needs percent-encoding.
     #[test]
     fn the_code_decodes_back_to_the_pairing_payload() {
         for name in [
@@ -152,7 +147,7 @@ mod tests {
         }
     }
 
-    /// A text too long for the largest code draws nothing, as Swift's nil.
+    /// A text too long for the largest code draws nothing.
     #[test]
     fn a_text_too_long_for_a_code_draws_nothing() {
         assert!(PngQrEncoder.png_base64(&"x".repeat(4000)).is_none());

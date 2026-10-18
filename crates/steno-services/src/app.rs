@@ -1,7 +1,5 @@
-//! [`build`] (and [`build_with_import`], the shell's, with the Swift
-//! import): the one function that turns the settings into the running
-//! object graph, and [`App`], what it hands back. Swift: `AppEnvironment.live`
-//! and `AppController.launch`.
+//! [`build`] and [`build_with_import`]: turn the settings into the running
+//! object graph, [`App`].
 
 use std::path::Path;
 use std::sync::Arc;
@@ -46,8 +44,7 @@ use crate::updates::{IdleGate, ScheduleParts, UpdateSchedule, UpdateSource};
 
 /// What stops the graph from being built: another process holds the
 /// database ([`DatabaseLock`]), or the database could not be opened or
-/// read. A secret store that cannot be read and a handover identity that
-/// cannot be loaded are warnings, not errors; the graph runs without them.
+/// read.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error(transparent)]
@@ -56,14 +53,10 @@ pub enum BuildError {
     Store(#[from] StoreError),
     #[error("Could not create the database folder: {0}")]
     DatabaseFolder(#[source] std::io::Error),
-    /// A stored setting cannot be read
-    /// ([`StoreError::UndecodableSetting`], or
-    /// [`StoreError::UndecodableSettings`]), with the database it is in,
-    /// so the dialog can say where it is ([`BuildError::unreadable_settings`]).
-    /// The text names the key and the problem, never the value or the
-    /// database's path: it goes into the log. The app refuses to start
-    /// rather than run on a default for it (a vault path, a retention
-    /// rule). Rust only.
+    /// A stored setting cannot be read, with the database it is in
+    /// ([`BuildError::unreadable_settings`]). The text names the key and the
+    /// problem, never the value or the path. The app refuses to start rather
+    /// than run on a default for it.
     #[error("{source}")]
     Setting {
         database: std::path::PathBuf,
@@ -72,11 +65,8 @@ pub enum BuildError {
 }
 
 impl BuildError {
-    /// For the stored settings that cannot be read: the store's error,
-    /// whose text names the key and the problem (or that the settings do
-    /// not read together) and never a value, and the database they are in,
-    /// which the "could not start" dialog says; `None` for every other
-    /// failure.
+    /// For unreadable stored settings: the store's error and the database
+    /// they are in; `None` for every other failure.
     #[must_use]
     pub fn unreadable_settings(&self) -> Option<(&StoreError, &Path)> {
         match self {
@@ -88,58 +78,34 @@ impl BuildError {
 
 /// What differs between the shell, the CLI and the tests.
 pub struct AppOptions {
-    /// The support directory; the database, the preferences and, by
-    /// default, the models and the audio live under it.
+    /// The support directory.
     pub paths: StenoPaths,
     /// `None` opens the database under `paths`.
     pub database_path: Option<std::path::PathBuf>,
-    /// The platform keyring when true, else the 0600 secrets file (the CLI
-    /// and headless machines). On Linux the keyring is the Secret Service
-    /// when a provider runs, else the file; see the crate doc.
+    /// The platform keyring when true, else the 0600 secrets file.
     pub keyring: bool,
-    /// The window opener and URL opener; the shell's, a no-op for the CLI.
     pub opener: Arc<dyn Opener>,
-    /// The login item; the shell's (`autostart.rs`), `None` for a fake
-    /// that registers nothing (the CLI, the tests).
+    /// The login item; `None` for a fake that registers nothing.
     pub login_item: Option<Arc<dyn LoginItem>>,
-    /// The updater the update schedule drives; the shell's (`updater.rs`),
-    /// `None` for a fake that never checks (the CLI, the tests).
+    /// The updater the update schedule drives; `None` for a fake that never checks.
     pub update_source: Option<Arc<dyn UpdateSource>>,
-    /// What the system says of each permission: the shell's
-    /// (`permissions.rs`), wrapped in [`SystemPermissions`] with the Mac's
-    /// system audio probe. `None` for a fake that grants everything (the
-    /// CLI, the tests).
+    /// What the system says of each permission; `None` grants everything.
     pub permissions: Option<Arc<dyn Permissions>>,
-    /// The calendar a recording's start is named from; the shell passes
-    /// [`system_calendar`](crate::calendar::system_calendar). `None` reads
-    /// no calendar (the CLI, the tests).
+    /// The calendar a recording is named from; `None` reads none.
     pub calendar: Option<Arc<dyn Calendar>>,
-    /// The runtime the host's synchronous service calls block on.
     pub runtime: tokio::runtime::Handle,
-    /// `CFBundleShortVersionString`'s equivalent.
     pub version: String,
-    /// Builds a capture session; `CaptureSession::new` in the product.
     pub make_capture_session: MakeCaptureSession,
-    /// Meeting detection with the shell's prompt panel
-    /// ([`crate::detection`]); `None` runs no detection (the CLI, the
-    /// tests).
+    /// Meeting detection with the shell's prompt panel; `None` runs none.
     pub detection: Option<DetectionOptions>,
-    /// How long [`build`] waits for the database's lock while another
-    /// process holds it ([`DatabaseLock::acquire_within`]):
-    /// [`LOCK_PATIENCE`] in the product, whose update relaunch starts the
-    /// new process before the old one has exited; the hang guard in the
-    /// tests, and zero or a short window in a test of the refusal.
+    /// How long [`build`] waits for the database's lock: [`LOCK_PATIENCE`]
+    /// in the product, whose update relaunch starts the new process before
+    /// the old one has exited.
     pub lock_patience: std::time::Duration,
-    /// The shell runs from an installed app bundle
-    /// ([`HostConfig::installed_bundle`]); false for the CLI and the tests,
-    /// and in [`AppOptions::product`] until the shell says otherwise.
+    /// The shell runs from an installed app bundle.
     pub installed_bundle: bool,
-    /// Where Pair again writes the Swift import's `swift-import-done`
-    /// marker before it mints a new handover identity: the Mac's login
-    /// keychain in the shell
-    /// ([`marker_on_this_mac`](crate::swift_import::marker_on_this_mac)),
-    /// `None` for the CLI, the tests, and in [`AppOptions::product`] until
-    /// the shell says otherwise.
+    /// Where Pair again writes the Swift import's `swift-import-done` marker
+    /// before it mints a new handover identity; `None` outside the shell.
     pub import_marker: Option<Arc<dyn ImportMarker>>,
 }
 
@@ -147,8 +113,7 @@ pub struct AppOptions {
 pub const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl AppOptions {
-    /// The product under the default support directory on the given
-    /// runtime, with the live capture backend.
+    /// The product under the default support directory, with live capture.
     pub fn product(
         runtime: tokio::runtime::Handle,
         opener: Arc<dyn Opener>,
@@ -184,57 +149,40 @@ pub struct App {
     pub events: MeetingEventBus,
     pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
-    /// The launch re-exports in a row per meeting that did not deliver
-    /// every row, which the launch counts and any re-export the user causes
-    /// resets.
+    /// The launch re-exports in a row per meeting.
     pub export_retries: Arc<ExportRetries>,
     pub services: Services,
-    /// The update schedule behind `services.updater`, when the shell
-    /// passed an update source; [`App::launch`] starts it.
+    /// The update schedule, when the shell passed an update source.
     pub updates: Option<Arc<UpdateSchedule>>,
     pub handover: Option<Arc<ListenerHandover>>,
     /// The handover while the Swift import is pending: its listener comes
-    /// once the import's gate opens (`crate::swift_import`).
+    /// once the import's gate opens.
     pub gated_handover: Option<Arc<GatedHandover>>,
     /// The Swift import's gate while it is pending: [`App::launch`] holds
-    /// the resume, the re-exports, the sweep and the recovery until the
-    /// step is over.
+    /// the resume, the re-exports, the sweep and the recovery until it opens.
     pub import_gate: Option<Arc<ImportGate>>,
     pub recorder: Arc<CaptureRecorder>,
-    /// Meeting detection, when the shell passed its prompt panel;
-    /// [`App::launch`] starts it.
     pub detection: Option<Arc<DetectionController>>,
-    /// Where the speech and diarization models live.
     pub models_directory: std::path::PathBuf,
     pub zone: FixedOffset,
-    /// The runtime the graph's async calls block on.
     pub runtime: tokio::runtime::Handle,
     pub version: String,
-    /// [`AppOptions::installed_bundle`], for [`App::host`].
     pub installed_bundle: bool,
-    /// What went wrong while building, for the shell's log; an unreadable
-    /// API key is logged where it is read.
+    /// What went wrong while building, for the shell's log.
     pub startup_warnings: Vec<String>,
-    /// When the launch counts an interrupted recording's master as still
-    /// being written ([`crate::recovery`]).
     pub live_recording_check: LiveRecordingCheck,
-    /// Where the Mac's system audio probe writes its tone
-    /// (`steno_audio::capture::permission::tone_directory`), for
-    /// [`App::launch`] to remove the tone files a process that ended
-    /// during a probe left there; none off the Mac, which has no probe.
+    /// Where the Mac's system audio probe writes its tone, for
+    /// [`App::launch`] to remove the files a crashed probe left; none off
+    /// the Mac.
     pub tone_directory: Option<std::path::PathBuf>,
-    /// The launch's background half, for [`App::launch_finished`].
     pub(crate) launch_work: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Resolves once the secret store chose where the secrets are, true
-    /// when it turned a read away while the keyring asked the user, for
-    /// [`App::launch`] to read the API key and the handover identity again
-    /// before it recovers the meetings
-    /// ([`crate::secrets::secret_store_with_unlock`]).
+    /// Resolves once the secret store chose where the secrets are, true when
+    /// it turned a read away while the keyring asked the user, so
+    /// [`App::launch`] reads the API key and the identity again.
     pub(crate) secrets_unlocked: std::sync::Mutex<Option<SecretsUnlocked>>,
-    /// Held while the graph lives, so no second app or CLI command takes
-    /// the same database; `None` on a filesystem without locks
-    /// ([`DatabaseLockError::Unsupported`], a startup warning). Declared
-    /// last so it outlives what it guards: fields drop in order.
+    /// Held while the graph lives, so no second process takes the database;
+    /// `None` on a filesystem without locks. Declared last so it outlives
+    /// what it guards.
     pub database_lock: Option<DatabaseLock>,
 }
 
@@ -250,9 +198,8 @@ pub fn open_store(path: &std::path::Path) -> Result<Arc<Store>, BuildError> {
     Ok(Arc::new(Store::open(path)?))
 }
 
-/// Takes the lock of the database at `path` ([`DatabaseLock`]), creating
-/// its folder, and waits up to `patience` while another process holds it.
-/// Rust only: the Swift app and CLI took no lock.
+/// Takes the lock of the database at `path`, creating its folder, and
+/// waits up to `patience` while another process holds it.
 pub fn lock_database(
     path: &std::path::Path,
     patience: std::time::Duration,
@@ -269,8 +216,7 @@ fn create_database_folder(path: &std::path::Path) -> Result<(), BuildError> {
 }
 
 /// The LLM API key, or `None` with the reason when the secret store could
-/// not be read: the app runs without summaries rather than not at all, as
-/// `AppEnvironment.live` did when the keychain was unreachable.
+/// not be read: the app runs without summaries rather than not at all.
 fn api_key(
     secrets: &dyn SecretStore,
     runtime: &tokio::runtime::Handle,
@@ -280,49 +226,27 @@ fn api_key(
 }
 
 /// The graph's secret store, in three layers from the inside out: the
-/// platform store (the keyring, the Secret Service or the secrets file;
-/// [`crate::secrets`]); the app's [`KeepsApiKey`] around it, which keeps
-/// the API key last read or written for a rebuild whose read fails; and,
-/// outermost, the Swift import's gate while one stands (the
-/// [`GraphImport`]'s while an import is pending, else the gate of a
-/// refused key read, [`crate::swift_import::key_denied_secrets`]). So a key
-/// the gate withholds is never read from the keychain, and an empty key
-/// write the gate swallows never reaches `KeepsApiKey`, whose kept key
-/// stays. `secrets` is what everything in the graph reads and writes
-/// through: the host's [`Services`], the pipeline
-/// ([`pipeline_dependencies`]) and the handover listener. Only the
-/// import's step writes the identity to the store behind the gate.
-/// `gated_secrets` builds the layers in one place, which
-/// [`build_with_import`] and the tests share.
+/// platform store; [`KeepsApiKey`], which keeps the API key last read or
+/// written for a rebuild whose read fails; and, outermost, the Swift
+/// import's gate while one stands. So a key the gate withholds is never
+/// read from the keychain, and an empty key write the gate swallows never
+/// reaches `KeepsApiKey`. Built only by `gated_secrets`.
 #[derive(Clone)]
 pub struct GraphSecrets {
-    /// The outermost layer.
     pub secrets: Arc<dyn SecretStore>,
-    /// The middle layer, whose kept key a failed read falls back on.
     pub kept: Arc<KeepsApiKey>,
-    /// The gate, which the pipeline and the meeting detail ask whether the
-    /// key is withheld ([`ImportGate::withholds_summaries`]).
+    /// The gate, which says whether the key is withheld
+    /// ([`ImportGate::withholds_summaries`]).
     pub key_gate: Option<Arc<ImportGate>>,
 }
 
 /// The dependencies of one pipeline from the stored settings, the API key
-/// and `engines`, shared by the first build and every reload, with the
-/// speech engine and the diarizer `engines` keeps: the engine for the
-/// runtime of the stored engine id ([`SpeechEngines`]). The setup of
-/// `engines` is read once by [`build`] and also backs the model service,
-/// so the two agree on where each engine runs; the recorder's warm-up
-/// reads the engine from the pipeline. A secret store that cannot be read
-/// is logged, and the passes are built with the key last read or written
-/// through the app's store ([`KeepsApiKey`]), or without one: a keyring
-/// locked again while the app runs keeps the key a rebuild had, and a key
-/// the user removed or changed is never the one kept. While the Swift
-/// import's gate withholds the key for the stored endpoint
-/// ([`ImportGate::withholds_summaries`]: an endpoint that needs the key,
-/// not `ChatGPT`'s) there are no passes, as when no summaries are set up:
-/// the meeting completes with its raw transcript and without a summary
-/// instead of failing at it, and its summary can be run again once a key
-/// is saved. The pipeline carries the support directory's files in
-/// `support` ([`SupportFiles`]), and the retention rule is to ask.
+/// and `engines`, shared by the first build and every reload. An
+/// unreadable secret store is logged and the passes use the key
+/// [`KeepsApiKey`] kept, or none. While the Swift import's gate withholds
+/// the key for the stored endpoint there are no passes: the meeting
+/// completes with its raw transcript instead of failing, and its summary
+/// can run again once a key is saved.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,
@@ -382,17 +306,13 @@ pub fn pipeline_dependencies(
     })
 }
 
-/// What every build of the pipeline, the first and each reload, shares
-/// from the support directory.
+/// What every build of the pipeline shares from the support directory.
 #[derive(Debug, Clone)]
 pub struct SupportFiles {
-    /// What of each recording the decode stage replaced by silence, which
-    /// the detail reads.
+    /// What of each recording the decode stage replaced by silence.
     pub damaged_audio: Arc<DamagedAudio>,
-    /// The recordings' warm-up mark, read once by the launch.
     pub warm_up_mark: Arc<WarmUpMark>,
-    /// The reads of a recording, marked; the meetings the launch
-    /// quarantined for one that ended with the app.
+    /// The reads of a recording, marked.
     pub reading_marks: Arc<ReadingMarks>,
 }
 
@@ -408,8 +328,7 @@ impl SupportFiles {
     }
 }
 
-/// [`pipeline_dependencies`] over clones of its inputs, for the reloads,
-/// every build sharing `support`.
+/// [`pipeline_dependencies`] over clones of its inputs, for the reloads.
 fn make_dependencies(
     store: &Arc<Store>,
     engines: &Arc<SpeechEngines>,
@@ -436,13 +355,9 @@ fn make_dependencies(
 }
 
 /// The phone intake over whichever pipeline is current when a recording
-/// arrives, so a reload is not bypassed. The intake commits the meeting
-/// with its receipt and the pipeline only processes it
-/// ([`steno_pipeline::ProcessingPipeline::enqueue_saved`]), as in
-/// `RecordingIntake::over`. Each copy's folder is noted in the record
-/// under `support_directory` until its admission commits
-/// ([`crate::audio_folders`]), so the launch adopts a copy left with no
-/// meeting. Swift: `AppEnvironment.makeIntake`.
+/// arrives, so a reload is not bypassed. Each copy's folder is noted
+/// under `support_directory` until its admission commits, so the launch
+/// adopts a copy left with no meeting.
 pub fn handover_intake(
     store: Arc<Store>,
     pipeline: Arc<CurrentPipeline>,
@@ -464,10 +379,7 @@ pub fn handover_intake(
     }))
 }
 
-/// Where the handover reads its identity and mints one: the secret store
-/// (`secrets`, the graph's), the fingerprint record in the support
-/// directory, the paired phones in `store`, the import's `marker` and the
-/// listener over the store and the phone intake.
+/// Where the handover reads its identity and mints one.
 fn identity_source(
     store: &Arc<Store>,
     pipeline: &Arc<CurrentPipeline>,
@@ -509,23 +421,16 @@ fn identity_source(
 }
 
 /// The handover over the listener on the identity `source` loads or
-/// mints, whose mac id the Phones settings show, or one that waits with
-/// the reason when the identity cannot be read or is not the one the
-/// paired phones pinned ([`ListenerHandover::read`]): it mints nothing
-/// then, and reads again at Try again or, when the keyring was asking the
-/// user ([`KeyringUnavailable::Unlocking`](crate::secrets::KeyringUnavailable::Unlocking)),
-/// once [`App::launch`] heard it answer. `None`, with the reason, when
-/// the launch checkpoint failed ([`HandoverService::checkpoint_store`],
-/// which says why it comes first): the handover stays off until the next
-/// launch, and the rest of the app runs. Swift:
-/// `AppEnvironment.makeHandover`.
+/// mints, or one that waits with the reason when the identity cannot be
+/// read or is not the one the paired phones pinned: it mints nothing
+/// then. `None` when the launch checkpoint failed: the handover stays off
+/// until the next launch.
 fn handover_listener(source: &Arc<IdentitySource>) -> Result<Arc<ListenerHandover>, String> {
     HandoverService::checkpoint_store(&source.store).map_err(|error| error.to_string())?;
     Ok(Arc::new(ListenerHandover::read(source.clone())))
 }
 
-/// [`lock_database`], or `None` with a startup warning on a filesystem
-/// without locks.
+/// [`lock_database`], or `None` with a startup warning without locks.
 fn lock_or_run_without(
     database_path: &std::path::Path,
     patience: std::time::Duration,
@@ -544,9 +449,7 @@ fn lock_or_run_without(
 }
 
 /// The listener's configuration, with the inbox under the support
-/// directory: [`crate::handover::configuration`] over the environment, and
-/// in this crate's tests loopback only, unadvertised, on a port the system
-/// chooses.
+/// directory; in tests loopback only, unadvertised, on any port.
 fn listener_configuration(
     paths: &StenoPaths,
     store: &Store,
@@ -569,15 +472,10 @@ fn listener_configuration(
     }
 }
 
-/// The graph's [`GraphSecrets`] over `platform`, the one place its three
-/// layers are built: [`KeepsApiKey`] around `platform`, and around that
-/// the import's gate while an import is pending (returned with the
-/// import), else the gate of a refused key read, if any
-/// ([`crate::swift_import::key_denied_secrets`]). That gate is the
-/// keychain's only: over the secrets file (`file`, the CLI's on the Mac,
-/// which never asks the keychain) the key stays readable, so a run with
-/// `STENO_LLM_API_KEY` set still gets its key. The import's step records
-/// the identity's fingerprint in the support directory of `paths`.
+/// The graph's [`GraphSecrets`] over `platform`: [`KeepsApiKey`], then
+/// the import's gate while an import is pending, else the gate of a
+/// refused keychain read, if any. Over the secrets file (`file`) the key
+/// stays readable, so `STENO_LLM_API_KEY` still works.
 pub(crate) fn gated_secrets(
     pending: Option<crate::swift_import::PendingImport>,
     preferences: &Arc<FilePreferences>,
@@ -610,10 +508,9 @@ pub(crate) fn gated_secrets(
     )
 }
 
-/// The handover while an import is pending: its listener, over the
-/// identity the import stores, comes once the import's gate opens; while
-/// the gate waits, Try again runs `step` again and Pair again ends the
-/// import with an identity `source` mints.
+/// The handover while an import is pending: its listener comes once the
+/// import's gate opens; Try again runs `step` again and Pair again ends
+/// the import with an identity `source` mints.
 fn gated_handover(
     import: &GraphImport,
     step: &Arc<ImportStep>,
@@ -629,8 +526,6 @@ fn gated_handover(
     ))
 }
 
-/// The host's handover: the gated one while an import is pending, else the
-/// listener built at launch, if any.
 fn host_handover(
     gated: Option<&Arc<GatedHandover>>,
     listener: Option<&Arc<ListenerHandover>>,
@@ -641,9 +536,8 @@ fn host_handover(
     listener.map(|listener| listener.clone() as Arc<dyn steno_host::services::Handover>)
 }
 
-/// The import's onboarding step, which chooses the Swift certificate by
-/// the phones paired in `store`, and reloads the pipeline whenever the key
-/// gate opens, so the passes get the key it read.
+/// The import's onboarding step, which reloads the pipeline whenever the
+/// key gate opens.
 fn import_step(
     import: &GraphImport,
     pipeline: &Arc<CurrentPipeline>,
@@ -666,13 +560,10 @@ fn import_step(
     ))
 }
 
-/// Turns a stored engine id other than Parakeet v3 (Whisper, Ultra or the
-/// German Parakeet the Swift app offered) into Parakeet v3, before
-/// anything reads the engine, with the notice the main window shows once:
-/// its pending flag
-/// ([`engine_notice::PENDING_KEY`](steno_host::setup::engine_notice::PENDING_KEY))
-/// is written to `preferences`, the graph's one `preferences.json`, before
-/// the database changes. A failed update is a warning.
+/// Turns a stored engine id other than Parakeet v3 into Parakeet v3,
+/// before anything reads the engine, with the notice the main window
+/// shows once; the notice's flag is written to `preferences` before the
+/// database changes. A failed update is a warning.
 fn retire_the_engine(store: &Store, preferences: &FilePreferences, warnings: &mut Vec<String>) {
     let retired = store.retire_speech_engine(|| {
         preferences.set_flag(steno_host::setup::engine_notice::PENDING_KEY, true);
@@ -682,41 +573,20 @@ fn retire_the_engine(store: &Store, preferences: &FilePreferences, warnings: &mu
     }
 }
 
-/// Builds the graph. First the database's lock ([`DatabaseLock`]): while
-/// another process holds it past [`AppOptions::lock_patience`] the build
-/// fails with [`BuildError::Lock`] before the database is opened; on a
-/// filesystem without locks it runs without one and says so in
-/// [`App::startup_warnings`]. Real: store, settings, secret store, speech
-/// engine (`CoreML` in this process on the Mac, the ONNX speech sidecar
-/// elsewhere and as the Mac's fallback; [`SpeechSetup::runtime`]), ONNX
-/// diarizer, cosine speaker memory over the store, LLM passes, delivery
-/// coordinator, handover listener, capture session, recorder, the speech
-/// models, folder usage, preferences, and the login item when the shell
-/// passes its own ([`AppOptions::login_item`]), the update schedule over
-/// the shell's update source ([`AppOptions::update_source`]), the QR
-/// encoder, the shell's permissions with the system audio probe
-/// ([`AppOptions::permissions`]) and the calendar it passes
-/// ([`AppOptions::calendar`]), the clip player
-/// ([`ProcessClipPlayer`](crate::clip_player::ProcessClipPlayer)). Fakes
-/// where no platform side exists yet (the plan's "Pipeline and services
-/// (WP6b)" list says why for each): the permissions (all granted) when
-/// the shell passes none, the updater when the shell passes no source;
-/// the audio device list is empty off the Mac until the `PipeWire` and
-/// WASAPI backends enumerate devices.
+/// Builds the graph. First the database's lock: while another process
+/// holds it past [`AppOptions::lock_patience`] the build fails with
+/// [`BuildError::Lock`] before the database is opened. Fakes stand in
+/// where the shell passes no platform side: the permissions (all
+/// granted) and the updater.
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
     build_with_import(options, |_| None)
 }
 
 /// [`build`] with the Swift import's launch half: `import` runs once the
-/// database's lock is held, so a second app that the lock refuses never
-/// touches the Swift app's items or `preferences.json`, and before
-/// anything reads a preference or a secret. It gets the graph's
-/// `preferences.json` ([`crate::swift_import::launch_on_this_mac`] in the
-/// shell, `|_| None` in [`build`]). With a pending import the graph reads
-/// its secrets through the import's gate, so no API key is read and no
-/// handover listener is built until the onboarding step ran, and the step
-/// is the host's `SwiftImport`. The shell's entry point on every platform;
-/// off the Mac the launch half finds nothing.
+/// database's lock is held and before anything reads a preference or a
+/// secret. With a pending import the graph reads its secrets through the
+/// import's gate, so no API key is read and no handover listener is built
+/// until the onboarding step ran.
 #[allow(clippy::too_many_lines)]
 pub fn build_with_import(
     options: AppOptions,
@@ -742,11 +612,9 @@ pub fn build_with_import(
     let runtime = options.runtime;
     let zone = local_zone();
 
-    // The engine notice's flag goes into the graph's one `preferences.json`.
     retire_the_engine(&store, &preferences, &mut warnings);
-    // The speech settings and the models directory are read once, here:
-    // the pipeline (and every reload, which keeps its engine when it runs
-    // where the last one did) and the model service share them.
+    // Read once, here: the pipeline (and every reload) and the model
+    // service share them.
     let settings = store.settings().map_err(|error| match error {
         StoreError::UndecodableSetting { .. } | StoreError::UndecodableSettings => {
             BuildError::Setting {
@@ -756,16 +624,11 @@ pub fn build_with_import(
         }
         other => BuildError::Store(other),
     })?;
-    // What the decoder replaced by silence per meeting, in the support
-    // directory, which the detail reads through `HostPipeline`; a deleted
-    // meeting's entry goes at launch.
     let damaged_audio = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
     damaged_audio.retain(|meeting_id| store.meeting(meeting_id).map_or(true, |m| m.is_some()));
-    // The launch check, before anything reads a recording: a mark left over
-    // from a warm-up that ended with the app turns the warm-up off
-    // ([`WarmUpMark`]), and a mark a read left quarantines its meeting
-    // ([`ReadingMarks`]). Either, from `CoreML`, turns the speech sidecar on
-    // in its place ([`SpeechFallback`]), before the engines are built.
+    // Before anything reads a recording: a leftover warm-up mark turns the
+    // warm-up off and a leftover read mark quarantines its meeting; either
+    // turns the speech sidecar on in place of `CoreML`.
     let support = SupportFiles {
         damaged_audio,
         warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
@@ -784,8 +647,6 @@ pub fn build_with_import(
         SpeechSetup::new(&settings, &paths).with_fallback(fallback),
     ));
     let speech = engines.setup();
-    // An unreadable API key is logged by the first build of the
-    // dependencies below, once.
     let withheld_api_key = graph_secrets
         .key_gate
         .clone()
@@ -815,8 +676,8 @@ pub fn build_with_import(
         Some(system) => system.clone(),
         None => Arc::new(FakePermissions::all_granted()),
     };
-    // Settings and onboarding install the models; the pipeline never does
-    // (`model_gate`), so an install resumes the meetings waiting for it.
+    // Settings and onboarding install the models, so an install resumes
+    // the meetings waiting for it.
     let speech_models = Arc::new(ResumingSpeechModels::resuming(
         ModelStoreSpeechModels::new(speech),
         pipeline.clone(),
@@ -869,16 +730,13 @@ pub fn build_with_import(
     let swift_import = step.map(|step| step as Arc<dyn steno_host::services::SwiftImport>);
 
     let clock = Arc::new(WallClock);
-    // The one `preferences.json` the launch half, the import's step, the
-    // engine notice, the update schedule and the host share.
     let preferences: Arc<dyn Preferences> = preferences;
     let updates = options.update_source.map(|source| {
         UpdateSchedule::new(ScheduleParts {
             source,
             preferences: preferences.clone(),
             clock: clock.clone(),
-            // Stable plan P25: no update installs over a recording or a
-            // processing job.
+            // No update installs over a recording or a processing job.
             gate: Arc::new(IdleGate::new(recorder.clone(), pipeline.clone())),
             recorder: recorder.clone(),
             support_directory: paths.support_directory.clone(),
@@ -950,16 +808,11 @@ pub fn build_with_import(
 }
 
 /// The launch's last step on the meetings a previous process left
-/// unfinished, after the resume, the re-exports and the sweep: the
-/// interrupted recordings in `interrupted` are recovered, left alone while
-/// another process still writes them or while a folder they may be in
-/// cannot be read, or failed ([`reconcile_interrupted`]). It comes last, so
-/// a folder that is slow to answer (a network volume) or a fresh master it
-/// watches delays nothing else. A panic in it is caught and logged, and the
-/// rows it had not reached stay `recording` for the next launch. Then the
-/// recordings in the audio folders that have no meeting at all are adopted
-/// ([`adopt_orphans`]), also after such a panic; their ids are returned.
-/// Blocks, so [`App::launch`] runs it on a blocking task.
+/// unfinished: the interrupted recordings are recovered, left alone or
+/// failed ([`reconcile_interrupted`]), then the recordings with no meeting
+/// are adopted ([`adopt_orphans`]); their ids are returned. Last, so a
+/// slow folder delays nothing else. A panic is caught and logged.
+/// Blocks.
 pub(crate) fn reconcile_at_launch(
     store: &Arc<Store>,
     pipeline: &CurrentPipeline,
@@ -994,15 +847,10 @@ pub(crate) fn reconcile_at_launch(
 pub const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The shell's exits around [`App::shutdown`], which runs once, for at
-/// most `patience` (the shell passes [`SHUTDOWN_PATIENCE`]), before the
-/// process ends: an exit request the gate can hold goes through
-/// [`ExitGate::exit_requested`], an exit it cannot (the run loop's last
-/// event after the Dock's Quit or a logout on macOS and a logoff on
-/// Windows, an update's relaunch, the Windows installer's exit, a logout
-/// or a system shutdown on Linux, from the shell's `session_end`)
-/// through [`ExitGate::exiting`]. Clones share one gate. Swift:
-/// `applicationShouldTerminate` answered `.terminateLater`, awaited
-/// `AppController.shutdown()` without a bound and then replied.
+/// most `patience`: an exit request the gate can hold goes through
+/// [`ExitGate::exit_requested`], one it cannot (a logout, an update's
+/// relaunch, a system shutdown) through [`ExitGate::exiting`]. Clones
+/// share one gate.
 ///
 /// ```
 /// use std::time::Duration;
@@ -1011,8 +859,7 @@ pub const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_sec
 ///
 /// let gate = ExitGate::default();
 /// let (exited, exit) = std::sync::mpsc::channel();
-/// // The first request is held: the shutdown runs, then the exit, which
-/// // the shell's run loop answers by raising the request again.
+/// // The first request is held: the shutdown runs, then the exit.
 /// let held = !gate.exit_requested(
 ///     Duration::from_secs(10),
 ///     || { /* stop and save the recording */ },
@@ -1020,7 +867,7 @@ pub const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_sec
 /// );
 /// assert!(held);
 /// exit.recv_timeout(Duration::from_secs(10)).unwrap();
-/// // That request, and every one after it, goes ahead.
+/// // Every request after it goes ahead.
 /// assert!(gate.exit_requested(
 ///     Duration::from_secs(10),
 ///     || unreachable!("the shutdown runs once"),
@@ -1032,7 +879,6 @@ pub struct ExitGate {
     shared: Arc<(std::sync::Mutex<ExitStage>, std::sync::Condvar)>,
 }
 
-/// Where the gate stands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum ExitStage {
     /// No exit yet.
@@ -1049,12 +895,10 @@ enum ExitStage {
 }
 
 impl ExitGate {
-    /// Whether this exit request may go ahead now. The first one returns
-    /// false, runs `shutdown` on a thread of its own for at most
-    /// `patience` and then calls `exit`, which is expected to raise the
-    /// request again; that one, and every one after it, returns true. A
-    /// request while the shutdown runs returns false and is held: the
-    /// exit is coming.
+    /// Whether this exit request may go ahead now. The first returns false,
+    /// runs `shutdown` on its own thread for at most `patience`, then calls
+    /// `exit`, which should raise the request again; that and every later
+    /// one return true. Requests while the shutdown runs are held.
     #[must_use]
     pub fn exit_requested(
         &self,
@@ -1070,8 +914,7 @@ impl ExitGate {
         let gate = self.clone();
         std::thread::spawn(move || {
             run_for_at_most(patience, shutdown);
-            // `exiting` took over while the shutdown ran: the process is
-            // ending without the gate's exit.
+            // `exiting` took over: the process ends without the gate's exit.
             if gate.release() == ExitStage::ShuttingDown {
                 exit();
             }
@@ -1079,11 +922,9 @@ impl ExitGate {
         false
     }
 
-    /// The process is about to end without an exit request the gate
-    /// holds: runs `shutdown` on this thread's behalf, or waits for the
-    /// one already running (a held request's, or an earlier `exiting`'s),
-    /// and returns once it ended, at most `patience` later; at once when it
-    /// already ran. Every exit request goes ahead afterwards.
+    /// The process is about to end without a held request: runs `shutdown`,
+    /// or waits for the one already running, and returns once it ended, at
+    /// most `patience` later.
     pub fn exiting(&self, patience: std::time::Duration, shutdown: impl FnOnce() + Send + 'static) {
         match self.advance(ExitStage::Ending) {
             ExitStage::Open => {
@@ -1102,15 +943,13 @@ impl ExitGate {
         }
     }
 
-    /// Whether the shutdown has run, or ran out of patience: every exit
-    /// goes ahead without one.
+    /// Whether the shutdown has run or ran out of patience.
     #[must_use]
     pub fn released(&self) -> bool {
         *lock_stage(&self.shared.0) == ExitStage::Released
     }
 
-    /// Moves an open gate to `next`, and a held request's shutdown to
-    /// `Ending` when `next` is `Ending`; returns the stage it found.
+    /// Moves an open gate to `next`; returns the stage it found.
     fn advance(&self, next: ExitStage) -> ExitStage {
         let mut stage = lock_stage(&self.shared.0);
         let found = *stage;
@@ -1137,8 +976,6 @@ fn lock_stage(stage: &std::sync::Mutex<ExitStage>) -> std::sync::MutexGuard<'_, 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Runs `shutdown` on a thread of its own and waits for it, at most
-/// `patience`.
 fn run_for_at_most(patience: std::time::Duration, shutdown: impl FnOnce() + Send + 'static) {
     let (done, finished) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -1154,8 +991,7 @@ fn run_for_at_most(patience: std::time::Duration, shutdown: impl FnOnce() + Send
 }
 
 /// Logs an `OperationFailed`: warn names the meeting, the operation and
-/// the stage; the failure text, which can quote the model or the server,
-/// goes to debug only.
+/// the stage; the failure text, which can quote the server, goes to debug.
 fn log_operation_failure(event: &MeetingEvent) {
     if let MeetingEvent::OperationFailed {
         meeting_id,
@@ -1174,16 +1010,13 @@ fn log_operation_failure(event: &MeetingEvent) {
     }
 }
 
-/// How often the reload owner's pass runs when nothing asked for one
-/// ([`own_the_reloads`]).
+/// How often the reload owner's pass runs when nothing asked for one.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// What the event follower does with one event from the pipeline's bus,
-/// on the blocking pool ([`App::launch`]): the host applies it, then asks
-/// the reload owner for a pass where the event changed what the progress
-/// does not carry, rows or the pipeline's own flags, with or without a
-/// commit. A retention applied also sweeps first. `None` is a follower
-/// that fell behind the bus and missed events: it asks for a reload too.
+/// The event follower's handling of one bus event, on the blocking pool:
+/// the host applies it, then asks the reload owner for a pass where the
+/// event changed rows or the pipeline's flags. `None` is a follower that
+/// fell behind and missed events: it asks for a reload too.
 fn follow_event(host: &Host, sweep: &RetentionSweep, event: Option<&MeetingEvent>) {
     let Some(event) = event else {
         host.request_reload();
@@ -1207,17 +1040,11 @@ fn follow_event(host: &Host, sweep: &RetentionSweep, event: Option<&MeetingEvent
     }
 }
 
-/// The reload owner (P40 decision 3, `.plans/2026-10-12-store-off-the-workers.md`):
-/// one [`Host::reload_pass`] on each tick of `every` and on each request
-/// ([`Host::request_reload`]), whichever comes first, on the blocking
-/// pool, so a pass that waits holds no runtime worker. A tick that waited
-/// is followed by the next one a full interval later, never by a burst;
-/// requests made while a pass runs fold into one more pass. Ends when the
-/// runtime shuts down. The pass reloads only when asked or when the
-/// store's change mark moved: stage writes post no events of their own,
-/// and another process's commits none at all, so the tick is what finds
-/// them (the Swift app had GRDB observation). The same tick is the
-/// pairing poll Swift's Phones pane ran every two seconds.
+/// The reload owner: one [`Host::reload_pass`] on each tick of `every`
+/// and on each request ([`Host::request_reload`]), on the blocking pool.
+/// A late tick is followed by the next a full interval later, never a
+/// burst; requests during a pass fold into one more pass. The tick finds
+/// stage writes and other processes' commits, which post no events.
 pub(crate) async fn own_the_reloads(host: Arc<Host>, every: std::time::Duration) {
     let mut interval = tokio::time::interval(every);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1233,10 +1060,9 @@ pub(crate) async fn own_the_reloads(host: Arc<Host>, every: std::time::Duration)
     }
 }
 
-/// Runs `body` on the runtime's blocking pool and waits for it there, so
-/// a host call that waits on the store holds no runtime worker. A panic
-/// in `body` resumes here. False when the runtime is shutting down and
-/// did not run it, which ends the calling task.
+/// Runs `body` on the blocking pool and waits for it there, so a wait on
+/// the store holds no runtime worker. A panic resumes here. False when
+/// the runtime is shutting down and did not run it.
 async fn off_the_workers(body: impl FnOnce() + Send + 'static) -> bool {
     match tokio::task::spawn_blocking(body).await {
         Ok(()) => true,
@@ -1246,8 +1072,7 @@ async fn off_the_workers(body: impl FnOnce() + Send + 'static) -> bool {
 }
 
 /// The update schedule's change hook: the host's `updates_changed` on the
-/// blocking pool, since the schedule calls from a runtime worker and the
-/// host's lock may be held through a settings save's busy wait.
+/// blocking pool, since the host's lock may be held through a busy wait.
 fn updates_hook(host: &Arc<Host>, runtime: &tokio::runtime::Handle) -> Arc<dyn Fn() + Send + Sync> {
     let (host, runtime) = (host.clone(), runtime.clone());
     Arc::new(move || {
@@ -1256,8 +1081,6 @@ fn updates_hook(host: &Arc<Host>, runtime: &tokio::runtime::Handle) -> Arc<dyn F
     })
 }
 
-/// What the gated handover calls once its listener is adopted: the host's
-/// `phones_changed` on the blocking pool, as [`updates_hook`].
 fn phones_hook(
     host: &Arc<Host>,
     runtime: &tokio::runtime::Handle,
@@ -1266,10 +1089,8 @@ fn phones_hook(
     move || notify_on_the_blocking_pool(&runtime, "phones_changed", move || host.phones_changed())
 }
 
-/// Runs `notify`, a host notification nothing waits for, on `runtime`'s
-/// blocking pool. Nothing would see its panic, so a panic is logged at
-/// `error` under the notification's name, without its message, which may
-/// name a path.
+/// Runs `notify`, a host notification nothing waits for, on the blocking
+/// pool; a panic is logged at `error` under `name`, without its message.
 fn notify_on_the_blocking_pool(
     runtime: &tokio::runtime::Handle,
     notification: &'static str,
@@ -1283,11 +1104,7 @@ fn notify_on_the_blocking_pool(
 }
 
 impl App {
-    /// The host over this graph, with the viewer's zone, the version,
-    /// whether a package manager delivers the updates
-    /// ([`updates_are_managed`](crate::updates::updates_are_managed)) and
-    /// whether the shell runs from an installed bundle
-    /// ([`AppOptions::installed_bundle`]).
+    /// The host over this graph.
     pub fn host(&self) -> Result<Host, steno_host::host::HostError> {
         Host::new(
             self.store.clone(),
@@ -1303,22 +1120,11 @@ impl App {
     }
 
     /// What every exit does first ([`ExitGate`]), in order: the pipelines
-    /// quit ([`CurrentPipeline::quit`]), so no job starts and a job the
-    /// exit ends stays `processing` for the next launch rather than
-    /// `failed`; a start or a stop in progress settles; a recording in
-    /// progress is stopped with the `quit` end reason and saved (its asset
-    /// written, the meeting enqueued, where it stays `queued` until the
-    /// next launch processes it); the handover listener stops; and
-    /// meeting detection stops ([`DetectionController::stop`]). Every
-    /// write is a committed transaction by then, so the store has nothing
-    /// left to flush, except a phone admission in flight at the stop: it
-    /// still finishes after this returns, or the exit cuts it as a crash
-    /// would: a copy without its commit is noted, and the next launch
-    /// adopts it (at worst a duplicate meeting, never a lost one). A
-    /// handover still waiting for its listener gets none after this
-    /// ([`ListenerHandover::close`]). Swift: `AppController.shutdown`,
-    /// whose pipeline died with the app, so the next launch resumed its
-    /// job.
+    /// quit, so a job the exit ends stays `processing` for the next launch;
+    /// a start or stop in progress settles; a recording is stopped with
+    /// `quit` and saved; the handover listener stops; detection stops. A
+    /// phone admission in flight may still finish or be cut as by a crash:
+    /// the next launch adopts the copy.
     pub fn shutdown(&self) {
         self.pipeline.quit();
         self.recorder.stop_for_quit();
@@ -1328,9 +1134,7 @@ impl App {
         if let Some(handover) = self.gated_handover.as_ref().and_then(|gated| gated.close()) {
             block_on(&self.runtime, handover.stop());
         }
-        // Last: the quit save must not wait for a detector start or a
-        // snapshot under way, and a prompt's Record meanwhile is refused,
-        // as the quit refuses every start.
+        // Last: the quit save must not wait for a detector start.
         if let Some(detection) = &self.detection {
             detection.stop();
         }
@@ -1338,64 +1142,27 @@ impl App {
 
     /// Everything that happens once at launch, in order:
     ///
-    /// 1. The pipeline's events are subscribed and routed into the host,
-    ///    the recorder's changes into the host and the detection
-    ///    controller, the reload owner starts (`own_the_reloads`), and
-    ///    meeting detection starts following its setting
-    ///    ([`DetectionController::run`]).
-    /// 2. The meetings left `recording`, the folder each was recorded into
-    ///    and the known audio folders ([`crate::audio_folders`]) are
+    /// 1. The pipeline's and the recorder's events are routed into the host,
+    ///    the reload owner starts, and meeting detection starts.
+    /// 2. The meetings left `recording` and the known audio folders are
     ///    listed, before anything here can start a recording.
-    /// 3. Meetings left queued or processing are processed again, exports
-    ///    left unfinished are re-exported
-    ///    ([`ProcessingPipeline::redeliver_unfinished`](steno_pipeline::ProcessingPipeline::redeliver_unfinished)),
-    ///    and the retention sweep runs.
-    /// 4. On a blocking task (`reconcile_at_launch`, which may wait up to
-    ///    10 s for a master that is still written): those recordings are
-    ///    recovered, left alone or failed; a master this install wrote
-    ///    that has no meeting at all is adopted as one, and the main window
-    ///    says "Recovered a recording that was missing from your list. It
-    ///    is being processed." under the Record control
-    ///    (`CaptureRecorder::note_adopted`); the list is refreshed.
+    /// 3. Meetings left queued or processing are processed again, unfinished
+    ///    exports are re-exported, and the retention sweep runs.
+    /// 4. On a blocking task (`reconcile_at_launch`): those recordings are
+    ///    recovered, left alone or failed, and a master with no meeting is
+    ///    adopted.
     /// 5. Meanwhile the login item is registered the first time, the
-    ///    handover listener starts when a phone is already paired, or,
-    ///    behind the Swift import's gate, once the identity came over, and
-    ///    the update schedule starts with its launch tick
-    ///    ([`UpdateSchedule::start`]).
+    ///    handover listener starts when a phone is paired, and the update
+    ///    schedule starts.
     ///
-    /// Steps 3 and 4 may wait on a task of their own: first for the
-    /// keyring's answer, where the secret store can ask (the Secret
-    /// Service), until it chose and the reread below ran; then, while the
-    /// Swift import is pending ([`App::import_gate`]), for the onboarding
-    /// step to run or be skipped ([`ImportGate::step_over`]), by when the
-    /// pipeline has reloaded with what the step read. Then they run on the
-    /// reread pipeline, so no meeting, export or recovered recording runs
-    /// on a pipeline built without the key, and a meeting the Swift app
-    /// left queued is not processed without it. The sweep waits only
-    /// behind the import, so it still follows the resume; behind the
-    /// keyring alone it runs at once. [`App::launch_finished`] waits for
-    /// that task too. The update schedule waits for the keyring's answer
-    /// as well, so its launch tick's alert does not come up beside the
-    /// keyring's prompt, but not for the import's step.
+    /// Steps 3 and 4 wait for the keyring's answer where the secret store can
+    /// ask, and for the Swift import's step while it is pending, so nothing
+    /// runs on a pipeline built without the key. Keyring prompts may stay up
+    /// for two minutes, so a meeting can show as processing that long.
+    /// [`App::launch_finished`] waits for that task.
     ///
-    /// The keyring's choice includes the unlock and the first
-    /// launch's move or a later launch's tidy; on a locked keyring or
-    /// `KeePassXC` each of their prompts may stay up for two minutes, so a
-    /// meeting a crash left processing can show as processing that long (it
-    /// is not a hang). [`build`] itself may wait on the user once: on the
-    /// first launch over an open keyring with no identity in it, the
-    /// handover identity is minted into it on the calling thread, before
-    /// any window shows, and that write waits up to two minutes when the
-    /// provider asks to confirm the new item (`KeePassXC` answers every new
-    /// item with a prompt, which may show a window).
-    ///
-    /// When the keyring answers later, after a read failed while it asked
-    /// the user, the pipeline is built again, the host reads the API key
-    /// again, and a handover that waits for its listener reads the identity
-    /// again and starts it when a phone is paired.
-    ///
-    /// Swift: `AppController.launch`, which failed every interrupted
-    /// recording instead of recovering it.
+    /// When the keyring answers after a failed read, the pipeline is rebuilt
+    /// and the API key and the handover identity are read again.
     pub fn launch(&self, host: &Arc<Host>) {
         let recorder_host = host.clone();
         let detection = self.detection.as_ref().map(Arc::downgrade);
@@ -1410,13 +1177,9 @@ impl App {
         }
         self.report_update_checks(host);
 
-        // The host's reloads read the store, and the sweep writes it: each
-        // waits, behind a write, for as long as another process holds the
-        // write lock. So both tasks hand the host to the blocking pool and
-        // await it there, one event at a time in the bus's order, and no
-        // wait holds a runtime worker, which the pipeline's runs, the
-        // handover and the timers need. The follower asks the reload owner
-        // for its reloads.
+        // Reloads and the sweep may wait behind another process's write lock,
+        // so both tasks run on the blocking pool, one event at a time in the
+        // bus's order, and no wait holds a runtime worker.
         let mut receiver = self.events.subscribe();
         let sweep = self.sweep.clone();
         let event_host = host.clone();
@@ -1442,7 +1205,6 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(work);
         self.start_alongside(host);
-        // Off this thread, which never waits for the listing.
         if let Some(directory) = self.tone_directory.clone() {
             tokio::task::spawn_blocking(move || {
                 steno_audio::capture::permission::remove_leftover_tones(
@@ -1454,17 +1216,14 @@ impl App {
         host.store_changed();
     }
 
-    /// The host hears of every update check from here on, the launch
-    /// tick's included ([`updates_hook`]).
+    /// The host hears of every update check from here on.
     fn report_update_checks(&self, host: &Arc<Host>) {
         if let Some(updates) = &self.updates {
             updates.on_change(updates_hook(host, &self.runtime));
         }
     }
 
-    /// The launch's step 5, but the update schedule: the login item
-    /// registered the first time, and the handover listener started when a
-    /// phone is already paired.
+    /// The launch's step 5, without the update schedule.
     fn start_alongside(&self, host: &Arc<Host>) {
         host.register_login_item_on_first_launch();
         if let Some(handover) = self
@@ -1480,10 +1239,8 @@ impl App {
         }
     }
 
-    /// Steps 3 and 4 of [`App::launch`], the recovery then `reconcile`:
-    /// at once, or, while the secret store asks the user or the Swift
-    /// import is pending, on a task of their own once the keyring answered
-    /// and the step ran.
+    /// Steps 3 and 4 of [`App::launch`]: at once, or on a task of their own
+    /// once the keyring answered and the import's step ran.
     fn recover_at_launch(
         &self,
         host: &Arc<Host>,
@@ -1508,12 +1265,9 @@ impl App {
             }
             tokio::task::spawn_blocking(reconcile)
         } else {
-            // The pipeline built while the keyring asked, or while the
-            // Swift import was pending, has no API key, so the meetings and
-            // the interrupted recordings wait for the one built after the
-            // answer or the step. Behind the import the sweep waits too,
-            // so it runs after the resume, as without a wait. The update
-            // schedule waits for the keyring's answer, not for the step.
+            // The pipeline built while the keyring asked or the import was pending
+            // has no API key, so the recovery waits. Behind the import the sweep
+            // waits too, so it runs after the resume.
             let sweep_now = held.is_none();
             if sweep_now {
                 run_sweep(&self.sweep);
@@ -1548,9 +1302,8 @@ impl App {
         }
     }
 
-    /// The launch's crash recovery: meetings left queued or processing
-    /// processed again on the current pipeline, then exports left
-    /// unfinished re-exported.
+    /// The launch's crash recovery: queued or processing meetings processed
+    /// again, then unfinished exports re-exported.
     fn recover_unfinished(&self) -> impl FnOnce() + Send + 'static {
         let (pipeline, export_retries) = (self.pipeline.clone(), self.export_retries.clone());
         move || {
@@ -1562,8 +1315,7 @@ impl App {
                 Ok(_) => {}
                 Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
             }
-            // After `resume_unfinished`, so a meeting it resumed is skipped:
-            // its run exports it.
+            // After `resume_unfinished`, whose runs export what they resumed.
             match pipeline.redeliver_unfinished(&export_retries) {
                 Ok(owed) if !owed.is_empty() => {
                     tracing::info!(count = owed.len(), "re-exporting unfinished exports");
@@ -1576,10 +1328,8 @@ impl App {
         }
     }
 
-    /// The launch's reconcile of the recordings it lists now
-    /// ([`reconcile_at_launch`]): the main window says when one with no
-    /// meeting was adopted (`CaptureRecorder::note_adopted`), and the list
-    /// is refreshed.
+    /// The launch's reconcile ([`reconcile_at_launch`]), then the list is
+    /// refreshed.
     fn reconcile_listed(&self, host: &Arc<Host>) -> impl FnOnce() + Send + 'static {
         let interrupted = Interrupted::list(&self.store, &self.paths.support_directory);
         let (store, pipeline) = (self.store.clone(), self.pipeline.clone());
@@ -1598,9 +1348,7 @@ impl App {
     }
 
     /// What [`App::launch`] runs once the keyring answered: the pipeline
-    /// built again, the API key read again, and a waiting handover's
-    /// identity read again ([`ListenerHandover::read_again`]), its listener
-    /// started when a phone is paired.
+    /// rebuilt, the API key and a waiting handover's identity read again.
     fn reread_after_unlock(&self, host: &Arc<Host>) -> impl FnOnce() + Send + 'static {
         let (pipeline, host) = (self.pipeline.clone(), host.clone());
         let waiting = self
@@ -1622,10 +1370,8 @@ impl App {
         }
     }
 
-    /// Waits until the launch's background half (`reconcile_at_launch`,
-    /// and the work held for the keyring's answer or the Swift import's
-    /// step) has run; at once when [`App::launch`] was not called or this
-    /// was already awaited.
+    /// Waits until the launch's background half has run; at once when
+    /// [`App::launch`] was not called or this was already awaited.
     pub async fn launch_finished(&self) {
         let work = self
             .launch_work
@@ -1712,10 +1458,8 @@ mod tests {
             format: AudioFormat::Wav16kInt16,
             device_name: "Phone".to_owned(),
         };
-        // The level, the meeting's state and the folders noted for the
-        // launch's adoption of each commit that holds a phone meeting. The
-        // intake's commit is the first, and the only one with the meeting
-        // `queued`: the enqueue writes nothing.
+        // The level, the meeting's state and the folders noted, per commit that
+        // holds a phone meeting.
         let commits: Arc<std::sync::Mutex<Vec<(i64, String, usize)>>> = Arc::default();
         let (seen, noted) = (commits.clone(), support.clone());
         store.probe_commits(move |connection| {
@@ -1766,11 +1510,8 @@ mod tests {
         );
     }
 
-    /// One setting row the app cannot read stops the build (the stable
-    /// plan's "First launch after the handoff", row "A setting the new app
-    /// cannot read"): the error's text, which the log gets, names the row's
-    /// key and what is wrong and neither the value nor the database's path;
-    /// the dialog's parts add the database; the database keeps the row.
+    /// One unreadable setting row stops the build: the error names the key
+    /// and the problem, not the value or the path; the database keeps the row.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unreadable_setting_names_its_key_and_the_database_and_not_its_value() {
         let dir = tempfile::tempdir().unwrap();
@@ -1831,8 +1572,7 @@ mod tests {
         );
     }
 
-    /// The shell's host lists the permissions of the OS it was built for,
-    /// so a host wired to the Mac fails here on Windows and Linux.
+    /// The shell's host lists the permissions of the OS it was built for.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_host_runs_on_the_platform_the_app_was_built_for() {
         let dir = tempfile::tempdir().unwrap();
@@ -1856,14 +1596,11 @@ mod tests {
         assert_eq!(listed, expected);
     }
 
-    /// Set in the child [`the_host_says_whether_a_package_manager_delivers_the_updates`]
-    /// runs.
     const DISTRIBUTION_CHILD: &str = "STENO_DISTRIBUTION_TEST_CHILD";
 
-    /// The shell's host says a package manager delivers the updates exactly
-    /// when [`updates_are_managed`](crate::updates::updates_are_managed)
-    /// does: here, and in a child of this test binary told the opposite
-    /// through the environment (stable plan X5).
+    /// The host says a package manager delivers the updates exactly when
+    /// [`updates_are_managed`](crate::updates::updates_are_managed) does, here
+    /// and in a child told the opposite.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_host_says_whether_a_package_manager_delivers_the_updates() {
         let managed = crate::updates::updates_are_managed();
@@ -1896,8 +1633,7 @@ mod tests {
         );
     }
 
-    /// The recorder's disk watch reads the volume of the database's folder
-    /// beside the recordings folder's.
+    /// The recorder's disk watch reads the database's volume too.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_recorder_watches_the_database_folder_s_volume_too() {
         let dir = tempfile::tempdir().unwrap();
@@ -1909,10 +1645,8 @@ mod tests {
         assert_eq!(disk.database_folder.as_deref(), database.parent());
     }
 
-    /// The build runs the reading marks' launch check before anything
-    /// reads a recording: a meeting whose read ended with the app twice in
-    /// a row is failed and held by the pipeline the build makes (A17 of
-    /// `.plans/2026-10-07-stable-promotion.md`).
+    /// A meeting whose read ended with the app twice in a row is failed and
+    /// held by the pipeline the build makes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_build_quarantines_a_meeting_whose_reads_ended_with_the_app_twice() {
         let dir = tempfile::tempdir().unwrap();
@@ -1953,10 +1687,8 @@ mod tests {
         );
     }
 
-    /// The build drops the damage marks of meetings that are gone and
-    /// keeps the others: a mark for a stored meeting and one for a meeting
-    /// deleted since, and after the next build only the first is in the
-    /// file.
+    /// The build drops the damage marks of deleted meetings and keeps the
+    /// others.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_build_drops_the_damage_marks_of_deleted_meetings() {
         let dir = tempfile::tempdir().unwrap();
@@ -1975,8 +1707,6 @@ mod tests {
         marks.record(kept.id, damage).unwrap();
         marks.record(deleted, damage).unwrap();
         let app = build(options_under(&support)).unwrap();
-        // The pipeline holds the store the launch pruned, not a copy read
-        // before it: the detail and the retention rule see what is on disk.
         assert_eq!(
             app.pipeline
                 .current()
@@ -1999,9 +1729,7 @@ mod tests {
         drop(app);
     }
 
-    /// The build reads the warm-up mark in the support directory: a mark
-    /// left over from a warm-up that ended with the app turns the warm-up
-    /// off in the pipeline, and without one it stays on.
+    /// A leftover warm-up mark turns the warm-up off; without one it stays on.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_build_reads_the_warm_up_mark_a_crash_left() {
         let dir = tempfile::tempdir().unwrap();
@@ -2022,9 +1750,8 @@ mod tests {
         drop(app);
     }
 
-    /// The launch removes, in the background, a tone file the system audio
-    /// probe of a process that ended during it left in the tone directory,
-    /// and leaves a file whose name only resembles it.
+    /// The launch removes a tone file a crashed probe left, and leaves a file
+    /// whose name only resembles it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn launch_removes_the_tone_files_a_probe_left() {
         let dir = tempfile::tempdir().unwrap();
@@ -2055,9 +1782,7 @@ mod tests {
         app.launch_finished().await;
     }
 
-    /// What `App::launch` does to a meeting a previous process left
-    /// recording with no audio in the audio folder, which is there: it
-    /// fails with Swift's reason.
+    /// The launch fails a meeting left recording with no audio on disk.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn launch_fails_a_recording_the_last_process_left_with_the_swift_reason() {
         let dir = tempfile::tempdir().unwrap();
@@ -2078,8 +1803,7 @@ mod tests {
         );
     }
 
-    /// What `App::launch` does to a ready meeting whose export a previous
-    /// process left `pending`: it re-exports it into the vault.
+    /// The launch re-exports a ready meeting whose export was left `pending`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn launch_re_exports_a_meeting_whose_export_was_left_pending() {
         let dir = tempfile::tempdir().unwrap();
@@ -2118,10 +1842,8 @@ mod tests {
         assert!(delivery.receipt.is_some());
     }
 
-    /// `App::launch` itself, over fakes: a call recording whose process
-    /// died (its writer dropped without `finish`) is recovered on the
-    /// launch's blocking task, queued with the `failed` end reason and
-    /// processed.
+    /// The launch recovers a call recording whose process died, queued with
+    /// the `failed` end reason and processed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn launch_recovers_a_recording_the_last_process_left() {
         let (dir, store) = crate::testing::temp_store();
@@ -2161,12 +1883,9 @@ mod tests {
         assert_eq!(store.asset(meeting.id).unwrap().unwrap().lanes, lanes);
     }
 
-    /// `App::launch` itself: a call master in the audio folder with no
-    /// meeting (a row a power loss took before it was durable), whose
-    /// folder the recorder recorded before its row, is adopted on the
-    /// launch's blocking task and processed, and the main window says so
-    /// under the Record control until the user dismisses it. Its folder
-    /// stays recorded until a later launch finds the row durable.
+    /// The launch adopts a call master with no meeting, processes it, and the
+    /// main window says so until dismissed; its folder stays recorded until a
+    /// later launch finds the row durable.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn launch_adopts_a_recording_with_no_meeting_and_says_so() {
         use steno_host::services::Recorder as _;
@@ -2204,20 +1923,14 @@ mod tests {
         assert_eq!(app.recorder.status().warning, None);
     }
 
-    /// The app's resumes ask the app's gates: a meeting a run left waiting
-    /// for models stays waiting through a reload while they are missing,
-    /// no run started, and the first reload once every model the gates
-    /// check is on disk (the `steno` command's install) starts it. The
-    /// models directory is the settings' one in the test's directory, which
-    /// wins over `STENO_MODELS_DIR`: the placeholder models never land in
-    /// a directory the environment names.
+    /// A meeting waiting for models stays waiting through reloads while they
+    /// are missing, and the first reload once they are on disk starts it. The
+    /// settings' models directory wins over `STENO_MODELS_DIR`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_resumes_the_waiting_meetings_once_the_apps_gates_pass() {
         let dir = tempfile::tempdir().unwrap();
         let support = dir.path().join("support");
         std::fs::create_dir_all(&support).unwrap();
-        // The sidecar on every platform; a closed port, should anything
-        // fetch.
         std::fs::write(
             support.join("speech.json"),
             r#"{"onnxSidecarOnMac":true,"modelsMirror":"http://127.0.0.1:9"}"#,
@@ -2268,12 +1981,9 @@ mod tests {
         app.pipeline.current().wait_until_idle().await;
     }
 
-    /// The reload test above, run as a child of this test binary with
-    /// `STENO_MODELS_DIR` naming a directory that holds a model file of
-    /// known bytes, and a home of its own: the child passes, and the
-    /// directory holds that file alone, its bytes unchanged. A child,
-    /// because the environment is the process's: setting the variable here
-    /// is `unsafe` and would reach every test running beside this one.
+    /// The reload test above, as a child with `STENO_MODELS_DIR` naming a
+    /// directory with a known file: that file is left alone. A child, because
+    /// setting the variable here would reach every test beside this one.
     #[test]
     fn the_reload_test_leaves_the_models_directory_the_environment_names_alone() {
         const RELOAD_TEST: &str =
@@ -2317,9 +2027,8 @@ mod tests {
         );
     }
 
-    /// A stored engine the Rust app does not run (the Swift app's Whisper)
-    /// is Parakeet v3 once the app is built, with the notice's pending flag
-    /// in `preferences.json`, which the main window then shows.
+    /// A stored engine the app does not run is Parakeet v3 once the app is
+    /// built, with the notice's pending flag in `preferences.json`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_build_retires_a_stored_whisper_engine_with_the_notice_pending() {
         use steno_host::setup::engine_notice::PENDING_KEY;
@@ -2344,10 +2053,8 @@ mod tests {
         app.pipeline.quit();
     }
 
-    /// The retirement writes the notice's flag through the one
-    /// `preferences.json` the import's launch half got, so a flag that
-    /// half's instance writes later (as the import's step does) keeps the
-    /// notice's flag, and the host reads both.
+    /// The retirement writes the notice's flag through the launch half's
+    /// `preferences.json`, so a later write there keeps it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_engine_notice_and_the_import_share_one_preferences_file() {
         use steno_host::setup::engine_notice::PENDING_KEY;
@@ -2383,11 +2090,9 @@ mod tests {
         app.pipeline.quit();
     }
 
-    /// The notice's pending flag is written inside the retirement's
-    /// transaction, before the engine's row changes: when the database
-    /// refuses the update, the flag is pending all the same, the build
-    /// warns, and the stored engine is as it was, for the next launch to
-    /// retire.
+    /// The notice's flag is written before the engine's row changes: when the
+    /// update is refused, the flag is pending, the build warns, and the
+    /// engine stays for the next launch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_retirement_the_database_refuses_leaves_the_notice_pending_and_warns() {
         use steno_host::setup::engine_notice::PENDING_KEY;
@@ -2425,13 +2130,9 @@ mod tests {
         app.pipeline.quit();
     }
 
-    /// The models directory is decided once, when the app is built: a
-    /// reload after the settings name another directory keeps the first,
-    /// so the pipeline and the model service agree. The first is empty,
-    /// the second holds every model (placeholder files of their sizes):
-    /// the engine's `prepare` is refused for missing models before the
-    /// reload and still after it, where an engine over the second would
-    /// get past the gate. No network.
+    /// The models directory is decided once, at build: a reload after the
+    /// settings name another directory keeps the first, so `prepare` is still
+    /// refused for missing models.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_keeps_the_models_directory_the_app_was_built_with() {
         use crate::speech::testing::{install_every_model, models_in};
@@ -2468,15 +2169,10 @@ mod tests {
         );
     }
 
-    /// The app's reloads keep the speech engine (the same engine and
-    /// claims) while the stored engine id runs where the last one did: a
-    /// reload with the settings unchanged, and on Linux and Windows a
-    /// switch to an engine id the sidecar runs too. On the Mac, where
-    /// `parakeet-v3` runs on `CoreML` in this process and other ids in the
-    /// sidecar, the switch builds the sidecar engine, and the switch back
-    /// finds the first `CoreML` one, which the test still holds as a
-    /// retired pipeline would. Every reload keeps the diarizer. Nothing
-    /// here starts a sidecar: no job runs.
+    /// Reloads keep the speech engine while the stored engine id runs where
+    /// the last one did; on the Mac a switch to a sidecar id builds a new
+    /// engine and the switch back finds the first. Every reload keeps the
+    /// diarizer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_keeps_the_speech_engine_while_the_engine_id_runs_where_it_did() {
         let dir = tempfile::tempdir().unwrap();
@@ -2509,8 +2205,7 @@ mod tests {
         assert!(Arc::ptr_eq(&diarizer(), &first_diarizer));
     }
 
-    /// The shell's login item is the one the host reads and switches; the
-    /// CLI and the tests, which pass none, get a fake that registers
+    /// The shell's login item is the host's; without one a fake registers
     /// nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_login_item_the_shell_passes_is_the_hosts() {
@@ -2537,11 +2232,9 @@ mod tests {
         );
     }
 
-    /// The permissions the shell passes are the host's, through the
-    /// services' system audio probe: a microphone the system reports
-    /// denied opens onboarding whatever the completed flag says, and on
-    /// the Mac system audio is what the last probe found. Without the
-    /// shell's (the CLI, the tests) every permission is granted.
+    /// The shell's permissions are the host's: a denied microphone opens
+    /// onboarding, and on the Mac system audio is the last probe's result.
+    /// Without the shell's every permission is granted.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_permissions_the_shell_passes_are_the_hosts() {
         use steno_bridge::{PermissionKind, PermissionState};
@@ -2589,8 +2282,7 @@ mod tests {
         }
     }
 
-    /// The calendar the shell passes names the graph's recordings: a
-    /// recording started during an event takes its title and attendee.
+    /// A recording started during an event takes its title and attendee.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_calendar_the_shell_passes_names_the_graphs_recordings() {
         let dir = tempfile::tempdir().unwrap();
@@ -2645,9 +2337,7 @@ mod tests {
         pipeline.wait_until_idle().await;
     }
 
-    /// A recording's start reads the calendar but asks for no permission:
-    /// with every grant still `unknown`, a start during an event names the
-    /// meeting and no request reaches the shell.
+    /// A recording's start reads the calendar but asks for no permission.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_start_never_asks_for_a_permission() {
         use steno_bridge::PermissionState;
@@ -2699,9 +2389,8 @@ mod tests {
         app.pipeline.current().wait_until_idle().await;
     }
 
-    /// The shell's word on its bundle reaches the host: on the Mac only a
-    /// graph built for an installed bundle registers the login item at its
-    /// first launch; off the Mac both do.
+    /// On the Mac only a graph built for an installed bundle registers the
+    /// login item at first launch; off the Mac both do.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_first_launch_follows_the_shells_installed_bundle() {
         for installed_bundle in [false, true] {
@@ -2727,15 +2416,12 @@ mod tests {
         }
     }
 
-    /// [`crate::testing::app_over_fakes`] under `dir` over a synthetic
-    /// tone.
     fn recording_app(dir: &tempfile::TempDir, store: &Arc<Store>) -> App {
         crate::testing::app_over_fakes(dir.path(), store, crate::testing::synthetic_capture())
     }
 
     /// `app`'s host with the hook `App::launch` wires, without the launch's
-    /// tasks: one stuck on the host's lock would hang the runtime's
-    /// shutdown, and with it the test.
+    /// tasks, which could hang the runtime's shutdown.
     fn wired_host(app: &App) -> Host {
         let host = app.host().unwrap();
         let changed = host.clone();
@@ -2744,10 +2430,8 @@ mod tests {
         host
     }
 
-    /// Calls `method` through `host` on a thread of its own and asserts
-    /// that it succeeded, failing the test as hung after [`HANG_GUARD`]: a
-    /// recording's start and stop through the host are the capture's real
-    /// work.
+    /// Calls `method` through `host` on its own thread and asserts success,
+    /// failing as hung after [`HANG_GUARD`].
     fn call(host: &Host, method: steno_bridge::BridgeMethod, params: Option<serde_json::Value>) {
         let dispatcher = steno_bridge::Dispatcher::new(host.clone());
         let reply = on_own_thread(HANG_GUARD, &format!("{method} returned"), move || {
@@ -2756,10 +2440,9 @@ mod tests {
         assert!(reply.is_ok(), "{method}: {reply:?}");
     }
 
-    /// A recording that cannot start (no capture device), from the sidebar
-    /// and the tray's Record and Stop: every recorder command through the
-    /// host returns, though each change the recorder reports re-enters the
-    /// host (`Host::recorder_changed`), and the start's error is shown.
+    /// A recording that cannot start: every recorder command through the host
+    /// returns, though each recorder change re-enters the host, and the
+    /// error is shown.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn every_recorder_command_returns_when_the_recording_cannot_start() {
         use steno_bridge::BridgeMethod;
@@ -2789,11 +2472,8 @@ mod tests {
         assert_eq!(store.all_meetings().unwrap(), []);
     }
 
-    /// The page's Record and Record in person while a menu Quit waits for
-    /// the actions clicked before it (the starts refused,
-    /// [`Recorder::refuse_starts`](steno_host::services::Recorder::refuse_starts)):
-    /// each returns, records nothing, and the page's `recording` snapshot
-    /// says why.
+    /// Record while a Quit refuses starts: each returns, records nothing,
+    /// and the `recording` snapshot says why.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_pages_record_during_a_menu_quit_is_refused_and_says_why() {
         use steno_bridge::BridgeMethod;
@@ -2816,8 +2496,7 @@ mod tests {
         assert_eq!(store.all_meetings().unwrap(), []);
     }
 
-    /// [`recording_app`] whose host runs the app's own pipeline and the
-    /// real file system, over a failed meeting (`reason`) with a two-lane
+    /// [`recording_app`] with the real pipeline over a failed meeting with a
     /// call on disk, selected on a ready page; the meeting's id.
     fn failed_meeting_selected(
         dir: &tempfile::TempDir,
@@ -2853,9 +2532,8 @@ mod tests {
         (app, host, meeting.id)
     }
 
-    /// "Process again" through the host on the selected failed meeting
-    /// whose master is on disk: the detail and the list show it queued or
-    /// further on once the call returns, and the run takes it to ready.
+    /// "Process again" on a failed meeting shows it queued at once, and the
+    /// run takes it to ready.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_through_the_host_runs_a_failed_meeting_to_ready() {
         use steno_bridge::BridgeMethod;
@@ -2880,11 +2558,8 @@ mod tests {
         );
     }
 
-    /// The detail is loaded while the meeting is failed; the store then
-    /// marks it ready with both lanes transcribed behind the host's back
-    /// (as a Try again run does before the host's `store_changed` reload).
-    /// The click is refused under the pipeline's own read: the ready,
-    /// complete meeting is not queued again, and the error line says why.
+    /// "Process again" on a meeting the store marked ready and complete
+    /// behind the host's back is refused, and the error line says why.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_on_a_stale_failed_detail_refuses_a_ready_meeting() {
         use steno_bridge::BridgeMethod;
@@ -2925,9 +2600,7 @@ mod tests {
         app.pipeline.current().wait_until_idle().await;
     }
 
-    /// A ready meeting kept incomplete (here a long call with no
-    /// transcript, marked ready behind the host's back) is offered
-    /// "Process again" through the host too, and the run takes it to ready.
+    /// A ready but incomplete meeting is offered "Process again" too.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_again_through_the_host_runs_a_ready_meeting_kept_incomplete() {
         use steno_bridge::BridgeMethod;
@@ -2957,10 +2630,8 @@ mod tests {
         );
     }
 
-    /// A recording in progress, stopped from the sidebar or the tray (Stop,
-    /// then Toggle): each command through the host returns, though the
-    /// recorder's `Stopping` and `Idle` re-enter the host
-    /// (`Host::recorder_changed`), and each recording is saved.
+    /// A recording stopped from the sidebar or the tray: each command returns
+    /// and each recording is saved.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stopping_a_recording_through_the_host_returns_and_saves_it() {
         use steno_bridge::BridgeMethod;
@@ -2998,10 +2669,8 @@ mod tests {
         }
     }
 
-    /// What every exit runs first: a recording in progress is stopped with
-    /// `quit` and saved by the time the shutdown returns. The pipelines
-    /// quit before the stop, so the saved meeting stays `queued` for the
-    /// next launch, through a reload too, and no job starts in the exit.
+    /// The shutdown stops and saves a recording with `quit`; it stays
+    /// `queued` for the next launch, through a reload too.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutting_down_stops_and_saves_a_recording_in_progress() {
         use steno_host::services::Recorder as _;
@@ -3044,8 +2713,7 @@ mod tests {
         );
     }
 
-    /// An idle exit runs the same shutdown, which saves nothing and
-    /// returns at once.
+    /// An idle shutdown saves nothing and returns at once.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutting_down_with_nothing_recorded_saves_nothing() {
         let (dir, store) = temp_store();
@@ -3056,10 +2724,8 @@ mod tests {
         assert_eq!(store.all_meetings().unwrap(), []);
     }
 
-    /// The first exit request is held and runs the shutdown once, to the
-    /// end, recording or not; a request meanwhile is held too; then the
-    /// gate's exit runs, and the request it raises goes ahead, as does
-    /// every one after it.
+    /// The first exit request is held and runs the shutdown once; requests
+    /// meanwhile are held; then every request goes ahead.
     #[test]
     fn the_first_exit_runs_the_shutdown_once_and_holds_the_others_until_it_ends() {
         use std::sync::Mutex;
@@ -3083,7 +2749,6 @@ mod tests {
                 let (gate, steps) = (gate.clone(), steps.clone());
                 move || {
                     steps.lock().unwrap().push("exit");
-                    // The shell's own exit raises a second request.
                     let _ = exited.send(gate.exit_requested(
                         PATIENCE,
                         || panic!("no second shutdown"),
@@ -3114,8 +2779,7 @@ mod tests {
         ));
     }
 
-    /// A shutdown that does not finish within the patience does not keep
-    /// the app from quitting.
+    /// A shutdown past the patience does not keep the app from quitting.
     #[test]
     fn an_exit_waits_at_most_the_patience() {
         let gate = ExitGate::default();
@@ -3133,10 +2797,8 @@ mod tests {
             .expect("exited after the patience");
     }
 
-    /// An exit no request held (the Dock's Quit, a relaunch) runs the
-    /// shutdown on the caller's behalf and returns once it ended, or once
-    /// the patience ran out; exits go ahead afterwards, and a second one
-    /// runs nothing.
+    /// An exit no request held runs the shutdown and returns once it ended or
+    /// the patience ran out; a second one runs nothing.
     #[test]
     fn an_exit_without_a_request_runs_the_shutdown_before_it_returns() {
         use std::sync::atomic::AtomicBool;
@@ -3169,9 +2831,8 @@ mod tests {
         );
     }
 
-    /// The process ends while a held request's shutdown runs (a Quit, then
-    /// the Dock's Quit): `exiting` waits for that shutdown instead of
-    /// running another, and the gate's exit is not raised on top.
+    /// `exiting` during a held request's shutdown waits for it instead of
+    /// running another, and the gate's exit is not raised.
     #[test]
     fn an_exit_during_a_held_shutdown_waits_for_it_and_takes_its_exit_over() {
         use std::sync::atomic::AtomicBool;
@@ -3205,9 +2866,7 @@ mod tests {
         );
     }
 
-    /// Two exits no request held (an update's relaunch, then the Dock's
-    /// Quit or a logout): the second waits for the first's shutdown instead
-    /// of running another, or returning while it still runs.
+    /// A second unheld exit waits for the first's shutdown.
     #[test]
     fn a_second_exit_without_a_request_waits_for_the_first_ones_shutdown() {
         use std::sync::atomic::AtomicBool;
@@ -3261,9 +2920,8 @@ mod tests {
         assert!(!text.contains("the model said"), "{text}");
     }
 
-    /// The update source the shell passes makes the update schedule the
-    /// host's updater, over the graph's `preferences.json`; without one the
-    /// updater is the fake. The QR encoder draws real codes either way.
+    /// The shell's update source makes the schedule the host's updater;
+    /// without one the updater is the fake.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_update_source_the_shell_passes_drives_the_hosts_updater() {
         struct NoUpdates;
@@ -3316,9 +2974,8 @@ mod tests {
         assert!(app.services.updater.last_check_at().is_none());
     }
 
-    /// After a refused keychain read (`KEY_DENIED_KEY`) the graph's store
-    /// answers no key over the keychain, but the secrets file's key, which
-    /// no keychain prompt guards, still answers.
+    /// After a refused keychain read the keychain answers no key, but the
+    /// secrets file's key still answers.
     #[tokio::test]
     async fn a_refused_key_read_gates_the_keychain_and_not_the_secrets_file() {
         use steno_host::services::Preferences as _;
@@ -3341,9 +2998,8 @@ mod tests {
         }
     }
 
-    /// A phone is paired but the stored identity is gone: the launch
-    /// builds no listener, so no new identity is minted that every phone
-    /// would have to pair with again; the handover waits for Pair again.
+    /// A paired phone with its identity gone: the launch builds no listener
+    /// and mints nothing; the handover waits for Pair again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_launch_mints_no_identity_over_paired_phones() {
         let dir = tempfile::tempdir().unwrap();
@@ -3366,9 +3022,8 @@ mod tests {
         assert!(!secrets.exists(), "an identity was minted");
     }
 
-    /// A second app on one database is refused before it opens the
-    /// database, so it neither migrates it nor fails the first one's
-    /// recording at launch; once the first is gone, the next one builds.
+    /// A second app on one database is refused before it opens it; once the
+    /// first is gone, the next one builds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_second_app_on_one_database_is_refused_until_the_first_is_gone() {
         let dir = tempfile::tempdir().unwrap();
@@ -3395,9 +3050,8 @@ mod tests {
         build(options_under(&support)).unwrap();
     }
 
-    /// The lock comes before the database: a second app over a file that
-    /// is no database fails with `Held`, not with the store's error, so it
-    /// never opened (or migrated) what the first one holds.
+    /// The lock comes before the database: a second app over a non-database
+    /// file fails with `Held`, not with the store's error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_lock_is_taken_before_the_database_is_opened() {
         let dir = tempfile::tempdir().unwrap();
@@ -3416,11 +3070,8 @@ mod tests {
         );
     }
 
-    /// A test's relaunch waits out a lock that outlives the app it
-    /// dropped: a child another test forked before the drop holds a copy
-    /// of the lock's file until it execs. A second holder stands in for
-    /// that child and lets go once the relaunch has waited a short window
-    /// for it; a relaunch that gives up at once fails within the window.
+    /// A relaunch waits out a lock that briefly outlives the app it dropped;
+    /// one that gives up at once fails within the window.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_relaunch_in_a_test_waits_out_a_lock_held_past_the_drop() {
         let dir = tempfile::tempdir().unwrap();
@@ -3446,9 +3097,8 @@ mod tests {
         assert!(relaunched.database_lock.is_some());
     }
 
-    /// An update's relaunch starts the new app before the old one has
-    /// exited: the new one waits out the old one's lock within its
-    /// patience, and is refused once the patience has passed.
+    /// An update's relaunch waits out the old app's lock within its patience,
+    /// and is refused once it has passed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_relaunched_app_waits_for_the_old_one_within_its_patience() {
         let dir = tempfile::tempdir().unwrap();
@@ -3495,11 +3145,8 @@ mod tests {
         );
     }
 
-    /// The handover listener is built only over a store whose commits are on
-    /// the disk: a checkpoint that fails (here one another connection blocks,
-    /// with no busy timeout so the test does not wait) keeps the handover off,
-    /// before an identity is minted; once the checkpoint succeeds the listener
-    /// is built. Swift: `testAStoreThatCannotSyncKeepsTheHandoverOff`.
+    /// A failing checkpoint keeps the handover off before an identity is
+    /// minted; once it succeeds the listener is built.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_store_that_cannot_sync_keeps_the_handover_off() {
         let (dir, store) = temp_store();
@@ -3535,9 +3182,7 @@ mod tests {
         assert!(listener().is_ok());
     }
 
-    /// A secret store whose reads fail with `failure` while it is set:
-    /// [`KeyringUnavailable::Unlocking`] as the Linux store's while the
-    /// keyring's prompt is up, `Locked` or `NotOpened` after it.
+    /// A secret store whose reads fail with `failure` while it is set.
     #[derive(Default)]
     struct UnavailableSecrets {
         failure: std::sync::Mutex<Option<KeyringUnavailable>>,
@@ -3570,12 +3215,9 @@ mod tests {
         }
     }
 
-    /// An app launched while the keyring asks the user: its secret store
-    /// holds the API key (and, with `paired`, an identity and a paired
-    /// phone) but turns every read away, its pipeline notes the key each
-    /// build read, a meeting the last process left queued without its
-    /// asset waits for the crash recovery, and its handover waits for its
-    /// listener. `answer` makes the keyring answer.
+    /// An app launched while the keyring asks the user: reads are turned
+    /// away, a queued meeting waits for the recovery, and the handover waits
+    /// for its listener. `answer` makes the keyring answer.
     struct AskedAtLaunch {
         _dir: tempfile::TempDir,
         app: App,
@@ -3694,9 +3336,7 @@ mod tests {
                 .state
         }
 
-        /// Waits until the crash recovery ran, which ends the reread. The
-        /// reread builds a real listener first, so the wait is the hang
-        /// guard's.
+        /// Waits until the crash recovery ran, which ends the reread.
         async fn until_recovered(&self) {
             tokio::time::timeout(HANG_GUARD, async {
                 while self.queued_state() == steno_core::MeetingState::Queued {
@@ -3727,11 +3367,9 @@ mod tests {
         }
     }
 
-    /// The identity read while the keyring asked the user: the handover
-    /// waits for its listener and says why, and once the keyring answered
-    /// `App::launch` rebuilds the pipeline with the key, shows the key in
-    /// Settings, reads the identity again and hands the listener over, and
-    /// only then recovers the meetings the last process left.
+    /// Once the keyring answered, the launch rebuilds the pipeline with the
+    /// key, reads the identity again, hands the listener over, and only then
+    /// recovers the meetings.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_handover_read_while_the_keyring_asked_gets_its_listener_once_it_answers() {
         let mut asked = AskedAtLaunch::new(false).await;
@@ -3751,8 +3389,7 @@ mod tests {
         let summaries = asked.snapshot(BridgeTopic::SettingsSummaries);
         assert_eq!(summaries["hasAPIKey"], false);
         assert!(summaries.get("keyStore").is_none(), "{summaries}");
-        // No speech model is installed here, so onboarding waits on page 1
-        // with its speech models row; Continue shows the Summaries row.
+        // No speech model is installed, so onboarding waits on page 1.
         let host = asked.host.clone();
         on_own_thread(PATIENCE, "onboarding moved on", move || {
             steno_bridge::BridgeHost::onboarding_advance(&host).unwrap();
@@ -3815,9 +3452,7 @@ mod tests {
         assert_eq!(asked.handover_state(), ListenerState::Stopped);
     }
 
-    /// A phone paired: its listener starts once the keyring answered, the
-    /// Phones settings show it, and the paired phones come from the
-    /// database while the handover waits.
+    /// A paired phone's listener starts once the keyring answered.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_paired_phones_listener_starts_once_the_keyring_answered() {
         let mut asked = AskedAtLaunch::new(true).await;
@@ -3838,8 +3473,7 @@ mod tests {
         assert_eq!(phone["listener"]["state"], "listening", "{phone}");
     }
 
-    /// The app quits after the keyring answered: the shutdown stops the
-    /// listener the reread started.
+    /// A quit after the answer stops the listener the reread started.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_quit_stops_the_listener_started_after_the_answer() {
         let mut asked = AskedAtLaunch::new(true).await;
@@ -3854,8 +3488,7 @@ mod tests {
         assert_eq!(asked.handover_state(), ListenerState::Stopped);
     }
 
-    /// The store chose without turning a read away (the commonest Linux
-    /// launch): the meetings are recovered all the same, with no reread.
+    /// A store that chose without turning a read away recovers with no reread.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_choice_that_turned_nothing_away_still_recovers_the_meetings() {
         let mut asked = AskedAtLaunch::new(false).await;
@@ -3865,8 +3498,7 @@ mod tests {
         assert_eq!(*asked.keys_read.lock().unwrap(), [None], "no reread");
     }
 
-    /// The app quits before the keyring answered: the reread hands no
-    /// listener over, so nothing listens after the shutdown.
+    /// A quit before the answer leaves nothing listening.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_quit_before_the_keyring_answered_leaves_no_listener_running() {
         let mut asked = AskedAtLaunch::new(true).await;
@@ -3884,8 +3516,8 @@ mod tests {
         assert!(asked.handover.listener().is_none());
     }
 
-    /// A reread that still cannot read the identity keeps the handover
-    /// waiting, with the new reason, and recovers the meetings anyway.
+    /// A reread that still fails keeps the handover waiting, with the new
+    /// reason, and recovers the meetings anyway.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reread_that_fails_again_says_why_and_recovers_the_meetings() {
         let mut asked = AskedAtLaunch::new(true).await;
@@ -3905,9 +3537,8 @@ mod tests {
         );
     }
 
-    /// An identity read that fails for any reason but the keyring asking
-    /// (locked again, or not opened at start) leaves the handover waiting
-    /// for Try again, with the reason, and mints nothing.
+    /// Any other identity read failure leaves the handover waiting for Try
+    /// again, with the reason, and mints nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_identity_read_that_fails_otherwise_waits_for_try_again() {
         use steno_host::services::Handover as _;
@@ -3972,9 +3603,8 @@ mod tests {
         }
     }
 
-    /// The listener reads the identity once, and builds on the bundle it
-    /// read: a stored identity, a minted one while no phone is paired, and
-    /// none at all once a phone is paired and the identity is gone.
+    /// The listener reads the identity once: a stored one, a minted one while
+    /// no phone is paired, and none once a phone is paired and it is gone.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_listener_reads_the_identity_once_and_mints_none_over_paired_phones() {
         let dir = tempfile::tempdir().unwrap();
@@ -4027,8 +3657,7 @@ mod tests {
         app.shutdown();
     }
 
-    /// A secret store whose reads fail, as the keyring does without a
-    /// default keychain.
+    /// A secret store whose reads fail.
     struct BrokenSecrets;
 
     #[async_trait]
@@ -4074,8 +3703,7 @@ mod tests {
         }
     }
 
-    /// Every build of the app's pipeline, the first and each reload, records
-    /// the decoder's damage in the one store the app reads it from.
+    /// Every build of the pipeline records damage in the store the app reads.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn every_build_records_damage_in_the_apps_store() {
         let (dir, store) = temp_store();
@@ -4110,9 +3738,8 @@ mod tests {
         }
     }
 
-    /// The Authorization header one build of the pipeline sends: builds it
-    /// as a reload does over `secrets` and runs its cleanup once against
-    /// `server`.
+    /// The Authorization header a reload's pipeline over `secrets` sends
+    /// to `server`.
     async fn authorization_sent(
         store: &Arc<Store>,
         paths: &StenoPaths,
@@ -4152,10 +3779,8 @@ mod tests {
         server.requests()[before].authorization().map(str::to_owned)
     }
 
-    /// A keyring locked again while the app runs fails a rebuild's read
-    /// (a model-only save, a speech engine change): the pipeline keeps the
-    /// key it had. A key removed or changed meanwhile is never the one
-    /// kept, and a reread of no key drops it.
+    /// A keyring locked again fails a rebuild's read: the pipeline keeps its
+    /// key. A key removed or changed is never the one kept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pipeline_rebuilt_while_the_keyring_is_locked_keeps_the_key_it_had() {
         let (dir, store) = temp_store();
@@ -4193,9 +3818,8 @@ mod tests {
         server.stop();
     }
 
-    /// Fails unless the timer behind `ticked` keeps ticking for `length`:
-    /// no gap of 200 ms or more between its ticks, read from the test's
-    /// own thread, which is not one of the runtime's.
+    /// Fails unless the timer behind `ticked` ticks with no 200 ms gap for
+    /// `length`.
     fn assert_live(
         ticked: &std::sync::Mutex<std::time::Instant>,
         length: std::time::Duration,
@@ -4213,11 +3837,7 @@ mod tests {
     }
 
     /// Fails unless the runtime's one worker runs tasks spawned while a
-    /// reload is held at the gate. A worker the held reload blocks never
-    /// runs them, however long the test waits, so the bound is only
-    /// [`HANG_GUARD`] and load cannot fail the test; three tasks a little
-    /// apart, so a follower that takes its event late is behind the gate
-    /// by the last of them.
+    /// reload is held at the gate.
     fn assert_the_worker_runs(runtime: &tokio::runtime::Runtime, what: &str) {
         for _ in 0..3 {
             let (ran, runs) = std::sync::mpsc::channel();
@@ -4230,17 +3850,9 @@ mod tests {
         }
     }
 
-    /// The launch's two tasks, the event follower and the reload owner
-    /// (the two-second poll), reach the host on the blocking pool: while
-    /// a reload is held (the detail asks the pipeline whether its export
-    /// keeps failing, at a gate), a task spawned on the services runtime,
-    /// which has one worker, still runs. Run on that worker, a held reload
-    /// would stop every task there: the pipeline's runs, the handover, the
-    /// timers. An idle tick reloads nothing, so each held reload is a
-    /// forced pass of the owner's: one an event asked for, while the
-    /// follower's next event waits behind the host's lock, then one the
-    /// test asks for. Only the gate decides; every wait is bounded for
-    /// hangs alone.
+    /// The event follower and the reload owner reach the host on the blocking
+    /// pool: while a reload is held at a gate, a task on the one-worker
+    /// services runtime still runs.
     #[test]
     fn the_poll_and_the_events_task_never_block_a_worker() {
         let runtime = one_worker_runtime();
@@ -4279,23 +3891,16 @@ mod tests {
         runtime.shutdown_background();
     }
 
-    /// Waits until the reload owner has nothing left to reload: a forced
-    /// pass on this thread loads at the latest change mark, and the
-    /// owner's passes asked for before it are over.
+    /// Waits until the reload owner has nothing left to reload.
     fn settled(host: &Host) {
         host.store_changed();
         std::thread::sleep(std::time::Duration::from_millis(300));
         host.store_changed();
     }
 
-    /// The update and phone hooks reach the host on the blocking pool:
-    /// called on the services runtime's one worker while the host's lock is
-    /// held through a settings save that waits on another connection's
-    /// lock, they return at once, and the task that called them goes on
-    /// within [`LIVE`](crate::testing::LIVE); once the lock goes, the phone
-    /// section is published. Inline, either would wait on the host's lock
-    /// and stop that worker for the busy timeout (the shape of P40 check
-    /// 11).
+    /// The update and phone hooks reach the host on the blocking pool: called
+    /// while the host's lock is held through a busy save, they return at
+    /// once, and the phone section is published once the lock goes.
     #[test]
     fn the_update_and_phone_hooks_never_wait_on_the_hosts_lock() {
         use steno_bridge::BridgeHost as _;
@@ -4314,8 +3919,6 @@ mod tests {
                 host.settings_general_set_detection(steno_bridge::SetBoolParams { value: false })
             }
         });
-        // The save holds the host's lock in its busy wait by now; nothing
-        // reports it.
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         let (updates, phones) = (
@@ -4347,11 +3950,8 @@ mod tests {
         runtime.shutdown_background();
     }
 
-    /// A host notification nothing waits for that panics is logged at
-    /// `error` under its name, without the panic's message. The
-    /// notification is the test's own and starts at once, so the log line
-    /// is waited for within [`PATIENCE`](crate::testing::PATIENCE): a
-    /// panic nothing logs fails there.
+    /// A panicking host notification is logged at `error` under its name,
+    /// without the panic's message.
     #[test]
     fn a_notification_that_panics_is_logged_without_its_message() {
         let log = steno_pipeline::fixtures::CapturedLog::warnings();
@@ -4381,9 +3981,8 @@ mod tests {
             .unwrap()
     }
 
-    /// The launch on `runtime`, under `dir`, over a [`GatedPipeline`],
-    /// with one meeting's detail shown, so each reload asks the gate, and
-    /// the launch's own reloads over ([`settled`]).
+    /// The launch on `runtime` over a [`GatedPipeline`], with a detail shown
+    /// so each reload asks the gate, its own reloads over.
     fn launched_over_a_gated_pipeline(
         runtime: &tokio::runtime::Runtime,
         dir: &std::path::Path,
@@ -4407,12 +4006,8 @@ mod tests {
         (app, pipeline, host)
     }
 
-    /// The event follower takes one event at a time, in the bus's order:
-    /// while the first event's reload is held, the next events wait in the
-    /// bus. The host's own lock would hold a second reload back before the
-    /// gate, so the gate alone cannot tell; the runtime's tasks can: a
-    /// follower that spawned per event would leave one task per waiting
-    /// event.
+    /// The event follower takes one event at a time, in order: while the
+    /// first reload is held, the next events wait in the bus, not in tasks.
     #[test]
     fn the_event_follower_takes_one_event_at_a_time() {
         let runtime = one_worker_runtime();
@@ -4451,13 +4046,9 @@ mod tests {
         );
     }
 
-    /// A retention applied sweeps on the blocking pool too: while the
-    /// sweep's write waits on a store another process holds, a timer task
-    /// on the services runtime, which has one worker, keeps ticking, and
-    /// the sweep goes through once the lock goes. Run inline in the
-    /// follower's task, the wait would stop that worker. (The test reads
-    /// the store only after the release: until P40's readers land, a read
-    /// waits behind the sweep's write.)
+    /// A retention sweep waits on the blocking pool: while its write waits on
+    /// a locked store, a timer on the one-worker runtime keeps ticking, and
+    /// the sweep goes through once the lock goes.
     #[test]
     fn the_event_followers_sweep_never_blocks_a_worker() {
         let runtime = one_worker_runtime();
@@ -4513,11 +4104,8 @@ mod tests {
         runtime.shutdown_background();
     }
 
-    /// A poll tick that waited is followed by one overdue tick, then the
-    /// next a full interval later, never by a burst of the ticks it
-    /// missed (`MissedTickBehavior::Delay`). The poll's reload is held for
-    /// two intervals and a half. Commits keep coming meanwhile, as a busy
-    /// pipeline's stage writes do, so every tick reloads.
+    /// A tick that waited is followed by one overdue tick, then the next a
+    /// full interval later, never by a burst.
     #[test]
     fn a_held_poll_is_not_followed_by_a_burst() {
         let runtime = one_worker_runtime();
@@ -4545,8 +4133,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(700));
         let after = gate.reloads() - released;
         runtime.shutdown_background();
-        // The held tick's own passes after the held one, then one overdue
-        // tick; a burst adds another.
+        // The held tick's own passes, then one overdue tick.
         assert!(
             after < 2 * per_tick,
             "the held tick was followed by a burst: {after} passes, {per_tick} per tick"
@@ -4586,9 +4173,8 @@ mod tests {
         }
     }
 
-    /// A host over `store` and the fakes, with `pipeline` in place of the
-    /// fake's when there is one, the page ready and the sample meeting's
-    /// detail shown, and its [`TimedSink`].
+    /// A host over `store` and the fakes, with `pipeline` if given, the page
+    /// ready and a detail shown, and its [`TimedSink`].
     fn idle_host(
         store: &Arc<Store>,
         fakes: &steno_host::fakes::FakeServices,
@@ -4611,19 +4197,15 @@ mod tests {
         (host, sink)
     }
 
-    /// Waits until `n` passes of the reload owner ran since `since`: each
-    /// publishes `settings.phone` (the pairing poll).
+    /// Waits until `n` reload owner passes ran since `since`.
     fn passes(sink: &TimedSink, since: std::time::Instant, n: usize) {
         found_within(PATIENCE, "the reload owner's passes", || {
             (sink.since(BridgeTopic::SettingsPhone, since).len() >= n).then_some(())
         });
     }
 
-    /// P40 check 19: with the page ready and nothing committed, ten passes
-    /// of the reload owner send no `meetings.list`, `meeting.detail` or
-    /// `progress` snapshot (the light part's `settings.phone` goes out
-    /// each time). The owner ticks every 50 ms here, two seconds in the
-    /// app.
+    /// With nothing committed, ten passes send no `meetings.list`,
+    /// `meeting.detail` or `progress` snapshot.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn an_idle_app_sends_no_list_detail_or_progress() {
         let (_dir, store) = temp_store();
@@ -4649,8 +4231,8 @@ mod tests {
         }
     }
 
-    /// P40 check 20 over `store`: `writer` retitles the sample meeting, and
-    /// the list carries the title within one poll interval and [`LIVE`].
+    /// `writer` retitles the sample meeting, and the list shows it within one
+    /// poll interval and [`LIVE`].
     fn a_retitle_shows_within_one_poll(store: &Arc<Store>, writer: &Store) {
         let fakes = steno_host::fakes::FakeServices::new(Utc::now());
         let (host, sink) = idle_host(store, &fakes, None);
@@ -4679,11 +4261,8 @@ mod tests {
         owner.abort();
     }
 
-    /// P40 check 20, a guard for the gate: a second connection to the
-    /// database (another process: the Swift app, the CLI) retitles a
-    /// meeting, which this process's commit hook never sees, and the list
-    /// carries the title within one poll interval, through the host
-    /// reader's `data_version`.
+    /// Another connection's retitle shows within one poll interval, through
+    /// the reader's `data_version`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_commit_from_another_process_shows_within_one_poll() {
         let (dir, store) = temp_store();
@@ -4691,22 +4270,16 @@ mod tests {
         a_retitle_shows_within_one_poll(&store, &other);
     }
 
-    /// P40 check 20, the in-process side: a commit through the in-memory
-    /// store's writer, whose one connection's `data_version` does not move
-    /// for its own commits, shows within one poll interval, through the
-    /// writer's commit count.
+    /// An in-memory store's own commit shows within one poll interval,
+    /// through the writer's commit count.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn an_in_process_commit_shows_within_one_poll() {
         let store = Arc::new(Store::in_memory().unwrap());
         a_retitle_shows_within_one_poll(&store, &store);
     }
 
-    /// P40 check 22, a guard for the gate: an event that commits nothing
-    /// (`StoreBusy`, `OperationFailed`, `ModelsMissing`, each for a meeting
-    /// the detail does not show) still reloads, since the pipeline's own
-    /// flags that the detail reads moved: the detail and the progress reach
-    /// the sink within [`LIVE`], from a forced pass whose reload the gate
-    /// counts.
+    /// An event that commits nothing (`StoreBusy`, `OperationFailed`,
+    /// `ModelsMissing`) still reloads the detail and the progress.
     #[test]
     fn an_event_without_a_commit_still_reloads() {
         use steno_bridge::BridgeHost as _;
@@ -4749,9 +4322,8 @@ mod tests {
         runtime.shutdown_background();
     }
 
-    /// P40 check 22: what the light part follows shows within one poll
-    /// with nothing committed: a microphone permission granted in the
-    /// system's settings changes the Recording section's subtitle.
+    /// A microphone permission granted in the system shows within one poll
+    /// with nothing committed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_permission_granted_outside_the_app_shows_within_one_poll() {
         use steno_bridge::{PermissionKind, PermissionState};
@@ -4788,9 +4360,7 @@ mod tests {
         owner.abort();
     }
 
-    /// A forced pass runs the light part too: with no reload owner, a
-    /// microphone permission granted in the system's settings shows at
-    /// the next [`Host::store_changed`].
+    /// A forced pass runs the light part too.
     #[test]
     fn a_forced_pass_follows_what_the_store_does_not_hold() {
         use steno_bridge::{PermissionKind, PermissionState};
@@ -4815,9 +4385,7 @@ mod tests {
         );
     }
 
-    /// A request that races a tick is honoured with nothing committed: the
-    /// owner here ticks every millisecond, so most requests land beside a
-    /// tick, and each one still reloads the detail.
+    /// A request that races a tick still reloads the detail.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_request_beside_a_tick_still_reloads() {
         let (_dir, store) = temp_store();
@@ -4840,11 +4408,7 @@ mod tests {
         owner.abort();
     }
 
-    /// P40 check 23: ten requests made while a pass is held run exactly
-    /// one more forced reload once it goes on: the pass took the flag
-    /// before it read the mark, and the `Notify`'s stored permit wakes the
-    /// owner once. Counted in reloads, not passes, since a tick may land
-    /// beside the permit; the owner here ticks once an hour.
+    /// Ten requests during a held pass run exactly one more forced reload.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn reload_requests_during_a_pass_run_one_more_pass() {
         let (_dir, store) = temp_store();
@@ -4858,7 +4422,6 @@ mod tests {
         ));
         passes(&sink, std::time::Instant::now(), 1);
 
-        // What one forced reload asks the gate.
         let before = gate.reloads();
         host.request_reload();
         assert!(gate.wait_for(PATIENCE, |state| state.reloads > before));
@@ -4890,9 +4453,8 @@ mod tests {
         owner.abort();
     }
 
-    /// The app's build turns the fallback on over a transcription's mark a
-    /// crash left, and its end through the app's model service holds this
-    /// run's warm-up off, on the warm-up mark the pipelines share (A19).
+    /// A transcription mark a crash left turns the fallback on, and its end
+    /// through the model service holds this run's warm-up off.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_build_turns_the_fallback_on_and_its_end_holds_this_runs_warm_up_off() {
         let dir = tempfile::tempdir().unwrap();

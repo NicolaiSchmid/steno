@@ -1,68 +1,8 @@
-//! The composition root of the Rust app: one function, [`build`], turns
-//! the stored settings into the real object graph and the
-//! [`steno_host::Services`] the host runs on. The `steno` CLI calls it,
-//! the Tauri shell calls [`build_with_import`], which is [`build`] with the
-//! Mac's import of the Swift app ([`swift_import`]); apart from the
-//! import, nothing here contains logic the other would not also need.
-//! Swift: `apps/macos/Steno/AppEnvironment.swift` and
-//! `Sources/steno/Wiring.swift`.
-//! Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md` (`WP6b`).
-//!
-//! | Module | What it holds |
-//! |--------|---------------|
-//! | [`app`] | [`AppOptions`], [`build`], [`build_with_import`], [`App`] with `host()`, `launch()`, `launch_finished()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`], [`open_store`], [`lock_database`] with [`LOCK_PATIENCE`](app::LOCK_PATIENCE), [`GraphSecrets`](app::GraphSecrets), the graph's secret store in its three layers (the platform store, `KeepsApiKey`, the import's gate) |
-//! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) with the [`BuiltEngine`](pipeline::BuiltEngine) it was built with and the retry of the meetings waiting for the store ([`StoreRetry`](pipeline::StoreRetry)), and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
-//! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
-//! | [`calendar`] | The calendar event that names a recording and its attendees: the [`Calendar`](calendar::Calendar) seam, `EventKit` on the Mac ([`system_calendar`](calendar::system_calendar)), and the lookup that never holds a start up |
-//! | [`permissions`] | The host's `Permissions` over the shell's: [`SystemPermissions`](permissions::SystemPermissions) adds the Mac's system audio probe and its remembered answer |
-//! | [`auto_stop`] | The auto-stop after a call ends, the recorder's policy: the 90-second grace ([`AUTO_STOP_GRACE`](auto_stop::AUTO_STOP_GRACE)), "Keep recording" and the `callEnded` end reason, fed with [`MicrophoneActivity`](auto_stop::MicrophoneActivity) |
-//! | [`detection`] | [`DetectionController`](detection::DetectionController): the meeting detector's events into one prompt at a time through the shell's [`PromptPanel`](detection::PromptPanel), and into the recorder's auto-stop while recording |
-//! | [`audio_folders`] | Where recordings were written, beside the database: each recording's and phone upload's folder and the upload each phone copy holds, for crash recovery and the adoption of a master with no meeting, and the known folders |
-//! | [`recovery`] | Recovery of an interrupted recording from its master on disk, at launch and after a failed stop, the launch's adoption of a master no meeting names (a phone copy adopted with its upload's ledger row, and the copy of bytes whose meeting the user deleted removed), and [`LiveRecordingCheck`](recovery::LiveRecordingCheck), when a master counts as still written |
-//! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels`, and [`SpeechEngines`](speech::SpeechEngines), the engines and the diarizer the pipelines share across reloads |
-//! | [`model_gate`] | The gates that keep a pipeline run from downloading a model, [`GatedSpeechEngine`](model_gate::GatedSpeechEngine) and [`GatedDiarizer`](model_gate::GatedDiarizer) over an [`InstalledCheck`](model_gate::InstalledCheck), and [`ResumingSpeechModels`](model_gate::ResumingSpeechModels): a refusal leaves the meeting queued until Settings or onboarding installs the models, or a reload or the launch finds them |
-//! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
-//! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`LOG_FILTER`], [`flush_logs`] |
-//! | [`handover`] | Where the identity is read and made anew ([`IdentitySource`](handover::IdentitySource)), the file its fingerprint is recorded in, the host's `Handover` over the listener, which waits with Try again and Pair again while the identity cannot be read, the listener's port ([`listener_port`](handover::listener_port), [`PORT_VARIABLE`](handover::PORT_VARIABLE)), and [`GatedHandover`](handover::GatedHandover), the one that waits for the import's gate |
-//! | [`secrets`] | The platform keyring, the Secret Service on Linux and the 0600 secrets file behind `SecretStore`, and [`KeepsApiKey`](secrets::KeepsApiKey), the app's store that keeps the API key for the pipeline's rebuilds; its Windows credential store module is the one place in the crate allowed `unsafe` |
-//! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
-//! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json`, `audio-folders.json` and `update-check.json` |
-//! | [`platform`] | The clock, the folder usage walk, the input device list, the flags in `preferences.json` |
-//! | [`updates`] | The host's `Updater`: the daily update schedule over the shell's updater, its flags, the last check time, the install gate (`IdleGate`, stable plan P25) and the packaged-install switch |
-//! | [`qr`] | The host's `QrEncoder`: the pairing code as a PNG |
-//! | [`swift_import`] | The Mac's import of the Swift app's preferences, API key and handover identity, at the first launch after the update: the launch half, the onboarding step's half and the handover gate |
-//!
-//! What stays a fake here is named in [`build`]'s doc: the platform
-//! services the shell does not supply yet (the clip player; the
-//! permissions, the updater and the login item when the shell passes
-//! none), each with its reason and owner in the plan's "Pipeline and
-//! services (WP6b)" list.
-//!
-//! Off the Mac, and on the Mac when the speech settings choose it, Parakeet
-//! runs in the speech sidecar ([`speech::SpeechSetup::runtime`]); a stored
-//! engine id the Rust app does not run becomes `parakeet-v3` at launch
-//! (`Store::retire_speech_engine`). The diarizer's ONNX models run in this
-//! process.
-//!
-//! Secrets live in the platform keyring on macOS (the Keychain) and on
-//! Windows (the credential store, each credential kept on this computer,
-//! not with a roaming profile; one the `keyring` crate wrote with the
-//! roaming profile moves here on its first read). On Linux they live in
-//! the Secret Service when a provider answers on the session bus
-//! (`secrets::SecretServiceStore`, which first moves what the file holds
-//! into it and marks the file), else in the 0600 `secrets.json` under the
-//! support directory, the store the CLI uses everywhere; the choice is
-//! made once per process, on the store's own thread, and logged. A read
-//! never waits on the keyring's prompt: one made while the prompt is up
-//! fails, and [`App::launch`] reads again once the keyring answered (the
-//! handover's identity too). [`build`] still waits for the choice until a
-//! prompt shows, so a bus or a provider that never answers holds the start
-//! for two seconds (the connection and its session), and a provider that
-//! stops answering after the session for one D-Bus call timeout (25 s),
-//! before the file is chosen. A write may wait on the user. The `keyring`
-//! crate's `linux-native` store is the kernel keyring, which does not
-//! survive a reboot (the handover identity and the LLM API key would
-//! vanish), so it is not used.
+//! The composition root of the Rust app: [`build`] turns the stored
+//! settings into the real object graph and the [`steno_host::Services`]
+//! the host runs on. The `steno` CLI calls [`build`]; the Tauri shell calls
+//! [`build_with_import`], which adds the Mac's import of the Swift app's
+//! preferences, API key and handover identity.
 //!
 //! The shell's launch, in one piece:
 //!
@@ -132,13 +72,10 @@ pub use logs::{LOG_FILTER, flush_logs, log_to_stderr};
 pub use secrets::{
     FileSecretStore, KeyringSecretStore, KeyringUnavailable, secret_store, secret_store_with_unlock,
 };
-/// The durable writes live with the pipeline, whose phone intake needs
-/// them; the secrets file, `handover-identity.json` and the CLI's
-/// `meeting.json` use them from here.
+/// The durable writes, which live with the pipeline's phone intake.
 pub use steno_pipeline::files;
 
-/// Runs `future` to completion on `runtime` from a synchronous host
-/// service (the host's traits are synchronous, the clients are async).
+/// Runs `future` to completion on `runtime` from a synchronous host service.
 pub(crate) fn block_on<T>(
     runtime: &tokio::runtime::Handle,
     future: impl std::future::Future<Output = T>,

@@ -1,9 +1,6 @@
 //! The LLM passes for the pipeline and the host's `LlmService`, built from
-//! `Settings` and the API key: `LlmEndpoint::from_settings` (None until the
-//! chosen provider is set up; the pipeline then skips both passes), one
-//! client shared by the cleaner and the summarizer. The endpoint provider's
-//! key goes into the client only; the Codex provider reads the Codex CLI's
-//! sign-in. Swift: `apps/macos/Steno/Services/LLMWiring.swift`.
+//! `Settings` and the API key (None until the chosen provider is set up),
+//! one client shared by the cleaner and the summarizer.
 
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
@@ -74,8 +71,7 @@ pub async fn probe_line(
 ) -> Result<String, String> {
     let endpoint = LlmEndpoint::from_settings(settings)
         .ok_or_else(|| "Set up a summaries service first.".to_owned())?;
-    // One attempt: a button press should answer at once, not after the
-    // pipeline's retry backoff.
+    // One attempt: a button press answers at once.
     let client = make_client(endpoint, api_key, codex, RetryPolicy::with_max_attempts(1));
     let report = client.probe().await.map_err(|error| error.to_string())?;
     let listed = match report.model_listed {
@@ -98,14 +94,10 @@ pub async fn probe_line(
     ))
 }
 
-/// The runtime the host's network calls run on, with a worker of its
-/// own. The host calls in from a bridge command, which can itself be
-/// running on an app runtime worker, and the app runtime's other workers
-/// can all be waiting on the host's state (the event loop and the poll
-/// take it), leaving nobody there to drive a request or fire its timeout.
-/// It lives as long as the process, because a pooled connection it opens
-/// may later serve the pipeline's client and would break if this runtime
-/// were dropped.
+/// The runtime the host's network calls run on, with a worker of its own:
+/// the app runtime's workers can all be waiting on the host's state,
+/// leaving nobody to drive a request. It lives as long as the process,
+/// since a pooled connection it opens may serve the pipeline's client.
 fn network_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
@@ -140,10 +132,8 @@ const NETWORK_CALL_PANICKED: &str = "The request stopped unexpectedly.";
 
 /// The host's `LlmService` over the real clients. The host's traits are
 /// synchronous, so the probe and the model list wait on the network
-/// runtime; the host calls both with its lock released (the probe's single
-/// attempt and the clients' timeouts bound the wait). The sign-in is read
-/// from the file, never refreshed over the network, as Swift's
-/// `refreshCodexStatus` read `CodexCredentialStore.stored()`.
+/// runtime, with the host's lock released. The sign-in is read from the
+/// file, never refreshed over the network.
 pub struct ClientLlmService {
     pub codex: Arc<CodexCredentialStore>,
 }
@@ -206,10 +196,8 @@ mod tests {
     use super::*;
     use crate::testing::on_own_thread;
 
-    /// The deadlock the network runtime prevents: the app runtime's only
-    /// worker is parked on a lock the caller holds (as the host's flush
-    /// timer parks on the host's state while a Settings command holds it),
-    /// and the probe still answers.
+    /// The app runtime's only worker parked on a lock the caller holds, and
+    /// the probe still answers.
     #[test]
     fn a_probe_answers_while_every_app_worker_waits_on_a_lock_the_caller_holds() {
         let one_worker = || {
@@ -261,9 +249,8 @@ mod tests {
         );
     }
 
-    /// The Summaries section reads the sign-in with the host's lock held,
-    /// so the account line comes from the file even when its tokens are
-    /// due for a refresh: no request reaches the token endpoint.
+    /// The Summaries section reads the sign-in from the file even when its
+    /// tokens are due for a refresh: no request reaches the token endpoint.
     #[test]
     fn the_codex_account_is_read_from_the_file_without_a_refresh() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -273,8 +260,7 @@ mod tests {
             .unwrap();
         let server = runtime.block_on(StubChatServer::start()).unwrap();
         let home = tempfile::tempdir().unwrap();
-        // No `last_refresh`: the file counts as stale, so `current()` would
-        // refresh first.
+        // No `last_refresh`: the file counts as stale.
         std::fs::write(
             home.path().join("auth.json"),
             r#"{"OPENAI_API_KEY":null,"tokens":{"access_token":"access","refresh_token":"refresh","account_id":"account"}}"#,

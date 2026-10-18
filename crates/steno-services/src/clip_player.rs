@@ -1,8 +1,6 @@
 //! The host's `ClipPlayer`: a speaker's sample clip played by the
-//! platform's own player in a child process (`afplay` on macOS, `pw-play`
-//! on Linux, PowerShell's `SoundPlayer` on Windows), one clip at a time,
-//! behind the playback gate, so a recording that starts stops it and none
-//! starts while one runs. Swift: `ClipPlayer.swift` (`AVAudioPlayer`).
+//! platform's own player in a child process, one clip at a time, behind the
+//! playback gate, so a recording that starts stops it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

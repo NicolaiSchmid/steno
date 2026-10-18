@@ -1,21 +1,8 @@
-//! What the unit tests share: a store in a temp directory, the
-//! pipeline's dependencies over core's fakes, the app's graph over them,
-//! the options of the product's graph under a temp directory, frames for a
-//! recording writer, a live check that counts every master old, a paired
-//! phone, a recording it delivered, a store that keeps the last phone, a
-//! fingerprint record that refuses writes, the waits that fail a test
-//! instead of hanging it ([`PATIENCE`] for the tests' own fakes and gates,
-//! [`HANG_GUARD`] for real capture work and a real listener's build),
-//! [`warnings`], what a call logs at `warn` and above, and what the checks
-//! of `.plans/2026-10-12-store-off-the-workers.md` run under: a store held
-//! by another connection ([`HeldStore`]) and a host whose sink keeps the
-//! time of each snapshot ([`hosted`]).
-//!
-//! A test that writes models gives the app an explicit models directory in
-//! its temp directory (the settings' one wins over `STENO_MODELS_DIR`), and
-//! `speech::testing`'s writers panic outside the temp directory or inside
-//! the directory `STENO_MODELS_DIR` names, so no test overwrites the
-//! models a developer keeps for the real-model tests.
+//! What the unit tests share: temp stores, fakes and the app's graph over
+//! them, recording frames, paired phones, and the waits that fail a test
+//! instead of hanging it. A test that writes models gives the app a models
+//! directory in its temp directory, so no test overwrites a developer's
+//! real models.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,51 +22,25 @@ use crate::pipeline::{BuiltEngine, BuiltPipeline, CurrentPipeline, MakeDependenc
 use crate::recorder::MakeCaptureSession;
 
 /// How long a test waits for work driven by its own fakes, gates and
-/// manual clock before it fails. That work takes milliseconds, so this
-/// bound only turns a hang into a failure; for real capture work, the
-/// synthetic capture's first audio included, and a real listener's
-/// build, see [`HANG_GUARD`].
+/// manual clock before it fails; real capture work takes [`HANG_GUARD`].
 pub const PATIENCE: Duration = Duration::from_secs(5);
 
-/// How long a test waits for real work (over the synthetic capture, or a
-/// real handover listener's build) before it fails as hung: a start, a stop and save, a quit, a rebuild or
-/// restart, a recording that ends on its own, and the first audio once
-/// it records (a level, frames in the files), which passes the producer,
-/// the processing and the writer threads at wall-clock pace; and the
-/// build of a real handover listener (its identity read or minted and,
-/// with a phone paired, its TLS setup and its socket). A loaded runner
-/// stretches that work past [`PATIENCE`]. A gate that waits while
-/// such work runs, before the test can open it, takes this bound too,
-/// and so does a call that does the work only when the behaviour under
-/// test is broken (a refused start accepted after all), so the break
-/// fails on its assertion. A gate the test opens after only its own
-/// checks keeps [`PATIENCE`], so a claim can be timed against it. No
-/// verdict rests on how long the work took: a test about how often
-/// something happens counts it, and a product patience a test passes in
-/// takes this bound unless that patience is what it checks. An outage
-/// that can end a wait's condition (a device change whose rebuild
-/// silences the meter) is held by the test until that wait is over
-/// ([`HeldOutages`]): once the outage began, no bound would help. The
-/// value is steno-audio's, which its capture tests and
-/// `ManualClock::wait_for_sleepers` wait too.
+/// How long a test waits for real work (the synthetic capture, a real
+/// handover listener's build) before it fails as hung. A loaded runner
+/// stretches that work past [`PATIENCE`]; no verdict rests on how long it
+/// took.
 pub const HANG_GUARD: Duration = steno_audio::testing::HANG_GUARD;
 
-/// What "live" means in the held-store checks of
-/// `.plans/2026-10-12-store-off-the-workers.md`: one call or one hop that
-/// must not wait on the store. A fifth of the busy timeout that every
-/// regression waits out, and loose enough for a loaded machine at
-/// `nice 19`.
+/// What "live" means in the held-store checks: one call or one hop that
+/// must not wait on the store.
 pub const LIVE: Duration = Duration::from_secs(1);
 
-/// The coarse bound of a held-store check from the user's side, the
-/// action to what the host shows: generous for a loaded machine (a load
-/// of 40 to 70), and still well under the five-second freeze a wait on
-/// the store would show.
+/// The bound of a held-store check from the user's side: well under the
+/// five-second freeze a wait on the store would show.
 pub const END_TO_END: Duration = Duration::from_secs(2);
 
-/// The synthetic backends a test's capture built with their outages held
-/// (`SyntheticOptions::hold_outages`), so that the test lets each outage
-/// go once it saw what comes before it.
+/// The synthetic backends a test's capture built with their outages held,
+/// so the test lets each outage go once it saw what comes before it.
 #[derive(Clone, Default)]
 pub struct HeldOutages(Arc<Mutex<Vec<Arc<steno_audio::testing::SyntheticCaptureBackend>>>>);
 
@@ -97,9 +58,8 @@ impl HeldOutages {
         backend
     }
 
-    /// Lets the next held outage of every backend kept go. Call it once
-    /// the start built the capture: a release saves nothing for a backend
-    /// built later.
+    /// Lets the next held outage of every kept backend go. Call it once the
+    /// start built the capture.
     pub fn release(&self) {
         let backends = self.0.lock().unwrap();
         assert!(
@@ -141,9 +101,7 @@ pub fn fake_dependencies(store: &Arc<Store>, engine_id: &str) -> PipelineDepende
     )
 }
 
-/// `dependencies` as a build of `parakeet-v3` in the speech sidecar; only
-/// the recorder's warm-up reads the engine, and its tests build their own
-/// (`recorder::tests::harness_over`).
+/// `dependencies` as a build of `parakeet-v3` in the speech sidecar.
 pub fn built(dependencies: PipelineDependencies) -> BuiltPipeline {
     BuiltPipeline {
         dependencies,
@@ -186,8 +144,7 @@ pub fn synthetic_capture() -> MakeCaptureSession {
 }
 
 /// [`synthetic_capture`], each session's files written through what
-/// `wrap` makes of the production writer: a writer that dies, or one held
-/// at a gate.
+/// `wrap` makes of the production writer.
 pub fn synthetic_capture_through(
     wrap: impl Fn(steno_audio::RecordingWriter) -> Box<dyn steno_audio::writer::RecordingWriting>
     + Send
@@ -202,8 +159,7 @@ pub fn synthetic_capture_through(
 }
 
 /// [`synthetic_capture`] whose sessions make their writer with
-/// `make_writer` when they start: a writer that cannot be created fails
-/// the start.
+/// `make_writer` when they start.
 pub fn synthetic_capture_writing(
     make_writer: steno_audio::capture::RecordingWriterFactory,
 ) -> MakeCaptureSession {
@@ -235,15 +191,10 @@ pub fn synthetic_tone(
     options
 }
 
-/// A capture recorder over [`synthetic_capture`] and fakes, recording
-/// into a temp audio folder, for the tests that drive it from outside
-/// (the auto-stop, the detection prompt). Dropped after a test that
-/// passed, it stops a recording still running; after a failed one it
-/// leaves the recording, since a stop stuck on the recorder's lock would
-/// hang the test binary. Either way it then waits for the pipeline's
-/// runs, so no file of a test's processing is left behind; that needs a
-/// multi-threaded runtime. The temp directory is dropped last, after the
-/// store, the pipeline and the recorder.
+/// A capture recorder over [`synthetic_capture`] and fakes, recording into
+/// a temp audio folder. Dropped after a passing test, it stops a recording
+/// still running, then waits for the pipeline's runs (needs a
+/// multi-threaded runtime).
 pub struct SyntheticRecorder {
     pub store: Arc<Store>,
     pipeline: Arc<CurrentPipeline>,
@@ -256,8 +207,7 @@ pub fn synthetic_recorder() -> SyntheticRecorder {
     synthetic_recorder_over(synthetic_capture())
 }
 
-/// A [`SyntheticRecorder`] whose sessions `make_session` builds: one whose
-/// device changes, say.
+/// A [`SyntheticRecorder`] whose sessions `make_session` builds.
 pub fn synthetic_recorder_over(make_session: MakeCaptureSession) -> SyntheticRecorder {
     let (dir, store) = temp_store();
     let mut settings = store.settings().unwrap();
@@ -289,9 +239,8 @@ impl SyntheticRecorder {
         database_in(self.dir.path())
     }
 
-    /// Starts a recording in `mode` for `call_app` on a thread of its own,
-    /// as the host calls it, and returns once the start returned, refused
-    /// or not, failing the test as hung after [`HANG_GUARD`].
+    /// Starts a recording on a thread of its own and returns once the start
+    /// returned, failing the test as hung after [`HANG_GUARD`].
     pub fn start(&self, mode: steno_bridge::CaptureMode, call_app: Option<&str>) {
         let (recorder, call_app) = (self.recorder.clone(), call_app.map(str::to_owned));
         on_own_thread(HANG_GUARD, "the start returned", move || {
@@ -299,16 +248,14 @@ impl SyntheticRecorder {
         });
     }
 
-    /// Stops the recording on a thread of its own, as the host calls it,
-    /// and returns once the stop saved it, failing the test as hung after
-    /// [`HANG_GUARD`].
+    /// Stops the recording on a thread of its own and returns once it saved,
+    /// failing the test as hung after [`HANG_GUARD`].
     pub fn stop(&self) {
         let recorder = self.recorder.clone();
         on_own_thread(HANG_GUARD, "the stop returned", move || recorder.stop());
     }
 
-    /// Waits until the recorder is idle again: a stop it began on its own
-    /// (a grace that ran out, say) saved the recording.
+    /// Waits until the recorder is idle again.
     pub async fn idle(&self, what: &str) {
         eventually_within(HANG_GUARD, what, || {
             self.recorder.status().state == steno_bridge::RecordingState::Idle
@@ -331,13 +278,10 @@ impl Drop for SyntheticRecorder {
     }
 }
 
-/// The options of the product's graph under `support`, without a
-/// capture backend, a keyring, an updater, permissions, a calendar,
-/// detection or the Swift import's marker. The database's lock waits up
-/// to [`HANG_GUARD`]: once a test dropped its app, a child that another
-/// test forked before the drop holds a copy of the lock's file until it
-/// execs, so a relaunch that does not wait can find the lock still held.
-/// A test of the refusal itself sets its own patience.
+/// The options of the product's graph under `support`, without a capture
+/// backend, keyring, updater, permissions, calendar, detection or import
+/// marker. The database's lock waits up to [`HANG_GUARD`]: a child another
+/// test forked can hold a copy of the lock's file until it execs.
 pub fn options_under(support: &std::path::Path) -> crate::AppOptions {
     crate::AppOptions {
         paths: steno_core::StenoPaths::new(support),
@@ -359,8 +303,7 @@ pub fn options_under(support: &std::path::Path) -> crate::AppOptions {
 }
 
 /// The graph `build` assembles, over fakes, with a recorder over
-/// `make_session` that records into `root/audio`: what `App::shutdown`
-/// drives, the host's recorder, and the launch. On the current runtime.
+/// `make_session` that records into `root/audio`.
 pub fn app_over_fakes(
     root: &std::path::Path,
     store: &Arc<Store>,
@@ -377,11 +320,8 @@ pub fn app_over_fakes(
 }
 
 /// [`app_over_fakes`] with `engine` run in this process, as `CoreML` is on
-/// the Mac (its load and transcriptions marked as reads, and run only
-/// while no recording is under way), its models and the diarizer's
-/// installed, and the warm-up mark of `root/support` read as a launch
-/// reads it: a recording warms `engine` up, unless a mark left there turns
-/// the warm-up off.
+/// the Mac, its models and the diarizer's installed, and the warm-up mark
+/// of `root/support` read as a launch reads it.
 pub fn app_warming_up(
     root: &std::path::Path,
     store: &Arc<Store>,
@@ -427,15 +367,8 @@ pub fn app_decoding(
 }
 
 /// The app's launch over `root/support` with two speech engines: `coreml`
-/// in this process, as `CoreML` is on the Mac, and `sidecar` in its
-/// place, as the speech sidecar. The launch reads the warm-up mark and the
-/// reading marks there, and the fallback over them
-/// (`steno_pipeline::SpeechFallback`), as `build_with_import` does; every
-/// build runs `coreml`, the Mac's default on every platform, unless the
-/// fallback is on, and the model service is the app's over
-/// `root/models`, every model installed. The fallback ends through the
-/// host's model service (`SpeechModels::end_speech_fallback`) and a
-/// reload.
+/// in this process and `sidecar` in its place, with the speech fallback
+/// over the reading marks as `build_with_import` builds it.
 pub fn app_falling_back(
     root: &std::path::Path,
     store: &Arc<Store>,
@@ -505,9 +438,8 @@ pub fn app_falling_back(
     )
 }
 
-/// [`app_over_fakes`] over the build `first` (every reload builds it again)
-/// and the host's `fakes`, its reads marked in `root/support`, which the
-/// launch check reads first (`steno_pipeline::ReadingMarks`).
+/// [`app_over_fakes`] over the build `first` and the host's `fakes`, its
+/// reads marked in `root/support`.
 fn app_over_build(
     root: &std::path::Path,
     store: &Arc<Store>,
@@ -599,9 +531,8 @@ pub fn an_hour_later() -> crate::recovery::LiveRecordingCheck {
     }
 }
 
-/// A fingerprint record over the app's file that refuses every record of
-/// a fingerprint while `refuse` is set, as a full disk does, so a Pair
-/// again stops at its last step; the next fingerprint's note is written.
+/// A fingerprint record that refuses every write while `refuse` is set, as
+/// a full disk does.
 pub struct RefusingRecord {
     pub file: Arc<crate::handover::FingerprintFile>,
     pub refuse: std::sync::atomic::AtomicBool,
@@ -628,8 +559,7 @@ impl steno_handover::FingerprintRecord for RefusingRecord {
     }
 }
 
-/// Saves a paired phone in `store`, the evidence that an identity existed;
-/// each call another phone, with a token of its own.
+/// Saves another paired phone in `store`, with a token of its own.
 pub fn pair_a_phone(store: &Store) {
     pair_a_phone_at(store, chrono::Utc::now());
 }
@@ -652,9 +582,7 @@ pub fn pair_a_phone_at(store: &Store, paired_at: chrono::DateTime<chrono::Utc>) 
 }
 
 /// Keeps the last paired phone in `store` whatever deletes it, as a disk
-/// that refuses the write would, until [`let_the_last_phone_go`]: Pair
-/// again stops right after the write with one phone paired, and after the
-/// first phone with two.
+/// that refuses the write would, until [`let_the_last_phone_go`].
 pub fn keep_the_last_phone(store: &Store) {
     execute(
         store,
@@ -685,8 +613,7 @@ pub struct Admitted {
 }
 
 impl Admitted {
-    /// The recording still reads as delivered into its meeting, which is
-    /// still there.
+    /// The recording still reads as delivered into its still existing meeting.
     pub fn is_unchanged(&self, store: &Store) -> bool {
         store.admitted_meeting(self.recording, 4, &[7; 32]).unwrap() == Some(self.meeting)
             && store.meeting(self.meeting).unwrap().is_some()
@@ -694,8 +621,7 @@ impl Admitted {
 }
 
 /// Admits a recording of the first paired phone in `store` as a meeting,
-/// with its `complete` receipt and its row in the admission ledger (4
-/// bytes, SHA-256 `[7; 32]`).
+/// with its `complete` receipt and its admission ledger row.
 pub fn admit_a_recording(store: &Store) -> Admitted {
     let now = chrono::Utc::now();
     let meeting = steno_core::Meeting {
@@ -736,8 +662,7 @@ pub fn admit_a_recording(store: &Store) -> Admitted {
     }
 }
 
-/// Waits until `done` holds, failing the test with `what` after
-/// [`PATIENCE`].
+/// Waits until `done` holds, failing the test after [`PATIENCE`].
 pub async fn eventually(what: &str, done: impl FnMut() -> bool) {
     eventually_within(PATIENCE, what, done).await;
 }
@@ -753,8 +678,8 @@ pub async fn eventually_within(patience: Duration, what: &str, mut done: impl Fn
     .expect(what);
 }
 
-/// What `found` returns once it returns something, polled on this thread,
-/// failing the test with `what` after `patience`.
+/// What `found` returns once it returns something, failing the test after
+/// `patience`.
 pub fn found_within<T>(patience: Duration, what: &str, mut found: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + patience;
     loop {
@@ -766,11 +691,9 @@ pub fn found_within<T>(patience: Duration, what: &str, mut found: impl FnMut() -
     }
 }
 
-/// Calls `f` on a thread of its own, as the host calls its services,
-/// failing the test with `what` unless it returns within `patience`. Not
-/// a `spawn_blocking` task: the runtime waits for those when it shuts
-/// down, so a call stuck on the work would hang the test instead of
-/// failing it.
+/// Calls `f` on a thread of its own, failing the test unless it returns
+/// within `patience`. Not `spawn_blocking`: the runtime waits for those at
+/// shutdown, so a stuck call would hang the test.
 pub fn on_own_thread<T: Send + 'static>(
     patience: Duration,
     what: &str,
@@ -787,8 +710,7 @@ pub fn on_own_thread<T: Send + 'static>(
     }
 }
 
-/// `frames` frames of a tone on every lane of `writer`, as a capture
-/// hands them over.
+/// `frames` frames of a tone on every lane of `writer`.
 pub fn write_frames(writer: &mut steno_audio::RecordingWriter, frames: usize) {
     use steno_audio::FRAME_SIZE;
     use steno_audio::writer::{LaneFrames, RecordingWriting as _};
@@ -838,13 +760,9 @@ pub fn warnings<T>(run: impl FnOnce() -> T) -> (T, String) {
     (value, logged)
 }
 
-/// What the checks of `.plans/2026-10-12-store-off-the-workers.md` run
-/// under ("Acceptance"): another connection holds the database's write
-/// lock, as another process does, for [`HeldStore::HOLD`]. With
-/// [`HeldStore::with_a_write_waiting`] a write of this process waits out
-/// its busy timeout behind it meanwhile, as a pipeline write does, and so
-/// holds the store's writer. Dropped, it lets the lock go, and the waiting
-/// write commits.
+/// Another connection holding the database's write lock for
+/// [`HeldStore::HOLD`], as another process does. Dropped, it lets the lock
+/// go.
 pub struct HeldStore {
     since: Instant,
     released: Arc<AtomicBool>,
@@ -853,8 +771,8 @@ pub struct HeldStore {
 }
 
 impl HeldStore {
-    /// How long a check holds the lock: past the five-second busy timeout,
-    /// so a write that waits for it fails once and tries again.
+    /// Past the five-second busy timeout, so a waiting write fails once and
+    /// tries again.
     pub const HOLD: Duration = Duration::from_secs(7);
 
     /// The lock held on the database at `path`, and no write waiting.
@@ -867,10 +785,8 @@ impl HeldStore {
         }
     }
 
-    /// The lock held on the database at `path`, and a write through
-    /// `store`, which is over it, waiting behind it, tried again whenever
-    /// its busy timeout runs out, until the lock goes. Returns once that
-    /// write is in its wait.
+    /// The lock held on `path`, and a write through `store` waiting behind it
+    /// until the lock goes. Returns once that write is in its wait.
     pub fn with_a_write_waiting(store: &Arc<Store>, path: &Path) -> HeldStore {
         let store = store.clone();
         HeldStore::with_waiting(path, move || {
@@ -878,10 +794,8 @@ impl HeldStore {
         })
     }
 
-    /// The lock held on the database at `path`, and `write`, which waits
-    /// behind it, run on a thread of its own again and again (each time
-    /// its busy timeout runs out) until the lock goes. Returns once the
-    /// first is in its wait.
+    /// The lock held on `path`, and `write` run again and again behind it until
+    /// the lock goes. Returns once the first is in its wait.
     pub fn with_waiting(path: &Path, mut write: impl FnMut() + Send + 'static) -> HeldStore {
         let mut held = HeldStore::lock_only(path);
         let released = held.released.clone();
@@ -895,15 +809,13 @@ impl HeldStore {
         held
     }
 
-    /// Waits until [`Self::HOLD`] has passed since the lock was taken, then
-    /// lets it go; returns when it did.
+    /// Lets the lock go once [`Self::HOLD`] has passed; returns when it did.
     pub fn release_after_hold(&mut self) -> Instant {
         std::thread::sleep((self.since + Self::HOLD).saturating_duration_since(Instant::now()));
         self.release()
     }
 
-    /// Lets the lock go, and waits for the waiting write to commit; returns
-    /// when the lock went.
+    /// Lets the lock go and waits for the waiting write to commit.
     pub fn release(&mut self) -> Instant {
         self.released.store(true, Ordering::SeqCst);
         drop(self.hold.take());
@@ -921,8 +833,7 @@ impl Drop for HeldStore {
     }
 }
 
-/// Waits up to `within` of `released` until `meeting_id` was saved: out
-/// of `recording` and not failed.
+/// Waits up to `within` of `released` until `meeting_id` was saved.
 pub fn saved_within(store: &Store, meeting_id: uuid::Uuid, released: Instant, within: Duration) {
     let deadline = released + within;
     loop {
@@ -967,8 +878,7 @@ impl steno_bridge::EventSink for TimedSink {
 }
 
 impl TimedSink {
-    /// The snapshots of `topic` that arrived at or after `since`, with
-    /// when each did.
+    /// The snapshots of `topic` that arrived at or after `since`.
     pub fn since(
         &self,
         topic: steno_bridge::BridgeTopic,
@@ -995,9 +905,8 @@ impl TimedSink {
             .collect()
     }
 
-    /// When the first `recording` snapshot in `state` (`"stopping"`, say)
-    /// that arrived at or after `since` did, waiting up to `patience` for
-    /// it.
+    /// When the first `recording` snapshot in `state` at or after `since`
+    /// arrived, waiting up to `patience`.
     pub fn recording_in(&self, state: &str, since: Instant, patience: Duration) -> Option<Instant> {
         let deadline = Instant::now() + patience;
         loop {
@@ -1014,9 +923,7 @@ impl TimedSink {
     }
 }
 
-/// One `recorder_changed` the recorder's hook made: when it began, how
-/// long it took, on which thread, and the recorder's state and whether its
-/// auto-stop was armed once it returned.
+/// One `recorder_changed` call the recorder's hook made.
 #[derive(Debug, Clone)]
 pub struct HookCall {
     pub began: Instant,
@@ -1033,9 +940,8 @@ pub struct Hosted {
     hooks: Arc<Mutex<Vec<HookCall>>>,
 }
 
-/// A host over `store` and the fakes, whose recorder is `recorder`, with
-/// the recorder's changes routed into it as `App::launch` routes them, and
-/// a [`TimedSink`]. The page is ready, so every publish reaches the sink.
+/// A host over `store` and the fakes with `recorder`'s changes routed into
+/// it as `App::launch` routes them, and a [`TimedSink`].
 pub fn hosted(store: &Arc<Store>, recorder: &Arc<crate::recorder::CaptureRecorder>) -> Hosted {
     hosted_over(store, recorder, None)
 }
@@ -1084,8 +990,7 @@ pub fn hosted_over(
 }
 
 impl Hosted {
-    /// A forced reload in flight, as the reload owner runs one, on a
-    /// thread of its own.
+    /// A forced reload in flight on a thread of its own.
     pub fn reload_in_flight(&self) -> std::thread::JoinHandle<()> {
         let host = self.host.clone();
         std::thread::spawn(move || host.store_changed())
@@ -1103,12 +1008,9 @@ impl Hosted {
     }
 }
 
-/// A pipeline whose `export_keeps_failing`, which the detail's reload
-/// asks, waits at a gate while the gate is armed: a reload held there
-/// stands for one that waits on the store behind another process's
-/// write lock. Set to a store handle ([`Self::gate_inside_reads_on`]), it
-/// waits inside a read on that handle's reader, so the reader stays taken
-/// while it waits. Everything else is the host's fake.
+/// A pipeline whose `export_keeps_failing` waits at a gate while it is
+/// armed, standing for a reload that waits on the store. Set with
+/// [`Self::gate_inside_reads_on`], it waits inside a read on that store.
 #[derive(Default)]
 pub struct GatedPipeline {
     fake: steno_host::fakes::FakePipeline,
@@ -1117,8 +1019,8 @@ pub struct GatedPipeline {
 }
 
 impl GatedPipeline {
-    /// From now on the gate is passed inside a read on `store`'s reader;
-    /// the first call wins.
+    /// From now on the gate is passed inside a read on `store`; the first
+    /// call wins.
     pub fn gate_inside_reads_on(&self, store: Arc<Store>) {
         let _ = self.reader.set(store);
     }
@@ -1178,8 +1080,7 @@ impl ReloadGate {
         reached(&state)
     }
 
-    /// Arms the gate; the next reload waits there until the guard
-    /// drops, also when the test fails.
+    /// Arms the gate until the guard drops.
     pub fn arm(&self) -> ArmedGate<'_> {
         self.state().armed = true;
         ArmedGate(self)

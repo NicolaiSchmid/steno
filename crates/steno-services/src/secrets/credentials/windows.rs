@@ -234,9 +234,7 @@ unsafe fn bytes<'a>(blob: *const u8, size: u32) -> &'a [u8] {
 }
 
 /// The `on_windows_` tests run against the runner's real credential store,
-/// each under target names of its own
-/// (`steno-test-<uuid>.uno.schmid.steno.mac`), which it deletes again
-/// however it ends; no other credential is touched.
+/// each under target names of its own, deleted however it ends.
 #[cfg(test)]
 mod tests {
     use steno_core::SecretKey;
@@ -284,9 +282,8 @@ mod tests {
         assert!(!is_not_found(&io::Error::other("not an OS error")));
     }
 
-    /// A secret written here is kept on this computer, filed and encoded
-    /// as the `keyring` crate files it, so the crate (and a build from
-    /// before this store) reads it too; a removal deletes it.
+    /// A secret written here is kept on this computer, filed and encoded as
+    /// the `keyring` crate files it; a removal deletes it.
     #[test]
     fn on_windows_a_written_secret_is_kept_on_this_computer_and_reads_through_the_keyring_crate() {
         let key = TestKey::new();
@@ -312,10 +309,8 @@ mod tests {
         write_secret(&mut *credential_set(), &key.0, None).unwrap();
     }
 
-    /// A credential the `keyring` crate wrote roams
-    /// (`CRED_PERSIST_ENTERPRISE`); its first read returns it and moves it
-    /// to this computer with its blob, user name and comment, under the
-    /// same target name, where the crate still reads it.
+    /// A credential the `keyring` crate wrote roams; its first read returns it
+    /// and moves it to this computer, where the crate still reads it.
     #[test]
     fn on_windows_a_credential_the_keyring_crate_wrote_reads_and_moves_to_this_computer() {
         let key = TestKey::new();
@@ -344,9 +339,8 @@ mod tests {
         assert_eq!(key.keyring_entry().get_password().unwrap(), identity);
     }
 
-    /// `CredWriteW` replaces the credential of the same target name,
-    /// whatever its persistence: one credential per target name and type,
-    /// never two.
+    /// `CredWriteW` replaces the credential of the same target name, whatever
+    /// its persistence.
     #[test]
     fn on_windows_a_write_replaces_the_credential_of_the_same_target_name() {
         let key = TestKey::new();
@@ -374,9 +368,8 @@ mod tests {
         assert!(!credential_set().delete(&roaming.target_name).unwrap());
     }
 
-    /// A move under `CRED_PRESERVE_CREDENTIAL_BLOB` keeps the blob the
-    /// credential manager holds and never brings back a deleted credential,
-    /// as the in-memory set's move does.
+    /// A move under `CRED_PRESERVE_CREDENTIAL_BLOB` keeps the stored blob and
+    /// never brings back a deleted credential, as the in-memory set's does.
     #[test]
     fn on_windows_a_move_keeps_the_stored_blob_and_never_brings_back_a_deleted_credential() {
         let key = TestKey::new();

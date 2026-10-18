@@ -1,12 +1,8 @@
-//! The app's listener, built as the shell builds it (`build`, outside
-//! `cfg(test)`), listens on the stored `handoverPort`, or on
-//! `STENO_HANDOVER_PORT` when it is set (stable plan X4). It publishes a
-//! Bonjour record while it runs, named `Steno port test` (`HOSTNAME`) on
-//! Linux and Windows. On the Mac the computer name comes first, so there
-//! it can shadow a running Steno's record. Each case runs in a child
-//! process of this test binary with a temporary home, so neither the
-//! session's variable nor the developer's support directory (and its
-//! handover inbox) reaches it.
+//! The app's listener, built as the shell builds it, listens on the stored
+//! `handoverPort`, or on `STENO_HANDOVER_PORT` when it is set. Each case
+//! runs in a child process with a temporary home, so neither the session's
+//! variable nor the developer's support directory reaches it. On the Mac
+//! its Bonjour record can shadow a running Steno's.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -65,10 +61,8 @@ fn the_app_listens_on_the_stored_handover_port() {
     );
 }
 
-/// In the child, once [`common::assert_temporary_home`] passes: the
-/// shell's options (`AppOptions::product`, without the keyring) with
-/// `stored` as `handoverPort`, and the app built on them. Prints the port
-/// its listener bound.
+/// In the child: the shell's options with `stored` as `handoverPort`, and
+/// the app built on them. Prints the port its listener bound.
 fn listen_as_the_shell_does(stored: u16) {
     common::assert_temporary_home();
     let runtime = tokio::runtime::Builder::new_multi_thread()

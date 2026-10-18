@@ -1,23 +1,8 @@
-//! A secret store that comes back without the handover identity, end to
-//! end through the graph ([`crate::build`]) and the host's iPhone section:
-//! on the Mac, the login keychain after a password reset when the user
-//! chose Create New Keychain (stable plan P35). The computer had an
-//! identity, its recorded fingerprint and two paired phones; the next
-//! launch waits, mints nothing, keeps the record and the phones, and
-//! listens on nothing. Try again brings the listener back once the same
-//! identity is in the store again, and Pair again, confirmed, is the one
-//! way to a new identity. A launch over the note of an unfinished Pair
-//! again decides it by what the store holds, and a record that does not
-//! parse waits until Pair again sets it aside.
-//!
-//! The secrets file stands in for the Keychain: the graph reads both
-//! through `SecretStore`, and `KeyringSecretStore` answers an item the new
-//! keychain lacks (`keyring::Error::NoEntry`) with `None`, as the file
-//! answers a key it lacks. Any other Keychain error (access denied, a
-//! cancelled prompt, a locked keychain) is an `Err`, which waits as
-//! `unreadable`; `handover.rs` and `app.rs` test that answer. The Mac
-//! shell's import marker is a fake that counts its writes. The Swift app,
-//! whose guard keeps its own record file, is not covered here.
+//! A secret store that comes back without the handover identity (the Mac's
+//! login keychain after a password reset), through the graph and the
+//! host's iPhone section: the launch waits, mints nothing and keeps the
+//! record and the phones; Pair again, confirmed, is the one way to a new
+//! identity. The secrets file stands in for the Keychain.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -67,9 +52,7 @@ struct Prompt {
 }
 
 /// A computer whose two phones paired with the identity its first launch
-/// minted, and what the guard must keep: the identity's bundle, its
-/// recorded fingerprint as the file holds it, the paired phones, each
-/// with its token hash, and a recording the first phone delivered.
+/// minted, and what the guard must keep.
 struct Paired {
     dir: tempfile::TempDir,
     pem: String,
@@ -87,8 +70,8 @@ struct Paired {
 }
 
 impl Paired {
-    /// The first launch mints the identity and records its fingerprint; two
-    /// phones pair and the first delivers a recording; the app quits.
+    /// The first launch mints the identity; two phones pair and the first
+    /// delivers a recording; the app quits.
     async fn new() -> Self {
         let mut paired = Paired {
             dir: tempfile::tempdir().unwrap(),
@@ -201,9 +184,8 @@ impl Paired {
         self.record_file().next().unwrap()
     }
 
-    /// Notes `next` as an unfinished Pair again does: the record the guard
-    /// keeps is now the file with the note; returns the bytes from before
-    /// the note.
+    /// Notes `next` as an unfinished Pair again does; returns the record's
+    /// bytes from before the note.
     fn note_next(&mut self, next: &str) -> Vec<u8> {
         self.record_file().note_next(Some(next)).unwrap();
         let noted = std::fs::read(self.record_path()).unwrap();
@@ -225,8 +207,7 @@ impl Paired {
         aside
     }
 
-    /// The next launch, and its host with Pair again's prompt answering
-    /// [`Self::prompt`].
+    /// The next launch, with Pair again's prompt answering [`Self::prompt`].
     fn launch(&self) -> Launched {
         let app = build(self.options()).unwrap();
         let prompt = self.prompt.clone();
@@ -245,17 +226,15 @@ impl Paired {
     }
 
     /// The handover waits for `reason` and mints nothing: the store holds
-    /// `stored` (none, or the identity found there), no listener is built
-    /// (so nothing listens), and the record, the phones and the marker are
-    /// as [`Self::kept`] says.
+    /// `stored`, nothing listens, and the rest is as [`Self::kept`] says.
     async fn waits_untouched(&self, launched: &Launched, reason: &str, stored: Option<&str>) {
         self.waits(launched, reason);
         assert_eq!(self.stored().await.as_deref(), stored, "nothing minted");
         self.kept(launched);
     }
 
-    /// The handover waits for `reason`: no listener is built, no mac id,
-    /// and the card says why and lists every phone.
+    /// The handover waits for `reason`: no listener, no mac id, and the card
+    /// says why and lists every phone.
     fn waits(&self, launched: &Launched, reason: &str) {
         let handover = launched.handover();
         assert!(handover.listener().is_none(), "nothing listens");
@@ -274,9 +253,8 @@ impl Paired {
         );
     }
 
-    /// The listener is back on the identity the phones paired with, started
-    /// for the paired phones, no error shows, and the record, the phones
-    /// and the marker are as [`Self::kept`] says.
+    /// The listener is back on the identity the phones paired with, and the
+    /// rest is as [`Self::kept`] says.
     async fn listens_on_the_known_identity(&self, launched: &Launched) {
         let handover = launched.handover();
         assert!(
@@ -301,8 +279,7 @@ impl Paired {
     }
 
     /// The launch loaded the identity the phones paired with and waits for
-    /// nothing, and the record, the phones and the marker are as
-    /// [`Self::kept`] says.
+    /// nothing, and the rest is as [`Self::kept`] says.
     async fn loads_the_known_identity(&self, launched: &Launched) {
         launched.loaded(&self.mac_id);
         let phone = launched.phone();
@@ -315,8 +292,7 @@ impl Paired {
         self.kept(launched);
     }
 
-    /// Pair again went through, now or at this launch: no phone is paired
-    /// or found by its token, the card waits for nothing and lists none, and
+    /// Pair again went through: no phone is paired, the card lists none, and
     /// the admission ledger keeps the delivered recording.
     fn forgot_the_phones(&self, launched: &Launched, case: &str) {
         let store = &launched.app.store;
@@ -337,10 +313,9 @@ impl Paired {
         assert_eq!(phone["devices"], json!([]), "{case}: {phone}");
     }
 
-    /// The record file is the one the phones' pairing left, byte for byte
-    /// (with the note, where one was taken), every phone is still paired,
-    /// each row and token hash unchanged, the admission ledger keeps the
-    /// delivered recording, and no marker was written.
+    /// The record file is byte for byte the pairing's (with any note), every
+    /// phone is still paired, the ledger keeps the recording, and no marker
+    /// was written.
     fn kept(&self, launched: &Launched) {
         let store = &launched.app.store;
         assert_eq!(
@@ -365,8 +340,7 @@ impl Paired {
     }
 }
 
-/// One launch of the graph and its host, with Pair again's prompt; shuts
-/// the app down when dropped.
+/// One launch of the graph and its host; shuts the app down when dropped.
 struct Launched {
     app: App,
     host: Host,
@@ -428,11 +402,9 @@ fn another_identity() -> String {
         .unwrap()
 }
 
-/// The identity is gone from the store: the launch waits with `missing`,
-/// and so does Try again while the store is still empty. Pair again that
-/// the user declines changes nothing. Once the item is back, Try again
-/// starts the listener on the same identity without a restart, the
-/// phones stay paired, and the next launch loads that identity.
+/// The identity is gone: the launch and Try again wait with `missing`, a
+/// declined Pair again changes nothing, and once the item is back Try
+/// again starts the listener on the same identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_emptied_keychain_waits_until_the_identity_is_back() {
     let paired = Paired::new().await;
@@ -456,12 +428,9 @@ async fn an_emptied_keychain_waits_until_the_identity_is_back() {
     paired.loads_the_known_identity(&paired.launch()).await;
 }
 
-/// Pair again over an emptied store, once the user confirms the warning,
-/// ends with the import's marker written, a new identity in the store with
-/// its fingerprint recorded over the old one, and no paired phone, as each
-/// must pair again (`HandoverIdentity::mint_anew`); the listener is up on
-/// the new identity, stopped until a phone pairs. The next launch loads
-/// that identity and waits for nothing.
+/// Pair again over an emptied store, confirmed, writes the import's
+/// marker, mints and records a new identity, and unpairs every phone; the
+/// next launch loads that identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
     let paired = Paired::new().await;
@@ -497,12 +466,9 @@ async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
     );
 }
 
-/// The store holds another identity than the one whose fingerprint is
-/// recorded (a keychain restored from elsewhere, or another build's
-/// mint): the launch waits with `replaced`, keeps that identity as it
-/// found it, and neither adopts it nor mints; Try again and a declined
-/// Pair again keep it so. Once the identity the phones know is back, Try
-/// again starts the listener on it, and the next launch loads it.
+/// The store holds another identity than the recorded one: the launch
+/// waits with `replaced`, neither adopting it nor minting, until the
+/// identity the phones know is back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn another_identity_in_the_keychain_waits_until_the_known_one_is_back() {
     let paired = Paired::new().await;
@@ -532,19 +498,9 @@ async fn another_identity_in_the_keychain_waits_until_the_known_one_is_back() {
 }
 
 /// A launch that finds the note of an unfinished Pair again decides it by
-/// what the keychain holds:
-/// - the next identity: finished. The launch loads it, removes the
-///   phones, records its fingerprint alone and mints nothing; the
-///   admission ledger keeps the delivered recording.
-/// - the recorded identity, or none: abandoned. The note goes, the record
-///   is back to its bytes, and the launch reads as without it: it loads
-///   the known identity, or waits as missing.
-/// - another identity: the note stays and the launch waits as replaced.
-/// - a keychain that cannot be read: the note stays and the launch waits
-///   as unreadable.
-///
-/// None of them writes the marker, and only the finished one touches the
-/// phones or the record's fingerprint.
+/// what the keychain holds: the next identity finishes it, the recorded
+/// one or none abandons it, another identity or an unreadable keychain
+/// keeps the note and waits. None writes the marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unfinished_pair_again_is_decided_by_the_keychain_at_the_launch() {
     for case in ["next", "recorded", "none", "other", "unreadable"] {
@@ -620,18 +576,10 @@ async fn an_unfinished_pair_again_is_decided_by_the_keychain_at_the_launch() {
     }
 }
 
-/// A record file that does not parse is never read as nothing recorded.
-/// A value that is not a string makes it one that does not parse, under
-/// the fingerprint's key (with another identity in the keychain, which a
-/// missing record would adopt) as under a key the app does not know
-/// (beside the right fingerprint). The launch waits as unreadable, and
-/// neither Try again nor the next launch writes the file or sets it
-/// aside. Pair again, once the user confirms, moves it aside as
-/// `handover-identity.json.corrupt-<time>` with its bytes and records the
-/// new identity alone; the launch after it loads that identity and leaves
-/// both files as they are. Over the same file mended instead, with the
-/// identity the phones know back in the keychain, Try again starts the
-/// listener on it without a restart.
+/// A record file that does not parse is never read as nothing recorded:
+/// the launch waits as unreadable and nothing writes the file, until Pair
+/// again, confirmed, moves it aside and records the new identity alone.
+/// Mended instead, Try again starts the listener without a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_with_a_value_that_is_not_a_string_waits_until_pair_again_sets_it_aside() {
     for case in ["fingerprint", "unknown key"] {
@@ -699,9 +647,8 @@ async fn a_record_with_a_value_that_is_not_a_string_waits_until_pair_again_sets_
 }
 
 /// A paired computer whose record holds a value that is not a string,
-/// under the fingerprint's key with another identity in the keychain
-/// (`fingerprint`), or under a key the app does not know beside the right
-/// fingerprint (`unknown key`); and the identity the keychain holds.
+/// under the fingerprint's key or an unknown one; and the identity the
+/// keychain holds.
 async fn unparsable_record(case: &str) -> (Paired, String) {
     let mut paired = Paired::new().await;
     let (bad, stored) = if case == "fingerprint" {

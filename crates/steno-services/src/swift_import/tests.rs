@@ -13,8 +13,7 @@ use steno_handover::identity::hex;
 
 use super::*;
 
-/// SHA-256 of `Tests/Fixtures/handover/test-identity.der`
-/// (`TestIdentity.fingerprintHex` in the Swift tests).
+/// SHA-256 of `Tests/Fixtures/handover/test-identity.der`.
 const FIXTURE_FINGERPRINT: &str =
     "76ac0c0b28f976f25589214d5b2c614d983df9de081b06ec1fe9247bf1e40d92";
 
@@ -40,8 +39,7 @@ fn identity_der() -> Vec<u8> {
     std::fs::read(repository().join("Tests/Fixtures/handover/test-identity.der")).unwrap()
 }
 
-/// The committed test identity as PKCS#12 under `passphrase`, as
-/// `SecItemExport` hands it over.
+/// The committed test identity as PKCS#12 under `passphrase`.
 fn identity_pkcs12(passphrase: &str) -> Vec<u8> {
     let committed =
         std::fs::read(repository().join("Tests/Fixtures/handover/test-identity.p12")).unwrap();
@@ -56,8 +54,7 @@ fn identity_pkcs12(passphrase: &str) -> Vec<u8> {
     again.writer(passphrase).write().unwrap()
 }
 
-/// `identity` as PKCS#12 under `passphrase`, as `SecItemExport` hands
-/// over a minted one.
+/// `identity` as PKCS#12 under `passphrase`.
 fn pkcs12_of(identity: &HandoverIdentity, passphrase: &str) -> Vec<u8> {
     use base64::Engine as _;
     let pem = identity.to_pem().unwrap();
@@ -80,8 +77,7 @@ fn pkcs12_of(identity: &HandoverIdentity, passphrase: &str) -> Vec<u8> {
     store.writer(passphrase).write().unwrap()
 }
 
-/// What a step chooses the certificate by: the phones paired in `store`,
-/// judged at `now`.
+/// The phones paired in `store`, judged at `now`.
 fn choice_at(store: &Arc<Store>, now: fn() -> chrono::DateTime<chrono::Utc>) -> CertificateChoice {
     CertificateChoice {
         store: store.clone(),
@@ -94,9 +90,8 @@ fn choice_in(store: &Arc<Store>) -> CertificateChoice {
     choice_at(store, test_clock)
 }
 
-/// The tests' clock: a year after the committed identity's certificate
-/// starts, past every start and pairing the tests set from it, or the
-/// real clock once that is later, past every phone paired now.
+/// A year after the committed certificate starts, or the real clock once
+/// that is later.
 fn test_clock() -> chrono::DateTime<chrono::Utc> {
     (fixture_start() + chrono::TimeDelta::days(365)).max(chrono::Utc::now())
 }
@@ -143,8 +138,8 @@ type OnCall = Arc<dyn Fn(&'static str) + Send + Sync>;
 struct FakeKeychain {
     /// The certificates under the Swift label, in the keychain's order.
     certificates: Mutex<Vec<Vec<u8>>>,
-    /// Identities whose certificates the export hands over as themselves;
-    /// any other certificate exports as the committed test identity.
+    /// Certificates the export hands over as themselves; any other exports
+    /// as the committed test identity.
     identities: Mutex<Vec<HandoverIdentity>>,
     /// The certificate query's failure, which wins over `certificates`.
     certificate_error: Mutex<Option<String>>,
@@ -152,8 +147,7 @@ struct FakeKeychain {
     /// A `handover-identity` entry is filed (a desktop-id build's).
     stored_identity: Result<bool, String>,
     key: Result<Option<String>, KeychainRefusal>,
-    /// The `swift-import-done` marker: whether it is filed, or the query's
-    /// failure.
+    /// The `swift-import-done` marker, or the query's failure.
     marker: Mutex<Result<bool, String>>,
     /// The export's refusal; `None` exports the test identity.
     export_refusal: Mutex<Option<KeychainRefusal>>,
@@ -409,8 +403,7 @@ fn without_a_swift_certificate_the_import_is_over_at_launch_and_a_second_launch_
     assert!(preferences.flag(IMPORT_RAN_KEY));
     assert!(preferences.flag(OnboardingViewModel::COMPLETED_KEY));
 
-    // The next launch: the import ran, so nothing is read or written,
-    // even with a certificate now in the keychain.
+    // The import ran: nothing is read, even with a certificate now there.
     *keychain.certificates.lock().unwrap() = vec![identity_der()];
     keychain.calls.lock().unwrap().clear();
     let fresh = Arc::new(FilePreferences::in_support_directory(dir.path()));
@@ -485,9 +478,8 @@ fn the_context_reads_the_smoke_variable() {
     assert_eq!(context.skip_reason(), Some(SkipReason::Smoke));
 }
 
-/// A secret store that counts the reads of each key, and refuses the
-/// identity's writes while `refuse_identity` is set and the API key's
-/// while `refuse_key` is.
+/// A secret store that counts each key's reads and refuses the identity's
+/// or the API key's writes on request.
 #[derive(Default)]
 struct CountingSecrets {
     inner: InMemorySecretStore,
@@ -527,9 +519,8 @@ impl SecretStore for CountingSecrets {
     }
 }
 
-/// `preferences.json` stays a map of booleans, which every earlier build
-/// reads: a value of another type would make such a build drop every flag
-/// after a rollback.
+/// `preferences.json` stays a map of booleans, so an earlier build keeps
+/// its flags after a rollback.
 fn assert_flags_only(support_directory: &Path) {
     let bytes = std::fs::read(support_directory.join("preferences.json")).unwrap();
     serde_json::from_slice::<std::collections::BTreeMap<String, bool>>(&bytes)
@@ -676,7 +667,6 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
     assert_flags_only(step.dir.path());
     assert!(step.preferences.flag(KEY_READ_KEY));
     assert_eq!(step.graph.gate.handover(), HandoverGate::Ready);
-    // The key the step read, answered without asking the keychain again.
     step.raw.reads.lock().unwrap().clear();
     assert_eq!(
         read(&*step.graph.secrets, &SecretKey::llm_api_key()).as_deref(),
@@ -691,11 +681,9 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
     );
 }
 
-/// An import over a `handover-identity.json` that does not parse (an
-/// earlier desktop build's record, damaged, or a value that is not a
-/// string) keeps it as `handover-identity.json.corrupt-<time>` with its
-/// bytes, then records the Swift identity's fingerprint: no write replaces
-/// such a file without a kept copy.
+/// An import over a `handover-identity.json` that does not parse keeps it
+/// as `handover-identity.json.corrupt-<time>`, then records the Swift
+/// identity's fingerprint.
 #[test]
 fn an_import_over_a_record_that_does_not_parse_keeps_it_aside() {
     let desktop =
@@ -754,8 +742,7 @@ fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_agai
             step.graph.gate.handover(),
             HandoverGate::Waiting(WaitReason::ImportDenied)
         );
-        // Try again asks for the identity alone (and the entry it
-        // replaces): the key was read.
+        // Try again asks for the identity alone: the key was read.
         assert_eq!(status.prompts, 1 + u8::from(existing.is_some()));
         step.keychain.allow_export();
         assert_eq!(step.import.run().stage, SwiftImportStage::Done);
@@ -764,8 +751,8 @@ fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_agai
     }
 }
 
-/// The export is of the certificate the step's lookup found, so two
-/// certificates under the Swift label cannot make the two calls disagree.
+/// The export is of the certificate the lookup found, even with two under
+/// the Swift label.
 #[test]
 fn the_export_is_of_the_certificate_the_lookup_found() {
     let step = step(FakeKeychain::swift_app(), None);
@@ -773,9 +760,8 @@ fn the_export_is_of_the_certificate_the_lookup_found() {
     assert_eq!(*step.keychain.exported.lock().unwrap(), [identity_der()]);
 }
 
-/// A desktop-id build's key item and identity entry each count as a
-/// prompt the step announces. Not now reads neither; Continue lets the
-/// graph read the key.
+/// A desktop-id build's key item and identity entry each count as a prompt;
+/// Not now reads neither, Continue lets the graph read the key.
 #[test]
 fn a_desktop_id_key_and_identity_count_as_prompts_and_not_now_reads_neither() {
     let desktop =
@@ -805,9 +791,8 @@ fn a_desktop_id_key_and_identity_count_as_prompts_and_not_now_reads_neither() {
     );
 }
 
-/// A store that fails while it replaces a stored entry reads as that
-/// prompt denied; Try again stores the identity it kept, without a second
-/// export. Without an entry to replace the store simply failed.
+/// A failed store while replacing an entry reads as that prompt denied; Try
+/// again stores the kept identity without a second export.
 #[test]
 fn a_refused_replace_counts_as_denied_and_try_again_repeats_only_the_store() {
     let desktop =
@@ -843,8 +828,7 @@ fn a_refused_replace_counts_as_denied_and_try_again_repeats_only_the_store() {
     }
 }
 
-/// The handover's own load, as the listener does it, over `secrets` and
-/// `record` with no phone paired.
+/// The handover's own load over `secrets` and `record`, no phone paired.
 fn load_identity(
     secrets: &dyn SecretStore,
     record: &dyn FingerprintRecord,
@@ -859,12 +843,9 @@ fn load_identity(
     ))
 }
 
-/// The Swift identity replaces a desktop-id build's, whose fingerprint
-/// that build recorded. Its secret is written but its fingerprint is not:
-/// the step does not count that as done (Waiting with Try again, no
-/// marker, no `IMPORT_RAN`), and the handover's load refuses the stored
-/// identity rather than mint. Try again stores it again, now with its
-/// fingerprint, and the load accepts the Swift identity.
+/// When the Swift identity replaces a desktop-id build's but its
+/// fingerprint is not recorded, the step waits and the handover refuses the
+/// identity rather than mint; Try again records it and the load accepts it.
 #[test]
 fn a_fingerprint_not_recorded_after_the_store_is_surfaced_and_try_again_records_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -938,9 +919,8 @@ fn a_fingerprint_not_recorded_after_the_store_is_surfaced_and_try_again_records_
     assert_eq!(hex(&loaded.fingerprint()), FIXTURE_FINGERPRINT);
 }
 
-/// A certificate query that failed may have hidden the Swift identity:
-/// the import stays pending rather than end, so the listener cannot mint
-/// over it.
+/// A failed certificate query keeps the import pending, so the listener
+/// cannot mint over a hidden Swift identity.
 #[test]
 fn a_failed_certificate_query_leaves_the_import_pending() {
     let dir = tempfile::tempdir().unwrap();
@@ -992,10 +972,8 @@ fn the_gate_s_debug_leaves_the_key_out() {
     assert!(!printed.contains("sk-swift"), "{printed}");
 }
 
-/// While the gate hides the key (before the step, after Not now), a
-/// cleared key field or a keyless preset saves no key: the write never
-/// reaches the store, so the Swift app's item stays, and the gate stays
-/// shut. A key the user types goes through.
+/// While the gate hides the key, a cleared field or keyless preset never
+/// reaches the store; a typed key goes through.
 #[test]
 fn a_gated_empty_key_write_leaves_the_stored_key_in_place() {
     let step = step(FakeKeychain::swift_app(), None);
@@ -1025,12 +1003,9 @@ fn a_gated_empty_key_write_leaves_the_stored_key_in_place() {
     assert_eq!(read(&*step.raw, &key), None);
 }
 
-/// The graph's store is the import's gate over the app's `KeepsApiKey`,
-/// as the graph's one wiring function builds them
-/// (`crate::app::gated_secrets`): an empty key write the gate swallows
-/// never reaches `KeepsApiKey`, so the key it kept for the pipeline stays;
-/// once a saved key opened the gate, `KeepsApiKey` keeps and drops the key
-/// as it does without an import.
+/// Over `KeepsApiKey` (as `crate::app::gated_secrets` wires it), an empty
+/// key write the gate swallows keeps the pipeline's key; once the gate is
+/// open `KeepsApiKey` behaves as without an import.
 #[test]
 fn a_write_the_gate_swallows_leaves_the_kept_key_and_an_open_gate_writes_through() {
     let dir = tempfile::tempdir().unwrap();
@@ -1071,10 +1046,8 @@ fn a_write_the_gate_swallows_leaves_the_kept_key_and_an_open_gate_writes_through
     assert_eq!(read(&*memory, &key), None);
 }
 
-/// The pipeline reads the key through the gate, as the graph's one wiring
-/// function builds it (`crate::app::gated_secrets`): behind a pending
-/// import its build asks the store behind the gate for no API key, though
-/// the `KeepsApiKey` it falls back on wraps that store.
+/// Behind a pending import the pipeline's build asks the store behind the
+/// gate for no API key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_pipeline_reads_the_key_through_the_gate_and_not_the_store_behind_it() {
     let (dir, store) = crate::testing::temp_store();
@@ -1096,8 +1069,7 @@ async fn the_pipeline_reads_the_key_through_the_gate_and_not_the_store_behind_it
     );
 }
 
-/// The gate says where the store behind it keeps the secrets, so Settings
-/// word the key's place as without an import.
+/// The gate reports where the store behind it keeps the secrets.
 #[test]
 fn the_gate_reports_the_place_of_the_store_behind_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -1116,10 +1088,8 @@ fn the_gate_reports_the_place_of_the_store_behind_it() {
     assert_eq!(graph.secrets.place(), Some(SecretPlace::File));
 }
 
-/// A refused key read is remembered: the next launch, whose import still
-/// waits for the identity, answers no key without asking the keychain
-/// (so nothing prompts before the step), and so does every launch after
-/// the import is over, until the user saves a key.
+/// A refused key read is remembered: later launches answer no key without
+/// asking the keychain, until the user saves one.
 #[test]
 fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
     let first = step(FakeKeychain::denying_the_key(), None);
@@ -1162,8 +1132,8 @@ fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
     assert_eq!(read(&*later, &key).as_deref(), Some("sk-new"));
 }
 
-/// A refused keychain read hides the keychain's key only: a graph over the
-/// secrets file (the CLI's on the Mac) still answers the key it holds.
+/// A refused keychain read hides only the keychain's key, not the secrets
+/// file's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_graph_over_the_secrets_file_reads_its_key_after_a_refused_keychain_read() {
     let dir = tempfile::tempdir().unwrap();
@@ -1190,8 +1160,7 @@ async fn a_graph_over_the_secrets_file_reads_its_key_after_a_refused_keychain_re
     app.shutdown();
 }
 
-/// Not now reads nothing and brings up no prompt; unlike a refusal it
-/// writes no flag, so the next launch asks again.
+/// Not now reads nothing and writes no flag, so the next launch asks again.
 #[test]
 fn skipping_the_step_reads_nothing_and_the_next_launch_asks_again() {
     let step = step(FakeKeychain::swift_app(), None);
@@ -1226,9 +1195,8 @@ fn skipping_the_step_reads_nothing_and_the_next_launch_asks_again() {
     assert_eq!(again.key, LaunchKey::Unread(ApiKeyItem::Swift));
 }
 
-/// `SecItemExport`'s PKCS#12 of the committed test identity, written on a
-/// Mac by the keychain test (`tests/swift_keychain.rs`): the legacy
-/// encryption Apple writes decodes here on every platform.
+/// `SecItemExport`'s PKCS#12 of the committed test identity (written by
+/// `tests/swift_keychain.rs`) decodes on every platform.
 #[test]
 fn a_pkcs12_the_mac_exported_decodes_into_the_identity() {
     let (identity, bundle) = decode_pkcs12(
@@ -1253,9 +1221,8 @@ fn a_pkcs12_the_mac_exported_decodes_into_the_identity() {
 /// The passphrase of `test-identity.exported.p12`.
 const EXPORTED_PASSPHRASE: &str = "steno-export-fixture";
 
-/// The graph over a pending import, end to end on the 0600 secrets file:
-/// no API key is read and no listener built (so no identity minted) until
-/// the step ran; then the listener comes up with the Swift identity.
+/// The graph over a pending import: no API key read and no listener built
+/// until the step ran, then the listener comes up with the Swift identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_graph_over_a_pending_import_reads_no_key_and_binds_no_listener_until_the_step_ran() {
     use steno_host::services::{Handover as _, ListenerState};
@@ -1300,8 +1267,7 @@ async fn a_graph_over_a_pending_import_reads_no_key_and_binds_no_listener_until_
         .await
         .unwrap();
     assert_eq!(status.stage, SwiftImportStage::Done);
-    // The step and the host write through one `preferences.json`: a flag
-    // the app sets after the step keeps the step's flags beside it.
+    // A flag the app sets after the step keeps the step's flags beside it.
     app.services
         .preferences
         .set_flag(OnboardingViewModel::COMPLETED_KEY, true);
@@ -1336,9 +1302,8 @@ async fn a_graph_over_a_pending_import_reads_no_key_and_binds_no_listener_until_
     app.shutdown();
 }
 
-/// After a denied export the gate waits: the gated listener stays closed
-/// and no identity is minted, though no phone is paired, until Try again
-/// brings the Swift identity over; then the listener opens on it.
+/// After a denied export the listener stays closed and nothing is minted
+/// until Try again brings the Swift identity over.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_waiting_gate_keeps_the_listener_closed_until_the_identity_came_over() {
     use std::task::{Context, Poll, Waker};
@@ -1384,11 +1349,9 @@ async fn a_waiting_gate_keeps_the_listener_closed_until_the_identity_came_over()
     app.shutdown();
 }
 
-/// D5 through the handover's guard: a desktop-id build ran first, so the
-/// secret store holds the identity it minted and its fingerprint is
-/// recorded. The Swift identity replaces it at the step, with its
-/// fingerprint, so the listener built behind the gate loads the Swift
-/// identity instead of refusing it as replaced.
+/// Over a desktop-id build's recorded identity, the Swift identity replaces
+/// it with its fingerprint, so the gated listener loads it instead of
+/// refusing it as replaced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_swift_identity_that_replaced_a_desktop_id_one_is_the_one_the_listener_loads() {
     use steno_handover::FingerprintRecord as _;
@@ -1439,10 +1402,8 @@ async fn a_swift_identity_that_replaced_a_desktop_id_one_is_the_one_the_listener
     app.shutdown();
 }
 
-/// A paired phone proves that an identity existed: with `preferences.json`
-/// gone, the Swift certificate gone before the step and the stored
-/// identity missing or unreadable, the gate opens but the listener it
-/// brings waits, saying why, and no identity is minted.
+/// A paired phone proves an identity existed: with everything else gone the
+/// gate opens but the listener waits, saying why, and nothing is minted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
     use steno_bridge::PhoneWaitingReason;
@@ -1497,10 +1458,8 @@ async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
     }
 }
 
-/// Settings' Pair again while the import waits: the marker first, then
-/// the mint, under the run's lock; then the import is over (`IMPORT_RAN`,
-/// the gate ready, the step done) and no later run exports the Swift
-/// identity over the new one. The marker stays.
+/// Pair again while the import waits writes the marker, mints, ends the
+/// import, and no later run exports the Swift identity over the new one.
 #[test]
 fn pair_again_ends_a_waiting_import_with_the_marker_written_first() {
     use crate::handover::WaitingImport as _;
@@ -1536,8 +1495,7 @@ fn pair_again_ends_a_waiting_import_with_the_marker_written_first() {
     );
 }
 
-/// A marker that cannot be written stops Pair again before the mint: the
-/// import still waits, with Try again.
+/// A marker that cannot be written stops Pair again before the mint.
 #[test]
 fn a_marker_that_cannot_be_written_stops_the_import_s_pair_again() {
     use crate::handover::WaitingImport as _;
@@ -1564,10 +1522,8 @@ fn a_marker_that_cannot_be_written_stops_the_import_s_pair_again() {
     assert_eq!(step.import.status().stage, SwiftImportStage::Waiting);
 }
 
-/// Settings' Try again while the onboarding window runs the step answers
-/// that the step is under way, not the last run's line, and runs no second
-/// export; Pair again then says the same, and once the step is over says
-/// that the phones can send recordings.
+/// Try again during the onboarding window's run answers that the step is
+/// under way and runs no second export; Pair again too, until it is over.
 #[test]
 fn settings_meets_a_run_under_way_or_over_with_its_own_answer() {
     use crate::handover::WaitingImport as _;
@@ -1594,11 +1550,9 @@ fn settings_meets_a_run_under_way_or_over_with_its_own_answer() {
     );
 }
 
-/// The graph after a denied export, a phone paired with the Swift
-/// identity: Settings' iPhone section says the pairing did not come over.
-/// Try again repeats the export without a restart and the listener comes
-/// up on the Swift identity; Pair again instead mints a new one after the
-/// marker, removes the phone, and the listener comes up on the new one.
+/// After a denied export with a Swift-paired phone, Try again brings the
+/// Swift identity up; Pair again instead mints, removes the phone and comes
+/// up on the new identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settings_try_again_or_pair_again_ends_a_denied_export() {
     use steno_bridge::PhoneWaitingReason;
@@ -1653,21 +1607,10 @@ async fn settings_try_again_or_pair_again_ends_a_denied_export() {
     }
 }
 
-/// The first launch after the Swift app records no fingerprint and lists
-/// the phones from the shared database. Settings' Pair again after a
-/// denied export writes the marker and the new identity, then stops while
-/// the phones are removed (the database refuses to delete the last phone,
-/// with one paired or with two), the window in which the phones would stay
-/// listed beside an identity they do not know.
-///
-/// The next launch finds the marker, so no import runs, and the
-/// handover's read finishes the Pair again: no phone listed, the new
-/// fingerprint recorded and the note dropped, no mint, no export, and the
-/// admission ledger as it was. Try again in the same launch, where the
-/// gate still waits, runs the import instead: the export brings the Swift
-/// pairing back over the new identity and records it, which drops the
-/// note, and the listener comes up over it with the phone still listed,
-/// which knows it; the admission ledger is as it was.
+/// A Pair again that stopped while removing the phones: the next launch's
+/// handover read finishes it (no phone listed, no mint, no export), while
+/// Try again in the same launch brings the Swift pairing back over the new
+/// identity. The admission ledger is unchanged either way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_import_pair_again_that_stopped_is_decided_by_the_next_read() {
     use steno_handover::FingerprintRecord as _;
@@ -1767,12 +1710,8 @@ async fn an_import_pair_again_that_stopped_is_decided_by_the_next_read() {
     }
 }
 
-/// The meeting detail asks what the pipeline asks, over the real gate:
-/// behind a pending import whose key is withheld, a ready meeting without
-/// a summary says the key is not available yet and offers no re-run for
-/// an endpoint that needs the key; for `ChatGPT` summaries (the Codex
-/// backend), which need none and keep running, the row is the runnable one
-/// and Run summary is on offer.
+/// Behind a withheld key, a ready meeting without a summary offers no re-run
+/// for an endpoint that needs the key; for `ChatGPT` summaries it does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_detail_withholds_the_summary_only_for_an_endpoint_that_needs_the_key() {
     use steno_bridge::{BridgeHost as _, BridgeTopic, MeetingIdParams};
@@ -1829,24 +1768,21 @@ async fn the_detail_withholds_the_summary_only_for_an_endpoint_that_needs_the_ke
     app.shutdown();
 }
 
-/// `settings` with summaries from the endpoint at `base_url`, which needs
-/// the API key.
+/// `settings` with summaries from the keyed endpoint at `base_url`.
 fn summaries_from_endpoint(settings: &mut steno_core::Settings, base_url: &str) {
     settings.llm_provider = steno_core::LlmProvider::Endpoint;
     settings.llm_base_url = Some(base_url.to_owned());
     settings.llm_model = Some("model".to_owned());
 }
 
-/// `settings` with `ChatGPT` summaries (the Codex backend), which need no
-/// API key.
+/// `settings` with `ChatGPT` summaries, which need no API key.
 fn chatgpt_summaries(settings: &mut steno_core::Settings) {
     settings.llm_provider = steno_core::LlmProvider::Codex;
     settings.codex_model = Some("gpt-5".to_owned());
     settings.codex_confirmed_at = Some(chrono::Utc::now());
 }
 
-/// The graph under `paths` over the launch half against the Swift domain
-/// fixture and `keychain`, which must leave the import pending.
+/// The graph under `paths` over a launch half that leaves the import pending.
 fn build_over(paths: &steno_core::StenoPaths, keychain: Arc<FakeKeychain>) -> crate::App {
     crate::build_with_import(
         crate::testing::options_under(&paths.support_directory),
@@ -1855,8 +1791,7 @@ fn build_over(paths: &steno_core::StenoPaths, keychain: Arc<FakeKeychain>) -> cr
     .unwrap()
 }
 
-/// An update source that finds nothing, for a graph whose updater is the
-/// update schedule (S4).
+/// An update source that finds nothing.
 struct NoUpdates;
 
 #[async_trait]
@@ -1882,13 +1817,8 @@ impl crate::updates::UpdateSource for NoUpdates {
     fn announce(&self, _version: &str) {}
 }
 
-/// Sparkle's two choices come over into exactly the flags the update
-/// schedule (S4) reads, through the graph's one `preferences.json`: with
-/// the Swift app's automatic checks off and automatic downloads on (both
-/// the opposite of the schedule's defaults), the host's updater answers
-/// the Swift app's choices, with the import pending or over at launch,
-/// and a flag the updater sets after the step keeps the step's flags
-/// beside it.
+/// Sparkle's two choices come over into the update schedule's flags, and a
+/// flag the updater sets after the step keeps the step's flags beside it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_update_schedule_reads_the_flags_the_launch_half_copied() {
     let domain = br#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1948,9 +1878,7 @@ async fn the_update_schedule_reads_the_flags_the_launch_half_copied() {
     }
 }
 
-/// A second app that the database's lock refuses (#225) runs no launch
-/// half: it reads neither the Swift domain nor the keychain and writes no
-/// `preferences.json` beside the first app's.
+/// A second app the database's lock refuses (#225) runs no launch half.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_app_the_database_lock_refuses_runs_no_launch_half() {
     let dir = tempfile::tempdir().unwrap();
@@ -1979,14 +1907,11 @@ async fn an_app_the_database_lock_refuses_runs_no_launch_half() {
     assert!(!paths.support_directory.join("preferences.json").exists());
 }
 
-/// How long a call that must not wait may take before the test fails
-/// instead of hanging.
+/// How long a call that must not wait may take before the test fails.
 const NO_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// `call` on another thread, from inside the fake's export (as if while
-/// its prompt is up). Once the export ran, the closure this returns gives
-/// what `call` answered, or the timeout when it was still waiting after
-/// [`NO_WAIT`].
+/// `call` on another thread, from inside the fake's export; the returned
+/// closure gives its answer, or the timeout after [`NO_WAIT`].
 fn during_the_export_prompt(
     step: &Step,
     call: impl Fn(&ImportStep) -> SwiftImportStatus + Send + Sync + 'static,
@@ -2012,9 +1937,8 @@ fn during_the_export_prompt(
     move || answered.lock().unwrap().take().expect("no export ran")
 }
 
-/// Closing the onboarding window while the export's prompt is up skips the
-/// step on the main thread: the skip answers at once, without waiting for
-/// the prompt, and changes nothing; the run then ends as the user answers.
+/// Closing the window during the export's prompt skips at once and changes
+/// nothing; the run ends as the user answers.
 #[test]
 fn a_skip_while_the_export_prompt_is_up_answers_at_once_and_mints_nothing() {
     let step = step(FakeKeychain::swift_app(), None);
@@ -2047,9 +1971,8 @@ fn a_second_run_while_the_export_prompt_is_up_reads_nothing() {
     assert_eq!(step.keychain.count("read key"), 1);
 }
 
-/// A key the user saved in Settings before the step is the key: the run
-/// does not read the Swift item over it (so a refusal there cannot hide
-/// it), and Not now leaves it too.
+/// A key saved before the step is the key: the run does not read the Swift
+/// item over it, and Not now leaves it too.
 #[test]
 fn a_key_saved_before_the_step_is_not_read_over() {
     for skipping in [false, true] {
@@ -2078,8 +2001,7 @@ fn a_key_saved_before_the_step_is_not_read_over() {
     }
 }
 
-/// Clearing the key the step read drops it at this launch, though the write
-/// never reaches the store (the item the Swift app shares stays).
+/// Clearing the step's key drops it at this launch; the Swift item stays.
 #[test]
 fn clearing_the_key_the_step_read_drops_it_for_this_launch() {
     let step = step(FakeKeychain::swift_app(), None);
@@ -2094,9 +2016,8 @@ fn clearing_the_key_the_step_read_drops_it_for_this_launch() {
     assert_eq!(read(&*step.raw, &key).as_deref(), Some("sk-swift"));
 }
 
-/// No flag is on disk while the key's prompt is up, so an app quit then
-/// leaves the next launch with the key unread, and the step asks again;
-/// only the answer writes `KEY_READ_KEY` (and `KEY_DENIED_KEY`).
+/// No flag is on disk while the key's prompt is up; only the answer writes
+/// `KEY_READ_KEY` (and `KEY_DENIED_KEY`).
 #[test]
 fn no_flag_is_written_while_the_key_prompt_is_up() {
     for denied in [false, true] {
@@ -2129,8 +2050,7 @@ fn no_flag_is_written_while_the_key_prompt_is_up() {
     }
 }
 
-/// A key save the store refuses keeps the refused read on record: the key
-/// stays unasked until a save goes through.
+/// A refused key save keeps the refused read on record.
 #[test]
 fn a_refused_key_save_keeps_the_refused_read_flag() {
     let dir = tempfile::tempdir().unwrap();
@@ -2153,9 +2073,7 @@ fn a_refused_key_save_keeps_the_refused_read_flag() {
     );
 }
 
-/// Attribute queries that fail count as items that may prompt: the key as
-/// one that is not the Swift app's (the graph reads it after the step), the
-/// identity entry as one the import replaces.
+/// Failed attribute queries count as items that may prompt.
 #[test]
 fn failed_attribute_queries_count_as_items_that_may_prompt() {
     let dir = tempfile::tempdir().unwrap();
@@ -2182,13 +2100,9 @@ fn failed_attribute_queries_count_as_items_that_may_prompt() {
     assert!(!keychain.calls().contains(&"read key"), "not the Swift key");
 }
 
-/// The marker is written second, after the identity, and before
-/// `IMPORT_RAN_KEY`: at its write the store already holds the Swift
-/// identity and `preferences.json` on disk has no `IMPORT_RAN_KEY` yet, so
-/// no crash leaves the flag without the marker (a `preferences.json` set
-/// aside later would then bring the import back). A crash between the
-/// identity and the marker leaves neither, and the rerun stores the same
-/// Swift identity again (harmless) and then the marker.
+/// The marker is written after the identity and before `IMPORT_RAN_KEY`, so
+/// no crash leaves the flag without the marker; a crash before the marker
+/// reruns the same store.
 #[test]
 fn the_marker_comes_after_the_identity_and_a_crash_between_them_stores_the_same_identity_again() {
     let step = step(FakeKeychain::swift_app(), None);
@@ -2213,8 +2127,7 @@ fn the_marker_comes_after_the_identity_and_a_crash_between_them_stores_the_same_
     assert!(step.preferences.flag(IMPORT_RAN_KEY));
     assert_eq!(step.keychain.count("mark done"), 1);
 
-    // The crash window: the identity is stored, the marker and the flag
-    // are not.
+    // The crash window: the identity is stored, the marker and flag are not.
     let dir = tempfile::tempdir().unwrap();
     let keychain = Arc::new(FakeKeychain::swift_app());
     let raw = Arc::new(CountingSecrets::default());
@@ -2237,11 +2150,8 @@ fn the_marker_comes_after_the_identity_and_a_crash_between_them_stores_the_same_
     assert_eq!(*keychain.marker.lock().unwrap(), Ok(true));
 }
 
-/// The store over a desktop-id build's identity replaces it (S6's design,
-/// one of the two named writes that destroy a stored identity) and says
-/// so at warn, naming the fingerprint recorded for it and the imported
-/// one, never a secret. Over the same identity (a rerun) or over nothing
-/// recorded it says nothing.
+/// Replacing a desktop-id build's identity warns with both fingerprints,
+/// never a secret; a rerun or nothing recorded says nothing.
 #[test]
 fn the_store_over_a_desktop_identity_names_both_fingerprints_at_warn() {
     let desktop =
@@ -2287,9 +2197,8 @@ fn the_store_over_a_desktop_identity_names_both_fingerprints_at_warn() {
     assert_eq!(logged, "", "nothing recorded");
 }
 
-/// A marker query that fails is not a first run: the run replaces nothing
-/// (no export prompt, the stored identity stays) and waits with Try
-/// again, until a query answers.
+/// A failed marker query is not a first run: nothing is replaced and the
+/// run waits with Try again.
 #[test]
 fn an_unreadable_marker_replaces_nothing_until_a_query_answers() {
     let desktop =
@@ -2323,10 +2232,8 @@ fn an_unreadable_marker_replaces_nothing_until_a_query_answers() {
     }
 }
 
-/// Pair again (Settings) stores a new identity and keeps the marker: with
-/// `preferences.json` set aside since, the next launch finds the marker,
-/// asks nothing and leaves that identity in place, though the Swift
-/// certificate is still in the keychain.
+/// After Pair again and `preferences.json` set aside, the next launch finds
+/// the marker and leaves the new identity in place.
 #[test]
 fn after_the_import_a_set_aside_preferences_file_brings_no_replace_and_no_prompt() {
     let step = step(FakeKeychain::swift_app(), None);
@@ -2353,9 +2260,7 @@ fn after_the_import_a_set_aside_preferences_file_brings_no_replace_and_no_prompt
     );
 }
 
-/// A key saved in Settings while the Swift key's prompt is up wins over a
-/// Deny there: the refused read sets no flag that would hide the saved
-/// key at this launch or the next.
+/// A key saved while the Swift key's prompt is up wins over a Deny there.
 #[test]
 fn a_key_saved_while_the_key_prompt_is_up_survives_a_deny() {
     let step = step(FakeKeychain::denying_the_key(), None);
@@ -2376,9 +2281,8 @@ fn a_key_saved_while_the_key_prompt_is_up_survives_a_deny() {
     assert_eq!(read(&*next, &key).as_deref(), Some("sk-saved"));
 }
 
-/// The graph's secrets over `platform`, wired as the graph wires them
-/// (`crate::app::gated_secrets`), behind the import the launch half leaves
-/// pending under `support` with `keychain`; with that import.
+/// The graph's secrets over `platform`, wired as the graph wires them,
+/// behind the import the launch half leaves pending; with that import.
 fn wired(
     support: &Path,
     keychain: FakeKeychain,
@@ -2398,8 +2302,7 @@ fn wired(
     (import.expect("the import is pending"), secrets)
 }
 
-/// The pipeline's dependencies over the graph's secrets, with the stored
-/// settings.
+/// The pipeline's dependencies over the graph's secrets.
 fn built_over(
     store: &Arc<steno_core::Store>,
     paths: &steno_core::StenoPaths,
@@ -2426,11 +2329,8 @@ fn built_over(
     .unwrap()
 }
 
-/// A withheld key (before the step, after Not now) is no summaries: the
-/// pipeline gets no LLM pass, so a meeting completes without a summary
-/// rather than fail at it; once a key is saved the reload has both
-/// passes, and the summary can be run again. The Codex backend needs no
-/// key, and without a key item there is nothing to withhold.
+/// A withheld key means no LLM pass; a saved key brings both back. The
+/// Codex backend needs no key, and without a key item nothing is withheld.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
     let (dir, store) = crate::testing::temp_store();
@@ -2496,12 +2396,9 @@ async fn a_withheld_key_builds_no_llm_pass_until_a_key_is_saved() {
     );
 }
 
-/// A meeting processed while the key is withheld runs neither LLM pass:
-/// no request reaches the endpoint, the transcript stays raw (no cleanup)
-/// and the meeting is ready without a summary, never failed. Once a key is
-/// saved, the summary runs again from the stored transcript, with the
-/// recording gone (retention may have removed it), and the endpoint gets
-/// the saved key. The re-run summarises only, so the transcript stays raw.
+/// A meeting processed while the key is withheld sends no request and is
+/// ready without a summary; once a key is saved the summary runs again from
+/// the stored transcript, with the saved key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_meeting_under_a_withheld_key_stays_raw_and_its_summary_runs_later_without_its_audio() {
     use steno_core::{AudioRetention, MeetingState};
@@ -2599,10 +2496,8 @@ async fn a_meeting_under_a_withheld_key_stays_raw_and_its_summary_runs_later_wit
     server.stop();
 }
 
-/// A meeting processed behind a pending import whose key is withheld,
-/// with an endpoint at `server` and the vault under `dir`: ready without a
-/// summary and exported into the vault. The graph's secrets, through which
-/// a test saves the key, and the folder note the export wrote.
+/// A meeting processed and exported while the key is withheld, with the
+/// graph's secrets and the folder note the export wrote.
 struct ExportedWithoutAKey {
     store: Arc<steno_core::Store>,
     paths: steno_core::StenoPaths,
@@ -2704,21 +2599,15 @@ impl ExportedWithoutAKey {
     }
 }
 
-/// P30 (D13) behind the withheld key: a meeting processed while the key
-/// was withheld is exported without a summary. Once a key is saved, the
-/// summary runs again and the re-run exports the note again, through the
-/// pipeline's delivery and the Obsidian folder. A note the user edited in
-/// the vault since Steno wrote it stays byte for byte as the user left it:
-/// the new version, with the summary, goes beside it as
-/// `<name> (Steno <date>).md` and the delivery warns. Export again then
-/// rewrites that copy rather than add one. An unedited note is replaced in
-/// place, with no copy and no warning.
+/// A meeting exported without a summary is exported again once a key is
+/// saved: a note the user edited stays as it is and the new version goes
+/// beside it as `<name> (Steno <date>).md` with a warning (Export again
+/// rewrites that copy); an unedited note is replaced in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_summary_run_after_the_key_is_saved_keeps_an_edited_note_and_writes_beside_it() {
     use steno_llm::testing::{Scripts, StubChatServer};
 
-    /// A bullet of the e2e summary fixture, which only a note with the
-    /// summary holds.
+    /// A bullet only a note with the summary holds.
     const SUMMARY_LINE: &str = "Die zwölf Testsegmente wurden der Reihe nach besprochen.";
     let has_summary = |bytes: &[u8]| String::from_utf8_lossy(bytes).contains(SUMMARY_LINE);
     for edited in [true, false] {
@@ -2744,8 +2633,7 @@ async fn a_summary_run_after_the_key_is_saved_keeps_an_edited_note_and_writes_be
             .set_secret(&SecretKey::llm_api_key(), Some("sk-saved"))
             .await
             .unwrap();
-        // Dated in the destination's zone, the machine's: the day before
-        // and after the run, so a run over midnight finds its copy too.
+        // The day before and after too, for a run over midnight.
         let today = || chrono::Local::now().format("%Y-%m-%d").to_string();
         let before = today();
         exported
@@ -2803,9 +2691,8 @@ async fn a_summary_run_after_the_key_is_saved_keeps_an_edited_note_and_writes_be
     }
 }
 
-/// The pipeline the M1 test builds: core's fakes, with a cleaner that
-/// fails as a server refuses a request without a key (a 401) whenever the
-/// gated store answered none when it was built.
+/// Core's fakes, with a cleaner that fails as a 401 whenever the gated store
+/// answered no key at build time.
 fn keyed_make(
     store: &Arc<steno_core::Store>,
     secrets: &Arc<dyn SecretStore>,
@@ -2853,8 +2740,8 @@ fn finished_result(
     }
 }
 
-/// The graph over core's fakes behind a pending import whose store holds
-/// the Swift key, on a pipeline built by [`keyed_make`], with its step.
+/// The graph behind a pending import whose store holds the Swift key, with
+/// its step.
 async fn app_behind_a_pending_import(
     dir: &tempfile::TempDir,
     store: &Arc<steno_core::Store>,
@@ -2894,14 +2781,9 @@ async fn app_behind_a_pending_import(
     (app, step)
 }
 
-/// What the Swift app left at the update, launched behind a pending
-/// import: a queued meeting (`resume_unfinished`) and an interrupted
-/// recording (the recovery's intake) wait until the step ran, then run on
-/// the pipeline the step reloaded with the key. The retention sweep waits
-/// with them, so it follows the resume: a ready meeting's expired audio
-/// stays until the step ran. A meeting that failed for want of the key
-/// before the step processes again with it, through the app's Process
-/// again (`ProcessingPipeline::process_again`, #240).
+/// A queued meeting, an interrupted recording and the retention sweep wait
+/// for the step, then run on the reloaded pipeline; a meeting that failed
+/// for want of the key processes again with it (#240).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn meetings_left_at_the_first_launch_wait_for_the_step_and_run_with_its_key() {
     use steno_audio::writer::RecordingWriting as _;
@@ -3013,9 +2895,8 @@ fn fixture_start() -> chrono::DateTime<chrono::Utc> {
     HandoverIdentity::not_valid_before_of_der(&identity_der()).unwrap()
 }
 
-/// A Swift identity whose certificate starts `days` after the committed
-/// one's (before it when negative), which the fake keychain exports as
-/// itself; its certificate's DER.
+/// A Swift identity starting `days` after the committed one, which the fake
+/// keychain exports as itself; its certificate's DER.
 fn swift_identity_starting(step: &Step, days: i64) -> Vec<u8> {
     // A mint back-dates its start a minute.
     let mint = fixture_start() + chrono::TimeDelta::days(days) + chrono::TimeDelta::minutes(1);
@@ -3033,8 +2914,7 @@ fn pair_phones_at(store: &Store, days: &[i64]) {
     }
 }
 
-/// The run's outcome: the certificates it exported, and the stored
-/// identity's fingerprint, if any.
+/// The certificates the run exported, and the stored fingerprint.
 fn exported_and_stored(step: &Step) -> (Vec<Vec<u8>>, Option<String>) {
     let stored = read(&*step.raw, &HandoverIdentity::secret_key())
         .map(|pem| hex(&HandoverIdentity::from_pem(&pem).unwrap().fingerprint()));
@@ -3045,10 +2925,8 @@ fn fingerprint_of(der: &[u8]) -> String {
     hex(&HandoverIdentity::fingerprint_of_der(der))
 }
 
-/// Two Swift certificates under the label (an old login keychain added
-/// back beside a new one): the committed identity's and a newer one
-/// starting 30 days after it, the newer first in the keychain's order when
-/// `newer_first`; `(newer, older)`.
+/// The committed Swift certificate and one 30 days newer (first when
+/// `newer_first`); `(newer, older)`.
 fn two_swift_certificates(step: &Step, newer_first: bool) -> (Vec<u8>, Vec<u8>) {
     let newer = swift_identity_starting(step, 30);
     let older = identity_der();
@@ -3061,11 +2939,8 @@ fn two_swift_certificates(step: &Step, newer_first: bool) -> (Vec<u8>, Vec<u8>) 
 }
 
 /// Of two Swift certificates, in both orders, the paired phones choose by
-/// the pairing-time rule, and nothing is picked silently: the older when
-/// every phone was paired between them, the newer with no phone; with one
-/// phone between them and one after the newer the run waits as partly
-/// replaced, and with every phone before both as replaced, exporting
-/// nothing and recording no fingerprint.
+/// the pairing-time rule, or the run waits (partly) replaced and exports
+/// nothing.
 #[test]
 fn of_two_swift_certificates_the_phones_choose() {
     for newer_first in [false, true] {
@@ -3108,10 +2983,8 @@ fn of_two_swift_certificates_the_phones_choose() {
     }
 }
 
-/// A `swift-handover-identity.json` in the support directory (a Swift
-/// build that was never released wrote one) decides nothing and is left
-/// alone: of two Swift certificates with no phone paired, the newer comes
-/// over though the file names the older.
+/// A `swift-handover-identity.json` in the support directory decides nothing
+/// and is left alone.
 #[test]
 fn a_swift_record_beside_the_import_is_not_read() {
     let step = step(FakeKeychain::swift_app(), None);
@@ -3130,9 +3003,8 @@ fn a_swift_record_beside_the_import_is_not_read() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), naming_the_older);
 }
 
-/// One Swift certificate (copies of it count once) is judged by the
-/// pairing-time rule: it comes over for a phone paired after it and not
-/// over one that predates it.
+/// One Swift certificate comes over for a phone paired after it, not one
+/// that predates it.
 #[test]
 fn one_swift_certificate_is_judged_by_the_rule() {
     for copies in [1, 2] {
@@ -3162,10 +3034,7 @@ fn one_swift_certificate_is_judged_by_the_rule() {
     }
 }
 
-/// Two copies of one Swift certificate (one identity in two keychains)
-/// count once: they do not tie as two certificates
-/// of one second, so the rule brings it over, with no phone or a phone
-/// paired after it.
+/// Two copies of one Swift certificate count once.
 #[test]
 fn two_copies_of_one_swift_certificate_count_once() {
     for phones in [&[][..], &[1][..]] {
@@ -3185,9 +3054,7 @@ fn two_copies_of_one_swift_certificate_count_once() {
     }
 }
 
-/// A run that waits for the phones (replaced, partly replaced, the clock)
-/// records no fingerprint and writes no record file, no marker and no
-/// flag, so the next load finds nothing it would have to undo.
+/// A waiting run writes no record, marker or flag.
 #[test]
 fn a_waiting_choice_records_nothing() {
     for (phones, reason) in [
@@ -3213,11 +3080,8 @@ fn a_waiting_choice_records_nothing() {
     }
 }
 
-/// Two Swift certificates that start in the same second (two mints in one
-/// second) are no newest one, so the keychain's order never decides: with
-/// no phone, or a phone paired after both, the run waits as replaced, in
-/// either order; beside an older certificate a phone paired between them
-/// still brings the older over.
+/// Two Swift certificates starting in the same second never let the
+/// keychain's order decide.
 #[test]
 fn two_swift_certificates_that_start_in_the_same_second_are_never_chosen_by_order() {
     for first_first in [false, true] {
@@ -3263,10 +3127,8 @@ fn two_swift_certificates_that_start_in_the_same_second_are_never_chosen_by_orde
     );
 }
 
-/// A Swift certificate that starts after now, or a phone paired after now,
-/// means this Mac's clock went back: the run waits for the clock, with
-/// phones or without, says so in the iPhone section's words, and exports,
-/// stores and records nothing.
+/// A certificate or pairing after now means the clock went back: the run
+/// waits for the clock and exports, stores and records nothing.
 #[test]
 fn a_swift_certificate_or_pairing_after_now_waits_for_the_clock() {
     let ten_days_in = || fixture_start() + chrono::TimeDelta::days(10);
@@ -3301,12 +3163,9 @@ fn a_swift_certificate_or_pairing_after_now_waits_for_the_clock() {
     );
 }
 
-/// A Swift certificate every paired phone predates is one the Swift app
-/// minted after a keychain reset, which the phones cannot know: the run
-/// waits as replaced, exports and stores nothing, and the iPhone section
-/// says so; some phones before it and some after wait as partly replaced,
-/// with the section's first sentence. Once the old login keychain is added back,
-/// Try again brings over the identity the phones know.
+/// A certificate every phone predates waits as replaced, some before and
+/// some after as partly replaced; once the old keychain is back, Try again
+/// brings over the identity the phones know.
 #[test]
 fn a_swift_certificate_the_phones_predate_waits_and_the_old_one_comes_over_once_it_is_back() {
     let step = step(FakeKeychain::swift_app(), None);
@@ -3354,9 +3213,7 @@ fn a_swift_certificate_the_phones_predate_waits_and_the_old_one_comes_over_once_
     assert_eq!(exported_and_stored(&step), (vec![], None));
 }
 
-/// A certificate whose start cannot be read, and paired phones the
-/// database cannot read, are no reason to bring a certificate over: the
-/// run waits as for a failed lookup and exports nothing.
+/// An unreadable certificate start or phone list waits as a failed lookup.
 #[test]
 fn a_start_or_a_pairing_time_that_cannot_be_read_waits_as_a_failed_lookup() {
     let step = step(FakeKeychain::swift_app(), None);

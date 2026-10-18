@@ -1,10 +1,7 @@
-//! The one real-pipeline test across crates. The LLM passes run against the
-//! stub chat server on loopback, fed from `Tests/Fixtures/llm/responses/`;
-//! delivery runs through the real `DeliveryCoordinator` and
-//! `ObsidianFolderDestination` into a temp vault; speaker suggestions come
-//! from the store-backed cosine memory (the engine and the diarizer stay
-//! fakes). No models, no network.
-//! Swift: `Tests/StenoEndToEndTests/EndToEndTests.swift`.
+//! The one real-pipeline test across crates: the LLM passes against a stub
+//! chat server on loopback, delivery through the real Obsidian destination
+//! into a temp vault, and speaker suggestions from the store-backed cosine
+//! memory; the engine and the diarizer stay fakes. No models, no network.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -59,7 +56,7 @@ fn stages(events: &[MeetingEvent]) -> Vec<PipelineStage> {
         .collect()
 }
 
-// One flow, as the Swift test: every assertion reads the run before it.
+// One flow: every assertion reads the run before it.
 #[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mac_call_fixture_lands_in_the_vault() {
@@ -86,9 +83,7 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
         store.save_person(&person).unwrap();
     }
 
-    // The real cleaner and summarizer on the loopback stub: the cleanup
-    // answer echoes every segment capitalised, the summary answer is the
-    // canned analysis in `llm/responses/e2e-summary.json`.
+    // The real cleaner and summarizer on the loopback stub.
     let server = StubChatServer::start().await.unwrap();
     let summary_body = std::fs::read_to_string(fixture("llm/responses/e2e-summary.json")).unwrap();
     let echo = Scripts.cleanup_echo(cleanup_usage(), |_, text| {
@@ -117,8 +112,7 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
     let cleaner = Arc::new(LlmTranscriptCleaner::new(client.clone(), endpoint.clone()));
     let summarizer = Arc::new(LlmMeetingSummarizer::new(client, endpoint, chrono_tz::UTC));
 
-    // The stored settings decide the destination, as in the app; the time
-    // zone is pinned so the folder names hold on every machine.
+    // The time zone is pinned so the folder names hold on every machine.
     let berlin: Tz = "Europe/Berlin".parse().unwrap();
     let dispatcher = Arc::new(DeliveryCoordinator::with_destinations(
         store.clone(),

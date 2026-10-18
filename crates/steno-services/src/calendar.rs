@@ -1,28 +1,8 @@
 //! The calendar event that names a recording and its attendees, looked up
-//! when the recording starts (stable plan S3,
-//! `.plans/2026-10-07-stable-promotion.md`). Swift:
-//! `RecordingController.resolveCalendarEvent` over `CalendarService`
-//! (`apps/macos/Steno/Services/CalendarService.swift`).
-//!
-//! - [`Calendar`] is the seam: the timed events of a day. On the Mac it is
-//!   `EventKitCalendar` over `steno_macos::calendar`; elsewhere
-//!   [`NoCalendar`], which never prompts and lists nothing. Neither ever
-//!   asks for access: the prompt is the calendar permission's request
-//!   (onboarding and Settings > General), as in the Swift app.
-//! - The event is the one `steno_core::pick_event` picks among the day's
-//!   events: under way at the start, else the next within fifteen minutes.
-//! - The lookup runs on a thread of its own, started before the capture
-//!   opens its devices. The recorder takes the answer if it is there when
-//!   it writes the meeting's row, and otherwise writes the row as it would
-//!   without a calendar and hands a late answer to the store, which names
-//!   the row under its rule (`Store::name_recording_after_event`) or drops
-//!   the answer. So a slow or hung calendar never holds a start up and
-//!   never fails one. While a lookup has not returned, no other starts, so
-//!   a calendar that hangs holds one thread, never one per recording. Rust
-//!   only: Swift awaited the lookup before it wrote the row.
-//!
-//! Titles and attendee names are the user's data: no log line here
-//! carries them, at any level.
+//! on a thread of its own when the recording starts, so a slow or hung
+//! calendar never holds a start up: a late answer names the row afterwards
+//! (`Store::name_recording_after_event`). Nothing here prompts for access.
+//! Titles and attendee names are the user's data: no log line carries them.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -30,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use chrono::{DateTime, Days, TimeZone, Utc};
 use steno_core::{CALENDAR_LOOKAHEAD, CalendarAttendee, CalendarEvent, pick_event};
 
-/// The calendar a recording's start reads. Swift: `CalendarProviding`.
+/// The calendar a recording's start reads.
 pub trait Calendar: Send + Sync {
     /// Every timed event of the local calendar day that contains `day`;
     /// empty without access. Never prompts. May block; the recorder calls
@@ -64,8 +44,7 @@ pub fn system_calendar() -> Arc<dyn Calendar> {
 }
 
 /// `EventKit` through `steno_macos::calendar`: the events of the local day,
-/// read only with full access, so it never prompts. Swift:
-/// `CalendarService.events(on:)`.
+/// read only with full access, so it never prompts.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EventKitCalendar;
@@ -129,11 +108,8 @@ fn from_seconds(seconds: f64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis((seconds * 1000.0).round() as i64)
 }
 
-/// The local calendar day in `zone` that contains `instant`, from its
-/// midnight to the next, so a day that changes the clock lasts 23 or 25
-/// hours. `None` only where `zone` has no midnight that day and no
-/// earlier time either, which no real zone does. Swift:
-/// `Calendar.startOfDay(for:)` and one day added to it.
+/// The local calendar day in `zone` that contains `instant`, midnight to
+/// midnight, so a day that changes the clock lasts 23 or 25 hours.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn day_bounds<Tz: TimeZone>(
     instant: DateTime<Utc>,
@@ -151,12 +127,9 @@ pub(crate) fn day_bounds<Tz: TimeZone>(
     ))
 }
 
-/// The attendee Steno keeps of an `EventKit` participant, or none: people
-/// only (not rooms, resources or groups); the email from a `mailto:` URL
-/// (the rest of the URL as it stands); the name trimmed of spaces and
-/// tabs, or the email when the name is blank; none without either. Swift:
-/// `CalendarService.attendee`, whose `.whitespaces` trims spaces and tabs
-/// but not line breaks.
+/// The attendee Steno keeps of an `EventKit` participant: people only; the
+/// email from a `mailto:` URL; the name trimmed of spaces and tabs (not
+/// line breaks), or the email when the name is blank; none without either.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn attendee(
     name: Option<&str>,
@@ -191,8 +164,7 @@ pub(crate) fn attendee(
     })
 }
 
-/// The characters `CharacterSet.newlines` holds, which `.whitespaces`
-/// leaves alone.
+/// The characters `CharacterSet.newlines` holds, which the trim leaves.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn is_line_break(c: char) -> bool {
     matches!(
@@ -201,9 +173,8 @@ fn is_line_break(c: char) -> bool {
     )
 }
 
-/// The event Steno keeps of an `EventKit` event, or none: a timed event
-/// (not all-day) with an identifier, a start and an end; a missing title
-/// is empty. Swift: the filter and map in `CalendarService.events(on:)`.
+/// The event Steno keeps of an `EventKit` event: a timed event with an
+/// identifier, a start and an end; a missing title is empty.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn timed_event(
     id: Option<String>,
@@ -241,8 +212,8 @@ pub(crate) struct Lookup {
 }
 
 impl Lookup {
-    /// The answer, the event or none, once the lookup has returned; the
-    /// lookup itself while it still reads, for [`Self::then`].
+    /// The answer once the lookup has returned; the lookup itself while it
+    /// still reads, for [`Self::then`].
     pub(crate) fn take(self) -> Result<Option<CalendarEvent>, Lookup> {
         let mut answer = self.answer.lock().unwrap_or_else(PoisonError::into_inner);
         match std::mem::replace(&mut *answer, Answer::Done(None)) {
@@ -255,9 +226,8 @@ impl Lookup {
         }
     }
 
-    /// Runs `then` with the answer once the lookup returns: here and now
-    /// when it already has, else on the lookup's thread. A lookup whose
-    /// thread panicked never runs it.
+    /// Runs `then` with the answer once the lookup returns, here or on the
+    /// lookup's thread. A lookup whose thread panicked never runs it.
     pub(crate) fn then(self, then: impl FnOnce(Option<CalendarEvent>) + Send + 'static) {
         let mut answer = self.answer.lock().unwrap_or_else(PoisonError::into_inner);
         match std::mem::replace(&mut *answer, Answer::Done(None)) {
@@ -275,8 +245,8 @@ impl Lookup {
 pub(crate) struct CalendarLookups {
     calendar: Mutex<Arc<dyn Calendar>>,
     running: Arc<AtomicBool>,
-    /// Lookups whose answer was handed over (`then` ran, or the answer
-    /// waits for `take`): a test's signal that a late answer is done.
+    /// Lookups whose answer was handed over: a test's signal that a late
+    /// answer is done.
     #[cfg(test)]
     pub(crate) answered: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -306,10 +276,9 @@ impl CalendarLookups {
         *self.calendar.lock().unwrap_or_else(PoisonError::into_inner) = calendar;
     }
 
-    /// Starts the lookup for a recording that starts at `now` on a thread
-    /// of its own. `None` while an earlier lookup has not returned, or
-    /// when the thread does not start: the recording then starts as it
-    /// would without a calendar.
+    /// Starts the lookup for a recording that starts at `now` on a thread of
+    /// its own. `None` while an earlier lookup has not returned (so a hung
+    /// calendar holds one thread), or when the thread does not start.
     pub(crate) fn start(&self, now: DateTime<Utc>) -> Option<Lookup> {
         if self.running.swap(true, Ordering::SeqCst) {
             tracing::debug!("the calendar has not answered the previous recording's lookup");
@@ -473,7 +442,7 @@ mod tests {
         }
     }
 
-    /// Swift's `CalendarService.attendee`, one row per rule.
+    /// One row per attendee rule.
     #[test]
     fn attendees_follow_the_swift_rules() {
         let person = |name: Option<&str>, url: Option<&str>| attendee(name, url, true, false);
@@ -533,7 +502,7 @@ mod tests {
         );
     }
 
-    /// Swift's filter in `CalendarService.events(on:)`.
+    /// Only timed events with an identifier are kept.
     #[test]
     fn only_timed_events_with_an_id_and_both_times_are_kept() {
         let start = Some(now());
@@ -575,9 +544,7 @@ mod tests {
     }
 
     /// On the Mac the system calendar reads without asking: without full
-    /// access it lists nothing, and the access stays what it was. (A test
-    /// process has no grant on CI or over SSH, so this is the denied or
-    /// not-determined path; the granted one is a step for a person.)
+    /// access it lists nothing, and the access stays what it was.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_system_calendar_reads_without_asking() {
@@ -598,8 +565,7 @@ mod tests {
         let calendar = FakeCalendar::with(vec![event("later", 600, 1200), event("now", -60, 600)]);
         let lookups = CalendarLookups::new(calendar.clone());
         let lookup = lookups.start(now()).unwrap();
-        // `then` on the start's thread: the event is handed over once the
-        // lookup returned, whenever that is.
+        // `then` on the start's thread.
         let (sender, receiver) = mpsc::channel();
         lookup.then(move |event| sender.send(event.map(|event| event.id)).unwrap());
         assert_eq!(
@@ -608,9 +574,8 @@ mod tests {
         );
     }
 
-    /// While the calendar has not answered, the answer is not there and
-    /// no second lookup starts; once it answers, the event goes to `then`
-    /// and the next start reads again.
+    /// While the calendar has not answered, no second lookup starts; once it
+    /// answers, the event goes to `then` and the next start reads again.
     #[test]
     fn a_held_lookup_hands_its_event_over_later() {
         let calendar = FakeCalendar::with(vec![event("now", -60, 600)]);

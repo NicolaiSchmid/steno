@@ -1,18 +1,8 @@
-//! The opt-in acceptance over the real engines: the synthetic two-lane
-//! fixture through the Parakeet engine the platform runs (the speech
-//! sidecar off the Mac, `CoreML` on it) and the ONNX diarizer in the
-//! sidecar's child, the way
-//! `steno process --engine parakeet-v3` wires them (except that this
-//! diarizer may download its models), asserting the shape of the exported
-//! `meeting.json`. Set `STENO_MODEL_TESTS=1`. The ONNX models download on
-//! first run (off the Mac about 2.6 GB, nearly all of it the
-//! fp32 Parakeet export); on the Mac the `CoreML` Parakeet must already be
-//! in `STENO_MODELS_DIR` (`fluidaudio/parakeet-tdt-0.6b-v3/`).
-//! `STENO_MODELS_DIR` keeps the models between runs. The sidecar binary,
-//! which diarizes on every platform, must be built in the target directory
-//! (`cargo test --workspace` builds it, as does
-//! `cargo build -p steno-speech-sidecar`).
-//! Swift: `Tests/StenoEndToEndTests/RealModelsEndToEndTests.swift`.
+//! The opt-in acceptance over the real engines (`STENO_MODEL_TESTS=1`): the
+//! synthetic two-lane fixture through the platform's Parakeet engine and
+//! the ONNX diarizer in the sidecar's child, asserting the shape of the
+//! exported `meeting.json`. Models download on first run (about 2.6 GB off
+//! the Mac); `STENO_MODELS_DIR` keeps them between runs.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -52,9 +42,8 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
     "parakeet-v3".clone_into(&mut settings.speech_engine_id);
     store.save_settings(&settings).unwrap();
 
-    // The app's setup, over a support directory without `speech.json`
-    // (so `STENO_MODELS_MIRROR` still applies), with the sidecar binary
-    // from the target directory, which diarizes on every platform.
+    // The app's setup without `speech.json`, so `STENO_MODELS_MIRROR` still
+    // applies, with the sidecar binary from the target directory.
     let mut setup = SpeechSetup::in_models_directory(models.clone(), &StenoPaths::new(dir.path()));
     setup.sidecar.program = common::sidecar_binary();
     let runtime = setup.runtime(&settings.speech_engine_id);
@@ -143,8 +132,7 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
             .all(|s| s.embedding.is_none()),
         "embeddings never reach meeting.json"
     );
-    // Synthetic tones carry no speech: the engine may return no segments,
-    // and the shape is what this test pins, not the words.
+    // Synthetic tones carry no speech: the shape is what this pins.
     eprintln!(
         "[model-tests] {} segments, {} speakers: {:?}",
         decoded.segments.len(),

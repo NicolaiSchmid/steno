@@ -1,15 +1,7 @@
-//! A phone admission that gave up under a write lock another process held
-//! (its commit and its `failed` save both ran out the busy timeout), then
+//! A phone admission that gave up under another process's write lock, then
 //! a relaunch and the phone's retry, in either order: the recording is one
-//! meeting with one ledger row, and its audio is kept
-//! (`.plans/2026-10-07-stable-promotion.md`, "P40 follow-up: the copy an
-//! admission left is one meeting"). The copy is noted with the upload it holds
-//! ([`crate::audio_folders::uploads`]): the launch adopts it with the
-//! upload's ledger row, and a retry before the launch admits into it. A
-//! copy an older build noted names no upload and is adopted as a
-//! recording with no meeting, without a ledger row. The writer's busy timeout is 20 ms in place of five seconds
-//! (`Store::on_writer`), so an admission gives up within a second rather
-//! than after a hold of more than 20 s. Rust only.
+//! meeting with one ledger row, and its audio is kept. The writer's busy
+//! timeout is 20 ms here, so an admission gives up within a second.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -111,10 +103,8 @@ impl World {
         .expect("the admission ends within the guard")
     }
 
-    /// An admission that gives up under a write lock another connection
-    /// takes and still holds, returned: the busy commit and the `failed`
-    /// save that follows. Also returns the meeting id its copy is noted
-    /// under, read as an older build reads the record.
+    /// An admission that gives up under a write lock another connection takes
+    /// and still holds; also the meeting id its copy is noted under.
     pub(super) async fn gave_up(&self, app: &App) -> (Uuid, WriteLockHold) {
         let hold = WriteLockHold::new(&self.database());
         app.store
@@ -187,8 +177,7 @@ fn meeting_folders_in(folder: &std::path::Path) -> Vec<Uuid> {
     ids
 }
 
-/// The app over the same directory again, launched as the product
-/// launches, once its launch work ran.
+/// The app over the same directory again, once its launch work ran.
 pub(super) async fn relaunch(world: &World) -> App {
     let store = Arc::new(Store::open(world.database()).unwrap());
     let mut app = app_over_fakes(world.dir.path(), &store, synthetic_capture());
@@ -209,9 +198,8 @@ pub(super) async fn quit(app: App) {
     app.shutdown();
 }
 
-/// The launch first: it adopts the noted copy with the upload's ledger
-/// row, and the phone's retry is answered with that meeting, its new copy
-/// removed.
+/// The launch first adopts the noted copy with the upload's ledger row,
+/// and the retry is answered with that meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_copy_left_by_an_admission_that_gave_up_is_adopted_and_the_retry_gets_its_meeting() {
     let (world, app) = World::new();
@@ -227,9 +215,7 @@ async fn a_copy_left_by_an_admission_that_gave_up_is_adopted_and_the_retry_gets_
     quit(app).await;
 }
 
-/// The retry first, while the lock is still held and once it went: it
-/// admits into the noted copy and makes no second one, and the next launch
-/// has nothing left to adopt.
+/// The retry first admits into the noted copy and makes no second one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retry_admits_into_the_copy_an_admission_that_gave_up_left() {
     let (world, app) = World::new();
@@ -259,10 +245,8 @@ async fn a_retry_admits_into_the_copy_an_admission_that_gave_up_left() {
     quit(app).await;
 }
 
-/// A note an older build wrote names no upload: the launch adopts the
-/// copy as a recording with no meeting, without a ledger row, and the
-/// phone's retry admits the recording again, as a second meeting. Nothing
-/// is lost.
+/// A note an older build wrote names no upload: the launch adopts the copy
+/// without a ledger row, and the retry admits it again as a second meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_copy_noted_without_its_upload_is_adopted_with_no_ledger_row() {
     let (world, app) = World::new();
@@ -283,10 +267,8 @@ async fn a_copy_noted_without_its_upload_is_adopted_with_no_ledger_row() {
 }
 
 impl World {
-    /// The upload's ledger row written as another meeting, with its own
-    /// asset elsewhere, as an older build's retry or another device's
-    /// upload of the same bytes leaves it; the user then deleted that
-    /// meeting when `deleted`. Returns its id.
+    /// The upload's ledger row written as another meeting, with its own asset
+    /// elsewhere, which the user then deleted when `deleted`. Returns its id.
     fn ledger_holds_the_upload_as_another_meeting(&self, store: &Store, deleted: bool) -> Uuid {
         let meeting = steno_core::Meeting {
             id: Uuid::new_v4(),
@@ -339,9 +321,8 @@ impl World {
         bytes
     }
 
-    /// The read of `meeting_id`'s length ended with the app at two
-    /// launches in a row (`steno_pipeline::ReadingMarks`), so the next
-    /// launch holds its copy (A17). Call with the app quit.
+    /// The read of `meeting_id`'s length ended with the app at two launches in
+    /// a row, so the next launch holds its copy. Call with the app quit.
     fn length_read_ended_twice(&self, meeting_id: Uuid) {
         let store = Store::open(self.database()).unwrap();
         for _ in 0..2 {
@@ -393,11 +374,9 @@ impl World {
     }
 }
 
-/// The read of the noted copy's length ended with the app at two launches
-/// in a row (`steno_pipeline::ReadingMarks`): the next launch adopts it
-/// with the upload's ledger row, failed with
-/// [`steno_pipeline::READ_STOPPED`] and unread, and does not process it;
-/// the phone's retry is answered with that meeting.
+/// A noted copy whose length read ended with the app twice is adopted with
+/// the upload's ledger row, failed with [`steno_pipeline::READ_STOPPED`]
+/// and unprocessed; the retry is answered with that meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_noted_copy_whose_length_read_ended_with_the_app_is_adopted_failed_with_its_ledger_row() {
     let (world, app) = World::new();
@@ -423,11 +402,8 @@ async fn a_noted_copy_whose_length_read_ended_with_the_app_is_adopted_failed_wit
     quit(app).await;
 }
 
-/// The noted copy the launch holds (its length read ended with the app
-/// twice) holds other bytes of the same size: it is adopted failed with
-/// [`steno_pipeline::READ_STOPPED`] but gets no ledger row, since Steno
-/// does not hold the phone's upload, so the phone's retry admits the
-/// upload afresh.
+/// That held copy with other bytes of the same size gets no ledger row, so
+/// the retry admits the upload afresh.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_held_copy_holding_other_bytes_is_adopted_failed_with_no_ledger_row() {
     let (world, app) = World::new();
@@ -477,9 +453,7 @@ async fn a_held_copy_that_cannot_be_read_is_kept_with_no_ledger_row() {
 }
 
 /// The ledger holds the noted copy's bytes as a meeting the user deleted:
-/// the launch removes the copy's folder, since the user deleted that
-/// audio, and forgets its notes. The ledger row stays, so the phone is
-/// answered "delivered" from it.
+/// the launch removes the copy, and the ledger row answers the phone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_noted_copy_of_bytes_whose_meeting_the_user_deleted_is_removed() {
     let (world, app) = World::new();
@@ -523,10 +497,8 @@ async fn the_noted_copy_of_bytes_whose_meeting_exists_is_kept() {
     quit(app).await;
 }
 
-/// The meeting that holds the noted copy's bytes exists in a state other
-/// than ready (its processing failed, so its own master may not be
-/// readable): the copy is kept with its entries, neither adopted nor
-/// removed.
+/// The meeting that holds the copy's bytes exists but is not ready: the
+/// copy is kept with its entries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_copy_of_bytes_whose_meeting_failed_is_kept() {
     let (world, app) = World::new();
@@ -552,11 +524,9 @@ async fn the_copy_of_bytes_whose_meeting_failed_is_kept() {
     quit(app).await;
 }
 
-/// While the meeting that holds the noted copy's bytes exists, the copy
-/// keeps its entries, and neither the retry nor a launch makes it a second
-/// meeting or a second copy. Once the user deletes that meeting through
-/// the host, the next launch removes the copy and forgets its entries; the
-/// ledger row stays.
+/// While the meeting that holds the copy's bytes exists, the copy keeps
+/// its entries and becomes no second meeting; once the user deletes that
+/// meeting, the next launch removes the copy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kept_copy_goes_once_the_user_deletes_the_meeting_holding_its_bytes() {
     use steno_bridge::BridgeHost as _;
@@ -580,7 +550,7 @@ async fn a_kept_copy_goes_once_the_user_deletes_the_meeting_holding_its_bytes() 
     assert_eq!(world.noted(), (1, 1));
     quit(app).await;
 
-    // A launch whose host confirms the delete, as the user does.
+    // A launch whose host confirms the delete.
     let store = Arc::new(Store::open(world.database()).unwrap());
     let mut app = app_over_fakes(world.dir.path(), &store, synthetic_capture());
     app.live_recording_check = an_hour_later();
@@ -658,11 +628,9 @@ async fn an_unrelated_file_in_a_removed_copys_folder_is_kept() {
     quit(app).await;
 }
 
-/// The copy sits in an audio folder the user chose, beside a file of the
-/// user's and a meeting folder another install wrote, and the ledger
-/// holds its bytes as a meeting the user deleted: only the copy's own
-/// folder goes, also when the setting changed after the copy
-/// (`change_setting_after`).
+/// A copy in a chosen audio folder whose bytes the ledger holds as a
+/// deleted meeting: only the copy's own folder goes, also when the setting
+/// changed after the copy.
 async fn removes_a_copy_in_a_chosen_audio_folder_alone(change_setting_after: bool) {
     let (world, app) = World::new();
     let chosen = world.dir.path().join("Chosen Audio");
@@ -725,10 +693,8 @@ async fn a_copy_in_a_chosen_audio_folder_goes_alone_after_the_setting_changed() 
     removes_a_copy_in_a_chosen_audio_folder_alone(true).await;
 }
 
-/// The noted copy holds other bytes of the same size, and the ledger
-/// holds the upload as a meeting the user deleted: the copy is not the
-/// upload, so it is kept and adopted as a recording with no meeting,
-/// without a ledger row, and stays noted until its row is durable.
+/// A noted copy with other bytes, the upload's meeting deleted: the copy is
+/// kept and adopted as a recording with no meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_noted_copy_holding_other_bytes_is_kept_though_the_uploads_meeting_was_deleted() {
     let (world, app) = World::new();
@@ -746,9 +712,8 @@ async fn a_noted_copy_holding_other_bytes_is_kept_though_the_uploads_meeting_was
     quit(app).await;
 }
 
-/// The noted copy cannot be read, and the ledger holds the upload as a
-/// meeting the user deleted: the copy is kept with its notes for the next
-/// launch, neither adopted nor removed.
+/// An unreadable noted copy, the upload's meeting deleted: the copy is kept
+/// with its notes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_noted_copy_that_cannot_be_read_is_kept_though_the_uploads_meeting_was_deleted() {
     let (world, app) = World::new();
@@ -769,10 +734,8 @@ async fn a_noted_copy_that_cannot_be_read_is_kept_though_the_uploads_meeting_was
     quit(app).await;
 }
 
-/// The noted copy holds other bytes of the same size: the retry does not
-/// admit into it but copies the upload afresh, and the launch adopts the
-/// noted copy as a recording with no meeting, without a ledger row. Both
-/// copies are kept.
+/// A noted copy with other bytes: the retry copies the upload afresh and
+/// the launch adopts the noted copy; both are kept.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retry_does_not_admit_into_a_noted_copy_holding_other_bytes() {
     let (world, app) = World::new();
@@ -800,10 +763,8 @@ async fn a_retry_does_not_admit_into_a_noted_copy_holding_other_bytes() {
     quit(app).await;
 }
 
-/// The retry admits into the noted copy and the ledger answers with
-/// another meeting that holds the same bytes: the retry gets that meeting,
-/// and the noted copy stays noted for the launch, which removes it once
-/// the user deleted that meeting.
+/// The retry into the noted copy is answered with another meeting holding
+/// the same bytes; the copy stays noted until that meeting is deleted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_noted_copy_the_ledger_answers_as_another_meeting_is_left_to_the_launch() {
     let (world, app) = World::new();

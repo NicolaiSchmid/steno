@@ -1,29 +1,8 @@
-//! The recovery of a recording whose process was killed, with a real kill:
-//! each test runs the recorder in a child process (this test binary,
-//! running [`child_records_until_killed`]) over a synthetic capture and
-//! the fakes, kills it (`SIGKILL` on Unix, `TerminateProcess` on Windows,
-//! through [`std::process::Child::kill`]) at one point of the recording,
-//! and launches a new app over the same database and audio folder. The
-//! points are gates in the child's file writer, a test seam the product
-//! does not have: before the first write, after some frames, after the
-//! first periodic sync, and in the stop, between the writer's finish and
-//! the save. One more holds inside the stop's save, in the store's commit
-//! probe, before the commit. The writer counts its frames and its syncs
-//! into files the test reads, so the test knows what reached the files
-//! before the kill.
-//! A kill keeps the page cache, so these tests show what a crash leaves,
-//! not what a power loss does; that each sync is a full sync of the data
-//! is the writers' own test
-//! (`each_sync_is_one_full_sync_and_the_finish_one_more` in
-//! `steno_audio::writer`). A child dies with its test: the test kills it
-//! when its guard drops, and the child ends itself once its parent is gone
-//! or its own time is up.
-//!
-//! The delete's kill tests run the same way, at a gate between two steps
-//! of a delete through the host ([`DeleteGate`]): the child records and
-//! saves a meeting, deletes it, and is killed at the gate; the next launch
-//! lists it, with its recording, or does not, and adopts no master.
-//! Rust only: Swift had no recovery.
+//! The recovery of a recording or a delete whose process was killed, with a
+//! real kill: each test runs the recorder in a child process (this test
+//! binary) held at a gate in its file writer or its delete, kills it, and
+//! launches a new app over the same database and audio folder. A kill keeps
+//! the page cache, so these show what a crash leaves, not a power loss.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -193,15 +172,12 @@ fn gated_capture(gate: Gate, reports: &Path) -> MakeCaptureSession {
     })
 }
 
-/// How long a child lives at most, whatever becomes of its test: on
-/// Windows, which has no parent id to watch, the one guard against a test
-/// process that dies before its child.
+/// How long a child lives at most: on Windows, which has no parent id to
+/// watch, the one guard against a test process that dies before its child.
 const CHILD_LIFETIME: Duration = Duration::from_secs(180);
 
-/// Ends this process once its parent is gone (on Unix its parent id is no
-/// longer the test's, passed in [`PARENT`]: the orphan is adopted, even
-/// before the child got here) or [`CHILD_LIFETIME`] is up, so a killed or
-/// failed test leaves no recorder behind holding memory or a build slot.
+/// Ends this process once its parent is gone or [`CHILD_LIFETIME`] is up,
+/// so a killed or failed test leaves no recorder behind.
 fn die_with_the_parent() {
     let deadline = Instant::now() + CHILD_LIFETIME;
     #[cfg(unix)]
@@ -220,9 +196,8 @@ fn die_with_the_parent() {
     });
 }
 
-/// The child: records a call under its directory until it is killed; at
-/// [`Gate::AfterFinish`] it stops once 20 writes are counted. Passes at
-/// once outside a child, so a run with `--include-ignored` does nothing.
+/// The child: records a call until it is killed; at [`Gate::AfterFinish`]
+/// it stops once 20 writes are counted. Passes at once outside a child.
 #[test]
 #[ignore = "the kill tests run it in a child process"]
 fn child_records_until_killed() {
@@ -259,8 +234,7 @@ fn child_records_until_killed() {
 /// How long the test waits for the child to reach its point.
 const CHILD_PATIENCE: Duration = Duration::from_secs(60);
 
-/// A child process, killed and waited for when this drops, so a test that
-/// fails before its kill leaves nothing running.
+/// A child process, killed and waited for when this drops.
 struct ChildGuard(Child);
 
 impl Drop for ChildGuard {
@@ -270,8 +244,7 @@ impl Drop for ChildGuard {
     }
 }
 
-/// Starts the child over `directory` with `gate`, its output in files
-/// there.
+/// Starts the child over `directory` with `gate`.
 fn spawn_child(directory: &Path, gate: Gate) -> ChildGuard {
     spawn_test(
         "kill_tests::child_records_until_killed",
@@ -282,8 +255,6 @@ fn spawn_child(directory: &Path, gate: Gate) -> ChildGuard {
 
 /// Starts the ignored test `name` of this binary as the child over
 /// `directory` with the gate named `gate`, its output in files there.
-/// Some children read no gate (the warm-up's), so for them `gate` changes
-/// nothing.
 fn spawn_test(name: &str, directory: &Path, gate: &str) -> ChildGuard {
     let output = |name: &str| Stdio::from(std::fs::File::create(directory.join(name)).unwrap());
     let child = Command::new(std::env::current_exe().unwrap())
@@ -327,8 +298,7 @@ fn kill_when(child: &mut ChildGuard, directory: &Path, what: &str, reached: impl
     child.0.wait().unwrap();
 }
 
-/// What the next launch found: the meeting the child left as the launch
-/// left it, and once its processing settled.
+/// What the next launch found, once its processing settled.
 struct Relaunched {
     launched: steno_core::Meeting,
     settled: steno_core::Meeting,
@@ -340,9 +310,8 @@ fn audio_folder(directory: &Path) -> PathBuf {
     directory.join("audio")
 }
 
-/// A new app over the database and the audio folder the child left,
-/// launched as the product launches; every master counts as an old
-/// crash's (the live check has its own tests).
+/// A new app over what the child left, launched as the product launches;
+/// every master counts as an old crash's.
 async fn relaunch(directory: &Path) -> Relaunched {
     relaunch_in(directory, &audio_folder(directory)).await
 }
@@ -371,9 +340,8 @@ async fn relaunch_in(directory: &Path, folder: &Path) -> Relaunched {
 }
 
 /// A kill past the first write: the next launch queues the meeting with
-/// the end reason `failed`, no failure reason, and the audio up to the
-/// last write (between `frames.0` and `frames.0 + frames.1` frames, the
-/// last write maybe not counted yet), and the fakes process it.
+/// the end reason `failed` and the audio up to the last write, and the
+/// fakes process it.
 fn assert_recovered(relaunched: &Relaunched, frames: (u64, u64)) -> u64 {
     let Relaunched {
         launched,
@@ -420,8 +388,7 @@ fn the_meeting(directory: &Path) -> steno_core::Meeting {
 }
 
 /// Killed in the first write: the master holds its header alone, and the
-/// next launch fails the meeting with Swift's reason. The meeting is
-/// listed, never missing.
+/// next launch fails the meeting. The meeting is listed, never missing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_before_the_first_write_fails_the_meeting() {
     let dir = tempfile::tempdir().unwrap();
@@ -456,9 +423,8 @@ async fn a_kill_after_some_frames_recovers_them() {
     assert!(recovered > 0);
 }
 
-/// Killed mid-recording, after the writer's first periodic sync, which
-/// the count shows returned before the kill: every frame it covered is
-/// recovered.
+/// Killed after the writer's first periodic sync: every frame it covered
+/// is recovered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_mid_recording_recovers_what_was_written_and_synced() {
     let dir = tempfile::tempdir().unwrap();
@@ -474,9 +440,8 @@ async fn a_kill_mid_recording_recovers_what_was_written_and_synced() {
     assert!(recovered >= synced, "{recovered} frames, {synced} synced");
 }
 
-/// Killed in the stop, after the writer finished its files and before
-/// the meeting was saved: recovered with the end reason `failed` (the
-/// stop's own never landed) and every frame written.
+/// Killed in the stop, after the writer finished and before the save:
+/// recovered with the end reason `failed` and every frame written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_between_the_writers_finish_and_the_save_recovers_the_recording() {
     let dir = tempfile::tempdir().unwrap();
@@ -486,9 +451,7 @@ async fn a_kill_between_the_writers_finish_and_the_save_recovers_the_recording()
         reports.gated().exists()
     });
     let (counted, _) = reports.written();
-    // The writer's finish patched every header before the kill: the
-    // master's data size, and the sidecars' sizes, which a reader of a
-    // sidecar left unfinished refuses.
+    // The finish patched every header before the kill.
     let layout =
         steno_core::RecordingLayout::new(&audio_folder(dir.path()), the_meeting(dir.path()).id);
     let master = std::fs::read(layout.master(steno_core::AudioFormat::Caf48kFloat32)).unwrap();
@@ -507,11 +470,9 @@ async fn a_kill_between_the_writers_finish_and_the_save_recovers_the_recording()
     assert_eq!(recovered, counted, "the finished master, whole");
 }
 
-/// The child: records a call under its directory, stops once 20 writes
-/// are counted, and holds inside the stop's save until it is killed: in
-/// the transaction that writes the asset, the row written `queued` and
-/// the writer's lock held, before the commit. Passes at once outside a
-/// child.
+/// The child: records, stops once 20 writes are counted, and holds inside
+/// the stop's save transaction before the commit until it is killed.
+/// Passes at once outside a child.
 #[test]
 #[ignore = "the kill tests run it in a child process"]
 fn child_holds_inside_the_stops_save_until_killed() {
@@ -551,9 +512,8 @@ fn child_holds_inside_the_stops_save_until_killed() {
     }
 }
 
-/// Killed inside the stop's save, before its commit: nothing of the save
-/// lands, the row is still `recording`, and the next launch recovers the
-/// recording whole, as after a kill just before the save.
+/// Killed inside the stop's save, before its commit: the row is still
+/// `recording`, and the next launch recovers the recording whole.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_inside_the_stops_save_recovers_the_recording() {
     let dir = tempfile::tempdir().unwrap();
@@ -576,11 +536,9 @@ async fn a_kill_inside_the_stops_save_recovers_the_recording() {
     assert_eq!(recovered, counted, "the finished master, whole");
 }
 
-/// The first recording in a newly chosen folder, which no asset names
-/// yet; the setting moves to another folder while it runs, then the kill.
-/// The recorder recorded its folder before it wrote the row
-/// ([`crate::audio_folders`]), so the next launch recovers the master from
-/// there, though the settings name a folder that is there and empty.
+/// The first recording in a newly chosen folder, the setting moved while
+/// it runs, then the kill: the next launch recovers the master from the
+/// folder the recorder recorded before it wrote the row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_after_the_folder_changed_recovers_from_the_folder_it_started_in() {
     let dir = tempfile::tempdir().unwrap();
@@ -612,10 +570,9 @@ async fn a_kill_after_the_folder_changed_recovers_from_the_folder_it_started_in(
     );
 }
 
-/// The child's speech engine for the warm-up test: its load says so in
-/// `loading` under the child's directory, with whether the warm-up's mark
-/// was on disk as it started, and waits for the kill, as a load that a
-/// `CoreML` abort ends would never return.
+/// The child's speech engine for the warm-up test: its load writes
+/// `loading`, saying whether the warm-up's mark was on disk, and waits for
+/// the kill, as a load a `CoreML` abort ends would never return.
 struct LoadUntilKilled {
     inner: steno_core::testing::FakeSpeechEngine,
     loading: PathBuf,
@@ -678,9 +635,8 @@ fn warm_up_mark(directory: &Path) -> PathBuf {
         .join(steno_pipeline::WarmUpMark::FILE_NAME)
 }
 
-/// The child: starts a recording whose warm-up loads the speech engine in
-/// this process, as `CoreML` on the Mac, and is killed in that load.
-/// Passes at once outside a child.
+/// The child: starts a recording whose warm-up loads the in-process
+/// engine, and is killed in that load. Passes at once outside a child.
 #[test]
 #[ignore = "the kill tests run it in a child process"]
 fn child_warms_up_until_killed() {
@@ -703,8 +659,7 @@ fn child_warms_up_until_killed() {
     }
 }
 
-/// Starts an in-person recording on `app` and stops it after `seconds`;
-/// the meeting's id.
+/// Records in person for `seconds`; the meeting's id.
 fn record(app: &crate::App, seconds: f64) -> uuid::Uuid {
     tokio::task::block_in_place(|| {
         app.recorder.start(CaptureMode::InPerson, None);
@@ -720,14 +675,10 @@ fn record(app: &crate::App, seconds: f64) -> uuid::Uuid {
     })
 }
 
-/// A warm-up killed in its model load (an abort no `@catch` stops ends the
-/// app the same way) leaves its mark, so the next launch skips the
-/// warm-up: a recording then loads nothing while it runs, records and is
-/// saved, and its processing loads the engine, which clears the mark, so
-/// the recording after it warms up again. A15 of
-/// `.plans/2026-10-07-stable-promotion.md`. The app here has no fallback,
-/// to show the mark alone; the app's own launch also turns the speech
-/// sidecar on in `CoreML`'s place (A19, the test after this one).
+/// A warm-up killed in its model load leaves its mark, so the next launch
+/// skips the warm-up; the recording's processing loads the engine, clears
+/// the mark, and the recording after it warms up again. This app has no
+/// speech fallback, to show the mark alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_warm_up_killed_turns_the_warm_up_off_until_a_meeting_loads_the_models() {
     let dir = tempfile::tempdir().unwrap();
@@ -787,10 +738,8 @@ async fn a_warm_up_killed_turns_the_warm_up_off_until_a_meeting_loads_the_models
     assert!(!warm_up_mark(dir.path()).exists());
 }
 
-/// The child: processes the asset in `bad` under its directory on a
-/// speech engine in this process, as `CoreML` is on the Mac, whose load
-/// never returns, and is killed in it, as an abort in `CoreML` that no
-/// `@catch` stops ends the app. Passes at once outside a child.
+/// The child: processes the asset in `bad` on an in-process engine whose
+/// load never returns, and is killed in it. Passes at once outside a child.
 #[test]
 #[ignore = "the kill tests run it in a child process"]
 fn child_loads_the_engine_until_killed() {
@@ -814,8 +763,8 @@ fn child_loads_the_engine_until_killed() {
     unreachable!("the load never returns");
 }
 
-/// A speech engine that counts its calls, and says whether a recording
-/// was under way at each, as the pipelines see it.
+/// A speech engine that counts its calls, and whether a recording was
+/// under way at each.
 #[derive(Default)]
 struct Counting {
     inner: steno_core::testing::FakeSpeechEngine,
@@ -899,8 +848,7 @@ async fn falling_back_after(
     (store, launched(app).await)
 }
 
-/// Records half a second on `app` and waits for the meeting's processing,
-/// which must succeed.
+/// Records half a second on `app` and waits for its processing to succeed.
 async fn recorded_and_processed(app: &crate::App, store: &Store) {
     let recorded = record(app, 0.5);
     app.pipeline.current().wait_until_idle().await;
@@ -910,15 +858,11 @@ async fn recorded_and_processed(app: &crate::App, store: &Store) {
     );
 }
 
-/// A process killed in `CoreML`'s load during a meeting's processing (an
-/// abort no `@catch` stops ends it the same way) turns the speech sidecar
-/// on in `CoreML`'s place: the next launch processes that meeting in the
-/// sidecar, the recordings after it load nothing in the app's process,
-/// while they run or after, and the next launch keeps the
-/// sidecar. Only the user turns `CoreML` back on: then the next meeting
-/// runs on it, with no warm-up beside its recording, the recording after
-/// it warms up again, and a launch after that does not turn the sidecar
-/// on again for the same marks. A19 of `.plans/2026-10-07-stable-promotion.md`.
+/// A process killed in `CoreML`'s load during processing turns the speech
+/// sidecar on in its place: the next launch processes that meeting in the
+/// sidecar, and later recordings load nothing in the app's process. Only
+/// the user turns `CoreML` back on; then a launch does not turn the
+/// sidecar on again for the same marks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_coreml_load_killed_moves_the_meetings_to_the_speech_sidecar_until_the_user_says() {
     let dir = tempfile::tempdir().unwrap();
@@ -990,12 +934,10 @@ async fn a_coreml_load_killed_moves_the_meetings_to_the_speech_sidecar_until_the
     );
 }
 
-/// A warm-up killed in its load turns the speech sidecar on too: the
-/// recordings after it load nothing in the app's process. Once the user
-/// turns `CoreML` back on, the warm-up stays off until a meeting's
+/// A warm-up killed in its load turns the speech sidecar on too. Once the
+/// user turns `CoreML` back on, the warm-up stays off until a meeting's
 /// processing has loaded it, so that first load never runs beside a
-/// recording; the recording after it warms up again. A19 of
-/// `.plans/2026-10-07-stable-promotion.md`.
+/// recording.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_warm_up_killed_moves_the_meetings_to_the_speech_sidecar_until_the_user_says() {
     let dir = tempfile::tempdir().unwrap();
@@ -1039,18 +981,15 @@ async fn a_warm_up_killed_moves_the_meetings_to_the_speech_sidecar_until_the_use
     assert!(!app.services.speech_models.speech_fallback());
 }
 
-/// Where the child's delete waits to be killed: each between two of the
-/// delete's steps, the entry the recorder kept for the meeting forgotten
-/// first (`Recorder::forget_recording`).
+/// Where the child's delete waits to be killed, between two of the
+/// delete's steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeleteGate {
-    /// The entry forgotten, the delete's transaction open and not yet
-    /// committed: a commit probe holds it.
+    /// The delete's transaction open, a commit probe holding it.
     BeforeCommit,
     /// The rows deleted and committed, the meeting's files not yet removed.
     AfterCommit,
-    /// The delete refused (the pipeline took the meeting up while the
-    /// prompt was up), the rows kept, and the forgotten entry not yet
+    /// The delete refused, the rows kept, the forgotten entry not yet
     /// recorded again.
     BeforeRestore,
 }
@@ -1084,8 +1023,7 @@ fn hold_at_the_gate(reports: &Reports) -> ! {
     }
 }
 
-/// The real file system, held at the first removal: the delete's rows are
-/// gone by then.
+/// The real file system, held at the first removal.
 struct RemovalGate(Reports);
 
 impl FileSystem for RemovalGate {
@@ -1152,9 +1090,9 @@ fn meeting_id_file(directory: &Path) -> PathBuf {
     directory.join("meeting.id")
 }
 
-/// The child: records and saves a meeting under its directory, then
-/// deletes it through the host, confirmed, until it is killed at its
-/// [`DeleteGate`]. Passes at once outside a child.
+/// The child: records and saves a meeting, then deletes it through the
+/// host until it is killed at its [`DeleteGate`]. Passes at once outside a
+/// child.
 #[test]
 #[ignore = "the kill tests run it in a child process"]
 fn child_deletes_until_killed() {
@@ -1226,9 +1164,8 @@ fn child_deletes_until_killed() {
     panic!("the delete passed its gate");
 }
 
-/// Kills the child at `gate` and launches a new app over what it left;
-/// the meeting's id and the meetings that launch lists once its
-/// processing settled.
+/// Kills the child at `gate` and launches a new app over what it left; the
+/// meeting's id and the meetings that launch lists.
 async fn delete_killed_at(
     directory: &Path,
     gate: DeleteGate,
@@ -1287,8 +1224,8 @@ fn assert_listed_with_its_recording(
     );
 }
 
-/// Killed after the delete forgot the meeting's entry and before its
-/// rows went: the next launch lists the meeting with its recording, once.
+/// Killed before the delete's rows went: the next launch lists the meeting
+/// with its recording, once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_after_the_entry_is_forgotten_keeps_the_meeting() {
     let dir = tempfile::tempdir().unwrap();
@@ -1297,8 +1234,7 @@ async fn a_kill_after_the_entry_is_forgotten_keeps_the_meeting() {
 }
 
 /// Killed after the delete committed and before its files went: the next
-/// launch does not list the meeting, and its master, still on disk, is
-/// not adopted as a recovered recording.
+/// launch does not list the meeting and adopts no master.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_after_the_delete_commits_never_brings_the_meeting_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -1310,8 +1246,7 @@ async fn a_kill_after_the_delete_commits_never_brings_the_meeting_back() {
     assert_eq!(listed, Vec::new(), "nothing listed, nothing adopted");
 }
 
-/// A delete refused because the pipeline took the meeting up while the
-/// prompt was up, killed before the forgotten entry was recorded again:
+/// A refused delete killed before the forgotten entry was recorded again:
 /// the next launch lists the kept meeting with its recording, once, and
 /// processes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1321,9 +1256,8 @@ async fn a_kill_before_a_kept_meetings_entry_is_restored_keeps_it() {
     assert_listed_with_its_recording(dir.path(), meeting_id, &listed);
 }
 
-/// The child's decoder for the reading test: a decode says so in `reading`
-/// under the child's directory and waits for the kill, as a decode that a
-/// failed allocation aborts never returns.
+/// The child's decoder for the reading test: a decode writes `reading` and
+/// waits for the kill.
 struct DecodeUntilKilled {
     reading: PathBuf,
 }
@@ -1354,8 +1288,8 @@ impl steno_core::AudioDecoder for DecodeUntilKilled {
     }
 }
 
-/// The child: processes the asset whose id is in `bad` under its
-/// directory, and is killed in the decode. Passes at once outside a child.
+/// The child: processes the asset in `bad` and is killed in the decode.
+/// Passes at once outside a child.
 #[test]
 #[ignore = "the kill tests run it in a child process"]
 fn child_decodes_until_killed() {
@@ -1415,9 +1349,8 @@ fn recording_files(asset: &steno_core::AudioAsset) -> Vec<(PathBuf, Vec<u8>)> {
     files
 }
 
-/// The children for the reading tests: each processes the asset in `bad`
-/// and is killed in its decode, `kills` in a row, each over the marks
-/// the one before left. Returns the marks' folder.
+/// Children that each process `bad` and are killed in its decode, `kills`
+/// in a row over the marks the one before left. Returns the marks' folder.
 fn killed_in_the_decode(dir: &Path, bad: &steno_core::AudioAsset, kills: usize) -> PathBuf {
     let marks = dir
         .join("support")
@@ -1457,11 +1390,8 @@ async fn launched(app: crate::App) -> crate::App {
     app
 }
 
-/// A process killed once while it reads a recording (a failed allocation
-/// in the decoder aborts it the same way: nothing runs after; so does a
-/// force quit or a power loss) costs that meeting nothing: the next launch
-/// processes it again with the others, and its mark goes. A17 of
-/// `.plans/2026-10-07-stable-promotion.md`, "the breaker counts".
+/// A process killed once while it reads a recording costs that meeting
+/// nothing: the next launch processes it again, and its mark goes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_read_killed_once_is_processed_at_the_next_launch() {
     let dir = tempfile::tempdir().unwrap();
@@ -1490,12 +1420,9 @@ async fn a_read_killed_once_is_processed_at_the_next_launch() {
     assert_eq!(std::fs::read_dir(&marks).unwrap().count(), 0);
 }
 
-/// Killed twice in a row while it reads the same recording, the meeting
-/// is quarantined at the next launch: it fails with "Steno stopped while
-/// reading this recording", its files are kept as they were, and nothing
-/// reads it again; the other queued meeting is processed as before.
-/// Process again reads it once more and clears the marks. A17 of
-/// `.plans/2026-10-07-stable-promotion.md`.
+/// Killed twice in a row while reading the same recording, the meeting is
+/// quarantined at the next launch: it fails, its files are kept, and
+/// nothing reads it again until Process again, which clears the marks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_read_killed_twice_quarantines_its_meeting_and_the_launch_runs_the_others() {
     let dir = tempfile::tempdir().unwrap();
@@ -1533,9 +1460,8 @@ async fn a_read_killed_twice_quarantines_its_meeting_and_the_launch_runs_the_oth
     assert_eq!(std::fs::read_dir(&marks).unwrap().count(), 0);
 }
 
-/// The decoder of the quit test: a decode says so in `reading` and waits
-/// until `open` is there, or for 30 seconds, so a test that fails before it
-/// opens the decode does not wait on it for ever.
+/// The decoder of the quit test: a decode writes `reading` and waits until
+/// `open` is there, or for 30 seconds.
 struct DecodeUntilOpened {
     reading: PathBuf,
     open: PathBuf,
@@ -1569,9 +1495,8 @@ impl steno_core::AudioDecoder for DecodeUntilOpened {
     }
 }
 
-/// The app's own quit ([`crate::App::shutdown`]) during a read removes its
-/// mark: the quit ended the read, not the file, so the next launch counts
-/// nothing against the meeting and processes it.
+/// The app's own quit during a read removes its mark, so the next launch
+/// counts nothing against the meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_apps_quit_during_a_read_leaves_no_mark() {
     let dir = tempfile::tempdir().unwrap();

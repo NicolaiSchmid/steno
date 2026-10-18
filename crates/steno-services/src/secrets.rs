@@ -1,12 +1,7 @@
-//! `SecretStore` implementations: the platform keyring (the Keychain
-//! through the `keyring` crate, the Windows credential store through
-//! `credentials`, kept on this computer), the Secret Service on Linux
-//! (`secret_service::SecretServiceStore`), and the 0600 JSON file the
-//! Swift CLI used where no keyring is reachable (`STENO_<KEY>` wins over
-//! the file and over the Secret Service); and [`KeepsApiKey`], the app's
+//! `SecretStore` implementations: the platform keyring (the Keychain, the
+//! Windows credential store), the Secret Service on Linux, and the 0600
+//! JSON file where no keyring is reachable; and [`KeepsApiKey`], the app's
 //! store over them, which keeps the API key for the pipeline's rebuilds.
-//! Swift: `apps/macos/Steno/Services/KeychainSecretStore.swift`,
-//! `Sources/StenoCore/Testing/FileSecretStore.swift`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -29,39 +24,25 @@ mod secret_service;
 pub use secret_service::SecretServiceStore;
 
 /// The service every Steno keyring entry is filed under, on every
-/// platform: the Swift app's (`KeychainSecretStore.defaultService` in
-/// `apps/macos/Steno/Services/KeychainSecretStore.swift`), so the Rust app
-/// reads the API key the Swift app stored on the Mac. The account is the
-/// `SecretKey`'s raw value, as in Swift. Swift also labels the item
-/// `Steno <key>`; the `keyring` crate cannot set a label (the Keychain
-/// then shows the service), and lookups match on service and account only.
-/// The Secret Service item carries the label (`SecretServiceStore` on
-/// Linux), and a Windows credential Steno writes carries it as its
-/// comment. On Windows the credential's target name is `<key>.<service>`,
-/// as the `keyring` crate filed it (`credentials`).
-/// It is a literal, not the app's identifier, which changes at the Mac
+/// platform: the Swift app's, so the Rust app reads the API key the Swift
+/// app stored on the Mac. The account is the `SecretKey`'s raw value; on
+/// Windows the target name is `<key>.<service>`, as the `keyring` crate
+/// filed it. A literal, not the app's identifier, which changes at the Mac
 /// cutover while the entries stay where they are.
 pub const KEYRING_SERVICE: &str = "uno.schmid.steno.mac";
 
-/// The platform keyring when `keyring` is set: the Keychain on macOS, the
-/// credential store on Windows, the Secret Service on Linux when a
-/// provider answers on the session bus (else the secrets file, decided on
-/// a thread of the store's own as soon as it is made; see
-/// `SecretServiceStore`). Without `keyring` (the CLI), the secrets file
-/// under the support directory. It has no database, so a first move into
-/// the Secret Service reads no paired phones; the app's store is
-/// [`secret_store_with_unlock`]'s.
+/// The platform keyring when `keyring` is set (on Linux the Secret Service
+/// when a provider answers, else the secrets file); without it (the CLI),
+/// the secrets file under the support directory.
 #[must_use]
 pub fn secret_store(keyring: bool, paths: &StenoPaths) -> Arc<dyn SecretStore> {
     secret_store_from(keyring, paths, None, Bus::Session).0
 }
 
 /// [`secret_store`], and on Linux what resolves once the Secret Service
-/// store made its choice, true when a read failed with
-/// [`KeyringUnavailable::Unlocking`] on the way while the keyring asked the
-/// user: the app reads its secrets again then. `None` where no store asks.
-/// On Linux the first move into the Secret Service reads the phones paired
-/// in `store` (`SecretServiceStore`).
+/// store made its choice: true when a read failed with
+/// [`KeyringUnavailable::Unlocking`] meanwhile, so the app reads again.
+/// `None` where no store asks.
 #[must_use]
 pub fn secret_store_with_unlock(
     keyring: bool,
@@ -109,17 +90,13 @@ fn secret_store_from(
     }
 }
 
-/// Resolves once the secret store chose where the secrets are, the
-/// keyring or the file (so also when nothing was unlocked): true when it
-/// turned a read away while the keyring asked the user, so the caller
-/// reads again.
+/// Resolves once the secret store chose the keyring or the file: true when
+/// it turned a read away while the keyring asked the user.
 pub type SecretsUnlocked = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
 
-/// A secret Steno cannot reach because the keyring that holds it is
-/// locked, still waiting for the user to answer its prompt, or was not
-/// open when the app started. Never a reason to treat the secret as
-/// absent: a caller that would mint or delete on `None` stops instead.
-/// No Swift counterpart (the Keychain store reported its `OSStatus`).
+/// A secret Steno cannot reach because its keyring is locked, waiting for
+/// the user, or was not open at start. Never a reason to treat the secret
+/// as absent: a caller that would mint or delete on `None` stops instead.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyringUnavailable {
     /// The keyring is waiting for the user to answer its prompt.
@@ -128,17 +105,15 @@ pub enum KeyringUnavailable {
          once it is answered"
     )]
     Unlocking,
-    /// The keyring was locked again while the app ran, refused Steno
-    /// access (`KeePassXC`'s access dialog denied), or stopped answering.
+    /// The keyring was locked again, refused Steno access, or stopped
+    /// answering.
     #[error(
         "the keyring is locked or did not let Steno in; unlock it or allow Steno, then start \
          Steno again"
     )]
     Locked,
     /// The secrets moved into the keyring, which could not be opened at
-    /// start: locked, its prompt dismissed, no provider running, or no
-    /// answer within two seconds. Holds the key's raw value; the message
-    /// names it in plain words.
+    /// start. Holds the key's raw value.
     #[error(
         "{} is kept in the keyring, which Steno could not open when it started; unlock the \
          keyring and start Steno again",
@@ -157,9 +132,7 @@ fn plain_name(key: &str) -> &'static str {
 }
 
 /// The platform keyring: the Keychain through the `keyring` crate, and on
-/// Windows the credential store through `credentials`, which keeps every
-/// credential on this computer and moves the crate's roaming ones there on
-/// their first read.
+/// Windows the credential store through `credentials`.
 #[derive(Debug, Default)]
 pub struct KeyringSecretStore;
 
@@ -214,7 +187,7 @@ impl SecretStore for KeyringSecretStore {
         Self::read(key)
     }
 
-    /// `None` and an empty value remove the entry, as in Swift.
+    /// `None` and an empty value remove the entry.
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
         Self::write(key, value)
     }
@@ -225,30 +198,20 @@ impl SecretStore for KeyringSecretStore {
 }
 
 /// A JSON object of secrets in one file, owner-only (0600) where the
-/// platform has modes. An environment variable `STENO_<KEY>`
-/// (`llm-api-key` becomes `STENO_LLM_API_KEY`) overrides the file, so a
-/// CLI run never has to store a key.
+/// platform has modes. `STENO_<KEY>` (`llm-api-key` becomes
+/// `STENO_LLM_API_KEY`) overrides the file.
 ///
-/// Every read goes to the file; nothing is cached, so two processes over
-/// one file see each other's writes (the CLI and an app on Linux that
-/// found no Secret Service provider). A write is a
-/// read-modify-write under an advisory lock on `<file>.lock`, so two
-/// processes writing different keys both keep theirs, and it replaces the
-/// file by renaming a complete, synced temporary file over it, so a crash
-/// or a full disk leaves the old file or the new one, never a torn one.
-/// An empty file reads as no secrets, as in Swift, and an empty value as
-/// no value.
+/// Nothing is cached, so two processes over one file see each other's
+/// writes. A write is a read-modify-write under an advisory lock on
+/// `<file>.lock` and replaces the file by renaming a synced temporary file
+/// over it, so a crash leaves the old file or the new one.
 ///
 /// Once the Linux app moved the entries into the Secret Service, the file
-/// carries `"movedToSecretService": true` for good. From then on it is no
-/// longer a store: a key it does not hold is an error
-/// ([`KeyringUnavailable::NotOpened`]), not `None`, and a write fails, so
-/// a run that cannot open the keyring never mints a fresh handover
-/// identity or drops the API key. The entries the move left behind are
-/// still read until a later launch deletes them, or the app saves that
-/// key. A build from before the marker cannot parse the file (the marker
-/// is a boolean, and that build reads only text values), so it fails every
-/// secret read and write instead of minting.
+/// carries `"movedToSecretService": true` for good: a key it does not hold
+/// is then an error ([`KeyringUnavailable::NotOpened`]), not `None`, and a
+/// write fails, so no run mints a fresh handover identity or drops the API
+/// key. A build from before the marker cannot parse the file, so it fails
+/// instead of minting.
 pub struct FileSecretStore {
     path: PathBuf,
     environment: BTreeMap<String, String>,
@@ -301,7 +264,7 @@ impl FileSecretStore {
     }
 
     /// `secrets.json` under the support directory, reading the process
-    /// environment's Unicode variables (see `text_variables`).
+    /// environment's Unicode variables.
     #[must_use]
     pub fn in_support_directory(support_directory: &Path) -> Self {
         Self::new(
@@ -310,7 +273,7 @@ impl FileSecretStore {
         )
     }
 
-    /// The variable that overrides `key`. Swift: `environmentVariable(for:)`.
+    /// The variable that overrides `key`.
     #[must_use]
     pub fn environment_variable(key: &SecretKey) -> String {
         format!("STENO_{}", key.as_str().to_uppercase().replace('-', "_"))
@@ -324,10 +287,9 @@ impl FileSecretStore {
             .filter(|value| !value.is_empty())
     }
 
-    /// Applies `change` to the contents under the lock and writes them
-    /// back, deleting the file when nothing is left in it. The lock file
-    /// stays: deleting it while another process waits on it would let the
-    /// next writer lock a new file beside the old one.
+    /// Applies `change` to the contents under the lock and writes them back,
+    /// deleting the file when nothing is left. The lock file stays, so a
+    /// waiting writer never locks a new file beside the old one.
     #[cfg(target_os = "linux")]
     pub(crate) fn change(
         &self,
@@ -390,11 +352,8 @@ impl FileSecretStore {
     }
 }
 
-/// The variables of `variables` whose name and value are both Unicode, as
-/// a secret override is text. `std::env::vars()` panics on the first one
-/// that is not, which would stop the app and the CLI from starting; the
-/// path variables are read with `var_os` and used as they are
-/// (`StenoPaths::support_directory`, `CodexCredentialStore::default_home`).
+/// The variables whose name and value are both Unicode:
+/// `std::env::vars()` panics on the first one that is not.
 fn text_variables(
     variables: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> BTreeMap<String, String> {
@@ -448,17 +407,10 @@ impl SecretStore for FileSecretStore {
 
 /// The app's secret store, which keeps the last API key read or written
 /// through it for the pipeline's rebuilds: a keyring locked again while
-/// the app runs (`KeePassXC` locks with the session) fails a rebuild's
-/// read, and the pipeline then keeps the key it had
-/// ([`KeepsApiKey::kept_api_key`]) instead of running without summaries
-/// until the next start. Every call passes through unchanged, so Settings
-/// still see the failure. A write of the key replaces the kept one, and a
-/// removal clears it, even one that failed, as the user asked for no key.
-/// A failed write keeps the key it had, as a write the keyring refused
-/// (its prompt dismissed) changed nothing. A read that a write overtook
-/// keeps nothing, so the kept key never outlives a removal or a change
-/// that went through.
-/// No Swift counterpart (the Keychain does not lock while the app runs).
+/// the app runs fails a rebuild's read, and the pipeline then keeps the key
+/// it had ([`KeepsApiKey::kept_api_key`]). Every call passes through
+/// unchanged. A removal clears the kept key, even a failed one; a failed
+/// write keeps it; a read that a write overtook keeps nothing.
 pub struct KeepsApiKey {
     inner: Arc<dyn SecretStore>,
     kept: Mutex<Kept>,
@@ -481,9 +433,8 @@ impl KeepsApiKey {
         }
     }
 
-    /// The API key the last successful read or write through the store
-    /// saw; `None` after a removal (failed or not) or a read of no key. A
-    /// failed write leaves it as it was.
+    /// The API key the last successful read or write saw; `None` after a
+    /// removal or a read of no key.
     #[must_use]
     pub fn kept_api_key(&self) -> Option<String> {
         self.state().key.clone()
@@ -580,9 +531,8 @@ mod tests {
         assert_eq!(store.kept_api_key(), None, "only the API key is kept");
     }
 
-    /// A write the store refuses (a dismissed prompt) keeps the key it
-    /// had, a removal it refuses clears it, and a read that began before a
-    /// write keeps nothing.
+    /// A refused write keeps the key it had, a refused removal clears it, and
+    /// a read that began before a write keeps nothing.
     #[tokio::test]
     async fn a_failed_write_keeps_the_key_and_a_failed_removal_clears_it() {
         let key = SecretKey::llm_api_key();
@@ -940,8 +890,7 @@ mod tests {
     }
 
     /// The service stays the Swift app's bundle identifier as a literal,
-    /// whatever this app's own identifier becomes: the API key the Swift
-    /// app stored, and every entry this app stored since, live under it.
+    /// whatever this app's own identifier becomes.
     #[test]
     fn the_keyring_service_is_the_swift_app_s_literal() {
         assert_eq!(KEYRING_SERVICE, "uno.schmid.steno.mac");

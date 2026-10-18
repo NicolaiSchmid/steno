@@ -65,8 +65,7 @@ fn lines_reach_stderr_from_warn_up_unless_rust_log_says_otherwise() {
         steno_services::log_to_stderr(&filter);
         tracing::warn!("a warning line");
         tracing::info!("an info line");
-        // The writer thread ends with the process, so the queued lines are
-        // written out first, as the shell and the CLI do.
+        // The writer thread ends with the process: write out the queue first.
         steno_services::flush_logs();
         return;
     }
@@ -98,11 +97,9 @@ fn a_burst_the_queue_holds_reaches_stderr_whole() {
     assert!(!stderr.contains("lines dropped"), "{stderr}");
 }
 
-/// A panic writes out the queued lines before the hook it wraps runs, here
-/// one that ends the process at once, as an abort would. The child says
-/// on stdout when it is about to panic; the parent reads its stderr only a
-/// moment later, so the writer thread is still stuck on a full pipe then,
-/// and only the panic's flush lets the lines out.
+/// A panic writes out the queued lines before the hook it wraps runs (one
+/// that ends the process at once); the writer is stuck on a full pipe
+/// until then, so only the panic's flush lets the lines out.
 #[test]
 fn a_panic_writes_out_the_queued_lines_first() {
     const ME: &str = "a_panic_writes_out_the_queued_lines_first";

@@ -34,8 +34,7 @@ async fn load(
     HandoverIdentity::load_or_create(store, record, &database, "x", chrono::Utc::now()).await
 }
 
-/// A store over a fresh fake: the daemon, the fake's connection (kept for
-/// its lifetime), the fake's state and the secrets file's folder.
+/// A store over a fresh fake daemon and provider.
 struct Setup {
     daemon: Daemon,
     fake: Option<Connection>,
@@ -93,8 +92,7 @@ impl Setup {
         self.launch_with_phones(None).await
     }
 
-    /// A launch whose move reads the phones paired in `phones`, once its
-    /// choice is made.
+    /// A launch whose move reads the phones paired in `phones`.
     async fn launch_with_phones(
         &self,
         phones: Option<Arc<steno_core::Store>>,
@@ -342,10 +340,9 @@ async fn the_service_keeps_its_handover_identity_and_the_file_keeps_its_own() {
     );
 }
 
-/// The service's identity (a keyring synced from another computer) is not
-/// the one this computer's phones paired with: with nothing recorded, the
-/// first move records the file's, so the handover finds the service's
-/// replaced instead of adopting it. A recorded fingerprint stays.
+/// A service identity the phones did not pair with: with nothing recorded,
+/// the first move records the file's, so the handover finds the service's
+/// replaced instead of adopting it.
 #[tokio::test]
 async fn an_identity_the_service_already_holds_is_not_adopted_over_the_files() {
     let Some(setup) = Setup::new(true, State::default()).await else {
@@ -384,12 +381,8 @@ async fn an_identity_the_service_already_holds_is_not_adopted_over_the_files() {
     );
 }
 
-/// The move's pin applies the handover identity's decision: with nothing
-/// recorded, the file's identity is pinned unless every paired phone was
-/// paired before it started, as no phone can know it then. With no phone,
-/// with phones paired after it, with some before and some after, with a
-/// time after now, and with phones it cannot read, it is pinned, as the
-/// move runs once; a recorded fingerprint stays.
+/// The move pins the file's identity unless every paired phone was paired
+/// before it started; a recorded fingerprint stays.
 #[test]
 fn the_pin_records_the_file_s_identity_unless_no_phone_can_know_it() {
     use chrono::TimeDelta;
@@ -442,11 +435,8 @@ fn the_pin_records_the_file_s_identity_unless_no_phone_can_know_it() {
     }
 }
 
-/// The service's identity is the one the phones know when every phone was
-/// paired before the file's identity started (the file's was minted later,
-/// while the keyring could not be opened): the first move pins nothing, and
-/// the handover's load adopts the service's identity by the same rule
-/// instead of waiting as replaced.
+/// When every phone predates the file's identity, the first move pins
+/// nothing, and the handover's load adopts the service's identity.
 #[tokio::test]
 async fn a_file_identity_every_phone_predates_is_not_pinned_over_the_service_s() {
     use chrono::TimeDelta;
@@ -487,11 +477,8 @@ async fn a_file_identity_every_phone_predates_is_not_pinned_over_the_service_s()
     );
 }
 
-/// The app's secret store reads the phones paired in the app's database:
-/// built through the constructor the app uses, over the private bus, its
+/// The app's store reads the phones paired in the app's database, so its
 /// first move pins nothing where every phone predates the file's identity.
-/// A store built without the database would read no phones and pin the
-/// file's.
 #[tokio::test]
 async fn the_app_s_secret_store_reads_the_app_s_paired_phones_in_the_move() {
     use chrono::TimeDelta;
@@ -539,13 +526,8 @@ async fn the_app_s_secret_store_reads_the_app_s_paired_phones_in_the_move() {
     assert_eq!(loaded.fingerprint(), theirs.fingerprint());
 }
 
-/// No identity is ever destroyed by the move. Whether it pins the file's
-/// identity or, where every phone predates that identity, pins nothing,
-/// the service keeps its identity and the file keeps its own through the
-/// move, the next launch's tidy, a load and another tidy, and every phone
-/// stays paired: only the record says which one the load may serve, so
-/// whichever one the phones know can still be served. Pair again, the
-/// user's confirmed choice, is the write that replaces them.
+/// No identity is ever destroyed by the move: both stores keep theirs
+/// through the move, tidies and a load, and every phone stays paired.
 #[tokio::test]
 async fn no_identity_is_ever_destroyed_by_the_move() {
     use chrono::TimeDelta;
@@ -593,11 +575,8 @@ async fn no_identity_is_ever_destroyed_by_the_move() {
     }
 }
 
-/// One layout of [`no_identity_is_ever_destroyed_by_the_move`]: the
-/// service holds `service`, the unmarked file an identity minted at
-/// `file_minted`, and the phones paired at `phones` (`None`: no
-/// database); the move pins the file's identity where `pinned`, judged
-/// at `now`.
+/// One layout of [`no_identity_is_ever_destroyed_by_the_move`]; the move
+/// pins the file's identity where `pinned`, judged at `now`.
 async fn both_kept_through_the_move(
     setup: &Setup,
     service: &HandoverIdentity,
@@ -701,10 +680,9 @@ async fn after_the_move_the_service_wins_and_an_older_file_key_goes() {
     assert_eq!(setup.contents(), moved(&[]));
 }
 
-/// A key removed or changed in the launch that did the move, and an
-/// identity stored over the moved one: the next launch that opens the
-/// keyring keeps what the user did, and one that cannot open it never reads
-/// the file's old copy.
+/// A key removed or changed in the launch that did the move: the next
+/// launch keeps what the user did, and one that cannot open the keyring
+/// never reads the file's old copy.
 #[tokio::test]
 async fn a_key_removed_or_changed_in_the_move_launch_stays_so() {
     let key = SecretKey::llm_api_key();
@@ -762,9 +740,8 @@ async fn a_key_removed_or_changed_in_the_move_launch_stays_so() {
     }
 }
 
-/// The loss this guards against: a launch that cannot open the keyring
-/// read the identity as missing, minted a new one into the file, and the
-/// next launch moved it over the phones' pinned one.
+/// A launch that cannot open the keyring never mints a new identity into
+/// the file for the next launch to move over the phones' pinned one.
 #[tokio::test]
 async fn after_the_move_a_launch_without_the_keyring_fails_instead_of_reading_none() {
     let Some(setup) = Setup::new(true, State::default()).await else {
@@ -996,8 +973,8 @@ async fn a_choice_that_asked_but_turned_no_call_away_never_says_to_read_again() 
     assert!(!unlocked.await);
 }
 
-/// The prompt closed after the timeout and the file chosen: a read turned
-/// away while it was open is made again, and the file answers it.
+/// A read turned away while the prompt was open is made again once the
+/// file was chosen.
 #[tokio::test]
 async fn an_unanswered_prompt_is_dismissed_and_the_file_answers_the_read_it_turned_away() {
     let state = State {
@@ -1098,9 +1075,8 @@ async fn writes_the_provider_confirms_complete_through_its_prompt() {
     assert!(setup.state().items.is_empty());
 }
 
-/// `KeePassXC` answers a `CreateItem` that replaces an item with "no
-/// object" and a prompt naming the item it updated in place: that item is
-/// the one written, never an extra to delete.
+/// A `CreateItem` that answers "no object" and a prompt naming the item it
+/// updated in place: that item is never deleted as an extra.
 #[tokio::test]
 async fn a_confirmed_overwrite_keeps_the_item_it_updated() {
     let state = State {
@@ -1119,8 +1095,7 @@ async fn a_confirmed_overwrite_keeps_the_item_it_updated() {
     }
 }
 
-/// The handover identity written again over itself (`HandoverIdentity::store`
-/// over an identity, as an import replaces one) keeps the new identity.
+/// The handover identity written again over itself keeps the new identity.
 #[tokio::test]
 async fn a_confirmed_identity_store_over_an_identity_keeps_the_new_one() {
     let state = State {
@@ -1140,8 +1115,8 @@ async fn a_confirmed_identity_store_over_an_identity_keeps_the_new_one() {
     assert_eq!(fingerprint(&loaded), fingerprint(&second));
 }
 
-/// The first move over a key the service already holds, through confirmed
-/// writes: the file's value replaces it, and the move goes through.
+/// The first move over a key the service already holds: the file's value
+/// replaces it.
 #[tokio::test]
 async fn a_confirmed_move_over_a_key_the_service_holds_keeps_the_files_value() {
     let Some(setup) = Setup::new(true, State::default()).await else {
@@ -1163,8 +1138,7 @@ async fn a_confirmed_move_over_a_key_the_service_holds_keeps_the_files_value() {
 }
 
 /// Of two items for one key, a confirmed create deletes the other once its
-/// prompt names the item it wrote; one that names no item may have written
-/// either, so it deletes none.
+/// prompt names the item it wrote; one that names none deletes none.
 #[tokio::test]
 async fn a_confirmed_create_deletes_the_other_item_only_once_it_names_its_own() {
     let Some(setup) = Setup::new(true, State::default()).await else {
@@ -1241,9 +1215,8 @@ async fn a_write_the_keyring_refused_keeps_the_files_copy() {
     assert_eq!(setup.contents(), moved(&[("llm-api-key", "sk-file")]));
 }
 
-/// A collection that leaves the bus while the app runs (`KeePassXC`
-/// removes a locked database's) fails reads and writes as a locked
-/// keyring, in the keyring's own words.
+/// A collection that leaves the bus while the app runs fails reads and
+/// writes as a locked keyring.
 #[tokio::test]
 async fn a_collection_that_left_the_bus_reads_as_locked() {
     let Some(setup) = Setup::new(true, State::default()).await else {
@@ -1263,9 +1236,7 @@ async fn a_collection_that_left_the_bus_reads_as_locked() {
     assert_eq!(setup.values("llm-api-key"), ["sk-1"]);
 }
 
-/// A collection that leaves the bus between the store's search and its
-/// calls on the item (the item's unlock, `GetSecret`) reads as locked too,
-/// as does any other bus error after the choice, and the key reads again
+/// Any bus error after the choice reads as locked, and the key reads again
 /// once the collection is back.
 #[tokio::test]
 async fn a_collection_that_leaves_the_bus_after_the_search_reads_as_locked() {
@@ -1294,9 +1265,7 @@ async fn a_collection_that_leaves_the_bus_after_the_search_reads_as_locked() {
     assert_eq!(setup.values("llm-api-key"), ["sk-1"]);
 }
 
-/// A unix socket that takes every connection and never answers, as a bus
-/// whose daemon hangs; a connection stays open until the test takes it
-/// from `accepted` and drops it.
+/// A unix socket that takes every connection and never answers.
 struct SilentBus {
     address: String,
     socket: std::path::PathBuf,
@@ -1327,9 +1296,8 @@ impl SilentBus {
 }
 
 impl SilentBus {
-    /// Joins the connection the bus took to the daemon at `address`, as a
-    /// bus that answers late; the thread ends with how many bytes the
-    /// daemon sent once the connection closed.
+    /// Joins the connection the bus took to the daemon at `address`, as a bus
+    /// that answers late; returns the bytes the daemon sent.
     fn answer_late(&self, address: &str) -> std::thread::JoinHandle<u64> {
         let held = self
             .accepted
@@ -1354,8 +1322,7 @@ impl SilentBus {
 }
 
 impl Drop for SilentBus {
-    /// Ends the accepting thread: with the receiver gone, the connection
-    /// that wakes it is its last.
+    /// Ends the accepting thread.
     fn drop(&mut self) {
         drop(std::mem::replace(
             &mut self.accepted,
@@ -1365,9 +1332,8 @@ impl Drop for SilentBus {
     }
 }
 
-/// A launch over a bus that takes the connection and never answers
-/// settles within the connection's two seconds, as a keyring it could not
-/// open: over a marked file the secrets are unavailable, and the
+/// A bus that never answers settles within two seconds as a keyring it
+/// could not open: over a marked file the secrets are unavailable, and the
 /// handover's load mints nothing.
 #[tokio::test]
 async fn a_bus_that_never_answers_settles_in_time_as_a_keyring_not_opened() {
@@ -1407,11 +1373,8 @@ async fn a_bus_that_never_answers_settles_in_time_as_a_keyring_not_opened() {
     assert_eq!(file_at(&path, &[]).read().unwrap(), moved(&[]));
 }
 
-/// A bus that answers only after the choice gave up on it changes
-/// nothing: the store stays with the file it chose, no session is opened,
-/// nothing moves into the keyring, and the file's identity is not
-/// adopted over the keyring's or replaced. The connection's thread holds
-/// no lock meanwhile: the file takes a write.
+/// A bus that answers only after the choice gave up changes nothing: the
+/// store stays with the file, and the connection's thread holds no lock.
 #[tokio::test]
 async fn an_answer_after_the_connections_deadline_changes_nothing() {
     let Some(setup) = Setup::new(true, State::default()).await else {
@@ -1527,9 +1490,8 @@ async fn a_choice_that_panics_falls_back_to_the_file() {
     assert!(chose_file(&store));
 }
 
-/// A removal the keyring refuses has dropped the file's copy first, so a
-/// crash between the two cannot bring the removed key back at the next
-/// launch.
+/// A refused removal has dropped the file's copy first, so a crash cannot
+/// bring the removed key back.
 #[tokio::test]
 async fn a_removal_drops_the_files_copy_before_the_service_item() {
     let Some(setup) = Setup::new(true, State::default()).await else {
@@ -1640,8 +1602,7 @@ async fn the_environment_wins_over_the_service() {
     assert_eq!(setup.values("llm-api-key"), ["sk-service"]);
 }
 
-/// Omarchy's GNOME Keyring keeps an unencrypted file with one line per
-/// secret; a line break in a value would make it reject the whole file.
+/// A value with a line break is stored on one line.
 #[tokio::test]
 async fn a_value_with_line_breaks_is_stored_on_one_line_and_reads_back_whole() {
     let Some(setup) = Setup::new(true, State::default()).await else {

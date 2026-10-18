@@ -1,7 +1,6 @@
 //! The exported Swift identity on its way into the secret store: the
-//! PKCS#12 file `SecItemExport` wrote, decoded into the PEM bundle
-//! `steno-handover` reads, checked, and stored under `handover-identity`
-//! with its fingerprint recorded.
+//! PKCS#12 file decoded into the PEM bundle `steno-handover` reads, checked,
+//! and stored with its fingerprint recorded.
 
 use base64::Engine as _;
 use p12_keystore::{KeyStore, KeyStoreEntry, Pkcs12ImportPolicy};
@@ -19,19 +18,16 @@ pub enum ImportedIdentityError {
     Unusable(String),
     #[error("the identity could not be stored: {0}")]
     Store(String),
-    /// The identity is in the secret store, but its fingerprint was not
-    /// recorded: the handover refuses it as another identity than the
-    /// recorded one (`Unavailability::Replaced`) until a store records it.
+    /// The identity is stored but its fingerprint is not recorded, so the
+    /// handover refuses it until a store records it.
     #[error("the identity was stored, but its fingerprint could not be recorded: {0}")]
     Record(String),
 }
 
-/// The identity in `pkcs12`, a file `SecItemExport` wrote under
-/// `passphrase` (3DES key bag, 40-bit RC2 certificate bag): its private
-/// key (PKCS#8) and the certificate whose DER is `certificate_der`, the
-/// one the keychain query found by label, as the PEM bundle
-/// [`HandoverIdentity::from_pem`] reads. Refused when the file holds
-/// another certificate, or a key that does not sign for it.
+/// The identity in `pkcs12` (written by `SecItemExport` under `passphrase`)
+/// as the PEM bundle [`HandoverIdentity::from_pem`] reads. Refused when the
+/// file holds another certificate than `certificate_der`, or a key that
+/// does not sign for it.
 pub fn decode_pkcs12(
     pkcs12: &[u8],
     passphrase: &str,
@@ -64,23 +60,14 @@ pub fn decode_pkcs12(
     Ok((identity, bundle))
 }
 
-/// Stores an imported identity through [`HandoverIdentity::store`]: the
-/// PEM bundle under [`HandoverIdentity::SECRET_KEY`], replacing whatever
-/// identity was there (a desktop-id build's, as the [module doc](super)
-/// defines it), then its fingerprint in `record`, over the one recorded for
-/// the identity it replaced, so the handover's guard accepts the Swift
-/// identity at the next load. The one place the import writes the
-/// identity. A record that fails after the secret was written is
-/// [`ImportedIdentityError::Record`]: the import is not done then, as the
-/// guard refuses the identity until a store records its fingerprint.
+/// Stores an imported identity through [`HandoverIdentity::store`],
+/// replacing whatever identity was there, then records its fingerprint so
+/// the handover's guard accepts it at the next load. A record that fails
+/// after the secret was written is [`ImportedIdentityError::Record`].
 ///
-/// Replacing a desktop-id build's identity is one of the two writes that
-/// destroy a stored identity by design (the other is Pair again), so the
-/// store says so at warn first, naming the fingerprint recorded for the
-/// identity it replaces and the imported one, never the identity itself.
-/// It reads the record, not the secret store, so it adds no keychain
-/// prompt; over the same fingerprint (a rerun) or nothing recorded it says
-/// nothing.
+/// Replacing an identity destroys it, so this warns first with both
+/// fingerprints (read from the record, so no keychain prompt); a rerun over
+/// the same fingerprint says nothing.
 pub async fn store_imported_identity(
     secrets: &dyn SecretStore,
     record: &dyn FingerprintRecord,

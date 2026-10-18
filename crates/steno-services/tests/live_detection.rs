@@ -1,13 +1,7 @@
-//! Meeting detection against the real Core Audio HAL, ignored by default:
-//! it needs a Mac with a microphone and runs with `cargo test -p
-//! steno-services --test live_detection -- --ignored --nocapture`. The
-//! test opens the microphone in its own process, through the live capture
-//! backend, with a detector that does not ignore its own pid: the
-//! controller over the live process list raises the prompt once the
-//! microphone has been held for the debounce, and takes it down once the
-//! capture stops. Over SSH the microphone delivers silence (no TCC grant),
-//! which does not matter: the HAL still reports the input running.
-//! Swift had no live detection test.
+//! Meeting detection against the real Core Audio HAL, ignored by default
+//! (needs a Mac with a microphone; run with `--ignored --nocapture`): the
+//! test opens the microphone itself, and the prompt comes after the
+//! debounce and goes once the capture stops.
 #![cfg(target_os = "macos")]
 
 use std::sync::{Arc, Mutex};

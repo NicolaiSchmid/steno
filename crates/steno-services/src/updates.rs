@@ -1,100 +1,8 @@
 //! The update schedule: the host's `Updater` over the shell's update
-//! source (the Tauri updater, `apps/desktop/src-tauri/src/updater.rs`).
-//! Swift: `apps/macos/Steno/Services/UpdaterController.swift`, where
-//! Sparkle checked daily (`SUScheduledCheckInterval` 86400 in
-//! `apps/macos/project.yml`).
-//!
-//! - **The schedule.** [`UpdateSchedule::start`] runs a [`UpdateSchedule::tick`]
-//!   at launch and every hour ([`TICK`]). A tick checks when automatic
-//!   checks are on and the last check time is missing, more than a day old
-//!   ([`CHECK_INTERVAL`]) or in the future (the clock was set back). A check
-//!   that has not answered after [`CHECK_TIMEOUT`] fails, so a stalled
-//!   request cannot hold the next check or Settings' button.
-//! - **The flags** are the booleans [`AUTOMATIC_CHECKS_KEY`] and
-//!   [`AUTOMATIC_DOWNLOAD_KEY`] in `preferences.json`, where the Mac's
-//!   first launch copies Sparkle's `SUEnableAutomaticChecks` and
-//!   `SUAutomaticallyUpdate`. A missing key reads as Sparkle's value for a
-//!   fresh install: `SUEnableAutomaticChecks` is true in the Swift app's
-//!   Info.plist, and Sparkle does not download by itself unless asked
-//!   ([`AUTOMATIC_CHECKS_DEFAULT`], [`AUTOMATIC_DOWNLOAD_DEFAULT`]).
-//! - **The last check time** is the RFC 3339 UTC string under
-//!   [`LAST_CHECK_KEY`] in [`LAST_CHECK_FILE`] beside `preferences.json`,
-//!   written whole with [`replace_file`] after a check that succeeded,
-//!   whether or not it found an update; a failed check leaves it as it was,
-//!   so the next hourly tick tries again. A file that cannot be read or
-//!   parsed reads as no check yet. Swift: Sparkle's `SULastCheckTime`.
-//! - **A found update** is announced once per version in a run
-//!   ([`UpdateSource::announce`]), as Sparkle's update alert, but not while
-//!   a recording starts, runs or stops; the first tick with no recording
-//!   under way announces it. The user installs it from there
-//!   ([`UpdateSchedule::offer`]): a yes given while a recording or a
-//!   processing job runs asks once more, whether to install once it ends
-//!   ([`Question::AfterItEnds`]), and "Not Now" there leaves the version to
-//!   announce again ([`UpdateSchedule::announce_again`]).
-//! - **An install never stops a recording or a processing job** (stable
-//!   plan P25). It installs only while it holds the [`InstallGate`]'s
-//!   [`InstallHold`], which the app's gate ([`IdleGate`]) gives only while
-//!   no recording starts, runs or stops (its save runs while it stops),
-//!   no processing job runs or waits to, and the app is not shutting down.
-//!   The download comes first, unless the package is kept, and only while
-//!   the app is idle ([`InstallGate::is_idle_now`]), since a recording or a
-//!   processing job has the disk and the network to itself. The user's
-//!   install waits for an idle app before its download, and for the hold
-//!   before its install, looking again every [`IDLE_POLL`]
-//!   ([`UpdateSchedule::hold_once_idle`]). One install runs at a time, and
-//!   only of the version the last check found: a yes carries over to a
-//!   newer version a check finds while the install waits.
-//! - **Recording always wins.** An installer that returns
-//!   ([`Installer::returns`]) may wait on a password prompt nobody
-//!   answers, so the install lets recording starts go at once and
-//!   processing jobs after [`JOB_HOLD_LIMIT`]; a recording started
-//!   meanwhile is waited for, and its processing, before the relaunch
-//!   takes the hold again, and the user is told
-//!   ([`UpdateSource::tell_relaunch_waits`]), as is a yes given meanwhile.
-//!   A password typed after the limit still installs, and the relaunch
-//!   follows as it would have. The hold is kept through the shutdown and
-//!   the relaunch, and, where the install ends the app (Windows), through
-//!   the install: meanwhile a Record is refused and says
-//!   [`INSTALLING_UPDATE`](steno_host::services::INSTALLING_UPDATE), and a
-//!   processing job, such as one for a phone recording that arrives, waits
-//!   `queued`.
-//! - **An installer that asks an administrator**
-//!   ([`Installer::asks_an_administrator`]: a `.deb`'s or an `.rpm`'s
-//!   password, a macOS bundle the user cannot write, the MSI's consent
-//!   prompt) runs only right after a yes given while the app is idle, so
-//!   someone is at the screen to answer. A download that took longer than
-//!   [`LONG_DOWNLOAD`] counts as such a wait. On Windows the app ends
-//!   before the MSI's prompt, so Steno is down until the prompt is
-//!   answered; a no or a failure starts the version that ran again, as a
-//!   failed NSIS setup does (the shell's Windows watcher). A yes given
-//!   while the app was busy, or one the app turned busy after, is asked
-//!   again once it is idle ([`Question::InstallNow`]), before the install
-//!   takes the hold. "Later" there keeps a package the schedule had kept.
-//! - **Between an install that returned and the relaunch** the running
-//!   version works beside the new files. A recording reads none of them; a
-//!   processing job starts the new speech sidecar, which fails cleanly
-//!   when its protocol changed and keeps the audio for Process again after
-//!   the relaunch. A password prompt left open at Quit outlives the app:
-//!   an answer given later installs beside a Steno started meanwhile,
-//!   which runs the old version until its next launch, and whose next
-//!   check offers the update again.
-//! - **Automatic downloads**: a found update is downloaded at the first
-//!   tick that finds the app idle and no install under way, and installed
-//!   at the first tick that gets the gate's hold; while the app is busy
-//!   each waits for a later tick. An installer that asks an administrator
-//!   is not run by the schedule, since nobody may be there to answer: the
-//!   kept package is announced instead. The flag is read again when the
-//!   download ends, so a switch turned off during the transfer keeps
-//!   nothing; turning it off frees a kept package, so nothing installs.
-//!   The schedule keeps the downloaded package until an install takes it,
-//!   and frees it when a check finds another version, or none.
-//! - **Packaged installs** ([`updates_are_managed`], stable plan X5): no
-//!   schedule, and no check, the user's included. A binary that runs from a
-//!   folder Nix fills is one whatever the variable says: the flake's Mac
-//!   bundle.
-//!
-//! The network is the updater's: the schedule reads the same lane manifests
-//! as the tray's Check for Updates, and sends nothing else.
+//! source. It checks at launch and daily, announces a found update, and
+//! never installs over a recording or a processing job: an install runs
+//! only while it holds the [`InstallGate`]'s [`InstallHold`]. Packaged
+//! installs ([`updates_are_managed`]) get no schedule and no check.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -110,81 +18,58 @@ use steno_host::services::{Clock, Preferences, Recorder, StartHold, UpdateOutcom
 use crate::files::{Access, replace_file};
 use crate::pipeline::CurrentPipeline;
 
-/// Whether the schedule checks by itself. Swift: Sparkle's
-/// `SUEnableAutomaticChecks`.
+/// Whether the schedule checks by itself.
 pub const AUTOMATIC_CHECKS_KEY: &str = "steno.updates.automaticChecks";
 /// Whether a found update is downloaded and installed by itself once the
-/// install gate allows it (P25). Swift: Sparkle's `SUAutomaticallyUpdate`.
+/// install gate allows it.
 pub const AUTOMATIC_DOWNLOAD_KEY: &str = "steno.updates.automaticDownload";
-/// [`AUTOMATIC_CHECKS_KEY`] when `preferences.json` lacks it: the Swift
-/// app's Info.plist set `SUEnableAutomaticChecks`.
+/// [`AUTOMATIC_CHECKS_KEY`] when `preferences.json` lacks it.
 pub const AUTOMATIC_CHECKS_DEFAULT: bool = true;
-/// [`AUTOMATIC_DOWNLOAD_KEY`] when `preferences.json` lacks it: Sparkle's
-/// own default, which the Swift app kept.
+/// [`AUTOMATIC_DOWNLOAD_KEY`] when `preferences.json` lacks it.
 pub const AUTOMATIC_DOWNLOAD_DEFAULT: bool = false;
 /// The file under the support directory that holds the last check time.
 pub const LAST_CHECK_FILE: &str = "update-check.json";
-/// The key in [`LAST_CHECK_FILE`]: an RFC 3339 time in UTC
-/// (`2026-10-09T08:00:00Z`).
+/// The key in [`LAST_CHECK_FILE`]: an RFC 3339 time in UTC.
 pub const LAST_CHECK_KEY: &str = "lastCheckAt";
 /// How old the last check may grow before the schedule checks again.
-/// Swift: `SUScheduledCheckInterval` 86400.
 pub const CHECK_INTERVAL: TimeDelta = TimeDelta::days(1);
 /// How often the schedule looks at the last check time.
 pub const TICK: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-/// How long a check may take before it fails. Without it a stalled request
-/// (a captive portal, a connection left dead by sleep) would hold the one
-/// check at a time, every later tick and Settings' button until quit. The
-/// updater's own timeout would cap the download as well, so the limit
-/// wraps the check alone.
+/// How long a check may take before it fails, so a stalled request cannot
+/// hold every later check. It wraps the check alone, not the download.
 pub const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// How often the user's install, waiting for a recording or a processing
-/// job to end, looks again ([`UpdateSchedule::hold_once_idle`]).
+/// How often the user's waiting install looks again.
 pub const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
-/// How long an installer that returns ([`Installer::returns`]) keeps
-/// processing jobs waiting; it never holds recording starts off. It
-/// covers what the install does by itself, a password typed by someone at
-/// the screen and the package manager's run, which take seconds; past a
-/// minute nobody is answering the prompt, and a meeting recorded
-/// meanwhile, or a phone's that arrives, is processed while the prompt
-/// waits.
+/// How long an installer that returns keeps processing jobs waiting; it
+/// never holds recording starts off. Past a minute nobody is answering
+/// the password prompt.
 pub const JOB_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// How long the user's download may take before an installer that asks an
-/// administrator asks again ([`Question::InstallNow`]): the user may have
-/// left the screen since the yes.
+/// administrator asks again: the user may have left the screen.
 pub const LONG_DOWNLOAD: std::time::Duration = std::time::Duration::from_secs(30);
 /// The outcome of a check that ran into [`CHECK_TIMEOUT`].
 pub const CHECK_TIMED_OUT: &str = "The update check timed out.";
-/// The outcome of a check asked for on a packaged install: the line the
-/// General section shows there too
-/// (`steno_host::settings::snapshots::MANAGED_UPDATES`).
+/// The outcome of a check asked for on a packaged install.
 pub const MANAGED_CHECK: &str = steno_host::settings::snapshots::MANAGED_UPDATES;
 
-/// The variable a package sets to say it delivers the updates
-/// ([`updates_are_managed`]).
+/// The variable a package sets to say it delivers the updates.
 pub const DISTRIBUTION_VARIABLE: &str = "STENO_DISTRIBUTION";
 
 /// Where Nix keeps its builds, read-only to everything but Nix itself.
 const NIX_STORE: &str = "/nix/store";
-/// Where nix-darwin copies a package's apps; its next switch replaces the
-/// copy.
+/// Where nix-darwin copies a package's apps.
 const NIX_DARWIN_APPS: &str = "/Applications/Nix Apps";
-/// Where home-manager (25.11 and later, `targets.darwin.copyApps`) copies
-/// a package's apps by default, under the home folder; its next switch
-/// replaces the copy. A folder set in `targets.darwin.copyApps.directory`
-/// is not recognised.
+/// Where home-manager (`targets.darwin.copyApps`) copies a package's apps
+/// by default, under the home folder; a custom directory is not
+/// recognised.
 const HOME_MANAGER_APPS: &str = "Applications/Home Manager Apps";
 
-/// Whether a package manager delivers this app's updates (stable plan X5):
-/// [`DISTRIBUTION_VARIABLE`] is `aur` or `nix`, the environment's value (the
-/// AUR wrapper) before the build's (the Nix package), or the running binary,
-/// its links resolved, lies in a folder Nix fills: the store, nix-darwin's
-/// `/Applications/Nix Apps` or home-manager's default
-/// `~/Applications/Home Manager Apps`. Such a binary is managed whatever
-/// the variable says: an update cannot replace it in the read-only store,
-/// and the next switch would undo one made to a copy. This covers the
-/// flake's Mac bundle, which is unpacked from the release image, so no
-/// build sets the variable.
+/// Whether a package manager delivers this app's updates:
+/// [`DISTRIBUTION_VARIABLE`] is `aur` or `nix` (the environment's value
+/// before the build's), or the running binary, its links resolved, lies
+/// in a folder Nix fills. Such a binary is managed whatever the variable
+/// says: an update cannot replace it in the read-only store, and the next
+/// switch would undo one made to a copy.
 pub fn updates_are_managed() -> bool {
     managed_install(
         std::env::var(DISTRIBUTION_VARIABLE).ok().as_deref(),
@@ -194,8 +79,7 @@ pub fn updates_are_managed() -> bool {
     )
 }
 
-/// [`updates_are_managed`] from its inputs: the variable's value in the
-/// environment and in the build, the running binary and [`nix_folders`].
+/// [`updates_are_managed`] from its inputs.
 fn managed_install(
     environment: Option<&str>,
     build: Option<&str>,
@@ -206,17 +90,13 @@ fn managed_install(
         || executable.is_some_and(|executable| runs_from(executable, folders))
 }
 
-/// Whether the variable says a package manager delivers the updates: the
-/// environment's value before the build's is `aur` or `nix`.
 fn managed_by(environment: Option<&str>, build: Option<&str>) -> bool {
     matches!(environment.or(build), Some("aur" | "nix"))
 }
 
 /// The folders Nix fills: the store, nix-darwin's copies, and
 /// home-manager's default folder under `home`, left out when `home` is
-/// unset or not absolute (the folder would resolve against the working
-/// directory). Off the Mac only the store exists, so the other two match
-/// nothing there.
+/// unset or not absolute.
 fn nix_folders(home: Option<&OsStr>) -> Vec<PathBuf> {
     let mut folders = vec![PathBuf::from(NIX_STORE), PathBuf::from(NIX_DARWIN_APPS)];
     folders.extend(
@@ -227,8 +107,6 @@ fn nix_folders(home: Option<&OsStr>) -> Vec<PathBuf> {
     folders
 }
 
-/// Whether `executable`, [`resolved`], lies in one of `folders`, as given
-/// or resolved.
 fn runs_from(executable: &Path, folders: &[PathBuf]) -> bool {
     let executable = resolved(executable);
     folders
@@ -236,25 +114,20 @@ fn runs_from(executable: &Path, folders: &[PathBuf]) -> bool {
         .any(|folder| executable.starts_with(folder) || executable.starts_with(resolved(folder)))
 }
 
-/// `path` with its links resolved, or as given when it cannot be (it does
-/// not exist).
+/// `path` with its links resolved, or as given when it does not exist.
 fn resolved(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// What an install holds ([`InstallGate::try_hold`]): until it is dropped
-/// no recording starts and no processing job begins. [`IdleGate`]'s are the
-/// recorder's [`Recorder::hold_starts`] and the pipelines'
-/// [`JobHold`](steno_pipeline::JobHold). The schedule lets each part go on
-/// its own, the starts first ("Recording always wins" in the module doc).
+/// no recording starts and no processing job begins. The schedule lets
+/// each part go on its own, the starts first.
 pub struct InstallHold {
     starts: Option<StartHold>,
     jobs: Option<Box<dyn Send>>,
 }
 
 impl InstallHold {
-    /// A hold of recording starts (`starts`) and of processing jobs
-    /// (`jobs`, whatever keeps them from starting until it is dropped).
     #[must_use]
     pub fn new(starts: StartHold, jobs: impl Send + 'static) -> Self {
         InstallHold {
@@ -264,41 +137,32 @@ impl InstallHold {
     }
 }
 
-/// Whether an update may install and relaunch the app now (stable plan
-/// P25); the app's is [`IdleGate`]. Rust only: Sparkle installed at quit.
+/// Whether an update may install and relaunch the app now; the app's is
+/// [`IdleGate`].
 pub trait InstallGate: Send + Sync {
-    /// A hold when the app is idle (no recording starting, running or
-    /// stopping, no save in progress, no processing job, no shutdown),
-    /// `None` while it is busy. One hold lives at a time.
+    /// A hold when the app is idle, `None` while it is busy. One hold lives
+    /// at a time.
     fn try_hold(&self) -> Option<InstallHold>;
-    /// Whether the app is idle now, without keeping a hold: a download
-    /// waits for it, since a recording or a processing job has the disk
-    /// and the network to itself. A gate may answer it more cheaply.
+    /// Whether the app is idle now, without keeping a hold.
     fn is_idle_now(&self) -> bool {
         self.try_hold().is_some()
     }
-    /// Whether the app is shutting down, so a relaunch that waits never
-    /// comes: the app quits instead.
+    /// Whether the app is shutting down, so a waiting relaunch never comes.
     fn is_shutting_down(&self) -> bool {
         false
     }
 }
 
-/// The app's [`InstallGate`] (stable plan P25), over the recorder and the
-/// pipelines' in-flight set ([`InFlight`](steno_pipeline::InFlight)), which
-/// every reload shares. The app is idle when no recording starts, runs or
-/// stops (a stop saves the recording before the recorder is idle, and by
-/// then its processing job is claimed), the app is not shutting down
-/// ([`CurrentPipeline::quit`]), and no processing job runs or waits to (a
-/// meeting waiting for models waits for the user, so it does not count).
-/// Rust only.
+/// The app's [`InstallGate`], over the recorder and the pipelines'
+/// in-flight set. Idle means no recording starts, runs or stops, the app
+/// is not shutting down, and no processing job runs or waits to (a
+/// meeting waiting for models does not count).
 pub struct IdleGate {
     recorder: Arc<dyn Recorder>,
     pipeline: Arc<CurrentPipeline>,
 }
 
 impl IdleGate {
-    /// The gate over the app's recorder and pipeline.
     #[must_use]
     pub fn new(recorder: Arc<dyn Recorder>, pipeline: Arc<CurrentPipeline>) -> Self {
         IdleGate { recorder, pipeline }
@@ -307,11 +171,9 @@ impl IdleGate {
 
 impl InstallGate for IdleGate {
     /// Takes the recorder's start hold, then reads its status, so no
-    /// recording starts after the read; then the pipelines' job hold,
-    /// whose check that nothing is in flight is one step with the hold. A
-    /// busy app is told apart first without a start hold, so a Record
-    /// clicked while a job runs is never refused for an install that is
-    /// not coming.
+    /// recording starts after the read; then the pipelines' job hold. A busy
+    /// app is told apart first without a start hold, so a Record clicked
+    /// while a job runs is never refused for an install that is not coming.
     fn try_hold(&self) -> Option<InstallHold> {
         if !self.is_idle_now() {
             return None;
@@ -335,8 +197,7 @@ impl InstallGate for IdleGate {
     }
 }
 
-/// Whether a recording is under way: one is starting, running or
-/// stopping. The announcement waits while it does, and no install runs.
+/// Whether a recording is starting, running or stopping.
 fn under_way(state: RecordingState) -> bool {
     state != RecordingState::Idle
 }
@@ -346,15 +207,10 @@ fn under_way(state: RecordingState) -> bool {
 pub enum Question<'a> {
     /// The update alert for this version: install it now and relaunch?
     Install(&'a str),
-    /// A yes given while the app is busy: install once that ends? The
-    /// answer that installs then is the default; neither answer stops the
-    /// recording or the processing.
+    /// A yes given while the app is busy: install once that ends?
     AfterItEnds(Busy),
-    /// A yes for an installer that asks an administrator, put off while
-    /// the app was busy or by a download that took longer than
-    /// [`LONG_DOWNLOAD`], now that the app is idle: install this version
-    /// now and relaunch? Asked so someone is at the screen to answer the
-    /// prompt.
+    /// A yes for an installer that asks an administrator, put off while the
+    /// app was busy or by a long download, asked again now that it is idle.
     InstallNow(&'a str),
 }
 
@@ -373,19 +229,17 @@ pub enum Busy {
 enum Installed {
     /// The relaunch is under way (in a test, it returned).
     Relaunching,
-    /// The install, or its download, failed, or the last check found no
-    /// update any more; the user is told.
+    /// The install or its download failed, or the update is gone; the user
+    /// is told.
     Failed,
     /// Another install runs, so nothing was installed.
     Skipped,
-    /// The user answered no when asked again ([`Question::InstallNow`]):
-    /// the version is left to announce again.
+    /// The user answered no to [`Question::InstallNow`].
     PutOff,
 }
 
 /// How [`UpdateSource::install`] writes the new version, which decides
-/// how long the install holds recording starts and processing jobs off
-/// (the module doc's "Recording always wins").
+/// how long the install holds recording starts and processing jobs off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Installer {
     /// Replaces the app where it lies and returns: an `AppImage`, or a macOS
@@ -395,14 +249,10 @@ pub enum Installer {
     /// `.deb` or an `.rpm`, or a macOS bundle the user cannot write.
     AsksForAPassword,
     /// Ends the app and leaves the installer to a watcher: Windows' NSIS
-    /// setup, which installs for the user alone. Nothing outside Steno is
-    /// waited on before the shutdown, and a setup that fails starts the
-    /// version that ran again.
+    /// setup. A failed setup starts the old version again.
     EndsTheApp,
-    /// Ends the app; the installer then asks for an administrator's consent
-    /// and installs for every user: Windows' MSI. Steno is down until the
-    /// prompt is answered; a no or a failure starts the version that ran
-    /// again.
+    /// Ends the app; the installer then asks for an administrator's consent:
+    /// Windows' MSI. A no or a failure starts the old version again.
     EndsTheAppThenAsks,
 }
 
@@ -414,9 +264,8 @@ impl Installer {
         matches!(self, Installer::InPlace | Installer::AsksForAPassword)
     }
 
-    /// Whether the install asks an administrator, so it needs someone at
-    /// the screen: the schedule does not run it, and the user's yes given
-    /// while the app was busy is asked again once it is idle.
+    /// Whether the install asks an administrator, so it needs someone at the
+    /// screen.
     #[must_use]
     pub fn asks_an_administrator(self) -> bool {
         matches!(
@@ -426,25 +275,20 @@ impl Installer {
     }
 }
 
-/// The updater the schedule drives, and the dialogs it asks through; the
-/// shell's runs the Tauri updater over the release lanes. The schedule
-/// decides the order (download, the gate's hold, install, relaunch); the
-/// source only carries each step out. Errors are the updater's words,
-/// which the General section shows.
+/// The updater the schedule drives, and the dialogs it asks through. The
+/// schedule decides the order (download, hold, install, relaunch); the
+/// source carries each step out. Errors are the updater's words.
 #[async_trait]
 pub trait UpdateSource: Send + Sync {
     /// Reads the lanes' manifests: the newer version they offer, or `None`
     /// when this build is the newest.
     async fn check(&self) -> Result<Option<String>, String>;
-    /// Downloads and verifies `version`, the update the last check found:
-    /// the package an install writes. Fails when the last check found
+    /// Downloads and verifies `version`. Fails when the last check found
     /// another version, or none.
     async fn download(&self, version: &str) -> Result<Vec<u8>, String>;
-    /// Writes `package`, the download of `version`, over the app. Fails
-    /// when the last check found another version, or none. On Windows it
-    /// runs the shutdown and ends the process once the watcher runs, which
-    /// starts this version again when the installer does not install, so
-    /// it returns there only when it failed.
+    /// Writes `package`, the download of `version`, over the app. Fails when
+    /// the last check found another version, or none. On Windows it ends the
+    /// process, so it returns only on failure.
     async fn install(&self, version: &str, package: Vec<u8>) -> Result<(), String>;
     /// How [`Self::install`] installs on this build.
     fn installer(&self) -> Installer;
@@ -453,16 +297,13 @@ pub trait UpdateSource: Send + Sync {
     async fn relaunch(&self);
     /// Asks the user `question`; true for the answer that installs.
     async fn ask(&self, question: Question<'_>) -> bool;
-    /// Tells the user an install failed, with the updater's `message`. One
-    /// that failed after the install's own shutdown (Windows) restarts the
-    /// app instead, and one that failed while the app quits is only logged.
+    /// Tells the user an install failed. One after the install's own
+    /// shutdown restarts the app instead; one while the app quits is logged.
     fn tell_install_failed(&self, message: &str);
-    /// Tells the user `version` is installed and Steno relaunches once
-    /// `busy` has ended: a recording started, or a processing job began,
-    /// while the installer ran.
+    /// Tells the user `version` is installed and Steno relaunches once `busy`
+    /// has ended.
     fn tell_relaunch_waits(&self, version: &str, busy: Busy);
     /// Offers the found update to the user ([`UpdateSchedule::offer`]).
-    /// Swift: Sparkle's update alert.
     fn announce(&self, version: &str);
 }
 
@@ -470,28 +311,20 @@ pub trait UpdateSource: Send + Sync {
 struct State {
     last_check_at: Option<DateTime<Utc>>,
     outcome: UpdateOutcome,
-    /// While a check runs, Settings' button is off (Sparkle's
-    /// `canCheckForUpdates`); `one_check` makes a second check wait.
+    /// While a check runs, Settings' button is off.
     checking: bool,
     /// The newer version the last successful check found.
     found: Option<String>,
-    /// The found version still to download, once the app is idle; taken
-    /// by the attempt, so a failed download or install waits for the next
-    /// check.
+    /// The found version still to download, once the app is idle.
     to_download: Option<String>,
-    /// The package [`UpdateSource::download`] fetched, until an install
-    /// takes it.
     staged: Option<Staged>,
-    /// The version last announced or shown to the user, so a later tick in
-    /// this run does not ask again; a relaunch asks again, as Sparkle
-    /// re-alerted at each scheduled check.
+    /// The version last announced or shown, so this run does not ask again.
     announced: Option<String>,
-    /// The version an installer that returned installed, while the
-    /// relaunch waits for the app to be idle.
+    /// The version an installer that returned installed, while the relaunch
+    /// waits.
     installed: Option<String>,
 }
 
-/// A downloaded and verified package and its version.
 struct Staged {
     version: String,
     package: Vec<u8>,
@@ -507,7 +340,6 @@ impl std::fmt::Debug for Staged {
 }
 
 /// The host's `Updater`: the daily schedule, the flags and the last check.
-/// See the module doc.
 pub struct UpdateSchedule {
     me: Weak<UpdateSchedule>,
     source: Arc<dyn UpdateSource>,
@@ -519,11 +351,9 @@ pub struct UpdateSchedule {
     managed: bool,
     runtime: tokio::runtime::Handle,
     state: Mutex<State>,
-    /// One check at a time: a tick that waited behind the user's check
-    /// finds it no longer due.
+    /// One check at a time.
     one_check: tokio::sync::Mutex<()>,
-    /// One install at a time ([`OneInstall`]), the download of the user's
-    /// included, so two dialogs answered yes do not write two packages.
+    /// One install at a time, the user's download included.
     installing: AtomicBool,
     on_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
@@ -541,24 +371,18 @@ impl std::fmt::Debug for UpdateSchedule {
 /// What [`UpdateSchedule::new`] is built from.
 pub struct ScheduleParts {
     pub source: Arc<dyn UpdateSource>,
-    /// The graph's `preferences.json`, shared with the host.
     pub preferences: Arc<dyn Preferences>,
     pub clock: Arc<dyn Clock>,
     pub gate: Arc<dyn InstallGate>,
-    /// The recorder, whose recording holds back the announcement and is
-    /// what the user's install says it waits for.
+    /// The recorder, whose recording holds back the announcement.
     pub recorder: Arc<dyn Recorder>,
-    /// Where [`LAST_CHECK_FILE`] lives.
     pub support_directory: PathBuf,
-    /// [`updates_are_managed`] in the product.
     pub managed: bool,
-    /// Where the schedule and the host's checks run.
     pub runtime: tokio::runtime::Handle,
 }
 
 impl UpdateSchedule {
-    /// Reads the last check time from [`LAST_CHECK_FILE`]; the schedule
-    /// waits for [`Self::start`].
+    /// Reads the last check time; the schedule waits for [`Self::start`].
     pub fn new(parts: ScheduleParts) -> Arc<Self> {
         let last_check_path = parts.support_directory.join(LAST_CHECK_FILE);
         let last_check_at = read_last_check(&last_check_path);
@@ -588,8 +412,7 @@ impl UpdateSchedule {
         })
     }
 
-    /// Calls `on_change` from now on whenever a check starts or ends (the
-    /// host's `updates_changed`).
+    /// Calls `on_change` whenever a check starts or ends.
     pub fn on_change(&self, on_change: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.on_change) = Some(on_change);
     }
@@ -613,11 +436,10 @@ impl UpdateSchedule {
         });
     }
 
-    /// One round of the schedule: when a check is due, the check; with
-    /// automatic downloads on, the download of a found update and its
-    /// install, each once the gate says the app is idle; last, unless a
-    /// recording is under way, the announcement of a found update that
-    /// did not install.
+    /// One round of the schedule: a due check; with automatic downloads on,
+    /// the download and install of a found update once the app is idle; and,
+    /// unless a recording is under way, the announcement of one that did not
+    /// install.
     pub async fn tick(&self) {
         if self.managed {
             return;
@@ -644,10 +466,8 @@ impl UpdateSchedule {
         }
     }
 
-    /// The user's check, from the tray or from Settings: records it as the
-    /// schedule's own, and counts a found update as announced, since the
-    /// caller shows it. [`MANAGED_CHECK`] on a packaged install, without a
-    /// request.
+    /// The user's check: recorded as the schedule's own, and a found update
+    /// counts as announced. [`MANAGED_CHECK`] on a packaged install.
     pub async fn check_on_request(&self) -> Result<Option<String>, String> {
         if self.managed {
             return Err(MANAGED_CHECK.to_owned());
@@ -660,8 +480,7 @@ impl UpdateSchedule {
         result
     }
 
-    /// The tick's check, once it holds `one_check`: none when it is no
-    /// longer due because the user's check ran meanwhile.
+    /// The tick's check, unless the user's check ran meanwhile.
     async fn check_if_due(&self) {
         let one = self.one_check.lock().await;
         if self.is_due() {
@@ -669,10 +488,9 @@ impl UpdateSchedule {
         }
     }
 
-    /// Downloads the found update when the app is idle and no install
-    /// runs (the user's downloads its own); otherwise the download waits for
-    /// a later tick. A package whose download ends after automatic downloads
-    /// were turned off is not kept.
+    /// Downloads the found update when the app is idle and no install runs.
+    /// A package whose download ends after automatic downloads were turned
+    /// off is not kept.
     async fn download_when_idle(&self) {
         if self.installing.load(Ordering::SeqCst) || !self.gate.is_idle_now() {
             return;
@@ -691,10 +509,9 @@ impl UpdateSchedule {
         }
     }
 
-    /// Checks, giving up after [`CHECK_TIMEOUT`]: records the outcome and,
-    /// when the check succeeded, the time and what it found; a package kept
-    /// for another version is freed, and a found version not kept is to
-    /// download.
+    /// Checks, giving up after [`CHECK_TIMEOUT`]: on success records the time
+    /// and what it found, frees a package kept for another version, and
+    /// marks a new version to download.
     async fn check_holding(
         &self,
         _one: tokio::sync::MutexGuard<'_, ()>,
@@ -727,8 +544,6 @@ impl UpdateSchedule {
         result
     }
 
-    /// An install failed, the user's or the schedule's: the General section
-    /// says so, and the user is told.
     fn install_failed(&self, message: String) {
         self.source.tell_install_failed(&message);
         self.change(|state| {
@@ -737,18 +552,11 @@ impl UpdateSchedule {
         });
     }
 
-    /// Asks whether to install `version` now and, when the user agrees,
-    /// installs and relaunches as the module doc's "An install" says:
-    /// after the tray's check, and when the schedule announced an update it
-    /// does not install by itself. When the app is busy by the yes (the
-    /// dialog may have been open since before a recording started) it asks
-    /// whether to install once that ends ([`Question::AfterItEnds`]), and
-    /// a yes there waits for it ([`Self::hold_once_idle`]); "Not Now", or
-    /// closing that dialog, leaves the version to announce again at the
-    /// first tick with no recording under way. Once an update is
-    /// installed and the relaunch waits, the offer (the tray's check runs
-    /// against the version still running) tells the user so instead.
-    /// Swift: Sparkle's update alert.
+    /// Asks whether to install `version` now and, on a yes, installs and
+    /// relaunches. When the app is busy by the yes it asks whether to install
+    /// once that ends ([`Question::AfterItEnds`]); "Not Now" leaves the
+    /// version to announce again. Once an update is installed and the
+    /// relaunch waits, the user is told so instead.
     pub async fn offer(&self, version: &str) {
         let installed = self.state().installed.clone();
         if let Some(installed) = installed {
@@ -768,8 +576,7 @@ impl UpdateSchedule {
         self.install_on_request(version, busy.is_some()).await;
     }
 
-    /// What keeps an install from running now; `None` while the app is
-    /// idle.
+    /// What keeps an install from running now; `None` while the app is idle.
     fn busy(&self) -> Option<Busy> {
         if self.recording_under_way() {
             Some(Busy::Recording)
@@ -780,19 +587,12 @@ impl UpdateSchedule {
         }
     }
 
-    /// The user's install of `version`, after the dialog's yes (`put_off`
-    /// when it was given while the app was busy): once the app is idle,
-    /// from the kept package when it is that version, else downloaded
-    /// then; then, once the app is idle again and the gate's hold is taken
-    /// ([`Self::hold_for_install`]), installed as [`Self::install_now`]
-    /// does. A download that took longer than [`LONG_DOWNLOAD`] counts as
-    /// put off, and a "Later" when asked again keeps the schedule's kept
-    /// package ([`Self::keep`]). A recording started during the download
-    /// is waited for, never stopped. Nothing installs while another
-    /// install runs (a second yes meanwhile does nothing). A newer version
-    /// a check found during a wait keeps the yes: the install downloads
-    /// and installs that one instead. A version no longer found fails with
-    /// a message.
+    /// The user's install of `version` after the dialog's yes (`put_off` when
+    /// given while the app was busy): once idle, from the kept package or a
+    /// download, then installed once the gate's hold is taken
+    /// ([`Self::hold_for_install`]). A long download counts as put off. A
+    /// recording started meanwhile is waited for, never stopped. A newer
+    /// version a check found during a wait keeps the yes.
     async fn install_on_request(&self, version: &str, mut put_off: bool) -> Installed {
         let Some(_one) = OneInstall::start(&self.installing) else {
             return Installed::Skipped;
@@ -831,22 +631,19 @@ impl UpdateSchedule {
                 self.announce_again(&version);
                 return Installed::PutOff;
             };
-            // A check during the waits may have found a newer version, which
-            // is downloaded without the hold, or none.
+            // A check during the waits may have found a newer version, or none.
             match self.on_offer(&version) {
                 Some(found) if found == version => {
                     return self.install_now(&version, package, hold).await;
                 }
-                // The user has not seen the newer version.
                 Some(_) => put_off = true,
                 None => return Installed::Failed,
             }
         }
     }
 
-    /// Keeps `package` of `version` again, the schedule's kept package that
-    /// a "Later" handed back, unless a check found another version or
-    /// automatic downloads were turned off meanwhile.
+    /// Keeps `package` again after a "Later", unless a check found another
+    /// version or automatic downloads were turned off meanwhile.
     fn keep(&self, version: &str, package: Vec<u8>) {
         let downloads = self.automatically_downloads();
         let mut state = self.state();
@@ -858,10 +655,9 @@ impl UpdateSchedule {
         }
     }
 
-    /// The version a yes for `version` installs: the update the last check
-    /// found, `version` or a newer one, which is then counted as announced
-    /// since the yes covers it. `None` when the last check found no update,
-    /// and the user is told.
+    /// The version a yes for `version` installs: the last check's update,
+    /// then counted as announced. `None` when there is none, and the user is
+    /// told.
     fn on_offer(&self, version: &str) -> Option<String> {
         let mut state = self.state();
         let Some(found) = state.found.clone() else {
@@ -876,8 +672,8 @@ impl UpdateSchedule {
         Some(found)
     }
 
-    /// Returns once the gate says the app is idle, looking again every
-    /// [`IDLE_POLL`]; true when it had to wait.
+    /// Returns once the app is idle, polling every [`IDLE_POLL`]; true when
+    /// it had to wait.
     async fn until_idle(&self) -> bool {
         let mut waited = false;
         while !self.gate.is_idle_now() {
@@ -887,13 +683,10 @@ impl UpdateSchedule {
         waited
     }
 
-    /// The gate's hold for the user's install of `version`, as
-    /// [`Self::hold_once_idle`] takes it. An installer that asks an
-    /// administrator ([`Installer::asks_an_administrator`]) runs only right
-    /// after a yes given while the app is idle: when the yes was put off
-    /// (`put_off`), or the app is busy by now, it asks again once the app
-    /// is idle ([`Question::InstallNow`]), and holds nothing while it asks.
-    /// `None` when the answer is no.
+    /// The gate's hold for the user's install. An installer that asks an
+    /// administrator runs only right after a yes given while idle: otherwise
+    /// it asks again once the app is idle ([`Question::InstallNow`]). `None`
+    /// when the answer is no.
     async fn hold_for_install(&self, version: &str, put_off: bool) -> Option<InstallHold> {
         if !self.source.installer().asks_an_administrator() {
             return Some(self.hold_once_idle().await);
@@ -913,11 +706,7 @@ impl UpdateSchedule {
     }
 
     /// The gate's hold, once the app is idle: tried at once and then every
-    /// [`IDLE_POLL`], so it waits for a recording to end and be saved, for
-    /// every processing job, and for a tick holding the gate for a moment.
-    /// What the user's install waits for after its download (an installer
-    /// that asks an administrator asks again first), and the relaunch
-    /// after an installer that let recording go on.
+    /// [`IDLE_POLL`].
     pub async fn hold_once_idle(&self) -> InstallHold {
         loop {
             if let Some(hold) = self.gate.try_hold() {
@@ -927,17 +716,12 @@ impl UpdateSchedule {
         }
     }
 
-    /// Installs the downloaded `package` of `version` and relaunches, with
-    /// `hold`, the gate's, taken before the install. Where the install
-    /// ends the app the hold is kept through the install, since the process
-    /// ends inside it. An installer that returns may wait on a password
-    /// prompt (a `.deb` install always asks), so recording starts are let
-    /// go at once and processing jobs after [`JOB_HOLD_LIMIT`]; the
-    /// install is awaited however long it takes, and once it has installed
-    /// the relaunch takes the gate's hold again
-    /// ([`Self::hold_to_relaunch`]). The relaunch keeps the hold through
-    /// the shutdown. A failed install, a cancelled prompt's included, drops
-    /// it.
+    /// Installs `package` of `version` and relaunches, with the gate's
+    /// `hold`. Where the install ends the app the hold is kept through it.
+    /// An installer that returns may wait on a password prompt, so recording
+    /// starts go at once and processing jobs after [`JOB_HOLD_LIMIT`]; the
+    /// relaunch then takes the hold again ([`Self::hold_to_relaunch`]). A
+    /// failed install drops it.
     async fn install_now(
         &self,
         version: &str,
@@ -976,10 +760,8 @@ impl UpdateSchedule {
         Installed::Relaunching
     }
 
-    /// The gate's hold for the relaunch, after an installer that let
-    /// recording and processing go on: at once while the app is idle;
-    /// otherwise the user is told the relaunch waits, and it waits as
-    /// [`Self::hold_once_idle`] does.
+    /// The gate's hold for the relaunch: at once while idle; otherwise the
+    /// user is told the relaunch waits.
     async fn hold_to_relaunch(&self, version: &str) -> InstallHold {
         if let Some(hold) = self.gate.try_hold() {
             return hold;
@@ -988,9 +770,8 @@ impl UpdateSchedule {
         self.hold_once_idle().await
     }
 
-    /// Tells the user `version` is installed and the relaunch waits, and
-    /// for what; nothing while the app is idle, since the relaunch is under
-    /// way, or shutting down, since it quits instead.
+    /// Tells the user the relaunch waits, and for what; nothing while idle or
+    /// shutting down.
     fn tell_relaunch_waits(&self, version: &str) {
         if self.gate.is_shutting_down() {
             return;
@@ -1000,15 +781,12 @@ impl UpdateSchedule {
         }
     }
 
-    /// Whether a recording is starting, running or stopping now
-    /// ([`under_way`]).
     fn recording_under_way(&self) -> bool {
         under_way(self.recorder.status().state)
     }
 
-    /// The user put the install of `version` off ("Not Now" while the app
-    /// was busy): the version is left to announce again at the first tick
-    /// with no recording under way.
+    /// The user put the install of `version` off: it is announced again at
+    /// the first tick with no recording under way.
     pub fn announce_again(&self, version: &str) {
         self.state()
             .announced
@@ -1016,11 +794,8 @@ impl UpdateSchedule {
     }
 
     /// Installs the kept package while holding the gate; true when the
-    /// relaunch is under way. It takes no hold with nothing kept, while
-    /// another install runs, or for an installer that asks an
-    /// administrator, whose kept package is announced instead. Automatic
-    /// downloads turned off free the kept package, so nothing is left to
-    /// install.
+    /// relaunch is under way. Not for an installer that asks an
+    /// administrator, whose kept package is announced instead.
     async fn install_when_idle(&self) -> bool {
         if self.state().staged.is_none() || self.source.installer().asks_an_administrator() {
             return false;
@@ -1039,10 +814,8 @@ impl UpdateSchedule {
             == Installed::Relaunching
     }
 
-    /// Announces the found update unless it was announced or shown in this
-    /// run, or a recording is under way: the alert would come up over the
-    /// meeting, so the first tick with no recording under way announces it
-    /// instead.
+    /// Announces the found update unless already shown in this run or a
+    /// recording is under way.
     fn announce_when_idle(&self) {
         if self.recording_under_way() {
             return;
@@ -1095,8 +868,7 @@ impl Updater for UpdateSchedule {
             .unwrap_or(AUTOMATIC_DOWNLOAD_DEFAULT)
     }
 
-    /// Turning automatic downloads off frees any kept package, which the
-    /// next yes downloads again.
+    /// Turning automatic downloads off frees any kept package.
     fn set_automatically_downloads(&self, enabled: bool) {
         self.preferences.set_flag(AUTOMATIC_DOWNLOAD_KEY, enabled);
         if !enabled {
@@ -1112,10 +884,8 @@ impl Updater for UpdateSchedule {
         self.state().outcome.clone()
     }
 
-    /// The host's answer to `updates.check`, for a host without a shell:
-    /// checks on the runtime ([`UpdateSchedule::check_on_request`]) and
-    /// announces a found update. The desktop shell answers `updates.check`
-    /// itself with its dialogs (`bridge.rs`, `updater::check_and_offer`).
+    /// The host's answer to `updates.check`, for a host without a shell; the
+    /// desktop shell answers it itself with its dialogs.
     fn check_for_updates(&self) {
         if self.managed {
             return;
@@ -1135,11 +905,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// An install under way: while it lives a second one returns at once.
 struct OneInstall<'a>(&'a AtomicBool);
 
 impl<'a> OneInstall<'a> {
-    /// `None` while another install runs.
     fn start(installing: &'a AtomicBool) -> Option<Self> {
         (!installing.swap(true, Ordering::SeqCst)).then_some(OneInstall(installing))
     }
@@ -1158,8 +926,7 @@ struct LastCheck {
     last_check_at: String,
 }
 
-/// The time in `path`; `None` when there is no file or it does not hold
-/// one, which a later check overwrites.
+/// The time in `path`; `None` when there is no file or it holds none.
 fn read_last_check(path: &Path) -> Option<DateTime<Utc>> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
