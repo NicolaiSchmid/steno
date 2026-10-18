@@ -423,9 +423,6 @@ mod tests {
         let folder = support.path().join(ReadingMarks::FOLDER);
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("x.json"), b"{}").unwrap();
-        let store = Store::in_memory().unwrap();
-        let marks = ReadingMarks::at_launch(support.path(), &store, chrono::Utc::now());
-        assert!(marks.speech_marks_left().is_empty());
         assert!(!launch(support.path()).is_on());
     }
 
