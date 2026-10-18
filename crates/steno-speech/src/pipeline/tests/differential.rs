@@ -2084,29 +2084,27 @@ fn ref_later_recovery_case(
 /// 25.4 s and from 28 to 37.8 s, over a fake a frame off and deaf for a
 /// window's last 30 frames.
 fn ref_orphan_led_case() -> (RefCase, RefRun) {
-    let config = random_config(3, true);
     let regions = vec![41_600..219_200, 310_400..406_400, 448_000..604_800];
-    let mut samples = vec![0.0; 640_000];
-    for loud in &regions[1..] {
-        samples[loud.clone()].fill(0.05);
-    }
-    let words = ref_at(&[
-        (&[16, 36, 36, 41], 108, 5),
-        (&[17, 37, 41], 134, 6),
-        (&[12], 175, 4),
-        (&[3, 23, 23, 41], 187, 2),
-        (&[10, 30], 208, 3),
-        (&[10, 41], 228, 6),
-        (&[41], 244, 6),
-        (&[14], 296, 4),
-    ]);
-    let case = ref_case(samples, words, regions);
     let hearing = Hearing {
         jitter: 1,
         deaf: (0, 30, 1),
     };
-    let run = ref_run(&case, &config, 130, hearing);
-    (case, run)
+    let config = random_config(3, true);
+    ref_cut_case(
+        &config,
+        hearing,
+        (640_000, regions, &[1, 2]),
+        &[
+            (&[16, 36, 36, 41], 108, 5),
+            (&[17, 37, 41], 134, 6),
+            (&[12], 175, 4),
+            (&[3, 23, 23, 41], 187, 2),
+            (&[10, 30], 208, 3),
+            (&[10, 41], 228, 6),
+            (&[41], 244, 6),
+            (&[14], 296, 4),
+        ],
+    )
 }
 
 #[test]
@@ -2132,29 +2130,48 @@ fn a_recovery_that_begins_at_an_orphan_can_glue_the_end_of_a_word_onto_the_word_
     );
 }
 
+/// A generated case cut to the words around a limit, run under `config`
+/// over a fake that hears as `hearing` and decodes a window under 130
+/// frames that holds loud sound to nothing: `total` samples with speech
+/// in `regions`, loud sound the fake decodes to nothing in the regions
+/// `loud` names, and `words` placed as [`ref_at`] reads them.
+fn ref_cut_case(
+    config: &PipelineConfig,
+    hearing: Hearing,
+    (total, regions, loud): (usize, Vec<Range<usize>>, &[usize]),
+    words: &[(&[u32], usize, usize)],
+) -> (RefCase, RefRun) {
+    let mut samples = vec![0.0; total];
+    for &r in loud {
+        samples[regions[r].clone()].fill(0.05);
+    }
+    let case = ref_case(samples, ref_at(words), regions);
+    let run = ref_run(&case, config, 130, hearing);
+    (case, run)
+}
+
+/// The words of case 1929 of seed 0xa09c6d2c7ddf7445 around its limit
+/// ([`ref_across_gap_case`]).
+const REF_CASE_1929: &[(&[u32], usize, usize)] = &[
+    (&[14, 34, 34, 41], 280, 2),
+    (&[13, 33, 41], 493, 2),
+    (&[36, 41], 510, 6),
+    (&[13], 551, 2),
+];
+
 /// Case 1929 of seed 0xa09c6d2c7ddf7445 in the orphan layout, cut to the
 /// words around the limit: settings with 25 s chunks of at most 15 s and
 /// no extra windows, 51.7 s without noise, speech to 14.2 s and loud sound
 /// the fake decodes to nothing from 43.5 s to the end, over a fake
 /// `jitter` frames off and deaf for a window's first 30 frames.
 fn ref_across_gap_case(jitter: usize) -> (RefCase, RefRun) {
-    let config = random_config(385, false);
     let regions = vec![0..227_200, 696_000..827_200];
-    let mut samples = vec![0.0; 827_200];
-    samples[regions[1].clone()].fill(0.05);
-    let words = ref_at(&[
-        (&[14, 34, 34, 41], 280, 2),
-        (&[13, 33, 41], 493, 2),
-        (&[36, 41], 510, 6),
-        (&[13], 551, 2),
-    ]);
-    let case = ref_case(samples, words, regions);
     let hearing = Hearing {
         jitter,
         deaf: (30, 0, 1),
     };
-    let run = ref_run(&case, &config, 130, hearing);
-    (case, run)
+    let config = random_config(385, false);
+    ref_cut_case(&config, hearing, (827_200, regions, &[1]), REF_CASE_1929)
 }
 
 #[test]
@@ -2238,25 +2255,13 @@ fn the_boundary_check_never_fails_the_old_merges_text_against_itself() {
 /// 27 to 29.5 s: a chunk whose decoded window hears nothing and that has
 /// too little speech to recover, between the middle chunk and the last.
 fn ref_across_empty_chunk_case(jitter: usize) -> (RefCase, RefRun) {
-    let config = random_config(385, false);
     let regions = vec![0..227_200, 432_000..472_000, 696_000..827_200];
-    let mut samples = vec![0.0; 827_200];
-    for loud in &regions[1..] {
-        samples[loud.clone()].fill(0.05);
-    }
-    let words = ref_at(&[
-        (&[14, 34, 34, 41], 280, 2),
-        (&[13, 33, 41], 493, 2),
-        (&[36, 41], 510, 6),
-        (&[13], 551, 2),
-    ]);
-    let case = ref_case(samples, words, regions);
     let hearing = Hearing {
         jitter,
         deaf: (30, 0, 1),
     };
-    let run = ref_run(&case, &config, 130, hearing);
-    (case, run)
+    let config = random_config(385, false);
+    ref_cut_case(&config, hearing, (827_200, regions, &[1, 2]), REF_CASE_1929)
 }
 
 #[test]
@@ -2292,30 +2297,28 @@ fn a_recovery_that_missed_a_words_start_can_glue_its_rest_across_a_chunk_that_he
 /// nothing to 9.6 s and from 63 to 67.1 s, over a fake `jitter` frames
 /// off and deaf for a window's first 30 frames.
 fn ref_own_window_case(jitter: usize) -> (RefCase, RefRun) {
-    let config = random_config(481, false);
     let regions = vec![
         0..153_600,
         681_600..793_600,
         1_008_000..1_073_600,
         1_353_600..1_435_200,
     ];
-    let mut samples = vec![0.0; 1_435_200];
-    for loud in [&regions[0], &regions[2]] {
-        samples[loud.clone()].fill(0.05);
-    }
-    let words = ref_at(&[
-        (&[20], 850, 3),
-        (&[13, 33], 1006, 2),
-        (&[41, 34], 1025, 3),
-        (&[16, 36], 1058, 4),
-    ]);
-    let case = ref_case(samples, words, regions);
     let hearing = Hearing {
         jitter,
         deaf: (30, 0, 1),
     };
-    let run = ref_run(&case, &config, 130, hearing);
-    (case, run)
+    let config = random_config(481, false);
+    ref_cut_case(
+        &config,
+        hearing,
+        (1_435_200, regions, &[0, 2]),
+        &[
+            (&[20], 850, 3),
+            (&[13, 33], 1006, 2),
+            (&[41, 34], 1025, 3),
+            (&[16, 36], 1058, 4),
+        ],
+    )
 }
 
 #[test]
@@ -2354,7 +2357,6 @@ fn a_recovery_that_missed_a_words_start_can_glue_its_rest_across_a_boundary_its_
 /// from 39.7 to 46.4 s and from 53.6 to 57.4 s, over a fake `jitter`
 /// frames off that hears every frame.
 fn ref_inside_glue_case(jitter: usize) -> (RefCase, RefRun) {
-    let config = random_config(276, false);
     let regions = vec![
         1_600..105_600,
         249_600..356_800,
@@ -2362,20 +2364,20 @@ fn ref_inside_glue_case(jitter: usize) -> (RefCase, RefRun) {
         635_200..742_400,
         857_600..918_399,
     ];
-    let mut samples = vec![0.0; 1_041_600];
-    for loud in [&regions[1], &regions[3], &regions[4]] {
-        samples[loud.clone()].fill(0.05);
-    }
-    let words = ref_at(&[
-        (&[7], 510, 6),
-        (&[9, 29, 29], 601, 6),
-        (&[41, 24], 628, 5),
-        (&[41, 37, 37, 41], 644, 4),
-        (&[12, 32, 32, 41], 708, 2),
-    ]);
-    let case = ref_case(samples, words, regions);
-    let run = ref_run(&case, &config, 130, Hearing::every_frame(jitter));
-    (case, run)
+    let hearing = Hearing::every_frame(jitter);
+    let config = random_config(276, false);
+    ref_cut_case(
+        &config,
+        hearing,
+        (1_041_600, regions, &[1, 3, 4]),
+        &[
+            (&[7], 510, 6),
+            (&[9, 29, 29], 601, 6),
+            (&[41, 24], 628, 5),
+            (&[41, 37, 37, 41], 644, 4),
+            (&[12, 32, 32, 41], 708, 2),
+        ],
+    )
 }
 
 #[test]
