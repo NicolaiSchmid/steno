@@ -42,17 +42,22 @@ pub const WORKERS: usize = 4;
 ///   chunk that began just before speech after a long pause lost words
 ///   (5.86 % mean WER against 5.09 % without the skip);
 /// - the gaps, the audio the chunks leave out, are decoded too, in extra
-///   windows ([`steno_speech::chunker::gap_windows`]): the chunks still
+///   windows ([`steno_speech::chunker::partition`]): the chunks still
 ///   start 0.25 s before the first speech the detector finds, a chunk that
 ///   starts inside a pause still moves to 0.25 s before the speech after
 ///   it, and the last chunk still ends 0.25 s after the last speech, and
 ///   each gap those leave is decoded in windows of at most 15 s that stay
-///   inside it; their words go in between the chunks' and never replace
-///   one ([`steno_speech::pipeline`]). Quiet speech the detector takes for
-///   silence there is kept. A word sounding across a gap's edge, or
-///   heard again by a window beside the words a recovery kept inside the
-///   gap, comes out twice when the two copies start more than two frames
-///   apart: the merge cannot tell it from the word said again.
+///   inside it. A gap's windows keep their whole decodes and merge with
+///   each other as the chunks do, and the chunks and a gap's windows are
+///   joined in order ([`steno_speech::pipeline`]). Quiet speech the
+///   detector takes for silence there is kept. Where a chunk meets a gap's
+///   window, a copy of a word both heard falls away when the two start
+///   within two frames, and the copy with more pieces stays, so the
+///   chunk's copy can give way to the window's. A word sounding across
+///   the end of a gap into a chunk comes out twice when the chunk hears its
+///   rest as a word of its own, and so does one sounding across a chunk's
+///   end into a gap when the two copies start more than two frames apart:
+///   the join cannot tell it from the word said again.
 ///
 /// The limit: a gap shorter than 2.5 s
 /// ([`MIN_GAP_SECONDS`](steno_speech::chunker::MIN_GAP_SECONDS)) is not

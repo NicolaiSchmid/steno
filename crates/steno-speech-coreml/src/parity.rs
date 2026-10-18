@@ -307,7 +307,7 @@ pub fn run(
             audio_seconds,
             wall_seconds,
             tokens: transcript.tokens.len(),
-            chunks: transcript.chunks.len(),
+            chunks: transcript.spans.iter().filter(|s| s.chunk).count(),
             stats: transcript.stats,
             errors,
             timing,

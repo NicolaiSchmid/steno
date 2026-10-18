@@ -102,7 +102,7 @@ fn main() {
         println!(
             "# {} speech regions, {} chunks, {} tokens, {} words, {:?}",
             transcript.speech.len(),
-            transcript.chunks.len(),
+            transcript.spans.iter().filter(|s| s.chunk).count(),
             transcript.tokens.len(),
             transcript.words.len(),
             transcript.stats
