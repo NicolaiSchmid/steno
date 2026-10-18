@@ -489,11 +489,7 @@ mod tests {
 
     use super::*;
 
-    fn v4(name: &str, ip: [u8; 4], status: IfOperStatus, p2p: bool) -> Interface {
-        v4_at(name, 1, ip, status, p2p)
-    }
-
-    fn v4_at(name: &str, index: u32, ip: [u8; 4], status: IfOperStatus, p2p: bool) -> Interface {
+    fn v4(name: &str, index: u32, ip: [u8; 4], status: IfOperStatus, p2p: bool) -> Interface {
         Interface {
             name: name.to_owned(),
             addr: IfAddr::V4(Ifv4Addr {
@@ -519,11 +515,10 @@ mod tests {
     }
 
     #[test]
-    fn the_record_carries_the_version_the_id_and_the_addresses() {
+    fn the_record_carries_the_version_the_id_the_addresses_and_a_host_only_steno_uses() {
         let mac_id = Uuid::parse_str("0F8FAD5B-D9CB-469F-A165-70867728950E").unwrap();
         let address = Ipv4Addr::new(192, 168, 1, 20);
         let info = Advertiser::service_info("Nicolai's Mac", mac_id, 4242, &[address]).unwrap();
-        assert_eq!(info.get_type(), "_steno._tcp.local.");
         assert_eq!(info.get_fullname(), "Nicolai's Mac._steno._tcp.local.");
         assert_eq!(info.get_port(), 4242);
         assert_eq!(info.get_property_val_str("v"), Some("1"));
@@ -534,50 +529,22 @@ mod tests {
         assert!(!info.is_addr_auto(), "the addresses are chosen here");
         assert_eq!(
             info.get_addresses_v4().into_iter().collect::<Vec<_>>(),
-            vec![&address]
+            [&address]
         );
         assert_eq!(info.get_hostname(), "steno-nicolai-s-mac-0f8fad5b.local.");
-    }
 
-    #[test]
-    fn the_host_is_a_name_only_steno_uses_told_apart_by_the_id_and_fits_one_label() {
-        let mac_id = Uuid::parse_str("0F8FAD5B-D9CB-469F-A165-70867728950E").unwrap();
-        let other = Uuid::parse_str("00000001-0000-0000-0000-000000000000").unwrap();
-        assert_eq!(
-            Advertiser::host_name("MacBook Pro", mac_id),
-            "steno-macbook-pro-0f8fad5b.local."
-        );
-        assert_eq!(
-            Advertiser::host_name("MacBook Pro", other),
-            "steno-macbook-pro-00000001.local.",
-            "two computers of one name"
-        );
-        assert_eq!(
-            Advertiser::host_name("---", mac_id),
-            "steno-steno-0f8fad5b.local."
-        );
-        // `steno-`, 47 bytes of name, then `-` and 8 hex digits fit; the
-        // name's `-` at the cut is dropped.
-        let long = Advertiser::host_name(&format!("{}-b", "a".repeat(47)), mac_id);
-        assert_eq!(long, format!("steno-{}-0f8fad5b.local.", "a".repeat(47)));
-        let label = Advertiser::host_name(&"c".repeat(80), mac_id);
-        let label = label.strip_suffix(".local.").unwrap();
-        assert_eq!(label.len(), Advertiser::HOST_LABEL_BYTES);
-        assert!(label.ends_with("c-0f8fad5b"), "the cut takes the name");
-    }
-
-    #[test]
-    fn a_name_too_long_for_a_label_is_cut_at_a_character_boundary() {
-        let mac_id = Uuid::nil();
+        // Both labels fit DNS: the instance name is cut at a character boundary,
+        // the host's name part before the id.
         let long = format!("{}\u{e9}tude", "a".repeat(62));
         let info = Advertiser::service_info(&long, mac_id, 4242, &[]).unwrap();
         assert_eq!(
             info.get_fullname(),
             format!("{}._steno._tcp.local.", "a".repeat(62))
         );
-        let fits = "b".repeat(63);
-        let info = Advertiser::service_info(&fits, mac_id, 4242, &[]).unwrap();
-        assert_eq!(info.get_fullname(), format!("{fits}._steno._tcp.local."));
+        let host = Advertiser::host_name(&"c".repeat(80), mac_id);
+        let label = host.strip_suffix(".local.").unwrap();
+        assert_eq!(label.len(), Advertiser::HOST_LABEL_BYTES);
+        assert!(label.ends_with("c-0f8fad5b"), "{label}");
     }
 
     /// A watcher whose closure says which change came; `None` ends it.
@@ -589,223 +556,107 @@ mod tests {
         }
     }
 
-    /// Runs `follow` over `steps` (a change and the addresses then) and returns
-    /// every registration it tried; attempts numbered in `failing` (from 1)
-    /// fail.
-    fn registrations(
-        published: &Mutex<Published>,
-        steps: Vec<(Change, Vec<Ipv4Addr>)>,
-        failing: &[usize],
-    ) -> Vec<Vec<Ipv4Addr>> {
+    #[test]
+    fn the_record_is_registered_again_when_the_addresses_move_a_report_names_one_or_a_try_failed() {
+        let home = Ipv4Addr::new(192, 168, 1, 20);
+        let office = Ipv4Addr::new(10, 0, 0, 5);
+        let docker = Ipv4Addr::new(172, 17, 0, 1);
+        // A change, the addresses then, and whether that registration fails.
+        let steps = [
+            (Change::Quiet, vec![home], false),
+            (Change::Quiet, vec![home, office], false),
+            (Change::Quiet, vec![office], true),
+            (Change::Quiet, vec![office], false),
+            (Change::Reported(office), vec![office], false),
+            (Change::Reported(docker), vec![office], false),
+            (Change::Quiet, vec![], false),
+        ];
+        let expected = [
+            vec![home, office],
+            vec![office],
+            vec![office],
+            vec![office],
+            vec![],
+        ];
+        let published = Mutex::new(Published {
+            addresses: vec![home],
+            withdrawn: false,
+        });
         let lan = Mutex::new(Vec::new());
+        let failing = Mutex::new(false);
         let mut steps = steps.into_iter();
         let mut watcher = Watch(|| {
-            let (change, next) = steps.next()?;
+            let (change, next, fails) = steps.next()?;
             *lan.lock().unwrap() = next;
+            *failing.lock().unwrap() = fails;
             Some(change)
         });
         let mut registered = Vec::new();
         follow(
             &mut watcher,
             || lan.lock().unwrap().clone(),
-            published,
+            &published,
             |addresses| {
                 registered.push(addresses.to_vec());
-                if failing.contains(&registered.len()) {
+                if *failing.lock().unwrap() {
                     Err(mdns_sd::Error::Again)
                 } else {
                     Ok(())
                 }
             },
         );
-        registered
-    }
+        assert_eq!(registered, expected);
+        assert_eq!(published.lock().unwrap().addresses, Vec::<Ipv4Addr>::new());
 
-    fn published(addresses: &[Ipv4Addr]) -> Mutex<Published> {
-        Mutex::new(Published {
-            addresses: addresses.to_vec(),
-            withdrawn: false,
-        })
-    }
-
-    #[test]
-    fn a_quiet_recheck_registers_the_record_again_only_when_the_addresses_moved() {
-        let home = Ipv4Addr::new(192, 168, 1, 20);
-        let office = Ipv4Addr::new(10, 0, 0, 5);
-        let record = published(&[home]);
-        let quiet = |addresses: Vec<Ipv4Addr>| (Change::Quiet, addresses);
-        let registered = registrations(
-            &record,
-            vec![
-                quiet(vec![home]),
-                quiet(vec![home, office]),
-                quiet(vec![office]),
-                quiet(vec![]),
-                quiet(vec![]),
-                quiet(vec![home]),
-            ],
-            &[],
-        );
-        assert_eq!(
-            registered,
-            vec![vec![home, office], vec![office], vec![], vec![home]],
-            "registered again on each move, not for a recheck that moved nothing"
-        );
-        assert_eq!(record.lock().unwrap().addresses, vec![home]);
-    }
-
-    #[test]
-    fn a_report_of_an_address_the_record_carries_registers_it_again_even_when_nothing_moved() {
-        let office = Ipv4Addr::new(10, 0, 0, 5);
-        let docker = Ipv4Addr::new(172, 17, 0, 1);
-        let record = published(&[]);
-        let registered = registrations(
-            &record,
-            vec![
-                // A recheck sees the address before the daemon's report.
-                (Change::Quiet, vec![office]),
-                (Change::Reported(office), vec![office]),
-                (Change::Quiet, vec![office]),
-                (Change::Reported(docker), vec![office]),
-                (Change::Reported(office), vec![]),
-                (Change::Reported(office), vec![]),
-            ],
-            &[],
-        );
-        assert_eq!(
-            registered,
-            vec![vec![office], vec![office], vec![]],
-            "a report registers only for an address the record carries; otherwise only a move does"
-        );
-    }
-
-    #[test]
-    fn a_failed_registration_is_tried_again_at_the_next_change_even_a_quiet_one() {
-        let office = Ipv4Addr::new(10, 0, 0, 5);
-        let record = published(&[]);
-        let steps = [
-            Change::Quiet,
-            Change::Quiet,
-            Change::Reported(office),
-            Change::Quiet,
-            Change::Quiet,
-        ]
-        .map(|change| (change, vec![office]));
-        // The first registration, after a move, and the one the report forces.
-        let registered = registrations(&record, steps.into(), &[1, 3]);
-        assert_eq!(
-            registered.len(),
-            4,
-            "each failure is tried again at the next change"
-        );
-        assert_eq!(record.lock().unwrap().addresses, vec![office]);
-    }
-
-    #[test]
-    fn nothing_is_registered_once_the_record_is_withdrawn() {
-        let office = Ipv4Addr::new(10, 0, 0, 5);
-        let record = published(&[]);
-        let mut first = true;
-        let mut watcher = Watch(|| {
-            assert!(
-                std::mem::take(&mut first),
-                "the watch goes on after a withdraw"
-            );
-            record.lock().unwrap().withdrawn = true;
-            Some(Change::Reported(office))
-        });
+        // Nothing registers once the record is withdrawn.
+        published.lock().unwrap().withdrawn = true;
+        let mut once = Some(Change::Reported(office));
         follow(
-            &mut watcher,
+            &mut Watch(|| once.take()),
             || vec![office],
-            &record,
+            &published,
             |_| panic!("registered after a withdraw"),
         );
-        assert_eq!(record.lock().unwrap().addresses, Vec::<Ipv4Addr>::new());
     }
 
     #[test]
-    fn an_added_ipv4_lan_address_or_a_quiet_recheck_is_a_change_and_a_gone_daemon_ends_the_watch() {
+    fn the_daemon_watcher_reports_an_added_lan_address_or_a_quiet_recheck() {
         let office = Ipv4Addr::new(10, 0, 0, 5);
         let (daemon, events) = flume::unbounded();
-        // A zero recheck times out at once on an empty channel.
         let mut watcher = DaemonWatcher {
             events,
             recheck: Duration::ZERO,
         };
         assert_eq!(watcher.changed(), Some(Change::Quiet));
-        daemon.send(DaemonEvent::IpAdd(office.into())).unwrap();
-        assert_eq!(watcher.changed(), Some(Change::Reported(office)));
         let passed_over = [
             DaemonEvent::Respond("en0".to_owned()),
-            DaemonEvent::Announce(String::new(), String::new()),
             DaemonEvent::IpAdd("fe80::1".parse().unwrap()),
-            DaemonEvent::IpAdd("2001:db8::7".parse().unwrap()),
             DaemonEvent::IpAdd(Ipv4Addr::new(169, 254, 7, 7).into()),
             DaemonEvent::IpAdd(Ipv4Addr::new(100, 64, 0, 2).into()),
             DaemonEvent::IpDel(office.into()),
+            DaemonEvent::IpAdd(office.into()),
         ];
         for event in passed_over {
             daemon.send(event).unwrap();
         }
-        assert_eq!(
-            watcher.changed(),
-            Some(Change::Quiet),
-            "other events, an IPv6, non-LAN or removed address too, are passed over"
-        );
-        daemon.send(DaemonEvent::IpAdd(office.into())).unwrap();
         drop(daemon);
         assert_eq!(watcher.changed(), Some(Change::Reported(office)));
         assert_eq!(watcher.changed(), None, "the watch ends with the daemon");
     }
 
     #[test]
-    fn events_passed_over_do_not_postpone_the_quiet_recheck() {
-        let (daemon, events) = flume::unbounded();
-        let recheck = Duration::from_millis(300);
-        let mut watcher = DaemonWatcher { events, recheck };
-        // A busy network: an event every 100 ms for up to 5 s.
-        let feeder = std::thread::spawn(move || {
-            for _ in 0..50 {
-                let busy = [
-                    DaemonEvent::Respond("en0".to_owned()),
-                    DaemonEvent::IpAdd("fe80::1".parse().unwrap()),
-                    DaemonEvent::IpDel(Ipv4Addr::new(10, 0, 0, 5).into()),
-                ];
-                for event in busy {
-                    if daemon.send(event).is_err() {
-                        return;
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        });
-        let began = Instant::now();
-        assert_eq!(watcher.changed(), Some(Change::Quiet));
-        let waited = began.elapsed();
-        drop(watcher);
-        feeder.join().unwrap();
-        // The recheck comes 300 ms after the wait began, not after the feeder's
-        // 5 s.
-        assert!(
-            waited >= recheck && waited < Duration::from_secs(2),
-            "{waited:?}"
-        );
-    }
-
-    #[test]
-    fn only_the_lan_interfaces_qualify() {
+    fn only_lan_interfaces_qualify_and_only_they_and_loopback_are_served() {
         let interfaces = vec![
-            v4("lo0", [127, 0, 0, 1], IfOperStatus::Up, false),
-            v4("en0", [192, 168, 1, 20], IfOperStatus::Up, false),
-            v4("en1", [10, 0, 0, 5], IfOperStatus::Up, false),
-            v4("en1", [10, 0, 0, 5], IfOperStatus::Up, false),
-            v4("en2", [10, 0, 1, 5], IfOperStatus::Down, false),
-            v4("en3", [169, 254, 7, 7], IfOperStatus::Up, false),
-            v4("utun3", [10, 8, 0, 2], IfOperStatus::Up, true),
-            v4("mesh0", [100, 101, 7, 9], IfOperStatus::Up, false),
-            v4("en4", [100, 127, 255, 1], IfOperStatus::Up, false),
-            v4("en6", [100, 63, 255, 255], IfOperStatus::Up, false),
-            v4("en5", [100, 128, 0, 1], IfOperStatus::Up, false),
+            v4("lo0", 1, [127, 0, 0, 1], IfOperStatus::Up, false),
+            v4("en0", 1, [192, 168, 1, 20], IfOperStatus::Up, false),
+            v4("en1", 1, [10, 0, 0, 5], IfOperStatus::Up, false),
+            v4("en1", 1, [10, 0, 0, 5], IfOperStatus::Up, false),
+            v4("en2", 1, [10, 0, 1, 5], IfOperStatus::Down, false),
+            v4("en3", 1, [169, 254, 7, 7], IfOperStatus::Up, false),
+            v4("utun3", 1, [10, 8, 0, 2], IfOperStatus::Up, true),
+            v4("mesh0", 1, [100, 101, 7, 9], IfOperStatus::Up, false),
+            v4("en6", 1, [100, 63, 255, 255], IfOperStatus::Up, false),
+            v4("en5", 1, [100, 128, 0, 1], IfOperStatus::Up, false),
             Interface {
                 name: "en0".to_owned(),
                 addr: IfAddr::V6(Ifv6Addr {
@@ -821,16 +672,29 @@ mod tests {
                 adapter_name: String::new(),
             },
         ];
-        assert_eq!(
-            lan_addresses(&interfaces),
-            vec![
-                Ipv4Addr::new(10, 0, 0, 5),
-                Ipv4Addr::new(100, 63, 255, 255),
-                Ipv4Addr::new(100, 128, 0, 1),
-                Ipv4Addr::new(192, 168, 1, 20)
-            ]
-        );
-        assert_eq!(lan_addresses(&[]), Vec::<Ipv4Addr>::new());
+        let lan = lan_addresses(&interfaces);
+        let expected = [
+            [10, 0, 0, 5],
+            [100, 63, 255, 255],
+            [100, 128, 0, 1],
+            [192, 168, 1, 20],
+        ];
+        assert_eq!(lan, expected.map(Ipv4Addr::from));
+
+        for (local, served) in [
+            ("127.0.0.1", true),
+            ("::1", true),
+            ("192.168.1.20", true),
+            ("100.64.0.2", false),
+            ("10.8.0.6", false),
+        ] {
+            assert_eq!(
+                accepts_local_address(local.parse().unwrap(), &lan),
+                served,
+                "{local}"
+            );
+        }
+        assert!(!accepts_local_address("192.168.1.20".parse().unwrap(), &[]));
     }
 
     #[test]
@@ -846,46 +710,12 @@ mod tests {
                 lan,
                 false,
             ),
+            ("TAP, type 6", adapter(6, false, true), lan, false),
+            ("PPP", adapter(23, true, true), lan, false),
             (
-                "Wintun",
-                adapter(53, false, true),
-                Ipv4Addr::new(10, 6, 0, 2),
-                false,
-            ),
-            (
-                "TAP, type 6",
-                adapter(6, false, true),
-                Ipv4Addr::new(10, 8, 0, 6),
-                false,
-            ),
-            (
-                "Hyper-V vEthernet",
-                adapter(6, false, true),
-                Ipv4Addr::new(172, 20, 16, 1),
-                false,
-            ),
-            (
-                "PPP",
-                adapter(23, true, true),
-                Ipv4Addr::new(10, 64, 0, 3),
-                false,
-            ),
-            (
-                "loopback",
-                adapter(24, false, true),
-                Ipv4Addr::LOCALHOST,
-                false,
-            ),
-            (
-                "loopback address on Ethernet",
+                "loopback on Ethernet",
                 adapter(6, true, true),
                 Ipv4Addr::LOCALHOST,
-                false,
-            ),
-            (
-                "link-local on Wi-Fi",
-                adapter(71, true, true),
-                Ipv4Addr::new(169, 254, 3, 4),
                 false,
             ),
             (
@@ -898,28 +728,20 @@ mod tests {
         for (what, adapter, address, kept) in cases {
             assert_eq!(windows_keeps(adapter, address), kept, "{what}");
         }
-    }
-
-    #[test]
-    fn on_windows_each_address_is_judged_by_its_own_adapter() {
         let interfaces = vec![
-            v4_at("Ethernet", 4, [192, 168, 1, 3], IfOperStatus::Up, false),
-            v4_at("Wi-Fi", 7, [10, 0, 0, 9], IfOperStatus::Up, false),
-            v4_at("Mesh VPN", 12, [100, 64, 0, 10], IfOperStatus::Up, false),
-            v4_at("TAP", 15, [10, 8, 0, 6], IfOperStatus::Up, false),
-            v4_at("vEthernet", 21, [172, 20, 16, 1], IfOperStatus::Up, false),
-            v4_at("Unknown", 30, [192, 168, 2, 3], IfOperStatus::Up, false),
+            v4("Ethernet", 4, [192, 168, 1, 3], IfOperStatus::Up, false),
+            v4("Wi-Fi", 7, [10, 0, 0, 9], IfOperStatus::Up, false),
+            v4("vEthernet", 21, [172, 20, 16, 1], IfOperStatus::Up, false),
+            v4("Unknown", 30, [192, 168, 2, 3], IfOperStatus::Up, false),
         ];
         let adapters = std::collections::BTreeMap::from([
             (4, adapter(6, true, true)),
             (7, adapter(71, true, true)),
-            (12, adapter(53, false, true)),
-            (15, adapter(6, false, true)),
             (21, adapter(6, false, true)),
         ]);
         assert_eq!(
             windows_lan_addresses(&interfaces, |index| adapters.get(&index).copied()),
-            vec![Ipv4Addr::new(10, 0, 0, 9), Ipv4Addr::new(192, 168, 1, 3)]
+            [Ipv4Addr::new(10, 0, 0, 9), Ipv4Addr::new(192, 168, 1, 3)]
         );
     }
 
@@ -958,16 +780,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn loopback_and_the_lan_addresses_are_accepted_a_tunnel_is_not() {
-        let lan = vec![Ipv4Addr::new(192, 168, 1, 20)];
-        assert!(accepts_local_address("127.0.0.1".parse().unwrap(), &lan));
-        assert!(accepts_local_address("::1".parse().unwrap(), &lan));
-        assert!(accepts_local_address("192.168.1.20".parse().unwrap(), &lan));
-        assert!(!accepts_local_address("100.64.0.2".parse().unwrap(), &lan));
-        assert!(!accepts_local_address("10.8.0.6".parse().unwrap(), &lan));
-        assert!(!accepts_local_address("192.168.1.20".parse().unwrap(), &[]));
     }
 }

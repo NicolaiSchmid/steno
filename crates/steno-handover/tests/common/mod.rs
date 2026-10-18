@@ -1,520 +1,136 @@
 //! One `HandoverService` on loopback with a minted identity, an in-memory
-//! store, a fake intake, a wall clock and a temporary inbox. `advertise` is
-//! always false: nothing leaves 127.0.0.1.
+//! store, an intake that commits like the real one, a settable clock and a
+//! temporary inbox; and the phone as the computer sees it, over pinned TLS.
 
 #![allow(
     dead_code,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
     clippy::large_futures
 )]
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, TimeZone as _, Utc};
 pub use steno_core::content_hash::sha256;
-use steno_core::testing::FakeHandoverIntake;
 use steno_core::{
-    AudioFormat, BoundaryResult, HandoverIntake, PairedDevice, RecordingMetadata, Store,
-};
-use steno_handover::engine::{
-    AuthOutcome, HandoverRequest, HandoverResponse, Principal, RequestHandling as _,
+    AudioAsset, AudioFormat, AudioLane, AudioRetention, BoundaryResult, HandoverIntake,
+    HandoverState, PairedDevice, RecordingMetadata, Store,
 };
 use steno_handover::pinning::pinned_client_config;
-use steno_handover::route::Route;
 use steno_handover::server::MetricsSnapshot;
 use steno_handover::{
     HandoverConfiguration, HandoverIdentity, HandoverService, ListenerState, wire,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
-use tokio::sync::Notify;
 use tokio_rustls::TlsConnector;
 use uuid::Uuid;
 
 pub const START: i64 = 1_790_000_000;
 
-/// How long a test waits for a signal it is sure to get before it fails.
-pub const SIGNAL_BOUND: Duration = Duration::from_secs(30);
-
-/// Waits for `signal`; panics with `what` after [`SIGNAL_BOUND`].
-pub async fn signalled<T>(what: &str, signal: impl Future<Output = T>) -> T {
-    tokio::time::timeout(SIGNAL_BOUND, signal)
-        .await
-        .unwrap_or_else(|_| panic!("{what} within {SIGNAL_BOUND:?}"))
-}
-
-/// Runs `test` on one worker and one blocking thread, so store calls reach
-/// the pool in a fixed order and an out-of-order commit fails every time.
-pub fn on_one_worker(test: impl Future<Output = ()> + Send + 'static) {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .max_blocking_threads(1)
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async { tokio::spawn(test).await.unwrap() });
-}
-
-/// Holds the store's one connection from another thread until released.
-pub struct StoreHold {
-    release: mpsc::Sender<()>,
-    holder: std::thread::JoinHandle<()>,
-}
-
-impl StoreHold {
-    pub fn new(store: &Arc<Store>) -> StoreHold {
-        let (held, store_is_held) = mpsc::channel();
-        let (release, released) = mpsc::channel::<()>();
-        let store = store.clone();
-        let holder = std::thread::spawn(move || {
-            store
-                .write(|_| {
-                    held.send(()).unwrap();
-                    // A test that failed meanwhile drops the sender.
-                    let _ = released.recv();
-                    Ok(())
-                })
-                .unwrap();
-        });
-        store_is_held
-            .recv_timeout(SIGNAL_BOUND)
-            .expect("the store is held");
-        StoreHold { release, holder }
-    }
-
-    pub fn release(self) {
-        self.release.send(()).unwrap();
-        self.holder.join().unwrap();
-    }
-}
-
-/// The one time source the service reads; tests move it or hold it.
-#[derive(Clone)]
-pub struct WallClock {
-    time: Arc<Mutex<DateTime<Utc>>>,
-    hold: Arc<Mutex<Option<HeldRead>>>,
-}
-
-/// The service's side of a [`ClockHold`].
-struct HeldRead {
-    reached: mpsc::Sender<()>,
-    released: mpsc::Receiver<()>,
-}
-
-/// The service's next clock read, held until [`ClockHold::release`].
-pub struct ClockHold {
-    reached: mpsc::Receiver<()>,
-    release: mpsc::Sender<()>,
-}
-
-impl ClockHold {
-    /// Returns once a request of the service is held at its clock read.
-    pub fn reached(&self) {
-        self.reached
-            .recv_timeout(SIGNAL_BOUND)
-            .expect("the service reads the clock");
-    }
-
-    /// Lets the held read return.
-    pub fn release(self) {
-        let _ = self.release.send(());
-    }
-}
-
-impl WallClock {
-    pub fn new(start: DateTime<Utc>) -> Self {
-        WallClock {
-            time: Arc::new(Mutex::new(start)),
-            hold: Arc::default(),
-        }
-    }
-
-    pub fn now(&self) -> DateTime<Utc> {
-        *self.time.lock().unwrap()
-    }
-
-    pub fn advance(&self, duration: Duration) {
-        *self.time.lock().unwrap() += chrono::Duration::from_std(duration).unwrap();
-    }
-
-    /// Holds the service's next clock read until released; a hold not released
-    /// within [`SIGNAL_BOUND`] panics.
-    pub fn hold_next_read(&self) -> ClockHold {
-        let (reached, reached_here) = mpsc::channel();
-        let (release, released) = mpsc::channel();
-        *self.hold.lock().unwrap() = Some(HeldRead { reached, released });
-        ClockHold {
-            reached: reached_here,
-            release,
-        }
-    }
-
-    pub fn clock(&self) -> steno_handover::Clock {
-        let clock = self.clone();
-        Arc::new(move || {
-            let held = clock.hold.lock().unwrap().take();
-            if let Some(held) = held {
-                let _ = held.reached.send(());
-                match held.released.recv_timeout(SIGNAL_BOUND) {
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        panic!("the held clock read was not released within {SIGNAL_BOUND:?}")
-                    }
-                    // A test that failed meanwhile drops the sender.
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
-                }
-            }
-            clock.now()
-        })
-    }
-}
-
-/// Runs `request` on its own thread, held at its clock read while
-/// `meanwhile` runs; returns both answers.
-pub async fn held_while<T>(
-    test: &TestService,
-    request: impl Future<Output = HandoverResponse> + Send + 'static,
-    meanwhile: impl Future<Output = T>,
-) -> (HandoverResponse, T) {
-    let (hold, thread) = held(test, request);
-    let during = meanwhile.await;
-    hold.release();
-    (thread.join().unwrap(), during)
-}
-
-/// Runs `request` on its own thread and returns once it is held at its
-/// clock read.
-pub fn held(
-    test: &TestService,
-    request: impl Future<Output = HandoverResponse> + Send + 'static,
-) -> (ClockHold, std::thread::JoinHandle<HandoverResponse>) {
-    let hold = test.clock.hold_next_read();
-    let thread = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(request)
-    });
-    hold.reached();
-    (hold, thread)
-}
-
 pub fn date(seconds: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(seconds, 0).single().unwrap()
 }
 
-/// Core's fake intake, answering `meeting_id` for every admission.
-pub fn fake_intake(meeting_id: Uuid) -> Arc<FakeHandoverIntake> {
-    Arc::new(FakeHandoverIntake {
-        meeting_id: Some(meeting_id),
-        ..FakeHandoverIntake::default()
-    })
+/// The service's one time source; tests move it.
+#[derive(Clone)]
+pub struct Clock(Arc<Mutex<DateTime<Utc>>>);
+
+impl Clock {
+    pub fn now(&self) -> DateTime<Utc> {
+        *self.0.lock().unwrap()
+    }
+
+    pub fn advance(&self, duration: Duration) {
+        *self.0.lock().unwrap() += chrono::Duration::from_std(duration).unwrap();
+    }
+
+    fn source(&self) -> steno_handover::Clock {
+        let clock = self.clone();
+        Arc::new(move || clock.now())
+    }
 }
 
-/// The meeting row a real intake commits with the `complete` receipt; the
-/// engine reads a `complete` receipt without it as not admitted.
-pub fn save_admitted_meeting(store: &Store, meeting_id: Uuid) {
-    store
-        .save_meeting(&steno_core::Meeting {
-            id: meeting_id,
-            ..steno_core::testing::sample_data::meeting()
-        })
-        .unwrap();
-}
-
-/// Runs `sql` on the store's connection, e.g. a failing temporary trigger.
-pub fn execute_batch(store: &Store, sql: &str) {
-    store
-        .write(|transaction| Ok(transaction.execute_batch(sql)?))
-        .unwrap();
-}
-
-/// Takes the verified file out of the inbox before `inner` sees it, as the
-/// real intake does, and puts it back when `inner` refuses.
-pub struct TakingIntake {
-    inner: Arc<dyn HandoverIntake>,
-    directory: tempfile::TempDir,
-}
-
-/// `inner` behind a [`TakingIntake`].
-pub fn taking(inner: Arc<dyn HandoverIntake>) -> Arc<dyn HandoverIntake> {
-    Arc::new(TakingIntake {
-        inner,
-        directory: tempfile::tempdir().unwrap(),
-    })
+/// Commits like the real intake (receipt, meeting and asset in one durable
+/// write, so the admission ledger holds the bytes), after refusing the first
+/// `failures` admissions. Keeps the bytes of every file it was handed.
+pub struct Intake {
+    store: Arc<Store>,
+    failures: Mutex<u32>,
+    delay: Duration,
+    pub files: Mutex<Vec<Vec<u8>>>,
+    pub meetings: Mutex<Vec<Uuid>>,
 }
 
 #[steno_core::async_trait]
-impl HandoverIntake for TakingIntake {
+impl HandoverIntake for Intake {
     async fn admit(
         &self,
         file: &Path,
         metadata: &RecordingMetadata,
-        device: &PairedDevice,
-    ) -> BoundaryResult<Uuid> {
-        let taken = self.directory.path().join(file.file_name().unwrap());
-        std::fs::rename(file, &taken)?;
-        let admitted = self.inner.admit(&taken, metadata, device).await;
-        if admitted.is_err() {
-            std::fs::rename(&taken, file)?;
-        }
-        admitted
-    }
-}
-
-/// An intake that fails the first `failures` admissions, then returns
-/// `meeting_id`; it can delay, admit once, or gate each admission.
-pub struct ScriptedIntake {
-    pub meeting_id: Uuid,
-    pub delay: Duration,
-    pub admit_once: bool,
-    pub admissions: Mutex<Vec<PathBuf>>,
-    failures_left: Mutex<u32>,
-    admitted: Mutex<bool>,
-    gated: bool,
-    entered: Notify,
-    released: Notify,
-}
-
-/// Carries the file path, as a real I/O error would; the computer must not
-/// echo it to the phone or into the receipt.
-#[derive(Debug)]
-pub struct Refused(pub PathBuf);
-
-impl std::fmt::Display for Refused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the pipeline refused {}", self.0.display())
-    }
-}
-
-impl std::error::Error for Refused {}
-
-impl ScriptedIntake {
-    pub fn new(meeting_id: Uuid, failures: u32) -> Arc<Self> {
-        Self::with_delay(meeting_id, failures, Duration::ZERO, false)
-    }
-
-    pub fn with_delay(
-        meeting_id: Uuid,
-        failures: u32,
-        delay: Duration,
-        admit_once: bool,
-    ) -> Arc<Self> {
-        Arc::new(ScriptedIntake {
-            meeting_id,
-            delay,
-            admit_once,
-            admissions: Mutex::new(Vec::new()),
-            failures_left: Mutex::new(failures),
-            admitted: Mutex::new(false),
-            gated: false,
-            entered: Notify::new(),
-            released: Notify::new(),
-        })
-    }
-
-    /// Holds each admission open until [`ScriptedIntake::release`].
-    pub fn gated(meeting_id: Uuid, admit_once: bool) -> Arc<Self> {
-        let mut intake = Self::with_delay(meeting_id, 0, Duration::ZERO, admit_once);
-        Arc::get_mut(&mut intake).unwrap().gated = true;
-        intake
-    }
-
-    /// Returns once an admission of a gated intake is in flight.
-    pub async fn admitting(&self) {
-        signalled("the intake is entered", self.entered.notified()).await;
-    }
-
-    /// Lets the admission in flight answer.
-    pub fn release(&self) {
-        self.released.notify_one();
-    }
-
-    pub fn entries(&self) -> Vec<PathBuf> {
-        self.admissions.lock().unwrap().clone()
-    }
-
-    pub fn count(&self) -> usize {
-        self.admissions.lock().unwrap().len()
-    }
-}
-
-#[steno_core::async_trait]
-impl HandoverIntake for ScriptedIntake {
-    async fn admit(
-        &self,
-        file: &Path,
-        _metadata: &RecordingMetadata,
         _device: &PairedDevice,
     ) -> BoundaryResult<Uuid> {
-        self.admissions.lock().unwrap().push(file.to_path_buf());
-        if self.gated {
-            self.entered.notify_one();
-            self.released.notified().await;
-        }
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
-        }
-        let refuse = {
-            let mut left = self.failures_left.lock().unwrap();
-            if *left > 0 {
-                *left -= 1;
-                true
-            } else {
-                false
+        self.files.lock().unwrap().push(std::fs::read(file)?);
+        tokio::time::sleep(self.delay).await;
+        {
+            let mut failures = self.failures.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(format!("the pipeline refused {}", file.display()).into());
             }
-        };
-        if refuse {
-            return Err(Box::new(Refused(file.to_path_buf())));
         }
-        let repeated = {
-            let mut done = self.admitted.lock().unwrap();
-            let was = *done;
-            *done = true;
-            was
-        };
-        if self.admit_once && repeated {
-            return Err(Box::new(Refused(file.to_path_buf())));
-        }
-        Ok(self.meeting_id)
-    }
-}
-
-/// An intake that commits like the real one, without the copy: the receipt,
-/// meeting and asset in one durable transaction, or the receipt alone with
-/// the ledger's meeting.
-pub struct StoreIntake {
-    store: Arc<Store>,
-    meetings: Mutex<Vec<Uuid>>,
-    hold: Mutex<Option<Hold>>,
-    entered: Notify,
-    released: Notify,
-}
-
-/// Where [`StoreIntake::hold_next`] holds the admission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hold {
-    BeforeTheCommit,
-    AfterTheCommit,
-}
-
-impl StoreIntake {
-    pub fn new(store: &Arc<Store>) -> Arc<Self> {
-        Arc::new(StoreIntake {
-            store: store.clone(),
-            meetings: Mutex::new(Vec::new()),
-            hold: Mutex::new(None),
-            entered: Notify::new(),
-            released: Notify::new(),
-        })
-    }
-
-    /// Holds the next admission at `hold`.
-    pub fn hold_next(&self, hold: Hold) {
-        *self.hold.lock().unwrap() = Some(hold);
-    }
-
-    /// Waits at `point` when the admission is held there.
-    async fn held_at(&self, hold: Option<Hold>, point: Hold) {
-        if hold == Some(point) {
-            self.entered.notify_one();
-            self.released.notified().await;
-        }
-    }
-
-    /// Returns once a held admission is in flight.
-    pub async fn admitting(&self) {
-        signalled("the intake is entered", self.entered.notified()).await;
-    }
-
-    /// Lets the held admission go on to its commit.
-    pub fn release(&self) {
-        self.released.notify_one();
-    }
-
-    /// The meetings committed so far, oldest first.
-    pub fn meetings(&self) -> Vec<Uuid> {
-        self.meetings.lock().unwrap().clone()
-    }
-}
-
-#[steno_core::async_trait]
-impl HandoverIntake for StoreIntake {
-    async fn admit(
-        &self,
-        _file: &Path,
-        metadata: &RecordingMetadata,
-        device: &PairedDevice,
-    ) -> BoundaryResult<Uuid> {
-        let hold = self.hold.lock().unwrap().take();
-        self.held_at(hold, Hold::BeforeTheCommit).await;
-        let recording_id = metadata.recording_id;
         let mut receipt = self
             .store
-            .handover_receipt(recording_id)?
+            .handover_receipt(metadata.recording_id)?
             .ok_or("no receipt")?;
-        if (receipt.device_id, receipt.byte_count, &receipt.sha256)
-            != (device.id, metadata.byte_count, &metadata.sha256)
-        {
-            return Err(steno_core::StoreError::ReceiptOfAnotherUpload(recording_id).into());
-        }
         let meeting = steno_core::Meeting {
             id: Uuid::new_v4(),
             ..steno_core::testing::sample_data::meeting()
         };
-        let asset = steno_core::AudioAsset {
+        let asset = AudioAsset {
             id: Uuid::new_v4(),
             meeting_id: meeting.id,
             url: format!("file:///tmp/Audio/{}/master.m4a", meeting.id),
             format: metadata.format,
-            lanes: vec![steno_core::AudioLane::Mixed],
+            lanes: vec![AudioLane::Mixed],
             sidecars_16k: std::collections::BTreeMap::new(),
             mixdown_url: None,
-            retention: steno_core::AudioRetention::KeepForever,
+            retention: AudioRetention::KeepForever,
             expires_at: None,
         };
-        receipt.state = steno_core::HandoverState::Complete {
+        receipt.state = HandoverState::Complete {
             meeting_id: meeting.id,
         };
         let admitted = self
             .store
             .save_admission_durably(&receipt, &meeting, &asset)?;
-        if admitted == meeting.id {
-            self.meetings.lock().unwrap().push(meeting.id);
-        }
-        self.held_at(hold, Hold::AfterTheCommit).await;
+        self.meetings.lock().unwrap().push(admitted);
         Ok(admitted)
     }
 }
 
 pub struct Options {
     pub chunk_size: i64,
-    pub intake: Option<Arc<dyn HandoverIntake>>,
-    /// The port to listen on; `0`, one the system chooses, by default.
-    pub port: u16,
+    /// Admissions the intake refuses before it admits.
+    pub failures: u32,
+    /// How long each admission takes.
+    pub delay: Duration,
     pub read_timeout: Duration,
-    pub start: bool,
-    /// The store in place of a fresh one: a second service over it is a restart.
-    pub store: Option<Arc<Store>>,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Options {
             chunk_size: 1024 * 1024,
-            intake: None,
-            port: 0,
+            failures: 0,
+            delay: Duration::ZERO,
             read_timeout: Duration::from_secs(30),
-            start: true,
-            store: None,
         }
     }
 }
@@ -522,11 +138,9 @@ impl Default for Options {
 pub struct TestService {
     pub service: Arc<HandoverService>,
     pub store: Arc<Store>,
-    pub intake: Arc<FakeHandoverIntake>,
-    pub directory: tempfile::TempDir,
-    pub clock: WallClock,
-    /// The wall clock as the service read it at start.
-    pub now: DateTime<Utc>,
+    pub intake: Arc<Intake>,
+    pub directory: Arc<tempfile::TempDir>,
+    pub clock: Clock,
 }
 
 impl TestService {
@@ -542,61 +156,79 @@ impl TestService {
         .await
     }
 
-    pub async fn with_intake(chunk_size: i64, intake: Arc<dyn HandoverIntake>) -> TestService {
-        Self::with(Options {
-            chunk_size,
-            intake: Some(intake),
-            ..Options::default()
-        })
+    pub async fn with(options: Options) -> TestService {
+        let clock = Clock(Arc::new(Mutex::new(date(START))));
+        let identity =
+            Arc::new(HandoverIdentity::mint("Steno test identity", clock.now()).unwrap());
+        Self::over(
+            Arc::new(Store::in_memory().unwrap()),
+            Arc::new(tempfile::tempdir().unwrap()),
+            identity,
+            clock,
+            &options,
+        )
         .await
     }
 
-    /// The service, started unless `options.start` is false.
-    pub async fn with(options: Options) -> TestService {
-        let directory = tempfile::tempdir().unwrap();
-        let store = options
-            .store
-            .unwrap_or_else(|| Arc::new(Store::in_memory().unwrap()));
-        let fake = Arc::new(FakeHandoverIntake::default());
-        let intake = taking(options.intake.unwrap_or_else(|| fake.clone()));
-        let clock = WallClock::new(date(START));
+    async fn over(
+        store: Arc<Store>,
+        directory: Arc<tempfile::TempDir>,
+        identity: Arc<HandoverIdentity>,
+        clock: Clock,
+        options: &Options,
+    ) -> TestService {
+        let intake = Arc::new(Intake {
+            store: store.clone(),
+            failures: Mutex::new(options.failures),
+            delay: options.delay,
+            files: Mutex::default(),
+            meetings: Mutex::default(),
+        });
         let configuration = HandoverConfiguration {
             service_name: "Test Mac".to_owned(),
             advertise: false,
             chunk_size: options.chunk_size,
             inbox_directory: directory.path().join("inbox"),
             pairing_window: Duration::from_secs(300),
-            port: options.port,
+            port: 0,
             read_timeout: options.read_timeout,
         };
-        let identity =
-            Arc::new(HandoverIdentity::mint("Steno test identity", clock.now()).unwrap());
         let service = Arc::new(HandoverService::new(
             configuration,
             store.clone(),
-            intake,
+            intake.clone(),
             identity,
-            clock.clock(),
+            clock.source(),
         ));
-        if options.start {
-            service.start().await.unwrap();
-        }
+        service.start().await.unwrap();
         TestService {
             service,
             store,
-            intake: fake,
+            intake,
             directory,
-            now: clock.now(),
             clock,
         }
     }
 
-    pub async fn stop(&self) {
-        self.service.stop().await;
+    /// The computer after a restart: the same store, inbox, identity and
+    /// clock, a new service and an intake that admits.
+    pub async fn restart(&self, chunk_size: i64) -> TestService {
+        self.stop().await;
+        Self::over(
+            self.store.clone(),
+            self.directory.clone(),
+            self.service.identity.clone(),
+            self.clock.clone(),
+            &Options {
+                chunk_size,
+                ..Options::default()
+            },
+        )
+        .await
     }
 
-    pub fn advance(&self, duration: Duration) {
-        self.clock.advance(duration);
+    pub async fn stop(&self) {
+        self.service.stop().await;
     }
 
     pub fn port(&self) -> u16 {
@@ -618,10 +250,6 @@ impl TestService {
         LoopbackClient::new(self.port(), &self.fingerprint())
     }
 
-    pub fn client_pinning(&self, fingerprint: &[u8]) -> LoopbackClient {
-        LoopbackClient::new(self.port(), fingerprint)
-    }
-
     pub fn raw_client(&self) -> RawClient {
         RawClient {
             port: self.port(),
@@ -634,38 +262,20 @@ impl TestService {
     }
 }
 
-// Loopback client: the phone as far as the computer can tell
-
 #[derive(Debug)]
 pub struct Response {
     pub status: u16,
-    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
 impl Response {
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> T {
-        serde_json::from_slice(&self.body).unwrap_or_else(|error| {
-            panic!(
-                "body is not {}: {error}: {}",
-                std::any::type_name::<T>(),
-                String::from_utf8_lossy(&self.body)
-            )
-        })
-    }
-
-    pub fn header(&self, name: &str) -> Option<&str> {
-        header(&self.headers, name)
+        serde_json::from_slice(&self.body)
+            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&self.body)))
     }
 }
 
-fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
-}
-
+/// The phone's HTTP client, pinning `fingerprint`.
 #[derive(Clone)]
 pub struct LoopbackClient {
     base: String,
@@ -677,7 +287,6 @@ impl LoopbackClient {
         let tls = pinned_client_config(fingerprint).unwrap();
         let client = reqwest::Client::builder()
             .use_preconfigured_tls((*tls).clone())
-            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(15))
             .no_proxy()
             .build()
@@ -697,74 +306,36 @@ impl LoopbackClient {
     ) -> Result<Response, reqwest::Error> {
         let mut request = self
             .client
-            .request(method.parse().unwrap(), format!("{}{path}", self.base))
-            .header("Accept", "application/json");
-        let mut has_content_type = false;
+            .request(method.parse().unwrap(), format!("{}{path}", self.base));
         for (name, value) in headers {
-            if name.eq_ignore_ascii_case("content-type") {
-                has_content_type = true;
-            }
             request = request.header(*name, *value);
         }
         if let Some(body) = body {
-            if !has_content_type {
-                request = request.header("Content-Type", "application/json");
-            }
             request = request.body(body);
         }
         let response = request.send().await?;
         let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_owned(),
-                    value.to_str().unwrap_or_default().to_owned(),
-                )
-            })
-            .collect();
         let body = response.bytes().await?.to_vec();
-        Ok(Response {
-            status,
-            headers,
-            body,
-        })
+        Ok(Response { status, body })
     }
 
-    pub async fn get(&self, path: &str, headers: &[(&str, &str)]) -> Response {
-        self.request("GET", path, headers, None).await.unwrap()
-    }
-
-    pub async fn json<T: serde::Serialize>(
+    pub async fn send(
         &self,
         method: &str,
         path: &str,
         headers: &[(&str, &str)],
-        body: &T,
+        body: Option<Vec<u8>>,
     ) -> Response {
-        self.request(
-            method,
-            path,
-            headers,
-            Some(serde_json::to_vec(body).unwrap()),
-        )
-        .await
-        .unwrap()
+        self.request(method, path, headers, body).await.unwrap()
     }
-}
-
-pub fn bearer(token: &str) -> String {
-    format!("Bearer {token}")
 }
 
 pub fn pairing(secret: &[u8]) -> String {
     format!("Pairing {}", STANDARD.encode(secret))
 }
 
-// Raw client: for the limit tests
-
-#[derive(Default)]
+/// One response read off a raw connection.
+#[derive(Debug, Default)]
 pub struct Exchange {
     pub status: Option<u16>,
     pub headers: Vec<(String, String)>,
@@ -774,12 +345,16 @@ pub struct Exchange {
 
 impl Exchange {
     pub fn header(&self, name: &str) -> Option<&str> {
-        header(&self.headers, name)
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 }
 
 pub type ClientStream = tokio_rustls::client::TlsStream<TcpStream>;
 
+/// A pinned TLS connection that writes exactly the bytes it is given.
 pub struct RawClient {
     pub port: u16,
     pub fingerprint: Vec<u8>,
@@ -793,8 +368,8 @@ impl RawClient {
         connector.connect(name, tcp).await
     }
 
-    /// Sends exactly the head and body it is given and reads one response,
-    /// waiting up to `close_grace` for a close and `timeout` overall.
+    /// Sends the head and `body` as given, reads one response for up to
+    /// `timeout`, then waits up to `close_grace` for the server's close.
     pub async fn exchange(
         &self,
         method: &str,
@@ -813,7 +388,6 @@ impl RawClient {
         stream.write_all(head.as_bytes()).await?;
         stream.write_all(body).await?;
         stream.flush().await?;
-
         let mut received = Vec::new();
         let complete = |bytes: &[u8]| parse_response(bytes).is_some();
         let mut closed = read_until(&mut stream, timeout, &mut received, complete).await;
@@ -824,18 +398,10 @@ impl RawClient {
         exchange.closed_by_server = closed;
         Ok(exchange)
     }
-
-    /// Sends `bytes` as they are and then stays silent. True when the server
-    /// closed the connection within `timeout`.
-    pub async fn hold_open(&self, bytes: &[u8], timeout: Duration) -> std::io::Result<bool> {
-        let mut stream = self.connect().await?;
-        stream.write_all(bytes).await?;
-        stream.flush().await?;
-        Ok(read_until(&mut stream, timeout, &mut Vec::new(), |_| false).await)
-    }
 }
 
-/// Appends what arrives to `received` until `done`, a close (true) or `timeout`.
+/// Appends what arrives to `received` until `done` (false), a close (true)
+/// or `timeout` (false).
 pub async fn read_until(
     stream: &mut ClientStream,
     timeout: Duration,
@@ -846,9 +412,6 @@ pub async fn read_until(
     let mut buffer = [0u8; 16 * 1024];
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return false;
-        }
         match tokio::time::timeout(remaining, stream.read(&mut buffer)).await {
             Ok(Ok(0) | Err(_)) => return true,
             Ok(Ok(count)) => {
@@ -867,8 +430,7 @@ pub fn parse_response(bytes: &[u8]) -> Option<Exchange> {
     let end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
     let head = std::str::from_utf8(&bytes[..end]).ok()?;
     let mut lines = head.split("\r\n");
-    let status_line = lines.next()?;
-    let status: u16 = status_line.split(' ').nth(1)?.parse().ok()?;
+    let status: u16 = lines.next()?.split(' ').nth(1)?.parse().ok()?;
     let headers: Vec<(String, String)> = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
@@ -887,14 +449,11 @@ pub fn parse_response(bytes: &[u8]) -> Option<Exchange> {
     })
 }
 
-// The phone
-
-/// A paired phone in the tests, over `LoopbackClient`.
+/// A paired phone.
 pub struct Phone {
     pub client: LoopbackClient,
     pub token: String,
     pub device_id: Uuid,
-    pub device_name: String,
 }
 
 impl Phone {
@@ -905,125 +464,122 @@ impl Phone {
         device_id: Uuid,
         device_name: &str,
     ) -> Response {
+        let body = wire::PairRequest {
+            device_id,
+            device_name: device_name.to_owned(),
+        };
         test.client()
-            .json(
+            .send(
                 "POST",
                 "/v1/pair",
                 &[("Authorization", &pairing(secret))],
-                &wire::PairRequest {
-                    device_id,
-                    device_name: device_name.to_owned(),
-                },
+                Some(serde_json::to_vec(&body).unwrap()),
             )
             .await
     }
 
-    /// Opens a window and pairs a fresh device against the running service.
+    /// Opens a window and pairs a new phone.
     pub async fn pair(test: &TestService) -> Phone {
-        Self::pair_named(test, "Test iPhone").await
+        Self::pair_as(test, Uuid::new_v4()).await
     }
 
-    pub async fn pair_named(test: &TestService, device_name: &str) -> Phone {
+    /// Opens a window and pairs `device_id`.
+    pub async fn pair_as(test: &TestService, device_id: Uuid) -> Phone {
         let payload = test.service.begin_pairing();
-        Self::pair_with(test, &payload, device_name).await
-    }
-
-    /// Pairs a fresh device with the secret of `payload`.
-    pub async fn pair_with(
-        test: &TestService,
-        payload: &steno_handover::PairingPayload,
-        device_name: &str,
-    ) -> Phone {
-        let device_id = Uuid::new_v4();
-        let response = Self::try_pair(test, &payload.secret, device_id, device_name).await;
+        let response = Self::try_pair(test, &payload.secret, device_id, "Test iPhone").await;
         assert_eq!(response.status, 200, "pairing failed");
-        let pair: wire::PairResponse = response.json();
         Phone {
             client: test.client(),
-            token: pair.token,
+            token: response.json::<wire::PairResponse>().token,
             device_id,
-            device_name: device_name.to_owned(),
+        }
+    }
+
+    /// The same phone talking to `test`, e.g. after a restart.
+    pub fn to(&self, test: &TestService) -> Phone {
+        Phone {
+            client: test.client(),
+            token: self.token.clone(),
+            device_id: self.device_id,
         }
     }
 
     pub fn bearer(&self) -> String {
-        bearer(&self.token)
+        format!("Bearer {}", self.token)
+    }
+
+    async fn call(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Response {
+        self.client
+            .send(method, path, &[("Authorization", &self.bearer())], body)
+            .await
     }
 
     pub async fn announce(&self, metadata: &RecordingMetadata) -> Response {
-        self.client
-            .json(
-                "PUT",
-                &format!("/v1/recordings/{}", metadata.recording_id),
-                &[("Authorization", &self.bearer())],
-                metadata,
-            )
-            .await
+        let body = serde_json::to_vec(metadata).unwrap();
+        let path = format!("/v1/recordings/{}", metadata.recording_id);
+        self.call("PUT", &path, Some(body)).await
     }
 
     pub async fn status(&self, recording_id: Uuid) -> Response {
-        self.client
-            .get(
-                &format!("/v1/recordings/{recording_id}"),
-                &[("Authorization", &self.bearer())],
-            )
+        self.call("GET", &format!("/v1/recordings/{recording_id}"), None)
             .await
     }
 
-    /// Uploads one chunk with its hash header; a different `declared_hash`
-    /// simulates a corrupt body.
+    pub async fn status_of(&self, recording_id: Uuid) -> wire::RecordingStatus {
+        let response = self.status(recording_id).await;
+        assert_eq!(response.status, 200);
+        response.json()
+    }
+
     pub async fn upload(&self, recording_id: Uuid, index: i64, bytes: &[u8]) -> Response {
-        self.upload_with(recording_id, index, bytes, Some(&sha256(bytes)))
-            .await
+        self.upload_with(
+            recording_id,
+            index,
+            bytes,
+            Some(&STANDARD.encode(sha256(bytes))),
+        )
+        .await
     }
 
+    /// One chunk with `hash` as its hash header, or none.
     pub async fn upload_with(
         &self,
         recording_id: Uuid,
         index: i64,
         bytes: &[u8],
-        declared_hash: Option<&[u8]>,
+        hash: Option<&str>,
     ) -> Response {
         let authorization = self.bearer();
-        let mut headers: Vec<(&str, &str)> = vec![
-            ("Authorization", &authorization),
-            ("Content-Type", "application/octet-stream"),
-        ];
-        let encoded = declared_hash.map(|hash| STANDARD.encode(hash));
-        if let Some(encoded) = &encoded {
-            headers.push((wire::CHUNK_HASH_HEADER, encoded));
+        let mut headers = vec![("Authorization", authorization.as_str())];
+        if let Some(hash) = hash {
+            headers.push((wire::CHUNK_HASH_HEADER, hash));
         }
+        let path = format!("/v1/recordings/{recording_id}/chunks/{index}");
         self.client
-            .request(
-                "PUT",
-                &format!("/v1/recordings/{recording_id}/chunks/{index}"),
-                &headers,
-                Some(bytes.to_vec()),
-            )
+            .send("PUT", &path, &headers, Some(bytes.to_vec()))
             .await
-            .unwrap()
     }
 
     pub async fn complete(&self, recording_id: Uuid) -> Response {
-        self.client
-            .request(
-                "POST",
-                &format!("/v1/recordings/{recording_id}/complete"),
-                &[("Authorization", &self.bearer())],
-                None,
-            )
-            .await
-            .unwrap()
+        let path = format!("/v1/recordings/{recording_id}/complete");
+        self.call("POST", &path, None).await
     }
 
-    /// Announces and uploads every chunk of `bytes`.
+    /// The meeting a `complete` answered with 200.
+    pub async fn completed(&self, recording_id: Uuid) -> Uuid {
+        let response = self.complete(recording_id).await;
+        assert_eq!(response.status, 200, "complete");
+        response.json::<wire::CompleteResponse>().meeting_id
+    }
+
+    pub async fn unpair(&self) -> Response {
+        self.call("DELETE", "/v1/pairing", None).await
+    }
+
+    /// Announces `metadata` and uploads every chunk of `bytes`.
     pub async fn upload_all(&self, metadata: &RecordingMetadata, bytes: &[u8]) {
         let announced = self.announce(metadata).await;
-        assert!(
-            announced.status == 201 || announced.status == 200,
-            "announce: {}",
-            announced.status
-        );
+        assert!([200, 201].contains(&announced.status), "announce");
         for (index, chunk) in chunks(bytes, metadata.chunk_size).iter().enumerate() {
             let response = self
                 .upload(metadata.recording_id, index as i64, chunk)
@@ -1031,37 +587,19 @@ impl Phone {
             assert_eq!(response.status, 204, "chunk {index}");
         }
     }
-
-    /// Metadata for `bytes` as the phone would declare it.
-    pub fn metadata(&self, bytes: &[u8], chunk_size: i64) -> RecordingMetadata {
-        metadata_for(
-            bytes,
-            &self.device_name,
-            Uuid::new_v4(),
-            chunk_size,
-            AudioFormat::M4aAac,
-            None,
-        )
-    }
 }
 
-pub fn metadata_for(
-    bytes: &[u8],
-    device_name: &str,
-    recording_id: Uuid,
-    chunk_size: i64,
-    format: AudioFormat,
-    sha256_override: Option<Vec<u8>>,
-) -> RecordingMetadata {
+/// The metadata the phone announces for `bytes`.
+pub fn metadata_for(bytes: &[u8], chunk_size: i64) -> RecordingMetadata {
     RecordingMetadata {
-        recording_id,
+        recording_id: Uuid::new_v4(),
         started_at: date(1_789_990_000),
         duration_seconds: 61.5,
         byte_count: bytes.len() as i64,
-        sha256: sha256_override.unwrap_or_else(|| sha256(bytes)),
+        sha256: sha256(bytes),
         chunk_size,
-        format,
-        device_name: device_name.to_owned(),
+        format: AudioFormat::M4aAac,
+        device_name: "Test iPhone".to_owned(),
     }
 }
 
@@ -1081,229 +619,16 @@ pub fn seeded_bytes(count: usize, seed: u64) -> Vec<u8> {
         let mut z = state;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^= z >> 31;
-        data.extend_from_slice(&z.to_le_bytes());
+        data.extend_from_slice(&(z ^ (z >> 31)).to_le_bytes());
     }
     data.truncate(count);
     data
 }
 
-// The engine driven directly, without the listener
-
-/// A paired device's recording calls, straight into the engine.
-#[derive(Clone)]
-pub struct EngineDevice {
-    pub service: Arc<HandoverService>,
-    pub device: PairedDevice,
-}
-
-impl EngineDevice {
-    /// Opens a window, pairs and returns the paired device's view.
-    pub async fn paired(test: &TestService, device_name: &str) -> EngineDevice {
-        Self::paired_on(&test.service, &test.store, device_name).await
-    }
-
-    /// [`EngineDevice::paired`] on `service` over `store`, e.g. after a restart.
-    pub async fn paired_on(
-        service: &Arc<HandoverService>,
-        store: &Store,
-        device_name: &str,
-    ) -> EngineDevice {
-        let payload = service.begin_pairing();
-        let device_id = Uuid::new_v4();
-        let response = engine_pair(service, &payload, device_id, device_name).await;
-        assert_eq!(response.status, 200);
-        let device = store.paired_device(device_id).unwrap().unwrap();
-        EngineDevice {
-            service: service.clone(),
-            device,
-        }
-    }
-
-    /// Pairs again under the same device id and name, as a revoked phone does.
-    pub async fn pair_again(&self) -> EngineDevice {
-        let payload = self.service.begin_pairing();
-        let response =
-            engine_pair(&self.service, &payload, self.device.id, &self.device.name).await;
-        assert_eq!(response.status, 200, "paired again");
-        let device = self
-            .service
-            .paired_devices()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|device| device.id == self.device.id)
-            .expect("the device is paired");
-        EngineDevice {
-            service: self.service.clone(),
-            device,
-        }
-    }
-
-    pub async fn announce(&self, metadata: &RecordingMetadata) -> HandoverResponse {
-        self.handle(
-            HandoverRequest::new(
-                Route::Announce(metadata.recording_id),
-                Principal::Device(self.device.clone()),
-            )
-            .with_body(serde_json::to_vec(metadata).unwrap()),
-        )
-        .await
-    }
-
-    pub async fn status(&self, recording_id: Uuid) -> HandoverResponse {
-        self.handle(HandoverRequest::new(
-            Route::Status(recording_id),
-            Principal::Device(self.device.clone()),
-        ))
-        .await
-    }
-
-    pub async fn upload(&self, recording_id: Uuid, index: i64, bytes: &[u8]) -> HandoverResponse {
-        self.handle(
-            HandoverRequest::new(
-                Route::Chunk(recording_id, index),
-                Principal::Device(self.device.clone()),
-            )
-            .with_body(bytes.to_vec())
-            .with_header(wire::CHUNK_HASH_HEADER, &STANDARD.encode(sha256(bytes))),
-        )
-        .await
-    }
-
-    pub async fn complete(&self, recording_id: Uuid) -> HandoverResponse {
-        self.handle(HandoverRequest::new(
-            Route::Complete(recording_id),
-            Principal::Device(self.device.clone()),
-        ))
-        .await
-    }
-
-    pub async fn upload_all(&self, metadata: &RecordingMetadata, bytes: &[u8]) {
-        let announced = self.announce(metadata).await;
-        assert!(announced.status.as_u16() == 201 || announced.status.as_u16() == 200);
-        for (index, chunk) in chunks(bytes, metadata.chunk_size).iter().enumerate() {
-            let response = self
-                .upload(metadata.recording_id, index as i64, chunk)
-                .await;
-            assert_eq!(response.status.as_u16(), 204, "chunk {index}");
-        }
-    }
-
-    pub fn metadata(&self, bytes: &[u8], chunk_size: i64) -> RecordingMetadata {
-        metadata_for(
-            bytes,
-            &self.device.name,
-            Uuid::new_v4(),
-            chunk_size,
-            AudioFormat::M4aAac,
-            None,
-        )
-    }
-
-    async fn handle(&self, request: HandoverRequest) -> HandoverResponse {
-        self.service.engine.handle(request).await
-    }
-}
-
-/// The gate's answer to `POST /v1/pair` with `payload`'s secret; panics on a rejection.
-pub async fn pairing_principal(
-    service: &HandoverService,
-    payload: &steno_handover::PairingPayload,
-) -> Principal {
-    let authorization = pairing(&payload.secret);
-    match service
-        .engine
-        .authenticate(Route::Pair, Some(&authorization))
-        .await
-    {
-        AuthOutcome::Allowed(principal) => principal,
-        AuthOutcome::Rejected(response) => panic!("the gate refused the secret: {response:?}"),
-    }
-}
-
-/// `POST /v1/pair` with the secret of `payload`, straight into the engine.
-pub async fn engine_pair(
-    service: &HandoverService,
-    payload: &steno_handover::PairingPayload,
-    device_id: Uuid,
-    device_name: &str,
-) -> HandoverResponse {
-    let principal = pairing_principal(service, payload).await;
-    engine_pair_as(service, principal, device_id, device_name).await
-}
-
-/// The body of `POST /v1/pair` straight into the engine, as `principal`.
-pub async fn engine_pair_as(
-    service: &HandoverService,
-    principal: Principal,
-    device_id: Uuid,
-    device_name: &str,
-) -> HandoverResponse {
-    service
-        .engine
-        .handle(
-            HandoverRequest::new(Route::Pair, principal).with_body(
-                serde_json::to_vec(&wire::PairRequest {
-                    device_id,
-                    device_name: device_name.to_owned(),
-                })
-                .unwrap(),
-            ),
-        )
-        .await
-}
-
-pub async fn engine_hello(test: &TestService) -> HandoverResponse {
-    test.service
-        .engine
-        .handle(HandoverRequest::new(Route::Hello, Principal::Anonymous))
-        .await
-}
-
-/// An in-memory fingerprint record that refuses records while `refuse` is
-/// set and notes while `refuse_note` is.
-#[derive(Default)]
-pub struct MemoryRecord {
-    pub recorded: Mutex<Option<String>>,
-    pub next: Mutex<Option<String>>,
-    pub refuse: AtomicBool,
-    pub refuse_note: AtomicBool,
-}
-
-impl MemoryRecord {
-    pub fn get_recorded(&self) -> Option<String> {
-        self.recorded.lock().unwrap().clone()
-    }
-
-    pub fn get_next(&self) -> Option<String> {
-        self.next.lock().unwrap().clone()
-    }
-}
-
-impl steno_handover::FingerprintRecord for MemoryRecord {
-    fn recorded(&self) -> BoundaryResult<Option<String>> {
-        Ok(self.get_recorded())
-    }
-
-    fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
-        if self.refuse.load(Ordering::SeqCst) {
-            return Err("No space left on device".into());
-        }
-        *self.recorded.lock().unwrap() = Some(fingerprint.to_owned());
-        *self.next.lock().unwrap() = None;
-        Ok(())
-    }
-
-    fn next(&self) -> BoundaryResult<Option<String>> {
-        Ok(self.get_next())
-    }
-
-    fn note_next(&self, fingerprint: Option<&str>) -> BoundaryResult<()> {
-        if self.refuse_note.load(Ordering::SeqCst) {
-            return Err("No space left on device".into());
-        }
-        *self.next.lock().unwrap() = fingerprint.map(str::to_owned);
-        Ok(())
-    }
+/// Runs `sql` on the store's connection, e.g. a temporary table that makes
+/// reads fail.
+pub fn execute_batch(store: &Store, sql: &str) {
+    store
+        .write(|transaction| Ok(transaction.execute_batch(sql)?))
+        .unwrap();
 }

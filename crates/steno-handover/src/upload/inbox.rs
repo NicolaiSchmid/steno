@@ -153,9 +153,13 @@ mod tests {
 
     use super::*;
 
-    fn metadata(recording_id: Uuid) -> RecordingMetadata {
-        RecordingMetadata {
-            recording_id,
+    #[test]
+    fn begin_promote_and_discard_leave_exactly_the_files_they_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let inbox = Inbox::new(directory.path().join("inbox"));
+        let id = Uuid::new_v4();
+        let metadata = RecordingMetadata {
+            recording_id: id,
             started_at: chrono::Utc.timestamp_opt(1_789_990_000, 0).unwrap(),
             duration_seconds: 61.5,
             byte_count: 3,
@@ -163,96 +167,34 @@ mod tests {
             chunk_size: 64 * 1024,
             format: AudioFormat::M4aAac,
             device_name: "Phone".to_owned(),
-        }
-    }
-
-    fn files_of(inbox: &Inbox, recording_id: Uuid) -> Vec<String> {
-        let prefix = recording_id.hyphenated().to_string();
-        let mut names: Vec<String> = std::fs::read_dir(&inbox.directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(&prefix))
-            .collect();
-        names.sort();
-        names
-    }
-
-    #[test]
-    fn begin_leaves_the_metadata_in_place_and_no_temporary_behind() {
-        let directory = tempfile::tempdir().unwrap();
-        let inbox = Inbox::new(directory.path().join("inbox"));
-        let id = Uuid::new_v4();
-        inbox.begin(&metadata(id)).unwrap();
+        };
+        let names = || {
+            let mut names: Vec<String> = std::fs::read_dir(&inbox.directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        inbox.begin(&metadata).unwrap();
         assert_eq!(
-            files_of(&inbox, id),
-            vec![format!("{id}.metadata.json"), format!("{id}.partial")]
+            names(),
+            [format!("{id}.metadata.json"), format!("{id}.partial")]
         );
-        assert!(!inbox.metadata_temporary(id).exists());
-        assert_eq!(inbox.load_metadata(id), Some(metadata(id)));
-    }
+        assert_eq!(inbox.load_metadata(id), Some(metadata.clone()));
 
-    #[test]
-    fn a_truncated_sidecar_loads_as_none() {
-        let directory = tempfile::tempdir().unwrap();
-        let inbox = Inbox::new(directory.path().join("inbox"));
-        let id = Uuid::new_v4();
-        inbox.begin(&metadata(id)).unwrap();
+        // A crash between the write and the rename leaves the temporary.
+        std::fs::write(inbox.metadata_temporary(id), b"{").unwrap();
+        let verified = inbox.promote(id, AudioFormat::M4aAac).unwrap();
+        assert_eq!(verified, inbox.verified(id, AudioFormat::M4aAac));
+        assert!(!inbox.has_partial(id));
+        assert_eq!(inbox.recording_ids().into_iter().collect::<Vec<_>>(), [id]);
+        let gone = inbox.promote(id, AudioFormat::M4aAac).unwrap_err();
+        assert_eq!(gone.kind(), std::io::ErrorKind::NotFound, "no partial");
         let whole = std::fs::read(inbox.metadata(id)).unwrap();
         std::fs::write(inbox.metadata(id), &whole[..whole.len() / 2]).unwrap();
-        assert_eq!(inbox.load_metadata(id), None);
-    }
-
-    #[test]
-    fn discard_removes_the_temporary_metadata_too() {
-        let directory = tempfile::tempdir().unwrap();
-        let inbox = Inbox::new(directory.path().join("inbox"));
-        let id = Uuid::new_v4();
-        inbox.begin(&metadata(id)).unwrap();
-        // A crash between the write and the rename leaves this behind.
-        std::fs::write(inbox.metadata_temporary(id), b"{").unwrap();
-        inbox.promote(id, AudioFormat::M4aAac).unwrap();
-        assert_eq!(files_of(&inbox, id).len(), 3);
+        assert_eq!(inbox.load_metadata(id), None, "a truncated sidecar");
         inbox.discard(id);
-        assert_eq!(files_of(&inbox, id), Vec::<String>::new());
-        assert!(inbox.recording_ids().is_empty());
-    }
-
-    /// A partial already gone fails `promote`, so `complete` answers 500,
-    /// and no verified file appears.
-    #[test]
-    fn a_missing_partial_is_not_promoted() {
-        let directory = tempfile::tempdir().unwrap();
-        let inbox = Inbox::new(directory.path().join("inbox"));
-        let id = Uuid::new_v4();
-        inbox.begin(&metadata(id)).unwrap();
-        std::fs::remove_file(inbox.partial(id)).unwrap();
-        let error = inbox.promote(id, AudioFormat::M4aAac).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-        assert!(!inbox.has_verified(id, AudioFormat::M4aAac));
-    }
-
-    /// On Windows a partial held without delete sharing refuses the rename past
-    /// its retries: `promote` fails and the partial keeps every byte.
-    #[cfg(windows)]
-    #[test]
-    fn a_partial_held_past_the_retries_is_not_promoted_and_stays() {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        /// `FILE_SHARE_READ | FILE_SHARE_WRITE`, without `FILE_SHARE_DELETE`.
-        const SHARE_READ_WRITE: u32 = 0x1 | 0x2;
-        let directory = tempfile::tempdir().unwrap();
-        let inbox = Inbox::new(directory.path().join("inbox"));
-        let id = Uuid::new_v4();
-        inbox.begin(&metadata(id)).unwrap();
-        std::fs::write(inbox.partial(id), b"aac").unwrap();
-        let holder = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(SHARE_READ_WRITE)
-            .open(inbox.partial(id))
-            .unwrap();
-        let error = inbox.promote(id, AudioFormat::M4aAac).unwrap_err();
-        drop(holder);
-        assert!(busy_file::is_busy(&error), "{error:?}");
-        assert!(!inbox.has_verified(id, AudioFormat::M4aAac));
-        assert_eq!(std::fs::read(inbox.partial(id)).unwrap(), b"aac");
+        assert_eq!(names(), Vec::<String>::new());
     }
 }

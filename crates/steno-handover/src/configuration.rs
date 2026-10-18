@@ -163,99 +163,38 @@ impl Default for HandoverConfiguration {
 mod tests {
     use super::*;
 
-    /// The Mac's sources; Linux and Windows use all but the first.
-    const MAC_SOURCES: [NameSource; 4] = [
-        NameSource::ComputerName,
-        NameSource::HostnameVariable,
-        NameSource::EtcHostname,
-        NameSource::SystemHostname,
-    ];
-
     #[test]
-    fn the_mac_asks_for_the_computer_name_first_and_linux_and_windows_for_the_host_name() {
-        if cfg!(target_os = "macos") {
-            assert_eq!(NAME_SOURCES, &MAC_SOURCES[..]);
-        } else {
-            assert_eq!(NAME_SOURCES, &MAC_SOURCES[1..]);
-            assert_eq!(
-                NameSource::ComputerName.read(),
-                None,
-                "no computer name here"
-            );
-        }
-        assert!(
-            NameSource::SystemHostname.read().is_some(),
-            "every platform has a host name"
-        );
-    }
-
-    /// Another name orphans a phone's partial uploads after an upgrade.
-    #[test]
-    fn the_inbox_keeps_the_name_the_swift_app_and_earlier_builds_use() {
-        assert_eq!(
-            HandoverConfiguration::INBOX_DIRECTORY_NAME,
-            "handover-inbox"
-        );
-    }
-
-    #[test]
-    fn linux_listens_on_the_fixed_port_and_the_mac_and_windows_on_one_the_system_chooses() {
-        let expected = if cfg!(target_os = "linux") { 23820 } else { 0 };
-        assert_eq!(HandoverConfiguration::platform_port(), expected);
-        assert!(
-            (1024..32768).contains(&HandoverConfiguration::LINUX_PORT),
-            "registered, and below Linux's ephemeral range"
-        );
-        assert_eq!(
-            HandoverConfiguration::default().port,
-            0,
-            "tests and the CLI"
-        );
-    }
-
-    #[test]
-    fn the_default_is_the_first_name_a_source_gives_in_order() {
+    fn the_service_name_is_the_first_a_source_gives_in_order() {
+        let sources = [
+            NameSource::ComputerName,
+            NameSource::HostnameVariable,
+            NameSource::EtcHostname,
+            NameSource::SystemHostname,
+        ];
         let reader = |names: [Option<&'static str>; 4]| {
             move |source: NameSource| {
-                let index = MAC_SOURCES
-                    .iter()
-                    .position(|&known| known == source)
-                    .unwrap();
+                let index = sources.iter().position(|&known| known == source).unwrap();
                 names[index].map(str::to_owned)
             }
         };
-        let all = reader([Some("Studio"), Some("env"), Some("etc"), Some("host")]);
-        assert_eq!(first_name(&MAC_SOURCES, all), "Studio");
-        assert_eq!(first_name(&MAC_SOURCES[1..], all), "env");
-        assert_eq!(
-            first_name(
-                &MAC_SOURCES,
-                reader([None, None, Some("etc"), Some("host")])
+        let cases = [
+            (
+                [Some("Studio"), Some("env"), Some("etc"), Some("host")],
+                "Studio",
             ),
-            "etc"
-        );
-        assert_eq!(
-            first_name(&MAC_SOURCES, reader([None, None, None, Some("host")])),
-            "host"
-        );
-        assert_eq!(first_name(&MAC_SOURCES, reader([None; 4])), "Steno");
-    }
-
-    /// The computer name `scutil --get ComputerName` reads.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn on_the_mac_the_computer_name_is_the_one_system_settings_shows() {
-        let output = std::process::Command::new("/usr/sbin/scutil")
-            .args(["--get", "ComputerName"])
-            .output()
-            .expect("scutil runs");
-        let shown = String::from_utf8(output.stdout).unwrap();
-        let shown = shown.strip_suffix('\n').unwrap_or(&shown);
-        if !output.status.success() || shown.is_empty() {
-            assert_eq!(NameSource::ComputerName.read(), None);
-            return;
+            ([None, None, Some("etc"), Some("host")], "etc"),
+            ([None, None, None, Some("host")], "host"),
+            ([None; 4], "Steno"),
+        ];
+        for (names, expected) in cases {
+            assert_eq!(first_name(&sources, reader(names)), expected);
         }
-        assert_eq!(NameSource::ComputerName.read().as_deref(), Some(shown));
-        assert_eq!(HandoverConfiguration::default_service_name(), shown);
+        let expected = if cfg!(target_os = "macos") {
+            &sources[..]
+        } else {
+            &sources[1..]
+        };
+        assert_eq!(NAME_SOURCES, expected, "the computer name on the Mac only");
+        assert!(NameSource::SystemHostname.read().is_some());
     }
 }

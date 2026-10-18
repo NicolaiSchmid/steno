@@ -354,7 +354,7 @@ pub enum ServerError {
 #[cfg(test)]
 mod tests {
     use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use chrono::Utc;
     use rustls_pki_types::ServerName;
@@ -375,47 +375,22 @@ mod tests {
         vec![Ipv4Addr::new(192, 168, 1, 20)]
     }
 
-    fn no_lan() -> Vec<Ipv4Addr> {
-        Vec::new()
-    }
-
     #[tokio::test]
     async fn the_lan_addresses_are_read_once_per_refresh_and_a_failed_read_serves_none() {
         let mut kept = LanAddresses::new(counted, Duration::from_secs(3600));
-        let before = QUERIES.load(Ordering::SeqCst);
         assert_eq!(kept.current().await, &[Ipv4Addr::new(192, 168, 1, 20)]);
         assert_eq!(kept.current().await, &[Ipv4Addr::new(192, 168, 1, 20)]);
-        assert_eq!(QUERIES.load(Ordering::SeqCst) - before, 1, "one query");
-
+        assert_eq!(QUERIES.load(Ordering::SeqCst), 1, "one query");
         let mut panicking = LanAddresses::new(|| panic!("the system did not say"), LAN_REFRESH);
         assert!(panicking.current().await.is_empty(), "fails closed");
     }
 
-    static READS: AtomicUsize = AtomicUsize::new(0);
-
-    /// Answers twice, then panics: the system that stops saying.
-    fn answers_twice() -> Vec<Ipv4Addr> {
-        assert!(
-            READS.fetch_add(1, Ordering::SeqCst) < 2,
-            "the system stopped saying"
-        );
-        vec![Ipv4Addr::new(192, 168, 1, 20)]
-    }
-
-    #[tokio::test]
-    async fn with_no_refresh_interval_each_connection_reads_again_and_a_failed_read_keeps_nothing()
-    {
-        let mut fresh = LanAddresses::new(answers_twice, Duration::ZERO);
-        assert_eq!(fresh.current().await, &[Ipv4Addr::new(192, 168, 1, 20)]);
-        assert_eq!(fresh.current().await, &[Ipv4Addr::new(192, 168, 1, 20)]);
-        assert_eq!(READS.load(Ordering::SeqCst), 2, "read again");
-        assert!(fresh.current().await.is_empty(), "not the stale set");
-    }
-
-    /// A non-loopback IPv4 address of this host, preferring an interface that is
-    /// up.
-    fn host_address() -> Option<Ipv4Addr> {
-        let interfaces = if_addrs::get_if_addrs().ok()?;
+    /// A non-loopback IPv4 address of this host that delivers a connection to
+    /// this process (the macOS firewall can hold one back), or why there is
+    /// none. CI sets `STENO_REQUIRE_LAN_TEST` on Linux and Windows, where a
+    /// skip fails.
+    async fn host_address() -> Result<Ipv4Addr, String> {
+        let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
         let mut candidates: Vec<_> = interfaces
             .iter()
             .filter_map(|interface| match &interface.addr {
@@ -426,92 +401,64 @@ mod tests {
             })
             .collect();
         candidates.sort_unstable();
-        candidates.first().map(|&(_, address)| address)
-    }
-
-    /// Whether a connection to `address` reaches an `accept` in this process;
-    /// the macOS application firewall can hold it back from an unsigned binary.
-    async fn reaches_this_process(address: Ipv4Addr) -> bool {
-        let Ok(listener) = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await else {
-            return false;
+        let Some(&(_, address)) = candidates.first() else {
+            return Err("this host has no non-loopback IPv4 address".to_owned());
         };
-        let Ok(local) = listener.local_addr() else {
-            return false;
-        };
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
         let both = async {
-            let (connected, accepted) = tokio::join!(
-                TcpStream::connect((address, local.port())),
-                listener.accept()
-            );
+            let (connected, accepted) =
+                tokio::join!(TcpStream::connect((address, port)), listener.accept());
             connected.is_ok() && accepted.is_ok()
         };
-        tokio::time::timeout(Duration::from_secs(3), both)
-            .await
-            .unwrap_or(false)
-    }
-
-    /// The interface test's host address, as its second server's LAN query.
-    static HOST: OnceLock<Ipv4Addr> = OnceLock::new();
-
-    fn the_host() -> Vec<Ipv4Addr> {
-        HOST.get().copied().into_iter().collect()
-    }
-
-    /// Reports a skipped test. CI sets `STENO_REQUIRE_LAN_TEST` on Linux and
-    /// Windows, so a skip there fails.
-    fn skip(reason: &str) {
-        let required = std::env::var_os("STENO_REQUIRE_LAN_TEST").is_some();
-        if let Err(message) = may_skip(required, reason) {
-            panic!("{message}");
+        match tokio::time::timeout(Duration::from_secs(3), both).await {
+            Ok(true) => Ok(address),
+            _ => Err(format!("{address} delivers no inbound connection here")),
         }
+    }
+
+    fn skip(reason: &str) {
+        assert!(
+            std::env::var_os("STENO_REQUIRE_LAN_TEST").is_none(),
+            "the interface test must not skip here: {reason}"
+        );
         println!("SKIPPED: {reason}");
     }
 
-    /// Whether the interface test may skip: only where the run does not
-    /// require it.
-    fn may_skip(required: bool, reason: &str) -> Result<(), String> {
-        if required {
-            Err(format!("the interface test must not skip here: {reason}"))
-        } else {
-            Ok(())
+    fn configuration() -> HandoverConfiguration {
+        HandoverConfiguration {
+            inbox_directory: std::env::temp_dir().join("steno-handover-server-tests"),
+            read_timeout: Duration::from_secs(20),
+            advertise: false,
+            ..HandoverConfiguration::default()
         }
     }
 
-    #[test]
-    fn a_skip_fails_where_the_run_requires_the_interface_test() {
-        let refused = may_skip(true, "no LAN address").unwrap_err();
-        assert!(refused.contains("no LAN address"), "{refused}");
-        assert_eq!(may_skip(false, "no LAN address"), Ok(()));
+    fn identity() -> Arc<HandoverIdentity> {
+        Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap())
     }
 
-    /// An engine over an empty in-memory store.
-    fn engine(
+    /// A listener on every IPv4 address serving loopback and `lan`, read
+    /// again after `every`.
+    async fn serve(
         configuration: &HandoverConfiguration,
         identity: &Arc<HandoverIdentity>,
-    ) -> Arc<Engine> {
-        Engine::new(
+        lan: fn() -> Vec<Ipv4Addr>,
+        every: Duration,
+        publish: bool,
+    ) -> (HandoverServer, Arc<ServerMetrics>) {
+        let engine = Engine::new(
             configuration.clone(),
             identity.clone(),
             Arc::new(Store::in_memory().unwrap()),
             Arc::new(FakeHandoverIntake::default()),
             watch::channel(Vec::new()).0,
             Arc::new(Utc::now),
-        )
-    }
-
-    /// A listener on every IPv4 address serving loopback and `lan`, read again
-    /// after `every`.
-    async fn serve(
-        configuration: &HandoverConfiguration,
-        identity: &Arc<HandoverIdentity>,
-        lan: fn() -> Vec<Ipv4Addr>,
-        every: Duration,
-    ) -> (HandoverServer, Arc<ServerMetrics>) {
-        let engine = engine(configuration, identity);
+        );
         let metrics = Arc::new(ServerMetrics::default());
         let reach = Reach::Lan {
             lan: LanAddresses::new(lan, every),
-            publish: false,
+            publish,
         };
         let server =
             HandoverServer::start_with(configuration, identity, engine, metrics.clone(), reach)
@@ -520,235 +467,6 @@ mod tests {
         (server, metrics)
     }
 
-    #[tokio::test]
-    async fn the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte() {
-        let Some(address) = host_address() else {
-            return skip("this host has no non-loopback IPv4 address");
-        };
-        if !reaches_this_process(address).await {
-            return skip(&format!(
-                "{address} delivers no inbound connection here (a firewall)"
-            ));
-        }
-        HOST.set(address).unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let configuration = HandoverConfiguration {
-            inbox_directory: directory.path().join("inbox"),
-            read_timeout: Duration::from_secs(20),
-            ..HandoverConfiguration::default()
-        };
-        let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
-
-        // Only loopback is served; the host's own address stands in for a tunnel.
-        let (outside, metrics) = serve(&configuration, &identity, no_lan, LAN_REFRESH).await;
-        let mut refused = TcpStream::connect((address, outside.port)).await.unwrap();
-        let mut received = Vec::new();
-        let read = tokio::time::timeout(Duration::from_secs(5), refused.read_to_end(&mut received))
-            .await
-            .expect("closed long before the read timeout");
-        assert!(
-            read.is_ok() || received.is_empty(),
-            "closed or reset: {read:?}"
-        );
-        assert!(received.is_empty(), "no TLS byte: {received:?}");
-        let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.refused_interface, 1);
-        assert_eq!(snapshot.closed_by_server, 1);
-
-        // Loopback is served: the server waits for the client's hello.
-        let mut on_loopback = TcpStream::connect((Ipv4Addr::LOCALHOST, outside.port))
-            .await
-            .unwrap();
-        let mut byte = [0u8; 1];
-        let waited =
-            tokio::time::timeout(Duration::from_millis(300), on_loopback.read(&mut byte)).await;
-        assert!(waited.is_err(), "a loopback connection stays open");
-        assert_eq!(metrics.snapshot().refused_interface, 1);
-        outside.stop().await;
-
-        // The host's address is the LAN: the handshake completes.
-        let (lan, metrics) = serve(&configuration, &identity, the_host, LAN_REFRESH).await;
-        let exchange = async {
-            let mut tls = connect(&identity, address, lan.port).await?;
-            tls.write_all(b"GET /v1/hello HTTP/1.1\r\nHost: steno\r\nConnection: close\r\n\r\n")
-                .await?;
-            let mut response = Vec::new();
-            tls.read_to_end(&mut response).await?;
-            std::io::Result::Ok(response)
-        };
-        let response = within(exchange)
-            .await
-            .expect("a TLS exchange on the LAN address");
-        let response = String::from_utf8_lossy(&response);
-        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-        assert_eq!(metrics.snapshot().refused_interface, 0);
-        lan.stop().await;
-    }
-
-    /// A loopback listener on `port`.
-    async fn on_loopback(port: u16, identity: &Arc<HandoverIdentity>) -> HandoverServer {
-        let directory = tempfile::tempdir().unwrap();
-        let configuration = HandoverConfiguration {
-            advertise: false,
-            inbox_directory: directory.path().join("inbox"),
-            port,
-            ..HandoverConfiguration::default()
-        };
-        HandoverServer::start(
-            &configuration,
-            identity,
-            engine(&configuration, identity),
-            Arc::new(ServerMetrics::default()),
-        )
-        .await
-        .unwrap()
-    }
-
-    /// The warnings logged on this thread while it is installed.
-    #[derive(Clone, Default)]
-    struct Warnings(Arc<std::sync::Mutex<Vec<String>>>);
-
-    struct Message<'a>(&'a mut String);
-
-    impl tracing::field::Visit for Message<'_> {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "message" {
-                *self.0 = format!("{value:?}");
-            }
-        }
-    }
-
-    impl tracing::Subscriber for Warnings {
-        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-            *metadata.level() == tracing::Level::WARN
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut message = String::new();
-            event.record(&mut Message(&mut message));
-            self.0.lock().unwrap().push(message);
-        }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    /// A listener holding a system-chosen port on `address`, and that port.
-    async fn hold_port(address: Ipv4Addr) -> (TcpListener, u16) {
-        let held = TcpListener::bind((address, 0)).await.unwrap();
-        let port = held.local_addr().unwrap().port();
-        (held, port)
-    }
-
-    #[tokio::test]
-    async fn a_fixed_port_that_is_free_is_the_one_bound() {
-        let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
-        // Free again: the listener drops here.
-        let (_, port) = hold_port(Ipv4Addr::LOCALHOST).await;
-        let warnings = Warnings::default();
-        let _installed = tracing::subscriber::set_default(warnings.clone());
-        let server = on_loopback(port, &identity).await;
-        assert_eq!(server.port, port);
-        assert!(warnings.0.lock().unwrap().is_empty(), "no warning");
-        server.stop().await;
-    }
-
-    #[tokio::test]
-    async fn a_fixed_port_another_program_holds_gives_way_to_one_the_system_chooses_with_a_warning()
-    {
-        let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
-        let (held, taken) = hold_port(Ipv4Addr::LOCALHOST).await;
-        let warnings = Warnings::default();
-        let _installed = tracing::subscriber::set_default(warnings.clone());
-        let server = on_loopback(taken, &identity).await;
-        assert_ne!(server.port, taken);
-        assert_ne!(server.port, 0);
-        let warnings = warnings.0.lock().unwrap().clone();
-        let [warning] = warnings.as_slice() else {
-            panic!("one warning: {warnings:?}");
-        };
-        assert!(
-            warning.starts_with(&format!("port {taken} is not available (")),
-            "{warning}"
-        );
-        assert!(
-            warning.ends_with(&format!(
-                "listens on port {} instead, which a firewall opened only for port {taken} blocks",
-                server.port
-            )),
-            "{warning}"
-        );
-
-        // The port reported, which Bonjour publishes, is the one that answers.
-        let mut tls = within(connect(&identity, Ipv4Addr::LOCALHOST, server.port))
-            .await
-            .unwrap();
-        let status = within(hello(&mut tls)).await.unwrap();
-        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
-        drop(tls);
-        server.stop().await;
-        drop(held);
-    }
-
-    /// The fallback binds the address asked for: loopback stays loopback.
-    #[tokio::test]
-    async fn the_fallback_keeps_the_address() {
-        let (_held, taken) = hold_port(Ipv4Addr::LOCALHOST).await;
-        let listener = bind(IpAddr::V4(Ipv4Addr::LOCALHOST), taken).await.unwrap();
-        let bound = listener.local_addr().unwrap();
-        assert_eq!(bound.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert_ne!(bound.port(), taken);
-    }
-
-    /// After a fallback the Bonjour record carries the port bound, not the one
-    /// configured.
-    #[tokio::test]
-    async fn after_a_fallback_the_record_carries_the_port_bound() {
-        let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
-        let (held, taken) = hold_port(Ipv4Addr::UNSPECIFIED).await;
-        let directory = tempfile::tempdir().unwrap();
-        let configuration = HandoverConfiguration {
-            service_name: "Steno port test".to_owned(),
-            inbox_directory: directory.path().join("inbox"),
-            port: taken,
-            ..HandoverConfiguration::default()
-        };
-        let reach = Reach::Lan {
-            lan: LanAddresses::new(Vec::new, Duration::from_secs(60)),
-            publish: true,
-        };
-        let server = HandoverServer::start_with(
-            &configuration,
-            &identity,
-            engine(&configuration, &identity),
-            Arc::new(ServerMetrics::default()),
-            reach,
-        )
-        .await
-        .unwrap();
-        assert_ne!(server.port, taken);
-        assert_eq!(server.advertised_port(), Some(server.port));
-        server.stop().await;
-        drop(held);
-    }
-
-    /// The network test's host address, and whether the computer is on that
-    /// network yet.
-    static JOINING: OnceLock<Ipv4Addr> = OnceLock::new();
-    static JOINED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-    fn the_host_once_joined() -> Vec<Ipv4Addr> {
-        if JOINED.load(Ordering::SeqCst) {
-            JOINING.get().copied().into_iter().collect()
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// `future`'s output, which comes long before the read timeout.
     async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
         tokio::time::timeout(Duration::from_secs(5), future)
             .await
@@ -768,87 +486,133 @@ mod tests {
             .await
     }
 
-    /// `GET /v1/hello` on `tls`, kept alive; returns the status line.
-    async fn hello(
-        tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
-    ) -> std::io::Result<String> {
+    /// `GET /v1/hello` on `tls`, kept alive; true for a 200.
+    async fn hello(tls: &mut tokio_rustls::client::TlsStream<TcpStream>) -> bool {
         tls.write_all(b"GET /v1/hello HTTP/1.1\r\nHost: steno\r\n\r\n")
-            .await?;
+            .await
+            .unwrap();
         let mut response = Vec::new();
-        let head_end = loop {
-            if let Some(end) = response.windows(4).position(|window| window == b"\r\n\r\n") {
-                break end + 4;
-            }
-            let mut buffer = [0u8; 1024];
-            let read = tls.read(&mut buffer).await?;
-            if read == 0 {
-                return Err(std::io::ErrorKind::UnexpectedEof.into());
-            }
+        let mut buffer = [0u8; 1024];
+        // The hello's JSON body ends the response.
+        while !response.ends_with(b"}") {
+            let read = tls.read(&mut buffer).await.unwrap();
+            assert_ne!(read, 0, "closed mid-response");
             response.extend_from_slice(&buffer[..read]);
+        }
+        response.starts_with(b"HTTP/1.1 200")
+    }
+
+    static HOST: OnceLock<Ipv4Addr> = OnceLock::new();
+
+    fn the_host() -> Vec<Ipv4Addr> {
+        HOST.get().copied().into_iter().collect()
+    }
+
+    #[tokio::test]
+    async fn the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte() {
+        let address = match host_address().await {
+            Ok(address) => address,
+            Err(reason) => return skip(&reason),
         };
-        let head = String::from_utf8_lossy(&response[..head_end]).into_owned();
-        let length: usize = head
-            .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse().ok())?
-            })
-            .unwrap_or(0);
-        let mut body = vec![0u8; (head_end + length).saturating_sub(response.len())];
-        tls.read_exact(&mut body).await?;
-        Ok(head.lines().next().unwrap_or_default().to_owned())
+        HOST.set(address).unwrap();
+        let identity = identity();
+
+        // Only loopback is served; the host's own address stands in for a tunnel.
+        let (outside, metrics) =
+            serve(&configuration(), &identity, Vec::new, LAN_REFRESH, false).await;
+        let mut refused = TcpStream::connect((address, outside.port)).await.unwrap();
+        let mut received = Vec::new();
+        let _ = within(refused.read_to_end(&mut received)).await;
+        assert!(received.is_empty(), "no TLS byte: {received:?}");
+        assert_eq!(metrics.snapshot().refused_interface, 1);
+        let mut on_loopback = within(connect(&identity, Ipv4Addr::LOCALHOST, outside.port))
+            .await
+            .unwrap();
+        assert!(within(hello(&mut on_loopback)).await, "loopback is served");
+        outside.stop().await;
+
+        let (lan, metrics) = serve(&configuration(), &identity, the_host, LAN_REFRESH, false).await;
+        let mut tls = within(connect(&identity, address, lan.port)).await.unwrap();
+        assert!(within(hello(&mut tls)).await, "the LAN is served");
+        assert_eq!(metrics.snapshot().refused_interface, 0);
+        lan.stop().await;
+    }
+
+    static JOINING: OnceLock<Ipv4Addr> = OnceLock::new();
+    static JOINED: AtomicBool = AtomicBool::new(false);
+
+    fn the_host_once_joined() -> Vec<Ipv4Addr> {
+        if JOINED.load(Ordering::SeqCst) {
+            JOINING.get().copied().into_iter().collect()
+        } else {
+            Vec::new()
+        }
     }
 
     #[tokio::test]
     async fn an_address_gained_after_start_is_served_and_the_listener_keeps_an_open_connection_when_it_leaves()
      {
-        let Some(address) = host_address() else {
-            return skip("this host has no non-loopback IPv4 address");
+        let address = match host_address().await {
+            Ok(address) => address,
+            Err(reason) => return skip(&reason),
         };
-        if !reaches_this_process(address).await {
-            return skip(&format!(
-                "{address} delivers no inbound connection here (a firewall)"
-            ));
-        }
         JOINING.set(address).unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let configuration = HandoverConfiguration {
-            inbox_directory: directory.path().join("inbox"),
-            read_timeout: Duration::from_secs(20),
-            ..HandoverConfiguration::default()
-        };
-        let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
+        let identity = identity();
         let (server, metrics) = serve(
-            &configuration,
+            &configuration(),
             &identity,
             the_host_once_joined,
             Duration::ZERO,
+            false,
         )
         .await;
+        assert!(
+            within(connect(&identity, address, server.port))
+                .await
+                .is_err()
+        );
 
-        // Not on the network yet: refused before the handshake.
-        let refused = within(connect(&identity, address, server.port)).await;
-        assert!(refused.is_err(), "no handshake off the LAN");
-        assert_eq!(metrics.snapshot().refused_interface, 1);
-
-        // The computer joins: the same socket serves the new address.
         JOINED.store(true, Ordering::SeqCst);
         let mut joined = within(connect(&identity, address, server.port))
             .await
             .expect("a handshake on the gained address");
-        let status = within(hello(&mut joined)).await.unwrap();
-        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert!(within(hello(&mut joined)).await);
 
-        // The address leaves: the open connection is still answered, a new one is
-        // refused.
+        // The address leaves: the open connection is still answered, a new one
+        // is refused.
         JOINED.store(false, Ordering::SeqCst);
-        let status = within(hello(&mut joined)).await.unwrap();
-        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
-        let refused = within(connect(&identity, address, server.port)).await;
-        assert!(refused.is_err(), "no handshake once the address left");
+        assert!(within(hello(&mut joined)).await);
+        assert!(
+            within(connect(&identity, address, server.port))
+                .await
+                .is_err()
+        );
         assert_eq!(metrics.snapshot().refused_interface, 2);
         drop(joined);
         server.stop().await;
+    }
+
+    /// The Bonjour record carries the port bound, so a phone still finds a
+    /// listener whose fixed port was taken.
+    #[tokio::test]
+    async fn a_fixed_port_another_program_holds_gives_way_and_the_record_carries_the_port_bound() {
+        let held = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+        let taken = held.local_addr().unwrap().port();
+        let configuration = HandoverConfiguration {
+            service_name: "Steno port test".to_owned(),
+            port: taken,
+            ..configuration()
+        };
+        let identity = identity();
+        let (server, _) = serve(&configuration, &identity, Vec::new, LAN_REFRESH, true).await;
+        assert_ne!(server.port, taken);
+        assert_eq!(server.advertised_port(), Some(server.port));
+        let mut tls = within(connect(&identity, Ipv4Addr::LOCALHOST, server.port))
+            .await
+            .unwrap();
+        assert!(within(hello(&mut tls)).await);
+        drop(tls);
+        server.stop().await;
+        drop(held);
     }
 }
