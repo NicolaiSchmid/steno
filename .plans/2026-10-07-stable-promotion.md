@@ -1602,8 +1602,10 @@ Each lands before `0.11.0-rc.1`.
        this one may hold more pieces than that word only as the merge before
        glued them after it, or, with no chunk's owned span starting or
        ending between the word's start and the piece, as a copy of a piece
-       it kept elsewhere or a piece of a word it dropped. A duplicate is
-       allowed, a loss never, and the two glue limits below are text only.
+       it kept elsewhere or a piece of a word it dropped; the one exception
+       is the named limit across an undecoded gap below, counted and
+       capped. A duplicate is allowed, a loss never, and the glue limits
+       below are text only.
        This is measured, not proved: the test below is its gate, and its
        exemptions are one closed table.
   - Which test checks which clause:
@@ -1648,7 +1650,16 @@ Each lands before `0.11.0-rc.1`.
       after a copy), and pieces compared by placed word and id. A text-only
       glue shape found later becomes a named limit whose count the gate
       reports and caps at its value on the CI seed; a lost word or piece
-      always fails. The check has its own test
+      always fails. The one named so far is the limit across an undecoded
+      gap below (`Tally::across_gap`, capped at 0). The check's first line
+      is a sanity rule: identical token sequences pass, so it never fails
+      the old merge's text against itself
+      (`the_boundary_check_never_fails_the_old_merges_text_against_itself`,
+      case 158 of seed 0xa09c6d2c7ddf7445, where the jitter puts a piece
+      beyond the test's slack of every placed word); a flag an unplaced
+      piece makes on texts that differ is counted apart
+      (`Tally::unplaced`: 0 at the CI seed and in 100,000 new-seed cases).
+      The check has its own test
       (`the_boundary_check_fails_each_planted_glue_and_passes_each_limit`):
       planted texts fail it for both earlier forms of the drain below (the
       rest of a word glued onto the word before an empty chunk) and for
@@ -1794,11 +1805,29 @@ Each lands before `0.11.0-rc.1`.
       starts or ends between them: keep over drop, as #263 chose.
       `own` keeps a word that trim cut at a full stop inside it, and the
       seam rule keeps the copy with more pieces.
-    The test's count of longer words the boundaries allow, both limits and
+    - Across an undecoded gap, a named limit: a recovery that missed a
+      word's start can glue its rest onto a word across an undecoded gap.
+      The recovery's window begins inside the word, or the fake is deaf
+      there, and `own` keeps the rest, which lies in its reach; the last
+      token kept before it is a word of the chunk before the gap, and that
+      chunk's owned end lies in the gap's undecoded middle, so the rest
+      follows that word across it ("w14s34.s33.s36." for "w14s34.."). The
+      old merge dropped the rest, so it is a glue, never a loss. The test
+      counts it apart (`Tally::across_gap`) and the gate caps it at its
+      CI-seed value, 0. In 100,000 new-seed cases it showed on two layouts
+      of the orphan layout, each at every jitter, 8 in those 50,000 (case
+      1929 of seed 0xa09c6d2c7ddf7445, a window deaf at its start, and
+      case 641 of seed 0x197a54127b096499, a recovery's window that begins
+      inside a word, over a fake that hears every frame), and never in the
+      gate's layouts.
+      `a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_a_word_across_an_undecoded_gap`
+      pins case 1929's text, cut to four words.
+    The test's count of longer words the boundaries allow, limits E and (ii) and
     the longer copies the seam rule keeps: 26 at CI's seed; over 100,000
-    new-seed cases (jitter 0 to 3, the deaf mix), 678 in the 50,000 of the
-    gate's layouts and 3,107 in 50,000 with orphans at every seam, with 0
-    words, pieces or boundaries lost.
+    new-seed cases (jitter 0 to 3, the deaf mix), 686 in the 50,000 of the
+    gate's layouts and 2,932 in 50,000 with orphans at every seam, with 0
+    words, pieces or boundaries lost and the limit across an undecoded gap
+    as above.
   - Known limit, an order, not a loss: an accepted recovery keeps words
     inside the gap's window on either side of its chunk, so at either seam
     of that chunk the tokens can step back in time, by up to the overlap
