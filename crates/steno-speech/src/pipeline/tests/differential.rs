@@ -874,6 +874,14 @@ struct Losses {
     doubled: usize,
 }
 
+impl Losses {
+    /// Whether the case passes the gate: no word lost, no piece lost, no
+    /// word glued beyond what the boundaries allow.
+    fn passes(&self) -> bool {
+        self.lost.is_empty() && self.pieces.is_empty() && self.glued.is_empty()
+    }
+}
+
 /// Where `run` loses against the old merge ([`Losses`]). `unheard` also
 /// fires on a word both merges drop, as a run's LCS can (between two
 /// recoveries, say), so it flags a case to look at, and the comparison
@@ -1319,7 +1327,7 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
             ..
         } = &losses;
         assert!(
-            lost.is_empty() && pieces.is_empty() && glued.is_empty() && unheard.is_empty(),
+            losses.passes() && unheard.is_empty(),
             "seed {seed:#x} case {case} jitter {jitter} deaf {deaf:?}: lost {:?}, pieces lost {:?}, glued {:?}, heard and lost {:?}\n spans {:?}\n windows {:?}\n old {}\n new {}\n heard {}",
             words(lost),
             words(pieces),
@@ -2083,10 +2091,7 @@ fn a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_a_word_across_an_
         );
         let losses = ref_losses(&case, &run, 2 + jitter);
         assert!(
-            losses.lost.is_empty()
-                && losses.pieces.is_empty()
-                && losses.glued.is_empty()
-                && losses.across_gap == 1,
+            losses.passes() && losses.across_gap == 1,
             "{jitter} {losses:?}"
         );
     }
@@ -2130,13 +2135,7 @@ fn the_boundary_check_never_fails_the_old_merges_text_against_itself() {
     let words = texts.words();
     assert!(words.iter().any(|&(_, of)| !texts.held(of, Extras::Check)));
     let losses = ref_losses(&case, &run, 5);
-    assert!(
-        losses.lost.is_empty()
-            && losses.pieces.is_empty()
-            && losses.glued.is_empty()
-            && losses.unplaced == 0,
-        "{losses:?}"
-    );
+    assert!(losses.passes() && losses.unplaced == 0, "{losses:?}");
     let mut run = run;
     run.new.tokens.push(run.new.tokens[0]);
     let losses = ref_losses(&case, &run, 5);
@@ -2167,8 +2166,7 @@ fn the_boundary_check_fails_each_planted_glue_and_passes_each_limit() {
     let check = |case: &RefCase, run: &mut RefRun, old: &[(usize, usize)], new| {
         run.old = ref_plant(&case.words, old);
         run.new.tokens = ref_plant(&case.words, new);
-        let losses = ref_losses(case, run, 2);
-        !losses.lost.is_empty() || !losses.pieces.is_empty() || !losses.glued.is_empty()
+        !ref_losses(case, run, 2).passes()
     };
     // The layout of `a_gaps_run_after_a_chunk_that_kept_nothing_...`: word
     // 11 in a chunk, word 2 in the gap, a chunk the fake decodes to
