@@ -1,21 +1,8 @@
 //! `EventKit`: the calendar permission and the timed events of a stretch of
-//! time, read as plain values. Swift: `CalendarService` in
-//! `apps/macos/Steno/Services/CalendarService.swift` (the events) and
-//! `PermissionsService` in `apps/macos/Steno/Services/PermissionsService.swift`
-//! (the status and the prompt). Which event names a recording is not
-//! decided here: `steno-services`' `calendar` module maps these values and
-//! `steno_core::pick_event` picks one.
-//!
-//! Only [`request_full_access`] can show the system prompt.
-//! [`events_between`] reads nothing, and creates no event store, unless the
-//! user has already granted full access, so a lookup never prompts.
-//!
-//! Every call goes through `objc2-event-kit`'s bindings, which mark all of
-//! `EventKit` `unsafe`, except the object getters of an event and a
-//! participant: those are sent with `msg_send!` so that a `nil` reads as
-//! `None` (the generated getters assume non-null). Each block below says
-//! what it relies on. The event store is made for the call and released on
-//! the thread that made it, so no `EventKit` object crosses a thread.
+//! time, read as plain values. Only [`request_full_access`] can prompt.
+//! Object getters go through `msg_send!` so a `nil` reads as `None`; the
+//! event store is made and released on the calling thread, so no `EventKit`
+//! object crosses a thread.
 #![allow(unsafe_code)]
 
 use std::sync::Mutex;
@@ -46,8 +33,7 @@ pub enum CalendarAccess {
     WriteOnly,
 }
 
-/// Calendar access as macOS has it recorded for this app, without
-/// prompting.
+/// Calendar access as macOS has it recorded for this app, without prompting.
 #[must_use]
 pub fn access() -> CalendarAccess {
     // SAFETY: a class method with no preconditions: it reads the TCC record
@@ -79,17 +65,13 @@ pub enum CalendarError {
     Request(String),
 }
 
-/// Asks for full access to calendar events
-/// (`requestFullAccessToEventsWithCompletion:`): the system prompt the
-/// first time, the recorded answer after. Blocks until the user answers,
-/// so call it from a thread that may wait (never the main thread). `true`
-/// when access is granted. The prompt needs
-/// `NSCalendarsFullAccessUsageDescription` in the app's `Info.plist`;
-/// without it macOS ends the process.
+/// Asks for full access to calendar events: the system prompt the first
+/// time, the recorded answer after. Blocks until the user answers, so never
+/// call it on the main thread. Needs `NSCalendarsFullAccessUsageDescription`
+/// in `Info.plist`, or macOS ends the process.
 pub fn request_full_access() -> Result<bool, CalendarError> {
     let (sender, receiver) = mpsc::channel::<Result<bool, CalendarError>>();
-    // The block is `Fn`, so the one-shot sender sits in a slot it takes
-    // from.
+    // The block is `Fn`, so the one-shot sender sits in a slot it takes.
     let sender = Mutex::new(Some(sender));
     let completion: RcBlock<dyn Fn(Bool, *mut NSError)> =
         RcBlock::new(move |granted: Bool, error: *mut NSError| {
@@ -153,14 +135,10 @@ pub struct Event {
     pub participants: Vec<Participant>,
 }
 
-/// Every event of every calendar that overlaps `start..end` (seconds
-/// since 1970, UTC), all-day ones included, in no particular order
-/// (`predicateForEventsWithStartDate:endDate:calendars:` with all
-/// calendars, then `eventsMatchingPredicate:`). Without full access it
-/// reads nothing and answers [`CalendarError::NoAccess`]; it never
-/// prompts. Synchronous: it blocks the calling thread for as long as
-/// `EventKit` takes (milliseconds for a day), so call it off the thread that
-/// starts a recording.
+/// Every event of every calendar that overlaps `start..end` (seconds since
+/// 1970, UTC), all-day ones included, in no particular order. Without full
+/// access it reads nothing and answers [`CalendarError::NoAccess`]; it never
+/// prompts. Blocks for as long as `EventKit` takes.
 pub fn events_between(start: f64, end: f64) -> Result<Vec<Event>, CalendarError> {
     let access = access();
     if access != CalendarAccess::FullAccess {
@@ -250,12 +228,8 @@ fn read_participant(participant: &EKParticipant) -> Participant {
 mod tests {
     use super::{CalendarAccess, CalendarError, access, events_between};
 
-    /// The status reads without a prompt (a headless test process is
-    /// never asked), and the read follows it: without full access it
-    /// refuses before it makes an event store, so it can never prompt, and
-    /// names the access it found. A test process normally has no grant
-    /// (CI, Forge over SSH); one started from a terminal the user let read
-    /// the calendar reads events instead.
+    /// Without full access the read refuses before it makes an event store,
+    /// so it never prompts, and names the access it found.
     #[test]
     fn the_read_follows_the_access_and_never_prompts() {
         let now = 1_790_413_200.0;

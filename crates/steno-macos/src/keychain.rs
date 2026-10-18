@@ -1,14 +1,7 @@
 //! The file-based keychain calls `security-framework` has no safe wrapper
-//! for. Swift: `IdentityKeychain` in
-//! `Sources/StenoHandover/Identity/IdentityKeychain.swift`, which stores the
-//! handover identity these calls read back.
-//!
-//! [`export_pkcs12`] is the product's one call: the Swift identity leaves
-//! the keychain once, as PKCS#12 under a passphrase, which macOS lets
-//! through only after the user typed the login password and allowed the
-//! export. The `fixture` calls (feature `testing`) store an identity
-//! the way `IdentityKeychain.store` does, so the keychain test exports
-//! what the Swift app would have stored.
+//! for. [`export_pkcs12`] exports the Swift app's handover identity once,
+//! after the user allows it; the `fixture` calls (feature `testing`) store
+//! an identity the way the Swift app did, so the test exports the same.
 #![allow(unsafe_code)]
 
 use std::ptr;
@@ -36,15 +29,12 @@ pub struct KeychainError {
 impl KeychainError {
     /// `userCanceledErr`: the user chose Deny in the prompt.
     pub const USER_CANCELED: i32 = -128;
-    /// `errSecAuthFailed`: the password in the prompt was wrong, or the
-    /// prompt was dismissed.
+    /// `errSecAuthFailed`: a wrong password, or the prompt was dismissed.
     pub const AUTH_FAILED: i32 = -25293;
-    /// `errSecInteractionNotAllowed`: a prompt was needed while user
-    /// interaction is disabled (a locked screen, a test keychain).
+    /// `errSecInteractionNotAllowed`: a prompt was needed but not allowed.
     pub const INTERACTION_NOT_ALLOWED: i32 = -25308;
 
-    /// Whether the user, or the lack of one, refused the call, as opposed
-    /// to the item being unusable.
+    /// Whether the user, or the lack of one, refused the call.
     #[must_use]
     pub fn is_denied(&self) -> bool {
         matches!(
@@ -62,13 +52,9 @@ impl KeychainError {
     }
 }
 
-/// `identity` (its certificate and private key) as a PKCS#12 file
-/// encrypted under `passphrase`. macOS asks the user for the login password
-/// before the key leaves the keychain, unless this process is already on
-/// the key's access list; the call blocks until the prompt is answered.
-/// The file uses the encryption the Security framework writes, 3DES for
-/// the key bag and 40-bit RC2 for the certificate bag. Swift: none (the
-/// Swift app never exported its identity).
+/// `identity` (certificate and private key) as PKCS#12 encrypted under
+/// `passphrase`. Blocks while macOS asks for the login password, unless
+/// this process is on the key's access list.
 pub fn export_pkcs12(identity: &SecIdentity, passphrase: &str) -> Result<Vec<u8>, KeychainError> {
     let passphrase = CFString::new(passphrase);
     let parameters = key_parameters(passphrase.as_CFTypeRef());
@@ -102,8 +88,7 @@ pub fn export_pkcs12(identity: &SecIdentity, passphrase: &str) -> Result<Vec<u8>
     Ok(data.bytes().to_vec())
 }
 
-/// Version-0 import and export parameters with `passphrase` (null for
-/// none) as their only reference.
+/// Version-0 import and export parameters with `passphrase` (null for none).
 fn key_parameters(passphrase: CFTypeRef) -> SecItemImportExportKeyParameters {
     SecItemImportExportKeyParameters {
         version: SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION,
@@ -117,9 +102,8 @@ fn key_parameters(passphrase: CFTypeRef) -> SecItemImportExportKeyParameters {
     }
 }
 
-/// The keychain test's fixture calls: an identity stored the way
-/// `IdentityKeychain.store` stores it, into a keychain the test owns, and
-/// that keychain's deletion.
+/// The keychain test's fixture: an identity stored the way the Swift app's
+/// `IdentityKeychain.store` stores it, into a keychain the test owns.
 #[cfg(feature = "testing")]
 pub mod fixture {
     use std::ptr;
@@ -165,10 +149,8 @@ pub mod fixture {
         unsafe { CFString::wrap_under_get_rule(key) }
     }
 
-    /// Imports a P-256 private key in SEC1 (RFC 5915) DER into `keychain`
-    /// through the OpenSSL importer, as `IdentityKeychain.store` does
-    /// (#88: nothing else puts a software key into a file keychain). The
-    /// key, or `None` when the keychain already holds it.
+    /// Imports a P-256 private key in SEC1 DER into `keychain` through the
+    /// OpenSSL importer. The key, or `None` when the keychain already holds it.
     pub fn import_sec1_private_key(
         der: &[u8],
         keychain: &SecKeychain,
@@ -216,9 +198,7 @@ pub mod fixture {
             }))
     }
 
-    /// Labels a stored key and tags it with the label's bytes, so Keychain
-    /// Access and a label query find it, as `IdentityKeychain.store`'s
-    /// `SecItemUpdate(key)` does.
+    /// Labels a stored key and tags it with the label's bytes.
     pub fn label_key(key: &SecKey, label: &str) -> Result<(), KeychainError> {
         // SAFETY: both keys are Security framework constants.
         let (class_key, tag_key) =
@@ -236,10 +216,8 @@ pub mod fixture {
         )
     }
 
-    /// Labels a stored certificate, as `IdentityKeychain.store`'s
-    /// `SecItemUpdate(certificate)` does: the file keychain labels a
-    /// certificate with its common name on add and ignores a label in the
-    /// add dictionary.
+    /// Labels a stored certificate: the file keychain ignores a label given
+    /// on add.
     pub fn label_certificate(
         certificate: &SecCertificate,
         label: &str,
@@ -255,8 +233,7 @@ pub mod fixture {
         )
     }
 
-    /// `SecItemUpdate` of the `class` item `item`: sets its label to
-    /// `label`, and `extra` with it.
+    /// Sets the label of the `class` item `item`, and `extra` with it.
     fn relabel(
         class: &CFString,
         item: CFType,
@@ -286,8 +263,7 @@ pub mod fixture {
         KeychainError::check(call, status)
     }
 
-    /// Deletes `keychain`'s file and removes it from the search list, so a
-    /// test leaves nothing behind.
+    /// Deletes `keychain`'s file and removes it from the search list.
     pub fn delete_keychain(keychain: &SecKeychain) -> Result<(), KeychainError> {
         // SAFETY: `keychain` is a live `SecKeychainRef` the borrow keeps
         // alive for the whole call; `SecKeychainDelete` does not release it.
@@ -300,9 +276,8 @@ pub mod fixture {
 mod tests {
     use super::KeychainError;
 
-    /// Deny, a wrong password and a prompt that could not come up read as
-    /// a refusal (the step's Try again, then Always Allow); any other
-    /// status as an item that could not be used.
+    /// Deny, a wrong password and a blocked prompt read as a refusal; any
+    /// other status does not.
     #[test]
     fn only_a_refused_prompt_is_denied() {
         let error = |status| KeychainError {
