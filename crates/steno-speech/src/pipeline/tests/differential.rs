@@ -9,6 +9,7 @@
 //! on the layouts and fakes it runs ([`ref_losses`]).
 
 use super::*;
+use std::collections::HashSet;
 
 fn ref_split(range: Range<usize>, max: usize, overlap: usize, out: &mut Vec<Range<usize>>) {
     let stride = range.len().saturating_sub(overlap);
@@ -287,6 +288,29 @@ struct RefCase {
     samples: Vec<f32>,
     words: Vec<Placed>,
     regions: Option<Vec<Range<usize>>>,
+}
+
+/// `words` put into `samples`, over the fixed speech `regions`.
+fn ref_case(mut samples: Vec<f32>, words: Vec<Placed>, regions: Vec<Range<usize>>) -> RefCase {
+    for word in &words {
+        word.put(&mut samples);
+    }
+    RefCase {
+        samples,
+        words,
+        regions: Some(regions),
+    }
+}
+
+/// Words placed at encoder frames: their pieces, the first piece's frame
+/// and each piece's frames.
+fn ref_at(words: &[(&[u32], usize, usize)]) -> Vec<Placed> {
+    let word = |&(pieces, frame, frames): &(&[u32], usize, usize)| Placed {
+        pieces: pieces.to_vec(),
+        frame,
+        frames,
+    };
+    words.iter().map(word).collect()
 }
 
 /// The old merge's tests' random layout: the 20 words, loud and quiet, one or two
@@ -768,6 +792,16 @@ struct Hearing {
     deaf: (usize, usize, usize),
 }
 
+impl Hearing {
+    /// A fake `jitter` frames off that hears every frame.
+    fn every_frame(jitter: usize) -> Self {
+        Self {
+            jitter,
+            deaf: (0, 0, 1),
+        }
+    }
+}
+
 /// The deaf edges the differential test runs, beside hearing every frame:
 /// a window's first or last 30 or 10 frames on every window, both edges on
 /// every second window, and 15 frames either side on every third.
@@ -873,44 +907,12 @@ struct Losses {
 /// | A word that repeats the word before it is not asked for | The fake's repeat artefact, as in the loss check | the CI seed |
 /// | Pieces compare by placed word and id, not by index | The fake's artefact: of a word's two equal pieces it gives one, from either copy | case 1486 of seed 0x163f372fe94f82f |
 fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> Losses {
-    use std::collections::HashSet;
     let vocab = vocab();
     let old = ref_tally(&run.old, &case.words, slack);
     let new = ref_tally(&run.new.tokens, &case.words, slack);
     let heard = ref_tally(&run.heard, &case.words, slack);
     let reached = ref_tally(&run.reached, &case.words, slack);
-    let start = |w: usize| case.words[w].start(0);
-    // The placed word that starts last before `w`.
-    let previous = |w: usize| {
-        (0..case.words.len())
-            .filter(|&o| start(o) < start(w))
-            .max_by_key(|&o| start(o))
-    };
-    let orphan = |w: usize| !starts_word(vocab.piece(case.words[w].pieces[0]));
-    let repeats = |w: usize| {
-        let word = &case.words[w];
-        previous(w).is_some_and(|o| {
-            let pieces = &case.words[o].pieces;
-            *pieces == word.pieces || pieces.last() == word.pieces.first()
-        })
-    };
-    // Whether `w` follows `head` along a chain of repeats: each word from
-    // `w` back to the one after `head` repeats the word before it, or is an
-    // orphan after a word that does, and `w` repeats `head` if it follows
-    // it.
-    let chain = |w: usize, head: usize| {
-        let mut at = w;
-        while let Some(before) = previous(at) {
-            if !repeats(at) && !(orphan(at) && repeats(before)) {
-                return false;
-            }
-            if before == head {
-                return at != w || repeats(w);
-            }
-            at = before;
-        }
-        false
-    };
+    let repeats = |w: usize| ref_repeats_before(&case.words, w);
     let mut out = Losses {
         doubled: old.iter().zip(&new).filter(|(m, a)| a.0 > m.0).count(),
         ..Losses::default()
@@ -925,68 +927,19 @@ fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> Losses {
         } else if old[w].1 & !new[w].1 != 0 {
             out.pieces.push(w);
         }
-        if reached[w].0 > 0 && new[w].0 == 0 && !repeats && !orphan(w) {
+        if reached[w].0 > 0 && new[w].0 == 0 && !repeats && !ref_orphan(&case.words, &vocab, w) {
             out.unheard.push(w);
         }
     }
-    let before = ref_joins(&run.old, &case.words, &vocab, slack);
-    let after = ref_joins(&run.new.tokens, &case.words, &vocab, slack);
-    let kept: HashSet<(usize, usize)> = before.iter().flatten().filter_map(|p| p.0).collect();
-    // Pairs of placed words `(first, other)` where the old merge's text
-    // holds a piece of `other` in a word that begins with `first`.
-    let glued: HashSet<(usize, usize)> = before
-        .iter()
-        .filter_map(|word| Some((word[0].0?.0, word)))
-        .flat_map(|(head, word)| word.iter().filter_map(move |p| Some((head, p.0?.0))))
-        .collect();
-    // Whether a word that begins with `first` may hold this piece beyond a
-    // word of the old merge's.
-    let extra = |&(place, at): &RefPiece, &(first, head): &RefPiece| {
-        let between = at.min(head)..at.max(head);
-        let cuts = |b: usize| between.start < b && b <= between.end;
-        let crosses = |s: &Span| s.chunk && (cuts(s.owned.start) || cuts(s.owned.end));
-        let follows =
-            |(w, _): (usize, usize), (h, _): (usize, usize)| glued.contains(&(h, w)) || chain(w, h);
-        place.zip(first).is_some_and(|(p, f)| follows(p, f))
-            || place.is_some() && !run.new.spans.iter().any(crosses)
-    };
-    // A piece as its placed word and id: the fake never gives one piece
-    // twice in a row, so of a word's two equal pieces either can come out.
-    let piece = |p: &RefPiece| p.0.map(|(w, i)| (w, case.words[w].pieces[i]));
-    // Whether `word` holds `of` from its first piece on, each piece of
-    // `of` in order, every other piece of `word` an extra one.
-    let holds = |word: &[RefPiece], of: &[RefPiece]| {
-        let mut wanted = of.iter().map(piece).peekable();
-        piece(&word[0]) == piece(&of[0])
-            && word
-                .iter()
-                .all(|p| wanted.next_if_eq(&piece(p)).is_some() || extra(p, &word[0]))
-            && wanted.peek().is_none()
-    };
-    let held = |of: &[RefPiece]| after.iter().any(|word| holds(word, of));
-    // Each of the old merge's words that begins at a word start, up to its
-    // first piece of another placed word.
-    let words: Vec<(usize, &[RefPiece])> = before
-        .iter()
-        .filter_map(|word| {
-            let (w, i) = word[0].0?;
-            if !starts_word(vocab.piece(case.words[w].pieces[i])) {
-                return None;
-            }
-            let own = 1 + word[1..]
-                .iter()
-                .take_while(|p| p.0.is_some_and(|(o, _)| o == w))
-                .count();
-            Some((w, &word[..own]))
-        })
-        .collect();
+    let texts = RefTexts::new(case, run, &vocab, slack);
+    let words = texts.words();
     let leads: HashSet<(usize, usize)> = run
         .leads
         .iter()
         .filter_map(|t| ref_place(t, &case.words, slack))
         .collect();
     for &(w, of) in &words {
-        if repeats(w) || held(of) {
+        if repeats(w) || texts.held(of) {
             continue;
         }
         let rest = of
@@ -994,57 +947,204 @@ fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> Losses {
             .rev()
             .take_while(|p| p.0.is_some_and(|q| leads.contains(&q)))
             .count();
-        if rest > 0 && rest < of.len() && held(&of[..of.len() - rest]) {
+        if rest > 0 && rest < of.len() && texts.held(&of[..of.len() - rest]) {
             out.led += 1;
         } else {
             out.glued.push(w);
         }
     }
-    // The old merge's text-leading orphan, up to its first piece of another
-    // placed word or its first repeated place: alone, after pieces the old
-    // merge did not keep, or after a word whose every word of the old
-    // merge's comes out in another word too.
-    if let Some(lead) = before.first()
-        && let Some((w, i)) = lead[0].0
-        && !starts_word(vocab.piece(case.words[w].pieces[i]))
-    {
+    out.glued.extend(texts.lead_glued(&words));
+    out.glues = texts
+        .after
+        .iter()
+        .filter(|word| {
+            let same = |of: &Vec<RefPiece>| {
+                of.iter()
+                    .map(|p| texts.piece(p))
+                    .eq(word.iter().map(|p| texts.piece(p)))
+            };
+            !texts.before.iter().any(same)
+                && words
+                    .iter()
+                    .any(|&(_, of)| of.len() < word.len() && texts.holds(word, of))
+        })
+        .count();
+    out
+}
+
+/// The placed word that starts last before `w`.
+fn ref_previous(words: &[Placed], w: usize) -> Option<usize> {
+    let start = |w: usize| words[w].start(0);
+    (0..words.len())
+        .filter(|&o| start(o) < start(w))
+        .max_by_key(|&o| start(o))
+}
+
+/// Whether placed word `w` begins with a piece that continues a word.
+fn ref_orphan(words: &[Placed], vocab: &Vocab, w: usize) -> bool {
+    !starts_word(vocab.piece(words[w].pieces[0]))
+}
+
+/// Whether placed word `w` repeats the word before it, or its first piece
+/// that word's last.
+fn ref_repeats_before(words: &[Placed], w: usize) -> bool {
+    let word = &words[w];
+    ref_previous(words, w).is_some_and(|o| {
+        let pieces = &words[o].pieces;
+        *pieces == word.pieces || pieces.last() == word.pieces.first()
+    })
+}
+
+/// Whether placed word `w` follows `head` along a chain of repeats: each
+/// word from `w` back to the one after `head` repeats the word before it,
+/// or is an orphan after a word that does, and `w` repeats `head` if it
+/// follows it.
+fn ref_chain(words: &[Placed], vocab: &Vocab, w: usize, head: usize) -> bool {
+    let mut at = w;
+    while let Some(before) = ref_previous(words, at) {
+        if !(ref_repeats_before(words, at)
+            || ref_orphan(words, vocab, at) && ref_repeats_before(words, before))
+        {
+            return false;
+        }
+        if before == head {
+            return at != w || ref_repeats_before(words, w);
+        }
+        at = before;
+    }
+    false
+}
+
+/// The two texts the boundary check compares ([`ref_losses`]), as placed
+/// pieces grouped into words ([`ref_joins`]).
+struct RefTexts<'a> {
+    case: &'a RefCase,
+    vocab: &'a Vocab,
+    /// The transcript's spans.
+    spans: &'a [Span],
+    /// The old merge's text.
+    before: Vec<Vec<RefPiece>>,
+    /// The transcript's text.
+    after: Vec<Vec<RefPiece>>,
+    /// The places the old merge kept.
+    kept: HashSet<(usize, usize)>,
+    /// Pairs of placed words `(first, other)` where the old merge's text
+    /// holds a piece of `other` in a word that begins with `first`.
+    glued: HashSet<(usize, usize)>,
+}
+
+impl<'a> RefTexts<'a> {
+    fn new(case: &'a RefCase, run: &'a RefRun, vocab: &'a Vocab, slack: usize) -> Self {
+        let before = ref_joins(&run.old, &case.words, vocab, slack);
+        let after = ref_joins(&run.new.tokens, &case.words, vocab, slack);
+        let kept = before.iter().flatten().filter_map(|p| p.0).collect();
+        let glued = before
+            .iter()
+            .filter_map(|word| Some((word[0].0?.0, word)))
+            .flat_map(|(head, word)| word.iter().filter_map(move |p| Some((head, p.0?.0))))
+            .collect();
+        Self {
+            case,
+            vocab,
+            spans: &run.new.spans,
+            before,
+            after,
+            kept,
+            glued,
+        }
+    }
+
+    /// A piece as its placed word and id: the fake never gives one piece
+    /// twice in a row, so of a word's two equal pieces either can come out.
+    fn piece(&self, p: &RefPiece) -> Option<(usize, u32)> {
+        p.0.map(|(w, i)| (w, self.case.words[w].pieces[i]))
+    }
+
+    /// Whether a word that begins with `first` may hold this piece beyond
+    /// a word of the old merge's.
+    fn extra(&self, &(place, at): &RefPiece, &(first, head): &RefPiece) -> bool {
+        let between = at.min(head)..at.max(head);
+        let cuts = |b: usize| between.start < b && b <= between.end;
+        let crosses = |s: &Span| s.chunk && (cuts(s.owned.start) || cuts(s.owned.end));
+        let follows = |(w, _): (usize, usize), (h, _): (usize, usize)| {
+            self.glued.contains(&(h, w)) || ref_chain(&self.case.words, self.vocab, w, h)
+        };
+        place.zip(first).is_some_and(|(p, f)| follows(p, f))
+            || place.is_some() && !self.spans.iter().any(crosses)
+    }
+
+    /// Whether `word` holds `of` from its first piece on, each piece of
+    /// `of` in order, every other piece of `word` an extra one.
+    fn holds(&self, word: &[RefPiece], of: &[RefPiece]) -> bool {
+        let mut wanted = of.iter().map(|p| self.piece(p)).peekable();
+        self.piece(&word[0]) == self.piece(&of[0])
+            && word
+                .iter()
+                .all(|p| wanted.next_if_eq(&self.piece(p)).is_some() || self.extra(p, &word[0]))
+            && wanted.peek().is_none()
+    }
+
+    /// Whether a word of the transcript's text holds `of`.
+    fn held(&self, of: &[RefPiece]) -> bool {
+        self.after.iter().any(|word| self.holds(word, of))
+    }
+
+    /// Each of the old merge's words that begins at a word start, up to its
+    /// first piece of another placed word.
+    fn words(&self) -> Vec<(usize, &[RefPiece])> {
+        self.before
+            .iter()
+            .filter_map(|word| {
+                let (w, i) = word[0].0?;
+                if !starts_word(self.vocab.piece(self.case.words[w].pieces[i])) {
+                    return None;
+                }
+                let own = 1 + word[1..]
+                    .iter()
+                    .take_while(|p| p.0.is_some_and(|(o, _)| o == w))
+                    .count();
+                Some((w, &word[..own]))
+            })
+            .collect()
+    }
+
+    /// The old merge's text-leading orphan, up to its first piece of
+    /// another placed word or its first repeated place, if the transcript's
+    /// text holds it nowhere alone, after pieces the old merge did not
+    /// keep, or after a word whose every word of the old merge's (`words`)
+    /// comes out in another word too.
+    fn lead_glued(&self, words: &[(usize, &[RefPiece])]) -> Option<usize> {
+        let lead = self.before.first()?;
+        let (w, i) = lead[0].0?;
+        if starts_word(self.vocab.piece(self.case.words[w].pieces[i])) {
+            return None;
+        }
         let mut seen = HashSet::new();
         let of = lead
             .iter()
             .take_while(|p| p.0.is_some_and(|(o, _)| o == w) && seen.insert(p.0));
         let of = &lead[..of.count()];
         let copy = |x: usize| {
-            after[x][0].0.is_some_and(|(h, _)| {
+            self.after[x][0].0.is_some_and(|(h, _)| {
                 let mut mine = words.iter().filter(|&&(o, _)| o == h).peekable();
                 mine.peek().is_some()
                     && mine.all(|&(_, of)| {
                         let elsewhere =
-                            |(y, word): (usize, &Vec<RefPiece>)| y != x && holds(word, of);
-                        after.iter().enumerate().any(elsewhere)
+                            |(y, word): (usize, &Vec<RefPiece>)| y != x && self.holds(word, of);
+                        self.after.iter().enumerate().any(elsewhere)
                     })
             })
         };
-        let unkept =
-            |word: &[RefPiece]| word.iter().all(|p| p.0.is_none_or(|q| !kept.contains(&q)));
-        let alone = after.iter().enumerate().any(|(x, word)| {
+        let unkept = |word: &[RefPiece]| {
+            word.iter()
+                .all(|p| p.0.is_none_or(|q| !self.kept.contains(&q)))
+        };
+        let alone = self.after.iter().enumerate().any(|(x, word)| {
             (0..word.len())
-                .any(|k| holds(&word[k..], of) && (k == 0 || unkept(&word[..k]) || copy(x)))
+                .any(|k| self.holds(&word[k..], of) && (k == 0 || unkept(&word[..k]) || copy(x)))
         });
-        if !alone {
-            out.glued.push(w);
-        }
+        (!alone).then_some(w)
     }
-    out.glues = after
-        .iter()
-        .filter(|word| {
-            let same = |of: &Vec<RefPiece>| of.iter().map(piece).eq(word.iter().map(piece));
-            !before.iter().any(same)
-                && words
-                    .iter()
-                    .any(|&(_, of)| of.len() < word.len() && holds(word, of))
-        })
-        .count();
-    out
 }
 
 /// What one seed's differential run counted.
@@ -1709,6 +1809,21 @@ fn a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_the_word_before_i
     }
 }
 
+/// Case 1411 of seed 0x120f372fe94f82d in the orphan layout: 11.2 s,
+/// loud sound from 3.8 s to the end that the fake decodes to nothing, and
+/// the recording begins with an orphan (".s40").
+fn ref_case_1411() -> RefCase {
+    let regions = vec![60_800..179_200];
+    let words = ref_at(&[
+        (&[41, 40], 21, 3),
+        (&[18, 38, 38], 33, 2),
+        (&[41, 25, 25, 41], 49, 6),
+        (&[13], 81, 3),
+        (&[18, 38, 38, 41], 113, 6),
+    ]);
+    ref_case(crafted(11.2, &regions, &[]), words, regions)
+}
+
 #[test]
 fn a_recovery_that_begins_at_an_orphan_can_glue_it_onto_the_word_before_it() {
     // A known limit, text only, from the orphan layout (seed
@@ -1721,25 +1836,10 @@ fn a_recovery_that_begins_at_an_orphan_can_glue_it_onto_the_word_before_it() {
     // begins at the same orphan and keeps it, as it lies in its reach, and
     // its tokens step back into the gap's window: ".s40" follows word 18,
     // and word 18 comes out again. A copy glued on, never a loss.
-    let config = random_config(2, true);
-    let regions = vec![60_800..179_200];
-    let mut samples = crafted(11.2, &regions, &[]);
-    for (pieces, frame, frames) in [
-        (vec![41, 40], 21, 3),
-        (vec![18, 38, 38], 33, 2),
-        (vec![41, 25, 25, 41], 49, 6),
-        (vec![13], 81, 3),
-        (vec![18, 38, 38, 41], 113, 6),
-    ] {
-        Placed {
-            pieces,
-            frame,
-            frames,
-        }
-        .put(&mut samples);
-    }
+    let case = ref_case_1411();
+    let regions = case.regions.as_deref().unwrap();
     for jitter in 0..=1 {
-        let (new, old) = texts(&samples, &regions, &config, jitter);
+        let (new, old) = texts(&case.samples, regions, &random_config(2, true), jitter);
         assert_eq!(new.stats.recoveries_accepted, 1, "{jitter}");
         assert_eq!(
             (new.text().as_str(), old.as_str()),
@@ -1764,11 +1864,8 @@ fn a_gaps_run_drops_the_rest_of_a_word_a_later_recovery_kept_from_its_start() {
     // merge, and does not glue onto word 2 across the empty chunk
     // ("w2s25s26").
     let config = random_config(2, true);
-    for (end, pause, frames, jitter) in [
-        (13.5, 3.2, 10, 0),
-        (13.5, 3.2, 10, 1),
-        (13.0, 3.2, 10, 0),
-    ] {
+    for (end, pause, frames, jitter) in [(13.5, 3.2, 10, 0), (13.5, 3.2, 10, 1), (13.0, 3.2, 10, 0)]
+    {
         let (case, run) = ref_later_recovery_case(&config, (end, pause, frames), jitter);
         let old = quiet_transcriber(config.clone(), 130).render(&run.old);
         assert_eq!(
@@ -1793,7 +1890,7 @@ fn ref_later_recovery_case(
     let s = sample_count;
     let after = end + pause;
     let regions = vec![s(4.0)..s(end), s(after)..s(after + 5.0)];
-    let mut samples = crafted(after + 5.0, &regions, &[]);
+    let samples = crafted(after + 5.0, &regions, &[]);
     let spans = partition(&samples, &regions, &config.chunker);
     let empty = &spans.iter().find(|s| s.chunk).unwrap().window;
     let words = vec![
@@ -1805,19 +1902,8 @@ fn ref_later_recovery_case(
         },
         ref_placed(vec![3], after + 2.0, 4),
     ];
-    for word in &words {
-        word.put(&mut samples);
-    }
-    let case = RefCase {
-        samples,
-        words,
-        regions: Some(regions),
-    };
-    let hearing = Hearing {
-        jitter,
-        deaf: (0, 0, 1),
-    };
-    let run = ref_run(&case, config, 130, hearing);
+    let case = ref_case(samples, words, regions);
+    let run = ref_run(&case, config, 130, Hearing::every_frame(jitter));
     (case, run)
 }
 
@@ -1833,31 +1919,17 @@ fn ref_orphan_led_case() -> (RefCase, RefRun) {
     for loud in &regions[1..] {
         samples[loud.clone()].fill(0.05);
     }
-    let words: Vec<Placed> = [
-        (vec![16, 36, 36, 41], 108, 5),
-        (vec![17, 37, 41], 134, 6),
-        (vec![12], 175, 4),
-        (vec![3, 23, 23, 41], 187, 2),
-        (vec![10, 30], 208, 3),
-        (vec![10, 41], 228, 6),
-        (vec![41], 244, 6),
-        (vec![14], 296, 4),
-    ]
-    .into_iter()
-    .map(|(pieces, frame, frames)| Placed {
-        pieces,
-        frame,
-        frames,
-    })
-    .collect();
-    for word in &words {
-        word.put(&mut samples);
-    }
-    let case = RefCase {
-        samples,
-        words,
-        regions: Some(regions),
-    };
+    let words = ref_at(&[
+        (&[16, 36, 36, 41], 108, 5),
+        (&[17, 37, 41], 134, 6),
+        (&[12], 175, 4),
+        (&[3, 23, 23, 41], 187, 2),
+        (&[10, 30], 208, 3),
+        (&[10, 41], 228, 6),
+        (&[41], 244, 6),
+        (&[14], 296, 4),
+    ]);
+    let case = ref_case(samples, words, regions);
     let hearing = Hearing {
         jitter: 1,
         deaf: (0, 30, 1),
@@ -1920,7 +1992,7 @@ fn the_boundary_check_fails_each_planted_glue_and_passes_each_limit() {
     let config = random_config(1, true);
     let s = sample_count;
     let regions = vec![s(1.0)..s(4.0), s(20.0)..s(23.0)];
-    let mut samples = crafted(40.0, &regions, &[]);
+    let samples = crafted(40.0, &regions, &[]);
     let spans = partition(&samples, &regions, &config.chunker);
     let empty = &spans.iter().filter(|s| s.chunk).nth(1).unwrap().window;
     let words = vec![
@@ -1933,21 +2005,11 @@ fn the_boundary_check_fails_each_planted_glue_and_passes_each_limit() {
         },
         ref_placed(vec![3], 30.0, 4),
     ];
-    for word in &words {
-        word.put(&mut samples);
-    }
-    let case = RefCase {
-        samples,
-        words,
-        regions: Some(regions),
-    };
-    let hearing = Hearing {
-        jitter: 0,
-        deaf: (0, 0, 1),
-    };
-    let mut run = ref_run(&case, &config, 0, hearing);
+    let case = ref_case(samples, words, regions);
+    let mut run = ref_run(&case, &config, 0, Hearing::every_frame(0));
     let main = [(0, 0), (1, 0), (3, 0)];
-    // M1: the rest glued onto word 2 across the empty chunk.
+    // The drain that counted only the chunk run right before: the rest
+    // glued onto word 2 across the empty chunk.
     assert!(check(
         &case,
         &mut run,
@@ -1979,60 +2041,25 @@ fn the_boundary_check_fails_each_planted_glue_and_passes_each_limit() {
         &[(0, 0), (1, 0), (2, 0), (2, 1), (3, 0)]
     ));
 
-    // M1': the rest of word 5, which the old merge kept whole, glued onto
-    // word 2 across the empty chunk; and a copy of it onto word 3, across
-    // only the owned start of word 3's chunk.
+    // The drain that counted only the chunk runs before the gap: the rest
+    // of word 5, which the old merge kept whole, glued onto word 2 across
+    // the empty chunk; and a copy of it onto word 3, across only the owned
+    // start of word 3's chunk.
     let (case, mut run) = ref_later_recovery_case(&random_config(2, true), (13.5, 3.2, 10), 0);
     let main = [(0, 0), (1, 0), (1, 1), (1, 2), (2, 0)];
-    let m1 = [(0, 0), (1, 1), (1, 2), (1, 0), (1, 1), (1, 2), (2, 0)];
-    assert!(check(&case, &mut run, &main, &m1));
+    let later = [(0, 0), (1, 1), (1, 2), (1, 0), (1, 1), (1, 2), (2, 0)];
+    assert!(check(&case, &mut run, &main, &later));
     let copy = [(0, 0), (1, 0), (1, 1), (1, 2), (2, 0), (1, 1), (1, 2)];
     assert!(check(&case, &mut run, &main, &copy));
 
-    // Case 1411 (`a_recovery_that_begins_at_an_orphan_can_glue_it_...`):
-    // the old merge's text begins with the orphan ".s40".
-    let config = random_config(2, true);
-    let regions = vec![60_800..179_200];
-    let mut samples = crafted(11.2, &regions, &[]);
-    let words: Vec<Placed> = [
-        (vec![41, 40], 21, 3),
-        (vec![18, 38, 38], 33, 2),
-        (vec![41, 25, 25, 41], 49, 6),
-        (vec![13], 81, 3),
-        (vec![18, 38, 38, 41], 113, 6),
-    ]
-    .into_iter()
-    .map(|(pieces, frame, frames)| Placed {
-        pieces,
-        frame,
-        frames,
-    })
-    .collect();
-    for word in &words {
-        word.put(&mut samples);
-    }
-    let case = RefCase {
-        samples,
-        words,
-        regions: Some(regions),
-    };
-    let mut run = ref_run(&case, &config, 130, hearing);
+    // Case 1411: the old merge's text begins with the orphan ".s40".
+    let case = ref_case_1411();
+    let mut run = ref_run(&case, &random_config(2, true), 130, Hearing::every_frame(0));
     assert!(ref_losses(&case, &run, 2).glued.is_empty());
-    let main = [
-        (0, 0),
-        (0, 1),
-        (1, 0),
-        (1, 1),
-        (2, 0),
-        (2, 1),
-        (2, 3),
-        (3, 0),
-        (4, 0),
-        (4, 1),
-        (4, 3),
-    ];
+    let main = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1), (2, 3)];
+    let main = [&main[..], &[(3, 0), (4, 0), (4, 1), (4, 3)]].concat();
     // Plant 1: the leading orphan moved onto the old merge's next word.
-    let moved = [main[2..7].to_vec(), main[..2].to_vec(), main[7..].to_vec()].concat();
+    let moved = [&main[2..7], &main[..2], &main[7..]].concat();
     assert!(check(&case, &mut run, &main, &moved));
     // Plant 2: word 18's kept piece dropped in every copy, or moved onto
     // word 13.
@@ -2041,37 +2068,18 @@ fn the_boundary_check_fails_each_planted_glue_and_passes_each_limit() {
     let moved = [&main[..3], &main[4..8], &main[3..4], &main[8..]].concat();
     assert!(check(&case, &mut run, &main, &moved));
 
-    // Limit E: probe-e (`a_recovery_that_missed_a_words_start_...`) and
-    // case 855 pass as they come out, the second at E's exact signature.
-    let config = random_config(1, true);
+    // Limit E: the layout of `a_recovery_that_missed_a_words_start_...`
+    // and case 855 pass as they come out, the second at E's exact
+    // signature.
     let regions = vec![sample_count(3.0)..sample_count(6.5)];
-    let mut samples = crafted(20.0, &regions, &[]);
-    let words = vec![
-        Placed {
-            pieces: vec![5, 25],
-            frame: 4,
-            frames: 6,
-        },
-        Placed {
-            pieces: vec![14],
-            frame: 20,
-            frames: 5,
-        },
-        ref_placed(vec![13], 4.5, 5),
-    ];
-    for word in &words {
-        word.put(&mut samples);
-    }
-    let case = RefCase {
-        samples,
-        words,
-        regions: Some(regions),
-    };
+    let mut words = ref_at(&[(&[5, 25], 4, 6), (&[14], 20, 5)]);
+    words.push(ref_placed(vec![13], 4.5, 5));
+    let case = ref_case(crafted(20.0, &regions, &[]), words, regions);
     let hearing = Hearing {
         jitter: 0,
         deaf: (12, 0, 1),
     };
-    let run = ref_run(&case, &config, 130, hearing);
+    let run = ref_run(&case, &random_config(1, true), 130, hearing);
     let losses = ref_losses(&case, &run, 2);
     assert!(losses.glued.is_empty() && losses.glues == 1, "{losses:?}");
     let (case, run) = ref_orphan_led_case();
