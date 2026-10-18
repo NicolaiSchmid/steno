@@ -110,11 +110,13 @@ fn optional_snapshot_fields_appear_only_when_set() {
     sets(
         "settings.general",
         |general: &mut GeneralSettingsSnapshot| {
+            general.error = Some("Could not read login item state.".into());
             general.error_details = Some("SMAppService returned 1".into());
             general.login_item_note = Some("Your system opens Steno.".into());
             general.updates.managed_note = Some("Updates come from your package manager.".into());
         },
         &[
+            ("/error", json!("Could not read login item state.")),
             ("/errorDetails", json!("SMAppService returned 1")),
             ("/loginItemNote", json!("Your system opens Steno.")),
             (
