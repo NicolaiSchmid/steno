@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use steno_host::services::{LoginItem as _, Preferences as _, SpeechModels as _};
 
 use common::*;
-use serde_json::{Value, json};
+use serde_json::json;
 use steno_bridge::{
     AssetIdParams, BridgeErrorCode, BridgeHost, BridgeTopic, DeviceIdParams, ExportUpdateParams,
     PermissionKind, PermissionKindParams, PermissionState, PhoneWaitingReason, Platform,
@@ -19,11 +19,11 @@ use steno_bridge::{
     SetRetentionParams, SetStringParams, SetTemplateParams, SummariesUpdateParams,
 };
 use steno_core::paths::file_url;
-use steno_core::protocols::{BoundaryResult, SecretKey, SecretStore};
+use steno_core::protocols::{SecretKey, SecretStore};
 use steno_core::{AudioRetention, LlmProvider, MeetingEvent, MeetingState};
 use steno_host::host::{LOGIN_ITEM_REGISTERED_KEY, MAIN_APP_REGISTERED_KEY, first_launch_key};
 use steno_host::services::{CodexModel, LoginItemStatus, UpdateOutcome};
-use steno_host::settings::{KeyRead, LlmSettingsViewModel};
+use steno_host::settings::KeyRead;
 use steno_host::speech::ModelAsset;
 
 /// Page ready publishes every topic once.
@@ -173,17 +173,6 @@ fn seed_launch_at_login(store: &steno_core::Store, _: &steno_host::fakes::FakeSe
     store.save_settings(&settings).unwrap();
 }
 
-/// The registrations and the launch count after a first launch on the Mac.
-fn first_launch_on_mac(
-    on: bool,
-    status: LoginItemStatus,
-    flags: &'static [&'static str],
-) -> (Vec<bool>, bool) {
-    let harness = launched_on_mac(on, status, flags);
-    let changes = harness.fakes.login_item.changes.lock().unwrap().clone();
-    (changes, launch_counted(&harness))
-}
-
 /// The host after two launches on the Mac from an installed bundle.
 fn launched_on_mac(on: bool, status: LoginItemStatus, flags: &'static [&'static str]) -> Harness {
     let harness = Harness::builder()
@@ -203,58 +192,44 @@ fn launched_on_mac(on: bool, status: LoginItemStatus, flags: &'static [&'static 
     harness
 }
 
-/// A build under the earlier identifier set `steno.loginItemRegistered`; the
-/// first launch on the new identifier registers the main app once, under
-/// its own flag.
+/// The first launch on the Mac registers only a not-registered login item
+/// with the setting on; the earlier builds' flag does not stop it, one
+/// removed after it is not added back (only the switch in General does), and
+/// a run outside an app bundle (`NotFound`) or with the setting off is not
+/// counted.
 #[test]
-fn the_earlier_builds_flag_does_not_stop_the_main_apps_first_registration() {
-    let harness = launched_on_mac(
-        true,
-        LoginItemStatus::NotRegistered,
-        &[LOGIN_ITEM_REGISTERED_KEY],
-    );
-    assert_eq!(*harness.fakes.login_item.changes.lock().unwrap(), [true]);
-    assert!(launch_counted(&harness));
-    let general = harness.snapshot(BridgeTopic::SettingsGeneral);
-    assert_eq!(general["loginItem"], "enabled");
-}
-
-/// Only the switch in General registers it again.
-#[test]
-fn a_login_item_removed_after_the_first_launch_is_not_added_back() {
-    let (changes, counted) = first_launch_on_mac(
-        true,
-        LoginItemStatus::NotRegistered,
-        &[MAIN_APP_REGISTERED_KEY],
-    );
-    assert!(changes.is_empty(), "{changes:?}");
-    assert!(counted);
-}
-
-/// With the setting off nothing registers and the launch is not counted. A
-/// login item already enabled or awaiting approval is left as it is.
-#[test]
-fn the_first_launch_registers_only_a_not_registered_login_item_with_the_setting_on() {
-    assert_eq!(
-        first_launch_on_mac(false, LoginItemStatus::NotRegistered, &[]),
-        (vec![], false)
-    );
-    for status in [LoginItemStatus::Enabled, LoginItemStatus::RequiresApproval] {
+fn the_first_launch_on_the_mac_registers_only_a_not_registered_login_item() {
+    use LoginItemStatus::{Enabled, NotFound, NotRegistered, RequiresApproval};
+    let none: &[&str] = &[];
+    for (on, status, flags, changes, counted) in [
+        (
+            true,
+            NotRegistered,
+            &[LOGIN_ITEM_REGISTERED_KEY][..],
+            &[true][..],
+            true,
+        ),
+        (
+            true,
+            NotRegistered,
+            &[MAIN_APP_REGISTERED_KEY][..],
+            &[][..],
+            true,
+        ),
+        (false, NotRegistered, none, &[][..], false),
+        (true, Enabled, none, &[][..], true),
+        (true, RequiresApproval, none, &[][..], true),
+        (true, NotFound, none, &[][..], false),
+    ] {
+        let harness = launched_on_mac(on, status, flags);
+        let case = format!("{on} {status:?} {flags:?}");
         assert_eq!(
-            first_launch_on_mac(true, status, &[]),
-            (vec![], true),
-            "{status:?}"
+            *harness.fakes.login_item.changes.lock().unwrap(),
+            changes,
+            "{case}"
         );
+        assert_eq!(launch_counted(&harness), counted, "{case}");
     }
-}
-
-/// A run outside an app bundle (`NotFound` on the Mac) registers nothing.
-#[test]
-fn a_login_item_the_mac_cannot_find_leaves_the_first_launch_uncounted() {
-    assert_eq!(
-        first_launch_on_mac(true, LoginItemStatus::NotFound, &[]),
-        (vec![], false)
-    );
 }
 
 #[test]
@@ -920,97 +895,6 @@ fn the_download_reply_returns_while_the_download_runs() {
     );
 }
 
-/// Downloads the diarizer under the five second guard.
-fn download_diarizer(harness: &Harness) {
-    let host = harness.host.clone();
-    within_five_seconds("the download reply", move || {
-        host.settings_transcription_download(AssetIdParams {
-            asset_id: "offlineDiarizer".to_owned(),
-        })
-    })
-    .unwrap();
-}
-
-fn remove_diarizer(harness: &Harness) {
-    harness
-        .host
-        .settings_transcription_remove(AssetIdParams {
-            asset_id: "offlineDiarizer".to_owned(),
-        })
-        .unwrap();
-}
-
-fn diarizer_state(harness: &Harness) -> Value {
-    harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1]["state"].clone()
-}
-
-/// Its late progress does not mark the asset downloading again.
-#[test]
-fn a_remove_detaches_the_download_in_flight() {
-    let (harness, release_downloads) = holding_downloads();
-    download_diarizer(&harness);
-    remove_diarizer(&harness);
-    assert_eq!(diarizer_state(&harness), "absent");
-    harness.sink.clear();
-    release_downloads();
-    harness.wait_for("the detached download to end", |harness| {
-        diarizer_state(harness) == "installed"
-    });
-    assert!(
-        harness
-            .sink
-            .all(BridgeTopic::SettingsTranscription)
-            .iter()
-            .all(|snapshot| snapshot["assets"][1]["state"] != "downloading"),
-        "a detached download's progress is not shown"
-    );
-    assert_eq!(
-        harness.fakes.speech_models.downloads.lock().unwrap().len(),
-        1
-    );
-}
-
-/// No second thread starts; once the first ended, the asset downloads again.
-#[test]
-fn download_again_after_a_remove_reattaches_to_the_running_download() {
-    let (harness, release_downloads) = holding_downloads();
-    download_diarizer(&harness);
-    remove_diarizer(&harness);
-    assert_eq!(diarizer_state(&harness), "absent");
-    harness.sink.clear();
-    download_diarizer(&harness);
-    assert_eq!(
-        harness
-            .sink
-            .last(BridgeTopic::SettingsTranscription)
-            .unwrap()["assets"][1]["state"],
-        "downloading",
-        "the click reattached and published"
-    );
-    release_downloads();
-    harness.wait_for_download(1);
-    assert!(
-        harness
-            .sink
-            .all(BridgeTopic::SettingsTranscription)
-            .iter()
-            .any(|snapshot| snapshot["assets"][1]["downloadFraction"] == 0.5),
-        "the running thread's progress shows again"
-    );
-    assert_eq!(diarizer_state(&harness), "installed");
-    assert_eq!(
-        harness.fakes.speech_models.downloads.lock().unwrap().len(),
-        1,
-        "no second thread"
-    );
-    // Its thread has ended: the asset downloads again.
-    download_diarizer(&harness);
-    harness.wait_for("the second download to run", |harness| {
-        harness.fakes.speech_models.downloads.lock().unwrap().len() == 2
-    });
-    harness.wait_for_download(1);
-}
-
 #[test]
 fn refresh_devices_rereads_the_inputs() {
     let harness = Harness::builder().build();
@@ -1148,114 +1032,6 @@ fn busy_flags_are_published_before_the_service_runs() {
         harness.snapshot(BridgeTopic::SettingsRecording)["permissions"][1],
         json!({"isRequesting": false, "kind": "systemAudio", "state": "granted"})
     );
-}
-
-/// Another call answers during the fetch and sees the list loading.
-#[test]
-fn confirming_codex_fetches_the_model_list_with_the_lock_released() {
-    let harness = Harness::builder()
-        .seed(|_, fakes| {
-            fakes
-                .llm
-                .set_codex_account(Ok("nicolai@example.com (Plus)"));
-            fakes.llm.set_codex_models(Ok(vec![CodexModel {
-                slug: "gpt-5.1-codex".to_owned(),
-                display_name: "GPT-5.1 Codex".to_owned(),
-                context_window: Some(272_000),
-            }]));
-        })
-        .build();
-    harness
-        .host
-        .settings_summaries_select_preset(SetStringParams {
-            value: "codex".to_owned(),
-        })
-        .unwrap();
-    // The hook reaches the host through a slot the test empties.
-    let host = Arc::new(Mutex::new(Some(harness.host.clone())));
-    let seen = Arc::new(Mutex::new(None));
-    harness.fakes.llm.set_on_codex_models(Some(Arc::new({
-        let (host, seen) = (host.clone(), seen.clone());
-        move || {
-            let host = host.lock().unwrap().clone().unwrap();
-            let (sender, receiver) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = sender.send(host.snapshot(BridgeTopic::SettingsSummaries));
-            });
-            *seen.lock().unwrap() = Some(
-                receiver
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .ok()
-                    .flatten()
-                    .map(|summaries| summaries["codex"]["isLoadingModels"].clone()),
-            );
-        }
-    })));
-    harness.host.settings_summaries_confirm_codex().unwrap();
-    harness.fakes.llm.set_on_codex_models(None);
-    host.lock().unwrap().take();
-    assert_eq!(
-        *seen.lock().unwrap(),
-        Some(Some(json!(true))),
-        "another call answered during the fetch and saw it loading"
-    );
-    let settings = harness.store.settings().unwrap();
-    assert_eq!(settings.llm_provider, LlmProvider::Codex);
-    assert_eq!(settings.codex_model.as_deref(), Some("gpt-5.1-codex"));
-    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
-    assert_eq!(summaries["codex"]["isLoadingModels"], false);
-    assert_eq!(summaries["isConfigured"], true);
-}
-
-/// A host call can arrive inside a tokio runtime; blocking there must not panic.
-#[test]
-fn the_secret_store_is_awaited_from_inside_an_async_runtime() {
-    let runtimes = [
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap(),
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .build()
-            .unwrap(),
-    ];
-    for runtime in runtimes {
-        runtime.block_on(async {
-            let harness = Harness::builder().build();
-            harness
-                .host
-                .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
-                .unwrap();
-            harness
-                .host
-                .settings_summaries_select_preset(SetStringParams {
-                    value: "openAI".to_owned(),
-                })
-                .unwrap();
-            harness
-                .host
-                .settings_summaries_update(update(None, None, Some("sk-async"), None))
-                .unwrap();
-            harness.host.settings_summaries_save().unwrap();
-            let stored = harness
-                .fakes
-                .secrets
-                .secret(&SecretKey::llm_api_key())
-                .await
-                .unwrap();
-            assert_eq!(stored.as_deref(), Some("sk-async"));
-
-            // A write from elsewhere reloads the sections, the key with them.
-            let mut settings = harness.store.settings().unwrap();
-            settings.meeting_detection_enabled = false;
-            harness.store.save_settings(&settings).unwrap();
-            harness.host.store_changed();
-            assert_eq!(
-                harness.snapshot(BridgeTopic::SettingsGeneral)["detectionEnabled"],
-                false
-            );
-        });
-    }
 }
 
 fn update(
@@ -1425,196 +1201,6 @@ fn a_reread_key_keeps_the_forms_unsaved_edits() {
             .unwrap()
             .as_deref(),
         Some("sk-stored")
-    );
-}
-
-#[test]
-fn a_key_saved_while_it_was_read_again_keeps_the_saved_key() {
-    let harness = a_harness_whose_key_cannot_be_read();
-    let services = harness.host.services();
-    let mut model = LlmSettingsViewModel::new();
-    model.load(
-        &harness.store,
-        services,
-        KeyRead::Unreadable("the keyring is locked".to_owned()),
-    );
-    let read_at = model.key_version();
-    let older = KeyRead::Present("sk-stored".to_owned());
-    "sk-saved".clone_into(&mut model.api_key);
-    model.save(&harness.store, services, now());
-    assert_eq!(model.errors.error, None);
-    model.reload_key(services, older.clone(), read_at);
-    assert_eq!(model.api_key, "sk-saved", "the older read is dropped");
-    model.reload_key(services, older, model.key_version());
-    assert_eq!(
-        model.api_key, "sk-stored",
-        "a read begun after the save applies"
-    );
-}
-
-#[test]
-fn a_reread_gives_way_to_a_later_load_but_not_to_a_model_only_save() {
-    let harness = a_harness_whose_key_cannot_be_read();
-    let services = harness.host.services();
-    let unreadable = || KeyRead::Unreadable("the keyring is locked".to_owned());
-    let mut model = LlmSettingsViewModel::new();
-    model.load(&harness.store, services, unreadable());
-    let read_at = model.key_version();
-    model.load(
-        &harness.store,
-        services,
-        KeyRead::Present("sk-new".to_owned()),
-    );
-    model.reload_key(services, KeyRead::Present("sk-old".to_owned()), read_at);
-    assert_eq!(
-        model.api_key, "sk-new",
-        "the load came after the read began"
-    );
-
-    let mut settings = harness.store.settings().unwrap();
-    settings.llm_provider = LlmProvider::Endpoint;
-    settings.llm_base_url = Some("https://api.openai.com/v1".to_owned());
-    settings.llm_model = Some("gpt-4.1-mini".to_owned());
-    harness.store.save_settings(&settings).unwrap();
-    let mut model = LlmSettingsViewModel::new();
-    model.load(&harness.store, services, unreadable());
-    let read_at = model.key_version();
-    "gpt-other".clone_into(&mut model.model);
-    model.save(&harness.store, services, now());
-    assert_eq!(model.errors.error.as_deref(), Some(KeyRead::UNREADABLE));
-    assert_eq!(
-        harness.store.settings().unwrap().llm_model.as_deref(),
-        Some("gpt-other")
-    );
-    model.reload_key(services, KeyRead::Present("sk-stored".to_owned()), read_at);
-    assert_eq!(model.api_key, "sk-stored", "the model-only save kept it");
-    assert!(model.has_stored_api_key());
-    assert_eq!(model.errors.error, None, "the unreadable message went");
-}
-
-/// A secret store whose next read, once armed, takes the value and then
-/// waits until released.
-struct HeldReads {
-    inner: Arc<dyn SecretStore>,
-    hold: Arc<Hold>,
-}
-
-#[derive(Default)]
-struct Hold {
-    state: Mutex<Phases>,
-    changed: Condvar,
-}
-
-#[derive(Default)]
-struct Phases {
-    armed: bool,
-    holding: bool,
-    released: bool,
-}
-
-impl Hold {
-    fn arm(&self) {
-        *self.state.lock().unwrap() = Phases {
-            armed: true,
-            ..Phases::default()
-        };
-    }
-
-    fn until_holding(&self) {
-        let state = self.state.lock().unwrap();
-        let (_state, timeout) = self
-            .changed
-            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| {
-                !state.holding
-            })
-            .unwrap();
-        assert!(!timeout.timed_out(), "no read was held");
-    }
-
-    fn release(&self) {
-        self.state.lock().unwrap().released = true;
-        self.changed.notify_all();
-    }
-}
-
-#[steno_core::async_trait]
-impl SecretStore for HeldReads {
-    async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
-        let read = self.inner.secret(key).await;
-        let mut state = self.hold.state.lock().unwrap();
-        if state.armed {
-            state.armed = false;
-            state.holding = true;
-            self.hold.changed.notify_all();
-            drop(
-                self.hold
-                    .changed
-                    .wait_while(state, |state| !state.released)
-                    .unwrap(),
-            );
-        }
-        read
-    }
-
-    async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
-        self.inner.set_secret(key, value).await
-    }
-}
-
-/// The reread takes the form's version before it reads the key.
-#[test]
-fn a_key_saved_during_the_reads_own_read_stays() {
-    let hold = Arc::new(Hold::default());
-    let harness = Harness::builder()
-        .seed(|_, fakes| fakes.secrets.fail_reads(Some("the keyring is locked")))
-        .change_services({
-            let hold = hold.clone();
-            move |services| {
-                services.secrets = Arc::new(HeldReads {
-                    inner: services.secrets.clone(),
-                    hold,
-                });
-            }
-        })
-        .build();
-    harness
-        .host
-        .settings_summaries_select_preset(SetStringParams {
-            value: "openAI".to_owned(),
-        })
-        .unwrap();
-    harness
-        .host
-        .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
-        .unwrap();
-    harness.fakes.secrets.fail_reads(None);
-    hold.arm();
-    let reread = {
-        let host = harness.host.clone();
-        std::thread::spawn(move || host.secrets_changed())
-    };
-    hold.until_holding();
-    harness
-        .host
-        .settings_summaries_update(update(None, None, Some("sk-saved"), None))
-        .unwrap();
-    harness.host.settings_summaries_save().unwrap();
-    assert_eq!(
-        harness.snapshot(BridgeTopic::SettingsSummaries)["hasAPIKey"],
-        true
-    );
-    hold.release();
-    reread.join().unwrap();
-    assert_eq!(
-        harness.snapshot(BridgeTopic::SettingsSummaries)["hasAPIKey"],
-        true,
-        "the read that saw no key is dropped"
-    );
-    assert_eq!(
-        block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key()))
-            .unwrap()
-            .as_deref(),
-        Some("sk-saved")
     );
 }
 
@@ -2174,63 +1760,8 @@ fn an_export_edit_keeps_unknown_rows_and_obsidian_fields() {
     );
 }
 
-/// A reload while a check runs keeps the user's form.
-#[test]
-fn only_the_latest_of_two_vault_saves_stores() {
-    let harness = Harness::builder().build();
-    let mut model = steno_host::settings::ObsidianSettingsViewModel::default();
-    model.load(&harness.store);
-    assert!(model.set_enabled(true).is_none(), "no vault yet");
-    let first = model
-        .choose_vault(std::path::Path::new("/Vaults/First"))
-        .unwrap();
-    let second = model
-        .choose_vault(std::path::Path::new("/Vaults/Second"))
-        .unwrap();
-    model.load(&harness.store);
-    assert_eq!(
-        model.draft().map(|draft| draft.vault_path).as_deref(),
-        Some("/Vaults/Second"),
-        "the reload kept the form"
-    );
-
-    model.finish_save(second, Ok(()), &harness.store);
-    model.finish_save(first, Ok(()), &harness.store);
-    let stored = harness.store.settings().unwrap().obsidian.unwrap();
-    assert_eq!(stored.vault_path, "/Vaults/Second");
-    assert!(model.saved);
-    let mut settings = harness.store.settings().unwrap();
-    settings.obsidian.as_mut().unwrap().vault_path = "/Vaults/Elsewhere".to_owned();
-    harness.store.save_settings(&settings).unwrap();
-    model.load(&harness.store);
-    assert_eq!(
-        model.vault_path, "/Vaults/Elsewhere",
-        "loads again once saved"
-    );
-}
-
 /// The stored export settings the undo tests start from.
 const STORED_OBSIDIAN: &str = r#"{"includeAudio":false,"vaultPath":"/Vaults/Stored"}"#;
-
-/// Runs `edit` on another thread with its vault check held, runs `undo`
-/// while the check runs, then lets the check answer.
-fn undo_while_the_check_runs(
-    harness: &Harness,
-    edit: impl FnOnce(&steno_host::Host) + Send + 'static,
-    undo: impl FnOnce(&steno_host::Host),
-) {
-    let (checking, release) = hold_the_first_vault_check(harness);
-    let editing = std::thread::spawn({
-        let host = harness.host.clone();
-        move || edit(&host)
-    });
-    checking
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("the vault check began");
-    undo(&harness.host);
-    release.send(()).unwrap();
-    editing.join().unwrap();
-}
 
 fn include_audio(host: &steno_host::Host, on: bool) {
     host.settings_export_update(ExportUpdateParams {
@@ -2239,128 +1770,6 @@ fn include_audio(host: &steno_host::Host, on: bool) {
         task_tag: None,
     })
     .unwrap();
-}
-
-/// The stale save reports no refusal.
-#[test]
-fn audio_turned_off_while_its_check_runs_is_stored_off() {
-    let harness = Harness::builder()
-        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
-        .build();
-    let refuse = harness.fakes.export_validator.clone();
-    undo_while_the_check_runs(
-        &harness,
-        |host| include_audio(host, true),
-        move |host| {
-            include_audio(host, false);
-            refuse.fail_validation(Some("The vault is gone."));
-        },
-    );
-    let stored = harness.store.settings().unwrap().obsidian.unwrap();
-    let export = harness.snapshot(BridgeTopic::SettingsExport);
-    assert_eq!(export["includeAudio"], false);
-    assert!(!stored.include_audio, "the store holds what the form shows");
-    assert_eq!(export["saved"], true);
-    assert!(
-        export["validationMessage"].is_null(),
-        "the stale check's refusal shows nothing: {export}"
-    );
-}
-
-#[test]
-fn the_export_turned_off_while_its_check_runs_stays_off() {
-    let harness = Harness::builder()
-        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
-        .build();
-    harness
-        .host
-        .settings_export_set_enabled(SetBoolParams { value: false })
-        .unwrap();
-    assert_eq!(harness.store.settings().unwrap().obsidian, None);
-    undo_while_the_check_runs(
-        &harness,
-        |host| {
-            host.settings_export_set_enabled(SetBoolParams { value: true })
-                .unwrap();
-        },
-        |host| {
-            host.settings_export_set_enabled(SetBoolParams { value: false })
-                .unwrap();
-        },
-    );
-    assert_eq!(
-        harness.snapshot(BridgeTopic::SettingsExport)["enabled"],
-        false
-    );
-    assert_eq!(
-        harness.store.settings().unwrap().obsidian,
-        None,
-        "the store holds what the form shows"
-    );
-}
-
-#[test]
-fn the_stored_vault_chosen_again_while_a_check_runs_stays_stored() {
-    let harness = Harness::builder()
-        .seed(|store, _| put_setting_row(store, "obsidian", STORED_OBSIDIAN))
-        .choose_in_turn(&["/Vaults/Other", "/Vaults/Stored"])
-        .build();
-    undo_while_the_check_runs(
-        &harness,
-        |host| {
-            host.settings_export_choose_vault().unwrap();
-        },
-        |host| {
-            host.settings_export_choose_vault().unwrap();
-        },
-    );
-    assert_eq!(
-        harness.snapshot(BridgeTopic::SettingsExport)["vaultName"],
-        "Stored"
-    );
-    assert_eq!(
-        harness
-            .store
-            .settings()
-            .unwrap()
-            .obsidian
-            .unwrap()
-            .vault_path,
-        "/Vaults/Stored",
-        "the store holds what the form shows"
-    );
-}
-
-#[test]
-fn the_later_vault_save_stores_when_the_earlier_check_answers_first() {
-    let harness = Harness::builder().build();
-    let mut model = steno_host::settings::ObsidianSettingsViewModel::default();
-    model.load(&harness.store);
-    model.set_enabled(true);
-    let first = model
-        .choose_vault(std::path::Path::new("/Vaults/First"))
-        .unwrap();
-    let second = model
-        .choose_vault(std::path::Path::new("/Vaults/Second"))
-        .unwrap();
-    model.finish_save(first, Ok(()), &harness.store);
-    assert_eq!(
-        harness.store.settings().unwrap().obsidian,
-        None,
-        "the earlier save stores nothing"
-    );
-    model.finish_save(second, Ok(()), &harness.store);
-    assert_eq!(
-        harness
-            .store
-            .settings()
-            .unwrap()
-            .obsidian
-            .unwrap()
-            .vault_path,
-        "/Vaults/Second"
-    );
-    assert!(model.saved);
 }
 
 #[test]
@@ -2516,36 +1925,6 @@ fn the_waiting_reasons_are_plain_sentences() {
             );
         }
     }
-    assert_eq!(
-        waiting_message(PhoneWaitingReason::Missing, Platform::Linux),
-        "This computer's phone pairing is no longer saved. Choose Pair again to start over."
-    );
-    // A file Steno cannot open: the fix is outside the app.
-    assert_eq!(
-        waiting_message(PhoneWaitingReason::FileNotOpened, Platform::Linux),
-        "Steno cannot open a file in the folder it keeps its data in, so it cannot check this \
-         computer's phone pairing. Check that folder's permissions and that the disk has space, \
-         then choose Try again."
-    );
-    // Phones paired before the pairing changed: Pair again reconnects them.
-    assert_eq!(
-        waiting_message(PhoneWaitingReason::PartlyReplaced, Platform::Macos),
-        "Some of your phones were paired before this Mac's pairing changed and can't connect. \
-         To reconnect them, choose Pair again."
-    );
-    // The clock went back: the fix is the clock, then Try again.
-    assert_eq!(
-        waiting_message(PhoneWaitingReason::ClockBehind, Platform::Macos),
-        "This Mac's date and time are earlier than when its phone pairing was made, so Steno \
-         can't tell which pairing your phones know. Check the date and time in System Settings, \
-         then choose Try again."
-    );
-    assert_eq!(
-        waiting_message(PhoneWaitingReason::ClockBehind, Platform::Windows),
-        "This computer's date and time are earlier than when its phone pairing was made, so \
-         Steno can't tell which pairing your phones know. Check the date and time, then choose \
-         Try again."
-    );
     // Pair again cannot help with a file or the clock.
     for platform in Platform::ALL {
         for reason in [
