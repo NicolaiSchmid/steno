@@ -2145,25 +2145,32 @@ fn a_damaged_recording_reads_kept_incomplete_and_can_still_be_deleted_now() {
 }
 
 /// A run's waiting event sets the progress stage, the store's poll keeps it,
-/// and the run's next event replaces it.
+/// and the run's next event replaces it; a job parked for the recording
+/// resumes at its own stage and lane.
 #[test]
 fn a_waiting_meetings_progress_says_what_it_waits_for() {
     let meeting_id = uuid(0x89);
-    for (event, stage, title) in [
+    for (event, stage, title, (next, lane, lane_count), resumed) in [
         (
             MeetingEvent::ModelsMissing { meeting_id },
             "modelsMissing",
             "Download the speech models in Settings",
+            (PipelineStage::Decode, 0, 1),
+            "decode",
         ),
         (
             MeetingEvent::WaitingForRecording { meeting_id },
             "waiting",
             "Waiting for the recording to finish",
+            (PipelineStage::Transcribe, 1, 2),
+            "transcribe",
         ),
         (
             MeetingEvent::StoreBusy { meeting_id },
             "storeBusy",
             "Waiting for another app to finish with Steno's data",
+            (PipelineStage::Decode, 0, 1),
+            "decode",
         ),
     ] {
         let harness = Harness::builder()
@@ -2189,16 +2196,16 @@ fn a_waiting_meetings_progress_says_what_it_waits_for() {
         harness.host.apply_meeting_event(&MeetingEvent::Progress {
             meeting_id,
             progress: steno_core::ProcessingProgress {
-                stage: PipelineStage::Decode,
+                stage: next,
                 fraction: 0.05,
                 next_fraction: 0.1,
                 estimated_remaining_seconds: 60.0,
                 is_estimate_seeded: false,
-                lane: 0,
-                lane_count: 1,
+                lane,
+                lane_count,
             },
         });
-        assert_eq!(entry()["stage"], "decode");
+        assert_eq!(entry()["stage"], resumed);
     }
 }
 
