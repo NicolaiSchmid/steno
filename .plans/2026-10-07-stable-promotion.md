@@ -2024,12 +2024,14 @@ Each lands before `0.11.0-rc.1`.
       from 8 alternating pairs on the 15-minute meeting's two lanes on Forge
       (load 3.5 to 8): +1.8 % over the seven pairs at load 3.5 to 5.3; the
       eighth ran at load 6.5 to 8, both runs slow. The tail is decoded in
-      full, so ONNX's processing time grows with the quiet audio after the
-      last speech (measured +77 % on 422 s of speech plus 300 s of quiet
-      synthetic room noise, 0 words added); call recordings are bounded by
-      the auto-stop grace (90 s), an in-person recording left running is
-      not. The model-gated tests at the branch: FLEURS 4.865 %, and A9's
-      44.1 kHz bound holds (5.05 % against 5.40 % from 48 kHz).
+      full, so ONNX's processing time grows with the length of the quiet
+      audio after the last speech: a tail costs about what the same length
+      of speech costs (+77 % and +99 % on two files with a 300 s tail of
+      quiet synthetic room noise, 0 words added); call recordings are
+      bounded by the auto-stop grace (90 s), an in-person recording left
+      running is not. The model-gated tests at the branch: FLEURS
+      4.865 %, and A9's 44.1 kHz bound holds (5.05 % against 5.40 % from
+      48 kHz).
     - The crafted cases (`crates/steno-speech/tests/common/crafted.rs`, now
       run by both engines' tests): a quiet lead-in keeps 15 words at -20
       and -26 dB (12 and 0 before), a quiet tail 14 (none before); silence
@@ -2039,6 +2041,8 @@ Each lands before `0.11.0-rc.1`.
       the detector hears no speech is not decoded at all, as before. A
       lead-in longer than a chunk is decoded only as far as the first chunk
       reaches; the next chunk starts just before the speech, as before.
+      "Process again" on an older ONNX meeting transcribes it with these
+      settings, so its transcript can change.
     - Recoveries, which A16a left to this item: FLEURS, the corpus and the
       meeting try none. Over the two lanes of all seven calibration
       meetings (10 hours) one lane tries 15 and accepts 1, the same at
