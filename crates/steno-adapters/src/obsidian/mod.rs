@@ -4,6 +4,4 @@
 mod destination;
 
 pub use crate::rendering::ManagedBlock;
-#[cfg(feature = "testing")]
-pub use destination::DeliveryStep;
 pub use destination::{ObsidianError, ObsidianFolderDestination};
