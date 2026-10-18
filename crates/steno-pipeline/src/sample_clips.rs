@@ -1,63 +1,8 @@
-//! The speakers' sample clips on the disk: each run writes its own files,
-//! the merge names them, and only then are the files of the meeting's
-//! speakers that no speaker row names removed.
-//!
-//! A run writes each clip to `speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`
-//! ([`RecordingLayout::run_sample_clip`]), a name no other run uses, and
-//! syncs it and the folder before the merge (`write`). The merge's
-//! `Store::replace_transcript` switches the speaker rows' `sampleClipURL`s
-//! to the new files in the transaction that keeps their confirmations,
-//! commits durably and returns the rows it replaced. A confirmed speaker
-//! the run gives no clip keeps the clip and range its row named. Only after
-//! that commit does `sweep_after_merge` remove the clip files of the
-//! meeting's speakers that no speaker row names: the clips the earlier rows
-//! named, and the files of a run that ended before its commit (a crash, a
-//! failed write, a failed merge). So at every point each speaker row names
-//! no clip, a whole clip of the run that wrote the row, or, for a
-//! confirmed speaker that run gave no clip, the whole clip its row named
-//! before, and a confirmed speaker's earlier clip is removed only once a
-//! durable commit names the new one:
-//!
-//! | The run ends | The rows name | Left over, for a later sweep |
-//! |--------------|---------------|------------------------------|
-//! | while writing the clips | the earlier clips | the new files written so far |
-//! | before the merge commits | the earlier clips | every new file |
-//! | after the commit, before the sweep | the new clips | the earlier clips |
-//! | during the sweep | the new clips | the earlier clips not yet removed |
-//!
-//! A sweep removes a clip file only when all of these hold:
-//! - The file belongs to one of the meeting's speakers, by the speaker id
-//!   its name starts with: one this run gave a clip or one the merge
-//!   replaced. Speaker ids derive from their meeting's id, so the clips of
-//!   another meeting whose master lies in this folder are never the
-//!   sweep's. A speaker the merge did not replace that this run gave no
-//!   clip keeps its files in this run, under the rule for a dropped
-//!   confirmed speaker below.
-//! - No speaker row of any meeting names it, matched by file name in any
-//!   ASCII case, so a URL that spells the folder another way still keeps
-//!   its clip.
-//! - Its speaker is not a confirmed one this run gave no clip, and it is
-//!   not the clip such a speaker's earlier row named. A confirmed speaker
-//!   that comes back without a clip keeps naming its earlier clip, so the
-//!   clip is kept by name and still plays, and retention removes it with
-//!   audio ([`steno_core::ExpiredAsset::confirmed_with_clips`]). A
-//!   confirmed speaker the re-run drops loses its row but keeps every file
-//!   it had, unnamed and not played. A later run removes such a file only
-//!   if it gives the speaker id the file name starts with a clip, or
-//!   replaces that id's row while the row is unconfirmed; retention
-//!   removes it only when it removes the meeting's audio while that id is
-//!   one of the meeting's speakers. Otherwise the file stays past any
-//!   retention period until the meeting is deleted, as in Swift.
-//!
-//! The sweep runs only inside a run, after its merge, on the meeting's own
-//! folder ([`RecordingLayout::own_folder`]), while the run holds the meeting
-//! in the in-flight set, so no other run of the meeting has uncommitted
-//! clips there. A meeting whose master is not in its own folder writes no
-//! clip and sweeps nothing. When retention removes a meeting's audio, it
-//! also removes the clip files of the meeting's speakers that no row names
-//! ([`crate::retention`]). The clips Swift wrote
-//! (`speakers/<SPEAKER-UUID>.wav`) stay while a row names them. Rust only:
-//! Swift writes each clip in place, over the file a row may name.
+//! The speakers' sample clips on the disk. A run writes each clip under a
+//! name of its own (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), the merge's
+//! commit points the speaker rows at the new files, and only then does the
+//! sweep remove the meeting's speakers' clips that no row names, sparing a
+//! confirmed speaker without a new clip, so every row names a whole clip or none.
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -74,7 +19,7 @@ use crate::fixtures::{int16, wav_data};
 use crate::pipeline::BACKGROUND_RUN_LOG;
 
 /// A point in a run's clip handling where a test fails the step or ends
-/// the run as a crash would ([`ClipProbe`]).
+/// the run as a crash would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipStep {
     /// The clip at this index is on the disk under its run's name.
@@ -87,23 +32,18 @@ pub enum ClipStep {
     Removed(usize),
 }
 
-/// Called at each [`ClipStep`] (`PipelineDependencies::with_clip_probe`).
-/// An error is the step's failure: the write of that clip fails, the merge
-/// fails, the sweep is skipped, or it stops after that removal. A panic
+/// Called at each [`ClipStep`]. An error is the step's failure; a panic
 /// ends the run there, as a crash would.
 pub type ClipProbe = Arc<dyn Fn(ClipStep) -> std::io::Result<()> + Send + Sync>;
 
-/// Calls `probe`, when there is one, at `step`.
 pub(crate) fn reach(probe: Option<&ClipProbe>, step: ClipStep) -> std::io::Result<()> {
     probe.map_or(Ok(()), |probe| probe(step))
 }
 
-/// Writes each of `clips` to its path, a run's own name under `layout`'s
-/// `speakers/` that no file has yet, durably: the folder is created with
-/// its entry synced, and each file is synced and its folder entry with it
-/// ([`files::replace_file`]), so a commit that names them names files on
-/// the disk. A failure removes the files this call wrote and leaves every
-/// other file alone, so the clips the speaker rows name stay playable.
+/// Writes each of `clips` durably to its run's own path under `layout`'s
+/// `speakers/`, so a commit that names them names files on the disk. A
+/// failure removes the files this call wrote and leaves every other file
+/// alone.
 pub(crate) fn write(
     layout: &RecordingLayout,
     clips: &[(PathBuf, AudioBuffer16k)],
@@ -124,16 +64,12 @@ pub(crate) fn write(
     Ok(())
 }
 
-/// The sweep of a run, once its merge committed `committed`, the rows this
-/// run wrote as `diarize` built them (before the store restored the kept
-/// confirmations and clips), in place of `replaced`, the rows
-/// `Store::replace_transcript` returned: [`sweep`] over the speakers the
-/// merge replaced and those this run gave a clip, keeping every clip a row
-/// now names. A confirmed speaker this run gave no clip keeps every file of
-/// its own and the clip its earlier row named: a dropped confirmed speaker's
-/// earlier clip, which a merge may have left under another speaker's id
-/// (see the module doc). Reads the rows first and removes nothing when that
-/// read fails. The caller holds the meeting in the in-flight set.
+/// The sweep of a run once its merge committed `committed` (the rows as
+/// `diarize` built them) in place of `replaced`: [`sweep`] over the
+/// speakers the merge replaced and those this run gave a clip, keeping every
+/// clip a row names and a confirmed clip-less speaker's files. Removes
+/// nothing when reading the rows fails. The caller holds the meeting in the
+/// in-flight set.
 pub(crate) fn sweep_after_merge(
     store: &Store,
     directory: &Path,
@@ -158,20 +94,18 @@ pub(crate) fn sweep_after_merge(
     Ok(sweep(directory, &owners, &named, probe))
 }
 
-/// Removes every clip file in `directory` of one of `owners`, by the
-/// speaker id its name starts with, that none of the `named` URLs names, by
-/// file name in any ASCII case, and returns the files removed: WAV files
-/// and the temporaries of an unfinished write. On Windows a file another
-/// handle holds is tried again for a moment ([`busy_file::retried`]); a
-/// file that cannot be removed is skipped and left for the next sweep.
+/// Removes every clip file in `directory` of one of `owners` that none of
+/// the `named` URLs names (by file name in any ASCII case), WAV files and
+/// unfinished temporaries alike, and returns the files removed. A file that
+/// cannot be removed is left for the next sweep.
 pub(crate) fn sweep(
     directory: &Path,
     owners: &BTreeSet<Uuid>,
     named: &[String],
     probe: Option<&ClipProbe>,
 ) -> Vec<PathBuf> {
-    // Both apps spell the ids in upper case, but a file system that
-    // ignores case plays a URL in any case, so such a URL keeps its file.
+    // A file system that ignores case plays a URL in any case, so such a URL
+    // keeps its file.
     let named: BTreeSet<OsString> = named
         .iter()
         .filter_map(|url| Some(file_url_path(url)?.file_name()?.to_ascii_uppercase()))
@@ -208,11 +142,9 @@ pub(crate) fn sweep(
     removed
 }
 
-/// The speaker a clip file belongs to, by the id its name starts with,
-/// for a clip (`<SPEAKER-UUID>.wav`, `<SPEAKER-UUID>-<RUN-UUID>.wav`) or
-/// the temporary of an unfinished clip write: `.<name>.<random>.partial`
-/// from [`files::replace_file`], which [`write`] uses, and `.wav.partial`
-/// and `.wav.part` from the writers before it. `None` for any other file.
+/// The speaker a clip file belongs to, by the id its name starts with, for
+/// a clip or the temporary of an unfinished clip write (`.partial`,
+/// `.wav.partial`, `.wav.part`). `None` for any other file.
 fn clip_speaker(name: &OsStr) -> Option<Uuid> {
     let name = name.to_str()?;
     if ![".wav", ".partial", ".part"]
@@ -260,17 +192,14 @@ mod tests {
         path.file_name().unwrap().to_string_lossy().into_owned()
     }
 
-    /// Writes `b"clip"` to each of `paths`.
     fn put(paths: &[&PathBuf]) {
         for path in paths {
             std::fs::write(path, b"clip").unwrap();
         }
     }
 
-    /// The sweep keeps every file a URL names, a run's new clip and an old
-    /// fixed-name clip alike, and every file of a speaker it was not given
-    /// (another meeting's whose master lies here), and removes the unnamed
-    /// clips and temporaries of its speakers only; other files stay.
+    /// The sweep removes only its speakers' unnamed clips and temporaries;
+    /// named files, other speakers' files and other files stay.
     #[test]
     fn the_sweep_removes_only_this_meetings_clips_no_row_names() {
         let dir = tempfile::tempdir().unwrap();
@@ -310,9 +239,8 @@ mod tests {
         );
     }
 
-    /// A URL that spells the folder another way, through a link, still
-    /// keeps the clip it names: the sweep matches by file name in any
-    /// ASCII case.
+    /// A URL that spells the folder another way, through a link, still keeps
+    /// the clip it names.
     #[cfg(unix)]
     #[test]
     fn a_url_through_another_spelling_of_the_folder_keeps_its_clip() {
@@ -340,8 +268,7 @@ mod tests {
         assert!(clip.exists());
     }
 
-    /// A URL that spells the clip's name in another case keeps the clip:
-    /// a file system that ignores case plays it.
+    /// A URL that spells the clip's name in another case keeps the clip.
     #[test]
     fn a_url_in_another_case_keeps_its_clip() {
         let dir = tempfile::tempdir().unwrap();
@@ -363,15 +290,9 @@ mod tests {
         assert!(clip.exists());
     }
 
-    /// After the merge only the unnamed files of the sweep's owners go. A
-    /// confirmed speaker that the re-run dropped, or whose new row has no
-    /// clip, keeps every file it had and the clip its row named under
-    /// another speaker's id, and a speaker the merge did not replace that
-    /// this run gave no clip keeps its files. A confirmed speaker given a
-    /// new clip and an unconfirmed one lose their earlier clips, an
-    /// unconfirmed speaker the re-run drops loses its clip, a speaker new
-    /// in this run that it gave a clip loses a crashed run's leftover, and
-    /// every clip a row names stays.
+    /// After the merge only the unnamed files of the sweep's owners go;
+    /// confirmed speakers without a new clip keep theirs, and every clip a
+    /// row names stays.
     #[test]
     fn after_the_merge_only_the_owners_unnamed_clips_go() {
         let dir = tempfile::tempdir().unwrap();
@@ -493,8 +414,8 @@ mod tests {
         assert!(unnamed.exists());
     }
 
-    /// A write that fails partway removes the files it wrote and leaves
-    /// the clip a row names as it was, the same speaker's included.
+    /// A write that fails partway removes the files it wrote and leaves the
+    /// named clips alone.
     #[test]
     fn a_failed_write_removes_its_own_files_and_keeps_the_earlier_clip() {
         let dir = tempfile::tempdir().unwrap();

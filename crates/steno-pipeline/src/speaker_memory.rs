@@ -1,8 +1,6 @@
 //! `SpeakerMemory` over the persons in the store: cosine ranking against
 //! every stored voice. The threshold and margin live in the trait's
-//! provided `match_voice`; this type only ranks. Voices themselves are
-//! written by the store when speakers are confirmed or merged.
-//! Swift: `Sources/StenoSpeech/Speakers/CosineSpeakerMemory.swift`.
+//! provided `match_voice`; this type only ranks.
 
 use std::sync::Arc;
 

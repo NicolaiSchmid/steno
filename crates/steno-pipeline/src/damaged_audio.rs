@@ -1,21 +1,8 @@
-//! What of each meeting's recording the decoder could not read and
-//! replaced by silence of its length
-//! ([`AudioBuffer16k::damage`](steno_core::AudioBuffer16k::damage): the
-//! parts and the seconds of silence), kept in `damaged-audio.json` in the
-//! support directory (meeting id to damage), so the meeting's detail can
-//! say so after the run. The database has no column for it, and the Swift
-//! app never reads the file, so a rollback ignores it. Rust only:
-//! `AVFoundation` conceals a damaged packet and reports nothing.
-//!
-//! The decode stage records the damage of every run, so a meeting
-//! processed again shows what that run found; a meeting whose recording
-//! decoded clean has no entry.
-//!
-//! A `damaged-audio.json` that is there but cannot be read or does not
-//! parse is left alone, and every meeting's recording counts as possibly
-//! damaged until it reads again ([`DamagedAudio::may_be_damaged`]); the
-//! launch logs this once. To clear it, remove the file (the meetings then
-//! lose their warnings) or repair its JSON.
+//! What of each meeting's recording the decoder could not read and replaced
+//! by silence, kept in `damaged-audio.json` in the support directory so the
+//! meeting's detail can say so. The decode stage records every run's damage;
+//! a clean decode has no entry. A file that cannot be read or parsed is left
+//! alone, and every recording counts as possibly damaged until it reads.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,21 +12,14 @@ use uuid::Uuid;
 
 use crate::files::MeetingValues;
 
-/// The damage of each meeting's recording, as its last decode counted it,
-/// replaced with [`write_json`](crate::files::write_json) on every change.
+/// The damage of each meeting's recording, as its last decode counted it.
 ///
-/// Unlike [`ExportRetries`](crate::ExportRetries), whose counts may be lost,
-/// this file is never set aside: a file that is there but cannot be read
-/// or does not parse stays as it is and is never written, and the store
-/// then does not [know](Self::known) which meetings are damaged. A missing
-/// file holds no damage. A write that fails is returned by
-/// [`record`](Self::record), and the decode stage fails the meeting, which
-/// keeps its recording.
-///
-/// [`may_be_damaged`](Self::may_be_damaged) says yes for every meeting
-/// while the store does not know, for the retention rule to ask: it is to
-/// keep such a meeting's recording as it keeps an incomplete one's, and
-/// leave the user's own keep or delete alone.
+/// Unlike [`ExportRetries`](crate::ExportRetries), this file is never set
+/// aside: one that cannot be read or parsed stays as it is and is never
+/// written, and [`may_be_damaged`](Self::may_be_damaged) then says yes for
+/// every meeting, so retention keeps their recordings. A write that fails is
+/// returned by [`record`](Self::record), and the decode stage fails the
+/// meeting.
 ///
 /// ```
 /// use steno_core::AudioDamage;
@@ -63,7 +43,6 @@ pub struct DamagedAudio {
 }
 
 impl DamagedAudio {
-    /// The file's name in the support directory.
     pub const FILE_NAME: &'static str = "damaged-audio.json";
 
     /// The damage in `path`, read now.
@@ -95,15 +74,13 @@ impl DamagedAudio {
         }
     }
 
-    /// The damage in [`FILE_NAME`](Self::FILE_NAME) in `directory` (the
-    /// support directory), read now.
+    /// The damage in [`FILE_NAME`](Self::FILE_NAME) in `directory`, read now.
     #[must_use]
     pub fn in_directory(directory: &Path) -> Self {
         Self::new(directory.join(Self::FILE_NAME))
     }
 
-    /// Damage that lives in memory only and is never written, for tests
-    /// and a caller without a support directory.
+    /// Damage that lives in memory only and is never written.
     #[must_use]
     pub fn in_memory() -> Self {
         DamagedAudio {
@@ -112,40 +89,36 @@ impl DamagedAudio {
         }
     }
 
-    /// What of `meeting_id`'s recording was replaced by silence, as far as
-    /// the store knows; none when it has no entry.
+    /// What of `meeting_id`'s recording was replaced by silence; none when it
+    /// has no entry.
     #[must_use]
     pub fn damage(&self, meeting_id: Uuid) -> AudioDamage {
         self.damage.get(meeting_id).unwrap_or_default()
     }
 
-    /// The parts of `meeting_id`'s recording replaced by silence, as far as
-    /// the store knows.
+    /// The parts of `meeting_id`'s recording replaced by silence.
     #[must_use]
     pub fn parts(&self, meeting_id: Uuid) -> u32 {
         self.damage(meeting_id).parts
     }
 
-    /// Whether the file read: false while one is there that could not be
-    /// read or parsed, so a meeting with no entry may still be damaged.
+    /// Whether the file read; while false a meeting with no entry may still
+    /// be damaged.
     #[must_use]
     pub fn known(&self) -> bool {
         self.known
     }
 
-    /// Whether `meeting_id`'s recording has damaged parts or was salvaged
-    /// ([`AudioDamage::salvaged`]), or may be either because the store does
-    /// not [know](Self::known): what the retention rule is to keep a
+    /// Whether `meeting_id`'s recording has damaged parts, was salvaged, or
+    /// may be either because the file did not read: what retention keeps a
     /// recording for.
     #[must_use]
     pub fn may_be_damaged(&self, meeting_id: Uuid) -> bool {
         !self.known || !self.damage(meeting_id).is_none()
     }
 
-    /// `damage` for `meeting_id`, replacing what an earlier run counted;
-    /// none removes the meeting. The error of a write that failed, after
-    /// which the damage stays in memory; a store that may not write keeps
-    /// it in memory without one.
+    /// Records `damage` for `meeting_id`, replacing an earlier run's; none
+    /// removes the meeting. On a failed write the damage stays in memory.
     pub fn record(&self, meeting_id: Uuid, damage: AudioDamage) -> std::io::Result<()> {
         self.damage.change(|all| {
             if damage.is_none() {
@@ -156,8 +129,8 @@ impl DamagedAudio {
         })
     }
 
-    /// Keeps only the damage of the meetings `keep` accepts: the launch
-    /// drops the meetings that were deleted. A failed write is logged.
+    /// Keeps only the damage of the meetings `keep` accepts; a failed write
+    /// is logged.
     pub fn retain(&self, keep: impl FnMut(Uuid) -> bool) {
         self.damage.retain(keep);
     }
@@ -175,8 +148,8 @@ mod tests {
         }
     }
 
-    /// The damage survives a restart, none removes the meeting from the
-    /// file, and the launch drops the meetings it does not keep.
+    /// The damage survives a restart, none removes the meeting, and the
+    /// launch drops the meetings it does not keep.
     #[test]
     fn damage_is_kept_across_launches_and_cleared_by_a_clean_decode() {
         let dir = tempfile::tempdir().unwrap();
@@ -201,9 +174,8 @@ mod tests {
         assert!(!DamagedAudio::in_directory(dir.path()).may_be_damaged(meeting));
     }
 
-    /// A salvaged recording (no index, read up to where it was cut off or
-    /// could not be read) counts as damaged with no part lost, so the
-    /// retention rule keeps it, also after a restart.
+    /// A salvaged recording counts as damaged with no part lost, also after
+    /// a restart.
     #[test]
     fn a_salvaged_recording_may_be_damaged_with_no_part_lost() {
         let dir = tempfile::tempdir().unwrap();
@@ -222,9 +194,8 @@ mod tests {
         assert!(!relaunched.may_be_damaged(Uuid::new_v4()));
     }
 
-    /// A file that does not parse stays as it is and is never written, and
-    /// every meeting may then be damaged, also after a restart: the marks
-    /// it held are not lost by starting empty.
+    /// A file that does not parse is never written, and every meeting may
+    /// then be damaged.
     #[test]
     fn a_file_that_does_not_parse_leaves_every_meeting_possibly_damaged() {
         let dir = tempfile::tempdir().unwrap();
@@ -241,8 +212,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
     }
 
-    /// A file that cannot be read (a folder in its place) is not written
-    /// either, and leaves every meeting possibly damaged.
+    /// A file that cannot be read is not written either.
     #[test]
     fn a_file_that_cannot_be_read_leaves_every_meeting_possibly_damaged() {
         let dir = tempfile::tempdir().unwrap();
@@ -254,9 +224,8 @@ mod tests {
         assert!(dir.path().join(DamagedAudio::FILE_NAME).is_dir());
     }
 
-    /// A write that fails (a support directory that may not be written) is
-    /// an error for the decode stage to fail the meeting with; a clean
-    /// decode, which changes nothing, writes nothing and succeeds.
+    /// A failed write is an error; a clean decode writes nothing and
+    /// succeeds.
     #[cfg(unix)]
     #[test]
     fn a_write_that_fails_is_an_error() {

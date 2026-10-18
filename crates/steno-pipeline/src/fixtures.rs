@@ -1,13 +1,7 @@
 //! The one synthetic-audio generator and the Int16 WAV writer: seeded
-//! `SplitMix64` noise, integer phase accumulators, byte-identical on every
-//! machine and to the Swift generator (`Tests/Fixtures/MANIFEST.sha256`
-//! pins both). `steno dev fixtures generate` writes these files; the
-//! pipeline's sample clips use the writer; `two_lane_call` (behind the
-//! `testing` feature) lays the
-//! conversation out as a recording for the tests across crates, and
-//! `CapturedLog` captures what they log.
-//! Swift: `Sources/StenoCore/Testing/FixtureGenerator.swift`,
-//! `Sources/StenoCore/Audio/WAVWriter.swift`.
+//! `SplitMix64` noise and integer phase accumulators, byte-identical on
+//! every machine (`Tests/Fixtures/MANIFEST.sha256` pins them). Behind the
+//! `testing` feature, `two_lane_call` and `CapturedLog` serve the tests.
 
 use std::path::Path;
 
@@ -27,7 +21,6 @@ const TWO_POW_32: f64 = 4_294_967_296.0;
 
 /// Speaker A of the two-tone conversation: fundamental plus one harmonic.
 const VOICE_A: [(f64, f64); 2] = [(330.0, 0.35), (660.0, 0.15)];
-/// Speaker B.
 const VOICE_B: [(f64, f64); 2] = [(220.0, 0.35), (880.0, 0.15)];
 
 /// Every case in path order.
@@ -119,9 +112,8 @@ pub fn noise(seconds: f64, seed: u64, amplitude: f64) -> Vec<i16> {
         .collect()
 }
 
-/// Speaker A and B alternate in 1.5 s turns with 0.1 s of silence between
-/// them; A speaks on `mic`, B on `system`. Passing one lane yields that
-/// lane's sidecar, both lanes the mixed room recording.
+/// Speaker A (on `mic`) and B (on `system`) alternate in 1.5 s turns with
+/// 0.1 s of silence; one lane yields its sidecar, both the mixed recording.
 #[must_use]
 pub fn conversation(seconds: f64, lanes: &[AudioLane]) -> Vec<i16> {
     let count = count(seconds);
@@ -176,7 +168,7 @@ fn quantize(value: f64) -> i16 {
     sample
 }
 
-/// Float samples to Int16 the way `WAVWriter.int16` did.
+/// Float samples to Int16, clamped.
 #[must_use]
 pub fn int16(samples: &[f32]) -> Vec<i16> {
     samples
@@ -212,16 +204,14 @@ pub fn wav_data(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
     data
 }
 
-/// Writes a 16 kHz mono Int16 WAV atomically (`write_atomically`).
+/// Writes a 16 kHz mono Int16 WAV atomically.
 pub fn write_wav(path: &Path, samples: &[i16]) -> std::io::Result<()> {
     write_atomically(path, &wav_data(samples, 16_000, 1))
 }
 
-/// Writes beside `path`, its extension replaced by `wav.part`, then renames
-/// that temporary over `path`, tried again on Windows while a file is busy
-/// ([`busy_file::rename`]): a freshly written WAV is what an antivirus
-/// client scans first. A failure removes the temporary and leaves `path` as
-/// it was.
+/// Writes a `wav.part` temporary beside `path` and renames it over `path`,
+/// retried on Windows while an antivirus scan holds it. A failure removes
+/// the temporary and leaves `path` as it was.
 fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let temporary = path.with_extension("wav.part");
     let written =
@@ -253,7 +243,6 @@ impl SplitMix64 {
     }
 }
 
-/// What only tests need: behind the `testing` feature.
 #[cfg(feature = "testing")]
 mod testing {
     use std::collections::BTreeMap;
@@ -268,10 +257,9 @@ mod testing {
 
     use super::{conversation, write_wav};
 
-    /// The six-second call recorded into `audio_folder` for `meeting_id`: the
-    /// two-lane master and the mic and system sidecars of [`conversation`]
-    /// (the committed `audio/conversation-*-6s.wav`), and the asset naming
-    /// them, its id derived from the meeting's.
+    /// The six-second call recorded into `audio_folder` for `meeting_id`:
+    /// the two-lane master, the mic and system sidecars, and the asset naming
+    /// them.
     pub fn two_lane_call(
         audio_folder: &Path,
         meeting_id: Uuid,
@@ -301,10 +289,8 @@ mod testing {
         })
     }
 
-    /// What a test binary logs at `warn` and above, from the first
-    /// [`CapturedLog::warnings`] on: the process-wide subscriber, so a line
-    /// is captured whichever thread writes it. Every test in the binary logs
-    /// into it, so a test picks its own lines out by an id of its own.
+    /// What a test binary logs at `warn` and above, through the process-wide
+    /// subscriber; tests pick their own lines out by an id of their own.
     #[derive(Clone, Default)]
     pub struct CapturedLog(Arc<Mutex<Vec<u8>>>);
 
@@ -364,9 +350,8 @@ mod testing {
 mod tests {
     use super::*;
 
-    /// A WAV that cannot be moved over its path (a folder holds the name)
-    /// fails the write, leaves the folder as it was and leaves no temporary
-    /// behind. On Windows the refused move is tried again first.
+    /// A WAV that cannot be moved over its path fails the write and leaves no
+    /// temporary.
     #[test]
     fn a_failed_write_leaves_no_temporary_behind() {
         let directory = tempfile::tempdir().unwrap();
@@ -382,8 +367,7 @@ mod tests {
         assert_eq!(std::fs::read(path.join("kept")).unwrap(), b"kept");
     }
 
-    /// A write that fails before its move (a folder holds the temporary's
-    /// name) leaves the earlier file at `path` as it was.
+    /// A write that fails before its move leaves the earlier file as it was.
     #[test]
     fn a_failed_write_keeps_the_earlier_file() {
         let directory = tempfile::tempdir().unwrap();

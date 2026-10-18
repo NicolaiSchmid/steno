@@ -1,8 +1,6 @@
-//! The pipeline over core's fakes: the stage order, what each stage
-//! persists, the no-LLM path, failure attribution, deferred retention,
-//! launch recovery and the learned rates.
-//! Swift: `Tests/StenoCoreTests/PipelineIntegrationTests.swift`,
-//! `StageTests.swift`, `RetentionSweepTests.swift`.
+//! The pipeline over core's fakes: stage order, what each stage persists,
+//! the no-LLM path, failure attribution, retention, launch recovery and the
+//! learned rates.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -41,9 +39,7 @@ impl MonotonicClock for TickingClock {
     }
 }
 
-/// The dispatcher the adapters crate provides, reduced to what the stages
-/// need: one `Delivery` row per destination, the stored receipt as
-/// `previous`.
+/// The adapters' dispatcher reduced to one `Delivery` row per destination.
 struct FakeDispatcher {
     store: Arc<Store>,
     destinations: Vec<Arc<dyn Destination>>,
@@ -96,8 +92,7 @@ struct World {
     now: DateTime<Utc>,
 }
 
-/// `destination` builds the one fake destination over the vault path,
-/// `None` runs without any.
+/// `destination` builds the one fake destination over the vault path.
 fn world(
     summarizer: bool,
     destination: Option<fn(&Path) -> FakeDestination>,
@@ -178,13 +173,11 @@ fn world_with(
     }
 }
 
-/// Reads the 16 kHz mono WAV fixtures and logs the lanes it decoded; the
-/// real decoders live in `steno-audio`.
+/// Reads the 16 kHz mono WAV fixtures and logs the lanes it decoded.
 #[derive(Default)]
 struct WavDecoder {
     decodes: Mutex<Vec<AudioLane>>,
-    /// What each decode reports it replaced by silence, as a damaged AAC
-    /// decode does; none by default.
+    /// What each decode reports it replaced by silence; none by default.
     damage: Mutex<steno_core::AudioDamage>,
 }
 
@@ -243,15 +236,13 @@ fn call_asset(audio: &Path, meeting_id: Uuid, retention: AudioRetention) -> Audi
     steno_pipeline::fixtures::two_lane_call(audio, meeting_id, retention).unwrap()
 }
 
-/// Six seconds of digital silence over the asset's system sidecar: the tap
-/// of a phone call held on speaker next to the Mac.
+/// Six seconds of silence over the asset's system sidecar.
 fn silence_the_tap(asset: &AudioAsset) {
     let layout = RecordingLayout::from_asset(asset).unwrap();
     steno_pipeline::fixtures::write_wav(&layout.sidecar(AudioLane::System), &vec![0; 6 * 16_000])
         .unwrap();
 }
 
-/// The fake engine hearing nothing in a silent buffer.
 fn engine_deaf_to_silence() -> FakeSpeechEngine {
     FakeSpeechEngine {
         silent_below_peak: Some(1e-4),
@@ -285,10 +276,8 @@ fn stages(events: &[MeetingEvent]) -> Vec<PipelineStage> {
         .collect()
 }
 
-/// `RetentionApplied` follows the durable stamp: a follower that reads
-/// the asset as the event arrives (the app sweeps and reloads on it)
-/// finds `expires_at` set. A commit probe holds the stamp's commit for a
-/// moment, so an event posted before it would be read first.
+/// `RetentionApplied` follows the durable stamp: a follower reading the
+/// asset on the event finds `expires_at` set.
 #[tokio::test(flavor = "multi_thread")]
 async fn retention_applied_is_posted_after_its_stamp() {
     let world = world(
@@ -337,7 +326,6 @@ async fn retention_applied_is_posted_after_its_stamp() {
     );
 }
 
-// One flow, as the Swift test: every assertion reads the run before it.
 #[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
@@ -483,10 +471,8 @@ async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
     assert_eq!(stages(&drain(&mut receiver)), [PipelineStage::Deliver]);
 }
 
-/// A call whose tap holds less than 5 % of the mic's speech and under ten
-/// seconds is diarized on the mic lane; one with a real partner, however
-/// quiet, zero mic speech, or no tap at all keeps the standard lane.
-/// Swift: `StageTests.aCallWhoseTapCarriedNoConversationIsDiarizedOnTheMicLane`.
+/// A call whose tap holds under 5 % of the mic's speech and under ten
+/// seconds is diarized on the mic lane; otherwise the standard lane stays.
 #[test]
 fn a_call_whose_tap_carried_no_conversation_is_diarized_on_the_mic_lane() {
     fn segments(durations: &[f64]) -> Vec<RawSegment> {
@@ -528,8 +514,7 @@ fn a_call_whose_tap_carried_no_conversation_is_diarized_on_the_mic_lane() {
     assert!(!tap_carried_no_conversation(&lanes(&[60.0], &[3.0])));
     let partner = lanes(&[30.0], &[30.0]);
     assert!(!tap_carried_no_conversation(&partner));
-    // A partner who mostly listens: 60 s against 2000 s is 3 %, but ten
-    // seconds of speech is a conversation.
+    // A mostly listening partner: 3 %, but ten seconds is a conversation.
     assert!(!tap_carried_no_conversation(&lanes(&[2000.0], &[60.0])));
     assert!(!tap_carried_no_conversation(&lanes(&[2000.0], &[10.0])));
     assert!(tap_carried_no_conversation(&lanes(&[2000.0], &[9.5])));
@@ -551,19 +536,15 @@ fn a_call_whose_tap_carried_no_conversation_is_diarized_on_the_mic_lane() {
         ),
         Some(AudioLane::Mixed)
     );
-    // The silent-tap rule is for calls: an in-person asset with the same
-    // lanes keeps the last lane.
+    // The rule is for calls: an in-person asset keeps the last lane.
     assert_eq!(
         diarized_lane_after_transcription(MeetingSource::MacInPerson, &call, &silent_tap),
         Some(AudioLane::System)
     );
 }
 
-/// A phone call on speaker next to the Mac: the tap records silence and the
-/// microphone hears both people. The mic lane is diarized like a room,
-/// nobody is "me", the mic is decoded a second time for the diarizer, and
-/// the kept recording and lanes are untouched. Swift:
-/// `PipelineIntegrationTests.aCallWithASilentTapDiarizesTheMicLaneAndHasNoMe`.
+/// A call on speaker with a silent tap: the mic lane is diarized like a
+/// room, nobody is "me", and the recording and lanes are untouched.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_with_a_silent_tap_diarizes_the_mic_lane_and_has_no_me() {
     let world = world_with(
@@ -613,10 +594,8 @@ async fn a_call_with_a_silent_tap_diarizes_the_mic_lane_and_has_no_me() {
     );
 }
 
-/// A silent tap with one voice on the mic is the user alone (headphones,
-/// the tap permission missing): the standard rules stand, the mic is "me",
-/// and no clip is written for a cluster that was never made a speaker.
-/// Swift: `PipelineIntegrationTests.aSilentTapWithOneVoiceOnTheMicKeepsTheMicAsMe`.
+/// A silent tap with one voice on the mic keeps the mic as "me" and writes
+/// no clip for a cluster never made a speaker.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_silent_tap_with_one_voice_on_the_mic_keeps_the_mic_as_me() {
     let world = world_with(
@@ -658,10 +637,8 @@ async fn a_silent_tap_with_one_voice_on_the_mic_keeps_the_mic_as_me() {
     assert!(!layout.speakers_directory().exists());
 }
 
-/// Processing again after the tap went quiet: the "me" participant the
-/// first run created goes with the "me" speaker, so the export does not
-/// advertise a participant nobody speaks as. Swift:
-/// `PipelineIntegrationTests.aRerunThatFallsBackToTheMicLaneRemovesThePipelinesMeParticipant`.
+/// A re-run after the tap went quiet removes the "me" participant the
+/// first run created.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rerun_that_falls_back_to_the_mic_lane_removes_the_pipelines_me_participant() {
     let world = world_with(
@@ -720,9 +697,8 @@ async fn without_an_llm_the_meeting_is_ready_with_no_summary() {
     assert!(error.reason.contains("no LLM endpoint"));
 }
 
-/// A cleaner that first does what the user can while the cleanup pass
-/// waits on the model (`meddle`, with the store), then returns every
-/// segment's text marked as cleaned.
+/// A cleaner that first runs `meddle` with the store, as the user can
+/// while the cleanup waits, then marks every segment cleaned.
 struct MeddlingCleaner {
     store: Arc<Store>,
     meddle: fn(&Store, &steno_core::CleanupInput),
@@ -755,8 +731,7 @@ impl steno_core::TranscriptCleaner for MeddlingCleaner {
     }
 }
 
-/// A pipeline over the world whose cleaner is a [`MeddlingCleaner`] with
-/// `meddle`, and whose summarizer is `summarizer`.
+/// A pipeline with a [`MeddlingCleaner`] and `summarizer`.
 fn meddling(
     world: &World,
     meddle: fn(&Store, &steno_core::CleanupInput),
@@ -775,7 +750,6 @@ fn meddling(
     )
 }
 
-/// The speaker of `speakers` labelled `label`.
 fn speaker<'a>(speakers: &'a [steno_core::Speaker], label: &str) -> &'a steno_core::Speaker {
     speakers
         .iter()
@@ -783,8 +757,7 @@ fn speaker<'a>(speakers: &'a [steno_core::Speaker], label: &str) -> &'a steno_co
         .unwrap_or_else(|| panic!("no speaker {label}"))
 }
 
-/// A summarizer that keeps the input each call saw and answers as
-/// [`FakeSummarizer`] does.
+/// A [`FakeSummarizer`] that keeps the input each call saw.
 #[derive(Default)]
 struct RecordingSummarizer(Mutex<Vec<steno_core::SummaryInput>>);
 
@@ -802,18 +775,15 @@ impl steno_core::MeetingSummarizer for RecordingSummarizer {
     }
 }
 
-/// The cleanup pass writes the cleaned text by segment and leaves the
-/// speakers alone, so a speaker confirmed while it ran stays confirmed,
-/// another speaker's clip cleared meanwhile stays cleared, and the summary
-/// is made with the speakers as stored then.
+/// Cleanup writes text by segment and leaves the speakers alone, so edits
+/// made while it ran stay and the summary sees the stored speakers.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_speaker_named_during_cleanup_stays_named() {
     let world = world(false, None, AudioRetention::KeepForever);
     let summarizer = Arc::new(RecordingSummarizer::default());
     let pipeline = meddling(
         &world,
-        // Confirms "Speaker 1" as Anna and clears the clip of "Speaker 2",
-        // as the retention sweep can.
+        // Confirms "Speaker 1" as Anna and clears the clip of "Speaker 2".
         |store, input| {
             let anna = sample_data::person(0, "Anna");
             store
@@ -867,9 +837,8 @@ async fn a_speaker_named_during_cleanup_stays_named() {
     );
 }
 
-/// A title the user types while the meeting processes is kept, and the
-/// summary is made with it: the stages' writes leave a title whose stored
-/// origin is `user` alone.
+/// A title typed while the meeting processes is kept and used by the
+/// summary.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_typed_while_processing_is_kept() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -906,8 +875,7 @@ async fn a_title_typed_while_processing_is_kept() {
     );
 }
 
-/// A run without a summarizer (the LLM was turned off since) keeps the
-/// summary, tasks, decisions and name suggestions an earlier run wrote.
+/// A run without a summarizer keeps what an earlier run's summary wrote.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_without_a_summarizer_keeps_the_earlier_summary() {
     let world = world(true, None, AudioRetention::KeepForever);
@@ -958,16 +926,13 @@ async fn a_run_without_a_summarizer_keeps_the_earlier_summary() {
     );
 }
 
-/// A template picked while the meeting processes is kept, and the summary
-/// is made with it: the run read the meeting before the pick and never
-/// writes the old template back.
+/// A template picked while the meeting processes is kept and used by the
+/// summary.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_template_picked_while_processing_is_kept_and_used() {
     let world = world(false, None, AudioRetention::KeepForever);
     let pipeline = meddling(
         &world,
-        // Picks another template, as the user's `meeting.setTemplate` can
-        // while the meeting is in flight.
         |store, input| {
             store
                 .update_meeting(
@@ -994,10 +959,8 @@ async fn a_template_picked_while_processing_is_kept_and_used() {
     assert_eq!(stored.summary.unwrap().template_id, "interview");
 }
 
-/// A summary re-run does not store the template it ran with: the host
-/// stores the user's pick before it starts a re-run, so a re-run started
-/// with "daily-standup" never writes it back over "interview", a pick
-/// stored since. The summary records which template made it.
+/// A summary re-run never writes its template back over a pick stored
+/// since; the summary records which template made it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_summary_rerun_leaves_a_later_pick_alone() {
     let world = world(true, None, AudioRetention::KeepForever);
@@ -1020,7 +983,6 @@ async fn a_summary_rerun_leaves_a_later_pick_alone() {
     assert_eq!(stored.summary.unwrap().template_id, "daily-standup");
 }
 
-/// The world's dependencies with `engine` as the speech engine.
 fn with_engine(world: &World, engine: Arc<dyn steno_core::SpeechEngine>) -> PipelineDependencies {
     world
         .pipeline
@@ -1029,7 +991,7 @@ fn with_engine(world: &World, engine: Arc<dyn steno_core::SpeechEngine>) -> Pipe
         .with_speech_engine(SharedSpeechEngine::new(engine))
 }
 
-/// Enqueues the two-lane call as a meeting of its own; its id.
+/// Enqueues the two-lane call as its own meeting; its id.
 fn enqueue_call(world: &World, pipeline: &ProcessingPipeline) -> Uuid {
     let mut meeting = call_meeting(world.now);
     meeting.id = Uuid::new_v4();
@@ -1038,8 +1000,7 @@ fn enqueue_call(world: &World, pipeline: &ProcessingPipeline) -> Uuid {
     meeting.id
 }
 
-/// [`enqueue_call`] for a run refused for missing models, once it ended:
-/// its meeting is the one waiting.
+/// [`enqueue_call`] for a run refused for missing models, once it ended.
 async fn enqueue_refused_call(world: &World, pipeline: &ProcessingPipeline) -> Uuid {
     let meeting = enqueue_call(world, pipeline);
     pipeline.wait_until_idle().await;
@@ -1051,9 +1012,8 @@ fn meeting_state(world: &World, id: Uuid) -> MeetingState {
     world.store.meeting(id).unwrap().unwrap().state
 }
 
-/// The speech engine is released once a job's lanes are transcribed,
-/// before the diarizer runs, so the speech sidecar's working set is back
-/// before the stages after transcription.
+/// The speech engine is released once the lanes are transcribed, before
+/// the diarizer runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_engine_is_released_after_the_last_lane_before_diarization() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1103,17 +1063,13 @@ async fn a_job_whose_transcription_fails_releases_the_engine_too() {
     assert_eq!(failing.releases.count(), 1);
 }
 
-/// What the `CoreML` engine fails with once its model call raised an
-/// Objective-C exception and the boundary caught it (A15 of
-/// `.plans/2026-10-07-stable-promotion.md`): an ordinary speech error.
+/// What the `CoreML` engine fails with once the boundary caught an
+/// Objective-C exception: an ordinary speech error.
 const COREML_EXCEPTION: &str =
     "CoreML raised NSGenericException: Failed to allocate memory IOSurface object";
 
-/// A `CoreML` exception caught at the model call fails the meeting like
-/// any speech failure, in the job's model load (`decode`) or in a
-/// transcription: under "delete after processing" every audio file stays,
-/// through the sweep too, and Process again, once the models work, makes
-/// the meeting ready.
+/// A caught `CoreML` exception fails the meeting like any speech failure:
+/// every audio file stays, and Process again later makes it ready.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_coreml_exception_fails_the_meeting_retryably_with_its_audio_kept() {
     let world = world(false, None, AudioRetention::DeleteAfterProcessing);
@@ -1165,7 +1121,6 @@ async fn a_coreml_exception_fails_the_meeting_retryably_with_its_audio_kept() {
 /// The stages of the reading marks' files present while each call ran.
 type SeenStages = Arc<Mutex<Vec<(&'static str, Vec<String>)>>>;
 
-/// The marks' stages in `folder` now, sorted.
 fn marked_stages(folder: &Path) -> Vec<String> {
     let mut stages: Vec<String> = std::fs::read_dir(folder)
         .into_iter()
@@ -1179,9 +1134,8 @@ fn marked_stages(folder: &Path) -> Vec<String> {
     stages
 }
 
-/// A speech engine that notes which reads are marked while it loads and
-/// transcribes, and hears nothing on its second lane: a call's tap that
-/// carried no conversation, so the diarizer decodes the mic lane itself.
+/// A speech engine that notes the marked reads while it loads and
+/// transcribes, and hears nothing on its second lane.
 struct MarkWatchingEngine {
     inner: FakeSpeechEngine,
     folder: PathBuf,
@@ -1224,8 +1178,7 @@ impl steno_core::SpeechEngine for MarkWatchingEngine {
     }
 }
 
-/// A decoder that notes which reads are marked while it decodes a lane
-/// (for the transcript or the diarizer) and mixes down.
+/// A decoder that notes the marked reads while it decodes and mixes down.
 struct MarkWatchingDecoder {
     inner: Arc<WavDecoder>,
     folder: PathBuf,
@@ -1263,12 +1216,9 @@ impl steno_core::AudioDecoder for MarkWatchingDecoder {
     }
 }
 
-/// Every read of a recording is marked while it runs and only then: each
-/// lane's decode for the transcript and for the diarizer, and the
-/// mixdown; none is left once the meeting is ready. A speech engine in
-/// this process is marked while it loads and transcribes, since an abort
-/// inside it ends the app; one in the sidecar is not, its abort ending
-/// only its child (A17 of `.plans/2026-10-07-stable-promotion.md`).
+/// Every read of a recording is marked while it runs and only then. An
+/// in-process engine is marked while it loads and transcribes; a sidecar
+/// one is not, as its abort ends only its child.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_reads_of_a_recording_are_marked_while_they_run() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1317,10 +1267,8 @@ async fn the_reads_of_a_recording_are_marked_while_they_run() {
     }
 }
 
-/// A meeting the launch quarantined (a second read in a row that ended
-/// with the app) is not resumed, at launch or on a later resume, even when
-/// the launch could not mark it failed; Process again runs it, and its
-/// marks go once the run reads through.
+/// A quarantined meeting is not resumed, even when the launch could not
+/// mark it failed; Process again runs it and clears its marks.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quarantined_meeting_is_never_resumed() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1371,9 +1319,8 @@ async fn a_quarantined_meeting_is_never_resumed() {
     );
 }
 
-/// A meeting whose first read ended with the app is not held: the launch
-/// resumes it, and once its run reads through, its mark goes and the
-/// count starts again.
+/// A meeting whose first read ended with the app is resumed, and its mark
+/// goes once the run reads through.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_meeting_whose_read_ended_with_the_app_once_is_resumed() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1407,8 +1354,8 @@ async fn a_meeting_whose_read_ended_with_the_app_once_is_resumed() {
     );
 }
 
-/// A decoder that says so in `entered` and waits for `gate` (at most
-/// 30 s) before each decode: a read under way when the app quits.
+/// A decoder that signals `entered` and waits for `gate` (at most 30 s)
+/// before each decode.
 struct GatedDecoder {
     inner: Arc<WavDecoder>,
     gate: PathBuf,
@@ -1443,8 +1390,7 @@ impl steno_core::AudioDecoder for GatedDecoder {
     }
 }
 
-/// A processing meeting whose reads ended with the app `kills` launches
-/// in a row.
+/// A processing meeting whose reads ended with the app `kills` times.
 fn killed_in_its_reads(world: &World, support: &Path, kills: usize) -> Uuid {
     let mut meeting = call_meeting(world.now);
     meeting.id = Uuid::new_v4();
@@ -1462,12 +1408,9 @@ fn killed_in_its_reads(world: &World, support: &Path, kills: usize) -> Uuid {
     meeting.id
 }
 
-/// An orderly quit is no crash, so the next launch holds no meeting for
-/// it: (a) a quarantined meeting released by Process again, quit before
-/// its run reads; (b) the same, quit while its run decodes, which then
-/// finishes ready; (c) a meeting on its retry after one crash, quit while
-/// it decodes, which then finishes ready. Each one's marks are gone, and
-/// the ready ones stay ready.
+/// An orderly quit is no crash: (a) a released quarantined meeting quit
+/// before its run reads, (b) the same quit while decoding, (c) a retry
+/// quit while decoding. None is held next launch.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quit_never_counts_as_a_read_that_ended_with_the_app() {
     // (a)
@@ -1532,10 +1475,8 @@ async fn a_quit_never_counts_as_a_read_that_ended_with_the_app() {
     }
 }
 
-/// A retry after one crash whose run fails plainly returned every read,
-/// so the count starts again: after Process again and one more crash in
-/// its read, the next launch reads the meeting once more instead of
-/// quarantining it.
+/// A retry whose run fails plainly resets the crash count, so one more
+/// crash does not quarantine the meeting.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_retry_that_fails_plainly_starts_the_count_again() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1591,8 +1532,7 @@ async fn a_retry_that_fails_plainly_starts_the_count_again() {
     assert_eq!(meeting_state(&world, id), MeetingState::Ready);
 }
 
-/// A lane that cannot be decoded fails the job in `decode`, after the
-/// engine was loaded; the engine is released all the same.
+/// An undecodable lane fails the job in `decode`; the engine is released.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_whose_lane_cannot_be_decoded_releases_the_engine_too() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1613,7 +1553,6 @@ async fn a_job_whose_lane_cannot_be_decoded_releases_the_engine_too() {
     assert_eq!(engine.releases.count(), 1);
 }
 
-/// A diarizer whose models cannot load.
 struct UnloadableDiarizer;
 
 #[async_trait]
@@ -1630,10 +1569,8 @@ impl steno_core::Diarizer for UnloadableDiarizer {
     }
 }
 
-/// A diarizer that does not load fails neither the warm-up nor the job:
-/// the lanes are transcribed, the meeting is ready with one unknown room
-/// speaker, and the engine is released after the last lane as usual. The
-/// speech engine loaded, so a warm-up mark left over is cleared too.
+/// A diarizer that does not load fails nothing: the meeting is ready with
+/// one unknown room speaker, and a leftover warm-up mark is cleared.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_whose_diarizer_does_not_load_keeps_its_transcript() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1659,8 +1596,7 @@ async fn a_job_whose_diarizer_does_not_load_keeps_its_transcript() {
     assert!(!left_over.exists());
 }
 
-/// Waits until `receiver` sees [`MeetingEvent::WaitingForRecording`] for
-/// each of `meetings`, failing after [`PATIENCE`].
+/// Waits for [`MeetingEvent::WaitingForRecording`] for each of `meetings`.
 async fn waiting_for_recording(receiver: &mut steno_pipeline::EventReceiver, meetings: &[Uuid]) {
     let mut left: BTreeSet<Uuid> = meetings.iter().copied().collect();
     tokio::time::timeout(PATIENCE, async {
@@ -1675,8 +1611,8 @@ async fn waiting_for_recording(receiver: &mut steno_pipeline::EventReceiver, mee
     .expect("each meeting said it waits for the recording");
 }
 
-/// A pipeline over the world's dependencies that runs `engine` in this
-/// process and sees `live` as the recorder's state.
+/// A pipeline running `engine` in this process with `live` as the
+/// recorder's state.
 fn in_process_beside(
     world: &World,
     engine: Arc<dyn steno_core::SpeechEngine>,
@@ -1689,14 +1625,12 @@ fn in_process_beside(
     )
 }
 
-/// A short while for a job that is not supposed to move.
 async fn a_moment() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 }
 
-/// While a recording starts, runs or stops, a job loads and runs no speech
-/// engine in this process: it says it waits for the recording, and goes
-/// on once the recorder is idle (A19).
+/// While recording, a job runs no in-process speech engine: it waits and
+/// goes on once the recorder is idle.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_waits_for_the_recording_before_the_engine_in_this_process_loads() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1766,8 +1700,8 @@ impl steno_core::SpeechEngine for StartsARecording {
     }
 }
 
-/// A recording that starts while a lane is transcribed lets that call end;
-/// the next lane waits for it, and the meeting says so.
+/// A recording started mid-transcription lets that call end; the next
+/// lane waits.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_recording_that_starts_mid_job_holds_the_next_lane() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1791,8 +1725,8 @@ async fn a_recording_that_starts_mid_job_holds_the_next_lane() {
     assert_eq!(engine.inner.transcriptions.count(), 2);
 }
 
-/// Two jobs on one engine: the one behind the other's turn waits for a
-/// recording that started meanwhile too, once its turn comes.
+/// A job queued behind another's turn waits for a recording that started
+/// meanwhile.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_queued_behind_another_waits_for_the_recording_too() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1815,9 +1749,8 @@ async fn a_job_queued_behind_another_waits_for_the_recording_too() {
     assert_eq!(engine.inner.transcriptions.count(), 4);
 }
 
-/// A speech engine that runs one call at a time, as `OneCallAtATime` does
-/// on the Mac, over a [`GatedEngine`] whose first transcription waits; it
-/// counts the calls made while a recording is under way.
+/// A one-call-at-a-time engine over a [`GatedEngine`] that counts calls
+/// made while recording.
 struct OneCallAtATime {
     inner: GatedEngine,
     live: LiveRecording,
@@ -1835,8 +1768,7 @@ impl OneCallAtATime {
         }
     }
 
-    /// Takes the one call's turn and counts the call if a recording is
-    /// under way.
+    /// Takes the turn and counts the call if recording.
     async fn call(&self) -> tokio::sync::MutexGuard<'_, ()> {
         let one = self.calls.lock().await;
         if self.live.is_live() {
@@ -1876,10 +1808,8 @@ impl steno_core::SpeechEngine for OneCallAtATime {
     }
 }
 
-/// A job that queued for the turn while no recording was under way checks
-/// again once it has the turn: a recording that started meanwhile holds
-/// it, and nothing runs beside the recording, even on an engine that
-/// queues the calls inside it (A19).
+/// A job re-checks the recorder once it has the turn, so nothing runs
+/// beside a recording that started meanwhile.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_that_queued_before_the_recording_checks_again_at_its_turn() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1907,8 +1837,7 @@ async fn a_job_that_queued_before_the_recording_checks_again_at_its_turn() {
     assert_eq!(meeting_state(&world, second), MeetingState::Ready);
 }
 
-/// An engine whose abort ends only its child (the speech sidecar) does not
-/// wait for a recording.
+/// A sidecar engine does not wait for a recording.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_on_an_engine_in_a_child_runs_beside_a_recording() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1923,8 +1852,7 @@ async fn a_job_on_an_engine_in_a_child_runs_beside_a_recording() {
     assert_eq!(engine.transcriptions.count(), 2);
 }
 
-/// A quit while a job waits for the recording ends the job without a
-/// load: the meeting stays `queued` for the next launch.
+/// A quit while a job waits for the recording leaves the meeting `queued`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quit_while_a_job_waits_for_the_recording_leaves_the_meeting_queued() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1942,9 +1870,7 @@ async fn a_quit_while_a_job_waits_for_the_recording_leaves_the_meeting_queued() 
     assert_eq!(engine.preparations.count(), 0);
 }
 
-/// A job on an engine in a child (the speech sidecar standing in for
-/// `CoreML`) keeps a warm-up mark left over in place: its load says
-/// nothing of the engine the warm-up loads (A19).
+/// A job on a sidecar engine keeps a leftover warm-up mark in place.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_on_an_engine_in_a_child_keeps_the_warm_up_mark_left_over() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1993,8 +1919,8 @@ impl steno_core::SpeechEngine for UnloadableEngine {
     }
 }
 
-/// A warm-up whose speech engine does not load fails the job in `decode`
-/// before anything is transcribed, and still releases the engine.
+/// A warm-up whose engine does not load fails the job in `decode` and
+/// still releases the engine.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_whose_warm_up_fails_releases_the_engine_too() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2012,8 +1938,7 @@ async fn a_job_whose_warm_up_fails_releases_the_engine_too() {
     assert_eq!(engine.0.releases.count(), 1);
 }
 
-/// A speech engine that does not load keeps a warm-up mark left over in
-/// place: only a load that succeeded turns the warm-up back on.
+/// An engine that does not load keeps a leftover warm-up mark in place.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_whose_speech_engine_does_not_load_keeps_the_mark_left_over() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2041,20 +1966,17 @@ async fn a_job_whose_speech_engine_does_not_load_keeps_the_mark_left_over() {
 enum Gate {
     FirstTranscription,
     FirstRelease,
-    /// Every transcription, and for ever, as a crash leaves the runs
-    /// alive at it.
+    /// Every transcription hangs, as a crash leaves the runs.
     EveryTranscription,
 }
 
-/// A fake engine whose first transcription or first release waits until
-/// `open` is notified (or panics, with `panics`), or whose every
-/// transcription hangs (`Gate::EveryTranscription`), logging each `prepare`
-/// and the start and end of each `release`.
+/// A fake engine whose first transcription or release waits for `open`
+/// (or panics), or whose every transcription hangs; it logs `prepare` and
+/// each `release`.
 struct GatedEngine {
     inner: FakeSpeechEngine,
     gate: Gate,
     panics: bool,
-    /// Set once the gated call has started.
     entered: std::sync::atomic::AtomicBool,
     open: tokio::sync::Notify,
     log: Mutex<Vec<&'static str>>,
@@ -2072,7 +1994,6 @@ impl GatedEngine {
         }
     }
 
-    /// Waits until the gated call has started.
     async fn wait_until_entered(&self) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !self.entered.load(std::sync::atomic::Ordering::SeqCst) {
@@ -2134,8 +2055,7 @@ impl steno_core::SpeechEngine for GatedEngine {
     }
 }
 
-/// Two jobs on one engine: the one that finishes while the other is still
-/// transcribing leaves the engine loaded; the last one releases it.
+/// Of two jobs on one engine, only the last to finish releases it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_leaves_the_engine_loaded_while_another_still_transcribes() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2165,10 +2085,8 @@ async fn a_job_leaves_the_engine_loaded_while_another_still_transcribes() {
     assert_eq!(engine.inner.releases.count(), 1);
 }
 
-/// Two pipelines over one engine and its claims, as the services build
-/// them across a reload: a job on the new one that finishes while a job
-/// on the retired one still transcribes leaves the engine loaded; the
-/// retired one's job, the last, releases it once.
+/// The same across a reload: two pipelines share the engine's claims, and
+/// only the last job releases it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_on_another_pipeline_over_the_engine_keeps_it_loaded_too() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2200,8 +2118,7 @@ async fn a_job_on_another_pipeline_over_the_engine_keeps_it_loaded_too() {
     assert_eq!(engine.inner.releases.count(), 1);
 }
 
-/// A job that claims the engine while another job's release runs waits
-/// for the release and prepares again after it, never during it.
+/// A job claiming the engine during a release prepares again after it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_that_starts_during_a_release_prepares_again_after_it() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2229,9 +2146,7 @@ async fn a_job_that_starts_during_a_release_prepares_again_after_it() {
     }
 }
 
-/// The same across a reload: a job on another pipeline over the engine
-/// that claims it while the retired pipeline's job releases it waits for
-/// the release and prepares after it, as the lock is the engine's.
+/// The same across a reload, as the lock is the engine's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_on_another_pipeline_that_starts_during_a_release_prepares_after_it() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2243,7 +2158,6 @@ async fn a_job_on_another_pipeline_that_starts_during_a_release_prepares_after_i
     let first = enqueue_call(&world, &retired);
     engine.wait_until_entered().await;
     let second = enqueue_call(&world, &current);
-    // Time enough for the second job's warm-up, were it not held.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(engine.log(), ["prepare", "release"]);
 
@@ -2261,9 +2175,7 @@ async fn a_job_on_another_pipeline_that_starts_during_a_release_prepares_after_i
     }
 }
 
-/// A recording's diarizer warm-up during a job's release waits for the
-/// release, as a job's warm-up does: the diarizer never loads while the
-/// speech engine frees its models.
+/// A recording's diarizer warm-up waits for a running release.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_diarizer_warm_up_waits_for_a_release() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2280,7 +2192,6 @@ async fn the_diarizer_warm_up_waits_for_a_release() {
         let pipeline = pipeline.clone();
         async move { pipeline.warm_up_diarizer().await }
     });
-    // Time enough for the diarizer's warm-up, were it not held.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(diarizer.preparations.count(), 1);
     assert_eq!(engine.log(), ["prepare", "release"]);
@@ -2292,11 +2203,8 @@ async fn the_diarizer_warm_up_waits_for_a_release() {
     assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
 }
 
-/// Waits until `count` jobs claim `pipeline`'s speech engine. A job
-/// claims it in the same poll that takes it to its warm-up, and drops it in
-/// the same poll that takes it to its release, so a job counted (or no
-/// longer counted) here goes on to the lock a warm-up holds. A signal, not
-/// a time: a loaded runner can take any time to get there.
+/// Waits until `count` jobs claim `pipeline`'s speech engine; a claim is
+/// taken and dropped in the same poll that reaches the warm-up or release.
 async fn until_claims(pipeline: &ProcessingPipeline, count: usize) {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while pipeline.dependencies().speech_engine.claims() != count {
@@ -2307,8 +2215,7 @@ async fn until_claims(pipeline: &ProcessingPipeline, count: usize) {
     .unwrap_or_else(|_| panic!("{count} jobs never claimed the engine"));
 }
 
-/// [`GatedEngine`] whose second `prepare` also waits, until `open` is
-/// notified: the first is the first job's warm-up.
+/// [`GatedEngine`] whose second `prepare` also waits for `open`.
 struct SecondPrepareHeld {
     inner: Arc<GatedEngine>,
     prepares: std::sync::atomic::AtomicUsize,
@@ -2351,10 +2258,8 @@ impl steno_core::SpeechEngine for SecondPrepareHeld {
     }
 }
 
-/// A job whose lanes end while a recording's warm-up holds the lock
-/// leaves the engine loaded when a second job claims it meanwhile: the
-/// count is checked again under the lock, so only the second job's end
-/// releases it.
+/// The claim count is checked again under the lock, so a job ending while
+/// a warm-up holds it leaves the engine loaded for a second job.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_claimed_while_a_finisher_waits_on_a_warm_up_keeps_the_engine_loaded() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2397,9 +2302,8 @@ async fn a_job_claimed_while_a_finisher_waits_on_a_warm_up_keeps_the_engine_load
     }
 }
 
-/// A job whose lanes end while another job holds a claim does not wait on
-/// the lock at all: it finishes while a recording's warm-up still holds
-/// it, and the engine stays loaded for the other job.
+/// A job ending while another holds a claim does not wait on the lock and
+/// leaves the engine loaded.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_finisher_that_sees_another_claim_does_not_wait_on_a_warm_up() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2446,8 +2350,7 @@ async fn a_finisher_that_sees_another_claim_does_not_wait_on_a_warm_up() {
     assert_eq!(meeting_state(&world, second), MeetingState::Ready);
 }
 
-/// A job that panics gives its claim back without a release, so the next
-/// job on the same pipeline still releases the engine after its lanes.
+/// A panicking job gives its claim back without a release.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_that_panics_gives_its_claim_on_the_engine_back() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2470,8 +2373,7 @@ async fn a_job_that_panics_gives_its_claim_on_the_engine_back() {
     assert_eq!(engine.inner.releases.count(), 1);
 }
 
-/// A job that fails once the pipeline has quit (the exit signalled the
-/// speech sidecar with the app) leaves its meeting `processing`, warns
+/// A job failing after quit leaves its meeting `processing`, warns
 /// nothing, and the next launch processes it again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch() {
@@ -2486,8 +2388,7 @@ async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch
     });
     let dependencies = with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default());
     let pipeline = ProcessingPipeline::new(dependencies);
-    // Its own meeting id gives the asset an id that picks this run's log
-    // lines out.
+    // Its own meeting id picks this run's log lines out.
     let (meeting, asset) = processing_with_count(&world, 2);
     assert_eq!(pipeline.resume_unfinished().unwrap(), [meeting.id]);
     engine.wait_until_entered().await;
@@ -2523,8 +2424,7 @@ async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch
     assert!(!runs.exists());
 }
 
-/// A run the exit took back that still makes the meeting ready clears the
-/// count, earlier crashes included.
+/// A run after quit that still makes the meeting ready clears the count.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_the_exit_took_back_that_ends_ready_clears_the_count() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2540,10 +2440,8 @@ async fn a_run_the_exit_took_back_that_ends_ready_clears_the_count() {
     assert!(!runs_file(&asset).exists());
 }
 
-/// Once the pipeline has quit, no job starts: `enqueue` saves the meeting
-/// `queued` with its asset and spawns no task (its debug line says so),
-/// launch recovery starts nothing, and a direct `process` is refused
-/// before it claims the meeting.
+/// Once quit, no job starts: `enqueue` saves the meeting `queued` and
+/// spawns nothing, recovery starts nothing, and `process` is refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_job_starts_once_the_pipeline_quits() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2615,14 +2513,12 @@ async fn a_failing_stage_marks_the_meeting_failed_with_its_name() {
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
 }
 
-/// A pipeline over the world whose diarizer fails with `reason`.
 fn with_failing_diarizer(world: &World, reason: &str) -> ProcessingPipeline {
     let mut dependencies = world.pipeline.dependencies().clone();
     dependencies.diarizer = failing_diarizer(reason);
     ProcessingPipeline::new(dependencies)
 }
 
-/// A diarizer whose every run fails with `reason`.
 fn failing_diarizer(reason: &str) -> Arc<FakeDiarizer> {
     Arc::new(FakeDiarizer {
         failure: Some(reason.to_owned()),
@@ -2630,10 +2526,8 @@ fn failing_diarizer(reason: &str) -> Arc<FakeDiarizer> {
     })
 }
 
-/// A diarizer that fails costs the speaker labels, not the transcript:
-/// the meeting is ready, the mic lane stays "me" and the tap's segments
-/// all go to one unknown speaker, without an embedding, that the user can
-/// still name.
+/// A failing diarizer costs the labels, not the transcript: the mic stays
+/// "me" and the tap goes to one unknown, nameable speaker.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_diarizer_keeps_the_transcript_with_one_room_speaker() {
     let world = world(true, None, AudioRetention::KeepForever);
@@ -2664,7 +2558,6 @@ async fn a_failing_diarizer_keeps_the_transcript_with_one_room_speaker() {
     }
 }
 
-/// A speaker memory whose lookups fail.
 struct BrokenSpeakerMemory;
 
 #[async_trait]
@@ -2678,8 +2571,7 @@ impl steno_core::SpeakerMemory for BrokenSpeakerMemory {
     }
 }
 
-/// A failing voice lookup leaves the diarized speakers unknown and the
-/// meeting ready.
+/// A failing voice lookup leaves speakers unknown and the meeting ready.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_speaker_match_keeps_the_speakers_unknown() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2702,9 +2594,8 @@ async fn a_failing_speaker_match_keeps_the_speakers_unknown() {
     assert_eq!(export.segments.len(), 12);
 }
 
-/// A diarizer failure once the app quits does not fall back: the run
-/// stops without persisting, so the meeting is processed again, speakers
-/// and all, at the next launch.
+/// A diarizer failure after quit stops without persisting, so the next
+/// launch processes the meeting again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_launch() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2727,9 +2618,8 @@ async fn a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_laun
     assert_eq!(world.store.segments(meeting).unwrap(), Vec::new());
 }
 
-/// A re-run whose diarizer fails keeps the speakers the first run stored:
-/// a confirmation stays, with the person's voice, and the new transcript's
-/// segments point at the kept speakers.
+/// A re-run whose diarizer fails keeps the stored speakers, confirmation
+/// and voice included.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2777,17 +2667,15 @@ async fn a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers() {
     }
 }
 
-/// The re-run's diarizer: the first run's two speakers, so the same ids,
-/// with one-second clips where the first run's are one and a half seconds
-/// long, so a clip's length tells which run wrote it.
+/// The re-run's diarizer: the same two speakers with one-second clips (the
+/// first run's are 1.5 s), so a clip's length tells which run wrote it.
 fn rediarizing() -> Arc<FakeDiarizer> {
     Arc::new(FakeDiarizer::answering(|audio| {
         FakeDiarizer::round_robin(audio.duration(), 2, 1.0)
     }))
 }
 
-/// A pipeline over the world's dependencies with the re-run's diarizer,
-/// and `probe` at the clip steps.
+/// A pipeline with the re-run's diarizer and `probe` at the clip steps.
 fn rerun_pipeline(world: &World, probe: Option<ClipProbe>) -> ProcessingPipeline {
     let mut dependencies = world.pipeline.dependencies().clone();
     dependencies.diarizer = rediarizing();
@@ -2797,8 +2685,8 @@ fn rerun_pipeline(world: &World, probe: Option<ClipProbe>) -> ProcessingPipeline
     ProcessingPipeline::new(dependencies)
 }
 
-/// The meeting ready after the first run with its two speakers, "Speaker
-/// 1" confirmed as Anna; its asset and the confirmed speaker's id.
+/// The ready meeting with "Speaker 1" confirmed as Anna; its asset and
+/// that speaker's id.
 async fn confirmed_call(world: &World) -> (AudioAsset, Uuid) {
     let meeting = call_meeting(world.now);
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
@@ -2812,8 +2700,7 @@ async fn confirmed_call(world: &World) -> (AudioAsset, Uuid) {
     (asset, confirmed)
 }
 
-/// The samples of the 16 kHz mono WAV at `path`, which must be whole: its
-/// header's data size is the rest of the file.
+/// The samples of the whole 16 kHz mono WAV at `path`.
 fn whole_clip_samples(path: &Path) -> u32 {
     let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     assert!(bytes.len() >= 44, "{} has no header", path.display());
@@ -2828,11 +2715,8 @@ fn whole_clip_samples(path: &Path) -> u32 {
     size / 2
 }
 
-/// Asserts that "Speaker 1" is still confirmed as Anna and that every
-/// speaker row of `meeting_id` with a clip names a whole WAV whose length
-/// is the row's clip range: the clip of the run that wrote the row, or the
-/// earlier clip a confirmed row given none kept. Returns the file names the
-/// rows name.
+/// Asserts "Speaker 1" is still Anna and every speaker row's clip is a
+/// whole WAV as long as its range; returns the file names the rows name.
 fn assert_each_row_names_its_own_clip(store: &Store, meeting_id: Uuid) -> BTreeSet<OsString> {
     let speakers = store.speakers(meeting_id).unwrap();
     assert_eq!(
@@ -2859,8 +2743,8 @@ fn assert_each_row_names_its_own_clip(store: &Store, meeting_id: Uuid) -> BTreeS
     named
 }
 
-/// A probe that holds a run at [`ClipStep::Merging`], with the receiver
-/// that hears when a run is held there and the sender that lets it go.
+/// A probe holding a run at [`ClipStep::Merging`], with its held receiver
+/// and release sender.
 fn held_at_merging() -> (
     ClipProbe,
     std::sync::mpsc::Receiver<()>,
@@ -2879,7 +2763,6 @@ fn held_at_merging() -> (
     (gate, held_there, go)
 }
 
-/// The names of the files in the meeting's `speakers/`.
 fn clip_files(asset: &AudioAsset) -> BTreeSet<OsString> {
     let layout = RecordingLayout::from_asset(asset).unwrap();
     std::fs::read_dir(layout.speakers_directory())
@@ -2893,12 +2776,8 @@ fn file_name_of(url: &str) -> OsString {
     file_url_path(url).unwrap().file_name().unwrap().to_owned()
 }
 
-/// A re-run that ends at any step of its sample clips, as a crash would,
-/// leaves each speaker row naming a whole clip of the run that wrote the
-/// row: the confirmed speaker keeps its earlier clip until the merge
-/// commits the new one, which is on the disk by then, and the earlier clip
-/// goes only after that commit. The next run sweeps what the ended one
-/// left, and only that.
+/// A re-run ended at any clip step, as by a crash, leaves every row naming
+/// a whole clip; the next run sweeps only what the ended one left.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rerun_that_ends_at_any_clip_step_leaves_each_speaker_its_own_clip() {
     for (step, committed) in [
@@ -2944,10 +2823,8 @@ async fn a_rerun_that_ends_at_any_clip_step_leaves_each_speaker_its_own_clip() {
     }
 }
 
-/// "Process again" whose clip write fails once one clip is on the disk
-/// keeps the confirmed speaker's clip playable: the run removes the file it
-/// wrote, falls back to the stored speakers, and the rows still name the
-/// first run's clips.
+/// A re-run whose clip write fails removes the file it wrote and falls
+/// back to the stored speakers, whose clips stay playable.
 #[tokio::test(flavor = "multi_thread")]
 async fn process_again_whose_clip_write_fails_keeps_the_confirmed_clip_playable() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2976,11 +2853,8 @@ async fn process_again_whose_clip_write_fails_keeps_the_confirmed_clip_playable(
     assert_eq!(clip_files(&asset), earlier, "the failed write left nothing");
 }
 
-/// No sweep removes the clips of a run in flight: a re-run held after
-/// writing its clips, before its merge, keeps them while another meeting's
-/// run sweeps its own folder, and "Process again" on the held meeting is
-/// refused, so no other run sweeps that folder. Once let go, the held run
-/// names its clips and sweeps the earlier ones.
+/// No sweep removes the clips of a run in flight: another meeting's sweep
+/// leaves them, and Process again on the held meeting is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_runs_uncommitted_clips_survive_every_other_runs_sweep() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -3011,10 +2885,8 @@ async fn a_runs_uncommitted_clips_survive_every_other_runs_sweep() {
     assert_eq!(clip_files(&asset), in_flight);
 }
 
-/// A meeting whose master lies in another meeting's folder writes no clip
-/// there and sweeps nothing, and the owner's re-run, which sweeps while the
-/// guest's re-run is held before its merge, leaves the guest's files alone:
-/// a clip of the guest's speaker that no row names stays.
+/// A meeting whose master lies in another meeting's folder writes and
+/// sweeps nothing there, and the owner's sweep leaves the guest's files.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_meeting_whose_master_lies_in_another_meetings_folder_leaves_its_clips_alone() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -3032,8 +2904,7 @@ async fn a_meeting_whose_master_lies_in_another_meetings_folder_leaves_its_clips
     let speakers = world.store.speakers(guest.id).unwrap();
     assert!(speakers.iter().all(|row| row.sample_clip_url.is_none()));
     assert_eq!(clip_files(&owners), before, "the guest wrote no clip here");
-    // A clip of the guest's speaker that no row names, a fixed-name clip
-    // as Swift writes it.
+    // A fixed-name clip of the guest's speaker that no row names.
     let layout = RecordingLayout::from_asset(&owners).unwrap();
     let guests_clip = layout.sample_clip(speaker(&speakers, "Speaker 1").id);
     std::fs::write(&guests_clip, b"the guest's earlier clip").unwrap();
@@ -3064,10 +2935,8 @@ async fn a_meeting_whose_master_lies_in_another_meetings_folder_leaves_its_clips
     assert_eq!(clip_files(&owners), expected);
 }
 
-/// A confirmed speaker that a re-run gives no clip keeps naming its
-/// earlier clip, which stays whole and playable, and a confirmed speaker
-/// the re-run drops keeps its file with no row naming it, through that
-/// re-run and the next.
+/// A confirmed speaker a re-run gives no clip keeps its earlier clip, and
+/// one the re-run drops keeps its file, through two re-runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_confirmed_speaker_a_rerun_gives_no_clip_keeps_its_clip_file() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -3084,8 +2953,7 @@ async fn a_confirmed_speaker_a_rerun_gives_no_clip_keeps_its_clip_file() {
         .unwrap();
     let earlier = clip_files(&asset);
     assert_eq!(earlier.len(), 2);
-    // One cluster without a clip: "Speaker 1" comes back without one, and
-    // "Speaker 2" is dropped.
+    // "Speaker 1" comes back without a clip; "Speaker 2" is dropped.
     let pipeline = rerun_with_clipless(&world, 1, &["Speaker 1"], 1.0);
 
     for run in 0..2 {
@@ -3105,9 +2973,8 @@ async fn a_confirmed_speaker_a_rerun_gives_no_clip_keeps_its_clip_file() {
     }
 }
 
-/// A pipeline over the world's dependencies whose diarizer gives
-/// `clusters` speakers of `turn`-second turns, and no clip to the ones
-/// labelled in `clipless`.
+/// A pipeline whose diarizer gives `clusters` speakers of `turn`-second
+/// turns and no clip to the labels in `clipless`.
 fn rerun_with_clipless(
     world: &World,
     clusters: usize,
@@ -3127,11 +2994,8 @@ fn rerun_with_clipless(
     ProcessingPipeline::new(dependencies)
 }
 
-/// Confirming a speaker as the person of a confirmed speaker without a clip
-/// merges it into that row, which takes the merged speaker's clip under
-/// that speaker's id. Re-runs that again give the confirmed row no clip,
-/// and the merged speaker's id a clip of its own, leave the row naming the
-/// clip it took, whole and playable.
+/// A speaker merged into a clipless confirmed row lends it its clip, and
+/// later re-runs leave the row naming that clip, whole and playable.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_merge_into_a_confirmed_speaker_without_a_clip_keeps_its_clip_through_reruns() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -3177,10 +3041,8 @@ async fn a_merge_into_a_confirmed_speaker_without_a_clip_keeps_its_clip_through_
     }
 }
 
-/// A confirmed speaker a re-run drops keeps its file, and so it does when
-/// a later re-run brings its id back unconfirmed and without a clip: only
-/// a speaker the merge replaced or this run gave a clip has its files
-/// swept.
+/// A dropped confirmed speaker keeps its file, even when a later re-run
+/// brings its id back unconfirmed and clipless.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dropped_confirmed_speaker_that_comes_back_without_a_clip_keeps_its_file() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -3221,11 +3083,8 @@ async fn a_dropped_confirmed_speaker_that_comes_back_without_a_clip_keeps_its_fi
     );
 }
 
-/// A confirmation the user makes while a re-run is held after writing its
-/// clips, before its merge, is kept by the merge, and the sweep reads it in
-/// the merge's transaction: given a clip, the speaker names the new one;
-/// given none, it keeps naming its earlier clip; dropped, its earlier file
-/// stays.
+/// A confirmation made while a re-run is held before its merge is kept,
+/// and the sweep reads it in the merge's transaction.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_confirmation_during_a_rerun_keeps_the_speakers_clip() {
     for (clusters, clipless) in [(2, &[][..]), (2, &["Speaker 2"][..]), (1, &[][..])] {
@@ -3274,9 +3133,8 @@ async fn a_confirmation_during_a_rerun_keeps_the_speakers_clip() {
     }
 }
 
-/// Retention that comes due while a re-run is held after writing its
-/// clips, before its merge, removes nothing: the meeting is processing.
-/// Once let go, the run commits rows that name clips on the disk.
+/// Retention due while a re-run is held before its merge removes nothing,
+/// and the run then commits rows naming clips on the disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retention_during_a_held_rerun_removes_nothing() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -3308,10 +3166,8 @@ async fn retention_during_a_held_rerun_removes_nothing() {
     );
 }
 
-/// A call whose tap carried no conversation diarizes its mic lane, which
-/// is the room. When that diarizer fails, the mic lane becomes the one
-/// room speaker, not "me", so the other party's words are never the
-/// user's.
+/// When the mic lane of a silent-tap call fails to diarize, it becomes
+/// the one room speaker, not "me".
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_diarizer_on_the_mic_lane_makes_it_the_room() {
     let world = world_with(
@@ -3342,9 +3198,8 @@ async fn a_failing_diarizer_on_the_mic_lane_makes_it_the_room() {
     );
 }
 
-/// A re-run of a call whose mic lane was diarized as the room keeps the
-/// room's stored speakers on the mic lane when its diarizer fails: a
-/// confirmation stays, and the mic never goes back to "me".
+/// A re-run of such a call whose diarizer fails keeps the room's stored
+/// speakers on the mic lane; the mic never goes back to "me".
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rerun_of_a_mic_room_whose_diarizer_fails_keeps_its_speakers() {
     let world = world_with(
@@ -3385,10 +3240,8 @@ async fn a_rerun_of_a_mic_room_whose_diarizer_fails_keeps_its_speakers() {
     }
 }
 
-/// When a re-run diarizes the other lane than the run before (the tap
-/// went quiet, so the mic is now the room) and its diarizer fails, the
-/// stored speakers keep their rows and confirmations but none of the new
-/// lane's words: those go to one unknown room speaker.
+/// A re-run diarizing the other lane whose diarizer fails keeps the stored
+/// speakers but gives the new lane's words to one unknown room speaker.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rerun_on_the_other_lane_whose_diarizer_fails_gives_it_the_room_speaker() {
     let world = world_with(
@@ -3438,8 +3291,7 @@ async fn a_rerun_on_the_other_lane_whose_diarizer_fails_gives_it_the_room_speake
     );
 }
 
-/// A re-run whose diarizer fails again keeps the room speaker the first
-/// failure made, with the name the user gave it.
+/// A second diarizer failure keeps the named room speaker of the first.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_diarizer_failure_keeps_the_named_room_speaker() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -3468,8 +3320,8 @@ async fn a_second_diarizer_failure_keeps_the_named_room_speaker() {
     );
 }
 
-/// A diarizer failure the run goes on after is logged at warn with its
-/// meeting and stage only: the reason can name the audio file.
+/// A diarizer fallback is logged at warn with meeting and stage only: the
+/// reason can name the audio file.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_diarizer_failure_warns_with_its_stage_not_its_reason() {
     let log = steno_pipeline::fixtures::CapturedLog::warnings();
@@ -3484,7 +3336,6 @@ async fn a_diarizer_failure_warns_with_its_stage_not_its_reason() {
     .expect_err("the failing diarizer fails");
     assert!(error.to_string().contains(reason), "{error}");
     let pipeline = with_failing_diarizer(&world, reason);
-    // An id of its own picks this run's line out.
     let meeting = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
@@ -3499,8 +3350,8 @@ async fn a_diarizer_failure_warns_with_its_stage_not_its_reason() {
     assert!(!text.contains(reason), "{text}");
 }
 
-/// A clock that panics once the meeting is stored `ready`: a panic inside
-/// `persist`, after its ready write.
+/// A clock that panics once the meeting is stored `ready`, inside
+/// `persist`.
 struct PanickingOnceReady {
     store: Arc<Store>,
     meeting_id: Uuid,
@@ -3526,8 +3377,8 @@ impl MonotonicClock for PanickingOnceReady {
     }
 }
 
-/// A meeting `persist` marked ready stays ready, and is delivered, even
-/// when the run panics after that write.
+/// A meeting `persist` marked ready stays ready and is delivered after a
+/// later panic.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panic_after_the_ready_write_leaves_the_meeting_ready() {
     let world = world(
@@ -3558,9 +3409,8 @@ async fn a_panic_after_the_ready_write_leaves_the_meeting_ready() {
     assert_eq!(deliveries[0].status, DeliveryStatus::Delivered);
 }
 
-/// A failed background run is logged at warn with its asset and stage
-/// only: a stage's reason can name the audio file or quote the model, and
-/// stays with the meeting row and the debug level.
+/// A failed background run is logged at warn with asset and stage only;
+/// the reason stays with the meeting row and the debug level.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_background_run_warns_with_its_stage_not_its_reason() {
     let log = steno_pipeline::fixtures::CapturedLog::warnings();
@@ -3574,8 +3424,7 @@ async fn a_failed_background_run_warns_with_its_stage_not_its_reason() {
         }),
     ));
     let meeting = call_meeting(world.now);
-    // Other tests in this binary log through the same subscriber; an id
-    // of its own picks this run's line out.
+    // An id of its own picks this run's line out of the shared subscriber.
     let mut asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
     asset.id = Uuid::new_v4();
     pipeline.enqueue(&meeting, &asset).unwrap();
@@ -3617,8 +3466,7 @@ async fn a_failing_summary_names_its_stage_once() {
         }
     );
 
-    // A re-run that fails the same way leaves the state alone, returns the
-    // failure and posts it for the window.
+    // A re-run failing the same way returns and posts the failure.
     let mut receiver = world.events.subscribe();
     let error = pipeline
         .rerun_summary(meeting.id, "default")
@@ -3754,8 +3602,8 @@ async fn a_run_that_panics_releases_its_asset_and_its_meeting() {
     let meeting = call_meeting(world.now);
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
     pipeline.enqueue(&meeting, &asset).unwrap();
-    // Without waiting for idle (which drops the entries itself), the same
-    // asset can be enqueued again once the panicked run is gone.
+    // Without waiting for idle, the asset can be enqueued again once the
+    // panicked run is gone.
     let enqueued = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if pipeline.enqueue(&meeting, &asset).is_ok() {
@@ -3775,9 +3623,7 @@ async fn a_run_that_panics_releases_its_asset_and_its_meeting() {
 }
 
 /// A decoder whose next `decode` panics while `panics` is set, as
-/// symphonia's demuxer does on a crafted file: its `next_packet` asserts
-/// on a `co64` offset near 2^64, in a release build too, synchronously
-/// inside `SymphoniaAudioCodec::decode`.
+/// symphonia's demuxer does on a crafted `co64` offset.
 struct PanickingDecoder {
     inner: Arc<WavDecoder>,
     panics: std::sync::atomic::AtomicBool,
@@ -3810,8 +3656,7 @@ impl steno_core::AudioDecoder for PanickingDecoder {
     }
 }
 
-/// Every file in the asset's folder but its `.processing-runs`, with its
-/// bytes.
+/// Every file in the asset's folder but `.processing-runs`, with its bytes.
 fn audio_files(asset: &AudioAsset) -> BTreeMap<PathBuf, Vec<u8>> {
     let folder = file_url_path(&asset.url).unwrap();
     std::fs::read_dir(folder.parent().unwrap())
@@ -3825,10 +3670,9 @@ fn audio_files(asset: &AudioAsset) -> BTreeMap<PathBuf, Vec<u8>> {
         .collect()
 }
 
-/// A panic in the decode (symphonia's demuxer on a crafted file) fails the
-/// meeting and keeps every audio file under "delete after processing",
-/// through the sweep too; the worker lives on for the next meeting, and the
-/// failed one can be reprocessed. The same on the launch's resume path.
+/// A decode panic fails the meeting and keeps every audio file, sweep
+/// included; the worker lives on and the meeting can be reprocessed, on
+/// the resume path too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_decoder_panic_fails_the_meeting_and_keeps_its_audio() {
     let world = world(false, None, AudioRetention::DeleteAfterProcessing);
@@ -3895,16 +3739,14 @@ async fn a_decoder_panic_fails_the_meeting_and_keeps_its_audio() {
     assert_eq!(meeting_state(&world, resumed.id), MeetingState::Ready);
 }
 
-/// The asset's `.processing-runs`.
 fn runs_file(asset: &AudioAsset) -> PathBuf {
     RecordingLayout::from_asset(asset)
         .unwrap()
         .processing_runs()
 }
 
-/// A pipeline over `dependencies` as a new process builds it: with a quit
-/// latch and an in-flight set of its own, so a run an earlier launch left
-/// holding its meeting claims nothing in the new set.
+/// A pipeline as a new process builds it, with its own quit latch and
+/// in-flight set.
 fn new_process(dependencies: PipelineDependencies) -> ProcessingPipeline {
     ProcessingPipeline::new(
         dependencies
@@ -3913,8 +3755,7 @@ fn new_process(dependencies: PipelineDependencies) -> ProcessingPipeline {
     )
 }
 
-/// A launch whose run of the meeting never ends: the run is left
-/// mid-transcription, as a crash leaves it, and the pipeline is dropped.
+/// A launch whose run is left mid-transcription, as a crash leaves it.
 async fn launch_that_crashes(world: &World, first: Option<(&Meeting, &AudioAsset)>) -> Vec<Uuid> {
     let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
     let pipeline = new_process(with_engine(world, engine.clone()));
@@ -3931,12 +3772,9 @@ async fn launch_that_crashes(world: &World, first: Option<(&Meeting, &AudioAsset
     resumed
 }
 
-/// Processing that takes the app down is not retried for ever: each run is
-/// counted in the meeting's folder, a run that ended with the app leaves
-/// its count, and once three have, launch recovery marks the meeting
-/// failed with a reason the user sees and keeps the audio. Processing the
-/// meeting again (`enqueue`) starts afresh, and a run that ends clears
-/// the count.
+/// Runs that take the app down are counted; after three, launch recovery
+/// fails the meeting and keeps the audio. `enqueue` starts the count
+/// afresh, and a run that ends clears it.
 #[tokio::test(flavor = "multi_thread")]
 async fn launch_recovery_gives_up_on_a_meeting_whose_runs_ended_with_the_app() {
     assert!(TOO_MANY_CRASHED_RUNS.contains(&MAX_CRASHED_RUNS.to_string()));
@@ -3986,8 +3824,7 @@ async fn launch_recovery_gives_up_on_a_meeting_whose_runs_ended_with_the_app() {
     assert!(!runs.exists());
 }
 
-/// `reprocess` takes a ready or failed meeting only, and one with its
-/// asset.
+/// `reprocess` takes only a ready or failed meeting with its asset.
 #[tokio::test(flavor = "multi_thread")]
 async fn reprocess_refuses_a_meeting_that_is_not_finished_or_has_no_asset() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4024,9 +3861,8 @@ async fn reprocess_refuses_a_meeting_that_is_not_finished_or_has_no_asset() {
     );
 }
 
-/// `process_again` is `reprocess` for a meeting the app offers it for: a
-/// ready one is refused under the pipeline's own read and stays as it was,
-/// unclaimed; a failed one runs to ready.
+/// `process_again` refuses a ready meeting, leaving it unclaimed, and runs
+/// a failed one to ready.
 #[tokio::test(flavor = "multi_thread")]
 async fn process_again_refuses_a_ready_meeting_and_runs_a_failed_one() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4059,10 +3895,8 @@ async fn process_again_refuses_a_ready_meeting_and_runs_a_failed_one() {
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
 }
 
-/// A ready meeting whose results may be incomplete is offered "Process
-/// again" too: after a diarizer fallback stored the room row, the
-/// pipeline's own read accepts it, and once a working diarizer replaced
-/// the row the meeting is complete and refused again.
+/// A ready meeting with a diarizer fallback's room row is offered Process
+/// again, and refused once a working diarizer replaced the row.
 #[tokio::test(flavor = "multi_thread")]
 async fn process_again_runs_a_ready_meeting_kept_incomplete() {
     let world = world(false, None, AudioRetention::DeleteAfterProcessing);
@@ -4082,10 +3916,8 @@ async fn process_again_runs_a_ready_meeting_kept_incomplete() {
     );
 }
 
-/// The retention sweep keeps the asset row when it removes a ready
-/// meeting's files, so `reprocess` checks the disk: a meeting whose master
-/// is gone is refused before anything is saved, so its transcript stays,
-/// even with its sidecars there (the run ends by mixing the master down).
+/// `reprocess` refuses a meeting whose master is gone before saving
+/// anything, even with its sidecars there.
 #[tokio::test(flavor = "multi_thread")]
 async fn reprocess_refuses_a_meeting_whose_audio_is_gone() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4103,9 +3935,8 @@ async fn reprocess_refuses_a_meeting_whose_audio_is_gone() {
     assert_eq!(read_runs(&asset), "2", "the count is untouched");
 }
 
-/// Two "Process again" at once start one run: the in-flight check and the
-/// claim are one step, so the second call is refused (busy, or
-/// queued by the first by the time it reads the meeting).
+/// Two Process again at once start one run: the check and the claim are
+/// one step.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_reprocess_calls_at_once_start_one_run() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4146,8 +3977,8 @@ async fn two_reprocess_calls_at_once_start_one_run() {
     }
 }
 
-/// `reprocess` is refused while another operation holds the meeting, and
-/// so is `enqueue`.
+/// `reprocess` and `enqueue` are refused while another operation holds
+/// the meeting.
 #[tokio::test(flavor = "multi_thread")]
 async fn reprocess_refuses_a_meeting_another_operation_holds() {
     let world = world(true, None, AudioRetention::KeepForever);
@@ -4166,9 +3997,8 @@ async fn reprocess_refuses_a_meeting_another_operation_holds() {
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
 }
 
-/// A store that fails saving the meeting queued: `reprocess` says so with
-/// the store's failure, the meeting and its count are as they were, and
-/// the claim is released, so a later call starts the run.
+/// A failed queued save makes `reprocess` return the store's error, leave
+/// the meeting as it was and release the claim.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reprocess_whose_save_fails_is_refused_and_changes_nothing() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4205,8 +4035,7 @@ async fn a_reprocess_whose_save_fails_is_refused_and_changes_nothing() {
     assert_eq!(meeting_state(&world, asset.meeting_id), MeetingState::Ready);
 }
 
-/// A reprocess that fails leaves no retention stamp from the run before
-/// it, so the sweep keeps the audio a retry needs.
+/// A failed reprocess leaves no retention stamp from the run before it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_reprocess_leaves_the_audio_to_no_sweep() {
     let world = world_with(
@@ -4247,11 +4076,9 @@ async fn a_failed_reprocess_leaves_the_audio_to_no_sweep() {
     }
 }
 
-/// A meeting's crashes are charged to it, not to the meetings waiting
-/// behind it: of two unfinished meetings that both ran when the app first
-/// went down, the one launch recovery resumes first (A) takes it down at
-/// every launch after, while the other (B) waits for its turn uncounted. Launch recovery gives up on A
-/// and processes B, which ends ready.
+/// Crashes are charged to the meeting that causes them: A, resumed first,
+/// crashes every launch while B waits uncounted; recovery gives up on A and
+/// B ends ready.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4259,7 +4086,6 @@ async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash
         processing_with_count(&world, 0),
         processing_with_count(&world, 0),
     ];
-    // Launch recovery takes meetings of one start time by id.
     two.sort_by_key(|(meeting, _)| meeting.id);
     let [(a, a_asset), (b, b_asset)] = two;
     for launch in 1..=MAX_CRASHED_RUNS {
@@ -4270,7 +4096,6 @@ async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash
             [a.id, b.id],
             "launch {launch}"
         );
-        // A is transcribing.
         engine.wait_until_entered().await;
         assert_eq!(read_runs(&a_asset), launch.to_string(), "launch {launch}");
         // Both ran at the first launch; B waits behind A after that.
@@ -4292,9 +4117,8 @@ async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash
     assert!(!runs_file(&b_asset).exists());
 }
 
-/// A count-0 meeting started at once and held mid-transcription, and a
-/// count-1 meeting that goes alone: the alone run waits uncounted until the
-/// first run ends, then runs; both end ready.
+/// A count-1 meeting runs alone: it waits uncounted until a held count-0
+/// run ends; both end ready.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_started_at_once_holds_back_a_run_that_goes_alone() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4323,8 +4147,7 @@ async fn a_run_started_at_once_holds_back_a_run_that_goes_alone() {
     assert!(!runs_file(&counted_asset).exists());
 }
 
-/// A quit while the alone run waits its turn: it never starts, its count
-/// stays, and the next launch resumes it.
+/// A quit while the alone run waits keeps its count for the next launch.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quit_while_a_run_waits_its_turn_leaves_its_count() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4360,8 +4183,7 @@ async fn a_quit_while_a_run_waits_its_turn_leaves_its_count() {
     assert!(!runs_file(&counted_asset).exists());
 }
 
-/// Three alone meetings, the first two hung: only the first is counted;
-/// the dispatcher serialises them oldest first.
+/// Alone meetings run oldest first, and only the running one is counted.
 #[tokio::test(flavor = "multi_thread")]
 async fn alone_runs_are_serial_and_oldest_first() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4382,8 +4204,7 @@ async fn alone_runs_are_serial_and_oldest_first() {
     drop(pipeline);
 }
 
-/// A meeting saved `processing` with `crashed` runs that ended with the
-/// app already counted, as an earlier launch leaves it.
+/// A meeting saved `processing` with `crashed` runs already counted.
 fn processing_with_count(world: &World, crashed: u32) -> (Meeting, AudioAsset) {
     let mut meeting = call_meeting(world.now);
     meeting.id = Uuid::new_v4();
@@ -4405,13 +4226,12 @@ fn ready_with_count(world: &World, crashed: u32) -> AudioAsset {
     asset
 }
 
-/// The asset's count as written.
 fn read_runs(asset: &AudioAsset) -> String {
     std::fs::read_to_string(runs_file(asset)).unwrap()
 }
 
 /// A pipeline over its own latch and an engine whose first transcription
-/// waits until it is let go.
+/// waits.
 fn gated_pipeline(world: &World, latch: &QuitLatch) -> (ProcessingPipeline, Arc<GatedEngine>) {
     let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
     let pipeline =
@@ -4419,10 +4239,8 @@ fn gated_pipeline(world: &World, latch: &QuitLatch) -> (ProcessingPipeline, Arc<
     (pipeline, engine)
 }
 
-/// A normal quit with a run held mid-transcription, never let go (the app
-/// exits before the run ends, and nothing drops it): the exit takes the
-/// run back at once, so the count is what it was before the run and the
-/// earlier crashes still count. The next launch resumes the meeting.
+/// A normal quit takes a held run back at once, so the count keeps only
+/// the earlier crashes, and the next launch resumes the meeting.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quit_takes_back_a_run_held_mid_transcription() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4445,11 +4263,8 @@ async fn a_quit_takes_back_a_run_held_mid_transcription() {
     assert!(!runs.exists());
 }
 
-/// The exit reaches every pipeline that shares the latch: a reload's
-/// retired pipeline still finishing a resumed run, and the current one
-/// with a meeting processed again. Both runs are taken back, the earlier
-/// crash still counts, and `reprocess` after the exit is refused before it
-/// saves or counts anything.
+/// The exit reaches every pipeline sharing the latch, and `reprocess`
+/// after it is refused before saving or counting.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quit_takes_back_the_runs_of_every_pipeline_on_the_latch() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4478,8 +4293,7 @@ async fn a_quit_takes_back_the_runs_of_every_pipeline_on_the_latch() {
     assert_eq!(meeting_state(&world, late.meeting_id), MeetingState::Ready);
 }
 
-/// A run that fails before any exit is the pipeline's to report: the
-/// meeting is failed and the count goes, earlier crashes included.
+/// A run failing before any exit fails the meeting and clears the count.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_ordinary_failure_clears_the_count() {
     let world = world_with(
@@ -4502,9 +4316,8 @@ async fn an_ordinary_failure_clears_the_count() {
     assert!(!runs_file(&asset).exists());
 }
 
-/// A panic the pipeline catches fails the meeting like any stage failure
-/// and is reported as one: the count goes, earlier crashes included, so
-/// the one run is never counted as a crash too.
+/// A caught panic fails the meeting and clears the count, so the run is
+/// never also counted as a crash.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_caught_panic_clears_the_count() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4525,8 +4338,7 @@ async fn a_caught_panic_clears_the_count() {
     assert!(!runs_file(&asset).exists());
 }
 
-/// `reprocess` starts the count afresh: mid-run it holds this run only,
-/// not the crashes before.
+/// `reprocess` starts the count afresh.
 #[tokio::test(flavor = "multi_thread")]
 async fn reprocess_counts_its_run_from_none() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4541,8 +4353,7 @@ async fn reprocess_counts_its_run_from_none() {
     assert!(!runs_file(&asset).exists());
 }
 
-/// A count that cannot be read never blocks processing: a file that is
-/// not text, text that is not a number, and an empty file count as none.
+/// An unreadable count (not text, not a number, empty) counts as none.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_corrupt_run_count_never_blocks_processing() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4562,10 +4373,8 @@ async fn a_corrupt_run_count_never_blocks_processing() {
     }
 }
 
-/// A meeting launch recovery gave up on keeps its audio through the
-/// retention sweep, even with an expired stamp an earlier run left on its
-/// asset; the same stamp on a ready meeting is swept, so the failure never
-/// makes the audio go sooner.
+/// A meeting recovery gave up on keeps its audio despite an expired
+/// stamp; the same stamp on a ready meeting is swept.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_meeting_given_up_on_keeps_its_audio_through_the_sweep() {
     let world = world(false, None, AudioRetention::DeleteAfterProcessing);
@@ -4622,9 +4431,8 @@ async fn a_meeting_given_up_on_keeps_its_audio_through_the_sweep() {
     }
 }
 
-/// A run that panics fails its meeting, named by the stage it was in, so
-/// the user can delete it or process it again, and the next launch does
-/// not resume it.
+/// A panicking run fails its meeting, named by its stage, and is not
+/// resumed at the next launch.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_that_panics_fails_its_meeting() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -4785,8 +4593,7 @@ fn the_generated_fixtures_match_the_committed_files() {
     let dir = tempfile::tempdir().unwrap();
     let outputs = steno_pipeline::fixtures::generate(dir.path(), &|data| {
         use std::fmt::Write as _;
-        // The manifest hash is checked in the CLI, which has sha2; here the
-        // bytes themselves are compared with the committed fixtures.
+        // The CLI checks the manifest hash; here the bytes are compared.
         let mut text = String::new();
         for byte in data.iter().take(4) {
             write!(text, "{byte:02x}").unwrap();
@@ -4807,12 +4614,9 @@ fn the_generated_fixtures_match_the_committed_files() {
     }
 }
 
-/// What the app does after `resume_unfinished` at launch: an export a
-/// previous process left `pending` (it ended mid-delivery), or one that
-/// failed more than a day before the launch, after it (a clock that ran
-/// ahead) or was never attempted (a Swift row), is re-exported; a failure within the day, a meeting that is not
-/// ready and an export that went through are left alone, and the count of
-/// a meeting exported since its last failure is dropped.
+/// Launch re-export: a `pending` export, or a failure older than a day,
+/// in the future or never attempted, is re-exported; recent failures,
+/// unready meetings and delivered exports are left, and stale counts drop.
 #[tokio::test(flavor = "multi_thread")]
 async fn exports_left_unfinished_are_re_exported_at_launch() {
     let world = world(
@@ -4866,13 +4670,11 @@ async fn exports_left_unfinished_are_re_exported_at_launch() {
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
 }
 
-/// The meeting's first delivery row.
 fn delivery(world: &World, id: Uuid) -> Delivery {
     world.store.deliveries(id).unwrap().remove(0)
 }
 
-/// Stores the meeting's first delivery row as `status`, last attempted at
-/// `attempt`.
+/// Stores the first delivery row as `status`, last attempted at `attempt`.
 fn mark_delivery(world: &World, id: Uuid, status: DeliveryStatus, attempt: Option<DateTime<Utc>>) {
     let mut row = delivery(world, id);
     row.status = status;
@@ -4880,7 +4682,6 @@ fn mark_delivery(world: &World, id: Uuid, status: DeliveryStatus, attempt: Optio
     world.store.save_delivery(&row).unwrap();
 }
 
-/// The world's `export-retries.json`, read as a launch reads it.
 fn export_retries(world: &World) -> Arc<ExportRetries> {
     Arc::new(ExportRetries::new(retries_path(world)))
 }
@@ -4889,12 +4690,10 @@ fn retries_path(world: &World) -> PathBuf {
     world.dir.path().join(ExportRetries::FILE_NAME)
 }
 
-/// Writes `count` launch re-exports in a row for `id` alone.
 fn write_retries(world: &World, id: Uuid, count: u32) {
     std::fs::write(retries_path(world), format!("{{\"{id}\": {count}}}")).unwrap();
 }
 
-/// A destination whose every delivery fails.
 fn offline(vault: &Path) -> FakeDestination {
     FakeDestination {
         deliver_failure: Some("the vault is offline".to_owned()),
@@ -4902,8 +4701,7 @@ fn offline(vault: &Path) -> FakeDestination {
     }
 }
 
-/// The world's pipeline as a launch at `at` builds it: its clock reads
-/// `at`, and its one destination, `destination`, stamps `at` on the row.
+/// The pipeline a launch at `at` builds, with `destination` stamping `at`.
 fn launch_at(world: &World, at: DateTime<Utc>, destination: FakeDestination) -> ProcessingPipeline {
     launch_with(world, at, vec![destination])
 }
@@ -4930,11 +4728,9 @@ fn launch_with(
     ProcessingPipeline::new(dependencies)
 }
 
-/// A failed export is retried by one launch a day at most, posting no
-/// `OperationFailed`, and after three failed launches in a row it is left
-/// until the user exports it again (`reset`); a row an exit left `pending`
-/// on a meeting the launch stopped retrying is saved failed, and an export
-/// that goes through starts the count from 0.
+/// A failed export is retried once a day at most without `OperationFailed`,
+/// and after three failed launches waits for the user; an export that goes
+/// through resets the count.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_export_is_retried_once_a_day_and_left_after_three_failed_launches() {
     let world = world(false, Some(offline), AudioRetention::KeepForever);
@@ -5015,9 +4811,8 @@ async fn a_failed_export_is_retried_once_a_day_and_left_after_three_failed_launc
     assert_eq!(export_retries(&world).count(id), 0);
 }
 
-/// An export that goes through to one destination and fails at the other
-/// is not delivered: the launches stop after three, although each wrote a
-/// `Delivered` row.
+/// An export delivered to one destination and failed at the other counts
+/// as failed.
 #[tokio::test(flavor = "multi_thread")]
 async fn launches_stop_an_export_that_fails_at_one_of_two_destinations() {
     let world = world(false, Some(offline), AudioRetention::KeepForever);
@@ -5055,8 +4850,7 @@ async fn launches_stop_an_export_that_fails_at_one_of_two_destinations() {
     );
 }
 
-/// A meeting another operation holds when its turn comes is skipped at
-/// launch, and once the pipeline quits nothing is started.
+/// A held meeting is skipped at launch; after quit nothing starts.
 #[tokio::test(flavor = "multi_thread")]
 async fn launch_re_exports_skip_a_meeting_in_flight_and_stop_once_quitting() {
     let world = world(
@@ -5083,8 +4877,7 @@ async fn launch_re_exports_skip_a_meeting_in_flight_and_stop_once_quitting() {
     );
 }
 
-/// A dispatcher that waits in `deliver_all` until released, counting the
-/// calls waiting.
+/// A dispatcher holding `deliver_all` until released, counting waiters.
 #[derive(Default)]
 struct HeldDispatcher {
     asked: tokio::sync::Notify,
@@ -5104,8 +4897,7 @@ impl DeliveryDispatcher for HeldDispatcher {
     }
 }
 
-/// The launch re-exports one meeting at a time: the second meeting's
-/// export starts only once the first one's is released.
+/// The launch re-exports one meeting at a time.
 #[tokio::test(flavor = "multi_thread")]
 async fn launch_re_exports_run_one_at_a_time() {
     use std::sync::atomic::Ordering::SeqCst;
@@ -5141,8 +4933,7 @@ async fn launch_re_exports_run_one_at_a_time() {
     assert_eq!(held.waiting.load(SeqCst), 0);
 }
 
-/// `wait_until_idle` waits for the launch's re-exports too, so the app's
-/// reload and the CLI see them finished.
+/// `wait_until_idle` waits for the launch's re-exports too.
 #[tokio::test(flavor = "multi_thread")]
 async fn waiting_until_idle_waits_for_the_launch_re_exports() {
     let world = world(
@@ -5176,10 +4967,8 @@ async fn waiting_until_idle_waits_for_the_launch_re_exports() {
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
 }
 
-/// Pipelines over dependencies that share their in-flight set (the services'
-/// reloads) refuse a meeting another of them holds, so a reload's new
-/// pipeline never runs a second operation on a meeting the retired one is
-/// still delivering.
+/// Pipelines sharing an in-flight set refuse a meeting another of them
+/// holds.
 #[tokio::test(flavor = "multi_thread")]
 async fn pipelines_that_share_the_in_flight_set_refuse_each_others_meetings() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -5207,10 +4996,8 @@ async fn pipelines_that_share_the_in_flight_set_refuse_each_others_meetings() {
     assert_eq!(replacement.in_flight(), Vec::<Uuid>::new());
 }
 
-/// A processing run on a retired pipeline holds its asset in the shared
-/// in-flight set, so the replacement starts no second run of the meeting,
-/// even when the row reads `ready` again (a reprocess is refused as busy,
-/// an enqueue too), and starts one once the retired run has ended.
+/// A retired pipeline's run holds its asset in the shared set, so the
+/// replacement refuses the meeting until that run ended.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reprocess_is_refused_while_a_retired_pipeline_runs_the_meeting() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -5248,9 +5035,8 @@ async fn a_reprocess_is_refused_while_a_retired_pipeline_runs_the_meeting() {
     assert_eq!(replacement.in_flight(), Vec::<Uuid>::new());
 }
 
-/// A dispatcher that records the meeting's state and its summary's
-/// template when the export is marked pending, and delivers nothing, as if
-/// the app ended right after.
+/// A dispatcher that records the meeting's state and summary template at
+/// `mark_pending` and delivers nothing.
 struct MarkedPendingOnly {
     store: Arc<Store>,
     seen: Mutex<Vec<(MeetingState, Option<String>)>>,
@@ -5271,9 +5057,8 @@ impl DeliveryDispatcher for MarkedPendingOnly {
     }
 }
 
-/// `persist` marks the export pending before it marks the meeting ready,
-/// and a summary re-run once the new summary is saved, so an exit before
-/// the delivery leaves rows the next launch re-exports.
+/// `persist` marks the export pending before the meeting ready, so an exit
+/// before delivery leaves rows the next launch re-exports.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_export_is_marked_pending_before_the_meeting_is_ready() {
     let world = world(true, None, AudioRetention::KeepForever);
@@ -5299,9 +5084,8 @@ async fn the_export_is_marked_pending_before_the_meeting_is_ready() {
     );
 }
 
-/// A dispatcher that saves the row `pending`, stamped now, as the
-/// coordinator does before `destination.deliver`, and then panics
-/// (`panics`) or returns as if the process had been killed there.
+/// A dispatcher that saves the row `pending` and then panics or returns as
+/// if killed.
 struct EndsMidExport {
     store: Arc<Store>,
     now: DateTime<Utc>,
@@ -5322,11 +5106,8 @@ impl DeliveryDispatcher for EndsMidExport {
     }
 }
 
-/// An export that ends with its row `pending`, by a panic in the
-/// destination or an exit mid-export, counts as a launch re-export that
-/// did not deliver every row: the launches stop after three, the row is
-/// failed after every launch, the detail says the export keeps failing,
-/// and no `OperationFailed` is posted.
+/// An export ending `pending`, by panic or exit, counts as a failed launch
+/// re-export: launches stop after three, without `OperationFailed`.
 async fn launches_stop_an_export_that_ends_mid_delivery(panics: bool) {
     let world = world(false, Some(offline), AudioRetention::KeepForever);
     let id = enqueue_call(&world, &world.pipeline);
@@ -5395,8 +5176,8 @@ async fn launches_stop_an_export_the_process_was_killed_in() {
     launches_stop_an_export_that_ends_mid_delivery(false).await;
 }
 
-/// A dispatcher that holds `held`'s export until released and delivers
-/// every other meeting at once, recording each `deliver_all` call.
+/// A dispatcher that holds `held`'s export and delivers the rest at once,
+/// recording each call.
 struct HoldsOne {
     store: Arc<Store>,
     held: Uuid,
@@ -5422,9 +5203,7 @@ impl DeliveryDispatcher for HoldsOne {
     }
 }
 
-/// A meeting the user exported again while the launch re-exported an
-/// earlier one is not exported a second time when its turn comes, and is
-/// not counted.
+/// A meeting the user re-exported meanwhile is skipped and not counted.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_launch_skips_a_meeting_the_user_exported_meanwhile() {
     let world = world(
@@ -5437,7 +5216,6 @@ async fn a_launch_skips_a_meeting_the_user_exported_meanwhile() {
         world.pipeline.wait_until_idle().await;
         mark_delivery(&world, id, DeliveryStatus::Pending, Some(world.now));
     }
-    // In the launch's order.
     let ids = world
         .store
         .meetings_with_unfinished_deliveries(world.now, ExportRetries::INTERVAL)
@@ -5466,9 +5244,8 @@ async fn a_launch_skips_a_meeting_the_user_exported_meanwhile() {
     assert_eq!(retries.count(ids[1]), 0);
 }
 
-/// A dispatcher that returns without writing any row, as a re-export that
-/// fails before `deliver_all` stamps the row (a settings, asset or
-/// stage-rate read error) leaves it.
+/// A dispatcher writing no row, as a re-export failing before
+/// `deliver_all` leaves it.
 struct WritesNothing {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -5481,10 +5258,8 @@ impl DeliveryDispatcher for WritesNothing {
     }
 }
 
-/// A `pending` row never attempted (as `mark_pending` writes it) that a
-/// launch re-export leaves unstamped is saved failed with the launch's
-/// time, so it waits a day like any failure instead of being retried at
-/// every launch.
+/// A never-attempted `pending` row a launch leaves unstamped is saved
+/// failed at the launch time, so it waits a day.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_row_failed_without_an_attempt_waits_a_day() {
     let world = world(
@@ -5531,9 +5306,8 @@ enum Refusal {
     Diarize,
 }
 
-/// The fakes behind a gate that refuses at one point with
-/// `PipelineFailure::models_missing` until `installed` is set, as the
-/// app's engines refuse a model that is not on disk.
+/// Fakes that refuse at one point with `PipelineFailure::models_missing`
+/// until `installed` is set.
 struct Uninstalled {
     refusal: Refusal,
     installed: std::sync::atomic::AtomicBool,
@@ -5551,7 +5325,6 @@ impl Uninstalled {
         })
     }
 
-    /// The models are installed from now on.
     fn install(&self) {
         self.installed
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -5615,12 +5388,9 @@ impl steno_core::Diarizer for UninstalledDiarizer {
     }
 }
 
-/// A run refused because a model is missing, whether the speech engine's
-/// warm-up, a transcription, the diarizer's warm-up or the diarize stage
-/// refuses it, leaves the meeting `queued` with no failure reason on its
-/// row and posts `ModelsMissing`, and never reaches `ready` without its
-/// speakers; once the models are installed, `resume_unfinished` processes
-/// it to `ready`.
+/// A run refused for a missing model, at any of the four gates, leaves the
+/// meeting `queued` with no failure reason and posts `ModelsMissing`; once
+/// installed, `resume_unfinished` takes it to `ready`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_refused_for_missing_models_stays_queued_and_resumes_once_they_are_installed() {
     for refusal in [
@@ -5664,9 +5434,8 @@ async fn a_run_refused_for_missing_models_stays_queued_and_resumes_once_they_are
     }
 }
 
-/// `process` returns the refusal itself, its kind carried through the
-/// boxed boundary error, so a caller (Process again) can tell it from a
-/// failure.
+/// `process` returns the refusal itself, its kind intact through the
+/// boxed error, so Process again can tell it from a failure.
 #[tokio::test(flavor = "multi_thread")]
 async fn process_returns_the_models_missing_refusal() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -5686,8 +5455,7 @@ async fn process_returns_the_models_missing_refusal() {
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Queued);
 }
 
-/// A diarizer whose gate decided "missing" and is held before it returns
-/// the refusal, so a test can finish the install and resume in between.
+/// A diarizer held after deciding "missing", before returning the refusal.
 #[derive(Default)]
 struct HeldRefusingDiarizer {
     installed: std::sync::atomic::AtomicBool,
@@ -5717,8 +5485,7 @@ impl steno_core::Diarizer for HeldRefusingDiarizer {
     }
 }
 
-/// A diarizer whose `prepare` waits at a gate (`entered`, then `open`)
-/// while `hold` is set, as a model load that takes a while.
+/// A diarizer whose `prepare` waits at a gate while `hold` is set.
 #[derive(Default)]
 struct SlowLoadDiarizer {
     hold: std::sync::atomic::AtomicBool,
@@ -5745,9 +5512,8 @@ impl steno_core::Diarizer for SlowLoadDiarizer {
     }
 }
 
-/// A meeting an install's resume starts after it waited for models posts
-/// its `decode` progress before the engines load, so its card no longer
-/// asks for the download while they do.
+/// A resumed meeting posts its `decode` progress before the engines load,
+/// so its card stops asking for the download.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_resumed_meeting_posts_progress_before_the_engines_load() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -5781,11 +5547,8 @@ async fn a_resumed_meeting_posts_progress_before_the_engines_load() {
     assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
 }
 
-/// A resume after only the speech model was installed, with the
-/// diarizer's still missing: the run is refused again at `diarize`, so the
-/// meeting stays `queued` with no failure reason, posts one more
-/// `ModelsMissing` and waits again; the diarizer's install then takes it
-/// to `ready`.
+/// With only the speech model installed the run is refused again at
+/// `diarize` and waits; the diarizer's install takes it to `ready`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_resume_with_one_of_two_models_installed_waits_again() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -5826,9 +5589,8 @@ async fn a_resume_with_one_of_two_models_installed_waits_again() {
     assert_eq!(waits.waiting(), Vec::<Uuid>::new());
 }
 
-/// An install that finishes while a run is being refused, with its resume
-/// skipping the meeting because it is in flight: the run goes again
-/// instead of leaving the meeting waiting with every model installed.
+/// An install finishing while a run is refused, its resume skipping the
+/// in-flight meeting: the run goes again.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_install_during_the_refusing_run_still_processes_the_meeting() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -5859,9 +5621,8 @@ async fn an_install_during_the_refusing_run_still_processes_the_meeting() {
     );
 }
 
-/// A refused run that must start its meeting again, with the newest
-/// pipeline built over its dependencies already gone: the run starts it
-/// on its own pipeline instead, so the meeting is still processed.
+/// A refused run whose newest pipeline is gone restarts the meeting on its
+/// own pipeline.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_run_whose_newest_pipeline_is_gone_starts_its_meeting_again_itself() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -5887,9 +5648,7 @@ async fn a_refused_run_whose_newest_pipeline_is_gone_starts_its_meeting_again_it
     assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
 }
 
-/// Only a meeting a run left waiting is resumed by `resume_waiting`, once:
-/// a queued meeting no run refused stays for `resume_unfinished`, and a
-/// second resume finds nothing.
+/// `resume_waiting` resumes only meetings a run left waiting, once.
 #[tokio::test(flavor = "multi_thread")]
 async fn resume_waiting_starts_only_the_meetings_runs_left_waiting() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -5913,10 +5672,8 @@ async fn resume_waiting_starts_only_the_meetings_runs_left_waiting() {
     assert_eq!(pipeline.resume_waiting().unwrap(), Vec::<Uuid>::new());
 }
 
-/// "Process again" (or `reprocess`) on a meeting a run left waiting for
-/// models says so instead of "unfinished", under the claim, and leaves it
-/// waiting: nothing is saved, no run starts, and an install's resume then
-/// processes it.
+/// Process again on a meeting waiting for models says so and leaves it
+/// waiting; an install's resume then processes it.
 #[tokio::test(flavor = "multi_thread")]
 async fn process_again_on_a_meeting_waiting_for_models_leaves_it_waiting() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -5946,12 +5703,9 @@ async fn process_again_on_a_meeting_waiting_for_models_leaves_it_waiting() {
     assert_eq!(meeting_state(&world, refused), MeetingState::Ready);
 }
 
-/// "Process again" on a failed meeting while its models are missing parks
-/// it like any refused run: `queued` with no failure reason, waiting for
-/// the models, its audio kept and its old retention stamp gone, so the
-/// sweep cannot take the recording while it waits. It is no resume: a
-/// meeting already waiting keeps waiting beside it, and the install's
-/// resume processes both.
+/// Process again on a failed meeting with models missing parks it like a
+/// refused run, its retention stamp gone; the install's resume processes
+/// it and any meeting already waiting.
 #[tokio::test(flavor = "multi_thread")]
 async fn process_again_with_models_missing_parks_the_failed_meeting_with_its_audio() {
     let world = world(false, None, AudioRetention::KeepDays(30));
@@ -5993,8 +5747,7 @@ async fn process_again_with_models_missing_parks_the_failed_meeting_with_its_aud
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
 }
 
-/// An update's job hold (P25 of the stable plan) is taken only while no
-/// job is in flight: not while a run transcribes, and again once it ended.
+/// An update's job hold is taken only while no job is in flight.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_job_hold_while_a_run_is_in_flight() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -6016,9 +5769,8 @@ async fn no_job_hold_while_a_run_is_in_flight() {
     assert!(in_flight.try_hold().is_some());
 }
 
-/// While the hold lives, a run enqueued meanwhile is claimed and its
-/// meeting saved `queued`, but the run reads nothing; a second hold is
-/// refused. Once the hold is dropped the run goes through to `ready`.
+/// Under the hold a run is claimed and saved `queued` but reads nothing,
+/// and a second hold is refused; once dropped the run goes to `ready`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_hold_keeps_a_queued_run_from_starting_until_it_drops() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -6042,8 +5794,7 @@ async fn a_job_hold_keeps_a_queued_run_from_starting_until_it_drops() {
     assert!(engine.transcriptions.count() > 0);
 }
 
-/// A summary re-run and a re-export claimed under the hold keep their
-/// claim and wait; each runs once the hold is dropped.
+/// A summary re-run and a re-export claimed under the hold wait for it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_hold_keeps_a_claimed_operation_waiting_until_it_drops() {
     type Claim = fn(
@@ -6074,7 +5825,6 @@ async fn a_job_hold_keeps_a_claimed_operation_waiting_until_it_drops() {
     }
 }
 
-/// The stored asset's retention stamp.
 fn expires_at(world: &World, asset: &AudioAsset) -> Option<DateTime<Utc>> {
     world
         .store
@@ -6084,10 +5834,8 @@ fn expires_at(world: &World, asset: &AudioAsset) -> Option<DateTime<Utc>> {
         .expires_at
 }
 
-/// A meeting whose diarizer failed is ready with one unknown room speaker,
-/// but its speakers can still be found from the recording: the automatic
-/// retention keeps it unstamped, even under "delete after processing",
-/// until a run with speakers succeeds.
+/// A diarizer fallback meeting stays unstamped, even under "delete after
+/// processing", until a run with speakers succeeds.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_diarizer_fallback_keeps_the_recording_until_a_run_finds_the_speakers() {
     let world = world(false, None, AudioRetention::DeleteAfterProcessing);
@@ -6114,8 +5862,7 @@ async fn a_diarizer_fallback_keeps_the_recording_until_a_run_finds_the_speakers(
     assert_eq!(expires_at(&world, &asset), Some(world.now));
 }
 
-/// The user's own rule is applied as chosen, also while the speakers are
-/// incomplete.
+/// The user's own rule applies as chosen, incomplete speakers or not.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -6131,12 +5878,8 @@ async fn a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed() {
     assert_eq!(expires_at(&world, &asset), Some(world.now));
 }
 
-/// Runs a call of `duration` seconds whose every lane comes out with no
-/// transcript, under "delete after processing", over `diarizer`, and
-/// tells the meeting and whether its recording was kept unstamped. No
-/// segment names the room, so no room row is stored even when the
-/// diarizer fails, and the detail reads kept-incomplete exactly when the
-/// recording is kept.
+/// Runs a `duration`-second call with empty lanes under "delete after
+/// processing"; the meeting and whether it was kept unstamped.
 async fn silent_call(duration: f64, diarizer: FakeDiarizer) -> (Uuid, bool) {
     let world = world_with(
         false,
@@ -6149,7 +5892,6 @@ async fn silent_call(duration: f64, diarizer: FakeDiarizer) -> (Uuid, bool) {
         diarizer,
     );
     let mut meeting = call_meeting(world.now);
-    // An id of its own picks this run's log lines out.
     meeting.id = Uuid::new_v4();
     meeting.duration = duration;
     let asset = call_asset(
@@ -6174,7 +5916,6 @@ async fn silent_call(duration: f64, diarizer: FakeDiarizer) -> (Uuid, bool) {
     (meeting.id, kept)
 }
 
-/// [`silent_call`] with a working diarizer.
 async fn silent_call_is_kept(duration: f64) -> bool {
     silent_call(duration, FakeDiarizer::default()).await.1
 }
@@ -6190,9 +5931,8 @@ fn has_room_row(world: &World, meeting_id: Uuid) -> bool {
         .any(|speaker| speaker.id == room)
 }
 
-/// A first run whose diarizer fails over a call with both lanes silent
-/// stores no room row, since no segment names it: the empty-lane arm
-/// alone decides, so 30 s is stamped and 31 s is kept.
+/// A failed diarizer over a silent call stores no room row, so the length
+/// decides: 30 s is stamped and 31 s kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_first_run_fallback_over_an_empty_call_stores_no_room_row() {
     let log = steno_pipeline::fixtures::CapturedLog::warnings();
@@ -6217,9 +5957,8 @@ async fn a_first_run_fallback_over_an_empty_call_stores_no_room_row() {
     }
 }
 
-/// A recording longer than half a minute that came out with no transcript
-/// at all most likely failed to transcribe: the automatic retention keeps
-/// it; a short one is stamped as usual.
+/// An empty transcript over more than 30 s likely failed, so it is kept;
+/// a short one is stamped.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_recording_with_no_transcript_keeps_its_recording() {
     for (duration, kept) in [(31.0, true), (6.0, false)] {
@@ -6227,8 +5966,8 @@ async fn a_long_recording_with_no_transcript_keeps_its_recording() {
     }
 }
 
-/// Records, for every commit from now on, whether the asset holds a stamp
-/// then and the connection's `synchronous` level (2 is FULL).
+/// Records for each commit whether the asset is stamped and the
+/// `synchronous` level (2 is FULL).
 fn stamp_commits(world: &World, asset: &AudioAsset) -> Arc<Mutex<Vec<(bool, i64)>>> {
     let commits: Arc<Mutex<Vec<(bool, i64)>>> = Arc::default();
     let seen = commits.clone();
@@ -6249,7 +5988,6 @@ fn stamp_commits(world: &World, asset: &AudioAsset) -> Arc<Mutex<Vec<(bool, i64)
     commits
 }
 
-/// The level of the first recorded commit whose stamp is `stamped`.
 fn first_level(commits: &Mutex<Vec<(bool, i64)>>, stamped: bool) -> Option<i64> {
     commits
         .lock()
@@ -6259,11 +5997,9 @@ fn first_level(commits: &Mutex<Vec<(bool, i64)>>, stamped: bool) -> Option<i64> 
         .map(|(_, level)| *level)
 }
 
-/// The retention stamp, which lets the sweep delete the recording, commits
-/// under `synchronous = FULL`: that commit also syncs the transcript and
-/// summary written before it, so a power loss cannot leave the recording
-/// gone and its results rolled back. That the commit then survives a power
-/// loss is SQLite's and cannot be tested.
+/// The retention stamp commits under `synchronous = FULL`, syncing the
+/// results written before it, so a power loss cannot leave the recording
+/// gone and its results rolled back.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_retention_stamp_commits_durably() {
     let world = world(true, None, AudioRetention::DeleteAfterProcessing);
@@ -6284,9 +6020,7 @@ async fn the_retention_stamp_commits_durably() {
     );
 }
 
-/// The keep that clears a stamp is what stops the sweep, so it commits as
-/// durably as the stamp: a power loss never brings the stamp back for the
-/// sweep to delete what the user kept.
+/// A keep that clears a stamp commits as durably as the stamp.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_keep_that_clears_a_stamp_commits_durably() {
     let world = world(false, None, AudioRetention::KeepDays(30));
@@ -6310,9 +6044,7 @@ async fn the_keep_that_clears_a_stamp_commits_durably() {
     );
 }
 
-/// Settings' Keep forever for every recording clears every stamp, and
-/// the clear of each recording is as durable as the first, in one write
-/// ([`Store::keep_forever`]).
+/// [`Store::keep_forever`] clears every stamp durably in one write.
 #[tokio::test(flavor = "multi_thread")]
 async fn keep_forever_for_every_recording_commits_durably() {
     let world = world(false, None, AudioRetention::KeepDays(30));
@@ -6327,8 +6059,7 @@ async fn keep_forever_for_every_recording_commits_durably() {
         world.pipeline.wait_until_idle().await;
         assert!(expires_at(&world, asset).is_some());
     }
-    // The ids sort the assets either way round; probe the one
-    // `keep_forever` writes last.
+    // Probe the asset `keep_forever` writes last.
     let last = if first_asset.id > second_asset.id {
         &first_asset
     } else {
@@ -6347,9 +6078,8 @@ async fn keep_forever_for_every_recording_commits_durably() {
     assert_eq!(first_level(&commits, false), Some(2));
 }
 
-/// A meeting whose diarizer failed, run under "delete after processing"
-/// by the pipeline returned with it, its one export failed; `summarizer`
-/// as in [`world`].
+/// A diarizer fallback meeting under "delete after processing" whose one
+/// export failed, with its pipeline.
 async fn a_fallback_whose_export_failed(
     summarizer: bool,
 ) -> (World, ProcessingPipeline, Meeting, AudioAsset) {
@@ -6373,9 +6103,7 @@ async fn a_fallback_whose_export_failed(
     (world, pipeline, meeting, asset)
 }
 
-/// A fallback meeting whose export failed is exported again: once every
-/// delivery succeeded, the re-export still keeps the recording unstamped,
-/// and the sweep deletes nothing.
+/// A successful re-export of a fallback meeting still keeps it unstamped.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reexport_of_a_diarizer_fallback_keeps_the_recording() {
     let (world, pipeline, meeting, asset) = a_fallback_whose_export_failed(false).await;
@@ -6417,8 +6145,7 @@ async fn a_launch_reexport_of_a_diarizer_fallback_keeps_the_recording() {
     assert_eq!(expires_at(&world, &asset), None);
 }
 
-/// A summary re-run delivers again and then asks for the stamp: a
-/// fallback meeting stays unstamped.
+/// A summary re-run keeps a fallback meeting unstamped.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_summary_rerun_of_a_diarizer_fallback_keeps_the_recording() {
     let (world, pipeline, meeting, asset) = a_fallback_whose_export_failed(true).await;
@@ -6430,12 +6157,9 @@ async fn a_summary_rerun_of_a_diarizer_fallback_keeps_the_recording() {
     assert_eq!(expires_at(&world, &asset), None);
 }
 
-/// A recording whose decode replaced parts by silence (#264) counts as
-/// incomplete for the automatic retention, whatever its rows: the run, a
-/// re-export, a summary re-run and the launch's re-export (a new pipeline
-/// that reads the damage back from the file the run synced) all leave it
-/// unstamped, and "Process again" is offered for it. The user's own rule
-/// ("Delete recording now") is stamped as chosen.
+/// A decode that replaced parts by silence counts as incomplete: every
+/// run and re-export, also after a relaunch, leaves it unstamped and
+/// offers Process again; the user's own rule is stamped as chosen.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_damaged_recording_stays_unstamped_through_every_automatic_stamp() {
     let world = world(
@@ -6479,8 +6203,8 @@ async fn a_damaged_recording_stays_unstamped_through_every_automatic_stamp() {
         &stored.segments,
         &asset,
     ));
-    // The first export fails, so the run leaves it unstamped either way;
-    // the steps below, whose exports succeed, show the damage keeping it.
+    // The first export fails, so later successful steps show the damage
+    // keeping it.
     assert_eq!(
         expires_at(&world, &asset),
         None,
@@ -6531,8 +6255,8 @@ async fn a_damaged_recording_stays_unstamped_through_every_automatic_stamp() {
     );
 }
 
-/// A run that fails after `persist` marked the meeting ready is delivered
-/// and asks for the deferred stamp: a fallback meeting stays unstamped.
+/// A run failing after `persist` marked it ready keeps a fallback meeting
+/// unstamped.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failure_after_the_ready_write_keeps_a_fallback_recording() {
     let world = world(false, None, AudioRetention::DeleteAfterProcessing);
@@ -6561,11 +6285,8 @@ async fn a_failure_after_the_ready_write_keeps_a_fallback_recording() {
     assert_eq!(expires_at(&world, &asset), None);
 }
 
-/// A re-run whose diarizer fails on a meeting with diarized speakers keeps
-/// them, and every new segment falls inside a stored span (the same
-/// audio): those speakers are as complete as the earlier working
-/// diarization, so no room row is stored, every segment keeps a speaker,
-/// and the run is stamped as the rule says.
+/// A failed re-run diarizer whose stored speakers cover every new segment
+/// stores no room row and stamps as the rule says.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rerun_whose_diarizer_fails_stamps_when_the_stored_speakers_cover_every_segment() {
     let world = world(
@@ -6609,8 +6330,8 @@ async fn a_rerun_whose_diarizer_fails_stamps_when_the_stored_speakers_cover_ever
     );
 }
 
-/// The bound itself: an empty transcript over exactly 30 s is stamped,
-/// just over it is kept.
+/// The bound: an empty transcript over exactly 30 s is stamped, just over
+/// is kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_empty_lane_bound_is_exclusive() {
     for (duration, kept) in [(30.0, false), (30.5, true)] {
@@ -6618,9 +6339,8 @@ async fn the_empty_lane_bound_is_exclusive() {
     }
 }
 
-/// A call whose mic lane came out empty while the tap carried the other
-/// side: past the bound the recording is kept (the mic may have failed to
-/// transcribe, or stayed muted); within it, stamped.
+/// A call with an empty mic lane is kept past the bound and stamped
+/// within it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_with_an_empty_mic_lane_keeps_its_recording_past_the_bound() {
     for (duration, kept) in [(31.0, true), (30.0, false)] {
@@ -6656,7 +6376,7 @@ async fn a_call_with_an_empty_mic_lane_keeps_its_recording_past_the_bound() {
     }
 }
 
-/// A phone recording whose metadata announced no length, over `samples`.
+/// A phone recording with no announced length, over `samples`.
 fn phone_recording(world: &World, samples: &[i16]) -> (Meeting, AudioAsset) {
     let mut meeting = call_meeting(world.now);
     meeting.source = MeetingSource::Phone;
@@ -6672,9 +6392,7 @@ fn phone_recording(world: &World, samples: &[i16]) -> (Meeting, AudioAsset) {
     (meeting, asset)
 }
 
-/// A phone meeting that announced no duration gets the length the run
-/// decoded: with a transcript it is stamped as usual, and a long one with
-/// no transcript at all keeps its recording.
+/// A phone meeting with no announced duration uses the decoded length.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_phone_meeting_without_a_duration_gets_the_decoded_length() {
     let world = world(false, None, AudioRetention::DeleteAfterProcessing);
@@ -6707,9 +6425,7 @@ async fn a_phone_meeting_without_a_duration_gets_the_decoded_length() {
     assert_eq!(expires_at(&world, &asset), None);
 }
 
-/// The one-lane variant: an empty phone recording whose diarizer fails
-/// stores no room row, and its decoded length decides, so 30 s is stamped
-/// and 31 s is kept.
+/// The one-lane variant: 30 s is stamped and 31 s kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_first_run_fallback_over_an_empty_phone_recording_stores_no_room_row() {
     for (seconds, kept) in [(30, false), (31, true)] {
@@ -6736,10 +6452,8 @@ async fn a_first_run_fallback_over_an_empty_phone_recording_stores_no_room_row()
     }
 }
 
-/// Rewrites the system sidecar with `seconds` of the conversation: the
-/// fake engine then yields one-second tap segments up to `seconds`, so a
-/// re-run past the first run's six seconds has speech that no stored
-/// speaker's span covers (`cluster_covering` returns `None` for it).
+/// Rewrites the system sidecar with `seconds` of the conversation, giving
+/// a re-run speech no stored speaker's span covers.
 fn extend_the_tap(asset: &AudioAsset, seconds: f64) {
     let layout = RecordingLayout::from_asset(asset).unwrap();
     steno_pipeline::fixtures::write_wav(
@@ -6749,10 +6463,8 @@ fn extend_the_tap(asset: &AudioAsset, seconds: f64) {
     .unwrap();
 }
 
-/// What the meeting detail's recording line reads for a ready meeting
-/// (`MeetingDetailViewModel::recording_status`, steno-host): `true` for
-/// `KeptIncomplete`. steno-host is not a dev-dependency of the pipeline,
-/// so this mirrors its ladder over the stored rows.
+/// Whether the detail's recording line reads `KeptIncomplete`, mirroring
+/// steno-host's `recording_status` over the stored rows.
 fn detail_reads_kept_incomplete(world: &World, meeting_id: Uuid) -> bool {
     let export = world.store.export(meeting_id).unwrap();
     let asset = export.audio.clone().expect("an asset");
@@ -6774,9 +6486,8 @@ fn detail_reads_kept_incomplete(world: &World, meeting_id: Uuid) -> bool {
         )
 }
 
-/// A call processed with a working diarizer under "delete after
-/// processing" and one working destination (stamped at `world.now`), its
-/// tap then extended to eight seconds.
+/// A call processed under "delete after processing" with one working
+/// destination, its tap then extended to eight seconds.
 async fn a_diarized_call_with_new_speech(
     summarizer: bool,
 ) -> (World, Meeting, AudioAsset, MeetingExport) {
@@ -6800,12 +6511,8 @@ async fn a_diarized_call_with_new_speech(
     (world, meeting, asset, first)
 }
 
-/// A re-run whose diarizer fails keeps
-/// the stored speakers, and the tap's new speech (6..8 s), which no stored
-/// span covers, goes to the room row: the stored mark. The re-run, then a
-/// re-export, a summary re-run and a launch re-export all leave the
-/// recording unstamped, the detail reads keptIncomplete at every step, and
-/// the sweep deletes nothing.
+/// A failed re-run diarizer gives uncovered new speech to the room row,
+/// and every later step leaves the recording unstamped and kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fell_back_rerun_with_new_speech_keeps_the_recording_through_every_later_stamp() {
     let (world, meeting, asset, first) = a_diarized_call_with_new_speech(true).await;
@@ -6890,11 +6597,8 @@ async fn a_fell_back_rerun_with_new_speech_keeps_the_recording_through_every_lat
     );
 }
 
-/// The room row beside stored speakers takes the next free "Speaker N",
-/// never a stored label: in the export (its display name, every speaker
-/// once in the participants), in the delivered note and in the labels the
-/// summary pass maps back to ids (`steno_llm::labels::SpeakerLabels`
-/// keeps one id per lower-cased label).
+/// The room row beside stored speakers takes the next free "Speaker N"
+/// everywhere: export, note and the summary's label map.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_room_row_beside_stored_speakers_takes_the_next_free_label() {
     let (world, meeting, _asset, _first) = a_diarized_call_with_new_speech(false).await;
@@ -6959,10 +6663,8 @@ async fn the_room_row_beside_stored_speakers_takes_the_next_free_label() {
     );
 }
 
-/// A label merged away below the highest stored one is not reused: the
-/// room row takes the label after the highest stored one, never at or
-/// below it, so a kept summary that still names the merged voice never
-/// points at the room's speech.
+/// The room row takes the label after the highest stored one, never a
+/// label merged away below it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_room_label_skips_every_stored_label() {
     let (world, meeting, _asset, first) = a_diarized_call_with_new_speech(false).await;
@@ -7001,11 +6703,8 @@ async fn the_room_label_skips_every_stored_label() {
     );
 }
 
-/// A confirmed speaker and a renamed one (confirmed to a person typed in
-/// as new) keep every segment they cover, by midpoint or by overlap: the
-/// re-run's 1.4 s segments put [5.6, 7.0] over the end of the renamed
-/// speaker's stored [5, 6], so the overlap fallback gives it that segment,
-/// and only [7, 8], which overlaps nothing stored, goes to the room row.
+/// Confirmed and renamed speakers keep every segment they cover by
+/// midpoint or overlap; only uncovered speech goes to the room row.
 #[tokio::test(flavor = "multi_thread")]
 async fn confirmed_and_renamed_speakers_keep_their_segments_on_a_fell_back_rerun() {
     let (world, meeting, _asset, first) = a_diarized_call_with_new_speech(false).await;
@@ -7062,13 +6761,8 @@ async fn confirmed_and_renamed_speakers_keep_their_segments_on_a_fell_back_rerun
     }
 }
 
-/// The room row feeds no voice: confirmed to a person, it gives them no
-/// embedding (the voice is computed only from rows with one), so the next
-/// meeting's matching never suggests them; a diarized speaker confirmed to
-/// the same person merges into the room row (`merge_speaker_rows`) and
-/// the voice is then exactly that speaker's own embedding, what a plain
-/// confirmation of it gives, with nothing from the room's segments; the
-/// room row and so the mark stay.
+/// The room row feeds no voice, and a speaker merged into it gives the
+/// person exactly that speaker's embedding; the room row stays.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_room_row_feeds_no_voice() {
     let (world, meeting, asset, first) = a_diarized_call_with_new_speech(false).await;
@@ -7094,8 +6788,7 @@ async fn the_room_row_feeds_no_voice() {
     let voice = world.store.person(cleo.id).unwrap().unwrap();
     assert_eq!((voice.embedding.clone(), voice.sample_count), (None, 0));
 
-    // The next meeting, matched against the stored voices, never meets
-    // Cleo.
+    // The next meeting, matched against the stored voices, never meets Cleo.
     let mut dependencies = world.pipeline.dependencies().clone();
     dependencies.speaker_memory =
         Arc::new(steno_pipeline::StoreSpeakerMemory::new(world.store.clone()));
@@ -7131,10 +6824,8 @@ async fn the_room_row_feeds_no_voice() {
     assert_eq!(expires_at(&world, &asset), None);
 }
 
-/// A first-run fallback re-run whose diarizer fails again: the stored room
-/// row is the only owner, covers the whole recording again (the new speech
-/// included), and no second room row is pushed (a duplicate id would fail
-/// `insert_speaker` and so the run).
+/// A fallback re-run failing again reuses the stored room row for the
+/// whole recording and pushes no second one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rerun_of_a_first_run_fallback_keeps_one_room_row() {
     let (world, pipeline, meeting, asset) = a_fallback_whose_export_failed(false).await;
@@ -7161,11 +6852,8 @@ async fn a_rerun_of_a_first_run_fallback_keeps_one_room_row() {
     assert!(detail_reads_kept_incomplete(&world, meeting.id));
 }
 
-/// A room row stored for the other lane (the first run diarized the mic,
-/// its tap silent) that the user confirmed takes none of this lane's
-/// segments when a re-run diarizes the tap and fails again: a confirmed
-/// row never gets segments it did not own. The row stays, so the meeting
-/// stays kept.
+/// A confirmed room row stored for the other lane takes none of this
+/// lane's segments; the row stays, so the meeting stays kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_confirmed_room_row_of_the_other_lane_takes_no_tap_segment() {
     let world = world_with(
@@ -7223,10 +6911,8 @@ async fn a_confirmed_room_row_of_the_other_lane_takes_no_tap_segment() {
     assert_eq!(expires_at(&world, &asset), None);
 }
 
-/// Only a failed diarizer has a room fallback: the tap's segments a
-/// working diarizer's clusters miss (here the last two seconds) keep no
-/// speaker, no room row is stored, and the recording is stamped as the rule
-/// says.
+/// Only a failed diarizer has a room fallback: segments a working one
+/// misses keep no speaker, and the recording is stamped.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_working_diarizer_leaves_what_its_clusters_miss_without_a_speaker() {
     let world = world_with(

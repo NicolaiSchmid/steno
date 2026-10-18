@@ -1,5 +1,4 @@
 //! Removes the audio of every asset whose expiry has passed.
-//! Swift: `Sources/StenoCore/Storage/RetentionSweep.swift`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -10,8 +9,8 @@ use steno_core::{RecordingLayout, Store, StoreError, paths::file_url_path};
 
 use crate::sample_clips;
 
-/// Why a sweep stopped short: files it could not remove, or a store read
-/// or write that failed.
+/// Why a sweep stopped short: files it could not remove, or a store read or
+/// write that failed.
 #[derive(Debug, thiserror::Error)]
 pub enum SweepIncomplete {
     #[error("retention sweep could not remove {}", listed(.0))]
@@ -20,7 +19,6 @@ pub enum SweepIncomplete {
     Store(#[from] StoreError),
 }
 
-/// `path (reason), path (reason)`.
 fn listed(failures: &[(PathBuf, std::io::Error)]) -> String {
     failures
         .iter()
@@ -30,23 +28,14 @@ fn listed(failures: &[(PathBuf, std::io::Error)]) -> String {
 }
 
 /// Master, sidecars and mixdown go together with the sample clips of the
-/// meeting's confirmed speakers. Unconfirmed speakers keep their clips
-/// until confirmation or deletion. The clip files of the meeting's speakers
-/// that no row names, left by a run that ended before its sweep, go too
-/// ([`sample_clips`]). A clip file whose name starts with the id of no
-/// current speaker of the meeting, such as a file of a confirmed speaker
-/// a re-run dropped, stays past the retention period until the meeting
-/// is deleted, as in Swift. The asset row keeps its URLs and loses
-/// `expires_at` once every file is gone, so a sweep runs once per expiry.
-/// A file known to be missing is skipped. One whose presence cannot be
-/// read (an I/O error, a folder the sweep cannot search) counts as there,
-/// so its removal fails and the stamp stays (`known_gone`). That rule is
-/// Rust only: Swift's sweep and "Keep all" ask `fileExists`, which reads
-/// such a file as gone. A file that cannot be removed leaves the stamp in
-/// place for the next sweep and never stops the sweep
-/// from reaching the other assets. Each asset is checked again in the write that
-/// removes its files ([`Store::sweep_expired_asset`]), so a meeting queued
-/// since the sweep read the list keeps its audio.
+/// meeting's confirmed speakers and the clip files no row names
+/// ([`sample_clips`]); unconfirmed speakers keep their clips. The asset row
+/// loses `expires_at` once every file is gone, so a sweep runs once per
+/// expiry. A file whose presence cannot be read counts as there, so its
+/// removal fails and the stamp stays for the next sweep. Each asset is
+/// checked again in the write that removes its files
+/// ([`Store::sweep_expired_asset`]), so a meeting queued since keeps its
+/// audio.
 #[derive(Debug, Clone)]
 pub struct RetentionSweep {
     store: Arc<Store>,
@@ -87,9 +76,8 @@ impl RetentionSweep {
                         }
                     }
                 }
-                // The meeting is not processing, and the write lock
-                // keeps a run from starting, so no clip here is a
-                // run's uncommitted one.
+                // The write lock keeps a run from starting, so no clip here
+                // is a run's uncommitted one.
                 if let Some(layout) = RecordingLayout::own_folder(&expired.asset) {
                     let owners: BTreeSet<_> = expired.speakers.iter().map(|s| s.id).collect();
                     removed.extend(sample_clips::sweep(
@@ -109,10 +97,9 @@ impl RetentionSweep {
         }
     }
 
-    /// Every asset whose master file is still on disk, or may be (its
-    /// presence cannot be read), becomes keep forever with `expires_at`
-    /// cleared, in one write, so no later sweep removes it once it can be
-    /// read again. Returns how many.
+    /// Every asset whose master file is still on disk, or may be, becomes
+    /// keep forever with `expires_at` cleared, in one write. Returns how
+    /// many.
     pub fn keep_all(&self) -> Result<usize, StoreError> {
         let ids: Vec<_> = self
             .store
@@ -126,12 +113,9 @@ impl RetentionSweep {
     }
 }
 
-/// Whether `path` is known not to exist. An error reading its metadata
-/// (an I/O error, a folder that cannot be searched) is not knowing. So is
-/// an error that does prove absence (`ENOTDIR`, a path component that is a
-/// file; `ELOOP`): the stamp stays, and each sweep tries again and warns.
-/// That is rare and bounded (a sweep runs at launch and after a run stamps a
-/// meeting's retention), and accepted.
+/// Whether `path` is known not to exist. Any error reading its metadata,
+/// even one that proves absence (`ENOTDIR`, `ELOOP`), is not knowing: the
+/// stamp stays and each sweep tries again.
 fn known_gone(path: &Path) -> bool {
     matches!(path.try_exists(), Ok(false))
 }
@@ -151,10 +135,8 @@ mod tests {
 
     use super::*;
 
-    /// Two asset rows for one master, one kept forever and one expired
-    /// after processing (a fault's leftover): the sweep removes nothing,
-    /// leaves both rows as they are, and removes the master once the other
-    /// row is due too, and then both rows lose `expiresAt`.
+    /// A master shared with a kept row stays until both rows are due, then
+    /// goes and both rows lose `expiresAt`.
     #[test]
     fn the_sweep_keeps_a_master_another_asset_row_still_needs() {
         let dir = tempfile::tempdir().unwrap();
@@ -212,11 +194,8 @@ mod tests {
         );
     }
 
-    /// Two asset rows for one master, one kept forever and one expired,
-    /// and the master's folder cannot be searched, so whether the master
-    /// is there cannot be read: it counts as there, the keeper check runs,
-    /// and the expired row is not swept. Skipped where the folder's mode
-    /// does not stop the read (as root).
+    /// A master shared with a kept row whose folder cannot be searched counts
+    /// as there, and the expired row is not swept. Skipped as root.
     #[cfg(unix)]
     #[test]
     fn a_master_whose_metadata_cannot_be_read_keeps_its_keeper_check() {
@@ -280,9 +259,8 @@ mod tests {
         assert_eq!(due, [expired.id], "still due, for the next sweep");
     }
 
-    /// A ready meeting whose one asset, its master in its own folder,
-    /// expired an hour before `now`. Returns the layout, the master and
-    /// the asset.
+    /// A ready meeting whose one asset, in its own folder, expired an hour
+    /// before `now`: the layout, the master and the asset.
     #[cfg(unix)]
     fn expired_recording(
         store: &Store,
@@ -310,9 +288,7 @@ mod tests {
         (layout, master, asset)
     }
 
-    /// Makes a folder unsearchable (mode 000) and searchable again (755)
-    /// when dropped, so a failed assertion never leaves a folder the
-    /// temporary directory cannot remove.
+    /// Makes a folder unsearchable and searchable again when dropped.
     #[cfg(unix)]
     struct Unsearchable<'a>(&'a Path);
 
@@ -337,12 +313,9 @@ mod tests {
         }
     }
 
-    /// One expired asset, no keeper, and the master's folder cannot be
-    /// searched, so whether the master is there cannot be read: it counts
-    /// as there, its removal fails, nothing is removed and the stamp stays.
-    /// Once the folder can be searched again, the next sweep removes the
-    /// master and clears the stamp. Skipped where the folder's mode does
-    /// not stop the read (as root).
+    /// An expired master in an unsearchable folder is not removed and the
+    /// stamp stays; once searchable, the next sweep removes it. Skipped as
+    /// root.
     #[cfg(unix)]
     #[test]
     fn a_master_in_a_folder_the_sweep_cannot_search_keeps_its_stamp_until_it_goes() {
@@ -380,9 +353,8 @@ mod tests {
         );
     }
 
-    /// "Keep all" while the master's folder cannot be searched keeps that
-    /// recording too, so no sweep removes it once the folder can be
-    /// searched again. Skipped as root, like the test above.
+    /// "Keep all" keeps a master in an unsearchable folder too. Skipped as
+    /// root.
     #[cfg(unix)]
     #[test]
     fn keep_all_keeps_a_master_whose_folder_cannot_be_searched() {
@@ -407,11 +379,8 @@ mod tests {
         assert!(master.exists(), "kept forever");
     }
 
-    /// Two asset rows for one master, each with its own sidecar and
-    /// mixdown, one kept for a day and one expired: the first sweep keeps
-    /// the master. Once the keeper falls due too, the next sweep removes
-    /// the master once and every row's sidecar and mixdown, and both rows
-    /// lose `expiresAt`, so no row is left due once its master went.
+    /// A master shared by two rows with their own sidecars goes once both are
+    /// due, with every row's sidecar and mixdown.
     #[test]
     fn two_rows_on_one_master_both_lose_their_stamp_once_the_master_goes() {
         let dir = tempfile::tempdir().unwrap();
@@ -551,10 +520,9 @@ mod tests {
         );
     }
 
-    /// A ready meeting whose master in its own folder expired an hour
-    /// before `now`, with a speaker confirmed as Anna and an unconfirmed
-    /// one, each naming its clip of one run. Returns the layout, the
-    /// master, the run's id and the two speakers' ids.
+    /// A ready, expired meeting with a confirmed and an unconfirmed speaker,
+    /// each naming its clip of one run: the layout, the master, the run's id
+    /// and the two speakers' ids.
     fn expired_meeting_with_run_clips(
         store: &Store,
         dir: &Path,
@@ -609,8 +577,7 @@ mod tests {
         (layout, master, run, confirmed, unconfirmed)
     }
 
-    /// A clip a run wrote under its own name goes by the name its row
-    /// holds: the confirmed speaker's, not an unconfirmed speaker's.
+    /// A run's clip goes by the name its confirmed row holds.
     #[test]
     fn the_sweep_removes_the_run_clip_a_confirmed_row_names() {
         let dir = tempfile::tempdir().unwrap();
@@ -627,10 +594,8 @@ mod tests {
         assert!(layout.run_sample_clip(unconfirmed, run).exists());
     }
 
-    /// With the audio go the clip files of the meeting's speakers that no
-    /// row names, the leftovers of runs that ended before their sweep; the
-    /// clip an unconfirmed row names, and a file of a speaker the meeting
-    /// no longer has (a confirmed speaker a re-run dropped), stay.
+    /// With the audio go the speakers' unnamed clip files; an unconfirmed
+    /// row's clip and a dropped speaker's file stay.
     #[test]
     fn the_sweep_removes_the_clips_no_row_names_of_the_meetings_speakers() {
         let dir = tempfile::tempdir().unwrap();
@@ -661,9 +626,8 @@ mod tests {
         assert!(dropped.exists(), "a speaker the meeting no longer has");
     }
 
-    /// The sweep checks each asset again in the write that removes its
-    /// files: a meeting `reprocess` queued after the list was read keeps
-    /// its audio and its row.
+    /// A meeting `reprocess` queued after the list was read keeps its audio
+    /// and its row.
     #[test]
     fn an_asset_whose_meeting_was_queued_since_the_list_was_read_is_kept() {
         let dir = tempfile::tempdir().unwrap();

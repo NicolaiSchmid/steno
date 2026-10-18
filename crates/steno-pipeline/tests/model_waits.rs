@@ -1,8 +1,7 @@
 //! A resume that lands while a refused run lets go of its meeting, a
 //! refused run's restart, and the restart an exit stops. Their own test
-//! binary: the gates are log lines, seen by the binary's global subscriber
-//! (the first test, on a current-thread runtime) or by one its runtime's
-//! worker threads alone use (the others), which no other test shares.
+//! binary: the gates are log lines, seen by a subscriber no other test
+//! shares.
 
 mod common;
 
@@ -24,10 +23,9 @@ use uuid::Uuid;
 /// How long a test waits for a gate or for its runs to end.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// A speech engine whose first transcription decides its model is
-/// missing, then waits at a gate (`entered`, then `open`) before it
-/// returns the refusal, so a test can install and resume in between; every
-/// later call transcribes.
+/// A speech engine whose first transcription decides its model is missing,
+/// then waits at a gate before it returns the refusal; later calls
+/// transcribe.
 #[derive(Default)]
 struct HeldRefusal {
     refused: AtomicBool,
@@ -77,7 +75,6 @@ fn pipeline_over(
     (store, audio, pipeline)
 }
 
-/// Enqueues a two-lane call in `audio` on `pipeline`; its meeting id.
 fn enqueue_call(audio: &Path, pipeline: &ProcessingPipeline) -> Uuid {
     let mut meeting = sample_data::meeting();
     meeting.id = Uuid::new_v4();
@@ -116,14 +113,8 @@ where
     }
 }
 
-/// An install's resume that lands after a refused run decided its meeting
-/// waits and before the run let the meeting go. The gate is the background
-/// task's "waits for the models" line, which it logs before it ends, on
-/// this thread (a current-thread runtime): the resume runs right there,
-/// and the task ends in the same poll, before the test goes on. The
-/// meeting is started once the run is done, rather than left waiting with
-/// every model installed. (`wait_until_idle` takes the task's entry out of
-/// the running ones, so the test waits for the gate before it calls it.)
+/// An install's resume between a refused run's decision and its release of
+/// the meeting still gets the meeting started once the run is done.
 #[tokio::test(flavor = "current_thread")]
 async fn a_resume_while_a_refused_run_lets_go_of_its_meeting_still_starts_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -162,13 +153,8 @@ async fn a_resume_while_a_refused_run_lets_go_of_its_meeting_still_starts_it() {
     );
 }
 
-/// An install's resume while a run is being refused skips the meeting,
-/// which is in flight, so the run starts it again instead of leaving it
-/// waiting. The restart's log line is the gate: it holds the run's worker
-/// thread there until the test lets go. `wait_until_idle` called then
-/// does not return, as the refused run is still among the background
-/// runs until it has started the meeting again, and once let go it waits
-/// for the restart too: the meeting is ready when it returns.
+/// An install's resume while a run is being refused skips the in-flight
+/// meeting, and the run starts it again instead of leaving it waiting.
 #[test]
 fn wait_until_idle_waits_for_a_refused_run_to_start_its_meeting_again() {
     let reached = Arc::new(tokio::sync::Notify::new());
@@ -240,12 +226,8 @@ fn wait_until_idle_waits_for_a_refused_run_to_start_its_meeting_again() {
     });
 }
 
-/// The app quits after a refused run decided its meeting waits and while
-/// an install's resume had skipped it (it was in flight): the run neither
-/// starts the meeting again nor posts its progress, and the meeting stays
-/// `queued`, recorded nowhere, for the next launch's recovery. The gate is
-/// the run's "waits for the models" line, logged between the refusal and
-/// the restart, on a worker thread this test's runtime alone uses.
+/// A quit while a refused run's meeting was skipped by a resume leaves the
+/// meeting `queued` for the next launch, unstarted.
 #[test]
 fn a_refused_run_the_exit_overtakes_does_not_start_its_meeting_again() {
     let quitting = Arc::new(std::sync::Mutex::new(None::<ProcessingPipeline>));

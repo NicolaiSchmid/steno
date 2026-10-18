@@ -1,5 +1,4 @@
 //! The learned stage rates and the arithmetic behind `progress` events.
-//! Swift: `Sources/StenoCore/Pipeline/ProcessingEstimator.swift`.
 
 use std::collections::BTreeMap;
 
@@ -13,9 +12,8 @@ use steno_core::{
 pub const ALPHA: f64 = 0.3;
 
 /// The rate after one more measurement: the first sample replaces a seed
-/// outright, so the second run already runs on this machine's numbers;
-/// later samples are folded in as an exponential moving average with
-/// [`ALPHA`]. Swift: `StageRate.absorbing`.
+/// outright, later ones fold in as an exponential moving average with
+/// [`ALPHA`].
 #[must_use]
 pub fn absorbing(current: StageRate, seconds_per_unit: f64) -> StageRate {
     if current.samples <= 0 {
@@ -37,8 +35,8 @@ fn seed(seconds_per_unit: f64) -> StageRate {
     }
 }
 
-/// One measured stage: what the pipeline records once a stage ran alone in
-/// flight and did not fail. Swift: `StageSample`.
+/// One measured stage, recorded once a stage ran alone in flight and did not
+/// fail.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StageSample {
     pub stage: PipelineStage,
@@ -49,7 +47,7 @@ pub struct StageSample {
     pub recorded_at: DateTime<Utc>,
 }
 
-/// What a stage's cost depends on. Swift: `PipelineStage.CostDriver`.
+/// What a stage's cost depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CostDriver {
     /// Audio seconds summed over the lanes decoded, transcribed or encoded.
@@ -75,9 +73,8 @@ pub enum RateKeying {
 pub trait StageCost {
     fn cost_driver(self) -> CostDriver;
     fn rate_keying(self) -> RateKeying;
-    /// Whether the pipeline learns the stage's rate. Decode is never
-    /// learned: the CLI and the app decode through different decoders and
-    /// a shared rate would mix them, so it stays on its flat seed.
+    /// Whether the pipeline learns the stage's rate. Decode is never learned:
+    /// the CLI and the app decode differently, so it stays on its seed.
     fn learns_rate(self) -> bool;
 }
 
@@ -109,11 +106,9 @@ impl StageCost for PipelineStage {
     }
 }
 
-/// The per-stage rates the estimator weighs stages with, keyed by stage
-/// and by what the stage depends on. [`StageRates::seeds`] is the one
-/// source of the seed constants; a key without a sample falls back to its
-/// seed, and a transcribe key without a seed (a fake engine) to the
-/// `parakeet-v3` seed. Swift: `StageRates`.
+/// The per-stage rates, keyed by stage and by what the stage depends on. A
+/// key without a sample falls back to its seed, and a transcribe key without
+/// a seed (a fake engine) to the `parakeet-v3` seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StageRates {
     entries: BTreeMap<(PipelineStage, String), StageRate>,
@@ -122,15 +117,13 @@ pub struct StageRates {
 impl StageRates {
     /// The key of a stage whose cost depends on no engine or model.
     pub const UNKEYED: &'static str = "";
-    /// The key of `cleanup` and `summarize` when no LLM model is configured
-    /// and the passthrough passes run.
+    /// The key of `cleanup` and `summarize` when no LLM model is configured.
     pub const NO_MODEL: &'static str = "none";
     /// The transcribe seed an engine without a seed of its own uses.
     pub const FALLBACK_ENGINE: &'static str = "parakeet-v3";
 
-    /// Seconds per unit before any run was measured on this machine, in
-    /// the units of [`CostDriver`]. Basis and provenance:
-    /// `.plans/2026-09-28-processing-progress.md` D2.
+    /// Seconds per unit before any run was measured on this machine, in the
+    /// units of [`CostDriver`].
     #[must_use]
     pub fn seeds() -> Self {
         let mut rates = StageRates {
@@ -157,9 +150,8 @@ impl StageRates {
         rates
     }
 
-    /// The seeds with every stored row laid over them. A row whose key is
-    /// not empty for a stage that is not keyed, or whose rate is negative
-    /// or not a finite number, is ignored. Swift: `MeetingStore.stageRates`.
+    /// The seeds with every stored row laid over them. A row with a key for
+    /// an unkeyed stage, or a negative or non-finite rate, is ignored.
     #[must_use]
     pub fn from_rows(rows: &[StageRateRow]) -> Self {
         let mut rates = Self::seeds();
@@ -191,8 +183,7 @@ impl StageRates {
     }
 
     /// The learned rate for `stage` under `key`, else its seed, else the
-    /// stage's fallback seed. Every table starts from [`StageRates::seeds`],
-    /// so a key missing here has no seed of its own either.
+    /// stage's fallback seed.
     #[must_use]
     pub fn rate(&self, stage: PipelineStage, key: &str) -> StageRate {
         self.entries
@@ -213,10 +204,8 @@ impl StageRates {
 }
 
 /// Pure arithmetic behind `progress` events: from a meeting's duration,
-/// its lanes, a transcript token count and [`StageRates`], the expected
-/// seconds per stage, the expected remaining time from any point in the
-/// run and the fraction at which the next event is expected.
-/// Swift: `ProcessingEstimator`.
+/// lanes, token count and [`StageRates`], the expected seconds per stage and
+/// remaining, and the fraction at which the next event is expected.
 #[derive(Debug, Clone)]
 pub struct ProcessingEstimator {
     /// The meeting's audio in seconds.
@@ -407,8 +396,7 @@ mod tests {
         );
     }
 
-    /// The numbers of `StageRates.seeds` in `ProcessingEstimator.swift`,
-    /// every one a seed (`samples == 0`).
+    /// The seed numbers, every one a seed (`samples == 0`).
     #[test]
     fn the_seeds_are_the_swift_constants() {
         let rates = StageRates::seeds();

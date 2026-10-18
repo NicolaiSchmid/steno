@@ -1,5 +1,4 @@
 //! Pure lane merge: one ordered transcript from per-lane raw segments.
-//! Swift: `Sources/StenoCore/Pipeline/LaneMerger.swift`.
 
 use std::collections::BTreeMap;
 
@@ -15,13 +14,11 @@ pub struct ClusterSpeaker {
     pub ranges: Vec<TimeRange>,
 }
 
-/// `.mic` segments belong to the deterministic "me" speaker; `.system` and
-/// `.mixed` segments get the diarization cluster covering their midpoint,
-/// and a `.mixed` segment is never assigned to "me". When the mic lane is
+/// `.mic` segments belong to the "me" speaker; `.system` and `.mixed`
+/// segments get the cluster covering their midpoint. When the mic lane is
 /// the diarized lane (a call whose tap carried no conversation), its
-/// segments get clusters like a room lane and the tap's stray segments (a
-/// chime, a hallucinated word) are kept without a speaker: the clusters
-/// describe the room, not the tap, and nothing transcribed is thrown away.
+/// segments get clusters like a room lane and the tap's stray segments are
+/// kept without a speaker.
 pub struct LaneMerger;
 
 impl LaneMerger {
@@ -64,10 +61,8 @@ impl LaneMerger {
     }
 
     /// The merged transcript, ordered by start, then lane order, then index.
-    /// `diarized_lane` is the lane the clusters cover; `Some(Mic)` makes
-    /// the mic lane the room. `fallback` is the speaker a segment that the
-    /// clusters are for and no cluster covers goes to (the diarizer
-    /// fallback's room speaker); `None` leaves it without one. Rust only.
+    /// `diarized_lane` is the lane the clusters cover; `fallback` is the
+    /// speaker for its segments no cluster covers.
     #[must_use]
     pub fn merge(
         meeting_id: Uuid,
@@ -198,9 +193,8 @@ mod tests {
         );
     }
 
-    /// A call whose tap carried no conversation: the mic lane is the room,
-    /// its segments get clusters, nobody is "me", and the tap's stray
-    /// segments are kept without a speaker.
+    /// A call whose tap carried no conversation: the mic lane is the room and
+    /// the tap's stray segments have no speaker.
     #[test]
     fn a_mic_lane_diarized_as_the_room_gets_clusters_and_keeps_the_tap_unassigned() {
         let meeting = Uuid::new_v4();
@@ -269,7 +263,7 @@ mod tests {
         );
 
         // A stray tap segment inside a room cluster's range still has no
-        // speaker: the clusters describe the mic lane.
+        // speaker.
         lanes
             .get_mut(&AudioLane::System)
             .unwrap()
