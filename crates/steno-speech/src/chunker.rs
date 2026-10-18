@@ -17,7 +17,8 @@
 //! windows: none, the tail, or every one; the chunks stay where [`layout`]
 //! put them. With [`ChunkerConfig::from_start`] the first chunk starts at
 //! the recording's start, so the lead-in is decoded with the speech after
-//! it and leaves no gap.
+//! it; a lead-in longer than the first chunk is decoded only as far as that
+//! chunk reaches.
 //!
 //! [`partition`] splits the recording once into the [`Span`]s that own it,
 //! one per chunk and one per extra window, and gives each the bound its
@@ -90,7 +91,7 @@ pub struct ChunkerConfig {
     pub decode_gaps: Gaps,
     /// The first chunk starts at the recording's start, not `pad_seconds`
     /// before the first speech, so the lead-in is decoded with the speech
-    /// after it. Off by default.
+    /// after it, as far as that chunk reaches. Off by default.
     pub from_start: bool,
 }
 
@@ -312,8 +313,9 @@ pub struct Span {
 /// own. The first span owns from the recording's start and the last to its
 /// end; without a window there is no span.
 ///
-/// The extra windows (see the module doc) cover each gap `decode_gaps`
-/// decodes of at least [`MIN_GAP_SECONDS`] and stay inside it: no window reaches into a chunk.
+/// The extra windows (see the module doc) cover each gap of at least
+/// [`MIN_GAP_SECONDS`] that `decode_gaps` names and stay inside it:
+/// no window reaches into a chunk.
 /// A gap longer than `max_seconds` is split into windows of equal length
 /// that share `overlap_seconds` with each other. A shorter gap is not
 /// decoded, even where it is the uncovered edge of a longer pause. Nor is a

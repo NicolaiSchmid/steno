@@ -37,11 +37,12 @@ pub const PARAKEET_V3_LANGUAGES: [&str; 25] = [
 /// - the first chunk starts at the recording's start
 ///   ([`ChunkerConfig::from_start`]), so the lead-in is decoded with the
 ///   speech after it: FLEURS 4.865 % mean WER against 4.882 % without, the
-///   corpus 9.735 % against the Swift transcripts against 9.814 %, and no
-///   word added where the Swift transcripts have none;
-/// - the tail is decoded in extra windows ([`Gaps::Tail`]), so quiet speech
-///   after the last speech the detector hears comes through; FLEURS and
-///   the corpus are unchanged by it.
+///   corpus's mean WER against the Swift transcripts 9.735 % instead of
+///   9.814 %, and no word added where the Swift transcripts have none;
+/// - the tail is decoded in extra windows ([`Gaps::Tail`]) once it is at
+///   least [`MIN_GAP_SECONDS`](crate::chunker::MIN_GAP_SECONDS) long, so
+///   quiet speech after the last speech the detector hears comes through;
+///   FLEURS and the corpus are unchanged by it.
 ///
 /// The long pauses stay skipped (`long_pause_seconds`, 3 s): extra windows
 /// over every gap ([`Gaps::All`], the `CoreML` engine's setting) inserted

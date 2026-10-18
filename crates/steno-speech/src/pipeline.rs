@@ -1,11 +1,12 @@
 //! The pipeline above the tensors, in order: VAD regions, the partition of
 //! the recording into owned spans ([`partition`]: the pause-aligned chunks
 //! and extra windows over the audio no chunk covers, in the gaps
-//! [`ChunkerConfig::decode_gaps`] names), one decode per span with the empty-decode
-//! recovery for a chunk, the spans' words joined in order, pieces to words
-//! to segments, and the language tag. A chunk is a range the layout chose;
-//! a window is the range actually decoded: the chunk itself or, after a
-//! recovery, the chunk with more audio around it, or an extra window.
+//! [`ChunkerConfig::decode_gaps`] names), one decode per span with the
+//! empty-decode recovery for a chunk, the spans' words joined in order,
+//! pieces to words to segments, and the language tag. A chunk is a range
+//! the layout chose; a window is the range actually decoded: the chunk
+//! itself or, after a recovery, the chunk with more audio around it, or an
+//! extra window.
 //!
 //! The spans' decodes are joined by runs (`join`). A run is the
 //! consecutive spans of one kind: the chunks between two gaps' windows, or

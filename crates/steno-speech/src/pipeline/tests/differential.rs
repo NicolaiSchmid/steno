@@ -1497,23 +1497,22 @@ struct Tally {
 }
 
 /// `cases` random layouts from `seed`, with recovery on: the first
-/// generator's words of one to three pieces, the old merge's random
-/// layout, its two-sided layout around a gap with recoveries reaching
-/// into it, the collision layout and the general one, on a third of its
-/// cases with orphans at every seam ([`ref_seam_layout`]), under the default
-/// settings, `CoreML`'s, two between and the ONNX engine's, with the extra
-/// windows off and on, over the exact fake, one that moves tokens by `jitter` frames, and,
-/// on half the cases, one deaf at a window's edges (`DEAF`), as a model
-/// with little context there can be, so that two windows of a layout
-/// disagree about a word at every kind of seam. Every word the old merge
-/// kept comes out, with every piece the old merge gave it and its
-/// boundaries ([`ref_losses`]): a duplicate is allowed, a loss never, and a
-/// longer word only with extra pieces the boundaries allow (counted in
-/// [`Tally::glues`], beside the words limit E cuts, [`Tally::led`]). And,
-/// where the fake hears every frame, every word a gap's window or an
-/// accepted recovery heard in its reach comes out at least once (see
-/// `ref_losses` for that check and for a word that repeats the one before
-/// it).
+/// generator's words of one to three pieces, the old merge's random layout,
+/// its two-sided layout around a gap with recoveries reaching into it, the
+/// collision layout and the general one, on a third of its cases with orphans
+/// at every seam ([`ref_seam_layout`]), under the default settings,
+/// `CoreML`'s, two between and the ONNX engine's, with the extra windows off
+/// and on, over the exact fake, one that moves tokens by `jitter` frames,
+/// and, on half the cases, one deaf at a window's edges (`DEAF`), as a model
+/// with little context there can be, so that two windows of a layout disagree
+/// about a word at every kind of seam. Every word the old merge kept comes
+/// out, with every piece the old merge gave it and its boundaries
+/// ([`ref_losses`]): a duplicate is allowed, a loss never, and a longer word
+/// only with extra pieces the boundaries allow (counted in [`Tally::glues`],
+/// beside the words limit E cuts, [`Tally::led`]). And, where the fake hears
+/// every frame, every word a gap's window or an accepted recovery heard in
+/// its reach comes out at least once (see `ref_losses` for that check and for
+/// a word that repeats the one before it).
 fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
     let mut rng = Rng(seed);
     let mut tally = Tally::default();

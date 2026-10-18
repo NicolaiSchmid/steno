@@ -167,9 +167,9 @@ fn upsample(samples: &[f32], rate: f64) -> Vec<f32> {
 /// so a file's WER moves by up to two points between them and the means
 /// by half a point (measured on atlas at the engine's settings: 5.40 %
 /// from 48 kHz, 5.05 % from 44.1 kHz; 5.51 and 5.02 % before A16b of
-/// `.plans/2026-10-07-stable-promotion.md`). FLEURS is 16 kHz speech, so this measures the two
-/// passbands and phases on real speech; the aliasing of content above
-/// 8 kHz is `steno-audio`'s `tests/resampler_sweep.rs`.
+/// `.plans/2026-10-07-stable-promotion.md`). FLEURS is 16 kHz speech, so
+/// this measures the two passbands and phases on real speech; the aliasing
+/// of content above 8 kHz is `steno-audio`'s `tests/resampler_sweep.rs`.
 #[test]
 fn fleurs_wer_from_44k1_is_at_most_a_tenth_of_a_point_over_48k() {
     let Some(models) = common::installed_store() else {
