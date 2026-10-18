@@ -1,9 +1,6 @@
-//! What the handover logs through `tracing` never carries a credential:
-//! not the pairing secret, not the bearer token, through a pairing, an
-//! upload and a failure that logs at error level. The capture is a
-//! subscriber of its own (the crate has no `tracing-subscriber`), installed
-//! as the global default so the blocking pool's threads report to it too,
-//! and it keeps span fields and recorded values as well as events.
+//! What the handover logs never carries the pairing secret or bearer token,
+//! through a pairing, an upload and an error. The capture is a global
+//! subscriber of its own so the blocking pool reports to it too.
 
 #![allow(clippy::large_futures)]
 
@@ -91,14 +88,12 @@ async fn no_credential_reaches_the_log() {
     let capture = Capture::installed();
     let test = TestService::with_chunk_size(CHUNK_SIZE).await;
 
-    // Pairing with the secret of the window opened here, after one
-    // rejected attempt, then an upload whose write fails: the error path
-    // is the one that logs the most.
+    // One rejected pairing, then a pairing and an upload whose write fails,
+    // the path that logs the most.
     let payload = test.service.begin_pairing();
     let rejected = Phone::try_pair(&test, &[0u8; 32], Uuid::new_v4(), "Intruder").await;
     assert_eq!(rejected.status, 403);
-    // Straight through `try_pair`, so the secret the log is searched for
-    // is the one that went over the wire.
+    // Through `try_pair`, so the searched secret is the one sent.
     let device_id = Uuid::new_v4();
     let paired = Phone::try_pair(&test, &payload.secret, device_id, "Test iPhone").await;
     assert_eq!(paired.status, 200, "the window's own secret pairs");

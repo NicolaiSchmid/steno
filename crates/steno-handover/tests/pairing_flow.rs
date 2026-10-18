@@ -1,8 +1,6 @@
-//! Pairing on the injected wall clock: the first use of a secret pairs,
-//! the second is 403, an expired window is 403, a revoked token is 401,
-//! the name is stored trimmed, a failed save reopens the window but not
-//! one cancelled or replaced while it ran, and a head authorised against a
-//! closed window does not pair against the next.
+//! Pairing on the injected wall clock: a secret pairs once, an expired
+//! window is 403, a revoked token is 401, the name is trimmed, and a failed
+//! save reopens only a window still current.
 
 #![allow(
     clippy::assert_is_empty,
@@ -140,8 +138,7 @@ async fn wrong_secrets_and_no_session_are_forbidden() {
         .await;
     assert_eq!(bearer_instead.status, 403);
 
-    // A wrong secret does not burn the session; the right one still pairs,
-    // and base64url (the QR form) is accepted too.
+    // A wrong secret does not burn the session; base64url (the QR form) pairs.
     let url_form = client
         .json(
             "POST",
@@ -278,8 +275,7 @@ async fn the_device_name_is_stored_trimmed() {
 
 #[tokio::test]
 async fn a_failed_device_save_reopens_the_window_for_the_same_secret() {
-    // The secret was taken before the save; a save that fails must give
-    // the window back, or the phone holds a QR code that pairs nothing.
+    // A failed save gives the window back, or the QR code pairs nothing.
     let test = TestService::with(common::Options {
         start: false,
         ..common::Options::default()
@@ -305,8 +301,8 @@ async fn a_failed_device_save_reopens_the_window_for_the_same_secret() {
 
 #[tokio::test]
 async fn a_head_authorised_against_a_closed_window_does_not_pair_against_the_next() {
-    // The phone's head passed the gate, then its body trickled in while
-    // the user cancelled and opened a window for another phone.
+    // The head passed the gate, then the user opened a window for another
+    // phone while the body trickled in.
     let test = TestService::with(common::Options {
         start: false,
         ..common::Options::default()
@@ -348,9 +344,8 @@ async fn gate_refuses(test: &TestService, secret: &[u8]) -> bool {
     }
 }
 
-/// The body of `POST /v1/pair` as `principal` while a thread holds the
-/// store, so the device save waits; `meanwhile` runs once the engine has
-/// taken the session, then the save goes ahead. Returns the status.
+/// The body of `POST /v1/pair` as `principal` with the device save held;
+/// `meanwhile` runs once the session is taken. Returns the status.
 async fn pair_during_a_held_save(
     test: &TestService,
     principal: Principal,
@@ -374,8 +369,7 @@ async fn pair_during_a_held_save(
 
 #[tokio::test]
 async fn a_window_cancelled_while_its_save_runs_stays_closed_when_the_save_fails() {
-    // The user cancels while the phone's pair is saving; the save then
-    // fails. The QR code on screen must stay dead.
+    // A cancel during a failing save keeps the QR code dead.
     let test = TestService::with(common::Options {
         start: false,
         ..common::Options::default()
@@ -401,8 +395,8 @@ async fn a_window_cancelled_while_its_save_runs_stays_closed_when_the_save_fails
 
 #[tokio::test]
 async fn a_window_replaced_and_cancelled_while_a_save_runs_brings_neither_back() {
-    // The phone's pair is saving; the user opens a window for another
-    // phone, then cancels it; the save fails. Neither QR code pairs.
+    // Another window opened and cancelled during a failing save: neither QR
+    // code pairs.
     let test = TestService::with(common::Options {
         start: false,
         ..common::Options::default()

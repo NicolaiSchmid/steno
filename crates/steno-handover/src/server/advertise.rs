@@ -1,34 +1,8 @@
 //! Bonjour: `_steno._tcp` on the LAN with the TXT record the phone reads
-//! (`v`, the protocol version; `id`, the computer's id). The Swift listener
-//! publishes through `NWListener.Service`; here `mdns-sd` does it. Both
-//! answer the phone's `NWBrowser` the same way.
-//!
-//! Which network: the Swift listener sets `prohibitedInterfaceTypes =
-//! [.cellular, .other]`, so the service lives on Wi-Fi and wired Ethernet
-//! and never on a VPN tunnel. Here [`lan_addresses`] keeps the IPv4
-//! addresses of the interfaces that are up and not loopback, link-local or
-//! point-to-point, and never one in `100.64.0.0/10`, the shared address
-//! space (RFC 6598) carrier-grade NAT and mesh VPNs number from. Most
-//! tunnels on Linux and macOS (`wg0`, `tun0`, `utun3`) are point-to-point;
-//! layer-2 ones (a TAP device, `feth`) and bridges (`docker0`,
-//! `bridge100`) are not, and are served. Windows marks only PPP and its
-//! own tunnels point-to-point; a Wintun, TAP or Hyper-V adapter there
-//! looks like Ethernet, so on Windows an address also needs an adapter
-//! that is Ethernet or Wi-Fi, hardware, and up ([`windows_keeps`]), the
-//! counterpart of Swift's "not `.other`". The record carries those
-//! addresses, and the listener accepts connections on them and on loopback
-//! only. The listener reads them again, at most once a second, while it
-//! accepts. The record follows them as `NWListener` follows a network
-//! change ([`Advertiser`]): it is registered again under the same name,
-//! TXT record and port. The daemon's report that it added an IPv4 address
-//! the record carries ([`IP_CHECK_SECONDS`]) always registers it, because
-//! only a registration made after the daemon joined a new network is
-//! announced there; any other wake, including a quiet [`RECHECK`] a minute
-//! after the last, registers it only when the addresses moved. The
-//! record's host is `steno-<name>-<id>.local.` ([`Advertiser::host_name`]),
-//! a name only Steno answers for, where Swift's record uses mDNSResponder's
-//! own host.
-//! Swift: `Network/HandoverServer.swift`.
+//! (`v`, the protocol version; `id`, the computer's id), published through
+//! `mdns-sd`. The service lives on Wi-Fi and wired Ethernet only, never on a
+//! VPN tunnel ([`lan_addresses`]); the listener accepts connections on those
+//! addresses and on loopback only, and the record follows them as they change.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -41,17 +15,16 @@ use uuid::Uuid;
 use crate::identity::HandoverIdentity;
 use crate::wire;
 
-/// The IPv4 addresses of the interfaces the service may use: up, not
-/// loopback, not link-local, not point-to-point, not in `100.64.0.0/10`.
-/// Sorted, without duplicates. This is the whole rule on Linux and macOS;
-/// Windows adds [`windows_keeps`] ([`windows_lan_addresses`]).
+/// The IPv4 addresses the service may use: up, not loopback, link-local or
+/// point-to-point, not in `100.64.0.0/10`. Sorted, without duplicates.
+/// Windows adds [`windows_keeps`], since its virtual adapters look like
+/// Ethernet.
 pub fn lan_addresses<'a>(interfaces: impl IntoIterator<Item = &'a Interface>) -> Vec<Ipv4Addr> {
     lan_addresses_where(interfaces, |_, _| true)
 }
 
-/// [`lan_addresses`] with the Windows adapter rule on top: `adapter` gives
-/// the facts of the adapter with an interface index, and an address whose
-/// adapter has none is dropped.
+/// [`lan_addresses`] with the Windows adapter rule on top; an address whose
+/// adapter `adapter` does not know is dropped.
 pub fn windows_lan_addresses<'a>(
     interfaces: impl IntoIterator<Item = &'a Interface>,
     adapter: impl Fn(u32) -> Option<WindowsAdapter>,
@@ -83,9 +56,9 @@ fn lan_addresses_where<'a>(
     addresses
 }
 
-/// Not loopback, not link-local, not unspecified, not in the shared
-/// address space `100.64.0.0/10` (RFC 6598), where a carrier-grade NAT or a
-/// mesh VPN lives and a home or office network does not.
+/// Not loopback, link-local or unspecified, and not in the shared address
+/// space `100.64.0.0/10` (RFC 6598) where carrier-grade NAT and mesh VPNs
+/// live.
 fn is_lan_address(address: Ipv4Addr) -> bool {
     let [first, second, ..] = address.octets();
     let shared = first == 100 && second & 0b1100_0000 == 64;
@@ -97,8 +70,8 @@ fn is_lan_address(address: Ipv4Addr) -> bool {
 pub struct WindowsAdapter {
     /// `Type`, the IANA interface type.
     pub if_type: u32,
-    /// `InterfaceAndOperStatusFlags.HardwareInterface`: a physical adapter,
-    /// not a Wintun, TAP or Hyper-V virtual one.
+    /// `InterfaceAndOperStatusFlags.HardwareInterface`: a physical adapter, not
+    /// a Wintun, TAP or Hyper-V one.
     pub hardware: bool,
     /// `OperStatus` is `IfOperStatusUp`.
     pub oper_up: bool,
@@ -111,9 +84,9 @@ impl WindowsAdapter {
     pub const WIFI: u32 = 71;
 }
 
-/// Whether `address` on `adapter` is a LAN address on Windows: the
-/// adapter is Ethernet or Wi-Fi, hardware, and up, and the address passes
-/// the rule of every platform. Swift's "wired or Wi-Fi, not `.other`".
+/// Whether `address` on `adapter` is a LAN address on Windows: an Ethernet
+/// or Wi-Fi hardware adapter that is up, and an address that passes the
+/// common rule.
 #[must_use]
 pub fn windows_keeps(adapter: WindowsAdapter, address: Ipv4Addr) -> bool {
     matches!(
@@ -124,9 +97,8 @@ pub fn windows_keeps(adapter: WindowsAdapter, address: Ipv4Addr) -> bool {
         && is_lan_address(address)
 }
 
-/// [`lan_addresses`] of the computer now (on Windows,
-/// [`windows_lan_addresses`]); empty when the system does not say, which
-/// refuses every connection but loopback.
+/// [`lan_addresses`] of the computer now; empty when the system does not
+/// say, which refuses every connection but loopback.
 #[must_use]
 pub fn current_lan_addresses() -> Vec<Ipv4Addr> {
     let Ok(interfaces) = if_addrs::get_if_addrs() else {
@@ -143,8 +115,8 @@ pub fn current_lan_addresses() -> Vec<Ipv4Addr> {
     lan_addresses(&interfaces)
 }
 
-/// Whether a connection that arrived on `local` (the listener's side) is
-/// on a network the service lives on: loopback, or one of `lan`.
+/// Whether a connection that arrived on `local` is on a network the service
+/// lives on: loopback, or one of `lan`.
 #[must_use]
 pub fn accepts_local_address(local: IpAddr, lan: &[Ipv4Addr]) -> bool {
     match local {
@@ -153,8 +125,7 @@ pub fn accepts_local_address(local: IpAddr, lan: &[Ipv4Addr]) -> bool {
     }
 }
 
-/// The adapter table through `GetIfTable2`, by interface index (the
-/// `IfIndex` if-addrs reports for an IPv4 address).
+/// The adapter table through `GetIfTable2`, by interface index.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows_adapters {
@@ -218,55 +189,37 @@ mod windows_adapters {
     }
 }
 
-/// How often the daemon reads the interfaces, in seconds: it joins the
-/// multicast group of a new network and reports the change then, so the
-/// record cannot be announced there sooner. A Wi-Fi switch and its DHCP
-/// lease take seconds too, and the phone waits 15 s for the computer to
-/// appear before it backs off, so five seconds (`mdns-sd`'s default,
-/// stated here so a new default cannot change it) costs one interface
-/// read every 5 s and no phone a retry.
+/// How often the daemon reads the interfaces, in seconds. The phone waits
+/// 15 s before it backs off, so 5 s (`mdns-sd`'s default, pinned here)
+/// costs no phone a retry.
 pub const IP_CHECK_SECONDS: u32 = 5;
 
-/// How long the advertiser waits after a wake before it reads the
-/// addresses anyway, whatever else the daemon sends meanwhile: a report the
-/// daemon dropped (its channel to the advertiser was full), a removed
-/// address, or a change it does not report (a Windows adapter that stopped
-/// counting as hardware), is followed within a minute. Until then the
-/// daemon sends a removed address only on an interface in its subnet, so
-/// only a second interface on the same LAN can still carry it.
+/// How long the advertiser waits after a wake before it reads the addresses
+/// anyway, so a dropped report, a removed address or an unreported change is
+/// followed within a minute.
 pub const RECHECK: Duration = Duration::from_secs(60);
 
 /// Why the advertiser woke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Change {
-    /// The daemon reported that it added this IPv4 LAN address. It sends
-    /// the report after its interface check joined the address's multicast
-    /// group, and on its own it announces only records that let it choose
-    /// the addresses, which this one does not; so the record reaches a
-    /// network the daemon has just joined only through a registration made
-    /// after the report, even when a recheck already published that
-    /// network's address.
+    /// The daemon added this IPv4 LAN address. The record reaches a network the
+    /// daemon just joined only through a registration made after this report,
+    /// so it always registers.
     Reported(Ipv4Addr),
-    /// [`RECHECK`] passed since the last wake, whatever else the daemon
-    /// sent.
+    /// [`RECHECK`] passed since the last wake.
     Quiet,
 }
 
-/// What tells the advertiser that the computer's addresses may have
-/// changed. The product's is the daemon's own interface check; the tests
-/// drive a fake one.
+/// What tells the advertiser the addresses may have changed: the daemon's
+/// interface check, or a fake in tests.
 pub(crate) trait InterfaceWatcher {
-    /// Waits for the next possible change; `None` once the watch has
-    /// ended.
+    /// Waits for the next possible change; `None` once the watch has ended.
     fn changed(&mut self) -> Option<Change>;
 }
 
-/// The daemon's report of an IPv4 LAN address it added (`IpAdd`), sent
-/// during its interface check, or `recheck` ([`RECHECK`] in the product)
-/// passed since the wait began. Every other event (an IPv6 or non-LAN
-/// address, a removed address, an answered query) is passed over under the
-/// same deadline, so a busy network never postpones the recheck. The watch
-/// ends with the daemon.
+/// The daemon's `IpAdd` report of an IPv4 LAN address, or `recheck` passed
+/// since the wait began. Other events are passed over under the same
+/// deadline, so a busy network never postpones the recheck.
 struct DaemonWatcher {
     events: mdns_sd::Receiver<DaemonEvent>,
     recheck: Duration,
@@ -288,25 +241,21 @@ impl InterfaceWatcher for DaemonWatcher {
     }
 }
 
-/// What the record carries now, shared by the advertiser and the thread
-/// that follows the network.
+/// What the record carries now, shared with the thread that follows the
+/// network.
 #[derive(Debug)]
 pub(crate) struct Published {
     pub(crate) addresses: Vec<Ipv4Addr>,
-    /// Set when the [`Advertiser`] is withdrawn or dropped: nothing is
-    /// registered after it.
+    /// Set when the [`Advertiser`] is withdrawn or dropped; nothing registers
+    /// after it.
     pub(crate) withdrawn: bool,
 }
 
 /// Follows the network until `watcher` ends or the record is withdrawn:
-/// after each change it reads `lan` (sorted and without duplicates, as
-/// [`lan_addresses`] gives them, so the order never counts as a move) and
-/// registers the record with those addresses when they moved, or when the
-/// daemon reported adding one of them ([`Change::Reported`]). A failed
-/// registration keeps the old addresses as the published ones and is owed:
-/// the next change, quiet or not, tries again. The lock is held across
-/// `register`, so withdrawing or dropping the [`Advertiser`], which takes
-/// it too, never sees a registration land after its goodbye.
+/// after each change it registers the record again when the addresses moved
+/// or the daemon reported adding one. A failed registration is retried at
+/// the next change. The lock is held across `register`, so no registration
+/// lands after the withdraw's goodbye.
 pub(crate) fn follow(
     watcher: &mut impl InterfaceWatcher,
     lan: impl Fn() -> Vec<Ipv4Addr>,
@@ -363,9 +312,8 @@ fn warn_no_network() {
     );
 }
 
-/// The published record and the thread that registers it again when the
-/// network changes. Dropping it withdraws the record, as
-/// [`Advertiser::withdraw`] does.
+/// The published record and the thread that re-registers it on network
+/// changes. Dropping it withdraws the record.
 pub struct Advertiser {
     daemon: ServiceDaemon,
     fullname: String,
@@ -382,20 +330,13 @@ impl Advertiser {
     /// The longest instance name a DNS label holds, in bytes.
     pub const INSTANCE_NAME_BYTES: usize = 63;
 
-    /// The longest first label of the record's host, in bytes: one DNS
-    /// label.
+    /// The longest first label of the record's host, in bytes.
     const HOST_LABEL_BYTES: usize = 63;
 
-    /// The record's host, `steno-<name>-<id>.local.`: `<name>` is
-    /// [`HandoverIdentity::san_label`]'s of `service_name`, cut so the
-    /// whole fits one DNS label, and `<id>` the first 8 hex digits of
-    /// `mac_id`, which the TXT record publishes anyway. A name only Steno
-    /// uses: the computer's own host name belongs to mDNSResponder, Avahi or
-    /// Windows, and a second responder claiming it would send a goodbye for
-    /// it at withdraw and, with an address the system no longer holds, make
-    /// mDNSResponder rename the computer. The id tells two computers of
-    /// one name apart without the daemon's probe, whose rename (`-2`) would
-    /// not fit a label already cut to the limit.
+    /// The record's host, `steno-<name>-<id>.local.`: `<name>` is the SAN label
+    /// of `service_name`, cut to fit one DNS label, `<id>` the first 8 hex
+    /// digits of `mac_id`. A name only Steno answers for: claiming the
+    /// computer's own host name would fight the system's responder.
     #[must_use]
     pub fn host_name(service_name: &str, mac_id: Uuid) -> String {
         const PREFIX: &str = "steno-";
@@ -408,11 +349,9 @@ impl Advertiser {
         format!("{PREFIX}{name}{id}.local.")
     }
 
-    /// The record for `service_name` on `port` at `addresses`, before it
-    /// is published. The instance name is `service_name` cut to
-    /// [`Self::INSTANCE_NAME_BYTES`] at a character boundary: a longer
-    /// label fails every packet, and a computer name can be longer. The
-    /// host is [`Self::host_name`].
+    /// The record for `service_name` on `port` at `addresses`. The instance
+    /// name is cut to [`Self::INSTANCE_NAME_BYTES`] at a character boundary, as
+    /// a longer label fails every packet.
     pub fn service_info(
         service_name: &str,
         mac_id: Uuid,
@@ -439,10 +378,9 @@ impl Advertiser {
         )
     }
 
-    /// Publishes the record with the computer's LAN addresses
-    /// ([`current_lan_addresses`]) and follows them from then on. With no
-    /// address the record is published empty, which no phone can resolve,
-    /// and filled once the computer joins a network.
+    /// Publishes the record with the computer's LAN addresses and follows them.
+    /// With no address it is published empty and filled once the computer joins
+    /// a network.
     pub fn publish(service_name: &str, mac_id: Uuid, port: u16) -> mdns_sd::Result<Self> {
         let daemon = ServiceDaemon::new()?;
         #[cfg_attr(
@@ -475,8 +413,7 @@ impl Advertiser {
         port: u16,
     ) -> mdns_sd::Result<(String, u16, Arc<Mutex<Published>>)> {
         daemon.set_ip_check_interval(IP_CHECK_SECONDS)?;
-        // Watch before the first read, so a change between the two is
-        // reported.
+        // Watch before the first read, so a change between the two is reported.
         let mut watcher = DaemonWatcher {
             events: daemon.monitor()?,
             recheck: RECHECK,
@@ -517,10 +454,8 @@ impl Advertiser {
         Ok((fullname, registered_port, published))
     }
 
-    /// Withdraws the record and stops the daemon; the thread that follows
-    /// the network registers nothing after this and ends with the daemon,
-    /// or at its next wake when the daemon would not stop (logged). The
-    /// same as dropping the advertiser, which does the work, once.
+    /// Withdraws the record and stops the daemon, as dropping the advertiser
+    /// does; nothing is registered after this.
     pub fn withdraw(self) {
         drop(self);
     }
@@ -538,8 +473,7 @@ impl Drop for Advertiser {
     }
 }
 
-/// Stops the daemon. A failure (its command queue full) leaves the
-/// daemon's thread running, so it is logged.
+/// Stops the daemon; a failure (its command queue full) is logged.
 fn stop(daemon: &ServiceDaemon) {
     if let Err(error) = daemon.shutdown() {
         tracing::warn!(
@@ -646,8 +580,7 @@ mod tests {
         assert_eq!(info.get_fullname(), format!("{fits}._steno._tcp.local."));
     }
 
-    /// A watcher whose closure says which change came; it ends the watch
-    /// by returning `None`.
+    /// A watcher whose closure says which change came; `None` ends it.
     struct Watch<F: FnMut() -> Option<Change>>(F);
 
     impl<F: FnMut() -> Option<Change>> InterfaceWatcher for Watch<F> {
@@ -656,9 +589,9 @@ mod tests {
         }
     }
 
-    /// Runs `follow` from `published` over `steps`, each a change and the
-    /// addresses the computer has then, and returns every registration it
-    /// tried; the attempts numbered in `failing` (from 1) fail.
+    /// Runs `follow` over `steps` (a change and the addresses then) and returns
+    /// every registration it tried; attempts numbered in `failing` (from 1)
+    /// fail.
     fn registrations(
         published: &Mutex<Published>,
         steps: Vec<(Change, Vec<Ipv4Addr>)>,
@@ -729,8 +662,7 @@ mod tests {
         let registered = registrations(
             &record,
             vec![
-                // A recheck reads the address before the daemon has joined
-                // its network; the daemon's report then comes with it.
+                // A recheck sees the address before the daemon's report.
                 (Change::Quiet, vec![office]),
                 (Change::Reported(office), vec![office]),
                 (Change::Quiet, vec![office]),
@@ -759,8 +691,7 @@ mod tests {
             Change::Quiet,
         ]
         .map(|change| (change, vec![office]));
-        // The first registration, after a move, and the one the report
-        // forces, with nothing moved.
+        // The first registration, after a move, and the one the report forces.
         let registered = registrations(&record, steps.into(), &[1, 3]);
         assert_eq!(
             registered.len(),
@@ -832,8 +763,7 @@ mod tests {
         let (daemon, events) = flume::unbounded();
         let recheck = Duration::from_millis(300);
         let mut watcher = DaemonWatcher { events, recheck };
-        // A busy network: an answered query, an IPv6 address and a removed
-        // address every 100 ms, for up to 5 s or until the watcher is gone.
+        // A busy network: an event every 100 ms for up to 5 s.
         let feeder = std::thread::spawn(move || {
             for _ in 0..50 {
                 let busy = [
@@ -854,9 +784,8 @@ mod tests {
         let waited = began.elapsed();
         drop(watcher);
         feeder.join().unwrap();
-        // The recheck comes 300 ms after the wait began; a wait restarted at
-        // each event would last as long as the feeder, 5 s. The bound
-        // leaves room for a loaded machine.
+        // The recheck comes 300 ms after the wait began, not after the feeder's
+        // 5 s.
         assert!(
             waited >= recheck && waited < Duration::from_secs(2),
             "{waited:?}"

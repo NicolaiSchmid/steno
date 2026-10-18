@@ -1,21 +1,8 @@
 //! The TLS identity the listener presents: a self-signed P-256 leaf
-//! certificate and its key. Read it as mint ([`HandoverIdentity::mint`]),
-//! store and load ([`HandoverIdentity::load_or_create`] through the
-//! [`SecretStore`]), serve ([`HandoverIdentity::server_config`]).
-//! Swift: `Identity/MintedIdentity.swift`, `Identity/HandoverIdentity.swift`
-//! and `Identity/IdentityKeychain.swift`.
-//!
-//! The Swift app keeps the identity in the login keychain as a certificate
-//! and a key item. Here the whole identity is one secret, a PEM bundle
-//! (certificate, then PKCS#8 key) under [`HandoverIdentity::SECRET_KEY`], so
-//! the platform keyring, a `0600` file or memory all hold it the same way.
-//! Losing the identity means re-pairing every phone, on both sides, so the
-//! loader never mints one while phones are paired or after one was in use,
-//! over the identity's fingerprint in a [`FingerprintRecord`]. Which
-//! identity is served, minted or waited for is one pure decision
-//! ([`decision::decide`]), whose truth table states the rule. Only the
-//! user's Pair again mints over an identity ([`HandoverIdentity::mint_anew`]);
-//! one that stopped is finished by the next load.
+//! certificate and its key, kept as one PEM bundle secret. Losing it means
+//! re-pairing every phone, so the loader never mints one while phones are
+//! paired or after one was in use; [`decision::decide`] holds the rule. Only
+//! the user's Pair again mints over an identity.
 
 pub mod decision;
 
@@ -36,9 +23,8 @@ use uuid::Uuid;
 
 use decision::{Caller, Found, Identities, Observations, Outcome, Phones, Reason, Record, Write};
 
-/// The identity: the leaf certificate (for the fingerprint the phone pins
-/// and the computer id derived from it) and the private key rustls
-/// terminates TLS with.
+/// The leaf certificate (for the pinned fingerprint and the computer id)
+/// and the private key rustls terminates TLS with.
 pub struct HandoverIdentity {
     certificate_der: Vec<u8>,
     private_key: PrivateKeyDer<'static>,
@@ -65,11 +51,9 @@ impl HandoverIdentity {
         SecretKey::from(Self::SECRET_KEY)
     }
 
-    /// Mints a fresh identity: P-256, self-signed, ten years,
-    /// `CN=<common_name>` (`Steno on <computer name>` in the product), not a
-    /// CA, `digitalSignature` only (RFC 5480 §3: an EC key signs), server
-    /// authentication, one DNS SAN. `now` is the start of validity; a
-    /// minute of clock skew is absorbed by backdating.
+    /// Mints a fresh identity: P-256, self-signed, ten years, `CN=<common_name>`,
+    /// not a CA, `digitalSignature` only, server authentication, one DNS SAN.
+    /// Backdated a minute to absorb clock skew.
     pub fn mint(common_name: &str, now: DateTime<Utc>) -> Result<Self, IdentityError> {
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
         let mut params = CertificateParams::new(vec![Self::san_label(common_name)])?;
@@ -102,8 +86,8 @@ impl HandoverIdentity {
         })
     }
 
-    /// The certificate and the key as one PEM bundle. A key of a kind this
-    /// crate cannot write is an error, not a bundle without a key.
+    /// The certificate and the key as one PEM bundle; a key this crate cannot
+    /// write is an error.
     pub fn to_pem(&self) -> Result<String, IdentityError> {
         let certificate = pem_block("CERTIFICATE", &self.certificate_der);
         let key = match &self.private_key {
@@ -115,33 +99,13 @@ impl HandoverIdentity {
         Ok(certificate + &key)
     }
 
-    /// The host's entry point: the stored identity, or a fresh one minted
-    /// with `common_name` and stored ([`HandoverIdentity::store`]). It reads
-    /// `record` ([`observe_record`]), the secret store and the phones paired
-    /// in `store`, decides at `now` ([`decision::decide`], whose truth table
-    /// gives every case), applies the decision's writes in order, then
-    /// serves, mints or waits. A wait is [`IdentityError::Unavailable`] with
-    /// the [`Unavailability`], or the error of the read that failed:
-    /// [`IdentityError::Record`], [`IdentityError::Malformed`] for a secret
-    /// or a certificate start that does not parse, [`IdentityError::Store`]
-    /// for phones that cannot be read. A write that fails stops the rest;
-    /// as every write is idempotent, the next read decides the same and
-    /// writes what is left. A note that cannot be dropped is logged and
-    /// left.
-    ///
-    /// All three reads run every time, so the decision alone orders them:
-    /// a record that cannot be read waits on the record whatever the secret
-    /// store and the phones hold, but the secret store is still read, which
-    /// on a Mac may show the keychain's prompt for an entry another build
-    /// owns before the load waits. That needs a record that cannot be read
-    /// (its permissions, a disk error), which is rare.
-    ///
-    /// Every read decides an unfinished Pair again
-    /// ([`HandoverIdentity::mint_anew`] stopped after it noted the next
-    /// fingerprint) the same way: the launch, a plain handover's Try again,
-    /// the import's gate opening and the reread after an unlock. Behind the
-    /// import's waiting gate, Try again runs the import instead; its store
-    /// records the Swift identity, which ends the note like every record.
+    /// The host's entry point: the stored identity, or a fresh one minted and
+    /// stored. Reads `record`, the secret store and the paired phones, decides
+    /// at `now` ([`decision::decide`]), applies the decision's writes in order,
+    /// then serves, mints or waits. A wait is [`IdentityError::Unavailable`] or
+    /// the error of the read that failed. Every write is idempotent, so after a
+    /// failed write the next load decides the same and finishes the rest,
+    /// including an unfinished Pair again.
     pub async fn load_or_create(
         secrets: &dyn SecretStore,
         record: &dyn FingerprintRecord,
@@ -212,17 +176,15 @@ impl HandoverIdentity {
         }
     }
 
-    /// When the certificate starts to be valid (`notValidBefore`), on this
-    /// computer's clock: a minute before its mint ([`Self::mint`]; the
-    /// Swift app's mint back-dates it the same), so a phone paired before
-    /// it cannot know this identity.
+    /// When the certificate starts to be valid, on this computer's clock: a
+    /// minute before its mint, so a phone paired before it cannot know this
+    /// identity.
     pub fn not_valid_before(&self) -> Result<DateTime<Utc>, IdentityError> {
         Self::not_valid_before_of_der(&self.certificate_der)
     }
 
-    /// [`Self::not_valid_before`] of a certificate's DER: a certificate
-    /// that does not parse, or a start this computer's clock cannot hold,
-    /// is [`IdentityError::Malformed`].
+    /// [`Self::not_valid_before`] of a certificate's DER;
+    /// [`IdentityError::Malformed`] when it does not parse.
     pub fn not_valid_before_of_der(der: &[u8]) -> Result<DateTime<Utc>, IdentityError> {
         let (_, certificate) = x509_parser::parse_x509_certificate(der)
             .map_err(|error| IdentityError::Malformed(format!("certificate: {error}")))?;
@@ -232,27 +194,15 @@ impl HandoverIdentity {
         })
     }
 
-    /// Pair again's identity step, the user's choice when the identity the
-    /// paired phones know cannot be read or is gone (stable plan S6): a new
-    /// identity is minted with `common_name`. Then:
-    /// 1. Its fingerprint is noted as the next one in `record`. Over a
-    ///    record that does not parse, the record is set aside first
-    ///    ([`FingerprintRecord::note_next`]).
-    /// 2. The identity is written to `secrets`.
-    /// 3. Every paired phone is removed from `store`.
-    /// 4. Its fingerprint is recorded, which drops the note in the same
-    ///    write.
+    /// Pair again's identity step, when the identity the phones know is
+    /// unreadable or gone. Mints a new identity, then:
+    /// 1. notes its fingerprint as the next one in `record`;
+    /// 2. writes it to `secrets`;
+    /// 3. removes every paired phone from `store`;
+    /// 4. records its fingerprint, dropping the note.
     ///
-    /// Every phone must pair again. This is the one mint over an identity
-    /// that may exist. A step that fails stops the rest and leaves the note
-    /// where it is. A note that cannot be written stops before the write
-    /// ([`IdentityError::Note`]). Every later stop, a refused write
-    /// included, is decided by the next load
-    /// ([`HandoverIdentity::load_or_create`]):
-    /// - a write that did not land is abandoned there;
-    /// - a write that landed, even one the store reported as refused, and
-    ///   every stop after it, is finished;
-    /// - this holds whether or not a fingerprint was recorded before.
+    /// A step that fails stops the rest and leaves the note; the next load
+    /// abandons a write that did not land and finishes one that did.
     pub async fn mint_anew(
         secrets: &dyn SecretStore,
         record: &dyn FingerprintRecord,
@@ -270,15 +220,9 @@ impl HandoverIdentity {
         Ok(minted)
     }
 
-    /// Stores the identity in `secrets` and records its fingerprint in
-    /// `record`, over whatever either held: the mint and an identity
-    /// brought over from elsewhere; [`HandoverIdentity::mint_anew`] does
-    /// the same two writes with the phones removed between them. The
-    /// secret is written first, so a write that fails records nothing; a
-    /// record that fails after it leaves the next load to record it again,
-    /// or to refuse it as [`Unavailability::Replaced`] where another
-    /// fingerprint is recorded; never a mint. Like every record, it ends
-    /// an unfinished Pair again.
+    /// Stores the identity in `secrets`, then records its fingerprint, over
+    /// whatever either held. A failed record leaves the next load to record it
+    /// again, or to refuse it as [`Unavailability::Replaced`]; never a mint.
     pub async fn store(
         &self,
         secrets: &dyn SecretStore,
@@ -288,8 +232,7 @@ impl HandoverIdentity {
         self.record_fingerprint(record)
     }
 
-    /// Writes the identity to `secrets` under [`HandoverIdentity::SECRET_KEY`],
-    /// over what it held: every write of the secret goes through here.
+    /// Writes the identity to `secrets`; every write of the secret goes here.
     async fn write_secret(&self, secrets: &dyn SecretStore) -> Result<(), IdentityError> {
         secrets
             .set_secret(&Self::secret_key(), Some(&self.to_pem()?))
@@ -322,8 +265,7 @@ impl HandoverIdentity {
         Self::mac_id_for_fingerprint(&self.fingerprint())
     }
 
-    /// SHA-256 of a certificate's DER, the same bytes the phone hashes
-    /// (`PinnedTrustEvaluator.fingerprint(of:)`).
+    /// SHA-256 of a certificate's DER, the same bytes the phone hashes.
     #[must_use]
     pub fn fingerprint_of_der(der: &[u8]) -> [u8; 32] {
         Sha256::digest(der).into()
@@ -331,8 +273,7 @@ impl HandoverIdentity {
 
     /// The computer id in the Bonjour TXT record, the QR payload and
     /// `/v1/hello`: a UUID from the first 16 bytes of
-    /// SHA-256(`"steno-mac-id"` || fingerprint) with version 4 and variant 1
-    /// bits set.
+    /// SHA-256(`"steno-mac-id"` || fingerprint), version 4 and variant 1 bits set.
     #[must_use]
     pub fn mac_id_for_fingerprint(fingerprint: &[u8]) -> Uuid {
         let mut hasher = Sha256::new();
@@ -346,8 +287,8 @@ impl HandoverIdentity {
         Uuid::from_bytes(bytes)
     }
 
-    /// A rustls server configuration that terminates TLS 1.3 only with this
-    /// identity and asks the client for nothing.
+    /// A rustls server configuration: TLS 1.3 only, this identity, no client
+    /// authentication.
     pub fn server_config(&self) -> Result<Arc<ServerConfig>, IdentityError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = ServerConfig::builder_with_provider(provider)
@@ -360,8 +301,8 @@ impl HandoverIdentity {
         Ok(Arc::new(config))
     }
 
-    /// A DNS-safe label for the SAN: the phone never checks the name, but a
-    /// certificate without one trips some tooling.
+    /// A DNS-safe SAN label: the phone never checks it, but some tooling needs
+    /// one.
     #[must_use]
     pub fn san_label(common_name: &str) -> String {
         let label: String = common_name
@@ -398,8 +339,7 @@ fn pem_block(tag: &str, der: &[u8]) -> String {
     text
 }
 
-/// Removes every paired phone from `store`: Pair again's step, and the
-/// load that finishes one.
+/// Removes every paired phone from `store`.
 fn remove_paired_phones(store: &Store) -> Result<(), IdentityError> {
     for device in store.paired_devices()? {
         store.delete_paired_device(device.id)?;
@@ -407,77 +347,60 @@ fn remove_paired_phones(store: &Store) -> Result<(), IdentityError> {
     Ok(())
 }
 
-/// Drops the note where the Pair again it stood for changed nothing (the
-/// load's abandoned case); one that cannot be dropped is logged and left,
-/// as the next load finds it abandoned again.
+/// Drops the note of a Pair again that changed nothing; a failure is logged,
+/// and the next load tries again.
 fn drop_the_note(record: &dyn FingerprintRecord) {
     if let Err(error) = record.note_next(None) {
         tracing::warn!(%error, "the note of an unfinished Pair again was not dropped");
     }
 }
 
-/// Where the identity's fingerprint (SHA-256 of the leaf DER, lowercase
-/// hex) is recorded, and, while a Pair again is unfinished, the next one:
-/// outside the secret store, which may be the thing that lost the
-/// identity, and outside the settings, which the Swift app's save
-/// rewrites. Not a secret.
+/// Where the identity's fingerprint (lowercase hex SHA-256 of the leaf DER)
+/// is recorded, plus the next one while a Pair again is unfinished. Outside
+/// the secret store, which may be what lost the identity. Not a secret.
 pub trait FingerprintRecord: Send + Sync {
     /// The recorded fingerprint, `None` when nothing is recorded.
     fn recorded(&self) -> Result<Option<String>, BoxError>;
-    /// Records `fingerprint`, replacing what was recorded, and drops the
-    /// note in the same write. Over a record that does not parse, it keeps
-    /// the old one where the user can find it first, as `note_next(Some)`
-    /// does.
+    /// Records `fingerprint` and drops the note in one write; a record that
+    /// does not parse is kept aside first.
     fn record(&self, fingerprint: &str) -> Result<(), BoxError>;
-    /// The next fingerprint, kept in the note of an unfinished Pair again:
-    /// that of the identity it is writing ([`HandoverIdentity::mint_anew`]);
-    /// `None` when there is no note.
+    /// The next fingerprint noted by an unfinished Pair again, if any.
     fn next(&self) -> Result<Option<String>, BoxError>;
-    /// Pair again's note. `Some` notes the next fingerprint beside the
-    /// recorded one. Over a record that does not parse, it starts a new
-    /// record and keeps the old one where the user can find it, so nothing
-    /// is recorded after it. `None` drops the note and never replaces
-    /// anything.
+    /// Pair again's note. `Some` notes the next fingerprint (over an unparsable
+    /// record, a new one is started and the old one kept aside); `None` drops
+    /// the note.
     fn note_next(&self, fingerprint: Option<&str>) -> Result<(), BoxError>;
 }
 
-/// Why the identity is unavailable rather than minted
-/// ([`decision::decide`] says when).
+/// Why the identity is unavailable rather than minted.
 #[derive(Debug, Error)]
 pub enum Unavailability {
-    /// The secret store's read failed (a locked keyring, a keyring still
-    /// asking the user); the error says why.
+    /// The secret store's read failed (locked or prompting).
     #[error("this computer's phone pairing could not be read ({0})")]
     Unreadable(BoxError),
-    /// The secret store holds no identity, though a fingerprint is
-    /// recorded or a phone is paired. Not minted, as a new identity would
-    /// make every phone pair again.
+    /// No identity stored, though a fingerprint is recorded or a phone is
+    /// paired; a new one would make every phone pair again.
     #[error(
         "the identity this computer's phones paired with is not in the secret store; a new \
          identity would make every phone pair again"
     )]
     Missing,
-    /// The secret store's identity is not the one whose fingerprint is
-    /// recorded, or, with nothing recorded, no paired phone knows it. Not
-    /// adopted, as the phones would refuse it.
+    /// The stored identity is not the recorded one, or no paired phone knows
+    /// it; the phones would refuse it.
     #[error(
         "the secret store holds another identity than the one this computer's phones paired \
          with; a new identity would make every phone pair again"
     )]
     Replaced,
-    /// With nothing recorded, the paired phones do not all know one
-    /// identity, but some know one. Not adopted, as the others could not
-    /// connect; a [`Unavailability::Replaced`] in all but its words.
+    /// Nothing recorded, and the paired phones do not all know one identity.
     #[error(
         "some of this computer's phones were paired before the identity the secret store holds; \
          a new identity would make every phone pair again"
     )]
     PartlyReplaced,
-    /// With nothing recorded, a pairing time or a certificate's start is
-    /// after now on this computer's clock, by more than
-    /// [`decision::CLOCK_SLACK`]: the clock reads earlier than when it was
-    /// set, so which identity the phones know cannot be told. Not adopted
-    /// and not minted; Try again decides once the clock has passed both.
+    /// Nothing recorded, and a pairing time or certificate start lies after
+    /// now by more than [`decision::CLOCK_SLACK`], so which identity the phones
+    /// know cannot be told. Try again decides once the clock has passed both.
     #[error(
         "this computer's clock reads earlier than a phone's pairing or the identity's start, so \
          which identity the phones know cannot be told"
@@ -485,12 +408,9 @@ pub enum Unavailability {
     ClockBehind,
 }
 
-/// What `record` holds, as [`decision::decide`] reads it, with the error
-/// of a read that failed: one that cannot open the file (an
-/// [`std::io::Error`], as [`FingerprintRecord`]'s file reports it) is
-/// [`Record::NotOpened`], any other [`Record::DoesNotParse`].
-/// `steno-services`' `file_not_opened` reads the same distinction from
-/// the error the load returns.
+/// What `record` holds, with the error of a failed read: an
+/// [`std::io::Error`] is [`Record::NotOpened`], anything else
+/// [`Record::DoesNotParse`].
 pub fn observe_record(record: &dyn FingerprintRecord) -> (Record, Option<BoxError>) {
     let read = record
         .recorded()
@@ -502,8 +422,7 @@ pub fn observe_record(record: &dyn FingerprintRecord) -> (Record, Option<BoxErro
     }
 }
 
-/// The errors of the load's reads that failed, for the wait the decision
-/// names.
+/// The errors of the load's failed reads.
 #[derive(Default)]
 struct ReadErrors {
     record: Option<BoxError>,
@@ -513,8 +432,7 @@ struct ReadErrors {
 }
 
 impl ReadErrors {
-    /// The load's error for waiting with `reason`: the unavailability, or
-    /// the error of the read the decision waits on.
+    /// The load's error for waiting with `reason`.
     fn into_error(self, reason: Reason) -> IdentityError {
         let failed = "the decision waits on a read only where that read failed";
         match reason {
@@ -558,8 +476,7 @@ pub enum IdentityError {
     Store(#[from] StoreError),
     #[error("the identity's fingerprint record: {0}")]
     Record(BoxError),
-    /// Pair again could not note the next fingerprint, so it stopped
-    /// before it wrote anything ([`HandoverIdentity::mint_anew`]).
+    /// Pair again could not note the next fingerprint, so it wrote nothing.
     #[error("noting the next fingerprint in the identity's record: {0}")]
     Note(BoxError),
     /// Not minted ([`Unavailability`] says why).

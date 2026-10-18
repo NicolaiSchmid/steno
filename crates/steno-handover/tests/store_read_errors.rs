@@ -1,11 +1,7 @@
-//! A row the store cannot read is an error, not a missing row. A receipt:
-//! the sweep keeps the upload's files and every recording route answers
-//! 500, so a failed read never deletes a resumable upload, nor lets an
-//! announce start the recording over (which would overwrite a `complete`
-//! receipt and admit the meeting twice). A device: the gate answers 500,
-//! not the 401 the phone takes for a revoke. The read fails because a
-//! temporary table of the same name shadows `handoverReceipt` or
-//! `pairedDevice` on the store's connection.
+//! An unreadable row is an error, not a missing row: for a receipt the
+//! sweep keeps the files and recording routes answer 500; for a device the
+//! gate answers 500, not the 401 the phone takes for a revoke. A temporary
+//! table shadowing the real one makes the read fail.
 
 #![allow(clippy::cast_possible_truncation, clippy::large_futures)]
 
@@ -42,8 +38,7 @@ async fn a_failed_receipt_read_keeps_the_upload_and_answers_500() {
     );
     let id = metadata.recording_id;
 
-    // The computer comes back over the same store and inbox, with nothing
-    // in memory, and the store cannot read the receipts.
+    // A restart over the same store and inbox that cannot read the receipts.
     let second = Arc::new(HandoverService::new(
         first.service.configuration.clone(),
         first.store.clone(),

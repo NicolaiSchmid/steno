@@ -1,7 +1,5 @@
-//! The read timeout over a real connection: a client that stays silent is
-//! cut; a request the engine is still handling is not. Swift drives the
-//! handler on an embedded channel and fires the idle event by hand; here
-//! the timeout is short enough to wait out.
+//! The read timeout over a real connection: a silent client is cut; a
+//! request the engine is still handling is not.
 
 #![allow(
     clippy::assert_is_empty,
@@ -33,8 +31,8 @@ async fn a_silent_connection_is_closed_on_the_read_timeout() {
     .await;
     let raw = test.raw_client();
 
-    // Half a request line, then nothing: without a read timeout any peer on
-    // the Wi-Fi could hold hundreds of such connections open for good.
+    // Half a request line, then nothing: without a read timeout any LAN peer
+    // could hold such connections open for good.
     let closed = raw
         .hold_open(b"GET /v1/hel", Duration::from_secs(10))
         .await
@@ -65,8 +63,7 @@ async fn a_torn_body_is_closed_on_the_read_timeout() {
     assert_eq!(phone.announce(&metadata).await.status, 201);
 
     // The head and 16 KiB of a 256 KiB chunk, then silence.
-    // The phone's pooled connections from pairing and announcing idle out
-    // meanwhile; the assertions are about the torn connection.
+    // The phone's pooled connections may idle out meanwhile.
     let handled_before = test.metrics().handled_requests;
     let statuses_before = test.metrics().statuses.len();
     let exchange = test
@@ -125,10 +122,8 @@ async fn the_read_timeout_does_not_cut_a_request_the_engine_is_still_handling() 
     let metadata = phone.metadata(&bytes, CHUNK_SIZE);
     phone.upload_all(&metadata, &bytes).await;
 
-    // A `complete` whose intake takes three times the timeout: the silence
-    // is the computer's, so the connection that carries it is answered, not
-    // cut; and it stays open afterwards for the next request. The phone's
-    // own pooled connections may legitimately idle out meanwhile.
+    // A `complete` whose intake takes three times the timeout: the silence is
+    // the computer's, so the connection is answered, not cut, and stays open.
     let raw = test.raw_client();
     let completed = raw
         .exchange(

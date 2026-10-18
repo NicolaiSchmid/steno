@@ -1,10 +1,7 @@
 //! Stopping the service closes the connections it holds, not only the
-//! listener: a phone on a kept-alive connection is cut, a request sent
-//! after the stop is not handled, nothing new connects, an upload stalled
-//! mid-body is cut by the end of the grace, the linger after a close
-//! ends with the stop, and a start made during a stop waits for it and
-//! keeps the fixed port.
-//! Swift: `group.shutdownGracefully()` closes the child channels.
+//! listener: kept-alive and stalled connections are cut, nothing new
+//! connects, the close linger ends, and a start during a stop waits for it
+//! and keeps the fixed port.
 
 #![allow(
     clippy::cast_sign_loss,
@@ -63,8 +60,7 @@ async fn stop_closes_a_kept_alive_connection_and_handles_nothing_after() {
     let metrics = test.metrics();
     assert!(metrics.closed_by_server >= 1);
 
-    // A request on the dead connection goes nowhere, and nothing new
-    // connects.
+    // The dead connection goes nowhere, and nothing new connects.
     let _ = stream.write_all(HELLO).await;
     let _ = stream.flush().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -78,9 +74,7 @@ async fn stop_closes_a_kept_alive_connection_and_handles_nothing_after() {
 
 #[tokio::test]
 async fn stop_cuts_an_upload_stalled_mid_body_by_the_end_of_the_grace() {
-    // The phone sent half a chunk and went quiet; the read timeout is far
-    // off. Once `stop` returns, the connection is closed: nothing the
-    // server started outlives it.
+    // A stalled half chunk: once `stop` returns, the connection is closed.
     let test = TestService::with(common::Options {
         chunk_size: CHUNK_SIZE,
         read_timeout: Duration::from_secs(60),
@@ -133,10 +127,8 @@ async fn stop_cuts_an_upload_stalled_mid_body_by_the_end_of_the_grace() {
 
 #[tokio::test]
 async fn stop_ends_the_linger_after_a_close() {
-    // A request with `Connection: close` is answered and half-closed; the
-    // server then reads and discards for up to CLOSE_GRACE, so the client's
-    // writes land. That linger ends when the server stops: once `stop`
-    // returns, the socket is gone and a write from the client is reset.
+    // The linger after `Connection: close` ends with the stop: once `stop`
+    // returns, a write from the client is reset.
     let test = TestService::start().await;
     let mut stream = test.raw_client().connect().await.unwrap();
     stream
@@ -152,8 +144,7 @@ async fn stop_ends_the_linger_after_a_close() {
     assert!(closed, "the server half-closed after the response");
     assert_eq!(parse_response(&received).and_then(|r| r.status), Some(200));
 
-    // Well-formed records: the linger reads through TLS and would stop at
-    // the first garbage byte on its own.
+    // Well-formed records, so the linger would not stop on its own.
     let mut writes_land = async |probes: usize| {
         for _ in 0..probes {
             let written = async {
@@ -168,9 +159,8 @@ async fn stop_ends_the_linger_after_a_close() {
         true
     };
     assert!(writes_land(12).await, "the socket lingers after the close");
-    // A stop that waited the linger out would return about CLOSE_GRACE
-    // after the close, less the probes' 300 ms. Only the stop is timed:
-    // the probes before it stretch on a loaded machine.
+    // A stop that waited the linger out would take about CLOSE_GRACE; only the
+    // stop is timed.
     let stopping = tokio::time::Instant::now();
     test.stop().await;
     assert!(
@@ -183,8 +173,7 @@ async fn stop_ends_the_linger_after_a_close() {
     );
 }
 
-/// A start that waits on a stop binds the port the stop let go, not one
-/// the system chooses.
+/// A start that waits on a stop binds the port the stop let go.
 #[tokio::test]
 async fn a_start_during_a_stop_keeps_the_fixed_port() {
     let port = std::net::TcpListener::bind("127.0.0.1:0")

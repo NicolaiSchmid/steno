@@ -1,57 +1,14 @@
 //! The handover identity's one decision: from what the reads found, serve
-//! an identity, mint one, or wait, with the writes that go with it
-//! ([`decide`]). It reads nothing and asks no clock: each caller reads,
-//! decides, then applies the writes in order.
-//!
-//! Its truth table is the statement of the rule:
-//! `crates/steno-handover/tests/fixtures/identity-decisions.json`, one row
-//! per case, which `crates/steno-handover/tests/identity_decisions.rs` runs
-//! through [`decide`].
-//! A new case is a new row there, not a paragraph here.
-//!
-//! Three callers ask ([`Caller`]):
-//! - the load ([`HandoverIdentity::load_or_create`]): the identity the
-//!   secret store holds, the record, the paired phones;
-//! - the Swift import's choice among the Swift certificates it found
-//!   (`steno_services::swift_import::choose_certificate`), which stores
-//!   what it serves over whatever the record holds;
-//! - the Secret Service move, which pins the identity of the file it moves
-//!   (`pin_file_identity` in `steno-services`).
-//!
-//! An identity found with nothing recorded is judged by the pairing-time
-//! rule: a phone knows the newest identity whose start is at or before its
-//! pairing. Two equal starts (a certificate's start is a whole second) are
-//! no newest one, so nothing is ever chosen by order. Over the times it can
-//! read, a start or a pairing more than [`CLOCK_SLACK`] after now means the
-//! clock went back, whatever the other times say; phones or a start that
-//! cannot be read wait with their read's reason first, as fixing the clock
-//! would not help. The import judges every certificate it found, the load
-//! the one identity it found, and the move the file's identity alone.
-//!
-//! No decision destroys a stored identity: [`Write`] holds no write of a
-//! secret, the move records at most the file's fingerprint, and the import
-//! writes nothing. The two writes that replace a stored identity are the
-//! callers' own, by design: Pair again ([`HandoverIdentity::mint_anew`],
-//! the user's confirmed choice, which removes every phone) and the Mac
-//! import's store over a desktop-id build's identity
-//! (`steno_services::swift_import::store_imported_identity`, S6 of
-//! `.plans/2026-10-07-stable-promotion.md`).
-//!
-//! Swift: no counterpart; the Swift app has no guard and mints after a
-//! keychain reset (P35 of `.plans/2026-10-07-stable-promotion.md`).
-//!
-//! [`HandoverIdentity::load_or_create`]: super::HandoverIdentity::load_or_create
-//! [`HandoverIdentity::mint_anew`]: super::HandoverIdentity::mint_anew
+//! an identity, mint one, or wait, with the writes that go with it. It reads
+//! nothing and asks no clock. The truth table in
+//! `tests/fixtures/identity-decisions.json` states the rule; a new case is a
+//! new row there. No decision destroys a stored identity.
 
 use chrono::{DateTime, TimeDelta, Utc};
 
 /// How far after now a start or a pairing may be before an identity found
-/// with nothing recorded waits for the clock ([`Reason::ClockBehind`]),
-/// whatever the other times it can read say. The database stores a
-/// pairing time rounded half up to the millisecond, so a phone paired in
-/// the instant of the decision can read up to half a millisecond after
-/// now; a second is a round margin over that. Starts are never rounded but
-/// share it, so the check stays one comparison.
+/// with nothing recorded waits for the clock. Pairing times are rounded to
+/// the millisecond, so a second is a round margin.
 pub const CLOCK_SLACK: TimeDelta = TimeDelta::seconds(1);
 
 /// Who asks: where the callers differ, the decision differs.
@@ -59,16 +16,15 @@ pub const CLOCK_SLACK: TimeDelta = TimeDelta::seconds(1);
 pub enum Caller {
     /// The handover's load of its identity.
     Load,
-    /// The Swift import, choosing among the Swift certificates it found.
-    /// It does not read the record: its store records what it serves.
+    /// The Swift import, choosing among the certificates it found; it does not
+    /// read the record.
     Import,
-    /// The Secret Service move, pinning the identity of the file it moves
-    /// while the service holds another one.
+    /// The Secret Service move, pinning the identity of the file it moves.
     Move,
 }
 
-/// An identity found: its fingerprint (SHA-256 of the leaf DER, lowercase
-/// hex) and when its certificate starts, `None` when that cannot be read.
+/// An identity found: its fingerprint (lowercase hex SHA-256 of the leaf
+/// DER) and its certificate's start, `None` when unreadable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub fingerprint: String,
@@ -82,21 +38,18 @@ pub enum Identities {
     Unreadable,
     /// What it holds does not parse as an identity.
     Malformed,
-    /// The identities in it: none, one, or for the import several, copies
-    /// of one certificate included.
+    /// The identities in it: none, one, or for the import several.
     Found(Vec<Found>),
 }
 
-/// The record of the identity's fingerprint
-/// ([`FingerprintRecord`](super::FingerprintRecord)).
+/// The record of the identity's fingerprint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Record {
     /// The file cannot be opened (its permissions, a disk error).
     NotOpened,
     /// The file does not parse.
     DoesNotParse,
-    /// The recorded fingerprint and the note of an unfinished Pair again,
-    /// each `None` when absent.
+    /// The recorded fingerprint and the note of an unfinished Pair again.
     Read {
         current: Option<String>,
         pending: Option<String>,
@@ -134,83 +87,59 @@ pub struct Observations {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     pub outcome: Outcome,
-    /// Each write is idempotent, so a stop after any of them decides the
-    /// same at the next read and writes the rest.
+    /// Each write is idempotent, so a stop after any of them decides the same
+    /// at the next read.
     pub writes: Vec<Write>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The identity with this fingerprint: the load serves it, the import
-    /// brings it over, the move leaves it recorded.
+    /// The identity with this fingerprint: served, brought over, or left
+    /// recorded.
     Serve(String),
-    /// Mint a new identity and store it with its fingerprint recorded.
-    /// Only the load mints, and only with no identity, nothing recorded, no
-    /// phone paired and a record that reads.
+    /// Mint and store a new identity. Only the load mints, and only with no
+    /// identity, nothing recorded, no phone paired and a readable record.
     Mint,
-    /// Neither; the reason is the handover's. For the move: nothing is
-    /// pinned, and the next load decides.
+    /// Neither. For the move: nothing is pinned, and the next load decides.
     Wait(Reason),
 }
 
-/// Why the decision waits. Five are
-/// [`Unavailability`](super::Unavailability)'s; the others name the read
-/// that failed, whose error the caller holds. Each says what the load
-/// returns and the card Settings > iPhone shows for it (`wait_reason` in
-/// `steno-services`); the import maps the last three to its own lines
-/// (`choose_certificate`) and every other reason to a failed lookup.
+/// Why the decision waits: an [`Unavailability`](super::Unavailability), or
+/// the read that failed, whose error the caller holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
-    /// The record cannot be opened:
-    /// [`IdentityError::Record`](super::IdentityError::Record) over an
-    /// [`std::io::Error`], the card `fileNotOpened`.
+    /// The record cannot be opened.
     RecordNotOpened,
-    /// The record does not parse:
-    /// [`IdentityError::Record`](super::IdentityError::Record), the card
-    /// `unreadable`.
+    /// The record does not parse.
     RecordDoesNotParse,
-    /// The place the identity is kept could not be read:
-    /// [`Unavailability::Unreadable`](super::Unavailability::Unreadable),
-    /// the card `unreadable`.
+    /// The secret store could not be read.
     SecretUnreadable,
-    /// An identity, or a certificate's start, does not parse:
-    /// [`IdentityError::Malformed`](super::IdentityError::Malformed), the
-    /// card `unreadable`.
+    /// An identity, or a certificate's start, does not parse.
     Malformed,
-    /// The paired phones could not be read:
-    /// [`IdentityError::Store`](super::IdentityError::Store), the card
-    /// `unreadable`.
+    /// The paired phones could not be read.
     PhonesUnreadable,
-    /// [`Unavailability::Missing`](super::Unavailability::Missing), the
-    /// card `missing`.
+    /// [`Unavailability::Missing`](super::Unavailability::Missing).
     Missing,
-    /// [`Unavailability::Replaced`](super::Unavailability::Replaced), the
-    /// card `replaced`.
+    /// [`Unavailability::Replaced`](super::Unavailability::Replaced).
     Replaced,
-    /// [`Unavailability::PartlyReplaced`](super::Unavailability::PartlyReplaced),
-    /// the card `partlyReplaced`.
+    /// [`Unavailability::PartlyReplaced`](super::Unavailability::PartlyReplaced).
     PartlyReplaced,
-    /// [`Unavailability::ClockBehind`](super::Unavailability::ClockBehind),
-    /// the card `clockBehind`.
+    /// [`Unavailability::ClockBehind`](super::Unavailability::ClockBehind).
     ClockBehind,
 }
 
 /// One write, applied in the order given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Write {
-    /// Drop the note of a Pair again that wrote nothing; one that cannot
-    /// be dropped is left, as the next read decides the same.
+    /// Drop the note of a Pair again that wrote nothing.
     DropNote,
-    /// Remove every paired phone: only to finish a Pair again whose new
-    /// identity the secret store holds.
+    /// Remove every paired phone, to finish a Pair again.
     RemovePhones,
     /// Record this fingerprint, which drops the note in the same write.
     Record(String),
 }
 
-/// The decision over `observed`; the truth table
-/// (`crates/steno-handover/tests/fixtures/identity-decisions.json`) is its
-/// statement.
+/// The decision over `observed`.
 ///
 /// ```
 /// use chrono::{TimeDelta, Utc};
@@ -249,8 +178,8 @@ fn wait(reason: Reason) -> Decision {
     }
 }
 
-/// The identities found, or the wait for a place that could not be read
-/// or held no identity that parses.
+/// The identities found, or the wait for a place that could not be read or
+/// held none that parses.
 fn identities_found(identities: &Identities) -> Result<&[Found], Decision> {
     match identities {
         Identities::Unreadable => Err(wait(Reason::SecretUnreadable)),
@@ -311,9 +240,8 @@ fn load(observed: &Observations) -> Decision {
     }
 }
 
-/// The load with no identity found. A note left stands for a Pair again
-/// that wrote nothing, so it goes; then the guard: a mint only with
-/// nothing recorded and no phone paired.
+/// The load with no identity found: a leftover note goes, then a mint only
+/// with nothing recorded and no phone paired.
 fn no_identity(current: Option<&str>, pending: Option<&str>, phones: &Phones) -> Decision {
     let outcome = match (current, phones) {
         (Some(_), _) => Outcome::Wait(Reason::Missing),
@@ -342,12 +270,9 @@ fn import(observed: &Observations) -> Decision {
     }
 }
 
-/// The move pins the file's identity where nothing is recorded, unless the
-/// rule shows that no paired phone can know it. It runs once, so where the
-/// rule cannot tell (some phones before the identity, the clock, a time or
-/// the phones that cannot be read) it pins, and the load waits as
-/// replaced: never adopting the service's identity over phones that may
-/// know the file's.
+/// The move pins the file's identity where nothing is recorded, unless no
+/// paired phone can know it. Where the rule cannot tell, it pins, and the
+/// load then waits rather than adopting the service's identity.
 fn pin(observed: &Observations) -> Decision {
     match &observed.record {
         Record::NotOpened => return wait(Reason::RecordNotOpened),
@@ -374,10 +299,9 @@ fn pin(observed: &Observations) -> Decision {
     }
 }
 
-/// The pairing-time rule over identities found with nothing recorded: of
-/// `found`, the index of the one every paired phone knows at `now`, or why
-/// there is none. The phones are read before the starts, and both before
-/// the clock.
+/// The pairing-time rule: a phone knows the newest identity whose start is
+/// at or before its pairing. Returns the index in `found` every paired phone
+/// knows at `now`, or why there is none; equal starts have no newest.
 fn judge(found: &[Found], phones: &Phones, now: DateTime<Utc>) -> Result<usize, Reason> {
     let Phones::Paired(paired) = phones else {
         return Err(Reason::PhonesUnreadable);

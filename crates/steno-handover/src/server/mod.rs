@@ -1,20 +1,8 @@
 //! The listener: a TCP acceptor that terminates TLS 1.3 with the identity,
-//! runs HTTP/1.1 over each connection ([`connection`]) and, when
-//! advertising, publishes `_steno._tcp` with the TXT record (`v=1`,
-//! `id=<macID>`) through Bonjour, and again when the network changes
-//! ([`advertise`]). Loopback only when `advertise` is false; otherwise
-//! every IPv4 address is bound, and a connection whose local address is
-//! neither loopback nor a LAN address (a VPN tunnel) is closed before the
-//! handshake, as the Swift listener's prohibited interface types refuse
-//! it. One socket on every address serves an address the computer gains
-//! after start on the same port. The check runs once per connection, at
-//! accept, so the listener closes no connection when the network changes;
-//! one on an address that leaves breaks with it, and the phone resumes
-//! from the partial. The port is the configuration's; a fixed one that
-//! is taken gives way to one the system chooses, with a warning, and the
-//! record carries the port bound (Rust only: the Swift app always let the
-//! system choose). Swift: `Network/HandoverServer.swift`,
-//! `Network/ServerMetrics.swift`.
+//! runs HTTP/1.1 over each connection and, when advertising, publishes the
+//! Bonjour record. It serves loopback and LAN addresses only: a connection
+//! arriving on any other local address (a VPN tunnel) is closed before the
+//! handshake. A fixed port that is taken gives way to one the system chooses.
 
 pub mod advertise;
 pub mod connection;
@@ -33,9 +21,9 @@ use crate::configuration::HandoverConfiguration;
 use crate::engine::RequestHandling;
 use crate::identity::{HandoverIdentity, IdentityError};
 
-/// Counters the tests read to prove the auth gate and the body limit did
-/// what the plan says: heads seen, body bytes discarded after a rejection,
-/// statuses written, connections the server closed.
+/// Counters the tests read to prove the auth gate and the body limit work:
+/// heads seen, body bytes discarded after a rejection, statuses written,
+/// connections the server closed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MetricsSnapshot {
     pub request_heads: u64,
@@ -43,12 +31,11 @@ pub struct MetricsSnapshot {
     pub discarded_body_bytes: u64,
     pub statuses: Vec<u16>,
     pub closed_by_server: u64,
-    /// Connections closed because the client stayed silent past the read
-    /// timeout (counted in `closed_by_server` too).
+    /// Connections closed for silence past the read timeout (also in
+    /// `closed_by_server`).
     pub timed_out: u64,
-    /// Connections closed before the handshake because they arrived on an
-    /// address the service does not live on (counted in `closed_by_server`
-    /// too).
+    /// Connections closed before the handshake for arriving on an address the
+    /// service does not live on (also in `closed_by_server`).
     pub refused_interface: u64,
 }
 
@@ -71,18 +58,17 @@ impl ServerMetrics {
     }
 }
 
-/// How long [`HandoverServer::stop`] waits for the connections in flight
-/// to finish their request before it cuts them.
+/// How long [`HandoverServer::stop`] lets connections finish their request
+/// before it cuts them.
 pub const STOP_GRACE: Duration = Duration::from_secs(2);
 
-/// How long the accept loop keeps the LAN addresses before it reads them
-/// again: a connection flood costs one interface query a second, not one
-/// per connection.
+/// How long the accept loop keeps the LAN addresses, so a connection flood
+/// costs one interface query a second.
 pub const LAN_REFRESH: Duration = Duration::from_secs(1);
 
-/// The LAN addresses a connection is checked against: `query` on the
-/// blocking pool, kept for `every`. A query that fails or panics gives the
-/// empty set, which refuses every connection but loopback.
+/// The LAN addresses a connection is checked against, queried on the
+/// blocking pool and kept for `every`. A failed query gives the empty set,
+/// which refuses every connection but loopback.
 pub(crate) struct LanAddresses {
     query: fn() -> Vec<Ipv4Addr>,
     every: Duration,
@@ -123,14 +109,13 @@ impl LanAddresses {
 pub(crate) enum Reach {
     /// 127.0.0.1 only.
     Loopback,
-    /// Every IPv4 address, each connection checked against `lan`; the
-    /// Bonjour record is published when `publish`.
+    /// Every IPv4 address, each connection checked against `lan`; the record is
+    /// published when `publish`.
     Lan { lan: LanAddresses, publish: bool },
 }
 
-/// A running listener. [`HandoverServer::stop`] closes it in order;
-/// dropping it sends the same signal and withdraws the record without
-/// waiting.
+/// A running listener. [`HandoverServer::stop`] closes it in order; dropping
+/// it signals the same and withdraws the record without waiting.
 pub struct HandoverServer {
     pub port: u16,
     accept_task: JoinHandle<()>,
@@ -153,9 +138,8 @@ impl HandoverServer {
         self.advertiser.as_ref().map(advertise::Advertiser::port)
     }
 
-    /// Binds and starts accepting. Advertising binds every IPv4 interface
-    /// (the phone resolves IPv4 only) and publishes the LAN addresses;
-    /// otherwise 127.0.0.1.
+    /// Binds and starts accepting: every IPv4 interface when advertising (the
+    /// phone resolves IPv4 only), otherwise 127.0.0.1.
     pub async fn start(
         configuration: &HandoverConfiguration,
         identity: &HandoverIdentity,
@@ -173,8 +157,7 @@ impl HandoverServer {
         Self::start_with(configuration, identity, engine, metrics, reach).await
     }
 
-    /// [`HandoverServer::start`] with the reach given, not derived from
-    /// `configuration.advertise`.
+    /// [`HandoverServer::start`] with an explicit reach.
     pub(crate) async fn start_with(
         configuration: &HandoverConfiguration,
         identity: &HandoverIdentity,
@@ -220,19 +203,12 @@ impl HandoverServer {
         })
     }
 
-    /// Stops accepting, closes every connection (an idle one, or one
-    /// lingering after its last response, at once; one mid-request after
-    /// its response; any still busy after [`STOP_GRACE`] by force) and
-    /// withdraws the Bonjour record. Its port is free when it returns. No
-    /// task of the listener outlives it, except store writes already in
-    /// line, which finish unless the runtime shuts down first. An admission
-    /// in flight at the stop (its phone hung up, or its connection was
-    /// closed by force) is one of them: it still copies, commits and
-    /// enqueues, or the exit cuts it as a crash would: a copy without its
-    /// commit is noted, and the next launch adopts it (at worst a
-    /// duplicate meeting, never a lost one).
-    /// Swift: `HandoverServer.stop` (`group.shutdownGracefully()` closes the
-    /// child channels).
+    /// Stops accepting, closes every connection (idle ones at once, busy ones
+    /// after their response or after [`STOP_GRACE`] by force) and withdraws the
+    /// record; the port is free when it returns. Store writes already in line
+    /// still finish, including an admission in flight; if the exit cuts one,
+    /// the next launch adopts the copy (at worst a duplicate meeting, never a
+    /// lost one).
     pub async fn stop(self) {
         let HandoverServer {
             mut accept_task,
@@ -241,9 +217,7 @@ impl HandoverServer {
             ..
         } = self;
         stop_signal.send_replace(true);
-        // The accept task drains for STOP_GRACE; one second more before it
-        // is aborted outright. The abort is awaited, so the listener is
-        // closed when this returns.
+        // The accept task drains for `STOP_GRACE`; one second more, then abort.
         if tokio::time::timeout(STOP_GRACE + Duration::from_secs(1), &mut accept_task)
             .await
             .is_err()
@@ -258,9 +232,8 @@ impl HandoverServer {
 }
 
 /// A listener on `port` at `address`. A fixed port that cannot be bound
-/// gives way to one the system chooses, with a warning: the phone still
-/// finds it through Bonjour, but a firewall opened for the fixed port
-/// blocks it.
+/// gives way to a system-chosen one with a warning: Bonjour still finds it,
+/// but a firewall opened for the fixed port blocks it.
 async fn bind(address: IpAddr, port: u16) -> std::io::Result<TcpListener> {
     let error = match TcpListener::bind(SocketAddr::new(address, port)).await {
         Err(error) if port != 0 => error,
@@ -291,9 +264,8 @@ async fn accept_loop(
 ) {
     let mut connections = JoinSet::new();
     loop {
-        // Stop first, so nothing is accepted once it is asked for; then reap
-        // finished connections before the next accept, so the set does not
-        // grow for the life of the listener, nor under a connection flood.
+        // Stop first, so nothing is accepted once asked; reap finished connections
+        // so the set does not grow.
         let accepted = tokio::select! {
             biased;
             () = stopped(&mut stopping) => break,
@@ -326,8 +298,8 @@ async fn accept_loop(
         let configuration = configuration.clone();
         let mut stopping = stopping.clone();
         connections.spawn(async move {
-            // The handshake gets the read timeout: a client that connects
-            // and says nothing costs the same as one that stops mid-request.
+            // The handshake gets the read timeout, so a silent client costs the same as
+            // one that stops mid-request.
             let handshake =
                 tokio::time::timeout(configuration.read_timeout, acceptor.accept(stream));
             let handshake = tokio::select! {
@@ -353,17 +325,14 @@ async fn accept_loop(
             }
         });
     }
-    // The listener is dropped here: nothing new connects while the
-    // connections in flight finish. What is still busy after the grace is
-    // aborted with the set.
+    // Nothing new connects while the connections in flight finish.
     drop(listener);
     let drained = async { while connections.join_next().await.is_some() {} };
     let _ = tokio::time::timeout(STOP_GRACE, drained).await;
 }
 
 /// Whether `stream` arrived on loopback or on one of `lan`; a connection
-/// over a tunnel is not served. `lan` is at most [`LAN_REFRESH`] old, so a
-/// network change after start is followed.
+/// over a tunnel is not served.
 fn on_a_served_network(stream: &tokio::net::TcpStream, lan: &[Ipv4Addr]) -> bool {
     stream
         .local_addr()
@@ -443,8 +412,8 @@ mod tests {
         assert!(fresh.current().await.is_empty(), "not the stale set");
     }
 
-    /// A non-loopback IPv4 address of this host, an interface that is up
-    /// first.
+    /// A non-loopback IPv4 address of this host, preferring an interface that is
+    /// up.
     fn host_address() -> Option<Ipv4Addr> {
         let interfaces = if_addrs::get_if_addrs().ok()?;
         let mut candidates: Vec<_> = interfaces
@@ -460,9 +429,8 @@ mod tests {
         candidates.first().map(|&(_, address)| address)
     }
 
-    /// Whether a connection to `address` reaches an `accept` in this
-    /// process. An application firewall (macOS) completes the handshake
-    /// and then holds the connection back from an unsigned binary.
+    /// Whether a connection to `address` reaches an `accept` in this process;
+    /// the macOS application firewall can hold it back from an unsigned binary.
     async fn reaches_this_process(address: Ipv4Addr) -> bool {
         let Ok(listener) = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await else {
             return false;
@@ -482,16 +450,15 @@ mod tests {
             .unwrap_or(false)
     }
 
-    /// The interface test's host address, as the LAN query of its second
-    /// server.
+    /// The interface test's host address, as its second server's LAN query.
     static HOST: OnceLock<Ipv4Addr> = OnceLock::new();
 
     fn the_host() -> Vec<Ipv4Addr> {
         HOST.get().copied().into_iter().collect()
     }
 
-    /// Reports a test this host cannot run on stdout. CI sets
-    /// `STENO_REQUIRE_LAN_TEST` on Linux and Windows, so a skip there fails.
+    /// Reports a skipped test. CI sets `STENO_REQUIRE_LAN_TEST` on Linux and
+    /// Windows, so a skip there fails.
     fn skip(reason: &str) {
         let required = std::env::var_os("STENO_REQUIRE_LAN_TEST").is_some();
         if let Err(message) = may_skip(required, reason) {
@@ -500,8 +467,8 @@ mod tests {
         println!("SKIPPED: {reason}");
     }
 
-    /// Whether the interface test may skip for `reason`: only where the run
-    /// does not require it.
+    /// Whether the interface test may skip: only where the run does not
+    /// require it.
     fn may_skip(required: bool, reason: &str) -> Result<(), String> {
         if required {
             Err(format!("the interface test must not skip here: {reason}"))
@@ -532,8 +499,8 @@ mod tests {
         )
     }
 
-    /// A listener on every IPv4 address that serves loopback and `lan`,
-    /// read again after `every`.
+    /// A listener on every IPv4 address serving loopback and `lan`, read again
+    /// after `every`.
     async fn serve(
         configuration: &HandoverConfiguration,
         identity: &Arc<HandoverIdentity>,
@@ -572,8 +539,7 @@ mod tests {
         };
         let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
 
-        // Only loopback is served: the host's own address stands in for a
-        // tunnel's.
+        // Only loopback is served; the host's own address stands in for a tunnel.
         let (outside, metrics) = serve(&configuration, &identity, no_lan, LAN_REFRESH).await;
         let mut refused = TcpStream::connect((address, outside.port)).await.unwrap();
         let mut received = Vec::new();
@@ -600,8 +566,7 @@ mod tests {
         assert_eq!(metrics.snapshot().refused_interface, 1);
         outside.stop().await;
 
-        // The host's address is the LAN: the handshake completes and a
-        // request is answered.
+        // The host's address is the LAN: the handshake completes.
         let (lan, metrics) = serve(&configuration, &identity, the_host, LAN_REFRESH).await;
         let exchange = async {
             let mut tls = connect(&identity, address, lan.port).await?;
@@ -671,8 +636,7 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    /// A listener that holds a port the system chose on `address`, and
-    /// that port.
+    /// A listener holding a system-chosen port on `address`, and that port.
     async fn hold_port(address: Ipv4Addr) -> (TcpListener, u16) {
         let held = TcpListener::bind((address, 0)).await.unwrap();
         let port = held.local_addr().unwrap().port();
@@ -739,8 +703,8 @@ mod tests {
         assert_ne!(bound.port(), taken);
     }
 
-    /// After a fallback the Bonjour record carries the port bound, not the
-    /// one configured, so the phone never resolves the other program.
+    /// After a fallback the Bonjour record carries the port bound, not the one
+    /// configured.
     #[tokio::test]
     async fn after_a_fallback_the_record_carries_the_port_bound() {
         let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
@@ -771,8 +735,8 @@ mod tests {
         drop(held);
     }
 
-    /// The host address of the network test below, and whether the
-    /// computer is on that network yet.
+    /// The network test's host address, and whether the computer is on that
+    /// network yet.
     static JOINING: OnceLock<Ipv4Addr> = OnceLock::new();
     static JOINED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -804,8 +768,7 @@ mod tests {
             .await
     }
 
-    /// `GET /v1/hello` on `tls`, kept alive: the status line, after the
-    /// whole response is read.
+    /// `GET /v1/hello` on `tls`, kept alive; returns the status line.
     async fn hello(
         tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
     ) -> std::io::Result<String> {
@@ -869,8 +832,7 @@ mod tests {
         assert!(refused.is_err(), "no handshake off the LAN");
         assert_eq!(metrics.snapshot().refused_interface, 1);
 
-        // The computer joins: the same socket, on the same port, serves the
-        // new address.
+        // The computer joins: the same socket serves the new address.
         JOINED.store(true, Ordering::SeqCst);
         let mut joined = within(connect(&identity, address, server.port))
             .await
@@ -878,8 +840,8 @@ mod tests {
         let status = within(hello(&mut joined)).await.unwrap();
         assert!(status.starts_with("HTTP/1.1 200"), "{status}");
 
-        // The address leaves the LAN: the connection already open is still
-        // answered, and only a new one is refused.
+        // The address leaves: the open connection is still answered, a new one is
+        // refused.
         JOINED.store(false, Ordering::SeqCst);
         let status = within(hello(&mut joined)).await.unwrap();
         assert!(status.starts_with("HTTP/1.1 200"), "{status}");

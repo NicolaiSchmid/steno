@@ -1,5 +1,5 @@
-//! How the listener binds and where partial uploads live, and the clock
-//! the service runs on. Swift: `HandoverConfiguration.swift`.
+//! How the listener binds, where partial uploads live, and the clock the
+//! service runs on.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,39 +12,30 @@ use steno_core::StenoPaths;
 /// pairing window has closed. Tests advance it.
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
-/// How the computer's side of the handover listens and where it keeps
-/// partial uploads. Tests use `advertise: false` and a fresh temporary
-/// inbox, so nothing leaves 127.0.0.1.
+/// How the handover listens and where it keeps partial uploads. Tests use
+/// `advertise: false`, so nothing leaves 127.0.0.1.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoverConfiguration {
     /// Bonjour instance name; the phone shows it. Defaults to
     /// [`HandoverConfiguration::default_service_name`].
     pub service_name: String,
-    /// Publish `_steno._tcp` and serve on the LAN addresses
-    /// ([`server::advertise::current_lan_addresses`](crate::server::advertise::current_lan_addresses))
-    /// and loopback; `false` binds loopback only.
+    /// Publish `_steno._tcp` and serve on the LAN addresses and loopback;
+    /// `false` binds loopback only.
     pub advertise: bool,
-    /// The largest chunk the computer accepts; the phone declares its own
-    /// chunk size per recording and it must not exceed this. 16 MiB in the
-    /// product.
+    /// The largest chunk the computer accepts; a phone's declared chunk size
+    /// must not exceed it. 16 MiB in the product.
     pub chunk_size: i64,
     /// Where partial uploads and their metadata live until the intake takes
     /// the finished file.
     pub inbox_directory: PathBuf,
     /// How long a pairing QR code stays valid on the injected clock.
     pub pairing_window: Duration,
-    /// The port the listener binds; `0` lets the system choose. When a
-    /// fixed port cannot be bound (another program, or another user's
-    /// Steno, holds it), the listener binds one the system chooses and logs
-    /// a warning. Either way the port bound is the one published through
-    /// Bonjour, which the phone resolves before every connection. The app
-    /// passes [`HandoverConfiguration::platform_port`] unless the user chose
-    /// another.
+    /// The port the listener binds; `0` lets the system choose. A fixed port
+    /// that is taken gives way to a system-chosen one with a warning; the port
+    /// bound is what Bonjour publishes.
     pub port: u16,
-    /// How long a connection may stay silent while the computer waits for
-    /// the client (a request line, the rest of a body, the next request)
-    /// before it is closed. Not counted while the engine is handling a
-    /// request.
+    /// How long a connection may stay silent while the computer waits for the
+    /// client before it is closed; not counted while a request is handled.
     pub read_timeout: Duration,
 }
 
@@ -54,23 +45,17 @@ impl HandoverConfiguration {
     pub const BODY_HEADROOM: i64 = 64 * 1024;
     /// Upper bound for the JSON bodies of the small routes.
     pub const JSON_BODY_LIMIT: i64 = 64 * 1024;
-    /// The inbox's directory under the support directory. The Swift app
-    /// and every Rust build use this name, so a phone resumes its partial
-    /// uploads after an upgrade. Swift:
-    /// `HandoverConfiguration.defaultInboxDirectory`.
+    /// The inbox's directory under the support directory. Every build uses this
+    /// name, so a phone resumes its partial uploads after an upgrade.
     pub const INBOX_DIRECTORY_NAME: &str = "handover-inbox";
-    /// The port the app listens on under Linux, where the desktops' firewalls
-    /// (`ufw` on Omarchy, the NixOS firewall) block every incoming port not
-    /// opened by name: the AUR package's `ufw` profile and the NixOS module
-    /// open this one (stable plan X4). Unassigned by IANA, below Linux's
-    /// ephemeral range (32768 to 60999) so no outgoing connection takes it,
-    /// and in no list of ports common LAN software uses.
+    /// The port the app listens on under Linux, where the desktop firewalls
+    /// block every port not opened by name; the AUR `ufw` profile and the NixOS
+    /// module open this one. Unassigned by IANA and below Linux's ephemeral
+    /// range.
     pub const LINUX_PORT: u16 = 23820;
 
     /// The port the app listens on unless the user chose one:
-    /// [`HandoverConfiguration::LINUX_PORT`] on Linux; on macOS and Windows
-    /// `0`, a port the system chooses. Rust only: Swift's
-    /// `HandoverConfiguration.port` is always 0.
+    /// [`HandoverConfiguration::LINUX_PORT`] on Linux, `0` elsewhere.
     #[must_use]
     pub const fn platform_port() -> u16 {
         if cfg!(target_os = "linux") {
@@ -86,20 +71,16 @@ impl HandoverConfiguration {
         self.chunk_size + Self::BODY_HEADROOM
     }
 
-    /// The name the phone shows: the first of [`NAME_SOURCES`] that names
-    /// the computer, else `Steno`. On the Mac that is the computer name
-    /// from System Settings, the name Swift's `defaultServiceName` reads
-    /// (`Host.current().localizedName`), so a phone shows the same name
-    /// after the handoff; on Linux and Windows the host name.
-    /// Swift: `HandoverConfiguration.defaultServiceName`.
+    /// The name the phone shows: the first of [`NAME_SOURCES`] that names the
+    /// computer, else `Steno`. On the Mac that is the computer name from System
+    /// Settings; elsewhere the host name.
     #[must_use]
     pub fn default_service_name() -> String {
         first_name(NAME_SOURCES, NameSource::read)
     }
 
-    /// `<support>/`[`INBOX_DIRECTORY_NAME`](Self::INBOX_DIRECTORY_NAME);
-    /// [`StenoPaths`] decides the root so a `HOME` override in tests
-    /// applies here too.
+    /// `<support>/`[`INBOX_DIRECTORY_NAME`](Self::INBOX_DIRECTORY_NAME), rooted
+    /// by [`StenoPaths`] so a `HOME` override in tests applies.
     #[must_use]
     pub fn default_inbox_directory() -> PathBuf {
         StenoPaths::default_support_directory().join(Self::INBOX_DIRECTORY_NAME)
@@ -122,8 +103,7 @@ pub enum NameSource {
 }
 
 impl NameSource {
-    /// The name this source gives; `None` when it gives none or an empty
-    /// one.
+    /// The name this source gives; `None` when it gives none or an empty one.
     #[must_use]
     pub fn read(self) -> Option<String> {
         let name = match self {
@@ -148,10 +128,8 @@ fn first_name(sources: &[NameSource], read: impl Fn(NameSource) -> Option<String
         .unwrap_or_else(|| "Steno".to_owned())
 }
 
-/// The sources of the service name on this platform, in order: the Mac
-/// asks for the computer name first, as Swift did; Linux and Windows use
-/// the host name. The host name sources are the Mac's fallback, as
-/// Swift's `ProcessInfo.processInfo.hostName` was.
+/// The sources of the service name on this platform, in order: the Mac asks
+/// for the computer name first, then the host name sources.
 pub const NAME_SOURCES: &[NameSource] = if cfg!(target_os = "macos") {
     &[
         NameSource::ComputerName,
@@ -263,8 +241,7 @@ mod tests {
         assert_eq!(first_name(&MAC_SOURCES, reader([None; 4])), "Steno");
     }
 
-    /// The name Swift published: `scutil --get ComputerName` reads the
-    /// same `SCDynamicStoreCopyComputerName` as `Host.current().localizedName`.
+    /// The computer name `scutil --get ComputerName` reads.
     #[cfg(target_os = "macos")]
     #[test]
     fn on_the_mac_the_computer_name_is_the_one_system_settings_shows() {
