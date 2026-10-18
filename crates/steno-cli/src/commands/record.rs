@@ -1,10 +1,6 @@
-//! `steno record --mode call|in-person --out DIR [--seconds N] [--backend
-//! live|synthetic] [--keep-raw-mic]`: records one meeting folder under DIR,
-//! prints the lane levels at 10 Hz to stderr and the files plus statistics
-//! at the end; `--keep-raw-mic` keeps the microphone before echo
-//! cancellation beside the master as `mic.raw.caf`.
-//! Stops after `--seconds` or on Ctrl-C. `--backend synthetic` needs no
-//! devices. Swift: `Sources/steno/Commands/Record.swift`.
+//! `steno record`: records one meeting folder under `--out`, printing the
+//! lane levels to stderr and the files plus statistics at the end. Stops
+//! after `--seconds` or on Ctrl-C; `--backend synthetic` needs no devices.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,8 +117,7 @@ pub fn level_line(levels: &LaneLevels) -> String {
     }
 }
 
-/// Forwards every level and notice to stderr on threads that end with the
-/// session.
+/// Forwards every level and notice to stderr until the session ends.
 pub fn print_live(session: &CaptureSession, quiet: bool) -> Vec<std::thread::JoinHandle<()>> {
     let mut threads = Vec::new();
     if !quiet {

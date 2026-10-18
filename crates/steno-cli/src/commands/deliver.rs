@@ -1,10 +1,7 @@
 //! `steno deliver <meeting-id>`: re-exports a processed meeting to every
-//! configured destination through the pipeline's `redeliver` and the real
-//! coordinator. Without `--vault` the stored Obsidian settings decide; with
-//! it the destination is built for this run alone under its own id
-//! (`obsidian-folder@<vault>`), so neither the stored settings nor the
-//! stored destination's receipt are touched. Prints one line per
-//! destination of this run.
+//! configured destination. With `--vault` the destination is built for this
+//! run alone under its own id, so the stored settings and receipts stay
+//! untouched.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -145,9 +142,8 @@ impl Deliver {
     }
 }
 
-/// A delivered row's status and folder: `delivered`, then ` · <warning>`
-/// for each warning the receipt carries (the export line's separator), a
-/// tab and the meeting folder.
+/// A delivered row: `delivered`, ` · <warning>` per warning, a tab and the
+/// meeting folder.
 fn delivered(receipt: Option<&DeliveryReceipt>) -> String {
     let Some(receipt) = receipt else {
         return "delivered\t".to_owned();

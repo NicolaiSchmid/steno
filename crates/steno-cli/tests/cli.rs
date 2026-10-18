@@ -1,6 +1,5 @@
 //! The `steno` binary end to end on a temporary home: migrate, generate
 //! the fixtures, process, export, reindex, deliver.
-//! Swift: `Tests/stenoTests/CLITests.swift`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,9 +12,7 @@ struct Run {
     stderr: String,
 }
 
-/// The `steno` binary on `home`: its support directory and models are
-/// `home`'s, never the developer's key or the models directory their
-/// environment names for the real-model tests.
+/// The `steno` binary on `home`, never the developer's key or models.
 fn steno_on(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_steno"));
     command
@@ -30,9 +27,8 @@ fn steno_on(home: &Path) -> Command {
 fn steno(args: &[&str], home: &Path) -> Run {
     let mut command = steno_on(home);
     command.args(args);
-    // Every run on Unix carries a variable that is not Unicode, as a
-    // user's environment may: the secret overrides, which read every
-    // variable, must read past it (`std::env::vars()` would panic).
+    // Every run on Unix carries a variable that is not Unicode: the secret
+    // overrides must read past it.
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -58,8 +54,7 @@ fn export(path: &Path) -> serde_json::Value {
 }
 
 /// The `steno` every test runs has its home set and the developer's key
-/// and models directory removed from its environment, so no run writes
-/// into the models the developer keeps for the real-model tests.
+/// and models directory removed from its environment.
 #[test]
 fn the_steno_the_tests_run_inherits_no_models_directory_or_key() {
     let home = tempfile::tempdir().unwrap();
@@ -74,7 +69,7 @@ fn the_steno_the_tests_run_inherits_no_models_directory_or_key() {
     assert!(envs.contains(&(std::ffi::OsStr::new("HOME"), Some(home.path().as_os_str()))));
 }
 
-// The Swift test is one flow too: each step reads the one before.
+// One flow: each step reads the one before.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn the_swift_cli_flow_runs_end_to_end_on_a_fresh_home() {
@@ -330,11 +325,9 @@ fn the_swift_cli_flow_runs_end_to_end_on_a_fresh_home() {
     assert_eq!(steno(&["deliver", "nope", "--db", db], home).status, 1);
 }
 
-/// `steno deliver --vault <the app's vault>` delivers under its own id, so
-/// the app's receipt does not apply and the meeting's folder is reused
-/// through its `meeting.json`: a note the user edited since the app
-/// delivered it is kept, Steno's version goes beside it, and the line says
-/// so after `delivered`.
+/// `steno deliver --vault <the app's vault>` reuses the meeting's folder: a
+/// note the user edited is kept, Steno's version goes beside it, and the
+/// line says so.
 #[test]
 fn deliver_into_the_apps_vault_keeps_a_note_edited_since_the_app_delivered() {
     let home = tempfile::tempdir().unwrap();
@@ -503,9 +496,8 @@ fn a_refused_wav_leaves_no_meeting_folder() {
     assert!(left.is_empty(), "{left:?}");
 }
 
-/// A command that writes refuses while another process (the app) holds the
-/// database's lock, and runs once it is released; one that only reads runs
-/// beside it.
+/// A command that writes refuses while another process holds the lock,
+/// and runs once it is released; one that only reads runs beside it.
 #[test]
 fn a_writing_command_refuses_while_the_app_holds_the_database() {
     let home = tempfile::tempdir().unwrap();
@@ -570,10 +562,8 @@ fn export_beside(db: &Path, home: &Path) -> Run {
     )
 }
 
-/// A command that only reads, beside the app, opens the database without
-/// migrating it: it runs on a database at this build's version and changes
-/// nothing, and refuses one an older app still runs on (or the app is
-/// still migrating) rather than migrate the schema under it.
+/// A command that only reads, beside the app, never migrates: it changes
+/// nothing on a current database and refuses one that needs a migration.
 #[test]
 fn a_reading_command_beside_the_app_never_migrates() {
     let home = tempfile::tempdir().unwrap();
@@ -690,9 +680,8 @@ fn path_of_file_url(url: &str) -> PathBuf {
     PathBuf::from(rest.replace("%20", " "))
 }
 
-/// `STENO_MODELS_DIR` names the models directory, taken from the working
-/// directory when relative, as the app and the `transcribe` example take it
-/// (`crates/steno-services/tests/models_directory.rs` pins those two).
+/// `STENO_MODELS_DIR` names the models directory, relative to the working
+/// directory when relative.
 #[test]
 fn the_models_variable_names_the_models_directory() {
     let home = tempfile::tempdir().unwrap();
@@ -745,8 +734,7 @@ fn dev_models_lists_and_removes_in_the_models_dir_it_is_given() {
     let home = home.path();
     let models = home.join("models");
 
-    // The diarizer's two files in `--models-dir`, each a sparse file of
-    // its manifest size.
+    // The diarizer's two files, each a sparse file of its manifest size.
     let diarization = models.join("onnx").join("diarization");
     std::fs::create_dir_all(&diarization).unwrap();
     for file in &steno_diarize::models::asset().files {
@@ -792,9 +780,8 @@ fn models_list_line(home: &Path, asset: &str) -> String {
 }
 
 /// Parakeet v3 is listed with the size of the model the platform runs:
-/// the `CoreML` build's manifest on the Mac by default (about 483 MB); the
-/// fp32 export's (about 2.6 GB) elsewhere, and on the Mac too once
-/// `speech.json` chooses the speech sidecar.
+/// `CoreML` on the Mac by default, the fp32 export elsewhere or once
+/// `speech.json` chooses the sidecar.
 #[test]
 fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
     let home = tempfile::tempdir().unwrap();
@@ -833,11 +820,8 @@ fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
     assert!(line.ends_with(fp32.as_str()), "the sidecar chosen: {line}");
 }
 
-/// `steno process --meeting <id>` processes a stored failed meeting again
-/// from its recording: refused while the master is gone, and once the
-/// broken lane is replaced the run ends ready and prints the id. A ready
-/// meeting is refused unless `--allow-ready` asks for it, its master on
-/// disk or not.
+/// `steno process --meeting <id>` processes a failed meeting again once its
+/// master is back; a ready one only with `--allow-ready`.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
@@ -962,11 +946,9 @@ fn process_meeting_runs_a_failed_meeting_again_from_its_recording() {
     assert!(allowed.stderr.contains("transcribe"), "{}", allowed.stderr);
 }
 
-/// `steno process --meeting` writes what the decoder replaced by silence
-/// into `damaged-audio.json` beside the database, where the app reads it:
-/// a phone meeting whose recording becomes the fixture with three
-/// undecodable packets is marked with them after the run, and is then
-/// offered to be processed again without `--allow-ready`.
+/// `steno process --meeting` records undecodable packets in
+/// `damaged-audio.json` beside the database, and the meeting is then
+/// offered again without `--allow-ready`.
 #[test]
 fn process_meeting_writes_the_damage_beside_the_database() {
     let home = tempfile::tempdir().unwrap();
@@ -1038,10 +1020,7 @@ fn process_meeting_writes_the_damage_beside_the_database() {
     assert_eq!(marks().parts(id), 3);
 }
 
-/// A queued meeting is not processed again. The command's pipeline is its
-/// own, so it cannot tell a meeting the app is processing from one the app
-/// left waiting for its speech models or for the database; it says what
-/// happens to each.
+/// A queued meeting is not processed again, and the command says why.
 #[test]
 fn process_meeting_on_a_queued_meeting_says_the_app_processes_it() {
     let home = tempfile::tempdir().unwrap();
@@ -1123,8 +1102,7 @@ fn process_meeting_is_exclusive_of_the_input_and_names_an_unknown_id() {
     assert_eq!(unknown.stdout, "");
 }
 
-/// `--meeting` refuses every flag of a new meeting, each by name, and
-/// checks the speech flags before it opens the database.
+/// `--meeting` refuses every flag of a new meeting, each by name.
 #[test]
 fn process_meeting_refuses_each_new_meeting_flag() {
     let home = tempfile::tempdir().unwrap();
@@ -1174,7 +1152,7 @@ fn process_meeting_refuses_each_new_meeting_flag() {
     );
 }
 
-// Every usage error of the Swift test in one place.
+// Every usage error in one place.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn usage_errors_exit_one_and_name_the_known_values() {
@@ -1365,10 +1343,8 @@ fn aec_bench_runs_on_the_synthetic_fixtures() {
     assert!(out.exists());
 }
 
-/// `dev onsets` prints where a sound starts in each channel, from
-/// `--after` on, in a two-channel 16 kHz WAV (a call master's channel 1 is
-/// the system lane): on the first a click at 0.25 s and a tone from 1.5 s,
-/// on the second a click at 0.5 s and a quieter tone from 1.25 s.
+/// `dev onsets` prints where a sound starts in each channel of a
+/// two-channel WAV, from `--after` on.
 #[test]
 fn dev_onsets_finds_the_first_loud_sample_of_each_channel() {
     let home = tempfile::tempdir().unwrap();
@@ -1428,9 +1404,7 @@ fn dev_onsets_finds_the_first_loud_sample_of_each_channel() {
 }
 
 /// A call recorded with `--keep-raw-mic` keeps the microphone before echo
-/// cancellation as `mic.raw.caf` beside the master, and says where: the
-/// second take of the stable plan's A10 step 2 on the Mac reads the tone's
-/// residual there when the cancellation hides it.
+/// cancellation as `mic.raw.caf` beside the master, and says where.
 #[test]
 fn record_keeps_the_raw_mic_when_asked() {
     let home = tempfile::tempdir().unwrap();
@@ -1663,8 +1637,7 @@ fn bakeoff_with_fake_engines_reports_one_segment_per_second() {
         written.contains(&"report.json".to_owned()) && written.contains(&"report.md".to_owned())
     );
     assert!(written.contains(&"tone-3s.parakeet-v3.json".to_owned()));
-    // Both are in `StenoJSON`'s form, as the Swift bake-off wrote them:
-    // pretty, sorted keys, ` : ` between a key and its value.
+    // Both in `StenoJSON`'s form: pretty, sorted keys, ` : ` separators.
     for name in ["report.json", "tone-3s.parakeet-v3.json"] {
         let text = std::fs::read_to_string(out.join(name)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
