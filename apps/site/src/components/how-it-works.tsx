@@ -98,7 +98,7 @@ export function HowItWorks() {
 					<Checklist
 						items={[
 							"Zoom, Teams, Meet, FaceTime, Slack, phone calls, in person",
-							"On-device transcription with Parakeet or Whisper",
+							"On-device transcription with Parakeet",
 							"Remembers voices: name a speaker once",
 							"German, English and the Denglish in between",
 						]}

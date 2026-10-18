@@ -11,12 +11,10 @@
 //!
 //! Each lane is a rolling GitHub release that holds only its `latest.json`,
 //! which `.github/workflows/desktop-release.yml` replaces when it publishes
-//! a `desktop-v*` tag. The stable lane takes releases, the beta lane every
-//! version, and neither moves backwards (`apps/desktop/scripts/updater-lanes.sh`),
-//! so a beta build is offered the stable release that follows it. The
-//! manifest points at the installers on the versioned release. Neither
-//! lane is GitHub's "latest" release, which stays the Swift app's until the
-//! Mac cutover (`.plans/2026-10-04-mac-cutover.md`). `tauri.conf.json`
+//! a `v*` tag. The stable lane takes releases, the beta lane every version,
+//! and neither moves backwards (`apps/desktop/scripts/updater-lanes.sh`), so
+//! a beta build is offered the stable release that follows it. The manifest
+//! points at the installers on the versioned release. `tauri.conf.json`
 //! carries the public key (`plugins.updater.pubkey`) and the stable
 //! endpoint. The matching private key is the `TAURI_SIGNING_PRIVATE_KEY`
 //! secret and lives nowhere in the repository.

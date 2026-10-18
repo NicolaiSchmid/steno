@@ -4,10 +4,19 @@ import { cn } from "@/lib/cn";
 interface CommandProps {
 	command: string;
 	className?: string;
+	/** False for a line that goes in a config file: no `$` prompt. */
+	shell?: boolean;
+	/** The copy button's accessible name, when a page shows several. */
+	label?: string;
 }
 
-/** A one-line shell command in a tile with a copy control. */
-export function Command({ command, className }: CommandProps) {
+/** A one-line command in a tile with a copy control. */
+export function Command({
+	command,
+	className,
+	shell = true,
+	label = "Copy command",
+}: CommandProps) {
 	return (
 		<div
 			className={cn(
@@ -16,10 +25,10 @@ export function Command({ command, className }: CommandProps) {
 			)}
 		>
 			<code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-[12.5px] text-fg-muted leading-5">
-				<span className="select-none text-fg-faint">$ </span>
+				{shell && <span className="select-none text-fg-faint">$ </span>}
 				{command}
 			</code>
-			<CopyButton label="Copy command" text={command} />
+			<CopyButton label={label} text={command} />
 		</div>
 	);
 }
