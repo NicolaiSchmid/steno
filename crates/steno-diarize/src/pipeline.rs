@@ -11,26 +11,19 @@ use crate::refinement::{self, Rules, SliceEmbedder};
 use crate::to_f64;
 use crate::{mapping, timeline};
 
-/// The clustering knobs and whether the refinement pass runs, Steno's
-/// `FluidDiarizerConfig` with the window step and the stage rules exposed
-/// for the calibration harness. Swift:
-/// `Sources/StenoSpeech/Diarization/FluidDiarizer.swift`.
+/// The clustering knobs, the window step, the stage rules and whether
+/// refinement runs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiarizerConfig {
-    /// Mean pairwise cosine distance between the members of two clusters
-    /// (average linkage) at or below which they merge; see
-    /// [`DEFAULT_CLUSTERING_THRESHOLD`] and [`crate::clustering`].
+    /// Mean pairwise cosine distance (average linkage) at or below which two
+    /// clusters merge; see [`DEFAULT_CLUSTERING_THRESHOLD`].
     pub clustering_threshold: f32,
     pub min_speakers: Option<usize>,
     pub max_speakers: Option<usize>,
-    /// Whether the refinement pass runs after the mapping; off, the
-    /// clusters come back as the mapping produced them.
+    /// Whether the refinement pass runs after the mapping.
     pub refines_clusters: bool,
-    /// Seconds between two segmentation windows; `FluidAudio`'s community
-    /// configuration steps a fifth of the ten-second window. A frame's
-    /// votes count the windows covering it in two bytes, exact for any
-    /// step of three samples (0.19 ms) or more (the vote matrix in
-    /// `timeline`).
+    /// Seconds between two segmentation windows. Votes stay exact for any step
+    /// of three samples or more (see `timeline`).
     pub step_seconds: f64,
     pub extraction: ExtractionRules,
     pub timeline: timeline::TimelineRules,
@@ -38,11 +31,8 @@ pub struct DiarizerConfig {
 }
 
 /// The clustering cut: `FluidAudio`'s Euclidean 0.8 on unit vectors as a
-/// cosine distance (`d^2 = 2 - 2 cos`). The G3 sweep over the seven
-/// calibration calls (gate G3 in
-/// `.plans/2026-10-01-cross-platform-speech-stack.md`) passed at every
-/// cut from 0.20 to 0.60 on both backends, so the derived value is kept
-/// rather than tuned to the corpus.
+/// cosine distance (`d^2 = 2 - 2 cos`). The calibration calls passed at every
+/// cut from 0.20 to 0.60 on both backends, so the derived value is kept.
 pub const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.32;
 
 impl Default for DiarizerConfig {
@@ -61,8 +51,7 @@ impl Default for DiarizerConfig {
 }
 
 impl DiarizerConfig {
-    /// Audio shorter than this has nothing to cluster and yields no
-    /// speakers without touching the models, as `FluidDiarizer` does.
+    /// Audio shorter than this yields no speakers without touching the models.
     pub const MINIMUM_AUDIO_SECONDS: f64 = 1.0;
 
     fn clustering(&self, threshold: f32) -> ClusteringConfig {
@@ -74,16 +63,14 @@ impl DiarizerConfig {
     }
 
     fn step_samples(&self, sample_rate: usize) -> usize {
-        // Positive seconds times the rate; nothing to truncate.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let step = (self.step_seconds * to_f64(sample_rate)).round().max(1.0) as usize;
         step
     }
 }
 
-/// One backend and one configuration; `diarize` runs the whole chain,
-/// the pieces are public for the calibration harness, which analyses a
-/// lane once and sweeps the clustering cut.
+/// One backend and one configuration; `diarize` runs the whole chain, the
+/// pieces are public for the calibration harness.
 pub struct Pipeline<B: DiarizationBackend = Box<dyn DiarizationBackend>> {
     backend: B,
     config: DiarizerConfig,
@@ -102,22 +89,19 @@ impl<B: DiarizationBackend> Pipeline<B> {
         &self.config
     }
 
-    /// Replaces the configuration for the calls that follow; the backend
-    /// stays loaded.
+    /// Replaces the configuration; the backend stays loaded.
     pub fn set_config(&mut self, config: DiarizerConfig) {
         self.config = config;
     }
 
-    /// The backend, for what it reports about itself (geometry, call
-    /// counts in tests).
+    /// The backend, for what it reports about itself.
     #[must_use]
     pub fn backend(&self) -> &B {
         &self.backend
     }
 
-    /// Silence, room noise or a lane nobody spoke on is not a failed
-    /// meeting: no usable embedding becomes a result with no speakers,
-    /// like audio under [`DiarizerConfig::MINIMUM_AUDIO_SECONDS`].
+    /// No usable embedding (silence, noise) is a result with no speakers, not
+    /// a failure.
     pub fn diarize(&mut self, audio: &AudioBuffer16k) -> Result<DiarizationResult, DiarizeError> {
         if audio.duration() < DiarizerConfig::MINIMUM_AUDIO_SECONDS {
             return Ok(DiarizationResult::default());
@@ -143,8 +127,8 @@ impl<B: DiarizationBackend> Pipeline<B> {
         )
     }
 
-    /// Clustering at `threshold`, the timeline and the mapping; the result
-    /// before refinement.
+    /// Clustering at `threshold`, the timeline and the mapping, before
+    /// refinement.
     #[must_use]
     pub fn map(&self, analysis: &Analysis, threshold: f32) -> DiarizationResult {
         let vectors: Vec<Vec<f32>> = analysis
@@ -158,8 +142,7 @@ impl<B: DiarizationBackend> Pipeline<B> {
         mapping::result(&turns, &chunks(analysis, labels))
     }
 
-    /// The refinement pass over a mapped result, this pipeline as the
-    /// slice embedder.
+    /// The refinement pass over a mapped result, this pipeline as embedder.
     pub fn refine(
         &mut self,
         mapped: &DiarizationResult,
@@ -171,10 +154,8 @@ impl<B: DiarizationBackend> Pipeline<B> {
         Ok(DiarizationResult { clusters })
     }
 
-    /// The embedding of `audio` heard as one voice: every window
-    /// embedding of the slice, whoever the model split it into, in the
-    /// duration-weighted unit mean the mapping uses for a cluster. What
-    /// Swift gets from `FluidAudio` capped at one speaker.
+    /// The embedding of `audio` heard as one voice: the duration-weighted unit
+    /// mean of every window embedding of the slice.
     pub fn embed_slice(
         &mut self,
         audio: &AudioBuffer16k,
@@ -216,9 +197,7 @@ impl<B: DiarizationBackend> SliceEmbedder for Pipeline<B> {
 mod tests {
     use super::*;
 
-    /// The defaults are the plan's and `FluidAudio`'s numbers; nothing
-    /// else pins them, so a slipped constant would otherwise pass every
-    /// behavioural test that builds its own rules.
+    /// Pins the default constants, which no behavioural test checks.
     #[test]
     fn the_default_configuration_is_the_calibrated_one() {
         let config = DiarizerConfig::default();

@@ -1,9 +1,6 @@
 //! The whole chain over a fake backend that reads the speaker off the
-//! samples: analysis, clustering, timeline, mapping and refinement without
-//! a model. Audio holds a constant `c` wherever speaker `c` talks and zero
-//! for silence; the fake segments by that constant and embeds a window as
-//! the unit vector of the marked speaker's constant, so same speaker means
-//! cosine 1 and different speakers cosine 0.
+//! samples: audio holds constant `c` where speaker `c` talks, so the same
+//! speaker embeds at cosine 1 and different speakers at 0.
 
 mod common;
 
@@ -25,8 +22,7 @@ impl FakeBackend {
         }
     }
 
-    /// The speaker constants heard in `window`, up to three, in order of
-    /// appearance.
+    /// The speaker constants in `window`, up to three, in order of appearance.
     fn speakers_in_window(window: &[f32]) -> Vec<u32> {
         let mut speakers: Vec<u32> = Vec::new();
         for sample in window.iter().filter(|s| **s > 0.0) {
@@ -88,9 +84,8 @@ fn speech(cluster: &steno_core::SpeakerCluster) -> f64 {
     cluster.ranges.iter().map(|r| r.upper - r.lower).sum()
 }
 
-/// One remote speaker who talks at length and interjects briefly between
-/// long silences: with refinement off the interjections may be their own
-/// cluster or not, with it on they are the one speaker.
+/// One speaker with brief interjections: with refinement on they are the one
+/// speaker.
 #[test]
 fn one_voice_with_asides_is_one_speaker_after_refinement() {
     let layout: Vec<(f32, TimeRange)> = vec![
@@ -115,8 +110,8 @@ fn one_voice_with_asides_is_one_speaker_after_refinement() {
     );
 }
 
-/// Two voices taking turns: two speakers in order of first speech, with
-/// their speech kept apart and the embeddings orthogonal.
+/// Two voices taking turns: two speakers in order of first speech, apart,
+/// with orthogonal embeddings.
 #[test]
 fn two_voices_become_two_speakers_in_order_of_first_speech() {
     let layout: Vec<(f32, TimeRange)> = vec![
@@ -158,10 +153,8 @@ fn two_voices_become_two_speakers_in_order_of_first_speech() {
     }
 }
 
-/// The threshold sweep the harness runs: one analysis, many cuts. A
-/// negative cut splits every window into its own two-second speaker; none
-/// of those reaches thirty seconds, so the refinement pass leaves such a
-/// result alone, as the Swift rules say.
+/// One analysis, many cuts. A negative cut gives speakers under thirty
+/// seconds each, which the refinement leaves alone.
 #[test]
 fn the_analysis_is_reused_across_thresholds() {
     let buffer = audio(&[(1.0, range(0.0, 60.0)), (3.0, range(65.0, 125.0))], 130.0);
@@ -206,8 +199,7 @@ fn silence_and_short_audio_yield_no_speakers() {
     );
 }
 
-/// The fake with an embedding model of another size: 128 values where
-/// the store and the speaker matching hold 256.
+/// The fake with 128-value embeddings where 256 are expected.
 struct ShortEmbeddings(FakeBackend);
 
 impl DiarizationBackend for ShortEmbeddings {
@@ -228,9 +220,7 @@ impl DiarizationBackend for ShortEmbeddings {
     }
 }
 
-/// An embedding of the wrong length fails the analysis with the shape,
-/// whichever backend produced it, rather than clustering vectors the
-/// mapping would then drop.
+/// An embedding of the wrong length fails the analysis with the shape.
 #[test]
 fn an_embedding_of_the_wrong_length_is_an_error() {
     let buffer = audio(&[(1.0, range(0.0, 20.0))], 20.0);
@@ -252,8 +242,7 @@ fn an_embedding_of_the_wrong_length_is_an_error() {
     );
 }
 
-/// The fake with a segmentation model of another frame count: one frame
-/// short of pyannote's 589.
+/// The fake with one segmentation frame short of 589.
 struct ShortLogits(FakeBackend);
 
 impl DiarizationBackend for ShortLogits {
@@ -272,9 +261,7 @@ impl DiarizationBackend for ShortLogits {
     }
 }
 
-/// Segmentation logits of the wrong length fail the analysis with the
-/// shape, whichever backend produced them, rather than decoding frames
-/// against the wrong layout.
+/// Segmentation logits of the wrong length fail the analysis with the shape.
 #[test]
 fn segmentation_logits_of_the_wrong_length_are_an_error() {
     let buffer = audio(&[(1.0, range(0.0, 20.0))], 20.0);
@@ -319,9 +306,8 @@ async fn the_diarizer_loads_its_backend_once_and_serialises_calls() {
     assert_eq!(quiet.clusters.len(), 0);
 }
 
-/// Eight callers at once over one shared diarizer: every call runs on a
-/// blocking thread behind the one lock, so all eight see the same
-/// result and the backend loads once.
+/// Eight concurrent callers over one diarizer see the same result and the
+/// backend loads once.
 #[tokio::test]
 async fn concurrent_callers_get_identical_results_from_one_backend() {
     use std::sync::Arc;
@@ -357,8 +343,7 @@ async fn concurrent_callers_get_identical_results_from_one_backend() {
     assert_eq!(loads.load(Ordering::SeqCst), 1);
 }
 
-/// A backend that holds its first segmentation call until a flag is
-/// raised, then behaves as the fake does.
+/// A backend that holds its first segmentation call until a flag is raised.
 struct WaitingBackend {
     inner: FakeBackend,
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -385,10 +370,8 @@ impl DiarizationBackend for WaitingBackend {
     }
 }
 
-/// The call runs on a blocking thread, not on the executor: on a
-/// current-thread runtime a sibling task gets to run while the backend
-/// waits for it, and the backend sees the flag the sibling raises. Run
-/// inline, the sibling would never be polled and the wait would time out.
+/// The call runs on a blocking thread: on a current-thread runtime a sibling
+/// task still runs and raises the flag the backend waits for.
 #[tokio::test]
 async fn a_call_runs_off_the_executor_so_sibling_tasks_proceed() {
     use std::sync::Arc;
@@ -413,8 +396,7 @@ async fn a_call_runs_off_the_executor_so_sibling_tasks_proceed() {
     assert_eq!(result.clusters.len(), 1);
 }
 
-/// A backend that panics on its first segmentation call and works from
-/// the second.
+/// A backend that panics on its first segmentation call only.
 struct PanickingBackend {
     inner: FakeBackend,
     panicked: bool,
@@ -438,9 +420,8 @@ impl DiarizationBackend for PanickingBackend {
     }
 }
 
-/// A panic inside a call is the call's error, not the process's end, and
-/// the poisoned lock is reused: the next call over the same diarizer
-/// returns a result.
+/// A panic inside a call is the call's error, and the next call over the same
+/// diarizer returns a result.
 #[tokio::test]
 async fn a_panic_in_the_backend_is_an_error_and_the_next_call_works() {
     use steno_core::Diarizer;

@@ -1,48 +1,34 @@
-//! The post-pass over the mapped clusters decided in
-//! `.plans/2026-09-29-speaker-calibration.md`. Swift:
-//! `Sources/StenoSpeech/Diarization/ClusterRefinement.swift`, one for
-//! one. A speaker's short turns embed far from the same voice speaking at
-//! length, because each ten-second window holds little of them, so a 1:1
-//! call comes out as a main cluster and one or two clusters of
-//! interjections. Re-embedding each cluster over its own concatenated
-//! speech gives vectors that compare the way the long clusters do.
-//!
-//! The pass, in order: clusters with at least [`Rules::minimum_seconds`] of
-//! speech are re-embedded and merged greedily, highest cosine first, while
-//! a pair reaches [`Rules::merge_threshold`]; each merged cluster is
-//! re-embedded over the union. Fragments under the minimum join the
-//! substantive cluster they are closest to when that cosine reaches
-//! [`Rules::absorb_threshold`], otherwise they are dropped (their segments
-//! stay speaker-less). Labels are handed out again as "Speaker n" in order
-//! of first speech. A result without a substantive cluster is returned
-//! unchanged, so a short recording keeps its speakers.
+//! The post-pass over the mapped clusters. Short turns embed far from the
+//! same voice speaking at length, so each cluster with enough speech is
+//! re-embedded over its own concatenated speech and close clusters merge;
+//! fragments join the nearest substantive cluster or are dropped. Labels are
+//! handed out again in order of first speech.
 
 use steno_core::{AudioBuffer16k, BoxError, Embedding, SpeakerCluster, TimeRange};
 
 use crate::first_max_by;
 use crate::mapping::{display_label, merged, speech_seconds};
 
-/// Embeds one stretch of speech as a single speaker. The pipeline fulfils
-/// it with its own models; pure, so the refinement is tested without them.
+/// Embeds one stretch of speech as a single speaker; a trait so refinement
+/// is tested without models.
 pub trait SliceEmbedder {
     /// `None` when the audio holds no usable speech.
     fn embedding(&mut self, audio: &AudioBuffer16k) -> Result<Option<Embedding>, BoxError>;
 }
 
-/// The plan's constants.
+/// The refinement constants.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rules {
     /// Speech a cluster needs to count as a speaker on its own.
     pub minimum_seconds: f64,
     /// How much of a cluster's speech is embedded; the first stretches win.
     pub maximum_embed_seconds: f64,
-    /// Re-embedded, the same person scores 0.68 and up on the calibration
-    /// corpus and different people at most 0.50; 0.60 sits between.
+    /// Re-embedded, the same person scores 0.68 and up on the calibration corpus
+    /// and different people at most 0.50.
     pub merge_threshold: f32,
-    /// A fragment joins the substantive cluster it is closest to at this
-    /// cosine or above; below it, its segments stay speaker-less. Loose on
-    /// purpose: a fragment carries little evidence, and a wrong speaker on
-    /// ten seconds costs less than a phantom speaker.
+    /// A fragment joins the closest substantive cluster at this cosine or above;
+    /// loose on purpose, as a wrong speaker on ten seconds costs less than a
+    /// phantom one.
     pub absorb_threshold: f32,
 }
 
@@ -81,8 +67,7 @@ pub fn refine(
         reembed(cluster, audio, rules, embedder)?;
     }
 
-    // Greedy merge, highest cosine first. Each merge re-embeds the union,
-    // so the loop runs at most `substantive.len() - 1` more embeddings.
+    // Greedy merge, highest cosine first; each merge re-embeds the union.
     while substantive.len() > 1 {
         let Some((first, second, cosine)) = closest_pair(&substantive) else {
             break;
@@ -108,8 +93,7 @@ pub fn refine(
         if cosine < rules.absorb_threshold {
             continue;
         }
-        // The speaker keeps their embedding, clip and confidence; only the
-        // ranges grow.
+        // The speaker keeps embedding, clip and confidence; only the ranges grow.
         let speaker = &mut substantive[index];
         speaker.ranges = union(&speaker.ranges, &fragment.ranges);
     }
@@ -133,9 +117,8 @@ fn first_speech(cluster: &SpeakerCluster) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-/// Gives `cluster` the embedding of its own speech: ranges in time order,
-/// concatenated up to the cap, embedded as one voice. Unchanged when there
-/// is no audio or the embedder hears no speech.
+/// Gives `cluster` the embedding of its own speech, concatenated up to the
+/// cap. Unchanged when there is no audio or no speech is heard.
 fn reembed(
     cluster: &mut SpeakerCluster,
     audio: &AudioBuffer16k,
@@ -152,11 +135,10 @@ fn reembed(
     Ok(())
 }
 
-/// The samples under `ranges`, sorted and clipped to the buffer, joined
-/// until `cap` seconds are collected.
+/// The samples under `ranges`, sorted and clipped, joined until `cap`
+/// seconds are collected.
 #[must_use]
 pub fn concatenated(ranges: &[TimeRange], audio: &AudioBuffer16k, cap: f64) -> AudioBuffer16k {
-    // Positive seconds times the rate; far below any truncation.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let limit = (cap.max(0.0) * AudioBuffer16k::SAMPLE_RATE) as usize;
     let mut samples: Vec<f32> = Vec::with_capacity(limit.min(audio.len()));
@@ -171,8 +153,8 @@ pub fn concatenated(ranges: &[TimeRange], audio: &AudioBuffer16k, cap: f64) -> A
     AudioBuffer16k::new(samples)
 }
 
-/// The two clusters whose embeddings have the highest cosine, as indices
-/// with `first < second`; `None` when fewer than two carry an embedding.
+/// The two clusters with the highest cosine, `first < second`; `None` when
+/// fewer than two carry an embedding.
 fn closest_pair(clusters: &[SpeakerCluster]) -> Option<(usize, usize, f32)> {
     let mut best: Option<(usize, usize, f32)> = None;
     for (first, lhs) in clusters.iter().enumerate() {
@@ -192,8 +174,7 @@ fn closest_pair(clusters: &[SpeakerCluster]) -> Option<(usize, usize, f32)> {
     best
 }
 
-/// The cluster whose embedding is closest to `embedding`, with the cosine,
-/// the first on a tie; `None` when none carries an embedding.
+/// The closest cluster to `embedding` with the cosine, the first on a tie.
 fn closest(embedding: &Embedding, clusters: &[SpeakerCluster]) -> Option<(usize, f32)> {
     first_max_by(
         clusters.iter().enumerate().filter_map(|(index, cluster)| {
@@ -206,9 +187,8 @@ fn closest(embedding: &Embedding, clusters: &[SpeakerCluster]) -> Option<(usize,
     )
 }
 
-/// One cluster from two: ranges merged; clip, confidence and, until the
-/// caller re-embeds the union, embedding of the one with more speech. The
-/// label is provisional: `refine` relabels every survivor by first speech.
+/// One cluster from two: ranges merged; clip, confidence and embedding of
+/// the one with more speech. The label is provisional.
 fn merge(lhs: &SpeakerCluster, rhs: &SpeakerCluster) -> SpeakerCluster {
     let (longer, shorter) = if speech_seconds(&lhs.ranges) >= speech_seconds(&rhs.ranges) {
         (lhs, rhs)
@@ -227,7 +207,6 @@ fn merge(lhs: &SpeakerCluster, rhs: &SpeakerCluster) -> SpeakerCluster {
     }
 }
 
-/// The ranges of both sides, merged.
 fn union(lhs: &[TimeRange], rhs: &[TimeRange]) -> Vec<TimeRange> {
     merged(&[lhs, rhs].concat())
 }

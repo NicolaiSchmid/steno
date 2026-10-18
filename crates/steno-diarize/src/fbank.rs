@@ -1,13 +1,7 @@
-//! The fbank front end of the `WeSpeaker` embedding model, computed the way
-//! the model was trained (`wespeaker/dataset/processor.py`,
-//! `compute_fbank` and `apply_cmvn`): `torchaudio.compliance.kaldi.fbank`
-//! over samples scaled to the 16-bit range, 80 mel bins between 20 Hz and
-//! the Nyquist frequency, 25 ms Hamming frames every 10 ms with the edges
-//! snipped, no dither, the DC offset removed, pre-emphasis 0.97, the log of
-//! the mel energies floored at `f32::EPSILON`, then the mean over the
-//! utterance subtracted per bin. sherpa-onnx's generic extractor differs
-//! (Povey window, 7.6 kHz upper edge, centred frames); those are its
-//! defaults, not the recipe, so this module follows the recipe.
+//! The fbank front end of the `WeSpeaker` embedding model, computed as the
+//! model was trained (`compute_fbank` and `apply_cmvn`): Kaldi fbank over
+//! 16-bit-range samples, 80 mel bins from 20 Hz to Nyquist, 25 ms Hamming
+//! frames every 10 ms, no dither, then the utterance mean subtracted per bin.
 
 use std::sync::Arc;
 
@@ -33,20 +27,18 @@ pub struct FbankConfig {
     pub frame_shift_ms: f64,
     pub num_bins: usize,
     pub low_freq: f64,
-    /// Upper mel edge; zero or negative means the Nyquist frequency plus
-    /// the value, as in Kaldi.
+    /// Upper mel edge; zero or negative means Nyquist plus the value, as in Kaldi.
     pub high_freq: f64,
     pub preemphasis: f32,
     pub remove_dc_offset: bool,
     pub window: WindowType,
-    /// Multiplied into every sample first: `WeSpeaker` models expect the
-    /// 16-bit integer range, Steno's buffers hold `-1...1`.
+    /// Multiplied into every sample first: `WeSpeaker` models expect the 16-bit
+    /// range, Steno's buffers hold `-1...1`.
     pub sample_scale: f32,
 }
 
 impl FbankConfig {
-    /// `compute_fbank` in `wespeaker/dataset/processor.py` with dither off,
-    /// as `extract.py` forces at inference.
+    /// `compute_fbank` with dither off, as at inference.
     pub const WESPEAKER: FbankConfig = FbankConfig {
         sample_rate: 16_000,
         frame_length_ms: 25.0,
@@ -89,8 +81,7 @@ impl std::fmt::Debug for Fbank {
 }
 
 impl Fbank {
-    /// An extractor for `config`: the window, the mel filters and the FFT
-    /// plan are built once here.
+    /// An extractor for `config`; the window, filters and FFT plan are built once.
     #[must_use]
     pub fn new(config: FbankConfig) -> Self {
         let frame_length = ms_to_samples(config.frame_length_ms, config.sample_rate);
@@ -110,13 +101,11 @@ impl Fbank {
         }
     }
 
-    /// The recipe's extractor.
     #[must_use]
     pub fn wespeaker() -> Self {
         Fbank::new(FbankConfig::WESPEAKER)
     }
 
-    /// Mel bins per frame, the width of a feature row.
     #[must_use]
     pub fn num_bins(&self) -> usize {
         self.config.num_bins
@@ -134,8 +123,7 @@ impl Fbank {
         self.frame_length
     }
 
-    /// Frames `samples` samples yield with the edges snipped: every frame
-    /// lies fully inside the audio.
+    /// Frames `samples` samples yield, every frame fully inside the audio.
     #[must_use]
     pub fn num_frames(&self, samples: usize) -> usize {
         if samples < self.frame_length {
@@ -145,7 +133,6 @@ impl Fbank {
         }
     }
 
-    /// The time at the centre of `frame`.
     #[must_use]
     pub fn frame_centre_seconds(&self, frame: usize) -> f64 {
         to_f64(frame * self.frame_shift + self.frame_length / 2) / to_f64(self.config.sample_rate)
@@ -193,8 +180,7 @@ impl Fbank {
         features
     }
 
-    /// Subtracts the mean over the frames per bin, `apply_cmvn` with
-    /// `norm_mean` only; a no-op on no frames.
+    /// Subtracts the mean over the frames per bin; a no-op on no frames.
     pub fn subtract_mean(features: &mut [f32], num_bins: usize) {
         if num_bins == 0 || features.len() < num_bins {
             return;
@@ -206,7 +192,6 @@ impl Fbank {
                 *mean += value;
             }
         }
-        // Frame counts stay far below 2^24, where f32 would lose them.
         #[allow(clippy::cast_precision_loss)]
         let count = frames as f32;
         for mean in &mut means {
@@ -222,7 +207,6 @@ impl Fbank {
     /// DC offset, pre-emphasis and the window, in Kaldi's order.
     fn process_frame(&self, frame: &mut [f32]) {
         if self.config.remove_dc_offset {
-            // A frame has 400 samples; the sum stays exact in f32.
             #[allow(clippy::cast_precision_loss)]
             let mean = frame.iter().sum::<f32>() / frame.len() as f32;
             for value in frame.iter_mut() {
@@ -243,7 +227,6 @@ impl Fbank {
 }
 
 fn ms_to_samples(milliseconds: f64, sample_rate: usize) -> usize {
-    // Positive and tiny (hundreds of samples); the cast is exact.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let samples = (milliseconds * to_f64(sample_rate) / 1000.0).round() as usize;
     samples
@@ -258,7 +241,6 @@ fn window(kind: WindowType, length: usize) -> Vec<f32> {
                 WindowType::Hamming => 0.54 - 0.46 * phase.cos(),
                 WindowType::Povey => (0.5 - 0.5 * phase.cos()).powf(0.85),
             };
-            // Window weights lie in 0...1; the narrowing is intended.
             #[allow(clippy::cast_possible_truncation)]
             let weight = value as f32;
             weight
@@ -271,9 +253,8 @@ fn mel(frequency: f64) -> f64 {
     1127.0 * (1.0 + frequency / 700.0).ln()
 }
 
-/// Kaldi's triangular filters over the FFT bins below Nyquist
-/// (`MelBanks::MelBanks`): equal width on the mel scale, each spanning
-/// three successive edges.
+/// Kaldi's triangular filters over the FFT bins below Nyquist, equal width on
+/// the mel scale.
 fn mel_filters(config: &FbankConfig, fft_size: usize) -> Vec<MelFilter> {
     let nyquist = to_f64(config.sample_rate) / 2.0;
     let high = if config.high_freq > 0.0 {
@@ -306,7 +287,6 @@ fn mel_filters(config: &FbankConfig, fft_size: usize) -> Vec<MelFilter> {
                 };
                 if weight > 0.0 {
                     first_bin.get_or_insert(fft_bin);
-                    // Filter weights lie in 0...1.
                     #[allow(clippy::cast_possible_truncation)]
                     weights.push(weight as f32);
                 } else if first_bin.is_some() {
@@ -340,16 +320,15 @@ mod tests {
     fn filters_cover_twenty_hertz_to_nyquist_without_gaps() {
         let fbank = Fbank::wespeaker();
         assert_eq!(fbank.filters.len(), 80);
-        // Every FFT bin between the edges is covered by some filter; the
-        // weights of the two filters sharing a bin sum to one.
+        // Every FFT bin between the edges is covered; two filters sharing a bin sum
+        // to one.
         let mut coverage = vec![0.0f32; 256];
         for filter in &fbank.filters {
             for (offset, weight) in filter.weights.iter().enumerate() {
                 coverage[filter.first_bin + offset] += weight;
             }
         }
-        // The top filter's falling edge ends at Nyquist with no filter
-        // after it, so the last bins taper off.
+        // The top filter ends at Nyquist, so the last bins taper off.
         for (bin, total) in coverage.iter().enumerate().skip(2).take(240) {
             assert!((total - 1.0).abs() < 1e-4, "bin {bin}: {total}");
         }
@@ -385,9 +364,8 @@ mod tests {
         assert!(row[peak] - row[70] > 5.0);
     }
 
-    /// `WeSpeaker` trains on 16-bit integer samples; Steno's buffers hold
-    /// `-1...1`. The recipe scales by 32 768 before the FFT, so every log
-    /// energy of a tone sits `ln(32768^2)` above the unscaled one.
+    /// The recipe scales by 32 768, so every log energy of a tone sits
+    /// `ln(32768^2)` above the unscaled one.
     #[test]
     fn samples_are_scaled_to_the_sixteen_bit_range() {
         assert_eq!(FbankConfig::WESPEAKER.sample_scale, 32_768.0);

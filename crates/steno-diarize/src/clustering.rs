@@ -1,32 +1,19 @@
 //! Agglomerative clustering of the window embeddings: unit vectors, cosine
-//! distance, average linkage, cut at a distance threshold. The dendrogram
-//! comes from the nearest-neighbour chain algorithm (Müllner 2011), which
-//! is exact for average linkage and runs in quadratic time, so an
-//! hour-long lane with a few thousand embeddings clusters in well under a
-//! second.
-//!
-//! The threshold is a cosine distance (`1 - cos`) averaged over every
-//! pair of members across the two clusters, which is what average linkage
-//! compares. `FluidAudio` cuts a centroid-linkage dendrogram, then runs
-//! `VBx`, at a Euclidean distance between unit vectors, so its number is
-//! not this number; [`crate::DEFAULT_CLUSTERING_THRESHOLD`] says how the
-//! default was derived from it. This is one of the departures the crate
-//! doc lists.
+//! distance, average linkage, cut at a threshold. The dendrogram comes from
+//! the nearest-neighbour chain algorithm (Müllner 2011), exact for average
+//! linkage and quadratic, so thousands of embeddings cluster in under a second.
 
-/// The cut and the speaker-count constraints.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClusteringConfig {
-    /// Cosine distance at or below which two clusters merge.
     pub threshold: f32,
-    /// Stop merging at this many clusters even when pairs are closer than
-    /// the threshold.
+    /// Stop merging at this many clusters even below the threshold.
     pub min_speakers: Option<usize>,
     /// Keep merging past the threshold until this many clusters remain.
     pub max_speakers: Option<usize>,
 }
 
-/// One merge of the dendrogram: the two clusters joined, at what average
-/// cosine distance, and the size of the result.
+/// One merge of the dendrogram: the two clusters, the average cosine
+/// distance, and the size of the result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Merge {
     pub left: usize,
@@ -35,9 +22,8 @@ pub struct Merge {
     pub size: usize,
 }
 
-/// Cluster labels for `embeddings`, `0..k` in order of first appearance.
-/// Zero vectors land in a cluster of their own at distance 1 from
-/// everything.
+/// Cluster labels for `embeddings`, `0..k` in order of first appearance;
+/// zero vectors land in clusters of their own.
 #[must_use]
 pub fn cluster(embeddings: &[Vec<f32>], config: &ClusteringConfig) -> Vec<usize> {
     let merges = linkage(embeddings);
@@ -53,10 +39,8 @@ pub fn linkage(embeddings: &[Vec<f32>]) -> Vec<Merge> {
         return Vec::new();
     }
     let units: Vec<Vec<f32>> = embeddings.iter().map(|vector| normalized(vector)).collect();
-    // Full square distance matrix over the active clusters; row `i` of
-    // cluster `i`. Memory is n^2 * 4 bytes: the 5 400 embeddings a
-    // sixty-minute group call can yield take 117 MB, for the run of the
-    // clustering only.
+    // Full square distance matrix: n^2 * 4 bytes, about 117 MB for the 5 400
+    // embeddings of an hour-long group call.
     let mut distance = vec![0.0f32; n * n];
     for i in 0..n {
         for j in i + 1..n {
@@ -67,7 +51,6 @@ pub fn linkage(embeddings: &[Vec<f32>]) -> Vec<Merge> {
     }
     let mut size = vec![1usize; n];
     let mut active = vec![true; n];
-    // The id each slot carries now: a merged slot takes the new cluster id.
     let mut id: Vec<usize> = (0..n).collect();
     let mut merges = Vec::with_capacity(n - 1);
     let mut chain: Vec<usize> = Vec::new();
@@ -87,8 +70,8 @@ pub fn linkage(embeddings: &[Vec<f32>]) -> Vec<Merge> {
                 let d = distance[a * n + slot];
                 let better = match best {
                     None => true,
-                    // Prefer the chain's previous element on ties so the
-                    // reciprocal check below terminates.
+                    // Prefer the chain's previous element on ties so the reciprocal check
+                    // terminates.
                     #[allow(clippy::float_cmp)]
                     Some((slot_b, d_b)) => {
                         d < d_b || (d == d_b && Some(slot) == previous && slot_b != slot)
@@ -135,9 +118,8 @@ pub fn linkage(embeddings: &[Vec<f32>]) -> Vec<Merge> {
     merges
 }
 
-/// Applies `merges` in order of distance while a merge is at or below the
-/// threshold, honouring the count constraints, and labels the leaves by
-/// first appearance.
+/// Applies `merges` in order while at or below the threshold, honouring the
+/// count constraints, and labels the leaves by first appearance.
 #[must_use]
 pub fn cut(n: usize, merges: &[Merge], config: &ClusteringConfig) -> Vec<usize> {
     if n == 0 {
@@ -145,8 +127,8 @@ pub fn cut(n: usize, merges: &[Merge], config: &ClusteringConfig) -> Vec<usize> 
     }
     let mut order: Vec<usize> = (0..merges.len()).collect();
     order.sort_by(|lhs, rhs| merges[*lhs].distance.total_cmp(&merges[*rhs].distance));
-    // Union-find over leaf ids `0..n` and merge ids `n..`; a merge node is
-    // linked to its children only when the merge is applied.
+    // Union-find over leaf ids `0..n` and merge ids `n..`; a merge node links
+    // to its children only when applied.
     let mut parent: Vec<usize> = (0..n + merges.len()).collect();
     let mut count = n;
     let min = config.min_speakers.unwrap_or(1).max(1);
@@ -200,8 +182,8 @@ pub fn normalized(vector: &[f32]) -> Vec<f32> {
     }
 }
 
-/// `1 - cos` between two unit vectors, clamped to `0...2`; 1 when either
-/// is zero or the lengths differ.
+/// `1 - cos` between two unit vectors, clamped to `0...2`; 1 when either is
+/// zero or the lengths differ.
 #[must_use]
 pub fn cosine_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
     if lhs.len() != rhs.len() || lhs.is_empty() {

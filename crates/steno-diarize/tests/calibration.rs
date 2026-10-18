@@ -1,32 +1,9 @@
-//! Gate G3 of `.plans/2026-10-01-cross-platform-speech-stack.md`: the seven
-//! calibration calls against `truth.json`. Ignored unless
-//! `STENO_CALIBRATION_CORPUS` points at the corpus directory
-//! (`audio/<id>/system.wav` and `truth.json`, read only). Analyses each
-//! lane once and sweeps the clustering cut, with and without refinement,
-//! and prints a Markdown table per backend for the PR. The run fails when
-//! any lane misses the gate at [`DEFAULT_CLUSTERING_THRESHOLD`] or has no
-//! audio in the corpus, and a run over every lane fails when a lane's
-//! audio has no count in `truth.json`; the other cuts are reported, not
-//! asserted.
-//!
-//! Environment:
-//! - `STENO_CALIBRATION_CORPUS`: the corpus directory (required).
-//! - `STENO_MODELS_DIR`: the models directory whose `onnx/diarization/`
-//!   holds the ONNX models or receives their download (default: the app's,
-//!   `steno_speech::ModelStore::from_environment`), with the mirror
-//!   `STENO_MODELS_MIRROR` names.
-//! - `STENO_DIARIZE_BACKEND`: `onnx` (default) or `coreml`.
-//! - `STENO_COREML_MODELS`: `FluidAudio`'s `speaker-diarization` directory
-//!   for the `CoreML` backend.
-//! - `STENO_DIARIZE_THRESHOLDS`: comma-separated cosine-distance cuts
-//!   (default `0.20,0.26,0.32,0.38,0.44,0.50,0.60`).
-//! - `STENO_DIARIZE_THREADS`: ONNX Runtime intra-op threads (default 4).
-//! - `STENO_DIARIZE_FILES`: comma-separated ids to restrict the run, each
-//!   a full id or its first eight characters; an id that matches no lane
-//!   fails the run rather than silently running fewer lanes.
-//!
-//! Run: `STENO_CALIBRATION_CORPUS=~/steno-calibration cargo test -p steno-diarize
-//! --release --test calibration -- --ignored --nocapture`.
+//! The seven calibration calls against `truth.json`, ignored unless
+//! `STENO_CALIBRATION_CORPUS` is set. Sweeps the clustering cut with and without
+//! refinement per backend and fails when a lane misses the gate at
+//! [`DEFAULT_CLUSTERING_THRESHOLD`]. Other variables: `STENO_MODELS_DIR`,
+//! `STENO_DIARIZE_BACKEND` (`onnx` or `coreml`), `STENO_COREML_MODELS`,
+//! `STENO_DIARIZE_THRESHOLDS`, `STENO_DIARIZE_THREADS`, `STENO_DIARIZE_FILES`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,9 +12,8 @@ use std::time::Instant;
 use steno_core::AudioBuffer16k;
 use steno_diarize::{DEFAULT_CLUSTERING_THRESHOLD, DiarizationBackend, DiarizerConfig, Pipeline};
 
-/// The remote speaker count per call from `truth.json`, whatever shape
-/// the file has: an object keyed by id with a number or an object holding
-/// a count under a known key, or a list of objects with an `id`.
+/// The remote speaker count per call from `truth.json`, in any of the shapes
+/// the file has used.
 fn truth(path: &Path) -> BTreeMap<String, usize> {
     let text = std::fs::read_to_string(path).expect("truth.json readable");
     let value: serde_json::Value = serde_json::from_str(&text).expect("truth.json is JSON");
@@ -200,13 +176,13 @@ fn load_average() -> String {
 }
 
 /// Whether `id` is one of the `requested` lanes: a full id or its first
-/// eight characters, as the table prints them.
+/// eight characters.
 fn is_requested(id: &str, requested: &str) -> bool {
     id == requested || (requested.len() >= 8 && id.starts_with(requested))
 }
 
 /// The lanes `STENO_DIARIZE_FILES` restricts the run to, `None` for all;
-/// an id that names no lane in `truth` fails the run.
+/// an unknown id fails the run.
 fn requested_lanes(truth: &BTreeMap<String, usize>) -> Option<Vec<String>> {
     let requested: Vec<String> = std::env::var("STENO_DIARIZE_FILES")
         .ok()?
@@ -224,9 +200,8 @@ fn requested_lanes(truth: &BTreeMap<String, usize>) -> Option<Vec<String>> {
     Some(requested)
 }
 
-/// Every `audio/<id>` in the corpus has a count in `truth`, so an entry
-/// `truth.json` holds in a shape [`truth`] cannot read fails the full run
-/// rather than leaving that lane out of the gate.
+/// Every `audio/<id>` in the corpus has a count in `truth`, so an unreadable
+/// entry fails the run rather than leaving that lane out.
 fn assert_every_lane_has_truth(corpus: &Path, truth: &BTreeMap<String, usize>) {
     let missing: Vec<String> = std::fs::read_dir(corpus.join("audio"))
         .expect("audio directory readable")
@@ -252,7 +227,6 @@ fn thresholds() -> Vec<f32> {
     )
 }
 
-/// The backend's heading and the table header with its delimiter row.
 fn print_header(name: &str, thresholds: &[f32]) {
     println!("\n### {name}\n");
     println!(
@@ -272,8 +246,8 @@ fn print_header(name: &str, thresholds: &[f32]) {
     );
 }
 
-/// Gate G3 for one lane: exactly the truth for a call with at most one
-/// remote speaker, within one of it for a group call.
+/// The gate for one lane: exactly the truth for at most one remote speaker,
+/// within one of it for a group call.
 fn within_gate(refined: usize, expected: usize) -> bool {
     if expected <= 1 {
         refined == expected

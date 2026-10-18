@@ -1,27 +1,8 @@
-//! The two model files the ONNX backend loads, described as one
-//! [`steno_speech::ModelAsset`] with the id [`ASSET_ID`], so they install
-//! through `steno-speech`'s [`ModelStore`] like the speech models: into
-//! `<store root>/diarization/` (in Steno,
-//! `<models directory>/onnx/diarization/`), with the store's download
-//! lock, resume, 64 MiB ranges, progress and mirror
-//! (`<mirror>/diarization/<file name>`). Nothing is committed. How a
-//! download runs and what may be deleted: `steno_speech::model_store`.
-//! Rust-only: Swift's `ModelAsset.offlineDiarizer`
-//! (`Sources/StenoSpeech/Models/ModelAsset.swift`) installs `FluidAudio`'s
-//! `CoreML` models instead.
-//!
-//! Who may download them is the caller's [`Install`]: [`ensure`] installs
-//! what is missing ([`Install::Allowed`]), [`installed`] only finds an
-//! installed folder ([`Install::Never`]). A gate that asks whether a job
-//! can diarize calls the same function, so the two never disagree.
-//!
-//! [`DISPLAY_NAME`], [`LICENCE`] and [`ATTRIBUTION`] are the asset's name
-//! and the credit its licences require, for the notices the stable
-//! promotion (`.plans/2026-10-07-stable-promotion.md`) has the app show;
-//! Settings' Acknowledgements still show `steno-host`'s own string.
-//!
-//! This crate opens no connection of its own: the store fetches the
-//! published files and sends nothing but the request.
+//! The two model files the ONNX backend loads, one [`steno_speech::ModelAsset`]
+//! ([`ASSET_ID`]) installed by `steno-speech`'s [`ModelStore`] like the speech
+//! models. Who may download them is the caller's [`Install`]: [`ensure`]
+//! installs what is missing, [`installed`] only finds an installed folder.
+//! The store sends nothing but the request.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -34,12 +15,10 @@ use crate::error::DiarizeError;
 /// The asset's id, the name of its folder under the store root.
 pub const ASSET_ID: &str = "diarization";
 
-/// pyannote segmentation 3.0 as exported by sherpa-onnx (the Hugging Face
-/// original is gated, the export is public).
+/// pyannote segmentation 3.0 as exported by sherpa-onnx.
 pub const SEGMENTATION_FILE: &str = "pyannote-segmentation-3.0.onnx";
 
-/// `WeSpeaker` ResNet34-LM trained on `VoxCeleb`, from the sherpa-onnx
-/// speaker recognition models.
+/// `WeSpeaker` ResNet34-LM trained on `VoxCeleb`.
 pub const EMBEDDING_FILE: &str = "wespeaker-en-voxceleb-resnet34-lm.onnx";
 
 /// The asset's name.
@@ -50,23 +29,21 @@ pub const DISPLAY_NAME: &str =
 /// CC-BY-4.0 for the `WeSpeaker` embeddings trained on `VoxCeleb`.
 pub const LICENCE: &str = "MIT AND CC-BY-4.0";
 
-/// The credit both licences ask for: creator (with pyannote's copyright
-/// notice, which MIT asks for), source, licence and change.
+/// The credit both licences ask for: creator, source, licence and change.
 pub const ATTRIBUTION: &str = "pyannote segmentation 3.0 by pyannote.audio, Copyright (c) 2020 CNRS (https://github.com/pyannote/pyannote-audio), MIT, converted to ONNX by sherpa-onnx; WeSpeaker ResNet34-LM by WeSpeaker (https://github.com/wenet-e2e/wespeaker), trained on VoxCeleb, CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/), converted to ONNX by sherpa-onnx";
 
 /// The sherpa-onnx export of the segmentation model on Hugging Face.
 pub const SEGMENTATION_REPO: &str = "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0";
 
-/// The commit of [`SEGMENTATION_REPO`] the segmentation model is fetched
-/// at, so the bytes never change under the manifest's checksum.
+/// The commit of [`SEGMENTATION_REPO`] the model is fetched at, so the bytes
+/// never change under the manifest's checksum.
 pub const SEGMENTATION_REVISION: &str = "9403a6902bb58e3d5ae8c7e77c3422de279db2e0";
 
 /// The install policy the speech sidecar shares; see [`paths`].
 pub use steno_speech::Install;
 
 /// The asset: [`SEGMENTATION_FILE`] and [`EMBEDDING_FILE`] with their
-/// sources, sizes and SHA-256, [`DISPLAY_NAME`], [`LICENCE`] and
-/// [`ATTRIBUTION`].
+/// sources, sizes and SHA-256.
 #[must_use]
 pub fn asset() -> ModelAsset {
     let file = |name: &str, source: ModelSource, sha256: &str, size: u64| ModelFile {
@@ -104,9 +81,7 @@ pub fn asset() -> ModelAsset {
     }
 }
 
-/// Where the two model files are: plain paths, which
-/// [`crate::onnx::OnnxBackend::load`] opens and a child process can be
-/// handed as they are.
+/// Where the two model files are: plain paths a child process can be handed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelPaths {
     pub segmentation: PathBuf,
@@ -135,8 +110,7 @@ pub fn paths(store: &ModelStore, install: Install) -> Result<ModelPaths, Diarize
 }
 
 /// The paths of the two files when both are present with their manifest
-/// sizes ([`ModelStore::installed_directory`]), else
-/// [`DiarizeError::NotInstalled`] naming the missing ones. It hashes
+/// sizes, else [`DiarizeError::NotInstalled`] naming the missing ones. Hashes
 /// nothing and opens no connection.
 ///
 /// ```no_run
@@ -151,12 +125,8 @@ pub fn installed(store: &ModelStore) -> Result<ModelPaths, DiarizeError> {
     ))
 }
 
-/// Installs the asset into `store` when a file is missing
-/// ([`ModelStore::ensure`]; the download's progress goes to the debug log)
-/// and returns the paths of the two files. An installed folder is used as
-/// it is, without a request. The earlier store's partial files are
-/// deleted first ([`remove_old_parts`]). A failed download is
-/// [`DiarizeError::Model`].
+/// Installs the asset into `store` when a file is missing and returns the
+/// paths of the two files; a failed download is [`DiarizeError::Model`].
 ///
 /// ```no_run
 /// use steno_speech::ModelStore;
@@ -172,14 +142,10 @@ pub fn ensure(store: &ModelStore) -> Result<ModelPaths, DiarizeError> {
 }
 
 /// After a load over the installed files failed with `error`: hashes each
-/// file against the manifest and deletes those that fail, so the store,
-/// Settings and a gate report the asset not installed and a download
-/// replaces them; the result is then [`DiarizeError::NotInstalled`]
-/// naming them. A file that is gone by then (a Settings Remove during the
-/// load, or a concurrent check that deleted it first) is reported the same
-/// way. When every file is intact, or cannot be hashed or deleted for
-/// another reason, it is `error`. The hash runs only after a failure,
-/// never on a load that works.
+/// file and deletes those that fail the manifest, so a download replaces them,
+/// and returns [`DiarizeError::NotInstalled`] naming them (or naming a file
+/// that is already gone). When every file is intact, or cannot be checked, it
+/// is `error`. The hash runs only after a failure.
 pub(crate) fn after_failed_load(store: &ModelStore, error: DiarizeError) -> DiarizeError {
     after_failed_load_of(store, &asset(), error)
 }
@@ -206,8 +172,7 @@ fn after_failed_load_of(
     if missing.is_empty() {
         return error;
     }
-    // The load's error can be a crash report holding the child's stderr,
-    // which may hold a path: debug only.
+    // The error can hold the child's stderr, which may hold a path: debug only.
     tracing::debug!(%error, "the load that failed");
     DiarizeError::NotInstalled {
         asset: asset.id.clone(),
@@ -216,11 +181,9 @@ fn after_failed_load_of(
     }
 }
 
-/// Whether `file`, at `path`, is missing after the check, given `digest`,
-/// its hash: deleted because the digest is not the manifest's, or already
-/// gone (`NotFound`) when it was hashed or deleted. A file that cannot be
-/// hashed or deleted for another reason (permissions, I/O) is kept and is
-/// not missing.
+/// Whether `file` is missing after the check: deleted for a wrong digest,
+/// or already gone. A file that cannot be hashed or deleted for another
+/// reason is kept and is not missing.
 fn is_gone_after_check(file: &ModelFile, path: &Path, digest: Result<String, SpeechError>) -> bool {
     let actual = match digest {
         Ok(actual) if actual == file.sha256 => return false,
@@ -241,11 +204,8 @@ fn is_gone_after_check(file: &ModelFile, path: &Path, digest: Result<String, Spe
     }
 }
 
-/// Deletes `<file name>*.part` in the asset's folder in `store`: the
-/// temporary files of the diarizer's earlier store, which nothing resumes
-/// and the installed size would otherwise count. [`ensure`] and Settings'
-/// Download call it. Best effort: a file that cannot be deleted is logged
-/// and left.
+/// Deletes `<file name>*.part` in the asset's folder: leftovers of the
+/// earlier store, which nothing resumes. Best effort.
 pub fn remove_old_parts(store: &ModelStore) {
     let asset = asset();
     let Ok(entries) = std::fs::read_dir(store.directory(&asset)) else {
@@ -277,9 +237,8 @@ fn log_download(progress: DownloadProgress<'_>) {
 mod tests {
     use super::*;
 
-    /// A file removed between the check and the load (a Settings Remove)
-    /// makes the failed load [`DiarizeError::NotInstalled`] naming it, not
-    /// the backend's error, and the file still there is kept.
+    /// A file removed between the check and the load makes the failed load
+    /// [`DiarizeError::NotInstalled`] naming it; the file still there is kept.
     #[test]
     fn a_file_gone_by_the_failed_load_is_not_installed() {
         let dir = tempfile::tempdir().unwrap();
@@ -315,13 +274,11 @@ mod tests {
             licence: "MIT".to_owned(),
             attribution: String::new(),
             files: vec![
-                // The SHA-256 of the 12 bytes `segmentation`.
                 file(
                     "a.onnx",
                     "fba586be3b6f140b30389654d548a660d3a746cf8344ab6f39248caf65e2da4d",
                     12,
                 ),
-                // The SHA-256 of the 9 bytes `embedding`.
                 file(
                     "b.onnx",
                     "aa580156f36e357b5bfb0dcd869a026c7b0a244e7b01cba17d5da1dc1e7039cd",
@@ -343,7 +300,6 @@ mod tests {
         (store, folder)
     }
 
-    /// A load failed over the synthetic asset in `store`; the result.
     fn fail_load(store: &ModelStore) -> DiarizeError {
         after_failed_load_of(
             store,
@@ -352,8 +308,7 @@ mod tests {
         )
     }
 
-    /// Intact files survive a failed load, which keeps its own error: a
-    /// crash, a hang or a ceiling hit over good models deletes nothing.
+    /// Intact files survive a failed load, which keeps its own error.
     #[test]
     fn intact_files_are_kept_and_the_load_keeps_its_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -370,8 +325,7 @@ mod tests {
         assert_eq!(std::fs::read(folder.join("b.onnx")).unwrap(), b"embedding");
     }
 
-    /// A file of the right size that fails its checksum is deleted and is
-    /// the one file the result names; the intact one is kept.
+    /// A file failing its checksum is deleted and named; the intact one is kept.
     #[test]
     fn only_the_file_that_fails_its_checksum_is_deleted() {
         let dir = tempfile::tempdir().unwrap();
@@ -389,10 +343,8 @@ mod tests {
         );
     }
 
-    /// What this test binary logs at debug and above, from the first call
-    /// on: the process-wide subscriber, since a thread's own default can
-    /// miss a callsite another test's thread registered first. Every test
-    /// logs into it, so a test picks its lines out by its temporary folder.
+    /// What this test binary logs at debug and above, through the process-wide
+    /// subscriber; a test picks its lines out by its temporary folder.
     #[derive(Clone, Default)]
     struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -430,9 +382,8 @@ mod tests {
         }
     }
 
-    /// The checksum warning names the file and its digests, never the
-    /// load's error, whose crash report can hold the child's stderr: that
-    /// is logged once, at debug.
+    /// The checksum warning names the file and its digests, never the load's
+    /// error, which is logged once at debug.
     #[test]
     fn the_load_error_is_logged_at_debug_only() {
         let log = CapturedLog::installed();
@@ -465,10 +416,8 @@ mod tests {
         assert!(leaks[0].contains("DEBUG"), "{text}");
     }
 
-    /// A file deleted since the folder was found, by a concurrent check or
-    /// a Settings Remove, is missing whether it is gone by its hash or by
-    /// its removal; any other error when hashing keeps it and does not
-    /// name it.
+    /// A file deleted since the folder was found is missing whether gone by its
+    /// hash or its removal; any other hashing error keeps it unnamed.
     #[test]
     fn a_file_that_vanishes_during_the_check_is_missing() {
         let dir = tempfile::tempdir().unwrap();
@@ -487,15 +436,13 @@ mod tests {
         };
         assert!(!is_gone_after_check(file, &kept, Err(denied)));
         assert!(kept.exists());
-        // Intact.
         std::fs::write(&kept, b"embedding").unwrap();
         assert!(!is_gone_after_check(file, &kept, sha256_of(&kept)));
         assert!(kept.exists());
     }
 
-    /// A file that cannot be read is not hashed, so it is neither deleted
-    /// nor named, and the load keeps its error. Unix only, where a file
-    /// can be made unreadable; skipped where the test runs as root.
+    /// An unreadable file is neither deleted nor named, and the load keeps its
+    /// error. Skipped as root.
     #[cfg(unix)]
     #[test]
     fn a_file_that_cannot_be_read_is_skipped() {

@@ -1,28 +1,9 @@
-//! From window votes to exclusive speaker turns, the reconstruction step
-//! of the pyannote pipeline as sherpa-onnx and `FluidAudio` do it: every
-//! window votes per frame once for each cluster its active local speakers
-//! belong to, the frame's speaker count is the rounded mean count over
-//! the windows that cover it, the top clusters by votes are active, the
-//! frames of each cluster form runs, short gaps close, short runs go, and
-//! overlaps are resolved in favour of the earlier speaker so no two
-//! speakers share a moment, as the transcript lanes require.
-//!
-//! Two deliberate departures from `FluidAudio`'s
-//! `OfflineReconstruction.swift`, listed with the others in the crate doc:
-//! the speaker count rounds half up (`(sum + n / 2) / n`) where
-//! `FluidAudio` rounds half to even, which differs only where an even
-//! number of windows cover a frame and split evenly, the first and last
-//! eight seconds of a lane, and there one window hearing a voice means a
-//! speaker rather than nobody; and where at least one cluster has a vote,
-//! only voted clusters are active, where `FluidAudio` ranks the whole row
-//! and fills the count with clusters nobody voted for. Where no cluster
-//! has a vote on a frame the windows count as speech, the first `k`
-//! clusters are active, as `perFrameClusters` ranks an all-zero row;
-//! Steno's Swift app runs `OfflineDiarizerConfig.default`, whose zero-vote
-//! re-embed is off, so this is what the Mac ships. A one-to-two-second
-//! utterance is alone in no window for the two seconds extraction asks,
-//! so it is embedded nowhere and casts no vote, and without that fallback
-//! it would be a hole no transcript segment could be attributed to.
+//! From window votes to exclusive speaker turns: every window votes per
+//! frame once for each cluster its active local speakers belong to, the
+//! frame's speaker count is the mean count over the covering windows rounded
+//! half up, the top voted clusters are active (the first `k` when nobody
+//! voted, so a short unembedded utterance is not a hole), runs form, short
+//! gaps close, short runs go, and overlaps go to the earlier speaker.
 
 use steno_core::SpeakerTurn;
 
@@ -30,8 +11,7 @@ use crate::extraction::Analysis;
 use crate::segmentation::frame_span;
 use crate::to_f64;
 
-/// `FluidAudio`'s `PostProcessing.community` and `Embedding.community`:
-/// gaps up to 0.1 s between turns of one speaker close; turns under one
+/// Gaps up to 0.1 s between turns of one speaker close; turns under one
 /// second are dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimelineRules {
@@ -48,18 +28,16 @@ impl Default for TimelineRules {
     }
 }
 
-/// The turn and chunk label of cluster `index`: `S1`, `S2`, ... The
-/// mapping joins turns and chunks by this string, so it is spelled here
-/// and nowhere else.
+/// The turn and chunk label of cluster `index`: `S1`, `S2`, ... The mapping
+/// joins turns and chunks by this string.
 #[must_use]
 pub fn cluster_label(index: usize) -> String {
     format!("S{}", index + 1)
 }
 
 /// `assignments[i]` is the cluster of `analysis.embeddings[i]`, or `None`
-/// when it was left out of clustering. Turns carry [`cluster_label`] of
-/// their cluster and a quality in `0...1`: the share of the windows
-/// covering the turn's frames that voted for its cluster.
+/// when it was left out. Turns carry [`cluster_label`] and a quality in
+/// `0...1`: the share of covering windows that voted for its cluster.
 #[must_use]
 pub fn turns(
     analysis: &Analysis,
@@ -86,28 +64,18 @@ pub fn turns(
             speaker_label: cluster_label(run.cluster),
             start: run.start,
             end: run.end,
-            // Qualities lie in 0...1; the narrowing is intended.
             #[allow(clippy::cast_possible_truncation)]
             quality: run.quality as f32,
         })
         .collect()
 }
 
-/// Per global frame: votes per cluster, how many windows cover it, and
-/// the summed local speaker counts. A window casts one vote for a cluster
-/// on a frame however many of its local speakers the cluster holds, as
-/// `FluidAudio` takes the maximum activation per window and cluster
-/// (`OfflineReconstruction.swift`, `frameActivations`), so a voice the
-/// model split in two inside one window does not outvote the other
-/// windows. A vote cell holds at most the windows covering the frame:
-/// five at the default two-second step, 53 010 at a step of three samples
-/// (0.19 ms), which no configuration reaches and two bytes hold exactly;
-/// a step of one or two samples saturates rather than wrapping, which can
-/// only flatten the ranking. Two bytes, not four, because the matrix is
-/// the largest thing here (frames times clusters, 59 frames a second,
-/// dozens of clusters before refinement on a group call).
+/// Per global frame: votes per cluster, covering windows, and summed local
+/// speaker counts. A window casts one vote per cluster and frame however many
+/// of its local speakers the cluster holds. Cells are `u16`, exact up to
+/// 53 010 covering windows (a step of three samples) and saturating beyond,
+/// because the matrix is the largest thing here.
 struct Votes {
-    /// One row of `clusters` cells per frame.
     cells: Vec<u16>,
     clusters: usize,
     coverage: Vec<u32>,
@@ -160,10 +128,9 @@ impl Votes {
         votes
     }
 
-    /// Active clusters per frame, laid out like `cells`: the top `k` by
-    /// votes, `k` the rounded mean speaker count capped at the local
-    /// speakers one window tells apart, only clusters somebody voted for;
-    /// the first `k` when nobody did (see the module doc).
+    /// Active clusters per frame, laid out like `cells`: the top `k` by votes
+    /// with `k` the rounded mean speaker count, only voted clusters; the first
+    /// `k` when nobody voted.
     fn active(&self, local_speakers: usize) -> Vec<bool> {
         let clusters = self.clusters;
         let mut active = vec![false; self.cells.len()];
@@ -226,9 +193,8 @@ impl Votes {
     }
 }
 
-/// A stretch of frames one cluster is active in, before the gaps close
-/// and the overlaps resolve; a turn in the making. Not a transcript
-/// segment.
+/// A stretch of frames one cluster is active in, before gaps close and
+/// overlaps resolve.
 #[derive(Debug, Clone, PartialEq)]
 struct Run {
     cluster: usize,
@@ -237,12 +203,9 @@ struct Run {
     quality: f64,
 }
 
-/// Joins a run into the run immediately before it in start order when
-/// both belong to one cluster and the gap is at most `max_gap`, quality
-/// weighted by duration; `FluidAudio`'s `mergeSegments`. Only the
-/// immediately preceding run counts: `A B A` with a short second gap
-/// stays three runs, so `B` is not swallowed by the join of the two
-/// `A`s. `runs` sorted by start.
+/// Joins a run into the run immediately before it in start order when both
+/// belong to one cluster and the gap is at most `max_gap`, quality weighted
+/// by duration. `A B A` stays three runs. `runs` sorted by start.
 fn close_gaps(runs: Vec<Run>, max_gap: f64) -> Vec<Run> {
     let mut result: Vec<Run> = Vec::with_capacity(runs.len());
     for run in runs {
@@ -267,9 +230,8 @@ fn close_gaps(runs: Vec<Run>, max_gap: f64) -> Vec<Run> {
     result
 }
 
-/// Pushes each run's start to the previous run's end, drops what
-/// vanishes or falls under `min_duration`, and scales the quality by what
-/// survived, as `FluidAudio`'s `excludeOverlaps` does.
+/// Pushes each run's start to the previous run's end, drops what vanishes
+/// or falls under `min_duration`, and scales the quality by what survived.
 fn exclusive(runs: Vec<Run>, min_duration: f64) -> Vec<Run> {
     let mut result: Vec<Run> = Vec::with_capacity(runs.len());
     let mut previous_end = f64::NEG_INFINITY;
@@ -327,9 +289,7 @@ mod tests {
         assert_eq!(joined[3].start, 6.0);
     }
 
-    /// `A B A` with the second `A` starting 0.05 s after the first ends:
-    /// `B` sits between them in start order, so the two `A`s stay apart
-    /// and `B` survives, as `FluidAudio`'s `mergeSegments` has it.
+    /// `A B A` with a short second gap: the two `A`s stay apart and `B` survives.
     #[test]
     fn a_run_joins_only_the_one_immediately_before_it() {
         let joined = close_gaps(
@@ -369,8 +329,7 @@ mod tests {
         );
     }
 
-    /// Two windows over 12 s of one speaker, embedded in both, agree: one
-    /// turn, quality 1, spanning the speech.
+    /// Two windows over 12 s of one speaker agree: one turn, quality 1.
     #[test]
     fn agreeing_windows_yield_one_turn_with_full_quality() {
         let frames_a: Vec<u8> = (0..589).map(|f| u8::from((59..530).contains(&f))).collect();
@@ -419,10 +378,8 @@ mod tests {
             super::turns(&analysis, &[None, None], &TimelineRules::default()).len(),
             0
         );
-        // The second window's embedding left out of clustering: that window
-        // still counts towards coverage and the speaker count but votes for
-        // no cluster, so the 411 frames both windows hear carry a share of
-        // one half and the 60 only the first window hears a share of one.
+        // The second window's embedding left out: it still counts towards coverage
+        // but votes for no cluster, so shared frames carry a share of one half.
         let partial = super::turns(&analysis, &[Some(0), None], &TimelineRules::default());
         assert_eq!(partial.len(), 1, "{partial:?}");
         let expected = (60.0 + 411.0 * 0.5) / 471.0;
@@ -432,13 +389,8 @@ mod tests {
         );
     }
 
-    /// One speaker for eight seconds, a second and a half of speech from
-    /// nine to ten and a half that no window embeds (it is alone in none
-    /// for two seconds), then the speaker again from twelve. The windows
-    /// count one speaker over the short utterance, nobody voted for it,
-    /// and it still becomes a turn of the first cluster, as `FluidAudio`
-    /// has it, rather than a hole; its quality is zero because no vote
-    /// backs it.
+    /// A short utterance no window embeds still becomes a turn of the first
+    /// cluster, quality zero, rather than a hole.
     #[test]
     fn speech_nobody_voted_for_goes_to_the_first_cluster() {
         // Window 0 (0 s to 10 s): speaker 0 to 8 s, the utterance from 9 s.
@@ -449,8 +401,7 @@ mod tests {
                 _ => 0,
             })
             .collect();
-        // Window 1 (10 s to 20 s): the utterance to 10.5 s, speaker 0
-        // from 12 s.
+        // Window 1 (10 s to 20 s): the utterance to 10.5 s, speaker 0 from 12 s.
         let frames_b: Vec<u8> = (0..589)
             .map(|f| match f {
                 0..=28 => 0b10,
@@ -500,13 +451,8 @@ mod tests {
         assert!(turns[0].quality > 0.99 && turns[2].quality > 0.99);
     }
 
-    /// Two local speakers of one window that clustered together vote once
-    /// per frame, as `FluidAudio` takes the maximum per window and
-    /// cluster. Window 0 hears local speakers 0 and 1 throughout, both in
-    /// cluster 0; window 1, from two seconds, hears cluster 1. Where both
-    /// windows cover, cluster 0 has one vote of two windows, not two, so
-    /// its turn's quality is the mean of 1 over the first 119 frames and
-    /// one half over the 470 shared ones.
+    /// Two local speakers of one window in the same cluster vote once per
+    /// frame, so that cluster's quality is one half where both windows cover.
     #[test]
     fn a_window_votes_once_for_a_cluster_whatever_its_local_speakers() {
         let analysis = Analysis {
@@ -550,11 +496,8 @@ mod tests {
         );
     }
 
-    /// Two windows disagree on how many speak: the first hears two, the
-    /// second one. Where both cover, the mean count is 1.5, which rounds
-    /// to 2, so the second speaker keeps the floor until the first window
-    /// ends; a truncating mean would hand those eight seconds to the
-    /// first speaker.
+    /// A mean speaker count of 1.5 rounds to 2, so the second speaker keeps the
+    /// floor until the first window ends.
     #[test]
     fn the_speaker_count_is_the_rounded_mean_over_the_covering_windows() {
         // Window 0: local speaker 1 alone for 119 frames, then both.
@@ -615,12 +558,8 @@ mod tests {
         assert!((first.end - 12.0).abs() < 0.05, "{first:?}");
     }
 
-    /// At a step of three samples, the smallest at which two bytes stay
-    /// exact, 53 010 windows cover a frame. Every third window votes for
-    /// cluster 0 and the rest for cluster 1; both counts are past what one
-    /// byte holds, and both stay exact, so cluster 1 holds the floor
-    /// throughout with two thirds of the votes, where saturated cells
-    /// would tie and hand it to cluster 0.
+    /// At a step of three samples 53 010 windows cover a frame, and the `u16`
+    /// cells stay exact: the cluster with two thirds of the votes holds the floor.
     #[test]
     fn two_byte_cells_count_every_window_at_a_three_sample_step() {
         let windows = 53_010usize;
@@ -662,11 +601,8 @@ mod tests {
         assert!((turns[0].quality - 2.0 / 3.0).abs() < 0.01, "{turns:?}");
     }
 
-    /// An activity whose frames run past the end of the audio votes only
-    /// up to the last frame. `segmentation::windows` drops those frames
-    /// before they get here, but `turns` takes any `Analysis`: one window
-    /// from four seconds of a twelve-second lane, all 589 frames marked,
-    /// gives one turn that ends with the audio.
+    /// Activity frames past the end of the audio do not vote: the turn ends
+    /// with the audio.
     #[test]
     fn frames_past_the_end_of_the_audio_are_not_counted() {
         let analysis = Analysis {

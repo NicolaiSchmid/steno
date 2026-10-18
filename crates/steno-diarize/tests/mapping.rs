@@ -1,7 +1,5 @@
-//! `Tests/StenoSpeechTests/FluidDiarizerMappingTests.swift` ported, in
-//! the same order as the Swift file: the cluster embedding, the sample
-//! clip picker and the mapping. The generated-input, tie and non-finite
-//! cases at the end are Rust's own.
+//! The cluster embedding, the sample clip picker and the mapping, plus
+//! generated-input, tie and non-finite cases.
 
 mod common;
 
@@ -27,8 +25,7 @@ fn mean_is_duration_weighted_and_unit_length() {
     assert_eq!(embedding.0.len(), Embedding::DIMENSION);
     assert!((embedding.magnitude() - 1.0).abs() < 1e-5);
     assert!(embedding.0[0] > embedding.0[1], "three seconds beat one");
-    // Each chunk is brought to unit length first, so only the durations
-    // weigh: axis 0 gets 3, axis 1 gets 1. The norm of 5 plays no part.
+    // Each chunk is brought to unit length first, so only durations weigh.
     assert!((embedding.0[0] / embedding.0[1] - 3.0).abs() < 1e-3);
 }
 
@@ -154,8 +151,7 @@ fn chunk_quality_comes_from_the_overlapping_turn() {
     );
     let qualities: Vec<f32> = chunks.iter().map(|c| c.quality).collect();
     assert_eq!(qualities, [0.3, 0.7, 1.0]);
-    // `result` assigns first: the confidence is the duration-weighted mean of
-    // the turns' qualities, whatever the chunks arrived with.
+    // The confidence is the duration-weighted mean of the turns' qualities.
     let result = result(
         &turns,
         &[chunk("S1", 0.0, 4.0, 0, 0.0, 1.0), c("S1", 4.0, 9.0, 0)],
@@ -180,10 +176,8 @@ fn short_speakers_are_penalised_and_turnless_chunk_labels_are_not_speakers() {
     );
 }
 
-/// The shape the real model produced on an Anna + Daniel `say` fixture:
-/// two speakers alternate in the turns, and a third cluster label exists
-/// only in the chunks with a window-sized span over both. It must not
-/// become a speaker, and no two speakers' ranges may overlap.
+/// A cluster label only in the chunks, spanning both speakers, does not
+/// become a speaker, and no two speakers' ranges overlap.
 #[test]
 fn a_chunk_only_label_spanning_the_window_does_not_overlap_the_real_speakers() {
     let turns = [
@@ -262,9 +256,8 @@ fn one_speaker_gives_one_cluster_with_the_clip_inside_the_range() {
     assert!(only.embedding.as_ref().unwrap().0[3] > 0.99);
 }
 
-/// A two-second recording: everything is under the three-second floor, so
-/// the clip is the whole range and the confidence is halved, and no clip
-/// ever reaches past the audio.
+/// A two-second recording: the clip is the whole range, the confidence is
+/// halved, and no clip reaches past the audio.
 #[test]
 fn short_audio_keeps_clips_inside_the_audio_and_penalises_everyone() {
     let turns = [turn("S1", 0.0, 1.2, 1.0), turn("S2", 1.2, 2.0, 1.0)];
@@ -290,8 +283,7 @@ fn short_audio_keeps_clips_inside_the_audio_and_penalises_everyone() {
     );
 }
 
-/// Core documents `sample_clip_range` as at most ten seconds; the picker's
-/// constants are the one place that number lives and no config can raise it.
+/// The clip target is ten seconds and no config can raise it.
 #[test]
 fn the_clip_never_exceeds_cores_ten_second_cap() {
     assert_eq!(CLIP_TARGET_SECONDS, 10.0);
@@ -302,13 +294,9 @@ fn the_clip_never_exceeds_cores_ten_second_cap() {
     assert_eq!(clip, range(96.0, 106.0), "centred on the one chunk");
 }
 
-/// Invariants over generated diarizations, whatever the shape: labels are
-/// sequential in order of first speech, ranges are sorted and disjoint,
-/// every clip lies inside one of its cluster's ranges and within the
-/// target, embeddings are unit vectors, confidence is in `0...1`. Half the
-/// recordings also carry a chunk whose label has no turn (`S0`, spanning
-/// the window over whoever spoke), the phantom the real model produced; it
-/// must not become a cluster.
+/// Invariants over generated diarizations: sequential labels, sorted
+/// disjoint ranges, clips inside a range and within the target, unit
+/// embeddings, confidence in `0...1`, and no cluster for a chunk-only label.
 #[test]
 fn invariants_hold_over_generated_inputs() {
     let mut rng = SplitMix64(2026);
@@ -409,9 +397,7 @@ fn empty_input_gives_no_clusters() {
     );
 }
 
-/// Two ranges of one length and two chunks of one quality and duration:
-/// the earlier range and the earlier chunk win, as Swift's `max(by:)`
-/// returns the first maximum (Rust's `max_by` the last).
+/// On a tie the earlier range and the earlier chunk win.
 #[test]
 fn ties_go_to_the_first_range_and_the_first_chunk() {
     let ranges = [range(0.0, 20.0), range(30.0, 50.0)];
@@ -426,8 +412,7 @@ fn ties_go_to_the_first_range_and_the_first_chunk() {
         (0.0, 10.0),
         "around the 2...4 chunk"
     );
-    // A chunk overlapping two turns of its speaker equally takes the
-    // first turn's quality.
+    // A chunk overlapping two turns equally takes the first turn's quality.
     let turns = [t("S1", 0.0, 10.0), t("S1", 10.0, 20.0)];
     let turns = [
         SpeakerTurn {
@@ -443,8 +428,8 @@ fn ties_go_to_the_first_range_and_the_first_chunk() {
     assert!((scored[0].quality - 0.25).abs() < 1e-6);
 }
 
-/// A chunk with a non-finite vector or quality does not reach the cluster
-/// embedding or the confidence.
+/// A chunk with a non-finite vector or quality does not reach the embedding
+/// or the confidence.
 #[test]
 fn non_finite_chunks_are_left_out() {
     let mut poisoned = c("S1", 0.0, 5.0, 0);

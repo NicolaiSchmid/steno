@@ -1,7 +1,5 @@
 //! Times the ONNX backend on the two-voice fixture tiled to ten minutes:
-//! `STENO_MODELS_DIR=... cargo run --release -p steno-diarize --example bench_fixture`,
-//! the models directory whose `onnx/diarization/` holds the models.
-//! A timing run, not part of the test suite.
+//! `STENO_MODELS_DIR=... cargo run --release -p steno-diarize --example bench_fixture`.
 
 use std::path::PathBuf;
 use std::time::Instant;

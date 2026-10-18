@@ -1,28 +1,8 @@
-//! [`SidecarDiarizer`], the `steno_core::Diarizer` that runs the ONNX
-//! models in the speech sidecar (invariant 4 of
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`), so a crash in ONNX
-//! Runtime during a diarization ends the child, not the app. Rust only:
-//! Swift ran `FluidAudio` in its own process.
-//!
-//! The child runs the whole [`Pipeline::diarize`](crate::Pipeline::diarize)
-//! with [`DiarizerConfig::default`](crate::DiarizerConfig::default) and
-//! sends the clusters back bit for bit
-//! (`steno_speech::sidecar::protocol::DiarizedCluster`). One request a
-//! lane, rather than one per segmentation window and embedding (some 5 000
-//! for an hour and the audio sent four times over): the child runs the
-//! same code as [`ModelDiarizer`](crate::ModelDiarizer) in this process,
-//! so the clusters are the in-process ones bit for bit, and the protocol
-//! grows by two requests. `ModelDiarizer` and the in-process
-//! [`Pipeline`](crate::Pipeline) stay for the calibration harness, which
-//! sweeps the clustering cut over one analysis, and `steno dev
-//! diarize-sweep`.
-//!
-//! The models are installed in this process ([`crate::models::paths`] under
-//! the diarizer's [`Install`]); the child only loads the files it is
-//! handed, and opens no connection. A load that fails, whether the child
-//! refuses the files or dies, hangs or overruns the ceiling while it loads
-//! them, is checked against the manifest here ([`crate::models`]'s
-//! failed-load check), as for [`ModelDiarizer`](crate::ModelDiarizer).
+//! [`SidecarDiarizer`], the `steno_core::Diarizer` that runs the ONNX models
+//! in the speech sidecar, so an ONNX Runtime crash ends the child, not the
+//! app. The child runs the whole [`Pipeline::diarize`](crate::Pipeline::diarize),
+//! one request a lane, and sends the clusters back bit for bit. Models are
+//! installed here; the child only loads the files it is handed.
 
 use std::sync::Arc;
 
@@ -35,22 +15,15 @@ use crate::models::{self, Install};
 use crate::pipeline::DiarizerConfig;
 
 /// The diarizer the app and `steno process` run: the ONNX models in the
-/// child of `engine`, the speech sidecar engine whose child, deadline,
-/// memory ceiling and crash handling it shares
-/// ([`SidecarSpeechEngine::diarize`]). The models come from that engine's
-/// store, `<store root>/diarization/`.
+/// child of `engine`, sharing its deadline, memory ceiling and crash handling
+/// ([`SidecarSpeechEngine::diarize`]).
 ///
-/// `prepare` installs the models as `install` allows and starts no child;
-/// `diarize` hands the lane to the running child, or to a new one that is
-/// stopped after the call. A child that dies, hangs or overruns the
-/// ceiling while it diarizes fails the call with the sidecar's error, and
-/// the next call starts a new child. When the load of the models fails
-/// instead, refused, crashed, hung or over the ceiling alike, the files
-/// are hashed: one that fails its checksum is deleted and the call is
-/// [`DiarizeError::NotInstalled`], so a gate parks the meeting until a
-/// download replaces it; intact files leave the sidecar's error. Audio
-/// under [`DiarizerConfig::MINIMUM_AUDIO_SECONDS`] has no speakers and
-/// starts no child, as in [`Pipeline::diarize`](crate::Pipeline::diarize).
+/// `prepare` installs the models as `install` allows and starts no child. A
+/// child that dies, hangs or overruns while it diarizes fails the call, and
+/// the next call starts a new child. When the load fails, the files are
+/// hashed: a corrupt one is deleted and the call is
+/// [`DiarizeError::NotInstalled`]. Audio under
+/// [`DiarizerConfig::MINIMUM_AUDIO_SECONDS`] starts no child.
 ///
 /// ```no_run
 /// use std::sync::Arc;
@@ -83,11 +56,9 @@ impl std::fmt::Debug for SidecarDiarizer {
 }
 
 impl SidecarDiarizer {
-    /// A diarizer in `engine`'s child; `install` says whether a missing
-    /// model is downloaded first ([`Install::Allowed`]) or fails the call
-    /// with [`DiarizeError::NotInstalled`] and no request
-    /// ([`Install::Never`]). `threads` is the intra-op thread count of each
-    /// session in the child; zero lets ONNX Runtime decide.
+    /// A diarizer in `engine`'s child; `install` says whether a missing model is
+    /// downloaded first. `threads` is the intra-op thread count per session; zero
+    /// lets ONNX Runtime decide.
     #[must_use]
     pub fn new(engine: Arc<SidecarSpeechEngine>, install: Install, threads: usize) -> Self {
         SidecarDiarizer {
@@ -97,8 +68,8 @@ impl SidecarDiarizer {
         }
     }
 
-    /// The installed models, downloading them first where `install`
-    /// allows; on a blocking thread, as a download takes minutes.
+    /// The installed models, downloading where `install` allows; on a blocking
+    /// thread.
     async fn models(&self) -> Result<DiarizerModels, DiarizeError> {
         let store = self.engine.store().clone();
         let install = self.install;
@@ -128,9 +99,8 @@ impl Diarizer for SidecarDiarizer {
         match self.engine.diarize(models, audio).await {
             Ok(clusters) => Ok(DiarizationResult { clusters }),
             Err(error @ SpeechError::Sidecar(SidecarError::DiarizerLoad(_))) => {
-                // Whatever ended the load, even an abort a corrupt file
-                // set off: a file that fails its checksum is deleted and
-                // reported as not installed, so a download can replace it.
+                // Whatever ended the load: a corrupt file is deleted and reported as not
+                // installed.
                 let store = self.engine.store().clone();
                 let error = DiarizeError::Sidecar(error);
                 let checked =

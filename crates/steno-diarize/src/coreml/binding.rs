@@ -1,9 +1,7 @@
-//! The `CoreML` calls behind [`super::CoreMlBackend`]: load a compiled
-//! model, read an input's declared shape, build `MLMultiArray` inputs,
-//! predict, read outputs. Every `unsafe` block in the crate is here, each
-//! calling an Objective-C method through `objc2` with arguments that the
-//! surrounding Rust has already checked; the invariants are noted at each
-//! block.
+//! The `CoreML` calls behind [`super::CoreMlBackend`]: load a compiled model,
+//! read an input's declared shape, build `MLMultiArray` inputs, predict, read
+//! outputs. Every `unsafe` block in the crate is here, with its invariants
+//! noted at each block.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -31,8 +29,7 @@ pub struct Model {
 unsafe impl Send for Model {}
 
 impl Model {
-    /// Loads the `.mlmodelc` directory at `path` on the default compute
-    /// units (CPU, GPU and Neural Engine as `CoreML` sees fit).
+    /// Loads the `.mlmodelc` directory at `path` on the default compute units.
     pub fn load(path: &std::path::Path) -> Result<Self, BackendError> {
         let text = path.to_string_lossy();
         // SAFETY: `NSURL` and `MLModelConfiguration` are plain Foundation

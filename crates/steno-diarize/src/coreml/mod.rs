@@ -1,17 +1,8 @@
-//! The `CoreML` backend over `FluidAudio`'s compiled diarization models
-//! (`Segmentation.mlmodelc`, `FBank.mlmodelc`, `Embedding.mlmodelc` from
-//! the `speaker-diarization` repository the Swift app installs in
-//! [`model_directory`]), so the Mac keeps the embeddings the Swift app
-//! stored. The segmentation model takes `audio` `[1, 1, 160000]` and
-//! returns `[1, 589, 7]` powerset logits; `FBank` turns the window into
-//! `fbank_features`; `Embedding` takes those and per-frame `weights`
-//! `[1, 589]` and returns `embedding` `[1, 256]`, so the mask is applied
-//! inside the model rather than by selecting frames. The leading
-//! dimension of every input is the batch; it is pinned to 1 as
-//! `FluidAudio`'s `SegmentationProcessor` does, whatever default the model
-//! declares (the models accept 1 to 32 and `Segmentation.mlmodelc`
-//! declares 32). macOS only; the bindings live in `binding`, the one
-//! module in this crate allowed `unsafe` (the crate denies it elsewhere).
+//! The `CoreML` backend over `FluidAudio`'s compiled diarization models in
+//! [`model_directory`], so the Mac keeps the embeddings the Swift app stored.
+//! `Embedding` takes per-frame `weights`, so the mask is applied inside the
+//! model. The batch dimension is pinned to 1. macOS only; the bindings live in
+//! `binding`, the one module in this crate allowed `unsafe`.
 
 #[allow(unsafe_code)]
 mod binding;
@@ -24,11 +15,9 @@ use steno_core::StenoPaths;
 use crate::backend::{BackendError, DiarizationBackend, SegmentationGeometry};
 use crate::error::DiarizeError;
 
-/// `<support>/Models/fluidaudio/speaker-diarization`: where the Swift
-/// app's model store installs these models, its default models root plus
-/// `ModelAsset.offlineDiarizer`'s `frameworkRoot` and `modelFolder`
-/// (`Sources/StenoSpeech/Models/ModelAsset.swift`). A models directory
-/// moved in the Swift app's settings is not followed.
+/// `<support>/Models/fluidaudio/speaker-diarization`, where the Swift app's
+/// model store installs these models. A moved models directory is not
+/// followed.
 #[must_use]
 pub fn model_directory(paths: &StenoPaths) -> PathBuf {
     paths
@@ -38,7 +27,6 @@ pub fn model_directory(paths: &StenoPaths) -> PathBuf {
         .join("speaker-diarization")
 }
 
-/// The three models.
 pub struct CoreMlBackend {
     segmentation: Model,
     fbank: Model,
@@ -99,9 +87,8 @@ impl CoreMlBackend {
     }
 }
 
-/// `shape` with its leading (batch) dimension set to 1: the pipeline
-/// feeds one window per prediction, as `FluidAudio` does, whatever batch
-/// the model declares as its default.
+/// `shape` with its leading (batch) dimension set to 1: one window per
+/// prediction, whatever batch the model declares.
 fn one_window(mut shape: Vec<usize>) -> Vec<usize> {
     if let Some(batch) = shape.first_mut() {
         *batch = 1;

@@ -9,26 +9,16 @@ use crate::error::DiarizeError;
 use crate::segmentation::{self, Window, WindowActivity};
 use crate::to_f64;
 
-/// How much of a local speaker is needed before a window embeds them, as
-/// `FluidAudio`'s `Embedding.community` and its `OfflineEmbeddingExtractor`
-/// have it.
+/// How much of a local speaker is needed before a window embeds them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtractionRules {
     /// Active speech a local speaker needs inside a window to be embedded.
     pub min_segment_seconds: f64,
-    /// Whether frames where two speakers overlap are left out of the
-    /// embedding.
+    /// Whether frames where two speakers overlap are left out.
     pub exclude_overlap: bool,
-    /// The share of the window's frames the speaker must fill, after
-    /// overlap exclusion, to be embedded at all: `minActiveRatio = 0.2`
-    /// in `FluidAudio`'s
-    /// `Diarizer/Offline/Extraction/OfflineEmbeddingExtractor.swift`, 118
-    /// of 589 frames, about two seconds. A window that hears a speaker
-    /// only in passing contributes no embedding, so an interjection does
-    /// not seed a cluster of its own. `FluidAudio`'s fallback to the
-    /// overlapped frames when the clean ones are under the one-second
-    /// floor cannot trigger once this holds (118 frames exceed 60), so
-    /// the port omits it, as the crate doc notes.
+    /// The share of the window's frames the speaker must fill, after overlap
+    /// exclusion, to be embedded at all (0.2: 118 of 589 frames, about two
+    /// seconds), so an interjection does not seed a cluster of its own.
     pub min_active_ratio: f64,
 }
 
@@ -42,8 +32,8 @@ impl Default for ExtractionRules {
     }
 }
 
-/// One embedding window after extraction: which window, which local
-/// speaker inside it, the span of their speech and the raw vector.
+/// One embedding after extraction: the window, the local speaker, the span
+/// of their speech and the raw vector.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowEmbedding {
     pub window: usize,
@@ -60,8 +50,8 @@ impl WindowEmbedding {
     }
 }
 
-/// Everything the models say about one lane; clustering and the timeline
-/// are computed from it without touching the models again.
+/// Everything the models say about one lane; later stages never touch the
+/// models again.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Analysis {
     pub geometry: SegmentationGeometry,
@@ -71,7 +61,6 @@ pub struct Analysis {
 }
 
 impl Analysis {
-    /// Seconds of audio analysed.
     #[must_use]
     pub fn duration(&self) -> f64 {
         self.geometry.seconds(self.total_samples)
@@ -79,8 +68,8 @@ impl Analysis {
 }
 
 /// Runs segmentation over every window and embeds every local speaker with
-/// enough clean speech. `step` is in samples. A segmentation or embedding
-/// output of the wrong length is [`DiarizeError::Shape`].
+/// enough clean speech. `step` is in samples; an output of the wrong length
+/// is [`DiarizeError::Shape`].
 pub fn analyze(
     backend: &mut dyn DiarizationBackend,
     audio: &[f32],
@@ -120,9 +109,8 @@ pub fn analyze(
             if let Some(embedding) = embed_speaker(backend, &context, &window, &activity, speaker)
                 .map_err(DiarizeError::backend)?
             {
-                // Checked here, once for every backend: a vector of another
-                // length would cluster, then be dropped by the mapping,
-                // leaving every speaker without an embedding.
+                // Checked once for every backend: a vector of another length would be
+                // dropped by the mapping, leaving speakers without an embedding.
                 if embedding.embedding.len() != Embedding::DIMENSION {
                     return Err(DiarizeError::Shape {
                         what: "embedding output",
@@ -146,16 +134,13 @@ pub fn analyze(
 /// Frames worth `seconds` of speech, at least one.
 #[must_use]
 pub fn min_frames(geometry: &SegmentationGeometry, seconds: f64) -> usize {
-    // Positive and small; the cast cannot truncate anything that matters.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let frames = (seconds / geometry.frame_seconds()).ceil().max(1.0) as usize;
     frames
 }
 
-/// The weights for `speaker` in one window: 1 on the frames where they
-/// speak (alone, when `rules.exclude_overlap`), 0 elsewhere; `None` when
-/// those frames number under `min_frames` or under
-/// [`ExtractionRules::min_active_ratio`] of the window.
+/// The weights for `speaker` in one window: 1 where they speak (alone, when
+/// `rules.exclude_overlap`), 0 elsewhere; `None` when too few frames.
 #[must_use]
 pub fn speaker_weights(
     activity: &WindowActivity,
@@ -259,8 +244,8 @@ mod tests {
             clean,
             vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         );
-        // With a higher floor the clean frames are too few; the
-        // overlapped ones are no fallback.
+        // With a higher floor the clean frames are too few; overlapped ones are no
+        // fallback.
         assert!(speaker_weights(&activity, 0, 10, 5, &rules).is_none());
         // Speaker 1 is alone for one frame of ten: under the fifth.
         assert!(speaker_weights(&activity, 1, 10, 1, &rules).is_none());
@@ -294,9 +279,8 @@ mod tests {
         assert!(speaker_weights(&activity, 0, 40, 1, &lax).is_some());
     }
 
-    /// The default ratio on pyannote's geometry: 118 clean frames, about
-    /// two seconds, exceed the one-second floor, so the floor never
-    /// decides on its own.
+    /// With the default ratio, 118 clean frames exceed the one-second floor, so
+    /// the floor never decides on its own.
     #[test]
     fn the_default_ratio_asks_for_two_seconds_of_a_ten_second_window() {
         let geometry = SegmentationGeometry::PYANNOTE_3_0;

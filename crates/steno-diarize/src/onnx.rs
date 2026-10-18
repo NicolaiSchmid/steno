@@ -1,14 +1,7 @@
 //! The ONNX Runtime backend: pyannote segmentation 3.0 and `WeSpeaker`
-//! ResNet34-LM from the sherpa-onnx exports, with the fbank front end of
-//! [`crate::fbank`] in front of the embedding model. Runs on every
-//! platform: in the speech sidecar's child for the app and `steno process`
-//! ([`crate::SidecarDiarizer`]), in the caller's process for
-//! [`crate::ModelDiarizer`].
-//!
-//! Privacy invariant: ONNX Runtime's telemetry is off. `session`, the one
-//! place a session opens, calls [`steno_speech::onnx::init_environment`]
-//! first, which configures the process-wide environment with telemetry
-//! disabled; `steno-speech` opens its sessions after the same call.
+//! ResNet34-LM from the sherpa-onnx exports, with [`crate::fbank`] in front of
+//! the embedding model. ONNX Runtime's telemetry is off: `session`, the one
+//! place a session opens, calls [`steno_speech::onnx::init_environment`] first.
 
 use std::path::Path;
 
@@ -21,8 +14,8 @@ use crate::fbank::{Fbank, FbankConfig};
 use crate::models::{Install, ModelPaths};
 use crate::to_f64;
 
-/// Fbank frames the embedding model is given at least; under that the
-/// window's speaker is skipped (a quarter of a second).
+/// Fbank frames the embedding model needs (a quarter of a second); under
+/// that the speaker is skipped.
 const MIN_EMBEDDING_FRAMES: usize = 25;
 
 /// Both sessions plus what their metadata says about the inputs.
@@ -32,11 +25,9 @@ pub struct OnnxBackend {
     geometry: SegmentationGeometry,
     fbank: Fbank,
     /// Whether the embedding model expects samples in the 16-bit range
-    /// (`normalize_samples = 0` in the sherpa-onnx metadata); the fbank
-    /// scale is set from it.
+    /// (`normalize_samples = 0` in the metadata).
     scales_samples: bool,
-    /// Whether the per-utterance mean is subtracted from the features,
-    /// `WeSpeaker`'s `apply_cmvn`.
+    /// Whether the per-utterance mean is subtracted (`WeSpeaker`'s `apply_cmvn`).
     subtracts_mean: bool,
     embedding_dimension: usize,
 }
@@ -53,12 +44,9 @@ impl std::fmt::Debug for OnnxBackend {
 }
 
 impl OnnxBackend {
-    /// Loads both models from `store`. Under [`Install::Allowed`] a
-    /// missing file is installed first ([`crate::models::ensure`]); under
-    /// [`Install::Never`] it is [`DiarizeError::NotInstalled`], without a
-    /// request ([`crate::models::installed`]). When the load fails, the
-    /// files are hashed, and one that fails its checksum is deleted and
-    /// reported as not installed, so a download can replace it.
+    /// Loads both models from `store`, installing a missing file first under
+    /// [`Install::Allowed`], else [`DiarizeError::NotInstalled`]. After a failed
+    /// load, a file failing its checksum is deleted and reported as not installed.
     pub fn from_store(
         store: &steno_speech::ModelStore,
         install: Install,
@@ -69,8 +57,8 @@ impl OnnxBackend {
             .map_err(|error| crate::models::after_failed_load(store, error))
     }
 
-    /// Loads the two model files. `threads` is the intra-op thread count
-    /// of each session; zero lets ONNX Runtime decide.
+    /// Loads the two model files. `threads` is the intra-op thread count per
+    /// session; zero lets ONNX Runtime decide.
     pub fn load(paths: &ModelPaths, threads: usize) -> Result<Self, DiarizeError> {
         let segmentation = session(&paths.segmentation, threads)?;
         let embedding = session(&paths.embedding, threads)?;
@@ -120,15 +108,11 @@ impl OnnxBackend {
     }
 }
 
-/// The rows of `features` (one fbank frame each, `fbank.num_bins()` wide)
-/// that belong to the speaker: each feature frame takes the weight of the
-/// segmentation frame whose centre is nearest its own and is kept when
-/// that weight is above a half. When `subtract_mean`, the mean is
-/// subtracted over the whole ten-second window before the frames are
-/// picked, as pyannote's `WeSpeaker` wrapper and `FluidAudio`'s `FBank`
-/// model normalise before the mask is applied; normalising the selected
-/// frames alone would centre every speaker's features on their own voice
-/// and discard part of what tells voices apart.
+/// The rows of `features` that belong to the speaker: each fbank frame takes
+/// the weight of the nearest segmentation frame and is kept above a half.
+/// When `subtract_mean`, the mean is subtracted over the whole window before
+/// the frames are picked; centring the selected frames alone would discard
+/// part of what tells voices apart.
 fn speaker_features(
     mut features: Vec<f32>,
     subtract_mean: bool,
@@ -145,7 +129,6 @@ fn speaker_features(
     for frame in 0..frames {
         let centre = fbank.frame_centre_seconds(frame) * to_f64(geometry.sample_rate);
         let shifted = centre - to_f64(geometry.receptive_field_size / 2);
-        // Non-negative after the clamp; the index stays far below 2^53.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let segmentation_frame = ((shifted / to_f64(geometry.receptive_field_shift))
             .round()
@@ -165,8 +148,7 @@ fn session(path: &Path, threads: usize) -> Result<Session, DiarizeError> {
     steno_speech::onnx::init_environment();
     let mut builder = Session::builder().map_err(DiarizeError::backend)?;
     if threads > 0 {
-        // The builder error carries the builder back and is not `Send`;
-        // its message is what matters.
+        // The builder error is not `Send`; its message is what matters.
         builder = builder
             .with_intra_threads(threads)
             .map_err(|error| DiarizeError::backend(error.to_string()))?;
@@ -176,8 +158,8 @@ fn session(path: &Path, threads: usize) -> Result<Session, DiarizeError> {
         .map_err(DiarizeError::backend)
 }
 
-/// The geometry from the segmentation model's sherpa-onnx metadata, the
-/// pyannote 3.0 constants for anything missing.
+/// The geometry from the segmentation model's metadata, the pyannote 3.0
+/// constants for anything missing.
 fn geometry_of(session: &Session) -> Result<SegmentationGeometry, DiarizeError> {
     let metadata = session.metadata().map_err(DiarizeError::backend)?;
     let number = |key: &str, fallback: usize| -> usize {
@@ -278,8 +260,8 @@ mod tests {
 
     #[test]
     fn a_session_opens_only_once_telemetry_is_off() {
-        // A missing model still reaches ONNX Runtime, which would set up
-        // its default environment (telemetry on) had nothing come first.
+        // A missing model still reaches ONNX Runtime, which would set up its
+        // default environment (telemetry on) had nothing come first.
         let dir = tempfile::tempdir().unwrap();
         assert!(session(&dir.path().join("missing.onnx"), 1).is_err());
         assert!(
@@ -288,11 +270,8 @@ mod tests {
         );
     }
 
-    /// Features whose first five seconds sit at one and whose second five
-    /// sit at minus one, the speaker marked over the first five: the
+    /// The mean is subtracted over the whole window, not the selected rows: the
     /// window's mean is zero, so the selected rows keep their one.
-    /// Subtracting the mean of the selected rows instead would send every
-    /// one of them to zero, which is the order this test rules out.
     #[test]
     fn the_mean_comes_off_the_whole_window_before_the_speaker_is_picked() {
         let geometry = SegmentationGeometry::PYANNOTE_3_0;
