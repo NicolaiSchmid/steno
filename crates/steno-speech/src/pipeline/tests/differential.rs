@@ -872,8 +872,10 @@ struct Losses {
     /// Words of the old merge's text the boundaries flag, held once a
     /// later piece of a placed word may cross chunks' owned boundaries
     /// that lie in no decoded window, with no decoded window wholly
-    /// between the two pieces: the named limit of a recovery that missed a
-    /// word's start gluing its rest onto a word across an undecoded gap.
+    /// between the two pieces and no piece the old merge kept of another
+    /// word between ([`RefTexts::kept_between`]): the named limit of a
+    /// recovery that missed a word's start gluing its rest onto a word
+    /// across an undecoded gap.
     /// Counted, not passed: the gate caps it at its value on the CI seed,
     /// 0.
     across_gap: usize,
@@ -881,8 +883,8 @@ struct Losses {
     /// piece, of a place the old merge did not keep and in an accepted
     /// recovery's owned span, may cross that span's owned start alone,
     /// which the recovery's window holds, with no piece the old merge kept
-    /// of another word between ([`RefTexts::kept_between`]): limit E across
-    /// its own window. Counted and capped as `across_gap`, at 0.
+    /// of another word between: limit E across its own window. Counted and
+    /// capped as `across_gap`, at 0.
     across_own_window: usize,
     /// Words of the old merge's text the boundaries flag, held once a
     /// piece of an orphan word the old merge dropped may cross as
@@ -892,8 +894,9 @@ struct Losses {
     /// Words of the old merge's text the boundaries flag, held once a
     /// piece of an orphan word the old merge dropped may lie inside the
     /// old merge's own glue after the same word (before the last piece of
-    /// another word it glued there): limit (ii) inside the old merge's
-    /// glue. Counted and capped as `across_gap`, at 0.
+    /// another word it glued there), with no piece the old merge kept of
+    /// another word between: limit (ii) inside the old merge's glue.
+    /// Counted and capped as `across_gap`, at 0.
     inside_glue: usize,
     /// Words of the old merge's text the boundaries flag, held once the
     /// rest of a word the old merge kept nothing of, which an accepted
@@ -1008,20 +1011,18 @@ impl Losses {
 /// - Limit E inside the old merge's glue: a recovery's rest inside the old
 ///   merge's own glue after the same word, across a gap's window's start
 ///   ([`Losses::rest_inside_glue`];
-///   `a_recovery_that_missed_a_words_start_can_keep_its_rest_inside_the_old_merges_glue`),
-///   and inside its glue after its text-leading orphan
-///   ([`Losses::rest_inside_lead_glue`];
+///   `a_recovery_that_missed_a_words_start_can_keep_its_rest_inside_the_old_merges_glue`).
+/// - Limit E inside the old merge's leading glue: the same inside its glue
+///   after its text-leading orphan ([`Losses::rest_inside_lead_glue`];
 ///   `a_recovery_that_missed_a_words_start_can_keep_its_rest_inside_the_old_merges_leading_glue`).
 /// - A copy before the text-leading orphan: a gap's window's copy of a
 ///   piece the old merge kept, glued before the orphan a recovery begins
 ///   with ([`Losses::copy_before_lead`];
 ///   `a_copy_of_a_piece_the_old_merge_kept_can_come_out_before_its_text_leading_orphan`).
 ///
-/// Limits E and (ii) across their own window, E inside the old merge's glue
-/// and the copy before the text-leading orphan hold no word that grew
-/// across a piece the old merge kept of another word
-/// ([`RefTexts::kept_between`]): such a word moves its boundary across
-/// text the old merge kept, which fails at any scale.
+/// No counted limit holds a word that grew across a piece the old merge
+/// kept of another word ([`RefTexts::kept_between`]): such a word moves
+/// its boundary across text the old merge kept, which fails at any scale.
 ///
 /// | What passes | Behind it | Pinned by |
 /// |---|---|---|
@@ -1332,7 +1333,7 @@ impl<'a> RefTexts<'a> {
                 // The copies before the text-leading orphan are no extra
                 // pieces of a word: `lead_glued` allows them.
                 Extras::Check | Extras::CopyBeforeLead => false,
-                Extras::AcrossGap => later && undecoded(),
+                Extras::AcrossGap => later && undecoded() && !kept_between(),
                 Extras::AcrossOwnWindow => later && own_start() && !kept_between(),
                 Extras::OrphanAcrossOwnWindow => {
                     place.is_some_and(|(w, _)| ref_orphan(&self.case.words, self.vocab, w))
@@ -1341,12 +1342,14 @@ impl<'a> RefTexts<'a> {
                         && own_start()
                         && !kept_between()
                 }
-                Extras::InsideGlue => place.zip(first).is_some_and(|((w, _), (h, _))| {
-                    ref_orphan(&self.case.words, self.vocab, w)
-                        && !self.kept_words.contains(&w)
-                        && head < at
-                        && self.glue_end.get(&h).is_some_and(|&end| at < end)
-                }),
+                Extras::InsideGlue => {
+                    place.zip(first).is_some_and(|((w, _), (h, _))| {
+                        ref_orphan(&self.case.words, self.vocab, w)
+                            && !self.kept_words.contains(&w)
+                            && head < at
+                            && self.glue_end.get(&h).is_some_and(|&end| at < end)
+                    }) && !kept_between()
+                }
                 Extras::RestInsideGlue => {
                     place.zip(first).is_some_and(|(p, (h, _))| {
                         p.1 > 0
@@ -3057,11 +3060,35 @@ fn the_boundary_check_counts_a_glue_in_a_class_only_at_its_signature() {
 
 #[test]
 fn the_boundary_check_fails_a_counted_glue_across_text_the_old_merge_kept() {
-    // Each counted class but the first and limit (ii) inside the old
-    // merge's glue, planted as it comes out and then across a word the
-    // old merge kept on its own between the two pieces, which fails
+    // Each counted class planted as it comes out and then across a word
+    // the old merge kept on its own between the two pieces, which fails
     // ([`RefTexts::kept_between`], [`ref_planted_fails`]).
     let check = ref_planted_fails;
+    // The limit across an undecoded gap past a word 7 at 25 s, which the
+    // old merge kept on its own (its tokens put after word 14's).
+    let (mut case, mut run) = ref_across_gap_case(0);
+    case.words.push(ref_placed(vec![7], 25.0, 4));
+    let main = [(0, 0), (0, 1), (0, 3), (2, 1), (4, 0), (3, 0)];
+    let over = [
+        (0, 0),
+        (0, 1),
+        (0, 3),
+        (1, 1),
+        (1, 2),
+        (2, 0),
+        (2, 1),
+        (4, 0),
+        (3, 0),
+    ];
+    assert!(check(&case, &mut run, &main, &over));
+    // Limit (ii) inside the old merge's glue past a word 8 at 49.76 s,
+    // which the old merge kept on its own (its tokens put last).
+    let (mut case, mut run) = ref_inside_glue_case(0);
+    case.words.push(ref_placed(vec![8], 49.76, 2));
+    let after = [(3, 0), (3, 1), (3, 3), (4, 0), (4, 1), (4, 3), (5, 0)];
+    let main = [&[(0, 0), (1, 0), (1, 1)], &after[..]].concat();
+    let over = [&[(0, 0), (1, 0), (1, 1), (2, 0), (2, 1)], &after[..]].concat();
+    assert!(check(&case, &mut run, &main, &over));
     let (mut case, mut run) = ref_own_window_case(1);
     // Limit E there across text the old merge kept: a word 7 it kept at
     // 72 s, between word 20 and the rest of word 13 glued onto it. That
@@ -3116,6 +3143,44 @@ fn the_boundary_check_fails_a_counted_glue_across_text_the_old_merge_kept() {
     let main = [&main[..], &[(3, 0)]].concat();
     let over = [&copy[..], &[(3, 0)]].concat();
     assert!(check(&case, &mut run, &main, &over));
+}
+
+#[test]
+fn the_boundary_check_fails_a_glue_beside_each_class_found_at_scale() {
+    // Planted glues next to limit (ii) across its own window, limit E
+    // inside the old merge's glue and the copy before the text-leading
+    // orphan, each of which no class takes ([`ref_planted_fails`]).
+    let check = ref_planted_fails;
+    // An orphan glued onto word 20 across the recovered chunk's owned
+    // start, of a word the old merge kept a piece of elsewhere.
+    let (case, mut run) = ref_own_window_case(1);
+    let main = [(0, 0), (3, 0), (3, 1), (2, 1)];
+    let orphan = [(0, 0), (2, 0), (3, 0), (3, 1), (2, 1)];
+    assert!(check(&case, &mut run, &main, &orphan));
+    // The rest of word 12 glued onto word 14 across the gap's owned start,
+    // of a word the old merge kept a piece of elsewhere; and outside any
+    // glue the old merge has after word 14.
+    let (case, mut run) = ref_rest_inside_glue_case(0);
+    let after = [(2, 0), (2, 1), (3, 0), (3, 1), (3, 2)];
+    let main = [&[(0, 0), (0, 1)], &after[..], &[(1, 1)]].concat();
+    let rest = [&[(0, 0), (0, 1), (1, 1)], &after[..], &[(1, 1)]].concat();
+    assert!(check(&case, &mut run, &main, &rest));
+    let main = [(0, 0), (0, 1), (3, 0), (3, 1), (3, 2)];
+    let rest = [(0, 0), (0, 1), (1, 1), (3, 0), (3, 1), (3, 2)];
+    assert!(check(&case, &mut run, &main, &rest));
+    // The copy before the text-leading orphan with no recovery beginning
+    // at the orphan; and an orphan the old merge kept after word 10, not
+    // in the leading orphan's word, put before it.
+    let (mut case, mut run) = ref_copy_before_lead_case(0);
+    let main = [(0, 0), (1, 0), (2, 0), (2, 1), (2, 2)];
+    let copy = [&[(1, 0)], &main[..]].concat();
+    let leads = std::mem::take(&mut run.leads);
+    assert!(check(&case, &mut run, &main, &copy));
+    run.leads = leads;
+    case.words.push(ref_placed(vec![28], 11.2, 2));
+    let main = [&main[..], &[(3, 0)]].concat();
+    let before = [&[(3, 0)], &main[..]].concat();
+    assert!(check(&case, &mut run, &main, &before));
 }
 
 #[test]
