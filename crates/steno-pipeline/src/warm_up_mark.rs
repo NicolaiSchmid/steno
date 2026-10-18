@@ -13,7 +13,8 @@
 //!   before the warm-up starts and removed the same way once it returns,
 //!   failed or not, since the app lived through it. It holds a random id
 //!   of its own, so the fallback ([`crate::SpeechFallback`]) tells a mark
-//!   it has seen from a new one.
+//!   it has seen from a new one; a mark that cannot be read is given a
+//!   fresh one at each launch (`unreadable-<uuid>`), so it counts as new.
 //! - **The launch check**: [`WarmUpMark::at_launch`]. A mark there is a
 //!   warm-up that ended with the app, so from then on recordings skip the
 //!   warm-up, and the launch says so once at `warn`. The first meeting then
@@ -73,6 +74,9 @@ impl WarmUpMark {
     /// The start of a held mark's id (`WarmUpMark::hold_off`).
     const HELD_PREFIX: &'static str = "held-";
 
+    /// The start of the id a launch gives a mark it cannot read.
+    const UNREADABLE_PREFIX: &'static str = "unreadable-";
+
     /// A mark that writes nothing and never turns the warm-up off.
     #[must_use]
     pub fn in_memory() -> Self {
@@ -89,10 +93,13 @@ impl WarmUpMark {
     #[must_use]
     pub fn at_launch(support_directory: &Path) -> Self {
         let path = support_directory.join(Self::FILE_NAME);
-        // A mark that cannot be read still turns the warm-up off.
+        // A mark that cannot be read still turns the warm-up off, under a
+        // fresh id: the fallback cannot tell it from one it has seen.
         let left_over = path.exists().then(|| {
-            std::fs::read_to_string(&path)
-                .map_or_else(|_| "unreadable".to_owned(), |id| id.trim().to_owned())
+            std::fs::read_to_string(&path).map_or_else(
+                |_| format!("{}{}", Self::UNREADABLE_PREFIX, uuid::Uuid::new_v4()),
+                |id| id.trim().to_owned(),
+            )
         });
         let skipping = left_over.is_some();
         match &left_over {
@@ -121,7 +128,8 @@ impl WarmUpMark {
     /// The id of the mark the launch found left over: a warm-up that ended
     /// with the app, or `held-<uuid>` for one the user's end of the
     /// fallback held off. Earlier builds wrote `1` in every mark; an empty
-    /// mark gives an empty id.
+    /// mark gives an empty id, and one that cannot be read a fresh
+    /// `unreadable-<uuid>` at each launch, so the fallback counts it as new.
     #[must_use]
     pub fn left_over(&self) -> Option<&str> {
         self.left_over.as_deref()
@@ -345,6 +353,20 @@ mod tests {
         assert!(path.exists(), "the running warm-up is still guarded");
         drop(running);
         assert!(!path.exists());
+    }
+
+    /// A mark that cannot be read skips the warm-up, under a fresh id at
+    /// each launch.
+    #[test]
+    fn an_unreadable_mark_gets_a_fresh_id_at_each_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(WarmUpMark::FILE_NAME), b"\xff\xfe").unwrap();
+        let first = WarmUpMark::at_launch(dir.path());
+        let second = WarmUpMark::at_launch(dir.path());
+        assert!(first.skipping() && second.skipping());
+        let (first, second) = (first.left_over().unwrap(), second.left_over().unwrap());
+        assert!(first.starts_with("unreadable-"), "{first}");
+        assert_ne!(first, second);
     }
 
     #[test]

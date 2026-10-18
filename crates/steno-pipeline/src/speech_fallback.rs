@@ -495,4 +495,44 @@ mod tests {
             assert!(launch(support.path()).is_on(), "{body:?}");
         }
     }
+
+    /// Leaves a warm-up mark that cannot be read in `support`: bytes that
+    /// are not UTF-8 fail the read on every platform.
+    fn unreadable_warm_up_mark_left(support: &Path) {
+        std::fs::write(support.join(WarmUpMark::FILE_NAME), b"\xff\xfe").unwrap();
+    }
+
+    /// A warm-up mark that cannot be read turns it on once: the user's
+    /// action replaces it with the held mark, so the later launches stay
+    /// off.
+    #[test]
+    fn an_unreadable_warm_up_mark_turns_it_on_once() {
+        let support = tempfile::tempdir().unwrap();
+        unreadable_warm_up_mark_left(support.path());
+        assert!(launch(support.path()).is_on());
+        let fallback = launch(support.path());
+        assert!(fallback.is_on(), "the next launch too");
+        fallback.turn_off().unwrap();
+        assert!(!launch(support.path()).is_on());
+        assert!(!launch(support.path()).is_on(), "and the one after");
+    }
+
+    /// A later warm-up mark that cannot be read is a new one: after the
+    /// user turned it off over one, a crash that leaves another turns it
+    /// on again.
+    #[test]
+    fn a_later_unreadable_warm_up_mark_turns_it_on_again() {
+        let support = tempfile::tempdir().unwrap();
+        unreadable_warm_up_mark_left(support.path());
+        let (warm_up, fallback) = launched(support.path());
+        assert!(fallback.is_on());
+        fallback.turn_off().unwrap();
+
+        // A meeting loads the engine, and a later warm-up ends the app,
+        // leaving a mark that cannot be read.
+        warm_up.speech_engine_loaded();
+        std::mem::forget(warm_up.begin());
+        unreadable_warm_up_mark_left(support.path());
+        assert!(launch(support.path()).is_on(), "a new mark counts");
+    }
 }
