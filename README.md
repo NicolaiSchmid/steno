@@ -97,8 +97,8 @@ instead (Nix details below).
 Already running the Swift app, version 0.10 or earlier? Install nothing. It offers 0.11.0
 as an update within a week (the rollout is phased; *Check for Updates* gets it at once) and
 installs it at the same path. macOS then asks once more for Steno's permissions, and for
-the login keychain password once per stored secret (choose *Always Allow*). Installed
-with Nix, it cannot install the offer: update the flake instead (Nix details below).
+the login keychain password once per stored secret (choose *Always Allow*). A Nix install
+cannot take the offer; update the flake instead.
 
 <details>
 <summary><b>Homebrew details: tap, release candidates, nix-darwin</b></summary>
@@ -135,12 +135,11 @@ yourself. `nix run` does not apply: the output is an app bundle with no `bin/`.
 Steno installed from the flake does not offer updates. Running from the Nix store,
 `/Applications/Nix Apps` or `~/Applications/Home Manager Apps`, it leaves them to Nix, and
 Settings > General says "Updates come from your package manager." To update it, run
-`nix flake update <input>` on the input that pins Steno, then rebuild; after
-`nix profile install`, run `nix profile upgrade steno`. In a checkout of this repository,
+`nix flake update <input>` for the input that pins Steno and rebuild, or
+`nix profile upgrade steno` after `nix profile install`. In a checkout of this repository,
 bump `release.version` and `release.hash` at the top of `flake.nix` instead (the release
-workflow prints both in its job summary). A copy in a
-folder you set with Home Manager's `targets.darwin.copyApps.directory` still offers
-updates, and the next switch undoes them.
+workflow prints both in its job summary). A copy in a folder you set with Home Manager's
+`targets.darwin.copyApps.directory` still offers updates, and the next switch undoes them.
 
 nix-darwin users who want in-app updates can use the Homebrew cask through
 `homebrew.casks` instead; it installs into `/Applications`, where the updater can write.
