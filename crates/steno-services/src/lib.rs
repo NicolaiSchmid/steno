@@ -101,6 +101,7 @@ pub mod app;
 pub mod audio_folders;
 pub mod auto_stop;
 pub mod calendar;
+pub mod clip_player;
 pub mod detection;
 pub mod export;
 pub mod handover;

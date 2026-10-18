@@ -678,8 +678,8 @@ pub trait FileSystem: Send + Sync {
 /// cannot see).
 pub trait ClipPlayer: Send + Sync {
     /// Starts the clip; false when the file is missing or unreadable. The
-    /// shell's player, when it exists, returns false while a recording runs
-    /// (`Playback::begin` refused).
+    /// services' player (`steno_services::clip_player`) also returns false
+    /// while a recording runs (`Playback::begin` refused).
     fn play(&self, clip: &Path) -> bool;
     fn stop(&self);
     fn playing(&self) -> Option<PathBuf>;
