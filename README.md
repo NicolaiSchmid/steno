@@ -98,8 +98,8 @@ Already running the Swift app, version 0.10 or earlier? Install nothing. It offe
 as an update within a week (the rollout is phased; *Check for Updates* gets it at once) and
 installs it at the same path. macOS then asks once more for Steno's permissions, and for
 the login keychain password once per stored secret (choose *Always Allow*). Installed with
-Nix, it still shows the offer but cannot install it; update through Nix instead (Nix
-details below).
+Nix, it still shows the offer but cannot install it; update it as the Nix details below
+say.
 
 <details>
 <summary><b>Homebrew details: tap, release candidates, nix-darwin</b></summary>
@@ -126,19 +126,21 @@ homebrew.casks = [ "nicolaischmid/tap/steno" ];
 On `aarch64-darwin`, `flake.nix` installs the released `Steno.app` unchanged (no rebuild,
 no re-signing).
 
-With nix-darwin, add the flake as an input and put `steno.packages.aarch64-darwin.steno`
-in `environment.systemPackages`; nix-darwin copies `Applications/Steno.app` into
+Add the flake as an input, `inputs.steno.url = "github:NicolaiSchmid/steno";`, on the
+main branch, not a tag: a release tag's own `flake.nix` still pins the release before it.
+With nix-darwin, put `steno.packages.aarch64-darwin.steno` in
+`environment.systemPackages`; nix-darwin copies `Applications/Steno.app` into
 `/Applications/Nix Apps`. With Home Manager, use `home.packages`; from state version
 25.11 (`home.stateVersion`) it copies the app into `~/Applications/Home Manager Apps`,
 and with an earlier state version turn on `targets.darwin.copyApps` or link the app
 yourself. `nix run` does not apply: the output is an app bundle with no `bin/`.
 
-Steno installed from the flake does not offer updates. Running from the Nix store,
+From 0.11.0, a Nix install does not offer updates. Running from the Nix store,
 `/Applications/Nix Apps` or `~/Applications/Home Manager Apps`, it leaves them to Nix, and
 Settings > General says "Updates come from your package manager." A copy in a folder you
 set with Home Manager's `targets.darwin.copyApps.directory` still offers updates, and the
 next switch undoes them. To update, run `nix flake update <input>` for the input that pins
-Steno and rebuild; for a `nix profile` install, run `nix profile upgrade steno`. In a
+Steno and switch again; for a `nix profile` install, run `nix profile upgrade steno`. In a
 checkout of this repository, bump `release.version` and `release.hash` at the top of
 `flake.nix` instead (the release workflow prints both in its job summary).
 
@@ -246,11 +248,12 @@ The module installs Steno, starts it with your graphical session (one that reach
 opens the phone's port and mDNS in the firewall, and turns on PipeWire and, unless another
 Secret Service or SSH agent runs, GNOME Keyring for Steno's secrets.
 
-Log out and in once after the first switch. The in-app updater stays off; to update, move
-the input to the new tag and switch again. Without the module,
+Log out and in once after the first switch. To update, move the input to the new tag and
+switch again. Without the module,
 `nix profile install github:NicolaiSchmid/steno/v<version>#steno` installs the app alone.
-Since it pins the tag, `nix profile upgrade` changes nothing: run
-`nix profile remove steno`, then the same install line with the new tag.
+Since it pins the tag, `nix profile upgrade steno` changes nothing: run
+`nix profile remove steno`, then the same install line with the new tag. Either way the
+in-app updater stays off.
 
 Under Hyprland, the recording bubble and the meeting prompt need window rules. The
 desktop README's [Hyprland](apps/desktop/README.md#hyprland) section has them and says
