@@ -1593,16 +1593,19 @@ Each lands before `0.11.0-rc.1`.
 
        Between runs the join concatenates, drops one copy of a word both
        sides kept (the seam rule below), and a gap's run that begins inside
-       a word drops the pieces that continue it when a chunk kept a token
-       before the run's first window, as before the partition.
+       a word drops the pieces that continue it when any chunk, before the
+       run or after it, kept a token that starts before the run's first
+       window, as before the partition.
     5. On the differential test's layouts and fakes, deaf window edges
        included, every word the merge before the partition keeps, this one
        keeps, with its pieces and its boundaries, at least once: a word of
-       this one may hold more pieces only where the merge before kept none
-       of them there (a copy of a piece it kept elsewhere, or a piece of a
-       word it dropped, with no chunk between). A duplicate is allowed, a
-       loss never, and the two glue limits below are text only. This is
-       measured, not proved: the test below is its gate.
+       this one may hold more pieces than that word only as the merge before
+       glued them after it, or, with no chunk's owned span starting or
+       ending between the word's start and the piece, as a copy of a piece
+       it kept elsewhere or a piece of a word it dropped. A duplicate is
+       allowed, a loss never, and the two glue limits below are text only.
+       This is measured, not proved: the test below is its gate, and its
+       exemptions are one closed table.
   - Which test checks which clause:
     - clauses 1 to 3, and the reach of every span (a gap's window's is the
       window; a chunk's is its window ± the overlap, on the frame grid and
@@ -1630,11 +1633,27 @@ Each lands before `0.11.0-rc.1`.
       the old merge kept is lost, and no word of its text loses its
       boundaries: each word of the old merge's text that begins at a word
       start comes out from that start with each of its pieces in order,
-      and any other piece of that word is a copy of a piece the old merge
-      kept, or a piece of a word it dropped with no chunk's owned span
-      between (so the rest of a word glued across a chunk, two of its words
-      joined, or a full stop moved onto another word fails). Where the fake
-      hears every frame, it also checks that every word a gap's window or
+      and any other piece of that word is one the old merge glued after the
+      same word, or, with no chunk's owned span starting or ending between
+      it and the word's start, a copy of a piece the old merge kept or a
+      piece of a word it dropped (so the rest of a word glued across a
+      chunk, a copy or not, two of its words joined, or a full stop moved
+      onto another word fails). The check's exemptions are one closed
+      table in `ref_losses`, each with its limit or the fake's artefact
+      behind it and the test that pins it: the old merge's own glue, limits
+      E and (ii), the fake's repeat artefact (a window that heard a word
+      swallows the repeats after it, which the old merge's text shows too),
+      E at its exact signature (case 855 below), the old merge's
+      text-leading orphan (asked for alone, after a word it dropped, or
+      after a copy), and pieces compared by placed word and id. A text-only
+      glue shape found later becomes a named limit whose count the gate
+      reports and caps at its value on the CI seed; a lost word or piece
+      always fails. The check has its own test
+      (`the_boundary_check_fails_each_planted_glue_and_passes_each_limit`):
+      planted texts fail it for both earlier forms of the drain below (the
+      rest of a word glued onto the word before an empty chunk) and for
+      three more glues, and limit E, case 855 and an (ii) glue pass. Where
+      the fake hears every frame, it also checks that every word a gap's window or
       an accepted recovery heard in its reach comes out, orphans aside;
       that check can fire on a word both merges drop, as a run's LCS can
       (over the deaf fake it does, and at a jitter of three frames on new
@@ -1681,7 +1700,10 @@ Each lands before `0.11.0-rc.1`.
       And a gap's run after a chunk that kept nothing, whose first window
       begins on the rest of a word that chunk missed, once glued that rest
       onto the last word before the chunk
-      (`a_gaps_run_after_a_chunk_that_kept_nothing_drops_the_rest_of_a_word_it_begins_in`).
+      (`a_gaps_run_after_a_chunk_that_kept_nothing_drops_the_rest_of_a_word_it_begins_in`),
+      and the same when only a recovery after the gap kept the word whole
+      from its start, before the run
+      (`a_gaps_run_drops_the_rest_of_a_word_a_later_recovery_kept_from_its_start`).
       Two more are unit tests of `own` and the join: a word whose first
       piece lies before a recovery's reach and whose rest inside it; the
       lone later piece a gap's window begins with when no chunk kept a token
@@ -1700,8 +1722,10 @@ Each lands before `0.11.0-rc.1`.
     heard twice, and the copy with fewer pieces falls away (on a tie the gap
     window's), so a chunk's copy can give way to the window's; copies more
     than two frames apart, whichever comes first, both stay. A gap's run
-    that begins inside a word drops the pieces that continue it when a chunk
-    kept a token before the run's first window. It replaces `Seam::fit`. `splice_gaps`, `Seam`,
+    that begins inside a word drops the pieces that continue it when any
+    chunk, before the run or after it, kept a token that starts before the
+    run's first window, as before the partition (`Seam::fit`'s `at > 0`).
+    It replaces `Seam::fit`. `splice_gaps`, `Seam`,
     `keep_chunk_and_overlap`, `gap_windows` and the decode jobs are deleted.
   - Gates, met: CoreML replays identically. One CoreML run per set at main
     (0dd22ccaf) with a measurement-only dump of every decode (the window,
@@ -1752,15 +1776,22 @@ Each lands before `0.11.0-rc.1`.
       "s25 w14", or ". w14. w14" for ". w14", a full stop after the wrong
       word). The rest lies in the recovery's reach, so `own` keeps it, and
       its tokens step back into the gap's window, after the gap's last
-      word; the word it joins comes out on its own as well, so the glued
-      word is a copy. Seen only where a window misses a word's start (the
-      deaf fake) or the recording cuts a word off: 6 in 100,000 cases at
-      cycle 4's testing.
+      word, with no chunk's owned span starting or ending between; the
+      word it joins comes out on its own as well, so the glued word is a
+      copy. Seen only where a window misses a word's start (the deaf fake)
+      or the recording cuts a word off: 6 in 100,000 of the new-seed cases.
       `a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_the_word_before_it`
       and `a_recovery_that_begins_at_an_orphan_can_glue_it_onto_the_word_before_it`
-      pin today's text.
+      pin today's text. Where the recovery begins at an orphan that is the
+      only copy of a word's end (its full stop), the word comes out without
+      it, and the stop after a copy of the word before
+      (`a_recovery_that_begins_at_an_orphan_can_glue_the_end_of_a_word_onto_the_word_before_it`,
+      case 855 of seed 0x3ec9e6e5fd29f060, a window deaf at its end). The
+      test accepts that only at this exact signature and counts it apart
+      (`Tally::led`): once in about 285,000 new-seed cases.
     - (ii): the partition keeps an orphan word the merge before it (main's)
-      dropped, glued to the word before it: keep over drop, as #263 chose.
+      dropped, glued to the word before it where no chunk's owned span
+      starts or ends between them: keep over drop, as #263 chose.
       `own` keeps a word that trim cut at a full stop inside it, and the
       seam rule keeps the copy with more pieces.
     The test's count of longer words the boundaries allow, both limits and
