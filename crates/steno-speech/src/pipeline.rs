@@ -1,11 +1,12 @@
 //! The pipeline above the tensors, in order: VAD regions, the partition of
 //! the recording into owned spans ([`partition`]: the pause-aligned chunks
-//! and, when [`ChunkerConfig::decode_gaps`] is on, extra windows over the
-//! audio no chunk covers), one decode per span with the empty-decode
-//! recovery for a chunk, the spans' words joined in order, pieces to words
-//! to segments, and the language tag. A chunk is a range the layout chose;
-//! a window is the range actually decoded: the chunk itself or, after a
-//! recovery, the chunk with more audio around it, or an extra window.
+//! and extra windows over the audio no chunk covers, in the gaps
+//! [`ChunkerConfig::decode_gaps`] names), one decode per span with the
+//! empty-decode recovery for a chunk, the spans' words joined in order,
+//! pieces to words to segments, and the language tag. A chunk is a range
+//! the layout chose; a window is the range actually decoded: the chunk
+//! itself or, after a recovery, the chunk with more audio around it, or an
+//! extra window.
 //!
 //! The spans' decodes are joined by runs (`join`). A run is the
 //! consecutive spans of one kind: the chunks between two gaps' windows, or
@@ -52,6 +53,15 @@ pub struct RecoveryConfig {
     pub min_words_per_speech_second: f32,
     /// Seconds added before and after the chunk, tried in order.
     pub extensions_seconds: Vec<(f32, f32)>,
+    /// With [`ChunkerConfig::from_start`], the first chunk is also judged
+    /// on the window it had without it, from `pad_seconds` before the
+    /// first speech, when it ends at an undecoded gap: if that window looks
+    /// empty, the recovery it had runs too, and the chunk keeps its own
+    /// decode and gains the words only the recovery heard. Without it, a
+    /// first chunk that the earlier start made long enough to decode never
+    /// tries the recovery that kept the words in the skipped pause after
+    /// it. Off by default.
+    pub first_chunk_as_before: bool,
 }
 
 impl Default for RecoveryConfig {
@@ -60,6 +70,7 @@ impl Default for RecoveryConfig {
             min_speech_seconds: 3.0,
             min_words_per_speech_second: 0.4,
             extensions_seconds: vec![(0.0, 6.0), (6.0, 6.0), (6.0, 12.0)],
+            first_chunk_as_before: false,
         }
     }
 }
@@ -442,7 +453,9 @@ struct ChunkDecoder<'a, B: ?Sized> {
 
 impl<B: SpeechBackend + ?Sized> ChunkDecoder<'_, B> {
     /// The span's tokens: an extra window's whole decode; a chunk's,
-    /// recovered when the first decode looks empty.
+    /// recovered when the first decode looks empty, and the first chunk's
+    /// also when its window as before looks empty
+    /// ([`RecoveryConfig::first_chunk_as_before`]).
     fn decode_span(
         &mut self,
         samples: &[f32],
@@ -450,11 +463,125 @@ impl<B: SpeechBackend + ?Sized> ChunkDecoder<'_, B> {
         speech: &[Range<usize>],
         stats: &mut DecodeStats,
     ) -> Result<Decoded, SpeechError> {
-        let tokens = self.decode_range(samples, span.window.clone(), stats)?;
+        let mut tokens = self.decode_range(samples, span.window.clone(), stats)?;
         let window = span.window.clone();
+        let judged = self.judged_as_before(span, speech);
         if span.chunk && self.looks_empty(&tokens, speech, &window) {
-            return self.recover(samples, span, tokens, stats);
+            let recovered = self.recover(samples, span, tokens, stats)?;
+            // An accepted recovery stands; one that found nothing better
+            // falls through to the judgment as before.
+            if recovered.window != window || judged.is_none() {
+                return Ok(recovered);
+            }
+            tokens = recovered.tokens;
         }
+        if let Some(judged) = judged {
+            let before = self.decode_range(samples, judged.clone(), stats)?;
+            if self.looks_empty(&before, speech, &judged) {
+                return self.recover_as_before(samples, span, &judged, &before, tokens, stats);
+            }
+        }
+        Ok(Decoded { tokens, window })
+    }
+
+    /// The window the first chunk had without
+    /// [`ChunkerConfig::from_start`], from `pad_seconds` before the first
+    /// speech to the chunk's end, when [`RecoveryConfig::first_chunk_as_before`]
+    /// is on, the chunk ends at an undecoded gap (the audio past its end is
+    /// no other window's), and that window differs and holds enough speech
+    /// to be judged.
+    fn judged_as_before(&self, span: &Span, speech: &[Range<usize>]) -> Option<Range<usize>> {
+        let config = self.config;
+        if !(config.recovery.first_chunk_as_before
+            && config.chunker.from_start
+            && span.chunk
+            && span.window.start == 0
+            && span.owned.end > span.window.end)
+        {
+            return None;
+        }
+        let start = speech
+            .first()?
+            .start
+            .saturating_sub(sample_count(config.chunker.pad_seconds));
+        let judged = start..span.window.end;
+        (start > 0
+            && start < span.window.end
+            && speech_inside(speech, &judged) >= config.recovery.min_speech_seconds)
+            .then_some(judged)
+    }
+
+    /// The recovery the first chunk had without
+    /// [`ChunkerConfig::from_start`]: decided and scored on `judged`
+    /// against its decode `before`, over the chunk's own window extended
+    /// (from 0, so the lead-in stays decoded). An accepted candidate does
+    /// not replace the chunk's decode `own_tokens`: the chunk keeps it and
+    /// gains each whole word of the candidate's in the span's reach, before
+    /// the next window (the undecoded gap's far edge), that its own decode
+    /// lacks (no word of it starts with the same piece within 8 frames),
+    /// each at the word boundary its start sorts to.
+    fn recover_as_before(
+        &mut self,
+        samples: &[f32],
+        span: &Span,
+        judged: &Range<usize>,
+        before: &[Token],
+        own_tokens: Vec<Token>,
+        stats: &mut DecodeStats,
+    ) -> Result<Decoded, SpeechError> {
+        let config = self.config;
+        let max = sample_count(config.chunker.max_seconds);
+        let range = &span.window;
+        let mut best: Option<(Vec<Token>, usize, Range<usize>)> = None;
+        let mut tried: Vec<Range<usize>> = Vec::new();
+        for &(ahead, after) in &config.recovery.extensions_seconds {
+            let start = range.start.saturating_sub(sample_count(ahead));
+            let end = (range.end + sample_count(after)).min(samples.len());
+            if end - start > max || *range == (start..end) || tried.contains(&(start..end)) {
+                continue;
+            }
+            tried.push(start..end);
+            stats.recoveries_tried += 1;
+            let candidate = self.decode_range(samples, start..end, stats)?;
+            let words = self.words_inside(&candidate, judged);
+            let floor = best
+                .as_ref()
+                .map_or_else(|| self.words_inside(before, judged), |b| b.1);
+            if words > floor {
+                best = Some((candidate, words, start..end));
+            }
+        }
+        let Some((candidate, _, window)) = best else {
+            return Ok(Decoded {
+                tokens: own_tokens,
+                window: range.clone(),
+            });
+        };
+        stats.recoveries_accepted += 1;
+        let next = 2 * span.owned.end - range.end;
+        let vocab = self.vocab;
+        let begins = |t: &Token| starts_word(vocab.piece(t.id));
+        let have: Vec<(u32, usize)> = own_tokens
+            .iter()
+            .filter(|t| begins(t))
+            .map(|t| (t.id, t.frame))
+            .collect();
+        let mut words: Vec<Vec<Token>> = own_tokens
+            .chunk_by(|_, t| !begins(t))
+            .map(<[Token]>::to_vec)
+            .collect();
+        let kept = own(&candidate, &span.reach, vocab);
+        for word in kept.chunk_by(|_, t| !begins(t)) {
+            let first = &word[0];
+            let known = have
+                .iter()
+                .any(|&(id, frame)| id == first.id && frame.abs_diff(first.frame) <= 8);
+            if begins(first) && first.sample() < next && !known {
+                words.push(word.to_vec());
+            }
+        }
+        words.sort_by_key(|w| w[0].sample());
+        let tokens = words.into_iter().flatten().collect();
         Ok(Decoded { tokens, window })
     }
 
@@ -758,7 +885,7 @@ mod tests {
 
     use super::fake::{FrameTokenBackend, audio};
     use super::*;
-    use crate::chunker::{Cut, layout};
+    use crate::chunker::{Cut, Gaps, layout};
     use crate::language::StopwordRecognizer;
     use crate::vad::{EnergyVad, VadConfig};
 
@@ -1085,16 +1212,9 @@ mod tests {
     /// 16), and the quiet words of `more`, `(piece, seconds)`; the chunks
     /// skip the pause as a long one.
     fn quiet_stretches(
-        decode_gaps: bool,
+        config: PipelineConfig,
         more: &[(u32, f32)],
     ) -> (Transcriber<FrameTokenBackend>, Vec<f32>) {
-        let config = PipelineConfig {
-            chunker: ChunkerConfig {
-                decode_gaps,
-                ..ChunkerConfig::default()
-            },
-            ..PipelineConfig::default()
-        };
         let mut samples = vec![0.0f32; 36 * SAMPLE_RATE];
         for (piece, at) in [
             (1, 0.5),
@@ -1141,7 +1261,7 @@ mod tests {
         PipelineConfig {
             chunker: ChunkerConfig {
                 max_seconds,
-                decode_gaps: true,
+                decode_gaps: Gaps::All,
                 ..ChunkerConfig::default()
             },
             ..PipelineConfig::default()
@@ -1749,11 +1869,11 @@ mod tests {
 
     #[test]
     fn extra_windows_decode_the_lead_in_the_skipped_pauses_and_the_tail() {
-        let (mut t, samples) = quiet_stretches(false, &[]);
+        let (mut t, samples) = quiet_stretches(PipelineConfig::default(), &[]);
         let skipped = t.transcribe(&samples, None).unwrap();
         assert_eq!(skipped.text(), "w11 w12 w13 w14 w15 w16");
         assert!(windows(&skipped, false).is_empty());
-        let (mut t, samples) = quiet_stretches(true, &[]);
+        let (mut t, samples) = quiet_stretches(gaps_on(60.0), &[]);
         let transcript = t.transcribe(&samples, None).unwrap();
         assert_eq!(windows(&transcript, true), windows(&skipped, true));
         assert_eq!(transcript.text(), "w1 w11 w12 w13 w2 w14 w15 w16 w3");
@@ -1774,8 +1894,63 @@ mod tests {
         for (at, seconds) in [(0.3, 1.0), (13.8, 1.0), (32.8, 1.0)] {
             silent[sample_count(at)..sample_count(at + seconds)].fill(0.0);
         }
-        let (mut t, _) = quiet_stretches(true, &[]);
+        let (mut t, _) = quiet_stretches(gaps_on(60.0), &[]);
         assert_eq!(t.transcribe(&silent, None).unwrap().text(), skipped.text());
+    }
+
+    #[test]
+    fn the_onnx_engines_settings_decode_the_lead_in_and_the_tail_and_skip_the_long_pause() {
+        // The first chunk starts at 0 and hears the quiet lead-in, the
+        // tail's window hears the quiet tail, and the skipped pause stays
+        // skipped.
+        let (mut t, samples) = quiet_stretches(crate::engine::pipeline_config(), &[]);
+        let transcript = t.transcribe(&samples, None).unwrap();
+        assert_eq!(transcript.text(), "w1 w11 w12 w13 w14 w15 w16 w3");
+        assert_eq!(transcript.spans[0].window.start, 0);
+        let extra = windows(&transcript, false);
+        assert_eq!(extra.len(), 1, "{:?}", transcript.spans);
+        assert_eq!(extra[0].end, samples.len());
+    }
+
+    #[test]
+    fn the_first_chunk_judged_as_before_keeps_a_word_in_the_skipped_pause_after_it() {
+        // Speech at 2.3 to 10.7 s and 24.4 to 32.2 s, a word at 12.56 s in
+        // the skipped pause between, and windows under 130 frames decode
+        // to silence. Without the earlier start the first chunk, 2.05 to
+        // 10.95 s, is too short, and its recovery to 16.95 s keeps the
+        // word in its reach. From 0 the chunk is long enough, decodes,
+        // and nothing tries that recovery, unless the chunk is judged on
+        // its window as before.
+        let regions = [2.3..10.7, 24.4..32.2].map(|r| sample_count(r.start)..sample_count(r.end));
+        let mut samples = vec![0.0f32; sample_count(32.2)];
+        for (piece, at) in [
+            (1, 3.0),
+            (2, 5.0),
+            (3, 7.0),
+            (4, 9.0),
+            (5, 12.56),
+            (6, 25.0),
+            (7, 27.0),
+            (8, 29.0),
+            (9, 31.0),
+        ] {
+            put(&mut samples, piece, at, 3);
+        }
+        let transcribe = |config: PipelineConfig| {
+            let mut t = transcriber(config, 130);
+            t.vad = Box::new(FixedVad(regions.to_vec()));
+            t.transcribe(&samples, None).unwrap()
+        };
+        let all = "w1 w2 w3 w4 w5 w6 w7 w8 w9";
+        assert_eq!(transcribe(PipelineConfig::default()).text(), all);
+        let mut from_start = crate::engine::pipeline_config();
+        from_start.recovery.first_chunk_as_before = false;
+        let lost = transcribe(from_start);
+        assert_eq!(lost.spans[0].window, 0..sample_count(10.95));
+        assert_eq!(lost.text(), "w1 w2 w3 w4 w6 w7 w8 w9");
+        let kept = transcribe(crate::engine::pipeline_config());
+        assert_eq!(kept.text(), all);
+        assert_eq!(kept.windows[0], 0..sample_count(16.95));
     }
 
     #[test]
@@ -1787,10 +1962,10 @@ mod tests {
         // two frames from the chunk's and falls away; its word 5 starts
         // 0.22 s before the chunk's, so both copies stay.
         let more = [(4, 7.52), (5, 20.56)];
-        let (mut t, samples) = quiet_stretches(false, &more);
+        let (mut t, samples) = quiet_stretches(PipelineConfig::default(), &more);
         let chunked = t.transcribe(&samples, None).unwrap();
         assert_eq!(chunked.text(), "w11 w12 w13 w4 w5 w14 w15 w16");
-        let (mut t, samples) = quiet_stretches(true, &more);
+        let (mut t, samples) = quiet_stretches(gaps_on(60.0), &more);
         let transcript = t.transcribe(&samples, None).unwrap();
         assert_eq!(windows(&transcript, true), windows(&chunked, true));
         assert_eq!(
@@ -1902,7 +2077,7 @@ mod tests {
                 search_seconds,
                 long_pause_seconds,
                 max_seconds,
-                decode_gaps,
+                decode_gaps: if decode_gaps { Gaps::All } else { Gaps::None },
                 ..ChunkerConfig::default()
             },
             ..PipelineConfig::default()

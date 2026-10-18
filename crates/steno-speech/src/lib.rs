@@ -33,7 +33,8 @@
 //!   resumable download, and [`Install`], whether a missing file may be
 //!   downloaded.
 //! - [`engine`]: [`OnnxSpeechEngine`], the in-process `SpeechEngine` the
-//!   sidecar hosts.
+//!   sidecar hosts, and its settings
+//!   ([`pipeline_config`](engine::pipeline_config)).
 //! - [`sidecar`]: [`SidecarSpeechEngine`], the `SpeechEngine` over the
 //!   `steno-speech-sidecar` child process, and its wire protocol, and the
 //!   process-wide switch-off of `DirectML` after a child crashed, hung or
@@ -134,7 +135,7 @@ pub use backend::{
     DecoderState, DecoderStep, EncoderOutput, FRAME_SAMPLES, FRAME_SECONDS, Features,
     JointDecision, ModelShape, SAMPLE_RATE, SpeechBackend, sample_count, split_logits,
 };
-pub use chunker::{Chunk, ChunkerConfig, Cut};
+pub use chunker::{Chunk, ChunkerConfig, Cut, Gaps};
 pub use decoder::{DecodeStats, DecoderConfig, Token, confidence};
 pub use engine::{OnnxSpeechEngine, PARAKEET_V3_ID, PARAKEET_V3_LANGUAGES};
 pub use error::{SidecarError, SpeechError};

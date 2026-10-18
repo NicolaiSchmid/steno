@@ -20,7 +20,7 @@ use steno_core::{
     AudioBuffer16k, BoundaryResult, LanguageTag, RawSegment, SpeechEngine, StenoPaths, async_trait,
 };
 use steno_speech::{
-    AdaptiveEnergyVad, ChunkerConfig, LanguageTagger, PARAKEET_V3_ID, PARAKEET_V3_LANGUAGES,
+    AdaptiveEnergyVad, ChunkerConfig, Gaps, LanguageTagger, PARAKEET_V3_ID, PARAKEET_V3_LANGUAGES,
     PipelineConfig, Transcriber, Transcript, VadConfig,
 };
 
@@ -74,7 +74,7 @@ pub fn pipeline_config() -> PipelineConfig {
         chunker: ChunkerConfig {
             max_seconds,
             long_pause_seconds: f32::INFINITY,
-            decode_gaps: true,
+            decode_gaps: Gaps::All,
             ..ChunkerConfig::default()
         },
         ..PipelineConfig::default()
@@ -296,13 +296,13 @@ mod tests {
             steno_speech::sample_count(config.chunker.max_seconds),
             MAX_WINDOW_SAMPLES
         );
-        assert!(config.chunker.decode_gaps);
+        assert_eq!(config.chunker.decode_gaps, Gaps::All);
         assert_eq!(config.chunker.long_pause_seconds, f32::INFINITY);
         let rest = PipelineConfig {
             chunker: ChunkerConfig {
                 max_seconds: config.chunker.max_seconds,
                 long_pause_seconds: f32::INFINITY,
-                decode_gaps: true,
+                decode_gaps: Gaps::All,
                 ..ChunkerConfig::default()
             },
             ..PipelineConfig::default()

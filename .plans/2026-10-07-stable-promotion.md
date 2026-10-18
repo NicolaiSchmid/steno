@@ -477,7 +477,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
 | A16a | The owned-span partition (Nicolai's decision 3, 2026-10-15): the recording split once into disjoint owned spans, the consecutive spans of one kind merged by the LCS as before, a gap's window keeping its whole decode and an accepted recovery what it kept before; CoreML replays identically on FLEURS, the corpus, the meeting and the crafted cases, ONNX stays byte-identical on FLEURS, and no word the old merge kept is lost on 1,500 random layouts with recovery on, half of them over a fake deaf at window edges | audio (#310) |
-| A16b | The ONNX engine's extra windows on the partition: FLEURS at or below 4.882 %, the corpus not worse, no word added where Swift has none and none from silence or room noise, at most +15 % runtime; else the measured lead/tail switch | audio, after A16a |
+| A16b | The ONNX engine's lead-in and tail: the extra windows over every gap missed all four gates on ONNX (FLEURS 5.198 %, the corpus 9.916 %, words where Swift has none, +27 to +41 % runtime), so the lead/tail switch: the first chunk from the recording's start and the tail's extra windows on the partition, the long-pause skip kept, and the first chunk also judged as before (option 2) so a short first chunk's recovery still keeps the words in the pause after it; FLEURS 4.865 % from 4.882 %, the corpus 9.735 % from 9.814 %, no word added where Swift has none, none from silence or room noise, +3.6 % runtime on the meeting | audio (#317) |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured (it aborts on Linux, not on the Mac); every read of a recording marked durably, the in-process CoreML stage included; a recording whose read ended with the app read once more, and quarantined the second time in a row ("Steno stopped while reading this recording") with the file kept and Process again offered; the allocations bounded by a walk of the boxes, chunks and tables before symphonia opens a file, its reader the one the file's first bytes name (MP4, CAF or WAV) and opened where the walk began, any other kind of file refused plainly; kill tests for one kill and for two | audio (#298) |
 | A18 | A capture thread that misses cycles never loses audio silently: on PipeWire, Core Audio and WASAPI the missed frames are written as silence on every lane (past a second only counted), counted in the statistics and in the note about missing audio; PipeWire's data-loop thread without real-time scheduling is a warning | audio (#297) |
 | A19 | No in-process speech beside a live recording, and the speech sidecar after a CoreML abort: a job waits to load or run CoreML while a recording starts, runs or stops ("Waiting for the recording to finish"); a warm-up mark or a CoreML reading mark left by a crash turns the speech sidecar on in CoreML's place, durably, until the user turns the Neural Engine back on in Settings ("Use again"), the meeting waiting for the sidecar's models with "Neural Engine off after a crash: download the speech models in Settings"; kill tests for a load killed in a job and in a warm-up | audio |
@@ -1548,7 +1548,7 @@ Each lands before `0.11.0-rc.1`.
     build reads the mark, and a load whose diarizer then fails clears it
     too.
   - Owner: audio. It blocks stable (D3).
-- **A16 Owned spans, then extra windows for the ONNX engine.** Nicolai's
+- **A16 Owned spans, then the ONNX engine's lead-in and tail.** Nicolai's
   decision 3 (2026-10-15, after #263): the recording is split once into
   owned spans, each decode keeps the words that start in its own span, and
   recovery widens only the decoded window. Refined on 2026-10-17 (the
@@ -1984,14 +1984,95 @@ Each lands before `0.11.0-rc.1`.
     each time. `a_word_where_a_gaps_window_meets_a_recovered_chunk_comes_out`
     places one at a recovered chunk's edge, both sides: once, or twice where
     the copies start more than two frames apart.
-  - **A16b Extra windows for the ONNX engine** (after A16a merges).
-    `decode_gaps` on for the ONNX engine, the long-pause skip kept for the
-    cuts. Gates, against ONNX's own numbers: FLEURS German `cat/` at or below
-    4.882 % mean WER; the corpus not worse; no word added where the Swift
-    transcripts have none, and none from silence or room noise; at most
-    +15 % runtime. If it misses them, the measured lead/tail switch instead
-    (the lead-in and the tail only, the long-pause skip kept; measured at
-    FLEURS 4.865 % and corpus 9.794 %, no runtime cost).
+  - **A16b The lead-in and the tail for the ONNX engine** (#317). The plan
+    was `decode_gaps` on for the ONNX engine, the long-pause skip kept for
+    the cuts, with the gates against ONNX's own numbers: FLEURS German `cat/`
+    at or below 4.882 % mean WER; the corpus not worse; no word added where
+    the Swift transcripts have none, and none from silence or room noise;
+    at most +15 % runtime; else the measured lead/tail switch.
+    - The extra windows over every gap missed all four, so the engine takes
+      the lead/tail switch, as the entry planned: the first chunk starts at
+      the recording's start (`ChunkerConfig::from_start`), so the lead-in is
+      decoded with the speech after it, and the tail is decoded in extra
+      windows on the partition (`ChunkerConfig::decode_gaps`, now
+      `Gaps { None, Tail, All }`; `Gaps::Tail` decodes no window when there
+      is no chunk). The long pauses stay skipped.
+      `steno_speech::engine::pipeline_config` holds the engine's settings;
+      the `CoreML` engine keeps `Gaps::All`. #263's switch also stopped a
+      chunk's start from snapping forward inside a pause; that part stays
+      out: it scored the corpus worse (9.794 % against 9.735 %) and changed
+      no FLEURS word.
+    - Option 2 (Nicolai, 2026-10-18): on the differential's fake the switch
+      lost 157 real words against main in 3.2 % of the cases, in a skipped
+      pause past a short first chunk whose recovery main ran and the chunk
+      from 0 no longer did (limit (b)). With
+      `RecoveryConfig::first_chunk_as_before`, on in the ONNX engine's
+      settings only, the first chunk under `from_start` that ends at an
+      undecoded gap is also judged on its old window (from `pad_seconds`
+      before the first speech); if that looks empty, main's recovery runs
+      over the chunk's window extended from 0, and the chunk keeps its own
+      decode and gains the whole words only the recovery heard before the
+      next window. 134 of the 157 come back (all 26 over the exact fake),
+      0 words are lost against the switch, and FLEURS, the corpus and the
+      meeting give the same text (no recovery fires there) at one more
+      decode of the first chunk per lane: +3.6 % on the meeting against
+      main (8 pairs, Forge at load 14 to 32). The 23 left are deaf or
+      jitter cases, where the fake keys on the window's length.
+    - Measured at main (bec97e8f7) with one probe binary whose settings
+      switch at run time, FLEURS on atlas (ONNX threads 4), the corpus and
+      the meeting on Forge, the same files as A16a's gates (FLEURS German
+      `cat/` mean WER, the corpus' mean per-file WER against the Swift
+      transcripts, words added where Swift has none counted against the
+      run at main's settings with 0.5 s of slack):
+
+      | Settings | FLEURS (S/D/I) | Corpus | Added where Swift has none (corpus, FLEURS) | Cost |
+      |---|---:|---:|---:|---:|
+      | main: no gap decoded | 4.882 % (237/40/41) | 9.814 % | | |
+      | every gap (`Gaps::All`) | 5.198 % (239/39/60) | 9.916 % | 2, 6 | +27 % FLEURS, +41 % the meeting |
+      | windows over the lead-in and the tail | 4.882 % | 9.814 % | | |
+      | the tail's windows only | 4.882 % | 9.814 % | | |
+      | the first chunk from the start only | 4.865 % (237/39/41) | 9.735 % | | |
+      | the switch (shipped): both | 4.865 % (237/39/41) | 9.735 % | 0, 0 | +1.8 % the meeting |
+      | the switch and no snap (#263's) | 4.865 % | 9.794 % | | |
+
+      The shipped settings add 11 words and drop 12 on the corpus, 6 and 4
+      on FLEURS, every added one within 0.5 s of a Swift word. The cost,
+      from 8 alternating pairs on the 15-minute meeting's two lanes on Forge
+      (load 3.5 to 8): +1.8 % over the seven pairs at load 3.5 to 5.3; the
+      eighth ran at load 6.5 to 8, both runs slow. The tail is decoded in
+      full, so ONNX's processing time grows with the length of the quiet
+      audio after the last speech: a tail costs about what the same length
+      of speech costs (+77 % and +99 % on two files with a 300 s tail of
+      quiet synthetic room noise, 0 words added); call recordings are
+      bounded by the auto-stop grace (90 s), an in-person recording left
+      running is not. The model-gated tests at the branch: FLEURS
+      4.865 %, and A9's 44.1 kHz bound holds (5.05 % against 5.40 % from
+      48 kHz).
+    - The crafted cases (`crates/steno-speech/tests/common/crafted.rs`, now
+      run by both engines' tests): a quiet lead-in keeps 15 words at -20
+      and -26 dB (12 and 0 before), a quiet tail 14 (none before); silence
+      and room noise add no word. Known limit: quiet speech the detector
+      misses inside a skipped long pause is still lost (the 6.65 s and
+      9.1 s gaps keep none at -20 and -26 dB, as before). A lane in which
+      the detector hears no speech is not decoded at all, as before. A
+      lead-in longer than a chunk is decoded only as far as the first chunk
+      reaches; the next chunk starts just before the speech, as before.
+      "Process again" on an older ONNX meeting transcribes it with these
+      settings, so its transcript can change.
+    - Recoveries, which A16a left to this item: FLEURS, the corpus and the
+      meeting try none. Over the two lanes of all seven calibration
+      meetings (10 hours) one lane tries 15 and accepts 1, the same at
+      main's settings, with every gap decoded and with the shipped ones; the
+      words of that chunk and 2 s either side are the same in all three,
+      none doubled and none out of order.
+    - The differential test runs the ONNX engine's settings on every
+      collision case of an even round and wherever the defaults ran without
+      extra windows; its frozen merge's gap windows read `Gaps::Tail`. At
+      the CI seed every count stays within its cap. Over 100,000 new-seed
+      cases at the ONNX engine's settings alone (1,592,460 words, 47,961
+      cases with an accepted recovery, half over the deaf fake): 0 words,
+      pieces or boundaries lost, the core 0, every named limit 0, 0.21 %
+      doubled.
   - Owner: audio.
 - **A17 No crash loop from a file that aborts the process.** Found by A14's
   testing (#280): symphonia sizes some allocations straight from file

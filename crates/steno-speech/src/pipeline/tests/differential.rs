@@ -1,7 +1,8 @@
 //! The differential test: the partition's merge against a frozen copy of
 //! the merge before it (`chunker::gap_windows`, `splice_gaps`, `Seam::fit`,
 //! `keep_chunk_and_overlap` and the recovery that scored on the chunk's
-//! frames, as of 2fbab03dd). The copy is not reused code, so the partition
+//! frames, as of 2fbab03dd; its gap windows read the tail-only setting of
+//! [`Gaps::Tail`] since). The copy is not reused code, so the partition
 //! can change under it; it gives the same tokens (id and sample) as that
 //! commit on the jitter-free cases. It checks clause 5 of the ownership
 //! invariant (A16a in `.plans/2026-10-07-stable-promotion.md`): every word
@@ -26,7 +27,7 @@ fn ref_gap_windows(
     chunks: &[crate::chunker::Chunk],
     config: &ChunkerConfig,
 ) -> Vec<Range<usize>> {
-    if !config.decode_gaps {
+    if config.decode_gaps == Gaps::None {
         return Vec::new();
     }
     let total = audio.len();
@@ -35,12 +36,14 @@ fn ref_gap_windows(
     let shortest = sample_count(crate::chunker::MIN_GAP_SECONDS);
     let mut windows = Vec::new();
     let mut covered = 0;
-    for next in chunks
+    for (i, next) in chunks
         .iter()
         .map(|c| c.range.clone())
         .chain(std::iter::once(total..total))
+        .enumerate()
     {
-        if next.start >= covered + shortest {
+        let tail = i == chunks.len() && i > 0;
+        if next.start >= covered + shortest && (config.decode_gaps == Gaps::All || tail) {
             ref_split(covered..next.start, max, overlap, &mut windows);
         }
         covered = covered.max(next.end);
@@ -1494,30 +1497,32 @@ struct Tally {
 }
 
 /// `cases` random layouts from `seed`, with recovery on: the first
-/// generator's words of one to three pieces, the old merge's random
-/// layout, its two-sided layout around a gap with recoveries reaching
-/// into it, the collision layout and the general one, on a third of its
-/// cases with orphans at every seam ([`ref_seam_layout`]), under the default
-/// settings, `CoreML`'s and two between, with the extra windows off and
-/// on, over the exact fake, one that moves tokens by `jitter` frames, and,
-/// on half the cases, one deaf at a window's edges (`DEAF`), as a model
-/// with little context there can be, so that two windows of a layout
-/// disagree about a word at every kind of seam. Every word the old merge
-/// kept comes out, with every piece the old merge gave it and its
-/// boundaries ([`ref_losses`]): a duplicate is allowed, a loss never, and a
-/// longer word only with extra pieces the boundaries allow (counted in
-/// [`Tally::glues`], beside the words limit E cuts, [`Tally::led`]). And,
-/// where the fake hears every frame, every word a gap's window or an
-/// accepted recovery heard in its reach comes out at least once (see
-/// `ref_losses` for that check and for a word that repeats the one before
-/// it).
+/// generator's words of one to three pieces, the old merge's random layout,
+/// its two-sided layout around a gap with recoveries reaching into it, the
+/// collision layout and the general one, on a third of its cases with orphans
+/// at every seam ([`ref_seam_layout`]), under the default settings,
+/// `CoreML`'s, two between and the ONNX engine's, with the extra windows off
+/// and on, over the exact fake, one that moves tokens by `jitter` frames,
+/// and, on half the cases, one deaf at a window's edges (`DEAF`), as a model
+/// with little context there can be, so that two windows of a layout disagree
+/// about a word at every kind of seam. Every word the old merge kept comes
+/// out, with every piece the old merge gave it and its boundaries
+/// ([`ref_losses`]): a duplicate is allowed, a loss never, and a longer word
+/// only with extra pieces the boundaries allow (counted in [`Tally::glues`],
+/// beside the words limit E cuts, [`Tally::led`]). And, where the fake hears
+/// every frame, every word a gap's window or an accepted recovery heard in
+/// its reach comes out at least once (see `ref_losses` for that check and for
+/// a word that repeats the one before it).
 fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
     let mut rng = Rng(seed);
     let mut tally = Tally::default();
     for case in 0..cases {
         let (kind, round) = (case % 5, case / 5);
-        let config = if kind == 3 && round.is_multiple_of(2) {
-            PipelineConfig::default()
+        // The ONNX engine's settings on every collision case of an even
+        // round and wherever the defaults would run without extra windows
+        // (every 16th round).
+        let config = if (kind == 3 && round.is_multiple_of(2)) || round.is_multiple_of(16) {
+            crate::engine::pipeline_config()
         } else {
             random_config(round, (round / 4) % 4 != 0)
         };

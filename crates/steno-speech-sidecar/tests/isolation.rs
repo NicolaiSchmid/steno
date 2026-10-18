@@ -25,7 +25,10 @@
 //!
 //! The fake engine needs no models; the last test, ignored by default,
 //! runs the real one and fails unless `STENO_MODELS_DIR` holds them
-//! (`cargo test -p steno-speech-sidecar --release -- --ignored`).
+//! (`cargo test -p steno-speech-sidecar --release -- --ignored`). With
+//! `STENO_FLEURS_DIR` it also compares the sidecar's transcripts with the
+//! in-process engine's, on a FLEURS clip and on a crafted quiet tail
+//! (`steno-speech`'s `tests/common/crafted.rs`, included by path).
 
 #![allow(
     clippy::cast_precision_loss,
@@ -35,6 +38,8 @@
 )]
 
 mod common;
+#[path = "../../steno-speech/tests/common/crafted.rs"]
+mod crafted;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -1013,7 +1018,7 @@ async fn the_engine_installs_its_models_on_first_use_and_outside_its_lock() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the models: STENO_MODELS_DIR, and STENO_FLEURS_DIR for the parity clip; run with -- --ignored"]
+#[ignore = "needs the models: STENO_MODELS_DIR, and STENO_FLEURS_DIR for the parity clips; run with -- --ignored"]
 async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
     // Run on purpose, so missing models fail it rather than pass it.
     let models_directory = ModelStore::environment_models_directory()
@@ -1046,26 +1051,39 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
             .unwrap()
             .is_empty()
     );
-    // With FLEURS at hand: the sidecar's transcript of a clip is the
-    // in-process engine's, segment for segment.
-    let clip = std::env::var_os("STENO_FLEURS_DIR")
-        .map(|dir| std::path::PathBuf::from(dir).join("cat/fleurs-de-cat-01.wav"));
-    if let Some(clip) = clip {
+    // With FLEURS at hand: the sidecar's transcript is the in-process
+    // engine's, segment for segment, so the sidecar runs the engine's
+    // settings: on a FLEURS clip, whose first chunk starts at the
+    // recording's start, and on a quiet tail only the tail's windows
+    // decode.
+    if let Some(dir) = std::env::var_os("STENO_FLEURS_DIR").map(std::path::PathBuf::from) {
+        let clip = dir.join("cat/fleurs-de-cat-01.wav");
         assert!(clip.is_file(), "STENO_FLEURS_DIR has no {}", clip.display());
-        let audio = AudioBuffer16k::new(steno_speech::wav::read_pcm16(&clip).unwrap());
-        let started = Instant::now();
-        let sidecar = engine.transcribe(&audio, None).await.unwrap();
-        let elapsed = started.elapsed();
+        let tail = crafted::quiet_cases(&dir)
+            .into_iter()
+            .map(|(_, _, case)| case)
+            .find(|case| case.name == "tail-26dB")
+            .expect("the quiet tail at -26 dB");
+        let fleurs = steno_speech::wav::read_pcm16(&clip).unwrap();
         let in_process = OnnxSpeechEngine::new(store, OnnxOptions::default());
-        let expected = in_process.transcribe(&audio, None).await.unwrap();
-        assert!(!sidecar.is_empty());
-        assert_eq!(sidecar, expected);
-        eprintln!(
-            "{:.0} s of FLEURS in {:.1} s through the sidecar, {} segments identical to in-process",
-            audio.duration(),
-            elapsed.as_secs_f64(),
-            sidecar.len()
-        );
+        for (name, samples) in [
+            ("FLEURS cat-01", fleurs),
+            ("the quiet tail at -26 dB", tail.samples),
+        ] {
+            let audio = AudioBuffer16k::new(samples);
+            let started = Instant::now();
+            let sidecar = engine.transcribe(&audio, None).await.unwrap();
+            let elapsed = started.elapsed();
+            let expected = in_process.transcribe(&audio, None).await.unwrap();
+            assert!(!sidecar.is_empty(), "{name}");
+            assert_eq!(sidecar, expected, "{name}");
+            eprintln!(
+                "{name}, {:.0} s, in {:.1} s through the sidecar: {} segments identical to in-process",
+                audio.duration(),
+                elapsed.as_secs_f64(),
+                sidecar.len()
+            );
+        }
     }
     assert!(engine.shut_down().await.unwrap().unwrap().success());
 }

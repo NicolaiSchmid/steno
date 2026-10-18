@@ -87,13 +87,13 @@ use std::time::Duration;
 use steno_core::{AudioBuffer16k, Embedding, LanguageTag, RawSegment, SpeakerCluster, TimeRange};
 use steno_diarize::models::ModelPaths;
 use steno_diarize::{DiarizerConfig, Pipeline};
+use steno_speech::engine::pipeline_config;
 use steno_speech::sidecar::FALLBACK_NOTICE;
 use steno_speech::sidecar::protocol::{
     self, DiarizedCluster, MAX_HEADER_BYTES, PROTOCOL_VERSION, Reply, Request,
 };
 use steno_speech::{
-    EncoderProvider, ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig,
-    Transcriber, VadConfig,
+    EncoderProvider, ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, Transcriber, VadConfig,
 };
 
 steno_core::string_enum! {
@@ -299,7 +299,7 @@ impl Engine for OnnxEngine {
                 OnnxSpeechEngine::load_installed(
                     &ModelStore::new(models_root),
                     options,
-                    PipelineConfig::default(),
+                    pipeline_config(),
                     VadConfig::default(),
                 )
                 .map_err(|e| e.to_string())?,

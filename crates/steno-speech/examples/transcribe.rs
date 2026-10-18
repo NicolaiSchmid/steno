@@ -30,9 +30,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use common::read_wav;
+use steno_speech::engine::pipeline_config;
 use steno_speech::{
-    DecodeStats, ModelStore, OnnxOptions, OnnxSpeechEngine, PipelineConfig, SAMPLE_RATE, VadConfig,
-    sample_count,
+    DecodeStats, ModelStore, OnnxOptions, OnnxSpeechEngine, SAMPLE_RATE, VadConfig, sample_count,
 };
 
 fn main() {
@@ -64,7 +64,7 @@ fn main() {
     let mut transcriber = OnnxSpeechEngine::open_transcriber(
         &ModelStore::from_environment(),
         &OnnxOptions::default(),
-        PipelineConfig::default(),
+        pipeline_config(),
         VadConfig::default(),
     )
     .unwrap_or_else(|e| panic!("{e}"));

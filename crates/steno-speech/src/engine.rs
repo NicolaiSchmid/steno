@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use steno_core::protocols::{BoundaryResult, async_trait};
 use steno_core::{AudioBuffer16k, LanguageTag, RawSegment, SpeechEngine};
 
+use crate::chunker::{ChunkerConfig, Gaps};
 use crate::error::SpeechError;
 use crate::language::LanguageTagger;
 use crate::model_store::{DownloadProgress, ModelAsset, ModelStore};
 use crate::onnx::{OnnxBackend, OnnxOptions};
-use crate::pipeline::{PipelineConfig, Transcriber};
+use crate::pipeline::{PipelineConfig, RecoveryConfig, Transcriber};
 use crate::vad::{SileroVad, VadConfig};
 
 /// The engine id of Parakeet TDT v3, whichever backend runs it: the
@@ -28,6 +29,47 @@ pub const PARAKEET_V3_LANGUAGES: [&str; 25] = [
     "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt",
     "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
 ];
+
+/// The shared pipeline's defaults with two chunker settings of the
+/// engine's own, measured on FLEURS German `cat/` and the calibration
+/// corpus (A16b in `.plans/2026-10-07-stable-promotion.md`):
+///
+/// - the first chunk starts at the recording's start
+///   ([`ChunkerConfig::from_start`]), so the lead-in is decoded with the
+///   speech after it: FLEURS 4.865 % mean WER against 4.882 % without, the
+///   corpus's mean WER against the Swift transcripts 9.735 % instead of
+///   9.814 %, and no word added where the Swift transcripts have none;
+/// - the tail is decoded in extra windows ([`Gaps::Tail`]) once it is at
+///   least [`MIN_GAP_SECONDS`](crate::chunker::MIN_GAP_SECONDS) long, so
+///   quiet speech after the last speech the detector hears comes through;
+///   FLEURS and the corpus are unchanged by it;
+/// - the first chunk is also judged as it was before it started at 0
+///   ([`RecoveryConfig::first_chunk_as_before`]), so a short first chunk's
+///   recovery still keeps the words in the skipped pause after it: on the
+///   fake backend 134 of the 157 such words the earlier start lost come
+///   back, while FLEURS, the corpus and a meeting give the same text (the
+///   judgment never fires there) at one more decode of the first chunk.
+///
+/// The long pauses stay skipped (`long_pause_seconds`, 3 s): extra windows
+/// over every gap ([`Gaps::All`], the `CoreML` engine's setting) inserted
+/// words there, 19 more on FLEURS (5.198 %) and some where the Swift
+/// transcripts have none, scored worse on the corpus (9.916 %) and cost
+/// +27 % on FLEURS and +41 % on a 15-minute meeting's two lanes.
+#[must_use]
+pub fn pipeline_config() -> PipelineConfig {
+    PipelineConfig {
+        chunker: ChunkerConfig {
+            decode_gaps: Gaps::Tail,
+            from_start: true,
+            ..ChunkerConfig::default()
+        },
+        recovery: RecoveryConfig {
+            first_chunk_as_before: true,
+            ..RecoveryConfig::default()
+        },
+        ..PipelineConfig::default()
+    }
+}
 
 /// Parakeet v3 on ONNX Runtime.
 pub struct OnnxSpeechEngine {
@@ -46,15 +88,11 @@ impl OnnxSpeechEngine {
     /// [`PARAKEET_V3_LANGUAGES`].
     pub const LANGUAGES: [&'static str; 25] = PARAKEET_V3_LANGUAGES;
 
-    /// An engine over `store`; nothing is loaded until `prepare`.
+    /// An engine over `store` with the engine's settings
+    /// ([`pipeline_config`]); nothing is loaded until `prepare`.
     #[must_use]
     pub fn new(store: ModelStore, options: OnnxOptions) -> Self {
-        Self::with_config(
-            store,
-            options,
-            PipelineConfig::default(),
-            VadConfig::default(),
-        )
+        Self::with_config(store, options, pipeline_config(), VadConfig::default())
     }
 
     #[must_use]
@@ -85,12 +123,13 @@ impl OnnxSpeechEngine {
     /// download progress goes to `tracing` at debug level.
     ///
     /// ```no_run
-    /// use steno_speech::{ModelStore, OnnxOptions, OnnxSpeechEngine, PipelineConfig, VadConfig};
+    /// use steno_speech::engine::pipeline_config;
+    /// use steno_speech::{ModelStore, OnnxOptions, OnnxSpeechEngine, VadConfig};
     ///
     /// let mut transcriber = OnnxSpeechEngine::open_transcriber(
     ///     &ModelStore::from_environment(),
     ///     &OnnxOptions::default(),
-    ///     PipelineConfig::default(),
+    ///     pipeline_config(),
     ///     VadConfig::default(),
     /// )?;
     /// let samples = vec![0.0f32; 16_000]; // one second of 16 kHz mono
@@ -226,6 +265,30 @@ mod tests {
                 .contains(&LanguageTag::from("de"))
         );
         assert_eq!(engine.store().root(), std::path::Path::new("/nowhere"));
+    }
+
+    #[test]
+    fn the_engine_decodes_the_lead_in_and_the_tail_and_skips_long_pauses() {
+        let config = pipeline_config();
+        assert!(config.chunker.from_start);
+        assert_eq!(config.chunker.decode_gaps, Gaps::Tail);
+        assert_eq!(config.chunker.long_pause_seconds, 3.0);
+        assert!(config.recovery.first_chunk_as_before);
+        let rest = PipelineConfig {
+            chunker: ChunkerConfig {
+                decode_gaps: Gaps::Tail,
+                from_start: true,
+                ..ChunkerConfig::default()
+            },
+            recovery: RecoveryConfig {
+                first_chunk_as_before: true,
+                ..RecoveryConfig::default()
+            },
+            ..PipelineConfig::default()
+        };
+        assert_eq!(config, rest);
+        let engine = OnnxSpeechEngine::new(ModelStore::new("/nowhere"), OnnxOptions::default());
+        assert_eq!(engine.config, config);
     }
 
     #[tokio::test]
