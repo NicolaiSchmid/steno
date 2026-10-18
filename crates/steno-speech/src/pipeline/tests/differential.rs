@@ -800,6 +800,24 @@ impl Hearing {
             deaf: (0, 0, 1),
         }
     }
+
+    /// A quiet transcriber under `config` whose fake hears this way and
+    /// decodes a window under `min_frames` frames that holds loud sound to
+    /// nothing, with speech in `regions` if given.
+    fn transcriber(
+        self,
+        config: &PipelineConfig,
+        min_frames: usize,
+        regions: Option<&[Range<usize>]>,
+    ) -> Transcriber<FrameTokenBackend> {
+        let mut t = quiet_transcriber(config.clone(), min_frames);
+        t.workers[0].jitter = self.jitter;
+        t.workers[0].deaf = self.deaf;
+        if let Some(regions) = regions {
+            t.vad = Box::new(FixedVad(regions.to_vec()));
+        }
+        t
+    }
 }
 
 /// The deaf edges the differential test runs, beside hearing every frame:
@@ -816,15 +834,7 @@ const DEAF: [(usize, usize, usize); 6] = [
 
 fn ref_run(case: &RefCase, config: &PipelineConfig, min_frames: usize, hearing: Hearing) -> RefRun {
     let samples = &case.samples;
-    let make = || {
-        let mut t = quiet_transcriber(config.clone(), min_frames);
-        t.workers[0].jitter = hearing.jitter;
-        t.workers[0].deaf = hearing.deaf;
-        if let Some(regions) = &case.regions {
-            t.vad = Box::new(FixedVad(regions.clone()));
-        }
-        t
-    };
+    let make = || hearing.transcriber(config, min_frames, case.regions.as_deref());
     let old = ref_transcribe(&mut make(), samples);
     let mut t = make();
     let new = t.transcribe(samples, None).unwrap();
@@ -1252,10 +1262,11 @@ struct Tally {
 /// kept comes out, with every piece the old merge gave it and its
 /// boundaries ([`ref_losses`]): a duplicate is allowed, a loss never, and a
 /// longer word only with extra pieces the boundaries allow (counted in
-/// [`Tally::glues`], beside the words limit E cuts, [`Tally::led`]). And, where the fake hears every frame, every
-/// word a gap's window or an accepted recovery heard in its reach comes out
-/// at least once (see `ref_losses` for that check and for a word that
-/// repeats the one before it).
+/// [`Tally::glues`], beside the words limit E cuts, [`Tally::led`]). And,
+/// where the fake hears every frame, every word a gap's window or an
+/// accepted recovery heard in its reach comes out at least once (see
+/// `ref_losses` for that check and for a word that repeats the one before
+/// it).
 fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
     let mut rng = Rng(seed);
     let mut tally = Tally::default();
@@ -1384,11 +1395,7 @@ fn texts(
     config: &PipelineConfig,
     jitter: usize,
 ) -> (Transcript, String) {
-    let hearing = Hearing {
-        jitter,
-        deaf: (0, 0, 1),
-    };
-    texts_over(samples, regions, config, 130, hearing)
+    texts_over(samples, regions, config, 130, Hearing::every_frame(jitter))
 }
 
 /// `texts` over a fake that decodes a window under `min_frames` frames that
@@ -1400,13 +1407,7 @@ fn texts_over(
     min_frames: usize,
     hearing: Hearing,
 ) -> (Transcript, String) {
-    let make = || {
-        let mut t = quiet_transcriber(config.clone(), min_frames);
-        t.workers[0].jitter = hearing.jitter;
-        t.workers[0].deaf = hearing.deaf;
-        t.vad = Box::new(FixedVad(regions.to_vec()));
-        t
-    };
+    let make = || hearing.transcriber(config, min_frames, Some(regions));
     let new = make().transcribe(samples, None).unwrap();
     let mut t = make();
     let old = ref_transcribe(&mut t, samples);
@@ -1783,11 +1784,8 @@ fn a_recovery_that_begins_inside_a_skipped_pause_keeps_the_old_merges_text() {
         put(&mut samples, 17, 29.0, 6);
         samples[s(19.5)..s(20.0)].fill(piece as f32 / 1000.0);
         let regions = vec![s(2.0)..s(6.0), s(26.0)..s(33.0)];
-        let hearing = Hearing {
-            jitter: 0,
-            deaf: (0, 0, 1),
-        };
-        let (new, old) = texts_over(&samples, &regions, &PipelineConfig::default(), 200, hearing);
+        let config = PipelineConfig::default();
+        let (new, old) = texts_over(&samples, &regions, &config, 200, Hearing::every_frame(0));
         assert_eq!(new.stats.recoveries_accepted, 1, "{piece}");
         assert!(new.windows[1].start < s(20.0), "{:?}", new.windows);
         assert_eq!(
@@ -1825,10 +1823,7 @@ fn a_gaps_run_after_a_chunk_that_kept_nothing_drops_the_rest_of_a_word_it_begins
         .put(&mut samples);
         ref_placed(vec![3], 30.0, 4).put(&mut samples);
         for jitter in 0..=1 {
-            let hearing = Hearing {
-                jitter,
-                deaf: (0, 0, 1),
-            };
+            let hearing = Hearing::every_frame(jitter);
             let (new, old) = texts_over(&samples, &regions, &config, 0, hearing);
             assert_eq!(
                 (new.text().as_str(), old.as_str()),
