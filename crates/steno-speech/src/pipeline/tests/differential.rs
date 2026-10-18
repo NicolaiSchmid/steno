@@ -1519,12 +1519,12 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
     for case in 0..cases {
         let (kind, round) = (case % 5, case / 5);
         // The ONNX engine's settings on every collision case of an even
-        // round and wherever the defaults would run without extra windows.
-        let gaps = (round / 4) % 4 != 0;
-        let config = if (kind == 3 && round.is_multiple_of(2)) || (round % 4 == 0 && !gaps) {
+        // round and wherever the defaults would run without extra windows
+        // (every 16th round).
+        let config = if (kind == 3 && round.is_multiple_of(2)) || round.is_multiple_of(16) {
             crate::engine::pipeline_config()
         } else {
-            random_config(round, gaps)
+            random_config(round, (round / 4) % 4 != 0)
         };
         let layout = match kind {
             0 => {
