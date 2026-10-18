@@ -1,19 +1,17 @@
-//! What the tests of a run set aside share (`model_waits`, `store_waits`):
-//! the fakes around the speech engine, an engine refused for missing
-//! models, and a pipeline's dependencies over a store with an audio folder.
+//! What `store_waits` shares: a WAV decoder, no destinations, and a
+//! pipeline's dependencies over a store with an audio folder.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use steno_core::paths::{file_url, file_url_path};
 use steno_core::protocols::BoundaryResult;
-use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory};
+use steno_core::testing::{FakeDiarizer, InMemorySpeakerMemory};
 use steno_core::{
-    AudioAsset, AudioBuffer16k, AudioFormat, AudioLane, Delivery, DeliveryDispatcher, LanguageTag,
-    PipelineStage, RawSegment, SpeechEngine, Store, async_trait,
+    AudioAsset, AudioBuffer16k, AudioFormat, AudioLane, Delivery, DeliveryDispatcher, SpeechEngine,
+    Store, async_trait,
 };
-use steno_pipeline::{MeetingEventBus, PipelineDependencies, PipelineFailure};
+use steno_pipeline::{MeetingEventBus, PipelineDependencies};
 use uuid::Uuid;
 
 /// Reads the 16 kHz mono WAV fixtures.
@@ -51,42 +49,6 @@ struct NoDestinations;
 impl DeliveryDispatcher for NoDestinations {
     async fn deliver_all(&self, _meeting_id: Uuid) -> Vec<Delivery> {
         Vec::new()
-    }
-}
-
-/// A speech engine whose transcription is refused for missing models until
-/// `installed` is set, as the app's gated engines refuse.
-#[derive(Default)]
-pub struct Uninstalled {
-    pub installed: AtomicBool,
-    inner: FakeSpeechEngine,
-}
-
-#[async_trait]
-impl SpeechEngine for Uninstalled {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-
-    fn supported_languages(&self) -> &std::collections::BTreeSet<LanguageTag> {
-        self.inner.supported_languages()
-    }
-
-    async fn prepare(&self) -> BoundaryResult<()> {
-        self.inner.prepare().await
-    }
-
-    async fn transcribe(
-        &self,
-        audio: &AudioBuffer16k,
-        hint: Option<&LanguageTag>,
-    ) -> BoundaryResult<Vec<RawSegment>> {
-        if !self.installed.load(Ordering::SeqCst) {
-            return Err(Box::new(PipelineFailure::models_missing(
-                PipelineStage::Transcribe,
-            )));
-        }
-        self.inner.transcribe(audio, hint).await
     }
 }
 
