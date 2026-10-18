@@ -5,11 +5,11 @@
 //! (A10 of `.plans/2026-10-07-stable-promotion.md`): the tap aggregate runs
 //! only while a process the tap includes drives the output, so the
 //! capture's silent output IOProc must be inside it. Anything else Steno
-//! played would land in the recording's system lane. Steno plays nothing
-//! today; the clip player planned under "What follows" will be the first.
-//! That player is native: the web UI plays nothing, since its `<audio>`
-//! would play from the web view's media process, which the tap includes
-//! and this gate cannot see.
+//! played would land in the recording's system lane. The one player is the
+//! speakers' clip player (`steno_services::clip_player`), which asks this
+//! gate; the web UI plays nothing, since its `<audio>` would play from the
+//! web view's media process, which the tap includes and this gate cannot
+//! see.
 //!
 //! - A player asks [`Playback::begin`] for a [`PlaybackPermit`] before it
 //!   plays, starts through [`PlaybackPermit::start`], and plays only while

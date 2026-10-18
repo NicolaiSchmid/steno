@@ -2087,15 +2087,14 @@ The Swift app's removal is planned in `.plans/2026-10-04-mac-cutover.md`
 takes the handoff item, the desktop app installs beside it on the Mac. WP6b
 filled the host's half of the WP8 seams except four; S4 and S2 of
 `.plans/2026-10-07-stable-promotion.md` later filled the updater, the
-QR half of the fourth and the detection controller, which leaves the
-permissions and the clip player (the plan's "Pipeline and services
-(WP6b)" list gives each one's reason and what closes it): the host's
+QR half of the fourth and the detection controller, and the clip
+player followed, which leaves the permissions (the plan's "Pipeline and
+services (WP6b)" list gives the reason and what closes it): the host's
 `Permissions` stay the services' fake (all granted),
 because `permissions` answers `unknown` off the Mac and for the Mac's
 system audio, which the host's onboarding opener counts as missing, so
 onboarding would open at every launch until the audio probe (WP5) and a
-rule for `unknown` land; and the clip player is a fake, which needs an
-audio output and follows the stable release. The host may treat the main
+rule for `unknown` land. The host may treat the main
 window as always present: a close hides it, or ends the process when no
 tray stands, so publishing to it never fails for want of a window.
 What the Swift app's login item does once this app replaced it is for

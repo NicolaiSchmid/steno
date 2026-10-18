@@ -554,8 +554,8 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   (`apps/desktop/README.md`, "Checksums and OpenPGP signatures"); the Windows
   installers stay unsigned and the release notes say so. WP9b is the cutover:
   `.plans/2026-10-04-mac-cutover.md`.
-  The shell's gap ("Open after the port"): the clip player, a fake with no audio
-  output; it follows the stable release (`.plans/2026-10-07-stable-promotion.md`, D3). The QR encoder and the
+  The clip player plays a speaker's sample through the platform's own player
+  (`steno_services::clip_player`). The QR encoder and the
   update schedule, which blocked it, landed with S4 (`feat/rust-update-schedule`):
   `steno_services::qr` and `steno_services::updates`.
   The phone handover identity: on the first launch on macOS after the update the app
@@ -786,8 +786,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   the listener stopping when no phone is left; the `Handover` trait, WP7 implements.
 - [x] QR encoder: `steno_services::qr::PngQrEncoder` draws the pairing URL at
   error correction level M, as Swift's `CIQRCodeGenerator` did (see "Handover").
-- [ ] Clip player: a fake in the app, so a speaker's sample clip does not play (see
-  "Pipeline and services (WP6b)").
+- [x] Clip player: the platform's own player in a child process (`afplay`,
+  `pw-play`, PowerShell's `SoundPlayer`) behind the playback gate
+  (`steno_services::clip_player`). Difference: a clip that ends resets its play
+  button at the next reload pass (2 s), where Swift's delegate did at once.
 - [x] Onboarding opener rule (`Host::should_open_onboarding`): a missing required
   permission, or the flag unset; an install already configured writes the flag and
   stays closed. Missing is `permission_is_missing` (S3): `denied` everywhere, `unknown`
@@ -1634,10 +1636,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   Allow; (3) closed by
   S4: the host's `Updater` is the update schedule over the shell's updater, and
   `updates.check` stays the shell's, whose check records through the schedule; (4)
-  the clip player is a fake, so a speaker's sample clip does not play: it needs new
-  code (an audio output), not wiring, and follows the stable release
-  (`.plans/2026-10-07-stable-promotion.md`, D3); the QR encoder, the other half of
-  this seam, landed with S4.
+  the clip player is `steno_services::clip_player`; the QR encoder, the other half
+  of this seam, landed with S4.
 - The two-second pairing poll (`Host::refresh_pairing`, since P40 PR 2c, #304, the
   reload pass's light part) rides on the store poll in `App::launch` and runs whether
   or not a code is shown, where Swift ran it only while the Phones pane showed one.
@@ -3336,10 +3336,6 @@ Whatever its owner, an item that can lose a recording, a transcript, a note or a
 blocks the stable release (`.plans/2026-10-07-stable-promotion.md`, D3). An item that a row of that
 plan's tables names belongs to that row's package (S, A, P or X), whatever its label here.
 
-- **WP9b.** The shell's gap, following the stable release: a fake clip player (a
-  speaker's sample does not play). Where: the fake in `build`
-  (`crates/steno-services/src/app.rs`); the WP9 paragraph and seam (4) under
-  "Pipeline and services (WP6b)". Found: #173, #185.
 - **First Linux release.** No real GNOME or KDE Plasma session has logged out or shut
   down under the app: the session clients ran against fakes on a private bus, the lost
   display under Xvfb and headless sway, and real logouts only in xfce4-session 4.20.4

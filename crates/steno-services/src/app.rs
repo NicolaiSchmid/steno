@@ -14,9 +14,7 @@ use steno_core::{
     StoreError,
 };
 use steno_handover::HandoverService;
-use steno_host::fakes::{
-    FakeClipPlayer, FakeFileSystem, FakeLoginItem, FakePermissions, FakeUpdater,
-};
+use steno_host::fakes::{FakeLoginItem, FakePermissions, FakeUpdater};
 use steno_host::services::{
     LoginItem, LoginItemStatus, Opener, Permissions, Preferences, Services,
 };
@@ -698,10 +696,11 @@ fn retire_the_engine(store: &Store, preferences: &FilePreferences, warnings: &mu
 /// the shell's update source ([`AppOptions::update_source`]), the QR
 /// encoder, the shell's permissions with the system audio probe
 /// ([`AppOptions::permissions`]) and the calendar it passes
-/// ([`AppOptions::calendar`]). Fakes where no platform side exists yet
-/// (the plan's "Pipeline and services (WP6b)" list says why for each):
-/// clip player, the permissions (all granted) when the shell passes none,
-/// the updater when the shell passes no source;
+/// ([`AppOptions::calendar`]), the clip player
+/// ([`ProcessClipPlayer`](crate::clip_player::ProcessClipPlayer)). Fakes
+/// where no platform side exists yet (the plan's "Pipeline and services
+/// (WP6b)" list says why for each): the permissions (all granted) when
+/// the shell passes none, the updater when the shell passes no source;
 /// the audio device list is empty off the Mac until the `PipeWire` and
 /// WASAPI backends enumerate devices.
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
@@ -912,7 +911,7 @@ pub fn build_with_import(
         audio_devices: Arc::new(PlatformAudioDevices),
         folder_usage: Arc::new(DiskFolderUsage),
         file_system: Arc::new(steno_host::services::RealFileSystem),
-        clip_player: Arc::new(FakeClipPlayer::new(Arc::new(FakeFileSystem::default()))),
+        clip_player: Arc::new(crate::clip_player::ProcessClipPlayer::new()),
         opener: options.opener,
         preferences,
         secrets: secrets.clone(),

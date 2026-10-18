@@ -286,6 +286,9 @@ struct Inner {
     /// Meetings the pipeline flagged with unconfirmed speakers this launch
     /// (`speakersNeedReview`), pruned at each reload ([`tray::prune_reviews`]).
     reviews: BTreeSet<Uuid>,
+    /// The clip the player played at the last pass, so the detail goes
+    /// out again once a clip ends.
+    playing_clip: Option<PathBuf>,
     general: GeneralSettingsViewModel,
     audio: AudioSettingsViewModel,
     speech: SpeechSettingsViewModel,
@@ -641,6 +644,7 @@ impl Host {
                 detail: None,
                 progress,
                 reviews: BTreeSet::new(),
+                playing_clip: None,
                 general,
                 audio,
                 speech,
@@ -1105,13 +1109,19 @@ impl Host {
     /// shown: a phone that arrived closes the code and a code that ran out
     /// closes itself, and `settings.phone` is published each time. Once
     /// the recorder is idle, the system audio rows no longer say the test
-    /// was refused for the recording (`Host::waits_for_recording`).
+    /// was refused for the recording (`Host::waits_for_recording`). A
+    /// clip that ended republishes the detail, so its play button resets.
     fn follow_outside_the_store(&self, inner: &mut Inner) {
         let now = self.now();
         inner
             .phones
             .refresh_after_pairing(&self.shared.services, now);
         inner.publisher.schedule(BridgeTopic::SettingsPhone);
+        let playing = self.shared.services.clip_player.playing();
+        if playing != inner.playing_clip {
+            inner.playing_clip = playing;
+            inner.publisher.schedule(BridgeTopic::MeetingDetail);
+        }
         if self.shared.services.recorder.status().state == RecordingState::Idle {
             if inner.audio.waits_for_recording.take().is_some() {
                 inner.publisher.schedule(BridgeTopic::SettingsRecording);

@@ -391,6 +391,25 @@ fn playback_follows_the_clip_files() {
     let _ = json!(null);
 }
 
+/// A clip that ends on its own resets its play button at the next pass.
+#[test]
+fn a_clip_that_ends_republishes_the_detail() {
+    use steno_host::services::ClipPlayer as _;
+    let harness = sample();
+    harness
+        .host
+        .speakers_play(SpeakerIdParams {
+            speaker_id: uuid(SPEAKER_NICOLAI),
+        })
+        .unwrap();
+    harness.host.reload_pass();
+    harness.sink.clear();
+    harness.fakes.clip_player.stop();
+    harness.host.reload_pass();
+    let detail = harness.sink.last(BridgeTopic::MeetingDetail).unwrap();
+    assert_eq!(detail["speakers"][0]["isPlaying"], false);
+}
+
 /// Confirming a speaker once its meeting's audio is gone removes the clip
 /// its row names, under the name of the run that wrote it, and no other
 /// file: not an earlier clip of that speaker no row names, not another
