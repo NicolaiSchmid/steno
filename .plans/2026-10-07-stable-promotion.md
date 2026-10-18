@@ -2627,7 +2627,8 @@ Each lands before `0.11.0-rc.1`.
     CoreML back on only to crash again. The file keeps the marks it has
     seen, so the same marks (a warm-up mark stays until a meeting loads
     CoreML; a quarantined meeting keeps its marks) do not turn it on again;
-    a new one does. After the user's action, recordings skip the warm-up
+    a new one does, and so does every warm-up mark that cannot be read,
+    which the launch names afresh (`unreadable-<uuid>`). After the user's action, recordings skip the warm-up
     until a meeting's processing has loaded CoreML, whichever mark turned
     the fallback on, so that first load never runs beside a recording
     (`WarmUpMark::hold_off`, a mark of its own, `held-<uuid>`, listed as
