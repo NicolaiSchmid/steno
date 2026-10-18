@@ -11,14 +11,6 @@
 //! cargo test --release -p steno-speech --test extra_windows -- --nocapture --test-threads=1
 //! ```
 
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::float_cmp,
-    clippy::assert_is_empty
-)]
-
 mod common;
 #[path = "common/crafted.rs"]
 mod crafted;
