@@ -1,9 +1,9 @@
 #!/usr/bin/env zsh
-# The CoreML measurements of A2 in .plans/2026-10-07-stable-promotion.md, on
+# The CoreML measurements on
 # a Mac with the Swift app's Parakeet models: FLEURS German cat/ and the
 # calibration corpus through `steno-coreml-parity` built at two revisions,
 # each scored against the Swift transcripts (the harness table) and FLEURS
-# against its references (spikes/onnx-speech/fleurs/score_fleurs.py, the
+# against its references (scripts/score_fleurs.py, the
 # normaliser of the gate).
 #
 # The head's FLEURS mean WER is the CoreML accuracy gate: the script prints
@@ -67,7 +67,7 @@ run() {
   nice -n 19 $bin --out $out/corpus $corpus $baseline > $out/corpus.md
   print "FLEURS against Swift: $(tail -1 $out/fleurs.md)"
   print "Corpus against Swift: $(tail -1 $out/corpus.md)"
-  python3 $repo/spikes/onnx-speech/fleurs/score_fleurs.py $fleurs/cat --bakeoff $out/fleurs rust \
+  python3 $repo/scripts/score_fleurs.py $fleurs/cat --bakeoff $out/fleurs rust \
     --out $out/fleurs-score.json | grep '^| rust'
   print "(load after $(sysctl -n vm.loadavg))"
 }
@@ -91,7 +91,7 @@ run head $scratch/target-head/release/steno-coreml-parity
 verdict=0
 gate head || verdict=1
 print "## Swift"
-python3 $repo/spikes/onnx-speech/fleurs/score_fleurs.py $fleurs/cat --bakeoff $fleurs/cat/bakeoff parakeet-v3 | grep '^| parakeet-v3'
+python3 $repo/scripts/score_fleurs.py $fleurs/cat --bakeoff $fleurs/cat/bakeoff parakeet-v3 | grep '^| parakeet-v3'
 
 if (( $# > 0 )); then
   build variants $head patch

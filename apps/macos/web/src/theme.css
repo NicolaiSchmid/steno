@@ -1,7 +1,5 @@
 /*
- * Steno's design tokens for the Mac windows (plan
- * .plans/2026-09-29-macos-webview-ui.md, Decision 2, refined by
- * .plans/2026-10-01-t3code-design-polish.md against pingdotgg/t3code).
+ * Steno's design tokens for the Mac windows, modelled on pingdotgg/t3code.
  * Semantic variables live on :root and .dark; Tailwind sees them through
  * @theme inline. Nothing here loads from the network: the system font stack
  * only, the grain is an inline SVG.
@@ -46,7 +44,7 @@
 
 	/*
 	 * The primary is achromatic (near-black on light, white on dark), as in
-	 * the phone app and the native panels (plan 2026-10-02-neutral-accent.md).
+	 * the phone app and the native panels.
 	 * Red is reserved for what is live, amber for what needs the user.
 	 */
 	--primary: #171717;

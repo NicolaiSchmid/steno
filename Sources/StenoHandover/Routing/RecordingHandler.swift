@@ -14,8 +14,7 @@ extension HandoverEngine {
   /// listed for bytes the admission ledger shows admitted; 409 only for
   /// admitted bytes over another device's unfinished upload of other bytes;
   /// 500 with nothing opened when the store cannot read the ledger or the
-  /// receipt. The decision table is in
-  /// `.plans/2026-10-08-handover-admission-ledger.md`. Rust:
+  /// receipt. Rust:
   /// `Engine::announce`.
   func announce(_ recordingID: UUID, device: PairedDevice, body: Data) async -> HandoverResponse {
     let metadata: RecordingMetadata

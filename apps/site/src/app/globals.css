@@ -3,8 +3,7 @@
  * apps/marketing/src/layouts/Layout.astro): a dark-only page on #09090b with
  * a five-step neutral text ladder, hairline borders at 8 and 14 % white,
  * radii 16 / 12 / 8 and a 0.18 s functional tempo. Hue is spent on exactly
- * one thing, the red live state, as in the app
- * (.plans/2026-10-02-neutral-accent.md).
+ * one thing, the red live state, as in the app.
  */
 @import "tailwindcss";
 

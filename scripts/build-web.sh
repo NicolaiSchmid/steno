@@ -11,7 +11,6 @@
 # registry. Xcode script phases start with a minimal PATH, so the usual pnpm
 # and Node locations are appended. Failures are prefixed with `error:` so
 # Xcode and apps/macos/scripts/xcodebuild-quiet.sh surface the line.
-# Plan: .plans/2026-09-29-macos-webview-ui.md, Decision 8.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

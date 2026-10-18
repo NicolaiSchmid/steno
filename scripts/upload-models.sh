@@ -17,7 +17,8 @@
 #   --repo     the target repository; default nicolaischmid/steno-models,
 #              the one STENO_MODELS_REPO names
 #   --models   a store root holding parakeet-tdt-0.6b-v3-fp32/ (the files
-#              spikes/onnx-speech/export/ writes); default
+#              the export script writes, last in the repository at
+#              505cc9462 under spikes/onnx-speech/export/); default
 #              $STENO_MODELS_DIR/onnx, the store root inside the models
 #              directory
 #   --private  create the repository private if it does not exist yet
@@ -125,7 +126,7 @@ the Creative Commons Attribution 4.0 International licence (CC BY 4.0),
 <https://creativecommons.org/licenses/by/4.0/>.
 
 Changes made: the NeMo checkpoint was exported to ONNX in fp32 by
-\`spikes/onnx-speech/export/\` in <https://github.com/NicolaiSchmid/steno>
+the export script at <https://github.com/NicolaiSchmid/steno/tree/505cc9462/spikes/onnx-speech/export>
 (torch 2.14.1, NeMo 3.0.0): encoder (with its weights in the external data
 file \`encoder.weights\`), decoder and joiner as separate graphs, the
 encoder's relative position table extended to 10000 frames, and the

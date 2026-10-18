@@ -10,8 +10,7 @@ import XCTest
 /// end-to-end test target, so these tests and the manual checklist are its
 /// end-to-end proof.
 ///
-/// The main window's content is the web UI (plan
-/// `2026-09-29-macos-webview-ui.md`, WP2). WebKit exposes HTML by role and
+/// The main window's content is the web UI. WebKit exposes HTML by role and
 /// label, not by identifier, so the main window tests assert the two things
 /// it does expose, the web view element and the list column's "Meetings"
 /// heading by its text, and take the review screenshots; Playwright and

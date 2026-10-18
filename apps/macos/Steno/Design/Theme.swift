@@ -2,8 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Design tokens for the SwiftUI surfaces that remain native: the menu bar
-/// popover, the floating recording bubble and the detection prompt (plan
-/// `2026-09-29-macos-webview-ui.md`, non-goals). They mirror the names and
+/// popover, the floating recording bubble and the detection prompt. They mirror the names and
 /// values of `mobile/global.css`: dark is the base, light is the re-based
 /// ladder; alpha-veil surfaces (never opaque greys), hairline borders and
 /// semantic status colours. Every colour is a dynamic `NSColor` that follows

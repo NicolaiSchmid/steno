@@ -23,9 +23,8 @@ code; propose changes as a new plan file first.
 | Landing page | `apps/site/` | [steno.nicolaischmid.com](https://steno.nicolaischmid.com): Next.js 16 static export (home page and `/recording-law`), React and Tailwind, Biome. Lives in the root pnpm workspace (`package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml` at the repo root), own README |
 | AUR package | `packaging/aur/` | `steno-desktop-bin`, the Arch package that repackages the release `.deb` (stable plan X6); checked by `packaging/check-aur.sh` in an Arch container. Own README |
 | Mobile | `mobile/` | Expo dev-client iOS recorder. Own `pnpm` lockfile, own Biome config, own README |
-| Scripts | `scripts/` | Worktree bootstrap (`setup-worktree.sh`), Linux build packages (`setup-linux.sh`), headless PipeWire for capture tests, the Swift app's web build, Swift schema dump and store cross-check, model upload to Hugging Face |
+| Scripts | `scripts/` | Worktree bootstrap (`setup-worktree.sh`), Linux build packages (`setup-linux.sh`), headless PipeWire for capture tests, the Swift app's web build, Swift schema dump and store cross-check, model upload to Hugging Face, the FLEURS scorer for the CoreML parity gate |
 | Nix | `flake.nix`, `nix/` | The flake: the released Mac app unchanged (`aarch64-darwin`), the Linux app built from this tree (`x86_64-linux`, `nix/package.nix`), the NixOS module `programs.steno` (`nix/module.nix`) and the Linux checks (`nix/checks.nix`). The web UI's pnpm hash in `nix/package.nix` follows its lockfile; the desktop README says how |
-| Spikes | `spikes/` | Frozen evidence of the cross-platform spikes; not in the Cargo workspace |
 | Plans | `.plans/` | Dated decision and implementation plans |
 | Research | `docs/research/` | Product teardowns and landscape notes |
 | Skills | `.agents/skills/` | Repository-local agent skills (authoritative); `.claude/skills/` holds symlinks |
@@ -57,6 +56,8 @@ rewriting docs, use the `docs-writing` skill.
 - Enable the repository hooks once per clone:
   `git config core.hooksPath .githooks`. The post-checkout hook bootstraps
   worktrees via `scripts/setup-worktree.sh`.
+- A commit that touches only docs or plans ends its subject with `[skip ci]`;
+  the last commit of a pull request never does, so CI runs on its head.
 - Prefer `gh` REST-backed commands and the GitHub REST API. Use GraphQL only
   when REST cannot provide the data. Never use GraphQL for routine PR
   creation, status checks or comments.

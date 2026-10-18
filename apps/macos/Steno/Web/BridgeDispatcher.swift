@@ -45,8 +45,6 @@ extension BridgeEventSink {
 /// `apps/macos/web/src/bridge/webkit-transport.ts` posts and reads them; a
 /// body the host cannot read still gets a reply, so the page's promise always
 /// settles with a typed error instead of rejecting.
-///
-/// Plan: `.plans/2026-09-29-macos-webview-ui.md`, Decisions 5 and 6.
 enum BridgeDispatcher {
   /// The `webkit.messageHandlers.<name>` the page posts to.
   static let messageHandlerName = "steno"

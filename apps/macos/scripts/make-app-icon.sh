@@ -2,8 +2,7 @@
 # Renders every raster app icon from the one committed vector source,
 # Steno/Resources/AppIcon.svg: the ten mac PNGs of the AppIcon appiconset
 # (with its Contents.json), the AppIcon.sha256 drift guard beside the SVG,
-# and the opaque 1024 px iOS icon in mobile/assets/. Design notes and
-# geometry: .plans/2026-09-28-app-icon.md.
+# and the opaque 1024 px iOS icon in mobile/assets/.
 #
 # Renderer: ImageMagick 7 `magick` with the librsvg delegate, the one tool
 # that rasterises the SVG at any pixel size and verifies on macOS and Linux

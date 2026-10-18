@@ -125,8 +125,7 @@ public struct StageRates: Sendable, Equatable, Hashable {
   }
 
   /// Seconds per unit before any run was measured on this Mac, in the
-  /// units of `PipelineStage.costDriver`. Basis and provenance:
-  /// `.plans/2026-09-28-processing-progress.md` D2; `steno process` prints
+  /// units of `PipelineStage.costDriver`. `steno process` prints
   /// the lines that replace these.
   public static let seeds = StageRates(entries: [
     Key(.decode, unkeyed): .seed(0.005),

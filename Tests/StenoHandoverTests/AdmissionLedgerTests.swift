@@ -13,8 +13,7 @@ import Testing
 /// one meeting; and a late `complete` of replaced bytes never completes the
 /// new upload. The intake commits like the
 /// real one (`StoreIntake`), so the ledger row exists exactly when an
-/// admission committed. The design is
-/// `.plans/2026-10-08-handover-admission-ledger.md`. Rust:
+/// admission committed. Rust:
 /// `crates/steno-handover/tests/admission_ledger.rs`.
 @Suite struct AdmissionLedgerTests {
   /// Twice the smallest chunk size, so a resplit can halve it.

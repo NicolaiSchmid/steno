@@ -356,5 +356,4 @@ MIT, see [`LICENSE`](LICENSE), except where a directory or file carries its own
 licence: `crates/steno-audio/vendor/speexdsp` (BSD),
 `crates/steno-audio/src/codec/salvage/tables.rs` (MPL-2.0, AAC tables copied from the
 `symphonia-codec-aac` crate; the AUR package ships a copy,
-`packaging/aur/symphonia-aac-tables.rs`) and
-`spikes/onnx-speech/export/export_parakeet_v3.py` (Apache-2.0).
+`packaging/aur/symphonia-aac-tables.rs`).

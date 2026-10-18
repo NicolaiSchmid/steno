@@ -9,8 +9,8 @@ protocol SliceEmbedder: Sendable {
   func embedding(of audio: AudioBuffer16k) async throws -> Embedding?
 }
 
-/// The post-pass over the mapped clusters decided in
-/// `.plans/2026-09-29-speaker-calibration.md`: a speaker's short turns embed
+/// The post-pass over the mapped clusters decided by the speaker
+/// calibration: a speaker's short turns embed
 /// far from the same voice speaking at length, because each ten-second
 /// window holds little of them, so a 1:1 call comes out as a main cluster
 /// and one or two clusters of interjections. Re-embedding each cluster over
