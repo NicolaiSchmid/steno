@@ -13,7 +13,8 @@
 //! - **What turns it on.** The launch check ([`SpeechFallback::at_launch`])
 //!   over what the last process left: a warm-up mark
 //!   ([`WarmUpMark::left_over`]) or a reading mark of the engine's load or
-//!   a transcription ([`ReadingMarks::speech_marks_left`]). A force quit, a
+//!   a transcription ([`ReadingMarks::speech_marks_left`], which counts a
+//!   reading mark that cannot be read among them). A force quit, a
 //!   power loss or a crash elsewhere while the engine runs leaves the same
 //!   marks, and turns it on too: the cost is the speech sidecar's models
 //!   to download (the meetings wait for them in Settings) and its slower
@@ -387,6 +388,43 @@ mod tests {
         let (warm_up, after) = launched(support.path());
         assert!(!after.is_on());
         assert!(!warm_up.skipping(), "the load cleared it");
+    }
+
+    /// A reading mark that cannot be read turns it on, as a mark of the
+    /// engine's might; once the user turns it off, the same mark does not
+    /// turn it on again.
+    #[test]
+    fn a_reading_mark_that_cannot_be_read_turns_it_on_once() {
+        let support = tempfile::tempdir().unwrap();
+        let store = Store::in_memory().unwrap();
+        let marks = Arc::new(ReadingMarks::at_launch(
+            support.path(),
+            &store,
+            chrono::Utc::now(),
+        ));
+        let path = support.path().join("master.caf");
+        std::fs::write(&path, b"audio").unwrap();
+        std::mem::forget(marks.reading(
+            uuid::Uuid::new_v4(),
+            None,
+            &path,
+            crate::ReadStage::Decode,
+        ));
+        let folder = support.path().join(ReadingMarks::FOLDER);
+        let file = std::fs::read_dir(&folder)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        // A folder in the mark's place fails the read on every platform.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+
+        let fallback = launch(support.path());
+        assert!(fallback.is_on());
+        fallback.turn_off().unwrap();
+        assert!(!launch(support.path()).is_on(), "the mark seen");
     }
 
     /// A file that cannot be written keeps it on, and says so.
