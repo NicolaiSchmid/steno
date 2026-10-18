@@ -350,24 +350,38 @@ const SEAM_SAMPLES: usize = 2 * FRAME_SAMPLES;
 /// and on a tie the gap window's. A word said again starts later than
 /// that, unless it is two frames long or shorter: such a word said twice
 /// back to back across a seam comes out once. A gap's run that begins
-/// inside a word drops the pieces that continue it when a chunk kept a
-/// token that starts before the run's first window, as the merge before
-/// the partition did: the chunks heard the word's start, or missed the
-/// word. An accepted recovery keeps words inside the gap's window on either
-/// side of its chunk, so at either seam of that chunk the tokens can step
-/// back in time, by up to the overlap and the rest of a word that crosses
-/// the reach's edge; each keeps the time its window gave it.
+/// inside a word drops the pieces that continue it when any chunk, before
+/// the run or after it, kept a token that starts before the run's first
+/// window, as the merge before the partition did: the chunks heard the
+/// word's start, or missed the word. An accepted recovery keeps words
+/// inside the gap's window on either side of its chunk, so at either seam
+/// of that chunk the tokens can step back in time, by up to the overlap
+/// and the rest of a word that crosses the reach's edge; each keeps the
+/// time its window gave it.
 fn join(spans: &[Span], decoded: &[Vec<Token>], overlap_seconds: f64, vocab: &Vocab) -> Vec<Token> {
     let starts_word = |t: &Token| starts_word(vocab.piece(t.id));
+    let mut at = 0;
+    let runs: Vec<(&[Span], Vec<Token>)> = spans
+        .chunk_by(|a, b| a.chunk == b.chunk)
+        .map(|run| {
+            let next = merge_all(&decoded[at..at + run.len()], overlap_seconds, vocab);
+            at += run.len();
+            (run, next)
+        })
+        .collect();
+    // Where the earliest token any chunk kept starts: a run's first token
+    // is its earliest.
+    let chunks_from = runs
+        .iter()
+        .filter(|(run, _)| run[0].chunk)
+        .filter_map(|(_, next)| next.first())
+        .map(Token::sample)
+        .min()
+        .unwrap_or(usize::MAX);
     let mut out: Vec<Token> = Vec::with_capacity(decoded.iter().map(Vec::len).sum());
-    let (mut at, mut before) = (0, 0);
-    // Where the earliest token a chunk kept starts.
-    let mut chunks_from = usize::MAX;
-    for run in spans.chunk_by(|a, b| a.chunk == b.chunk) {
-        let mut next = merge_all(&decoded[at..at + run.len()], overlap_seconds, vocab);
-        if run[0].chunk {
-            chunks_from = chunks_from.min(next.first().map_or(usize::MAX, Token::sample));
-        } else if chunks_from < run[0].window.start {
+    let mut before = 0;
+    for (run, mut next) in runs {
+        if !run[0].chunk && chunks_from < run[0].window.start {
             let rest = next.iter().take_while(|t| !starts_word(t)).count();
             next.drain(..rest);
         }
@@ -390,7 +404,6 @@ fn join(spans: &[Span], decoded: &[Vec<Token>], overlap_seconds: f64, vocab: &Vo
         }
         before = out.len();
         out.extend(next);
-        at += run.len();
     }
     out
 }
@@ -1573,6 +1586,22 @@ mod tests {
             vec![piece(25, 20.0), piece(3, 24.0)],
         ];
         assert_eq!(ids(&join(&spans, &decoded, 2.0, &vocab)), [6, 2, 7, 3]);
+        // A chunk after the window counts too: the chunk before it kept
+        // nothing, and a recovery after it kept a word from its start,
+        // before the window.
+        let spans = [
+            span((0.0, 10.0), (0.0, 10.0), false),
+            span((10.0, 20.0), (10.0, 20.0), true),
+            span((20.0, 30.0), (20.0, 30.0), false),
+            span((30.0, 40.0), (16.0, 40.0), true),
+        ];
+        let decoded = [
+            vec![piece(2, 5.0)],
+            Vec::new(),
+            vec![piece(25, 20.0), piece(3, 24.0)],
+            vec![piece(5, 19.0), piece(4, 34.0)],
+        ];
+        assert_eq!(ids(&join(&spans, &decoded, 2.0, &vocab)), [2, 3, 5, 4]);
     }
 
     #[test]
