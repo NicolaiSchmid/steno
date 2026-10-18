@@ -2088,8 +2088,7 @@ takes the handoff item, the desktop app installs beside it on the Mac. WP6b
 filled the host's half of the WP8 seams except four; S4 and S2 of
 `.plans/2026-10-07-stable-promotion.md` later filled the updater, the
 QR half of the fourth and the detection controller, and the clip
-player followed, which leaves the permissions (the plan's "Pipeline and
-services (WP6b)" list gives the reason and what closes it): the host's
+player followed, which leaves the permissions: the host's
 `Permissions` stay the services' fake (all granted),
 because `permissions` answers `unknown` off the Mac and for the Mac's
 system audio, which the host's onboarding opener counts as missing, so
