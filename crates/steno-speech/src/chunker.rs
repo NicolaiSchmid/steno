@@ -867,9 +867,13 @@ mod tests {
             gap_windows(&sound(s(40.0)), &chunks, &tail),
             [s(30.0)..s(40.0)]
         );
-        // A tail under MIN_GAP_SECONDS is left out, and without a chunk
-        // there is no tail.
+        // A tail under MIN_GAP_SECONDS is left out, 2.45 s too, and so is
+        // a tail of digital silence; without a chunk there is no tail.
         assert!(gap_windows(&sound(s(32.0)), &chunks, &tail).is_empty());
+        assert!(gap_windows(&sound(s(32.45)), &chunks, &tail).is_empty());
+        let mut silent = sound(s(40.0));
+        silent[s(30.0)..].fill(0.0);
+        assert!(gap_windows(&silent, &chunks, &tail).is_empty());
         assert!(gap_windows(&sound(s(40.0)), &[], &tail).is_empty());
         // The undecoded gaps are owned half and half by the chunks around
         // them, the tail by its window.
@@ -898,6 +902,15 @@ mod tests {
             cuts(&layout(&samples, &speech, &from_start)),
             vec![(0..s(26.25), Cut::Tail)]
         );
+        // With no padding as well.
+        let unpadded = ChunkerConfig {
+            pad_seconds: 0.0,
+            ..from_start
+        };
+        assert_eq!(
+            cuts(&layout(&samples, &speech, &unpadded)),
+            vec![(0..s(26.0), Cut::Tail)]
+        );
         // A lead-in longer than a chunk: the first chunk decodes its first
         // 25 s or so, and the next starts again just before the speech, as
         // without the switch.
@@ -911,10 +924,11 @@ mod tests {
 
     #[test]
     fn with_extra_windows_only_short_stretches_are_left_out() {
-        // Random speech under the CoreML settings and others: every
-        // stretch neither the chunks nor the extra windows cover is under
-        // MIN_GAP_SECONDS, no window reaches into a chunk or past the
-        // clamp, and the windows come in order.
+        // Random speech under the CoreML settings and others, the first
+        // chunk at the recording's start or not: the chunks decode every
+        // speech region, every stretch neither the chunks nor the extra
+        // windows cover is under MIN_GAP_SECONDS, no window reaches into a
+        // chunk or past the clamp, and the windows come in order.
         let mut seed = 0x2545_f491_4f6c_dd1d_u64;
         let mut below = |n: usize| {
             seed ^= seed << 13;
@@ -935,6 +949,7 @@ mod tests {
                 max_seconds: [15.0, 60.0][case % 2],
                 long_pause_seconds: [f32::INFINITY, 3.0][(case / 2) % 2],
                 decode_gaps: Gaps::All,
+                from_start: (case / 4) % 2 == 1,
                 ..ChunkerConfig::default()
             };
             // Faint sound outside the speech, so no window is digital
@@ -944,6 +959,7 @@ mod tests {
                 samples[region.clone()].fill(0.5);
             }
             let chunks = layout(&samples, &speech, &config);
+            assert!(covers(&chunks, &speech), "case {case}: {chunks:?}");
             let windows = gap_windows(&samples, &chunks, &config);
             let max = sample_count(config.max_seconds);
             assert!(
