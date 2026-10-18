@@ -1,9 +1,6 @@
-//! An Objective-C exception from a model call, through the shared
-//! pipeline: a backend whose calls raise an `NSException` inside
-//! `coreml::contained`, as `CoreML`'s would inside the real backend, run by
-//! four workers. The transcription fails with the exception's name and
-//! reason as an ordinary error, and the process survives to run it again
-//! (A15 of `.plans/2026-10-07-stable-promotion.md`). No models needed.
+//! An Objective-C exception from a model call, run by four workers through
+//! the shared pipeline, fails the transcription as an ordinary error and the
+//! process survives to run it again. No models needed.
 
 #![cfg(target_os = "macos")]
 
@@ -16,8 +13,7 @@ use steno_speech_coreml::SpeechError;
 use steno_speech_coreml::coreml::contained;
 use steno_speech_coreml::engine::pipeline_config;
 
-/// Every model call raises, as a `CoreML` prediction that runs out of
-/// `IOSurface`s does.
+/// Every model call raises.
 #[derive(Clone)]
 struct Raising {
     shape: ModelShape,
@@ -67,8 +63,8 @@ impl SpeechBackend for Raising {
     }
 }
 
-/// 60 s of one-second bursts of noise between seconds of silence, so the
-/// layout has several windows for the workers.
+/// 60 s of one-second noise bursts between silences, so the layout has
+/// several windows.
 fn bursts() -> Vec<f32> {
     let mut state = 0x2545_f491_u32;
     (0..60 * steno_speech::SAMPLE_RATE)
