@@ -127,8 +127,9 @@ On `aarch64-darwin`, `flake.nix` installs the released `Steno.app` unchanged (no
 no re-signing).
 
 Add the flake as an input, `inputs.steno.url = "github:NicolaiSchmid/steno";`, on the
-main branch, not a tag: a release tag's own `flake.nix` still pins the release before it.
-With nix-darwin, put `steno.packages.aarch64-darwin.steno` in
+main branch, not a tag: a release tag's own `flake.nix` still pins the Mac app of the
+release before it. NixOS builds a tag's own source, so a flake for both hosts keeps two
+inputs. With nix-darwin, put `steno.packages.aarch64-darwin.steno` in
 `environment.systemPackages`; nix-darwin copies `Applications/Steno.app` into
 `/Applications/Nix Apps`. With Home Manager, use `home.packages`; from state version
 25.11 (`home.stateVersion`) it copies the app into `~/Applications/Home Manager Apps`,
@@ -139,10 +140,10 @@ From 0.11.0, a Nix install does not offer updates. Running from the Nix store,
 `/Applications/Nix Apps` or `~/Applications/Home Manager Apps`, it leaves them to Nix, and
 Settings > General says "Updates come from your package manager." A copy in a folder you
 set with Home Manager's `targets.darwin.copyApps.directory` still offers updates, and the
-next switch undoes them. To update, run `nix flake update <input>` for the input that pins
-Steno and switch again; for a `nix profile` install, run `nix profile upgrade steno`. In a
-checkout of this repository, bump `release.version` and `release.hash` at the top of
-`flake.nix` instead (the release workflow prints both in its job summary).
+next switch undoes them. To update, run `nix flake update steno` and switch again; for a
+`nix profile` install, run `nix profile upgrade steno`. In a checkout of this repository,
+bump `release.version` and `release.hash` at the top of `flake.nix` instead (the release
+workflow prints both in its job summary).
 
 nix-darwin users who want in-app updates can use the Homebrew cask through
 `homebrew.casks` instead; it installs into `/Applications`, where the updater can write.
