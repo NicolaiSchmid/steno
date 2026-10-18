@@ -9,7 +9,7 @@
 //! on the layouts and fakes it runs ([`ref_losses`]).
 
 use super::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 fn ref_split(range: Range<usize>, max: usize, overlap: usize, out: &mut Vec<Range<usize>>) {
     let stride = range.len().saturating_sub(overlap);
@@ -871,11 +871,24 @@ struct Losses {
     led: usize,
     /// Words of the old merge's text the boundaries flag, held once a
     /// later piece of a placed word may cross chunks' owned boundaries
-    /// that lie in no decoded window: the named limit of a recovery that
-    /// missed a word's start gluing its rest onto a word across an
-    /// undecoded gap. Counted, not passed: the gate caps it at its value
-    /// on the CI seed, 0.
+    /// that lie in no decoded window, with no decoded window wholly
+    /// between the two pieces: the named limit of a recovery that missed a
+    /// word's start gluing its rest onto a word across an undecoded gap.
+    /// Counted, not passed: the gate caps it at its value on the CI seed,
+    /// 0.
     across_gap: usize,
+    /// Words of the old merge's text the boundaries flag, held once such a
+    /// piece, of a place the old merge did not keep, may also cross
+    /// boundaries that only the window of the accepted recovery that holds
+    /// the piece decodes: limit E across its own window. Counted and
+    /// capped as `across_gap`, at 0.
+    across_own_window: usize,
+    /// Words of the old merge's text the boundaries flag, held once a
+    /// piece of an orphan word the old merge dropped may lie inside the
+    /// old merge's own glue after the same word (before the last piece of
+    /// another word it glued there): limit (ii) inside the old merge's
+    /// glue. Counted and capped as `across_gap`, at 0.
+    inside_glue: usize,
     /// Flags in `glued` that an unplaced piece makes: the word would be
     /// held if a piece no placed word lies near could be an extra one.
     /// Counted beside the flags.
@@ -928,25 +941,37 @@ impl Losses {
 ///
 /// # The boundaries' exemptions
 ///
-/// The list is closed. A text-only glue shape found later becomes a named
-/// limit whose count the gate reports and caps at its value on the CI
-/// seed; it never joins this table. A lost word or a lost piece always
-/// fails. The named limits so far:
+/// The table is closed. A text-only glue shape found later becomes a
+/// named limit whose count the gate reports and caps at its value on the
+/// CI seed; it never joins this table. A lost word or a lost piece always
+/// fails. The limits counted outside the table so far, each 0 on the CI
+/// seed:
 ///
 /// - A recovery that missed a word's start can glue its rest onto a word
-///   across an undecoded gap ([`Losses::across_gap`], 0 on the CI seed;
+///   across an undecoded gap ([`Losses::across_gap`];
 ///   `a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_a_word_across_an_undecoded_gap`).
+///   The same glue across a chunk whose decoded window heard nothing is
+///   no such limit, and fails
+///   (`a_recovery_that_missed_a_words_start_can_glue_its_rest_across_a_chunk_that_heard_nothing`).
+/// - Limit E across its own window: the same, across a chunk's owned
+///   boundary that only the window of the recovery that kept the rest
+///   decodes ([`Losses::across_own_window`];
+///   `a_recovery_that_missed_a_words_start_can_glue_its_rest_across_a_boundary_its_window_decodes`).
+/// - Limit (ii) inside the old merge's glue: an orphan word the old merge
+///   dropped comes out inside the old merge's own glue after the same
+///   word, across a chunk ([`Losses::inside_glue`];
+///   `an_orphan_the_old_merge_dropped_can_come_out_inside_its_glue_across_a_chunk`).
 ///
 /// | What passes | Behind it | Pinned by |
 /// |---|---|---|
 /// | Of the old merge's word, only its pieces up to its first piece of another placed word are asked for | What the old merge glued after a word comes out as pieces of their own word, or glued as below | the CI seed |
 /// | An extra piece of a placed word the old merge's text holds in a word that begins with the same placed word | The old merge's own glue, which `own` can extend by a piece the trim before it cut, and a word's twin piece | `the_boundary_check_fails_each_planted_glue_and_passes_each_limit`; cases 353 and 1556 of seed 0x3ec9e6e5fd29f060 and seed 0x642579b97f4a7c18 |
-/// | An extra piece with no chunk's owned span starting or ending between it and the word's first piece | Limit E (a recovery that missed a word's start, or began at an orphan, glues the word's rest onto the word before it) and limit (ii) (an orphan word the old merge dropped, kept and glued to the word before it) | `a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_the_word_before_it`, `a_recovery_that_begins_at_an_orphan_can_glue_it_onto_the_word_before_it`, and the (ii) plant of the check's own test |
-/// | An extra piece of a word that follows the word's first along a chain of repeats (each repeating the word before it, or an orphan after one that does) | The fake's repeat artefact: a window that heard the first word swallows the repeats after it, and the rest after them joins the first; the old merge's text shows the same shape | case 284 of the CI seed |
+/// | An extra piece with no chunk's owned span starting or ending between it and the word's first piece | Limit E (a recovery that missed a word's start, or began at an orphan, can glue the word's rest onto the word before it) and limit (ii) (the partition keeps an orphan word the old merge dropped, glued to the word before it) | `a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_the_word_before_it`, `a_recovery_that_begins_at_an_orphan_can_glue_it_onto_the_word_before_it`, and the (ii) plant of the check's own test |
+/// | An extra piece of a word that follows the word's first along a chain of repeats (each repeating the word before it, or an orphan after one that does) | The fake's repeat artefact: a window that heard the first word swallows the repeats after it, and the rest after them joins the first; the old merge's text shows the same shape at about the same rate (635 in 12,500 of the gate's cases, 3,560 in 12,500 orphan cases) | case 284 of the CI seed |
 /// | A word of the old merge's whose last pieces come out only as the orphan an accepted recovery begins with, glued onto another word ([`Losses::led`]) | Limit E at its exact signature: a recovery that began at an orphan glues it onto the word before it, and that orphan was the only copy of the word's end | `a_recovery_that_begins_at_an_orphan_can_glue_the_end_of_a_word_onto_the_word_before_it` (case 855 of seed 0x3ec9e6e5fd29f060) |
 /// | The old merge's text-leading orphan is asked for only alone, after a word the old merge dropped, or after a copy of a word that comes out elsewhere too | `own` keeps a word from its start where the trim before it began at the orphan | `a_recovery_that_begins_at_an_orphan_can_glue_it_onto_the_word_before_it`, and plant 1 of the check's own test |
 /// | A word that repeats the word before it is not asked for | The fake's repeat artefact, as in the loss check | the CI seed |
-/// | Pieces compare by placed word and id, not by index | The fake's artefact: of a word's two equal pieces it gives one, from either copy | case 1486 of seed 0x163f372fe94f82f |
+/// | Pieces compare by placed word and id, not by index | The fake's equal-piece artefact: of a word's two equal pieces it gives one, from either copy | case 1486 of seed 0x163f372fe94f82f |
 fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> Losses {
     if run.old == run.new.tokens {
         return Losses::default();
@@ -995,6 +1020,10 @@ fn ref_losses(case: &RefCase, run: &RefRun, slack: usize) -> Losses {
             out.led += 1;
         } else if texts.held(of, Extras::AcrossGap) {
             out.across_gap += 1;
+        } else if texts.held(of, Extras::AcrossOwnWindow) {
+            out.across_own_window += 1;
+        } else if texts.held(of, Extras::InsideGlue) {
+            out.inside_glue += 1;
         } else {
             out.unplaced += usize::from(texts.held(of, Extras::Unplaced));
             out.glued.push(w);
@@ -1066,14 +1095,22 @@ fn ref_chain(words: &[Placed], vocab: &Vocab, w: usize, head: usize) -> bool {
 }
 
 /// Which extra pieces [`RefTexts::holds`] allows: the boundaries' own
-/// ([`ref_losses`]), or, to count a word they flag, also a later piece of
-/// a placed word across chunks' owned boundaries that lie in no decoded
-/// window ([`Losses::across_gap`]), or also a piece no placed word lies
-/// near ([`Losses::unplaced`]).
+/// ([`ref_losses`]), or, to count a word they flag, also one of a counted
+/// class's: a later piece of a placed word across chunks' owned
+/// boundaries that lie in no decoded window, with no decoded window
+/// wholly between ([`Losses::across_gap`]); the same for a place the old
+/// merge did not keep, where the window of the accepted recovery that
+/// holds the piece may hold those boundaries
+/// ([`Losses::across_own_window`]); a piece of an orphan word the old
+/// merge dropped, inside the old merge's own glue after the same word
+/// ([`Losses::inside_glue`]); or a piece no placed word lies near
+/// ([`Losses::unplaced`]).
 #[derive(Clone, Copy)]
 enum Extras {
     Check,
     AcrossGap,
+    AcrossOwnWindow,
+    InsideGlue,
     Unplaced,
 }
 
@@ -1092,6 +1129,11 @@ struct RefTexts<'a> {
     after: Vec<Vec<RefPiece>>,
     /// The places the old merge kept.
     kept: HashSet<(usize, usize)>,
+    /// The placed words the old merge kept a piece of.
+    kept_words: HashSet<usize>,
+    /// Per placed word, where the last piece of another placed word starts
+    /// that the old merge's text holds in a word that begins with it.
+    glue_end: HashMap<usize, usize>,
     /// Pairs of placed words `(first, other)` where the old merge's text
     /// holds a piece of `other` in a word that begins with `first`.
     glued: HashSet<(usize, usize)>,
@@ -1101,7 +1143,20 @@ impl<'a> RefTexts<'a> {
     fn new(case: &'a RefCase, run: &'a RefRun, vocab: &'a Vocab, slack: usize) -> Self {
         let before = ref_joins(&run.old, &case.words, vocab, slack);
         let after = ref_joins(&run.new.tokens, &case.words, vocab, slack);
-        let kept = before.iter().flatten().filter_map(|p| p.0).collect();
+        let kept: HashSet<(usize, usize)> = before.iter().flatten().filter_map(|p| p.0).collect();
+        let kept_words = kept.iter().map(|&(w, _)| w).collect();
+        let mut glue_end = HashMap::new();
+        for word in &before {
+            let Some((head, _)) = word[0].0 else {
+                continue;
+            };
+            for &(place, at) in word {
+                if place.is_some_and(|(w, _)| w != head) {
+                    let end = glue_end.entry(head).or_insert(at);
+                    *end = at.max(*end);
+                }
+            }
+        }
         let glued = before
             .iter()
             .filter_map(|word| Some((word[0].0?.0, word)))
@@ -1115,6 +1170,8 @@ impl<'a> RefTexts<'a> {
             before,
             after,
             kept,
+            kept_words,
+            glue_end,
             glued,
         }
     }
@@ -1129,25 +1186,49 @@ impl<'a> RefTexts<'a> {
     /// a word of the old merge's, under `extras`.
     fn extra(&self, &(place, at): &RefPiece, &(first, head): &RefPiece, extras: Extras) -> bool {
         let between = at.min(head)..at.max(head);
-        // Whether a chunk's owned start or end lies between the two pieces,
-        // of all of them or only of those inside a decoded window.
-        let crosses = |decoded_only: bool| {
-            let cuts = |b: usize| {
-                between.start < b
-                    && b <= between.end
-                    && (!decoded_only || self.windows.iter().any(|w| w.contains(&b)))
-            };
+        // Whether a chunk's owned start or end that `counts` lies between
+        // the two pieces.
+        let crosses = |counts: &dyn Fn(usize) -> bool| {
+            let cuts = |b: usize| between.start < b && b <= between.end && counts(b);
             let chunks = self.spans.iter().filter(|s| s.chunk);
             chunks.flat_map(|s| [s.owned.start, s.owned.end]).any(cuts)
+        };
+        // Whether a decoded window holds `b`, not counting, with
+        // `own_window`, the window of an accepted recovery that holds the
+        // piece.
+        let decoded = |b: usize, own_window: bool| {
+            self.spans
+                .iter()
+                .zip(self.windows)
+                .any(|(s, w)| w.contains(&b) && !(own_window && *w != s.window && w.contains(&at)))
+        };
+        // A later piece of a placed word across only undecoded owned
+        // boundaries, with no decoded window wholly between.
+        let across = |own_window: bool| {
+            place.is_some_and(|(_, i)| i > 0)
+                && !crosses(&|b| decoded(b, own_window))
+                && !self
+                    .windows
+                    .iter()
+                    .any(|w| between.start < w.start && w.end <= between.end)
         };
         let follows = |(w, _): (usize, usize), (h, _): (usize, usize)| {
             self.glued.contains(&(h, w)) || ref_chain(&self.case.words, self.vocab, w, h)
         };
         place.zip(first).is_some_and(|(p, f)| follows(p, f))
-            || place.is_some() && !crosses(false)
+            || place.is_some() && !crosses(&|_| true)
             || match extras {
                 Extras::Check => false,
-                Extras::AcrossGap => place.is_some_and(|(_, i)| i > 0) && !crosses(true),
+                Extras::AcrossGap => across(false),
+                Extras::AcrossOwnWindow => {
+                    across(true) && place.is_some_and(|p| !self.kept.contains(&p))
+                }
+                Extras::InsideGlue => place.zip(first).is_some_and(|((w, _), (h, _))| {
+                    ref_orphan(&self.case.words, self.vocab, w)
+                        && !self.kept_words.contains(&w)
+                        && head < at
+                        && self.glue_end.get(&h).is_some_and(|&end| at < end)
+                }),
                 Extras::Unplaced => place.is_none(),
             }
     }
@@ -1245,6 +1326,12 @@ struct Tally {
     led: usize,
     /// Words glued on across an undecoded gap ([`Losses::across_gap`]).
     across_gap: usize,
+    /// Words glued on across a recovery's own window
+    /// ([`Losses::across_own_window`]).
+    across_own_window: usize,
+    /// Orphan words kept inside the old merge's glue
+    /// ([`Losses::inside_glue`]).
+    inside_glue: usize,
     /// Flags an unplaced piece makes ([`Losses::unplaced`]).
     unplaced: usize,
 }
@@ -1312,6 +1399,8 @@ fn differential(seed: u64, cases: usize, jitter: usize) -> Tally {
         tally.glues += losses.glues;
         tally.led += losses.led;
         tally.across_gap += losses.across_gap;
+        tally.across_own_window += losses.across_own_window;
+        tally.inside_glue += losses.inside_glue;
         tally.unplaced += losses.unplaced;
         // Over the deaf fake one window of a run can hear a word its
         // neighbour is deaf to, which the run's LCS drops in both merges
@@ -1363,12 +1452,14 @@ fn every_word_the_old_merge_keeps_comes_out() {
     // Words checked (about 24,000 with this seed), cases with an accepted
     // recovery (about 800), and words that came out more often than from
     // the old merge (about 1 in 150); `glues` is about 25.
-    // The named limit across an undecoded gap, capped at its count here.
+    // The three counted classes, each capped at its count here.
     assert!(
         tally.words > 20_000
             && tally.recovered > 600
             && tally.doubled * 50 < tally.words
-            && tally.across_gap == 0,
+            && tally.across_gap == 0
+            && tally.across_own_window == 0
+            && tally.inside_glue == 0,
         "{tally:?}"
     );
 }
@@ -2140,6 +2231,177 @@ fn the_boundary_check_never_fails_the_old_merges_text_against_itself() {
     );
 }
 
+/// `ref_across_gap_case` with loud sound the fake decodes to nothing from
+/// 27 to 29.5 s: a chunk whose decoded window hears nothing and that has
+/// too little speech to recover, between the middle chunk and the last.
+fn ref_across_empty_chunk_case(jitter: usize) -> (RefCase, RefRun) {
+    let config = random_config(385, false);
+    let regions = vec![0..227_200, 432_000..472_000, 696_000..827_200];
+    let mut samples = vec![0.0; 827_200];
+    for loud in &regions[1..] {
+        samples[loud.clone()].fill(0.05);
+    }
+    let words = ref_at(&[
+        (&[14, 34, 34, 41], 280, 2),
+        (&[13, 33, 41], 493, 2),
+        (&[36, 41], 510, 6),
+        (&[13], 551, 2),
+    ]);
+    let case = ref_case(samples, words, regions);
+    let hearing = Hearing {
+        jitter,
+        deaf: (30, 0, 1),
+    };
+    let run = ref_run(&case, &config, 130, hearing);
+    (case, run)
+}
+
+#[test]
+fn a_recovery_that_missed_a_words_start_can_glue_its_rest_across_a_chunk_that_heard_nothing() {
+    // Text only, never a loss, and outside every counted class, so the
+    // gate fails it wherever it shows (`ref_across_empty_chunk_case`). As
+    // in `a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_a_
+    // word_across_an_undecoded_gap`, the last chunk's recovery begins at
+    // the rest of word 13 and keeps it with the orphan after it, and that
+    // rest follows word 14, across the undecoded audio and the whole
+    // window of the chunk between, which decoded to nothing. The old
+    // merge dropped the rest. Never seen in 100,000 generated cases.
+    for jitter in 0..=3 {
+        let (case, run) = ref_across_empty_chunk_case(jitter);
+        let old = quiet_transcriber(random_config(385, false), 130).render(&run.old);
+        assert_eq!(run.new.stats.recoveries_accepted, 1, "{jitter}");
+        assert_eq!(
+            (run.new.text().as_str(), old.as_str()),
+            ("w14s34.s33.s36. w13", "w14s34.. w13"),
+            "{jitter}"
+        );
+        let losses = ref_losses(&case, &run, 2 + jitter);
+        assert!(
+            losses.lost.is_empty() && losses.pieces.is_empty() && losses.glued == [0],
+            "{jitter} {losses:?}"
+        );
+    }
+}
+
+/// Case 2406 of seed 0x6c62000000000062 in the orphan layout, cut to the
+/// words around the limit: settings with 25 s chunks of at most 15 s and
+/// no extra windows, 89.7 s without noise, loud sound the fake decodes to
+/// nothing to 9.6 s and from 63 to 67.1 s, over a fake `jitter` frames
+/// off and deaf for a window's first 30 frames.
+fn ref_own_window_case(jitter: usize) -> (RefCase, RefRun) {
+    let config = random_config(481, false);
+    let regions = vec![
+        0..153_600,
+        681_600..793_600,
+        1_008_000..1_073_600,
+        1_353_600..1_435_200,
+    ];
+    let mut samples = vec![0.0; 1_435_200];
+    for loud in [&regions[0], &regions[2]] {
+        samples[loud.clone()].fill(0.05);
+    }
+    let words = ref_at(&[
+        (&[20], 850, 3),
+        (&[13, 33], 1006, 2),
+        (&[41, 34], 1025, 3),
+        (&[16, 36], 1058, 4),
+    ]);
+    let case = ref_case(samples, words, regions);
+    let hearing = Hearing {
+        jitter,
+        deaf: (30, 0, 1),
+    };
+    let run = ref_run(&case, &config, 130, hearing);
+    (case, run)
+}
+
+#[test]
+fn a_recovery_that_missed_a_words_start_can_glue_its_rest_across_a_boundary_its_window_decodes() {
+    // Limit E across its own window, text only, counted and capped at 0
+    // on the CI seed (`ref_own_window_case`). The third chunk decodes word
+    // 20 at 68 s and owns up to 79.05 s, the middle of the undecoded gap
+    // after its window. The last chunk's window decodes to nothing, and
+    // its recovery from 78.35 s wins, deaf to 80.75 s: it misses the
+    // start of word 13 at 80.5 s and begins at its rest "s33", in its
+    // reach. That rest follows word 20 across the third chunk's owned end,
+    // which only the recovery's own window decodes, into the old merge's
+    // glue of the orphan ".s34" after word 20. Never a loss; the old merge
+    // dropped the rest.
+    for jitter in 1..=3 {
+        let (case, run) = ref_own_window_case(jitter);
+        let old = quiet_transcriber(random_config(481, false), 130).render(&run.old);
+        assert_eq!(run.new.stats.recoveries_accepted, 1, "{jitter}");
+        assert_eq!(
+            (run.new.text().as_str(), old.as_str()),
+            ("w20s33.s34 w16s36", "w20.s34 w16s36"),
+            "{jitter}"
+        );
+        let losses = ref_losses(&case, &run, 2 + jitter);
+        assert!(
+            losses.passes() && losses.across_gap == 0 && losses.across_own_window == 1,
+            "{jitter} {losses:?}"
+        );
+    }
+}
+
+/// Case 1381 of seed 0xa8d2f372fe94f88e in a layout of short regions
+/// split by long pauses, cut to the words around the limit: settings with
+/// 25 s chunks, long pauses of 3 s and no extra windows, 65.1 s without
+/// noise, loud sound the fake decodes to nothing from 15.6 to 22.3 s,
+/// from 39.7 to 46.4 s and from 53.6 to 57.4 s, over a fake `jitter`
+/// frames off that hears every frame.
+fn ref_inside_glue_case(jitter: usize) -> (RefCase, RefRun) {
+    let config = random_config(276, false);
+    let regions = vec![
+        1_600..105_600,
+        249_600..356_800,
+        481_600..547_200,
+        635_200..742_400,
+        857_600..918_399,
+    ];
+    let mut samples = vec![0.0; 1_041_600];
+    for loud in [&regions[1], &regions[3], &regions[4]] {
+        samples[loud.clone()].fill(0.05);
+    }
+    let words = ref_at(&[
+        (&[7], 510, 6),
+        (&[9, 29, 29], 601, 6),
+        (&[41, 24], 628, 5),
+        (&[41, 37, 37, 41], 644, 4),
+        (&[12, 32, 32, 41], 708, 2),
+    ]);
+    let case = ref_case(samples, words, regions);
+    let run = ref_run(&case, &config, 130, Hearing::every_frame(jitter));
+    (case, run)
+}
+
+#[test]
+fn an_orphan_the_old_merge_dropped_can_come_out_inside_its_glue_across_a_chunk() {
+    // Limit (ii) inside the old merge's glue, text only, counted and
+    // capped at 0 on the CI seed (`ref_inside_glue_case`), over a fake
+    // that hears every frame. The fourth and fifth chunks decode to
+    // nothing and both recoveries win. They keep word 9 at 48.1 s and the
+    // orphan ".s24" at 50.2 s, which the old merge dropped while it glued
+    // the orphan ".s37." after it onto word 9, across the fourth chunk's
+    // owned end at 50 s. So the dropped orphan comes out inside that glue.
+    // Never a loss.
+    for jitter in 0..=3 {
+        let (case, run) = ref_inside_glue_case(jitter);
+        let old = quiet_transcriber(random_config(276, false), 130).render(&run.old);
+        assert_eq!(run.new.stats.recoveries_accepted, 2, "{jitter}");
+        assert_eq!(
+            (run.new.text().as_str(), old.as_str()),
+            ("w7 w9s29.s24.s37. w12s32.", "w7 w9s29.s37. w12s32."),
+            "{jitter}"
+        );
+        let losses = ref_losses(&case, &run, 2 + jitter);
+        assert!(
+            losses.passes() && losses.inside_glue == 1,
+            "{jitter} {losses:?}"
+        );
+    }
+}
+
 /// The tokens of placed words' pieces, `(word, piece)`, each at its
 /// piece's start.
 fn ref_plant(words: &[Placed], pieces: &[(usize, usize)]) -> Vec<Token> {
@@ -2153,16 +2415,24 @@ fn ref_plant(words: &[Placed], pieces: &[(usize, usize)]) -> Vec<Token> {
     pieces.iter().map(token).collect()
 }
 
+/// Whether the boundary check fails `run` with the two merges' tokens
+/// planted: `old` and `new` give them as placed words' pieces.
+fn ref_planted_fails(
+    case: &RefCase,
+    run: &mut RefRun,
+    old: &[(usize, usize)],
+    new: &[(usize, usize)],
+) -> bool {
+    run.old = ref_plant(&case.words, old);
+    run.new.tokens = ref_plant(&case.words, new);
+    !ref_losses(case, run, 2).passes()
+}
+
 #[test]
 fn the_boundary_check_fails_each_planted_glue_and_passes_each_limit() {
     // The check itself ([`ref_losses`]), on planted texts over real
-    // partitions: `old` and `new` give the two merges' tokens as placed
-    // words' pieces.
-    let check = |case: &RefCase, run: &mut RefRun, old: &[(usize, usize)], new| {
-        run.old = ref_plant(&case.words, old);
-        run.new.tokens = ref_plant(&case.words, new);
-        !ref_losses(case, run, 2).passes()
-    };
+    // partitions ([`ref_planted_fails`]).
+    let check = ref_planted_fails;
     // The layout of `a_gaps_run_after_a_chunk_that_kept_nothing_...`: word
     // 11 in a chunk, word 2 in the gap, a chunk the fake decodes to
     // nothing, then an orphan, the rest of a word (".s25" here), and word
@@ -2280,4 +2550,76 @@ fn the_boundary_check_fails_each_planted_glue_and_passes_each_limit() {
     let (case, run) = ref_orphan_led_case();
     let losses = ref_losses(&case, &run, 3);
     assert!(losses.glued.is_empty() && losses.led == 1, "{losses:?}");
+}
+
+#[test]
+fn the_boundary_check_counts_a_glue_in_a_class_only_at_its_signature() {
+    // Planted glues next to the counted classes ([`Extras`]), each of
+    // which no class takes, so the check fails it ([`ref_planted_fails`]).
+    let check = ref_planted_fails;
+    // A chunk with word 5, then a gap's window with word 10, the orphan
+    // "." and word 14. The old merge glued the stop onto word 5, across
+    // the chunk's owned end, where the gap's window begins.
+    let regions = vec![sample_count(1.0)..sample_count(4.0)];
+    let words = vec![
+        ref_placed(vec![5, 25], 2.0, 4),
+        ref_placed(vec![10, 30], 5.5, 4),
+        ref_placed(vec![41], 7.0, 4),
+        ref_placed(vec![14], 10.0, 4),
+    ];
+    let case = ref_case(crafted(20.0, &regions, &[]), words, regions);
+    let mut run = ref_run(&case, &random_config(1, true), 130, Hearing::every_frame(0));
+    let main = [(0, 0), (0, 1), (2, 0), (3, 0)];
+    // A copy of word 5's last piece onto word 14, across only the chunk's
+    // owned end, into the gap's window.
+    let copy = [&main[..], &[(0, 1)]].concat();
+    assert!(check(&case, &mut run, &main, &copy));
+    // The rest of word 10, which the old merge dropped, inside its glue
+    // after word 5, across the chunk's owned end that a plain gap window
+    // decodes: no counted class takes it.
+    let rest = [(0, 0), (0, 1), (1, 1), (2, 0), (3, 0)];
+    assert!(check(&case, &mut run, &main, &rest));
+
+    // The layout of `a_recovery_that_missed_a_words_start_...across_a_
+    // chunk_that_heard_nothing`: its text is planted, and an orphan the
+    // old merge dropped, glued onto word 14 across the undecoded gap.
+    let (case, mut run) = ref_across_empty_chunk_case(0);
+    let main = [(0, 0), (0, 1), (0, 3), (2, 1), (3, 0)];
+    let across = [
+        (0, 0),
+        (0, 1),
+        (0, 3),
+        (1, 1),
+        (1, 2),
+        (2, 0),
+        (2, 1),
+        (3, 0),
+    ];
+    assert!(check(&case, &mut run, &main, &across));
+    let (case, mut run) = ref_across_gap_case(0);
+    let main = [(0, 0), (0, 1), (0, 3), (3, 0)];
+    let orphan = [(0, 0), (0, 1), (0, 3), (2, 0), (2, 1), (3, 0)];
+    assert!(check(&case, &mut run, &main, &orphan));
+    // In the layout of the limit across its own window, an orphan the old
+    // merge dropped, glued onto word 20 across the boundary only the
+    // recovery's window decodes.
+    let (case, mut run) = ref_own_window_case(1);
+    let orphan = [(0, 0), (2, 0), (2, 1), (3, 0), (3, 1)];
+    assert!(check(&case, &mut run, &[(0, 0), (3, 0), (3, 1)], &orphan));
+    // In the layout of the orphan inside the old merge's glue, an orphan
+    // the old merge kept after word 7, moved inside its glue after word 9.
+    let (case, mut run) = ref_inside_glue_case(0);
+    let after = [
+        (1, 0),
+        (1, 1),
+        (3, 0),
+        (3, 1),
+        (3, 3),
+        (4, 0),
+        (4, 1),
+        (4, 3),
+    ];
+    let main = [&[(0, 0), (2, 0), (2, 1)], &after[..]].concat();
+    let moved = [&[(0, 0), (1, 0), (1, 1), (2, 0), (2, 1)], &after[2..]].concat();
+    assert!(check(&case, &mut run, &main, &moved));
 }
