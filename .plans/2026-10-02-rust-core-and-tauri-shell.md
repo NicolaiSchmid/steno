@@ -554,9 +554,8 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   (`apps/desktop/README.md`, "Checksums and OpenPGP signatures"); the Windows
   installers stay unsigned and the release notes say so. WP9b is the cutover:
   `.plans/2026-10-04-mac-cutover.md`.
-  The shell's gaps ("Open after the port"): the tray's badge for pending speaker
-  reviews and the clip player, a fake with no audio output; both follow the stable
-  release (`.plans/2026-10-07-stable-promotion.md`, D3). The QR encoder and the
+  The shell's gap ("Open after the port"): the clip player, a fake with no audio
+  output; it follows the stable release (`.plans/2026-10-07-stable-promotion.md`, D3). The QR encoder and the
   update schedule, which blocked it, landed with S4 (`feat/rust-update-schedule`):
   `steno_services::qr` and `steno_services::updates`.
   The phone handover identity: on the first launch on macOS after the update the app
@@ -740,8 +739,9 @@ still has to draw the window side. `[ ]` is not ported yet.
 
 ### Beyond the bridge
 
-- [ ] Menu bar item: the processing queue, the five recent meetings, record and stop,
-  the login item toggle, check for updates (`MenuBarViewModel`); the shell's tray, WP8.
+- [x] Menu bar item: the processing queue, the five recent meetings, record and stop,
+  the login item toggle, check for updates (`MenuBarViewModel`); the shell's tray
+  (`steno_host::tray`, `apps/desktop/src-tauri/src/tray.rs`).
 - [x] Floating panels: the recording bubble and the detection prompt with its
   60-second countdown: the shell's panels (WP8), the prompt raised and cleared by the
   services' `DetectionController` (S2 of `.plans/2026-10-07-stable-promotion.md`).
@@ -760,9 +760,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   recovered from their master at launch or, with none on disk, marked failed
   (`steno_services::recovery`), unfinished processing resumed at launch
   (`steno_services::App::launch`).
-- [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
-  the host republishes `progress`; the tray (WP8) shows no badge for it; it follows the
-  stable release (`.plans/2026-10-07-stable-promotion.md`, D3).
+- [x] Pending speaker reviews (`speakersNeedReview`): the host keeps the flagged
+  meetings until every speaker is confirmed or the meeting is gone, as
+  `AppController.pendingReviews` did. Difference: Swift drew no badge; the tray lists
+  them and counts them on the icon and in its tooltip.
 - [x] Updates: Sparkle in the Swift app; in the Rust app the update schedule
   (`steno_services::updates::UpdateSchedule`, S4 of
   `.plans/2026-10-07-stable-promotion.md`) is the host's `Updater` over the shell's
@@ -3069,11 +3070,10 @@ touch and admission lines; each fix is ported to Swift before cutover.
   setting is not saved
   (`apps/desktop/src-tauri/src/packaged.rs`, `apps/desktop/README.md` "Packaged
   installs").
-- The menu bar on macOS carries the application, Edit and Window menus; the Swift
-  Record menu (`⌘⇧R`, Record In Person) and Find Meetings (`⌘F`) are not in it yet.
-  The page answers the shortcuts it shows itself (`useShortcut` in
-  `apps/macos/web/src/lib/platform.tsx`): ⌘F and ⇧⌘E in both apps, ⌘⇧R in the
-  Tauri shell only, where no Record menu owns it.
+- The menu bar on macOS carries the application, Edit (with Find Meetings, `⌘F`),
+  Record (`⌘⇧R`, Record in person) and Window menus. The page answers the shortcuts
+  it shows itself (`useShortcut` in `apps/macos/web/src/lib/platform.tsx`): ⌘F and
+  ⇧⌘E in both apps, ⌘⇧R off the Mac only, where no Record menu owns it.
 - Each platform's words and keys: the shell tells every page its platform before the
   page runs (`apps/desktop/src-tauri/src/platform.rs`, `window.__STENO_PLATFORM__`),
   the page words itself from one table (`apps/macos/web/src/lib/platform.tsx`: "this
@@ -3336,22 +3336,9 @@ Whatever its owner, an item that can lose a recording, a transcript, a note or a
 blocks the stable release (`.plans/2026-10-07-stable-promotion.md`, D3). An item that a row of that
 plan's tables names belongs to that row's package (S, A, P or X), whatever its label here.
 
-- **WP9b.** The unticked lines of the parity list; which of them block the stable
-  release, and which follow it, is the blocking list of
-  `.plans/2026-10-07-stable-promotion.md` (D3), which replaces the rule that all must
-  be ticked before the cutover opens. The lines: the menu bar's queue and recent
-  meetings, the macOS menu bar's Record and Find Meetings items. Several name WP5
-  or WP8, which merged without them. The other unticked "Speech" line,
-  `SpeechSettings`, covers Rust-only settings
-  with no Swift behaviour to match: it does not gate the cutover and has its own
-  **Unowned.** item. Where:
-  the unticked lines under "Beyond the bridge" and "Speech" and the open items under
-  "Pipeline and services (WP6b)" and "Shell" in the parity list. Found: #170, #172,
-  #173.
-- **WP9b.** The shell's two gaps, both following the stable release: no tray badge
-  for pending speaker reviews, and a fake clip player (a speaker's sample does not
-  play). Where: the fake in `build` (`crates/steno-services/src/app.rs`), the tray
-  (`apps/desktop/src-tauri/src/tray.rs`); the WP9 paragraph and seam (4) under
+- **WP9b.** The shell's gap, following the stable release: a fake clip player (a
+  speaker's sample does not play). Where: the fake in `build`
+  (`crates/steno-services/src/app.rs`); the WP9 paragraph and seam (4) under
   "Pipeline and services (WP6b)". Found: #173, #185.
 - **First Linux release.** No real GNOME or KDE Plasma session has logged out or shut
   down under the app: the session clients ran against fakes on a private bus, the lost

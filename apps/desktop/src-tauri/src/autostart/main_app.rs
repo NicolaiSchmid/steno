@@ -570,7 +570,7 @@ mod tests {
             .find("#[cfg(target_os = \"macos\")]\n    autostart::remove_earlier_agent();")
             .expect("setup removes the leftover agent on macOS");
         let launch = setup
-            .find("host::host(handle).launch(runtime);")
+            .find("host::host(handle).launch(handle, runtime);")
             .expect("setup launches the host");
         assert!(removal < launch);
     }

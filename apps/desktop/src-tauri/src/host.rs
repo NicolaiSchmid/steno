@@ -1049,16 +1049,23 @@ impl Host {
         self.inner.app.pipeline.quit();
     }
 
-    /// The launch sequence on the runtime; a no-op for the fixtures.
-    pub fn launch(&self, runtime: &tokio::runtime::Runtime) {
+    /// The launch sequence on the runtime, the tray (built by now) told
+    /// the meeting rows from here on; a no-op for the fixtures.
+    pub fn launch(&self, app: &AppHandle, runtime: &tokio::runtime::Runtime) {
         #[cfg(not(feature = "fixture-host"))]
         {
+            let app = app.clone();
+            self.inner.host.on_tray(Box::new(move |meetings| {
+                let tray = app.clone();
+                let _ =
+                    app.run_on_main_thread(move || crate::tray::note_meetings(&tray, &meetings));
+            }));
             let _guard = runtime.enter();
             self.inner.app.launch(&self.inner.host);
         }
         #[cfg(feature = "fixture-host")]
         {
-            let _ = runtime;
+            let _ = (app, runtime);
         }
     }
 

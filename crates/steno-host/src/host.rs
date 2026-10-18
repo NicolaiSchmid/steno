@@ -125,7 +125,7 @@
 //! secret store on a helper thread instead of panicking, and still blocks
 //! that worker.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard};
@@ -166,6 +166,7 @@ use crate::settings::{
 use crate::setup::engine_notice;
 use crate::speakers::{OptionKind, SpeakerOption as ModelOption};
 use crate::speech::{ModelAsset, SpeechEngineId};
+use crate::tray::{self, TrayMeetings};
 
 /// What the shell tells the host once. Swift: the bundle's marketing
 /// version and the viewer's calendar.
@@ -216,6 +217,10 @@ pub type Confirm = Box<dyn Fn(&ConfirmDestructiveParams) -> bool + Send + Sync>;
 /// The folder chooser: takes the folder to start in and returns the
 /// choice, `None` when cancelled. Swift: `SettingsBridge.ChooseFolder`.
 pub type ChooseFolder = Box<dyn Fn(Option<&Path>) -> Option<PathBuf> + Send + Sync>;
+
+/// The shell's tray ([`Host::on_tray`]); called while the host publishes,
+/// so it must not call into the host.
+pub type TraySink = Box<dyn Fn(TrayMeetings) + Send + Sync>;
 
 /// What constructing a host can fail on.
 #[derive(Debug, thiserror::Error)]
@@ -278,6 +283,9 @@ struct Inner {
     list: MeetingListViewModel,
     detail: Option<MeetingDetailViewModel>,
     progress: ProcessingProgressModel,
+    /// Meetings the pipeline flagged with unconfirmed speakers this launch
+    /// (`speakersNeedReview`), pruned at each reload ([`tray::prune_reviews`]).
+    reviews: BTreeSet<Uuid>,
     general: GeneralSettingsViewModel,
     audio: AudioSettingsViewModel,
     speech: SpeechSettingsViewModel,
@@ -307,6 +315,9 @@ struct Shared {
     dialogs: RwLock<Dialogs>,
     /// The `recording` topic's feed, which takes none of the locks above.
     feed: RecordingFeed,
+    /// The shell's tray, told the meeting rows with every publish that
+    /// moved them ([`Host::on_tray`]).
+    tray: Mutex<Option<TraySink>>,
     /// What asks the reload owner for a pass ([`Host::request_reload`]).
     reloads: Reloads,
 }
@@ -629,6 +640,7 @@ impl Host {
                 list,
                 detail: None,
                 progress,
+                reviews: BTreeSet::new(),
                 general,
                 audio,
                 speech,
@@ -647,6 +659,7 @@ impl Host {
                 choose_folder: Box::new(|_| None),
             }),
             feed: RecordingFeed::new(),
+            tray: Mutex::new(None),
             reloads: Reloads::default(),
         });
         RecordingFeed::start(&shared, (recorder.state, recorder.meeting_id))
@@ -702,6 +715,21 @@ impl Host {
     /// The sink snapshots go to. Swift: `attach(_:)`.
     pub fn attach(&self, sink: Arc<dyn EventSink>) {
         *lock(&self.shared.sink) = Some(sink);
+    }
+
+    /// Where the tray's meeting rows go: told them now, and again with
+    /// every publish of `progress` or `meetings.list`, page or none.
+    pub fn on_tray(&self, sink: TraySink) {
+        let _publishing = lock(&self.shared.publishing);
+        sink(self.tray_meetings());
+        *lock(&self.shared.tray) = Some(sink);
+    }
+
+    /// The tray's meeting rows as the view models stand.
+    #[must_use]
+    pub fn tray_meetings(&self) -> TrayMeetings {
+        let inner = self.lock();
+        tray::tray_meetings(&inner.list, &inner.progress, &inner.reviews)
     }
 
     #[must_use]
@@ -862,12 +890,16 @@ impl Host {
         let _publishing = lock(&self.shared.publishing);
         // Bounded: each pass only schedules what a consumed request changed.
         for _ in 0..4 {
-            let (sink, batch) = {
+            let (sink, batch, meetings) = {
                 let mut inner = self.lock();
                 let due = inner.publisher.take_due();
                 if due.is_empty() {
                     break;
                 }
+                let meetings = due
+                    .iter()
+                    .any(|topic| matches!(topic, BridgeTopic::Progress | BridgeTopic::MeetingsList))
+                    .then(|| tray::tray_meetings(&inner.list, &inner.progress, &inner.reviews));
                 // Nothing goes out before `page.ready`; the snapshots are
                 // still built for their side effects.
                 let sink = lock(&self.shared.sink)
@@ -881,12 +913,15 @@ impl Host {
                     }
                     batch.extend(snapshot.map(|payload| BridgeEvent::new(topic, payload)));
                 }
-                (sink, batch)
+                (sink, batch, meetings)
             };
             if let Some(sink) = sink {
                 for event in batch {
                     sink.emit(event);
                 }
+            }
+            if let (Some(meetings), Some(tray)) = (meetings, lock(&self.shared.tray).as_ref()) {
+                tray(meetings);
             }
         }
     }
@@ -1048,6 +1083,7 @@ impl Host {
         let now = self.now();
         inner.list.reload(&inner.store);
         inner.progress.meetings_changed(&inner.list.all, now);
+        tray::prune_reviews(&mut inner.reviews, &inner.list);
         if let Some(detail) = inner.detail.as_mut() {
             detail.reload(
                 &inner.store,
@@ -1103,6 +1139,9 @@ impl Host {
             let now = self.now();
             inner.progress.apply(event, now);
             inner.publisher.schedule(BridgeTopic::Progress);
+            if let MeetingEvent::SpeakersNeedReview { meeting_id, .. } = event {
+                inner.reviews.insert(*meeting_id);
+            }
             if let MeetingEvent::OperationFailed {
                 meeting_id,
                 operation,

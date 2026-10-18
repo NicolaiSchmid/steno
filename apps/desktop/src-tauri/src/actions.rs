@@ -47,8 +47,13 @@ steno_core::string_enum! {
         LaunchAtLogin = "launch-at-login",
         CheckForUpdates = "check-for-updates",
         Quit = "quit",
+        /// In the macOS menu bar's Edit menu only.
+        FindMeetings = "find-meetings",
     }
 }
+
+/// The id prefix of a tray row that opens a meeting: `meeting:<uuid>`.
+pub const MEETING_PREFIX: &str = "meeting:";
 
 impl MenuAction {
     /// The item's text at rest on this platform ([`Self::label_on`]);
@@ -74,6 +79,7 @@ impl MenuAction {
                 Platform::Windows => "Exit Steno",
                 Platform::Macos | Platform::Linux => "Quit Steno",
             },
+            Self::FindMeetings => "Find Meetings",
         }
     }
 
@@ -142,6 +148,13 @@ pub fn check_for_updates(app: &AppHandle) {
 /// A menu item was chosen, in the tray's menu or the menu bar's.
 pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
     let MenuId(id) = event.id();
+    if let Some(meeting_id) = id
+        .strip_prefix(MEETING_PREFIX)
+        .and_then(steno_core::json::parse_uuid)
+    {
+        open_meeting(app, meeting_id);
+        return;
+    }
     let Ok(action) = id.parse::<MenuAction>() else {
         return;
     };
@@ -164,6 +177,33 @@ pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
         },
         MenuAction::CheckForUpdates => check_for_updates(app),
         MenuAction::Quit => quit_from_menu(app),
+        MenuAction::FindMeetings => find_meetings(app),
+    }
+}
+
+/// Opens the main window on `meeting_id`, as a deep link does.
+fn open_meeting(app: &AppHandle, meeting_id: uuid::Uuid) {
+    let request = steno_bridge::WindowParams {
+        window: BridgeWindow::Main,
+        section: None,
+        meeting_id: Some(meeting_id),
+    };
+    if let Err(error) = windows::open_requested(app, &request) {
+        stderr_line!("[steno-desktop] opening a meeting failed: {error}");
+    }
+}
+
+/// The page's own ⌘F, pressed in the main window: its search field takes
+/// the focus (`useShortcut` in `meeting-list.tsx`).
+const FIND_MEETINGS_SCRIPT: &str = "window.dispatchEvent(new KeyboardEvent('keydown', \
+    { key: 'f', code: 'KeyF', metaKey: true }));";
+
+/// Find Meetings: brings the main window up and focuses its search.
+fn find_meetings(app: &AppHandle) {
+    let shown = windows::open(app, BridgeWindow::Main, None, None)
+        .and_then(|window| window.eval(FIND_MEETINGS_SCRIPT));
+    if let Err(error) = shown {
+        stderr_line!("[steno-desktop] Find Meetings failed: {error}");
     }
 }
 

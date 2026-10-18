@@ -312,9 +312,9 @@ export interface Platform {
 	/** Whether the page leaves room for the traffic lights (see `TITLE_BAR_INSET`). */
 	titleBarInset: boolean;
 	/**
-	 * Whether the page answers the Record shortcut itself. The Swift app's
-	 * Record menu owns ⌘⇧R there, and a page that answered it too would
-	 * toggle the recorder twice; the Tauri shell has no such menu.
+	 * Whether the page answers the Record shortcut itself. On the Mac both
+	 * apps' Record menu owns ⌘⇧R, and a page that answered it too would
+	 * toggle the recorder twice; Windows and Linux have no menu bar.
 	 */
 	bindsRecordShortcut: boolean;
 	/** `shortcut`'s label on this platform. */
@@ -327,24 +327,21 @@ function isPlatformOS(value: unknown): value is PlatformOS {
 	return platformSchema.safeParse(value).success;
 }
 
-/** The platform for `os` in the Tauri shell, which binds Record in the page. */
+/** The platform for `os` in the Tauri shell; off the Mac the page binds Record. */
 export function platformFor(os: PlatformOS): Platform {
 	return {
 		os,
 		words: WORDS[os],
 		readsCalendar: READS_CALENDAR[os],
 		titleBarInset: TITLE_BAR_INSET[os],
-		bindsRecordShortcut: true,
+		bindsRecordShortcut: os !== "macos",
 		label: (shortcut) => shortcutLabel(os, shortcut),
 		matches: (event, shortcut) => matchesShortcut(os, event, shortcut),
 	};
 }
 
-/** The Swift app's Mac, whose Record menu owns the Record shortcut. */
-export const SWIFT_MAC: Platform = {
-	...platformFor("macos"),
-	bindsRecordShortcut: false,
-};
+/** The Swift app's Mac. */
+export const SWIFT_MAC: Platform = platformFor("macos");
 
 /** What the Tauri shell sets (`platform.rs`). */
 interface StenoWindow {
