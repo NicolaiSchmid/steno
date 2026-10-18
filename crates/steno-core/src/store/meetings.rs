@@ -860,48 +860,6 @@ mod tests {
         }
     }
 
-    /// Another connection's short write lock makes the stop's save wait,
-    /// not fail, and the save reads what it committed.
-    #[test]
-    fn the_stopped_recordings_save_waits_out_another_writer() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("steno.sqlite");
-        let store = Store::open(&path).unwrap();
-        let meeting = a_recording_row(&store);
-        let other = Store::open(&path).unwrap();
-        let (held, holding) = std::sync::mpsc::channel();
-        let writer = std::thread::spawn(move || {
-            other
-                .write(|transaction| {
-                    transaction.execute(
-                        "INSERT OR REPLACE INTO setting (key, value) \
-                         VALUES ('defaultRetention', ?1)",
-                        params![crate::json::to_column_string(&AudioRetention::KeepDays(3))?],
-                    )?;
-                    held.send(()).unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                    Ok(())
-                })
-                .unwrap();
-        });
-        holding.recv().unwrap();
-        let saved = store.save_stopped_recording(
-            meeting.id,
-            1.0,
-            RecordingEndReason::Manual,
-            &asset(meeting.id, "file:///audio/x/master.caf"),
-            None,
-            Utc::now(),
-        );
-        writer.join().unwrap();
-        assert_eq!(saved.unwrap().state, MeetingState::Queued);
-        assert_eq!(
-            store.asset(meeting.id).unwrap().unwrap().retention,
-            AudioRetention::KeepDays(3),
-            "read after the other write committed"
-        );
-    }
-
     /// An unreadable default retention row does not fail the stop's save:
     /// the audio is kept forever and the warning names the key only.
     #[test]

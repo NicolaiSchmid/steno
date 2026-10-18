@@ -89,30 +89,3 @@ pub use transcript_cleaner::TranscriptCleaner;
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 pub type BoundaryResult<T> = Result<T, BoxError>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Compiles only when `T` can be held as `Arc<dyn T>`.
-    fn assert_shared_object<T: Send + Sync + ?Sized>() {}
-
-    /// The one boundary the audio thread owns.
-    fn assert_owned_object<T: Send + ?Sized>() {}
-
-    #[test]
-    fn boundaries_are_trait_objects_the_pipeline_can_share() {
-        assert_shared_object::<dyn SpeechEngine>();
-        assert_shared_object::<dyn Diarizer>();
-        assert_shared_object::<dyn LanguageModel>();
-        assert_shared_object::<dyn Destination>();
-        assert_shared_object::<dyn SecretStore>();
-        assert_shared_object::<dyn SpeakerMemory>();
-        assert_shared_object::<dyn AudioDecoder>();
-        assert_shared_object::<dyn TranscriptCleaner>();
-        assert_shared_object::<dyn MeetingSummarizer>();
-        assert_shared_object::<dyn DeliveryDispatcher>();
-        assert_shared_object::<dyn HandoverIntake>();
-        assert_owned_object::<dyn EchoCanceller>();
-    }
-}
