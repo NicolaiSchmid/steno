@@ -90,17 +90,29 @@ impl WarmUpMark {
 
     /// The launch check over the mark in `support_directory`: a mark left
     /// there turns the warm-up off until a load clears it, and is logged
-    /// once at `warn`. A mark whose presence cannot be checked counts as
-    /// one that cannot be read. Call it once per launch, before any
-    /// recording.
+    /// once at `warn`. On the Mac a mark whose presence cannot be checked
+    /// counts as one that cannot be read; elsewhere, where no warm-up mark
+    /// is written, it is no mark, logged at `warn`. Call it once per
+    /// launch, before any recording.
     #[must_use]
     pub fn at_launch(support_directory: &Path) -> Self {
         let path = support_directory.join(Self::FILE_NAME);
         // A mark that cannot be read still turns the warm-up off. Its id is
-        // lost, so it gets a fresh one and the fallback counts it as new. A
-        // check that fails is treated the same, so it never hides a crash.
+        // lost, so it gets a fresh one and the fallback counts it as new. On
+        // the Mac a check that fails is treated the same, so it never hides
+        // a crash. Only the Mac writes warm-up marks, so elsewhere a failed
+        // check is no mark.
         let left_over = match path.try_exists() {
             Ok(false) => None,
+            Err(error) if !cfg!(target_os = "macos") => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "the warm-up mark of the speech models could not be checked; only the Mac \
+                     writes one, so it counts as none"
+                );
+                None
+            }
             found => Some(
                 found
                     .and_then(|_| std::fs::read_to_string(&path))
@@ -383,8 +395,9 @@ mod tests {
         assert_eq!(lines_of(&text, first, "is held off"), 0, "{text}");
     }
 
-    /// A mark whose presence cannot be checked counts as one that cannot
-    /// be read. Unix: a support path through a regular file (`ENOTDIR`).
+    /// On the Mac a mark whose presence cannot be checked counts as one
+    /// that cannot be read; elsewhere it is no mark. Unix: a support path
+    /// through a regular file (`ENOTDIR`).
     #[cfg(unix)]
     #[test]
     fn a_mark_that_cannot_be_checked_counts_as_unreadable() {
@@ -392,9 +405,14 @@ mod tests {
         let file = dir.path().join("support");
         std::fs::write(&file, b"").unwrap();
         let mark = WarmUpMark::at_launch(&file);
-        assert!(mark.skipping());
-        let id = mark.left_over().unwrap();
-        assert!(id.starts_with("unreadable-"), "{id}");
+        if cfg!(target_os = "macos") {
+            assert!(mark.skipping());
+            let id = mark.left_over().unwrap();
+            assert!(id.starts_with("unreadable-"), "{id}");
+        } else {
+            assert!(!mark.skipping());
+            assert_eq!(mark.left_over(), None);
+        }
     }
 
     #[test]
