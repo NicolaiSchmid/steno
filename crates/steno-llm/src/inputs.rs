@@ -1,12 +1,8 @@
-//! A `MeetingExport` (`meeting.json`) carries everything both passes need,
-//! so the CLI and the fixtures feed the cleaner and summarizer from one
-//! file.
-//! Swift: `Sources/StenoLLM/Transcript/MeetingExport+StageInputs.swift`.
+//! A `MeetingExport` (`meeting.json`) as the input of both passes.
 
 use steno_core::{CleanupInput, MeetingExport, SummaryInput, SummaryTemplate};
 
-/// Pass 1's input: the export's segments, speakers, participants and
-/// known people under the meeting's language.
+/// Pass 1's input from the export.
 #[must_use]
 pub fn cleanup_input(export: &MeetingExport) -> CleanupInput {
     CleanupInput {

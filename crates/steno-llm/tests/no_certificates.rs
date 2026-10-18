@@ -1,11 +1,6 @@
-//! A computer without trusted root certificates (a minimal Linux install)
-//! cannot build the HTTP client. The clients are still made without a
-//! panic, so the app starts and records and only the summaries fail; the
-//! OpenAI-compatible client is called here and reports the reason, the
-//! Codex client and its credential store are only made. Linux reads the
-//! roots only from `SSL_CERT_FILE` and `SSL_CERT_DIR` when either is set,
-//! so the test runs itself again with both pointing at an empty file and
-//! folder.
+//! Without trusted root certificates the clients are still made without a
+//! panic and report the reason. The test reruns itself with
+//! `SSL_CERT_FILE` and `SSL_CERT_DIR` pointing at an empty file and folder.
 #![cfg(all(unix, not(target_vendor = "apple")))]
 
 use steno_core::{LlmRequest, LlmResponseFormat};

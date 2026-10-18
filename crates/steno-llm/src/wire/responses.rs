@@ -1,8 +1,6 @@
 //! The OpenAI Responses API as the Codex backend speaks it:
 //! `POST {codex}/responses`, always streamed, and `GET {codex}/models`.
-//! Only the fields Steno sends or reads; the backend rejects `temperature`
-//! and `max_output_tokens` by name, so neither has a place here.
-//! Swift: `Sources/StenoLLM/Wire/Responses.swift`.
+//! The backend rejects `temperature` and `max_output_tokens`, so neither is here.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,7 +26,7 @@ pub struct ResponsesRequest {
 }
 
 impl ResponsesRequest {
-    /// The fixed part of every request: no tools, nothing stored, streamed.
+    /// No tools, nothing stored, streamed.
     #[must_use]
     pub fn new(model: &str, input: Vec<ResponsesInputItem>) -> Self {
         ResponsesRequest {
@@ -56,9 +54,7 @@ pub struct ResponsesText {
     pub format: ResponsesFormat,
 }
 
-/// `{"type": "json_object"}` or
-/// `{"type": "json_schema", "name", "schema", "strict"}` (flat, unlike chat
-/// completions' nested `json_schema`).
+/// `json_object`, or a flat `json_schema` (unlike chat completions' nested one).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResponsesFormat {
     #[serde(rename = "type")]
@@ -93,9 +89,8 @@ impl ResponsesFormat {
     }
 }
 
-/// One `message` input item: a role and its text parts. User text goes as
-/// `input_text`; an earlier assistant answer (the repair round) as
-/// `output_text`, which is how the API names assistant-authored content.
+/// One `message` input item. User text goes as `input_text`, an earlier
+/// assistant answer (the repair round) as `output_text`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponsesInputItem {
     #[serde(rename = "type")]
@@ -129,8 +124,8 @@ impl From<&LlmMessage> for ResponsesInputItem {
     }
 }
 
-/// A `response` object as the stream's `response.*` events carry it. Only
-/// the fields Steno reads; `output` is used when no item event was seen.
+/// A `response` object from the stream's `response.*` events; `output` is
+/// used when no item event was seen.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ResponsesResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,8 +158,7 @@ pub struct ResponsesError {
     pub message: Option<String>,
 }
 
-/// `input_tokens` and `output_tokens`; both optional so a missing usage
-/// never fails a good answer.
+/// Token usage; both optional so a missing usage never fails a good answer.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ResponsesUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,8 +168,7 @@ pub struct ResponsesUsage {
 }
 
 /// One output item. Steno reads `message` items' `output_text` parts and
-/// treats a `refusal` part as the model declining; reasoning and tool items
-/// are skipped.
+/// treats a `refusal` part as the model declining.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ResponsesOutputItem {
     #[serde(rename = "type")]
@@ -236,9 +229,7 @@ impl ResponsesOutputItem {
     }
 }
 
-/// One event of the stream, decoded from its `data:` JSON. `type` matches
-/// the SSE `event:` name (`response.completed`, `response.output_item.done`,
-/// `error`, …).
+/// One event of the stream, decoded from its `data:` JSON.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ResponsesStreamEvent {
     #[serde(rename = "type")]
@@ -254,8 +245,7 @@ pub struct ResponsesStreamEvent {
     pub message: Option<String>,
 }
 
-/// The Codex backend's error bodies come in two shapes:
-/// `{"detail": "Unsupported parameter: …"}` and OpenAI's
+/// The Codex backend's error bodies: `{"detail": …}` or OpenAI's
 /// `{"error": {"message", "type", "code"}}`.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct CodexErrorEnvelope {
@@ -305,8 +295,8 @@ impl CodexErrorEnvelope {
     }
 }
 
-/// One entry of `GET {codex}/models`. `visibility` is "list" for models the
-/// picker should show; the rest are hidden or retired.
+/// One entry of `GET {codex}/models`; `visibility` "list" marks the models
+/// a picker should show.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CodexModel {
     pub slug: String,

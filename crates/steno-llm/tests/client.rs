@@ -1,7 +1,5 @@
 //! The OpenAI-compatible client against the stub server: wire format, auth,
 //! retries on the manual clock, mode and parameter fallback, redaction.
-//! Swift: `ClientTests`, `ClientContractTests`, `RetryTests`,
-//! `ModeFallbackTests`, `ParameterFallbackTests`.
 
 mod common;
 
@@ -341,7 +339,7 @@ async fn probe_throws_on_401_and_when_the_completion_fails_however_the_model_lis
 
 #[tokio::test]
 async fn probe_throws_a_transport_error_when_nothing_listens() {
-    // Port 1 (tcpmux) is closed on every runner: the connection is refused.
+    // Port 1 is closed on every runner.
     let endpoint = LlmEndpoint::new(url::Url::parse("http://127.0.0.1:1/v1").unwrap(), "m");
     let client = OpenAiCompatibleClient::new(endpoint, None).with_retry(RetryPolicy::NONE);
     let error = client.probe_llm().await.unwrap_err();
@@ -554,8 +552,6 @@ async fn a_null_or_partial_usage_block_never_fails_a_good_answer() {
     assert_eq!(harness.clock.pending_sleepers(), 0);
     assert!(!harness.events().iter().any(is_retrying));
 }
-
-// Retries
 
 #[test]
 fn policy_backs_off_exponentially_and_honours_retry_after_within_the_cap() {
@@ -910,8 +906,6 @@ fn format_kinds(harness: &ClientHarness) -> Vec<Option<&'static str>> {
         .collect()
 }
 
-// Mode fallback
-
 #[tokio::test]
 async fn a_400_naming_response_format_flips_to_json_object_and_is_remembered() {
     let harness = ClientHarness::new().await;
@@ -1112,9 +1106,8 @@ async fn a_json_object_request_walks_the_whole_chain_and_ends_at_prompt_only() {
         scripts.text("{}"),
     ));
     harness.client.complete_llm(&json_request()).await.unwrap();
-    // The chain is walked mode by mode, so the JsonSchema and JsonObject
-    // modes both send json_object for this request: one repeated wire
-    // format before PromptOnly. Steno's builders never send JsonObject.
+    // The chain is walked mode by mode, so `JsonSchema` and `JsonObject`
+    // both send json_object for this request.
     assert_eq!(
         format_kinds(&harness),
         [Some("json_object"), Some("json_object"), None]
@@ -1139,10 +1132,8 @@ async fn a_json_object_request_walks_the_whole_chain_and_ends_at_prompt_only() {
     assert_eq!(harness.clock.pending_sleepers(), 0);
 }
 
-/// Two chunks in flight under `JsonSchema` both draw the 400. The mode
-/// moves down once per step and is announced once; the second, late 400
-/// (its attempt started under the older mode) neither moves the mode back
-/// up nor fires a second `ModeDowngraded`.
+/// Two concurrent 400s under `JsonSchema`: the mode steps down once per
+/// step, announced once, and the late 400 cannot move it back up.
 #[tokio::test]
 async fn concurrent_rejections_downgrade_the_mode_once_per_step() {
     let harness = ClientHarness::new().await;
@@ -1183,8 +1174,6 @@ async fn concurrent_rejections_downgrade_the_mode_once_per_step() {
         harness.client.resolved_mode(),
         StructuredOutputMode::PromptOnly
     );
-    // Both first requests went out as json_schema, and no later request
-    // went out under a mode above the one already reached.
     assert_eq!(
         &request_modes(&harness.events())[..2],
         [StructuredOutputMode::JsonSchema; 2]
@@ -1193,8 +1182,6 @@ async fn concurrent_rejections_downgrade_the_mode_once_per_step() {
     assert_eq!(harness.server.request_count(), 6);
     assert_eq!(harness.clock.pending_sleepers(), 0);
 }
-
-// Parameter fallback
 
 #[tokio::test]
 async fn max_tokens_and_temperature_rejections_are_resent_and_remembered() {
@@ -1416,7 +1403,7 @@ fn the_param_is_read_from_the_envelope() {
     );
 }
 
-/// The client can be built from the secret store the app keeps the key in.
+/// The client can be built from the secret store.
 #[tokio::test]
 async fn the_client_reads_its_key_from_the_secret_store() {
     struct OneKey;

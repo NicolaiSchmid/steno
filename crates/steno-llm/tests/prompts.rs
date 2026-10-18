@@ -1,8 +1,6 @@
-//! Golden prompts for every builder. Fixed meeting date, UTC, English
-//! language names, so the files are identical on every machine and equal
-//! to what the Swift builders write. A diff here is a reviewed prompt
-//! change and needs a sentence in the PR.
-//! Swift: `PromptSnapshotTests`, `TemplateBlocksTests`, `OutputLanguageTests`.
+//! Golden prompts for every builder, with a fixed date, UTC and English
+//! language names so the files are identical everywhere. A diff here is a
+//! reviewed prompt change.
 
 mod common;
 

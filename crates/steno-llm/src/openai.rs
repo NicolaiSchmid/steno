@@ -1,5 +1,4 @@
 //! The endpoint client: `POST {base}/chat/completions` with Bearer auth.
-//! Swift: `Sources/StenoLLM/OpenAICompatibleClient.swift`.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -23,25 +22,19 @@ use crate::{
 };
 
 /// The endpoint [`LlmClient`]: `POST {base}/chat/completions` with Bearer
-/// auth, a per-attempt timeout and exponential retries on the injected
-/// clock, structured output mode fallback remembered per endpoint, and the
-/// API key redacted from every error and from the `Debug` form. Text only
-/// ever leaves through here or
-/// [`CodexResponsesClient`](crate::CodexResponsesClient).
+/// auth, per-attempt timeout, retries, and structured output mode fallback
+/// remembered per endpoint. The API key is redacted from every error and
+/// from `Debug`. Sends text only.
 pub struct OpenAiCompatibleClient {
     endpoint: LlmEndpoint,
     api_key: Option<String>,
-    /// The error instead when the default client could not be built.
     http: Result<reqwest::Client, LlmError>,
     retry: RetryPolicy,
     clock: Arc<dyn Clock>,
     observer: Option<Observer>,
     mode: RememberedMode,
-    /// Parameters a 400 named (`error.param`) and that the client now
-    /// spells differently, remembered per client like the mode:
-    /// `max_tokens` goes as `max_completion_tokens` (OpenAI's reasoning
-    /// models), `temperature` is left out (they accept only the default).
-    /// No model-name sniffing.
+    /// Parameters a 400 named that the client now spells differently:
+    /// `max_tokens` as `max_completion_tokens`, `temperature` left out.
     rejected_parameters: Mutex<BTreeSet<String>>,
 }
 
@@ -85,8 +78,8 @@ impl OpenAiCompatibleClient {
         }
     }
 
-    /// A client whose key is the [`SecretKey::LLM_API_KEY`] secret of
-    /// `secrets`; a missing secret is no key, as for a local server.
+    /// A client keyed by the [`SecretKey::LLM_API_KEY`] secret; a missing
+    /// secret is no key.
     pub async fn from_secret_store(
         endpoint: LlmEndpoint,
         secrets: &dyn SecretStore,
@@ -95,12 +88,8 @@ impl OpenAiCompatibleClient {
         Ok(Self::new(endpoint, key.as_deref()))
     }
 
-    /// An HTTP client of the caller's, for a proxy or for connect and read
-    /// timeouts. Its overall `ClientBuilder::timeout` does not apply: every
-    /// request carries its own, the wall-clock backstop past
-    /// `endpoint.request_timeout`, and reqwest prefers that. Start it from
-    /// [`transport::http_client_builder`]: reqwest comes without a TLS
-    /// provider here, and that builder installs one.
+    /// A caller-supplied HTTP client, for a proxy or timeouts. Start it from
+    /// [`transport::http_client_builder`], which installs the TLS provider.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
         self.http = Ok(http);
@@ -135,8 +124,7 @@ impl OpenAiCompatibleClient {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// One completion with this crate's own error type; the
-    /// [`LanguageModel`] impl boxes it.
+    /// One completion; the [`LanguageModel`] impl boxes the error.
     pub async fn complete_llm(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         transport::run_attempts(
             &self.retry,
@@ -147,9 +135,9 @@ impl OpenAiCompatibleClient {
         .await
     }
 
-    /// One attempt: the parsed answer or the failure to back off from, or a
-    /// resend after a mode downgrade or a parameter adjustment (neither
-    /// consumes an attempt). A request that cannot be built is final.
+    /// One attempt: the parsed answer, the failure to back off from, or a
+    /// resend that consumes no attempt. A request that cannot be built is
+    /// final.
     async fn attempt(&self, request: &LlmRequest, attempt: u32) -> Result<Attempt, LlmError> {
         let mode = self.mode.get();
         let adjusted = self.rejected_parameters().clone();
@@ -186,10 +174,8 @@ impl OpenAiCompatibleClient {
         {
             return Ok(Attempt::Resend);
         }
-        // Resent whenever this request still used the old spelling, even if
-        // a concurrent request already taught the client the new one; only
-        // the request that taught it reports it. The rebuilt request never
-        // carries the parameter again, so this resends at most once per
+        // Resent whenever this request used the old spelling, even if a
+        // concurrent request taught the client first; at most once per
         // parameter.
         if reply.status == 400
             && let Some(param) = Self::rejected_parameter(&reply)
@@ -207,12 +193,8 @@ impl OpenAiCompatibleClient {
         Ok(Attempt::Failed(self.classify(&reply)))
     }
 
-    /// `GET /models` (whether the model is listed; a server without a list
-    /// is tolerated) and one tiny structured completion (mode fallback,
-    /// round trip). Any failure of the completion is returned, so a probe
-    /// that succeeds describes an endpoint both passes can use; a wrong
-    /// base URL, an unknown model or an undecodable answer is the caller's
-    /// to show.
+    /// `GET /models` (a server without a list is tolerated) and one tiny
+    /// structured completion, whose failure is returned.
     pub async fn probe_llm(&self) -> Result<EndpointProbe, LlmError> {
         let start = self.clock.now();
         let mut model_listed = None;
@@ -240,8 +222,7 @@ impl OpenAiCompatibleClient {
         })
     }
 
-    /// Through the same builder as every other schema, so the strict-subset
-    /// walk in the tests covers it.
+    /// Through the shared schema builder, so the strict-subset tests cover it.
     #[must_use]
     pub fn probe_schema() -> JsonSchema {
         JsonSchema::object(vec![("ok", JsonSchema::boolean())])
@@ -271,11 +252,7 @@ impl OpenAiCompatibleClient {
         }
     }
 
-    // Requests
-
-    /// The wire request under `mode`, built around the `adjusted`
-    /// (rejected) parameters: a 400 naming one of those is final, not a
-    /// resend.
+    /// The wire request under `mode`, around the `adjusted` parameters.
     fn make_request(
         &self,
         request: &LlmRequest,
@@ -325,16 +302,14 @@ impl OpenAiCompatibleClient {
         if let Some(key) = &self.api_key
             && let Ok(mut value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
         {
-            // Sensitive: the `Debug` form of the headers and of any request
-            // built from them prints `Sensitive`, not the key.
+            // `Debug` prints `Sensitive`, not the key.
             value.set_sensitive(true);
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         headers
     }
 
-    /// The wire `response_format` for a request under `mode`; `None` sends
-    /// none.
+    /// The wire `response_format` for `mode`; `None` sends none.
     #[must_use]
     pub fn response_format(
         format: &LlmResponseFormat,
@@ -350,7 +325,6 @@ impl OpenAiCompatibleClient {
         })
     }
 
-    /// One attempt raced against `endpoint.request_timeout` on the clock.
     async fn perform(&self, request: reqwest::Request) -> Result<HttpReply, LlmError> {
         transport::perform(
             transport::client(&self.http)?,
@@ -361,8 +335,6 @@ impl OpenAiCompatibleClient {
         )
         .await
     }
-
-    // Replies
 
     fn parse(&self, reply: &HttpReply) -> Result<LlmResponse, LlmError> {
         let decoded: ChatCompletionResponse = wire::decode(&reply.body).map_err(|_| {
@@ -411,7 +383,7 @@ impl OpenAiCompatibleClient {
     }
 
     /// The server's `error.message`, else the first 500 characters of the
-    /// body, with every secret redacted.
+    /// body, redacted.
     #[must_use]
     pub fn error_message(reply: &HttpReply, secrets: &[String]) -> String {
         if let Ok(envelope) = wire::decode::<ChatErrorEnvelope>(&reply.body) {
@@ -421,7 +393,7 @@ impl OpenAiCompatibleClient {
     }
 
     /// A 400 whose message names the structured output request: the cue to
-    /// fall back one mode. Groq, OpenRouter and OpenAI all word it this way.
+    /// fall back one mode.
     #[must_use]
     pub fn complains_about_response_format(body: &str) -> bool {
         let lowered = body.to_lowercase();
@@ -434,7 +406,6 @@ impl OpenAiCompatibleClient {
     /// The parameters a 400 may name that the client can spell differently.
     pub const ADJUSTABLE_PARAMETERS: [&'static str; 2] = ["max_tokens", "temperature"];
 
-    /// `error.param` of a 400 envelope, when the server sent one.
     #[must_use]
     pub fn rejected_parameter(reply: &HttpReply) -> Option<String> {
         wire::decode::<ChatErrorEnvelope>(&reply.body)
@@ -494,8 +465,7 @@ mod tests {
         assert!(debug.contains("Sensitive"), "{debug}");
     }
 
-    /// A client whose HTTP client could not be built answers every call
-    /// with that failure, final, and never panics.
+    /// A client without an HTTP client answers every call with that failure.
     #[tokio::test]
     async fn without_an_http_client_every_call_fails_with_the_reason() {
         let mut client = client();

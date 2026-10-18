@@ -1,19 +1,15 @@
 //! A complete `text/event-stream` body as a list of events.
-//! Swift: `Sources/StenoLLM/Wire/ServerSentEvents.swift`.
 
-/// One server-sent event: the `event:` name when the server sent one and
-/// the `data:` lines joined with newlines, as the specification reads them.
+/// One server-sent event: the `event:` name, if any, and the `data:` lines
+/// joined with newlines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerSentEvent {
     pub event: Option<String>,
     pub data: String,
 }
 
-/// Parses a complete `text/event-stream` body. Steno buffers the whole
-/// answer (nothing shows partial output), so this is a pure function over
-/// the bytes: events are separated by a blank line, lines end in `\n`,
-/// `\r\n` or `\r`, a line starting with `:` is a comment, `id:` and `retry:`
-/// are ignored, and an event without data is dropped.
+/// Parses a complete `text/event-stream` body (Steno buffers the whole
+/// answer). `id:` and `retry:` are ignored, an event without data is dropped.
 #[must_use]
 pub fn parse_event_stream(text: &str) -> Vec<ServerSentEvent> {
     let mut events = Vec::new();

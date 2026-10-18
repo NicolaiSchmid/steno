@@ -1,5 +1,4 @@
 //! Reads and refreshes `$CODEX_HOME/auth.json` the way the Codex CLI does.
-//! Swift: `Sources/StenoLLM/Codex/CodexCredentialStore.swift`.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -14,21 +13,17 @@ use url::Url;
 use super::jwt::JwtClaims;
 use crate::transport;
 
-/// The ChatGPT sign-in the Codex CLI stored, as far as Steno reads it.
-/// Never persisted anywhere but the CLI's own file; never logged: the
-/// `Debug` form redacts both tokens and the account id.
+/// The ChatGPT sign-in the Codex CLI stored. The `Debug` form redacts both
+/// tokens and the account id.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CodexCredentials {
     pub access_token: String,
     pub refresh_token: String,
     pub account_id: String,
     pub email: Option<String>,
-    /// "plus", "pro", "free", "business", …; `None` when the token does not
-    /// say.
+    /// "plus", "pro", "free", "business", …
     pub plan_type: Option<String>,
-    /// The access token's `exp` claim; `None` when the token carries none.
     pub expires_at: Option<DateTime<Utc>>,
-    /// The file's `last_refresh`; `None` for a file the CLI never refreshed.
     pub last_refresh: Option<DateTime<Utc>>,
 }
 
@@ -47,8 +42,7 @@ impl fmt::Debug for CodexCredentials {
 }
 
 impl CodexCredentials {
-    /// "name@example.com (Plus)", "name@example.com", or "your ChatGPT
-    /// account".
+    /// "name@example.com (Plus)", "name@example.com", or "your ChatGPT account".
     #[must_use]
     pub fn account_line(&self) -> String {
         let plan = self.plan_type.as_deref().map(|plan| {
@@ -77,35 +71,28 @@ impl CodexCredentials {
     }
 }
 
-/// Why the sign-in could not be used. The `Display` form is the sentence
-/// the user reads and never carries the payload; [`detail`](Self::detail)
-/// is the technical text (already redacted) for logs and "Details".
+/// Why the sign-in could not be used. `Display` is the user-facing sentence;
+/// [`detail`](Self::detail) is the redacted technical text.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CodexCredentialError {
-    /// No `auth.json`, or one without ChatGPT tokens.
     #[error("No Codex sign-in found. Run `codex login` in Terminal, then try again.")]
     NotSignedIn,
-    /// The file holds an API key login, which the Codex backend does not
-    /// take; the OpenAI preset of the endpoint provider is the way.
+    /// An API key login, which the Codex backend does not take.
     #[error(
         "Codex is signed in with an API key, not a ChatGPT account. Pick OpenAI as the service and paste that key instead."
     )]
     ApiKeyLogin,
-    /// `auth.json` is not JSON, or its token fields have the wrong shape.
     #[error("The Codex sign-in file could not be read.")]
     Malformed(String),
-    /// The refresh token is spent, expired or revoked: only `codex login`
-    /// helps.
+    /// The refresh token is spent, expired or revoked.
     #[error("The Codex sign-in has expired. Run `codex login` in Terminal, then try again.")]
     SignInExpired(String),
-    /// The refresh did not go through for a reason a retry may fix.
     #[error("The Codex sign-in could not be refreshed. Check the connection and try again.")]
     RefreshFailed(String),
 }
 
 impl CodexCredentialError {
-    /// The technical reason, already redacted; `None` for the two cases
-    /// that have none.
+    /// The technical reason, already redacted.
     #[must_use]
     pub fn detail(&self) -> Option<&str> {
         match self {
@@ -117,78 +104,53 @@ impl CodexCredentialError {
     }
 }
 
-/// The clock the store reads for the refresh windows; what
-/// [`CodexCredentialStore::with_now`] takes.
+/// The clock the store reads for the refresh windows.
 pub type Now = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
-/// Reads and refreshes `$CODEX_HOME/auth.json` the way the Codex CLI does,
-/// so the two stay signed in together. Every read goes back to the file
-/// (the CLI may have rotated the tokens meanwhile), except while a failed
-/// write-back's tokens are kept (below). A refresh is written back
-/// atomically over the file's latest contents with every unknown key
-/// preserved, because refresh tokens rotate and the CLI would otherwise be
-/// signed out. Concurrent callers share one refresh: the second waits for
-/// the first and then reads the file it wrote, so two refreshes never spend
-/// the same token. Callers never see the file: they get
-/// [`CodexCredentials`] and attach the access token themselves.
+/// Reads and refreshes `$CODEX_HOME/auth.json` so Steno and the Codex CLI
+/// stay signed in together. Every read goes back to the file; a refresh is
+/// written back atomically with unknown keys preserved, because refresh
+/// tokens rotate. Concurrent callers share one refresh.
 ///
-/// A refresh whose write-back fails, or that finds the file half-written
-/// or unreadable and leaves it alone, still answers with the new tokens
-/// and keeps the document in memory: the posted refresh token is spent,
-/// so the new tokens are the only sign-in left. Every later call writes it
-/// again first and uses it instead of the file for as long as the file
-/// still holds the spent token or does not parse. The CLI and the Swift
-/// app read only the file, so until a write lands they see the spent
-/// token, and a refresh they post with it fails. Rust differs: Swift
-/// throws the write error and the tokens are lost.
+/// A refresh whose write-back fails keeps the new tokens in memory (the
+/// posted refresh token is spent) and writes them again on every later call
+/// while the file still holds the spent token or does not parse.
 pub struct CodexCredentialStore {
     home: PathBuf,
-    /// The error instead when the default client could not be built.
     http: Result<reqwest::Client, crate::LlmError>,
     token_endpoint: Url,
     client_id: String,
     now: Now,
-    /// Held for the length of one refresh; waiters re-read the file after.
-    /// Inside: the refresh token the endpoint last turned down for good,
-    /// so a waiter whose re-read shows that same token gets the answer
-    /// without posting the dead token again.
+    /// Held for the length of one refresh. Inside: the refresh token the
+    /// endpoint last refused for good, so waiters do not post it again.
     refresh_lock: tokio::sync::Mutex<Option<SpentToken>>,
-    /// The refreshed document the file could not take; set and taken
-    /// only under `refresh_lock`. A std mutex: it is never held across an
-    /// `.await`, only around a file write, which blocks as briefly as the
-    /// write always has.
+    /// The refreshed document the file could not take; only touched under
+    /// `refresh_lock`, never held across an `.await`.
     kept: std::sync::Mutex<Option<Kept>>,
 }
 
-/// Refreshed tokens whose write-back failed. Never `Debug`: it holds the
-/// tokens.
+/// Refreshed tokens whose write-back failed. Never `Debug`.
 struct Kept {
     auth: AuthFile,
-    /// The spent refresh token the file still holds, which `auth`
-    /// replaces. A file holding any other is newer and wins.
+    /// The spent refresh token the file still holds.
     replaces: String,
-    /// The temporary the latest failed rename left, a whole copy of the
-    /// refreshed document it tried to write: the newest, unless a later
-    /// write failed before it made a temporary. Removed once a write lands.
+    /// The temporary the latest failed rename left; removed once a write lands.
     left: Option<PathBuf>,
 }
 
-/// Why the write-back failed: the io error and the file's path, never a
-/// token, and the temporary a failed rename left with the whole document
-/// in it.
+/// Why the write-back failed; never carries a token.
 struct WriteFailure {
     detail: String,
     left: Option<PathBuf>,
 }
 
-/// A refresh token the endpoint turned down for good, with the error it
-/// gave. Never `Debug`: it holds the token.
+/// A refresh token the endpoint refused for good. Never `Debug`.
 struct SpentToken {
     refresh_token: String,
     error: CodexCredentialError,
 }
 
-/// The whole document plus what Steno read from it, kept so unknown keys
+/// The whole document plus what Steno read from it, so unknown keys
 /// survive a write-back.
 #[derive(Clone)]
 struct AuthFile {
@@ -196,16 +158,12 @@ struct AuthFile {
     credentials: CodexCredentials,
 }
 
-/// A refresh the token endpoint turned down, before it is mapped to the
-/// public error: a reused token triggers a re-read, and a permanent refusal
-/// is remembered against the token it was for. Never `Debug`.
+/// A refresh the token endpoint turned down. Never `Debug`.
 struct RefreshRejected {
-    /// The token the endpoint refused.
     refresh_token: String,
-    /// The code was `refresh_token_reused`.
     reused: bool,
     permanent: bool,
-    /// The code and the message, already redacted.
+    /// Already redacted.
     detail: String,
 }
 
@@ -239,7 +197,6 @@ impl From<RefreshFailure> for CodexCredentialError {
     }
 }
 
-/// The token endpoint's answer; every field is optional there.
 #[derive(Deserialize)]
 struct RefreshResponse {
     #[serde(default, rename = "id_token")]
@@ -250,9 +207,7 @@ struct RefreshResponse {
     refresh: Option<String>,
 }
 
-/// The token endpoint's rejection, in the two shapes it uses:
-/// `{"error": {"code": …}}` and `{"error": "invalid_grant", "error_code":
-/// …, "error_description": …}`.
+/// The token endpoint's rejection, in either of the two shapes it uses.
 #[derive(Deserialize, Default)]
 struct RefreshError {
     #[serde(default)]
@@ -264,8 +219,6 @@ struct RefreshError {
 }
 
 impl RefreshError {
-    /// The code as the endpoint wrote it: lowercased for the decisions,
-    /// redacted before and after it is lowercased for the detail.
     fn code(&self) -> Option<&str> {
         if let Some(code) = self.error_code.as_deref().filter(|c| !c.is_empty()) {
             return Some(code);
@@ -292,18 +245,14 @@ impl RefreshError {
 }
 
 impl CodexCredentialStore {
-    /// The OAuth client the Codex CLI refreshes with; the token endpoint
-    /// accepts refresh tokens for it only.
+    /// The OAuth client the Codex CLI refreshes with.
     pub const CODEX_CLIENT_ID: &'static str = "app_EMoamEEZ73f0CkXaXp7hrann";
     pub const DEFAULT_TOKEN_ENDPOINT: &'static str = "https://auth.openai.com/oauth/token";
-    /// The CLI refreshes an access token this close to its `exp`.
     pub const EXPIRY_WINDOW: TimeDelta = TimeDelta::minutes(5);
-    /// The CLI refreshes a file whose `last_refresh` is older than this even
-    /// when the access token has not expired.
+    /// Refresh a file whose `last_refresh` is older than this.
     pub const STALE_AFTER: TimeDelta = TimeDelta::days(8);
 
-    /// The error codes the token endpoint uses for a refresh token that
-    /// will never work again.
+    /// Token endpoint codes for a refresh token that will never work again.
     pub const PERMANENT_REFRESH_CODES: [&'static str; 4] = [
         "refresh_token_expired",
         "refresh_token_reused",
@@ -311,9 +260,8 @@ impl CodexCredentialStore {
         "invalid_grant",
     ];
 
-    /// `CODEX_HOME` as `lookup` answers it (the process environment:
-    /// `|name| std::env::var_os(name)`), else `~/.codex`. A path that is not
-    /// Unicode is used as it is; an empty one is no override.
+    /// `CODEX_HOME` as `lookup` answers it, else `~/.codex`. An empty value
+    /// is no override.
     #[must_use]
     pub fn default_home(lookup: impl Fn(&str) -> Option<OsString>) -> PathBuf {
         if let Some(home) = lookup("CODEX_HOME").filter(|home| !home.is_empty()) {
@@ -346,11 +294,8 @@ impl CodexCredentialStore {
         }
     }
 
-    /// An HTTP client of the caller's, for a proxy or for connect and read
-    /// timeouts. Its overall `ClientBuilder::timeout` does not apply: the
-    /// refresh carries its own 30-second timeout, and reqwest prefers that.
-    /// Start it from [`transport::http_client_builder`]: reqwest comes
-    /// without a TLS provider here, and that builder installs one.
+    /// A caller-supplied HTTP client, for a proxy or timeouts. Start it from
+    /// [`transport::http_client_builder`], which installs the TLS provider.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
         self.http = Ok(http);
@@ -385,23 +330,19 @@ impl CodexCredentialStore {
         self.home.join("auth.json")
     }
 
-    /// What the file says, without touching the network. For the consent
-    /// card and the status row.
+    /// What the file says, without touching the network.
     pub fn stored(&self) -> Result<CodexCredentials, CodexCredentialError> {
         Ok(self.read()?.credentials)
     }
 
-    /// Credentials fit to send: the file's tokens, refreshed first when the
-    /// access token is within [`Self::EXPIRY_WINDOW`] of its expiry or the
-    /// file is older than [`Self::STALE_AFTER`].
+    /// Credentials fit to send, refreshed first when near expiry or stale.
     pub async fn current(&self) -> Result<CodexCredentials, CodexCredentialError> {
         self.refresh_unless(|credentials| !self.needs_refresh(credentials))
             .await
     }
 
-    /// The 401 path: the file's credentials when they have changed since
-    /// `access_token` was read (the CLI rotated them; no network), else one
-    /// refresh regardless of age.
+    /// The 401 path: the file's credentials if they changed since
+    /// `access_token` was read, else one refresh regardless of age.
     pub async fn refreshed_if_still_using(
         &self,
         access_token: &str,
@@ -411,12 +352,7 @@ impl CodexCredentialStore {
     }
 
     /// The file's credentials when `usable` says so, else a refresh under
-    /// the lock, re-reading first: another caller may have refreshed while
-    /// this caller waited, and the file is the truth. A caller whose
-    /// re-read shows the token the previous refresh was refused for good
-    /// gets that refusal back without a round trip; only a token the CLI
-    /// rotated since is tried. Tokens kept in memory after a failed
-    /// write-back are written and read under the lock ([`Self::latest`]).
+    /// the lock, re-reading first since another caller may have refreshed.
     async fn refresh_unless(
         &self,
         usable: impl Fn(&CodexCredentials) -> bool,
@@ -461,8 +397,6 @@ impl CodexCredentialStore {
         }
     }
 
-    /// Whether the access token is inside its expiry window or the file is
-    /// stale.
     #[must_use]
     pub fn needs_refresh(&self, credentials: &CodexCredentials) -> bool {
         let now = (self.now)();
@@ -479,23 +413,16 @@ impl CodexCredentialStore {
         false
     }
 
-    // File
-
     fn lock_kept(&self) -> std::sync::MutexGuard<'_, Option<Kept>> {
         self.kept
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The file, or the tokens a refresh kept in memory while
-    /// the file still holds the spent token they replace; those are put
-    /// over the file's current contents (so keys the CLI changed meanwhile
-    /// survive) and written again first. A file that does not parse (as
-    /// while the CLI writes it) or cannot be read gets the kept tokens for
-    /// this call, and is not written over. A file that parses and holds
-    /// any other token, or none, or that no longer reads back with the
-    /// kept tokens put over it, was changed by the CLI or the user since
-    /// and is the truth: the kept tokens and their temporary go.
+    /// The file, or the kept tokens while the file still holds the spent
+    /// token they replace (written again first). A file that does not parse
+    /// gets the kept tokens for this call; any other change to the file
+    /// wins and drops the kept tokens.
     fn latest(&self) -> Result<AuthFile, CodexCredentialError> {
         let document = self.read_document();
         let mut slot = self.lock_kept();
@@ -515,8 +442,7 @@ impl CodexCredentialStore {
                 document.insert(key.to_owned(), value.clone());
             }
         }
-        // The file changed in a way Steno cannot use (an API-key login
-        // that kept the spent tokens): it wins, as above.
+        // An API-key login that kept the spent tokens: the file wins.
         kept.auth = match Self::auth_file(document) {
             Ok(auth) => auth,
             Err(error) => {
@@ -529,11 +455,8 @@ impl CodexCredentialStore {
         Ok(latest)
     }
 
-    /// Writes `kept.auth`. Returns `None` once the write lands, after
-    /// removing the temporary an earlier failure left; else `kept`, with
-    /// this failure's temporary, if it left one, in place of the earlier
-    /// one (it holds the same tokens or newer), to be written on the next
-    /// call.
+    /// Writes `kept.auth`: `None` once the write lands, else `kept` to retry
+    /// on the next call.
     fn write_kept(&self, mut kept: Kept) -> Option<Kept> {
         match self.write(&kept.auth.document) {
             Ok(()) => {
@@ -557,8 +480,6 @@ impl CodexCredentialStore {
         self.read_document().and_then(Self::auth_file)
     }
 
-    /// The file as a JSON object: `NotSignedIn` when it is missing,
-    /// `Malformed` when it cannot be read or does not parse as one.
     fn read_document(&self) -> Result<Map<String, Value>, CodexCredentialError> {
         let bytes = match std::fs::read(self.file_path()) {
             Ok(bytes) => bytes,
@@ -583,7 +504,6 @@ impl CodexCredentialStore {
         })
     }
 
-    /// The credentials an `auth.json` document holds.
     pub fn credentials_in(
         document: &Map<String, Value>,
     ) -> Result<CodexCredentials, CodexCredentialError> {
@@ -617,7 +537,6 @@ impl CodexCredentialStore {
             .map(str::to_owned)
             .or_else(|| id_token.and_then(JwtClaims::account_id))
             .ok_or_else(|| CodexCredentialError::Malformed("no account id".to_owned()))?;
-        // RFC 3339 with or without fractional seconds, as chrono writes it.
         let last_refresh = document
             .get("last_refresh")
             .and_then(Value::as_str)
@@ -637,8 +556,6 @@ impl CodexCredentialStore {
         })
     }
 
-    // Refresh
-
     async fn refresh_rereading_on_reuse(
         &self,
         file: AuthFile,
@@ -650,11 +567,8 @@ impl CodexCredentialStore {
             Err(RefreshFailure::Rejected(rejected)) => rejected,
         };
         if rejected.reused {
-            // The CLI may have rotated the token since this read; its file
-            // is the truth. One more read: its credentials when they are
-            // already fit to send (refreshing them would spend the CLI's
-            // fresh token for nothing), else one more try, then the
-            // failure stands.
+            // The CLI may have rotated the token; use its credentials if fit
+            // to send, else try once more.
             let latest = self.latest()?;
             if latest.credentials.refresh_token != rejected.refresh_token {
                 if usable(&latest.credentials) {
@@ -673,8 +587,7 @@ impl CodexCredentialStore {
             "client_id": self.client_id,
             "refresh_token": file.credentials.refresh_token,
         });
-        // No client (no trusted root certificates): a failure like a dropped
-        // connection, which leaves the sign-in as it is.
+        // No client: treated like a dropped connection.
         let http = transport::client(&self.http)
             .map_err(|error| CodexCredentialError::RefreshFailed(error.to_string()))?;
         let response = http
@@ -694,9 +607,7 @@ impl CodexCredentialStore {
             .map_err(|error| Self::refresh_failed(&error, &secrets))?;
         if !(200..300).contains(&status) {
             let rejection: RefreshError = serde_json::from_slice(&data).unwrap_or_default();
-            // Decided on the code as sent, so a secret that happens to
-            // occur in it cannot turn a permanent refusal into a temporary
-            // one; only the detail is redacted.
+            // Decided on the code as sent; only the detail is redacted.
             let sent = rejection.code();
             let code = sent.map(str::to_lowercase);
             let permanent = status == 401
@@ -707,9 +618,7 @@ impl CodexCredentialStore {
                 Some(message) => transport::redact(message, &secrets),
                 None => transport::redacted_prefix(&String::from_utf8_lossy(&data), &secrets, 300),
             };
-            // Redacted before the case fold, which could leave a folded
-            // copy of a secret, and after it, which could rebuild one from
-            // an upper-case echo.
+            // Redacted before and after the case fold.
             let detail = match sent {
                 Some(sent) => format!(
                     "{}: HTTP {status}: {message}",
@@ -731,14 +640,8 @@ impl CodexCredentialStore {
             .map_err(RefreshFailure::from)
     }
 
-    /// Puts `refreshed` over what the file holds now, not over `file`, the
-    /// copy read before the round trip, so keys the CLI wrote meanwhile
-    /// survive. The file decides as in [`Self::latest`]. It should hold the
-    /// spent token a kept copy replaces, else the one posted; one that
-    /// holds another refresh token, or none, or is gone, wins and the new
-    /// tokens are dropped; one that does not parse at that moment (the CLI
-    /// half way through writing it) or cannot be read gets the new tokens,
-    /// kept in memory, and is not written over.
+    /// Puts `refreshed` over what the file holds now, so keys the CLI wrote
+    /// meanwhile survive. The file decides as in [`Self::latest`].
     fn write_back(
         &self,
         file: AuthFile,
@@ -755,8 +658,7 @@ impl CodexCredentialStore {
                 if slot.is_some()
                     && let Some(tokens) = file.document.get("tokens")
                 {
-                    // The kept tokens, so an id token the answer leaves
-                    // out is the kept one, not the spent one's.
+                    // The kept tokens, so a missing id token stays the kept one.
                     document.insert("tokens".to_owned(), tokens.clone());
                 }
                 (document, true)
@@ -789,9 +691,7 @@ impl CodexCredentialStore {
         );
         let auth = Self::auth_file(document)?;
         let credentials = auth.credentials.clone();
-        // A write that fails, or is not made, keeps them for the next call.
-        // After an earlier failed write the file still holds that refresh's
-        // spent token, so `replaces` stays the earlier one.
+        // A failed or skipped write keeps the tokens for the next call.
         let (replaces, left) = match slot.take() {
             Some(earlier) => (earlier.replaces, earlier.left),
             None => (file.credentials.refresh_token, None),
@@ -809,8 +709,7 @@ impl CodexCredentialStore {
         Ok(credentials)
     }
 
-    /// reqwest's message plus every source, redacted, as the clients
-    /// report a transport failure.
+    /// reqwest's message plus every source, redacted.
     fn refresh_failed(error: &reqwest::Error, secrets: &[String]) -> CodexCredentialError {
         CodexCredentialError::RefreshFailed(transport::redact(
             &transport::error_chain(error),
@@ -818,17 +717,9 @@ impl CodexCredentialStore {
         ))
     }
 
-    /// Temp file beside the target with mode 0600, synced, then `rename`
-    /// (tried again on Windows while the file is busy,
-    /// `steno_core::busy_file`), then the folder synced: readers see the
-    /// old or the new file, never a partial one, the mode never opens up
-    /// on the way, and, where both syncs succeed, the new tokens survive a
-    /// power loss. A temporary that could not be written whole holds no
-    /// usable copy and is removed. A rename that fails leaves the
-    /// temporary, mode 0600, with the new tokens in it, in case the app
-    /// quits before a later write lands; that write removes it, and one
-    /// left by a run that quit first stays until removed by hand. The
-    /// failure names the file, never what it holds.
+    /// Atomic write: a 0600 temp file beside the target, synced, renamed
+    /// (retried on Windows while busy), then the folder synced. A failed
+    /// rename leaves the temporary for a later write to remove.
     fn write(&self, document: &Map<String, Value>) -> Result<(), WriteFailure> {
         let text = crate::wire::swift_pretty(&Value::Object(document.clone()));
         let temporary = self
@@ -844,9 +735,7 @@ impl CodexCredentialStore {
         let written = options.open(&temporary).and_then(|mut file| {
             use std::io::Write;
             file.write_all(text.as_bytes())?;
-            // A failed sync still leaves the bytes readable, and renaming
-            // them in is still better than the old file, whose refresh
-            // token is spent.
+            // A failed sync still beats the old file, whose token is spent.
             let _ = file.sync_all();
             Ok(())
         });
@@ -857,11 +746,8 @@ impl CodexCredentialStore {
                 left: None,
             });
         }
-        // A `codex login` that lands between the caller's read and this
-        // rename is replaced; only a file lock would close that window. On
-        // Windows the rename is tried again while another handle (a sync or
-        // antivirus client) holds the file for a moment, which widens that
-        // window by up to about 0.9 s; accepted, as the window itself is.
+        // A `codex login` between the read and this rename is replaced; only
+        // a file lock would close that window.
         if let Err(error) = steno_core::busy_file::rename(&temporary, &self.file_path()) {
             return Err(WriteFailure {
                 detail: format!(
@@ -871,9 +757,7 @@ impl CodexCredentialStore {
                 left: Some(temporary),
             });
         }
-        // The rename itself survives a power loss once the folder is
-        // synced; Windows cannot open a folder for that, and NTFS logs the
-        // rename in its journal.
+        // Sync the folder so the rename survives a power loss (not on Windows).
         #[cfg(unix)]
         if let Ok(folder) = std::fs::File::open(&self.home) {
             let _ = folder.sync_all();
@@ -882,14 +766,12 @@ impl CodexCredentialStore {
     }
 }
 
-/// Removes the temporary a failed rename left.
 fn remove_left(path: Option<PathBuf>) {
     if let Some(path) = path {
         let _ = std::fs::remove_file(path);
     }
 }
 
-/// The refresh token an `auth.json` document holds, if any.
 fn refresh_token_in(document: &Map<String, Value>) -> Option<&str> {
     document.get("tokens")?.get("refresh_token")?.as_str()
 }
@@ -898,8 +780,7 @@ fn refresh_token_in(document: &Map<String, Value>) -> Option<&str> {
 mod tests {
     use super::*;
 
-    /// A store over a temporary home whose `auth.json` is a non-empty
-    /// folder, so every rename onto it fails.
+    /// A store whose `auth.json` is a non-empty folder, so every rename fails.
     fn store_over_an_occupied_file() -> (tempfile::TempDir, CodexCredentialStore) {
         let home = tempfile::tempdir().unwrap();
         let file = home.path().join("auth.json");
@@ -909,7 +790,6 @@ mod tests {
         (home, store)
     }
 
-    /// The sign-in document holding `refresh_token`.
     fn document(refresh_token: &str) -> Map<String, Value> {
         let tokens = serde_json::json!({
             "access_token": "at",
@@ -919,7 +799,6 @@ mod tests {
         Map::from_iter([("tokens".to_owned(), tokens)])
     }
 
-    /// `refresh_token`'s tokens, kept over a file that holds `rt_1`.
     fn kept(refresh_token: &str) -> Kept {
         Kept {
             auth: CodexCredentialStore::auth_file(document(refresh_token)).unwrap(),
@@ -928,7 +807,6 @@ mod tests {
         }
     }
 
-    /// The temporaries failed renames left in `home`.
     fn leftovers(home: &Path) -> Vec<PathBuf> {
         std::fs::read_dir(home)
             .unwrap()
@@ -937,8 +815,8 @@ mod tests {
             .collect()
     }
 
-    /// A rename that keeps failing leaves one temporary, the newest, not
-    /// one per call; the write that lands removes it.
+    /// A rename that keeps failing leaves one temporary; the write that lands
+    /// removes it.
     #[test]
     fn a_rename_that_keeps_failing_leaves_only_the_newest_temporary() {
         let (home, store) = store_over_an_occupied_file();
@@ -971,8 +849,7 @@ mod tests {
         );
     }
 
-    /// A file holding another refresh token than the spent one wins over
-    /// the kept tokens, and the temporary they left goes.
+    /// A file holding another refresh token wins over the kept tokens.
     #[test]
     fn a_file_with_another_token_removes_the_kept_temporary() {
         let (home, store) = store_over_an_occupied_file();

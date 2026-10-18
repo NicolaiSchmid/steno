@@ -1,6 +1,5 @@
 //! Pass 2: title, structured summary for the template, decisions, tasks and
 //! speaker name suggestions.
-//! Swift: `Sources/StenoLLM/Summary/`.
 
 use std::sync::Arc;
 
@@ -24,12 +23,10 @@ use crate::{
     TranscriptChunker,
 };
 
-// The model's raw answers, before post-processing into `SummaryOutput`.
-// Decoding into these types is the validation.
+// The model's raw answers; decoding into these types is the validation.
 
-/// One task as the model wrote it. `due_date` is `YYYY-MM-DD` or null and
-/// is validated by Steno, never trusted; `priority` decodes straight into
-/// core's closed enum, so an unknown value is a decode failure.
+/// One task as the model wrote it. `due_date` is validated by Steno, never
+/// trusted; an unknown `priority` is a decode failure.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftTask {
@@ -50,7 +47,6 @@ pub struct DraftSpeakerName {
 }
 
 /// The single-shot or reduce answer.
-/// Swift: `Sources/StenoLLM/Summary/AnalysisDraft.swift`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisDraft {
@@ -98,24 +94,13 @@ pub struct Assignee {
     pub person_id: Option<Uuid>,
 }
 
-// "The model returned X, what the pass makes of it": the summary pass's
-// post-processing as pure functions over the draft, mirroring
-// `CleanupDraft::problems` for pass 1. `LlmMeetingSummarizer` only talks to
-// the model.
-
 impl AnalysisDraft {
-    /// The draft as [`SummaryOutput`]: sections in template order (unknown
-    /// ids dropped, a section the model split merged, empty optional ones
-    /// dropped, empty required ones kept with the template heading), a
-    /// blank title replaced by the meeting's, decisions deduplicated, tasks
-    /// with derived ids, strict `yyyy-MM-dd` due dates, assignees resolved
-    /// against the participants, speaker labels mapped to ids, name
-    /// suggestions below `minimum_confidence` dropped. The document's
-    /// `language` is the meeting's, else English (what the renderer needs);
-    /// the output's `language` is the meeting's tag as elected, `None`
-    /// included, so the pipeline never stores English for a meeting the
-    /// engine left untagged.
-    /// Swift: `Sources/StenoLLM/Summary/AnalysisDraft+Output.swift`.
+    /// The draft as [`SummaryOutput`]: sections in template order, a blank
+    /// title replaced by the meeting's, decisions deduplicated, tasks with
+    /// derived ids and strict due dates, assignees resolved, low-confidence
+    /// name suggestions dropped. The output's `language` is the meeting's
+    /// tag as elected, `None` included, so an untagged meeting is never
+    /// stored as English.
     #[must_use]
     pub fn summary_output(
         &self,
@@ -158,10 +143,9 @@ impl AnalysisDraft {
         }
     }
 
-    /// Template order; unknown ids dropped; a section the model split in
-    /// two is merged (bullets in order, the first non-blank heading); empty
-    /// optional sections dropped, empty required ones kept; a missing or
-    /// blank heading falls back to the template's.
+    /// Template order; unknown ids dropped; a section split in two merged;
+    /// empty optional sections dropped, empty required ones kept; a blank
+    /// heading falls back to the template's.
     #[must_use]
     pub fn sections(draft: &AnalysisDraft, template: &SummaryTemplate) -> Vec<SummarySection> {
         template
@@ -228,9 +212,8 @@ impl AnalysisDraft {
         })
     }
 
-    /// A participant by full name, then by unique first name, then a
-    /// speaker label (its confirmed or suggested person), then a known
-    /// person; else the name as written with no person.
+    /// A participant by full name, then unique first name, then a speaker
+    /// label's person, then a known person; else the name with no person.
     #[must_use]
     pub fn resolve_assignee(
         raw: Option<&str>,
@@ -302,8 +285,7 @@ impl AnalysisDraft {
         })
     }
 
-    /// `YYYY-MM-DD` at midnight UTC, else `None`; anything looser is
-    /// dropped.
+    /// `YYYY-MM-DD` at midnight UTC, else `None`.
     #[must_use]
     pub fn parse_due_date(raw: Option<&str>) -> Option<DateTime<Utc>> {
         let text = raw?.trim();
@@ -317,9 +299,8 @@ impl AnalysisDraft {
         Some(Utc.from_utc_datetime(&date.and_time(NaiveTime::MIN)))
     }
 
-    /// Known labels only, a name present, confidence at or above `minimum`
-    /// and clamped to 0...1, one suggestion per speaker (the strongest), in
-    /// speaker order.
+    /// Known labels only, confidence at or above `minimum` and clamped to
+    /// 0...1, the strongest suggestion per speaker, in speaker order.
     #[must_use]
     pub fn suggestions(
         drafts: &[DraftSpeakerName],
@@ -375,23 +356,17 @@ impl AnalysisDraft {
     }
 }
 
-/// Builds the analysis requests for one [`SummaryTemplate`]: the
-/// single-shot request over the whole transcript, the map request per
-/// chunk, the reduce request over the chunk notes, and the repair request
-/// after a decode failure. English prompts; the model writes in the
-/// meeting's language. Every string here is pinned by a golden in
-/// `Tests/Fixtures/llm/prompts/`.
-/// Swift: `Sources/StenoLLM/Summary/SummaryPromptBuilder.swift`.
+/// Builds the analysis requests for one [`SummaryTemplate`]: single-shot,
+/// map per chunk, reduce, and repair. English prompts; the model writes in
+/// the meeting's language. Every string is pinned by a golden.
 #[derive(Debug, Clone)]
 pub struct SummaryPromptBuilder<Tz: TimeZone> {
     pub template: SummaryTemplate,
-    /// The zone the meeting date is written in; the user's in the app, UTC
-    /// in goldens.
+    /// The zone the meeting date is written in.
     pub zone: Tz,
 }
 
 impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
-    /// Temperature of every analysis request.
     pub const TEMPERATURE: f64 = 0.2;
 
     #[must_use]
@@ -399,10 +374,7 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         SummaryPromptBuilder { template, zone }
     }
 
-    // Template
-
-    /// The template as prompt text: name, context, one line per section
-    /// with id, heading, whether it is required, and its instructions.
+    /// The template as prompt text, one line per section.
     #[must_use]
     pub fn template_blocks(&self) -> String {
         let mut lines = vec![
@@ -424,8 +396,6 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         }
         lines.join("\n")
     }
-
-    // Schemas
 
     #[must_use]
     pub fn task_schema() -> JsonSchema {
@@ -472,7 +442,7 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         ])
     }
 
-    /// The single-shot and reduce answer, section ids as an enum.
+    /// The single-shot and reduce answer schema.
     #[must_use]
     pub fn draft_schema(&self) -> JsonSchema {
         let ids: Vec<&str> = self
@@ -514,7 +484,7 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         ])
     }
 
-    /// The map answer for one chunk.
+    /// The map answer schema.
     #[must_use]
     pub fn notes_schema(&self) -> JsonSchema {
         JsonSchema::object(vec![
@@ -540,9 +510,6 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         ])
     }
 
-    // Requests
-
-    /// One call over the whole cleaned transcript.
     #[must_use]
     pub fn build_single_shot(&self, input: &SummaryInput) -> LlmRequest {
         let labels = SpeakerLabels::new(&input.speakers);
@@ -573,9 +540,8 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         )
     }
 
-    /// Notes for one chunk of a long transcript. `notes_tokens` is the
-    /// answer's ceiling (`max_tokens`) and sizes the length rule in the
-    /// prompt, so the notes of every chunk fit the reduce call together.
+    /// Notes for one chunk. `notes_tokens` is the answer ceiling and sizes
+    /// the prompt's length rule, so all notes fit the reduce call.
     #[must_use]
     pub fn build_map(
         &self,
@@ -617,15 +583,14 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         )
     }
 
-    /// The map prompt's length rule from the answer ceiling
-    /// ([`BudgetPolicy::TOKENS_PER_NOTES_POINT`]), never below the minimum.
+    /// The map prompt's length rule from the answer ceiling, never below
+    /// the minimum.
     #[must_use]
     pub fn max_notes_points(notes_tokens: i64) -> i64 {
         BudgetPolicy::MAP_NOTES_MINIMUM_POINTS
             .max(notes_tokens / BudgetPolicy::TOKENS_PER_NOTES_POINT)
     }
 
-    /// One call merging every chunk's notes into the final analysis.
     #[must_use]
     pub fn build_reduce(&self, input: &SummaryInput, notes: &[ChunkNotes]) -> LlmRequest {
         let system = [
@@ -658,9 +623,8 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         )
     }
 
-    /// The one repair round after `request`'s answer failed to decode: the
-    /// invalid output, the error, the shape; same response format, token
-    /// ceiling and purpose (suffixed `-repair`) as the request it repairs.
+    /// The one repair round after `request`'s answer failed to decode; same
+    /// format, ceiling and purpose (suffixed `-repair`).
     #[must_use]
     pub fn build_repair(
         request: &LlmRequest,
@@ -685,12 +649,8 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         }
     }
 
-    // Blocks
-
     /// Output language, meeting date, participants and speaker labels.
-    /// `headings_follow` appends [`Self::headings_rule`] to the language
-    /// line: the single-shot and reduce prompts list the template sections
-    /// below it, the map prompt has no headings to translate.
+    /// `headings_follow` appends [`Self::headings_rule`] to the language line.
     #[must_use]
     pub fn meeting_block(&self, input: &SummaryInput, headings_follow: bool) -> String {
         let language = OutputLanguage::resolve(input.meeting.language.as_ref());
@@ -732,8 +692,6 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         lines.join("\n")
     }
 
-    /// Used only where the template's section headings follow in the
-    /// prompt.
     #[must_use]
     pub fn headings_rule(language_name: &str) -> String {
         format!("Translate the section headings given below into {language_name}.")
@@ -821,17 +779,12 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
     }
 }
 
-/// Pass 2: title, structured summary for the template, decisions, tasks and
-/// speaker name suggestions. One call when the transcript fits the input
-/// budget, else map (notes per chunk) and reduce (one call). A decode
-/// failure goes once through the repair request, then fails the call.
-/// Post-processing is [`AnalysisDraft::summary_output`]. No Markdown is
-/// produced here; the core renders the [`SummaryDocument`].
-/// Swift: `Sources/StenoLLM/Summary/LLMMeetingSummarizer.swift`.
+/// Pass 2: one call when the transcript fits the input budget, else map
+/// and reduce. A decode failure goes once through the repair request.
+/// Post-processing is [`AnalysisDraft::summary_output`].
 pub struct LlmMeetingSummarizer<Tz: TimeZone> {
     pub model: Arc<dyn LanguageModel>,
     pub endpoint: LlmEndpoint,
-    /// The zone the meeting date is written in for the model.
     pub zone: Tz,
     /// Suggestions below this confidence are dropped.
     pub minimum_confidence: f64,
@@ -843,8 +796,7 @@ where
 {
     pub const DEFAULT_MINIMUM_CONFIDENCE: f64 = 0.3;
 
-    /// A summarizer writing the meeting date in `zone`, with the default
-    /// minimum confidence for name suggestions.
+    /// A summarizer writing the meeting date in `zone`.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -877,8 +829,7 @@ where
         SummaryPromptBuilder::new(input.template.clone(), self.zone.clone())
     }
 
-    /// The pass over `input` with this crate's own types; the
-    /// [`MeetingSummarizer`] impl calls it.
+    /// The pass over `input`; the [`MeetingSummarizer`] impl calls it.
     pub async fn summarize_input(&self, input: &SummaryInput) -> BoundaryResult<SummaryOutput> {
         let builder = self.builder(input);
         let mut single_shot = builder.build_single_shot(input);
@@ -897,9 +848,8 @@ where
         Ok(draft.summary_output(input, usage, self.minimum_confidence))
     }
 
-    /// The budget both paths work within: the context less the reserved
-    /// answer and the single-shot system prompt (the largest of the three)
-    /// plus message framing. `system_prompt` defaults to building it.
+    /// The input budget: context less the reserved answer and the
+    /// single-shot system prompt plus framing.
     #[must_use]
     pub fn budget_for(&self, input: &SummaryInput, system_prompt: Option<&str>) -> TokenBudget {
         let system = system_prompt.map_or_else(
@@ -919,14 +869,9 @@ where
         }
     }
 
-    /// Notes per chunk (`max_concurrent_requests` at a time), then one
-    /// reduce call over every chunk's notes. Two levels only. Each map call
-    /// may spend the chunk's share of the input budget on its notes
-    /// ([`TokenBudget::map_notes_output_tokens`]), which is also what the
-    /// up-front check reserves, so `TranscriptTooLong` is returned before
-    /// the first call when the chunks are too many for that share; the
-    /// post-map check only catches a model that ignored its ceiling and the
-    /// prompt's length rule.
+    /// Notes per chunk, then one reduce call; two levels only.
+    /// `TranscriptTooLong` is returned before the first call when the
+    /// chunks' notes cannot fit the reduce call.
     async fn map_reduce(
         &self,
         input: &SummaryInput,
@@ -986,8 +931,7 @@ where
         ))
     }
 
-    /// One request, decoded into `T`; an undecodable answer gets exactly
-    /// one repair round. Usage sums both calls.
+    /// One request decoded into `T`, with one repair round. Usage sums both.
     async fn complete<T: DeserializeOwned>(
         &self,
         request: &LlmRequest,

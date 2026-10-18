@@ -1,6 +1,5 @@
 //! Pass 1: the transcript in chunks through the model, fixing speech-to-text
 //! mistakes while keeping count, order and wording.
-//! Swift: `Sources/StenoLLM/Cleanup/`.
 
 use std::sync::Arc;
 
@@ -22,7 +21,6 @@ use crate::{
 };
 
 /// The model's answer to one cleanup chunk: the same segments by index.
-/// Swift: `Sources/StenoLLM/Cleanup/CleanupDraft.swift`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupDraft {
     pub segments: Vec<CleanupDraftSegment>,
@@ -56,8 +54,7 @@ impl CleanupDraft {
     }
 
     /// Why the draft does not fit its chunk, in prompt-ready sentences;
-    /// empty when it does. Same count, indices `0..n` each once, no emptied
-    /// segment, word count within [`Self::WORD_RATIO`] of the input.
+    /// empty when it does.
     #[must_use]
     pub fn problems(&self, chunk: &TranscriptChunk) -> Vec<String> {
         let expected = chunk.segments.len();
@@ -110,11 +107,8 @@ impl CleanupDraft {
         problems
     }
 
-    /// The draft with the framing of a prompt line stripped from the front
-    /// of every text: an optional `[n]` index, then a speaker label from
-    /// `labels` and its colon. The model reads `[3] Me: words` and some
-    /// models answer `Me: words`; the label is one word, so the word-count
-    /// check alone lets it through into the transcript.
+    /// The draft with a leading `[n]` index and speaker label stripped from
+    /// every text; the word-count check alone would let a label through.
     #[must_use]
     pub fn stripping_speaker_labels(mut self, labels: &SpeakerLabels) -> Self {
         for segment in &mut self.segments {
@@ -123,12 +117,10 @@ impl CleanupDraft {
         self
     }
 
-    /// `text` without a leading `[n]` index and a speaker label; `text`
-    /// itself when neither is there. The label may be wrapped in markdown or
-    /// brackets (`**Me:**`, `(Me)`) and end in a colon, a closing bracket or
-    /// a spaced dash (`Me - `); a first word that is no label ("Meeting:
-    /// agenda", "Me-too products") is left alone. Walks grapheme clusters
-    /// as Swift's `Character` does, so a colon carrying a combining mark is
+    /// `text` without a leading `[n]` index and a speaker label. The label
+    /// may be wrapped in markdown or brackets and end in a colon, a closing
+    /// bracket or a spaced dash; a first word that is no label is left
+    /// alone. Walks grapheme clusters, so a colon with a combining mark is
     /// no separator.
     ///
     /// ```
@@ -161,10 +153,8 @@ impl CleanupDraft {
         if stripped { rest } else { text }
     }
 
-    /// The byte offset of the first `:` or `)` in the opening stretch of
-    /// `text`, or of a `-` that follows whitespace; `None` when the opening
-    /// stretch has none. The stretch (32 grapheme clusters) is long enough
-    /// for `**Unknown speaker:**` and short enough that a colon deep in a
+    /// The byte offset of the first `:` or `)` within the opening 32
+    /// grapheme clusters, or of a `-` after whitespace, so a colon deep in a
     /// sentence is never taken for a label's.
     fn label_separator(text: &str) -> Option<usize> {
         let mut after_whitespace = false;
@@ -177,8 +167,7 @@ impl CleanupDraft {
         None
     }
 
-    /// The cleaned texts in segment order, trimmed; meaningful once
-    /// [`problems`](Self::problems) is empty.
+    /// The cleaned texts in segment order, trimmed.
     #[must_use]
     pub fn ordered_texts(&self) -> Vec<String> {
         let mut segments: Vec<&CleanupDraftSegment> = self.segments.iter().collect();
@@ -200,13 +189,11 @@ fn is_label_decoration(c: char) -> bool {
     "*_~`()[]".contains(c) || is_swift_whitespace(c)
 }
 
-/// Swift's `Character.isWhitespace`: the cluster's first scalar is
-/// Unicode `White_Space`.
+/// The cluster's first scalar is Unicode `White_Space`.
 fn starts_with_whitespace(grapheme: &str) -> bool {
     grapheme.chars().next().is_some_and(char::is_whitespace)
 }
 
-/// `text` from its first grapheme cluster `drop` refuses.
 fn drop_graphemes(text: &str, drop: impl Fn(&str) -> bool) -> &str {
     let start = text
         .grapheme_indices(true)
@@ -215,9 +202,8 @@ fn drop_graphemes(text: &str, drop: impl Fn(&str) -> bool) -> &str {
     &text[start..]
 }
 
-/// Names the cleanup pass must spell exactly: participants (calendar
-/// attendees included) first, then known people, each once
-/// (case-insensitively), in order of appearance. No product glossary in v1.
+/// Names the cleanup pass must spell exactly: participants first, then
+/// known people, each once case-insensitively, in order of appearance.
 #[must_use]
 pub fn glossary(input: &CleanupInput) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -238,13 +224,9 @@ pub fn glossary(input: &CleanupInput) -> Vec<String> {
         .collect()
 }
 
-/// Builds the pass 1 request for one chunk: fix speech-to-text mistakes,
-/// keep count, order and wording. Temperature 0. Pinned by the goldens in
-/// `Tests/Fixtures/llm/prompts/cleanup-*.txt`.
-/// Swift: `Sources/StenoLLM/Cleanup/CleanupPromptBuilder.swift`.
+/// Builds the pass 1 request for one chunk. Temperature 0; pinned by goldens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CleanupPromptBuilder {
-    /// The endpoint's ceiling for one answer.
     pub max_output_tokens: i64,
 }
 
@@ -276,7 +258,6 @@ impl CleanupPromptBuilder {
         )])
     }
 
-    /// `glossary` is [`glossary`]: the names to spell exactly.
     #[must_use]
     pub fn build(
         &self,
@@ -354,8 +335,7 @@ impl CleanupPromptBuilder {
         }
     }
 
-    /// The same request with the rejected answer and the reason appended,
-    /// for the one retry.
+    /// The request with the rejected answer and the reason appended.
     #[must_use]
     pub fn build_retry(request: &LlmRequest, previous_answer: &str, error: &str) -> LlmRequest {
         let mut retry = request.clone();
@@ -373,9 +353,8 @@ impl CleanupPromptBuilder {
         retry
     }
 
-    /// The answer repeats the chunk as JSON: its text plus the framing per
-    /// segment and the envelope, with headroom ([`BudgetPolicy`]), capped at
-    /// the endpoint's ceiling.
+    /// The answer repeats the chunk as JSON, with headroom, capped at the
+    /// endpoint's ceiling.
     #[must_use]
     pub fn output_tokens(&self, chunk: &TranscriptChunk, language: Option<&LanguageTag>) -> i64 {
         let text = TokenBudget::estimate_tokens(
@@ -398,15 +377,10 @@ impl CleanupPromptBuilder {
     }
 }
 
-/// Pass 1: the transcript in chunks through the model, at most
-/// `endpoint.max_concurrent_requests` at a time. A speaker label the model
-/// echoed into a text (`Me: words`) is stripped before validation. A chunk
-/// whose answer is refused, fails validation (count, indices, emptied or
-/// reworded segments) or does not decode is retried once with the reason appended, then kept
-/// as raw text and listed in `failed_chunks`. Network and HTTP failures
-/// propagate: the pipeline keeps the raw transcript and marks the stage
-/// failed. `raw_text` is never touched; ids, order and count come back as
-/// they went in. Swift: `Sources/StenoLLM/Cleanup/LLMTranscriptCleaner.swift`.
+/// Pass 1, at most `endpoint.max_concurrent_requests` chunks at a time. A
+/// chunk whose answer is refused, invalid or undecodable is retried once
+/// with the reason, then kept raw and listed in `failed_chunks`. Network
+/// and HTTP failures propagate. `raw_text` is never touched.
 pub struct LlmTranscriptCleaner {
     pub model: Arc<dyn LanguageModel>,
     pub endpoint: LlmEndpoint,
@@ -443,8 +417,7 @@ impl LlmTranscriptCleaner {
         self
     }
 
-    /// The pass over `input` with this crate's own types; the
-    /// [`TranscriptCleaner`] impl calls it.
+    /// The pass over `input`; the [`TranscriptCleaner`] impl calls it.
     pub async fn clean_input(&self, input: &CleanupInput) -> BoundaryResult<CleanupOutput> {
         let chunks = self.chunker.chunk(&input.segments, input.language.as_ref());
         let glossary = glossary(input);
@@ -485,8 +458,6 @@ impl LlmTranscriptCleaner {
         })
     }
 
-    /// One chunk: request, validate, one retry with the reason, else
-    /// `None`.
     async fn clean_chunk(
         &self,
         request: LlmRequest,
@@ -505,8 +476,7 @@ impl LlmTranscriptCleaner {
                     else {
                         return Err(error);
                     };
-                    // A refusal arrives as an error from the client, with no
-                    // body to validate; it costs a request all the same.
+                    // A refusal has no body to validate but costs a request.
                     usage = usage
                         + LlmUsage {
                             prompt_tokens: 0,

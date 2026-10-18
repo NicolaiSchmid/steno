@@ -56,8 +56,7 @@ pub fn uuid(text: &str) -> uuid::Uuid {
     uuid::Uuid::parse_str(text).unwrap()
 }
 
-/// `SampleData.uuid(n)` from the Swift fixtures: the number in the last
-/// group.
+/// The fixtures' sample UUID `number`: the number in the last group.
 pub fn sample_uuid(number: u32) -> uuid::Uuid {
     uuid(&format!("00000000-0000-0000-0000-{number:012X}"))
 }
@@ -166,8 +165,7 @@ pub fn text_request() -> LlmRequest {
     request("test", LlmResponseFormat::Text)
 }
 
-/// Every event logged for later assertions and streamed once for
-/// `drive_retries`.
+/// Every event logged for assertions and streamed for `drive_retries`.
 pub struct EventRecorder {
     log: Arc<Mutex<Vec<LlmClientEvent>>>,
     sender: mpsc::UnboundedSender<LlmClientEvent>,
@@ -246,8 +244,7 @@ pub fn request_modes(events: &[LlmClientEvent]) -> Vec<StructuredOutputMode> {
         .collect()
 }
 
-/// The structured output mode only ever walks down the chain: no request
-/// goes out under a mode above the one an earlier request was sent with.
+/// No request goes out under a mode above an earlier request's.
 pub fn assert_modes_never_go_up(events: &[LlmClientEvent]) {
     let rank = |mode: &StructuredOutputMode| {
         StructuredOutputMode::ALL
@@ -335,8 +332,7 @@ impl ClientHarness {
     }
 }
 
-/// A temporary `CODEX_HOME` with an `auth.json` the tests write, and a stub
-/// server standing in for the token endpoint.
+/// A temporary `CODEX_HOME` and a stub token endpoint.
 pub struct CodexHome {
     pub directory: tempfile::TempDir,
     pub server: StubChatServer,
@@ -387,8 +383,8 @@ impl CodexHome {
         }))
     }
 
-    /// Writes an `auth.json` like the CLI's, with an extra key Steno does
-    /// not know, so the tests can check it survives a write-back.
+    /// Writes an `auth.json` like the CLI's, plus an unknown key that must
+    /// survive a write-back.
     pub fn write(&self, auth: AuthFile) {
         write_auth(&self.file(), auth);
     }
@@ -400,8 +396,6 @@ impl CodexHome {
         }
     }
 }
-
-// The cuts a client takes of a body for an error.
 
 /// 4 096 characters of a body that is not the answer.
 pub const BODY_CUT: usize = 4_096;
@@ -455,8 +449,8 @@ pub fn write_auth(path: &std::path::Path, auth: AuthFile) {
     }
 }
 
-/// What `CodexHome::write` puts in the file; `Default` is the CLI's file
-/// after a fresh `ChatGPT` login an hour ago.
+/// What `CodexHome::write` puts in the file; `Default` is a fresh `ChatGPT`
+/// login an hour ago.
 pub struct AuthFile {
     pub access: String,
     pub refresh: String,
@@ -496,8 +490,7 @@ impl AuthFile {
     }
 }
 
-/// A `CodexHome` (auth file plus token endpoint), a second stub server as
-/// the Codex backend, a manual clock and the client wired to them.
+/// A `CodexHome`, a stub Codex backend, a manual clock and a client.
 pub struct CodexHarness {
     pub home: CodexHome,
     pub backend: StubChatServer,

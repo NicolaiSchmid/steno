@@ -1,11 +1,9 @@
 //! Exponential backoff for retryable failures.
-//! Swift: `Sources/StenoLLM/RetryPolicy.swift`.
 
 use std::time::Duration;
 
-/// Exponential backoff for retryable failures (408, 429, 5xx, transport
-/// errors, timeouts). Deterministic: no jitter, so a test on the manual
-/// clock of the `testing` module knows exactly how far to advance.
+/// Exponential backoff for retryable failures. No jitter, so tests on the
+/// manual clock know how far to advance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Total attempts including the first; 1 disables retries.
@@ -37,7 +35,6 @@ impl RetryPolicy {
         }
     }
 
-    /// The default policy with another attempt count.
     #[must_use]
     pub fn with_max_attempts(max_attempts: u32) -> Self {
         RetryPolicy {
@@ -46,9 +43,8 @@ impl RetryPolicy {
         }
     }
 
-    /// The wait before retry number `retry` (1 for the first retry): a
-    /// server's `Retry-After` when it sent one, else
-    /// `base_delay * 2^(retry-1)`, both clamped to `max_delay`.
+    /// The wait before retry `retry` (from 1): the server's `Retry-After`,
+    /// else `base_delay * 2^(retry-1)`, clamped to `max_delay`.
     #[must_use]
     pub fn delay(&self, retry: u32, retry_after: Option<Duration>) -> Duration {
         if let Some(retry_after) = retry_after {

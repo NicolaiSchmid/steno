@@ -1,5 +1,4 @@
 //! Bounded concurrency for the chunked passes.
-//! Swift: `Sources/StenoLLM/Support/BoundedConcurrency.swift`.
 
 use std::future::Future;
 

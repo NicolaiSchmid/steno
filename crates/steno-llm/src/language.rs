@@ -1,18 +1,13 @@
 //! The language the summary is written in and its English name for the
 //! prompt.
-//! Swift: `Sources/StenoLLM/Language/OutputLanguage.swift`.
 
 use steno_core::LanguageTag;
 
 use crate::budget::primary_subtag;
 
 /// The language the summary is written in: the meeting's elected language,
-/// English when the transcript was untagged. Names are English and come
-/// from a fixed table so golden prompts are machine-independent; a tag the
-/// table does not know is written as itself. (Swift falls back to
-/// Foundation's `en_US` locale names there; Rust has no locale data, so the
-/// table is the whole answer. The bundled fixtures and goldens only use
-/// listed tags.)
+/// English when untagged. Names come from a fixed English table so golden
+/// prompts are machine-independent; an unknown tag is written as itself.
 pub struct OutputLanguage;
 
 impl OutputLanguage {
@@ -26,8 +21,7 @@ impl OutputLanguage {
         }
     }
 
-    /// "German" for `de` or `de-CH`, "English" for `en-US`, the tag itself
-    /// when nothing knows it.
+    /// "German" for `de` or `de-CH`; the tag itself when unknown.
     #[must_use]
     pub fn prompt_name(language: &LanguageTag) -> String {
         let code = primary_subtag(language);

@@ -1,15 +1,11 @@
 //! A request-side JSON Schema builder limited to the strict subset.
-//! Swift: `Sources/StenoLLM/StructuredOutput/JSONSchema.swift`.
 
 use serde_json::{Map, Value};
 
-/// A request-side JSON Schema builder limited to what every structured
-/// output implementation accepts (OpenAI's strict subset): objects with
-/// every property required and `additionalProperties: false`, arrays,
-/// strings with optional `enum`, integers, numbers, booleans, and nullable
-/// variants as `"type": [..., "null"]`. No `format`, `pattern`, bounds or
-/// `anyOf`. Validation of the model's answer is done by decoding into the
-/// draft types, never by this schema.
+/// A request-side JSON Schema builder limited to OpenAI's strict subset:
+/// objects with every property required and `additionalProperties: false`,
+/// arrays, strings with optional `enum`, numbers, booleans and nullable
+/// variants. Answers are validated by decoding, never by this schema.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonSchema {
     node: Node,
@@ -79,8 +75,7 @@ impl JsonSchema {
         JsonSchema::new(Node::Boolean)
     }
 
-    /// The same schema with a description (a trailing comment in the prompt
-    /// form).
+    /// The same schema with a description (a trailing comment in the prompt).
     #[must_use]
     pub fn described(mut self, description: &str) -> Self {
         self.description = Some(description.to_owned());
@@ -102,8 +97,6 @@ impl JsonSchema {
             _ => Vec::new(),
         }
     }
-
-    // Wire form
 
     /// The schema as sent in `response_format.json_schema.schema`.
     #[must_use]
@@ -164,12 +157,9 @@ impl JsonSchema {
         Value::Object(object)
     }
 
-    // Prompt form
-
-    /// A compact, readable shape for the prompt: JSON with type names in
-    /// place of values, `"a" | "b"` for enums, `| null` for nullable,
-    /// descriptions as trailing comments. Shorter than the schema and
-    /// easier for small models than JSON Schema itself.
+    /// A compact shape for the prompt: JSON with type names in place of
+    /// values, `"a" | "b"` for enums, `| null`, descriptions as trailing
+    /// comments. Easier for small models than JSON Schema.
     #[must_use]
     pub fn prompt_text(&self) -> String {
         self.render(0)

@@ -1,5 +1,4 @@
 //! Splits a transcript on segment boundaries into runs that fit one request.
-//! Swift: `Sources/StenoLLM/Budget/TranscriptChunker.swift`.
 
 use steno_core::{LanguageTag, TranscriptSegment};
 
@@ -17,10 +16,8 @@ pub struct TranscriptChunk {
 }
 
 /// Splits a transcript on segment boundaries. A chunk grows to at least
-/// `target_tokens`, then closes at the next speaker change, or at the
-/// segment that would push it past `max_tokens`. A single segment larger
-/// than `max_tokens` gets a chunk of its own. Order is preserved;
-/// concatenating every chunk's `segments` yields the input.
+/// `target_tokens`, then closes at the next speaker change or before
+/// `max_tokens`; an oversized segment gets a chunk of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TranscriptChunker {
     pub target_tokens: i64,
@@ -48,8 +45,7 @@ impl TranscriptChunker {
         }
     }
 
-    /// A chunker whose chunks never exceed `budget`, keeping the defaults
-    /// where the budget allows.
+    /// A chunker whose chunks never exceed `budget`.
     #[must_use]
     pub fn with_budget(budget: i64, context_segments: usize) -> Self {
         TranscriptChunker::new(budget.min(2_000), budget.min(3_000), context_segments)

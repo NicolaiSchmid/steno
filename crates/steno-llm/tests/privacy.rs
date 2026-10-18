@@ -1,26 +1,8 @@
-//! Invariant 3 of the plan on the wire and on disk: each claim of the crate
-//! doc's privacy paragraph, asserted for every client it applies to:
-//! - a completion body is a JSON document of prompt text; it never holds a
-//!   file path, an audio byte, a speaker, person, meeting or segment id, or
-//!   a segment's `raw_text`;
-//! - secrets travel only in headers and in the token refresh: the API key
-//!   read from the `SecretStore` only in `Authorization`, the Codex access
-//!   token and account id only in their two headers, the refresh token only
-//!   in the refresh's body;
-//! - a refresh writes the Codex tokens back to `auth.json`, with mode 0600
-//!   on Unix, leaving no temporary file (where the file is read from is
-//!   `tests/credentials.rs`'s);
-//! - no secret (the API key, either Codex token or the account id), nor
-//!   eight bytes in a row of one in any case, however often or wherever a
-//!   server echoes it in a body that is not the model's answer, reaches an
-//!   error's `Display`, `Debug` or `detail()`, a `Debug` form or an observer
-//!   event: a body is redacted whole before it is cut, which
-//!   `tests/redaction_property.rs` also checks on random bodies;
-//! - the model's answer text is not redacted;
-//! - a secret shorter than eight bytes is not redacted; in practice that is
-//!   a placeholder key such as `x` or `ollama` for a local server.
-//!
-//! Swift: no single suite; Rust-only.
+//! The crate's privacy promises on the wire and on disk, for every client:
+//! completion bodies carry prompt text only (no audio, paths, ids or
+//! `raw_text`), secrets travel only in their headers and the token refresh,
+//! the written-back `auth.json` is 0600, and no secret of eight bytes or
+//! more reaches an error, a `Debug` form or an observer event.
 
 mod common;
 
@@ -83,21 +65,19 @@ fn assert_text_only(requests: &[RecordedRequest], export: &steno_core::MeetingEx
         for needle in &forbidden {
             assert!(!body.contains(needle), "{} carries {needle}", request.path);
         }
-        // Every string in the body is valid text; a body is never bytes.
         assert!(
             body.chars()
                 .all(|c| !c.is_control() || c == '\n' || c == '\t' || c == '\r'),
             "{} carries control bytes",
             request.path
         );
-        // The clients send prompt text, not the audio asset or paths.
+        // Prompt text, not the audio asset or paths.
         assert!(!body.contains("\"audio\""));
         assert!(!body.contains("sampleClipURL"));
         assert!(!body.contains("fileURL"));
     }
 }
 
-/// The names of the headers whose value holds `secret`, sorted.
 fn headers_carrying(request: &RecordedRequest, secret: &str) -> Vec<String> {
     let mut names: Vec<String> = request
         .headers
@@ -110,7 +90,7 @@ fn headers_carrying(request: &RecordedRequest, secret: &str) -> Vec<String> {
 }
 
 /// An export whose raw text, audio asset and clip URLs would stand out in a
-/// body: the pass reads the cleaned text and never the asset.
+/// body.
 fn sensitive_export() -> steno_core::MeetingExport {
     let mut export = standup();
     for (index, segment) in export.segments.iter_mut().enumerate() {
@@ -175,9 +155,7 @@ async fn the_endpoint_client_and_both_passes_send_text_only_and_the_key_only_in_
     let requests = server.requests();
     assert!(requests.len() >= 3);
     assert_text_only(&requests, &export);
-    // The key from the secret store goes in the Authorization header and in
-    // no other header or body; the summary reads the cleaned text, never
-    // rawText.
+    // The key goes only in `Authorization`; the summary never reads rawText.
     for request in &requests {
         assert_eq!(
             headers_carrying(request, API_KEY),
@@ -209,7 +187,6 @@ async fn the_codex_client_sends_text_only_and_the_access_token_and_account_id_on
     harness.backend.respond(Arc::new(move |request| {
         Some(match request.purpose.as_deref() {
             Some("cleanup" | "cleanup-retry") => {
-                // The Responses body carries the user turn under `input`.
                 let user = request
                     .responses
                     .as_ref()?
@@ -279,14 +256,13 @@ async fn the_codex_client_sends_text_only_and_the_access_token_and_account_id_on
             Some(format!("Bearer {access}").as_str())
         );
     }
-    // The token endpoint was never needed: nothing but the backend saw a
-    // request, and the refresh token never went anywhere.
+    // The token endpoint was never needed.
     assert_eq!(harness.home.server.requests().len(), 0);
 }
 
-/// The refresh token goes to the token endpoint in the refresh's body and
-/// nowhere else; the refresh carries no access token or account id; the
-/// file it writes back is 0600 on Unix and nothing else is left in the home.
+/// The refresh token goes only in the refresh's body, which carries no
+/// access token or account id; the written file is 0600 and nothing else is
+/// left in the home.
 #[tokio::test]
 async fn the_refresh_token_goes_only_in_the_refresh_body_and_auth_json_is_written_back_0600() {
     let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
@@ -338,12 +314,7 @@ async fn the_refresh_token_goes_only_in_the_refresh_body_and_auth_json_is_writte
     }
 }
 
-// No secret reaches an error, a `Debug` form or an observer event, however
-// often and wherever a server echoes it.
-
-/// Fails when `text` holds eight bytes in a row of any secret, in any case:
-/// a cut taken before the redaction leaves a prefix of the secret behind,
-/// a lowercased field a case-folded copy.
+/// Fails when `text` holds eight bytes in a row of any secret, in any case.
 fn assert_no_secret(text: &str, secrets: &[String], what: &str) {
     let folded = text.to_lowercase();
     for secret in secrets {
@@ -363,7 +334,6 @@ fn assert_error_redacted(error: &(impl std::fmt::Display + std::fmt::Debug), sec
     assert_no_secret(&format!("{error:?}"), secrets, "Debug");
 }
 
-/// The Codex secrets of `AuthFile::default()` with `access` in it.
 fn codex_secrets(access: &str) -> Vec<String> {
     vec![
         access.to_owned(),
@@ -372,8 +342,7 @@ fn codex_secrets(access: &str) -> Vec<String> {
     ]
 }
 
-/// Each secret twice in the error message, once as an echoed header and
-/// once in a nested field.
+/// Each secret twice in the error message: as a header echo and nested.
 fn echoing_envelope(secrets: &[String]) -> serde_json::Value {
     let all = secrets.join(" and ");
     serde_json::json!({
@@ -386,9 +355,8 @@ fn echoing_envelope(secrets: &[String]) -> serde_json::Value {
     })
 }
 
-/// A body that is not an error envelope, so the client falls back to its
-/// first `limit` characters: `echoed` as a header echo and in a nested
-/// field, then `cut` placed so it straddles the limit.
+/// A non-envelope body: `echoed` as a header echo and nested, then `cut`
+/// straddling `limit`.
 fn echoing_plain_body(echoed: &[String], cut: &str, limit: usize) -> Vec<u8> {
     let mut body = format!(
         "Authorization: Bearer {}\n{}\n",
@@ -474,8 +442,7 @@ async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id()
         }),
         400,
     );
-    // A code is lowercased for the decisions; a token in it is redacted
-    // before that, or a case-folded copy would survive.
+    // A token in the code is redacted before the lowercasing.
     let cased = StubResponse::json(&serde_json::json!({"error": {"code": access}}), 400);
     let plain = StubResponse::new(503, echoing_plain_body(&secrets[1..], &access, REFRESH_CUT));
     for reply in [nested, flat, cased, plain] {
@@ -490,9 +457,7 @@ async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id()
     }
 }
 
-/// An upper-case echo of the account id in the code does not match the
-/// secret, but the detail lowercases the code and so rebuilds it: the
-/// detail is redacted again after the case fold.
+/// An upper-case echo in the code is redacted again after the case fold.
 #[tokio::test]
 async fn a_code_that_lowercases_to_a_secret_is_redacted_after_the_case_fold() {
     let home = CodexHome::new().await;
@@ -505,20 +470,14 @@ async fn a_code_that_lowercases_to_a_secret_is_redacted_after_the_case_fold() {
     assert_eq!(error.detail(), Some("[redacted]: HTTP 400: refused"));
 }
 
-// Each body is redacted whole before it is cut at `BODY_CUT`, `ERROR_CUT`
-// or `REFRESH_CUT`.
-
-/// A project key (`sk-proj-` and 160 more characters), long enough that a
-/// body of its copies redacts to fewer than 500 characters before byte
-/// 4 096.
+/// A project key long enough that a body of its copies redacts to fewer
+/// than 500 characters before byte 4 096.
 fn long_api_key() -> String {
     format!("sk-proj-{}", "A1b2C3d4".repeat(20))
 }
 
-/// `filler` up to the cut, then `secret` with all but its last byte before
-/// the cut, then more text. `in_bytes` places the cut at a byte offset
-/// (Swift's `bodyText` cut), else at a character offset; a
-/// multi-byte `filler` ends right where the secret starts.
+/// `filler` up to the cut, then `secret` straddling it, then more text.
+/// `in_bytes` places the cut at a byte offset, else a character offset.
 fn straddling(filler: char, secret: &str, cut: usize, in_bytes: bool) -> Vec<u8> {
     let before = cut - (secret.len() - 1);
     let mut body = if in_bytes {
@@ -532,8 +491,7 @@ fn straddling(filler: char, secret: &str, cut: usize, in_bytes: bool) -> Vec<u8>
     body.into_bytes()
 }
 
-/// Copies of `secret`, one of them across byte 4 096 and five more after
-/// it, so the body runs past every cut.
+/// Copies of `secret`, one across byte 4 096 and five after it.
 fn many_copies(secret: &str) -> Vec<u8> {
     let start = BODY_CUT - (secret.len() - 1);
     let mut body = String::new();
@@ -549,10 +507,8 @@ fn many_copies(secret: &str) -> Vec<u8> {
     body.into_bytes()
 }
 
-/// Each body twice to an endpoint client allowed two attempts, `status` 200
-/// for a body that is not a completion and 500 for one that is not an
-/// error envelope: the first error lands in a `Retrying` event, the second
-/// is returned.
+/// Each body twice to an endpoint client allowed two attempts: the first
+/// error lands in a `Retrying` event, the second is returned.
 async fn assert_endpoint_client_redacts(key: &str, bodies: &[(u16, Vec<u8>)]) {
     let secrets = vec![key.to_owned()];
     let harness = ClientHarness::build(RetryPolicy::with_max_attempts(2), Some(key), |_| {}).await;
@@ -579,8 +535,8 @@ async fn assert_endpoint_client_redacts(key: &str, bodies: &[(u16, Vec<u8>)]) {
     }
 }
 
-/// As [`assert_endpoint_client_redacts`] for the Codex client, and each body
-/// once more as the answer to the model list.
+/// [`assert_endpoint_client_redacts`] for the Codex client, plus each body
+/// as the model list answer.
 async fn assert_codex_client_redacts(bodies: &[(u16, Vec<u8>)]) {
     let harness = CodexHarness::with_retry(RetryPolicy::with_max_attempts(2)).await;
     let secrets = codex_secrets(&CodexHome::access_token(3_600, "plus"));
@@ -612,7 +568,7 @@ async fn assert_codex_client_redacts(bodies: &[(u16, Vec<u8>)]) {
     }
 }
 
-/// Each body as the token endpoint's 503 to a refresh of a stale sign-in.
+/// Each body as the token endpoint's 503 to a refresh.
 async fn assert_token_refresh_redacts(bodies: impl Fn(&[String]) -> Vec<Vec<u8>>) {
     let access = CodexHome::access_token(10, "plus");
     let secrets = codex_secrets(&access);
@@ -697,9 +653,8 @@ async fn no_secret_after_a_multi_byte_character_at_a_cut_reaches_an_error_or_an_
     .await;
 }
 
-/// A body that is not an envelope, written as JSON, escapes a secret with
-/// a quote, a backslash or a slash in it; the escaped copy, with `/` as is
-/// or as `\/`, is redacted like the secret itself.
+/// A JSON-escaped secret (quote, backslash, slash as `/` or `\/`) is
+/// redacted like the secret itself.
 #[tokio::test]
 async fn a_json_escaped_copy_of_a_secret_is_redacted() {
     let echo = |escaped: &str| format!(r#"{{"echo":"bad key {escaped}"}}"#).into_bytes();
@@ -750,8 +705,7 @@ async fn a_json_escaped_copy_of_a_secret_is_redacted() {
     }
 }
 
-/// The model's answer text is the pass's input, not an error, and is not
-/// redacted: a secret the model writes into it comes back as written.
+/// The model's answer text is not redacted.
 #[tokio::test]
 async fn the_model_s_answer_text_is_not_redacted() {
     let answer = format!("the key was {API_KEY}");
@@ -767,9 +721,7 @@ async fn the_model_s_answer_text_is_not_redacted() {
     assert_eq!(response.text, answer);
 }
 
-/// A secret shorter than eight bytes, in practice a placeholder key for a
-/// local server, is not redacted: redacting it would garble every message.
-/// Eight bytes and more is redacted, a key or an account id alike.
+/// A secret shorter than eight bytes is not redacted; eight and more is.
 #[tokio::test]
 async fn a_secret_shorter_than_eight_bytes_is_not_redacted() {
     let message = serde_json::json!({"error": {"message": "context exceeded max tokens"}});

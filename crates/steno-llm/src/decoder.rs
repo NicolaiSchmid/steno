@@ -1,16 +1,14 @@
 //! Turns a completion into a typed value.
-//! Swift: `Sources/StenoLLM/StructuredOutput/StructuredOutputDecoder.swift`.
 
 use serde::de::DeserializeOwned;
 use steno_core::{LlmFinishReason, LlmResponse};
 
 use crate::LlmError;
 
-/// Turns a completion into a deserialisable value: `finish_reason: length`
-/// is [`LlmError::Truncated`], a Markdown fence or prose around the JSON is
-/// stripped, then serde decides. No repair heuristics: a failure is
-/// [`LlmError::InvalidJson`] with the path named, and the caller's one
-/// repair round takes over.
+/// Turns a completion into a typed value: `finish_reason: length` is
+/// [`LlmError::Truncated`], a fence or prose around the JSON is stripped,
+/// then serde decides. No repair heuristics; a failure is
+/// [`LlmError::InvalidJson`] with the path named.
 pub struct StructuredOutputDecoder;
 
 impl StructuredOutputDecoder {
@@ -27,11 +25,9 @@ impl StructuredOutputDecoder {
             .map_err(|error| LlmError::InvalidJson(Self::describe(&error)))
     }
 
-    /// The JSON inside `text`: the content of the first ``` fence when one
-    /// opens before the JSON starts, else everything from the first `{` or
-    /// `[` to the last matching `}` or `]`; whitespace trimmed. A fence
-    /// after the first `{` or `[` is text inside the answer (a bullet
-    /// quoting a code block), not Markdown around it.
+    /// The JSON inside `text`: the first fence's content when it opens
+    /// before the JSON, else the first `{` or `[` to the last `}` or `]`. A
+    /// later fence is content inside the answer.
     #[must_use]
     pub fn extract_json(text: &str) -> String {
         let mut body = text;
@@ -40,15 +36,13 @@ impl StructuredOutputDecoder {
             && json_start.is_none_or(|start| fence < start)
         {
             let mut after_fence = &body[fence + 3..];
-            // Skip a language tag such as `json` up to the end of the line.
             if let Some(newline) = after_fence.find('\n') {
                 let tag = &after_fence[..newline];
                 if tag.chars().all(char::is_alphanumeric) {
                     after_fence = &after_fence[newline + 1..];
                 }
             }
-            // The last fence closes the block; an earlier one is quoted
-            // content.
+            // The last fence closes the block.
             body = match after_fence.rfind("```") {
                 Some(closing) => &after_fence[..closing],
                 None => after_fence,
@@ -68,9 +62,8 @@ impl StructuredOutputDecoder {
         }
     }
 
-    /// The failure in Swift's `DecodingError` vocabulary with the path of
-    /// the offending value: `missing key x at root`, `expected a sequence
-    /// at sections.[0].bullets: …`, `malformed JSON at root: …`.
+    /// The failure with the path of the offending value: `missing key x at
+    /// root`, `malformed JSON at root: …`.
     #[must_use]
     pub fn describe(error: &serde_path_to_error::Error<serde_json::Error>) -> String {
         let path = Self::path(error.path());
@@ -104,8 +97,7 @@ impl StructuredOutputDecoder {
         format!("malformed JSON at {path}: {message}")
     }
 
-    /// `sections.[0].bullets`, Swift's coding path rendering; `root` for the
-    /// top level.
+    /// `sections.[0].bullets`; `root` for the top level.
     fn path(path: &serde_path_to_error::Path) -> String {
         let segments: Vec<String> = path
             .iter()
