@@ -545,13 +545,11 @@ fn read_folder(folder: &Path) -> (Vec<(PathBuf, Mark)>, BTreeSet<String>) {
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"));
     for path in paths {
-        match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<Mark>(&bytes) {
-                Ok(mark) => marks.push((path, mark)),
-                Err(_) => {
-                    tracing::debug!(path = %path.display(), "not a reading mark; left alone");
-                }
-            },
+        match std::fs::read(&path).map(|bytes| serde_json::from_slice::<Mark>(&bytes)) {
+            Ok(Ok(mark)) => marks.push((path, mark)),
+            Ok(Err(_)) => {
+                tracing::debug!(path = %path.display(), "not a reading mark; left alone");
+            }
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "a reading mark could not be read; it is left, and counts as one of an in-process speech engine's");
                 unread.extend(
