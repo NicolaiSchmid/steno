@@ -1,48 +1,25 @@
 # Stable promotion: the Tauri app becomes the Steno release
 
-Status: planned 2026-10-07, not started. Nicolai confirmed every decision on
-2026-10-07: D1, D2, D4, D7, D8, D10, D12 and D13 as proposed, D3, D5, D6 and D9
-with the changes the plan follows, and D11 as his own. The decision table at the
-head of "Decisions" shows what changed.
+Status (2026-10-18): every work package is merged except S8, the site and
+README (#303, open until R8 passes), and S9, the Swift removal after the
+rollback window. Gate G1's packages are all in. No `0.11.0-rc.1` is tagged
+yet. Left: the speaker-clip follow-up (Open work), the rehearsal R1 to R8 and
+the dogfood, the Linux and Windows gates, the stability count and Nicolai's
+checks (all under "Order of operations and gates"), then the stable tag, the
+handoff and the 14-day rollback window. `.plans/2026-10-18-simplify.md`
+(steps 4 and 5) removes several guards this plan built; the rows and gate
+steps it gives up say so.
 
 Nicolai decided on 2026-10-07 to promote the Tauri app from beta to stable:
 release tags and the build pipeline produce the Tauri app, the landing page
 offers it, and existing users of the Swift Mac app end up on it without losing
 meetings, settings, secrets, paired phones or the login item. His rule for the
-whole promotion: no data is ever lost (D3).
+whole promotion: no data is ever lost (D3). He confirmed every decision on
+2026-10-07; the decision table shows what changed.
 
-This plan extends `.plans/2026-10-04-mac-cutover.md` and changes it in these
-places:
-
-- the opening gate (every unticked parity line) becomes the blocking list below
-  (D3), and its one pull request becomes the packages below;
-- step 1's bundle id becomes `com.nicolaischmid.steno.desktop` (D5), so the app no longer
-  keeps the Swift app's id;
-- step 2's beta staging and signing, and all of step 3 (distribution), become
-  "Release mechanics" and "The Sparkle handoff"; step 2's frozen `appcast`
-  branch stands, with one handoff item (D8);
-- step 4 reads the Swift app's preference domain explicitly, copies one key
-  and Sparkle's two update flags, and drops the panel anchor (S6);
-- step 5's open choice is D4, which keeps `SMAppService`; the new app registers
-  itself, and the Swift app's entry is handled as S6 says;
-- step 6 also replaces an identity that a desktop-id build stored (D5), and
-  expects a keychain prompt;
-- step 7 is S9, apart from `release.yml`, which S7 deletes.
-
-The inventory table and the tests still apply: Rehearsal runs tests 1 to 6, R8
-runs test 7 and S9 runs test 8. These details of the cutover plan no longer hold
-(Facts):
-
-- the risks that TCC grants and keychain items carry over with the bundle id:
-  with a new id they do not, and the plan accepts one re-grant and one keychain
-  prompt per item (D5);
-- test 1's premise that a Swift release build reads no channel holds only for
-  `v0.9.0-rc.1`; every later build is a release candidate and reads `beta` too;
-- test 1's check that the designated requirements match: with a new identifier
-  they cannot, and Sparkle does not need them to;
-- the first risk: Sparkle never refuses a bundle for its id, so only the missing
-  key and the signature remain;
-- the two-login-items risk becomes the old Login Items entry that S6 handles.
+This plan extends `.plans/2026-10-04-mac-cutover.md`: the cutover's steps 1
+to 6 became S1 to S7 here, with a new bundle id (D5), and its step 7 is S9. The
+rehearsal replaces the cutover plan's tests.
 
 In `.plans/2026-10-02-rust-core-and-tauri-shell.md`, this plan owns every
 **WP9b.** item in "Open after the port", and every item there that can lose
@@ -50,14 +27,14 @@ data (D3).
 
 ## Facts this plan rests on
 
-Checked on 2026-10-07 against `main` at `2f9a253b` (#217's merge),
-the releases, the `appcast` branch, the released bundles, the GitHub API, the
+Checked on 2026-10-07 against `main` at `2f9a253b` (#217's merge), the
+releases, the `appcast` branch, the released bundles, the GitHub API, the
 Sparkle 2.10.0 source and tarball, GRDB 7.11.1, the Tauri 2.10 bundler, Apple's
 Security sources, Omarchy 4.0.4 and nixpkgs. The rollback facts were run on
 Forge and atlas.
 
 - **Every release so far is a pre-release.** Swift: `v0.9.0-rc.1` to
-  `v0.10.0-rc.2`. Tauri: `desktop-v0.1.0-rc.1`, `desktop-v0.1.0-rc.2` and the
+  `v0.10.0-rc.2`. Tauri: `desktop-v0.1.0-rc.1` to `desktop-v0.1.0-rc.3` and the
   rolling `desktop-beta` lane. `GET /releases/latest` answers 404. The site's
   Download button (`site.download` in `apps/site/src/lib/site.ts`) and the
   README's "latest release" link land on the releases list, not on a download.
@@ -73,10 +50,8 @@ Forge and atlas.
   one back; the rehearsal stages it on a local feed instead.
 - **Build numbers.** Sparkle orders updates by `CFBundleVersion` alone, and its
   installer refuses a lower one. The newest Swift build is 542
-  (`v0.10.0-rc.2`). The Tauri bundle's `CFBundleVersion` is today its marketing
-  version ("0.1.0-rc.2"), which Sparkle ranks below 542. `main` has well over
-  2068 commits, so the commit count, which is the Swift scheme, is far above 542.
-  Tauri 2.10's bundler takes `bundle.macOS.bundleVersion`.
+  (`v0.10.0-rc.2`). The Tauri build number is the commit count of `main`, far
+  above 542 (Tags and versions).
 - **Sparkle hands over across bundle ids.** In Sparkle 2.10.0:
   - the installer finds the new app in the archive by file name (`Steno.app`),
     and by bundle id only as a fallback (`Autoupdate/SUInstaller.m`);
@@ -97,125 +72,50 @@ Forge and atlas.
   - the API key is one keychain item that both apps read (same service and
     account, `KEYRING_SERVICE`). Its access list trusts the Swift app. When the
     new app reads it, macOS asks, and the dialog asks for the login keychain
-    password (Apple's `securityd` always requires it for this prompt). "Always
-    Allow" puts the new app on the item's list for good; "Allow" lets this one
-    read through and asks again next time. `keyring` writes such an item in
-    place and keeps its list, so writing it again changes nothing;
+    password. "Always Allow" puts the new app on the item's list for good;
+    "Allow" lets this one read through and asks again next time;
   - the handover identity's private key was imported with the default access,
     which trusts only the Swift app, so exporting it asks too ("wants to export
     key", with the password);
   - the `SMAppService.mainApp` registration belongs to the Swift bundle id, and
     an app can only register or unregister itself. What the stale entry does
-    after the swap is not documented; Apple keeps stale entries "to preserve
-    user intent";
+    after the swap is not documented;
   - the Swift app's preferences stay in the `uno.schmid.steno.mac` domain.
-- **Where the identifier names things.** The support directory, with the
-  database, audio and models, is not named after it on any platform
-  (`StenoPaths`: `~/Library/Application Support/Steno`, `~/.local/share/Steno`,
-  `%APPDATA%\Steno`). Tauri's app config directory, where `panel-anchor.json`
-  lives (`panels.rs`), and the webview's data are: on macOS
-  `~/Library/Application Support/<id>` and WebKit's `~/Library/WebKit/<id>`, on
-  Linux `~/.config/<id>` and `~/.local/share/<id>`, on Windows `%APPDATA%\<id>`
-  and `%LOCALAPPDATA%\<id>`. The web app keeps nothing in webview storage. The
-  single-instance guard is named after it on every platform. On Windows it also
-  sets the AppUserModelID (taskbar pins), while the MSI upgrade code and the
-  NSIS registry keys come from the product name, so an installer with a new
-  identifier still upgrades in place; the NSIS uninstaller's opt-in data cleanup
-  removes only its own identifier's folders. On Linux the login item's marks
-  (`launch-at-login-off-at-exit`, `systemd-reload-owed`) are in the support
-  directory (#227).
 - **The keyring service is not the identifier.** Every Steno keyring entry is
-  filed under the service string `uno.schmid.steno.mac` (`KEYRING_SERVICE`), in
-  the Keychain, in the Windows credential store, and on Linux in the Secret
-  Service once #221 lands. It stays, so no secret is filed under a new name.
+  filed under the service string `uno.schmid.steno.mac` (`KEYRING_SERVICE`) on
+  every platform. It stays, so no secret is filed under a new name.
 - **`com.nicolaischmid.steno` is the iOS app's production bundle id**
   (`mobile/app.config.ts`). App Store Connect offers an iOS app on Apple
   silicon Macs, so a desktop app with the same id would collide with it (TCC
   rows, Launch Services). The desktop app therefore takes
-  `com.nicolaischmid.steno.desktop` (D5), and the iOS app's availability needs
-  no change.
-- **Both desktop pre-releases published without manual steps** (runs
-  37349614159 and 37425455820). That covers the `publish` job and an MSI for an
-  `-rc.N` version, so the **WP9b.** item about the first `desktop-v*` tag is
-  closed.
+  `com.nicolaischmid.steno.desktop` (D5).
 - **The phone finds the computer by `macID`, not by name.** `macID` is derived
   from the handover certificate's fingerprint (`HandoverIdentity::mac_id`), and
-  the phone looks the service up by it (`findByMacID`). A new identity therefore
-  breaks every pairing. At launch, before any window exists, the app reads the
-  API key and loads or mints `handover-identity` (`app.rs`, `handover_listener`);
-  a desktop-id build (`uno.schmid.steno.desktop`, the beta's identifier) has
-  minted its own that way.
-- **The handover listens on a port the system picks** (`port: 0`) and advertises
-  through its own mDNS responder (`mdns-sd`). A firewall that blocks incoming TCP
-  hides it from the phone; `ufw` admits mDNS by default. From X4 (#276) the
-  port is TCP 23820 on Linux.
-- **"Process again" is new, and only in the Rust app.** "Try again" re-runs only
-  the summary and is off without a transcript; P9's "Process again" runs a
-  failed meeting from the start with its recording, from the button and from
-  `steno process --meeting <id>`. The Swift app refuses it. The CLI reads WAV
-  only.
-- **A recording ended by a kill is recovered at the next launch** from its CAF
-  on disk and queued with the end reason `failed`; one with no audio on disk is
-  marked failed as before (P3, #233).
-- **Omarchy 4** (Arch with Hyprland, Wayland):
-  - it is a `uwsm` session: logout is `uwsm stop`, which stops the app's unit
-    with SIGTERM while Hyprland still runs, so the app's signal handler saves;
-    reboot and poweroff go through logind, whose delay lock Omarchy sets to 15 s,
-    and Omarchy kills the user manager 5 s into its stop, so at a reboot the
-    save must end within logind's 15 s delay;
-  - systemd's XDG autostart generator gives the autostarted app's unit
-    `TimeoutStopSec=5s`, so a save longer than five seconds is killed; this
-    holds on every systemd desktop that runs XDG autostart through it;
-  - `app.slice` is under systemd-oomd with `kill`, and the app and its speech
-    sidecar share one cgroup, so a memory-pressure kill takes the recording;
-  - an app started outside a `uwsm` scope sits in Hyprland's own unit, whose stop
-    sends SIGTERM to the app with Hyprland and a second one once Hyprland has
-    exited, which ends the app unsaved, and `SIGKILL` 10 s in (measured with a
-    stand-in for the unit, #272); from #272 the app moves into a scope of its own
-    at launch;
-  - Hyprland's portal serves no Inhibit and no session monitor;
-  - the bar is a Quickshell shell, whose tray is an SNI host behind a hover
-    drawer; with `libayatana-appindicator` a left click on Steno's icon probably
-    does nothing (libayatana answers `Activate` with `UnknownMethod`), and a
-    right click opens the menu;
-  - it sets `GDK_BACKEND=wayland,x11,*`, which the shell today treats as the
-    user's choice, so the panels run as native Wayland windows that Hyprland
-    places itself, never reporting moves; on XWayland Hyprland floats them and
-    takes their position. Neither backend honours "above" or "all workspaces",
-    and a new window takes focus unless a rule says not to;
-  - window rules are Lua (`o.window(...)` in `~/.config/hypr/`);
-  - `ufw` denies every incoming port but LocalSend's 53317;
-  - gnome-keyring runs with a plaintext, always-unlocked default keyring, which
-    a multi-line secret corrupts (omacom/omarchy #5105, duplicate #11159).
-
-  These come from Omarchy's and Hyprland's source; the Omarchy gate runs them.
-- **NixOS:** a Tauri app needs `wrapGAppsHook3`, without which GTK's file chooser
-  aborts the process for want of its schemas; `ort` must link nixpkgs'
-  `onnxruntime` (`ORT_LIB_LOCATION`, `ORT_PREFER_DYNAMIC_LINK=1`), since the
-  sandbox forbids the build-time download; the tray library is loaded with
-  `dlopen`, so its path is patched; an autostart entry that names the store
-  path breaks after garbage collection, and plain Hyprland without `uwsm` runs
-  no XDG autostart at all. nixpkgs' `handy` (a Tauri 2 app with ONNX) shows the
-  ORT variables, the `dlopen` patch and `cargo-tauri.hook` (with
-  `wrapGAppsHook4`).
+  the phone looks the service up by it. A new identity therefore breaks every
+  pairing. A desktop-id build (`uno.schmid.steno.desktop`, the beta's
+  identifier) has minted its own identity.
+- **Omarchy 4** (Arch with Hyprland, Wayland): its bar's tray is an SNI host
+  behind a hover drawer, where a left click on Steno's icon may do nothing and
+  a right click opens the menu; the panels need Lua window rules
+  (`o.window(...)` in `~/.config/hypr/`); `ufw` denies every incoming port but
+  LocalSend's 53317; gnome-keyring runs a plaintext, always-unlocked default
+  keyring, which a multi-line secret corrupts (omacom/omarchy #5105).
 - **Asset names differ.** The Swift release carries `Steno-<v>.dmg`. The Tauri
   release carries `Steno_<v>_aarch64.dmg` and `.app.tar.gz`,
   `Steno_<v>_x64_en-US.msi` and `_x64-setup.exe`, and
-  `steno-desktop_<v>_amd64.deb` and `.AppImage`. The cask and `flake.nix` build
-  the Swift URL, and the flake checks for an executable named `Steno` and the
-  bundle id `uno.schmid.steno.mac`.
+  `steno-desktop_<v>_amd64.deb` and `.AppImage`.
 - **Rollback over a v5 database** (run on Forge and atlas):
-  - Swift and Rust stand at migrations 1 to 4. P2 adds a fifth in both apps, a
-    new table with no foreign key and no change to existing tables;
+  - P2 added a fifth migration in both apps, a new table with no foreign key
+    and no change to existing tables;
   - Swift `v0.10.0-rc.2` (GRDB 7.11.1) opens a v5 database normally: the
     migrator ignores an applied migration it does not know, never erases while
     `eraseDatabaseOnSchemaChange` is false, and the app never calls
     `hasBeenSuperseded`. It then keeps writing, and nothing is lost;
-  - the Rust `desktop-v0.1.0-rc.2` refuses it (`UnknownMigration`), then panics
-    at launch with no dialog. The file is untouched, but the in-app updater
-    cannot run, so that install needs a newer build installed by hand. P2 makes
-    the Rust migrator ignore later migrations with a warning, as GRDB does, and
-    show a dialog instead of panicking.
+  - the Rust `desktop-v0.1.0-rc.*` builds refuse it (`UnknownMigration`) and
+    panic at launch with no dialog. The file is untouched, but the in-app
+    updater cannot run, so such an install needs a newer build installed by
+    hand. Every build from P2 on ignores later migrations with a warning, as
+    GRDB does.
 
 ## Decisions
 
@@ -229,110 +129,85 @@ Forge and atlas.
 | D6 | Linux and Windows listed once gated | "also omarchy and nixos users" | Changed: GNOME, Omarchy and NixOS, X1 to X8 |
 | D7 | the cask follows stable releases only | as recommended | Confirmed |
 | D8 | one frozen handoff item | as recommended | Confirmed |
-| D9 | the parity differences accepted | "audio processing stable and ideally the final version" | Changed: A1 to A9 before the first candidate; the final choices confirmed |
+| D9 | the parity differences accepted | "audio processing stable and ideally the final version" | Changed: the audio path final before the first candidate; the final choices confirmed |
 | D10 | `steno-macos` | as recommended | Confirmed |
 | D11 | none | the lost-complete fix before stable | New, decided by Nicolai |
 | D12 | the dogfood: five meetings in three days | confirmed as proposed | New, confirmed |
 | D13 | none | "Write beside" | New, confirmed |
 
-A confirmed decision states the choice. A changed or new decision also states
-why and the alternative.
-
-- **D1 Tags are `v*` for the Tauri app.** Confirmed. One product, one tag line.
-  `release.yml` goes in S7, before the first `v0.11.0*` tag. The updater lanes
-  keep the names `desktop-stable` and `desktop-beta` for good, because installed
-  desktop builds have them compiled in. The old `desktop-v*` tags stay.
-- **D2 The version line continues at 0.11.0.** Confirmed. Candidates are
-  `0.11.0-rc.N`; `1.0.0` remains the name for the day the v1 checklist (issue
-  #74, re-scoped to the Rust app) is done.
-- **D3 Nothing that can lose data ships.** Changed. Nicolai: "we should never
-  loose any data. if there are gaps, then we need to dispatch more agents."
-  Every known path that can lose a recording, a transcript, a note or a pairing
-  blocks the stable release, whatever its likelihood: in the Rust app on every
-  platform the release publishes, Windows included though unlisted, and in both
-  apps where they share it. A
-  Swift-only path closes with the handoff (D9), since Swift ships no further
-  release and runs again only as a rollback. Everything that loses no data
-  follows (What follows). The blocking list holds the paths found in the plans
-  and by the data-loss audit of the Rust app's code. Alternative: the earlier gate, which also
-  blocked core flows and silent failures but not every unlikely loss.
-  - A crash loop counts as data loss (A17): an app that stops at every
-    launch records nothing. A recording whose read ends with the app is read
-    once more at the next launch; the second time in a row it is
-    quarantined, failed with its file kept and Process again offered, never
-    read again automatically. One power loss, force quit or update restart
-    mid-read costs nothing; two in a row on the same recording are the
-    accepted false alarm (one click, nothing lost).
-- **D4 The login item stays `SMAppService.mainApp` on macOS.** Confirmed. It is
-  the Mac's own login item, the one the Swift app uses, and it keeps the General
-  section's `requiresApproval` copy. The shell registers, reads and removes it
-  through the safe `smappservice-rs` (already in `Cargo.lock`, moved into
-  `[workspace.dependencies]`), not through `tauri-plugin-autostart`'s Launch
-  Agent. With D5, the new app registers itself (S6). Linux and Windows keep the
-  plugin, with X3's changes.
-- **D5 The app's identifier becomes `com.nicolaischmid.steno.desktop`.**
-  Changed, confirmed 2026-10-07. Nicolai: "it should be com.nicolaischmid.steno",
-  then, on the iOS app sharing that id: "Desktop gets .desktop."
-  - **One identifier on every platform,** `com.nicolaischmid.steno.desktop`,
-    replacing both old ones, set in `tauri.conf.json`. The iOS app keeps
-    `com.nicolaischmid.steno`. Alternative, not taken: per-platform
-    identifiers.
-  - **What it costs, stated plainly:**
-    - every Swift user grants microphone, system audio and calendar once more;
-    - macOS asks once for the API key and once for the handover key, each time
-      with the login keychain password, and the user must choose Always Allow;
-    - the Swift Login Items entry is left to macOS, and R3 finds out what it
-      does (S6);
-    - Tauri's per-identifier directories start empty, and the one thing in them
-      that matters, the panel anchor, is read back once;
-    - on a Mac that also holds a Swift identity, phones paired only with a
-      desktop-id build pair again, since the Swift identity wins (S6).
-  - **Directories: decouple, do not move.** Confirmed 2026-10-07 ("Stop
-    depending on the ID"). The panel anchor
-    moves into the support directory (`Steno/panel-anchor.json`), read once from
-    the desktop-id build's config directory when the new file is missing. Then
-    nothing that matters is named after the identifier, and a later id change
-    costs nothing. Alternative, not taken: move the old directories once at
-    first launch.
-  - **Mobile's native identifiers are not touched.**
-- **D6 Linux targets GNOME, Omarchy and NixOS; Windows ships unlisted.**
-  Changed. Nicolai: "yes. but i also wanna target omarchy and nixos users."
-  Every tag publishes all three platforms. The site lists a Linux target once
-  its gate passes on Nicolai's machine: GNOME (the `.deb` or the AppImage),
+- **D1 Tags are `v*` for the Tauri app.** One product, one tag line.
+  `release.yml` is gone (S7). The updater lanes keep the names
+  `desktop-stable` and `desktop-beta` for good, because installed desktop
+  builds have them compiled in. The old `desktop-v*` tags stay.
+- **D2 The version line continues at 0.11.0.** Candidates are `0.11.0-rc.N`;
+  `1.0.0` remains the name for the day the v1 checklist (issue #74, re-scoped
+  to the Rust app) is done.
+- **D3 Nothing that can lose data ships.** Nicolai: "we should never loose any
+  data. if there are gaps, then we need to dispatch more agents." Every known
+  path that can lose a recording, a transcript, a note or a pairing blocks the
+  stable release, whatever its likelihood, on every platform the release
+  publishes (Windows included though unlisted). A Swift-only path closes with
+  the handoff (D9), since Swift ships no further release and runs again only as
+  a rollback. Everything that loses no data follows (What follows). The
+  simplify plan (2026-10-18) narrows this: it gives up the Linux logout and OOM
+  kills and the NAS flush case it names under "Given up", and it removes the
+  crash-loop quarantine (A17's sub-rule that a crash loop counts as data loss);
+  a reported loss gets a small fix aimed at that case.
+- **D4 The login item stays `SMAppService.mainApp` on macOS,** through the safe
+  `smappservice-rs`, with the General section's `requiresApproval` copy. With
+  D5 the new app registers itself (S6). Linux and Windows keep
+  `tauri-plugin-autostart`, with X5's rules.
+- **D5 The app's identifier is `com.nicolaischmid.steno.desktop`,** on every
+  platform, replacing both old ones (`tauri.conf.json`). The iOS app keeps
+  `com.nicolaischmid.steno`; mobile's native identifiers are not touched.
+  - **What it costs:** every Swift user grants microphone, system audio and
+    calendar once more; macOS asks once for the API key and once for the
+    handover key, each with the login keychain password (choose Always
+    Allow); the Swift Login Items entry is left to macOS (S6, R3); on a Mac
+    that also holds a Swift identity, phones paired only with a desktop-id
+    build pair again, since the Swift identity wins.
+  - **Directories: decouple, do not move** ("Stop depending on the ID"). The
+    support directory was never named after the identifier. The panel anchor
+    lives in it (`Steno/panel-anchor.json`), read once from the desktop-id
+    build's config directory when missing, so nothing that matters is named
+    after the identifier and a later id change costs nothing.
+- **D6 Linux targets GNOME, Omarchy and NixOS; Windows ships unlisted.** Every
+  tag publishes all three platforms. The site lists a Linux target once its
+  gate passes on Nicolai's machine: GNOME (the `.deb` or the AppImage),
   Omarchy (the AUR package `steno-desktop-bin`) and NixOS (the flake's package
   and module). Windows is listed once a Windows machine has run its gate. A
-  gate blocks its target's listing, not the stable tag. Alternative: GNOME
-  alone at first, Omarchy and NixOS later.
-- **D7 The cask follows stable releases only.** Confirmed. The first stable bump
-  is **Nicolai**'s tap commit; after it he sets `HOMEBREW_TAP_TOKEN`, and the
+  gate blocks its target's listing, not the stable tag.
+- **D7 The cask follows stable releases only.** The first stable bump is
+  **Nicolai**'s tap commit; after it he sets `HOMEBREW_TAP_TOKEN`, and the
   workflow bumps from the second stable release on.
-- **D8 One frozen handoff item.** Confirmed. The `appcast` branch gets one item
-  without a channel, for `0.11.0`, with Sparkle's phased rollout
+- **D8 One frozen handoff item.** The `appcast` branch gets one item without a
+  channel, for `0.11.0`, with Sparkle's phased rollout
   (`--phased-rollout-interval 86400`: seven groups, one day apart, counted from
   the approval; Check for Updates skips the wait). The same feed is the
-  `appcast.xml` asset of every stable release, so `v0.9.0-rc.1` finds it through
-  `releases/latest`. Only a later release that fixes the handoff itself
+  `appcast.xml` asset of every stable release, so `v0.9.0-rc.1` finds it
+  through `releases/latest`. Only a later release that fixes the handoff itself
   publishes a new item, which supersedes this one.
 - **D9 The audio path is final before the first candidate, and the remaining
-  Swift fixes close at the handoff.** Changed. Nicolai: "we need to make sure
-  the audio processing is stable and ideally the final version before we
-  cutover to the tauri version."
-  - **Reading:** no change to the audio and speech path is planned after the
-    cutover. A1 to A10 and A12 to A20 land before `0.11.0-rc.1`, so the
-    rehearsals run on the final pipeline. A fix found during the candidates
-    becomes a new candidate and restarts the stability count (G2).
-  - **The remaining differences, each made final.** Confirmed 2026-10-07.
+  Swift fixes close at the handoff.** Nicolai: "we need to make sure the audio
+  processing is stable and ideally the final version before we cutover to the
+  tauri version."
+  - No change to the audio and speech path is planned after the cutover;
+    every A package is merged, so the rehearsals run on the final pipeline. A
+    fix found during the candidates becomes a new candidate and restarts the
+    stability count (G2). A later change to the capture's loss counting needs
+    a new D9 ruling (What follows).
+  - **The final choices** (confirmed 2026-10-07 and 2026-10-08):
 
-    | Difference | Choice | Why |
-    |---|---|---|
-    | Mixdown format | Final: 16 kHz mono WAV on every platform | One code path and no encoder dependency; the mixdown is optional (`include_audio`). Matching Swift's AAC needs AudioToolbox on the Mac, Media Foundation on Windows and nothing exists for Linux, so the format would differ by platform. Cost: about 115 MB per hour in the vault instead of about 30. Alternative: AAC on the Mac and Windows, WAV on Linux. |
-    | Resampler (44.1 kHz phone audio) | Final, the 7 to 8 kHz fold included (Nicolai accepted it, 2026-10-08) | Within 0.3 dB to 6 kHz. A9's sweep (#246): aliases that land below 7 kHz stay under -60 dB (-67 dB at 6.9 to 7.0 kHz, under -90 dB below 6.8 kHz), and the sinc's transition band folds 8 to 9 kHz of input into 7 to 8 kHz at -21 to -58 dB; the capture's 3:1 path is under -60 dB everywhere below 8 kHz. A9's speech test: FLEURS German through the 44.1 kHz path 5.02 % WER, through the 48 kHz path 5.51 %, so the one-sided bound (at most 0.1 points over 48 kHz) holds by 0.49 points. That proves the passband only: FLEURS is 16 kHz, so neither path carries anything above 7.2 kHz and the fold's cost to a transcript is unmeasured; and the 48 kHz reference already sits 0.6 points over the 16 kHz original (4.9 %), so the margin is per-file noise, not headroom. Nicolai accepted the fold on the sweep (2026-10-08); a sharper sinc would have changed every 44.1 kHz decode. |
-    | Sidecar's 2 ms lag | Final, accepted | Far below a word; Swift had the same relationship. `tests/codec.rs` pins both onsets and the 32 samples between them. |
-    | AAC priming (23 to 48 ms late on phone recordings) | Fixed (A9, #246) | The decoder reads the edit list (ffmpeg's files), else iTunes' gapless tag (`AVAudioFile`, so the Swift app's mixdowns: 2 112 samples), else the 2 112 AVFoundation assumes, but only in the layout of the phone's `AVAudioRecorder`, which writes neither box (major brand `M4A `, `mp42`, no `udta`, and an `esds` with ES_ID 0 and stream byte 0x14). Any other file that declares neither keeps every sample: Android's recorder primes 1 024 and declares nothing, and 25 ms of priming is harmless where 25 ms of speech is not. It drops exactly that many frames, so the decode starts where AVFoundation's did (checked on files from Apple's encoder in both layouts); every other input decodes bit for bit as before. |
-    | Call mode without an output client (the tap's IOProc runs only once another client opens the output) | Fixed first (A10) | Forge reproduces the loss over SSH: 0 callbacks while nothing plays. The tap aggregate runs only while a process the tap includes drives the output. The Swift app shares the defect and keeps its exclusion of its own process until the handoff, so this is not a regression, but D3 makes the loss blocking. The fix includes Steno in the tap, so the rule is: no in-app playback while recording, enforced by `Playback`. |
-    | A phone recording without a `moov` (AVFoundation and symphonia both refuse it) | Fixed (A14) | The phone's recorder writes the index only when it stops, so a crash, a jetsam kill or a force-quit leaves the audio with no index, and the phone's crash recovery still hands it over. Under D3 that recording must not be lost: the decoder reads such a file from the packets' own bits with the phone's fixed settings, in the recorder's layout only, and the meeting says it was cut off. The Swift app keeps failing it. |
-    | A capture thread that misses cycles (the audio of those cycles gone, the master short of wall time, no count and no notice; Swift's IOProc reads no time stamps either) | Fixed (A18, #297) | Under D3 a loss must never be silent. Each backend reads its callback's position on its clock and writes what its thread missed as silence, or counts it when the jump is too long to fill, and the note after the stop says how much is missing; the A18 item has the design. |
-    | A damaged AAC packet (AVFoundation conceals it; symphonia stopped the whole decode) | Fixed (A12, #264) | Under D3 one bad packet must not lose a phone recording. The packet becomes silence of its container duration, so later audio keeps its time; the meeting says how long the silence lasts. A file in which more than half of the packets fail is an error, never a meeting of silence. |
+    | Difference | Choice |
+    |---|---|
+    | Mixdown format | 16 kHz mono WAV on every platform: one code path, no encoder dependency; about 115 MB per hour in the vault instead of about 30 |
+    | Resampler (44.1 kHz phone audio) | Final, the 7 to 8 kHz fold included (Nicolai accepted it on A9's sweep, 2026-10-08): aliases below 7 kHz stay under -60 dB; FLEURS German 5.02 % WER through the 44.1 kHz path, 5.51 % through 48 kHz |
+    | Sidecar's 2 ms lag | Accepted, pinned by `tests/codec.rs` |
+    | AAC priming | Trimmed from the edit list, else iTunes' gapless tag, else the 2 112 samples AVFoundation assumes, only in the phone recorder's layout (A9) |
+    | Call mode without an output client | Fixed (A10): the tap includes Steno, so no in-app playback while recording, enforced by `steno_audio::Playback` |
+    | A phone recording without a `moov` | Salvaged into a meeting that says it was cut off (A14) |
+    | A capture thread that misses cycles | Written as silence or counted, and the note after the stop says how much is missing (A18) |
+    | A damaged AAC packet | Silence of its duration, shown on the meeting; more than half failed is an error (A12) |
 
   - **A known limit, A11** (Nicolai, 2026-10-12): a Bluetooth headset that is
     the system output may switch to hands-free while a call is recorded,
@@ -340,2745 +215,273 @@ why and the alternative.
     quality only, no audio is lost, and the Swift app is unchanged. It is
     revisited after stable; A10's step 6 notes whether it happens on
     Nicolai's Mac.
-  - The Swift defects under "Store", "Adapters", "Handover", "LLM" and "Audio"
-    and the CLI's `--title`, and the parity notes' other "before cutover" ports
-    to Swift, close with the handoff. No Swift bridge release ships (Nicolai,
+  - The Swift defects and the parity notes' other "before cutover" ports to
+    Swift close with the handoff. No Swift bridge release ships (Nicolai,
     2026-10-15: "if it migrates seamlessly in mac, or at least i can make codex
     fix it, we don't need a bridge. currently i'm the only user."): the Swift
     app ships no further build and runs again only as a rollback
     (`v0.10.0-rc.2`). The move from the Swift app to the Rust app on Nicolai's
     Mac must be seamless: anything that could break it is fixed before the
     handoff, or, where only his Mac can show it, is a step on his gate list
-    (Rehearsal, "Nicolai's Mac").
-    The fixtures the
-    Swift side owes ("Bridge") are dropped at S9, when the Rust fixtures
-    become the contract.
-- **D10 A new crate, `steno-macos`, joins `AGENTS.md`'s `unsafe` list, and the
-  list is brought in line with the code.** Confirmed.
-  - Two packages call Mac frameworks that have no safe binding: the identity
-    export (`SecItemExport`, S6) and EventKit (S3); the import's other keychain
-    calls use `security-framework`'s safe wrappers. `steno-macos` holds both,
-    each in a safe wrapper with a comment on every invariant, and also the
-    keychain test's fixture calls (`SecItemImport` of SEC1, `SecItemUpdate`).
-    S6 creates the crate, and S3 rebases onto it.
-  - In the same PR, `AGENTS.md`'s Rust core row lists the crate, and the
-    `unsafe` rule names it and the modules that already hold `unsafe` today: the
-    shell's `permissions.rs` and `main.rs`; `steno-handover`'s
-    `server/advertise.rs` and `upload/receiving_file.rs`; `steno-diarize`'s
-    `coreml/binding.rs`; `steno-speech-sidecar`'s `lib.rs`; the test targets
-    `steno-speech-sidecar/tests/isolation.rs` and `steno-speech/tests/frames.rs`.
+    (Rehearsal, "Nicolai's Mac"). The fixtures the Swift side owes are dropped
+    at S9, when the Rust fixtures become the contract.
+- **D10 `steno-macos` holds the Mac framework calls without a safe binding**
+  (the identity export's `SecItemExport`, EventKit, the keychain test's
+  fixture calls), each in a safe wrapper with a comment on every invariant,
+  and `AGENTS.md`'s `unsafe` list names it and every module that holds
+  `unsafe`. Done with S6 and S3.
 - **D11 The handover's lost-complete-answer fix lands before the stable
-  release.** New, decided by Nicolai on 2026-10-07. It is P2, with a fifth
-  migration in both apps; the 14-day no-migration rule applies after the stable
-  tag. Alternative: ship the fix after stable, with the migration inside the
-  rollback window.
+  release.** Decided by Nicolai on 2026-10-07. It is P2, with the fifth
+  migration in both apps; the 14-day no-migration rule applies after the
+  stable tag.
 - **D12 The stability count is ten real meetings on the Mac and five on each
-  Linux target to be listed.** New, confirmed 2026-10-07. Ten meetings cover a working
-  week's calls on the Mac, the platform with every Swift user; five per Linux
-  target cover its capture and session paths. The rules are in G2.
-  Alternative: more meetings, or a number of days of daily use.
-- **D13 A re-export never overwrites a note the user edited in the vault.** New,
-  confirmed 2026-10-07. Nicolai: "Write beside." The export audit found that a
-  re-export replaces the meeting's note whole, so an edit made in Obsidian is
-  lost. If a note changed since Steno wrote it, Steno leaves it alone, writes
-  the new version beside it as `<name> (Steno <date>).md`, and shows a warning
-  (P30). Carrying the edited note's `[x]` task ticks over into the new version is
-  not part of it. Alternative, not taken: Steno owns the note and the README
-  says edits belong in Steno.
+  Linux target to be listed.** Ten meetings cover a working week's calls on
+  the Mac, the platform with every Swift user; five per Linux target cover its
+  capture and session paths. The rules are in G2.
+- **D13 A re-export never overwrites a note the user edited in the vault.**
+  Nicolai: "Write beside." If a note changed since Steno wrote it, Steno leaves
+  it alone, writes the new version beside it as `<name> (Steno <date>).md`, and
+  shows a warning (P30). Carrying the edited note's `[x]` task ticks over into
+  the new version is not part of it.
 
-## What blocks the stable release
+## Closed packages
 
-A row closes when its PR merges and its item leaves "Open after the port". Rows
-with a PR number have one; the Rust plan's Progress table says whether it is
-open or merged. The owner is the workstream that writes the package: audio;
-capture and recovery (branches `wp-cap-*`); pipeline, store and export
-(`wp-pse-*`); handover; Linux desktop.
+Every package below is merged on `main`. The letters: S for the Mac and the
+release, A for the audio path, P for the other data-loss fixes, X for the
+Linux targets. Each line keeps what later work and the gates rely on; the
+code and the pull request hold the rest. "Simplify" means
+`.plans/2026-10-18-simplify.md`.
 
-**The handoff and the Mac (S1, S3 and S5 apply on every platform):**
+**S: the Mac and the release**
 
-| Item | Why it blocks | Package |
-|---|---|---|
-| The Rust app cannot download the CoreML Parakeet model | A fresh Mac install cannot transcribe | S1 |
-| Whisper, Ultra and DE have no Rust engine | A Swift user who chose one gets Parakeet v3 after an unannounced 2.6 GB download | S1 |
-| Downloads inside the pipeline (the speech models, the diarizer's models, the sidecar's install) | They fail silently or stall a meeting | S1 |
-| Diarizer Settings wording and model licences | The wrong model is shown, and WeSpeaker's CC BY 4.0 licence requires attribution | S1 |
-| Meeting detection and its prompt | Swift users start most recordings from the prompt; a missed meeting is a lost recording | S2 |
-| Auto-stop after a call | Recordings run until someone stops them | S2 |
-| Calendar lookup at recording start | Meeting titles and attendee names are lost | S3 |
-| Permissions probe and the real `Permissions` | A fresh install, and every Swift user after the new id, can record silence | S3 |
-| Update schedule | After the one-way handoff, fixes reach only users who check by hand | S4 |
-| QR encoder | A new phone cannot pair | S4 |
-| Bonjour re-publish after a network change, and the computer name | The phone loses the computer until Steno restarts | S5 |
-| The new identifier, `SUPublicEDKey`, the import, the login item | The handoff itself | S6 |
-| Build number, `v*` tags, the handoff item, `release.yml`'s concurrency | The release itself | S7 |
+- S1: done (#237). The Mac downloads CoreML Parakeet v3
+  (`FluidInference/parakeet-tdt-0.6b-v3-coreml`, pinned) into
+  `fluidaudio/parakeet-tdt-0.6b-v3`; a stored Whisper, Ultra or DE engine
+  becomes `parakeet-v3` with a one-time notice; the pipeline never downloads:
+  a meeting that lacks a model waits queued with "Download the speech models
+  in Settings" and resumes once they are installed; WeSpeaker's licence is
+  CC BY 4.0, shown with attribution.
+- S2: done (#271). Meeting detection's prompt and the auto-stop 90 s after a
+  call, which stops through the Stop path with `callEnded`; while the capture
+  recovers from a device change the countdown waits, for one grace at most.
+- S3: done (#288). The calendar event at recording start, and the
+  permissions: `unknown` counts as missing on the Mac only, and a missing
+  grant opens onboarding on its permissions page whatever
+  `steno.onboardingCompleted` says.
+- S4: done (#258). A daily update check, due at launch and hourly when the
+  last check time (`lastCheckAt` in `update-check.json` in the support
+  directory, RFC 3339 UTC) is missing or more than 24 hours old; the flags
+  `steno.updates.automaticChecks` (missing: on) and
+  `steno.updates.automaticDownload` (missing: off) in `preferences.json`; the
+  pairing QR code.
+- S5: done (#247). The Bonjour record follows a network change, and the Mac
+  advertises its computer name.
+- S6: done (#268, #236, #281, #289, #294). The identifier (D5); `Info.plist`
+  carries the Swift `SUPublicEDKey`
+  (`RxaX7phoHvb7M0P4yaOC7zngDo+lqlOE6Iq89UtOuQI=`); `steno-macos` (D10).
+  - **The import** (macOS only, `steno_services::swift_import`) runs once: it
+    copies `steno.onboardingCompleted` and Sparkle's `SUEnableAutomaticChecks`
+    and `SUAutomaticallyUpdate` into S4's flags, drops the panel anchor,
+    removes a desktop-id build's Launch Agent, then, on an onboarding step,
+    reads the API key (one prompt) and exports the handover identity (one
+    prompt) into the PEM entry `handover-identity`. It records
+    `steno.swiftImportRan` in `preferences.json` and the keychain entry
+    `swift-import-done`; either one stops it from touching the identity again.
+  - **Never mint over a pairing:** a denied or failed export, or an identity
+    that cannot be read, leaves the listener off with Try again in Settings >
+    iPhone; only the user's Pair again mints a new identity, and it writes the
+    `swift-import-done` marker first. The rule is one pure decision,
+    `steno_handover::identity::decision::decide`, and its truth table,
+    `crates/steno-handover/tests/fixtures/identity-decisions.json`, is the
+    statement of it (Nicolai's decision of 2026-10-15).
+  - **The login item** (D4): the new app registers itself when the stored
+    `launch_at_login` is on. The Swift entry is left to macOS. If R3 shows that
+    it stays as a second "Steno", launches a Swift copy or blocks the new app's
+    registration, the onboarding step and the release notes tell the user to
+    remove it in System Settings > General > Login Items; R3 checks that the
+    words lead there.
+- S7: done (#274). Everything under "Release mechanics", `release.yml`'s
+  deletion included.
 
-**No data lost, on every platform the release publishes (D3):**
+**A: the final audio path (D9)**
 
-| ID | What can be lost, and the fix | Owner |
-|---|---|---|
-| P1 | A recording: a power loss after `complete` must not roll back the meeting once the phone has deleted its copy. The intake commits its receipt, meeting and asset in one durable transaction, and the handover starts only after a durable checkpoint at launch that also restarts the WAL (#213) | handover (#213) |
-| P2 | A recording, or a second meeting: a `complete` answer that never reaches the phone. A `handoverAdmission` table answers the retry "delivered", also for a recording whose meeting was deleted; the Rust migrator ignores later migrations and the desktop shows a dialog instead of panicking; the backfill runs on every open; other bytes under a recording id are a new recording, and the same bytes from another device take the receipt over (P33) (`fix/handover-lost-complete-answer`, D11; design `.plans/2026-10-08-handover-admission-ledger.md`) | handover |
-| P3 | A recording ended by a kill, a crash or a power loss: salvage the CAF at launch into a meeting that processes, instead of leaving it failed and unprocessed. The salvage writes the existing end reason `failed` (the interrupted row has none), so the Swift app still decodes the row during the rollback window (a new value in a stored enum column would break that); a recovered meeting is told apart additively, by a log line now and, if the UI needs it, a nullable column in a later add-only migration. A master with no row at all (a phone upload copied in before a crash or a failed commit, a row a power loss took before it was durable, a recording whose meeting was deleted while it recorded) is adopted by the same launch where it lies, from the settings' folder, the recorded, the known and each stored asset's folder, when the record of recording folders names it: the recorder writes that entry before a recording's row and the phone intake before its copy. An entry is forgotten only by a delete that goes through (one refused, whose commit fails or that a panic unwinds records it again), by a start that failed (nothing was recorded), by the phone intake once its admission committed durably or its copy is gone, by a launch that finds the meeting's row no longer `recording` after a durable checkpoint, or by a launch that finds no master (the meeting folder there with none, with a CAF short of one whole frame or with a header and no audio, or missing from an audio folder that lists others; an empty, missing or unreadable audio folder keeps it). A meeting folder another install put into a shared audio folder, and one the Swift app or an earlier release wrote (no record), are left alone, and the launch logs their count; a recorded master the launch cannot read (a channel count the salvage does not take) keeps its entry, and the launch logs those in one line too. A recording starts only in a meeting folder it creates: the writer refuses one that exists, so a start with an existing meeting's id (`steno record --meeting-id`) writes over nothing, and a start whose devices do not open removes only the folder it created. The adoption is a meeting with its folder's id, `queued`, kept forever, the CAF salvaged with the end reason `failed`, an m4a or WAV as a phone recording with none, inserted only while no row has the id; a master modified within the live check's ten seconds waits for the next launch, nothing in the handover inbox is adopted, and the main window says "Recovered a recording that was missing from your list. It is being processed." Deleting a meeting whose files no asset names removes its folder in each of those folders, so it does not come back. A delete forgets the entry before its rows go, and the adoption reads the record again after the rows, so a meeting deleted while a launch runs does not come back either. During the rollback window a recording can come back once: a Rust recording is killed, the Swift app fails its row and the user deletes it there; Swift removes only what an asset names, so the next Rust launch adopts it again, and a delete there removes it | capture and recovery (`wp-cap-*`, `fix/recording-recovery`, `fix/recovery-adopts-orphans`) |
-| P4 | A recording's stop: a `stop()` that waited behind a writer failure's or a device loss's finalise returns that recording, as Swift's actor did | capture and recovery (`wp-cap-*`, #244) |
-| P5 | The recording in progress: a save that outlasts the session's wait. Measure the save; an autostarted Linux app gets a systemd drop-in raising `TimeoutStopSec` from the generator's 5 s to 20 s, in the `.deb`, the AUR and Nix packages and written by the app for the AppImage (for the generator's `app-steno\x2ddesktop@autostart.service` under uwsm and Plasma, named after the Linux product name `steno-desktop`; GNOME starts autostart apps in its own `app-gnome-steno\x2ddesktop-<pid>.scope`, which gnome-session's `app-gnome-.scope.d/override.conf` gives `TimeoutStopSec=5s`, so a `[Scope]` drop-in named to sort after `override.conf` raises it too); the save logs its duration at `warn`, so it shows under the default filter; on Windows, `ShutdownBlockReasonCreate` while recording. #227 delivers the Linux half: both drop-ins in the `.deb` (with a `postinst` that reloads the running user managers) and written by the app, the autostart entry kept until the exit when Launch at login is turned off while the app runs as its unit, the autostart unit's drop-in while managed (X5) for the app that runs as the unit made from an earlier build's entry, removed with that entry at the exit, and the logged duration; the AUR and Nix packages ship the files under X6 and X7 | Linux desktop (#227, with #220); Windows |
-| P6 | The recording in progress: systemd-oomd kills the app's cgroup with its sidecar. The sidecar moves into its own transient scope on Linux: right after the spawn the app asks the user manager over the user bus for `app-steno\x2dspeech\x2dsidecar-<pid>.scope`, in the app's slice and `PartOf` the app's unit, and waits about 2 s for the sidecar to be in it, so oomd takes the sidecar's cgroup first and the job fails as after any crash of the sidecar; a start the manager has not carried out by then is called off, and a sidecar that joined just before stays in its scope; an app outside a user unit, a missing bus or a refusal leaves the sidecar in the app's cgroup, and a manager that answers after the wait leaves it there or moves it later. Speaker diarization runs in the sidecar too (A3, #266), so the app's cgroup is a candidate only under pressure that lasts after the sidecar is gone | Linux desktop (#260) |
-| P7 | Every note: a people folder typed as `./People` or `.` in the Swift Settings makes each Rust delivery fail. `./People` becomes `People`; `.` becomes no people folder, as Swift wrote it | pipeline, store and export (`wp-pse-*`) |
-| P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221. At #221's first move, a key only `secrets.json` holds is copied; where both hold one, the file's API key wins and the Secret Service keeps its own `handover-identity`; after the move's mark, the Secret Service wins for every key | audio (with #221) |
-| P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess` (landed, #228), a `meeting.processAgain` bridge method and its button (`fix/pipeline-process-again`), shown while the detail's `canProcessAgain` holds (`Meeting::offers_process_again` and the master on disk; a ready meeting kept incomplete joins with P14, #241); the Swift app refuses it; and `steno process --meeting <id>` (with `input` optional and exclusive of `--meeting`, a ready meeting only with `--allow-ready`; the same branch); a meeting refused for missing models stays queued and resumes once they install (S1's queue, #237) | pipeline, store and export (`wp-pse-*`) |
-| P10 | A meeting's whole result: a diarizer or speaker-match failure fails the meeting. It merges without diarization instead | pipeline, store and export (`wp-pse-*`) |
-| P11 | Speaker names confirmed while the meeting processes: the cleanup updates text by id, and `replace_transcript` keeps Confirmed assignments (calibration WP4) | pipeline, store and export (`wp-pse-*`) |
-| P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | pipeline, store and export (`wp-pse-*`) |
-| P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a guard on resume attempts stops the loop | pipeline, store and export (`wp-pse-*`) (the panic wrap); audio (the crash-loop guard, #228) |
-| P14 | Audio deleted by the retention sweep before its stamp is durable: every stamp and every keep commits durably, and the automatic retention leaves a meeting unstamped while its speakers include the room fallback, or a recorded lane has no segment in a meeting over 30 s or with no duration, or its recording may be damaged (#264's `damaged-audio.json`) (#241) | pipeline, store and export (`wp-pse-*`) |
-| P15 | Anything two processes write at once: one exclusive lock beside the database for the app's lifetime (#225). A second app instance that the single-instance guard does not hand over is refused with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run without migrating, and refuse beside an older app. On the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs in the same login session (`NSRunningApplication`); a Swift app started after the Rust app is not kept out, and its launch fails every `recording` row, the one the Rust app is still recording among them, so that recording's stop cannot save it and its folder stays on disk unlisted (a known limit, accepted because the handoff runs one app at a time) | capture and recovery (`wp-cap-*`, #225) |
-| P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
-| P17 | A local recording's folder: a save that fails leaves the meeting `recording` with its folder on disk, and the next launch's recovery (P3) rebuilds the asset row from the master and queues the meeting, so the folder is not orphaned (#233); a panic in the session's rebuild ends the recording saved, as a lost device (#230) | capture and recovery (`wp-cap-*`) |
-| P18 | A recording that silently stopped: the recorder subscribes to session failures | capture and recovery (`wp-cap-*`) |
-| P19 | The mic lane when the input device goes away: the mic falls back to the default input mid-recording on every platform (Core Audio, PipeWire and WASAPI in #222), also when the chosen device is connected but does not open, and the recording returns to it once it is back and opens. One that does not open (at the start, or while it settles on its way back) is asked for again at the next rebuild, when a default device moves or a device in use goes. On Linux it is also asked by a probe on a PipeWire stream and connection of its own (#244): 5 s after the session fell back, then twice as long after each probe, up to 80 s. The probe touches nothing that records, and the session switches only once the chosen source delivered there. A Bluetooth source is not probed: linking its input switches the headset to its hands-free profile under the output the system lane records. The Mac and Windows backends do not probe, for the same reason and because neither is run on hardware here | audio (#222, the probe #244) |
-| P20 | A recording that fills the disk: a free-space check before and during recording, with a warning. Every platform refuses a start and stops the recording, saved, above a 512 MiB floor. On the Mac the reading is the larger of `statvfs` and `NSURLVolumeAvailableCapacityForImportantUsageKey` through `steno-macos`, which counts APFS's purgeable space and reads 0 on volumes CacheDelete does not manage (external drives, disk images), held to `statvfs` plus 384 MiB, so the warning and its minutes count to the first floor; a failed read leaves `statvfs`. A `statvfs` below 128 MiB stops and refuses whatever the purgeable space, since CacheDelete purges asynchronously. A save that still meets a full disk leaves the meeting `recording` for P3 (#233) and P17 to recover at the next launch with room | capture and recovery (`wp-cap-*`, #230; the Mac's floor #285) |
-| P21 | The unsynced tail of a recording: periodic `sync_data` on the master | capture and recovery (`wp-cap-*`) |
-| P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`). #244: the session reports a stream that delivered nothing for 2 s and rebuilds it, its gap filled from the last frame, on every platform except a Windows capture of the system lane alone (endpoint loopback is silent while nothing plays), a stream that delivers nothing from its start included: a Mac call capture runs from its start on its silent output (A10, #251), and one whose silent output did not start, which delivers only while another app plays, is restarted on the backoff below until something plays; playback that begins during a wait between two restarts is lost until the next start (up to 4 s plus one start, once per change from quiet to playback). Its restarts keep a chosen microphone: the output's clock stalls it, so neither a restart that delivered nothing nor a stall soon after a resume gives the microphone up for the default. A restart of `coreaudiod`, and a lost connection to the PipeWire daemon (killed or restarted), are reported as the audio service restarting. Restarts that fail on a graph that does not run, that start but deliver nothing within 2 s, or that follow a stall or a service restart go on until one runs, with no limit, backing off 250 ms, 500 ms, 1 s, 2 s, then every 4 s: once the devices are back, the 4 s cap costs the starts in flight (one deadline per device tried: 3.5 s each on Linux, 7.5 s for a thread that does not answer, a chosen microphone and then the default; up to 10 s on Windows), the wait and the first frame, filled with silence up to the 10 s `MAXIMUM_GAP`; past it the master falls short of wall time and the note after the stop counts it. A restart whose stream delivered before its start returned ends its gap at the clock reading before the start; the time from there to its first frame (the start's connect time) is audio lost, counted as missed and not filled (A18). A stream that resumes and stalls again within 10 s, or before it delivered anything, continues the same restarts' count and backoff, and the log says so when the first restart fails and then about once a minute, across the resumes, the lines each start and stop would log (the Mac's silent output and first callback lines included) at `debug` meanwhile. A stream whose stall comes 10 s or more after each resume begins new restarts each time: its stall logs at `debug` while an earlier warning line stands unanswered, and it never brings the warning up when none stands; the note after the stop counts what it lost. The warning "No audio from <device>. Still trying." names the microphone only when its stall began the rebuild and its clock drives the capture (in person, and on Windows), else "No audio is arriving. Still trying." (a Mac call with nothing playing gets this one); it stands until the stream has delivered for 10 s, so it does not go and come back with each resume, and a note after the stop says when about a second or more is missing, clock drift left out. While the capture recovers, from a device change until it is back, the call auto-stop waits, for one grace at most, and it then arms afresh (S2), since a restart of the audio service also empties the call detector's process list | capture and recovery (`wp-cap-*`, #244) |
-| P23 | Audio the relay dropped: a warning at stop and a log line; no stored count, since a column would need a migration | capture and recovery (`wp-cap-*`) |
-| P24 | A transcript cut short by a sidecar shorter than its master: the sidecar's duration is checked against the master's | audio (#228) |
-| P25 | A recording or a processing run stopped by an update: updates wait while either runs. Every install holds the app's install gate (`IdleGate`), which gives its hold only while no recording starts, runs or is saved, no processing job, summary re-run or re-export runs or is claimed, and the app is not shutting down. Recording always wins: while an installer that returns runs (a `.deb`'s password prompt may wait for good), Record works, a job claimed meanwhile (a phone recording's) waits `queued` for a minute at most, and the relaunch waits for a recording or a job started meanwhile, telling the user so; the hold refuses Record only through the shutdown and the relaunch, and on Windows from the install, which ends the app. An installer that asks an administrator (a `.deb`, an `.rpm`, a macOS bundle the user cannot write, and the MSI, whose consent prompt comes after the app has ended, so Steno is down until the prompt is answered) runs only right after a yes given while the app is idle; a yes given while busy, or one whose download took over 30 s, asks once more when it is idle. On Windows the app runs neither installer itself: it writes the verified installer, shuts down and leaves a hidden `cmd.exe` that starts it, waits and starts the version that ran again when it did not install (`msiexec` not 0, 1641 or 3010; the NSIS setup not 0), so a declined consent prompt, a failed MSI or an aborted setup leaves Steno down for seconds. If the `cmd.exe` cannot start, ends before it runs (a policy that turns off the command prompt ends it at once) or says nothing for 10 seconds, Steno restarts at once and the error goes to the log. Steno lets go of its single-instance lock just before it ends, so an old version started again at once (`msiexec` exits at once while another install runs) comes up rather than handing over to the ending Steno. An install that fails while Steno quits restarts nothing. A summary re-run or re-export claimed in those seconds is not kept, and the user asks again. The user's yes while busy asks whether to install after it ends, "Install After It Ends" (the default) or "Not Now", and waits; a recording started during the download is waited for, never stopped, and a newer version found meanwhile keeps the yes. Automatic downloads wait for an idle app and no install under way; the flag is read again after the download, turning it off frees the kept package, and the schedule never runs an installer that asks an administrator, which it announces instead (#270). Not part of the gate, by design: the launch's recovery of interrupted recordings, which survives a relaunch as it survives a kill (P3), and a phone upload before its intake claims the run, which the phone keeps until `complete` (P2) | Linux desktop (#270, every platform) |
-| P26 | A person page: a case-only rename of a person loses the page on a case-insensitive disk | pipeline, store and export (`wp-pse-*`) |
-| P27 | Notes written at once to one vault: deliveries are serialised per vault | pipeline, store and export (`wp-pse-*`) |
-| P28 | A note never written: a delivery left Pending is resumed at launch. Amended 2026-10-08 under D3: a Failed delivery is retried at launch too, at most once a day (by its `lastAttemptAt`); after three launch retries in a row that did not deliver every row the launch stops retrying it and the meeting's export line says "Export to <destination> keeps failing: <reason>" until Export again resets the count. The count lives in `export-retries.json` in the support directory, which the Swift app ignores, so no migration | pipeline, store and export (`wp-pse-*`) |
-| P29 | A note on Windows: names that Windows reserves (`CON`, `NUL`, ...) are escaped | pipeline, store and export (`wp-pse-*`) |
-| P30 | A note the user edited: a re-export writes the new version beside it as `<name> (Steno <date>).md` and warns, leaving the edited note alone; task ticks are not carried over (D13) | pipeline, store and export (`wp-pse-*`) |
-| P31 | Settings the other app wrote: a settings save upserts and keeps keys it does not know | pipeline, store and export (`wp-pse-*`) |
-| P32 | Preferences, the panel anchor and the Codex sign-in: each is written atomically, and the Codex `auth.json` is synced | pipeline, store and export (`wp-pse-*`) |
-| P33 | Another phone's upload: the first announce's discard, and a re-announce whose hash differs, leave other devices' files alone; an old device's 409 hands over cleanly (with P2) | handover (#219, #212) |
-| P34 | Recordings on the phone: the mobile queue index rebuilds after a failed load, and recorder files left by the audio module are found again (#223) | handover (#223) |
-| P35 | Pairings: the identity-fingerprint guard gets a macOS test (#213 makes the pairing writes durable and the intake one transaction). The test is #282, over the secrets file standing in for the Keychain: a keychain that comes back empty (Create New Keychain after a password reset) or holding another identity, through the graph and Settings' iPhone section; the live Keychain check on a spare account is still to run. The Swift mirror is dropped: #284 closed unmerged, as no Swift build ships again (D9). Until the handoff, and after a rollback to `v0.10.0-rc.2`, the Swift app still mints a new identity after a keychain reset: a Swift-only path, which closes with the handoff (D3). The guard's rule is one pure decision (`steno_handover::identity::decision::decide`, Nicolai's decision of 2026-10-15), which the load, the Swift import's choice and the Secret Service move all ask; its truth table, `crates/steno-handover/tests/fixtures/identity-decisions.json`, is the statement of the rule (S6) | handover (#282, #294) |
-| P36 | Secrets and files on Windows: credentials persist on this computer (`CRED_PERSIST_LOCAL_MACHINE`, not with the roaming profile; the `keyring` crate's roaming credentials move there on their first read, keeping the stored blob, #262), and renames are durable (#242: the durable writes in `steno_pipeline::files` rename with `MOVEFILE_WRITE_THROUGH` or with std, then flush the renamed file and the folders; a failed flush answers the phone 500, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS, or on a network drive) | handover (#242, #262) |
-| P37 | A recording through a cancelled logout: a cancelled logout does not stop the recording; only where the app saves as soon as the logout is announced (Xfce on Wayland) and the session then goes on does it stop, and it says so and relaunches, ready to record. Xfce's Quit Program saves before xfce4-session's kill, and its Save Session never stops the recording (#220) | Linux desktop (#220) |
-| P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks write one `crash-<UTC>.log` file per panic in the support directory, with the message, the location and the backtrace; the newest 20 are kept | capture and recovery (`wp-cap-*`) |
-| P39 | A meeting whose run meets the store locked by another process (the Swift app during the rollback window, or any program with the database open for writing; a `steno` writing command refuses while the app runs, P15) for longer than the 5 s busy timeout: it ended `failed` with "database is locked", a speaker match the store refused dropped the match, and a resume the store refused was logged and never tried again. The run now leaves the meeting `queued` with what it committed, waiting for the store beside the meetings waiting for models (`ModelWaits`), and writes `queued` back only over its own `processing`, so the park does not wait on the lock again (a refused write leaves `processing`, which the resumes take too). The services try those meetings again on a timer, 15 s doubling to 4 minutes (from 15 s again after a quiet spell), for as long as any waits and the app runs, and keep a meeting waiting while the lock refuses the retry or another operation holds it (another failure leaves it `queued` for the next launch); an install's resume the store refused hands its meetings to that retry, and a launch's resume is owed to it. The card and the list say "Waiting for another app to finish with Steno's data", and so does a refused Process again; the CLI says the meeting stays queued. No stored value, no migration (`fix/pipeline-waits-for-a-locked-store`) | pipeline, store and export (`wp-pse-*`) |
-| P40 | Nothing is lost, so not a D3 blocker: a stability item from the P39 work, closing before `0.11.0-rc.1`. While another process holds SQLite's write lock, the busy wait of up to 5 s lands on the Tauri command workers (`bridge_call`), the main thread (the tray's Record, Stop and Launch at login), the services runtime's workers (the pipeline's store calls, the delivery, the handover's admit, the 2 s poll) and the host's view-model lock, so the UI, the levels and the tray freeze for the wait; and an idle app reloads and resends the meetings every 2 s. Smaller cut (Nicolai, 2026-10-15): store calls in async code go through one facade over `spawn_blocking`; the store reads on two reader connections (`READERS`), the host's own, held with its view models, and a shared one, beside its one writer, so a read never waits for a write (WAL is on in both apps); `recording` comes from a feed that reads only the recorder's status and takes no host lock, so the levels and a stop never wait for a reload; one owner runs the reloads, and a reload that nobody forced runs only when the store changed: the writer's commit hook counts this process's commits, and `PRAGMA data_version` sees the other processes' (the Swift app during the rollback window, the CLI); the delete already runs its forget with the view-model lock released, and the host's writes keep that lock until the host actor after stable (`.plans/2026-10-15-host-actor.md`, with the change feed and a pipeline scheduler driven by the meeting rows); so does the delete's undo, on purpose, for one small durable write of the folder record on a refused delete, with a checkpoint only when that write fails; the recorder's stop keeps its synchronous path. No schema change (`.plans/2026-10-12-store-off-the-workers.md`) | pipeline, store and export (`wp-pse-*`; #286, #299, #304) |
+- A1: done (#228). A streamed decoder and mixdown; R5's soak bound is 6 GiB
+  for the app and its sidecar together.
+- A2: done (#263). CoreML on the shared chunker; the accuracy gate is FLEURS
+  German `cat/` through CoreML at or below 5.0 % mean WER
+  (`scripts/coreml-parity-forge.sh` prints PASS or FAIL), with the Swift
+  corpus as a drift check under 10 %; measured 4.87 %.
+- A3: done (#229, #266). The diarizer's models come through `ModelStore`, and
+  its inference runs in the speech sidecar on every platform (invariant 4).
+- A4: done (#214). PipeWire's `stop()` is bounded; `start`'s first cycle and
+  latencies on Nicolai's GNOME and Omarchy machines are measured in the Linux
+  gates.
+- A5: done (#218). A6: done (#198). A7 and A8: done (#222), the Linux input
+  device list and meeting detection over PipeWire.
+- A9: done (#246). The final choices in D9's table, proven.
+- A10: done (#251). Call mode records from its start with nothing playing;
+  Nicolai's steps on his Mac are under "Order of operations and gates".
+- A11: a known limit (D9), nothing before stable.
+- A12: done (#264). A13: done (#279), word starts from a chunk's exact start.
+- A14: done (#280). A phone recording without a `moov` is salvaged; the
+  phone-side check is Nicolai's (G2).
+- A15: done (#296). CoreML's IOSurface growth and Objective-C exceptions are
+  contained; the debug-build check is Nicolai's (G2).
+- A16: done. A16a (#310), the owned-span partition; A16b (#317), the ONNX
+  engine's lead-in and tail (FLEURS 4.865 %).
+- A17: done (#298). Allocations are bounded before symphonia opens a file;
+  the quarantine of a recording whose read ended the app twice is removed by
+  simplify step 4.
+- A18: done (#297). Missed capture cycles are written as silence or counted
+  on PipeWire, Core Audio and WASAPI, and the note after the stop says how
+  much is missing; WASAPI's fill is unit-tested only, so the Windows gate's
+  stalled recording is its hardware check. PipeWire's data-loop thread without
+  real-time scheduling logs a warning, which the Linux gates check.
+- A19: done (#311). No CoreML load or run beside a live recording. Its
+  warm-up mark and the switch to the sidecar after a CoreML abort are removed
+  by simplify step 4.
+- A20: done (#308). The level meter runs on a thread of its own.
 
-**The final audio path (D9), on every platform:**
+**P: no data lost (D3)**
 
-| ID | Package | Owner |
-|---|---|---|
-| A1 | A streamed decoder and mixdown: CAF and WAV decoded and mixed in bounded chunks, so a two-hour two-channel master never sits in memory whole | audio (#228) |
-| A2 | The CoreML backend on the shared chunker, merge and decoder settings | audio (#263) |
-| A3 | The diarizer on `ModelStore` (#229), and its inference in the speech sidecar's child on every platform, so a crash in ONNX Runtime ends the child, not the app (invariant 4) | audio (#229, #266) |
-| A4 | PipeWire: `stop()` bounded, the own output and the default move settled (#214); `start`'s first cycle and the latencies measured on Nicolai's hardware | audio (#214) |
-| A5 | One speech engine per reload | #218, merged |
-| A6 | Devices that will not run at 48 kHz, and a headset's switch mid-call | #198 |
-| A7 | The Linux input device list and the device UID fallback | #222 |
-| A8 | Meeting detection on Linux, over PipeWire's streams | #222 |
-| A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; the call-mode start is A10's, whose step 2 runs the tone check on the Mac | audio (#246) |
-| A10 | Call mode without an output client: the tap includes Steno, and the capture starts a silent output IOProc of its own on the aggregate's clock master, so with nothing playing the first callback comes within 100 ms of `start` returning and 200 ms of the call to `start`; no in-app playback while recording, enforced by `Playback` | audio |
-| A11 | Known limit (Nicolai, 2026-10-12): a Bluetooth headset that is the system output may switch to hands-free while a call is recorded, because recording the call also opens the headset's microphone; quality only, no audio lost; Swift unchanged; revisit after stable | none before stable (A10's step 6 notes it) |
-| A12 | An undecodable AAC packet becomes silence of its length, counted and shown on the meeting | audio (#264) |
-| A13 | Word starts from a chunk's exact start: the shared pipeline rounded it down to the 80 ms frame, so words came out up to 80 ms early | audio (#279) |
-| A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
-| A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
-| A16a | The owned-span partition (Nicolai's decision 3, 2026-10-15): the recording split once into disjoint owned spans, the consecutive spans of one kind merged by the LCS as before, a gap's window keeping its whole decode and an accepted recovery what it kept before; CoreML replays identically on FLEURS, the corpus, the meeting and the crafted cases, ONNX stays byte-identical on FLEURS, and no word the old merge kept is lost on 1,500 random layouts with recovery on, half of them over a fake deaf at window edges | audio (#310) |
-| A16b | The ONNX engine's lead-in and tail: the extra windows over every gap missed all four gates on ONNX (FLEURS 5.198 %, the corpus 9.916 %, words where Swift has none, +27 to +41 % runtime), so the lead/tail switch: the first chunk from the recording's start and the tail's extra windows on the partition, the long-pause skip kept, and the first chunk also judged as before (option 2) so a short first chunk's recovery still keeps the words in the pause after it; FLEURS 4.865 % from 4.882 %, the corpus 9.735 % from 9.814 %, no word added where Swift has none, none from silence or room noise, +3.6 % runtime on the meeting | audio (#317) |
-| A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured (it aborts on Linux, not on the Mac); every read of a recording marked durably, the in-process CoreML stage included; a recording whose read ended with the app read once more, and quarantined the second time in a row ("Steno stopped while reading this recording") with the file kept and Process again offered; the allocations bounded by a walk of the boxes, chunks and tables before symphonia opens a file, its reader the one the file's first bytes name (MP4, CAF or WAV) and opened where the walk began, any other kind of file refused plainly; kill tests for one kill and for two | audio (#298) |
-| A18 | A capture thread that misses cycles never loses audio silently: on PipeWire, Core Audio and WASAPI the missed frames are written as silence on every lane (past a second only counted), counted in the statistics and in the note about missing audio; PipeWire's data-loop thread without real-time scheduling is a warning | audio (#297) |
-| A19 | No in-process speech beside a live recording, and the speech sidecar after a CoreML abort: a job waits to load or run CoreML while a recording starts, runs or stops ("Waiting for the recording to finish"); a warm-up mark or a CoreML reading mark left by a crash turns the speech sidecar on in CoreML's place, durably, until the user turns the Neural Engine back on in Settings ("Use again"), the meeting waiting for the sidecar's models with "Neural Engine off after a crash: download the speech models in Settings"; kill tests for a load killed in a job and in a warm-up | audio |
-| A20 | The level meter never freezes behind a sync of the files: the levels go out from a thread of their own (`steno-levels`, woken by each publish into `LevelSlot`) instead of from the writer thread, whose periodic `sync_data` (P21; `FlushFileBuffers` on Windows) froze the meter and the `recording` snapshot for as long as it took, 1.0 to 1.3 s on a hosted runner; the sync, its cadence and the files are unchanged | audio |
+- P1: done (#213). The phone intake commits its receipt, meeting and asset in
+  one durable transaction before `complete` answers.
+- P2: done (#243). The v5 `handoverAdmission` table answers a re-sent
+  `complete` with the meeting it made; the Rust migrator ignores later
+  migrations with a warning and the desktop shows a dialog instead of
+  panicking (D11).
+- P3: done (#233, #248). A recording ended by a kill is salvaged at the next
+  launch with the existing end reason `failed` (no new enum value, so the
+  Swift app still reads the row), and a master with no row is adopted.
+- P4: done (#244). P5: done (#227); the systemd stop-timeout drop-ins are
+  removed by simplify step 4. P6: done (#260); the sidecar's own systemd scope
+  is removed by simplify step 4.
+- P7: done. A people folder typed as `./People` becomes `People`, and `.`
+  no people folder, as Swift wrote it.
+- P8: done (#221). Every secret written to the Secret Service is one line
+  (the PEM bundle base64-encoded), since a multi-line secret corrupts
+  Omarchy's keyring; this holds for the `keyring` client of simplify step 5
+  too.
+- P9: done (#240). Process again runs a failed meeting with its master from
+  the start, from the button and from `steno process --meeting <id>`; the
+  Swift app refuses it.
+- P10, P11, P12: done (#231). P13: done (#231, #228); its resume-attempt
+  guard is removed by simplify step 4.
+- P14: done (#241). Every retention stamp commits durably, and an incomplete
+  meeting's recording stays unstamped; its `damaged-audio.json` input is
+  removed by simplify step 4.
+- P15: done (#225). One exclusive lock beside the database; on the Mac the
+  Rust app refuses to start while the Swift Steno runs in the same session.
+- P16: done (#235). P17, P18, P20, P38: done (#230; the Mac's disk floor
+  #285). P19: done (#222, #244). P21, P23: done (#226). P22: done (#244). P24:
+  done (#228).
+- P25: done (#270); simplify step 5 replaces the install gate, the hold and
+  the Windows watcher with the Tauri updater's default behaviour.
+- P26, P27, P29: done (#234). P28: done (#235); the export-retry count is
+  removed by simplify step 4. P30: done (#238), D13.
+- P31, P32: done (#232). A settings save upserts and keeps keys it does not
+  know.
+- P33: done (#219, #212). P34: done (#223).
+- P35: done (#282, #294). The live Keychain check on a spare account is still
+  Nicolai's (G2).
+- P36: done (#242, #262); simplify steps 4 and 5 replace the hand-written
+  Windows durable writes and the Windows credential client.
+- P37: done (#220); simplify step 4 removes the Linux session-end handling.
+- P39: done (#278). A run that meets the store locked by another process
+  leaves the meeting `queued` and retries, instead of failing it.
+- P40: done (#286, #299, #304). Store calls in async code go through one
+  facade over `spawn_blocking`, reads use reader connections, `recording`
+  comes from a feed of its own, and reloads run only when the store changed;
+  the host's writes keep the view-model lock until
+  `.plans/2026-10-15-host-actor.md`. Its follow-up, the copy a phone admission
+  left is one meeting, is done (#307).
+**X: the Linux targets (D6)**
 
-**Per Linux target, blocking that target's listing (D6):**
+- X1: done (#220, #272); the own systemd scopes and the AppImage mount
+  server's scope are removed by simplify step 4.
+- X2: done (#267). The panels stay on XWayland under Hyprland, titled "Steno
+  bubble" and "Steno prompt", with the Lua rules in
+  `apps/desktop/src-tauri/linux/hyprland-steno.lua`.
+- X3: done (#275). Every tray action is in its menu, and with no tray host,
+  closing the main window quits and saves.
+- X4: done (#276). TCP 23820 on Linux (`HandoverConfiguration::LINUX_PORT`),
+  the AUR package's `ufw` profile `Steno`, and the NixOS module's
+  `programs.steno.openFirewall`.
+- X5: done (#261, #305). Packaged installs (`STENO_DISTRIBUTION`, a binary
+  under the Nix store) leave updates to the package manager, and the autostart
+  entry names a stable path; `STENO_LOGIN_ITEM=managed` leaves launch at login
+  to the system.
+- X6: done (#265). The AUR package `steno-desktop-bin` (`packaging/aur/`). The
+  first stable push is **Nicolai**'s; then he adds `AUR_SSH_PRIVATE_KEY`, and
+  `publish` pushes from the second stable release on. Publishing the release
+  key to keyserver.ubuntu.com is his too.
+- X7: done (#259). The flake's Linux package and the NixOS module
+  (`programs.steno.enable`, `steno.service`); FLEURS 4.9 % with nixpkgs' ONNX
+  Runtime.
+- X8: the Linux gates (Rehearsal), open.
 
-| ID | What | Targets |
-|---|---|---|
-| X1 | Session end under Hyprland: the SIGTERM path under `uwsm`, the lost display (#220), logind's delay; the README tells users to start Steno from the launcher or with `uwsm-app` (#272: an app started inside another program's service of the user manager, as a key binding without `uwsm-app` leaves it in `wayland-wm@hyprland.desktop.service`, whose stop ended it unsaved 0.26 s in, moves at launch into `app-steno\x2ddesktop-<pid>.scope` in `app-graphical.slice` with `TimeoutStopSec=20s`, `PartOf=` and `After=graphical-session.target`; at login the start waits for the target and is never called off, and a session that ends before then leaves the app in the compositor's unit; from an AppImage every mount server, found by its FUSE connection and keepalive pipe however the image was started, moves into a scope of its own in `app.slice` wherever it runs (a launcher's unit too, where GNOME leaves it), also when the app stays, and stays beside the app in a login's `session-<n>.scope`; each move is written to the journal and a failure logged at `warn`. In a systemd 255 container with uwsm 0.26.4's slice and shutdown target and a stand-in compositor's unit, every case saved `queued`; the README's Hyprland section has the table. logind's delay is #220's, tested against a fake logind) | Omarchy, NixOS with Hyprland; the AppImage on every systemd desktop |
-| X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) (#267: a list naming `x11` or `*`, or a lone `*`, counts as unset, any other value still wins; the titles on Linux only, macOS and Windows keep "Steno"; the rules are `apps/desktop/src-tauri/linux/hyprland-steno.lua`, one `hl.window_rule` on class `[Ss]teno-desktop` and title `Steno (bubble\|prompt)` that also turns off focus on hover, the border, shadow and blur, checked by Hyprland 0.56.2's `--verify-config`; the `.deb` installs it as `/usr/share/steno-desktop/hyprland-steno.lua` (`check-bundle.sh` checks it), and so does the AUR package that repackages it (#265) from the next release, loaded with `dofile`; the Linux smoke finds both panels by their titles) | Omarchy, NixOS with Hyprland |
-| X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves (#275: the menu holds every action once, which a test checks, and a click does nothing the menu does not; a thread follows `org.kde.StatusNotifierWatcher` on the session bus, its owner and its `IsStatusNotifierHostRegistered`, at launch and at every change of either, so a watcher with no host counts as none and a host that goes turns the next close into a quit where the watcher says so (Waybar, GNOME's extension; KDE's watcher always says a host registered, so on Plasma the name alone decides, as before); with no host the close quits through Quit's path, which stops and saves a recording first and logs the quit and the shutdown's duration; a watcher that says it lacks the property counts as a host, a failed reading as none, read again 10 s later, three times at most before the next change, and one that serves no watcher object yet as none until the next change, when the tray library registers again; a recording's bubble covers a main window hidden when the host went, and starting Steno again brings it forward; `close-without-tray-linux.sh` proves it in CI on a bus with no watcher, requiring the follower's `no tray host shows the tray icon`, and beside a stand-in host, where the tray's menu holds every action, the close hides the window and the menu's Quit saves; macOS and Windows keep their tray and close as before) | all |
-| X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port (#276: TCP 23820 on Linux, `HandoverConfiguration::LINUX_PORT`, unassigned by IANA, below Linux's ephemeral range of 32768 to 60999 so no outgoing connection takes it, and in neither nmap's port list nor Wikipedia's list of TCP and UDP port numbers (LocalSend's 53317, Syncthing's 22000 and 21027, Synergy's 24800 and the game servers lie elsewhere); macOS and Windows keep a port the system chooses, as Swift did. `STENO_HANDOVER_PORT` wins over the setting `handoverPort`, which Settings does not show and no bridge field carries, and either wins over the default; `0` lets the system choose; a stored `handoverPort` that is not a port is ignored with a warning. A port that cannot be bound gives way to one the system chooses with a `warn` line, "port 23820 is not available (...)", and the Bonjour record carries the port bound; a start during a stop waits for it, so a restart keeps the port. The phone resolves the record before every connection and the QR code carries no port, so the phone needs no change. The AUR package installs the `ufw` profile `Steno` (TCP 23820 only, as `ufw`'s `before.rules` admit mDNS) as `/etc/ufw/applications.d/steno-desktop`, in `backup=`; `check-aur.sh` compares its port with `LINUX_PORT` and reads it with `ufw app info Steno`; the package's install script prints `sudo ufw allow Steno`, and its removal `sudo ufw delete allow Steno`. The NixOS module's `programs.steno.openFirewall`, on by default, opens `programs.steno.handoverPort` (23820) and UDP 5353 for Steno's own mDNS responder, and the module sets `STENO_HANDOVER_PORT` on `steno.service` and in the session; `nix/checks.nix` holds the default to `LINUX_PORT`; the module refuses ports 1 to 1023) | Omarchy, NixOS |
-| X5 | Packaged installs: `STENO_DISTRIBUTION=aur` or `=nix`, read at build time (Nix) or from the environment (the AUR wrapper), turns the in-app updater off and Settings says updates come from the package manager; the autostart entry names a stable path (`/usr/bin/steno-desktop`, or the Nix profile's), never `current_exe()` or a store path; with `STENO_LOGIN_ITEM=managed`, which the NixOS module sets, the app leaves launch at login to the system; a binary that runs from a folder Nix fills leaves updates to the package manager whatever the variable says (#261: the environment wins over the build's value; the path is `$APPIMAGE`, else `STENO_EXEC_PATH` from a wrapper whose binary lies elsewhere, as X6's, else the first of `/usr/bin`, `/usr/local/bin` and the Nix profiles that resolves into the running binary's directory, else no entry, and turning Launch at login on fails with "Steno can't open at login from where it's installed now. Restart Steno, or install it with your package manager." and is not saved; managed, the app touches no entry except one an earlier build wrote, whose `Exec` starts a program in `/nix/store` or names a profile path: it goes at launch, or, when the app runs as the autostart unit made from it, after the save at Steno's first exit, so a reload never leaves the recorder in a unit no logout stops; #305, found in S8 (#303): `current_exe` with its links resolved, under `/nix/store`, nix-darwin's `/Applications/Nix Apps` or home-manager's default `~/Applications/Home Manager Apps` (25.11 and later; a custom `targets.darwin.copyApps.directory` is not seen), so the flake's Mac bundle, unpacked from the release image with no build to set the variable, never offers an update) | Omarchy, NixOS |
-| X6 | The AUR package `steno-desktop-bin` | Omarchy |
-| X7 | The flake's Linux package and NixOS module | NixOS |
-| X8 | The Linux gate on each target | each |
-| A18 | Steno's PipeWire data-loop thread gets real-time scheduling (RealtimeKit, or an `RLIMIT_RTPRIO` for the user): the "First Linux release" item of `.plans/2026-10-02-rust-core-and-tauri-shell.md` and the stalled recording in the Linux gates | each |
+## Open work
 
-**Also landing before the first candidate,** losing nothing but changing the code
-the rehearsals run: #215 (the folder note names the platform, merged), #217 (no
-title-bar band off the Mac, merged), #221 (Linux secrets in the Secret Service,
-with P8).
+- **S8 Site and README** (#303, `docs/stable-release-pages`). Written during
+  the candidates, merged after R8 passes; the content is under "Landing page
+  and README".
+- **S9 Swift removal.** The cutover plan's step 7, after the 14-day rollback
+  window, as step 7 of the simplify plan: the web app moves to `apps/web`, the Swift
+  rows leave `AGENTS.md`, `apps/macos/scripts` goes (what the desktop workflow
+  still calls moves to `apps/desktop/scripts`), and issue #74 is re-scoped or
+  closed.
+- **Leftover speaker clips can outlive the retention stamp** (a privacy item,
+  as the clips are voice snippets; found in #313's review). The retention
+  sweep removes the clip files no speaker row names through `sweep` in
+  `crates/steno-pipeline/src/sample_clips.rs`, and that pass never sets
+  `clean = false`: a `read_dir` error reads as an empty folder, and a clip
+  that cannot be removed is only logged. So the master goes, the stamp clears,
+  and those clips stay until the meeting is deleted. It needs clips a run left
+  behind, and then a speakers folder that alone cannot be searched or a clip
+  that resists removal. Planned fix: `sweep` reports its failures, a
+  `read_dir` error other than `NotFound` counts as one, and
+  `RetentionSweep::run` ANDs the result into `clean`, so the stamp stays for
+  the next sweep. No schema change.
 
 ## What follows
 
-These lose no data and block nothing. Each keeps or gets an owner line in "Open
-after the port".
+These lose no data and block nothing.
 
-- The tray's badge for pending speaker reviews; the main window shows them.
-- The menu bar's queue and five recent meetings.
-- The macOS Record and Find Meetings menu items; the page answers ⌘⇧R and ⌘F.
-- The clip player. It plays from Steno's own process, which the call capture's
-  tap includes (A10), so the rule is no in-app playback while recording: it
-  asks `steno_audio::Playback` before every clip. It is native; the web UI
-  plays nothing, since its `<audio>` would play from WebKit's media process,
-  which the tap includes and `Playback` cannot see.
 - Layer-shell panels on wlroots, Hyprland and Plasma (X2's rules cover them
   until then).
 - The phone records in a crash-safe container (CAF, or fragmented MP4), so a
   recorder killed mid-recording leaves a file any reader opens, not one only
-  A14's salvage reads. After stable, and not the audio owner's: it changes
-  the recorder's settings and moves the native fingerprint, so it needs a
-  TestFlight build (`mobile/README.md`).
+  A14's salvage reads. It changes the recorder's settings and moves the native
+  fingerprint, so it needs a TestFlight build (`mobile/README.md`).
 - Pair this phone again, per phone. In the mixed case (some phones paired
   before the identity changed, the others after it) Settings could keep the
-  newest identity and the phones that know it, and offer Pair this phone
-  again on the others alone. After stable; until then the Rust app waits, and
-  Pair again pairs every phone again.
+  newest identity and the phones that know it, and offer Pair this phone again
+  on the others alone. Until then Pair again pairs every phone again.
 - The handover identity from evidence, not times (Nicolai's decision of
-  2026-10-15). After the handoff, its 14-day rollback window and the Swift
-  removal (S9), as no migration lands in the window:
-  - a v6 migration adds a nullable `pairedDevice.identityFingerprint`,
-    written in the pairing's own durable transaction. Rows from before stay
-    NULL, and a launch that serves the recorded identity fills them in with
-    the fingerprint it serves, so the pairing-time rule survives only for
-    the one-time Swift import. Rust only, with no `Migrations.swift` mirror
-    after S9;
-  - the import's done flag, `steno.swiftImport = "done"`, moves into
-    `handover-identity.json`, written in the same replace that records the
-    imported fingerprint. The keychain marker (`swift-import-done`) and
-    `steno.swiftImportRan` are still read for good, and still written while
-    a Rust build that reads only them could be installed again after a
-    rollback.
+  2026-10-15). After the handoff, its 14-day rollback window and S9, as no
+  migration lands in the window:
+  - a v6 migration adds a nullable `pairedDevice.identityFingerprint`, written
+    in the pairing's own durable transaction. Rows from before stay NULL, and
+    a launch that serves the recorded identity fills them in, so the
+    pairing-time rule survives only for the one-time Swift import. Rust only,
+    with no `Migrations.swift` mirror after S9;
+  - the import's done flag moves into `handover-identity.json`, written in the
+    same replace that records the imported fingerprint. The keychain marker
+    (`swift-import-done`) and `steno.swiftImportRan` are still read for good,
+    and still written while a Rust build that reads only them could be
+    installed again after a rollback.
 - The speech settings without a Settings row, which
   `.plans/2026-10-07-speech-settings-ui.md` plans; the untested `steno-llm`
   cleanup paths.
-- The updater's zip: done, no zip in the build. `tauri-plugin-updater`
-  is built without its `zip` feature, which unpacks only formats Steno does
-  not ship (a zipped Windows update, a `.tar.gz` AppImage), so zip 4.6.1,
-  and with it RUSTSEC-2026-0367 to 0369, left `Cargo.lock`, and `deny.toml`
-  no longer accepts its yank (#300).
 - zbus 6, once `tauri-plugin-opener` and `tauri-plugin-single-instance` move
   to it, and the workspace's own `zbus` with them; until then `deny.toml`
-  ignores RUSTSEC-2026-0370 to 0372, which mark zvariant, zbus_names and
-  zvariant_derive unmaintained since zbus 6 merged them into itself.
+  ignores RUSTSEC-2026-0370 to 0372.
 - One loss ledger per stream (after A18): each stream compares the frames its
   clock expected with the frames its thread delivered, reconciled once at its
   stop, and the session merges the lost spans by union, so nothing is
   subtracted. It is the first capture PR after stable, with the recorder actor
   plan's capture seam and fake, and it needs a new D9 ruling.
-
-## Work packages
-
-Each package lands in one or more pull requests off `main`, reviewed and merged
-by merge commit; a pull request may close several rows (#220: P37 and X1, and P5's session end; #227: P5's Linux stop timeout and save log; #222: A7, A8 and P19).
-Steps marked **Nicolai** need him: secrets, settings on GitHub, his machines
-and the phone. The letters: S for the Mac and the release,
-A for the audio path, P for the other data-loss fixes, X for the Linux targets.
-Every package is written in parallel except where a dependency is named:
-
-- S3 on S6's `steno-macos` (D10); S4's packaged-install message on X5; A8 on S2's
-  controller; X6 on X5 and P5 (X2's rules come in the `.deb` it repackages;
-  X4's `ufw` profile joins X6 in X4's PR); X7 on X4, X5 and P5; P5's save
-  logging on P3's recoverable save; S1's queued refusal on P9's queue.
-
-### S: the Mac and the release
-
-- **S1 Speech models on the Mac** (`feat/rust-mac-speech-models`).
-  - **The CoreML model.** Download Parakeet v3 from the Hugging Face repository
-    FluidAudio reads (`FluidInference/parakeet-tdt-0.6b-v3-coreml`), pinned to
-    commit `7dd20fe6b1` the way `PARAKEET_V3_FP32_REVISION` is pinned, through
-    `steno_speech::ModelStore` into `fluidaudio/parakeet-tdt-0.6b-v3`. A new
-    path on an existing host, so the PR adds it to invariant 3.
-  - **The engine mapping.** A stored `whisperkit-large-v3-turbo`,
-    `parakeet-ultra` or `parakeet-de` becomes `parakeet-v3` when the settings
-    load, with a one-time notice ("Steno now transcribes with Parakeet v3"); the
-    three rows leave Settings.
-  - **No download inside the pipeline.** While any model the meeting needs is
-    missing (the speech models in `prepare`, the diarizer's through `warm_up`,
-    the sidecar's own install in `transcribe`), the meeting stays queued with
-    "Download the speech models in Settings", and resumes once the models are
-    installed (P9's queue).
-  - **The diarizer row** describes the ONNX models: pyannote segmentation 3.0
-    (MIT) and WeSpeaker ResNet34-LM, whose `licence` in
-    `crates/steno-diarize/src/models.rs` changes from the wrong Apache-2.0 to
-    CC BY 4.0 (VoxCeleb). Both notices show with attribution.
-  - **Tests.** Unit tests for the manifest, the mapping and each refusal. On
-    Forge, a download into an empty models directory gives the file tree and
-    SHA-256 list of the tree the Swift app installed there on 2026-09-25 (23
-    files, committed as a fixture), and the CoreML backend transcribes the
-    FLEURS sample as before.
-- **S2 Detection and auto-stop** (`feat/rust-recorder-policy`).
-  - Port `DetectionController`: one prompt at a time, suppressed while
-    recording or when the setting is off, shown through `panels::set_prompt`
-    with its 60-second countdown, with `dismiss_prompt` reaching the controller.
-  - Port the auto-stop after a call: the 90-second grace, "Keep recording" and
-    the end reasons.
-  - A prompt's Record that an update install's start hold refuses (S4) shows
-    the recorder's error in the prompt, or detection prompts again after the
-    relaunch for a call still under way; until then the refusal shows only in
-    the main window.
-  - Tests: Swift's `DetectionTests` and `AutoStopTests` as table tests against a
-    fake clock and a fake process list. **Nicolai**, on his Mac: a FaceTime or
-    Teams call raises the prompt, and hanging up stops the recording after the
-    grace.
-  - As built (`steno_services::detection`, `steno_services::auto_stop`): the
-    controller reads `meetingDetectionEnabled` every two seconds, which also
-    starts a detector that failed to start (PipeWire not up yet at login). The
-    prompt's Record goes to the shell's `panel_call` (`recordFromPrompt`), like
-    its X, so the recording is attributed to the prompt's app. The auto-stop
-    stops through the recorder's Stop path with `callEnded`, which the Swift app
-    decodes. A Record the update's start hold refuses closes the prompt and shows
-    the refusal in the main window; after the relaunch the detector reports the
-    microphone the call still holds, and the prompt comes up again. From a
-    `DeviceChanged` until the capture is back (`DeviceResumed`, or
-    `Delivering` after a `StillRestarting`), the countdown the release armed
-    is not shown and ends nothing, whether or not the warning was dismissed.
-    Once the capture is back, `CaptureRecorder::resume_auto_stop` puts a fresh
-    one in its place if the call app still holds no microphone. The wait is
-    capped at one grace: a release's countdown that runs out while the capture
-    still recovers is replaced at once by a fresh 90 s, shown, and that one
-    ends the call through the Stop path, saved, whatever the capture does; a
-    later resume leaves it. So a capture that keeps failing, or recovers over
-    and over, ends the call within two graces of the release. The capture's
-    recovery (#244) gates the countdown and calls it.
-- **S3 Calendar and permissions** (`feat/rust-calendar-permissions`).
-  - Look up the overlapping EventKit event at recording start, behind a trait
-    whose Mac implementation is in `steno-macos` (D10).
-  - Add the system-audio permission probe, with this rule for `unknown`: off the
-    Mac it counts as not required; on the Mac it counts as missing until the
-    probe records one sample. The host's `Permissions` then use the shell's
-    `permissions`. After the handoff, the missing grants open onboarding on its
-    permissions page, whatever `steno.onboardingCompleted` says.
-  - Tests: the opener rule over the four states and three platforms.
-    **Nicolai**, in a fresh account: onboarding asks for each permission, and a
-    denied system-audio grant shows as missing.
-  - As built (#288; `steno_services::calendar`, `steno_services::permissions`,
-    `steno_macos::calendar`, `steno_audio::capture::permission`):
-    - Calendar: the event is Swift's `CalendarMatch.pick`
-      (`steno_core::pick_event`). Of the local day's timed events, the one
-      under way at the start wins, the one that started last when several
-      are; else the next that starts within fifteen minutes
-      (`CALENDAR_LOOKAHEAD`: 15:00 out counts, 15:01 does not); ties go to the
-      smaller id; all-day events never count. Its title names the meeting with
-      the origin `calendar`, and its attendees, except the calendar's owner,
-      become `them` participants: people only, the email from a `mailto:` URL.
-      Off the Mac there is no calendar.
-    - Timing: the lookup starts on a thread of its own before the devices
-      open, and the start never waits for it. The row takes the answer when it
-      is in; otherwise it starts under the default title and a late answer is
-      handed to the store's rule (`Store::name_recording_after_event`): it
-      names only the meeting that asked, only while it still records, only
-      under its default title, only before any event named it. An answer the
-      rule drops (once the stop is saved, after a rename) is logged at debug,
-      without the event. A calendar that has not answered the previous start is not asked
-      again, so a hung calendar holds one thread and never a start. No log
-      line carries a title or a name.
-    - Prompt: the lookup reads EventKit only with full access, so neither a
-      launch nor a start ever prompts; the prompt is the calendar row's Allow
-      in onboarding and Settings > General, as in the Swift app.
-    - Permissions: three bridge states from four TCC statuses. The shell
-      answers the microphone and the calendar from TCC (not determined
-      `unknown`, restricted and denied `denied`, authorized `granted`; the
-      calendar's write-only access `denied`), and `unknown` for system audio
-      and the local network. On the Mac the services answer system audio from
-      the probe, which runs the tap while `afplay` plays a tone for up to
-      30 s, and remember a heard tone as `steno.systemAudioGranted` in
-      `preferences.json` (never copied from the Swift app; a probe that hears
-      nothing answers `denied` and forgets it).
-    - The probe and a recording: the tone would be in the recording, so the
-      probe runs only while no recording starts, runs or stops. A request
-      then plays nothing, and the row says "Stop the recording first. The
-      test plays a short tone, and the recording would pick it up." A start
-      while the probe runs stops it and opens its devices only once the tone
-      has stopped (at most 5 s for a probe stuck inside the system); the
-      stopped probe stores nothing. Rust only: Swift ran the probe whatever
-      the recorder did.
-    - Opener: `permission_is_missing` counts `denied` on every platform and
-      `unknown` on the Mac only. A missing grant opens onboarding on its
-      permissions page (after the import step when it is pending) whatever
-      `steno.onboardingCompleted` says, and holds its Continue. The tests run
-      three platforms by three bridge states by the flag.
-    - Off the Mac a permission row in `unknown` says that the system decides,
-      without claiming a grant, instead of offering an Allow that could do
-      nothing: "Your system may ask when you start a recording." with the
-      badge "Not checked yet" on Linux; "Windows decides this in its privacy
-      settings. Steno can't check it before you record." with Open Windows
-      Settings on Windows.
-    - Swift parity limits, kept: a recording at 23:55 does not see an event
-      at 00:05 the next day, because the read is the local day only; a probe
-      grant the user later revokes in System Settings stays `granted` until
-      the next probe, because only a probe clears the flag.
-- **S4 Update schedule and QR** (`feat/rust-update-schedule`).
-  - The host's `Updater` over `updater.rs`:
-    - a daily automatic check, as `SUScheduledCheckInterval` 86400 did;
-    - stored automatic-check and automatic-download flags;
-    - the last check time, under a file and key the PR names, in RFC 3339 UTC.
-
-    A check is due at launch and hourly when that time is missing or more than
-    24 hours old. The General section's Updates row reads them; a packaged
-    install (X5) says "Updates come from your package manager".
-  - A QR crate draws the pairing code into the pairing snapshot.
-  - Tests: the schedule against a fake clock (due at launch, skipped, retried
-    after a failure); the QR image decodes back to the pairing payload. R4
-    proves the schedule on real releases.
-  - In "Open after the port", S4 cuts the shell's four-gaps item down to the
-    badge and the clip player.
-  - As built (`steno_services::updates`, `steno_services::qr`): the last check
-    time is the key `lastCheckAt` in `update-check.json` in the support
-    directory (`~/Library/Application Support/Steno/update-check.json` on the
-    Mac), an RFC 3339 UTC string such as `{"lastCheckAt":"2026-10-09T08:00:00Z"}`,
-    which R4 sets back by 25 hours. The flags are the booleans
-    `steno.updates.automaticChecks` (missing: on, as `SUEnableAutomaticChecks`
-    in the Swift Info.plist) and `steno.updates.automaticDownload` (missing:
-    off, Sparkle's default) in `preferences.json`. A check is also due when the
-    stored time is in the future (the clock was set back), and a check that has
-    not answered after 60 seconds fails. A found update raises the "Install and
-    Relaunch" dialog once per version in a run, not while a recording starts,
-    runs or stops, and a yes given once a recording has started asks again
-    before it installs. The install downloads first, then holds recording
-    starts off (`Recorder::hold_starts`) from just before the package is
-    written through the relaunch, and a Record meanwhile says "Steno is
-    installing an update. You can record again once it relaunches, or if you
-    cancel the install." (the hold spans the updater's password prompt,
-    which a `.deb` install always shows; cancelling it fails the install and
-    frees Record); a recording that started during the download puts the
-    install off, with the package kept and the version raised again. A
-    refused Record shows only in the main window (S2 carries the prompt's
-    part). P25's `InstallHold` takes the same recorder start hold rather
-    than building a second one. P25 (#270) changed the rest: the install
-    waits for the recording and is never put off by one; an installer that
-    returns no longer holds Record off, so a `.deb`'s password prompt never
-    keeps Record refused, and the refusal now says "Steno is relaunching to
-    finish installing an update. You can record again in a moment.", since
-    the hold lasts only through the shutdown and the relaunch (on Windows,
-    from the install). Automatic downloads wait for P25's gate: the
-    schedule downloads by itself only while `InstallGate::is_idle_now` says
-    idle and installs only with the gate's hold from
-    `InstallGate::try_hold`; the stand-in `NeverIdle` was never idle, so it
-    downloaded nothing, and P25's gate (#270) turns automatic downloads on.
-    P25 also re-reads the automatic-downloads flag when a download ends,
-    and turning it off frees the kept package, so a switch turned off
-    during the transfer keeps and installs nothing. `updates_are_managed`
-    is X5's switch. The QR code is the `qrcode` crate's, level M, as a
-    greyscale PNG.
-- **S5 Handover on a changing network** (`fix/handover-republish`).
-  - Re-register the Bonjour record when the interfaces change, on every
-    platform.
-  - On the Mac the shell sets `service_name` to the computer name
-    (`whoami::devicename()`, `whoami` 2 as a new workspace dependency, which
-    `cargo deny` must allow); Windows and Linux keep the host name.
-  - Tests: a fake interface watcher triggers the re-registration.
-    **Nicolai**, with a paired phone: switch the computer to another network and
-    back; `dns-sd -B _steno._tcp` (or `avahi-browse -rt _steno._tcp` on Linux)
-    shows the record each time, and the phone uploads without a restart.
-  - As built: the shell passes no name.
-    `HandoverConfiguration::default_service_name`, which the shell, the services
-    graph and `steno dev handover serve` all read, picks it; on Windows the host
-    name now comes from `whoami::hostname()`, where `Steno` stood before. The
-    watcher is the `mdns-sd` daemon's interface check (5 s), with a one-minute
-    recheck: the daemon's report that it added an IPv4 address the record carries
-    always registers the record, any other wake only when the addresses moved.
-    The record's host is `steno-<name>-<id>.local.`, with the first 8 hex digits
-    of the `macID`, never the computer's own host name. The listener already
-    served every address on one port.
-- **S6 The new identifier and the import** (`feat/desktop-identifier`).
-  - **Identifier.** `tauri.conf.json` sets `identifier` to
-    `com.nicolaischmid.steno.desktop` (D5). `Info.plist` carries the Swift
-    `SUPublicEDKey` (`RxaX7phoHvb7M0P4yaOC7zngDo+lqlOE6Iq89UtOuQI=`), inert in
-    the Tauri app. `panel-anchor.json` moves into the support directory, read
-    once from the desktop-id build's config directory. The desktop README's
-    identifier paragraph follows. The PR creates `steno-macos`, makes the
-    `AGENTS.md` change (D10), and adds `security-framework`, `plist` and the
-    PKCS#12 crate to `[workspace.dependencies]`.
-  - **The import, in two halves** (macOS only, in `steno-services`;
-    `feat/swift-import`, #236). It sets `steno.swiftImportRan` in
-    `preferences.json` once the identity is in place (or there was no Swift
-    certificate), and never runs again. Right after it stores the identity,
-    and before that flag, it adds its own keychain entry `swift-import-done`
-    under the service `uno.schmid.steno.mac` (an item of this app's own, found
-    by an attribute query, so neither prompts). Once that entry or the flag
-    exists the import never touches `handover-identity` again, so a
-    `preferences.json` set aside cannot bring the Swift identity back over
-    one Pair again stored; Pair again keeps the entry. Without either, the
-    first run's replace of a desktop-id identity still applies. A crash
-    between the identity and the entry leaves a rerun that stores the same
-    Swift identity again. A lookup of the entry that fails is not a first
-    run: the import replaces nothing and waits with Try again until a lookup
-    answers. Its sources (the defaults domain and the keychain) are
-    traits. It is skipped under `STENO_SMOKE_SECONDS` and whenever `HOME` is not
-    the account's home.
-    - **At launch,** in `build_with_import` (the shell's entry point), once the
-      database's lock is held and before the graph reads a preference or a
-      secret: while `preferences.json` holds no onboarding flag, read the Swift
-      domain explicitly (`/usr/bin/defaults export uno.schmid.steno.mac -`,
-      parsed with the `plist` crate); copy `steno.onboardingCompleted` (not
-      `steno.loginItemRegistered`, so the new identifier registers itself);
-      copy Sparkle's `SUEnableAutomaticChecks` and
-      `SUAutomaticallyUpdate` into S4's flags; drop the panel anchor (the panel
-      opens at its default place). Whatever `preferences.json` holds, remove the
-      Launch Agent a desktop-id build left behind, before the shell registers with
-      `SMAppService`. If the keychain holds a Swift handover certificate (found by
-      label, which does not prompt), or the lookup fails, and the import has
-      not run, the graph is
-      built with the import pending: `steno-services` reads no API key and starts
-      no handover listener until the second half ends. A key alone does not make
-      the import pending, since a desktop-id build files its key under the same
-      service and account; the step reads a key only when it is the Swift one
-      (labelled `Steno llm-api-key`, an attribute query that does not prompt).
-    - **On an onboarding step,** shown first at that launch while the import is
-      pending (without a Swift certificate there is no step, and the second half
-      counts as done): the step says that
-      macOS will ask for the login password once for each item it finds (at most
-      three times: the API key, the identity's export, and a `handover-identity`
-      entry a desktop-id build left, which the store replaces; attribute queries
-      that do not prompt find them) so the new Steno can read
-      what the old one stored, and that the user should choose Always Allow.
-      Then it reads the API key through `keyring` (one prompt; the item stays as
-      it is, shared with the Swift app, which still reads it after a rollback),
-      and exports the handover identity: the certificate by label (when
-      there are several, one per keychain in the search list as after an
-      old login keychain was added back, the one the paired phones know,
-      below), `SecIdentityCreateWithCertificate` through
-      `security-framework`,
-      `SecItemExport` as PKCS#12 through `steno-macos` (one prompt), decoded by a
-      PKCS#12 crate (for example `p12-keystore`, which reads Apple's legacy
-      encryption; `cargo deny` must allow it) into the PEM entry
-      `handover-identity`, replacing a desktop-id identity, through
-      `HandoverIdentity::store`, which records its fingerprint over the
-      desktop-id one so #221's guard accepts it. A fingerprint not recorded
-      after the secret was written is a failed store: Try again, and no
-      `swift-import-done` marker. A denied read leaves
-      the key empty, and Settings asks for it; no later launch asks the keychain
-      for it until a key is saved. A denied or failed export never
-      mints an identity (D3): the handover listener stays off, and Settings'
-      iPhone section says that Steno could not bring over this Mac's phone
-      pairing, with Try again, which repeats the export and its prompt. Only
-      when the user chooses Pair again there, which says that every phone must
-      pair again, is a new identity minted: Pair again writes the import's
-      `swift-import-done` marker first, then notes the new identity's
-      fingerprint, writes the identity to the secret store, removes the paired
-      phones and records the fingerprint, which drops the note
-      (`HandoverIdentity::mint_anew`). A stop leaves the note, and the next
-      read decides by what the secret store holds: the noted identity, even one
-      whose write the store reported as refused, finishes the Pair again
-      without a new mint, whether or not a fingerprint was
-      recorded before; the recorded identity, or none, abandons it, which is
-      where a refused write ends (where nothing was recorded and an identity
-      is stored, a refused write waits as replaced instead); any other
-      identity waits as replaced. Behind the import's waiting gate, Try again
-      in the same launch brings the Swift pairing back instead. A `handover-identity.json` that does not parse is
-      never replaced without a kept copy: Pair again and the Swift import's
-      store first keep it as `handover-identity.json.corrupt-<time>`; a launch
-      or Try again waits as unreadable. One that cannot be opened is never
-      moved, and Settings says to check the permissions of the folder Steno
-      keeps its data in, then choose Try again.
-      That waiting state in Settings, with both bridge methods
-      (`settings.iphone.tryAgain`, `settings.iphone.pairAgain`), its fixture
-      and a test that a refused read mints nothing, came with
-      `feat/handover-waiting` (#281); until then Try again was on the
-      onboarding step alone. Then the pipeline starts, and the listener once
-      the identity is in place: the meetings the Swift app left queued or interrupted are resumed
-      and recovered only once the step ran or was skipped, on the pipeline
-      reloaded with what it read. Not now leaves both unread for that launch
-      (handover waits), writes no flag, and the step returns at the next
-      launch. While the key stays unread or refused, the pipeline runs as
-      without a summaries service for an endpoint that needs the key
-      (ChatGPT summaries keep running): the cleanup is skipped too, so the
-      transcript stays raw, meetings complete without a summary, and the
-      meeting detail says that Steno can't use the API key yet; the summary
-      can be run again once a key is saved, and Process again on a failed
-      meeting waits for the key too. Pair again must keep the
-      `swift-import-done` marker and write it before it mints, since the
-      step only logs a marker it could not write. The same rule holds outside the import:
-      when an existing `handover-identity` cannot be read (a denied prompt, a
-      locked keychain), `handover_listener` waits with Try again and never mints
-      over it; it mints only where #221's guard allows (no identity, no recorded
-      fingerprint and no paired phone), or when the user chooses Pair again.
-      - The rule is one pure decision
-        (`steno_handover::identity::decision::decide`), and its truth table,
-        `crates/steno-handover/tests/fixtures/identity-decisions.json`, is
-        the statement of it (Nicolai's decision of 2026-10-15): from what
-        the reads found (the identities, the record, the paired phones, the
-        clock) it serves, mints or waits, with idempotent writes in order.
-        The load (`HandoverIdentity::load_or_create`), the import's choice
-        and the Secret Service move ask it, and none keeps a rule of its
-        own. In short: an identity found with nothing recorded is recorded
-        only when every paired phone knows it (each phone knows the newest
-        identity whose certificate starts (a minute before its mint) at or
-        before its `pairedAt`, both on this computer's clock); a recorded
-        fingerprint is never judged by it; two equal starts are no newest
-        one; over the times it can read, a time more than a second after now
-        waits for the clock (a time that cannot be read waits on its read
-        first). A Swift identity minted silently after a keychain reset,
-        which every phone predates, waits as replaced. Every case, and every
-        new one, is a row of the table.
-      - No decision destroys a stored identity: it writes no identity, the
-        import's choice writes nothing, and the Secret Service move writes at
-        most the record of the file's identity. Two writes outside it replace
-        a stored identity, by design: Pair again (the user's confirmed
-        choice, which removes every phone, and under the Secret Service also
-        drops the file's copy of the old identity), and the import's store
-        over a desktop-id build's identity, which logs the fingerprint
-        recorded for the old one and the imported one at warn.
-      - The words. Where some phones know the identity and the others
-        another or none, the import's step says "Some of your phones were
-        paired before this Mac's pairing changed and can't connect. To
-        reconnect them, choose Pair again in Settings > iPhone." The card in
-        Settings > iPhone ends at "choose Pair again." and offers Pair again
-        first. Two lines stop after "can't connect.": the one under the card
-        after a Try again that still waits, and the listener's "Phone
-        handover is unavailable: ..." line. Where the clock went back
-        (`clockBehind`), Settings says to check the date and time, then Try
-        again; Try again leads, and Pair again stays the second button.
-      - The import's choice (`swift_import::choose_certificate`) asks the
-        decision over every Swift certificate it found: of several, the
-        rule decides, where none qualifies the import waits, and it never
-        takes the first. It reads no Swift record:
-        `swift-handover-identity.json` was #284's, which closed unmerged, so
-        no Swift build writes it (Nicolai's decision of 2026-10-15).
-      - The Secret Service move (Linux, `pin_file_identity`) asks it too. It
-        pins the file's identity where nothing is recorded, unless every
-        paired phone was paired before that identity started; then it pins
-        nothing, and the load judges the service's identity by the same
-        rule. It never writes, replaces or removes either identity; both
-        stay until Pair again.
-  - **Login item** (D4). On macOS, `autostart.rs` uses `SMAppService.mainApp`.
-    At the first launch after the handoff the new app registers its own
-    identifier explicitly when the stored `launch_at_login` setting (shared
-    database) is on. The Swift entry is
-    left to macOS. If R3 shows that it stays as a second "Steno" in Login Items,
-    the onboarding step and the release notes tell the user to remove it in
-    System Settings > General > Login Items. If it launches a Swift copy, or
-    blocks the new app's registration, the same words tell the user to remove
-    it, since no Swift bridge release ships to unregister it (D9); R3 checks
-    that the step's words lead there.
-  - **Tests.**
-    - A fixture plist covers the launch half, a missing key and an existing
-      `preferences.json`. A second run is a no-op; with the import pending, the
-      graph reads no key and binds no listener; the smoke skip is asserted.
-    - A keychain test, behind `STENO_KEYCHAIN_TESTS=1` and run by the S6 author
-      on Forge before the merge, opens a throwaway keychain by path with user
-      interaction disabled, stores a committed fixture identity with the calls
-      `IdentityKeychain.store` makes, runs the export against it through
-      `kSecMatchSearchList` (with the keychain as
-      `SecIdentityCreateWithCertificate`'s first argument and a PKCS#12
-      passphrase), never touches the default keychain, and gets the fingerprint
-      and `macID` a Swift test computes from the same fixture.
-    - The prompts across apps and the old login item are R3's job.
-- **S7 Release mechanics** (`ci/desktop-stable-release`). Everything under
-  Release mechanics, `release.yml`'s deletion included.
-  - Tests: a `*.test.sh` for every changed script, each `--handoff` failure
-    among them, with `check-bundle.test.sh` stubbing `codesign` and `plutil`; a
-    test that a pre-release does not bump the cask; `rust-ci.yml` runs every
-    `apps/desktop/scripts/*.test.sh` in a loop; the `pubDate` rewrite's test
-    parses the value back with Sparkle's format.
-  - The PR removes the three `StenoTests` that read `release.yml` (one in
-    `AppcastScriptsTests.swift`, two in `ReleaseScriptsTests.swift`). Their
-    still-relevant assertions move to a `desktop-release.yml` check: `publish`
-    makes the release public and uploads `appcast.xml` before the cask bump,
-    `handoff` needs `publish`, and `contents: write` is set. The PR touches
-    `apps/macos/`, so `swift-ci` runs on it.
-  - A manual run with `platforms=macos` passes. It signs no handoff item, so the
-    first tagged candidate's item is what R2 rehearses.
-  - The PR deletes the **WP9b.** item on the other Swift fixes (A10 has taken
-    call mode out of it).
-- **S8 Site and README** (`docs/stable-release-pages`). Written during the
-  candidates and merged after R8 passes.
-- **S9 Swift removal.** Cutover step 7, after the rollback window: the web app
-  moves to `apps/web`, the Swift rows leave `AGENTS.md`, `apps/macos/scripts`
-  goes (what the desktop workflow still calls moves to `apps/desktop/scripts`),
-  and issue #74 is re-scoped or closed.
-
-### A: the final audio path (D9)
-
-Each lands before `0.11.0-rc.1`.
-
-- **A1 A streamed decoder and mixdown.** Decode and mix every lane in bounded
-  chunks, CAF and WAV included. The PR names two memory bounds: the decoder's,
-  for its own test, and the soak's, for each of R5's commands (the app and its
-  sidecar together). Decoded samples equal today's. The soak's bound is 6 GiB
-  (#228); on atlas, `steno process` with the diarizer peaked at 4.26 GiB on a
-  two-hour two-lane recording.
-- **A2 CoreML on the shared chunker** (#263). The CoreML backend moves onto the shared
-  chunker, merge and decoder settings, settling the unticked WP4 integration
-  notes. FLEURS, which has references, is the accuracy gate (Nicolai,
-  2026-10-12): FLEURS German `cat/` through CoreML at or below 5.0 % mean WER,
-  a hard limit (`scripts/coreml-parity-forge.sh` prints PASS or FAIL against it
-  and exits 1 above it). The Swift corpus tracks drift, with a limit of 10 %.
-  The gaps the CoreML chunks leave (the lead-in, the tail, the rest of a
-  pause a chunk's start moves past) are decoded in extra windows: FLEURS and
-  the corpus are unchanged, and the cost is +13 % on FLEURS, +9 % on the
-  corpus and +10 % on a 15-minute meeting's two lanes (+21 % on its
-  microphone lane alone). Known limits: a gap shorter than 2.5 s is not
-  decoded, even where it is the uncovered edge of a longer pause, because
-  windows that short insert words; and a word that a chunk and a window
-  both hear across a gap's edge can come out twice (A16a below has the
-  cases as built), because the join cannot tell such a copy from the word
-  said again.
-  Measured with A13 (#279) in: FLEURS German `cat/` through CoreML 4.87 % mean
-  WER, from 5.46 % (the ONNX engine 4.88 %). The parity test against the Swift
-  transcripts of the calibration corpus tracks drift from the old Swift output:
-  8.46 % mean per-file WER, from 0.00 %, because the windows are laid out
-  differently, under its limit of 10 %; and the mean word-start offset from
-  Swift's, +4.2 ms (+7.4 ms on FLEURS), under its limit of 15 ms. The numbers per
-  item are in the port plan's WP4 integration notes.
-- **A3 The diarizer on `ModelStore` and in the sidecar.** Its models come
-  through `steno_speech::ModelStore` (resume, lock, mirror; #229), and its
-  inference runs in the speech sidecar's child on every platform, the Mac
-  included (`steno_diarize::SidecarDiarizer`): one `diarize` request a lane,
-  the samples on stdin, the clusters back exactly. It shares the speech
-  engine's child, lock, deadline and memory ceiling; a child started only to
-  diarize stops after the call, and a child that dies while it diarizes fails
-  that diarize stage (the job falls back to its stored speakers, as for any
-  diarizer failure) and the next call starts a new one. A load of the models
-  that fails, whether the child refuses the files or dies, hangs or overruns
-  the ceiling in it, has the files hashed against the manifest: one that
-  fails its checksum is deleted and the meeting waits for the models, rather
-  than falling back; intact files fall back as before. Parity: the sidecar's
-  clusters equal the in-process pipeline's bit for bit on the two-voice
-  fixture, once and tiled to 75 s, so refinement runs too.
-- **A4 PipeWire** (#214), plus `start`'s first cycle and the latencies measured
-  on Nicolai's GNOME and Omarchy machines.
-- **A5 One speech engine per reload** (#218, merged).
-- **A6 Devices that will not run at 48 kHz** (#198).
-- **A7 and A8 Linux devices and detection** (#222): the input device list, the
-  device UID fallback and meeting detection over PipeWire's streams, behind S2's
-  controller. Tests: table tests over a fake PipeWire node list (a Firefox or
-  Chromium input stream raises the prompt, an output-only stream does not,
-  Steno's own stream is ignored).
-- **A9 The final choices proven** (#246).
-  - The AAC priming offset is trimmed from the container's edit list, or from
-    iTunes' gapless tag where there is none (`AVAudioFile`: the Swift app's
-    mixdowns carry 2 112 samples there and no edit list), or, when the file
-    declares neither, by the 2 112 samples AVFoundation assumes, but only in
-    the layout of the phone's `AVAudioRecorder` (no edit list, no tag, and
-    the brands and `esds` marks of `codec::priming`); any other file that
-    declares neither keeps every sample. Exactly that many
-    frames go, by packet timestamp; the decode of every other input is bit for
-    bit what it was (`tests/codec_streaming.rs`), and AAC fixtures with an
-    onset at a known sample land on it, mono and stereo, from ffmpeg's encoder
-    and from Apple's in the recorder's layout, where the onset is
-    AVFoundation's, while ffmpeg's and Android's layouts that declare
-    nothing keep every sample (`tests/codec.rs`).
-  - A 44.1 kHz sweep to 22 kHz, resampled, leaves less than -60 dB below
-    8 kHz, and speech recorded at 48 kHz and resampled from 44.1 kHz gives the
-    48 kHz path's word error rate within 0.1 points. Measured
-    (`tests/resampler_sweep.rs`; `steno-speech`'s `tests/fleurs.rs`, model
-    gated): the capture's path (the converter to 48 kHz, then the 3:1 FIR)
-    keeps every alias below 8 kHz under -60 dB; the decoder's sinc keeps them
-    under -60 dB below 7 kHz and folds 8 to 9 kHz of input into 7 to 8 kHz
-    at -21 to -58 dB, so the first bound holds for the phone's path only
-    below 7 kHz. FLEURS German gives 5.02 % from 44.1 kHz against 5.51 %
-    from 48 kHz; a file moves by up to two points between the two, so the
-    test bounds the 44.1 kHz mean one way, as the G1 gate does. FLEURS has
-    nothing above 7.2 kHz on either path, so the fold's cost to a
-    transcript is unmeasured; Nicolai accepted the fold on the sweep
-    (2026-10-08, D9).
-  - The 2 ms sidecar lag is pinned by `tests/codec.rs`: both onsets and the
-    32 samples between them.
-  - **The call-mode start is A10's.** Its step 2 is this package's tone check
-    on the Mac: the first callback within 100 ms of `start` returning and
-    200 ms of the call to `start`, and the tone's onset in the system channel
-    and its residual in the echo-cancelled mic channel within 50 ms. A9
-    supplies the `info` line that step reads.
-- **A10 Call mode without an output client.**
-  - **The defect.** In call mode the aggregate holds the output device (its
-    clock master), the microphone and the process tap. With nothing playing,
-    `AudioDeviceStart` returns 0 and the IOProc is never called: neither the
-    tap nor the microphone delivers until some app plays. A call that starts
-    in silence loses everything up to the first sound. Forge reproduces it
-    over SSH (0 callbacks in 4 s). The Swift app has the same defect, which
-    closes at the handoff (D9) and is not ported.
-  - **Diagnostics** (Forge over SSH, nothing playing, a scratch IOProc on
-    hand-built aggregates, one variant per run, timed from before the start):
-
-    | Variant | First callback |
-    |---|---|
-    | The capture's IOProc zero-fills the aggregate's output | none: the IOProc is never called, and the HAL hands an IOProc zeroed output anyway |
-    | Output and microphone, no tap; or the output alone | 40 to 65 ms |
-    | Output, microphone and tap (Steno excluded); or output and tap | none |
-    | Steno excluded, plus a silent IOProc of Steno's own on the speakers (started at once, or after its first callback) | none, with the speakers running |
-    | Steno excluded, plus an AudioQueue of Steno's own playing silence | none, with the speakers running |
-    | Steno excluded, and a silent `afplay` (another process) already playing | 67 ms |
-    | Steno not excluded, no client | none |
-    | Steno not excluded, plus a silent IOProc of Steno's own | 88.8 ms |
-
-    The tap aggregate runs only while a process the tap includes drives the
-    output. The aggregate's output streams were in place and enabled for the
-    IOProc (`kAudioDevicePropertyIOProcStreamUsage`) throughout.
-
-    Which device the silent IOProc must run on (Forge, a public aggregate
-    over the speakers as the default output, the system output left on the
-    speakers, Steno not excluded, 1.5 s per run):
-
-    | Silent IOProc on | First callback after `start` returned |
-    |---|---|
-    | The system output (the clock master) alone | 56 to 65 ms; the default output never ran |
-    | The default output alone | 60 to 67 ms; the HAL ran it on the speakers' hardware, the clock master's |
-    | Both | 67 ms |
-    | Neither | none; the speakers did not run either |
-
-    So the gate does not follow the default output. Whether output on
-    another physical device than the clock master (a headset) would open it
-    stays open: Nicolai's step 4.
-  - **The remedy.**
-    - The tap includes Steno's own process (the global tap, no exclusion).
-    - The call capture owns a silent IOProc on the aggregate's clock master,
-      the system output, read once from the aggregate itself (its main
-      sub-device), never on the default output. The `info` line `the silent
-      output runs on <name> (audio device <id>), the aggregate's clock
-      master` names it. Its input streams are set off for its IOProc (read
-      back as off), through `kAudioDevicePropertyIOProcStreamUsage`.
-    - It starts once the aggregate is built and before the aggregate's
-      IOProc, and is stopped and destroyed last, after the tap, on a `start`
-      that fails part way too. Started before the aggregate is built, it
-      made `start` about 300 ms slower.
-    - It is rebuilt with the capture on every device change, so a new system
-      output moves it to the new clock master. The system output is read
-      again once the listeners are in place, so a switch while the aggregate
-      was built is reported as a change too, as the rate already was. One
-      that does not start is logged at `warn`, and the capture then records
-      only while another app plays, as before A10.
-    - Its body writes zeros over its output buffers (the HAL has zeroed them
-      already): no allocation, lock or syscall.
-    - The clock master, the drift compensation, the latency arithmetic of A6
-      and the echo-cancellation alignment are unchanged.
-  - **The rule: no in-app playback while recording, enforced by `Playback`.**
-    Steno's own output now reaches the system lane, so `steno_audio::Playback`
-    is the one gate every in-app playback goes through. Steno plays nothing
-    today; the clip player (What follows) will be the first.
-    - While a recording runs, the gate refuses playback ("Playback is off
-      while Steno records. It works again once the recording stops.").
-    - Playback that runs when a recording starts is stopped first. A player
-      starts through its permit, under the gate's lock, so none starts once
-      a recording holds the gate.
-    - The capture session takes the hold before its backend (and the tap)
-      starts, keeps it across every rebuild, and releases it after the
-      teardown; a drop guard releases it on an error or a panic.
-  - **Considered and declined.**
-    - **A helper process that plays the silence**, keeping Steno excluded:
-      another process's lifetime, crash handling and device-change rebuild,
-      for a gate that covers the same risk in Steno's own code.
-    - **The microphone as clock master:** no microphone in System-only mode;
-      the aggregate at a hands-free headset's rate; another clock under A6's
-      latency rescale and the echo cancellation. The diagnostics show that
-      the gating follows the processes the tap includes, not the clock.
-  - **Tests.**
-    - Unit: the silent IOProc writes only zeros over a fake buffer list
-      (past a null `mData` and a size of 0, nothing past a buffer's size),
-      and allocates nothing (`tests/realtime.rs`, under the counting
-      allocator).
-    - Unit: the gate, alone and in the capture session: refused while
-      recording and across a rebuild, held at every backend start and stop,
-      released after a failed or panicking start and after a device loss,
-      running playback stopped, a start refused once a hold is taken and a
-      start under way finished before the hold, two sessions; a session made
-      without a gate of its own holds the process's (`Playback::global`).
-    - Unit: a system output that switched before its listener is judged as
-      a change; the stream usage the silent IOProc writes names its proc,
-      with every stream off.
-    - Forge, live, one test at a time. Two bounds, both from the first
-      callback: 100 ms from `start` returning, always asserted (what A10
-      changes), and 200 ms from the call to `start`, always printed and
-      asserted while the one- and the five-minute load are both under 4
-      (`start`'s own tap, aggregate and rate settle take 54 to 100 ms on a
-      quiet Mac and up to 844 ms on a busy one). `call_capture_runs_from_its_start_with_nothing_playing`
-      fails on main (0 callbacks, 0.00 s in 4 s) and passes on the branch:
-      first callbacks 23 to 64 ms after `start` returned, 77 to 204 ms after
-      it was called (asserted at load 2: 77 and 111 ms; the 204 ms run was at
-      load 16); 3.96 to 3.99 s of frames in 4 s; the system lane all
-      zeros, which over SSH proves nothing about its content. A stop and
-      start as a rebuild runs them passes both bounds each time. With the
-      default output on another device than the system output, it passes at
-      49 ms, with the default output not running. The silent output's
-      `info` line names the speakers. An output-only IOProc on the
-      microphone reads its input usage back as off. A call test whose
-      `start` fails fails. Mutations, each failing a test: no silent output
-      (0 callbacks), the input usage not written, the system output's
-      re-read never reporting, the zero-fill skipping the last buffer.
-    - Not exercised on Forge (built-in speakers only): a system output that
-      changes mid-call, and a headset. Nicolai's steps 3 to 5.
-  - **Nicolai**, on his Mac in a GUI session, with A10's branch checked out
-    and its CLI built (`cargo build --release -p steno-cli`; the commands run
-    from the checkout's root). Before every step: the terminal app has
-    Privacy & Security, Screen & System Audio Recording and Microphone,
-    turned on; Do Not Disturb is on, so no alert sound plays; no app plays
-    audio; and the built-in microphone stays the input (System Settings,
-    Sound, Input), since macOS moves the input to a headset as it connects.
-    Steps 1 to 3 run on the Mac's speakers.
-    1. Nothing playing: `target/release/steno dev capture-spike --lanes call
-       --seconds 20 --out ~/a10`. Pass when it prints `nonzero system: 0 of N
-       samples`, with N about 960000 (20 s at 48 kHz; the spike stops on a
-       timer, so N is not exact): digital silence.
-    2. Both bounds, then the tone.
-       - `cargo test --release -p steno-audio --test live
-         call_capture_runs_from_its_start_with_nothing_playing -- --ignored
-         --nocapture`. Pass when it passes and prints `first callback A after
-         start returned (bound 100ms), B after start was called (bound
-         200ms)` with A at most 100 ms and B at most 200 ms. When the one- or
-         the five-minute load is 4 or more it prints `end-to-end bound not
-         checked: load N (1 min), M (5 min)`; B is then read against 200 ms
-         by eye.
-       - The tone, with main checked out and its CLI rebuilt once #246 has
-         merged (#246 adds the `info` line and `steno dev onsets`; its
-         description has the full take): with the Rust app built from main
-         in `~/Applications`, quit every
-         Steno, the Swift app included, run `: > ~/a10.log` and
-         `open --env RUST_LOG=info --stderr ~/a10.log ~/Applications/Steno.app`,
-         start a call recording, play a short tone at 10 s
-         (`sleep 10; afplay /System/Library/Sounds/Glass.aiff`), and stop
-         5 s later. Pass when `grep "first callback" ~/a10.log` prints
-         `the capture's first callback (system tap) came N ms after its
-         start` with N at most 100 (its start is the aggregate's
-         `AudioDeviceStart`, a few ms before `start` returns), and
-         `target/release/steno dev onsets <the meeting's recording.caf>`
-         puts the tone's onset in the system channel and its residual in the
-         echo-cancelled mic channel within 50 ms (if the cancellation hides
-         the residual, a second take with `target/release/steno record
-         --mode call --keep-raw-mic --out ~/a10-raw` keeps the raw mic as
-         `mic.raw.caf`).
-    3. A hands-free headset: pair a Bluetooth headset as the output, keep the
-       built-in microphone as the input, and run step 1's command with
-       `--seconds 60`. While it records, in a second Terminal window, read the
-       headset's "Current SampleRate" with `system_profiler SPAudioDataType |
-       grep -A8 "<the headset's name>"`. Pass when the headset stays at 44.1
-       or 48 kHz. A switch to 16 or 24 kHz is compared with main while
-       `afplay` plays. The aggregate's own inputs are A11's, not A10's: a
-       headset that drops to hands-free because recording the call also
-       opens the headset's microphone is A11's known limit, noted (step 6),
-       not a failure here.
-    4. Alerts on the speakers, the output on a headset: in System Settings,
-       Sound, set "Play sound effects through" to the Mac's speakers and the
-       output to a headset, then run step 2's `cargo test` command with
-       nothing playing. Pass on both bounds, as in step 2.
-    5. The output switched mid-call, with "Play sound effects through" on
-       "Selected sound output device": `RUST_LOG=info target/release/steno
-       dev capture-spike --lanes call --seconds 60 --out ~/a10-switch 2>
-       ~/a10-switch.log`; at about 20 s switch the output from the speakers
-       to a headset (or AirPlay), at about 40 s back, and speak now and
-       then. Pass when `grep -E "device|silent output" ~/a10-switch.log`
-       shows, for each switch, `device change: DefaultOutputChanged,
-       reconnecting`, then `device resumed: attempt 1, gap G s` with G under
-       1, then `the silent output runs on <the new device>`, and no `did not
-       start` line; when the `mic ... dBFS  system ... dBFS` lines go on
-       after each `device resumed`; and when the summary prints `duration`
-       within 1 s of 60.
-    6. AirPods, A11's known limit (noted, neither passed nor failed): with
-       AirPods connected as the output and the built-in microphone chosen as
-       the input, record a two-minute call in the app while a call or a video
-       plays through the AirPods. Note whether the AirPods switch to
-       hands-free while it records (their sound turns narrow, and
-       `system_profiler SPAudioDataType | grep -A8 AirPods` shows a "Current
-       SampleRate" of 16 or 24 kHz) and whether they switch back after the
-       stop. The note goes on A11's row.
-  - Owner: audio. It lands before `0.11.0-rc.1`, with its own pipeline.
-- **A12 An undecodable AAC packet becomes silence.** A packet the decoder
-  cannot read (corrupt payload: symphonia's invalid data, an element its
-  AAC decoder does not support, now and then a panic inside it) stopped
-  the whole decode, so one bad packet in a phone recording lost all of it.
-  The decoder now writes silence of the packet's length in its place: its
-  duration from the container's timing, 1 024 frames for AAC, the last
-  decoded packet's length when the container gives none, and at most
-  8 192 frames, so a corrupt duration cannot grow the lane. It logs the
-  first ten such packets (index, timestamp and the error, never the
-  audio) at `warn` and one line with the total, and counts those whose
-  silence outlasts the priming trim, with the silence's length
-  (`AudioBuffer16k::damage`); a damaged packet inside the priming costs
-  no audio and is not counted.
-  - After a damaged packet the decoder is a fresh one, not a reset:
-    symphonia's AAC decoder fixes its channel layout at its first packet
-    before checking it, so a reset after a corrupt first packet failed
-    every packet after it. A panic is caught and treated the same way. It
-    runs inside `crash_log::expected`, so the app's panic hooks write no
-    crash log for it, and a file that panics on many packets cannot push
-    the real crash logs out of the folder.
-  - Damaged packets before the first one that decodes wait for it, since
-    symphonia's MP4 reader declares no channel count for AAC. The priming
-    trim (A9) then cuts them by timestamp like any packet, and the
-    streamed decoder (A1) keeps its bound.
-  - A file with more than half of its packets damaged fails
-    (`codec::MAX_DAMAGED_SHARE`), and so does a container that cannot be
-    read; a failure keeps the recording with "Processing failed" and offers
-    Process again, where a meeting of silence is of no use.
-  - The damage reaches the meeting through `damaged-audio.json` in the
-    support directory (no migration; the Swift app ignores it) and the
-    detail's `audioWarning`, Rust only: "About 0.1 seconds of the phone
-    recording could not be read and was replaced by silence." The app,
-    `steno process` and `steno deliver` open the same file; a write that
-    fails fails the meeting at decode, which keeps its recording. A
-    `damaged-audio.json` that cannot be read or does not parse stays as it
-    is, unwritten, and every meeting then counts as possibly damaged
-    (`DamagedAudio::may_be_damaged`, which the host reads as
-    `Pipeline::audio_may_be_damaged`), for the retention rule to keep its
-    recording once #241 lands. The launch logs it once; to clear it,
-    remove the file (the meetings lose their warnings) or repair its
-    JSON. The damage and the warning are the
-    decoder's, not AAC's, so a later salvage that replaces lost audio by
-    silence reports through them too.
-  - Tests: `Tests/Fixtures/audio/tone-440-44k1-500ms-damaged.m4a` (three
-    packets overwritten; the command is in `Tests/Fixtures/README.md`)
-    decodes to the clean length, its damaged packets exact silence, the
-    audio before them bit for bit, the first packet after each from a
-    fresh decoder (no louder than the clean decode), the rest within
-    2 * 10^-3 (the decoder's noise-substitution generator starts over), and
-    the count 3 with its 3 * 1 024 frames. A stereo file is silent in both
-    channels; packets 0 to 3 damaged keep the clean length and alignment;
-    a mono file's first packet read as a channel pair costs that packet
-    only; a packet that panics the decoder becomes silence; a timescale
-    twice the rate gives the same lengths. 11 of 23 packets damaged
-    decode; 12, and all 23, fail; a truncated container fails
-    (`tests/codec_streaming.rs`). `steno-services` runs the damaged file
-    through the pipeline to the host, and a failed write to a failed
-    meeting; `steno-host` shows the warning.
-  - Owner: audio.
-- **A13 Word starts from a chunk's exact start.** The shared pipeline
-  counted a chunk's frames from its first sample rounded down to the 80 ms
-  frame (`range.start / 1280`), and the VAD layout's chunks almost never
-  start on a frame boundary, so every word of a chunk came out early by
-  the samples the chunk lay past that boundary: 0 to 80 ms, 38 ms on
-  average. Found by A2 (#263); fixed by #279.
-  - `steno_speech::decode_window` takes the window's first sample. Token
-    frames stay on the recording's grid; each token carries the samples
-    its window lies past that grid (`Token::phase`), and the timings add
-    them. A window on the grid keeps its timings bit for bit. The merge's
-    matching and the recovery count whole frames, so none of their
-    decisions changes; the merge's monotonic pass orders tokens by frame
-    and phase.
-  - The CoreML backend's own pipeline decoded only windows on the frame
-    grid, so its starts were exact (mean offset 0.0 ms from Swift's on the
-    corpus and FLEURS). On the shared chunker (A2, #263) its chunks start
-    anywhere too, and the fix applies: the text is unchanged, every start
-    moves 0 to 79 ms later, and against Swift's starts the mean offset is
-    +2.5 ms on the corpus and +7.5 ms on FLEURS, from -30.5 and -27.7 ms
-    without the phase (p10 and p90 -56 and +56 ms on the corpus, -48 and
-    +64 ms on FLEURS; matched as above). The CoreML parity test holds the
-    corpus mean within 15 ms; its own alignment of the words gives +4.2 ms.
-  - Measured on the ONNX backend: text and word order identical on FLEURS
-    German `cat/`, the Swift corpus, the seven calibration calls and the
-    fixtures; FLEURS mean WER 4.927 % before and after (CoreML 5.462 %
-    both). Every word that moved starts 1 to 77 ms later, and its end
-    moves with it. Against Swift's starts the offset fell with the chunk's
-    phase, from +5 to -63 ms on FLEURS and from +6 to -58 ms on the
-    corpus, and is now flat at +8 to +15 ms (mean -28.1 ms before,
-    +10.0 ms after on FLEURS; -25.5 and +12.4 ms on the corpus); the
-    spread is wider (p10 and p90 -56 and +72 ms on FLEURS, -55 and
-    +56 ms on the corpus) because Swift's starts sit on the recording's
-    grid and the chunks' do not. 3 of 3 651 segments join
-    their neighbour, where a gap of 0.72 s became 0.67 to 0.69 s, under
-    the 0.7 s split. On the calibration calls 32 of 31 629 words (0.10 %)
-    change speaker: 31 in one call, whose segments at the edge of the one
-    cluster's ranges gain or lose a sliver of overlap.
-  - Owner: audio.
-- **A14 A phone recording without a `moov` is salvaged.** Found by #246's
-  testing: `AVAudioRecorder` writes the `moov` only when it stops, so a
-  recorder killed mid-recording (a crash, a jetsam kill, a force-quit)
-  leaves a file that `AVAudioFile` and symphonia both refuse ("missing moov
-  atom"). The phone's crash recovery (`recovery.ts`) queues and hands over
-  that file, and the Mac failed it, though its audio is all there.
-  - **Measured on Forge** (macOS 26.7.1), with the phone's settings
-    (`recording-options.ts`: AAC-LC in `.m4a`, mono, 44.1 kHz, 64 kbps,
-    quality 96). `AVAudioRecorder` SIGKILLed after 1, 4 and 30 s, and
-    `AVAudioFile` (the same encoder and file writer) killed mid-encode on
-    synthetic speech, music, noise and clicks. A
-    finished file is `ftyp` (28 bytes: `M4A `, then `M4A `, `mp42`,
-    `isom`), `moov`, a `free` box filling the reserve, `mdat`, whose body
-    starts at byte 57 344 (a 19-minute file: `ftyp`, `free`, `mdat`, then
-    `moov`, the body again at 57 344). A killed one is the `ftyp`, zeros to
-    57 344, then the packets, with no `moov`, no `mdat` header and no sample
-    table; the packets are whole and byte for byte the finished file's.
-    Killed at 1 s, the file is the `ftyp` alone (no packet was written yet,
-    and the phone does not adopt a file under 1 KiB); at 4 s it holds 126
-    packets, at 30 s 1 262 (29.3 s).
-  - **The split.** Without a sample table nothing says where a packet ends,
-    so each packet's length is read off its own bits: a walk of the AAC-LC
-    `raw_data_block` (the channel's section data, scale factors, pulse and
-    TNS data and every spectral Huffman codeword, none of the audio decoded)
-    to its `END` element (`steno_audio::codec::salvage::packet`; the
-    standard's Huffman tables come from symphonia's AAC decoder, MPL-2.0,
-    in a file that stays under that licence). Against the sample tables of
-    12 finished files of Apple's encoder at the phone's settings (about 39
-    minutes: speech in eight synthetic voices, chords, a chirp, noise
-    bursts, clicks, silence, a full-scale square wave, levels from 0.02 to
-    3 times), it split all 101 375 packets where `stsz` says; the 19-minute
-    file splits in 0.16 s. Those packets hold 4 050 short-window packets,
-    11 352 with TNS and 479 336 codebook-11 escapes; Apple's encoder wrote
-    no noise band, pulse, fill or data element in them, so those branches
-    are tested on hand-built packets only. Apple's encoder is not always
-    deterministic: one of four killed encodes of the same input diverged
-    from its finished twin inside packet 36 (both valid streams). Nothing
-    else gives the sizes: these files hold no `mdat` header and no partial
-    `moov`, and AVFoundation has no recovery of its own to follow
-    (`AVAudioFile` fails on them).
-  - **The salvage.** When symphonia cannot read a file and it is in the
-    recorder's layout (the `ftyp` brands #246's priming checks, no `moov`
-    among the first 16 top-level boxes, before an `mdat` or after it or
-    after a box of another type, whatever the size field's width), the
-    decoder reads its packets with the phone's settings and trims
-    `AVAudioRecorder`'s 2 112 samples of priming. Where the packets start
-    is found, not assumed: past the zeros (or an `mdat` header, should iOS
-    leave one, then past the zeros in its body if the packets do not start
-    right after it), where eight packets parse in a row. It reads to the
-    end of the file, dropping a last packet the kill cut off; bytes that
-    are not a packet end it there (logged), and a salvage that reads less
-    than half of the bytes after the start fails, as a file with more than
-    half of its packets damaged does (A12). A packet that parses but does
-    not decode becomes silence (A12). Any other file without a `moov`
-    fails as before, with its recording kept. The file is never written.
-  - **The rate.** 44.1 and 48 kHz share their band tables, so the packets'
-    bits cannot tell the two apart (a 48 kHz stream would decode 8.8 %
-    slow, unflagged). The evidence is the phone's fixed preset instead: the
-    salvage assumes 44.1 kHz mono (`salvage::SAMPLE_RATE`), the preset in
-    `recording-options.ts` asks for it, and a Rust test fails unless the
-    preset holds exactly one `sampleRate:` and one `numberOfChannels:`,
-    reading `44_100` and `1`; Rust CI runs it whenever the preset changes. A
-    stream of more than one channel does not parse, so it stays failed. In
-    the app only the phone's uploads are `.m4a` masters (the Mac records
-    CAF, `steno process` takes WAV), so only they reach the salvage. A
-    recovered recording carries no wall-clock span to check the length
-    against: the phone records only its start, and its crash recovery
-    estimates the duration from the bytes at 64 kbps. The residual risk is
-    iOS ignoring the requested rate on some route, a Bluetooth microphone
-    say; the file is kept either way, and Nicolai's checks below compare
-    the length.
-  - **The meeting.** `AudioDamage` gains `salvaged` (left out of
-    `damaged-audio.json` when false, so earlier records read the same), so
-    the meeting is Ready with the detail's `audioWarning` "The phone
-    recording was cut off unexpectedly, and its end may be missing." (plus
-    A12's sentence when packets became silence; no bridge field changes).
-    The salvage reads up to where the recording was cut off or could not
-    be read, so the sentence holds for both stops.
-    `DamagedAudio::may_be_damaged` answers yes, so #241's retention leaves
-    the recording unstamped and the detail reads kept incomplete.
-  - **Not measured: iOS.** The phone's own files may differ (another
-    reserve, an `mdat` header); the salvage looks for the packets rather
-    than assuming the offset, but a different layout may still fail.
-    **Nicolai**, three times, with a build of the app: start a recording on
-    the phone, force-quit the app from the app switcher, relaunch it, let
-    the recording upload, and check that the meeting on the Mac is Ready
-    with the warning above and as long as the recording ran (within a
-    second or two). Once after about 30 s and once after more than 5
-    minutes, on the phone's built-in microphone; and once after about 30 s
-    while recording through AirPods, the route most likely to ignore the
-    preset's rate. If one fails or its length is off, the uploaded file (in
-    the meeting's folder) is what the salvage needs to read; send its first
-    64 KB.
-  - Tests: three fixtures made on Forge (`Tests/Fixtures/README.md`): the
-    killed `AVAudioFile` file decodes as its finished twin, sample for
-    sample, up to the kill; `AVAudioRecorder`'s killed file decodes to its
-    126 packets of silence; every packet of the finished fixtures splits
-    where `stsz` says; other brands, a `moov` in the reserve, no `ftyp`,
-    an `ftyp` alone and a reserve alone stay failed, as does a `moov`
-    after an `mdat` (next to it, after a `free` box, after a 64-bit
-    `mdat`, or after a `uuid` box before the `mdat`, which the box walk
-    alone also refuses), none of them written to; a file on which
-    symphonia's probe panics in a debug build (a 64-bit box size of
-    2^64 - 1) fails, the panic caught and no crash log written, with the
-    file kept; packets of a channel pair or of two channels stay failed; a
-    file cut mid-packet decodes up to the cut; a reserve of 0, 1 000 or
-    70 000 bytes, a longer `ftyp`, an `mdat` header (of size 0 or a 64-bit
-    size) or a placeholder `mdat` before the zeros decodes the same; a
-    finished file whose `moov` is gone reads from its `mdat`; the packets
-    24 times over (198 KB, past three reads of the file) decode to the
-    last one; bytes overwritten from packet 40 end the salvage there, from
-    packet 8 fail it; overwritten from about 45 % of the packets' bytes
-    the salvage fails, from about 55 % or with exactly half overwritten it
-    reads; a test pins the preset's rate and channels; a packet that
-    parses but does not decode becomes silence and is counted. Packet
-    tests build every syntax branch by hand (short windows and their
-    groups, escapes, pulses, TNS, noise and intensity bands, fill and data
-    elements, and each invalid case). `steno-services` processes the
-    killed fixture to a Ready meeting with the recording untouched, and
-    the same file with another brand to a failed one, its recording
-    untouched too; under "delete after processing" the salvaged recording
-    stays unstamped through the sweep and its detail reads kept
-    incomplete, while its finished twin is stamped.
-  - Owner: audio. It blocks stable (D3).
-- **A15 The CoreML IOSurface abort.** Found by A13's testing (#279): in a
-  release build with debug assertions, the CoreML parity test aborted on the
-  second corpus file ("Failed to allocate memory IOSurface object", then
-  "Rust cannot catch foreign exceptions"); a plain release build passed. If
-  CoreML's resources build up across runs, a plain build would meet the same
-  wall later. Its own PR, after #263 merges, since it measures #263's code.
-  - Gates: IOSurface and memory growth measured per file, and fixed if it
-    leaks; an Objective-C exception from CoreML is caught at the FFI boundary
-    (the crate's `coreml` module), so the meeting fails retryably with its
-    audio kept; Nicolai runs a debug build of the app over several meetings
-    and checks that nothing aborts and memory stays flat (in Gate G2).
-  - Measured on Forge (macOS 26, 24 GB), the corpus's 10-minute files and
-    the first six joined into one hour: in a release build with debug
-    assertions the footprint went from 26 MB to 462 MB and the IOSurface
-    regions from 2 to 6 271 over the first file, and the second file
-    aborted at about 9 200, exactly as in #279; a plain release build stayed
-    at 331 to 337 MB and about 70 regions over the corpus 8 times (9.3 h),
-    and at 551 to 559 MB over ten 1-hour meetings, so no plain build reaches
-    the wall within a day. The cause: CoreML returns its feature values and
-    output arrays (IOSurfaces) at +0, and objc2 skips its autorelease
-    elision under debug assertions, so each was autoreleased, and only the
-    prediction itself ran in a pool; a plain build depended on the
-    elision, an inlining accident.
-  - Fixed (#296): `coreml::contained` runs every model call (its inputs,
-    the prediction, the output reads) and every model load inside one
-    autorelease pool and one Objective-C `@catch` (objc2's
-    `exception::catch`). Both builds now stay flat over the same 9.3 h and
-    10 h (337 and 557 MB, about 71 regions), the debug-assert build passes
-    the parity corpus (mean of files 8.46 %, as before), and the
-    transcripts are unchanged (the same token counts per file). The catch
-    needs Rust frames that unwind, so the crate refuses to compile with
-    `panic = "abort"`.
-  - The exception path: a caught exception becomes `SpeechError::Exception`
-    ("CoreML raised <name>: <reason>"), and the engine drops its models so
-    the next call loads them again. The meeting fails at `decode` (the
-    job's load) or `transcribe` like any speech failure: no retention
-    stamp, every audio file kept, Process again offered. The recorder's
-    warm-up loads through the same call, so an exception there costs one
-    `warn` line with the name and reason, and the recording carries on.
-  - The warm-up breaker: the warm-up runs only when the user starts a
-    recording, never at launch or on a capture restart, so it cannot loop
-    at launch. An abort that no `@catch` stops (a C++ exception, a failed
-    allocation) would still end every recording at the same point. So the
-    warm-up is marked on disk while it runs (`warm-up-in-progress` in the
-    support directory, written and removed durably). A launch that finds
-    the mark left over skips the warm-up from then on and says so once at
-    `warn`, and the first meeting loads the models in its processing
-    instead. Only a load there clears the mark, after which recordings
-    warm up again. Such an abort in a meeting's own processing is A17's
-    (#298).
-  - Tests: a real `NSException` raised inside `contained` (with the Rust
-    frames unwound and the next call run), an object autoreleased inside
-    it released by the time it returns, the shared pipeline's four
-    workers over a backend that raises through it, the job failing
-    retryably with its audio kept under "delete after processing", a
-    recording whose warm-up fails running on to a saved recording with one
-    log line, and a kill test: a child killed in the warm-up's load, the
-    next launch's recording warming nothing up and saved, its processing
-    clearing the mark, the recording after it warming up again. The app's
-    build reads the mark, and a load whose diarizer then fails clears it
-    too.
-  - Owner: audio. It blocks stable (D3).
-- **A16 Owned spans, then the ONNX engine's lead-in and tail.** Nicolai's
-  decision 3 (2026-10-15, after #263): the recording is split once into
-  owned spans, each decode keeps the words that start in its own span, and
-  recovery widens only the decoded window. Refined on 2026-10-17 (the
-  invariant below): windows that overlap within a run keep the LCS
-  merge until after stable, as decision 3 allows, and a recovery keeps the
-  range it kept before. Two PRs, both before `0.11.0-rc.1`.
-  - **A16a The owned-span partition** (#310).
-    `steno_speech::chunker::partition` splits the recording into
-    `Span { owned, window, reach, chunk }`: one span per chunk of the layout
-    (`chunk`; its window is the chunk, so the decode is unchanged) and one
-    per extra window over a gap (the windows as before). Two neighbouring
-    spans meet at the middle of the audio between their windows: the middle
-    of two chunks' overlap, the edge a chunk and a gap's window share, the
-    middle of the overlap of two windows of one gap, and the middle of an
-    undecoded gap (shorter than `MIN_GAP_SECONDS`, digital silence, or every
-    gap while `decode_gaps` is off), whose halves the spans either side own.
-    `reach` is the samples whose words the span's decode keeps: for a gap's
-    window, the window; for a chunk, its window and `overlap_seconds` either
-    side, rounded out to whole encoder frames and clamped to the recording,
-    the range the merge before the partition kept from an accepted
-    recovery.
-  - **The ownership invariant.** The code and its tests are checked
-    against this. The recording is partitioned into owned spans. A run is the
-    consecutive spans of one kind: the chunks between two gaps' windows, or
-    one gap's windows. A run keeps the LCS merge inside it until after
-    stable (replacing it needs a D9 ruling, decision 3); the join acts
-    between runs.
-    1. The owned spans are sorted, disjoint and cover `0..total`; with
-       nothing to decode there is no span.
-    2. `window ⊇ owned`, except the share of an undecoded gap a span owns,
-       which no window decodes.
-    3. `window.len() <= max_seconds`.
-    4. Each decode keeps:
-       - a gap's window, its whole decode, which goes to its run's LCS
-         merge;
-       - a chunk's plain decode, likewise;
-       - an accepted recovery, the words with a piece in its reach (`own`:
-         pieces grouped into words at each word start, a word kept from its
-         start, wherever that lies, to the punctuation after its last piece
-         in the reach, where the trim before the partition cut; a decode's
-         leading continuation counts as a word of its own).
-
-       Between runs the join concatenates, drops one copy of a word both
-       sides kept (the seam rule below), and a gap's run that begins inside
-       a word drops the pieces that continue it when any chunk, before the
-       run or after it, kept a token that starts before the run's first
-       window, as before the partition.
-    5. On the differential test's layouts and fakes, deaf window edges
-       included, every word the merge before the partition keeps, this one
-       keeps, with its pieces and its boundaries, at least once: a word of
-       this one may hold more pieces than that word only as the merge before
-       glued them after it, or, with no chunk's owned span starting or
-       ending between the word's start and the piece, as a copy of a piece
-       it kept elsewhere or a piece of a word it dropped; the exceptions are
-       limit E at its exact signature and the seven named limits below
-       (across an undecoded gap, E and (ii) across their own window, E and
-       (ii) inside the old merge's glue, E inside its leading glue, and a
-       copy before the text-leading orphan), each counted apart, the seven
-       capped, none across text the old merge kept. A duplicate is allowed,
-       a loss never, and the glue limits below are text only.
-       This is measured, not proved: the test below is its gate, and its
-       exemptions are one closed table.
-  - Which test checks which clause:
-    - clauses 1 to 3, and the reach of every span (a gap's window's is the
-      window; a chunk's is its window ± the overlap, on the frame grid and
-      clamped): `a_partition_owns_every_sample_once` (chunker), apart from
-      any merge rule; `owned_shares_meet_in_the_middle_of_an_overlap_or_an_undecoded_gap`
-      for one fixed layout;
-    - clause 4: `a_decode_keeps_the_words_with_a_piece_in_its_span` (`own`),
-      and end to end without recovery
-      `every_word_away_from_a_spans_edge_comes_out_once` (pipeline);
-    - clause 4's recovery bound and clause 5:
-      `every_word_the_old_merge_keeps_comes_out` (pipeline's differential
-      tests), against a frozen copy of the merge before the partition, over
-      1,500 random layouts with recovery on, five generators: the old
-      merge's random and two-sided layouts, the oracle's words, a collision
-      layout (quiet words in a skipped pause reusing a plain chunk's ids)
-      and a general one (any ids in the pauses, gaps of several windows
-      beside recoveries, full stops at seams, the first and last spans), on
-      a third of its cases with quiet words at every seam, a third of them
-      orphans (a word whose start the recording cuts off, or a lone full
-      stop); the defaults, CoreML's settings and two between, the extra windows on
-      and off, an exact and a jittering fake, and on half the cases a fake
-      deaf at a window's edges (its first or last 10 or 30 frames, or 15 or
-      30 at both, on every window or on some), so that two windows of a
-      layout disagree about a word at every kind of seam. No word or piece
-      the old merge kept is lost, and no word of its text loses its
-      boundaries: each word of the old merge's text that begins at a word
-      start comes out from that start with each of its pieces in order,
-      and any other piece of that word is one the old merge glued after the
-      same word, or, with no chunk's owned span starting or ending between
-      it and the word's start, a copy of a piece the old merge kept or a
-      piece of a word it dropped (so the rest of a word glued across a
-      chunk, a copy or not, two of its words joined, or a full stop moved
-      onto another word fails). The check's exemptions are one closed
-      table in `ref_losses`, each with its limit or the fake's artefact
-      behind it and the test that pins it: the old merge's own glue, limits
-      E and (ii), the fake's repeat artefact (a window that heard a word
-      swallows the repeats after it, which the old merge's text shows too,
-      at about the same rate),
-      E at its exact signature (case 855 below), the old merge's
-      text-leading orphan (asked for alone, after a word it dropped, or
-      after a copy), and pieces compared by placed word and id. A text-only
-      glue shape found later becomes a named limit whose count the gate
-      reports and caps at its value on the CI seed; a lost word or piece
-      always fails. The seven named so far, each capped at 0, are the
-      limits below across an undecoded gap (`Tally::across_gap`), E across
-      its own window (`Tally::across_own_window`), (ii) across its own
-      window (`Tally::orphan_across_own_window`), (ii) inside the old
-      merge's glue (`Tally::inside_glue`), E inside the old merge's glue
-      (`Tally::rest_inside_glue`) and inside its leading glue
-      (`Tally::rest_inside_lead_glue`), and a copy before the text-leading
-      orphan (`Tally::copy_before_lead`). The check of the text-leading
-      orphan tries them too. None of them holds a word that grew across a
-      piece the old merge kept of another word: that is the merge bar's
-      core (below), which fails at any scale. The check's first line
-      is a sanity rule: identical token sequences pass, so it never fails
-      the old merge's text against itself
-      (`the_boundary_check_never_fails_the_old_merges_text_against_itself`,
-      case 158 of seed 0xa09c6d2c7ddf7445, where the jitter puts a piece
-      beyond the test's slack of every placed word); a flag an unplaced
-      piece makes on texts that differ is counted apart
-      (`Tally::unplaced`: 0 at the CI seed and in 100,000 new-seed cases).
-      The check has its own test
-      (`the_boundary_check_fails_each_planted_glue_and_passes_each_limit`):
-      planted texts fail it for both earlier forms of the drain below (the
-      rest of a word glued onto the word before an empty chunk) and for
-      three more glues, and limit E, case 1411 of seed 0x120f372fe94f82d,
-      case 855, an (ii) glue and the old merge's own glue pass. A second
-      (`the_boundary_check_counts_a_glue_in_a_class_only_at_its_signature`)
-      plants the glues next to each counted class, which no class may
-      take: a copy across only a chunk's owned end, the rest of a dropped
-      word inside the old merge's glue across a boundary a plain window
-      decodes, the text across a chunk that heard nothing (below), an
-      orphan across an undecoded gap, a kept copy across a recovered
-      chunk's owned start, an owned start the recovery's window does not
-      hold, a crossing of more than that start, a plain chunk's owned
-      start, and a kept orphan moved inside the old merge's glue; an
-      orphan the old merge dropped, glued across a recovered chunk's owned
-      start, passes as (ii) across its own window. A third
-      (`the_boundary_check_fails_a_counted_glue_across_text_the_old_merge_kept`)
-      plants each counted limit as it comes out, then across a word the
-      old merge kept on its own between the two pieces, which fails; one
-      of them has the shape a planted glue met at case 644 of seed
-      0x7a76000000000076 (a dropped word's piece glued onto the old
-      merge's first word across five words it kept), which E across its
-      own window counted before. A fourth
-      (`the_boundary_check_fails_a_glue_beside_each_class_found_at_scale`)
-      plants a glue beside each of the four limits named last, which
-      fails, and a fifth
-      (`the_boundary_check_counts_a_crossing_at_the_edge_of_a_window_or_a_span`)
-      a decoded window that begins at a word's first piece and a piece
-      exactly on a chunk's owned start. Where
-      the fake hears every frame, it also checks that every word a gap's window or
-      an accepted recovery heard in its reach comes out, orphans aside;
-      that check can fire on a word both merges drop, as a run's LCS can
-      (over the deaf fake it does, and at a jitter of three frames on new
-      seeds), so the comparison with the old merge is the loss gate. A word
-      that repeats the piece before it counts as lost only where a final
-      window heard it, and a word's two equal pieces count as one: the fake
-      never gives one piece twice in a row, which a model does. Of 24,091
-      words, 155 (0.6 %) come out more often than from the old merge; 780
-      cases have an accepted recovery; 26 words come out longer than the
-      old merge's, as the boundaries allow. The CI-size test takes as long
-      as before the boundary check (26 s in a debug build). The ignored
-      `..._over_more_seeds` runs eight more seeds of 2,500 cases each, with
-      the jitter at one, two and three frames (60,000 cases, half over the
-      deaf fake, 964,614 words, 30,539 cases with an accepted recovery): 0
-      words, pieces or boundaries lost, 0.6 % doubled, 927 longer words.
-    - The loss classes the differential test found in earlier forms of the
-      partition are tests, each the old merge's text and this one's equal:
-      a word only a recovery heard in a decoded or an undecoded neighbour's
-      share (`a_recovery_keeps_a_word_it_alone_heard_in_a_decoded_neighbours_share`,
-      `a_recovery_keeps_a_word_in_its_plain_neighbours_half_of_an_undecoded_gap`),
-      a recovery scored on its owned span and so rejected
-      (`a_recovery_is_scored_on_its_chunks_window`,
-      `a_recovery_counts_a_word_a_frame_early_at_its_windows_edge`), the
-      rest of a word a gap's window began
-      (`a_recovered_chunk_keeps_the_rest_of_a_word_a_gaps_window_began`), a
-      recovery that reached over a whole skipped pause, so that the run's
-      LCS took a quiet word there for a plain neighbour's and dropped the
-      words between
-      (`a_recovery_across_an_undecoded_pause_keeps_its_plain_neighbours_words`,
-      both directions, the jitter at zero to two frames), and a recovery
-      that began inside a skipped pause and glued a piece from it onto the
-      word before
-      (`a_recovery_that_begins_inside_a_skipped_pause_keeps_the_old_merges_text`).
-      Where two windows of one gap meet: a word across the seam whose
-      earlier window lost its tail
-      (`a_word_across_the_seam_of_two_gap_windows_keeps_every_piece`), a
-      full stop just past the seam
-      (`a_full_stop_past_the_seam_of_two_gap_windows_comes_out_as_before`),
-      and a word only one of the two windows hears, the other deaf there
-      (`a_word_one_window_of_a_gap_is_deaf_to_comes_out`). And a recovered
-      word whose full stop lies past the reach, beside a plain chunk that
-      heard a second word with a full stop 0.7 s later
-      (`a_recovered_word_whose_full_stop_lies_past_the_reach_comes_out_as_before`).
-      And a gap's run after a chunk that kept nothing, whose first window
-      begins on the rest of a word that chunk missed, once glued that rest
-      onto the last word before the chunk
-      (`a_gaps_run_after_a_chunk_that_kept_nothing_drops_the_rest_of_a_word_it_begins_in`),
-      and the same when only a recovery after the gap kept the word whole
-      from its start, before the run
-      (`a_gaps_run_drops_the_rest_of_a_word_a_later_recovery_kept_from_its_start`).
-      Two more are unit tests of `own` and the join: a word whose first
-      piece lies before a recovery's reach and whose rest inside it; the
-      lone later piece a gap's window begins with when no chunk kept a token
-      before it, and which chunk token counts.
-  - Recovery: a chunk looks empty on its window, as before; the candidates
-    are scored on the word starts whose encoder frame lies in the chunk's
-    window, as before (`a_recovery_counts_a_word_on_its_chunks_first_frame`
-    and `..._last_frame`); an accepted one keeps the words with a piece in
-    the chunk's reach, which holds every token `keep_chunk_and_overlap`
-    kept. `keep_chunk_and_overlap` is gone.
-  - The join merges each run's decodes with the LCS, as before the
-    partition, and concatenates the runs in order, with one measured rule
-    for the residual at every seam between runs, a chunk run beside a gap's
-    run: the last word before the seam and the first after it, the same
-    piece starting within two encoder frames of each other, are one word
-    heard twice, and the copy with fewer pieces falls away (on a tie the gap
-    window's), so a chunk's copy can give way to the window's; copies more
-    than two frames apart, whichever comes first, both stay. A gap's run
-    that begins inside a word drops the pieces that continue it when any
-    chunk, before the run or after it, kept a token that starts before the
-    run's first window, as before the partition (`Seam::fit`'s `at > 0`).
-    It replaces `Seam::fit`. `splice_gaps`, `Seam`,
-    `keep_chunk_and_overlap`, `gap_windows` and the decode jobs are deleted.
-  - Gates, met: CoreML replays identically. One CoreML run per set at main
-    (0dd22ccaf) with a measurement-only dump of every decode (the window,
-    and the tokens with frame and phase), then both merges replayed on
-    atlas from the dumps, without models: FLEURS German `cat/`, the corpus,
-    the 15-minute meeting's two lanes and the crafted -20/-26 dB, silence and
-    noise cases come out identical, text and tokens, from the same windows
-    (451, 366, 190 and 43). So FLEURS stays at 4.874 % (S/D/I 245/37/39), the
-    corpus at 8.46 %, no word is added, the crafted cases keep 14, 12, 19 and
-    14 words, silence and noise add none, and the cost is unchanged. On
-    those sets the join's rule fired 0 times and `own` ran on no decode: no
-    gap window of FLEURS or the corpus holds a token, and no recovery is
-    accepted. Confirmed by a live Forge run at the PR's first head
-    (de0c4be8a); the changes after it decode the same windows, and the
-    replay at the final head is identical again. The gate sets have no accepted recovery (the meeting
-    tries one wider window and keeps none), so the replay does not test the
-    recovery path: the differential test is its gate. ONNX at its
-    shipped settings (`decode_gaps` off) is byte-identical to main on
-    FLEURS.
-  - An accepted recovery keeps what it kept before the partition, its chunk
-    and 2 s either side, and no more: keeping its own share of an undecoded
-    gap as well let the run's LCS take a word there for a plain neighbour's
-    and drop the neighbour's word (on the differential test's layouts, at
-    new seeds). No ONNX chunk of FLEURS is retried; A16b measures
-    recoveries with `decode_gaps` on, on the meeting's lanes, which trigger
-    them.
-  - The punctuation split #263 left to A16 is moot: a decoded gap is its
-    window's, and a word only the window heard stays. The case is a test
-    (`a_punctuation_piece_from_a_later_recovery_loses_no_window_word`).
-  - Known limits, each a duplicate, never a loss:
-    - a word sounding across the edge between a gap's window and a chunk
-      comes out twice when the two copies start more than two frames apart,
-      as the exact window hears its rest as a word of its own; the 2-frame
-      stutter of #263 stays: a word two frames long or shorter, said twice
-      back to back across a seam, comes out once;
-    - a chunk that starts inside a word whose start the gap's window before
-      it heard gives the word's later piece twice ("w5s25s25"): the window
-      keeps the word whole, and the chunk's plain decode, which goes to its
-      run whole, begins with that piece again;
-    - an accepted recovery beside a decoded neighbour keeps its own copies
-      of the words in their overlap: the run's LCS meets a chunk's copies
-      and the seam rule a gap window's first or last word, and the rest come
-      out twice (the 0.6 % above).
-  - Known limits, glues, text only, never a loss (clause 5 allows them; the
-    differential test counts them):
-    - E: a recovery that missed a word's start, or began at an orphan, can
-      glue the word's rest onto the word before it ("s25 w14s25 w14" for
-      "s25 w14", or ". w14. w14" for ". w14", a full stop after the wrong
-      word). The rest lies in the recovery's reach, so `own` keeps it, and
-      its tokens step back into the gap's window, after the gap's last
-      word, with no chunk's owned span starting or ending between; the
-      word it joins comes out on its own as well, so the glued word is a
-      copy. Seen only where a window misses a word's start (the deaf fake)
-      or the recording cuts a word off: 6 in 100,000 of the new-seed cases.
-      `a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_the_word_before_it`
-      and `a_recovery_that_begins_at_an_orphan_can_glue_it_onto_the_word_before_it`
-      (the orphan layout's seed 0x120f372fe94f82d, case 1411) pin today's
-      text. Where the recovery begins at an orphan that is the
-      only copy of a word's end (its full stop), the word comes out without
-      it, and the stop after a copy of the word before
-      (`a_recovery_that_begins_at_an_orphan_can_glue_the_end_of_a_word_onto_the_word_before_it`,
-      case 855 of seed 0x3ec9e6e5fd29f060, a window deaf at its end). The
-      test accepts that only at this exact signature and counts it apart
-      (`Tally::led`): twice in about 1,060,000 new-seed cases (cases 855
-      and 2296, the second of seed 0x49a86d2c7ddf7441 at jitter 3).
-    - (ii): the partition keeps an orphan word the merge before it
-      dropped, glued to the word before it where no chunk's owned span
-      starts or ends between them: keep over drop, as #263 chose.
-      `own` keeps a word that trim cut at a full stop inside it, and the
-      seam rule keeps the copy with more pieces.
-    - Across an undecoded gap, a named limit: a recovery that missed a
-      word's start can glue its rest onto a word across an undecoded gap.
-      It can happen on a model that hears every frame. The recovery's
-      window begins inside the word, or the model is deaf at its start,
-      and `own` keeps the rest, which lies in its reach. The last token
-      kept before it is a word of the chunk before the gap, whose owned
-      end lies in the gap's undecoded middle with no decoded window
-      between the two, so the rest follows that word across it
-      ("w14s34.s33.s36." for "w14s34.."). The old merge dropped the rest:
-      a glue, never a loss, counted apart (`Tally::across_gap`) and capped
-      at its CI-seed value, 0. Over 100,000 new-seed cases it came out 8
-      times in the 50,000 of the orphan layout and never in the gate's
-      50,000: case 641 of seed 0x197a54127b096499, over a fake that hears
-      every frame, and case 1929 of seed 0xa09c6d2c7ddf7445, a window deaf
-      at its start, each at all four jitters; never in another 100,000.
-      `a_recovery_that_missed_a_words_start_can_glue_its_rest_onto_a_word_across_an_undecoded_gap`
-      pins case 1929's text, cut to four words. A chunk whose decoded
-      window heard nothing can let the same glue through, keeping pieces
-      the old merge dropped (text only, never a loss, 0 in 100,000
-      generated cases). It is no such limit, so the gate fails it wherever
-      it shows:
-      `a_recovery_that_missed_a_words_start_can_glue_its_rest_across_a_chunk_that_heard_nothing`
-      pins today's text ("w14s34.s33.s36. w13" for "w14s34.. w13") and
-      the check's flag.
-    - E across its own window, a named limit: the same rest glued across
-      the owned start of the recovered chunk that kept it, which the
-      recovery's own window holds. The recovery misses a word's start and
-      keeps its rest, and the word before it is the last word of the
-      chunk before, whose owned end lies in the undecoded gap the
-      recovery's window covers ("w20s33.s34" for "w20.s34"). The old merge
-      dropped the rest: text only, never a loss, counted apart
-      (`Tally::across_own_window`) and capped at its CI-seed value, 0. Seen
-      only at a window deaf at its start: 3 times in 50,000 new-seed cases
-      of the orphan layout (case 2406 of seed 0x6c62000000000062, at
-      jitters 1 to 3), never in the gate's 50,000, never in another
-      100,000.
-      `a_recovery_that_missed_a_words_start_can_glue_its_rest_across_a_boundary_its_window_decodes`
-      pins case 2406's text, cut to four words.
-    - (ii) inside the old merge's glue, a named limit: an orphan word the
-      old merge dropped comes out inside the old merge's own glue after
-      the same word, across a chunk's owned boundary that glue already
-      crosses ("w9s29.s24.s37." for "w9s29.s37."), over a fake that hears
-      every frame. Text only, never a loss, counted apart
-      (`Tally::inside_glue`) and capped at its CI-seed value, 0. Seen only
-      in a layout the gate does not generate (short regions that all
-      recover, split by long undecoded pauses): 11 in 24,000 such cases
-      (case 1381 of seed 0xa8d2f372fe94f88e among them) and 22 in another
-      24,000; never in 200,000 cases of the gate's and the orphan layout.
-      `an_orphan_the_old_merge_dropped_can_come_out_inside_its_glue_across_a_chunk`
-      pins case 1381's text, cut to five words.
-    - (ii) across its own window, a named limit: an orphan word the old
-      merge dropped comes out glued onto the word before it, after that
-      word's full stop, which the old merge dropped too, across the owned
-      start of the next chunk, which that chunk's recovered window holds
-      ("w9.s28" for "w9"), over a fake that hears every frame. Text only,
-      never a loss, counted apart (`Tally::orphan_across_own_window`) and
-      capped at its CI-seed value, 0. Seen only in the layout the gate
-      does not generate: once in 24,000 such cases (case 742 of seed
-      0x6f04000000000004, at jitter 1) and never in two more runs of
-      24,000; never in 300,000 cases of the gate's and the orphan layout.
-      `an_orphan_the_old_merge_dropped_can_come_out_across_a_boundary_its_window_decodes`
-      pins case 742's text, cut to three words.
-    - E inside the old merge's glue, a named limit: a recovery that
-      missed a word's start keeps its rest inside the old merge's own glue
-      after the word before it, before that glue's end, across the owned
-      start of a gap whose window decodes ("w14.s32.s36" for "w14..s36").
-      The old merge dropped the rest: text only, never a loss, counted
-      apart (`Tally::rest_inside_glue`) and capped at its CI-seed value, 0.
-      Seen only at a window deaf at its start or at both edges, in the
-      layout the gate does not generate: 1, 8 and 16 times in three runs
-      of 24,000 such cases (cases 797, 857 and 1095 among them); never in
-      300,000 cases of the gate's and the orphan layout.
-      `a_recovery_that_missed_a_words_start_can_keep_its_rest_inside_the_old_merges_glue`
-      pins case 857's text, cut to four words.
-    - E inside the old merge's leading glue, a named limit: the same rest
-      inside the old merge's glue after its text-leading orphan (".s23."
-      for ".."), counted apart (`Tally::rest_inside_lead_glue`) and capped
-      at its CI-seed value, 0. Seen only at a window deaf at its start, in
-      that layout: 4 times in 24,000 such cases (case 136 of seed
-      0xab72f372fe94f82e, at all four jitters), never in two more runs of
-      24,000 nor in the 300,000.
-      `a_recovery_that_missed_a_words_start_can_keep_its_rest_inside_the_old_merges_leading_glue`
-      pins case 136's text, cut to four words.
-    - A copy before the text-leading orphan, a named limit in the
-      duplicate family: the gap's window's copy of a piece the old merge
-      kept comes out before the orphan an accepted recovery begins with,
-      which leads the old merge's text, glued to it ("s33s35s33" for
-      "s35s33"). The recovery's tokens step back over the copy, and the
-      seam rule cannot drop it, as the copy is no word start. Text only,
-      never a loss, counted apart (`Tally::copy_before_lead`) and capped
-      at its CI-seed value, 0. Seen only at a window deaf at its start, in
-      that layout: 4 times in 24,000 such cases (case 499 of seed
-      0xd3b79b97f4a7c19, at all four jitters), never in two more runs of
-      24,000 nor in the 300,000.
-      `a_copy_of_a_piece_the_old_merge_kept_can_come_out_before_its_text_leading_orphan`
-      pins case 499's text, cut to three words.
-    The test's count of longer words the boundaries allow, limits E and (ii) and
-    the longer copies the seam rule keeps: 26 at CI's seed; over 100,000
-    new-seed cases (jitter 0 to 3, the deaf mix), 686 in the 50,000 of the
-    gate's layouts and 2,932 in 50,000 with orphans at every seam, with 0
-    words, pieces or boundaries lost and the limit across an undecoded gap
-    as above; over another 100,000, 694 and 3,173, with 0 words, pieces or
-    boundaries lost and every named limit at 0; over a third 100,000, with
-    the seven limits counted, 661 and 3,187, with 0 words, pieces or
-    boundaries lost, every named limit at 0 and no word grown across text
-    the old merge kept; and over 24,000 cases of the layout the gate does
-    not generate, 1,452, with 0 lost, (ii) inside the old merge's glue 25
-    and E inside it 16.
-  - The merge bar (2026-10-18):
-    1. 0 words and 0 pieces lost at the CI seed and over at least 100,000
-       new-seed cases, every layout included. A loss is a blocker.
-    2. The CoreML replay identical, ONNX FLEURS byte-identical, and the
-       mutants of the production code killed.
-    3. The boundary check's core stays a hard gate everywhere: no word the
-       old merge kept may grow a piece the old merge did not put there
-       such that its boundary moves across text the old merge kept. 0 at
-       any scale.
-    4. Every other glue is text only and counted under its named limit.
-       CI fails if a limit's count exceeds its CI-seed cap; at scale the
-       counts are reported, not gated. A glue at scale that fits no named
-       limit is reported with its case and named in the next change, with
-       no new rule in the check.
-  - Known limit, an order, not a loss: an accepted recovery keeps words
-    inside the gap's window on either side of its chunk, so at either seam
-    of that chunk the tokens can step back in time, by up to the overlap
-    (2 s) and the rest of a word that crosses the reach's edge. Each word
-    keeps the time its window gave it, and the segments tolerate the step
-    (a segment ends no earlier than it starts). Raising such tokens to the
-    time before them (`enforce_monotonic`, as inside a run) would move the
-    gap window's words, often the only whole copy, as much later instead:
-    over 50,000 of the differential test's cases it put 36 words more than
-    the tally's slack from where they were said.
-  - Where two windows of one gap meet, the LCS merges them, as before the
-    partition. `a_word_where_two_windows_of_a_gap_meet_comes_out_once`
-    places a word up to three frames either side of the seam, on and off
-    the frame grid, also in the mirror and over the jittering fake: once
-    each time. `a_word_where_a_gaps_window_meets_a_recovered_chunk_comes_out`
-    places one at a recovered chunk's edge, both sides: once, or twice where
-    the copies start more than two frames apart.
-  - **A16b The lead-in and the tail for the ONNX engine** (#317). The plan
-    was `decode_gaps` on for the ONNX engine, the long-pause skip kept for
-    the cuts, with the gates against ONNX's own numbers: FLEURS German `cat/`
-    at or below 4.882 % mean WER; the corpus not worse; no word added where
-    the Swift transcripts have none, and none from silence or room noise;
-    at most +15 % runtime; else the measured lead/tail switch.
-    - The extra windows over every gap missed all four, so the engine takes
-      the lead/tail switch, as the entry planned: the first chunk starts at
-      the recording's start (`ChunkerConfig::from_start`), so the lead-in is
-      decoded with the speech after it, and the tail is decoded in extra
-      windows on the partition (`ChunkerConfig::decode_gaps`, now
-      `Gaps { None, Tail, All }`; `Gaps::Tail` decodes no window when there
-      is no chunk). The long pauses stay skipped.
-      `steno_speech::engine::pipeline_config` holds the engine's settings;
-      the `CoreML` engine keeps `Gaps::All`. #263's switch also stopped a
-      chunk's start from snapping forward inside a pause; that part stays
-      out: it scored the corpus worse (9.794 % against 9.735 %) and changed
-      no FLEURS word.
-    - Option 2 (Nicolai, 2026-10-18): on the differential's fake the switch
-      lost 157 real words against main in 3.2 % of the cases, in a skipped
-      pause past a short first chunk whose recovery main ran and the chunk
-      from 0 no longer did (limit (b)). With
-      `RecoveryConfig::first_chunk_as_before`, on in the ONNX engine's
-      settings only, the first chunk under `from_start` that ends at an
-      undecoded gap is also judged on its old window (from `pad_seconds`
-      before the first speech); if that looks empty, main's recovery runs
-      over the chunk's window extended from 0, and the chunk keeps its own
-      decode and gains the whole words only the recovery heard before the
-      next window. 134 of the 157 come back (all 26 over the exact fake),
-      0 words are lost against the switch, and FLEURS, the corpus and the
-      meeting give the same text (no recovery fires there) at one more
-      decode of the first chunk per lane: +3.6 % on the meeting against
-      main (8 pairs, Forge at load 14 to 32). The 23 left are deaf or
-      jitter cases, where the fake keys on the window's length.
-    - Measured at main (bec97e8f7) with one probe binary whose settings
-      switch at run time, FLEURS on atlas (ONNX threads 4), the corpus and
-      the meeting on Forge, the same files as A16a's gates (FLEURS German
-      `cat/` mean WER, the corpus' mean per-file WER against the Swift
-      transcripts, words added where Swift has none counted against the
-      run at main's settings with 0.5 s of slack):
-
-      | Settings | FLEURS (S/D/I) | Corpus | Added where Swift has none (corpus, FLEURS) | Cost |
-      |---|---:|---:|---:|---:|
-      | main: no gap decoded | 4.882 % (237/40/41) | 9.814 % | | |
-      | every gap (`Gaps::All`) | 5.198 % (239/39/60) | 9.916 % | 2, 6 | +27 % FLEURS, +41 % the meeting |
-      | windows over the lead-in and the tail | 4.882 % | 9.814 % | | |
-      | the tail's windows only | 4.882 % | 9.814 % | | |
-      | the first chunk from the start only | 4.865 % (237/39/41) | 9.735 % | | |
-      | the switch (shipped): both | 4.865 % (237/39/41) | 9.735 % | 0, 0 | +1.8 % the meeting |
-      | the switch and no snap (#263's) | 4.865 % | 9.794 % | | |
-
-      The shipped settings add 11 words and drop 12 on the corpus, 6 and 4
-      on FLEURS, every added one within 0.5 s of a Swift word. The cost,
-      from 8 alternating pairs on the 15-minute meeting's two lanes on Forge
-      (load 3.5 to 8): +1.8 % over the seven pairs at load 3.5 to 5.3; the
-      eighth ran at load 6.5 to 8, both runs slow. The tail is decoded in
-      full, so ONNX's processing time grows with the length of the quiet
-      audio after the last speech: a tail costs about what the same length
-      of speech costs (+77 % and +99 % on two files with a 300 s tail of
-      quiet synthetic room noise, 0 words added); call recordings are
-      bounded by the auto-stop grace (90 s), an in-person recording left
-      running is not. The model-gated tests at the branch: FLEURS
-      4.865 %, and A9's 44.1 kHz bound holds (5.05 % against 5.40 % from
-      48 kHz).
-    - The crafted cases (`crates/steno-speech/tests/common/crafted.rs`, now
-      run by both engines' tests): a quiet lead-in keeps 15 words at -20
-      and -26 dB (12 and 0 before), a quiet tail 14 (none before); silence
-      and room noise add no word. Known limit: quiet speech the detector
-      misses inside a skipped long pause is still lost (the 6.65 s and
-      9.1 s gaps keep none at -20 and -26 dB, as before). A lane in which
-      the detector hears no speech is not decoded at all, as before. A
-      lead-in longer than a chunk is decoded only as far as the first chunk
-      reaches; the next chunk starts just before the speech, as before.
-      "Process again" on an older ONNX meeting transcribes it with these
-      settings, so its transcript can change.
-    - Recoveries, which A16a left to this item: FLEURS, the corpus and the
-      meeting try none. Over the two lanes of all seven calibration
-      meetings (10 hours) one lane tries 15 and accepts 1, the same at
-      main's settings, with every gap decoded and with the shipped ones; the
-      words of that chunk and 2 s either side are the same in all three,
-      none doubled and none out of order.
-    - The differential test runs the ONNX engine's settings on every
-      collision case of an even round and wherever the defaults ran without
-      extra windows; its frozen merge's gap windows read `Gaps::Tail`. At
-      the CI seed every count stays within its cap. Over 100,000 new-seed
-      cases at the ONNX engine's settings alone (1,592,460 words, 47,961
-      cases with an accepted recovery, half over the deaf fake): 0 words,
-      pieces or boundaries lost, the core 0, every named limit 0, 0.21 %
-      doubled.
-  - Owner: audio.
-- **A17 No crash loop from a file that aborts the process.** Found by A14's
-  testing (#280): symphonia sizes some allocations straight from file
-  fields, and a failed allocation aborts the process, which `catch_unwind`
-  cannot catch. A corrupt or crafted phone file could stop the app on
-  decode and again at every launch through recovery: a crash loop, which is
-  data loss under D3. Its own PR, after #263 merges, designed with A15's
-  containment.
-  - Gates: the allocation abort measured (which fields and paths can trigger
-    it); a durable "working on" marker around every read of an asset (the
-    decode, recovery's duration, the mixdown, Process again, the CLI); an
-    asset whose marker survives into a launch is quarantined: its meeting
-    fails with "Steno stopped while reading this recording", the file is
-    kept and never touched again automatically, and Process again is
-    offered; kill tests (a child killed or aborted with the marker written);
-    the allocations bounded only if the measurement finds a real trigger.
-  - Measured (#298), one process per entry point
-    (recovery's declared length, the decode, the mixdown, the pipeline's
-    asset decode) over files with one field patched: on Linux, in a 1-CPU
-    container on a host with 50 GB and 25 GB of swap, a 1 TiB `data` atom
-    in an m4a's `ilst` or a 1 TiB CAF `kuki` aborts all four, and a CAF
-    `pakt` of 2^32 packets aborts the declared length; with the address
-    space held to 8 GiB (a machine that cannot back the allocation) every
-    m4a's sample tables abort too (`stco` or `stsz` at 2^32 - 1 entries,
-    16 GiB; `stts`, 32 GiB; `stsc`, 64 GiB). On the Mac none aborts: the
-    reservation succeeds lazily and the read ends at the file's end with an
-    error. Windows, which does not overcommit, is expected to behave like
-    the limited Linux run (not measured). Every m4a carries the tables; the
-    Swift app's mixdowns carry an `ilst` (the gapless tag). Steno's own
-    readers size nothing from a field: the salvage's `CafHeader` and the
-    priming reader.
-  - Fixed (#298), the breaker: `steno_pipeline::ReadingMarks`. Before each
-    read of a recording in the app's process (each lane's decode for the
-    transcript and the diarizer, the mixdown, recovery's declared length of
-    an adopted recording) and, where the speech engine runs in the app
-    (CoreML on the Mac), around the job's load of the engine and each
-    transcription, a mark naming the meeting, the asset, the file, the stage
-    and the attempt is written durably to `reading/` in the support
-    directory, and removed when the read returns; the pipeline writes and
-    removes it off the async workers. The app's orderly quit removes the
-    open ones and those of a meeting Process again released, and marks no
-    more; a run that finishes after the quit began still reads through, a
-    Process again that races the quit removes its released marks itself, and
-    the exit signal's quit runs on the blocking pool while the signal loop
-    goes on receiving, so a second SIGTERM still ends the app at once. The
-    launch reads the folder beside A15's warm-up mark (`SupportFiles`), and
-    the breaker counts: a meeting's first read that ended with the app costs
-    nothing (logged at `warn`; the meeting is processed again, its reads
-    marked as a second attempt); the second in a row quarantines it: it
-    fails with "Steno stopped while reading this recording; the recording is
-    kept.", loses a retention stamp, and is logged once; its marks stay as
-    the quarantine, so the launch resume, the resumes after an install or a
-    busy store, and the adoption skip it, and an orphan whose length read
-    stopped twice is listed failed and unread. A run whose reads all
-    returned starts the count again; a single read does not, so an earlier
-    read that returns never hides a later one that ends the app. Process
-    again (and `steno process --meeting`, `steno reprocess`) releases a
-    quarantined meeting into a second attempt. Marks beside a meeting a run
-    finished (ready, or failed for another reason) count for nothing and are
-    removed. The CLI's writing commands, which hold the database lock, mark
-    their reads and run the same launch check. A15's warm-up mark stays
-    one-shot. Kill tests: a child SIGKILLed in a decode (an abort ends the
-    process at the same point, nothing runs after) leaves its mark; after
-    one kill the next launch processes that meeting with the others; after
-    two in a row it quarantines it, keeps its files byte for byte, processes
-    the other queued meeting, and Process again makes it ready. False alarms
-    left: a CoreML abort in one meeting's transcription also counts against
-    a meeting waiting for its turn at the engine (the Transcribe mark spans
-    the wait), and a crash in a resumed meeting's read against an orphan
-    whose length the launch reads beside it (the adoption runs last, so a
-    slow folder delays no resume).
-  - Fixed (#298), the allocations bounded (part c: the pre-check, not a
-    child): before symphonia opens a file, `steno_audio::codec::sizes` finds
-    which reader opens it and walks what that reader reads, from byte 0,
-    with no probe. An MP4 file (well-formed top-level boxes from byte 0, one
-    an `ftyp`; a `free` or `wide` box may come first) opens symphonia's MP4
-    reader at byte 0, a CAF file its CAF reader and a WAV file (`RIFF`, and
-    `WAVE` at byte 8) its WAV reader; any other file (an MP3, an ADTS
-    stream, an m4a behind junk or an ID3 tag, which symphonia 0.5.5 did not
-    read either) fails before symphonia reads a byte, with "Steno cannot
-    read this kind of file; the recording is kept." No path in Steno takes
-    another kind of file (the paths checked are listed in `codec::sizes`),
-    and a movie hidden in a leading box never reaches the MP4 reader
-    (symphonia's own probe scans the first MiB for any reader's marker and
-    reads from there). The walk follows boxes only where symphonia reads
-    them, each rule naming the isomp4 source it mirrors, and refuses, as an
-    unsupported file (the meeting fails retryably, the file is kept), a box
-    or chunk larger than the file or its parent or shorter than its header,
-    a sample table (`stts`, `stsc`, `stsz`, `stco`, `co64`, `trun`) counting
-    more entries than its box holds, a sample larger than the file (in
-    `stsz`, `trun`, or a `tfhd` or `trex` default), a box symphonia
-    subtracts a fixed header from that is shorter (`hdlr` in `mdia`, `meta`,
-    an `ilst` item's `data`, `mean`, `name`), a CAF packet table counting
-    more packets than its entries can describe or giving a packet larger
-    than the file, a CAF description giving packets larger than the file or
-    uncompressed frames above 4 KiB, a WAV chunk before the audio larger
-    than the file (a `LIST` with its `INFO` values included; what follows
-    the audio is never read), a WAV `LIST` of odd size before the audio
-    (symphonia pads it twice and reads every later header out of step, where
-    an `INFO` value may declare 4 GiB; the crate's own WAV reader, which
-    `steno process` checks a file with, refuses it too), and a WAV `fmt `
-    that symphonia would read short. A CAF `data` left open (-1) is walked
-    on into its audio, as symphonia reads on for chunks there. A final
-    top-level box that runs past the file is let through unless symphonia
-    parses it (`ftyp`, `moov`, `sidx`, `meta`, `moof`): the walk refuses
-    nothing symphonia 0.5.5 reads (which fails on any such box itself), but
-    for the MP3 and ADTS streams Steno never makes. Every path that opens a
-    file with symphonia (the declared length, the decode, the mixdown, the
-    pipeline) goes through the one opening that runs the walk, and symphonia
-    reads no further than the length the walk measured; the salvage of a
-    file without a `moov` reads its packets with its own bounded reader and
-    symphonia's AAC decoder only. Not bounded, and small by their encoding:
-    an `esds` descriptor (at most 256 MiB), a FLAC metadata block (16 MiB),
-    the ALAC and Opus headers, a WAV packet (at most 1 152 blocks of a
-    16-bit alignment, 75 MiB); a CAF channel layout reserves nothing; a
-    bounded count still reserves up to 32 times the file (32 bytes a `pakt`
-    packet). Gate: every measured or crafted case is refused, every fixture
-    and every healthy variant symphonia reads still reads (the bare MP3
-    fixture is refused plainly), and a fuzz that sets the size and count
-    fields of the MP4, CAF and WAV fixtures' boxes, chunks, tables and
-    packet sizes to boundary and random values, and in one case of eight
-    plants the header symphonia would misread after an odd WAV `LIST`,
-    aborts nothing; CI runs 400 cases on every platform. On Linux the
-    measured cases and the fuzz run in a child held to 2 GiB of address
-    space, so an allocation above about 2 GB fails loudly: healthy files
-    peak far below it (138 MB for the 12-minute Swift-era recording), and a
-    decode's five-hour reservation (1.15 GB) keeps the limit above 1.2 GiB.
-    The breaker stays, for anything the walk does not model.
-  - Owner: audio. It blocks stable (D3).
-- **A18 A capture thread that misses cycles never loses audio silently.**
-  Found: #291. With Steno's process starved on one CPU, its PipeWire
-  data-loop thread missed graph cycles. The daemon ran the
-  graph on time (its clock kept pace with the wall clock, the driver and
-  the microphone showed no `ERR`), Steno's `steno-capture` node showed 25
-  to 113, and the audio of those cycles was gone: 0.28 to 1.2 s in 10 s,
-  2.4 s with the whole machine starved, with no gap, no dropped frame and
-  no notice. Core Audio (an overload, the IOProc called late) and WASAPI
-  (a packet flagged as a data discontinuity, until now only counted and
-  logged) lose the same way. Lands before `0.11.0-rc.1`, ahead of A16: a
-  fix inside the backends and the statistics, no restructuring of the
-  capture. The code's account is the module doc of
-  `crates/steno-audio/src/realtime/missed.rs`.
-  - **Finding it.** Each callback says where its first frame sits on its
-    clock: PipeWire's `pw_time` ticks (converted from the graph's rate to
-    the stream's 48 kHz), the IOProc's input sample time, and on WASAPI a
-    packet flagged as a discontinuity, read from its QPC and device
-    position by the rule `split_streams::DevicePositions` states (see
-    **Left**).
-    `realtime::CycleClock` compares it with where the audio delivered so
-    far ends, the fills included, and reports the frames missed when that
-    is more than half the last callback (cycles are missed whole). Frames
-    delivered at or behind that end (a cycle delivered twice, a buffer
-    PipeWire kept from a stall and hands over in a second callback at the
-    same position) count against the next jump, so the master never runs
-    longer than wall time. The first callback, a callback after a reset, a
-    clock that goes back, a graph rate that changes and, on PipeWire, a
-    quantum that changes start the clock afresh. Every start and rebuild
-    begins a new clock, so the session's gap between two streams is never
-    counted again. A process stopped past `STALL_TIMEOUT` can have the
-    watch thread report the stall and the capture's thread count it as a
-    jump before the rebuild's stop, while the rebuild's gap writes that
-    time as silence too. The session counts it once by the rule under
-    "Missed audio" in the module doc of
-    `crates/steno-audio/src/capture/session.rs`, and none of it leaves the
-    note. A rebuild's restart whose frames came during its start (PipeWire's
-    returns after the first cycle) ends its gap at the clock's reading
-    before the start; the time from there to its first frame, the start's
-    time less the frames it delivered (0.25 to 0.4 s on a loaded host, 30
-    to 70 ms on an idle one), was silent, hidden by the drift allowance in
-    a long recording. The session now counts it unfilled on every lane, in
-    the same count and the same `warn` line as the stall. A restart whose
-    frames came only during the wait for its first frame (WASAPI, Core
-    Audio) keeps its gap, which runs to the last sample of the frames
-    offered that read none, so that time is counted to within
-    `STALL_CHECK_INTERVAL` (100 ms).
-  - **Writing it.** A jump of at most `MISSED_FILL_LIMIT` (one second at
-    the stream's rate) is written as zeros on every lane before the
-    callback's own frames (`LaneFrameSink::write_missed`), on the
-    real-time thread: integer arithmetic, one more reservation, no
-    allocation, no lock, no system call, no log. A longer one (a process
-    stopped for seconds, a computer that slept) is not written, with no
-    upper bound on what is counted: the master falls short of wall time by
-    it. The rings count both beside the drops; the session reports them per
-    lane at each stream's rate as `CaptureStatistics::filled_seconds` and
-    `unfilled_seconds` (the lane that lost most) and logs them at `warn`
-    after the stop. The recorder's existing note, "About N seconds of the
-    recording are missing", from about a second on as before, counts gap +
-    missed + the larger of the unfilled seconds and the wall time the master
-    lacks beyond the clocks' drift; without the unfilled seconds the drift
-    allowance (3.6 s in an hour) hid a 2.4 s stall in any recording over 41
-    minutes. `duration` keeps its meaning, the seconds the master holds,
-    silence included.
-  - **The lanes stay aligned**, for the mixdown, the echo canceller and
-    diarization, after a fill and after a jump too long to fill. On PipeWire
-    and Core Audio one callback writes every lane, so both lose the same
-    span. On WASAPI the microphone's thread writes the system lane too, from
-    the system stream's staging ring: its fill is a silent packet that
-    still pulls the system audio of that time; the system thread writes
-    nothing for its own loss, since the microphone's pulls already pad its
-    lane with zeros while it is out, and those zeros count as its fill
-    (the larger of them and what its clocks read, so positions that never
-    move cannot hide it); the microphone's
-    lateness covers what it fills, so its kept packets do not slip the queue
-    before the fill pulls it; and its jump too long to fill drops the system
-    audio queued for that time, keeping a packet the system thread already
-    queued for the moment it resumes, so the lag holds. Three shapes stay,
-    each counted, none silent; the module doc of
-    `crates/steno-audio/src/realtime/streams.rs` lists them, and step 9 of
-    the Windows gate looks for the last two.
-  - **At the stop.** A thread held up in the last moments before the stop
-    shows no jump, since no callback comes after it. PipeWire's `stop()`
-    compares `CLOCK_MONOTONIC`, read before the capture's gate closes, with
-    the last delivered cycle's `pw_time`; Core
-    Audio's reads `AudioDeviceGetCurrentTime` before the IOProc stops.
-    `CycleClock::missed_until` judges it by the same rule, the callback in
-    flight aside, and the stop writes it once no callback runs, while the
-    session's writer is still open. WASAPI's streams drain once more, and
-    their flagged packets are read as any. Then the microphone and process
-    loopback, which deliver continuously, compare the performance counter
-    with the last packet's QPC (`DevicePositions::missed_until`, the packet
-    in flight aside, on a sane QPC only), since an engine that refused the
-    newest packets of a stall leaves no flagged packet behind. Once both
-    threads are joined, the backend's stop hands those readings, unfilled,
-    and what the system lane's staging still holds (a system thread still
-    out, or one whose flagged packet came after the microphone's last pull)
-    to the sink (`realtime::count_at_stop`). Endpoint loopback delivers
-    nothing while nothing plays, so it cannot tell such a loss from an idle
-    and reads nothing at the stop: without a flagged packet a system-lane
-    loss there is silent. Process loopback delivers continuously, so the
-    padding still running on its lane at the stop counts as its loss
-    whether or not a packet flagged it, a sane QPC or none; step 9 of the
-    Windows gate stalls just before the stop on both loopbacks. A stop for a rebuild reads nothing; the gap
-    covers that time.
-  - **Before the first callback.** A first callback that comes late shows
-    no jump either, since the clock starts at it. PipeWire's `start`
-    returns only after the first cycle, and the recording's clock starts
-    after it, so nothing is lost there. Core Audio compares the first
-    callback's host time with the device's start
-    (`realtime::FirstCallback::missed`): past `FIRST_CALLBACK_ALLOWANCE`,
-    200 ms (A10's bound from the call to `start`, which comes before the
-    device's start), the time counts unfilled. On WASAPI the microphone
-    and process loopback read the performance counter just before
-    `IAudioClient::Start` and compare it with their first packet's QPC, less
-    the frames delivered before it (`DevicePositions::missed_before_first`,
-    on a sane QPC only): past the stream's latency and one period, the time
-    counts unfilled, since an engine that dropped its oldest packets before
-    the thread's first drain flags no packet. Both count at the stop, only
-    for a recording's first start (`LaneFrameSink::first_start`, claimed
-    once the start succeeded): a restart's gap runs to its first frame, or
-    the session counts the time from the start to it (**Finding it**), so
-    that time counts already. They count whatever the stop is for, on a
-    counter of their own (`LaneFrameSink::count_before_first`), so a
-    rebuild's gap never takes them back; the rule is stated once in
-    `realtime::missed` ("Before the first callback"). Endpoint loopback
-    may start in an idle, so it reads no start.
-  - **The bound.** One second is half the session's two-second rings, so
-    the fill fits beside a processing thread up to a second behind (a fill
-    the rings cannot take counts as dropped, as any refused callback), and
-    half of `STALL_TIMEOUT`, so no jump it fills was a stall the session
-    rebuilt for and filled as a gap.
-  - **Fewer misses.** The capture's client context loads PipeWire's
-    `module-rt` from `client.conf`, which asks for real-time scheduling of
-    the data-loop thread, directly under `RLIMIT_RTPRIO` or through
-    RealtimeKit; nothing in the stream's flags or properties was missing.
-    Where neither grants it (atlas, a container), `start` logs once per
-    process at `warn` that the thread runs without it. Measured in the
-    1-CPU container beside a hog, ten-second call captures, seconds
-    missed per run:
-
-    | Starved | Host load | Without real-time scheduling | With `--ulimit rtprio=95` (`SCHED_FIFO`) |
-    |---|---|---|---|
-    | Nothing | 30 to 40 | 0, 0, 0, 0, 0, 0 | |
-    | Only the test | about 40 | 0.30, 0.70, 0.15 | 0.09, 0.04, 0 |
-    | Everything | about 40 | 1.58, 1.20, 2.03 | 0.21, 1.58, 0.04 |
-    | Only the test | about 16, interleaved | 0, 0, 0 | 0, 0, 0.02 |
-    | Everything | about 16, interleaved | 0, 0.04, 0 | 0.06, 0.06, 0.60 |
-    | Only the test, half a CPU (100 ms in every 200 ms) | 20 to 40 | 2.77, 2.33 | 1.88, 1.13 |
-    | Everything, half a CPU | 20 to 40 | 2.75, 1.39 | 1.39, 2.11 |
-
-    Real-time scheduling cuts the misses when the machine is busy, but not
-    to zero: the container's CPU quota throttles every thread in it. The
-    counts matched an independent tally of the tick jumps in `process`, and
-    nothing was dropped.
-  - **Quantum changes.** At a new quantum PipeWire's graph clock jumps by
-    up to two of the new cycles while the wall clock moves by one old and
-    one new (256 to 1 024 frames: 2 048 ticks in 27.6 ms; 512 to 2 048:
-    4 096 ticks in 55.6 ms), so a cycle more than an eighth longer or
-    shorter than the last starts the clock afresh; the 10 to 20 ms of wall
-    time each change costs on the private daemon stays unfilled.
-  - **Gates.** Unit tests of the clock on synthetic positions (a jump, the
-    first cycle, a reset, an empty cycle, a clock that goes back or
-    repeats, a wrap past `u64::MAX`, the limit and one frame over it, 2.5 s
-    and an hour counted unfilled, a resampled graph's rounding, a rate
-    change, a quantum change, the reading at the stop); the sink's fill, its
-    refusal and the unfilled count; PipeWire's fill before the cycle, its
-    reading at the stop and its scheduling-policy parse; the session over the
-    synthetic backend, which misses 100 ms (filled on both lanes at the same
-    frames, counted, not dropped) and 2.5 s (counted unfilled, both lanes the
-    same length), and a miss before a rebuild to 24 kHz (counted at the old
-    rate); the lane that missed most; the recorder's note after two misses of
-    0.75 s, and for a gap, missed cycles and an unfilled jump together in an
-    hour's recording; a stall its thread counts before the rebuild's stop
-    (counted once with the gap, kept whole when a stop abandons the restart,
-    kept past `MAXIMUM_GAP` for what the gap did not write, and kept beside
-    a device change's gap), and the stop's `warn` line; the WASAPI bodies
-    with both threads out for 200 and 300 ms in either wake order and the
-    microphone's alone (filled once on each lane, the lag ending where it
-    started), both out for 1.5 and 2.5 s in either order and each alone
-    (counted once, as the note says, the system lane's padding up to the
-    engine's 100 ms buffer over), the microphone's unfilled jump; the
-    WASAPI clocks: a sane QPC filling exactly over device positions from
-    8 to 192 kHz and positions that never move, losses counted unfilled
-    without a QPC at the largest reading, a QPC 2.5 % off, twice real time
-    or stuck (never filled), a timestamp error on the flagged packet, on
-    the one after it and on the one before (each counted from the
-    position), timestamp errors, an unflagged idle of 25 ms or 10 s and a
-    step back left out of the measurements, the half-packet rule, a
-    garbage reading capped at an hour, the counters saturating, and
-    positions that never move with no, a 0 Hz, a 16 or a 48 kHz mix format
-    (no division by zero); the system thread out for 0.5, 0.9 and 1.5 s
-    under a sane QPC, 16 kHz positions and positions that never move
-    (counted from the padding, as the note says), a drift underrun (not
-    counted), and the microphone's out for 1.5 s without a QPC (counted);
-    at the stop, the system thread out for its last 0.5 s in either order
-    of the final drains (counted once by the backend's stop), a loss no
-    packet flags (counted from the counter's reading), the readings left
-    out at a rebuild, the counter read only on a sane QPC and past the
-    packet in flight; padding from an unflagged 10 s idle forgotten once the
-    hold passed, the padding of an outage whose flag comes after the kept
-    packets counted within it, positions that stand still and then move,
-    a first pair over an idle replaced, a QPC whose last pair did not match
-    filling nothing while a jittery one still fills, a second flag while
-    the microphone is out keeping the first's padding, a process-loopback
-    system thread out at the stop counted with no flag, an idle that ends
-    while the microphone is out forgotten at the re-prime, two idles within
-    the hold counted together, the stop's counter reading nothing after a
-    last pair that did not match and reading a stall of a packet and a
-    half, and two hours of clocks that wrap; a first packet half a second
-    after the start counted less the start latency, one inside it or half
-    a period past it counting nothing, no start (endpoint loopback), no QPC
-    or a QPC still measuring counting nothing, the first packet with a QPC
-    read past the frames before it, the stop putting each stream's loss
-    before its first packet on its own lanes, only a sink's first start
-    being its first, and Core Audio's first callback 0.5 s after the start
-    counting 0.3 s at 48 and 16 kHz and none inside the allowance or when
-    none came; the property test `tests/wasapi_loss_property.rs` (below); the
-    allocation count of
-    the fill and the unfilled jumps through the PipeWire gate and both
-    WASAPI bodies. CI's live PipeWire tests stop their own process with `SIGSTOP`
-    from a child shell, a guard that resumes the process and reaps the shell
-    whatever happens and prints when it sent each signal, which the bounds
-    use: three stops of 0.6 s are filled (1.73 to 1.75 s); one of 2.5 s is
-    counted unfilled (2.48 to 2.50 s); one that ends just after the stop is
-    counted (0.58 to 0.60 s); both lanes keep the same length, and the
-    master with the unfilled audio stays on wall time, which bounds the
-    written audio and the unfilled count from above (on a busy host the
-    thread misses cycles besides the stops, counted too: up to 3.16 s filled
-    for 2.0 s stopped, in 35 runs on atlas). A filled count leaves the
-    master's length as it is, so only the sink's unit tests bound it from
-    above. A daemon stopped across the recording's stop leaves only the
-    backend's `stop()` to count it (0.55 to 0.58 s for 0.59 to 0.60 s, 5
-    runs). The rebuild tests count nothing missed besides their gaps. The
-    same runs in the 1-CPU container passed
-    3 of 3 each. After a 2.5 s stall left unfilled, every later moment of the
-    recording, a transcript's time stamps included, sits 2.42 to 2.66 s
-    early against the wall clock, the unfilled seconds within the stop's
-    timing. Two live Core Audio call captures on Forge: stopped twice for
-    0.6 s mid-capture, one counted 1.24 s on both lanes; stopped for 0.6 s
-    across the end of its capture, the other counted 0.60 s at the stop,
-    with 4.03 s of frames in 4.09 s. Mutations each fail a test: the fill
-    removed or after the cycle, the count removed, the jump off by one
-    either way, a kept buffer not counted against the next jump, the
-    session's count dropped or taken from the lane that missed least, the
-    rebuild's fold without the missed counts, the limit removed, an
-    unfilled jump filled, the unfilled count removed, the reading at the
-    stop without the callback in flight, the quantum reset removed, the
-    WASAPI follower staging zeros, its lateness without the fill, the
-    microphone's unfilled jump not dropping the system audio, the note
-    without the missed or the unfilled seconds or with the larger of gap
-    and missed instead of their sum, the scheduling check taking
-    `SCHED_OTHER` for real time, the WASAPI follower's unfilled loss counted
-    as filled, the skip after the microphone's unfilled jump without the
-    packet the follower queued for that moment, PipeWire's `stop()` without
-    its reading or reading after a reported change, the stop's `warn` line
-    removed, a rebuild that counts a late unfilled jump on top of its gap,
-    one that takes it back when no gap was written, beyond the gap's
-    length, with the jump counted before the stall, or at a device change's
-    rebuild, the take-back on one lane only or from an earlier rebuild's
-    gap; on WASAPI, the QPC never filling, filling while measured, at a
-    10 % tolerance, kept after a timestamp error, or read when it did not
-    match or measured off; a timestamp error's pair in the sums; the QPC's
-    pair bound, the reading cap, the 1:1, mix-format, measured or QPC
-    reading, the fill limit or the count-only rule removed; the position
-    bound by rate or by measure alone, removed, or the measured ratio
-    exact; a 0 Hz mix format kept; a step back read; the last position
-    dropped after a timestamp error; the gap without the last packet; the
-    follower's padding ignored, without the target, summed, not held for
-    the re-prime, not cleared, not run; its flag not set; a wrapping
-    counter; the half-packet rule strict; a ratio without rounding; at the
-    stop, the staging's count not handed on, the run before the re-prime
-    or the current one always taken, the target taken off, the readings
-    kept at a rebuild, dropped, or put on every lane; the hold never or
-    always clearing, without its period, not restarted at a re-prime or
-    not counting the pulls while the lane is out; the flag's padding never
-    taken, taken from the current run alone or without the run before the
-    re-prime, taken whatever the queue at the flag, never, or without the
-    target, ignored or less the target; the zeros before the first prime
-    left out; the first move of the positions never seen, seen at any
-    advance, seen again after a pause, or its pair kept; the first pair
-    never replaced or replaced by any short pair; a fill without a
-    matched last QPC pair; the stop's counter read without a sane QPC,
-    past only the last packet, filled, or uncapped; the hold counted in
-    anything but the system stream's frames (its pushes not counted, or
-    the count not restarted at a re-prime), a pending discontinuity's
-    freshness overwritten by a second flag, the flags not counted, a stale
-    snapshot kept at the stop, the stop taking one run by whether the lane
-    primed, the re-prime's wait counted, the target taken off, a run
-    delivered past the hold kept at the re-prime or its mark never set, the
-    snapshot not taking the padding out of the runs, overwriting an
-    earlier one, taken at the first flag only, or its remainder cleared, the
-    stop dropping the snapshots, process loopback's padding at the stop
-    needing a clock's reading, the QPC's last pair matched at 2 % or a
-    quarter packet or once for good, and the stop's counter read after a
-    last pair that did not match or ignoring a stall under two packets;
-    before the first packet, the start never read, the frames before the
-    first QPC not taken off, the latency or the period left out, any QPC
-    trusted, the lanes swapped, every start taken as the first, Core
-    Audio's allowance removed; a pending flag made fresh only when none
-    was pending, or always; a re-prime within the hold dropping the run
-    before it. Two mutants survive, both equivalent in every sequence a
-    single-threaded test can make: the hand-on marking every flag recorded
-    so far as handed, rather than those it read (the race it closes is
-    inside one call), and a re-prime that keeps the run before it however
-    long ago (the master's take after each pull clears that run once the
-    hold has passed, and a flag's snapshot takes it).
-  - **The property test.** `crates/steno-audio/tests/wasapi_loss_property.rs`
-    runs random packet streams through `DevicePositions`, the master's
-    router and the recorder's note (1 000 streams in CI, fixed seed; 20 000
-    and three other seeds before the push): discontinuities, timestamp
-    errors and silent packets, device positions from 8 to 192 kHz and
-    positions that never move, a QPC present, absent, stuck, twice real
-    time or garbage, idles, losses of every size, rebuilds, and a quarter
-    of the streams with one or two short stalls. Each flagged packet counts
-    at least its loss, the note at least everything lost, no zeros go in
-    without a sane QPC and none above the loss. It also answers whether the
-    device positions could go: a counter that reads the QPC alone, the
-    master's loss left to the wall-time shortfall, fails 567 of 20 000
-    streams, each with the note short by up to the drift allowance (up to
-    0.35 s there, 3.6 s in an hour), on streams without a sane QPC or in
-    its first two seconds; the code counts each of them in full, so the
-    positions stay in the count. A second property test runs calls: the
-    microphone's stream as the master and the system stream through the
-    follower's staging, each engine keeping 10 to 20 packets of a stall
-    and dropping the oldest or refusing the newest, threads out alone,
-    together or in overlapping outages, some into the stop, idles, spurious
-    flags and timestamp errors, either order of the final drains, the
-    counter's reading at the stop and the backend's stop (300 calls in CI;
-    4 000 calls on 20 seeds before the push). Each lane counts at least
-    what its engine lost and at most six times the loss and idle before its
-    flagged packets plus the engine's buffer and two packets a flag, and
-    both lanes keep one length. The system lane's lower bound allows two
-    targets under only for a loss into the stop or overlapping the
-    microphone's outage. A third test runs short calls of one to eight
-    episodes, each placed inside, at the end of or just after the one
-    before: outages of either thread or both around the engine's buffer
-    and the lane's hold, spurious flags, idles flagged or not, timestamp
-    errors, the stop often right after the last (2 000 calls in CI;
-    150 000 on six seeds before the push, upper bounds too with
-    `WASAPI_STORM_UPPER=1`). It found silent shapes in the padding rule,
-    closed by counting the hold in the system stream's frames, taking a
-    fresh snapshot at each flag, taking both runs at the stop and leaving
-    the re-prime's wait out of the padding. The calls and the short calls
-    also start threads late to their first drain (15 % of them), cut a
-    thread's drain part way by the other's (both resume together), and let
-    the system device's clock drift from the microphone's by up to 0.5 %.
-    Each continuous stream reads the counter at its start, so a loss
-    before its first packet is exempt only on endpoint loopback or without
-    a sane QPC, and is bounded from above too. That found two more silent
-    shapes, both closed: a flag left pending since before the microphone's
-    first pull (late to its first drain) kept a later outage's flag from
-    being fresh, and a lane that primed on part of the kept packets, ran
-    out while the system thread drained the rest and primed again dropped
-    the outage's padding. It now fails only in a shape **Left** names, the
-    queue an earlier outage left above the target: 1 in 500 000 short
-    calls on ten new seeds (100 ms under where outages overlap the
-    microphone's, inside the 120 ms **Left** states; the generator's bound
-    allows two targets only, so a new seed can still print it), none of
-    100 000 single streams. A sweep of 13 776 variants found the other
-    shape at 20 ms under at most: a second outage within two slip windows
-    of one the engine's buffer held. With the upper bounds, 52 of 150 000
-    short calls and 3 of 20 000 calls go over, each an idle or unit shape
-    **Left** names.
-  - **Left.** WASAPI's fill is unit-tested and compiled in CI, not
-    provoked on hardware (no Windows machine). The rule is stated once, in
-    the doc of `split_streams::DevicePositions`. A flagged packet's loss is
-    filled only from its QPC, once that measures within 2 % of real time
-    over two seconds: the QPC counts 100 ns whatever the device, while
-    Microsoft leaves the device position's unit open under
-    `AUTOCONVERTPCM` (a 16 kHz hands-free headset's, read as frames, would
-    write each loss three times over) and CI's process loopback reports
-    positions that never move. Without a sane QPC the loss is counted
-    unfilled at the largest of the readings, the device position's
-    included, so the note says it; that reads up to the ratio of the units
-    over (six times at most for a unit the stream can explain, the
-    property test's bound), and never under for a unit 48 kHz or the mix
-    format explains once a clean pair is measured. The
-    position's readings stay for the microphone stream with no sane QPC
-    whose losses add up to less than the drift allowance, which only they
-    count (the property test above). Positions that never move with no
-    sane QPC read nothing; on the microphone the note's wall-time shortfall
-    counts that loss past the drift allowance, on the system stream the
-    padding counts it. The padding is the zeros written while the system
-    stream delivered nothing, not the re-prime's wait once it is back. It
-    reads the system lane's loss to within the lane's lag: up to the
-    engine's buffer over (its kept packets land late); up to two targets
-    (40 ms) under when the microphone's last pulls take the lag (an outage
-    that ends within the lag before the stop, its flag at the final drain,
-    or one overlapping the microphone's own); and any follower outage
-    within two slip windows of an earlier one whose late packets raised
-    the queue above the target reads also under by that excess, up to the
-    engine's buffer less the target (80 ms): 120 ms at most where both
-    apply (100 ms measured, where outages overlap the microphone's). Each
-    flag that comes while the lane is out
-    takes the padding so far out of the runs at the microphone's next
-    pull, so a later flag counts only what padded after it. The hold that
-    keeps an outage's padding for
-    a flag that comes after the engine's kept packets is counted in the
-    system stream's frames, so an idle that ends within it before a flag
-    counts with it, and two idles with less than the hold of audio between
-    them count together at a flag after the second, however long either
-    was (an overcount). So does an idle that ends while the microphone is
-    out into the stop, when the microphone's fill there pulls the system
-    queue empty and a system flag follows at once (0.76 s of idle counted
-    with a 50 ms loss in 1 of 20 000 calls). Audio the staging slipped in the microphone's
-    catch-up just before the stop, padded after it, counts at the stop on
-    process loopback (it is gone all the same). The count before the
-    first packet can read up to the stream's clock drift over (a few frames,
-    96 002 for 96 000 lost at 0.5 % drift): it reads the QPC's time
-    against frames on the device's own clock, rounded to a period (an
-    overcount). Where both threads were
-    out the note takes the lane that lost most, so the system lane's loss
-    beyond the microphone's in that time (up to the microphone engine's
-    buffer) is not in it; that is the note's rule on every backend, and a
-    follow-up decides it. What stays silent, each named and gated:
-    - endpoint loopback, which idles: a system-lane loss into the stop with
-      no flagged packet (**At the stop**) and one before its first packet
-      (**Before the first callback**); step 9 of the Windows gate stalls
-      just before the stop and right after the start there;
-    - a stream without a sane QPC (the microphone's frozen positions and
-      process loopback's first packet alike): on the microphone, a loss its
-      positions cannot read (positions that never move, or before its first
-      packet) counts only past the drift allowance (0.1 % of the wall time),
-      through the note's wall-time shortfall; on process loopback, a loss
-      before the first packet is silent. A stream under 2 s has no judged
-      QPC, so a first start torn down before 2 s counts nothing before its
-      first packet. Each stream whose QPC was judged not sane, or that ran
-      2 s or more with too few clean QPC pairs to judge it, logs a `warn`
-      line at its stop; one under 2 s logs the same line at `info` ("not
-      judged (under 2 s)"). Step 9 of the Windows gate fails any stream
-      whose QPC line is missing or not near 1.0000, so such hardware is
-      found there;
-    - the note takes the worst lane (above), on every backend: the general
-      follow-up.
-
-    Core Audio's first callback counts past 200 ms after the device's
-    start, so up to that much is uncounted at a slow start; a capture
-    whose first callback never comes is restarted by the stall watchdog,
-    whose gap holds that time. A process stopped
-    for over 2 s may still be rebuilt after its thread has delivered again
-    (the watch thread wakes first), which costs a gap of 10 to 20 ms,
-    counted. Nicolai's gate steps (step 6 of R5 on the Mac, the stalled
-    recording in the Linux gates, step 9 of the Windows gate) stop the
-    app's process as the tests do.
-
-    After stable, one ledger per stream replaces this counting: it compares
-    the frames the stream's clock expected with the frames its thread
-    delivered, reconciled once at the stream's stop, and the session merges
-    the lost spans by union on the recording's timeline, so nothing is
-    subtracted (the union also settles the worst-lane follow-up). It is the
-    first capture PR after stable, and it lands with the capture seam and
-    scripted fake of `.plans/2026-10-15-recorder-actor.md` (its PR 1), under
-    a new D9 ruling (What follows). Owner: audio. It blocks stable (D3).
-- **A19 No in-process speech beside a live recording, and the speech
-  sidecar after a CoreML abort.** Found by #296's code review: an abort in
-  CoreML's load that no `@catch` stops (a failed allocation, an IOSurface
-  the system refuses) is stopped at the warm-up by A15's mark, and counted
-  per meeting by A17's, but every meeting's own job still loads CoreML in
-  the app's process, so the app would die once per meeting, and a load
-  beside a later recording leaves that recording to recovery: under D3,
-  everything recorded after the crash is lost.
-  - The pipeline did overlap a live recording: a meeting is enqueued at
-    its stop, and the next recording may start while it processes.
-  - The live guard (`steno_pipeline::live_recording`): the recorder sets
-    `LiveRecording` at each change of its state (live from `Starting` to
-    `Idle`, `CaptureRecorder::notify`), every pipeline build shares it
-    through `CurrentPipeline`, and a job takes its turn at an engine in the
-    app's process only while the recorder is idle: before the load and
-    before each lane's transcription. A job that waits says so ("Waiting
-    for the recording to finish", `MeetingEvent::WaitingForRecording`,
-    under the progress stage `waiting`, no new meeting state) and holds the
-    turn, so the jobs behind it wait too; a quit during the wait leaves
-    the meeting for the next launch. A call already under way when a
-    recording starts runs to its end (it cannot be stopped from outside);
-    the next call waits. A15's warm-up while recording stays, behind its
-    mark. The jobs now take the turn before they mark the read, so A17's
-    false alarm of one meeting's abort counted against another waiting for
-    its turn is gone. A job whose load or transcription waits behind a
-    recording's warm-up (`OneCallAtATime`) can still be counted for that
-    warm-up's abort.
-  - The fallback (`steno_pipeline::SpeechFallback`,
-    `speech-fallback.json` in the support directory): the launch reads
-    A15's warm-up mark and A17's marks of the CoreML stage
-    (`ReadStage::Transcribe`, written only for an engine in the app's
-    process); one it has not seen turns the fallback on, durably, logged
-    at `warn`. While it is on, `SpeechSetup::runtime` puts Parakeet v3 in
-    the speech sidecar, where a repeated abort ends only the child and the
-    meeting stays retryable; the Parakeet row of Settings and onboarding
-    is then the sidecar's fp32 model, and a meeting whose models are
-    missing waits for them there ("Neural Engine off after a crash:
-    download the speech models in Settings"). A file that exists but
-    cannot be read or parsed keeps the fallback on, logged at `warn`: an
-    unparseable one is written again, on, with the marks found; an
-    unreadable one is left as it is. The sidecar is bundled on the Mac as
-    everywhere (`tauri.release.conf.json`'s `externalBin`, staged by
-    `stage-sidecar.sh` in `desktop-release.yml` for every platform,
-    checked beside the app binary by `check-bundle.sh`); the diarizer
-    runs in it on the Mac already.
-  - Only the user ends it: Settings, Transcription, "Turned off after a
-    crash" with "Use again" (`settings.transcription.useNeuralEngine`),
-    logged at `warn`, and the pipeline is rebuilt on CoreML at once. A
-    self-test was not chosen: a short load in a fresh process passes where
-    an abort that builds up over a meeting (A15's) does not, and would turn
-    CoreML back on only to crash again. The file keeps the marks it has
-    seen, so the same marks (a warm-up mark stays until a meeting loads
-    CoreML; a quarantined meeting keeps its marks) do not turn it on again;
-    a new one does. After the user's action, recordings skip the warm-up
-    until a meeting's processing has loaded CoreML, whichever mark turned
-    the fallback on, so that first load never runs beside a recording
-    (`WarmUpMark::hold_off`, a mark of its own, `held-<uuid>`, listed as
-    seen; the launch that finds it says the warm-up is held off, not that
-    it ended with the app); a load in the sidecar no longer clears the
-    warm-up mark. A file or a warm-up mark that cannot be written keeps
-    the fallback on: Settings says "The Neural Engine could not be turned
-    back on." and the pipeline is not rebuilt. A rebuild that fails after
-    the file is written keeps the row and the title until a reload
-    succeeds ("Use again" again, or a save in another section); the next
-    launch runs CoreML either way.
-  - False alarms: a force quit, a power loss or a crash elsewhere while
-    CoreML loads or transcribes leaves the same marks and turns the
-    fallback on too. The cost is the sidecar's models to download and its
-    slower runs until the user says "Use again", never a meeting. The
-    `steno` command neither reads nor writes the file.
-  - Tests: the pipeline's jobs over an engine in the process wait at the
-    load and between lanes while a recording is live, and so does a job
-    queued behind another's turn; a job that queued for the turn before a
-    recording started checks again at its turn, on an engine that runs one
-    call at a time; a job in a child does not wait; a quit during the wait
-    leaves the meeting queued; the recorder is live from `Starting` through
-    `Stopping`, and a notify that read a recording never sets the flag after
-    the stop that ended it; a reload shares the recorder's state with the
-    retired build and the new one; the fallback's file over every kind of
-    mark, the user's action, the marks it forgets, a file that does not
-    parse, cannot be read (its bytes kept) or cannot be written, and a
-    warm-up mark that cannot be written; the warm-up held off until a load,
-    a running warm-up's mark kept through a load, and the launch's line for
-    a held mark; the app's build turns the fallback on from a mark and its
-    end holds the warm-up off; the model service's wrapper passes the
-    fallback through; the waiting and fallback titles in the host and the
-    Settings action, which keeps the fallback on when it cannot be ended and
-    the offer when the rebuild fails, until a later reload succeeds; kill
-    tests: a child killed in a job's CoreML load, after which the next
-    launch processes that meeting in the sidecar, a recording loads nothing
-    in the app's process beside it or after it, the next launch keeps the
-    sidecar, and the user's "Use again" puts the next meeting on CoreML with
-    no warm-up beside its recording, the recording after it warms up again,
-    and a later launch keeps CoreML; and a child killed in the warm-up's
-    load, after which the same holds and, after "Use again", the first
-    CoreML load is the job's, not a warm-up beside the recording.
-  - Gate: A19's check in G2 (**Nicolai**, on the Mac), a forced fallback.
-  - Owner: audio. Lands before `0.11.0-rc.1` (D9).
-- **A20 The level meter never freezes behind a sync of the files.** Found
-  by P40's check 1 (`locked_store_tests`), which failed on Windows with no
-  level update for 1.03 s: the writer thread published the levels between
-  its writes, and the same thread runs the periodic `sync_data` of P21
-  every 5 s of audio (`FlushFileBuffers` on Windows), so the meter, and the
-  `recording` snapshot it pokes, froze for as long as a sync took: 1.0 to
-  1.3 s on a hosted runner, seconds on a slow or external disk. The audio
-  was safe (the relay's 20 s of headroom); only the UI froze.
-  - The fix (Nicolai, 2026-10-17): the levels go out from a thread of
-    their own, the crate-private `LevelPublisher`
-    (`crates/steno-audio/src/capture/level_publisher.rs`), which the
-    session starts and stops with the recording. Each publish into
-    `LevelSlot` wakes it (one more lock-free signal on the processing
-    thread, none on the audio callback), and it wakes at least every
-    100 ms in case a wake is lost; it takes no lock the writer holds, hands
-    on a last change before it ends, and ends at the stop and at the drop.
-    The writer's sync, its cadence and the files are unchanged, and so are
-    the levels and their 10 Hz cadence. Swift's writer thread still
-    publishes them (`Sources/StenoAudio/Writer/WriterThread.swift`) but
-    syncs only at the close, so it has no such stall.
-  - Gates: `tests/levels.rs` holds the writer's first sync through
-    `testing::HeldSyncs` (behind `test-support`) and requires a level, the
-    live tone's, at the consumer at least every 200 ms (the 100 ms cadence
-    plus 100 ms of lateness) for a second of the hold, then a recording with
-    nothing dropped; publishing from the writer again fails it with no
-    level in the whole hold. P40's check 1 passes on all three platforms.
-  - Owner: audio. Lands before `0.11.0-rc.1` (D9).
-
-### P: no data lost (D3)
-
-The table above names each package and its owner. Their tests:
-
-- **P2.** Its tests include a store written by the Swift `v0.10.0-rc.2` intake (a
-  phone meeting with no `handoverAdmission` row), opened by the Rust app, which
-  answers a re-sent `complete` for that recording as the PR states, with no
-  second meeting; the schema parity test covers v5; a v6 migration applied to a
-  copy is ignored with a warning.
-- **P3.** An integration test runs the recorder over a fake capture source in a
-  child process with a fake speech engine and kills it (SIGKILL,
-  `TerminateProcess` on Windows) before the first flush, after it, mid-recording,
-  and while `stop()` is held at a gate, in `rust-ci.yml` on all three platforms.
-  After a kill past the first flush, the next launch lists the meeting `queued`
-  with `endReason` `failed` and no failure reason, with audio up to the last
-  flush, and processes it. A kill before the first flush leaves state `failed`,
-  not a missing meeting. Each flush is followed by `sync_data` (P21): the CAF and
-  WAV writers' tests count the full syncs they run in place of the disk's, one
-  per writer sync and one at the finish, and a test pins the product's
-  `FullSyncs::DISK` to `File::sync_data` and `File::sync_all`, so the syncs
-  counted are the ones the product runs (a kill keeps the page cache, so the
-  kill test cannot show it).
-- **P4.** The interleaving forced with a gate.
-- **P5.** The save of a two-hour recording is measured on Nicolai's slowest
-  Linux machine, and on Windows in the Windows gate; it passes under 10 s. The
-  gates' logouts follow a recording of at least an hour.
-- **P6.** In the Omarchy gate, while a meeting processes, `cat /proc/$(pidof -s
-  steno-speech-sidecar)/cgroup` names a scope of its own, not the app's.
-- **P8.** A test that no secret written to #221's fake service holds a newline.
-- **P28.** A ready meeting whose delivery is `pending`, or `failed` more than
-  a day before the launch or never attempted, is re-exported at launch, one
-  meeting at a time; one that failed within the day, one delivered and a
-  meeting that is not ready are not. A failed export is retried by one launch a
-  day at most, is left with the "keeps failing" line after three launches in a
-  row that did not deliver every row, and the next launch retries it once
-  Export again resets the count. An `App::launch`
-  test re-exports a `pending` row into a vault.
-- **P30.** A note changed in the vault since Steno wrote it (its hash differs
-  from the ledger's) gets the new version beside it as `<name> (Steno
-  <date>).md` and a warning, and stays as it was; an unchanged note is replaced.
-  A rolled-back Swift app overwrites an edited note: a loss on rollback only,
-  accepted under D3 and D9.
-- **P9.** A failed meeting with its master processes again from the button and
-  from `steno process --meeting <id>`; a meeting queued for missing models
-  resumes after the install.
-- **P39.** A second connection holds `BEGIN IMMEDIATE`: a run whose first
-  write waits out the whole 5 s busy timeout ends `queued`, not `failed`, posts
-  `StoreBusy` and not `ModelsMissing`, and an install's resume leaves it
-  waiting; once the lock is let go the store's retry (short waits in the test)
-  processes it to `ready`. A lock taken after the merge leaves the transcript,
-  the recording and the asset row as they were, and the meeting `processing`
-  when the park's write is refused too. A speaker match the store refuses waits
-  instead of dropping the match. The store's retry leaves a meeting waiting for
-  models alone, and Process again says what each waits for, in the pipeline,
-  the detail and the CLI. An install's resume and a launch's resume the store
-  refuses wake the retry, which processes their meetings. A store error that
-  is not the lock (a full disk) does not wait. A retry the lock refuses again
-  keeps its meetings and wakes the next one; one that fails otherwise leaves
-  them `queued` for the next launch. A retry that reruns a launch's resume
-  takes the meetings waiting for models, puts back the meeting waiting for the
-  store that another operation holds, and puts back for models the one waiting
-  for them that another operation holds or that a failure other than the lock
-  left unstarted, so the install starts it; that failure is not owed again.
-  While the lock refuses it, the retry backs off. A quit while a meeting
-  waits, or while a run waits out the timeout, leaves it unfailed for the next
-  launch, which processes it, as it does a meeting the lock left `processing`;
-  an update's hold runs nothing until it is given up, which runs it, or the
-  app relaunches, which processes it. Where:
-  `crates/steno-pipeline/src/pipeline.rs` (`ModelWaits`,
-  `resume_waiting_for_store`, `park_for_store`), `crates/steno-services/src/pipeline.rs`
-  (`StoreRetry`), `crates/steno-host/src/main_window/progress.rs`,
-  `apps/macos/web/src/windows/main/`, `crates/steno-cli/src/commands/process.rs`;
-  tests in `crates/steno-pipeline/tests/store_waits.rs` and
-  `crates/steno-services/src/pipeline.rs`.
-- **P40.** Smaller cut (Nicolai, 2026-10-15). Each check in the plan's
-  Acceptance table that needs the lock holds another connection's
-  `BEGIN IMMEDIATE` for 7 s (check 11, 2 s), on a runtime with one worker:
-  the levels, the `recording` snapshot and the device notices reach the host
-  live (1 s as built in #299; the plan said 200 ms),
-  during a pipeline write's wait and during the user's own settings save's;
-  the UI's commands answer during a pipeline write's wait; the tray's Record
-  and Launch at login return before the host answers, reach it in click
-  order, and a Quit waits for the stop clicked before it; a stop shows
-  `Stopping` at once and saves within 1 s of the lock's release; a start is
-  refused after the timeout; a read never waits for a write; the handover's
-  admit leaves its worker free; #278's `store_waits` pass on one worker; a
-  stop during a slow reload finishes its files at once and saves within 1
-  s, with both readers held, since its save reads on the writer; no
-  settings row fails a stop's save (one unreadable `defaultRetention` row
-  keeps the audio forever, with a warning, and the run after it fails on
-  the same row, so the meeting shows failed with its audio kept; Process
-  again works once the row is fixed); the `recording` feed sends
-  nothing before `page.ready` and keeps sending while the view-model lock
-  is held; an idle app sends no list, detail or progress; another
-  process's commit shows within one poll; a command that reaches the host
-  before `page.ready` loses no snapshot; a kill between the delete's steps
-  never loses or brings back a recording. A settings save that waits, and a
-  refused delete's undo whose checkpoint waits, still hold the other commands
-  until the host actor (`.plans/2026-10-15-host-actor.md`).
-  Where: `crates/steno-services/src/locked_store_tests.rs`, the recorder,
-  auto-stop, detection and app tests, the kill tests, the store's tests,
-  `crates/steno-host/src/recording_feed.rs`'s tests, `store_waits.rs`, the
-  shell's `bridge.rs` and `actions.rs` tests, and the smoke
-  `apps/desktop/scripts/locked-store-linux.sh`, which stops through the
-  tray's menu. The smoke took 26 s on atlas, under the 2 minutes, so it runs
-  in `rust-ci.yml`'s Linux hosted job ("Desktop stop under a locked store").
-  P40 closes with #304. The feed's checks hold 100 ms, and check 20 allows
-  one 2 s poll and 1 s.
-- **P40 follow-up: the copy an admission left is one meeting** (Nicolai's
-  ruling, 2026-10-16. Not a regression: main made the same second meeting
-  before this change, and no audio was lost either way). A
-  phone admission whose commit and `failed` save both give up under a lock
-  held past about 20 s leaves its noted copy; the next launch adopted it with
-  no ledger row, and the phone's retry admitted a second meeting. Decided:
-  the intake notes the upload the copy holds (recording id, size, SHA-256)
-  beside the copy's folder, in a file of its own
-  (`admission-uploads.json` in the support directory), so the record of
-  recording folders keeps the shape older builds read; Swift reads neither.
-  The launch adopts a copy that holds its noted upload whole with the
-  upload's ledger row, in one durable transaction
-  (`Store::adopt_upload_durably`), so the phone's retry is answered with that
-  meeting from the ledger; a retry before the launch, or while the lock is
-  still held, admits into the noted copy instead of copying again, and never
-  removes it. Bytes the ledger already holds are not adopted. When that
-  row's meeting was deleted, the launch removes the master of the noted
-  copy whose size and SHA-256 match it, durably, then its folder only if
-  that is empty, because the user deleted those bytes. This is the one
-  exception to keeping audio. While that meeting still exists (in any
-  state), the copy stays with its notes, neither adopted nor removed, and
-  each launch answers it the same way until a launch after that meeting's
-  delete removes it (Nicolai's ruling, 2026-10-17). Any doubt keeps the
-  copy and its note: one that cannot be read, one cut short or holding
-  other bytes. No delete can be undone, so a meeting the adoption's
-  transaction finds gone stays gone.
-  A note with no upload (an older build's), or a copy that holds other
-  bytes, is adopted as a recording with no meeting, without a ledger row.
-  A copy A17's reading marks hold (#298) is adopted failed and unread, and
-  not processed, unless it cannot be read: a held copy that holds its
-  upload whole (size and SHA-256) gets the ledger row, so the phone's
-  delete loses nothing: the bytes are the phone's own, kept forever and
-  offered to Process again; one that does not is adopted failed with no
-  ledger row, so the retry admits the upload afresh; one that cannot be
-  read is not adopted and keeps its notes for the next launch. Either
-  way, with no ledger row, the phone keeps retrying.
-  No upload stays noted without its folder's entry: a refused folder note
-  forgets its upload, and each launch forgets the uploads whose folder has
-  no entry.
-  Two defences keep one master to one asset row (Nicolai's ruling,
-  2026-10-17, after a read fault produced a kept-forever and a
-  delete-after-processing row for one master): the admission's commit
-  refuses a meeting id that already has a row and no ledger row
-  (`MeetingExists`), and the retention sweep never removes a master
-  another asset row still needs (kept forever, not due yet, or its meeting
-  busy), logging the ids at info; a master known to be gone needs no
-  keeper, so every row naming it loses its stamp, and one whose metadata
-  cannot be read counts as there. No schema change. Where:
-  `crates/steno-pipeline/src/intake.rs` (`NotedUpload`, `reusable_copy`),
-  `crates/steno-services/src/audio_folders.rs`,
-  `crates/steno-services/src/recovery.rs` (`adopt`),
-  `crates/steno-core/src/store/handover.rs`,
-  `crates/steno-core/src/store/assets.rs` (`keeper_of_master`); tests in
-  `crates/steno-services/src/admission_copy_tests.rs` (with a 20 ms busy
-  timeout through `Store::on_writer`),
-  `crates/steno-services/src/admission_kill_tests.rs` (a real kill at each
-  step of the admission and the adoption, and the retry racing the
-  launch), `crates/steno-core/tests/handover_store.rs`, `audio_folders.rs`
-  and `crates/steno-pipeline/src/retention.rs`.
-- **P40 follow-up: leftover speaker clips can outlive the retention stamp**
-  (open; a privacy item, as the clips are voice snippets; found in #313's
-  review). The retention sweep removes the clip files no speaker row names
-  through `sweep` in `crates/steno-pipeline/src/sample_clips.rs`, and that
-  pass never sets `clean = false`: a `read_dir` error reads as an empty
-  folder, and a clip that cannot be removed is only logged. So the master
-  goes, the stamp clears, and those clips, each a few seconds of one
-  speaker's voice, stay until the meeting is deleted. It is narrow: it needs
-  clips a run left behind (one that ended before its own sweep), and then
-  either a speakers folder that alone cannot be searched or a leftover clip
-  that resists removal while the named files go. Planned fix: `sweep`
-  reports its failures, a `read_dir` error other than `NotFound` counts as
-  one, and `RetentionSweep::run` ANDs the result into `clean`, so the stamp
-  stays for the next sweep. No schema change. Where: `sample_clips.rs`
-  (`sweep`) and `crates/steno-pipeline/src/retention.rs`.
-
-### X: the Linux targets (D6)
-
-- **X1 to X5** are the rows above.
-- **X6 The AUR package `steno-desktop-bin`** (`packaging/aur/`). The PKGBUILD
-  extracts the release `.deb` (moving the binary and its sidecar to
-  `/usr/lib/steno-desktop/`), verifies it against its `.asc` with
-  `validpgpkeys` set to the release key
-  (`048B527950E4F609B90E63495F8810A6E6D4DB46`), depends on `webkit2gtk-4.1`,
-  `gtk3`, `glib2`, `libsoup3`, `libayatana-appindicator`, `pipewire` and
-  `dbus`, and ships P5's two drop-ins (the `.deb`'s `/usr/lib/systemd/user/`),
-  X4's `ufw` profile and a `/usr/bin` wrapper
-  that sets X5's flag and the path the autostart entry names. It needs no
-  `post_upgrade`: Arch's `systemd` package ships the pacman hook
-  `30-systemd-daemon-reload-user.hook`, which reloads every running user
-  manager (`systemctl reload 'user@*.service'`) after any package installs,
-  upgrades or removes a file under `usr/lib/systemd/user/`, with no condition
-  a package could add. So on Arch only the autostart entry the app keeps until
-  its exit (P5) protects a running autostart unit from that reload, and the
-  kept entry is a D3 requirement for Omarchy: X6 is accepted only with step 8
-  of the Omarchy gate passing. The first stable
-  push is by hand; then **Nicolai** adds
-  `AUR_SSH_PRIVATE_KEY`, and `publish` pushes from the second stable release
-  on. A candidate is installed with `makepkg -si` from `packaging/aur/` after
-  the README's Bump steps 1 to 5, with `pkgver` in pacman form (`0.11.0rc1`,
-  which `vercmp` ranks below `0.11.0`).
-  - As built (`packaging/aur/`, #265): pinned to `0.1.0rc3` as a build
-    vehicle until a release contains #227 and #261; the first AUR push is a
-    release with both (#227, #261 and #267 are on main). Two drop-ins (the
-    autostart service's and GNOME's scope's), byte for byte #227's
-    `apps/desktop/src-tauri/linux/` files. The drop-in copies stay until the
-    pinned `.deb` ships them, and the build then fails until Bump step 3
-    deletes them. `check-aur.sh` compares each copy with `linux/`'s and
-    requires both drop-ins with `TimeoutStopSec=20s`. X2's Hyprland rules
-    come in the `.deb` from the first release that contains #267; rc.3's
-    lacks them. The install script only prints `sudo ufw allow Steno` after an
-    install or an upgrade, and its removal `sudo ufw delete allow Steno`;
-    Arch's `30-systemd-daemon-reload-user.hook` reloads the user managers.
-    X4's `ufw` profile came in X4's PR (#276): `ufw-steno-desktop`, installed
-    as `/etc/ufw/applications.d/steno-desktop` and kept on upgrade
-    (`backup=`); `check-aur.sh` checks its port against `LINUX_PORT` and that
-    `ufw app info Steno` reads it. An autostart entry a candidate without X5
-    wrote survives the upgrade and bypasses the wrapper; Omarchy step 1
-    rewrites it. `depends` adds what namcap finds linked (`cairo`,
-    `gdk-pixbuf2`, `glibc`, `hicolor-icon-theme`, `libgcc`, `libpipewire`,
-    `libstdc++`). The release key is also committed as
-    `packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`;
-    publishing it to keyserver.ubuntu.com, which yay and paru query for a
-    missing `validpgpkeys` key, is **Nicolai**'s. The repository gains a root
-    `LICENSE`, which the package's copy must match; the package also carries
-    the vendored SpeexDSP's BSD notice, which the binary compiles in.
-    `packaging/check-aur.sh` (`aur-ci.yml`, also weekly) builds, verifies and
-    installs it in an Arch container, and fails when the checksum or signature
-    check is skipped, or the wrapper is not executable or runs anything but
-    its three lines.
-- **X7 Nix on Linux.** `flake.nix` gains `packages.x86_64-linux.steno`, built
-  from source with `rustPlatform` and `cargo-tauri.hook`, `wrapGAppsHook3`,
-  `ORT_LIB_LOCATION` against nixpkgs' `onnxruntime` with
-  `ORT_PREFER_DYNAMIC_LINK=1`, the sidecar staged by `stage-sidecar.sh`, the
-  tray library's `dlopen` path patched, `STENO_DISTRIBUTION=nix`, and P5's
-  two drop-ins, which the module links into the user units
-  (`systemd.packages`); without the module the app's own copies cover them.
-  `nixos-rebuild switch` and `home-manager switch` reload the user managers
-  too, so without the module (a profile or home-manager install with launch
-  at login on) only the autostart entry the app keeps until its exit (P5)
-  protects a running autostart unit; with it, Steno runs as `steno.service`,
-  which the module gives `TimeoutStopSec=20s` and no rebuild stops. The kept
-  entry is a D3 requirement for NixOS wherever Steno runs as the autostart
-  unit (the Hyprland session; GNOME runs the entry in a scope, which a reload
-  leaves alone): X7 is accepted only with step 9 of the NixOS gate passing,
-  in the session that step names. Built from `self` with every hash in the
-  tree, so any tag builds as it is. Without the module, the autostart entry
-  names, as an absolute path, the first of
-  `$HOME/.nix-profile/bin/steno-desktop` and
-  `/etc/profiles/per-user/$USER/bin/steno-desktop` that resolves into the
-  running package, else the bare `steno-desktop`; never a store path. Because this links a
-  different ONNX Runtime build, the PR re-runs
-  FLEURS against pyke's build and states both word error rates. It also gains
-  `nixosModules.default` (`programs.steno.enable`): the package, a systemd user
-  service, `steno.service`, started with the graphical session
-  (`TimeoutStopSec=20s`, `STENO_LOGIN_ITEM=managed`) that runs the stable
-  profile path the module picks, `/run/current-system/sw/bin/steno-desktop` for a system install or
-  `/etc/profiles/per-user/<user>/bin/steno-desktop` for a per-user one, X4's
-  firewall port, PipeWire on, a Secret
-  Service provider (`services.gnome.gnome-keyring.enable` unless one is set),
-  and an opt-in raise of logind's `InhibitDelayMaxSec`. The macOS output stays
-  as it is. A candidate is built from its tag
-  (`nix build github:NicolaiSchmid/steno/v0.11.0-rc.N#steno`).
-  - As built (#259): the package and the module are in
-    `nix/`. The module adds the options `users` (a per-user install instead of
-    a system-wide one) and `launchAtLogin`, and puts `STENO_LOGIN_ITEM=managed`
-    in `environment.sessionVariables` too. The per-user path in the unit is
-    `/etc/profiles/per-user/%u/bin/steno-desktop`. `steno.service` carries
-    `X-RestartIfChanged=false` and `X-StopOnRemoval=false`, so a switch never
-    restarts or stops Steno, whatever changed; the new unit applies at the next
-    login. A switch that changes PipeWire's units, as most nixpkgs bumps do,
-    restarts PipeWire: a recording in progress reconnects through the capture
-    session's restarts (`crates/steno-audio/src/capture/session.rs`, about 2 s)
-    with a second or two of silence, or ends and is saved if PipeWire is not
-    back in time (NixOS gate step 6). GNOME Keyring is a `mkDefault` only where
-    none of Plasma 6, `services.passSecretService`, `programs.ssh.startAgent`
-    and `programs.gnupg.agent.enableSSHSupport` is on: its gcr SSH agent
-    conflicts with `startAgent`, and takes `SSH_AUTH_SOCK` from gpg-agent's.
-    X4 (#276) added the firewall: `programs.steno.openFirewall`, on by
-    default, opens `programs.steno.handoverPort` (23820) and UDP 5353, and
-    the module sets `STENO_HANDOVER_PORT` to that port and refuses a
-    `handoverPort` from 1 to 1023. P5's drop-ins arrive through the `.deb`'s
-    `files` map (#227). Without the module, the autostart entry names the
-    profile's path by X5's rule (#261), so the wrapper sets no
-    `STENO_EXEC_PATH`. ONNX Runtime is nixpkgs' 1.27.1 against the
-    1.28.0 build `ort` downloads, at FLEURS 4.9 % with both. Nix CI
-    (`nix-ci.yml`) runs on a pull request that touches the flake, the web UI's
-    dependencies, a Cargo manifest, the lockfile, a build script, the Tauri
-    configuration, the sidecar staging or the release's Tauri CLI pin, and on
-    main after any change to what the package builds.
-- **X8 The Linux gates** (Rehearsal).
+- A11, the headset's drop to hands-free during a recorded call, revisited.
 
 ## Release mechanics
 
@@ -3106,7 +509,7 @@ still opens a later database, and the add-only rule lets it keep writing. A roll
 (`desktop-v0.1.0-rc.*`) is the one exception: it refuses a v5 database, so such
 an install needs a newer build installed by hand (Rollback).
 
-### The workflow after S7
+### The release workflow
 
 - **Trigger and names.** The trigger becomes `tags: ['v*']`, and the
   `desktop-v*` trigger goes. The release title becomes "Steno <version>". The
@@ -3451,7 +854,7 @@ except case e.
     iCloud folder, it reads "“Steno” wants to access files managed by
     “iCloud Drive”.", and may come at the first export instead, as R3
     records). Any other modal dialog fails R1.
-- **R2 Handoff mechanics** (Forge; the cutover plan's test 6).
+- **R2 Handoff mechanics** (Forge).
   1. Fetch the candidate's `sparkle-item` on atlas
      (`gh run download <run> -n sparkle-item`) and copy it over.
   2. Each case starts from a fresh `ditto` copy of its Swift app under
@@ -3475,8 +878,7 @@ except case e.
   - `codesign --verify --deep --strict` passes, and `codesign -d -r-` names team
     `KQB68F43PW`;
   - `spctl -a -t exec -vv` says "Notarized Developer ID".
-- **R3 The real handoff** (**Nicolai**, a fresh account; the cutover plan's
-  tests 1 to 3). The phone keeps one pairing, so pairing it here unpairs his
+- **R3 The real handoff** (**Nicolai**, a fresh account). The phone keeps one pairing, so pairing it here unpairs his
   daily install until he pairs it there again.
   1. Install `v0.10.0-rc.2`. Grant every permission, set an API key, choose
      a vault folder under `~/Documents`, pair the phone, record and process a
@@ -3536,11 +938,11 @@ except case e.
      Login Items shows; S6's handling follows from it. End the step with launch
      at login on again.
   6. Run `defaults delete uno.schmid.steno.mac SUFeedURL`.
-- **R4 Updates after the handoff** (**Nicolai**, R3's account; the cutover
-  plan's test 4).
+- **R4 Updates after the handoff** (**Nicolai**, R3's account).
   1. Publish the next candidate, which changes only the version.
-  2. Quit. Set S4's stored last check time to 25 hours ago in the file the S4
-     PR names, and relaunch.
+  2. Quit. Set `lastCheckAt` in `~/Library/Application
+     Support/Steno/update-check.json` to 25 hours ago (an RFC 3339 UTC string
+     such as `{"lastCheckAt":"2026-10-09T08:00:00Z"}`), and relaunch.
 
   Pass when:
   - the scheduled check finds the new candidate and offers or installs it;
@@ -3550,8 +952,7 @@ except case e.
   - no keychain or TCC prompt appears again;
   - with the speech setting on the ONNX engine for one meeting,
     `steno-speech-sidecar` starts from the same bundle (switch it back).
-- **R5 Fresh install** (**Nicolai**, a fresh account; the soak on Forge; the
-  cutover plan's test 5).
+- **R5 Fresh install** (**Nicolai**, a fresh account; the soak on Forge).
   1. With networking off, open the downloaded, quarantined DMG; `spctl -a -t
      open --context context:primary-signature -vv` accepts it, and the app
      opens. Turn networking back on.
@@ -3574,7 +975,7 @@ except case e.
 
      Pass: for each command, the peak of the resident memory of `steno` plus its
      children (each second, the sum of `ps -o rss=` over `steno` and `pgrep -P
-     <steno>`) stays under A1's soak bound, and the transcripts are complete.
+     <steno>`) stays under A1's soak bound of 6 GiB, and the transcripts are complete.
   6. A stalled recording (A18). Record a call; a minute in, stop the app's
      process three times for 0.6 s, a few seconds apart, in Terminal:
      `p=$(pgrep -x steno-desktop); for i in 1 2 3; do kill -STOP $p; sleep 0.6;
@@ -4088,16 +1489,25 @@ nix-collect-garbage -d` on NixOS. Step 0
 passes when the meeting and the pairing are kept and, after a logout and login,
 Steno starts once, as the new version. Each target's step 1 sets up its step 0;
 steps 2 onward run on the candidate under test. On `v0.11.0`, R8 repeats step 0
-from the last candidate and one recording. Every target also runs one more
-step on the candidate, the stalled recording (A18): `journalctl --user -b 0 |
-grep -i "without real-time scheduling"` prints nothing, and
-`ps -L -o tid,cls,rtprio,comm -p $(pidof -s steno-desktop) | grep data-loop`
-shows `FF` or `RR` (RealtimeKit installed and running; on NixOS
-`security.rtkit.enable`); then record a call, stop the app's process three
-times for 0.6 s a minute in (`p=$(pidof -s steno-desktop); for i in 1 2 3; do
-kill -STOP $p; sleep 0.6; kill -CONT $p; sleep 3; done`), record another
+from the last candidate and one recording. A4 still owes a measurement of
+`start`'s first cycle and the capture latencies on the GNOME and Omarchy
+machines; it runs with these gates.
+
+Every target also runs one more step on the candidate, the stalled recording
+(A18): `journalctl --user -b 0 | grep -i "without real-time scheduling"`
+prints nothing, and `ps -L -o tid,cls,rtprio,comm -p $(pidof -s steno-desktop)
+| grep data-loop` shows `FF` or `RR` (RealtimeKit installed and running; on
+NixOS `security.rtkit.enable`); then record a call, stop the app's process
+three times for 0.6 s a minute in (`p=$(pidof -s steno-desktop); for i in 1 2
+3; do kill -STOP $p; sleep 0.6; kill -CONT $p; sleep 3; done`), record another
 minute and stop. Pass when the note after the stop says "About 2 seconds of
 the recording are missing." and the meeting transcribes as usual.
+
+The simplify plan gives up the save at a Linux logout, reboot or OOM kill
+("Given up"), so the gates no longer check the session-end save, the stop
+timeouts, Steno's own systemd scopes or the kept autostart entry. A logout
+that loses a recording is reported, not a gate failure.
+
 The status queries used throughout (`sqlite3`, or `nix-shell -p sqlite` on
 NixOS, for `q`):
 
@@ -4114,10 +1524,8 @@ done; }
 ```
 
 Good: the newest meeting is `queued` or later, with a duration near the time
-recorded; after a logout, a reboot or a compositor exit, its `endReason` is
-`quit` (the save at session end), never `failed` (P3's salvage). Bad: state
-`recording` with 0.0 s before a relaunch, or state `failed` "Recording was
-interrupted" after one. On the GNOME machine,
+recorded. After a `kill -9`, its `state` at the next launch is `queued` or
+later with `failed` as `endReason` (P3's salvage). On the GNOME machine,
 `systemd-coredump` is installed before the gate, so crashes show in
 `coredumpctl list`.
 
@@ -4132,46 +1540,25 @@ interrupted" after one. On the GNOME machine,
      record it, with the floating panel on top; stop; the meeting has a
      microphone lane and a system lane, and is transcribed, diarized and
      exported.
-  5. With launch at login on since step 0, log out and in; the last path
-     component of `cat
-     /proc/$(pidof -s steno-desktop)/cgroup` names the unit that holds Steno, and
-     `systemctl --user show '<that unit>' -p TimeoutStopUSec` (single-quoted) is
-     at least 20 s (P5).
-  6. Record for at least an hour, then log out: after logging back in, `q` shows
-     the meeting with its full length and `quit` as `endReason`, it processes,
-     and `journalctl --user -b 0 --since '<logout time>' | grep -i steno` shows
-     the save's logged duration before the app exits, and neither "timed out.
-     Killing" nor "Failed with result 'timeout'" (P5). Record, then reboot: the same, with
-     `journalctl --user -b -1`. Record, then `kill -9` the app: at the next launch the
+  5. Record for a few minutes, then `kill -9` the app: at the next launch the
      meeting is recovered with `failed` as `endReason` and processes (P3).
-  7. Quit the `.deb`'s Steno; the AppImage starts (`pgrep -a steno-desktop`
+  6. Quit the `.deb`'s Steno; the AppImage starts (`pgrep -a steno-desktop`
      shows only its path) and finds the same meetings.
-  8. **GNOME, AppImage.** Note `uname -r`. Quit Steno, note the time, start
-     the release's AppImage from the app grid, through a desktop entry with
-     `Exec=<path to the AppImage>` (or the one an AppImage integration tool
-     wrote), and start a recording. While it records, `journalctl --user
-     --since '<launch time>' | grep 'mount server'` prints one line, "moved
-     the AppImage's mount server <pid> into a scope of its own,
-     app-steno\x2ddesktop\x2dimage-<pid>.scope, which the session's end does
-     not stop", and no warning, and `systemctl --user list-units 'app-steno*'`
-     lists that scope. Then log out with the system menu, log back in and
-     check the meeting.
-  9. **GNOME, the tray (X3).** With the AppIndicator extension on (on by
-     default on Ubuntu; on Debian install
-     `gnome-shell-extension-appindicator`, log out and in, then
-     `gnome-extensions enable <id>`, the id from `gnome-extensions list |
-     grep -i appindicator`, or turn it on in the Extensions app): the icon
-     is in the top bar, a left click and a right click each open the menu,
-     and every entry works; closing the main window hides it, and Open
-     Steno brings it back. Then turn the extension off (`gnome-extensions
-     disable <id>`) while Steno runs: `journalctl --user -b 0 --since
-     '<disable time>' | grep -i steno` shows `no tray host shows the tray
-     icon`. Start a recording and close the main window: Steno quits
-     within 10 s, `q` shows the meeting with its full length and `quit`
-     as `endReason`, and `journalctl --user -b 0 --since '<close time>' |
-     grep -i steno` shows `the main window closed with no tray` before
-     `the shutdown ended`. Turn the extension on again and start Steno:
-     the journal shows `a tray host shows the tray icon`.
+  7. **The tray (X3).** With the AppIndicator extension on (on by default on
+     Ubuntu; on Debian install `gnome-shell-extension-appindicator`, log out
+     and in, then `gnome-extensions enable <id>`, the id from
+     `gnome-extensions list | grep -i appindicator`, or turn it on in the
+     Extensions app): the icon is in the top bar, a left click and a right
+     click each open the menu, and every entry works; closing the main window
+     hides it, and Open Steno brings it back. Then turn the extension off
+     (`gnome-extensions disable <id>`) while Steno runs: `journalctl --user -b
+     0 --since '<disable time>' | grep -i steno` shows `no tray host shows the
+     tray icon`. Start a recording and close the main window: Steno quits
+     within 10 s, `q` shows the meeting with its full length and `quit` as
+     `endReason`, and `journalctl --user -b 0 --since '<close time>' | grep -i
+     steno` shows `the main window closed with no tray` before `the shutdown
+     ended`. Turn the extension on again and start Steno: the journal shows
+     `a tray host shows the tray icon`.
 - **Omarchy** (Omarchy 4, Arch with Hyprland on Wayland).
   1. Before step 0: import the release key from a checkout (`gpg --import
      packaging/aur/keys/pgp/048B527950E4F609B90E63495F8810A6E6D4DB46.asc`), so
@@ -4179,24 +1566,14 @@ interrupted" after one. On the GNOME machine,
      rules to `~/.config/hypr/` and reload Hyprland. In step 0, `sudo ufw allow
      Steno` runs right after the install and before the pairing, and the upgrade
      runs while the previous candidate, started at login, records; then stop the
-     recording: the meeting processes. When the previous candidate predates X4,
-     its package has no profile and it listens on a port from Linux's ephemeral
-     range: step 0 runs `sudo ufw allow 32768:60999/tcp` instead, the upgrade is
-     followed by `sudo ufw allow Steno`, and once the new version runs (`ss`
-     lists 23820) `sudo ufw delete allow 32768:60999/tcp`. When the previous
-     candidate predates X5, the autostart entry its first launch wrote names
-     `/usr/lib/steno-desktop/steno-desktop` and survives the upgrade: right
-     after step 0, quit Steno, start it from the Omarchy launcher and turn
-     Launch at login off and on, so step 7 finds `/usr/bin/steno-desktop`. From
-     `v0.11.0` on, step 0 installs with `yay -S steno-desktop-bin`, which
-     verifies with the imported key (and imports it itself once it is on
-     keyserver.ubuntu.com).
+     recording: the meeting processes. From `v0.11.0` on, step 0 installs with
+     `yay -S steno-desktop-bin`, which verifies with the imported key (and
+     imports it itself once it is on keyserver.ubuntu.com).
   2. Start Steno from the Omarchy launcher. `cat /proc/$(pidof -s
      steno-desktop)/cgroup` names an `app-…scope` (not Hyprland's unit). The
      tray icon is in the bar's drawer; a right click opens the menu, and every
      entry works; closing the main window hides it, and Open Steno brings it
-     back (X3). While a meeting processes, the sidecar's cgroup is a
-     scope of its own (P6).
+     back (X3).
   3. Start a recording: `hyprctl clients -j | jq '.[]|select(.class |
      test("steno-desktop"; "i"))|{title,xwayland,floating,pinned}'` shows "Steno
      bubble" as `xwayland: true`, floating and pinned (under XWayland the class
@@ -4204,64 +1581,30 @@ interrupted" after one. On the GNOME machine,
      stays on a workspace switch; a drag moves it, and the place survives a
      restart (X2).
   4. Secrets: save a password in Chromium, set an API key, then reboot (the
-     pairing from step 0 stands). Pass when no keyring
-     prompt appears at boot; `journalctl -b | grep -i 'unrecognized format'` is
-     empty; `secret-tool search --all service uno.schmid.steno.mac` lists
-     `llm-api-key` and `handover-identity`; `~/.local/share/Steno/secrets.json`
-     holds only `"movedToSecretService": true`; Chromium's saved passwords still
-     open (P8).
+     pairing from step 0 stands). Pass when no keyring prompt appears at boot;
+     `journalctl -b | grep -i 'unrecognized format'` is empty; `secret-tool
+     search --all service uno.schmid.steno.mac` lists `llm-api-key` and
+     `handover-identity`; Chromium's saved passwords still open (P8).
   5. The phone uploads a recording through the firewall (X4): `sudo ufw
      status` lists `Steno` as `ALLOW` and no wider rule, `ss -ltn 'sport =
      :23820'` lists Steno's listener, and `journalctl --user -b | grep
      'is not available'` prints nothing.
-  6. Steps 4 to 6 of the GNOME gate, with the call in Chromium and the logout
-     through the system menu, which is `uwsm stop`. Also `hyprctl dispatch exit`
-     while recording: after logging back in, the meeting is saved with `quit` as
-     `endReason` (X1). Then the same logout with Steno started by a key binding
-     without `uwsm-app` (`bind = SUPER SHIFT, S, exec, steno-desktop`), noting
-     the launch time: `cat /proc/$(pidof -s steno-desktop)/cgroup` ends in
-     `app-steno\x2ddesktop-<pid>.scope`, `journalctl --user --since '<launch
-     time>' | grep 'moved into a scope of its own'` names
-     `wayland-wm@hyprland.desktop.service`, and the meeting is saved the same
-     way (#272). Then the same with `exec-once = steno-desktop` in
-     `hyprland.conf`, after logging out and in, with the login time as the
-     launch time. Then quit Steno, note the time, run the release's AppImage
-     with `uwsm-app -- <path>` and start a recording. While it records,
-     `journalctl --user --since '<launch time>' | grep 'mount server'` prints
-     one line, "moved the AppImage's mount server <pid> ...", and no warning,
-     and `systemctl --user list-units 'app-steno*'` lists that scope. Then log
-     out: the meeting is saved the same way.
+  6. Steps 4 and 5 of the GNOME gate, with the call in Chromium.
   7. In the Steno that a login started, Settings says updates come from the
      package manager (X5), and `~/.config/autostart/steno-desktop.desktop`'s
      `Exec` names `/usr/bin/steno-desktop`.
-  8. The kept entry (P5, D3). With launch at login on, log out and in, so
-     Steno runs as `app-steno\x2ddesktop@autostart.service` (step 5 of the
-     GNOME gate's cgroup check names it), and start a recording. Turn launch
-     at login off in Settings: `~/.config/autostart/steno-desktop.desktop`
-     stays. Run
-     `makepkg -si` in `packaging/aur/` again, which runs systemd's reload
-     hook: `systemctl --user show 'app-steno\x2ddesktop@autostart.service' -p
-     LoadState -p TimeoutStopUSec` still shows `loaded` and 20 s. Log out:
-     after logging back in, `q` shows the meeting with its full length and
-     `quit` as `endReason`, and the entry is gone.
 - **NixOS** (x86_64-linux, GNOME, and Hyprland with `withUWSM = true` if
   Nicolai runs it).
   1. Step 0 uses a flake input at the previous candidate's tag
      (`github:NicolaiSchmid/steno/v0.11.0-rc.<N-1>`), with
      `steno.nixosModules.default` in the system's modules and
      `programs.steno.enable = true`.
-  2. Steps 2 to 4, 6 and 9 of the GNOME gate, with the phone through the
-     firewall the module opens (X4; when step 0's candidate predates X4,
-     step 0 opens `networking.firewall.allowedTCPPortRanges = [{ from =
-     32768; to = 60999; }]` and `allowedUDPPorts = [5353]` by hand, keeps
-     them through the upgrade's switch, and removes them with a later
-     switch once `ss -ltn 'sport = :23820'` lists the new version), and
-     step 9's extension from `gnomeExtensions.appindicator` in
-     `environment.systemPackages`, turned on in GNOME's Extensions app.
-     `systemctl --user show steno.service -p Environment` names
-     `STENO_HANDOVER_PORT=23820`. Under the module, step 5's cgroup check, run
-     as `cg`, prints one line, ending in `steno.service`, and
-     `systemctl --user show steno.service -p TimeoutStopUSec` is 20 s.
+  2. Steps 2 to 5 and 7 of the GNOME gate, with the phone through the
+     firewall the module opens (X4), and step 7's extension from
+     `gnomeExtensions.appindicator` in `environment.systemPackages`, turned on
+     in GNOME's Extensions app. `systemctl --user show steno.service -p
+     Environment` names `STENO_HANDOVER_PORT=23820`, and `cg` prints one line,
+     ending in `steno.service`.
   3. Open Settings and choose a folder: the file chooser opens (the wrapper's
      schemas).
   4. Launch at login: after step 0's upgrade and collection, `systemctl --user
@@ -4280,24 +1623,13 @@ interrupted" after one. On the GNOME machine,
      `~/.config/autostart/steno-desktop.desktop` with `[Desktop Entry]`,
      `Type=Application`, `Name=Steno` and `Exec=<dir>/.steno-desktop-wrapped`,
      where `<dir>` is `dirname $(readlink -f
-     /run/current-system/sw/bin/steno-desktop)`.
-     1. With `steno.service` masked, so that the entry's own unit starts
-        Steno: `systemctl --user mask steno.service`, then log out and in.
-        Pass when `cg` prints one line, ending in
-        `app-steno\x2ddesktop@autostart.service`; `systemctl --user
-        is-active 'app-steno\x2ddesktop@autostart.service'` prints `active`;
-        `systemctl --user show 'app-steno\x2ddesktop@autostart.service' -p
-        TimeoutStopUSec` is 20 s (P5); and the entry is still there. Log
-        out: the entry is gone.
-     2. Unmasked: `systemctl --user unmask steno.service`, write the entry
-        again, then log out and in. Both units start Steno; the one
-        `steno.service` starts wins and removes the entry at launch, and the
-        other ends before setup. Pass when `cg` prints one line, ending in
-        `steno.service`; `systemctl --user is-active
-        'app-steno\x2ddesktop@autostart.service'` does not print `active`;
-        the entry is gone; and step 6 run again keeps its recording the same
-        way. If `cg` names the autostart unit instead, that instance won the
-        start: log out and in once more, and check again.
+     /run/current-system/sw/bin/steno-desktop)`, then log out and in. Both
+     units start Steno; the one `steno.service` starts wins and removes the
+     entry at launch, and the other ends before setup. Pass when `cg` prints
+     one line, ending in `steno.service`; `systemctl --user is-active
+     'app-steno\x2ddesktop@autostart.service'` does not print `active`; and
+     the entry is gone. If `cg` names the autostart unit instead, that
+     instance won the start: log out and in once more, and check again.
   8. A package-only install: set `programs.steno.enable = false`,
      `nixos-rebuild switch`, and log out and in so the module's Steno is gone;
      `nix profile install
@@ -4306,135 +1638,107 @@ interrupted" after one. On the GNOME machine,
      `nix profile install github:NicolaiSchmid/steno/v0.11.0-rc.N#steno`);
      `nix-collect-garbage -d` as that user; log out and in: Steno starts once,
      as the new version, and its file chooser opens.
-  9. The kept entry (P5, D3), in step 8's package-only install, in the
-     Hyprland session with `withUWSM = true`: step 8 of the Omarchy gate, with
-     `nixos-rebuild switch` (and `home-manager switch` where Nicolai uses
-     home-manager) as the reload in place of `makepkg -si`. Under GNOME alone,
-     step 5 of the GNOME gate, naming `app-gnome-steno\x2ddesktop-<pid>.scope`,
-     stands in for it: gnome-session runs the entry in a scope, which a reload
-     leaves alone.
 
 **The Windows gate** (before the site lists Windows): a Windows machine runs the
-`--ignored` WASAPI tests, one real call, a logoff during a recording of at least
-an hour that saves it (P5), and a `kill` that P3 recovers. It also installs an
-update from each Windows installer (P25), from a build one version behind the
-candidate:
-1. With the MSI install: Check for Updates, Install and Relaunch, then decline
-   the consent prompt (or press Cancel in the MSI's window). The prompt comes
-   up in front. Steno is back in the tray within 10 s on the old version, and
-   its log shows the shutdown.
-2. Again, accepting the prompt: the new version starts by itself.
-3. With the NSIS install: the update installs and the new version starts. Then,
-   from the old version again, ending `Steno-<version>-setup.exe` in Task
-   Manager while it runs brings the old version back within 10 s.
-4. No `cmd.exe` window flashes up in any of these, and none is left in Task
-   Manager once Steno is back.
-5. With "Prevent access to the command prompt" on (`DisableCMD=1` under
-   `HKCU\Software\Policies\Microsoft\Windows\System`), Install and Relaunch
-   brings the old version back within 15 s, and its log says the installer's
-   watcher ended before it ran. Turn the policy off again after the step.
-6. With the MSI install, while the consent prompt is up, start Steno from the
-   Start menu and start a recording, then accept the prompt: the installer
-   closes Steno, the recording is saved, and the new version starts.
-7. With the MSI install, while the consent prompt is up, start Steno from the
-   Start menu, then decline the prompt: one Steno runs afterwards, on the old
-   version.
-8. With the MSI install, choose Install and Relaunch while another MSI package
-   is installing (its progress bar moving), so `msiexec` exits at once with
-   1618: Steno is back on the old version within 10 s.
-9. A stalled recording (A18), with `RUST_LOG=steno_audio=info`, on four
-   pairs of default devices (Sound settings, each device's Properties,
-   Advanced): microphone and output at 48 kHz; both at 44.1 kHz; a
-   Bluetooth headset in hands-free mode (16 or 8 kHz: the headset's
-   "Hands-Free" endpoint as the microphone, during a call); and a device
-   at 96 kHz or above. Each time, record a call with nothing playing for a
-   minute, then play something: the log at the stop shows no "packets
-   after a glitch" line. Then record a call while something plays, and
-   suspend the app's process three times for 0.6 s and once for 1.5 s, a
-   few seconds apart (Sysinternals' `pssuspend steno-desktop`,
-   `Start-Sleep -Milliseconds 600`, `pssuspend -r steno-desktop`). Write
-   down, from the log, which loopback the system lane ran on ("system lane
-   on Process loopback" or "Endpoint loopback" at the start) and both
-   streams' "device positions advanced" lines at the stop. Pass on those
-   lines:
-   - Every line shows its QPC, near 1.0000 a frame (within 2 %): a line
-     that says "QPC no reading", or a QPC ratio further off, fails the step,
-     so a QPC missing on real hardware shows up here.
-   - Each says "jumps filled", the system stream on process loopback
-     included: its QPC is sane even where its positions stand still. A line
-     that says "jumps counted, not filled" at `warn` fails the step. Write down
-     each line's device-position ratio too (1.0000, or the engine's rate
-     over 48 000: 0.9188 at 44.1 kHz, 0.3333 at 16 kHz, 2.0000 at 96 kHz).
-   - A line that says "0.0000 a frame" fails the step only when the same
-     stream has no sane QPC: it says "jumps counted, not filled" and shows
-     no QPC ratio near 1.0000. Its device positions never moved, so its
-     losses below the drift allowance are silent. Positions that stand
-     still beside a sane QPC (seen on process loopback) pass.
-   - The note after the stop says "About 3 seconds of the recording are
-     missing.", and each stream that filled has a "packets after a glitch"
-     line of about 3 s missed.
-   - The "system stream staging" line shows at most 3 840 frames skipped
-     (slipped) per suspension: the engine kept the oldest packets of each
-     stall, as the fill expects, and the lanes stayed aligned (the
-     microphone's thread woke first where it slipped). A recording that was
-     not suspended and still shows about a second skipped had the
-     microphone's thread alone stalled for 1.2 to 2.5 s: its note must count
-     that time too.
+`--ignored` WASAPI tests, one real call, a logoff during a recording that saves
+it, and a `kill` that P3 recovers. It installs an update from each Windows
+installer (the MSI and the NSIS setup), from a build one version behind the
+candidate: the new version starts. The P25 watcher's steps (a declined consent
+prompt, a failed or concurrent `msiexec`, `DisableCMD`) are dropped: simplify
+step 5 moves Windows updates to the Tauri updater's default behaviour, and a
+declined prompt no longer restarts the old version.
 
-   Then record a call for a minute while something plays, pause the
-   playback for 10 s halfway, and play again. Do it on endpoint loopback,
-   which delivers nothing while nothing plays: Steno uses it only where
-   process loopback fails to start, so run it on a Windows build without
-   process loopback (an older Windows 10) or wherever the start says
-   "Endpoint loopback", and do it once on process loopback too. Pass: the
-   stop shows no "packets after a glitch" line and no note about missing
-   audio, and the system stream's "device positions advanced" line passes
-   as above (the idle left out of both measurements). Write down which loopback
-   each run used; with no endpoint loopback machine, say so beside the
-   step.
+**The stalled recording on Windows** (A18), with `RUST_LOG=steno_audio=info`, on four
+pairs of default devices (Sound settings, each device's Properties,
+Advanced): microphone and output at 48 kHz; both at 44.1 kHz; a
+Bluetooth headset in hands-free mode (16 or 8 kHz: the headset's
+"Hands-Free" endpoint as the microphone, during a call); and a device
+at 96 kHz or above. Each time, record a call with nothing playing for a
+minute, then play something: the log at the stop shows no "packets
+after a glitch" line. Then record a call while something plays, and
+suspend the app's process three times for 0.6 s and once for 1.5 s, a
+few seconds apart (Sysinternals' `pssuspend steno-desktop`,
+`Start-Sleep -Milliseconds 600`, `pssuspend -r steno-desktop`). Write
+down, from the log, which loopback the system lane ran on ("system lane
+on Process loopback" or "Endpoint loopback" at the start) and both
+streams' "device positions advanced" lines at the stop. Pass on those
+lines:
+- Every line shows its QPC, near 1.0000 a frame (within 2 %): a line
+  that says "QPC no reading", or a QPC ratio further off, fails the step,
+  so a QPC missing on real hardware shows up here.
+- Each says "jumps filled", the system stream on process loopback
+  included: its QPC is sane even where its positions stand still. A line
+  that says "jumps counted, not filled" at `warn` fails the step. Write down
+  each line's device-position ratio too (1.0000, or the engine's rate
+  over 48 000: 0.9188 at 44.1 kHz, 0.3333 at 16 kHz, 2.0000 at 96 kHz).
+- A line that says "0.0000 a frame" fails the step only when the same
+  stream has no sane QPC: it says "jumps counted, not filled" and shows
+  no QPC ratio near 1.0000. Its device positions never moved, so its
+  losses below the drift allowance are silent. Positions that stand
+  still beside a sane QPC (seen on process loopback) pass.
+- The note after the stop says "About 3 seconds of the recording are
+  missing.", and each stream that filled has a "packets after a glitch"
+  line of about 3 s missed.
+- The "system stream staging" line shows at most 3 840 frames skipped
+  (slipped) per suspension: the engine kept the oldest packets of each
+  stall, as the fill expects, and the lanes stayed aligned (the
+  microphone's thread woke first where it slipped). A recording that was
+  not suspended and still shows about a second skipped had the
+  microphone's thread alone stalled for 1.2 to 2.5 s: its note must count
+  that time too.
 
-   Last, the stall just before the stop, once on each loopback: record a
-   call for a minute while something plays, suspend the app's process for
-   0.6 s as above, and stop the recording within a second of resuming it.
-   Then once more without the suspension. Pass: after the suspended run
-   the stop's `warn` line "the capture's thread missed ... s of audio"
-   reads about 0.6 s (the note stays silent for a second or less), and the
-   microphone's stream logs either a "packets after a glitch" line or a
-   "missed after its last packet" line of about 0.6 s; the system stream does the same on process loopback. On
-   endpoint loopback, write down whether the system stream logged either
-   line: when it logs neither, its engine refused the newest packets and
-   that loss on the system lane went uncounted (the lane reads no clock at
-   the stop there), which decides whether endpoint loopback needs a check
-   of its own. After the run without the suspension no stream logs a
-   "missed after its last packet" line.
+Then record a call for a minute while something plays, pause the
+playback for 10 s halfway, and play again. Do it on endpoint loopback,
+which delivers nothing while nothing plays: Steno uses it only where
+process loopback fails to start, so run it on a Windows build without
+process loopback (an older Windows 10) or wherever the start says
+"Endpoint loopback", and do it once on process loopback too. Pass: the
+stop shows no "packets after a glitch" line and no note about missing
+audio, and the system stream's "device positions advanced" line passes
+as above (the idle left out of both measurements). Write down which loopback
+each run used; with no endpoint loopback machine, say so beside the
+step.
 
-   Then the stall right after the start, once on each loopback, a new
-   recording each time: with something playing, start a call recording and
-   suspend the app's process for 0.6 s within half a second (run
-   `pssuspend steno-desktop` as the recording starts), then record a
-   minute. Then once more without the suspension. Pass: after the
-   suspended run the stop's `warn` line "the capture's thread missed ... s
-   of audio" reads about 0.6 s (the note stays silent for a second or
-   less), and the microphone's stream logs a "missed before its first
-   packet" or a "packets after a glitch" line of about 0.6 s (or 0.6 s
-   less what its engine kept); the system
-   stream does the same on process loopback. On endpoint loopback, write
-   down whether the system stream logged either line: it reads no start,
-   so a loss before its first packet there is uncounted. After the run
-   without the suspension no stream logs a "missed before its first
-   packet" line.
+Last, the stall just before the stop, once on each loopback: record a
+call for a minute while something plays, suspend the app's process for
+0.6 s as above, and stop the recording within a second of resuming it.
+Then once more without the suspension. Pass: after the suspended run
+the stop's `warn` line "the capture's thread missed ... s of audio"
+reads about 0.6 s (the note stays silent for a second or less), and the
+microphone's stream logs either a "packets after a glitch" line or a
+"missed after its last packet" line of about 0.6 s; the system stream does the same on process loopback. On
+endpoint loopback, write down whether the system stream logged either
+line: when it logs neither, its engine refused the newest packets and
+that loss on the system lane went uncounted (the lane reads no clock at
+the stop there), which decides whether endpoint loopback needs a check
+of its own. After the run without the suspension no stream logs a
+"missed after its last packet" line.
+
+Then the stall right after the start, once on each loopback, a new
+recording each time: with something playing, start a call recording and
+suspend the app's process for 0.6 s within half a second (run
+`pssuspend steno-desktop` as the recording starts), then record a
+minute. Then once more without the suspension. Pass: after the
+suspended run the stop's `warn` line "the capture's thread missed ... s
+of audio" reads about 0.6 s (the note stays silent for a second or
+less), and the microphone's stream logs a "missed before its first
+packet" or a "packets after a glitch" line of about 0.6 s (or 0.6 s
+less what its engine kept); the system
+stream does the same on process loopback. On endpoint loopback, write
+down whether the system stream logged either line: it reads no start,
+so a loss before its first packet there is uncounted. After the run
+without the suspension no stream logs a "missed before its first
+packet" line.
 
 ## Order of operations and gates
 
-1. **Every decision is confirmed** (2026-10-07). The call-mode row of D9
-   closes with A10 in step 2.
-2. **Every package is written,** in parallel except for the dependencies under
-   "Work packages": S1 to S7, A1 to A10, P1 to P40, X1 to X7. Any further gap the
-   data-loss audit finds joins the P table: before G1 it lands with the others;
-   after G1 it lands as a new candidate (G2).
-3. **Gate G1.** Every S, A and P row and X1 to X7 are closed, the pull requests
-   under "Also landing before the first candidate" are merged, and the audio
-   path is final (D9). X8 runs in G2.
+1. **Every decision is confirmed** (2026-10-07). Done.
+2. **Every package is written.** Done: S1 to S7, A1 to A20, P1 to P40 and X1
+   to X7 are merged (Closed packages). Any further gap the data-loss audit
+   finds lands as a new candidate (G2).
+3. **Gate G1.** Every S, A and P row and X1 to X7 are closed, and the audio
+   path is final (D9). Met on 2026-10-18. The speaker-clip follow-up (Open
+   work) is still open. X8 runs in G2.
 4. **Bump to `0.11.0-rc.1` and tag it.** This publishes a pre-release and moves
    `desktop-beta`; no handoff item is signed into the appcast. Desktop-id
    installs convert.
@@ -4459,6 +1763,80 @@ candidate:
 
      Nicolai keeps the tally (meeting, platform, candidate, result) in one
      GitHub issue.
+   - **A10's call-mode checks** (**Nicolai**, on his Mac in a GUI session,
+     from a checkout of the candidate's tag with its CLI built: `cargo build
+     --release -p steno-cli`; the commands run from the checkout's root).
+     Before every step: the terminal app has Privacy & Security, Screen &
+     System Audio Recording and Microphone, turned on; Do Not Disturb is on,
+     so no alert sound plays; no app plays audio; and the built-in microphone
+     stays the input (System Settings, Sound, Input), since macOS moves the
+     input to a headset as it connects. Steps 1 to 3 run on the Mac's
+     speakers.
+     1. Nothing playing: `target/release/steno dev capture-spike --lanes call
+        --seconds 20 --out ~/a10`. Pass when it prints `nonzero system: 0 of N
+        samples`, with N about 960000: digital silence.
+     2. Both bounds, then the tone.
+        - `cargo test --release -p steno-audio --test live
+          call_capture_runs_from_its_start_with_nothing_playing -- --ignored
+          --nocapture`. Pass when it passes and prints `first callback A after
+          start returned (bound 100ms), B after start was called (bound
+          200ms)` with A at most 100 ms and B at most 200 ms. When the one- or
+          the five-minute load is 4 or more it prints `end-to-end bound not
+          checked: load N (1 min), M (5 min)`; B is then read against 200 ms
+          by eye.
+        - The tone: with the candidate in `~/Applications`, quit every Steno,
+          the Swift app included, run `: > ~/a10.log` and `open --env
+          RUST_LOG=info --stderr ~/a10.log ~/Applications/Steno.app`, start a
+          call recording, play a short tone at 10 s (`sleep 10; afplay
+          /System/Library/Sounds/Glass.aiff`), and stop 5 s later. Pass when
+          `grep "first callback" ~/a10.log` prints `the capture's first
+          callback (system tap) came N ms after its start` with N at most 100,
+          and `target/release/steno dev onsets <the meeting's recording.caf>`
+          puts the tone's onset in the system channel and its residual in the
+          echo-cancelled mic channel within 50 ms (if the cancellation hides
+          the residual, a second take with `target/release/steno record
+          --mode call --keep-raw-mic --out ~/a10-raw` keeps the raw mic as
+          `mic.raw.caf`).
+     3. A hands-free headset: pair a Bluetooth headset as the output, keep the
+        built-in microphone as the input, and run step 1's command with
+        `--seconds 60`. While it records, in a second Terminal window, read
+        the headset's "Current SampleRate" with `system_profiler
+        SPAudioDataType | grep -A8 "<the headset's name>"`. Pass when the
+        headset stays at 44.1 or 48 kHz. A headset that drops to hands-free
+        because recording the call also opens its microphone is A11's known
+        limit, noted (step 6), not a failure here.
+     4. Alerts on the speakers, the output on a headset: in System Settings,
+        Sound, set "Play sound effects through" to the Mac's speakers and the
+        output to a headset, then run step 2's `cargo test` command with
+        nothing playing. Pass on both bounds, as in step 2.
+     5. The output switched mid-call, with "Play sound effects through" on
+        "Selected sound output device": `RUST_LOG=info target/release/steno
+        dev capture-spike --lanes call --seconds 60 --out ~/a10-switch 2>
+        ~/a10-switch.log`; at about 20 s switch the output from the speakers
+        to a headset (or AirPlay), at about 40 s back, and speak now and then.
+        Pass when `grep -E "device|silent output" ~/a10-switch.log` shows, for
+        each switch, `device change: DefaultOutputChanged, reconnecting`, then
+        `device resumed: attempt 1, gap G s` with G under 1, then `the silent
+        output runs on <the new device>`, and no `did not start` line; when
+        the `mic ... dBFS  system ... dBFS` lines go on after each `device
+        resumed`; and when the summary prints `duration` within 1 s of 60.
+     6. AirPods, A11's known limit (noted, neither passed nor failed): with
+        AirPods connected as the output and the built-in microphone chosen as
+        the input, record a two-minute call in the app while a call or a
+        video plays through the AirPods. Note whether the AirPods switch to
+        hands-free while it records (their sound turns narrow, and
+        `system_profiler SPAudioDataType | grep -A8 AirPods` shows a "Current
+        SampleRate" of 16 or 24 kHz) and whether they switch back after the
+        stop. The note goes on A11's line.
+   - **A14's phone check** (**Nicolai**, three times, with a build of the
+     phone app): start a recording on the phone, force-quit the app from the
+     app switcher, relaunch it, let the recording upload, and check that the
+     meeting on the Mac is Ready with the cut-off warning and as long as the
+     recording ran (within a second or two). Once after about 30 s and once
+     after more than 5 minutes, on the phone's built-in microphone; and once
+     after about 30 s while recording through AirPods. If one fails or its
+     length is off, the uploaded file (in the meeting's folder) is what the
+     salvage needs to read; send its first 64 KB.
    - **A15's check** (**Nicolai**, on the Mac): a debug build of the
      candidate (`cargo build -p steno-desktop -p steno-speech-sidecar`, as
      the desktop README's "Run" says) transcribes several real meetings with
@@ -4467,18 +1845,14 @@ candidate:
      `footprint -p steno-desktop` taken after each meeting stays within
      about 100 MB of the value after the first, with the IOSurface row
      under 200 regions.
-   - **A19's check** (**Nicolai**, on the Mac): a forced fallback. With
-     Steno quit, `touch ~/Library/Application\ Support/Steno/warm-up-in-progress`
-     (the mark a warm-up that ended with the app leaves), then start the
-     app's binary from Terminal (`Contents/MacOS/steno-desktop` in the
-     bundle), which prints its log there. Pass when the launch prints "the
-     speech engine in this process ended the app; from now on meetings are
-     transcribed in the speech sidecar…", Settings, Transcription shows
-     "Turned off after a crash", and a recorded meeting is ready (after the
-     speech models row's download if the sidecar's models are missing);
-     then, after "Use again", the next meeting is ready, and the launch
-     after it logs no line about the speech engine in this process and
-     shows no such row.
+   - **P35's live Keychain check** (**Nicolai**, a spare macOS account with
+     a paired phone): the case #282 tests over the secrets file, run against
+     the real Keychain. A login keychain that comes back empty (Create New
+     Keychain after a password reset), or holding another identity, makes
+     Steno mint nothing: the listener stays off and Settings > iPhone waits
+     with Try again and Pair again.
+   - A19's forced-fallback check is dropped with the warm-up mark (simplify
+     step 4).
    - A fix becomes a new candidate. The steps it touches run again, and a fix to
      the audio path or a new P package restarts the R5 soak and the stability
      count.
@@ -4580,22 +1954,3 @@ rollback: the race needs a meeting processed again, and the Swift app refuses
 look at (in a folder it cannot search) as gone again, as before #313, so its
 "Keep all" leaves that asset's stamp on and a later sweep can delete audio the
 user chose to keep.
-
-## Changes to other plans in this plan's PR
-
-- **`.plans/2026-10-04-mac-cutover.md`.** A note at the top says that this plan
-  extends it, where it changes it, and which details no longer hold.
-- **`.plans/2026-10-02-rust-core-and-tauri-shell.md`.**
-  - The status line, the WP9b progress row and the owner sentence of "Open after
-    the port" point here, and that sentence says that an item that can lose data
-    blocks the stable release whatever its owner, and that an item a row of this
-    plan's tables names belongs to that row's package.
-  - These places now point at this plan: the Transition paragraph and WP9's
-    opening line (the new identifier); WP9's cutover paragraph; the "Updates"
-    and "Pending speaker reviews" lines under "Beyond the bridge"; seam (4); the
-    first **WP9b.** item; the Shell section's login-item line (D4); the
-    **WP9b.** item on the other Swift fixes (D9; S7 deletes it; A10 took call
-    mode out of it).
-  - The closed **WP9b.** item about the first `desktop-v*` tag is deleted. The
-    other items stay until the pull requests that fix them delete them; the
-    packages named here take them over.

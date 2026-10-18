@@ -7,11 +7,10 @@ neither the recorder nor the capture is restructured before rc.1. PR 3 also
 needs a new D9 ruling, below. D, P, A, R, S and G IDs name entries of the
 stable plan.
 
-This plan turns a review of the capture and the recorder, and Nicolai's
-decisions on it (both 2026-10-15), into work; everything it needs from them is
-written here. It supersedes no plan and changes no other plan. Whichever way
-Nicolai rules on D9 (below), the PR that records the ruling in D9's entry also
-adds this plan to the stable plan's "What follows".
+This plan turns Nicolai's decisions of 2026-10-15 on the capture and the
+recorder into work; everything it needs from them is written here. Whichever
+way Nicolai rules on D9 (below), the PR that records the ruling in D9's entry
+also adds this plan to the stable plan's "What follows".
 
 ## Goal
 
@@ -31,25 +30,10 @@ The recorder and the capture session decide one recording's state from many
 threads through many locks, and each change uncovers an interleaving nobody
 wrote down. Counts are on `main` at c79d00b70.
 
-- **#244** (stall watchdog, restarts, coreaudiod restarts) took seven review
-  rounds: rounds 4 to 6 on the `Streak`, gap and backoff accounting across
-  rebuilds, round 7 on the window between the notice thread and the auto-stop
-  countdown. Only a 120 s probe on the manual clock showed that `session.rs`'s
-  doc, "about once a minute" (P22's log cadence), did not hold.
-- **#283** moved the device change's recovery mark (`Outage::follow`) ahead of
-  the notice thread's `session.stream()` read, so a Windows call's countdown
-  could not end a call while its capture recovered. It left a stale countdown
-  on the host (follow-ups, below).
-- **#277 and #287** were test-only: they moved waits to `HANG_GUARD` and added
-  `HeldOutages`, because the recorder's policy tests run the real producer,
-  processing and writer threads at real-time pace; #290 did the same for
-  `steno-audio`'s session tests. #287's investigation found that for a
-  condition that can become true and then false again "no bound helps".
-  `recorder.rs`'s tests hold 26 `eventually` waits, 8 sleeps and one
-  `ManualClock`.
-- **#286** (open) adds a third way to refuse a start, `starts_refused`:
-  `quitting` and `start_holds` are fields under `inner`, `starts_refused` an
-  `AtomicBool` outside it.
+The stall watchdog (#244), the device change's recovery mark (#283), the test
+waits of #277, #287 and #290 and the start refusals of #286 each found an
+ordering between these threads that nobody had written down. `recorder.rs`'s
+tests hold 26 `eventually` waits, 8 sleeps and one `ManualClock`.
 
 The cause:
 
@@ -83,23 +67,15 @@ returns a concrete `CaptureSession`) and one owner for the state.
 
 ## What this plan assumes
 
-These land before `0.11.0-rc.1` under their own owners:
-
-- **#286** merges as is (Nicolai, 2026-10-15).
-- **P40** (added to the stable plan by #286) changes how the host takes the
-  recorder's hook. Whatever its final form, the actor does not depend on it,
-  since the hook runs on its own notifier thread and `status()` never waits;
-  PR 2 keeps what P40 adds to the status (#286 proposes a sequence number) and
-  bumps it once per stored snapshot.
-- **A15** (added to the stable plan by #263) catches CoreML's Objective-C
-  exceptions at the FFI boundary (the crate's `coreml` module), which also
-  covers the CoreML warm-up (`warm_up_if_installed`) that runs during a live
-  recording. PR 2 keeps the warm-up off the actor: the I/O worker calls
-  `warm_up_if_installed` once it has sent `StartFinished`, inside a
-  `catch_unwind` that logs a panic and leaves the recording going. A stop
-  queued behind it waits only for its model checks, which stat the model
-  files: the load itself runs on the services runtime as today, where A15's
-  catch at the FFI boundary covers it.
+#286 (start refusals, `starts_refused`), P40 (the `recording` feed, #299) and
+A15 (CoreML's Objective-C exceptions caught at the FFI boundary, #296) are
+merged. The actor does not depend on how the host takes the recorder's hook,
+since the hook runs on its own notifier thread and `status()` never waits; PR 2
+keeps what P40 added to the status. PR 2 keeps the CoreML warm-up
+(`warm_up_if_installed`) off the actor: the I/O worker calls it once it has
+sent `StartFinished`, inside a `catch_unwind` that logs a panic and leaves the
+recording going. A stop queued behind it waits only for its model checks,
+which stat the model files.
 
 ## Target design
 

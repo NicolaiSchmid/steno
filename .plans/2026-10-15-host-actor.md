@@ -1,13 +1,16 @@
 # The host actor, the change feed and a pipeline scheduler
 
-After stable (`0.11.0`), owned by the pipeline, store and export area
-(`wp-pse-*`). It supersedes the after-stable parts of
-`.plans/2026-10-12-store-off-the-workers.md` (P40): the host's writes leaving
-the view-model lock, the delete's undo among them, the change feed and the
-targeted reloads. Once the host actor lands (PR 2 below), it also supersedes
-that plan's decision 3 lock order. It follows Nicolai's decision of 2026-10-15 to take P40's smaller cut
-for rc.1 and to do this work after stable. Line references are against `main`
-at c79d00b70.
+Status: planned, not started; it starts after stable (`0.11.0`). Owned by the
+pipeline, store and export area (`wp-pse-*`). It takes over the after-stable
+part of P40 (`.plans/2026-10-07-stable-promotion.md`; P40 itself, merged in
+#299, moved the store's work off the command workers): the host's writes
+leaving the view-model lock, the delete's undo among them, the change feed and
+the targeted reloads. Once the host actor lands (PR 2 below), it also replaces
+P40's lock order (its decision 3: the host's reads under the view-model lock
+go to the host's own reader, and the host's writes stay under that lock). It
+follows Nicolai's decision of 2026-10-15 to take P40's smaller cut for rc.1
+and to do this work after stable. Line references are against `main` at
+c79d00b70.
 
 ## What changes and why
 
@@ -133,21 +136,20 @@ capture session, which needs a new D9 ruling).
 ## Acceptance
 
 Every PR keeps the bridge fixtures in `apps/macos/web/fixtures/bridge/` byte
-for byte, and every P40 check that still applies passes unchanged.
+for byte, and every test P40 added that still applies passes unchanged.
 
 - **PR 1.** The host's bridge tests and fixtures pass with no edit. P40's
-  lane tests (check 7: click order, the Quit's wait, an owed request
-  before a later one) pass against the actor's inbox. A command and a level
+  lane tests (click order, the Quit's wait, an owed request before a later
+  one) pass against the actor's inbox. A command and a level
   update at once never deadlock, by construction: one thread holds `Inner`.
-- **PR 2.** P40's check 6 comes back whole: a settings save under a held lock
-  leaves another window's commands live. P40's check 9 comes here whole: the
-  save waits, then reports the busy error, while the list, the levels and
-  another command stay live, and the same holds for a refused delete's undo
-  whose fallback checkpoint waits. P40's check 17, the delete's kill tests,
-  passes unchanged. Two quick saves apply in order.
+- **PR 2.** A settings save under a held lock leaves another window's
+  commands live: the save waits, then reports the busy error, while the list,
+  the levels and another command stay live, and the same holds for a refused
+  delete's undo whose fallback checkpoint waits. The delete's kill tests pass
+  unchanged. Two quick saves apply in order.
 - **PR 3.** An idle app sends no snapshot at all, `settings.phone` included; a
   commit to one meeting reloads only that meeting's row and detail; another
-  process's commit shows within one tick (P40 checks 19 and 20 hold).
+  process's commit shows within one tick.
 - **PR 4.** `crates/steno-pipeline/tests/store_waits.rs` and
   `model_waits.rs` pass with no edit to their expectations, and so do the kill
   tests (`crates/steno-services/src/kill_tests.rs`). A meeting queued at
