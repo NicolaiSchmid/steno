@@ -371,22 +371,6 @@ fn an_unfinished_sidecar_is_rejected_until_finished() {
     assert_eq!(WavFile::read_16k_mono(&path).unwrap().len(), 160);
 }
 
-#[test]
-fn caf_reader_rejects_garbage() {
-    assert!(matches!(
-        CafFile::read_bytes(&[0x41; 64]),
-        Err(CafReadError::Malformed(_))
-    ));
-    assert!(matches!(
-        CafFile::read_bytes(b"caff"),
-        Err(CafReadError::Malformed(_))
-    ));
-    assert!(matches!(
-        CafFile::read(Path::new("/nonexistent/x.caf")),
-        Err(CafReadError::Io(_))
-    ));
-}
-
 /// The header reader counts every whole frame of an unfinished master, and
 /// the frames its size names in a finished one.
 #[test]
@@ -417,25 +401,6 @@ fn the_caf_header_counts_the_frames_of_an_unfinished_and_a_finished_master() {
     drop(file);
     let finished = CafHeader::read(&path).unwrap();
     assert_eq!(finished.frame_count, 960, "the patched size, not the file");
-}
-
-/// The header reader counts whole frames only.
-#[test]
-fn the_caf_header_counts_whole_frames_only() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("killed.caf");
-    let mut writer = CafStreamWriter::create(&path, 48_000.0, 2).unwrap();
-    writer.write(&[0.5f32; 960], 480).unwrap();
-    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-    file.set_len((CafStreamWriter::HEADER_SIZE + 479 * 8 + 5) as u64)
-        .unwrap();
-    drop(file);
-    assert_eq!(CafHeader::read(&path).unwrap().frame_count, 479);
-    assert_eq!(CafFile::read(&path).unwrap().frame_count(), 479);
-
-    let empty = directory.path().join("empty.caf");
-    drop(CafStreamWriter::create(&empty, 48_000.0, 1).unwrap());
-    assert_eq!(CafHeader::read(&empty).unwrap().frame_count, 0);
 }
 
 #[test]

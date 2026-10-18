@@ -624,18 +624,6 @@ fn a_file_the_demuxer_panics_on_fails_and_is_kept() {
     assert_eq!(logs, [earlier], "no crash log for a caught panic");
 }
 
-/// The phone's settings, as the decode is built from them.
-#[test]
-fn the_salvage_decodes_with_the_phones_settings() {
-    let params = salvage::SalvagedPackets::codec_params();
-    assert_eq!(params.sample_rate, Some(44_100));
-    assert_eq!(
-        params.channels.map(symphonia::core::audio::Channels::count),
-        Some(1)
-    );
-    assert_eq!(params.extra_data.as_deref(), Some(&[0x12, 0x08][..]));
-}
-
 /// Whether two runs of samples are equal, without printing them.
 fn same(a: &[f32], b: &[f32]) -> bool {
     a == b

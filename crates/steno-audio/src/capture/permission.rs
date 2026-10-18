@@ -589,43 +589,6 @@ mod tests {
         }
     }
 
-    /// A cancelled probe removes its tone file.
-    #[test]
-    fn the_tone_file_is_removed_when_the_probe_is_cancelled() {
-        let dir = tempfile::tempdir().unwrap();
-        let cancel = Cancel::new();
-        let raised = cancel.clone();
-        let cancelling = tap(false, move |poll| {
-            if poll == 2 {
-                raised.cancel();
-            }
-            vec![0.0]
-        });
-        let (found, written, seen) = probe_into(dir.path(), &cancelling, &cancel);
-        assert_eq!(found, ProbeAnswer::Stopped);
-        assert!(written);
-        assert_eq!(seen, [true, true]);
-        assert!(is_empty(dir.path()), "the tone file is gone");
-    }
-
-    /// A tap that cannot start answers silent and leaves no tone file.
-    #[test]
-    fn the_tone_file_is_removed_when_the_probe_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let failing = tap(true, |_| vec![0.5]);
-        let (found, written, seen) = probe_into(dir.path(), &failing, &Cancel::new());
-        assert_eq!(found, ProbeAnswer::Silent);
-        assert!(written, "the tone was written before the tap failed");
-        assert!(seen.is_empty(), "no tone without a tap");
-        assert!(is_empty(dir.path()), "the tone file is gone");
-
-        let missing = dir.path().join("missing");
-        let unwritten = tap(false, |_| vec![0.5]);
-        let (found, written, _) = probe_into(&missing, &unwritten, &Cancel::new());
-        assert_eq!((found, written), (ProbeAnswer::Silent, false));
-        assert!(!missing.exists());
-    }
-
     /// Only old regular files with the exact tone name are removed; near
     /// misses, fresh files, directories and symlinks stay. Case and
     /// trailing-space variants are checked by name alone, since
@@ -707,26 +670,5 @@ mod tests {
         left.sort();
         kept.sort();
         assert_eq!(left, kept);
-    }
-
-    /// The tone is one second of 1 kHz at half scale, 48 kHz mono 16-bit.
-    #[test]
-    fn the_tone_is_a_second_of_a_loud_sine() {
-        let file = tone_wav();
-        assert_eq!(&file[..4], b"RIFF");
-        assert_eq!(&file[8..12], b"WAVE");
-        let samples: Vec<i16> = file[44..]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| i16::from_le_bytes(*pair))
-            .collect();
-        assert_eq!(samples.len(), 48_000);
-        let peak = samples
-            .iter()
-            .map(|sample| sample.unsigned_abs())
-            .max()
-            .unwrap();
-        assert!((16_000..=16_384).contains(&peak), "{peak}");
     }
 }

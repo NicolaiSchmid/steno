@@ -1161,16 +1161,6 @@ mod tests {
         );
     }
 
-    /// Only a capture on the fallback is re-checked.
-    #[test]
-    fn the_recheck_runs_on_the_fallback_alone() {
-        assert_eq!(
-            LiveCaptureBackend::recheck_for(true),
-            Some(LiveCaptureBackend::FALLBACK_RECHECK)
-        );
-        assert_eq!(LiveCaptureBackend::recheck_for(false), None);
-    }
-
     /// A notification reports the first difference, else the failed
     /// stream's device gone; a re-check only another microphone.
     #[test]

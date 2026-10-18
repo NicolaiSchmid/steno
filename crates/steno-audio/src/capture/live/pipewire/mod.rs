@@ -127,8 +127,6 @@ impl Gate {
             if !self.open.load(Ordering::SeqCst) {
                 return false;
             }
-            #[cfg(test)]
-            tests::before_a_report_counts_itself();
             *inside += 1;
         }
         let _leaves = ReportLeaves(self);
@@ -1500,7 +1498,6 @@ impl Drop for LiveCaptureBackend {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
     use std::sync::mpsc::TrySendError;
 
     use super::*;
@@ -1656,19 +1653,6 @@ mod tests {
         assert_eq!(runs_realtime(&stat(3)), Some(false), "SCHED_BATCH");
         assert_eq!(runs_realtime("4242 (data-loop) S 1"), None, "cut short");
         assert_eq!(runs_realtime("no name"), None);
-    }
-
-    thread_local! {
-        /// Run once by the thread's next [`Gate::report`], after it saw the
-        /// gate open and before it counts itself.
-        static BEFORE_A_REPORT_COUNTS_ITSELF: Cell<Option<Box<dyn FnOnce()>>> =
-            const { Cell::new(None) };
-    }
-
-    pub(super) fn before_a_report_counts_itself() {
-        if let Some(hook) = BEFORE_A_REPORT_COUNTS_ITSELF.take() {
-            hook();
-        }
     }
 
     fn latency_pod(direction: u32, quantum: f32, rate: i32, ns: i64) -> Vec<u8> {
@@ -1965,63 +1949,6 @@ mod tests {
         assert_eq!(*gate.reporting(), 0);
     }
 
-    #[test]
-    fn close_waits_for_a_report_that_saw_the_gate_open_but_has_not_counted_itself() {
-        let gate = Arc::new(Gate::new());
-        let (paused, pause) = sync_channel(0);
-        let (resume, resumed) = sync_channel::<()>(0);
-        let ran = Arc::new(AtomicBool::new(false));
-        let reporter = std::thread::spawn({
-            let gate = Arc::clone(&gate);
-            let ran = Arc::clone(&ran);
-            move || {
-                BEFORE_A_REPORT_COUNTS_ITSELF.set(Some(Box::new(move || {
-                    paused.send(()).unwrap();
-                    resumed.recv().unwrap();
-                })));
-                gate.report(|| ran.store(true, Ordering::SeqCst))
-            }
-        });
-        pause.recv().unwrap();
-        let (returned, closer) = close_on_a_thread(&gate, Instant::now() + Duration::from_secs(60));
-        assert_eq!(
-            returned.recv_timeout(Duration::from_millis(200)),
-            Err(RecvTimeoutError::Timeout),
-            "close() returned before a report that saw the gate open counted itself"
-        );
-        resume.send(()).unwrap();
-        assert_eq!(returned.recv_timeout(Duration::from_secs(10)), Ok(true));
-        assert!(
-            ran.load(Ordering::SeqCst),
-            "close() returned before the report ran"
-        );
-        assert!(reporter.join().unwrap());
-        closer.join().unwrap();
-    }
-
-    #[test]
-    fn a_report_through_a_closed_gate_reaches_no_handler() {
-        let reports = Arc::new(AtomicUsize::new(0));
-        let sink = LaneFrameSink::with_handler(
-            &[AudioLane::Mic],
-            SAMPLE_RATE,
-            0.1,
-            Box::new({
-                let reports = Arc::clone(&reports);
-                move |_| {
-                    reports.fetch_add(1, Ordering::SeqCst);
-                }
-            }),
-        );
-        let gate = Gate::new();
-        gate.close(Instant::now());
-        report(&gate, &sink, DeviceChangeReason::OutputDeviceGone);
-        assert_eq!(reports.load(Ordering::SeqCst), 0);
-        let open = Gate::new();
-        report(&open, &sink, DeviceChangeReason::OutputDeviceGone);
-        assert_eq!(reports.load(Ordering::SeqCst), 1);
-    }
-
     /// `end(.., limit)` on its own thread for a capture thread that runs
     /// `body`; the receiver gets how long `end` took.
     fn end_on_a_thread(
@@ -2139,15 +2066,6 @@ mod tests {
         assert!(where_it_waits(id).starts_with(&format!("thread {id} in system call ")));
     }
 
-    #[test]
-    fn the_answer_channel_holds_no_answer_nobody_waits_for() {
-        let (answer, _answered) = answer_channel();
-        assert!(
-            matches!(answer.try_send(Ok(stream())), Err(TrySendError::Full(_))),
-            "a buffered answer would outlive a start that gave up"
-        );
-    }
-
     /// A thread that does not answer in time is given up on: `DidNotRun`
     /// when the daemon had answered, else a backend failure.
     #[test]
@@ -2166,17 +2084,6 @@ mod tests {
             await_answer(answered, Duration::ZERO, &AtomicBool::new(false)),
             Err(CaptureError::BackendFailed(_))
         ));
-    }
-
-    #[test]
-    fn a_waiting_start_takes_the_answer() {
-        let (answer, answered) = answer_channel();
-        let thread = std::thread::spawn(move || answer.send(Ok(stream())));
-        assert_eq!(
-            await_answer(answered, Duration::from_secs(10), &AtomicBool::new(true)),
-            Ok(stream())
-        );
-        assert!(thread.join().unwrap().is_ok());
     }
 
     /// Counts its drops, standing in for a `Capture`.

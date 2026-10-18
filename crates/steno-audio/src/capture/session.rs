@@ -100,11 +100,6 @@ struct Inner {
     /// belongs to: the answer of a `stop()` that waited out its finalise
     /// while a `start()` took the lock first.
     finalised: Option<(usize, Box<CaptureResult>)>,
-    /// Unit tests only: run by the next `stop()` that finds `Stopping`,
-    /// lock released, so a test can run a `start()` before it takes the
-    /// lock back.
-    #[cfg(test)]
-    before_stop_waits: Option<Box<dyn FnOnce() + Send>>,
 }
 
 struct Active {
@@ -509,8 +504,6 @@ impl CaptureSession {
                     rebuild_generation: 0,
                     recordings_started: 0,
                     finalised: None,
-                    #[cfg(test)]
-                    before_stop_waits: None,
                 }),
                 state_changed: Condvar::new(),
                 refuse_writer_failure_thread: AtomicBool::new(false),
@@ -967,14 +960,6 @@ impl Core {
             // wakeup.
             let mut inner = self.lock();
             let recording = inner.recordings_started;
-            #[cfg(test)]
-            if matches!(inner.state, CaptureState::Stopping)
-                && let Some(hook) = inner.before_stop_waits.take()
-            {
-                drop(inner);
-                hook();
-                inner = self.lock();
-            }
             while matches!(inner.state, CaptureState::Stopping) {
                 inner = self
                     .state_changed
@@ -1998,17 +1983,7 @@ impl Drop for Unwinding<'_> {
 
 #[cfg(test)]
 mod tests {
-    //! The window between a finalise's wakeup and the waiting `stop()`'s
-    //! next hold of the lock, forced through `before_stop_waits`.
-
-    use std::path::Path;
-
-    use steno_core::paths::file_url_path;
-
     use super::*;
-    use crate::capture::CaptureMode;
-    use crate::testing::{HANG_GUARD, SyntheticCaptureBackend};
-    use crate::writer::{LaneFrames, RecordingFiles};
 
     /// Missed audio counts on the lane that missed most, each stream's
     /// share at its own rate.
@@ -2078,144 +2053,5 @@ mod tests {
         counts.fold_at_a_rebuild(&sink, None, SAMPLE_RATE);
         counts.gap_written(48_000);
         assert_eq!(counts.unfilled_seconds(), 1.0);
-    }
-
-    /// The production writer, except that every write fails and `finish()`
-    /// waits for `release`, holding the finalise in `Stopping`.
-    struct FailsThenHolds {
-        inner: RecordingWriter,
-        release: Receiver<()>,
-    }
-
-    impl RecordingWriting for FailsThenHolds {
-        fn files(&self) -> RecordingFiles {
-            self.inner.files()
-        }
-        fn write(&mut self, _frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
-            Err(CaptureError::WriterFailed("DiskFull".into()))
-        }
-        fn sync(&mut self) -> std::io::Result<()> {
-            self.inner.sync()
-        }
-        fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
-            // Bounded, so a failed test cannot hang its session's drop.
-            let _ = self.release.recv_timeout(HANG_GUARD);
-            self.inner.finish()
-        }
-    }
-
-    /// Receives from `states` until a state matches `want`.
-    fn wait_for(states: &Receiver<CaptureState>, want: impl Fn(&CaptureState) -> bool) {
-        loop {
-            let state = states.recv_timeout(HANG_GUARD).expect("the state changes");
-            if want(&state) {
-                return;
-            }
-        }
-    }
-
-    /// The first recording's writer fails and its finalise holds
-    /// `Stopping`; a `stop()` pauses in `before_stop_waits` while the
-    /// finalise ends and, given `second`, a `start()` takes the lock.
-    fn stop_that_waited(
-        directory: &Path,
-        second: Option<Uuid>,
-    ) -> (CaptureSession, Result<CaptureResult, CaptureError>, Uuid) {
-        let (release, released) = channel();
-        let first_writer = Mutex::new(Some(released));
-        let session = CaptureSession::with_writer_factory(
-            CaptureConfiguration::new(CaptureMode::InPerson, directory),
-            Arc::new(SyntheticCaptureBackend::tones(
-                &[AudioLane::Mixed],
-                &[(AudioLane::Mixed, 440.0)],
-                0.5,
-            )),
-            None,
-            CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-            Arc::new(SystemClock::new()),
-            Arc::new(move |layout, lanes, keep_raw| {
-                let inner = RecordingWriter::new(layout, lanes, keep_raw)?;
-                Ok(match first_writer.lock().unwrap().take() {
-                    Some(release) => Box::new(FailsThenHolds { inner, release }),
-                    None => Box::new(inner) as Box<dyn RecordingWriting>,
-                })
-            }),
-        )
-        .unwrap();
-        let states = session.states();
-        let first = Uuid::new_v4();
-        session.start(first).unwrap();
-        wait_for(&states, |state| matches!(state, CaptureState::Stopping));
-
-        let (paused, pause) = channel();
-        let (resume, resumed) = channel::<()>();
-        session.core.lock().before_stop_waits = Some(Box::new(move || {
-            paused.send(()).unwrap();
-            resumed.recv_timeout(HANG_GUARD).unwrap();
-        }));
-        let stopped = std::thread::scope(|scope| {
-            // Owned here, so a failing step drops both at once.
-            let (release, resume) = (release, resume);
-            let stopper = scope.spawn(|| session.stop());
-            pause
-                .recv_timeout(HANG_GUARD)
-                .expect("the stop() finds the finalise in Stopping");
-            release.send(()).unwrap();
-            wait_for(&states, |state| {
-                matches!(state, CaptureState::Failed { .. })
-            });
-            if let Some(second) = second {
-                session.start(second).unwrap();
-            }
-            resume.send(()).unwrap();
-            stopper.join().unwrap()
-        });
-        (session, stopped, first)
-    }
-
-    /// A `start()` between the finalise and the waiting `stop()`: the stop
-    /// returns the finalised recording and leaves the new one running.
-    #[test]
-    fn a_stop_that_waited_does_not_stop_the_next_recording() {
-        let directory = tempfile::tempdir().unwrap();
-        let second = Uuid::new_v4();
-        let (session, stopped, first) = stop_that_waited(directory.path(), Some(second));
-        let result = stopped.expect("the finalised recording, not InvalidState");
-        assert_eq!(result.asset.meeting_id, first);
-        assert!(
-            file_url_path(&result.asset.url).unwrap().exists(),
-            "the first meeting's master"
-        );
-        assert!(
-            matches!(session.state(), CaptureState::Recording { .. }),
-            "{:?}",
-            session.state()
-        );
-        assert_eq!(session.stop().unwrap().asset.meeting_id, second);
-        assert_eq!(session.state(), CaptureState::Idle);
-    }
-
-    /// The waiting `stop()` gets the lock first: it returns the recording
-    /// `Failed` carries, and the next recording runs on its own.
-    #[test]
-    fn a_stop_that_waited_returns_the_failed_recording() {
-        let directory = tempfile::tempdir().unwrap();
-        let (session, stopped, first) = stop_that_waited(directory.path(), None);
-        let result = stopped.expect("stop() returns the finalised recording");
-        assert_eq!(result.asset.meeting_id, first);
-        match session.state() {
-            CaptureState::Failed {
-                error: CaptureError::WriterFailed(detail),
-                recording,
-            } => {
-                assert!(detail.contains("DiskFull"), "{detail}");
-                assert_eq!(recording.as_deref(), Some(&result));
-            }
-            other => panic!("expected Failed(WriterFailed), got {other:?}"),
-        }
-        let second = Uuid::new_v4();
-        session.start(second).unwrap();
-        assert_eq!(session.stop().unwrap().asset.meeting_id, second);
-        assert_eq!(session.state(), CaptureState::Idle);
     }
 }

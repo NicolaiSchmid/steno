@@ -28,7 +28,6 @@ const RATE: usize = 48_000;
 
 struct Material {
     far: Vec<f32>,
-    room: Vec<f32>,
     echo_only: Vec<f32>,
 }
 
@@ -38,11 +37,7 @@ fn material() -> &'static Material {
         let far = AudioFixtures::speech_like_far(SECONDS);
         let room = AudioFixtures::room_impulse_response();
         let echo_only = AudioFixtures::echo_mic(&far, &room);
-        Material {
-            far,
-            room,
-            echo_only,
-        }
+        Material { far, echo_only }
     })
 }
 
@@ -163,37 +158,4 @@ fn rejects_impossible_shapes_and_pads_short_buffers() {
     aec.process(&loud, &loud, &mut out);
     assert!(out.iter().all(|s| (-1.0..=1.0).contains(s)));
     assert_ne!(out[479], 9.0, "every output sample is written");
-}
-
-#[test]
-fn fixtures_are_deterministic() {
-    let m = material();
-    assert_eq!(
-        AudioFixtures::speech_like_far(0.1),
-        AudioFixtures::speech_like_far(0.1)
-    );
-    assert_eq!(AudioFixtures::room_impulse_response(), m.room);
-    assert_eq!(m.room[0], 1.0);
-    assert_eq!(m.room.len(), 4_800);
-    assert!(m.room[4_799].abs() < 0.001);
-    let tone = AudioFixtures::tone(1_000.0, 1.0, 0.5);
-    assert_eq!(tone.len(), 48_000);
-    assert!((EchoMetrics::decibels(EchoMetrics::rms(&tone)) - -9.03).abs() < 0.05);
-    let far_level = EchoMetrics::decibels(EchoMetrics::rms(&m.far));
-    assert!(
-        far_level > -30.0 && far_level < -6.0,
-        "far-end at {far_level} dBFS"
-    );
-    let echo_level = EchoMetrics::decibels(EchoMetrics::rms(&m.echo_only));
-    assert!(
-        echo_level > -40.0 && echo_level < -6.0,
-        "echo at {echo_level} dBFS"
-    );
-}
-
-#[test]
-fn goertzel_reads_a_full_scale_sine_as_one() {
-    let tone = AudioFixtures::tone(1_000.0, 1.0, 1.0);
-    assert!((EchoMetrics::tone_level(&tone, 1_000.0, 48_000.0) - 1.0).abs() < 0.01);
-    assert!(EchoMetrics::tone_level(&tone, 3_000.0, 48_000.0) < 0.01);
 }

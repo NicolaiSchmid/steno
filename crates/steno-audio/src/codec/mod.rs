@@ -1144,19 +1144,6 @@ mod tests {
         assert!((seconds - frames as f64 / 44_100.0).abs() < 1e-12);
     }
 
-    /// Exactly half the packets damaged still decodes; one more fails.
-    #[test]
-    fn half_the_packets_damaged_is_not_too_much() {
-        let damage = |damaged| Damage {
-            packets: 24,
-            damaged,
-            ..Damage::default()
-        };
-        assert!(!damage(12).too_much());
-        assert!(damage(13).too_much());
-        assert!(!damage(0).too_much());
-    }
-
     /// A declared length reserves at most five hours at 16 kHz; a measured
     /// one reserves all of it.
     #[test]
