@@ -3,7 +3,7 @@
  * `pnpm lint:ui`: callers of `src/components/ui` may only add layout classes
  * through `className`. Everything about a component's look (colour, type,
  * radius, shadow, padding) belongs in the component itself, behind `variant`
- * and `size`. Plan .plans/2026-09-29-macos-webview-ui.md, Decision 4.
+ * and `size`.
  *
  * Usage: node scripts/check-ui-restyle.mjs [--root src] [--ui src/components/ui]
  * Exit 1 lists every offending class as `file:line: <Component> "class"`.

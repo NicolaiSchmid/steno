@@ -2,7 +2,7 @@ import { Easing } from "react-native-reanimated";
 
 /**
  * The app's motion tokens — one tempo system, consumed everywhere. No inline
- * durations at call sites (plan: .plans/2026-08-22-ios-motion-polish.md).
+ * durations at call sites.
  *
  * Three registers:
  * - functional (opacity/color state swaps): fast, curve-driven;
