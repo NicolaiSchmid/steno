@@ -333,9 +333,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     because Swift's windows sit on the frame grid and the shared chunks do not. The
     test's limit on that mean is 15 ms.
   - The settings that still differ, CoreML then ONNX: the clamp (15 s, 60 s), the
-    long-pause skip (none, 3 s), the extra windows (on, off; A16 of the stable plan for
-    ONNX), the detector (`AdaptiveEnergyVad`, Silero) and the workers (four, one: ONNX
-    Runtime spreads one call over its threads).
+    long-pause skip (none, 3 s), the extra windows (every gap; the tail only, with the
+    first chunk from the recording's start: A16b of the stable plan), the detector
+    (`AdaptiveEnergyVad`, Silero) and the workers (four, one: ONNX Runtime spreads one
+    call over its threads).
 
   **WP4c sidecar and models.** `crates/steno-speech-sidecar` (binary
   `steno-speech-sidecar`) hosts the ONNX `Transcriber`; `SidecarSpeechEngine` in
