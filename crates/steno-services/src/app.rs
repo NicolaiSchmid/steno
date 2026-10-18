@@ -4939,18 +4939,41 @@ mod tests {
     async fn an_unreadable_reading_mark_turns_the_fallback_on_only_beside_an_in_process_engine() {
         let dir = tempfile::tempdir().unwrap();
         let support = dir.path().join("support");
-        // A folder in the mark's place fails the read on every platform.
-        std::fs::create_dir_all(
-            support
-                .join(ReadingMarks::FOLDER)
-                .join(format!("{}.json", uuid::Uuid::new_v4())),
-        )
-        .unwrap();
+        unreadable_reading_mark_under(&support);
         let app = build(options_under(&support)).unwrap();
         assert_eq!(
             app.services.speech_models.speech_fallback(),
             cfg!(target_os = "macos")
         );
         drop(app);
+    }
+
+    /// With the ONNX sidecar chosen on the Mac in `speech.json`, a reading
+    /// mark that cannot be read leaves the build's fallback off on every
+    /// platform: no engine runs in the app's process.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_reading_mark_leaves_the_fallback_off_beside_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        unreadable_reading_mark_under(&support);
+        std::fs::write(
+            support.join(crate::speech::SPEECH_SETTINGS_FILE),
+            r#"{"onnxSidecarOnMac":true}"#,
+        )
+        .unwrap();
+        let app = build(options_under(&support)).unwrap();
+        assert!(!app.services.speech_models.speech_fallback());
+        drop(app);
+    }
+
+    /// A reading mark under `support` that fails the read on every
+    /// platform: a folder in the mark's place.
+    fn unreadable_reading_mark_under(support: &std::path::Path) {
+        std::fs::create_dir_all(
+            support
+                .join(ReadingMarks::FOLDER)
+                .join(format!("{}.json", uuid::Uuid::new_v4())),
+        )
+        .unwrap();
     }
 }
