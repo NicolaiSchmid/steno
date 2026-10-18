@@ -477,7 +477,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A14 | A phone recording without a `moov` (its recorder killed mid-recording) is salvaged into a meeting, with a warning, instead of failing | audio (#280) |
 | A15 | The CoreML IOSurface abort: IOSurface and memory growth measured per file, and fixed if it leaks; an Objective-C exception caught at the FFI boundary, so the meeting fails retryably with its audio kept; Nicolai runs a debug build of the app over several meetings | audio (#296) |
 | A16a | The owned-span partition (Nicolai's decision 3, 2026-10-15): the recording split once into disjoint owned spans, the consecutive spans of one kind merged by the LCS as before, a gap's window keeping its whole decode and an accepted recovery what it kept before; CoreML replays identically on FLEURS, the corpus, the meeting and the crafted cases, ONNX stays byte-identical on FLEURS, and no word the old merge kept is lost on 1,500 random layouts with recovery on, half of them over a fake deaf at window edges | audio (#310) |
-| A16b | The ONNX engine's lead-in and tail: the extra windows over every gap missed all four gates on ONNX (FLEURS 5.198 %, the corpus 9.916 %, words where Swift has none, +27 to +41 % runtime), so the lead/tail switch: the first chunk from the recording's start and the tail's extra windows on the partition, the long-pause skip kept; FLEURS 4.865 % from 4.882 %, the corpus 9.735 % from 9.814 %, no word added where Swift has none, none from silence or room noise, about +1 % runtime | audio (#317) |
+| A16b | The ONNX engine's lead-in and tail: the extra windows over every gap missed all four gates on ONNX (FLEURS 5.198 %, the corpus 9.916 %, words where Swift has none, +27 to +41 % runtime), so the lead/tail switch: the first chunk from the recording's start and the tail's extra windows on the partition, the long-pause skip kept; FLEURS 4.865 % from 4.882 %, the corpus 9.735 % from 9.814 %, no word added where Swift has none, none from silence or room noise, +1.8 % runtime on the meeting | audio (#317) |
 | A17 | No crash loop from a file that aborts the process: symphonia's allocation abort measured (it aborts on Linux, not on the Mac); every read of a recording marked durably, the in-process CoreML stage included; a recording whose read ended with the app read once more, and quarantined the second time in a row ("Steno stopped while reading this recording") with the file kept and Process again offered; the allocations bounded by a walk of the boxes, chunks and tables before symphonia opens a file, its reader the one the file's first bytes name (MP4, CAF or WAV) and opened where the walk began, any other kind of file refused plainly; kill tests for one kill and for two | audio (#298) |
 | A18 | A capture thread that misses cycles never loses audio silently: on PipeWire, Core Audio and WASAPI the missed frames are written as silence on every lane (past a second only counted), counted in the statistics and in the note about missing audio; PipeWire's data-loop thread without real-time scheduling is a warning | audio (#297) |
 | A19 | No in-process speech beside a live recording, and the speech sidecar after a CoreML abort: a job waits to load or run CoreML while a recording starts, runs or stops ("Waiting for the recording to finish"); a warm-up mark or a CoreML reading mark left by a crash turns the speech sidecar on in CoreML's place, durably, until the user turns the Neural Engine back on in Settings ("Use again"), the meeting waiting for the sidecar's models with "Neural Engine off after a crash: download the speech models in Settings"; kill tests for a load killed in a job and in a warm-up | audio |
@@ -2020,20 +2020,25 @@ Each lands before `0.11.0-rc.1`.
       | the switch and no snap (#263's) | 4.865 % | 9.794 % | | |
 
       The shipped settings add 11 words and drop 12 on the corpus, 6 and 4
-      on FLEURS, every added one within 0.5 s of a Swift word. The cost is
-      8 alternating pairs on the 15-minute meeting's two lanes on Forge
+      on FLEURS, every added one within 0.5 s of a Swift word. The cost,
+      from 8 alternating pairs on the 15-minute meeting's two lanes on Forge
       (load 3.5 to 8): +1.8 % over the seven pairs at load 3.5 to 5.3; the
-      eighth ran at load 6.5 to 8, both runs slow. The model-gated tests at the branch: FLEURS
-      4.865 %, and A9's 44.1 kHz bound holds (5.05 % against 5.40 % from
-      48 kHz).
+      eighth ran at load 6.5 to 8, both runs slow. The tail is decoded in
+      full, so ONNX's processing time grows with the quiet audio after the
+      last speech (measured +77 % on 422 s of speech plus 300 s of quiet
+      synthetic room noise, 0 words added); call recordings are bounded by
+      the auto-stop grace (90 s), an in-person recording left running is
+      not. The model-gated tests at the branch: FLEURS 4.865 %, and A9's
+      44.1 kHz bound holds (5.05 % against 5.40 % from 48 kHz).
     - The crafted cases (`crates/steno-speech/tests/common/crafted.rs`, now
       run by both engines' tests): a quiet lead-in keeps 15 words at -20
       and -26 dB (12 and 0 before), a quiet tail 14 (none before); silence
       and room noise add no word. Known limit: quiet speech the detector
       misses inside a skipped long pause is still lost (the 6.65 s and
-      9.1 s gaps keep none at -20 and -26 dB, as before). A lead-in longer
-      than a chunk is decoded only as far as the first chunk reaches; the
-      next chunk starts just before the speech, as before.
+      9.1 s gaps keep none at -20 and -26 dB, as before). A lane in which
+      the detector hears no speech is not decoded at all, as before. A
+      lead-in longer than a chunk is decoded only as far as the first chunk
+      reaches; the next chunk starts just before the speech, as before.
     - Recoveries, which A16a left to this item: FLEURS, the corpus and the
       meeting try none. Over the two lanes of all seven calibration
       meetings (10 hours) one lane tries 15 and accepts 1, the same at
