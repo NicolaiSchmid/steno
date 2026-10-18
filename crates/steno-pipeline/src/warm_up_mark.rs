@@ -365,10 +365,12 @@ mod tests {
     }
 
     /// A mark that cannot be read skips the warm-up, under a fresh id at
-    /// each launch.
+    /// each launch, and the launch says a warm-up ended with the app.
     #[test]
     fn an_unreadable_mark_gets_a_fresh_id_at_each_launch() {
+        let log = crate::fixtures::CapturedLog::warnings();
         let dir = tempfile::tempdir().unwrap();
+        // Bytes that are not UTF-8 fail the read on every platform.
         std::fs::write(dir.path().join(WarmUpMark::FILE_NAME), b"\xff\xfe").unwrap();
         let first = WarmUpMark::at_launch(dir.path());
         let second = WarmUpMark::at_launch(dir.path());
@@ -376,6 +378,9 @@ mod tests {
         let (first, second) = (first.left_over().unwrap(), second.left_over().unwrap());
         assert!(first.starts_with("unreadable-"), "{first}");
         assert_ne!(first, second);
+        let text = log.text();
+        assert_eq!(lines_of(&text, first, "ended with the app;"), 1, "{text}");
+        assert_eq!(lines_of(&text, first, "is held off"), 0, "{text}");
     }
 
     #[test]
