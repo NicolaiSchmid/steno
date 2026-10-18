@@ -1086,13 +1086,9 @@ mod tests {
     /// 16), and the quiet words of `more`, `(piece, seconds)`; the chunks
     /// skip the pause as a long one.
     fn quiet_stretches(
-        chunker: ChunkerConfig,
+        config: PipelineConfig,
         more: &[(u32, f32)],
     ) -> (Transcriber<FrameTokenBackend>, Vec<f32>) {
-        let config = PipelineConfig {
-            chunker,
-            ..PipelineConfig::default()
-        };
         let mut samples = vec![0.0f32; 36 * SAMPLE_RATE];
         for (piece, at) in [
             (1, 0.5),
@@ -1747,11 +1743,11 @@ mod tests {
 
     #[test]
     fn extra_windows_decode_the_lead_in_the_skipped_pauses_and_the_tail() {
-        let (mut t, samples) = quiet_stretches(ChunkerConfig::default(), &[]);
+        let (mut t, samples) = quiet_stretches(PipelineConfig::default(), &[]);
         let skipped = t.transcribe(&samples, None).unwrap();
         assert_eq!(skipped.text(), "w11 w12 w13 w14 w15 w16");
         assert!(windows(&skipped, false).is_empty());
-        let (mut t, samples) = quiet_stretches(gaps_on(60.0).chunker, &[]);
+        let (mut t, samples) = quiet_stretches(gaps_on(60.0), &[]);
         let transcript = t.transcribe(&samples, None).unwrap();
         assert_eq!(windows(&transcript, true), windows(&skipped, true));
         assert_eq!(transcript.text(), "w1 w11 w12 w13 w2 w14 w15 w16 w3");
@@ -1772,7 +1768,7 @@ mod tests {
         for (at, seconds) in [(0.3, 1.0), (13.8, 1.0), (32.8, 1.0)] {
             silent[sample_count(at)..sample_count(at + seconds)].fill(0.0);
         }
-        let (mut t, _) = quiet_stretches(gaps_on(60.0).chunker, &[]);
+        let (mut t, _) = quiet_stretches(gaps_on(60.0), &[]);
         assert_eq!(t.transcribe(&silent, None).unwrap().text(), skipped.text());
     }
 
@@ -1781,7 +1777,7 @@ mod tests {
         // The first chunk starts at 0 and hears the quiet lead-in, the
         // tail's window hears the quiet tail, and the skipped pause stays
         // skipped.
-        let (mut t, samples) = quiet_stretches(crate::engine::pipeline_config().chunker, &[]);
+        let (mut t, samples) = quiet_stretches(crate::engine::pipeline_config(), &[]);
         let transcript = t.transcribe(&samples, None).unwrap();
         assert_eq!(transcript.text(), "w1 w11 w12 w13 w14 w15 w16 w3");
         assert_eq!(transcript.spans[0].window.start, 0);
@@ -1799,10 +1795,10 @@ mod tests {
         // two frames from the chunk's and falls away; its word 5 starts
         // 0.22 s before the chunk's, so both copies stay.
         let more = [(4, 7.52), (5, 20.56)];
-        let (mut t, samples) = quiet_stretches(ChunkerConfig::default(), &more);
+        let (mut t, samples) = quiet_stretches(PipelineConfig::default(), &more);
         let chunked = t.transcribe(&samples, None).unwrap();
         assert_eq!(chunked.text(), "w11 w12 w13 w4 w5 w14 w15 w16");
-        let (mut t, samples) = quiet_stretches(gaps_on(60.0).chunker, &more);
+        let (mut t, samples) = quiet_stretches(gaps_on(60.0), &more);
         let transcript = t.transcribe(&samples, None).unwrap();
         assert_eq!(windows(&transcript, true), windows(&chunked, true));
         assert_eq!(
