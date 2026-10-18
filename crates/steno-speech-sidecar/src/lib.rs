@@ -1,81 +1,14 @@
-//! `steno-speech-sidecar`, the speech sidecar: the child process that runs
-//! Parakeet and the diarizer on ONNX Runtime for the app (decision 5 of
-//! `.plans/2026-10-01-cross-platform-speech-stack.md`, invariant 4 of
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`). The app, its parent,
-//! drives it through [`steno_speech::SidecarSpeechEngine`]; the wire format
-//! is [`steno_speech::sidecar::protocol`]. Which platform runs it:
-//! [`steno_speech::runtime`].
+//! `steno-speech-sidecar`: the child process that runs Parakeet and the
+//! diarizer on ONNX Runtime for the app, driven through
+//! [`steno_speech::SidecarSpeechEngine`] over
+//! [`steno_speech::sidecar::protocol`]. It gets the audio only over stdin,
+//! opens no connection and never downloads; ONNX Runtime's telemetry is off for
+//! every session. It exits as soon as stdin ends or stdout breaks, and on unix
+//! ignores SIGINT, SIGTERM and SIGHUP so a job ends only when the parent does.
 //!
-//! - [`serve`]: the child's whole life, from the ready message to exit.
-//! - [`Options::parse`]: the command line the parent passes.
-//! - [`Fault`]: what the fake engine does wrong for the isolation tests.
-//!
-//! Swift: none; the Mac app runs `FluidAudio` in-process only.
-//!
-//! # What the child does
-//!
-//! It loads the models once from the store root the parent names and
-//! installed; it never downloads and opens no connection. The diarizer's
-//! two models (pyannote segmentation 3.0, `WeSpeaker` ResNet34-LM) load the
-//! same way from the files the parent names, on the CPU, independently of
-//! speech's; a diarization runs `steno_diarize`'s pipeline over them with
-//! its default configuration, the code the app ran in its own process
-//! before, and answers with the clusters, embeddings included. When the parent
-//! asks for `DirectML` on Windows, the encoder runs there if the probe in
-//! `steno_speech::onnx` passes, and the child answers the load with the
-//! provider it chose. Its health reports and transcripts carry the provider
-//! in force, and when the encoder falls back to the CPU it writes one line
-//! saying why, in fixed words. It reads framed requests from stdin with the
-//! audio as a binary payload, answers on stdout, and reports its resident
-//! set from a heartbeat thread so the parent can kill it at the memory
-//! ceiling. It exits on a shutdown request and as soon as stdin ends or
-//! stdout breaks, so a dead parent leaves no child behind. Its log goes to
-//! stderr, which the parent logs and keeps the tail of for crash reports.
-//!
-//! On Linux and macOS it ignores SIGINT, SIGTERM and SIGHUP from its start,
-//! before its ready message. Those are the signals that end the app, and they reach the
-//! child too: Ctrl-C and a closed terminal reach the terminal's whole
-//! foreground group, and systemd signals every process in a scope. A child
-//! that died of them would end its job before the app quit its pipeline. So
-//! the child finishes its request or exits within a heartbeat of its
-//! parent's exit, when stdout breaks. The client ends a child only with a
-//! shutdown request or SIGKILL (the memory ceiling, a deadline, a broken
-//! protocol); the child also ends when its stdin closes or its stdout
-//! breaks, as at the app's exit.
-//!
-//! # Privacy
-//!
-//! Its sessions open through [`steno_speech::onnx`], which switches ONNX
-//! Runtime's telemetry off first, so ONNX Runtime sends nothing; the
-//! diarizer's open through `steno_diarize::onnx`, which makes the same call
-//! first. The audio of a diarization arrives on stdin like a
-//! transcription's. With
-//! `DirectML` on, `DirectML.dll` and Direct3D 12 may still log to Windows'
-//! own diagnostic data, as for any program that uses them; the child opens
-//! nothing for it, and no audio or text is involved.
-//!
-//! # Test faults
-//!
-//! `--fake-engine` replaces Parakeet with an engine that needs no models
-//! and answers with the sample count and peak of the audio it received (a
-//! diarization with one cluster over the whole audio whose confidence is
-//! the peak and whose embedding is made from it); it
-//! answers a load that asks for `DirectML` with `DirectML`, and reports no
-//! live provider until `--fault fallback`. Only with it, `--fault <kind>`
-//! ([`Fault`]) makes the next transcription abort, panic, flood stderr and
-//! panic, exit, exit leaving a process that writes to its stderr later,
-//! hang, allocate 4 GiB, write garbage, fail, answer with a reply too large
-//! to send, answer and then report a resident set over any ceiling, report
-//! a fallback to the CPU or lose the encoder, the child abort on any load
-//! or on a load that asks for `DirectML`, or stay silent, greet late or
-//! announce another protocol version from the start; the crashes, the hang,
-//! the allocation and the failure apply to the next diarization too, one
-//! abort to a diarization only, one abort and one hang to the next
-//! diarizer load only, and one fault refuses every diarizer load.
-//! `--fault-once <path>` limits that to the first child that creates
-//! `<path>`, which holds that child's pid. The isolation tests, the
-//! diarization tests and the `DirectML` test binaries drive the real client
-//! against these.
+//! `--fake-engine` replaces the models with an engine that describes the audio
+//! it received; with it, `--fault <kind>` ([`Fault`]) and `--fault-once <path>`
+//! drive the isolation tests.
 
 use std::fs::File;
 use std::io::{self, BufReader, Write};
@@ -97,23 +30,18 @@ use steno_speech::{
 };
 
 steno_core::string_enum! {
-    /// What the next transcription of the fake engine does instead of
-    /// answering; [`Fault::Abort`], [`Fault::Panic`], [`Fault::Exit`],
-    /// [`Fault::Hang`], [`Fault::Allocate`] and [`Fault::Error`] apply to
-    /// the next diarization as well, whichever comes first,
-    /// [`Fault::AbortDiarizing`] to the next diarization only,
-    /// [`Fault::AbortOnDiarizerLoad`] and [`Fault::HangOnDiarizerLoad`] to
-    /// the next diarizer load only, and [`Fault::RefuseDiarizer`] to every
-    /// diarizer load.
+    /// What the fake engine does instead of answering the next transcription.
+    /// The crashes, the hang, the allocation and the error apply to the next
+    /// diarization too; the `*Diarizing` and `*DiarizerLoad` faults only to
+    /// that step.
     pub enum Fault {
         /// `std::process::abort`, the way an uncaught C++ exception in ONNX
         /// Runtime ends the process.
         Abort = "abort",
-        /// A line of stderr that is not UTF-8, then a Rust panic, which
-        /// ends the process with status 101.
+        /// A line of stderr that is not UTF-8, then a Rust panic (status 101).
         Panic = "panic",
-        /// 1 MiB of stderr without a newline, then a Rust panic: the
-        /// parent's crash report must stay small.
+        /// 1 MiB of stderr without a newline, then a Rust panic: the parent's
+        /// crash report must stay small.
         Flood = "flood",
         /// Exits with status 3.
         Exit = "exit",
@@ -121,53 +49,44 @@ steno_core::string_enum! {
         Hang = "hang",
         /// Allocates and touches 4 GiB in 16 MiB steps, then hangs.
         Allocate = "allocate",
-        /// Writes bytes that are not a frame (a length prefix of 16 MiB,
-        /// then text), then hangs.
+        /// Writes bytes that are not a frame, then hangs.
         Garbage = "garbage",
         /// Answers with an error and keeps running.
         Error = "error",
-        /// On unix, leaves a process behind that holds the child's stderr
-        /// and writes a line to it 300 ms after the child exits with
-        /// status 3; elsewhere only exits. The crash report must still hold
-        /// that line.
+        /// On unix, leaves a process behind that holds the child's stderr and
+        /// writes a line 300 ms after the child exits with status 3. The crash
+        /// report must still hold that line.
         LateStderr = "late-stderr",
-        /// Answers, and from then on reports the CPU as the encoder's
-        /// provider and writes why to stderr, as a child does after a run
-        /// that failed on `DirectML`.
+        /// Answers, then reports the CPU as the encoder's provider and writes
+        /// why to stderr, as after a failed `DirectML` run.
         Fallback = "fallback",
-        /// Fails and leaves the engine without an encoder, as a run that
-        /// failed on `DirectML` does when the CPU cannot reopen the model;
-        /// the child then exits without answering.
+        /// Fails and leaves the engine without an encoder, as when the CPU
+        /// cannot reopen the model after a failed `DirectML` run.
         LoseEncoder = "lose-encoder",
         /// `std::process::abort` inside any load.
         AbortOnLoad = "abort-on-load",
-        /// `std::process::abort` inside a load that asks for `DirectML`,
-        /// the way a driver may end the probe; a load on the CPU works.
+        /// `std::process::abort` inside a load that asks for `DirectML`, as a
+        /// driver may end the probe.
         AbortOnDirectmlLoad = "abort-on-directml-load",
-        /// Answers with a transcript over the frame limit, which the child
-        /// cannot send.
+        /// Answers with a transcript over the frame limit.
         Oversize = "oversize",
-        /// Answers, then reports a resident set over any ceiling from the
-        /// next heartbeat on, while idle.
+        /// Answers, then reports a resident set over any ceiling from the next
+        /// heartbeat on.
         Swell = "swell",
         /// At start: sends nothing, reads nothing, hangs.
         Silent = "silent",
         /// At start: announces protocol version 0 in its ready message.
         WrongProtocol = "wrong-protocol",
-        /// At start: waits 200 ms before its ready message, so a heartbeat
-        /// started before it would come first.
+        /// At start: waits 200 ms before its ready message.
         SlowStart = "slow-start",
-        /// `std::process::abort` inside the next diarization, the way an
-        /// uncaught C++ exception in ONNX Runtime ends it there;
-        /// transcriptions answer.
+        /// `std::process::abort` inside the next diarization; transcriptions
+        /// answer.
         AbortDiarizing = "abort-diarizing",
-        /// Refuses every diarizer load with an error and keeps running, as
-        /// the real engine does with a file ONNX Runtime cannot load;
+        /// Refuses every diarizer load with an error and keeps running;
         /// transcriptions answer.
         RefuseDiarizer = "refuse-diarizer",
-        /// `std::process::abort` inside the next diarizer load, the way a
-        /// model file that makes ONNX Runtime abort ends it there;
-        /// transcriptions answer.
+        /// `std::process::abort` inside the next diarizer load; transcriptions
+        /// answer.
         AbortOnDiarizerLoad = "abort-on-diarizer-load",
         /// Never answers the next diarizer load; transcriptions answer.
         HangOnDiarizerLoad = "hang-on-diarizer-load",
@@ -206,8 +125,7 @@ pub struct Options {
 }
 
 impl Options {
-    /// Parses `--fake-engine`, `--fault <kind>`, `--fault-once <path>` and
-    /// `--heartbeat-ms <n>`; faults need the fake engine.
+    /// Parses the command line; faults need the fake engine.
     pub fn parse(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Self, String> {
         let mut options = Options {
             fake_engine: false,
@@ -255,17 +173,16 @@ trait Engine {
         options: &OnnxOptions,
     ) -> Result<EncoderProvider, String>;
     fn loaded(&self) -> bool;
-    /// Where the encoder runs now; `None` before a load, or when the
-    /// engine cannot tell.
+    /// Where the encoder runs now; `None` before a load or when unknown.
     fn provider(&self) -> Option<EncoderProvider>;
-    /// Why the encoder is on the CPU though the load asked for `DirectML`,
-    /// in fixed words ([`OnnxBackend::fallback`]).
+    /// Why the encoder is on the CPU though the load asked for `DirectML`
+    /// ([`OnnxBackend::fallback`]).
     fn fallback(&self) -> Option<&'static str> {
         None
     }
-    /// Whether the engine can still run: `false` once a loaded encoder
-    /// lost its session ([`OnnxBackend::usable`]), after which the child
-    /// exits rather than answer every request with an error.
+    /// `false` once a loaded encoder lost its session
+    /// ([`OnnxBackend::usable`]); the child then exits rather than fail every
+    /// request.
     fn usable(&self) -> bool {
         true
     }
@@ -373,8 +290,8 @@ struct FakeEngine {
 }
 
 impl FakeEngine {
-    /// The fault to commit now: always, or with `--fault-once` only in
-    /// the child that creates the marker, which then holds its pid.
+    /// The fault to commit now: always, or with `--fault-once` only in the
+    /// child that creates the marker.
     fn fault_now(&self) -> Option<Fault> {
         let fault = self.fault?;
         match &self.fault_once {
@@ -393,10 +310,9 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
-    /// Reports `DirectML` when asked for it, as if the probe had passed, so
-    /// the tests see the setting reach the child and the answer come back;
-    /// with [`Fault::AbortOnLoad`], or [`Fault::AbortOnDirectmlLoad`] when
-    /// asked for `DirectML`, aborts there instead.
+    /// Reports `DirectML` when asked for it, as if the probe had passed; aborts
+    /// instead with [`Fault::AbortOnLoad`], or [`Fault::AbortOnDirectmlLoad`]
+    /// when asked for `DirectML`.
     fn load(&mut self, _: &Path, options: &OnnxOptions) -> Result<EncoderProvider, String> {
         let aborts = match self.fault {
             Some(Fault::AbortOnLoad) => true,
@@ -418,8 +334,7 @@ impl Engine for FakeEngine {
         self.loaded
     }
 
-    /// `None`, as from a child that does not say, until
-    /// [`Fault::Fallback`].
+    /// `None` until [`Fault::Fallback`].
     fn provider(&self) -> Option<EncoderProvider> {
         self.fell_back.then_some(EncoderProvider::Cpu)
     }
@@ -451,8 +366,8 @@ impl Engine for FakeEngine {
         match fault {
             Some(Fault::Abort) => std::process::abort(),
             Some(Fault::Panic) => {
-                // A line that is not UTF-8 first, as a native library may
-                // write: the parent must still keep the panic message.
+                // A non-UTF-8 line first: the parent must still keep the panic
+                // message.
                 let _ = io::stderr().write_all(b"native noise \xff\xfe\n");
                 panic!("simulated panic in the speech engine")
             }
@@ -462,8 +377,8 @@ impl Engine for FakeEngine {
             }
             Some(Fault::Exit) => std::process::exit(3),
             Some(Fault::LateStderr) => {
-                // Only stderr is inherited: stdout closes with the child,
-                // so the parent sees it die at once.
+                // Only stderr is inherited, so the parent sees stdout close at
+                // once.
                 #[cfg(unix)]
                 let _ = std::process::Command::new("sh")
                     .args(["-c", "sleep 0.3; echo 'a line after the exit' >&2"])
@@ -476,8 +391,8 @@ impl Engine for FakeEngine {
             Some(Fault::Allocate) => allocate_and_hang(),
             Some(Fault::Garbage) => {
                 let mut out = io::stdout().lock();
-                // Under the header limit, so only the first byte after
-                // it can tell the parent this is no frame.
+                // Under the header limit, so only the first byte after it shows
+                // this is no frame.
                 let _ = out.write_all(&(16u32 << 20).to_le_bytes());
                 let _ = out.write_all(b"this is not a frame");
                 let _ = out.flush();
@@ -518,9 +433,8 @@ impl Engine for FakeEngine {
         }
     }
 
-    /// Needs no files; fails with [`Fault::RefuseDiarizer`], aborts with
-    /// [`Fault::AbortOnDiarizerLoad`] and hangs with
-    /// [`Fault::HangOnDiarizerLoad`].
+    /// Needs no files; refuses, aborts or hangs as the diarizer-load faults
+    /// say.
     fn load_diarizer(&mut self, _: &ModelPaths, _: usize) -> Result<(), String> {
         match self.fault {
             Some(Fault::RefuseDiarizer) => {
@@ -545,9 +459,9 @@ impl Engine for FakeEngine {
     }
 }
 
-/// The fake diarizer's answer: one cluster over the whole audio, its
-/// confidence the peak and its embedding the peak times 1 to 256 over 256,
-/// so every bit of the floats has to cross.
+/// The fake diarizer's answer: one cluster over the whole audio, with
+/// confidence and embedding made from the peak so every bit of the floats has
+/// to cross.
 fn describe_voices(audio: &AudioBuffer16k) -> Vec<SpeakerCluster> {
     let peak = audio.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     let whole = TimeRange {
@@ -611,14 +525,13 @@ fn rss_bytes() -> u64 {
     memory_stats::memory_stats().map_or(0, |m| m.physical_mem as u64)
 }
 
-/// Writes one reply. A broken stdout means the parent is gone, so the
-/// child exits quietly, on unix through `_exit`: the heartbeat thread can
-/// get here while ONNX Runtime still infers on others, and
-/// `process::exit` would run the atexit handlers and C++ static
-/// destructors beside them; a hang there would keep the working set alive
-/// past the ignored exit signals. Nothing needs flushing, stdout is gone.
-/// Any other failure (a reply over the frame limit) is said on stderr
-/// first and exits with status 2, so the parent's crash report shows it.
+/// Writes one reply. A broken stdout means the parent is gone, so the child
+/// exits quietly, on unix through `_exit`: the heartbeat thread can get here
+/// while ONNX Runtime still infers on others, and `process::exit` would run the
+/// atexit handlers and C++ static destructors beside them; a hang there would
+/// keep the working set alive past the ignored exit signals. Nothing needs
+/// flushing, stdout is gone. Any other failure is said on stderr and exits with
+/// status 2.
 fn send(reply: &Reply) {
     let mut out = io::stdout().lock();
     if let Err(error) = protocol::write_frame(&mut out, reply, &[]) {
@@ -637,11 +550,9 @@ fn send(reply: &Reply) {
     }
 }
 
-/// Ignores SIGINT, SIGTERM and SIGHUP for the rest of the child's life
-/// (see the crate docs). Called first in [`serve`], so a signal does not
-/// fail the start and a parent that has the ready message knows they are
-/// ignored; a child whose parent is gone still ends when its ready message
-/// or a heartbeat finds stdout broken.
+/// Ignores SIGINT, SIGTERM and SIGHUP for the rest of the child's life. Called
+/// first in [`serve`], so a parent that has the ready message knows they are
+/// ignored; an orphaned child still ends when a heartbeat finds stdout broken.
 #[cfg(unix)]
 fn ignore_exit_signals() {
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
@@ -653,8 +564,7 @@ fn ignore_exit_signals() {
     }
 }
 
-/// Reports the resident set every `interval` from a thread of its own,
-/// between and during requests.
+/// Reports the resident set every `interval` from its own thread.
 fn start_heartbeat(interval: Duration) -> io::Result<()> {
     std::thread::Builder::new()
         .name("heartbeat".to_owned())
@@ -675,10 +585,9 @@ fn start_heartbeat(interval: Duration) -> io::Result<()> {
         .map(drop)
 }
 
-/// Writes to stderr why the encoder is on the CPU though the load asked
-/// for `DirectML`, once per reason: the child has no log subscriber, and
-/// the parent logs its stderr, a line that starts with
-/// [`FALLBACK_NOTICE`] at info level.
+/// Writes to stderr, once per reason, why the encoder is on the CPU though the
+/// load asked for `DirectML`; the parent logs a [`FALLBACK_NOTICE`] line at
+/// info.
 fn tell_fallback(engine: &dyn Engine, told: &mut Option<&'static str>) {
     if let Some(reason) = engine.fallback()
         && *told != Some(reason)
@@ -688,12 +597,10 @@ fn tell_fallback(engine: &dyn Engine, told: &mut Option<&'static str>) {
     }
 }
 
-/// Reads the samples of a transcription request and answers it. `Err` is
-/// the exit code when the child must exit instead: the audio is
-/// unreadable, or the engine lost its encoder. That exit sends no reply:
-/// the parent sees a crash with the encoder still on `DirectML`, switches
-/// `DirectML` off and starts a child that loads on the CPU, where an error
-/// reply would leave this child failing every request.
+/// Reads the samples of a transcription request and answers it. `Err` is the
+/// exit code when the audio is unreadable or the engine lost its encoder; that
+/// exit sends no reply, so the parent switches `DirectML` off and starts a
+/// child on the CPU.
 fn transcribe(
     engine: &mut dyn Engine,
     input: &mut impl io::Read,
@@ -719,8 +626,8 @@ fn transcribe(
     }
 }
 
-/// Reads the samples of a diarization request and answers it; `Err` is
-/// the exit code when the audio is unreadable.
+/// Reads the samples of a diarization request and answers it; `Err` is the exit
+/// code when the audio is unreadable.
 fn diarize(
     engine: &mut dyn Engine,
     input: &mut impl io::Read,
@@ -738,16 +645,13 @@ fn diarize(
     })
 }
 
-/// Says on stderr why the child stops, for the parent's crash report, and
-/// returns the exit status for it, 2 even when stderr is gone.
+/// Says on stderr why the child stops and returns exit status 2.
 fn give_up(why: &str, error: impl std::fmt::Display) -> ExitCode {
     stderr_line!("steno-speech-sidecar: {why}: {error}");
     ExitCode::from(2)
 }
 
-/// The reply to `request`, its payload read from `input`; `Err` is the
-/// exit code when the child exits instead: after a shutdown, which has
-/// said goodbye, or when the audio is unreadable or the encoder lost.
+/// The reply to `request`; `Err` is the exit code when the child exits instead.
 fn answer(
     engine: &mut dyn Engine,
     input: &mut impl io::Read,
@@ -806,9 +710,7 @@ fn answer(
     })
 }
 
-/// Runs the child until it exits, with status 0 or 2 as
-/// [`steno_speech::sidecar::protocol`] says; on unix SIGINT, SIGTERM and
-/// SIGHUP do not end it (see the crate docs).
+/// Runs the child until it exits, with status 0 or 2.
 pub fn serve(options: &Options) -> ExitCode {
     #[cfg(unix)]
     ignore_exit_signals();

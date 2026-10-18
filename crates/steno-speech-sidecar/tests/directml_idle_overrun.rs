@@ -1,10 +1,7 @@
-//! A child on `DirectML` whose resident set passes the memory ceiling
-//! between requests switches `DirectML` off, as one during a request does
-//! (the rule: `steno_speech::sidecar::client`'s module docs), even when it
-//! dies before the next call. The next call still gets no error, and its
-//! child loads on the CPU. The switch-off is process-wide and nothing
-//! clears it, so this test runs in a binary of its own. Windows only: the
-//! client asks for `DirectML` nowhere else.
+//! A child on `DirectML` over the memory ceiling between requests switches
+//! `DirectML` off, even when it dies before the next call, which still gets no
+//! error. The switch-off is process-wide, so this runs in a binary of its own.
+//! Windows only.
 
 #![cfg(windows)]
 
@@ -29,8 +26,8 @@ async fn a_child_over_the_ceiling_while_idle_on_directml_switches_it_off() {
         fault_queued_soon(&engine),
         "the reader never queued the report over the ceiling"
     );
-    // Killed by the system for memory, say, before the next call: the
-    // overrun the reader queued first still counts.
+    // Killed before the next call: the overrun the reader queued first still
+    // counts.
     let pid = engine.pid().unwrap();
     assert!(kill(pid));
     assert!(

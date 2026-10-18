@@ -1,14 +1,8 @@
-//! Linux only: the real sidecar in a systemd scope of its own, asked of a
-//! real systemd user manager (P6 of `.plans/2026-10-07-stable-promotion.md`,
-//! `crates/steno-speech/src/sidecar/scope.rs`). The client's own tests run
-//! against a fake manager; this one reads this process's cgroup and
-//! `$XDG_RUNTIME_DIR` and the child's `/proc` entries as the app does.
+//! Linux only: the real sidecar in a systemd scope of its own, asked of a real
+//! systemd user manager. Ignored by default: it needs a user manager and runs
+//! in a unit of one, as CI's Linux job runs it:
 //!
-//! Ignored by default: it needs a user manager and runs in a unit of
-//! one, as CI's Linux job runs it:
 //! `systemd-run --user --scope cargo test -p steno-speech-sidecar --test user_scope -- --ignored`.
-//! The app's own units, `app-steno\x2ddesktop…`, are not counted, so it
-//! also runs beside a running Steno.
 
 #![cfg(target_os = "linux")]
 
@@ -46,8 +40,8 @@ fn unit_of(pid: &str) -> String {
     path.rsplit('/').next().unwrap().to_owned()
 }
 
-/// The sidecar's scopes the user manager knows, in any state. The
-/// pattern's `?` stands for the backslash of the escaped `-`.
+/// The sidecar's scopes the user manager knows, in any state; `?` stands for
+/// the backslash of the escaped `-`.
 fn sidecar_scopes() -> String {
     systemctl(&[
         "list-units",

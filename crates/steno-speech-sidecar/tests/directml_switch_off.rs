@@ -1,8 +1,6 @@
 //! A child that dies during a request with `DirectML` in use switches
-//! `DirectML` off for the rest of the process's run, for every engine. The
-//! switch-off is process-wide and nothing clears it, so this test runs in a
-//! binary of its own, apart from the tests that need `DirectML` on. Windows
-//! only: the client asks for `DirectML` nowhere else.
+//! `DirectML` off for every engine for the rest of the process. The switch-off
+//! is process-wide, so this runs in a binary of its own. Windows only.
 
 #![cfg(windows)]
 
@@ -13,9 +11,8 @@ use steno_core::SpeechEngine as _;
 use steno_speech::sidecar::directml_switched_off;
 use steno_speech::{EncoderProvider, SidecarError};
 
-/// A child that aborts with its encoder on `DirectML`: the next child is
-/// asked for the CPU, and so is every engine built afterwards, as
-/// `steno-services` builds one on every pipeline reload.
+/// A child that aborts on `DirectML`: the next child, and every engine built
+/// afterwards, is asked for the CPU.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_dies_on_directml_leaves_every_later_engine_on_the_cpu() {
     assert!(!directml_switched_off());

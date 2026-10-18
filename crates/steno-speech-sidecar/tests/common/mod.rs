@@ -17,10 +17,8 @@ use steno_speech::{
 pub const BINARY: &str = env!("CARGO_BIN_EXE_steno-speech-sidecar");
 
 /// [`BINARY`], after it has once been run to the end by hand, so the start
-/// timeouts measure the child rather than a first start, which a loaded
-/// runner can take seconds over (macOS checks a new executable then). A
-/// first start that has not ended after two minutes fails the test rather
-/// than hang it.
+/// timeouts measure the child rather than a slow first start. A first start
+/// that has not ended after two minutes fails the test.
 pub fn binary() -> &'static str {
     static WARM: Once = Once::new();
     WARM.call_once(|| {
@@ -47,17 +45,16 @@ pub fn binary() -> &'static str {
     BINARY
 }
 
-/// The provider the fake engine reports to an engine whose options ask for
-/// `DirectML`: `DirectML` on Windows; elsewhere the client asks for the
-/// CPU.
+/// The provider the fake engine reports when the options ask for `DirectML`:
+/// `DirectML` on Windows, the CPU elsewhere.
 pub const ASKED_FOR_DIRECTML: EncoderProvider = if cfg!(windows) {
     EncoderProvider::DirectMl
 } else {
     EncoderProvider::Cpu
 };
 
-/// A fake-engine sidecar with `args` and short limits. The start timeout
-/// stays generous: only the silent child's test is about it.
+/// A fake-engine sidecar with `args` and short limits; the start timeout stays
+/// generous.
 pub fn config(args: &[&str]) -> SidecarConfig {
     let mut config = SidecarConfig::new(binary());
     config.args = std::iter::once("--fake-engine")
@@ -77,8 +74,7 @@ pub fn engine_in(dir: &tempfile::TempDir, config: SidecarConfig) -> SidecarSpeec
     SidecarSpeechEngine::with_assets(ModelStore::new(dir.path()), config, Vec::new())
 }
 
-/// An engine with `fault` committed by the first child only, so the next
-/// one is healthy.
+/// An engine with `fault` committed by the first child only.
 pub fn engine_with_fault(
     fault: &str,
     adjust: impl FnOnce(&mut SidecarConfig),
@@ -100,8 +96,7 @@ pub fn tone(seconds: f64) -> AudioBuffer16k {
     AudioBuffer16k::new((0..n).map(|i| (i as f32 * 0.05).sin() * 0.5).collect())
 }
 
-/// The sidecar error inside a boundary error: as the cause of a
-/// [`SpeechError`] (`prepare`, `transcribe`), or itself (`health`).
+/// The sidecar error inside a boundary error, or itself (`health`).
 pub fn sidecar_error<'a>(
     error: &'a (dyn std::error::Error + Send + Sync + 'static),
 ) -> &'a SidecarError {
@@ -182,17 +177,16 @@ pub fn within_ten_seconds<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> 
     }
 }
 
-/// Waits up to ten seconds for the engine's reader to queue a fault of
-/// the running child ([`SidecarSpeechEngine::fault_queued`]).
+/// Waits up to ten seconds for the engine's reader to queue a fault of the
+/// running child.
 pub fn fault_queued_soon(engine: &SidecarSpeechEngine) -> bool {
     within_ten_seconds(|| engine.fault_queued().then_some(())).is_some()
 }
 
-/// Kills the engine's idle child and waits until its reader has queued
-/// the end of its stdout, so the next call finds the child dead rather
-/// than send it a request. Not until the pid is a zombie: the main thread
-/// of a child with several shows as one before the others have exited
-/// and closed stdout. Returns the child's pid.
+/// Kills the engine's idle child and waits until its reader queued the end of
+/// its stdout, so the next call finds the child dead. Not until the pid is a
+/// zombie: a child's main thread shows as one before its other threads closed
+/// stdout. Returns the child's pid.
 pub fn kill_idle_child(engine: &SidecarSpeechEngine) -> u32 {
     let pid = engine.pid().unwrap();
     assert!(kill(pid));

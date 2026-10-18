@@ -1,8 +1,6 @@
-//! A child that aborts inside a load that asks for `DirectML`, where the
-//! probe runs, costs no job: no audio was sent yet, so the same call loads
-//! again in a new child on the CPU. That switches `DirectML` off for the
-//! rest of the process's run, so this test runs in a binary of its own.
-//! Windows only: the client asks for `DirectML` nowhere else.
+//! A child that aborts inside a `DirectML` load, where the probe runs, costs no
+//! job: the same call loads again in a new child on the CPU. The switch-off is
+//! process-wide, so this runs in a binary of its own. Windows only.
 
 #![cfg(windows)]
 

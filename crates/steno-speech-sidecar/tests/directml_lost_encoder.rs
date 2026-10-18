@@ -1,9 +1,7 @@
-//! A child whose encoder lost its session on `DirectML` (a run failed
-//! there and the CPU could not reopen the model) exits without answering,
-//! so the parent sees a crash with `DirectML` in use and switches it off;
-//! the next child loads on the CPU. The switch-off is process-wide and
-//! nothing clears it, so this test runs in a binary of its own. Windows
-//! only: the client asks for `DirectML` nowhere else.
+//! A child whose encoder lost its `DirectML` session exits without answering,
+//! so the parent switches `DirectML` off and the next child loads on the CPU.
+//! The switch-off is process-wide, so this runs in a binary of its own. Windows
+//! only.
 
 #![cfg(windows)]
 
