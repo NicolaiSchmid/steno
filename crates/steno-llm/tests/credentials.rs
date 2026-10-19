@@ -318,6 +318,22 @@ async fn token_endpoint_answers_are_classified_without_writing() {
             "a failed refresh never writes"
         );
     }
+    // A secret inside the code is redacted from the detail only: the code
+    // as sent still makes the refusal permanent.
+    let home = CodexHome::new().await;
+    home.write(AuthFile {
+        account_id: Some("invalid_grant".to_owned()),
+        ..AuthFile::default().access(&CodexHome::access_token(10, "plus"))
+    });
+    home.server
+        .enqueue([scripts.token_refresh_rejected("invalid_grant", 400)]);
+    let error = home.store().current().await.unwrap_err();
+    let CodexCredentialError::SignInExpired(detail) = &error else {
+        panic!("expected SignInExpired, got {error:?}");
+    };
+    assert!(!detail.contains("invalid_grant"), "{detail}");
+    assert!(detail.starts_with("[redacted]: HTTP 400"), "{detail}");
+
     let home = CodexHome::new().await;
     home.write_expiring();
     home.server.enqueue([StubResponse::drop_connection()]);

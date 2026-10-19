@@ -179,6 +179,7 @@ async fn a_model_echoing_the_speaker_label_is_cleaned_without_a_retry() {
         ("Unknown speaker: Hallo.", "Hallo."),
         ("  Speaker 2 : Hallo.", "Hallo."),
         ("**Me:** Danke dir.", "Danke dir."),
+        ("_Speaker 1_: Danke dir.", "Danke dir."),
         ("(Me) Danke dir.", "Danke dir."),
         ("Me - Danke dir.", "Danke dir."),
         ("\u{A0}Speaker 1\u{3000}: Hallo.", "Hallo."),
@@ -191,9 +192,16 @@ async fn a_model_echoing_the_speaker_label_is_cleaned_without_a_retry() {
             "Me-too products are everywhere.",
         ),
         ("Me, I think so: yes", "Me, I think so: yes"),
+        (
+            "Das ist, was ich meine, und zwar wirklich so: alles.",
+            "Das ist, was ich meine, und zwar wirklich so: alles.",
+        ),
+        (" Hallo.", " Hallo."),
         // A colon with a combining mark is no separator.
         ("Speaker 1:\u{301} Hallo.", "Speaker 1:\u{301} Hallo."),
         ("Speaker 1\n: Hallo.", "Speaker 1\n: Hallo."),
+        (" \u{301}[2] Hallo.", "Hallo."),
+        ("Speaker 1:  \u{301}Hallo.", " \u{301}Hallo."),
     ];
     for (text, stripped) in cases {
         assert_eq!(
@@ -203,6 +211,11 @@ async fn a_model_echoing_the_speaker_label_is_cleaned_without_a_retry() {
         );
     }
     // The colon must sit within the first 32 grapheme clusters.
+    let last_in_stretch = format!("{}Speaker 1: Hallo.", "* ".repeat(11));
+    assert_eq!(
+        CleanupDraft::stripping_label(&last_in_stretch, &labels),
+        "Hallo."
+    );
     let late = format!("{}Speaker 1: Hallo.", "*".repeat(23));
     assert_eq!(CleanupDraft::stripping_label(&late, &labels), late);
 }
