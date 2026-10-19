@@ -149,7 +149,7 @@ fn not_followed(url: &Url, error: &impl std::fmt::Display) -> String {
 /// Whether the running binary registers the scheme itself on Linux or
 /// Windows: a debug build or an `AppImage`, whose desktop entry no system
 /// reads. Installed builds get it from the installer.
-#[cfg(any(target_os = "linux", windows, test))]
+#[cfg(any(target_os = "linux", windows))]
 pub const fn registers_itself(debug_build: bool, appimage: bool) -> bool {
     debug_build || appimage
 }
