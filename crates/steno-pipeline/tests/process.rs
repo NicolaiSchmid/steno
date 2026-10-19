@@ -15,8 +15,8 @@ use steno_core::testing::{
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, Delivery, DeliveryDispatcher,
     DeliveryStatus, Destination, Meeting, MeetingEvent, MeetingExport, MeetingSource, MeetingState,
-    MeetingStateKind, PipelineStage, RawSegment, RecordingLayout, SpeakerAssignmentKind, Store,
-    async_trait,
+    MeetingStateKind, ParticipantRole, PipelineStage, RawSegment, RecordingLayout,
+    SpeakerAssignmentKind, Store, async_trait,
     paths::{file_url, file_url_path},
 };
 use steno_pipeline::pipeline::{diarized_lane_after_transcription, tap_carried_no_conversation};
@@ -541,6 +541,84 @@ async fn a_call_with_a_silent_tap_diarizes_the_mic_lane_and_has_no_me() {
         export.audio.unwrap().lanes,
         [AudioLane::Mic, AudioLane::System]
     );
+}
+
+/// A silent tap with one voice on the mic keeps the mic as "me" and writes
+/// no clip for a cluster never made a speaker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_tap_with_one_voice_on_the_mic_keeps_the_mic_as_me() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::KeepDays(30),
+        engine_deaf_to_silence(),
+        FakeDiarizer {
+            cluster_count: 1,
+            ..FakeDiarizer::default()
+        },
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepDays(30));
+    silence_the_tap(&asset);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+
+    let export = world.store.export(meeting.id).unwrap();
+    assert_eq!(export.meeting.state, MeetingState::Ready);
+    assert_eq!(labels(&export), ["Me"]);
+    assert_eq!(
+        export
+            .participants
+            .iter()
+            .map(|p| p.role)
+            .collect::<Vec<_>>(),
+        [ParticipantRole::Me]
+    );
+    let me = LaneMerger::me_speaker_id(meeting.id);
+    assert_eq!(export.segments.len(), 6);
+    assert!(
+        export
+            .segments
+            .iter()
+            .all(|s| s.lane == AudioLane::Mic && s.speaker_id == Some(me))
+    );
+    let layout = RecordingLayout::from_asset(&asset).unwrap();
+    assert!(!layout.speakers_directory().exists());
+}
+
+/// A re-run after the tap went quiet removes the "me" participant the
+/// first run created.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_that_falls_back_to_the_mic_lane_removes_the_pipelines_me_participant() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::KeepDays(30),
+        engine_deaf_to_silence(),
+        FakeDiarizer::default(),
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepDays(30));
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let first = world.store.export(meeting.id).unwrap();
+    assert_eq!(
+        first
+            .participants
+            .iter()
+            .map(|p| p.role)
+            .collect::<Vec<_>>(),
+        [ParticipantRole::Me]
+    );
+    assert_eq!(labels(&first), ["Me", "Speaker 1", "Speaker 2"]);
+
+    silence_the_tap(&asset);
+    world.pipeline.process(asset.id).await.unwrap();
+    let second = world.store.export(meeting.id).unwrap();
+    assert_eq!(second.meeting.state, MeetingState::Ready);
+    assert_eq!(second.participants, []);
+    assert_eq!(labels(&second), ["Speaker 1", "Speaker 2"]);
+    assert!(second.segments.iter().all(|s| s.speaker_id.is_some()));
 }
 
 #[tokio::test(flavor = "multi_thread")]

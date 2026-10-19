@@ -1443,6 +1443,52 @@ mod tests {
         assert!(store.meeting(meeting_id).unwrap().is_some());
     }
 
+    /// A failed commit saves `failed` under `FULL` before the copy is
+    /// removed, and the connection is back at `NORMAL`.
+    #[tokio::test]
+    async fn a_failed_admission_commit_saves_failed_durably_before_it_removes_the_copy() {
+        /// A commit's level, the receipt's state and the copies on the disk.
+        type Seen = (i64, Option<String>, usize);
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_audio_folder(dir.path());
+        let audio = dir.path().join("audio");
+        let now = Utc::now();
+        let (enqueue, _) = recording_enqueue();
+        refuse_writes(&store, false);
+        let intake = phone_intake(&store, enqueue, Arc::new(move || now));
+        let (device, metadata) = paired_phone(&store, now);
+        let upload = upload_in(dir.path());
+        let commits: Arc<Mutex<Vec<Seen>>> = Arc::default();
+        let seen = commits.clone();
+        let (copies, recording_id) = (audio.clone(), metadata.recording_id);
+        store.probe_commits(move |connection| {
+            let commit = (
+                connection
+                    .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                    .unwrap(),
+                connection
+                    .query_row(
+                        "SELECT (SELECT state FROM handoverReceipt WHERE recordingID = ?1)",
+                        [steno_core::store::convert::DbUuid(recording_id)],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                files_under(&copies).len(),
+            );
+            seen.lock().unwrap().push(commit);
+        });
+
+        intake.admit(&upload, &metadata, &device).await.unwrap_err();
+
+        assert_eq!(
+            *commits.lock().unwrap(),
+            [(2, Some("failed".to_owned()), 1)],
+            "the failed receipt commits under FULL, with the copy still there"
+        );
+        assert_eq!(files_under(&audio), Vec::<std::path::PathBuf>::new());
+        assert_eq!(synchronous(&store), 1);
+    }
+
     /// A `complete` receipt whose meeting is gone is admitted again into a
     /// new meeting.
     #[tokio::test]

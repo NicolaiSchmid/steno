@@ -289,6 +289,32 @@ mod tests {
         );
     }
 
+    /// "Keep all" keeps a master in an unsearchable folder too. Skipped as
+    /// root.
+    #[cfg(unix)]
+    #[test]
+    fn keep_all_keeps_a_master_whose_folder_cannot_be_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let now = Utc::now();
+        let (layout, master, asset) = expired_recording(&store, dir.path(), now);
+        let sweep = RetentionSweep::new(store.clone());
+
+        let unsearchable = Unsearchable::new(&layout.directory);
+        if master.try_exists().is_ok() {
+            return;
+        }
+        let kept = sweep.keep_all();
+        drop(unsearchable);
+        assert_eq!(kept.unwrap(), 1);
+        let stored = store.asset_by_id(asset.id).unwrap().unwrap();
+        assert_eq!(stored.retention, AudioRetention::KeepForever);
+        assert_eq!(stored.expires_at, None);
+
+        assert_eq!(sweep.run(now).unwrap(), Vec::<PathBuf>::new());
+        assert!(master.exists(), "kept forever");
+    }
+
     #[test]
     fn the_sweep_removes_the_clips_of_confirmed_speakers_and_keeps_the_others() {
         let dir = tempfile::tempdir().unwrap();
