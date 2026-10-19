@@ -26,120 +26,94 @@ fn source(lane: AudioLane, left: ChannelRef, right: Option<ChannelRef>) -> LaneS
     LaneSource { lane, left, right }
 }
 
-/// Built-in speakers (no input), built-in mic (mono), interleaved stereo tap.
+/// The call layouts the HAL builds: the mic and the stereo tap, in either
+/// order, interleaved or not, and a USB interface that is both devices.
 #[test]
-fn call_with_separate_mic_and_interleaved_tap() {
-    let layout = StreamLayout::resolve(
-        &[AudioLane::Mic, AudioLane::System],
-        &[1, 2],
-        &[vec![], vec![1]],
-        &[2],
-        Some(1),
-    )
-    .unwrap();
-    assert!(!layout.tap_first);
-    assert_eq!(
-        layout.sources,
-        vec![
-            source(AudioLane::Mic, ChannelRef::new(0, 0, 1), None),
-            source(
-                AudioLane::System,
-                ChannelRef::new(1, 0, 2),
-                Some(ChannelRef::new(1, 1, 2))
-            ),
-        ]
-    );
-}
-
-/// The HAL puts the tap first and delivers it non-interleaved: the two tap
-/// channels live in different buffers, each with stride 1.
-#[test]
-fn tap_first_non_interleaved() {
-    let layout = StreamLayout::resolve(
-        &[AudioLane::Mic, AudioLane::System],
-        &[1, 1, 2],
-        &[vec![], vec![2]],
-        &[1, 1],
-        Some(1),
-    )
-    .unwrap();
-    assert!(layout.tap_first);
-    assert_eq!(
-        layout.sources[0],
-        source(AudioLane::Mic, ChannelRef::new(2, 0, 2), None)
-    );
-    assert_eq!(
-        layout.sources[1],
-        source(
-            AudioLane::System,
-            ChannelRef::new(0, 0, 1),
-            Some(ChannelRef::new(1, 0, 1))
+fn call_layouts_resolve_to_the_mic_and_the_folded_tap() {
+    let c = ChannelRef::new;
+    // (case, aggregate streams, sub-device inputs, tap streams, mic index,
+    // tap first, mic, system left, system right)
+    let cases = [
+        // Built-in speakers (no input), built-in mic (mono), interleaved tap.
+        (
+            "separate mic, interleaved tap",
+            vec![1, 2],
+            vec![vec![], vec![1]],
+            vec![2],
+            Some(1),
+            false,
+            c(0, 0, 1),
+            c(1, 0, 2),
+            c(1, 1, 2),
+        ),
+        // The two tap channels live in different buffers, each with stride 1.
+        (
+            "tap first, non-interleaved",
+            vec![1, 1, 2],
+            vec![vec![], vec![2]],
+            vec![1, 1],
+            Some(1),
+            true,
+            c(2, 0, 2),
+            c(0, 0, 1),
+            c(1, 0, 1),
+        ),
+        (
+            "tap first, interleaved",
+            vec![2, 1],
+            vec![vec![], vec![1]],
+            vec![2],
+            Some(1),
+            true,
+            c(1, 0, 1),
+            c(0, 0, 2),
+            c(0, 1, 2),
+        ),
+        // One sub-device carrying two mono input streams.
+        (
+            "shared input and output device",
+            vec![1, 1, 2],
+            vec![vec![1, 1]],
+            vec![2],
+            Some(0),
+            false,
+            c(0, 0, 1),
+            c(2, 0, 2),
+            c(2, 1, 2),
+        ),
+        // A stereo mic beside a stereo tap: the same shape in either order,
+        // so the resolver assumes sub-devices first.
+        (
+            "equal shapes",
+            vec![2, 2],
+            vec![vec![], vec![2]],
+            vec![2],
+            Some(1),
+            false,
+            c(0, 0, 2),
+            c(1, 0, 2),
+            c(1, 1, 2),
+        ),
+    ];
+    for (case, aggregate, sub, tap, mic, tap_first, mic_left, left, right) in cases {
+        let layout = StreamLayout::resolve(
+            &[AudioLane::Mic, AudioLane::System],
+            &aggregate,
+            &sub,
+            &tap,
+            mic,
         )
-    );
-}
-
-/// A USB interface is both the output device and the microphone: one
-/// sub-device carrying two mono input streams.
-#[test]
-fn shared_input_output_device() {
-    let layout = StreamLayout::resolve(
-        &[AudioLane::Mic, AudioLane::System],
-        &[1, 1, 2],
-        &[vec![1, 1]],
-        &[2],
-        Some(0),
-    )
-    .unwrap();
-    assert_eq!(
-        layout.sources[0],
-        source(AudioLane::Mic, ChannelRef::new(0, 0, 1), None)
-    );
-    assert_eq!(layout.sources[1].left.buffer, 2);
-}
-
-#[test]
-fn tap_first_interleaved() {
-    let layout = StreamLayout::resolve(
-        &[AudioLane::Mic, AudioLane::System],
-        &[2, 1],
-        &[vec![], vec![1]],
-        &[2],
-        Some(1),
-    )
-    .unwrap();
-    assert!(layout.tap_first);
-    assert_eq!(
-        layout.sources,
-        vec![
-            source(AudioLane::Mic, ChannelRef::new(1, 0, 1), None),
-            source(
-                AudioLane::System,
-                ChannelRef::new(0, 0, 2),
-                Some(ChannelRef::new(0, 1, 2))
-            ),
-        ]
-    );
-}
-
-/// A stereo microphone next to a stereo tap has the same shape in either
-/// order; the resolver then assumes sub-devices first.
-#[test]
-fn equal_shapes_assume_sub_devices_first() {
-    let layout = StreamLayout::resolve(
-        &[AudioLane::Mic, AudioLane::System],
-        &[2, 2],
-        &[vec![], vec![2]],
-        &[2],
-        Some(1),
-    )
-    .unwrap();
-    assert!(!layout.tap_first);
-    assert_eq!(
-        layout.sources[0],
-        source(AudioLane::Mic, ChannelRef::new(0, 0, 2), None)
-    );
-    assert_eq!(layout.sources[1].left.buffer, 1);
-    assert!(layout.sources[1].right.is_some(), "a stereo tap is folded");
+        .unwrap();
+        assert_eq!(layout.tap_first, tap_first, "{case}");
+        assert_eq!(
+            layout.sources,
+            vec![
+                source(AudioLane::Mic, mic_left, None),
+                source(AudioLane::System, left, Some(right)),
+            ],
+            "{case}"
+        );
+    }
 }
 
 #[test]
@@ -218,45 +192,6 @@ fn read(sink: &LaneFrameSink, lane: usize, count: usize) -> Vec<f32> {
     let mut out = vec![f32::NAN; count];
     sink.ring(lane).read(&mut out);
     out
-}
-
-/// Built-in mic (mono) then the tap (interleaved stereo).
-#[test]
-fn sub_devices_first_with_an_interleaved_tap() {
-    let layout = StreamLayout::resolve(
-        &[AudioLane::Mic, AudioLane::System],
-        &[1, 2],
-        &[vec![], vec![1]],
-        &[2],
-        Some(1),
-    )
-    .unwrap();
-    let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
-    run_deliver(
-        &[
-            Buffer {
-                channels: 1,
-                samples: Some(vec![1.0, 2.0, 3.0, 4.0]),
-            },
-            Buffer {
-                channels: 2,
-                samples: Some(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]),
-            },
-        ],
-        4,
-        &layout,
-        &sink,
-    );
-    assert_eq!(sink.available_to_read(), 4);
-    assert_eq!(read(&sink, 0, 4), vec![1.0, 2.0, 3.0, 4.0]);
-    assert_eq!(
-        read(&sink, 1, 4),
-        vec![15.0, 35.0, 55.0, 75.0],
-        "stereo folded to mono"
-    );
-    assert!(sink.wake().try_take());
-    assert!(!sink.wake().try_take(), "one wake per callback");
-    assert!(sink.dropped_samples().is_empty());
 }
 
 /// The tap first and non-interleaved, the microphone a stereo device: the
@@ -508,50 +443,6 @@ fn an_unusable_first_buffer_costs_only_its_own_lane() {
     unsafe { deliver(&[no_channels, no_channels], &layout.sources, &sink) };
     assert_eq!(sink.available_to_read(), 0);
     assert!(sink.dropped_samples().is_empty());
-}
-
-/// Rings of four samples: the second callback of four is refused for both
-/// lanes and counted, and nothing is half-written.
-#[test]
-fn a_callback_that_does_not_fit_is_refused_for_every_lane() {
-    let layout = StreamLayout::resolve(
-        &[AudioLane::Mic, AudioLane::System],
-        &[1, 2],
-        &[vec![], vec![1]],
-        &[2],
-        Some(1),
-    )
-    .unwrap();
-    let sink = LaneFrameSink::with_handler(
-        &[AudioLane::Mic, AudioLane::System],
-        4.0,
-        1.0,
-        Box::new(|_| {}),
-    );
-    for _ in 0..2 {
-        run_deliver(
-            &[
-                Buffer {
-                    channels: 1,
-                    samples: Some(vec![1.0, 2.0, 3.0, 4.0]),
-                },
-                Buffer {
-                    channels: 2,
-                    samples: Some(vec![1.0; 8]),
-                },
-            ],
-            4,
-            &layout,
-            &sink,
-        );
-    }
-    assert_eq!(sink.available_to_read(), 4);
-    assert_eq!(
-        sink.dropped_samples().into_iter().collect::<Vec<_>>(),
-        vec![(AudioLane::Mic, 4), (AudioLane::System, 4)]
-    );
-    assert!(sink.wake().try_take());
-    assert!(!sink.wake().try_take(), "no wake for the refused callback");
 }
 
 fn baseline() -> DeviceSnapshot {

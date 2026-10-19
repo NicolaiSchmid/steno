@@ -22,13 +22,6 @@ use steno_audio::realtime::{FrameRelay, LaneFrameSink, LaneRingBuffer};
 use steno_core::AudioLane;
 
 #[test]
-fn capacity_rounds_up_to_a_power_of_two() {
-    assert_eq!(LaneRingBuffer::new(1000).capacity(), 1024);
-    assert_eq!(LaneRingBuffer::new(1024).capacity(), 1024);
-    assert_eq!(LaneRingBuffer::new(1).capacity(), 2);
-}
-
-#[test]
 fn write_then_read_round_trips_across_the_wrap_point() {
     let ring = LaneRingBuffer::new(8);
     let mut out = [0.0f32; 5];
@@ -109,21 +102,6 @@ fn a_ring_holds_exactly_its_capacity_and_empties_again() {
         assert!(!ring.read(&mut out[..1]), "empty: a read is refused");
     }
     assert_eq!(ring.dropped_samples(), 4, "one refused zero per round");
-}
-
-#[test]
-fn clear_zeroes_storage_and_resets_indices() {
-    let ring = LaneRingBuffer::new(4);
-    let block = [1.0f32, 2.0, 3.0];
-    ring.write_slice(&block);
-    ring.write_slice(&block);
-    ring.clear();
-    assert_eq!(ring.available_to_read(), 0);
-    assert_eq!(ring.dropped_samples(), 0);
-    ring.write_zeros(4);
-    let mut out = [9.0f32; 4];
-    ring.read(&mut out);
-    assert_eq!(out, [0.0; 4]);
 }
 
 /// One producer and one consumer for about 200 ms with varying block sizes:

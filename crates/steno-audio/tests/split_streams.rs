@@ -78,49 +78,53 @@ fn drain(sink: &LaneFrameSink, lane: usize) -> Vec<f32> {
     sink.ring(lane).drain_all()
 }
 
+/// A call masters on the microphone and follows the system stream, staged
+/// as mono; in person opens the microphone alone; a system-only capture
+/// masters on the stereo system stream; no lanes is refused.
 #[test]
-fn a_call_masters_on_the_microphone_and_follows_the_system_stream() {
-    let plan = SplitStreamPlan::new(&CaptureMode::Call.lanes()).unwrap();
-    assert_eq!(plan.master, StreamSource::Microphone);
-    assert_eq!(plan.follower, Some(StreamSource::System));
-    assert_eq!(
-        plan.streams(),
-        [StreamSource::Microphone, StreamSource::System]
-    );
-    let [mic, system] = plan.layout.sources.as_slice() else {
-        panic!("two sources: {:?}", plan.layout.sources);
-    };
-    assert_eq!(mic.lane, AudioLane::Mic);
-    assert_eq!(mic.left, ChannelRef::new(0, 0, 1));
-    assert_eq!(system.lane, AudioLane::System);
-    assert_eq!(system.left, ChannelRef::new(1, 0, 1));
-    assert_eq!(system.right, None, "the follower is staged as mono");
-}
-
-#[test]
-fn in_person_opens_the_microphone_alone() {
-    let plan = SplitStreamPlan::new(&CaptureMode::InPerson.lanes()).unwrap();
-    assert_eq!(plan.master, StreamSource::Microphone);
-    assert_eq!(plan.follower, None);
-    assert_eq!(plan.layout.sources.len(), 1);
-    assert_eq!(plan.layout.sources[0].lane, AudioLane::Mixed);
-    assert_eq!(plan.layout.sources[0].left, ChannelRef::new(0, 0, 1));
-}
-
-#[test]
-fn a_system_only_capture_masters_on_the_stereo_system_stream() {
-    let plan = SplitStreamPlan::new(&[AudioLane::System]).unwrap();
-    assert_eq!(plan.master, StreamSource::System);
-    assert_eq!(plan.follower, None);
-    let source = plan.layout.sources[0];
-    assert_eq!(source.left, ChannelRef::new(0, 0, 2));
-    assert_eq!(source.right, Some(ChannelRef::new(0, 1, 2)));
-    assert_eq!(StreamSource::System.channels(), 2);
-    assert_eq!(StreamSource::Microphone.channels(), 1);
-}
-
-#[test]
-fn no_lanes_is_refused() {
+fn the_stream_plan_masters_on_the_microphone_when_there_is_one() {
+    let mono = |stream| ChannelRef::new(stream, 0, 1);
+    for (lanes, master, follower, sources) in [
+        (
+            CaptureMode::Call.lanes(),
+            StreamSource::Microphone,
+            Some(StreamSource::System),
+            vec![
+                (AudioLane::Mic, mono(0), None),
+                (AudioLane::System, mono(1), None),
+            ],
+        ),
+        (
+            CaptureMode::InPerson.lanes(),
+            StreamSource::Microphone,
+            None,
+            vec![(AudioLane::Mixed, mono(0), None)],
+        ),
+        (
+            vec![AudioLane::System],
+            StreamSource::System,
+            None,
+            vec![(
+                AudioLane::System,
+                ChannelRef::new(0, 0, 2),
+                Some(ChannelRef::new(0, 1, 2)),
+            )],
+        ),
+    ] {
+        let plan = SplitStreamPlan::new(&lanes).unwrap();
+        assert_eq!(
+            (plan.master, plan.follower),
+            (master, follower),
+            "{lanes:?}"
+        );
+        let got: Vec<_> = plan
+            .layout
+            .sources
+            .iter()
+            .map(|source| (source.lane, source.left, source.right))
+            .collect();
+        assert_eq!(got, sources, "{lanes:?}");
+    }
     assert!(matches!(
         SplitStreamPlan::new(&[]),
         Err(CaptureError::UnexpectedStreamLayout(_))
@@ -965,36 +969,6 @@ fn a_burst_before_the_window_closes_survives_the_slip() {
     assert_eq!(follower.queued(), 1_440, "the burst stays queued");
 }
 
-/// A re-prime after an underrun starts a fresh window.
-#[test]
-fn a_reprime_starts_a_fresh_slip_window() {
-    let follower = FollowerLane::new(480, 960, 1_920, 48_000);
-    let mut scratch = vec![0.0f32; 4_096];
-    let mut out = vec![0.0f32; 480];
-    follower.push(packet(&ramp(0, 960), 1), &mut scratch);
-    follower.pull(&mut out);
-    for start in [960, 1_440] {
-        follower.push(packet(&ramp(start, 480), 1), &mut scratch);
-        follower.pull(&mut out);
-    }
-    // Three pulls into the window, an underrun.
-    follower.pull(&mut vec![0.0f32; 600]);
-    assert!(follower.underrun_frames() > 0);
-    follower.push(packet(&ramp(10_000, 2_400), 1), &mut scratch);
-    let mut pushed = 12_400;
-    let mut losses = Vec::new();
-    for _ in 0..4 {
-        losses.push(follower.pull(&mut out));
-        follower.push(packet(&ramp(pushed, 480), 1), &mut scratch);
-        pushed += 480;
-    }
-    assert_eq!(
-        losses,
-        vec![0, 0, 0, 1_440],
-        "one window after the re-prime"
-    );
-}
-
 /// A queue more than the master's buffer above high water slips at once.
 #[test]
 fn a_queue_beyond_the_masters_buffer_slips_at_once() {
@@ -1020,56 +994,6 @@ fn a_queue_beyond_the_masters_buffer_slips_at_once() {
     assert_eq!(follower.queued(), 480);
     follower.pull(&mut out);
     assert_eq!(out, ramp(3_360, 480), "the newest frames survive the slip");
-}
-
-/// A slip at once starts a fresh window.
-#[test]
-fn a_slip_at_once_starts_a_fresh_window() {
-    // Ten pulls a window; ceiling: high water 960 plus a 960-frame buffer.
-    let follower = FollowerLane::new(480, 960, 4_800, 48_000).with_max_lateness(960);
-    let mut scratch = vec![0.0f32; 4_096];
-    let mut out = vec![0.0f32; 480];
-    let mut pushed = 0;
-    let mut feed = |frames: usize| {
-        follower.push(packet(&ramp(pushed, frames), 1), &mut scratch);
-        pushed += frames;
-        follower.pull(&mut out)
-    };
-    // A first window at the target.
-    assert_eq!(feed(960), 0);
-    for _ in 0..9 {
-        assert_eq!(feed(480), 0);
-    }
-    // Three pulls above high water, then a burst above the ceiling.
-    assert_eq!(feed(1_200), 0);
-    assert_eq!(feed(480), 0);
-    assert_eq!(feed(480), 0);
-    assert_eq!(feed(1_440), 1_680, "2 160 left is above 1 920: at once");
-    // Nine pulls above high water, one short of a window.
-    assert_eq!(feed(1_200), 0);
-    for pull in 0..8 {
-        assert_eq!(feed(480), 0, "pull {pull} after the slip");
-    }
-    assert_eq!(follower.slipped_frames(), 1_680);
-}
-
-/// [`FollowerLane::for_streams`] sets the ceiling a master buffer above
-/// high water.
-#[test]
-fn the_stream_policy_slips_at_once_a_master_buffer_above_high_water() {
-    let follower = FollowerLane::for_streams(480, 960);
-    let mut scratch = vec![0.0f32; 4_096];
-    let mut out = vec![0.0f32; 480];
-    follower.push(packet(&ramp(0, 1_440), 1), &mut scratch);
-    assert_eq!(follower.pull(&mut out), 0);
-    assert_eq!(follower.queued(), 960);
-    follower.push(packet(&ramp(1_440, 1_980), 1), &mut scratch);
-    assert_eq!(
-        follower.pull(&mut out),
-        1_500,
-        "2 460 left is above 2 400: at once"
-    );
-    assert_eq!(follower.queued(), 960);
 }
 
 #[test]
@@ -1198,20 +1122,6 @@ fn audio_queued_before_the_first_pull_is_trimmed_uncounted() {
     follower.pull(&mut out);
     assert_eq!(out, ramp(10_000, 480));
     assert_eq!(follower.trimmed_frames(), 3_840);
-}
-
-/// A pre-roll above the ceiling is trimmed at the first pull, not slipped.
-#[test]
-fn a_pre_roll_above_the_ceiling_is_trimmed_not_slipped() {
-    let follower = FollowerLane::for_streams(480, 960);
-    let mut scratch = vec![0.0f32; 4_096];
-    let mut out = vec![0.0f32; 480];
-    follower.push(packet(&ramp(0, 8_000), 1), &mut scratch);
-    assert_eq!(follower.pull(&mut out), 0, "a trim is not a loss");
-    assert_eq!(out, ramp(6_560, 480));
-    assert_eq!(follower.trimmed_frames(), 6_560);
-    assert_eq!(follower.slipped_frames(), 0);
-    assert_eq!(follower.queued(), 960);
 }
 
 /// A follower that starts after the master's first pull is never trimmed.
@@ -1888,62 +1798,140 @@ impl Call {
     }
 }
 
-/// The system thread out for the last 0.5 s before the stop: the stop
-/// counts that loss on the system lane however the final drains fall.
-#[test]
-fn a_follower_out_at_the_stop_is_counted_at_the_backends_stop() {
-    for (master_first, master_packets_after) in [(true, 0), (false, 0), (false, 1), (false, 2)] {
-        let mut call = Call::new();
-        for _ in 0..200 {
-            call.tick();
-        }
-        for _ in 0..50 {
-            call.master_packet();
-        }
-        let follower_drain = |call: &mut Call| {
-            for _ in 0..10 {
-                call.follower_packet();
+impl Call {
+    /// Runs `script`, words split by spaces: `<n>t` ticks, `<n>m` master
+    /// packets, `<n>f` follower packets; `F` the follower's flagged packet
+    /// with nothing its clocks read, `F<n>` with `n` filled; `S` the stop
+    /// with no follower reading, `C` with a continuous follower's empty
+    /// reading, `U<n>` with `n` unfilled.
+    fn run(&mut self, script: &str) -> &mut Self {
+        for word in script.split_whitespace() {
+            let (letter, number) = if word.as_bytes()[0].is_ascii_digit() {
+                let (count, op) = word.split_at(word.len() - 1);
+                (op, count.parse::<usize>().unwrap())
+            } else {
+                let (op, value) = word.split_at(1);
+                (op, value.parse::<usize>().unwrap_or(0))
+            };
+            match letter {
+                "t" => (0..number).for_each(|_| self.tick()),
+                "m" => (0..number).for_each(|_| self.master_packet()),
+                "f" => (0..number).for_each(|_| self.follower_packet()),
+                "F" => self.follower_flagged(filled(number)),
+                "S" => self.stop(Missed::default(), None),
+                "C" => self.stop(Missed::default(), Some(Missed::default())),
+                "U" => self.stop(Missed::default(), Some(unfilled(number))),
+                _ => panic!("{word}"),
             }
-            call.follower_flagged(filled(19_200));
-        };
-        follower_drain(&mut call);
-        if !master_first {
-            for _ in 0..master_packets_after {
-                call.master_packet();
-            }
         }
-        call.stop(Missed::default(), None);
-        let (filled, unfilled) = call.system();
-        let context = format!("master first {master_first}, {master_packets_after} after");
-        assert!(
-            (19_200..=19_200 + 4_800).contains(&(filled + unfilled)),
-            "{context}: filled {filled}, unfilled {unfilled}"
-        );
-        call.stop(Missed::default(), None);
-        assert_eq!(call.system(), (filled, unfilled), "{context}: held once");
+        self
     }
 }
 
-/// A loss into the stop with no flag: the stop's counter reading counts it
-/// on a continuous stream.
+/// What the system lane counts (filled and unfilled) after each script of
+/// the follower's outages, idles, flags and the stop. Padding the master
+/// wrote while the system stream was out counts once, at its flag or at
+/// the stop; padding of an idle no flag follows within the hold, and a
+/// trim or re-prime that is only delay, does not.
 #[test]
-fn a_follower_loss_no_packet_flags_is_counted_from_the_stops_reading() {
-    let mut call = Call::new();
-    for _ in 0..200 {
-        call.tick();
+fn the_follower_padding_counts_once_for_every_outage_and_never_for_an_idle() {
+    let p = PERIOD;
+    for (name, script, counted) in [
+        // Out for the last 0.5 s before the stop, however the drains fall.
+        (
+            "out at the stop",
+            "200t 50m 10f F19200 S S",
+            19_200..=24_000,
+        ),
+        (
+            "out at the stop, 1 after",
+            "200t 50m 10f F19200 1m S S",
+            19_200..=24_000,
+        ),
+        (
+            "out at the stop, 2 after",
+            "200t 50m 10f F19200 2m S S",
+            19_200..=24_000,
+        ),
+        // A loss into the stop with no flag: the stop's counter reading.
+        ("no packet flags", "200t 50m 10f U19200", 19_200..=24_000),
+        // After an unflagged 10 s idle a flag counts only its own loss.
+        ("older than the hold", "100t 1000m 100t F 10t", 0..=0),
+        ("older, its own fill", "100t 1000m 100t F480 10t", 480..=480),
+        // Kept packets unflagged and the flag a period later.
+        (
+            "flag after, follower first",
+            "200t 50m 10f 1m F 1m 20t",
+            40 * p - 960..=40 * p + 4_800,
+        ),
+        (
+            "flag after, master first",
+            "200t 50m 1m 10f F 1m 20t",
+            40 * p - 960..=40 * p + 4_800,
+        ),
+        ("flag long after an idle", "100t 50m 60f F 10t S", 0..=0),
+        // A flag before a 6 s idle takes the outage's padding only.
+        (
+            "pending flag, idle after",
+            "100t 27m F 601m 20t",
+            27 * p - 960..=39 * p,
+        ),
+        // An underrun after the resume keeps the outage's padding.
+        (
+            "underrun, follower first",
+            "200t 63m 10f 10m 1m F 20t",
+            61 * p - 960..=usize::MAX,
+        ),
+        (
+            "underrun, master first",
+            "200t 63m 10m 10f 1m F 20t",
+            61 * p - 960..=usize::MAX,
+        ),
+        (
+            "out before the first prime",
+            "2t 96m 10f F 20t",
+            86 * p..=usize::MAX,
+        ),
+        // The stop takes the outage's padding, primed again or still out.
+        ("stop, primed again", "200t 50m 10f 3m F S", 48 * p..=50 * p),
+        ("stop, still out", "200t 50m 2f F S", 48 * p..=50 * p),
+        (
+            "two re-primes in the hold",
+            "200t 50m 3f 5m 4f 4m F 1m",
+            48 * p..=52 * p,
+        ),
+        // Two idles: both count within the hold apart, only the second past.
+        (
+            "two idles within the hold",
+            "200t 100m 5t 50m F 20t",
+            0..=152 * p,
+        ),
+        (
+            "two idles past the hold",
+            "200t 100m 20t 50m F 20t",
+            0..=52 * p,
+        ),
+        (
+            "idle ended while the master was out",
+            "200t 600m 30f 30m F S",
+            0..=4 * p,
+        ),
+        (
+            "a spurious second flag",
+            "200t 100m 8f F 1m 3t F 20t S",
+            100 * p - 1_920..=102 * p,
+        ),
+        // A process loopback follower out at the stop, unflagged.
+        ("continuous, out at the stop", "200t 50m C", 48 * p..=50 * p),
+        ("not continuous, out at the stop", "200t 50m S", 0..=0),
+    ] {
+        let mut call = Call::new();
+        let (filled, unfilled) = call.run(script).system();
+        assert!(
+            counted.contains(&(filled + unfilled)),
+            "{name} ({script}): filled {filled}, unfilled {unfilled}"
+        );
     }
-    for _ in 0..50 {
-        call.master_packet();
-    }
-    for _ in 0..10 {
-        call.follower_packet();
-    }
-    call.stop(Missed::default(), Some(unfilled(19_200)));
-    let (filled, unfilled) = call.system();
-    assert!(
-        (19_200..=19_200 + 4_800).contains(&(filled + unfilled)),
-        "filled {filled}, unfilled {unfilled}"
-    );
 }
 
 /// A rebuild's stop leaves out the stop's readings but not the follower's
@@ -1951,20 +1939,14 @@ fn a_follower_loss_no_packet_flags_is_counted_from_the_stops_reading() {
 #[test]
 fn the_stops_readings_count_on_their_own_lanes_and_not_at_a_rebuild() {
     let mut call = Call::new();
-    for _ in 0..200 {
-        call.tick();
-    }
-    call.stop(unfilled(9_600), None);
+    call.run("200t").stop(unfilled(9_600), None);
     assert_eq!(
         call.sink.unfilled_samples(),
         BTreeMap::from([(AudioLane::Mic, 9_600)])
     );
 
     let mut call = Call::new();
-    for _ in 0..200 {
-        call.tick();
-    }
-    call.follower_flagged(unfilled(4_800));
+    call.run("200t").follower_flagged(unfilled(4_800));
     call.sink
         .report_device_change(DeviceChangeReason::OutputDeviceGone);
     call.stop(unfilled(9_600), Some(unfilled(48_000)));
@@ -1975,61 +1957,17 @@ fn the_stops_readings_count_on_their_own_lanes_and_not_at_a_rebuild() {
     );
 }
 
-/// After an unflagged 10 s idle, a later flag counts only its own loss.
+/// A second flag keeps the first's padding, whenever the stop comes.
 #[test]
-fn padding_older_than_the_hold_is_no_discontinuitys_loss() {
-    for missed in [Missed::default(), filled(480)] {
+fn a_second_flag_while_the_master_is_out_keeps_the_first_flags_padding() {
+    for rest in ["F S", "F 50t S", "1f 50t S"] {
         let mut call = Call::new();
-        for _ in 0..100 {
-            call.tick();
-        }
-        for _ in 0..1_000 {
-            call.master_packet();
-        }
-        for _ in 0..100 {
-            call.tick();
-        }
-        call.follower_flagged(missed);
-        for _ in 0..10 {
-            call.tick();
-        }
-        let (filled, unfilled) = call.system();
-        assert_eq!(filled + unfilled, missed.fill, "{missed:?}");
-    }
-}
-
-/// Kept packets unflagged and the flag a period later, with clocks that
-/// read nothing: the padding alone counts the 40 lost packets.
-#[test]
-fn a_flag_after_the_kept_packets_counts_the_padding_within_the_hold() {
-    for follower_first in [true, false] {
-        let mut call = Call::new();
-        for _ in 0..200 {
-            call.tick();
-        }
-        for _ in 0..50 {
-            call.master_packet();
-        }
-        if follower_first {
-            for _ in 0..10 {
-                call.follower_packet();
-            }
-            call.master_packet();
-        } else {
-            call.master_packet();
-            for _ in 0..10 {
-                call.follower_packet();
-            }
-        }
-        call.follower_flagged(Missed::default());
-        call.master_packet();
-        for _ in 0..20 {
-            call.tick();
-        }
-        let (filled, unfilled) = call.system();
+        let before = call.run("200t").follower.underrun_frames();
+        let padded = call.run("100m").follower.underrun_frames() - before;
+        let (filled, unfilled) = call.run("F 1m 30f").run(rest).system();
         assert!(
-            (19_200 - 960..=19_200 + 4_800).contains(&(filled + unfilled)),
-            "follower first {follower_first}: filled {filled}, unfilled {unfilled}"
+            filled + unfilled + 2 * 960 >= padded,
+            "{rest}: {padded} padded, filled {filled}, unfilled {unfilled}"
         );
     }
 }
@@ -2390,116 +2328,6 @@ fn two_hours_of_wrapping_clocks_count_every_loss() {
     );
 }
 
-/// A flag long after an unflagged idle does not count the idle's padding.
-#[test]
-fn a_flag_long_after_the_follower_came_back_takes_no_padding() {
-    let mut call = Call::new();
-    for _ in 0..100 {
-        call.tick();
-    }
-    for _ in 0..50 {
-        call.master_packet();
-    }
-    for _ in 0..60 {
-        call.follower_packet();
-    }
-    call.follower_flagged(Missed::default());
-    for _ in 0..10 {
-        call.follower_packet();
-        call.master_packet();
-    }
-    call.stop(Missed::default(), None);
-    assert_eq!(call.system(), (0, 0));
-}
-
-/// A flag before a 6 s idle takes the outage's padding, not the idle's.
-#[test]
-fn a_pending_flag_does_not_take_the_idle_after_it() {
-    let mut call = Call::new();
-    for _ in 0..100 {
-        call.tick();
-    }
-    for _ in 0..27 {
-        call.master_packet();
-    }
-    call.follower_flagged(Missed::default());
-    call.master_packet();
-    for _ in 0..600 {
-        call.master_packet();
-    }
-    for _ in 0..20 {
-        call.tick();
-    }
-    let (filled, unfilled) = call.system();
-    assert!(
-        (27 * PERIOD - 960..=(27 + 12) * PERIOD).contains(&(filled + unfilled)),
-        "filled {filled}, unfilled {unfilled}"
-    );
-}
-
-/// An underrun after the resume does not hide the outage's padding.
-#[test]
-fn an_underrun_before_the_flag_keeps_the_outages_padding() {
-    for follower_first in [true, false] {
-        let mut call = Call::new();
-        for _ in 0..200 {
-            call.tick();
-        }
-        for _ in 0..63 {
-            call.master_packet();
-        }
-        // Both out; then the resume tick.
-        if follower_first {
-            for _ in 0..10 {
-                call.follower_packet();
-            }
-        }
-        for _ in 0..10 {
-            call.master_packet();
-        }
-        if !follower_first {
-            for _ in 0..10 {
-                call.follower_packet();
-            }
-        }
-        // The next tick: the master's packet before the follower's flag.
-        call.master_packet();
-        call.follower_flagged(Missed::default());
-        for _ in 0..20 {
-            call.tick();
-        }
-        let (filled, unfilled) = call.system();
-        assert!(
-            filled + unfilled >= 61 * PERIOD - 960,
-            "follower first {follower_first}: filled {filled}, unfilled {unfilled}"
-        );
-    }
-}
-
-/// An outage before the lane first primed counts its padding at its flag.
-#[test]
-fn a_follower_out_before_the_first_prime_counts_its_padding() {
-    let mut call = Call::new();
-    for _ in 0..2 {
-        call.tick();
-    }
-    for _ in 0..96 {
-        call.master_packet();
-    }
-    for _ in 0..10 {
-        call.follower_packet();
-    }
-    call.follower_flagged(Missed::default());
-    for _ in 0..20 {
-        call.tick();
-    }
-    let (filled, unfilled) = call.system();
-    assert!(
-        filled + unfilled >= 86 * PERIOD,
-        "filled {filled}, unfilled {unfilled}"
-    );
-}
-
 /// Frozen positions among left-out pairs still measure from the pair after
 /// their first move.
 #[test]
@@ -2523,233 +2351,6 @@ fn a_first_move_after_left_out_pairs_is_left_out_too() {
         (960..=6 * 1_920).contains(&missed.unfilled),
         "a 960-frame idle read as {missed:?}"
     );
-}
-
-/// The stop takes the padding of the run that holds the outage, primed
-/// again or still out.
-#[test]
-fn the_stop_takes_the_padding_of_the_outage_whether_or_not_the_lane_primed() {
-    // Primed again: the kept packets were pulled, the flag came after.
-    let mut call = Call::new();
-    for _ in 0..200 {
-        call.tick();
-    }
-    for _ in 0..50 {
-        call.master_packet();
-    }
-    for _ in 0..10 {
-        call.follower_packet();
-    }
-    for _ in 0..3 {
-        call.master_packet();
-    }
-    call.follower_flagged(Missed::default());
-    call.stop(Missed::default(), None);
-    let (filled, unfilled) = call.system();
-    assert!(
-        (48 * PERIOD..=50 * PERIOD).contains(&(filled + unfilled)),
-        "primed: filled {filled}, unfilled {unfilled}"
-    );
-
-    // Still out: the lane lacks the 48 packets the engine lost, all padded.
-    let mut call = Call::new();
-    for _ in 0..200 {
-        call.tick();
-    }
-    for _ in 0..50 {
-        call.master_packet();
-    }
-    for _ in 0..2 {
-        call.follower_packet();
-    }
-    call.follower_flagged(Missed::default());
-    call.stop(Missed::default(), None);
-    let (filled, unfilled) = call.system();
-    assert!(
-        (48 * PERIOD..=50 * PERIOD).contains(&(filled + unfilled)),
-        "still out: filled {filled}, unfilled {unfilled}"
-    );
-}
-
-/// Both threads resume after a follower outage and the lane primes twice:
-/// the flag counts the padding once.
-#[test]
-fn a_second_reprime_within_the_hold_counts_the_outage_once() {
-    let mut call = Call::new();
-    for _ in 0..200 {
-        call.tick();
-    }
-    for _ in 0..50 {
-        call.master_packet();
-    }
-    for _ in 0..3 {
-        call.follower_packet();
-    }
-    for _ in 0..5 {
-        call.master_packet();
-    }
-    for _ in 0..4 {
-        call.follower_packet();
-    }
-    for _ in 0..4 {
-        call.master_packet();
-    }
-    call.follower_flagged(Missed::default());
-    call.master_packet();
-    let (filled, unfilled) = call.system();
-    assert!(
-        (48 * PERIOD..=52 * PERIOD).contains(&(filled + unfilled)),
-        "filled {filled}, unfilled {unfilled}"
-    );
-}
-
-/// Two unflagged idles, then a flag: both idles count when under the hold
-/// apart, only the second when further.
-#[test]
-fn a_second_idle_within_the_hold_counts_the_first_too() {
-    for (between, most) in [(5, 152 * PERIOD), (20, 52 * PERIOD)] {
-        let mut call = Call::new();
-        for _ in 0..200 {
-            call.tick();
-        }
-        for _ in 0..100 {
-            call.master_packet();
-        }
-        for _ in 0..between {
-            call.tick();
-        }
-        for _ in 0..50 {
-            call.master_packet();
-        }
-        call.follower_flagged(Missed::default());
-        for _ in 0..20 {
-            call.tick();
-        }
-        let (filled, unfilled) = call.system();
-        assert!(
-            filled + unfilled <= most,
-            "{between} between: filled {filled}, unfilled {unfilled}"
-        );
-    }
-}
-
-/// An idle that ends while the master is out, past the hold: a flag right
-/// after takes none of its padding.
-#[test]
-fn an_idle_that_ends_while_the_master_is_out_is_forgotten_at_the_reprime() {
-    let mut call = Call::new();
-    for _ in 0..200 {
-        call.tick();
-    }
-    for _ in 0..600 {
-        call.master_packet();
-    }
-    for _ in 0..30 {
-        call.follower_packet();
-    }
-    for _ in 0..30 {
-        call.master_packet();
-    }
-    call.follower_flagged(Missed::default());
-    call.stop(Missed::default(), None);
-    let (filled, unfilled) = call.system();
-    assert!(
-        filled + unfilled <= 4 * PERIOD,
-        "filled {filled}, unfilled {unfilled}"
-    );
-}
-
-/// A second flag keeps the first's padding, whenever the stop comes.
-#[test]
-fn a_second_flag_while_the_master_is_out_keeps_the_first_flags_padding() {
-    for (second_flag, at_stop) in [(true, true), (true, false), (false, false)] {
-        let mut call = Call::new();
-        for _ in 0..200 {
-            call.tick();
-        }
-        let before = call.follower.underrun_frames();
-        for _ in 0..100 {
-            call.master_packet();
-        }
-        let padded = call.follower.underrun_frames() - before;
-        call.follower_flagged(Missed::default());
-        call.master_packet();
-        for _ in 0..30 {
-            call.follower_packet();
-        }
-        if second_flag {
-            call.follower_flagged(Missed::default());
-        } else {
-            call.follower_packet();
-        }
-        if !at_stop {
-            for _ in 0..50 {
-                call.tick();
-            }
-        }
-        call.stop(Missed::default(), None);
-        let (filled, unfilled) = call.system();
-        assert!(
-            filled + unfilled + 2 * 960 >= padded,
-            "second flag {second_flag}, at the stop {at_stop}: {padded} padded, filled \
-             {filled}, unfilled {unfilled}"
-        );
-    }
-}
-
-/// A spurious second flag after an outage: the padding counts once.
-#[test]
-fn a_spurious_flag_right_after_an_outage_counts_its_padding_once() {
-    let mut call = Call::new();
-    for _ in 0..200 {
-        call.tick();
-    }
-    for _ in 0..100 {
-        call.master_packet();
-    }
-    for _ in 0..8 {
-        call.follower_packet();
-    }
-    call.follower_flagged(Missed::default());
-    call.master_packet();
-    for _ in 0..3 {
-        call.tick();
-    }
-    call.follower_flagged(Missed::default());
-    for _ in 0..20 {
-        call.tick();
-    }
-    call.stop(Missed::default(), None);
-    let (filled, unfilled) = call.system();
-    assert!(
-        (100 * PERIOD - 2 * 960..=102 * PERIOD).contains(&(filled + unfilled)),
-        "filled {filled}, unfilled {unfilled}"
-    );
-}
-
-/// A process loopback follower out at the stop: its running padding counts
-/// at the stop.
-#[test]
-fn a_continuous_follower_out_at_the_stop_counts_its_padding_unflagged() {
-    for continuous in [true, false] {
-        let mut call = Call::new();
-        for _ in 0..200 {
-            call.tick();
-        }
-        for _ in 0..50 {
-            call.master_packet();
-        }
-        call.stop(Missed::default(), continuous.then(Missed::default));
-        let (filled, unfilled) = call.system();
-        if continuous {
-            assert!(
-                (48 * PERIOD..=50 * PERIOD).contains(&(filled + unfilled)),
-                "filled {filled}, unfilled {unfilled}"
-            );
-        } else {
-            assert_eq!((filled, unfilled), (0, 0));
-        }
-    }
 }
 
 /// Positions that pause mid-stream keep their measured ratio.

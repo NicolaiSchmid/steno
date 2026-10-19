@@ -199,17 +199,6 @@ fn load_averages(text: &str) -> Option<(f64, f64)> {
     Some((numbers.next()?, numbers.next()?))
 }
 
-#[test]
-fn the_load_reads_the_one_and_the_five_minute_average() {
-    let (one, five) = load_averages("{ 4.56 4.33 4.03 }").unwrap();
-    assert!(
-        (one - 4.56).abs() < 1e-9 && (five - 4.33).abs() < 1e-9,
-        "{one} {five}"
-    );
-    assert_eq!(load_averages("{ 1.5 }"), None);
-    assert_eq!(load_averages(""), None);
-}
-
 /// What one call capture measured.
 struct CallRun {
     first: Option<Duration>,

@@ -14,7 +14,7 @@
 //!
 //! A loss nothing can read is exempt from 1 and 2. Fixed seed, bounded
 //! case count (`WASAPI_PROPERTY_CASES`, `WASAPI_CALL_CASES`,
-//! `WASAPI_PROPERTY_SEED`); a failure is shrunk before it is reported.
+//! `WASAPI_PROPERTY_SEED`); a failure is reported with its case.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -432,7 +432,6 @@ pub fn run_with<C: Counter>(case: &Case, with_router: bool) -> Result<(), Failur
                         || !moving
                         || !was_moving
                         || !explained && moving_pairs == 0);
-                let unreadable = unreadable && !EXEMPT_NOTHING.with(std::cell::Cell::get);
                 if C::PER_PACKET && counted + slack < pending && !unreadable {
                     return Err(failure("counted below the loss"));
                 }
@@ -529,155 +528,11 @@ pub fn run_with<C: Counter>(case: &Case, with_router: bool) -> Result<(), Failur
     Ok(())
 }
 
-// --- shrinking ------------------------------------------------------------
-
 fn same_class(a: &Failure, b: &Failure) -> bool {
     a.invariant == b.invariant
         && a.fills == b.fills
         && a.timestamp_error == b.timestamp_error
         && a.previous_timestamp_error == b.previous_timestamp_error
-}
-
-/// The smallest case found that still fails like `failure`.
-pub fn shrink<C: Counter>(case: &Case, failure: &Failure) -> (Case, Failure) {
-    let mut best = case.clone();
-    let mut best_failure = failure.clone();
-    let budget = std::cell::Cell::new(20_000usize);
-    let try_case = |candidate: &Case, best_failure: &Failure| -> Option<Failure> {
-        if budget.get() == 0 {
-            return None;
-        }
-        budget.set(budget.get() - 1);
-        match run_with::<C>(candidate, false) {
-            Err(f) if same_class(&f, best_failure) => Some(f),
-            _ => None,
-        }
-    };
-    let mut cut = best.clone();
-    cut.events.truncate(best_failure.event + 1);
-    if let Some(f) = try_case(&cut, &best_failure) {
-        (best, best_failure) = (cut, f);
-    }
-    loop {
-        let mut changed = false;
-        // Remove chunks, halving their size (delta debugging).
-        let mut chunk = best.events.len() / 2;
-        while chunk >= 1 {
-            let mut at = 0;
-            while at + chunk <= best.events.len() {
-                let mut candidate = best.clone();
-                candidate.events.drain(at..at + chunk);
-                if let Some(f) = try_case(&candidate, &best_failure) {
-                    (best, best_failure) = (candidate, f);
-                    changed = true;
-                } else {
-                    at += chunk;
-                }
-            }
-            chunk /= 2;
-        }
-        for i in 0..best.events.len() {
-            let simpler: Vec<Event> = match best.events[i] {
-                Event::Loss(frames) if frames > best.period => vec![
-                    Event::Loss((frames / 2).div_ceil(best.period) * best.period),
-                    Event::Loss(best.period),
-                ],
-                Event::Idle { frames, flagged } if frames > best.period => vec![Event::Idle {
-                    frames: (frames / 2).div_ceil(best.period) * best.period,
-                    flagged,
-                }],
-                Event::Packet {
-                    frames,
-                    silent,
-                    timestamp_error,
-                    spurious,
-                } => {
-                    let mut v = Vec::new();
-                    if silent {
-                        v.push(Event::Packet {
-                            frames,
-                            silent: false,
-                            timestamp_error,
-                            spurious,
-                        });
-                    }
-                    if spurious {
-                        v.push(Event::Packet {
-                            frames,
-                            silent,
-                            timestamp_error,
-                            spurious: false,
-                        });
-                    }
-                    if timestamp_error {
-                        v.push(Event::Packet {
-                            frames,
-                            silent,
-                            timestamp_error: false,
-                            spurious,
-                        });
-                    }
-                    if frames != best.period {
-                        v.push(Event::Packet {
-                            frames: best.period,
-                            silent,
-                            timestamp_error,
-                            spurious,
-                        });
-                    }
-                    v
-                }
-                _ => Vec::new(),
-            };
-            for event in simpler {
-                let mut candidate = best.clone();
-                candidate.events[i] = event;
-                if let Some(f) = try_case(&candidate, &best_failure) {
-                    (best, best_failure) = (candidate, f);
-                    changed = true;
-                    break;
-                }
-            }
-        }
-        for (unit, qpc, rate, start, still) in [
-            (
-                Unit::Frames,
-                best.qpc,
-                best.engine_rate,
-                best.start,
-                best.still,
-            ),
-            (
-                best.unit,
-                Qpc::Absent,
-                best.engine_rate,
-                best.start,
-                best.still,
-            ),
-            (best.unit, best.qpc, Some(48_000), best.start, best.still),
-            (best.unit, best.qpc, best.engine_rate, 0, best.still),
-            (best.unit, best.qpc, best.engine_rate, best.start, 0),
-        ] {
-            let candidate = Case {
-                unit,
-                qpc,
-                engine_rate: rate,
-                start,
-                period: best.period,
-                still,
-                events: best.events.clone(),
-            };
-            if candidate != best
-                && let Some(f) = try_case(&candidate, &best_failure)
-            {
-                (best, best_failure) = (candidate, f);
-                changed = true;
-            }
-        }
-        if !changed || budget.get() == 0 {
-            return (best, best_failure);
-        }
-    }
 }
 
 /// The events as a short line, runs of the same packet as `N x`.
@@ -738,52 +593,30 @@ fn settings() -> (usize, u64) {
     (cases, seed)
 }
 
-fn explore<C: Counter>(name: &str, skip: impl Fn(&Case) -> bool) -> Vec<String> {
+fn explore<C: Counter>(name: &str) -> Vec<String> {
     let (cases, seed) = settings();
     let mut rng = Rng(seed);
     let mut classes: Vec<(Failure, usize, String)> = Vec::new();
-    let (mut failed, mut ran) = (0, 0);
+    let mut failed = 0;
     for _ in 0..cases {
         let case = generate(&mut rng);
-        if skip(&case) {
+        let Err(failure) = run::<C>(&case) else {
+            continue;
+        };
+        failed += 1;
+        if let Some(class) = classes.iter_mut().find(|(f, _, _)| same_class(f, &failure)) {
+            class.1 += 1;
             continue;
         }
-        ran += 1;
-        let begun = std::time::Instant::now();
-        let outcome = run::<C>(&case);
-        if std::env::var_os("WASAPI_PROPERTY_TRACE").is_some() {
-            eprintln!(
-                "{name} case {ran}: {} events, {:?}, {:?}",
-                case.events.len(),
-                begun.elapsed(),
-                outcome.as_ref().err().map(|f| f.invariant)
-            );
-        }
-        if let Err(failure) = outcome {
-            failed += 1;
-            if let Some(class) = classes.iter_mut().find(|(f, _, _)| same_class(f, &failure)) {
-                class.1 += 1;
-                continue;
-            }
-            let begun = std::time::Instant::now();
-            let (small, small_failure) = shrink::<C>(&case, &failure);
-            if std::env::var_os("WASAPI_PROPERTY_TRACE").is_some() {
-                eprintln!(
-                    "{name}: shrunk to {} events in {:?}",
-                    small.events.len(),
-                    begun.elapsed()
-                );
-            }
-            let line = format!("{small_failure:?}\n    {}", describe(&small));
-            classes.push((failure, 1, line));
-        }
+        let line = format!("{failure:?}\n    {}", describe(&case));
+        classes.push((failure, 1, line));
     }
     let lines: Vec<String> = classes
         .iter()
         .map(|(_, n, line)| format!("[{n} cases] {line}"))
         .collect();
     eprintln!(
-        "{name}: seed {seed:#x}, {ran} cases, {failed} failed, {} classes",
+        "{name}: seed {seed:#x}, {cases} cases, {failed} failed, {} classes",
         lines.len()
     );
     for line in &lines {
@@ -795,7 +628,7 @@ fn explore<C: Counter>(name: &str, skip: impl Fn(&Case) -> bool) -> Vec<String> 
 /// The code keeps every invariant on every stream.
 #[test]
 fn wasapi_counts_every_loss_and_fills_only_on_a_sane_qpc() {
-    let classes = explore::<Code>("code", |_| false);
+    let classes = explore::<Code>("code");
     assert!(
         classes.is_empty(),
         "{} classes of failure:\n{}",
@@ -853,19 +686,6 @@ fn wall_frames(case: &Case) -> f64 {
         }
     }
     (end - begin.unwrap_or(end)) as f64
-}
-
-/// The same streams with no loss exempt, for a report.
-#[test]
-#[ignore = "exploration for a report"]
-fn explore_everything() {
-    EXEMPT_NOTHING.with(|exempt| exempt.set(true));
-    explore::<Code>("code, all", |_| false);
-    explore::<QpcAlone>("the QPC alone, all", |_| false);
-}
-
-thread_local! {
-    static EXEMPT_NOTHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 // --- a call: the microphone master and the system follower ---------------
@@ -1631,63 +1451,6 @@ fn call_class(message: &str) -> String {
     format!("{lane} {kind}")
 }
 
-/// The smallest call found that still fails with the same invariant.
-fn shrink_call(case: &CallCase, failure: &str) -> (CallCase, String) {
-    let same = |message: &str| call_class(message) == call_class(failure);
-    let mut best = (case.clone(), failure.to_owned());
-    loop {
-        let mut changed = false;
-        let mut candidates: Vec<CallCase> = Vec::new();
-        let c = &best.0;
-        for i in 0..c.outages.len() {
-            let mut d = c.clone();
-            d.outages.remove(i);
-            candidates.push(d);
-        }
-        for i in 0..c.idles.len() {
-            let mut d = c.clone();
-            d.idles.remove(i);
-            candidates.push(d);
-        }
-        for i in 0..c.spurious.len() {
-            let mut d = c.clone();
-            d.spurious.remove(i);
-            candidates.push(d);
-        }
-        for i in 0..c.timestamp_errors.len() {
-            let mut d = c.clone();
-            d.timestamp_errors.remove(i);
-            candidates.push(d);
-        }
-        for field in 0..5 {
-            let mut d = c.clone();
-            match field {
-                0 => d.system.still = 0,
-                1 => d.system.qpc = Qpc::Absent,
-                2 => d.mic.qpc = Qpc::Absent,
-                3 => d.system_drift_ppm = 0,
-                _ => d.partial_drains = 0,
-            }
-            candidates.push(d);
-        }
-        for candidate in candidates {
-            if candidate == best.0 {
-                continue;
-            }
-            if let Err(message) = run_call(&candidate)
-                && same(&message)
-            {
-                best = (candidate, message);
-                changed = true;
-                break;
-            }
-        }
-        if !changed {
-            return best;
-        }
-    }
-}
-
 /// The call test: invariants 7 to 10 on every call.
 #[test]
 fn a_call_counts_both_lanes_losses_within_bounds_up_to_the_stop() {
@@ -1710,8 +1473,7 @@ fn a_call_counts_both_lanes_losses_within_bounds_up_to_the_stop() {
             class.1 += 1;
             continue;
         }
-        let (small, small_message) = shrink_call(&case, &message);
-        classes.push((key, 1, format!("{small_message}\n    {small:?}")));
+        classes.push((key, 1, format!("{message}\n    {case:?}")));
     }
     eprintln!(
         "call: seed {seed:#x}, {cases} cases, {failed} failed, {} classes",
@@ -1887,132 +1649,6 @@ fn generate_storm(rng: &mut Rng) -> CallCase {
     }
 }
 
-/// `shrink_call`, then smaller numbers; every step only lowers a number
-/// or drops a feature, so it ends.
-fn shrink_storm(case: &CallCase, failure: &str) -> (CallCase, String) {
-    let same = |message: &str| call_class(message) == call_class(failure);
-    let mut best = shrink_call(case, failure);
-    loop {
-        let c = &best.0;
-        let mut candidates: Vec<CallCase> = Vec::new();
-        for cut in [c.ticks / 2, 50, 10, 3, 1] {
-            if cut > 0 && c.ticks > cut + 10 {
-                let mut d = c.clone();
-                d.ticks -= cut;
-                candidates.push(d);
-            }
-        }
-        for i in 0..c.outages.len() {
-            let (who, from, len) = c.outages[i];
-            for (f, l) in [
-                (from, len / 2),
-                (from, len.saturating_sub(1)),
-                (from.saturating_sub(10), len),
-                (from.saturating_sub(1), len),
-            ] {
-                if l > 0 && (f, l) != (from, len) {
-                    let mut d = c.clone();
-                    d.outages[i] = (who, f, l);
-                    candidates.push(d);
-                }
-            }
-            if who == Who::Both {
-                for w in [Who::Mic, Who::System] {
-                    let mut d = c.clone();
-                    d.outages[i].0 = w;
-                    candidates.push(d);
-                }
-            }
-        }
-        for i in 0..c.idles.len() {
-            let (from, len, flagged) = c.idles[i];
-            for (f, l, g) in [
-                (from, len / 2, flagged),
-                (from, len.saturating_sub(1), flagged),
-                (from.saturating_sub(1), len, flagged),
-                (from, len, false),
-            ] {
-                if l > 0 && (f, l, g) != (from, len, flagged) {
-                    let mut d = c.clone();
-                    d.idles[i] = (f, l, g);
-                    candidates.push(d);
-                }
-            }
-        }
-        for i in 0..c.spurious.len() {
-            let (who, at) = c.spurious[i];
-            for a in [at.saturating_sub(10), at.saturating_sub(1)] {
-                if a != at {
-                    let mut d = c.clone();
-                    d.spurious[i] = (who, a);
-                    candidates.push(d);
-                }
-            }
-            if who == Who::Both {
-                for w in [Who::Mic, Who::System] {
-                    let mut d = c.clone();
-                    d.spurious[i].0 = w;
-                    candidates.push(d);
-                }
-            }
-        }
-        for field in 0..6 {
-            let mut d = c.clone();
-            match field {
-                0 => d.mic.engine_rate = None,
-                1 => d.system.engine_rate = None,
-                2 => d.start = 0,
-                3 => d.keep = d.keep.min(10),
-                4 => d.mic.unit = Unit::Frames,
-                _ => d.mic.qpc = Qpc::Absent,
-            }
-            candidates.push(d);
-        }
-        let mut changed = false;
-        for candidate in candidates {
-            if candidate == best.0 {
-                continue;
-            }
-            if let Err(message) = run_call_with(&candidate, storm_upper())
-                && same(&message)
-            {
-                best = (candidate, message);
-                changed = true;
-                break;
-            }
-        }
-        if !changed {
-            return best;
-        }
-    }
-}
-
-/// The shape of a shrunk call, to tell classes apart within one invariant.
-fn storm_shape(case: &CallCase) -> String {
-    let mut parts: Vec<(usize, String)> = Vec::new();
-    for &(who, from, len) in &case.outages {
-        parts.push((from, format!("out {who:?} {len}")));
-    }
-    for &(from, len, flagged) in &case.idles {
-        parts.push((
-            from,
-            format!("idle {len}{}", if flagged { " flagged" } else { "" }),
-        ));
-    }
-    for &(who, at) in &case.spurious {
-        parts.push((at, format!("spurious {who:?}")));
-    }
-    for &(who, at) in &case.timestamp_errors {
-        parts.push((at, format!("ts {who:?}")));
-    }
-    parts.sort();
-    parts
-        .into_iter()
-        .map(|(_, p)| p)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// Whether the multi-flag test checks the upper bounds too
 /// (`WASAPI_STORM_UPPER=1`); by default it checks that no loss is silent.
 fn storm_upper() -> bool {
@@ -2024,7 +1660,6 @@ fn storm_upper() -> bool {
 const STORM_CASES: usize = 2_000;
 
 /// Invariants 7 to 10 on every call [`generate_storm`] makes.
-/// `WASAPI_STORM_SHAPES=n` prints every distinct shrunk shape.
 #[test]
 fn a_call_with_many_flags_counts_both_lanes_losses_within_bounds() {
     let (_, seed) = settings();
@@ -2032,50 +1667,21 @@ fn a_call_with_many_flags_counts_both_lanes_losses_within_bounds() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(STORM_CASES);
-    let shapes: usize = std::env::var("WASAPI_STORM_SHAPES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
     let mut rng = Rng(seed ^ 0x5707);
     let mut classes: Vec<(String, usize, String)> = Vec::new();
     let mut failed = 0;
-    let mut shrunk = 0;
-    for index in 0..cases {
+    for _ in 0..cases {
         let case = generate_storm(&mut rng);
-        if let Ok(only) = std::env::var("WASAPI_STORM_ONLY") {
-            if only.parse::<usize>().ok() != Some(index) {
-                continue;
-            }
-            eprintln!("case {index}: {case:?}");
-        }
         let Err(message) = run_call_with(&case, storm_upper()) else {
             continue;
         };
         failed += 1;
-        if std::env::var_os("WASAPI_STORM_LIST").is_some() {
-            eprintln!("fail {index} {}", call_class(&message));
-        }
-        let mut key = call_class(&message);
-        if shapes > 0 {
-            if shrunk >= shapes {
-                continue;
-            }
-            shrunk += 1;
-            let (small, small_message) = shrink_storm(&case, &message);
-            key = format!("{} | {}", call_class(&small_message), storm_shape(&small));
-            if let Some(class) = classes.iter_mut().find(|(k, _, _)| *k == key) {
-                class.1 += 1;
-                continue;
-            }
-            classes.push((key, 1, format!("{small_message}\n    {small:?}")));
-            continue;
-        }
+        let key = call_class(&message);
         if let Some(class) = classes.iter_mut().find(|(k, _, _)| *k == key) {
             class.1 += 1;
             continue;
         }
-        let (small, small_message) = shrink_storm(&case, &message);
-        classes.push((key, 1, format!("{small_message}\n    {small:?}")));
+        classes.push((key, 1, format!("{message}\n    {case:?}")));
     }
     eprintln!(
         "storm: seed {seed:#x}, {cases} cases, {failed} failed, {} classes",

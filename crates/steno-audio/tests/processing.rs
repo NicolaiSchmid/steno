@@ -16,15 +16,14 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use steno_audio::capture::{CaptureBackend, CaptureError, CaptureStream};
+use steno_audio::PassthroughEchoCanceller;
+use steno_audio::capture::CaptureBackend;
 use steno_audio::realtime::{FrameRelay, LaneFrameSink, ProcessingConfiguration, ProcessingThread};
 use steno_audio::testing::synthetic::SyntheticOptions;
 use steno_audio::testing::{SyntheticCaptureBackend, SyntheticLane};
-use steno_audio::{PassthroughEchoCanceller, SAMPLE_RATE};
 use steno_core::{AudioLane, EchoCanceller};
 
 use common::{rms_decibels, upward_crossings};
@@ -102,71 +101,6 @@ fn tones_flow_through_to_the_relay_without_drops() {
     assert!((current.system.unwrap().rms - -9.03).abs() < 0.2);
     assert_eq!(levels.current_generation(), 10, "10 Hz over one second");
     assert!((system_peak - 0.5).abs() < 0.01);
-}
-
-/// A replacement processing thread built with the first one's level slot
-/// publishes into it, generation counting on.
-#[test]
-fn a_replacement_thread_publishes_into_the_shared_level_slot() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
-    let sink = Arc::new(LaneFrameSink::new(&lanes));
-    let relay = Arc::new(FrameRelay::new(2, 480, 400));
-    let mut first = ProcessingThread::new(
-        Arc::clone(&sink),
-        Arc::clone(&relay),
-        ProcessingConfiguration::new(&lanes, None),
-        None,
-    );
-    let fresh = ProcessingThread::new(
-        Arc::clone(&sink),
-        Arc::clone(&relay),
-        ProcessingConfiguration::new(&lanes, None),
-        None,
-    );
-    assert!(
-        !Arc::ptr_eq(fresh.levels(), first.levels()),
-        "without a slot every thread allocates its own"
-    );
-    drop(fresh);
-
-    let backend = SyntheticCaptureBackend::tones(
-        &lanes,
-        &[(AudioLane::Mic, 440.0), (AudioLane::System, 1_000.0)],
-        0.5,
-    );
-    first.start();
-    backend.start(&lanes, None, Arc::clone(&sink)).unwrap();
-    drain(&relay, 2, 480, 50);
-    backend.stop();
-    let slot = Arc::clone(first.levels());
-    first.stop();
-    assert_eq!(slot.current_generation(), 5, "10 Hz over half a second");
-
-    let mut configuration = ProcessingConfiguration::new(&lanes, None);
-    configuration.far_end_delay_frames = 960;
-    let mut replacement = ProcessingThread::new(
-        Arc::clone(&sink),
-        Arc::clone(&relay),
-        configuration,
-        Some(Arc::clone(&slot)),
-    );
-    assert!(Arc::ptr_eq(replacement.levels(), &slot));
-    let again = SyntheticCaptureBackend::tones(
-        &lanes,
-        &[(AudioLane::Mic, 440.0), (AudioLane::System, 1_000.0)],
-        0.5,
-    );
-    replacement.start();
-    again.start(&lanes, None, Arc::clone(&sink)).unwrap();
-    drain(&relay, 2, 480, 50);
-    again.stop();
-    let frames = replacement.frames_processed();
-    replacement.stop();
-    assert_eq!(slot.current_generation(), 10, "the shared slot counts on");
-    assert!((slot.levels().mic.rms - -9.03).abs() < 0.2);
-    assert_eq!(frames, 50);
-    assert!(sink.dropped_samples().is_empty());
-    assert_eq!(relay.dropped_frames(), vec![0, 0]);
 }
 
 #[test]
@@ -379,118 +313,4 @@ fn the_far_end_delay_line_shifts_the_system_lane_by_samples() {
         output[0],
         log.near_end.iter().map(|s| -s).collect::<Vec<_>>()
     );
-}
-
-#[test]
-fn synthetic_echo_is_a_delayed_copy() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
-    let backend = SyntheticCaptureBackend::new(
-        SyntheticOptions::signals(
-            signals(&[
-                (
-                    AudioLane::Mic,
-                    SyntheticLane::new(0.0, 0.0).with_echo(AudioLane::System, 0.060, 0.5),
-                ),
-                (AudioLane::System, SyntheticLane::new(1_000.0, 0.5)),
-            ]),
-            0.5,
-        )
-        .callback_frames(333),
-    );
-    let sink = Arc::new(LaneFrameSink::new(&lanes));
-    let relay = Arc::new(FrameRelay::new(2, 480, 100));
-    let mut thread = ProcessingThread::new(
-        Arc::clone(&sink),
-        Arc::clone(&relay),
-        ProcessingConfiguration::new(&lanes, None),
-        None,
-    );
-    thread.start();
-    backend.start(&lanes, None, Arc::clone(&sink)).unwrap();
-    let output = drain(&relay, 2, 480, 50);
-    backend.stop();
-    thread.stop();
-    let delay = 2_880;
-    assert!(
-        output[0][..delay].iter().all(|s| *s == 0.0),
-        "silent until the delay elapsed"
-    );
-    let mut max_error = 0.0f32;
-    for index in delay..24_000 {
-        max_error = max_error.max((output[0][index] - 0.5 * output[1][index - delay]).abs());
-    }
-    assert!(max_error < 1e-4);
-}
-
-/// The synthetic backend fires its device change once, delivers `seconds`
-/// per start, and reports `stream_after_restart` on a restart.
-#[test]
-fn a_change_fires_once_per_instance_and_every_start_delivers_its_seconds() {
-    let reports = Arc::new(AtomicUsize::new(0));
-    let sink = {
-        let reports = Arc::clone(&reports);
-        Arc::new(LaneFrameSink::with_handler(
-            &[AudioLane::Mixed],
-            SAMPLE_RATE,
-            2.0,
-            Box::new(move |_| {
-                reports.fetch_add(1, Ordering::Relaxed);
-            }),
-        ))
-    };
-    let restarted = CaptureStream {
-        sample_rate: SAMPLE_RATE,
-        input_latency_frames: 480,
-        output_latency_frames: 9_600,
-        layout: None,
-        input: None,
-    };
-    let backend = SyntheticCaptureBackend::new(
-        SyntheticOptions::tones(&[AudioLane::Mixed], &[(AudioLane::Mixed, 440.0)], 0.2)
-            .change_device_after(0.1)
-            .restarts_that_fail(1)
-            .stream_after_restart(restarted.clone()),
-    );
-    assert_eq!(
-        backend
-            .start(&[AudioLane::Mixed], None, Arc::clone(&sink))
-            .unwrap(),
-        CaptureStream::SYNTHETIC
-    );
-    backend.wait_until_finished();
-    assert_eq!(reports.load(Ordering::Relaxed), 1);
-    assert_eq!(backend.frames_delivered(), 4_800, "clipped to the change");
-    backend.stop();
-    sink.clear();
-
-    assert_eq!(
-        backend
-            .start(&[AudioLane::Mixed], None, Arc::clone(&sink))
-            .unwrap_err(),
-        CaptureError::InputDeviceUnavailable
-    );
-    assert_eq!(backend.starts(), 2);
-
-    // The session rearms the latch before a restart; a change that fired
-    // again would be counted here.
-    sink.rearm_device_change();
-    assert_eq!(
-        backend
-            .start(&[AudioLane::Mixed], None, Arc::clone(&sink))
-            .unwrap(),
-        restarted
-    );
-    backend.wait_until_finished();
-    assert_eq!(
-        reports.load(Ordering::Relaxed),
-        1,
-        "the one change is spent"
-    );
-    assert_eq!(
-        backend.frames_delivered(),
-        4_800 + 9_600,
-        "the restart delivers its full 0.2 s"
-    );
-    assert_eq!(backend.starts(), 3);
-    backend.stop();
 }

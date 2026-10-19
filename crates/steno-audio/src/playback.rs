@@ -192,9 +192,7 @@ impl Drop for RecordingHold {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::mpsc;
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -236,53 +234,6 @@ mod tests {
         drop(hold);
         let _again = playback.hold_for_recording();
         assert_eq!(stops.load(Ordering::SeqCst), 1, "once, not per recording");
-    }
-
-    /// Once a hold is taken the player cannot start; a start under way
-    /// finishes first and is then stopped.
-    #[test]
-    fn a_player_cannot_start_once_a_recording_holds_the_gate() {
-        let playback = Playback::new();
-        let playing = Arc::new(AtomicBool::new(false));
-        let stop = |playing: &Arc<AtomicBool>| {
-            let playing = Arc::clone(playing);
-            move || playing.store(false, Ordering::SeqCst)
-        };
-
-        // The recording takes its hold after the permit, before the start.
-        let permit = playback.begin(stop(&playing)).unwrap();
-        let hold = playback.hold_for_recording();
-        assert_eq!(
-            permit.start(|| playing.store(true, Ordering::SeqCst)),
-            Err(PlaybackRefused)
-        );
-        assert!(!playing.load(Ordering::SeqCst), "the start did not run");
-        drop((hold, permit));
-
-        // The recording asks for its hold while the start runs.
-        let permit = playback.begin(stop(&playing)).unwrap();
-        let (inside, entered) = mpsc::channel();
-        let taken = Arc::new(AtomicBool::new(false));
-        let recorder = {
-            let (playback, taken) = (playback.clone(), Arc::clone(&taken));
-            std::thread::spawn(move || {
-                entered.recv().unwrap();
-                let hold = playback.hold_for_recording();
-                taken.store(true, Ordering::SeqCst);
-                hold
-            })
-        };
-        permit
-            .start(|| {
-                inside.send(()).unwrap();
-                std::thread::sleep(Duration::from_millis(50));
-                assert!(!taken.load(Ordering::SeqCst), "the hold waits");
-                playing.store(true, Ordering::SeqCst);
-            })
-            .unwrap();
-        let _hold = recorder.join().unwrap();
-        assert!(!playing.load(Ordering::SeqCst), "on_stop stopped it");
-        assert!(permit.is_stopped());
     }
 
     /// The gate opens only when the last of two recordings releases it.

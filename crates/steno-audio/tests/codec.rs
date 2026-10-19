@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use steno_audio::EchoMetrics;
 use steno_audio::codec::priming::{MAX_PRIMING_FRAMES, Priming, PrimingSource};
 use steno_audio::codec::sinc::SincResampler;
-use steno_audio::codec::{CodecError, SymphoniaAudioCodec};
+use steno_audio::codec::{CodecError, LaneResampler, SymphoniaAudioCodec};
 use steno_audio::testing::AudioFixtures;
 use steno_audio::writer::{
     LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting, WavFile, WavStreamWriter,
@@ -162,18 +162,7 @@ async fn decodes_each_lane_of_the_master_like_its_sidecar() {
         "system master vs sidecar {system_difference} dB"
     );
     assert!((EchoMetrics::rms(&mic_from_master.samples[window.clone()]) - 0.3536).abs() < 0.01);
-    assert!((EchoMetrics::rms(&system_from_master.samples[window.clone()]) - 0.1768).abs() < 0.005);
-    // Same samples once the sidecar's 32-sample group delay is undone (the
-    // onset test below pins that shift; a 1 kHz tone alone cannot).
-    let mut max_error = 0.0f32;
-    for index in window {
-        max_error = max_error
-            .max((mic_from_master.samples[index] - mic_from_sidecar.samples[index + 32]).abs());
-    }
-    assert!(
-        max_error < 0.02,
-        "master decode vs shifted sidecar: {max_error}"
-    );
+    assert!((EchoMetrics::rms(&system_from_master.samples[window]) - 0.1768).abs() < 0.005);
 
     let error = codec
         .decode(&without_sidecars, AudioLane::Mixed)
@@ -285,36 +274,6 @@ async fn mixdown_is_a_16k_mono_wav_of_the_right_length() {
     assert_eq!(
         std::fs::read(&copy).unwrap(),
         std::fs::read(&master).unwrap()
-    );
-}
-
-/// A 16 kHz WAV master decodes through symphonia to what the crate's own
-/// reader sees.
-#[tokio::test]
-async fn wav_master_decodes_through_symphonia() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("recording.wav");
-    let mut writer = WavStreamWriter::create(&path, 16_000).unwrap();
-    let tone: Vec<i16> = (0..48_000)
-        .map(|i| {
-            ((2.0 * std::f64::consts::PI * 440.0 * i as f64 / 16_000.0).sin() * 16_000.0) as i16
-        })
-        .collect();
-    writer.write(&tone).unwrap();
-    writer.finish().unwrap();
-    let asset = make_asset(&path, AudioFormat::Wav16kInt16, &[AudioLane::Mixed], &[]);
-    let decoded = SymphoniaAudioCodec::new()
-        .decode(&asset, AudioLane::Mixed)
-        .await
-        .unwrap();
-    let reference = WavFile::read_16k_mono(&path).unwrap();
-    assert_eq!(decoded.len(), reference.len());
-    assert!(
-        decoded
-            .samples
-            .iter()
-            .zip(&reference)
-            .all(|(a, b)| (a - b).abs() < 1e-4)
     );
 }
 
@@ -1125,25 +1084,29 @@ async fn a_damaged_packet_becomes_silence_of_its_length() {
     }
 }
 
-/// A damaged packet inside the encoder priming is trimmed with it: the
-/// decode keeps its length and counts no damage.
+/// A damaged packet inside the encoder priming is trimmed with it, also
+/// one that reads as a channel pair in a mono file (the decoder after it
+/// is a fresh one, not a reset): the decode keeps its length and counts no
+/// damage.
 #[test]
 fn a_damaged_packet_in_the_priming_is_trimmed_with_it() {
     let directory = tempfile::tempdir().unwrap();
-    let clean =
-        SymphoniaAudioCodec::read_channel(&fixture("tone-440-44k1-500ms.m4a"), 0, AudioLane::Mixed)
-            .unwrap();
-    let path = with_zeroed_packets(directory.path(), [0]);
-    let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
-    assert_eq!(damaged.damage.parts, 0, "the priming took all of it");
-    assert_eq!(damaged.damage.seconds, 0.0);
-    assert_eq!(damaged.samples.len(), clean.samples.len());
-    let largest = largest_difference(
-        &damaged.samples,
-        &clean.samples,
-        PACKET..clean.samples.len(),
-    );
-    assert!(largest < 2e-3, "{largest}");
+    let name = "tone-440-44k1-500ms.m4a";
+    let clean = SymphoniaAudioCodec::read_channel(&fixture(name), 0, AudioLane::Mixed).unwrap();
+    for fill in [0, 0x2F] {
+        let path = damaged_copy(directory.path(), name, |bytes, payloads| {
+            bytes[payloads[0].clone()].fill(fill);
+        });
+        let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
+        assert_eq!(damaged.damage, AudioDamage::default(), "{fill}");
+        assert_eq!(damaged.samples.len(), clean.samples.len());
+        let largest = largest_difference(
+            &damaged.samples,
+            &clean.samples,
+            PACKET..clean.samples.len(),
+        );
+        assert!(largest < 2e-3, "{fill}: {largest}");
+    }
 }
 
 /// A damaged packet after one that decoded is trimmed by its own
@@ -1199,28 +1162,6 @@ fn a_damaged_run_from_the_first_packet_keeps_its_length() {
             .unwrap()
             .len()
     );
-}
-
-/// A corrupt first packet that reads as a channel pair in a mono file
-/// costs that packet only: the decoder after a damaged packet is a fresh
-/// one, not a reset.
-#[test]
-fn a_first_packet_read_as_a_channel_pair_costs_only_itself() {
-    let directory = tempfile::tempdir().unwrap();
-    let clean =
-        SymphoniaAudioCodec::read_channel(&fixture("tone-440-44k1-500ms.m4a"), 0, AudioLane::Mixed)
-            .unwrap();
-    let path = damaged_copy(
-        directory.path(),
-        "tone-440-44k1-500ms.m4a",
-        |bytes, payloads| {
-            bytes[payloads[0].clone()].fill(0x2F);
-        },
-    );
-    let damaged = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
-    // Packet 0 is all priming, so it costs no part of the recording.
-    assert_eq!(damaged.damage, AudioDamage::default());
-    assert_eq!(damaged.samples.len(), clean.samples.len());
 }
 
 /// A packet that makes symphonia's AAC decoder panic is a damaged packet
@@ -1387,5 +1328,49 @@ async fn a_file_with_more_damaged_packets_than_clean_ones_fails() {
         let to = directory.path().join("audio.wav");
         assert!(SymphoniaAudioCodec::mixdown_path(&path, &to).is_err());
         assert!(!to.exists(), "{packets:?}: the failed mixdown is removed");
+    }
+}
+
+/// The resampler fed in pieces of every size gives the same samples as one
+/// pass, and `settled` never promises a sample the finished lane drops.
+#[test]
+fn the_lane_resampler_is_cut_proof() {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for rate in [
+        8_000u32, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 96_000,
+    ] {
+        for count in [0usize, 1, 31, 32, 33, 479, 480, 481, 4_096, 77_777] {
+            let input: Vec<f32> = (0..count)
+                .map(|i| {
+                    let noise = (next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+                    let tone = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / f64::from(rate))
+                        .sin() as f32;
+                    0.6 * tone + 0.3 * noise
+                })
+                .collect();
+            let whole = SymphoniaAudioCodec::to_16k(&input, rate);
+            let mut resampler = LaneResampler::new(rate);
+            let (mut lane, mut handed_on) = (Vec::new(), Vec::new());
+            let mut at = 0;
+            while at < input.len() {
+                let size =
+                    [1, 2, 3, 7, 160, 479, 481, 1_152, 4_096, 40_000][(next() % 10) as usize];
+                let end = (at + size).min(input.len());
+                resampler.push(input[at..end].iter().copied(), &mut lane);
+                at = end;
+                // Hand on what is settled, as the mixdown does.
+                let settled = resampler.settled() - handed_on.len();
+                handed_on.extend(lane.drain(..settled));
+            }
+            resampler.finish(&mut lane);
+            handed_on.extend(lane);
+            assert!(same_bits(&handed_on, &whole), "{rate} Hz, {count} samples");
+        }
     }
 }

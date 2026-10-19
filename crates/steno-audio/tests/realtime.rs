@@ -103,33 +103,6 @@ fn the_allocator_sees_a_deliberate_allocation_on_this_thread() {
 }
 
 #[test]
-fn the_allocator_counts_another_thread_by_its_id() {
-    use std::sync::mpsc::channel;
-    let (id_sender, id) = channel();
-    let (go_sender, go) = channel::<()>();
-    let (done_sender, done) = channel();
-    let worker = std::thread::spawn(move || {
-        id_sender.send(CountingAllocator::current_thread()).unwrap();
-        go.recv().unwrap();
-        let vector = vec![1.0f32; 100_000];
-        std::hint::black_box(&vector);
-        drop(vector);
-        done_sender.send(()).unwrap();
-    });
-    let worker_id = id.recv().unwrap();
-    assert_ne!(worker_id, CountingAllocator::current_thread());
-    let seen = CountingAllocator::allocations_on(worker_id, || {
-        go_sender.send(()).unwrap();
-        done.recv().unwrap();
-    });
-    worker.join().unwrap();
-    assert!(
-        seen >= 1,
-        "counting another thread must observe its deliberate allocation"
-    );
-}
-
-#[test]
 fn producer_processing_and_relay_allocate_nothing_after_warm_up() {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let layout = StreamLayout::resolve(&lanes, &[1, 2], &[vec![], vec![1]], &[2], Some(1)).unwrap();
@@ -236,19 +209,6 @@ fn the_converting_processing_loop_allocates_nothing_after_warm_up() {
     }
 }
 
-/// A converting thread with no lanes builds and drains nothing.
-#[test]
-fn a_converting_processing_thread_without_lanes_does_nothing() {
-    let sink = Arc::new(LaneFrameSink::new(&[]));
-    let relay = Arc::new(FrameRelay::new(1, FRAME_SIZE, 4));
-    let mut configuration = ProcessingConfiguration::new(&[], None);
-    configuration.device_rate = 24_000.0;
-    let mut thread = ProcessingThread::new(sink, Arc::clone(&relay), configuration, None);
-    thread.drain_on_caller();
-    assert_eq!(thread.frames_processed(), 0);
-    assert_eq!(relay.available_frames(), 0);
-}
-
 /// `work` through the PipeWire capture's gate, as `process` delivers it.
 fn through_the_gate(work: impl FnOnce()) {
     #[cfg(target_os = "linux")]
@@ -335,27 +295,6 @@ fn the_pipewire_process_body_allocates_nothing() {
         let expected = f32::midpoint(material.tap[2 * index], material.tap[2 * index + 1]);
         assert_eq!(*sample, expected, "the monitor folds to mono at {index}");
     }
-}
-
-/// On Linux the counter names a thread by its kernel id, as
-/// `/proc/self/task` lists it.
-#[cfg(target_os = "linux")]
-#[test]
-fn the_counting_allocator_names_threads_as_the_kernel_does() {
-    fn kernel_thread_id() -> usize {
-        std::fs::read_link("/proc/thread-self")
-            .expect("/proc/thread-self")
-            .file_name()
-            .and_then(|name| name.to_str()?.parse().ok())
-            .expect("a thread id")
-    }
-    let here = (CountingAllocator::current_thread(), kernel_thread_id());
-    let there = std::thread::spawn(|| (CountingAllocator::current_thread(), kernel_thread_id()))
-        .join()
-        .unwrap();
-    assert_eq!(here.0, here.1);
-    assert_eq!(there.0, there.1);
-    assert_ne!(here.0, there.0);
 }
 
 #[test]

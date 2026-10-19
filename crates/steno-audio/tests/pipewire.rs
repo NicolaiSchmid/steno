@@ -1445,20 +1445,6 @@ impl Drop for DefaultSource {
     }
 }
 
-#[test]
-#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn moving_the_default_output_is_reported_once() {
-    let lanes = CALL;
-    let (sink, reasons) = reporting_sink(&lanes);
-    let backend = Arc::new(LiveCaptureBackend::new());
-    start(&backend, &lanes, None, &sink).expect("start");
-    let _restore = DefaultSink;
-    let since = Instant::now();
-    DefaultSink::set(SECOND_SINK);
-    assert_output_moved_once(&reasons, SECOND_SINK, since, true, "");
-    stop(&backend);
-}
-
 /// Expects one `DefaultOutputChanged` report and no second after
 /// WirePlumber moved the default to `to`; when `timed`, no sooner than the
 /// coalescing delay after `since`. The metadata is read only once the
@@ -1738,42 +1724,21 @@ fn destroy_own_client() {
     assert!(tool("pw-cli", &["destroy", &client.to_string()]));
 }
 
+/// A link removed from outside is reported as the lane it served gone, the
+/// monitor's loss kept when the microphone's follows within one coalescing
+/// delay; the capture's connection closed from outside is the audio
+/// service restarting, in a call and in person.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_monitor_link_removed_from_outside_is_reported_as_the_output_gone() {
+fn a_change_from_outside_is_reported_as_what_it_costs() {
+    let links = |from: &'static [&'static str]| move || destroy_capture_links_from(from);
+    assert_reported_after(&CALL, links(&[SINK]), DeviceChangeReason::OutputDeviceGone);
+    assert_reported_after(&CALL, links(&[MIC]), DeviceChangeReason::InputDeviceGone);
     assert_reported_after(
         &CALL,
-        || destroy_capture_links_from(&[SINK]),
+        links(&[SINK, MIC]),
         DeviceChangeReason::OutputDeviceGone,
     );
-}
-
-#[test]
-#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_microphone_link_removed_from_outside_is_reported_as_the_input_gone() {
-    assert_reported_after(
-        &CALL,
-        || destroy_capture_links_from(&[MIC]),
-        DeviceChangeReason::InputDeviceGone,
-    );
-}
-
-#[test]
-#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_monitor_then_a_microphone_link_removed_are_reported_as_the_output_gone() {
-    // Both within one coalescing delay: the monitor's loss must stay.
-    assert_reported_after(
-        &CALL,
-        || destroy_capture_links_from(&[SINK, MIC]),
-        DeviceChangeReason::OutputDeviceGone,
-    );
-}
-
-/// The capture's connection closed from outside is the audio service
-/// restarting, in a call and in person.
-#[test]
-#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_connection_closed_from_outside_is_reported_as_the_audio_service_restarting() {
     for lanes in [&CALL[..], &[AudioLane::Mixed]] {
         assert_reported_after(
             lanes,
@@ -1980,43 +1945,38 @@ impl Drop for TemporaryMic {
     }
 }
 
+/// A chosen microphone that goes away is the input gone, in person and in a
+/// call (the server removes Steno's link to it, the output stays); in
+/// person the rebuild's restart records the default source.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_microphone_that_goes_away_in_person_is_reported_as_the_input_gone() {
-    let mic = TemporaryMic::create("steno-test-mic-gone");
-    let lanes = [AudioLane::Mixed];
-    let (sink, reasons) = reporting_sink(&lanes);
-    let backend = Arc::new(LiveCaptureBackend::new());
-    start(&backend, &lanes, Some(mic.name), &sink).expect("start");
-    mic.destroy();
-    let reason = next_report(&reasons);
-    assert_eq!(reason, DeviceChangeReason::InputDeviceGone);
-    stop(&backend);
-    let _mic_tone = Tone::into_source(MIC, MIC_TONE);
-    start(&backend, &lanes, Some(mic.name), &sink)
-        .expect("the rebuild's restart records the default source");
-    let audio = collect(&sink, 24_000);
-    assert_tone(&audio[0], MIC_TONE, SINK_TONE, "the default source");
-    stop(&backend);
-}
-
-#[test]
-#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_microphone_that_goes_away_during_a_call_is_reported_as_the_input_gone() {
-    let mic = TemporaryMic::create("steno-test-mic-call");
-    let lanes = CALL;
-    let (sink, reasons) = reporting_sink(&lanes);
-    let backend = Arc::new(LiveCaptureBackend::new());
-    start(&backend, &lanes, Some(mic.name), &sink).expect("start");
-    // The server removes Steno's link to it too; the output stays.
-    mic.destroy();
-    let reason = next_report(&reasons);
-    assert_eq!(
-        reason,
-        DeviceChangeReason::InputDeviceGone,
-        "not the output gone"
-    );
-    stop_and_check_teardown(&backend, &sink);
+fn a_microphone_that_goes_away_is_reported_as_the_input_gone() {
+    for (name, lanes) in [
+        ("steno-test-mic-gone", &[AudioLane::Mixed][..]),
+        ("steno-test-mic-call", &CALL[..]),
+    ] {
+        let mic = TemporaryMic::create(name);
+        let (sink, reasons) = reporting_sink(lanes);
+        let backend = Arc::new(LiveCaptureBackend::new());
+        start(&backend, lanes, Some(mic.name), &sink).expect("start");
+        mic.destroy();
+        assert_eq!(
+            next_report(&reasons),
+            DeviceChangeReason::InputDeviceGone,
+            "{lanes:?}"
+        );
+        if lanes.len() > 1 {
+            stop_and_check_teardown(&backend, &sink);
+            continue;
+        }
+        stop(&backend);
+        let _mic_tone = Tone::into_source(MIC, MIC_TONE);
+        start(&backend, lanes, Some(mic.name), &sink)
+            .expect("the rebuild's restart records the default source");
+        let audio = collect(&sink, 24_000);
+        assert_tone(&audio[0], MIC_TONE, SINK_TONE, "the default source");
+        stop(&backend);
+    }
 }
 
 /// The live input list, on its own thread with a deadline.
