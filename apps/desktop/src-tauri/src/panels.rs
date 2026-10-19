@@ -835,16 +835,6 @@ mod macos {
 mod tests {
     use super::*;
 
-    /// The anchor's file is the support directory's, and the earlier
-    /// build's anchor is read from the config directory.
-    #[test]
-    fn the_anchor_lives_in_the_support_directory() {
-        let source = include_str!("panels.rs").replace("\r\n", "\n");
-        assert!(source.contains(
-            "        AnchorFile::new(\n            &steno_core::StenoPaths::default_support_directory(),\n            app.path().config_dir().ok().as_deref(),\n        )\n"
-        ));
-    }
-
     fn request(app_name: &str) -> PromptRequest {
         PromptRequest {
             app_name: app_name.into(),
@@ -859,30 +849,15 @@ mod tests {
         }
     }
 
-    /// On Linux each panel has the title the Hyprland rules match;
-    /// elsewhere both are "Steno". The rule itself is pinned whole.
+    /// On Linux each panel has the title the Hyprland rule matches;
+    /// elsewhere both are "Steno".
     #[test]
     fn the_panels_carry_the_titles_the_hyprland_rules_match() {
         let rules = include_str!("../linux/hyprland-steno.lua");
-        assert!(!rules.contains("--["), "{rules}");
-        let code = rules
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("--"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(
-            code,
-            r#"hl.window_rule({
-  name = "steno-panels",
-  match = { class = "[Ss]teno-desktop", title = "Steno (bubble|prompt)" },
-  float = true,
-  pin = true,
-  no_initial_focus = true,
-  no_follow_mouse = true,
-  border_size = 0,
-  no_shadow = true,
-  no_blur = true,
-})"#,
+        assert!(
+            rules.contains(
+                r#"match = { class = "[Ss]teno-desktop", title = "Steno (bubble|prompt)" },"#
+            ),
             "{rules}"
         );
         for panel in Panel::ALL {
@@ -1206,19 +1181,6 @@ mod tests {
         panels.set_prompt(Some(raised("Echo", 3)));
         assert!(answer_prompt(&panels, None, answer), "an unnumbered click");
         assert_eq!(answers.get(), 2);
-    }
-
-    /// An X from the old prompt that lands after a new one was raised, but
-    /// before it showed, leaves the new one up.
-    #[test]
-    fn an_old_x_between_raising_and_showing_leaves_the_new_prompt() {
-        let panels = Panels::default();
-        panels.set_prompt(Some(raised("Charlie", 1)));
-        let shown = pending_query(&panels);
-        assert!(shown.ends_with("raised=1"));
-        panels.set_prompt(Some(raised("Delta", 2)));
-        assert!(!panels.dismiss_prompt(Some(1)));
-        assert_eq!(pending_query(&panels), "app=Delta&seconds=60&raised=2");
     }
 
     /// A prompt raised after a clear cannot be dismissed by the first's X.

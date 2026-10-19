@@ -471,19 +471,16 @@ fn keeps_its_size(window: &WebviewWindow, label: &str, size: (f64, f64)) -> Resu
 mod tests {
     use super::*;
 
+    /// The wait is a positive number of seconds; anything else is invalid
+    /// and keeps the raw value.
     #[test]
     fn the_wait_is_a_positive_number_of_seconds() {
         assert_eq!(wait_from(Some("10")), Wait::Seconds(10));
         assert_eq!(wait_from(Some(" 3 ")), Wait::Seconds(3));
         assert_eq!(wait_from(None), Wait::NotASmokeRun);
-    }
-
-    #[test]
-    fn anything_else_is_invalid_and_keeps_the_raw_value() {
-        assert_eq!(wait_from(Some("0")), Wait::Invalid("0".into()));
-        assert_eq!(wait_from(Some("soon")), Wait::Invalid("soon".into()));
-        assert_eq!(wait_from(Some("")), Wait::Invalid(String::new()));
-        assert_eq!(wait_from(Some("-5")), Wait::Invalid("-5".into()));
+        for raw in ["0", "soon", "", "-5"] {
+            assert_eq!(wait_from(Some(raw)), Wait::Invalid(raw.into()));
+        }
     }
 
     fn app_requesting(meeting: &str) -> Value {

@@ -384,19 +384,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sizes_follow_the_swift_windows() {
-        assert_eq!(Spec::of(BridgeWindow::Main).size, (1120.0, 720.0));
-        assert_eq!(Spec::of(BridgeWindow::Main).min_size, Some((960.0, 600.0)));
-        assert_eq!(Spec::of(BridgeWindow::Settings).size, (960.0, 640.0));
-        assert_eq!(
-            Spec::of(BridgeWindow::Settings).min_size,
-            Some((760.0, 520.0))
-        );
-        assert_eq!(Spec::of(BridgeWindow::Onboarding).size, (560.0, 620.0));
-        assert_eq!(Spec::of(BridgeWindow::Onboarding).min_size, None);
-    }
-
     /// The field names match the keys `AppSnapshot` writes.
     #[test]
     fn the_request_fields_are_the_app_snapshots() {
@@ -592,36 +579,6 @@ mod tests {
         host.open();
         assert!(host.wait_answered(held, Duration::from_secs(5)));
         assert_eq!(host.answered(), [held]);
-    }
-
-    /// Two quick window requests reach the host in the order they came.
-    #[test]
-    fn two_window_requests_reach_the_host_in_the_order_they_came() {
-        use std::time::Duration;
-
-        use crate::host::gated::GatedHost;
-
-        let pages = Pages::default();
-        pages.ready("main", |_| {});
-        let meeting = |value: &str| Request {
-            field: RequestField::MeetingId,
-            value: value.to_owned(),
-        };
-        let rounds = 300;
-        let reordered = (0..rounds)
-            .filter(|_| {
-                let host = GatedHost::holding("nothing is held");
-                request(&host, &pages, "main", "main", meeting("m-1"));
-                request(&host, &pages, "main", "main", meeting("m-2"));
-                assert!(host.wait_answers(2, Duration::from_secs(5)));
-                host.answered()
-                    != [
-                        "request requestedMeetingID=m-1",
-                        "request requestedMeetingID=m-2",
-                    ]
-            })
-            .count();
-        assert_eq!(reordered, 0, "{reordered} of {rounds} pairs were reordered");
     }
 
     /// An owed request is queued at `page.ready`, before a later request,

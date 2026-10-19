@@ -1099,28 +1099,16 @@ mod ui_thread_tests {
     }
 
     #[test]
-    fn a_command_on_the_ui_thread_asserts() {
+    fn every_entry_point_asserts_on_the_ui_thread() {
         asserts_on_the_ui_thread("recording.toggle", |host| {
             let _ = host.call(&StandInWindow, "recording.toggle", Value::Null);
         });
-    }
-
-    #[test]
-    fn a_page_load_on_the_ui_thread_asserts() {
         asserts_on_the_ui_thread("page.ready", |host| {
             let _ = host.page_ready(&StandInWindow);
         });
-    }
-
-    #[test]
-    fn a_window_request_on_the_ui_thread_asserts() {
         asserts_on_the_ui_thread("a window request", |host| {
             let _ = host.publish_request(&StandInWindow, "requestedMeetingID", "m-1");
         });
-    }
-
-    #[test]
-    fn the_onboarding_close_on_the_ui_thread_asserts() {
         asserts_on_the_ui_thread(
             "the onboarding window's close",
             Host::onboarding_window_closed,

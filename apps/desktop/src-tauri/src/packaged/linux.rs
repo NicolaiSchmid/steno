@@ -329,48 +329,35 @@ mod tests {
         assert_eq!(candidates(Some(""), None, None).len(), 3);
     }
 
-    /// The store binary finds the profile that links to its own wrapper,
-    /// and the profile's path is returned.
+    /// The store binary finds the first profile that links to its own
+    /// wrapper, one through a linked `bin` too; profiles that link only to
+    /// another build, or name nothing, give no path.
     #[test]
     fn a_nix_build_names_the_profile_that_links_to_it() {
         let layout = nix_layout();
-        let found = stable_path(
-            &[
-                layout.system.clone(),
-                layout.per_user.clone(),
-                layout.user_profile.clone(),
-            ],
-            &layout.current_exe,
-        );
-        assert_eq!(found.as_ref(), Some(&layout.per_user));
-        assert!(!found.unwrap().to_string_lossy().contains("/nix/store/"));
-    }
-
-    #[test]
-    fn a_profile_whose_bin_is_a_link_counts() {
-        let layout = nix_layout();
-        let found = stable_path(
-            &[layout.system.clone(), layout.user_profile.clone()],
-            &layout.current_exe,
-        );
-        assert_eq!(found, Some(layout.user_profile));
-    }
-
-    /// Profiles that link only to another build give no path.
-    #[test]
-    fn no_profile_of_this_build_means_no_path() {
-        let layout = nix_layout();
-        assert_eq!(
-            stable_path(std::slice::from_ref(&layout.system), &layout.current_exe),
-            None
-        );
-        assert_eq!(
-            stable_path(
-                &[PathBuf::from("/nonexistent/steno-desktop")],
-                &layout.current_exe
+        let missing = PathBuf::from("/nonexistent/steno-desktop");
+        for (candidates, found) in [
+            (
+                vec![
+                    layout.system.clone(),
+                    layout.per_user.clone(),
+                    layout.user_profile.clone(),
+                ],
+                Some(&layout.per_user),
             ),
-            None
-        );
+            (
+                vec![layout.system.clone(), layout.user_profile.clone()],
+                Some(&layout.user_profile),
+            ),
+            (vec![layout.system.clone()], None),
+            (vec![missing], None),
+        ] {
+            assert_eq!(
+                stable_path(&candidates, &layout.current_exe).as_ref(),
+                found,
+                "{candidates:?}"
+            );
+        }
     }
 
     /// A binary installed in `/usr/bin` is its own candidate.

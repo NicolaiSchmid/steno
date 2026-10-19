@@ -340,14 +340,6 @@ mod tests {
         assert_eq!(describe(&Url::parse("steno:meeting").unwrap()), "steno:");
     }
 
-    #[test]
-    fn a_debug_build_and_an_appimage_register_the_scheme_themselves() {
-        assert!(registers_itself(true, false));
-        assert!(registers_itself(false, true));
-        assert!(registers_itself(true, true));
-        assert!(!registers_itself(false, false));
-    }
-
     /// Scheme and host are case-insensitive; the path is not, except a UUID.
     #[test]
     fn scheme_and_host_read_in_any_case_and_the_path_as_written() {

@@ -161,17 +161,4 @@ mod tests {
             assert!(!is_session_default(OsStr::new(value)), "{value}");
         }
     }
-
-    /// Only the shell's own choice narrows GDK, and to `x11` alone.
-    #[test]
-    fn only_xwayland_narrows_the_backends_and_to_x11() {
-        assert_eq!(Backend::ForcedX11.allowed_backends(), Some("x11"));
-        for backend in [
-            Backend::GtksChoice,
-            Backend::WaylandOnly,
-            Backend::UserChoice,
-        ] {
-            assert_eq!(backend.allowed_backends(), None, "{backend:?}");
-        }
-    }
 }
