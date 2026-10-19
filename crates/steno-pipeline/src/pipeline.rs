@@ -204,6 +204,9 @@ pub type Operation = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
 /// Wall-clock stamps for rows; tests pin it.
 pub type Now = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
+/// Whether the models the speech engine and the diarizer load are installed.
+pub type ModelsInstalled = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// A monotonic clock in seconds, for stage durations.
 pub trait MonotonicClock: Send + Sync {
     fn seconds(&self) -> f64;
@@ -660,6 +663,11 @@ pub struct PipelineDependencies {
     /// Whether a recording is under way; no in-process engine runs
     /// meanwhile.
     pub live_recording: LiveRecording,
+    /// While it is false a run refuses with
+    /// [`PipelineFailure::models_missing`] before the engine loads, and an
+    /// engine or diarizer call that fails once the models are gone is that
+    /// refusal too, so the meeting waits `queued` instead of failing.
+    pub models_installed: ModelsInstalled,
 }
 
 impl PipelineDependencies {
@@ -692,6 +700,7 @@ impl PipelineDependencies {
             model_waits: ModelWaits::default(),
             speech_in_process: false,
             live_recording: LiveRecording::default(),
+            models_installed: Arc::new(|| true),
         }
     }
 
@@ -753,6 +762,14 @@ impl PipelineDependencies {
     #[must_use]
     pub fn with_model_waits(mut self, waits: ModelWaits) -> Self {
         self.model_waits = waits;
+        self
+    }
+
+    /// Refuses runs while `installed` is false
+    /// ([`Self::models_installed`]).
+    #[must_use]
+    pub fn with_models_installed(mut self, installed: ModelsInstalled) -> Self {
+        self.models_installed = installed;
         self
     }
 
@@ -1687,17 +1704,32 @@ impl ProcessingPipeline {
     /// retried by the next call. Errors carry `decode` for the engine and
     /// `diarize` for the diarizer.
     pub async fn warm_up(&self) -> Result<()> {
+        if !(self.inner.dependencies.models_installed)() {
+            return Err(PipelineFailure::models_missing(PipelineStage::Decode));
+        }
         let _guard = self.speech_engine().preparing().await;
         let dependencies = &self.inner.dependencies;
-        attributing(
+        self.models_gone(attributing(
             PipelineStage::Decode,
             dependencies.speech_engine.prepare().await,
-        )?;
-        attributing(
+        ))?;
+        self.models_gone(attributing(
             PipelineStage::Diarize,
             dependencies.diarizer.prepare().await,
-        )?;
+        ))?;
         Ok(())
+    }
+
+    /// `result`'s failure as the models-missing refusal when the models are
+    /// no longer installed.
+    fn models_gone<T>(&self, result: Result<T>) -> Result<T> {
+        result.map_err(|failure| {
+            if failure.is_models_missing() || (self.inner.dependencies.models_installed)() {
+                failure
+            } else {
+                PipelineFailure::models_missing(failure.stage)
+            }
+        })
     }
 
     /// [`warm_up`](Self::warm_up) for `meeting_id`'s job: a diarizer that
@@ -1718,10 +1750,10 @@ impl ProcessingPipeline {
     /// keep it resident outside any claim.
     pub async fn warm_up_diarizer(&self) -> Result<()> {
         let _guard = self.speech_engine().preparing().await;
-        attributing(
+        self.models_gone(attributing(
             PipelineStage::Diarize,
             self.inner.dependencies.diarizer.prepare().await,
-        )
+        ))
     }
 
     /// Runs every stage: `queued → processing → ready`, or `failed(reason)`
@@ -2502,7 +2534,12 @@ impl ProcessingPipeline {
         };
         let clock = &self.inner.dependencies.clock;
         let started = clock.seconds();
-        let value = attributing(stage, body.await)?;
+        let value = attributing(stage, body.await);
+        let value = if matches!(stage, PipelineStage::Transcribe | PipelineStage::Diarize) {
+            self.models_gone(value)?
+        } else {
+            value?
+        };
         let seconds = clock.seconds() - started;
         let sample = {
             let alone = alone && self.in_flight_set().admissions == admissions_before;

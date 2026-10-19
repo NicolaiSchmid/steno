@@ -7,7 +7,8 @@ use std::time::Duration;
 use chrono::Utc;
 use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, MeetingStateKind};
-use steno_host::services::{Pipeline, ProcessAgainRefusal};
+use steno_host::services::{ModelNotice, Pipeline, ProcessAgainRefusal, SpeechModels};
+use steno_host::speech::ModelAsset;
 use steno_pipeline::{
     InFlight, LiveRecording, ModelWaits, Operation, PipelineDependencies, PipelineFailure,
     ProcessingPipeline, QuitLatch, ReprocessError, RetentionSweep, SweepIncomplete,
@@ -441,6 +442,72 @@ pub fn run_sweep(sweep: &RetentionSweep) {
     }
 }
 
+/// The host's model service, which also runs `resume` once a download
+/// from Settings or onboarding installed its models. Every other call goes
+/// to `inner` as it is.
+pub struct ResumingSpeechModels<M> {
+    inner: M,
+    resume: Box<dyn Fn() + Send + Sync>,
+}
+
+impl<M: SpeechModels> ResumingSpeechModels<M> {
+    #[must_use]
+    pub fn new(inner: M, resume: Box<dyn Fn() + Send + Sync>) -> Self {
+        ResumingSpeechModels { inner, resume }
+    }
+
+    /// The app's: an install resumes the meetings its pipelines left waiting
+    /// ([`CurrentPipeline::resume_waiting`]).
+    #[must_use]
+    pub fn resuming(inner: M, pipeline: Arc<CurrentPipeline>) -> Self {
+        Self::new(inner, Box::new(move || pipeline.resume_waiting()))
+    }
+}
+
+impl<M: SpeechModels> SpeechModels for ResumingSpeechModels<M> {
+    fn is_installed(&self, asset: ModelAsset) -> bool {
+        self.inner.is_installed(asset)
+    }
+
+    fn engine_installed(&self, engine_id: &str) -> bool {
+        self.inner.engine_installed(engine_id)
+    }
+
+    fn installed_size(&self, asset: ModelAsset) -> Option<i64> {
+        self.inner.installed_size(asset)
+    }
+
+    fn download(
+        &self,
+        asset: ModelAsset,
+        progress: &mut dyn FnMut(f64, &str),
+    ) -> BoundaryResult<()> {
+        self.inner.download(asset, progress)?;
+        (self.resume)();
+        Ok(())
+    }
+
+    fn remove(&self, asset: ModelAsset) -> BoundaryResult<()> {
+        self.inner.remove(asset)
+    }
+
+    fn display_name(&self, asset: ModelAsset) -> &'static str {
+        self.inner.display_name(asset)
+    }
+
+    fn source_repo(&self, asset: ModelAsset) -> &'static str {
+        self.inner.source_repo(asset)
+    }
+
+    fn notices(&self, asset: ModelAsset) -> Vec<ModelNotice> {
+        self.inner.notices(asset)
+    }
+
+    fn expected_bytes(&self, asset: ModelAsset) -> i64 {
+        self.inner.expected_bytes(asset)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -459,6 +526,47 @@ mod tests {
     use crate::testing::{
         PATIENCE, current_pipeline, eventually, fake_dependencies, on_own_thread, temp_store,
     };
+
+    /// A flag starting at `value` and the install check that reads it.
+    fn flag(value: bool) -> (Arc<AtomicBool>, steno_pipeline::ModelsInstalled) {
+        let flag = Arc::new(AtomicBool::new(value));
+        let read = flag.clone();
+        (flag, Arc::new(move || read.load(Ordering::SeqCst)))
+    }
+
+    /// The refusal's reason and the title of a waiting meeting's card are
+    /// one sentence.
+    #[test]
+    fn the_refusal_and_the_waiting_card_say_the_same() {
+        assert_eq!(
+            PipelineFailure::MODELS_MISSING,
+            steno_host::main_window::ProgressEntry::MODELS_MISSING_TITLE
+        );
+    }
+
+    /// A download that installed its models resumes the waiting meetings;
+    /// a failed one does not.
+    #[test]
+    fn an_install_resumes_the_waiting_meetings_and_a_failed_one_does_not() {
+        let resumed = Arc::new(AtomicUsize::new(0));
+        let models = ResumingSpeechModels::new(steno_host::fakes::FakeSpeechModels::default(), {
+            let resumed = resumed.clone();
+            Box::new(move || {
+                resumed.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+        models
+            .download(ModelAsset::ParakeetV3, &mut |_, _| {})
+            .unwrap();
+        assert_eq!(resumed.load(Ordering::SeqCst), 1);
+        models.inner.fail_downloads(Some("offline"));
+        assert!(
+            models
+                .download(ModelAsset::OfflineDiarizer, &mut |_, _| {})
+                .is_err()
+        );
+        assert_eq!(resumed.load(Ordering::SeqCst), 1);
+    }
 
     /// A summarizer that answers only once released, then fails.
     struct HeldSummarizer {
@@ -1269,16 +1377,16 @@ mod tests {
         store: &Arc<Store>,
         engine: Arc<dyn SpeechEngine>,
     ) -> (Arc<AtomicBool>, CurrentPipeline) {
-        let (installed, check) = crate::model_gate::testing::flag(false);
-        let shared = steno_pipeline::SharedSpeechEngine::new(Arc::new(
-            crate::model_gate::GatedSpeechEngine::new(engine, check.clone()),
-        ));
+        let (installed, check) = flag(false);
+        let shared = steno_pipeline::SharedSpeechEngine::new(engine);
         let events = steno_pipeline::MeetingEventBus::new();
         let make: MakeDependencies = {
             let store = store.clone();
+            let check = check.clone();
             Arc::new(move || {
-                let mut dependencies =
-                    fake_dependencies(&store, "fake-engine").with_speech_engine(shared.clone());
+                let mut dependencies = fake_dependencies(&store, "fake-engine")
+                    .with_speech_engine(shared.clone())
+                    .with_models_installed(check.clone());
                 dependencies.events = events.clone();
                 Ok(on_the_sidecar(dependencies))
             })
@@ -1494,18 +1602,12 @@ mod tests {
     async fn an_install_after_a_reload_resumes_the_meeting_the_retired_pipeline_left_waiting() {
         use steno_host::services::SpeechModels as _;
         let (dir, store) = temp_store();
-        let (installed, check) = crate::model_gate::testing::flag(false);
+        let (installed, check) = flag(false);
         let make: MakeDependencies = {
             let store = store.clone();
             Arc::new(move || {
-                let gated = crate::model_gate::GatedSpeechEngine::new(
-                    Arc::new(FakeSpeechEngine::default()),
-                    check.clone(),
-                );
                 Ok(on_the_sidecar(
-                    fake_dependencies(&store, "fake-engine").with_speech_engine(
-                        steno_pipeline::SharedSpeechEngine::new(Arc::new(gated)),
-                    ),
+                    fake_dependencies(&store, "fake-engine").with_models_installed(check.clone()),
                 ))
             })
         };
@@ -1514,7 +1616,7 @@ mod tests {
             make,
             tokio::runtime::Handle::current(),
         ));
-        let models = crate::model_gate::ResumingSpeechModels::resuming(
+        let models = ResumingSpeechModels::resuming(
             steno_host::fakes::FakeSpeechModels::default(),
             current.clone(),
         );
@@ -1537,18 +1639,16 @@ mod tests {
         use steno_bridge::{AssetIdParams, BridgeHost as _, BridgeTopic, BridgeWindow};
         use steno_host::speech::ModelAsset;
         let (dir, store) = temp_store();
-        let (installed, check) = crate::model_gate::testing::flag(false);
+        let (installed, check) = flag(false);
         let engine = Arc::new(FakeSpeechEngine::default());
         let make: MakeDependencies = {
             let store = store.clone();
             let engine = engine.clone();
             Arc::new(move || {
-                let gated =
-                    crate::model_gate::GatedSpeechEngine::new(engine.clone(), check.clone());
                 Ok(on_the_sidecar(
-                    fake_dependencies(&store, "fake-engine").with_speech_engine(
-                        steno_pipeline::SharedSpeechEngine::new(Arc::new(gated)),
-                    ),
+                    fake_dependencies(&store, "fake-engine")
+                        .with_speech_engine(steno_pipeline::SharedSpeechEngine::new(engine.clone()))
+                        .with_models_installed(check.clone()),
                 ))
             })
         };
@@ -1566,10 +1666,7 @@ mod tests {
         models.set_on_download(move |_| installed.store(true, Ordering::SeqCst));
         let fakes = steno_host::fakes::FakeServices::new(Utc::now());
         let mut services = fakes.services();
-        services.speech_models = Arc::new(crate::model_gate::ResumingSpeechModels::resuming(
-            models,
-            current.clone(),
-        ));
+        services.speech_models = Arc::new(ResumingSpeechModels::resuming(models, current.clone()));
         let host = steno_host::Host::new(
             store.clone(),
             services,

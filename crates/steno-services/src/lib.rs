@@ -53,7 +53,6 @@ pub mod llm;
 #[cfg(test)]
 mod locked_store_tests;
 pub mod logs;
-pub mod model_gate;
 pub mod permissions;
 pub mod pipeline;
 pub mod platform;

@@ -218,10 +218,7 @@ async fn every_sidecar_diarize_failure_keeps_the_recording_incomplete() {
         settings.audio_folder = file_url(&audio, true);
         settings.default_retention = AudioRetention::DeleteAfterProcessing;
         store.save_settings(&settings).unwrap();
-        let diarizer = Arc::new(steno_services::model_gate::GatedDiarizer::new(
-            Arc::new(FailingInTheSidecar(failure)),
-            Arc::new(|| true),
-        ));
+        let diarizer = Arc::new(FailingInTheSidecar(failure));
         let pipeline = ProcessingPipeline::new(PipelineDependencies::new(
             Arc::new(SymphoniaAudioCodec::new()),
             Arc::new(steno_core::testing::FakeSpeechEngine::default()),

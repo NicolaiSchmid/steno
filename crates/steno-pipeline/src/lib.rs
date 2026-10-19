@@ -61,9 +61,9 @@ pub use lane_merger::LaneMerger;
 pub use live_recording::LiveRecording;
 pub use pipeline::{
     BACKGROUND_RUN_LOG, CLOSED_WHILE_PROCESSING, FailureKind, InFlight, JobHold, ModelWaits,
-    MonotonicClock, Now, OPERATION_PANICKED, Operation, PipelineDependencies, PipelineFailure,
-    ProcessingPipeline, QuitLatch, REDELIVER_AFTER, ReprocessError, SharedSpeechEngine,
-    SystemClock, WeakSpeechEngine,
+    ModelsInstalled, MonotonicClock, Now, OPERATION_PANICKED, Operation, PipelineDependencies,
+    PipelineFailure, ProcessingPipeline, QuitLatch, REDELIVER_AFTER, ReprocessError,
+    SharedSpeechEngine, SystemClock, WeakSpeechEngine,
 };
 pub use retention::{RetentionSweep, SweepIncomplete};
 pub use sample_clips::{ClipProbe, ClipStep};
