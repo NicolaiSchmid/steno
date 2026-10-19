@@ -57,10 +57,10 @@ steno-macos = { path = "../steno-macos" }
 [target.'cfg(not(windows))'.dependencies]
 keyring.workspace = true
 
-# The credential store (`secrets::credentials`): `CredReadW`, `CredWriteW`,
-# `CredDeleteW` and `CredFree`.
+# The credential store (`secrets::credentials`).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Security_Credentials"] }
+keyring-core.workspace = true
+windows-native-keyring-store.workspace = true
 
 # The Secret Service client (`secrets::SecretServiceStore`).
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -80,12 +80,6 @@ rusqlite.workspace = true
 tempfile.workspace = true
 # The paused clock of the update check's timeout test.
 tokio = { workspace = true, features = ["test-util"] }
-
-# The Windows tests write credentials as the `keyring` crate wrote them
-# before the services kept them on this computer, and read the services'
-# credentials back through it.
-[target.'cfg(windows)'.dev-dependencies]
-keyring = { workspace = true, features = ["windows-native"] }
 
 # The keychain test (`tests/swift_keychain.rs`): the fixture calls and a
 # key item's data.
