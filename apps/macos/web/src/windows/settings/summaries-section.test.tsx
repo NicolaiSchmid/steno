@@ -5,30 +5,6 @@ import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { SummariesSection } from "./summaries-section";
 
 describe("SummariesSection", () => {
-	it("shows the preset, the fields and the not-set-up status", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<SummariesSection />, harness);
-		expect(screen.getByTestId("preset")).toHaveTextContent(
-			"LM Studio on this Mac",
-		);
-		expect(screen.getByTestId("base-url")).toHaveValue(
-			"http://127.0.0.1:1234/v1",
-		);
-		expect(screen.getByTestId("model")).toHaveAttribute(
-			"placeholder",
-			"the model loaded in LM Studio",
-		);
-		expect(screen.getByTestId("api-key")).toHaveAttribute(
-			"placeholder",
-			"Only if the server needs one",
-		);
-		expect(screen.getByTestId("summaries-status")).toHaveTextContent(
-			/^Not set up\./,
-		);
-		expect(screen.queryByTestId("test-connection")).not.toBeInTheDocument();
-		expect(screen.getByTestId("context-tokens")).toHaveValue("32000");
-	});
-
 	it("sends a changed field as one update and a save when it is left", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();

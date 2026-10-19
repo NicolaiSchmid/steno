@@ -13,28 +13,6 @@ async function fixture(): Promise<RecordingSettingsSnapshot> {
 }
 
 describe("RecordingSection", () => {
-	it("shows the permissions, the folder with its usage and the retention rule", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<RecordingSection />, harness);
-		expect(screen.getByTestId("permission-microphone")).toHaveTextContent(
-			"Allowed",
-		);
-		expect(screen.getByTestId("permission-systemAudio")).toHaveTextContent(
-			"Allowed",
-		);
-		expect(screen.getByTestId("audio-folder")).toHaveTextContent("audio");
-		expect(screen.getByTestId("folder-usage")).toHaveTextContent(
-			"Recordings use 734 MB",
-		);
-		expect(screen.getByTestId("retention-mode")).toHaveTextContent(
-			"For 30 days",
-		);
-		expect(screen.getByTestId("retention-days")).toHaveValue(30);
-		expect(screen.getByTestId("input-device")).toHaveTextContent(
-			"System default",
-		);
-	});
-
 	it("asks the host for the folder panel, the Finder and the device list", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();

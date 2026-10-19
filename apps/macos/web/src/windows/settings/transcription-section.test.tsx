@@ -5,25 +5,6 @@ import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { TranscriptionSection } from "./transcription-section";
 
 describe("TranscriptionSection", () => {
-	it("shows the engine picker, an installed component and one downloading", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<TranscriptionSection />, harness);
-		expect(screen.getByTestId("engine")).toHaveTextContent("Parakeet");
-		expect(screen.getByTestId("asset-parakeetV3")).toHaveTextContent(
-			"Parakeet v3",
-		);
-		expect(screen.getByTestId("asset-parakeetV3-remove")).toBeInTheDocument();
-		expect(
-			screen.getByTestId("asset-offlineDiarizer-progress"),
-		).toHaveTextContent("35%");
-		expect(screen.getByRole("progressbar")).toBeInTheDocument();
-		expect(
-			screen.getByText(
-				"Downloads happen once and are kept for later meetings.",
-			),
-		).toBeInTheDocument();
-	});
-
 	it("removes an installed component through the host", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();

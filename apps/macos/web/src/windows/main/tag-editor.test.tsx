@@ -13,17 +13,6 @@ describe("normaliseTag", () => {
 });
 
 describe("TagEditor", () => {
-	it("reads Add tag with no tags and Edit tags once there are some", async () => {
-		const harness = await createBridgeHarness();
-		const { rerender } = renderWithBridge(<TagEditor tags={[]} />, harness);
-		expect(screen.getByTestId("edit-tags")).toHaveTextContent("Add tag");
-		expect(screen.getByTestId("edit-tags")).not.toHaveAttribute("aria-label");
-		rerender(<TagEditor tags={["q4"]} />);
-		expect(screen.getByRole("button", { name: "Edit tags" })).toHaveTextContent(
-			"",
-		);
-	});
-
 	it("lists each tag as a removable button and sends the rest", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();

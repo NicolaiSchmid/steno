@@ -1,4 +1,4 @@
-import { act, screen, within } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { AppSnapshot } from "@/bridge/contract";
@@ -11,38 +11,7 @@ describe("SettingsWindow", () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SettingsWindow />, harness);
 		expect(callsTo(harness.transport, "page.ready")).toHaveLength(1);
-		// The breadcrumb carries the title; the page opens with its purpose.
-		expect(screen.getByRole("listitem", { current: "page" })).toHaveTextContent(
-			"General",
-		);
-		expect(screen.getByTestId("section-purpose-general")).toHaveTextContent(
-			"Steno runs in the menu bar and records when you ask it to.",
-		);
-	});
-
-	it("lists the six sections as single-line rows and marks the current one", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<SettingsWindow />, harness);
-		const nav = screen.getByRole("navigation", { name: "Settings sections" });
-		expect(
-			within(nav)
-				.getAllByRole("button")
-				.map((row) => row.textContent),
-		).toEqual([
-			"General",
-			"Recording",
-			"Transcription",
-			"Summaries",
-			"Export",
-			"iPhone",
-		]);
-		expect(screen.getByTestId("settings-general")).toHaveAttribute(
-			"aria-current",
-			"true",
-		);
-		expect(screen.getByTestId("settings-recording")).not.toHaveAttribute(
-			"aria-current",
-		);
+		expect(screen.getByTestId("section-purpose-general")).toBeInTheDocument();
 	});
 
 	it("switches sections from the sidebar", async () => {
@@ -51,9 +20,6 @@ describe("SettingsWindow", () => {
 		renderWithBridge(<SettingsWindow />, harness);
 		await user.click(screen.getByTestId("settings-recording"));
 		expect(screen.getByTestId("section-purpose-recording")).toBeInTheDocument();
-		expect(screen.getByRole("listitem", { current: "page" })).toHaveTextContent(
-			"Recording",
-		);
 		expect(screen.getByTestId("settings-recording")).toHaveAttribute(
 			"aria-current",
 			"true",

@@ -6,17 +6,11 @@ import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { OnboardingWindow } from "./onboarding-window";
 
 describe("OnboardingWindow", () => {
-	it("tells the host the page is ready once and shows the host's page", async () => {
+	it("tells the host the page is ready and follows it from page 1 to page 2 and back", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<OnboardingWindow />, harness);
 		expect(callsTo(harness.transport, "page.ready")).toHaveLength(1);
 		expect(screen.getByTestId("onboarding-permissions")).toBeInTheDocument();
-		expect(screen.queryByTestId("onboarding-setup")).not.toBeInTheDocument();
-	});
-
-	it("follows the host from page 1 to page 2 and back", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<OnboardingWindow />, harness);
 		const onboarding = (await loadFixtureSnapshots())
 			.onboarding as OnboardingSnapshot;
 		act(() => {

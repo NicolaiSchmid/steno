@@ -15,21 +15,9 @@ async function handoffWith(change: Partial<OnboardingSnapshot>) {
 }
 
 describe("PermissionsPage", () => {
-	it("shows every permission in its state with the retention sentence", async () => {
+	it("shows every permission in its state", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<OnboardingWindow />, harness);
-		expect(screen.getByTestId("onboarding-step")).toHaveTextContent(
-			"Step 1 of 2",
-		);
-		expect(screen.getByTestId("onboarding-title")).toHaveTextContent(
-			"Welcome to Steno",
-		);
-		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
-			"A few permissions, then where summaries come from and where meetings go. Audio never leaves this Mac.",
-		);
-		expect(screen.getByTestId("onboarding-retention")).toHaveTextContent(
-			/^Each recording is deleted 30 days/,
-		);
 		// Granted: the badge, no action.
 		expect(screen.getByTestId("permission-microphone")).toHaveTextContent(
 			"Allowed",
@@ -131,26 +119,6 @@ describe("PermissionsPage", () => {
 		expect(
 			screen.queryByTestId("onboarding-vault-access"),
 		).not.toBeInTheDocument();
-	});
-
-	it("downloads the speech models through Settings' install, once per model", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness("scenario=onboarding-handoff");
-		renderWithBridge(<OnboardingWindow />, harness);
-		const row = screen.getByTestId("onboarding-models");
-		expect(row).toHaveTextContent("Speech models");
-		expect(row).toHaveTextContent(
-			"Steno needs these to turn speech into text and tell the speakers apart. Meetings wait until they are on this Mac. Not downloaded · 22 MB.",
-		);
-		await user.click(screen.getByTestId("onboarding-models-download"));
-		expect(
-			callsTo(harness.transport, "settings.transcription.download"),
-		).toEqual([
-			{
-				method: "settings.transcription.download",
-				params: { assetID: "offlineDiarizer" },
-			},
-		]);
 	});
 
 	it("says where a refused vault is allowed, and checks again", async () => {

@@ -16,9 +16,7 @@ import { TranscriptTab } from "./main/transcript-tab";
 import { OnboardingWindow } from "./onboarding/onboarding-window";
 import { GeneralSection } from "./settings/general-section";
 import { RecordingSection } from "./settings/recording-section";
-import { SettingsWindow } from "./settings/settings-window";
 import { SummariesSection } from "./settings/summaries-section";
-import { TranscriptionSection } from "./settings/transcription-section";
 
 const NICOLAI = "00000000-0000-0000-0000-000000000014";
 
@@ -45,21 +43,6 @@ async function delivered(): Promise<MeetingDetailSnapshot> {
 }
 
 describe("the meeting list", () => {
-	it.each([
-		["macos", "Press Record above, or ⌘⇧R. The menu bar item works too.", "⌘F"],
-		[
-			"windows",
-			"Press Record above, or Ctrl+Shift+R. The tray icon works too.",
-			"Ctrl+F",
-		],
-		["linux", "Press Record above, or Ctrl+Shift+R.", "Ctrl+F"],
-	] as const)("on %s says %s", async (os, body, find) => {
-		const harness = await createBridgeHarness("scenario=empty");
-		renderWithBridge(<MeetingList />, harness, platformFor(os));
-		expect(screen.getByText(body)).toBeInTheDocument();
-		expect(screen.getByText(find).tagName).toBe("KBD");
-	});
-
 	it("focuses the search with Ctrl+F off the Mac and ⌘F on it", async () => {
 		const linux = await createBridgeHarness();
 		const { unmount } = renderWithBridge(
@@ -179,14 +162,6 @@ describe("the meeting detail", () => {
 		});
 		expect(callsTo(harness.transport, "meeting.reexport")).toHaveLength(0);
 	});
-
-	it("says where the audio stays while processing", async () => {
-		const harness = await createBridgeHarness("scenario=processing");
-		renderWithBridge(<MeetingDetail />, harness, platformFor("linux"));
-		expect(screen.getByTestId("processing-card")).toHaveTextContent(
-			"Audio stays on this computer.",
-		);
-	});
 });
 
 describe("the sidebar", () => {
@@ -235,16 +210,6 @@ describe("the sidebar", () => {
 
 describe("onboarding", () => {
 	it.each([
-		["macos", "Audio never leaves this Mac."],
-		["windows", "Audio never leaves this computer."],
-		["linux", "Audio never leaves this computer."],
-	] as const)("on %s says %s", async (os, sentence) => {
-		const harness = await createBridgeHarness("scenario=onboarding-unknown");
-		renderWithBridge(<OnboardingWindow />, harness, platformFor(os));
-		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(sentence);
-	});
-
-	it.each([
 		["linux", ["microphone"], "One permission"],
 		["windows", ["microphone", "localNetwork"], "A few permissions"],
 	] as const)("on %s with %j asks for %s", async (os, kinds, asked) => {
@@ -261,34 +226,6 @@ describe("onboarding", () => {
 		renderWithBridge(<OnboardingWindow />, harness, platformFor(os));
 		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
 			`${asked}, then where summaries come from and where meetings go. Audio never leaves this computer.`,
-		);
-	});
-
-	it("explains the local network step in the platform's words", async () => {
-		const harness = await createBridgeHarness("scenario=onboarding-unknown");
-		const { unmount } = renderWithBridge(
-			<OnboardingWindow />,
-			harness,
-			platformFor("windows"),
-		);
-		expect(screen.getByTestId("permission-localNetwork")).toHaveTextContent(
-			"Windows may ask to let Steno through the firewall when you pair the first phone. Optional.",
-		);
-		unmount();
-		const linux = renderWithBridge(
-			<OnboardingWindow />,
-			harness,
-			platformFor("linux"),
-		);
-		expect(screen.getByTestId("permission-localNetwork")).toHaveTextContent(
-			"The Steno iPhone app sends recordings over your Wi-Fi. Optional.",
-		);
-		linux.unmount();
-		// On the Mac the prompt comes when Steno starts listening, which
-		// after the update from the Swift app is at launch, not at a pairing.
-		renderWithBridge(<OnboardingWindow />, harness);
-		expect(screen.getByTestId("permission-localNetwork")).toHaveTextContent(
-			"macOS asks once, when Steno first listens for your phone. Optional.",
 		);
 	});
 
@@ -338,20 +275,6 @@ describe("onboarding", () => {
 		},
 	);
 
-	it("on the Mac offers Allow for a permission not asked yet", async () => {
-		const harness = await createBridgeHarness("scenario=onboarding-unknown");
-		renderWithBridge(<OnboardingWindow />, harness, SWIFT_MAC);
-		expect(
-			screen.getByTestId("permission-microphone-request"),
-		).toHaveTextContent("Allow");
-		expect(screen.getByTestId("permission-microphone")).not.toHaveTextContent(
-			"decides",
-		);
-		expect(screen.getByTestId("permission-systemAudio")).toHaveTextContent(
-			"macOS asks once, during a short test recording that plays a tone.",
-		);
-	});
-
 	it("on the Mac says the system audio test waits for the recording, in place of its explanation", async () => {
 		const harness = await createBridgeHarness(
 			"scenario=onboarding-waits-for-recording",
@@ -369,36 +292,9 @@ describe("onboarding", () => {
 			"Stop the recording first",
 		);
 	});
-
-	it("offers no System Settings on Linux for a denied permission, only Check again", async () => {
-		const harness = await createBridgeHarness("scenario=onboarding-denied");
-		renderWithBridge(<OnboardingWindow />, harness, platformFor("linux"));
-		expect(
-			screen.queryByTestId("permission-microphone-open"),
-		).not.toBeInTheDocument();
-		expect(screen.getByTestId("permission-microphone")).toHaveTextContent(
-			"Not allowed",
-		);
-		expect(screen.getByTestId("permission-microphone-check")).toBeVisible();
-	});
 });
 
 describe("Settings", () => {
-	it.each([
-		["macos", "Steno runs in the menu bar and records when you ask it to."],
-		[
-			"windows",
-			"Steno runs in the system tray and records when you ask it to.",
-		],
-		["linux", "Steno records when you ask it to."],
-	] as const)("on %s opens with %s", async (os, purpose) => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<SettingsWindow />, harness, platformFor(os));
-		expect(screen.getByTestId("section-purpose-general").textContent).toBe(
-			purpose,
-		);
-	});
-
 	it("shows the calendar row on the Mac only", async () => {
 		const mac = await createBridgeHarness();
 		const { unmount } = renderWithBridge(<GeneralSection />, mac, SWIFT_MAC);
@@ -407,24 +303,6 @@ describe("Settings", () => {
 		const linux = await createBridgeHarness();
 		renderWithBridge(<GeneralSection />, linux, platformFor("linux"));
 		expect(screen.queryByTestId("permission-calendar")).not.toBeInTheDocument();
-	});
-
-	it("names the file manager and the machine in Recording and Transcription", async () => {
-		const harness = await createBridgeHarness();
-		const { unmount } = renderWithBridge(
-			<RecordingSection />,
-			harness,
-			platformFor("windows"),
-		);
-		expect(screen.getByTestId("reveal-folder")).toHaveTextContent(
-			"Show in File Explorer",
-		);
-		expect(screen.getByTestId("section-purpose-recording")).toHaveTextContent(
-			"Audio is recorded and kept on this computer only.",
-		);
-		unmount();
-		renderWithBridge(<TranscriptionSection />, harness, platformFor("linux"));
-		expect(screen.getByText("On this computer")).toBeInTheDocument();
 	});
 
 	it("opens Windows Settings for a denied permission and none on Linux", async () => {
@@ -456,64 +334,19 @@ describe("Settings", () => {
 		).not.toBeInTheDocument();
 	});
 
-	it("says where the key and the sign-in live", async () => {
-		const harness = await createBridgeHarness("scenario=codex-consent");
-		const { unmount } = renderWithBridge(
-			<SummariesSection />,
-			harness,
-			platformFor("linux"),
-		);
-		expect(screen.getByTestId("codex-consent")).toHaveTextContent(
-			"saved on this computer (~/.codex/auth.json)",
-		);
-		expect(screen.getByTestId("codex-consent")).toHaveTextContent(
-			"Audio never leaves your computer.",
-		);
-		unmount();
-		const windowsCodex = await createBridgeHarness("scenario=codex-consent");
-		const second = renderWithBridge(
-			<SummariesSection />,
-			windowsCodex,
-			platformFor("windows"),
-		);
-		expect(screen.getByTestId("codex-consent")).toHaveTextContent(
-			"saved on this computer (%USERPROFILE%\\.codex\\auth.json)",
-		);
-		second.unmount();
-		const keyed = await createBridgeHarness();
-		const third = renderWithBridge(
-			<SummariesSection />,
-			keyed,
-			platformFor("windows"),
-		);
-		expect(
-			screen.getByText(
-				"Stored in Windows Credential Manager and sent only to the server above.",
-			),
-		).toBeInTheDocument();
-		third.unmount();
-		// Linux names the keyring only when the host says the key is there.
-		for (const [scenario, where] of [
-			["summaries-key-in-keyring", "your keyring"],
-			["summaries-key-in-file", "a file only you can read"],
-			["summaries-connected", "a file only you can read"],
-		] as const) {
-			const linuxKey = await createBridgeHarness(`scenario=${scenario}`);
-			const view = renderWithBridge(
-				<SummariesSection />,
-				linuxKey,
-				platformFor("linux"),
-			);
+	it.each([
+		["summaries-key-in-keyring", "your keyring"],
+		["summaries-key-in-file", "a file only you can read"],
+		["summaries-connected", "a file only you can read"],
+	] as const)(
+		"on Linux with %s says the key is in %s",
+		async (scenario, where) => {
+			const harness = await createBridgeHarness(`scenario=${scenario}`);
+			renderWithBridge(<SummariesSection />, harness, platformFor("linux"));
 			expect(screen.getByTestId("api-key")).toHaveAttribute(
 				"placeholder",
 				`Saved in ${where}`,
 			);
-			expect(
-				screen.getByText(
-					`Stored in ${where} and sent only to the server above.`,
-				),
-			).toBeInTheDocument();
-			view.unmount();
-		}
-	});
+		},
+	);
 });

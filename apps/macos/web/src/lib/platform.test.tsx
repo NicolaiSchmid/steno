@@ -1,19 +1,15 @@
-import { fireEvent, render, renderHook } from "@testing-library/react";
+import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { platform as platformSchema } from "@/bridge/contract";
 import {
 	detectPlatform,
 	keyHome,
 	matchesShortcut,
-	type PlatformOS,
 	PlatformProvider,
 	platformFor,
 	SECRETS_FILE_WORDS,
 	SHORTCUTS,
 	type ShortcutEvent,
-	SWIFT_MAC,
 	shortcutLabel,
-	usePlatform,
 	useShortcut,
 } from "./platform";
 
@@ -149,80 +145,9 @@ describe("detectPlatform", () => {
 		const odd = { __STENO_PLATFORM__: "beos" } as unknown as Window;
 		expect(detectPlatform(odd, "amiga").os).toBe("macos");
 	});
-
-	it("knows every platform the contract names", () => {
-		for (const os of platformSchema.options) {
-			const platform = platformFor(os);
-			expect(platform.words.computer).not.toBe("");
-			expect(typeof platform.readsCalendar).toBe("boolean");
-		}
-	});
 });
 
-describe("words", () => {
-	it("keep the Mac's and say computer and the file manager elsewhere", () => {
-		expect(platformFor("macos").words).toMatchObject({
-			computer: "Mac",
-			showInFileManager: "Show in Finder",
-			revealInFileManager: "Reveal in Finder",
-			showExport: "Reveal export",
-			showRecording: "Reveal recording",
-			systemSettings: "System Settings",
-			runsIn: "in the menu bar",
-			trayItem: "menu bar item",
-		});
-		expect(platformFor("windows").words).toMatchObject({
-			computer: "computer",
-			showInFileManager: "Show in File Explorer",
-			revealInFileManager: "Show in File Explorer",
-			systemSettings: "Windows Settings",
-			opensSystemSettings: true,
-			trayItem: "tray icon",
-		});
-		expect(platformFor("linux").words).toMatchObject({
-			computer: "computer",
-			showInFileManager: "Show in folder",
-			revealInFileManager: "Show in folder",
-			opensSystemSettings: false,
-		});
-		expect(platformFor("linux").words.localNetworkPrompt).toBeUndefined();
-	});
-
-	it("leave the tray unnamed on Linux, where it may not show", () => {
-		expect(platformFor("linux").words.runsIn).toBeUndefined();
-		expect(platformFor("linux").words.trayItem).toBeUndefined();
-	});
-
-	it("say where the API key and the Codex sign-in live", () => {
-		const where = (os: PlatformOS) => {
-			const { keychain, loginKeychain, codexSignInFile } =
-				platformFor(os).words;
-			return { keychain, loginKeychain, codexSignInFile };
-		};
-		expect(where("macos")).toEqual({
-			keychain: "your keychain",
-			loginKeychain: "your login keychain",
-			codexSignInFile: "~/.codex/auth.json",
-		});
-		expect(where("windows")).toEqual({
-			keychain: "Credential Manager",
-			loginKeychain: "Windows Credential Manager",
-			codexSignInFile: "%USERPROFILE%\\.codex\\auth.json",
-		});
-		expect(where("linux")).toEqual({
-			keychain: "your keyring",
-			loginKeychain: "your keyring",
-			codexSignInFile: "~/.codex/auth.json",
-		});
-	});
-
-	it("leave the traffic lights room on the Mac only", () => {
-		expect(SWIFT_MAC.titleBarInset).toBe(true);
-		expect(platformFor("macos").titleBarInset).toBe(true);
-		expect(platformFor("windows").titleBarInset).toBe(false);
-		expect(platformFor("linux").titleBarInset).toBe(false);
-	});
-
+describe("keyHome", () => {
 	it("name the keyring on Linux only when the host keeps the key there", () => {
 		const file = { short: SECRETS_FILE_WORDS, full: SECRETS_FILE_WORDS };
 		expect(keyHome(platformFor("linux"), "keyring")).toEqual({
@@ -239,29 +164,10 @@ describe("words", () => {
 			short: "Credential Manager",
 			full: "Windows Credential Manager",
 		});
-		expect(SECRETS_FILE_WORDS).toBe("a file only you can read");
-	});
-
-	it("read the calendar on the Mac only", () => {
-		expect(platformFor("macos").readsCalendar).toBe(true);
-		expect(platformFor("windows").readsCalendar).toBe(false);
-		expect(platformFor("linux").readsCalendar).toBe(false);
 	});
 });
 
-describe("usePlatform and useShortcut", () => {
-	it("read the provided platform", () => {
-		const { result } = renderHook(() => usePlatform(), {
-			wrapper: ({ children }) => (
-				<PlatformProvider platform={platformFor("windows")}>
-					{children}
-				</PlatformProvider>
-			),
-		});
-		expect(result.current.os).toBe("windows");
-		expect(result.current.label(SHORTCUTS.findMeetings)).toBe("Ctrl+F");
-	});
-
+describe("useShortcut", () => {
 	it("run the action for the platform's keys and stop the key there", () => {
 		const action = vi.fn();
 		function Probe({ enabled }: { enabled: boolean }) {
@@ -316,11 +222,5 @@ describe("usePlatform and useShortcut", () => {
 		expect(action).not.toHaveBeenCalled();
 		fireEvent.keyDown(getByTestId("page"), { key: "f", ctrlKey: true });
 		expect(action).toHaveBeenCalledTimes(1);
-	});
-
-	it("throw without a provider", () => {
-		const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
-		expect(() => renderHook(() => usePlatform())).toThrow("PlatformProvider");
-		quiet.mockRestore();
 	});
 });

@@ -3,79 +3,118 @@ import { expect, type Page, test } from "@playwright/test";
 
 /**
  * Renders the main window in every state at both reference window sizes,
- * the Settings window's six sections and notable states at its 960 by 640
- * default size, and the stories, each in light and dark, and writes PNGs to
- * screens/. Every page must make zero requests to anything but the preview
- * server (plan Decision 9). The windows run over the fixture bridge;
- * `scenario=` and `tab=` bend the fixtures (`src/bridge/mock-transport.ts`).
+ * the Settings window's sections and states at its 960 by 640 default size,
+ * the onboarding window at its fixed 560 by 620 and the stories, each in
+ * light and dark, to screens/. Every page must make zero requests to anything
+ * but the preview server. `scenario=` and `tab=` bend the fixtures
+ * (`src/bridge/mock-transport.ts`).
  */
 
 const OUT = "screens";
-const SIZES = [
+const SCHEMES = ["light", "dark"] as const;
+type Size = { width: number; height: number };
+
+/** A state: its name, the query that opens it, the test id that must show. */
+type State = readonly [name: string, query: string, ready: string];
+
+const MAIN_SIZES: readonly Size[] = [
 	{ width: 960, height: 600 },
 	{ width: 1200, height: 760 },
-] as const;
-const SCHEMES = ["light", "dark"] as const;
-
-interface MainState {
-	name: string;
-	query: string;
-	/** What must be on screen before the shot. */
-	expect: { testId?: string; role?: "menu" | "dialog" | "option" };
-	/** Scrolled into view before the shot (the footer sits below the fold). */
-	scrollTo?: string;
-}
-
-const MAIN_STATES: readonly MainState[] = [
-	{ name: "summary", query: "tab=summary", expect: { testId: "tab-summary" } },
-	{
-		name: "transcript-picker",
-		query: "tab=transcript&picker",
-		expect: { role: "option" },
-	},
-	{
-		name: "tasks",
-		query: "tab=tasks",
-		expect: { testId: "tab-content-tasks" },
-	},
-	{
-		name: "notes",
-		query: "tab=notes",
-		expect: { testId: "scratchpad-editor" },
-	},
-	{ name: "menu", query: "tab=summary&menu", expect: { role: "menu" } },
-	{
-		name: "empty",
-		query: "scenario=empty",
-		expect: { testId: "empty-meetings-title" },
-	},
-	{
-		name: "recording",
-		query: "scenario=recording",
-		expect: { testId: "auto-stop" },
-	},
-	{
-		name: "denied",
-		query: "scenario=denied",
-		expect: { testId: "denied-microphone" },
-	},
-	{
-		name: "failed",
-		query: "scenario=failed",
-		expect: { testId: "summary-try-again" },
-	},
-	{
-		name: "processing",
-		query: "scenario=processing",
-		expect: { testId: "processing-card" },
-	},
-	{
-		name: "export-failed",
-		query: "scenario=export-failed&tab=summary",
-		expect: { testId: "export-again" },
-		scrollTo: "meeting-footer",
-	},
 ];
+const MAIN_STATES: readonly State[] = [
+	["summary", "tab=summary", "tab-summary"],
+	["transcript-picker", "tab=transcript&picker", "role=option"],
+	["tasks", "tab=tasks", "tab-content-tasks"],
+	["notes", "tab=notes", "scratchpad-editor"],
+	["menu", "tab=summary&menu", "role=menu"],
+	["empty", "scenario=empty", "empty-detail-title"],
+	["recording", "scenario=recording", "auto-stop"],
+	["denied", "scenario=denied", "denied-microphone"],
+	["failed", "scenario=failed", "summary-try-again"],
+	["processing", "scenario=processing", "processing-card"],
+	// The footer sits below the fold; the shot scrolls it into view.
+	["export-failed", "scenario=export-failed&tab=summary", "export-again"],
+];
+
+const SETTINGS_SIZE: Size = { width: 960, height: 640 };
+const SETTINGS_STATES: readonly State[] = [
+	["general", "section=general", "update-status"],
+	[
+		"general-error",
+		"section=general&scenario=settings-error",
+		"login-item-approval",
+	],
+	["acknowledgements", "section=general", "acknowledgements-dialog"],
+	["recording", "section=recording", "retention-mode"],
+	["transcription", "section=transcription", "asset-offlineDiarizer-progress"],
+	[
+		"transcription-failed",
+		"section=transcription&scenario=download-failed",
+		"asset-parakeetV3-retry",
+	],
+	["summaries", "section=summaries", "summaries-status"],
+	[
+		"summaries-connected",
+		"section=summaries&scenario=summaries-connected",
+		"test-connection",
+	],
+	[
+		"summaries-failed",
+		"section=summaries&scenario=summaries-failed",
+		"test-result-details",
+	],
+	[
+		"codex-consent",
+		"section=summaries&scenario=codex-consent",
+		"codex-confirm",
+	],
+	["codex", "section=summaries&scenario=codex", "codex-model"],
+	["export", "section=export", "export-enabled"],
+	["export-on", "section=export&scenario=export-on", "export-status"],
+	["iphone", "section=iphone", "begin-pairing"],
+	["pairing", "section=iphone&scenario=pairing", "pairing-card"],
+	[
+		"iphone-unavailable",
+		"section=iphone&scenario=phone-unavailable",
+		"phone-unavailable",
+	],
+	["iphone-waiting", "section=iphone&scenario=phone-waiting", "phone-waiting"],
+];
+
+const ONBOARDING_SIZE: Size = { width: 560, height: 620 };
+const ONBOARDING_STATES: readonly State[] = [
+	["page-1", "", "permission-systemAudio-request"],
+	[
+		"page-1-unknown",
+		"scenario=onboarding-unknown",
+		"permission-microphone-request",
+	],
+	["page-1-denied", "scenario=onboarding-denied", "permission-microphone-open"],
+	["page-1-granted", "scenario=onboarding-granted", "onboarding-done"],
+	[
+		"page-1-handoff",
+		"scenario=onboarding-handoff",
+		"onboarding-models-download",
+	],
+	[
+		"page-1-handoff-downloading",
+		"scenario=onboarding-handoff-downloading",
+		"onboarding-models-progress",
+	],
+	["page-2", "scenario=onboarding-setup-open", "onboarding-save-summaries"],
+	["page-2-codex", "scenario=onboarding-codex", "codex-confirm"],
+	["page-2-saved", "scenario=onboarding-setup", "onboarding-vault-validation"],
+	[
+		"page-2-vault-saved",
+		"scenario=onboarding-vault-saved",
+		"setup-vault-saved",
+	],
+];
+
+/** Clicked before the shot: the trigger of a dialog state. */
+const CLICKS: Record<string, string> = { acknowledgements: "acknowledgements" };
+/** Scrolled into view before the shot. */
+const SCROLLS: Record<string, string> = { "export-failed": "meeting-footer" };
 
 mkdirSync(OUT, { recursive: true });
 
@@ -105,226 +144,59 @@ async function settle(page: Page) {
 	await page.waitForTimeout(300);
 }
 
-for (const size of SIZES) {
-	for (const scheme of SCHEMES) {
+function shoot(
+	window: "main" | "settings" | "onboarding",
+	size: Size,
+	scheme: (typeof SCHEMES)[number],
+	[name, query, ready]: State,
+	file: string,
+) {
+	test(`${window} ${scheme} ${file}`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize(size);
+		const params = [query, scheme === "dark" ? "dark" : ""]
+			.filter(Boolean)
+			.join("&");
+		await page.goto(`/#/${window}${params ? `?${params}` : ""}`);
+		await settle(page);
+		await expect(page.getByTestId(`${window}-window`)).toBeVisible();
+		const click = CLICKS[name];
+		if (click) {
+			await page.getByTestId(click).click();
+		}
+		const target = ready.startsWith("role=")
+			? page.getByRole(ready.slice(5) as "menu" | "option").first()
+			: page.getByTestId(ready);
+		await expect(target).toBeVisible();
+		const scroll = SCROLLS[name];
+		if (scroll) {
+			await page.getByTestId(scroll).scrollIntoViewIfNeeded();
+		}
+		await settle(page);
+		await page.screenshot({ path: `${OUT}/${window}-${scheme}-${file}.png` });
+		expect(external).toEqual([]);
+	});
+}
+
+for (const scheme of SCHEMES) {
+	for (const size of MAIN_SIZES) {
 		for (const state of MAIN_STATES) {
-			test(`main ${scheme} ${size.width}x${size.height} ${state.name}`, async ({
-				page,
-			}) => {
-				const external = watchExternalRequests(page);
-				await page.setViewportSize(size);
-				const dark = scheme === "dark" ? "&dark" : "";
-				await page.goto(`/#/main?${state.query}${dark}`);
-				await settle(page);
-				await expect(page.getByTestId("main-window")).toBeVisible();
-				if (state.expect.testId) {
-					await expect(page.getByTestId(state.expect.testId)).toBeVisible();
-				}
-				if (state.expect.role) {
-					await expect(page.getByRole(state.expect.role).first()).toBeVisible();
-				}
-				if (state.name === "empty") {
-					await expect(page.getByTestId("empty-detail-title")).toBeVisible();
-				}
-				if (state.scrollTo) {
-					await page.getByTestId(state.scrollTo).scrollIntoViewIfNeeded();
-				}
-				await settle(page);
-				await page.screenshot({
-					path: `${OUT}/main-${scheme}-${size.width}x${size.height}-${state.name}.png`,
-				});
-				expect(external).toEqual([]);
-			});
+			shoot(
+				"main",
+				size,
+				scheme,
+				state,
+				`${size.width}x${size.height}-${state[0]}`,
+			);
 		}
 	}
-}
-
-/** The Settings window's default size; it is resizable down to 760 by 520. */
-const SETTINGS_SIZE = { width: 960, height: 640 } as const;
-
-interface SettingsState {
-	name: string;
-	/** `section=` plus any scenario the state needs. */
-	query: string;
-	/** What must be on screen before the shot. */
-	testId: string;
-	/** Clicked before the shot (a dialog trigger). */
-	click?: string;
-}
-
-const SETTINGS_STATES: readonly SettingsState[] = [
-	{ name: "general", query: "section=general", testId: "update-status" },
-	{
-		name: "general-error",
-		query: "section=general&scenario=settings-error",
-		testId: "login-item-approval",
-	},
-	{
-		name: "acknowledgements",
-		query: "section=general",
-		testId: "acknowledgements-dialog",
-		click: "acknowledgements",
-	},
-	{ name: "recording", query: "section=recording", testId: "retention-mode" },
-	{
-		name: "transcription",
-		query: "section=transcription",
-		testId: "asset-offlineDiarizer-progress",
-	},
-	{
-		name: "transcription-failed",
-		query: "section=transcription&scenario=download-failed",
-		testId: "asset-parakeetV3-retry",
-	},
-	{ name: "summaries", query: "section=summaries", testId: "summaries-status" },
-	{
-		name: "summaries-connected",
-		query: "section=summaries&scenario=summaries-connected",
-		testId: "test-connection",
-	},
-	{
-		name: "summaries-failed",
-		query: "section=summaries&scenario=summaries-failed",
-		testId: "test-result-details",
-	},
-	{
-		name: "codex-consent",
-		query: "section=summaries&scenario=codex-consent",
-		testId: "codex-confirm",
-	},
-	{
-		name: "codex",
-		query: "section=summaries&scenario=codex",
-		testId: "codex-model",
-	},
-	{ name: "export", query: "section=export", testId: "export-enabled" },
-	{
-		name: "export-on",
-		query: "section=export&scenario=export-on",
-		testId: "export-status",
-	},
-	{ name: "iphone", query: "section=iphone", testId: "begin-pairing" },
-	{
-		name: "pairing",
-		query: "section=iphone&scenario=pairing",
-		testId: "pairing-card",
-	},
-	{
-		name: "iphone-unavailable",
-		query: "section=iphone&scenario=phone-unavailable",
-		testId: "phone-unavailable",
-	},
-	{
-		name: "iphone-waiting",
-		query: "section=iphone&scenario=phone-waiting",
-		testId: "phone-waiting",
-	},
-];
-
-for (const scheme of SCHEMES) {
 	for (const state of SETTINGS_STATES) {
-		test(`settings ${scheme} ${state.name}`, async ({ page }) => {
-			const external = watchExternalRequests(page);
-			await page.setViewportSize(SETTINGS_SIZE);
-			const dark = scheme === "dark" ? "&dark" : "";
-			await page.goto(`/#/settings?${state.query}${dark}`);
-			await settle(page);
-			await expect(page.getByTestId("settings-window")).toBeVisible();
-			if (state.click) {
-				await page.getByTestId(state.click).click();
-			}
-			await expect(page.getByTestId(state.testId)).toBeVisible();
-			await settle(page);
-			await page.screenshot({
-				path: `${OUT}/settings-${scheme}-${state.name}.png`,
-			});
-			expect(external).toEqual([]);
-		});
+		shoot("settings", SETTINGS_SIZE, scheme, state, state[0]);
 	}
-}
-
-/** The onboarding window is one fixed size (`OnboardingWindow.size`). */
-const ONBOARDING_SIZE = { width: 560, height: 620 } as const;
-
-interface OnboardingState {
-	name: string;
-	/** The scenario the state needs; empty for the recorded fixture. */
-	query: string;
-	/** What must be on screen before the shot. */
-	testId: string;
-}
-
-const ONBOARDING_STATES: readonly OnboardingState[] = [
-	{ name: "page-1", query: "", testId: "permission-systemAudio-request" },
-	{
-		name: "page-1-unknown",
-		query: "scenario=onboarding-unknown",
-		testId: "permission-microphone-request",
-	},
-	{
-		name: "page-1-denied",
-		query: "scenario=onboarding-denied",
-		testId: "permission-microphone-open",
-	},
-	{
-		name: "page-1-granted",
-		query: "scenario=onboarding-granted",
-		testId: "onboarding-done",
-	},
-	{
-		name: "page-1-handoff",
-		query: "scenario=onboarding-handoff",
-		testId: "onboarding-models-download",
-	},
-	{
-		name: "page-1-handoff-downloading",
-		query: "scenario=onboarding-handoff-downloading",
-		testId: "onboarding-models-progress",
-	},
-	{
-		name: "page-2",
-		query: "scenario=onboarding-setup-open",
-		testId: "onboarding-save-summaries",
-	},
-	{
-		name: "page-2-codex",
-		query: "scenario=onboarding-codex",
-		testId: "codex-confirm",
-	},
-	{
-		name: "page-2-saved",
-		query: "scenario=onboarding-setup",
-		testId: "onboarding-vault-validation",
-	},
-	{
-		name: "page-2-vault-saved",
-		query: "scenario=onboarding-vault-saved",
-		testId: "setup-vault-saved",
-	},
-];
-
-for (const scheme of SCHEMES) {
 	for (const state of ONBOARDING_STATES) {
-		test(`onboarding ${scheme} ${state.name}`, async ({ page }) => {
-			const external = watchExternalRequests(page);
-			await page.setViewportSize(ONBOARDING_SIZE);
-			const query = [state.query, scheme === "dark" ? "dark" : ""]
-				.filter(Boolean)
-				.join("&");
-			await page.goto(`/#/onboarding${query ? `?${query}` : ""}`);
-			await settle(page);
-			await expect(page.getByTestId("onboarding-window")).toBeVisible();
-			await expect(page.getByTestId(state.testId)).toBeVisible();
-			await settle(page);
-			await page.screenshot({
-				path: `${OUT}/onboarding-${scheme}-${state.name}.png`,
-			});
-			expect(external).toEqual([]);
-		});
+		shoot("onboarding", ONBOARDING_SIZE, scheme, state, state[0]);
 	}
-}
 
-for (const scheme of SCHEMES) {
 	test(`stories ${scheme}`, async ({ page }) => {
 		const external = watchExternalRequests(page);
 		await page.setViewportSize({ width: 1200, height: 760 });
@@ -336,10 +208,7 @@ for (const scheme of SCHEMES) {
 		const height = await page.evaluate(
 			() => document.documentElement.scrollHeight,
 		);
-		await page.setViewportSize({
-			width: 1200,
-			height: Math.min(height, 8000),
-		});
+		await page.setViewportSize({ width: 1200, height: Math.min(height, 8000) });
 		await settle(page);
 		await page.screenshot({ path: `${OUT}/stories-${scheme}.png` });
 		expect(external).toEqual([]);

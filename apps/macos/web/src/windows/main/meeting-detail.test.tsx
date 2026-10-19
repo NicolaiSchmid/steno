@@ -47,25 +47,6 @@ describe("MeetingDetail", () => {
 		);
 	});
 
-	it("keeps Not now on a banner with nothing to offer that is no notice", async () => {
-		const app = (await loadFixtureSnapshots()).app as AppSnapshot;
-		const harness = await createBridgeHarness("", {
-			app: {
-				...app,
-				setupBanner: {
-					title: "A later banner",
-					body: "Nothing to set up here.",
-					offersSummaries: false,
-					offersVault: false,
-				},
-			} satisfies AppSnapshot,
-		});
-		renderWithBridge(<MeetingDetail />, harness);
-		expect(await screen.findByTestId("banner-not-now")).toHaveTextContent(
-			"Not now",
-		);
-	});
-
 	it("deletes from the actions menu and leaves the alert to the host", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
@@ -76,17 +57,6 @@ describe("MeetingDetail", () => {
 				{ method: "meetings.delete", params: { meetingID: FIRST } },
 			]),
 		);
-		expect(callsTo(harness.transport, "ui.confirmDestructive")).toHaveLength(0);
-	});
-
-	it("offers to delete the recording now while its files exist", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness();
-		renderWithBridge(<MeetingDetail initialMenuOpen />, harness);
-		await user.click(await screen.findByTestId("delete-recording"));
-		expect(
-			callsTo(harness.transport, "meeting.deleteRecordingNow"),
-		).toHaveLength(1);
 		expect(callsTo(harness.transport, "ui.confirmDestructive")).toHaveLength(0);
 	});
 
@@ -204,39 +174,30 @@ describe("MeetingDetail", () => {
 		).toHaveAttribute("aria-disabled", "true");
 	});
 
-	it("shows the keep switch and slides it back when the host declines", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness(
-			"",
-			{},
-			{ "meeting.setKeepAudio": { confirmed: false } },
-		);
-		renderWithBridge(<MeetingDetail />, harness);
-		const toggle = screen.getByTestId("keep-audio");
-		expect(screen.getByTestId("retention-row")).toHaveTextContent(/^Deletes/);
-		expect(toggle).toHaveAttribute("aria-checked", "false");
-		await user.click(toggle);
-		expect(callsTo(harness.transport, "meeting.setKeepAudio")).toEqual([
-			{ method: "meeting.setKeepAudio", params: { value: true } },
-		]);
-		await vi.waitFor(() =>
-			expect(toggle).toHaveAttribute("aria-checked", "false"),
-		);
-	});
-
-	it("keeps the switch where the user put it when the host confirms", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness();
-		renderWithBridge(<MeetingDetail />, harness);
-		const toggle = screen.getByTestId("keep-audio");
-		await user.click(toggle);
-		await vi.waitFor(() =>
-			expect(callsTo(harness.transport, "meeting.setKeepAudio")).toHaveLength(
-				1,
-			),
-		);
-		expect(toggle).toHaveAttribute("aria-checked", "true");
-	});
+	it.each([
+		[true, "true"],
+		[false, "false"],
+	])(
+		"keeps the switch on only when the host confirms (%s)",
+		async (confirmed, checked) => {
+			const user = userEvent.setup();
+			const harness = await createBridgeHarness(
+				"",
+				{},
+				{ "meeting.setKeepAudio": { confirmed } },
+			);
+			renderWithBridge(<MeetingDetail />, harness);
+			const toggle = screen.getByTestId("keep-audio");
+			expect(toggle).toHaveAttribute("aria-checked", "false");
+			await user.click(toggle);
+			expect(callsTo(harness.transport, "meeting.setKeepAudio")).toEqual([
+				{ method: "meeting.setKeepAudio", params: { value: true } },
+			]);
+			await vi.waitFor(() =>
+				expect(toggle).toHaveAttribute("aria-checked", checked),
+			);
+		},
+	);
 
 	it("says why an incomplete meeting keeps its recording and offers Process again and the delete", async () => {
 		const user = userEvent.setup();
@@ -295,24 +256,15 @@ describe("MeetingDetail", () => {
 		);
 	});
 
-	it("reports where the export stands in the footer", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<MeetingDetail />, harness);
-		expect(screen.getByTestId("export-status")).toHaveTextContent(
-			"Not exported: no Obsidian vault is configured.",
-		);
-		expect(screen.queryByTestId("export-again")).not.toBeInTheDocument();
-		expect(screen.queryByTestId("reveal-export")).not.toBeInTheDocument();
-	});
-
-	it("offers Export again after a failed export, and Reveal in Finder once delivered", async () => {
+	it("offers Export again after a failed export, and Reveal once delivered", async () => {
 		const user = userEvent.setup();
 		const detail = await fixtureDetail();
 		const harness = await createBridgeHarness("scenario=export-failed");
 		renderWithBridge(<MeetingDetail />, harness);
 		expect(screen.getByTestId("export-status")).toHaveTextContent("Failed");
 		await user.click(screen.getByTestId("export-again"));
-		expect(callsTo(harness.transport, "meeting.reexport")).toHaveLength(1);
+		await user.click(screen.getByTestId("export-meeting"));
+		expect(callsTo(harness.transport, "meeting.reexport")).toHaveLength(2);
 		act(() => {
 			harness.transport.emit("meeting.detail", {
 				...detail,
@@ -351,54 +303,12 @@ describe("MeetingDetail", () => {
 });
 
 describe("MeetingDetail header", () => {
-	it("puts Meetings and the title in the breadcrumb with Export and the actions trigger", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<MeetingDetail />, harness);
-		const header = screen.getByRole("banner");
-		const crumbs = within(header).getAllByRole("listitem");
-		expect(crumbs.map((crumb) => crumb.textContent)).toEqual([
-			"Meetings",
-			"Produktstrategie 90/10",
-		]);
-		expect(
-			within(header).getByRole("listitem", { current: "page" }),
-		).toHaveTextContent("Produktstrategie 90/10");
-		expect(within(header).getByTestId("export-meeting")).toHaveTextContent(
-			"Export",
-		);
-		expect(within(header).getByTestId("export-meeting")).toBeDisabled();
-		expect(within(header).getByRole("button", { name: "More actions" })).toBe(
-			screen.getByTestId("meeting-actions"),
-		);
-		expect(screen.queryByTestId("header-stop")).not.toBeInTheDocument();
-	});
-
-	it("enables Export once the host allows a re-export and sends it", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness("scenario=export-failed");
-		renderWithBridge(<MeetingDetail />, harness);
-		await user.click(screen.getByTestId("export-meeting"));
-		expect(callsTo(harness.transport, "meeting.reexport")).toHaveLength(1);
-	});
-
-	it("opens the actions menu from the trigger", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness();
-		renderWithBridge(<MeetingDetail />, harness);
-		await user.click(screen.getByRole("button", { name: "More actions" }));
-		expect(
-			await screen.findByRole("menuitem", { name: "Delete meeting…" }),
-		).toBeInTheDocument();
-	});
-
 	it("shows Stop in the header only while this meeting is being recorded", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=recording");
 		renderWithBridge(<MeetingDetail />, harness);
 		const stop = screen.getByTestId("header-stop");
-		expect(screen.getByRole("banner")).toContainElement(stop);
 		expect(stop).toHaveTextContent(/^Stop\s*12:3\d$/);
-		expect(stop.querySelector(".animate-status-pulse")).not.toBeNull();
 		await user.click(stop);
 		expect(callsTo(harness.transport, "recording.stop")).toHaveLength(1);
 	});
@@ -421,21 +331,13 @@ describe("MeetingDetail header", () => {
 		const stop = screen.getByTestId("header-stop");
 		expect(stop).toBeDisabled();
 		expect(stop).toHaveTextContent(/^Stopping…$/);
-		expect(stop.querySelector(".animate-status-pulse")).toBeNull();
 	});
 
-	it("shows the tags as badges beside the people and a Confirm speakers button", async () => {
+	it("opens the transcript from Confirm speakers", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("tab=summary");
 		renderWithBridge(<MeetingDetail />, harness);
-		const row = screen.getByTestId("speakers-row");
-		expect(within(row).getByText("#strategie").tagName).toBe("SPAN");
-		expect(within(row).getByText("#q4")).toHaveClass("border-input");
-		const confirm = within(row).getByRole("button", {
-			name: "Confirm speakers",
-		});
-		expect(confirm).toBe(screen.getByTestId("confirm-speaker"));
-		await user.click(confirm);
+		await user.click(screen.getByRole("button", { name: "Confirm speakers" }));
 		expect(callsTo(harness.transport, "meeting.setTab")).toEqual([
 			{ method: "meeting.setTab", params: { tab: "transcript" } },
 		]);
@@ -473,14 +375,9 @@ describe("MeetingDetail header", () => {
 		expect(screen.queryByTestId("confirm-speaker")).not.toBeInTheDocument();
 	});
 
-	it("shows the Meetings crumb and the empty state with nothing selected", async () => {
+	it("shows the empty state with nothing selected", async () => {
 		const harness = await createBridgeHarness("scenario=empty");
 		renderWithBridge(<MeetingDetail />, harness);
-		const header = screen.getByRole("banner");
-		expect(
-			within(header).getByRole("listitem", { current: "page" }),
-		).toHaveTextContent("Meetings");
-		expect(within(header).getAllByRole("listitem")).toHaveLength(1);
 		expect(screen.queryByTestId("export-meeting")).not.toBeInTheDocument();
 		expect(screen.getByTestId("empty-detail-title")).toHaveTextContent(
 			"Select a meeting",

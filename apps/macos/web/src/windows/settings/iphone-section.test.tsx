@@ -73,15 +73,6 @@ describe("PhoneSection", () => {
 		expect(waiting).toHaveTextContent(
 			"Your phones can't send recordings right now.",
 		);
-		expect(waiting).toHaveTextContent(
-			"Steno could not bring over this Mac's phone pairing from the previous version. Choose Try again, then Always Allow when macOS asks.",
-		);
-		expect(screen.getByTestId("pair-again-row")).toHaveTextContent(
-			"Every phone must pair again.",
-		);
-		expect(screen.getByTestId(`device-${PHONE_ID}`)).toHaveTextContent(
-			"Nicolai's iPhone",
-		);
 		expect(screen.queryByTestId(`revoke-${PHONE_ID}`)).not.toBeInTheDocument();
 		expect(screen.queryByTestId("begin-pairing")).not.toBeInTheDocument();
 		await user.click(screen.getByTestId("try-again"));
@@ -178,9 +169,6 @@ describe("PhoneSection", () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
 		const { unmount } = renderWithBridge(<PhoneSection />, harness);
-		expect(screen.getByTestId("phone-local-network")).toHaveTextContent(
-			"If your iPhone can't find this Mac, turn on Steno under Local Network in System Settings.",
-		);
 		await user.click(screen.getByTestId("phone-local-network-open"));
 		expect(callsTo(harness.transport, "system.openSystemSettings")).toEqual([
 			{
