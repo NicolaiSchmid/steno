@@ -425,34 +425,25 @@ mod tests {
         runtime.shutdown_background();
     }
 
+    /// Only https: and mailto: open, the scheme in any case; every other
+    /// scheme and an unparsable URL are invalid params.
     #[test]
-    fn https_and_mailto_links_open() {
+    fn only_https_and_mailto_links_open() {
         let github = openable_url("https://github.com/NicolaiSchmid/steno").unwrap();
         assert_eq!(github.host_str(), Some("github.com"));
         let mail = openable_url("mailto:hello@example.com").unwrap();
         assert_eq!(mail.path(), "hello@example.com");
-        // The scheme is matched case-insensitively.
         assert!(openable_url("HTTPS://example.com/").is_ok());
-    }
-
-    #[test]
-    fn every_other_scheme_is_invalid_params() {
         for text in [
             "http://example.com/",
             "file:///etc/passwd",
             "javascript:alert(1)",
             "steno://meeting/1",
-            "ftp://example.com/",
+            "",
+            "not a url",
+            "example.com/no-scheme",
+            "https://",
         ] {
-            let error = openable_url(text).expect_err(text);
-            assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{text}");
-            assert_eq!(error.message, REFUSAL, "{text}");
-        }
-    }
-
-    #[test]
-    fn an_unparsable_url_is_invalid_params() {
-        for text in ["", "not a url", "example.com/no-scheme", "https://"] {
             let error = openable_url(text).expect_err(text);
             assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{text}");
             assert_eq!(error.message, REFUSAL, "{text}");

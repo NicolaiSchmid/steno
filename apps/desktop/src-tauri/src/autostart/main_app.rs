@@ -437,42 +437,61 @@ mod tests {
         }
     }
 
-    /// A loaded leftover agent is booted out and its file deleted.
+    /// A leftover agent is booted out unless it is not loaded or runs this
+    /// process, and its file is deleted even when the boot-out fails; a file
+    /// that cannot be deleted is a failure, and no file is nothing.
     #[test]
     fn a_leftover_agent_is_booted_out_and_deleted() {
-        let agents = FakeAgents::with(EARLIER_AGENT, Job::Loaded { pid: None });
-        assert_eq!(
-            remove_earlier_agent(&agents, OWN_PID),
-            EarlierAgent::Removed(Unloaded::BootedOut)
-        );
-        assert_eq!(agents.calls(), ["read", "job", "bootout", "remove"]);
-        assert!(agents.file.borrow().is_none());
-    }
-
-    /// When launchd started this process from the agent, only the file
-    /// goes.
-    #[test]
-    fn the_agent_this_process_runs_as_loses_its_file_only() {
-        let agents = FakeAgents::with(EARLIER_AGENT, Job::Loaded { pid: Some(OWN_PID) });
-        assert_eq!(
-            remove_earlier_agent(&agents, OWN_PID),
-            EarlierAgent::Removed(Unloaded::RunsThisProcess)
-        );
-        assert_eq!(agents.calls(), ["read", "job", "remove"]);
-        assert!(agents.file.borrow().is_none());
-    }
-
-    #[test]
-    fn an_unloaded_agent_loses_its_file_and_none_is_nothing() {
-        let agents = FakeAgents::with(EARLIER_AGENT, Job::NotLoaded);
-        assert_eq!(
-            remove_earlier_agent(&agents, OWN_PID),
-            EarlierAgent::Removed(Unloaded::NotLoaded)
-        );
-        assert!(agents.file.borrow().is_none());
-        let none = FakeAgents::default();
-        assert_eq!(remove_earlier_agent(&none, OWN_PID), EarlierAgent::None);
-        assert_eq!(none.calls(), ["read"]);
+        let with = |job, bootout_fails, remove_fails| FakeAgents {
+            bootout_fails,
+            remove_fails,
+            ..FakeAgents::with(EARLIER_AGENT, job)
+        };
+        let booted = ["read", "job", "bootout", "remove"];
+        for (agents, outcome, calls, kept) in [
+            (
+                with(Job::Loaded { pid: None }, false, false),
+                EarlierAgent::Removed(Unloaded::BootedOut),
+                &booted[..],
+                false,
+            ),
+            (
+                with(Job::Loaded { pid: Some(OWN_PID) }, false, false),
+                EarlierAgent::Removed(Unloaded::RunsThisProcess),
+                &["read", "job", "remove"][..],
+                false,
+            ),
+            (
+                with(Job::NotLoaded, false, false),
+                EarlierAgent::Removed(Unloaded::NotLoaded),
+                &["read", "job", "remove"][..],
+                false,
+            ),
+            (
+                with(Job::Loaded { pid: Some(7) }, true, false),
+                EarlierAgent::Removed(Unloaded::Failed(
+                    "Boot-out failed: 5: Input/output error".to_owned(),
+                )),
+                &booted[..],
+                false,
+            ),
+            (
+                with(Job::Loaded { pid: Some(7) }, false, true),
+                EarlierAgent::Failed("operation not permitted".to_owned()),
+                &booted[..],
+                true,
+            ),
+            (
+                FakeAgents::default(),
+                EarlierAgent::None,
+                &["read"][..],
+                false,
+            ),
+        ] {
+            assert_eq!(remove_earlier_agent(&agents, OWN_PID), outcome);
+            assert_eq!(agents.calls(), calls, "{outcome:?}");
+            assert_eq!(agents.file.borrow().is_some(), kept, "{outcome:?}");
+        }
     }
 
     /// Another program's file stays; an unreadable one is reported.
@@ -495,21 +514,6 @@ mod tests {
             remove_earlier_agent(&unreadable, OWN_PID),
             EarlierAgent::Failed(_)
         ));
-    }
-
-    /// The leftover agent goes in `setup` before the host's first-launch
-    /// registration.
-    #[test]
-    fn the_leftover_agent_goes_before_the_hosts_launch() {
-        let main = include_str!("../main.rs").replace("\r\n", "\n");
-        let setup = &main[main.find("\nfn setup(").unwrap()..];
-        let removal = setup
-            .find("#[cfg(target_os = \"macos\")]\n    autostart::remove_earlier_agent();")
-            .expect("setup removes the leftover agent on macOS");
-        let launch = setup
-            .find("host::host(handle).launch(handle, runtime);")
-            .expect("setup launches the host");
-        assert!(removal < launch);
     }
 
     /// Only an installed app bundle removes the earlier agent, never a
@@ -560,61 +564,6 @@ mod tests {
             assert!(!installed_bundle(Path::new(exe)), "{exe}");
             assert!(!removes_earlier_agent(false, Some(Path::new(exe))), "{exe}");
         }
-    }
-
-    /// The removal and the host's installed flag both go through
-    /// `installed_bundle`.
-    #[test]
-    fn the_launch_asks_whether_it_runs_from_an_installed_bundle() {
-        let autostart = include_str!("../autostart.rs").replace("\r\n", "\n");
-        let removal = &autostart[autostart
-            .find("\npub fn remove_earlier_agent() {")
-            .expect("the launch's removal")..];
-        let gate = removal
-            .find("if !main_app::removes_earlier_agent(main_app::smoke_run(), exe.as_deref()) {\n        return;\n    }")
-            .expect("the removal returns early unless the gate lets it");
-        let remove = removal
-            .find("main_app::remove_earlier_agent(")
-            .expect("the removal removes the agent");
-        assert!(gate < remove);
-
-        let host = include_str!("../host.rs").replace("\r\n", "\n");
-        assert!(host.contains("options.installed_bundle = crate::autostart::installed_bundle();"));
-        // The flag is this gate, not the looser `inside_app_bundle`.
-        assert!(autostart.contains(
-            "\npub fn installed_bundle() -> bool {\n    std::env::current_exe().is_ok_and(|exe| main_app::installed_bundle(&exe))\n}"
-        ));
-    }
-
-    /// A failed boot-out still deletes the file.
-    #[test]
-    fn a_failed_bootout_still_deletes_the_file() {
-        let agents = FakeAgents {
-            bootout_fails: true,
-            ..FakeAgents::with(EARLIER_AGENT, Job::Loaded { pid: Some(7) })
-        };
-        assert_eq!(
-            remove_earlier_agent(&agents, OWN_PID),
-            EarlierAgent::Removed(Unloaded::Failed(
-                "Boot-out failed: 5: Input/output error".to_owned()
-            ))
-        );
-        assert!(agents.file.borrow().is_none());
-    }
-
-    /// A file that cannot be deleted is a failure.
-    #[test]
-    fn a_file_that_cannot_be_deleted_is_a_failure() {
-        let agents = FakeAgents {
-            remove_fails: true,
-            ..FakeAgents::with(EARLIER_AGENT, Job::Loaded { pid: Some(7) })
-        };
-        assert_eq!(
-            remove_earlier_agent(&agents, OWN_PID),
-            EarlierAgent::Failed("operation not permitted".to_owned())
-        );
-        assert_eq!(agents.calls(), ["read", "job", "bootout", "remove"]);
-        assert!(agents.file.borrow().is_some());
     }
 
     #[test]

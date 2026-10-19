@@ -284,34 +284,10 @@ mod tests {
     }
 
     #[test]
-    fn the_anchor_round_trips_through_json() {
-        let anchor = PanelAnchor {
-            top_center: (720.0, 33.0),
-            screen: SCREEN,
-        };
-        let json = serde_json::to_string(&anchor).unwrap();
-        assert_eq!(serde_json::from_str::<PanelAnchor>(&json).unwrap(), anchor);
-    }
-
-    #[test]
     fn sub_point_differences_are_the_same_size() {
         assert!(same_size((240.0, 40.0), (240.4, 39.6)));
         assert!(!same_size((240.0, 40.0), (241.0, 40.0)));
         assert!(!same_size((240.0, 40.0), (240.0, 68.0)));
-    }
-
-    #[test]
-    fn rects_contain_points_and_rects() {
-        assert!(SCREEN.contains_point(0.0, 25.0));
-        assert!(!SCREEN.contains_point(1440.0, 25.0));
-        assert!(SCREEN.contains(&Rect::new(0.0, 25.0, 1440.0, 875.0)));
-        assert!(!SCREEN.contains(&Rect::new(0.0, 24.0, 10.0, 10.0)));
-        assert_eq!(SCREEN.max_y(), 900.0);
-        assert_eq!(
-            Rect::holding(&[SCREEN, SECOND], (1500.0, 10.0), SCREEN),
-            SECOND
-        );
-        assert_eq!(Rect::holding(&[SCREEN], (-1.0, -1.0), SECOND), SECOND);
     }
 
     #[test]

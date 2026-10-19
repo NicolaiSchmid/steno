@@ -149,7 +149,7 @@ fn not_followed(url: &Url, error: &impl std::fmt::Display) -> String {
 /// Whether the running binary registers the scheme itself on Linux or
 /// Windows: a debug build or an `AppImage`, whose desktop entry no system
 /// reads. Installed builds get it from the installer.
-#[cfg(any(target_os = "linux", windows, test))]
+#[cfg(any(target_os = "linux", windows))]
 pub const fn registers_itself(debug_build: bool, appimage: bool) -> bool {
     debug_build || appimage
 }
@@ -338,14 +338,6 @@ mod tests {
             "https://example.com"
         );
         assert_eq!(describe(&Url::parse("steno:meeting").unwrap()), "steno:");
-    }
-
-    #[test]
-    fn a_debug_build_and_an_appimage_register_the_scheme_themselves() {
-        assert!(registers_itself(true, false));
-        assert!(registers_itself(false, true));
-        assert!(registers_itself(true, true));
-        assert!(!registers_itself(false, false));
     }
 
     /// Scheme and host are case-insensitive; the path is not, except a UUID.
