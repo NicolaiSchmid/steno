@@ -5,6 +5,7 @@
 
 #![allow(clippy::large_futures, clippy::too_many_lines)]
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -510,66 +511,273 @@ fn after(observed: &Observations, writes: &[Write]) -> Observations {
     observed
 }
 
-/// Every row decides as the table says, in either order of the identities
-/// found, and holds the rules the table states: only the load mints, and
-/// only with nothing found, recorded or paired; phones go only to finish a
-/// Pair again; and a stop after any write decides the same next time.
+/// `found` in every rotation, and reversed in each.
+fn orders(found: &[Found]) -> Vec<Vec<Found>> {
+    let mut orders = Vec::new();
+    for turn in 0..found.len().max(1) {
+        let mut order = found.to_vec();
+        order.rotate_left(turn);
+        orders.push(order.clone());
+        order.reverse();
+        orders.push(order);
+    }
+    orders
+}
+
+/// Every row decides as the table says, in any order of the identities found.
 #[test]
-fn every_row_of_the_truth_table_decides_as_it_says_and_keeps_its_rules() {
+fn every_row_of_the_truth_table_decides_as_it_says() {
     let rows = rows();
     assert!(rows.len() > 90, "{} rows", rows.len());
     for (name, observed, expected) in &rows {
-        let mut orders = vec![observed.clone()];
-        if let Identities::Found(found) = &observed.identities {
-            let mut reversed = found.clone();
-            reversed.reverse();
-            orders.push(Observations {
-                identities: Identities::Found(reversed),
+        let Identities::Found(found) = &observed.identities else {
+            assert_eq!(decide(observed), *expected, "{name}");
+            continue;
+        };
+        for order in orders(found) {
+            let reordered = Observations {
+                identities: Identities::Found(order),
                 ..observed.clone()
+            };
+            assert_eq!(decide(&reordered), *expected, "{name}");
+        }
+    }
+}
+
+/// The input space: every caller, and identities, records and phones in
+/// every readable and unreadable state around now.
+fn every_observation() -> Vec<Observations> {
+    let starts = [
+        Some(offset("-30d")),
+        Some(offset("-10d")),
+        Some(offset("+1s")),
+        Some(offset("+1d")),
+        None,
+    ];
+    let found = |name: &str, start| Found {
+        fingerprint: name.to_owned(),
+        start,
+    };
+    let mut identities = vec![
+        Identities::Unreadable,
+        Identities::Malformed,
+        Identities::Found(Vec::new()),
+    ];
+    for first in ["A", "B", "C"] {
+        let second = if first == "A" { "B" } else { "A" };
+        for first_start in starts {
+            identities.push(Identities::Found(vec![found(first, first_start)]));
+            identities.push(Identities::Found(vec![
+                found(first, first_start),
+                found(first, first_start),
+            ]));
+            for second_start in starts {
+                identities.push(Identities::Found(vec![
+                    found(first, first_start),
+                    found(second, second_start),
+                ]));
+            }
+        }
+    }
+    let mut records = vec![Record::NotOpened, Record::DoesNotParse];
+    let maybe = [None, Some("A"), Some("B"), Some("C")];
+    for current in maybe {
+        for pending in maybe {
+            records.push(Record::Read {
+                current: current.map(str::to_owned),
+                pending: pending.map(str::to_owned),
             });
         }
-        for order in &orders {
-            assert_eq!(decide(order), *expected, "{name}");
+    }
+    let at = |offsets: &[&str]| Phones::Paired(offsets.iter().map(|text| offset(text)).collect());
+    let phones = [
+        Phones::Unreadable,
+        at(&[]),
+        at(&["-40d"]),
+        at(&["-20d"]),
+        at(&["-1d"]),
+        at(&["-20d", "-1d"]),
+        at(&["-40d", "-1d"]),
+        at(&["+1d"]),
+        at(&["-10d"]),
+        at(&["+500ms"]),
+    ];
+    let mut every = Vec::new();
+    for caller in [Caller::Load, Caller::Import, Caller::Move] {
+        for identities in &identities {
+            for record in &records {
+                for phones in &phones {
+                    every.push(Observations {
+                        caller,
+                        identities: identities.clone(),
+                        record: record.clone(),
+                        phones: phones.clone(),
+                        now: now(),
+                    });
+                }
+            }
         }
+    }
+    every
+}
 
-        if expected.outcome == Outcome::Mint {
-            assert_eq!(observed.caller, Caller::Load, "{name}");
-            assert_eq!(observed.identities, Identities::Found(Vec::new()), "{name}");
-            assert_eq!(observed.phones, Phones::Paired(Vec::new()), "{name}");
+/// Over the whole input space:
+/// - nothing mints silently: only the load mints, and only with no identity,
+///   nothing recorded, no phone paired and a readable record (a note beside
+///   it is dropped first);
+/// - no pairing the phones know is lost: phones go only where the load
+///   finishes a Pair again, only the served fingerprint is recorded, and
+///   nothing is served from nothing;
+/// - no decision destroys a stored identity: the import writes nothing, the
+///   move records at most the file's identity;
+/// - a stop after any write decides the same next time;
+/// - the order the identities were found in never decides.
+#[test]
+fn every_decision_keeps_the_rules_of_the_truth_table() {
+    for observed in every_observation() {
+        let decided = decide(&observed);
+        let found: &[Found] = match &observed.identities {
+            Identities::Found(found) => found,
+            _ => &[],
+        };
+        let (current, pending) = match &observed.record {
+            Record::Read { current, pending } => (current.as_deref(), pending.as_deref()),
+            _ => (None, None),
+        };
+
+        if decided.outcome == Outcome::Mint {
+            assert_eq!(observed.caller, Caller::Load, "{observed:?}");
+            assert_eq!(
+                observed.identities,
+                Identities::Found(Vec::new()),
+                "{observed:?}"
+            );
+            assert_eq!(observed.phones, Phones::Paired(Vec::new()), "{observed:?}");
             assert!(
                 matches!(observed.record, Record::Read { current: None, .. }),
-                "{name}"
+                "{observed:?}"
             );
-        }
-        if expected.writes.contains(&Write::RemovePhones) {
-            let Record::Read {
-                pending: Some(pending),
-                ..
-            } = &observed.record
-            else {
-                panic!("{name}: phones removed without a Pair again");
+            let writes = if pending.is_some() {
+                vec![Write::DropNote]
+            } else {
+                Vec::new()
             };
-            assert_eq!(expected.outcome, Outcome::Serve(pending.clone()), "{name}");
+            assert_eq!(decided.writes, writes, "{observed:?}");
         }
-        if observed.caller == Caller::Import {
+        for write in &decided.writes {
             assert!(
-                expected.writes.is_empty(),
-                "{name}: the import writes nothing"
+                matches!(observed.record, Record::Read { .. }),
+                "{observed:?}"
+            );
+            match write {
+                Write::RemovePhones => {
+                    assert_eq!(observed.caller, Caller::Load, "{observed:?}");
+                    let [identity] = found else {
+                        panic!("phones removed over {found:?}: {observed:?}");
+                    };
+                    assert_eq!(pending, Some(identity.fingerprint.as_str()), "{observed:?}");
+                    assert_eq!(
+                        decided.outcome,
+                        Outcome::Serve(identity.fingerprint.clone()),
+                        "{observed:?}"
+                    );
+                }
+                Write::Record(fingerprint) => {
+                    assert_eq!(
+                        decided.outcome,
+                        Outcome::Serve(fingerprint.clone()),
+                        "{observed:?}"
+                    );
+                }
+                Write::DropNote => assert!(pending.is_some(), "{observed:?}"),
+            }
+        }
+        if let Outcome::Serve(served) = &decided.outcome {
+            let recorded = current == Some(served.as_str());
+            assert!(
+                found.iter().any(|identity| identity.fingerprint == *served)
+                    || (observed.caller == Caller::Move && recorded),
+                "served from nothing: {observed:?}"
             );
         }
-        let end = after(observed, &expected.writes);
-        for landed in 0..=expected.writes.len() {
-            let stopped = after(observed, &expected.writes[..landed]);
+        match (observed.caller, decided.writes.as_slice()) {
+            (Caller::Load, _) | (_, []) => {}
+            (Caller::Move, [Write::Record(fingerprint)]) => assert!(
+                matches!(found, [file] if file.fingerprint == *fingerprint),
+                "the move recorded another than the file's: {observed:?}"
+            ),
+            (caller, other) => panic!("{caller:?} writes {other:?}: {observed:?}"),
+        }
+
+        let end = after(&observed, &decided.writes);
+        for landed in 0..=decided.writes.len() {
+            let stopped = after(&observed, &decided.writes[..landed]);
             let again = decide(&stopped);
-            assert_eq!(
-                again.outcome, expected.outcome,
-                "{name}: stopped after {landed}"
-            );
+            assert_eq!(again.outcome, decided.outcome, "{landed} of {observed:?}");
             assert_eq!(
                 after(&stopped, &again.writes),
                 end,
-                "{name}: stopped after {landed}"
+                "{landed} of {observed:?}"
             );
         }
+
+        if let Identities::Found(found) = &observed.identities {
+            for order in orders(found) {
+                let reordered = Observations {
+                    identities: Identities::Found(order),
+                    ..observed.clone()
+                };
+                assert_eq!(decide(&reordered), decided, "{observed:?}");
+            }
+        }
+    }
+}
+
+/// The kind of a decision for `caller`: its outcome and its writes.
+fn signature(caller: Caller, decided: &Decision) -> String {
+    let outcome = match &decided.outcome {
+        Outcome::Serve(_) => "serve".to_owned(),
+        Outcome::Mint => "mint".to_owned(),
+        Outcome::Wait(reason) => format!("wait {reason:?}"),
+    };
+    let writes: Vec<String> = decided
+        .writes
+        .iter()
+        .map(|write| match write {
+            Write::Record(_) => "record".to_owned(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    format!("{caller:?} {outcome} [{}]", writes.join(", "))
+}
+
+/// Every kind of decision the input space reaches has a row, except two no
+/// caller observes, and every row's kind is reached.
+#[test]
+fn the_table_has_a_row_for_every_kind_of_decision_reached() {
+    let unobserved = [
+        "Import wait SecretUnreadable []",
+        "Move wait SecretUnreadable []",
+    ];
+    let tabled: BTreeSet<String> = rows()
+        .iter()
+        .map(|(_, observed, expected)| signature(observed.caller, expected))
+        .collect();
+    let reached: BTreeSet<String> = every_observation()
+        .iter()
+        .map(|observed| signature(observed.caller, &decide(observed)))
+        .collect();
+    for kind in &reached {
+        assert!(
+            tabled.contains(kind) || unobserved.contains(&kind.as_str()),
+            "no row for {kind}"
+        );
+    }
+    for kind in unobserved {
+        assert!(reached.contains(kind), "{kind} is no longer reached");
+        assert!(!tabled.contains(kind), "{kind} has a row after all");
+    }
+    for kind in &tabled {
+        assert!(reached.contains(kind), "{kind} is outside the input space");
     }
 }
