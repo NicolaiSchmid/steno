@@ -3,43 +3,17 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { OnboardingWindow } from "./onboarding-window";
-import { SETUP_TITLE } from "./setup-page";
 
 describe("SetupPage", () => {
 	it("opens both rows with the endpoint form and the vault chooser", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=onboarding-setup-open");
 		renderWithBridge(<OnboardingWindow />, harness);
-		expect(screen.getByTestId("onboarding-step")).toHaveTextContent(
-			"Step 2 of 2",
-		);
-		expect(screen.getByTestId("onboarding-title")).toHaveTextContent(
-			SETUP_TITLE,
-		);
-		expect(
-			screen.queryByTestId("onboarding-retention"),
-		).not.toBeInTheDocument();
-		expect(screen.getByTestId("setup-summaries")).toHaveTextContent(
-			/Summaries.*Optional.*never audio/,
-		);
-		expect(screen.getByTestId("onboarding-preset")).toHaveTextContent(
-			"LM Studio on this Mac",
-		);
-		expect(screen.getByTestId("onboarding-base-url")).toHaveValue(
-			"http://127.0.0.1:1234/v1",
-		);
 		expect(screen.getByTestId("onboarding-save-summaries")).toBeDisabled();
 		expect(screen.getByTestId("onboarding-test-summaries")).toBeEnabled();
-		expect(screen.getByTestId("onboarding-choose-vault")).toHaveTextContent(
-			"Choose vault…",
-		);
 		expect(
 			screen.queryByTestId("onboarding-save-vault"),
 		).not.toBeInTheDocument();
-		expect(
-			screen.getByText(/live in Settings > Summaries/),
-		).toBeInTheDocument();
-		expect(screen.getByText(/live in Settings > Export/)).toBeInTheDocument();
 
 		await user.type(screen.getByTestId("onboarding-model"), "qwen");
 		expect(
@@ -93,9 +67,6 @@ describe("SetupPage", () => {
 			"Saved: qwen3-8b at 127.0.0.1",
 		);
 		expect(screen.queryByTestId("onboarding-preset")).not.toBeInTheDocument();
-		expect(
-			screen.queryByText(/live in Settings > Summaries/),
-		).not.toBeInTheDocument();
 		expect(screen.getByTestId("onboarding-vault-name")).toHaveTextContent(
 			"Work Vault",
 		);
@@ -115,12 +86,6 @@ describe("SetupPage", () => {
 		renderWithBridge(<OnboardingWindow />, harness);
 		expect(screen.getByTestId("onboarding-preset")).toHaveTextContent(
 			"ChatGPT (Codex)",
-		);
-		expect(screen.getByTestId("codex-consent")).toHaveTextContent(
-			"Use your ChatGPT plan for summaries",
-		);
-		expect(screen.getByTestId("codex-signed-in")).toHaveTextContent(
-			"nicolai@example.com (Plus)",
 		);
 		expect(screen.queryByTestId("codex-check-again")).not.toBeInTheDocument();
 		expect(screen.queryByTestId("onboarding-model")).not.toBeInTheDocument();

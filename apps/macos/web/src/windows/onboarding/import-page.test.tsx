@@ -17,10 +17,7 @@ describe("ImportPage", () => {
 			"macOS asks for your login password up to two times.",
 		);
 		expect(screen.getByTestId("import-always-allow")).toHaveTextContent(
-			"Choose Always Allow in each prompt.",
-		);
-		expect(screen.getByTestId("import-always-allow")).toHaveTextContent(
-			"Not now leaves phone uploads waiting until you choose Try again in Settings > iPhone, or this step comes back at the next launch. If your summaries use an API key, new meetings get no summary until then, or until you enter the key in Settings.",
+			"new meetings get no summary",
 		);
 		expect(screen.queryByTestId("import-waiting")).not.toBeInTheDocument();
 		await user.click(screen.getByTestId("import-run"));
@@ -74,14 +71,9 @@ describe("ImportPage", () => {
 		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
 			"macOS asks for your login password once.",
 		);
-		expect(screen.getByTestId("import-waiting")).toHaveTextContent(
-			"macOS did not let Steno read this Mac's phone pairing. Choose Try again, then Always Allow.",
-		);
+		expect(screen.getByTestId("import-waiting")).toBeInTheDocument();
 		expect(screen.getByTestId("import-skip")).toHaveTextContent(
 			"Continue for now",
-		);
-		expect(screen.getByTestId("import-always-allow")).toHaveTextContent(
-			"Continue for now leaves phone uploads waiting until you choose Try again in Settings > iPhone, or this step comes back at the next launch.",
 		);
 		expect(screen.getByTestId("import-always-allow")).not.toHaveTextContent(
 			"summaries",

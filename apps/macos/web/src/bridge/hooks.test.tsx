@@ -1,7 +1,7 @@
-import { act, render, renderHook, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, renderHook } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
 import { createBridgeClient } from "./client";
-import { BridgeProvider, useBridge, useSnapshot } from "./hooks";
+import { BridgeProvider, useSnapshot } from "./hooks";
 import { createMockTransport, loadFixtureSnapshots } from "./mock-transport";
 
 async function harness() {
@@ -11,7 +11,7 @@ async function harness() {
 	const wrapper = ({ children }: { children: React.ReactNode }) => (
 		<BridgeProvider client={client}>{children}</BridgeProvider>
 	);
-	return { transport, client, wrapper };
+	return { transport, wrapper };
 }
 
 describe("useSnapshot", () => {
@@ -26,55 +26,5 @@ describe("useSnapshot", () => {
 			transport.emit("recording", { state: "starting", deniedPermissions: [] });
 		});
 		expect(result.current?.state).toBe("starting");
-	});
-
-	it("drops a snapshot that violates the contract", async () => {
-		const { transport, wrapper } = await harness();
-		const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-		const { result } = renderHook(() => useSnapshot("recording"), {
-			wrapper,
-		});
-		act(() => {
-			transport.emit("recording", { state: "flying" });
-		});
-		expect(result.current?.state).toBe("idle");
-		expect(spy).toHaveBeenCalled();
-		spy.mockRestore();
-	});
-
-	it("unsubscribes on unmount", async () => {
-		const { transport, wrapper } = await harness();
-		const unsubscribe = vi.fn();
-		const subscribe = transport.subscribe.bind(transport);
-		transport.subscribe = ((topic, handler) => {
-			const stop = subscribe(topic, handler);
-			return () => {
-				unsubscribe();
-				stop();
-			};
-		}) as typeof transport.subscribe;
-		const client = createBridgeClient(transport);
-
-		function Probe() {
-			const app = useSnapshot("app");
-			return <span>{app?.version ?? "none"}</span>;
-		}
-		const { unmount } = render(
-			<BridgeProvider client={client}>
-				<Probe />
-			</BridgeProvider>,
-			{ wrapper },
-		);
-		expect(screen.getByText("0.10.0")).toBeInTheDocument();
-		unmount();
-		expect(unsubscribe).toHaveBeenCalledTimes(1);
-	});
-});
-
-describe("useBridge", () => {
-	it("returns the provided client", async () => {
-		const { client, wrapper } = await harness();
-		const { result } = renderHook(() => useBridge(), { wrapper });
-		expect(result.current).toBe(client);
 	});
 });

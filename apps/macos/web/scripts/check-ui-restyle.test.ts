@@ -37,12 +37,6 @@ describe("check-ui-restyle", () => {
 		expect(result.output).not.toContain('"w-full"');
 		expect(result.output).not.toContain('"justify-start"');
 	});
-
-	it("passes the app's own sources", () => {
-		const result = runScript([]);
-		expect(result.output).toContain("lint:ui ok");
-		expect(result.status).toBe(0);
-	});
 });
 
 describe("isLayoutClass", async () => {

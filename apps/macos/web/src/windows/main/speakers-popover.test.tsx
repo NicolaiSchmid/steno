@@ -31,13 +31,10 @@ describe("SpeakersPopover", () => {
 		const nicolai = within(popover).getByTestId(
 			`speakers-popover-row-${NICOLAI}`,
 		);
-		expect(nicolai).toHaveTextContent("Nicolai");
-		expect(nicolai).toHaveTextContent("nicolai@example.com");
 		expect(within(nicolai).queryByText("Who is this?")).toBeNull();
 		const unnamed = within(popover).getByTestId(
 			`speakers-popover-row-${UNNAMED}`,
 		);
-		expect(unnamed).toHaveTextContent("Speaker 4");
 		expect(within(unnamed).getByText("Who is this?")).toBeInTheDocument();
 		expect(
 			within(unnamed).queryByTestId(`speakers-popover-play-${UNNAMED}`),

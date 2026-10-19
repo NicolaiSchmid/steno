@@ -33,7 +33,7 @@ type SetupStep = OnboardingSnapshot["setup"][number];
 type SetupKind = SetupStep["kind"];
 
 /** The heading the smoke test finds page 2 by. */
-export const SETUP_TITLE = "Summaries and export";
+const SETUP_TITLE = "Summaries and export";
 
 /** One row's words; the Summaries row names the machine as the platform does. */
 function setupCopy(

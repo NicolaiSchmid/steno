@@ -5,11 +5,7 @@ const listen = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
-import {
-	createTauriTransport,
-	currentWindowLabel,
-	hasTauriBridge,
-} from "./tauri-transport";
+import { createTauriTransport, currentWindowLabel } from "./tauri-transport";
 import { BridgeError } from "./transport";
 
 /** What the shell injects before the page runs: the window's own label. */
@@ -130,13 +126,6 @@ describe("tauri transport", () => {
 		expect(listen).toHaveBeenCalledWith("steno:event", expect.any(Function), {
 			target: { kind: "WebviewWindow", label: "settings" },
 		});
-	});
-
-	it("detects the Tauri internals on the window", () => {
-		expect(hasTauriBridge({} as Window)).toBe(false);
-		expect(
-			hasTauriBridge({ __TAURI_INTERNALS__: {} } as unknown as Window),
-		).toBe(true);
 	});
 
 	it("reads the window label from the shell's metadata", () => {

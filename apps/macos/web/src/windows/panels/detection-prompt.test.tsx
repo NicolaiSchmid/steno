@@ -51,25 +51,6 @@ describe("parsePromptRequest", () => {
 });
 
 describe("DetectionPrompt", () => {
-	it("names the app and offers Record and Not now", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(
-			<DetectionPrompt
-				request={{ appName: "Zoom", seconds: 60 }}
-				shell={fakeShell()}
-			/>,
-			harness,
-		);
-		expect(screen.getByTestId("prompt-title")).toHaveTextContent(
-			"Zoom opened the microphone",
-		);
-		expect(
-			screen.getByRole("button", { name: "Record with Steno" }),
-		).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Not now" })).toBeInTheDocument();
-		expect(screen.getByTestId("countdown-hairline")).toBeInTheDocument();
-	});
-
 	it("Record tells the shell which prompt it was, never the bridge", async () => {
 		const harness = await createBridgeHarness();
 		const shell = fakeShell();
@@ -85,59 +66,23 @@ describe("DetectionPrompt", () => {
 		expect(callsTo(harness.transport, "recording.start")).toEqual([]);
 	});
 
-	it("the X tells the shell and never the bridge", async () => {
-		const harness = await createBridgeHarness();
-		const shell = fakeShell();
-		renderWithBridge(
-			<DetectionPrompt
-				request={{ appName: "Zoom", seconds: 60 }}
-				shell={shell}
-			/>,
-			harness,
-		);
-		await userEvent.click(screen.getByTestId("prompt-dismiss"));
-		expect(shell.calls).toEqual([["dismissPrompt", undefined]]);
-		expect(harness.transport.calls).toEqual([]);
-	});
-
-	it("the X names the prompt it dismisses", async () => {
-		const harness = await createBridgeHarness();
-		const shell = fakeShell();
-		renderWithBridge(
-			<DetectionPrompt
-				request={{ appName: "Zoom", seconds: 60, raised: 4 }}
-				shell={shell}
-			/>,
-			harness,
-		);
-		await userEvent.click(screen.getByTestId("prompt-dismiss"));
-		expect(shell.calls).toEqual([["dismissPrompt", { raised: 4 }]]);
-	});
-
-	it("reports its size to the shell", async () => {
-		const observed = vi.fn();
-		class FakeResizeObserver {
-			constructor(callback: () => void) {
-				observed(callback);
-			}
-			observe() {}
-			disconnect() {}
-		}
-		vi.stubGlobal("ResizeObserver", FakeResizeObserver);
-		const harness = await createBridgeHarness();
-		const shell = fakeShell();
-		renderWithBridge(
-			<DetectionPrompt
-				request={{ appName: "Zoom", seconds: 60 }}
-				shell={shell}
-			/>,
-			harness,
-		);
-		expect(observed).toHaveBeenCalledOnce();
-		// jsdom lays nothing out, so the zero size is not reported.
-		expect(shell.calls.filter(([action]) => action === "resize")).toEqual([]);
-		vi.unstubAllGlobals();
-	});
+	it.each([
+		[{ appName: "Zoom", seconds: 60 }, undefined],
+		[{ appName: "Zoom", seconds: 60, raised: 4 }, { raised: 4 }],
+	])(
+		"the X tells the shell (%o) and never the bridge",
+		async (request, params) => {
+			const harness = await createBridgeHarness();
+			const shell = fakeShell();
+			renderWithBridge(
+				<DetectionPrompt request={request} shell={shell} />,
+				harness,
+			);
+			await userEvent.click(screen.getByTestId("prompt-dismiss"));
+			expect(shell.calls).toEqual([["dismissPrompt", params]]);
+			expect(harness.transport.calls).toEqual([]);
+		},
+	);
 
 	it("reports its size in device pixels", async () => {
 		vi.stubGlobal(

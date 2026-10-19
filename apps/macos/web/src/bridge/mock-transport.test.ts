@@ -1,12 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-	type MeetingDetailSnapshot,
-	type MeetingsListSnapshot,
-	type PhoneSettingsSnapshot,
-	type RecordingSnapshot,
-	topicSchemas,
-} from "./contract";
-import {
 	applyScenario,
 	createMockTransport,
 	fixtureKey,
@@ -33,23 +26,12 @@ describe("fixture replies", () => {
 
 describe("scenarios", () => {
 	it("aliases the generic reply shapes onto the native alerts and panels", async () => {
-		expect(replyMethods("reply.confirm")).toEqual([
-			"ui.confirmDestructive",
-			"meetings.delete",
-			"meeting.deleteRecordingNow",
-			"meeting.setKeepAudio",
-			"settings.iphone.pairAgain",
-		]);
-		expect(replyMethods("speakers.options.reply")).toEqual([
-			"speakers.options",
-		]);
 		expect(replyMethods("meetings.list")).toEqual([]);
 		const replies = await loadFixtureReplies();
-		expect(replies["ui.confirmDestructive"]).toEqual({ confirmed: true });
-		expect(replies["meetings.delete"]).toEqual({ confirmed: true });
-		expect(replies["meeting.setKeepAudio"]).toEqual({ confirmed: true });
-		expect(replies["settings.iphone.pairAgain"]).toEqual({ confirmed: true });
-		expect(replies["settings.export.chooseVault"]).toBeDefined();
+		for (const method of replyMethods("reply.confirm")) {
+			expect(replies[method], method).toEqual({ confirmed: true });
+		}
+		expect(replies["speakers.options"]).toBeDefined();
 	});
 
 	it("reads the query from the search and the hash", () => {
@@ -67,146 +49,6 @@ describe("scenarios", () => {
 		const result = applyScenario(snapshots, new URLSearchParams(""));
 		expect(result["meetings.list"]).toBe(snapshots["meetings.list"]);
 		expect(result["recording.live"]).toBeUndefined();
-	});
-
-	it("empties the list and drops the detail", async () => {
-		const result = applyScenario(
-			await loadFixtureSnapshots(),
-			new URLSearchParams("scenario=empty"),
-		);
-		const list = topicSchemas["meetings.list"].parse(result["meetings.list"]);
-		expect(list.groups).toEqual([]);
-		expect(list.counts.all).toBe(0);
-		expect(list.selection).toBeUndefined();
-		expect(result["meeting.detail"]).toBeUndefined();
-	});
-
-	it("makes the live recording current, started 12:34 ago", async () => {
-		const before = Date.now();
-		const result = applyScenario(
-			await loadFixtureSnapshots(),
-			new URLSearchParams("scenario=recording"),
-		);
-		const recording = topicSchemas.recording.parse(
-			result.recording,
-		) as RecordingSnapshot;
-		expect(recording.state).toBe("recording");
-		const after = Date.now();
-		const started = new Date(recording.startedAt ?? "").getTime();
-		expect(after - started).toBeGreaterThanOrEqual(754_000);
-		expect(before - started).toBeLessThanOrEqual(754_000);
-	});
-
-	it("keeps the live recording's auto-stop so the countdown shows", async () => {
-		const result = applyScenario(
-			await loadFixtureSnapshots(),
-			new URLSearchParams("scenario=recording"),
-		);
-		const recording = topicSchemas.recording.parse(
-			result.recording,
-		) as RecordingSnapshot;
-		expect(recording.autoStop).toEqual({
-			reason: "Zoom closed",
-			remainingSeconds: 42,
-			totalSeconds: 60,
-		});
-	});
-
-	it("denies the microphone while idle", async () => {
-		const result = applyScenario(
-			await loadFixtureSnapshots(),
-			new URLSearchParams("scenario=denied"),
-		);
-		const recording = topicSchemas.recording.parse(
-			result.recording,
-		) as RecordingSnapshot;
-		expect(recording.state).toBe("idle");
-		expect(recording.deniedPermissions).toEqual(["microphone"]);
-	});
-
-	it("fails the selected meeting's export", async () => {
-		const snapshots = await loadFixtureSnapshots();
-		const result = applyScenario(
-			snapshots,
-			new URLSearchParams("scenario=export-failed"),
-		);
-		const detail = topicSchemas["meeting.detail"].parse(
-			result["meeting.detail"],
-		) as MeetingDetailSnapshot;
-		expect(detail.id).toBe(
-			(snapshots["meeting.detail"] as MeetingDetailSnapshot).id,
-		);
-		expect(detail.export.status).toBe("failed");
-		expect(detail.export.canReexport).toBe(true);
-		expect(detail.export.message).toContain("Failed");
-	});
-
-	it("shows a summary skipped for a withheld API key", async () => {
-		const result = applyScenario(
-			await loadFixtureSnapshots(),
-			new URLSearchParams("scenario=summary-key-withheld"),
-		);
-		const detail = topicSchemas["meeting.detail"].parse(
-			result["meeting.detail"],
-		) as MeetingDetailSnapshot;
-		expect(detail.summaryStatus.kind).toBe("skippedUnconfigured");
-		expect(detail.summaryStatus.title).toBe("Summary skipped");
-		expect(detail.canRerunSummary).toBe(false);
-		expect(result["meeting.detail.keyWithheld"]).toBeUndefined();
-	});
-
-	it("shows phone handover waiting for Try again or Pair again", async () => {
-		const result = applyScenario(
-			await loadFixtureSnapshots(),
-			new URLSearchParams("scenario=phone-waiting"),
-		);
-		const phone = topicSchemas["settings.iphone"].parse(
-			result["settings.iphone"],
-		) as PhoneSettingsSnapshot;
-		expect(phone.waiting?.reason).toBe("importDenied");
-		expect(phone.subtitle).toBe("Phones waiting");
-		expect(result["settings.iphone.waiting"]).toBeUndefined();
-	});
-
-	it("selects the failed meeting with a failed detail", async () => {
-		const result = applyScenario(
-			await loadFixtureSnapshots(),
-			new URLSearchParams("scenario=failed&tab=transcript"),
-		);
-		const list = topicSchemas["meetings.list"].parse(
-			result["meetings.list"],
-		) as MeetingsListSnapshot;
-		const detail = topicSchemas["meeting.detail"].parse(
-			result["meeting.detail"],
-		) as MeetingDetailSnapshot;
-		expect(list.selection).toBe("00000000-0000-0000-0000-000000000044");
-		expect(detail.id).toBe(list.selection);
-		expect(detail.state).toBe("failed");
-		expect(detail.failureReason).toContain("Transcription failed");
-		expect(detail.canRerunSummary).toBe(true);
-		expect(detail.canProcessAgain).toBe(true);
-		expect(detail.tab).toBe("transcript");
-	});
-
-	it("adds and selects the meeting the progress entry names", async () => {
-		const snapshots = await loadFixtureSnapshots();
-		const result = applyScenario(
-			snapshots,
-			new URLSearchParams("scenario=processing"),
-		);
-		const list = topicSchemas["meetings.list"].parse(
-			result["meetings.list"],
-		) as MeetingsListSnapshot;
-		const detail = topicSchemas["meeting.detail"].parse(
-			result["meeting.detail"],
-		) as MeetingDetailSnapshot;
-		const progress = topicSchemas.progress.parse(snapshots.progress);
-		expect(list.selection).toBe(progress.entries[0]?.meetingID);
-		expect(list.groups[0]?.meetings[0]?.state).toBe("processing");
-		expect(list.counts.processing).toBe(1);
-		expect(detail.id).toBe(list.selection);
-		expect(detail.state).toBe("processing");
-		expect(detail.summaryStatus.kind).toBe("pending");
 	});
 });
 

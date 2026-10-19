@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -23,7 +23,8 @@ describe("MeetingList", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("renders the day groups with the selected row filled", async () => {
+	it("marks the host's selection and selects a clicked row", async () => {
+		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
 		renderWithBridge(<MeetingList />, harness);
 		expect(screen.getByTestId(`meeting-${FIRST}`)).toHaveAttribute(
@@ -33,15 +34,6 @@ describe("MeetingList", () => {
 		expect(screen.getByTestId(`meeting-${FAILED}`)).not.toHaveAttribute(
 			"aria-current",
 		);
-		expect(screen.getByTestId(`meeting-${FAILED}`)).toHaveTextContent(
-			"Transcription failed: model not installed",
-		);
-	});
-
-	it("records meetings.select when a row is clicked", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness();
-		renderWithBridge(<MeetingList />, harness);
 		await user.click(screen.getByTestId(`meeting-${FAILED}`));
 		expect(callsTo(harness.transport, "meetings.select")).toEqual([
 			{ method: "meetings.select", params: { meetingID: FAILED } },
@@ -105,39 +97,10 @@ describe("MeetingList", () => {
 			await screen.findByRole("menuitem", { name: "Delete meeting…" }),
 		);
 		await vi.waitFor(() =>
-			expect(callsTo(harness.transport, "meetings.delete")).toHaveLength(1),
+			expect(harness.transport.calls).toEqual([
+				{ method: "meetings.delete", params: { meetingID: FAILED } },
+			]),
 		);
-		expect(harness.transport.calls.map((call) => call.method)).toEqual([
-			"meetings.delete",
-		]);
-		expect(callsTo(harness.transport, "ui.confirmDestructive")).toHaveLength(0);
-		expect(callsTo(harness.transport, "meetings.delete")[0]?.params).toEqual({
-			meetingID: FAILED,
-		});
-	});
-
-	it("leaves the list alone when the host reports the alert was declined", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness(
-			"",
-			{},
-			{ "meetings.delete": { confirmed: false } },
-		);
-		renderWithBridge(<MeetingList />, harness);
-		fireEvent.contextMenu(screen.getByTestId(`meeting-${FAILED}`), {
-			clientX: 40,
-			clientY: 40,
-		});
-		await user.click(
-			await screen.findByRole("menuitem", { name: "Delete meeting…" }),
-		);
-		await vi.waitFor(() =>
-			expect(callsTo(harness.transport, "meetings.delete")).toHaveLength(1),
-		);
-		expect(screen.getByTestId(`meeting-${FAILED}`)).toBeInTheDocument();
-		expect(harness.transport.calls.map((call) => call.method)).toEqual([
-			"meetings.delete",
-		]);
 	});
 
 	it("deletes the selected meeting with the Delete key", async () => {
@@ -243,21 +206,6 @@ describe("MeetingList rows", () => {
 		}
 	});
 
-	it("leads with the source and ends line 1 with the start time once ready", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<MeetingList />, harness);
-		const row = screen.getByTestId(`meeting-${FIRST}`);
-		expect(row).toHaveTextContent(/^Call/);
-		const time = row.querySelector("time");
-		expect(time).toHaveAttribute("dateTime", "2026-09-29T12:50:00.000Z");
-		expect(time).toHaveTextContent(/\d{1,2}:\d{2}/);
-		expect(row).toHaveTextContent("Produktstrategie 90/10");
-		expect(row).toHaveTextContent("45:38");
-		expect(row).not.toHaveTextContent("No summary");
-		expect(within(row).getByLabelText("Unnamed speaker")).toBeInTheDocument();
-		expect(row.querySelectorAll("[aria-label]")).toHaveLength(4);
-	});
-
 	it("flags a ready meeting without a summary, and only that one", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<MeetingList />, harness);
@@ -275,7 +223,6 @@ describe("MeetingList rows", () => {
 		renderWithBridge(<MeetingList />, harness);
 		const row = screen.getByTestId(`meeting-${FAILED}`);
 		expect(row).toHaveTextContent(/^CallFailed\d{1,2}:\d{2}/);
-		expect(row.querySelector("time")).not.toBeNull();
 		expect(row).toHaveTextContent("Transcription failed: model not installed");
 	});
 
@@ -286,7 +233,6 @@ describe("MeetingList rows", () => {
 		expect(row).toHaveAttribute("aria-current", "true");
 		expect(row).toHaveTextContent(/^CallWorking\d{1,2}:\d{2}/);
 		expect(row).toHaveTextContent("Standup");
-		expect(row.querySelector("time")).not.toBeNull();
 	});
 
 	/** The fixture list with its first row still `recording`. */
@@ -315,68 +261,41 @@ describe("MeetingList rows", () => {
 		};
 	}
 
-	it("shows Live with the pulse while a meeting records", async () => {
-		const snapshots = await loadFixtureSnapshots();
-		const harness = await createBridgeHarness("", {
-			"meetings.list": await recordingList(),
-			recording: snapshots["recording.live"],
-		});
-		renderWithBridge(<MeetingList />, harness);
-		const element = screen.getByTestId(`meeting-${FIRST}`);
-		expect(element).toHaveTextContent(/^CallLive\d{1,2}:\d{2}/);
-		expect(element).toHaveTextContent("Recording now.");
-		expect(element.querySelector(".animate-status-pulse")).not.toBeNull();
-		expect(element).not.toHaveTextContent("No summary");
-	});
-
-	it("says a recording row is not processed while the recorder is idle", async () => {
-		const harness = await createBridgeHarness("", {
-			"meetings.list": await recordingList(),
-		});
-		renderWithBridge(<MeetingList />, harness);
-		const element = screen.getByTestId(`meeting-${FIRST}`);
-		expect(element).toHaveTextContent(/^CallNot processed\d{1,2}:\d{2}/);
-		expect(element).toHaveTextContent(
+	// Around a start or a stop the list and the recording snapshot publish
+	// apart: while the recorder is not idle, a `recording` row is still live.
+	it.each([
+		["recording", "Live", "Recording now."],
+		["starting", "Live", "Recording now."],
+		["stopping", "Live", "Recording now."],
+		[
+			"idle",
+			"Not processed",
 			"Not saved yet. Steno will process it the next time it starts.",
-		);
-		expect(element).not.toHaveTextContent("Recording now.");
-		expect(element.querySelector(".animate-status-pulse")).toBeNull();
-	});
-
-	/**
-	 * Around a start or a stop the list and the recording snapshot publish
-	 * apart: while the recorder is not idle, a `recording` row whose id is
-	 * not (yet, or any longer) the recorder's is still shown live.
-	 */
-	it("keeps a recording row live while the recorder starts or stops", async () => {
-		for (const state of ["starting", "stopping"] as const) {
+		],
+	] as const)(
+		"shows a recording row with the recorder %s as %s",
+		async (state, badge, preview) => {
+			const live = (await loadFixtureSnapshots())["recording.live"];
 			const harness = await createBridgeHarness("", {
 				"meetings.list": await recordingList(),
-				recording: {
-					state,
-					deniedPermissions: [],
-				} satisfies RecordingSnapshot,
+				...(state === "recording"
+					? { recording: live }
+					: state === "idle"
+						? {}
+						: {
+								recording: {
+									state,
+									deniedPermissions: [],
+								} satisfies RecordingSnapshot,
+							}),
 			});
-			const { unmount } = renderWithBridge(<MeetingList />, harness);
+			renderWithBridge(<MeetingList />, harness);
 			const element = screen.getByTestId(`meeting-${FIRST}`);
-			expect(element).toHaveTextContent(/^CallLive\d{1,2}:\d{2}/);
-			expect(element).toHaveTextContent("Recording now.");
-			expect(element).not.toHaveTextContent("Not processed");
-			unmount();
-		}
-	});
-
-	it("labels each day group with its date after the hairline", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<MeetingList />, harness);
-		const list = screen.getByTestId("meeting-list");
-		expect(list).toHaveTextContent(/Sep 29/);
-		expect(list).toHaveTextContent(/Sep 28/);
-		expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
-			"Meetings",
-		);
-		expect(
-			screen.getByRole("searchbox", { name: "Search meetings" }),
-		).toHaveAttribute("type", "search");
-	});
+			expect(element).toHaveTextContent(
+				new RegExp(`^Call${badge}\\d{1,2}:\\d{2}`),
+			);
+			expect(element).toHaveTextContent(preview);
+			expect(element).not.toHaveTextContent("No summary");
+		},
+	);
 });

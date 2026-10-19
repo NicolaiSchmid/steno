@@ -8,14 +8,7 @@ import { MainWindow } from "./main-window";
 const FAILED = "00000000-0000-0000-0000-000000000044";
 
 describe("MainWindow", () => {
-	it("tells the host the page is ready, once", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<MainWindow />, harness);
-		expect(screen.getByTestId("main-window")).toBeInTheDocument();
-		expect(callsTo(harness.transport, "page.ready")).toHaveLength(1);
-	});
-
-	it("leaves a deep link for the host to follow", async () => {
+	it("tells the host the page is ready once and leaves a deep link to it", async () => {
 		const app = (await loadFixtureSnapshots()).app as AppSnapshot;
 		const harness = await createBridgeHarness("", {
 			app: { ...app, requestedMeetingID: FAILED } satisfies AppSnapshot,

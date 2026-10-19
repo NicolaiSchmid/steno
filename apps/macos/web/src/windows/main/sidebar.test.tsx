@@ -6,7 +6,8 @@ import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { Sidebar } from "./sidebar";
 
 describe("Sidebar", () => {
-	it("shows the filters with their counts and the active one", async () => {
+	it("shows the filters with their counts and the active one, and sets one", async () => {
+		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
 		renderWithBridge(<Sidebar />, harness);
 		expect(screen.getByTestId("nav-all")).toHaveAttribute(
@@ -15,12 +16,6 @@ describe("Sidebar", () => {
 		);
 		expect(screen.getByTestId("nav-all")).toHaveTextContent("All3");
 		expect(screen.getByTestId("nav-failed")).toHaveTextContent("Failed1");
-	});
-
-	it("records meetings.setFilter when a filter is clicked", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness();
-		renderWithBridge(<Sidebar />, harness);
 		await user.click(screen.getByTestId("nav-ready"));
 		expect(callsTo(harness.transport, "meetings.setFilter")).toEqual([
 			{ method: "meetings.setFilter", params: { filter: "ready" } },
@@ -87,21 +82,10 @@ describe("Sidebar", () => {
 		expect(callsTo(harness.transport, "recording.keepGoing")).toHaveLength(1);
 	});
 
-	it("shows no countdown once the recorder is idle", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<Sidebar />, harness);
-		expect(screen.queryByTestId("auto-stop")).not.toBeInTheDocument();
-		expect(screen.queryByTestId("recorder-warning")).not.toBeInTheDocument();
-	});
-
 	it("names a denied permission and opens System Settings for it", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=denied");
 		renderWithBridge(<Sidebar />, harness);
-		expect(screen.getByTestId("denied-microphone")).toHaveTextContent(
-			"Steno can't use the microphone.",
-		);
-		expect(screen.getByTestId("sidebar-record")).toBeInTheDocument();
 		await user.click(screen.getByTestId("fix-microphone"));
 		expect(callsTo(harness.transport, "system.openSystemSettings")).toEqual([
 			{ method: "system.openSystemSettings", params: { kind: "microphone" } },

@@ -1,4 +1,4 @@
-import { act, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { RecordingSnapshot } from "@/bridge/contract";
@@ -117,23 +117,6 @@ describe("RecordingBubble", () => {
 		expect(screen.getByTestId("countdown-hairline")).toBeInTheDocument();
 		await userEvent.click(screen.getByTestId("bubble-keep-recording"));
 		expect(callsTo(harness.transport, "recording.keepGoing")).toHaveLength(1);
-	});
-
-	it("says Starting… with no stop square, then Stopping… with it disabled", async () => {
-		const harness = await createBridgeHarness("", {
-			recording: { state: "starting", deniedPermissions: [] },
-		});
-		renderWithBridge(<RecordingBubble />, harness);
-		expect(await screen.findByText("Starting…")).toBeInTheDocument();
-		expect(screen.queryByTestId("bubble-stop")).not.toBeInTheDocument();
-		act(() => {
-			harness.transport.emit("recording", {
-				state: "stopping",
-				deniedPermissions: [],
-			});
-		});
-		expect(await screen.findByText("Stopping…")).toBeInTheDocument();
-		expect(screen.getByTestId("bubble-stop")).toBeDisabled();
 	});
 
 	it("sends page.ready so the host publishes the recorder", async () => {

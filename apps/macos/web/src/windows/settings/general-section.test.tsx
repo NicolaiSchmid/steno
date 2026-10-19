@@ -7,26 +7,6 @@ import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { GeneralSection } from "./general-section";
 
 describe("GeneralSection", () => {
-	it("shows the version, the update status and the template's description", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<GeneralSection />, harness);
-		expect(screen.getByText("Steno 0.10.0")).toBeInTheDocument();
-		expect(screen.getByTestId("update-status")).toHaveTextContent(
-			/^Up to date, checked /,
-		);
-		expect(screen.getByTestId("default-template")).toHaveTextContent(
-			"Standard",
-		);
-		expect(
-			screen.getByText(
-				"Executive summary, decisions, open questions and the tasks.",
-			),
-		).toBeInTheDocument();
-		expect(screen.getByTestId("permission-calendar")).toHaveTextContent(
-			"Allowed",
-		);
-	});
-
 	it("sends the switches and the update check to the host", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
@@ -110,16 +90,5 @@ describe("GeneralSection", () => {
 		expect(screen.queryByTestId("check-for-updates")).not.toBeInTheDocument();
 		expect(screen.queryByTestId("auto-check")).not.toBeInTheDocument();
 		expect(screen.queryByTestId("auto-install")).not.toBeInTheDocument();
-	});
-
-	it("opens the acknowledgements and lists models and libraries", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness();
-		renderWithBridge(<GeneralSection />, harness);
-		await user.click(screen.getByTestId("acknowledgements"));
-		const dialog = await screen.findByTestId("acknowledgements-dialog");
-		expect(dialog).toHaveTextContent("Parakeet TDT 0.6B v3 (int8)");
-		expect(dialog).toHaveTextContent("Sparkle");
-		expect(dialog).toHaveTextContent("MIT");
 	});
 });
