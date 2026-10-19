@@ -355,24 +355,31 @@ impl World {
     }
 }
 
-/// A noted copy that cannot be read is neither adopted
-/// nor given a ledger row, and keeps its notes for the next launch.
+/// A noted copy that cannot be read is neither adopted nor given a ledger
+/// row, also when the upload's meeting was deleted, and keeps its notes
+/// for the next launch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_noted_copy_that_cannot_be_read_is_kept_with_no_ledger_row() {
-    let (world, app) = World::new();
-    let (noted, hold) = world.gave_up(&app).await;
-    drop(hold);
-    quit(app).await;
-    crate::recovery::UNREADABLE_COPIES
-        .lock()
-        .unwrap()
-        .push(noted);
+    for deleted in [false, true] {
+        let (world, app) = World::new();
+        let (noted, hold) = world.gave_up(&app).await;
+        drop(hold);
+        let ledger =
+            deleted.then(|| world.ledger_holds_the_upload_as_another_meeting(&app.store, true));
+        quit(app).await;
+        crate::recovery::UNREADABLE_COPIES
+            .lock()
+            .unwrap()
+            .push(noted);
 
-    let app = relaunch(&world).await;
-    assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
-    assert_eq!(world.noted(), (1, 1), "kept for the next launch");
-    assert_eq!(world.ledger_row(&app.store), None);
-    quit(app).await;
+        let app = relaunch(&world).await;
+        assert_eq!(world.copies(), [noted], "deleted: {deleted}");
+        assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), world.bytes);
+        assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
+        assert_eq!(world.noted(), (1, 1), "kept for the next launch");
+        assert_eq!(world.ledger_row(&app.store), ledger);
+        quit(app).await;
+    }
 }
 
 /// The ledger holds the noted copy's bytes as a meeting the user deleted:
@@ -403,48 +410,32 @@ async fn the_noted_copy_of_bytes_whose_meeting_the_user_deleted_is_removed() {
 }
 
 /// The ledger holds the noted copy's bytes as a meeting that still
-/// exists: the copy is neither adopted nor removed, and keeps its entries.
+/// exists, ready or failed: the copy is neither adopted nor removed, and
+/// keeps its entries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_noted_copy_of_bytes_whose_meeting_exists_is_kept() {
-    let (world, app) = World::new();
-    let (noted, hold) = world.gave_up(&app).await;
-    drop(hold);
-    let existing = world.ledger_holds_the_upload_as_another_meeting(&app.store, false);
-    quit(app).await;
-
-    let app = relaunch(&world).await;
-    assert_eq!(world.copies(), [noted], "the copy is kept");
-    assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), world.bytes);
-    assert_eq!(World::meetings(&app.store), [existing]);
-    assert_eq!(world.noted(), (1, 1), "with its entries");
-    quit(app).await;
-}
-
-/// The meeting that holds the copy's bytes exists but is not ready: the
-/// copy is kept with its entries.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_copy_of_bytes_whose_meeting_failed_is_kept() {
-    let (world, app) = World::new();
-    let (noted, hold) = world.gave_up(&app).await;
-    drop(hold);
-    let existing = world.ledger_holds_the_upload_as_another_meeting(&app.store, false);
-    app.store
-        .set_state(
-            existing,
-            steno_core::MeetingState::Failed {
+    for failed in [false, true] {
+        let (world, app) = World::new();
+        let (noted, hold) = world.gave_up(&app).await;
+        drop(hold);
+        let existing = world.ledger_holds_the_upload_as_another_meeting(&app.store, false);
+        if failed {
+            let state = steno_core::MeetingState::Failed {
                 reason: "transcription".to_owned(),
-            },
-            chrono::Utc::now(),
-        )
-        .unwrap();
-    quit(app).await;
+            };
+            app.store
+                .set_state(existing, state, chrono::Utc::now())
+                .unwrap();
+        }
+        quit(app).await;
 
-    let app = relaunch(&world).await;
-    assert_eq!(world.copies(), [noted], "the copy is kept");
-    assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), world.bytes);
-    assert_eq!(World::meetings(&app.store), [existing]);
-    assert_eq!(world.noted(), (1, 1), "with its entries");
-    quit(app).await;
+        let app = relaunch(&world).await;
+        assert_eq!(world.copies(), [noted], "failed: {failed}");
+        assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), world.bytes);
+        assert_eq!(World::meetings(&app.store), [existing]);
+        assert_eq!(world.noted(), (1, 1), "with its entries");
+        quit(app).await;
+    }
 }
 
 /// While the meeting that holds the copy's bytes exists, the copy keeps
@@ -608,12 +599,9 @@ async fn removes_a_copy_in_a_chosen_audio_folder_alone(change_setting_after: boo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_copy_in_a_chosen_audio_folder_goes_alone() {
-    removes_a_copy_in_a_chosen_audio_folder_alone(false).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_copy_in_a_chosen_audio_folder_goes_alone_after_the_setting_changed() {
-    removes_a_copy_in_a_chosen_audio_folder_alone(true).await;
+    for change_setting_after in [false, true] {
+        removes_a_copy_in_a_chosen_audio_folder_alone(change_setting_after).await;
+    }
 }
 
 /// A noted copy with other bytes, the upload's meeting deleted: the copy is
@@ -632,28 +620,6 @@ async fn a_noted_copy_holding_other_bytes_is_kept_though_the_uploads_meeting_was
     assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), other_bytes);
     assert_eq!(World::meetings(&app.store), [noted], "adopted");
     assert_eq!(world.noted(), (1, 1), "still noted");
-    quit(app).await;
-}
-
-/// An unreadable noted copy, the upload's meeting deleted: the copy is kept
-/// with its notes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_noted_copy_that_cannot_be_read_is_kept_though_the_uploads_meeting_was_deleted() {
-    let (world, app) = World::new();
-    let (noted, hold) = world.gave_up(&app).await;
-    drop(hold);
-    world.ledger_holds_the_upload_as_another_meeting(&app.store, true);
-    quit(app).await;
-    crate::recovery::UNREADABLE_COPIES
-        .lock()
-        .unwrap()
-        .push(noted);
-
-    let app = relaunch(&world).await;
-    assert_eq!(world.copies(), [noted], "the copy is kept");
-    assert_eq!(std::fs::read(world.master_of(noted)).unwrap(), world.bytes);
-    assert_eq!(World::meetings(&app.store), Vec::<Uuid>::new());
-    assert_eq!(world.noted(), (1, 1), "still noted, for the next launch");
     quit(app).await;
 }
 

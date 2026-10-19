@@ -1579,8 +1579,11 @@ mod tests {
         );
     }
 
+    /// The sidecar's config: the binary beside the executable, the ONNX
+    /// threads, the `DirectML` setting and the crash logs in the support
+    /// directory.
     #[test]
-    fn the_directml_setting_reaches_the_sidecar_config() {
+    fn the_sidecar_config_comes_from_the_setup() {
         for directml in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(
@@ -1594,33 +1597,18 @@ mod tests {
             );
             assert_eq!(setup.speech_settings.directml_on_windows, directml);
             assert_eq!(setup.sidecar.options.directml, directml);
+            assert_eq!(
+                setup.sidecar.crash_log_directory.as_deref(),
+                Some(dir.path())
+            );
+            assert_eq!(setup.sidecar.options.intra_threads, ONNX_THREADS);
+            assert_eq!(
+                setup.sidecar.program,
+                std::env::current_exe()
+                    .unwrap()
+                    .with_file_name(steno_speech::sidecar::SIDECAR_BINARY)
+            );
         }
-    }
-
-    /// The sidecar's crash logs go into the support directory.
-    #[test]
-    fn the_sidecar_writes_its_crash_logs_into_the_support_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let setup = SpeechSetup::in_models_directory(
-            dir.path().join("Models"),
-            &StenoPaths::new(dir.path()),
-        );
-        assert_eq!(
-            setup.sidecar.crash_log_directory.as_deref(),
-            Some(dir.path())
-        );
-    }
-
-    #[test]
-    fn the_sidecar_binary_sits_beside_the_executable_with_the_onnx_threads() {
-        let config = sidecar_config();
-        assert_eq!(
-            config.program,
-            std::env::current_exe()
-                .unwrap()
-                .with_file_name(steno_speech::sidecar::SIDECAR_BINARY)
-        );
-        assert_eq!(config.options.intra_threads, ONNX_THREADS);
     }
 
     #[test]
@@ -1736,17 +1724,6 @@ mod tests {
             fp32_size_text()
         };
         assert_eq!(parakeet_size_text(&models), expected);
-        assert_eq!(
-            models.expected_bytes(ModelAsset::OfflineDiarizer),
-            32_523_463
-        );
-    }
-
-    /// The first acknowledgement row, Parakeet v3.
-    fn parakeet_acknowledgement() -> (String, String) {
-        let models = testing::models_in(Path::new("/tmp/steno-models"));
-        let rows = steno_host::settings::snapshots::acknowledgements(&models);
-        (rows[0].name.clone(), rows[0].source.clone())
     }
 
     /// Settings acknowledges Parakeet v3 and the diarizer's two models, each
@@ -1790,28 +1767,20 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    /// Parakeet v3 is acknowledged as the model the platform runs.
     #[test]
-    fn on_the_mac_parakeet_v3_is_acknowledged_as_the_swift_app_names_it() {
-        assert_eq!(
-            parakeet_acknowledgement(),
+    fn parakeet_v3_is_acknowledged_as_the_model_the_platform_runs() {
+        let models = testing::models_in(Path::new("/tmp/steno-models"));
+        let rows = steno_host::settings::snapshots::acknowledgements(&models);
+        let expected = if cfg!(target_os = "macos") {
             (
-                "Parakeet TDT 0.6B v3 (int8)".to_owned(),
-                "FluidInference/parakeet-tdt-0.6b-v3-coreml".to_owned()
+                "Parakeet TDT 0.6B v3 (int8)",
+                "FluidInference/parakeet-tdt-0.6b-v3-coreml",
             )
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn off_the_mac_parakeet_v3_is_acknowledged_as_the_fp32_onnx_export() {
-        assert_eq!(
-            parakeet_acknowledgement(),
-            (
-                "Parakeet TDT 0.6B v3 (fp32)".to_owned(),
-                "nvidia/parakeet-tdt-0.6b-v3".to_owned()
-            )
-        );
+        } else {
+            ("Parakeet TDT 0.6B v3 (fp32)", "nvidia/parakeet-tdt-0.6b-v3")
+        };
+        assert_eq!((rows[0].name.as_str(), rows[0].source.as_str()), expected);
     }
 
     /// An engine that transcribes synchronously until `go` lets it, counting

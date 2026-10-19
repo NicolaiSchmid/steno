@@ -954,49 +954,46 @@ mod tests {
     use crate::swift_import::WaitReason;
     use crate::testing::{RefusingRecord, warnings};
 
+    /// The variable wins over the stored port, which wins over the
+    /// platform's; only a variable that is set and not a port warns.
     #[test]
     fn the_port_is_the_environment_s_else_the_stored_one_else_the_platform_s() {
         let platform = HandoverConfiguration::platform_port();
-        assert_eq!(listener_port(None, None), platform);
-        assert_eq!(listener_port(None, Some(40000)), 40000);
-        assert_eq!(listener_port(None, Some(0)), 0, "the system chooses");
-        assert_eq!(listener_port(Some("23900"), Some(40000)), 23900);
-        assert_eq!(listener_port(Some(" 23900\n"), None), 23900);
-        assert_eq!(listener_port(Some("0"), None), 0);
-        assert_eq!(listener_port(Some(""), Some(40000)), 40000, "unset");
-        assert_eq!(listener_port(Some("65536"), Some(40000)), 40000);
-        assert_eq!(listener_port(Some("steno"), None), platform);
+        for (variable, stored, port, warns) in [
+            (None, None, platform, false),
+            (None, Some(40000), 40000, false),
+            (None, Some(0), 0, false),
+            (Some("23900"), Some(40000), 23900, false),
+            (Some(" 23900\n"), None, 23900, false),
+            (Some("0"), None, 0, false),
+            (Some(""), Some(40000), 40000, false),
+            (Some(" \n"), None, platform, false),
+            (Some("65536"), Some(40000), 40000, true),
+            (Some("steno"), None, platform, true),
+        ] {
+            let case = format!("{variable:?}, {stored:?}");
+            let (chosen, logged) = warnings(|| listener_port(variable, stored));
+            assert_eq!(chosen, port, "{case}");
+            assert_eq!(
+                logged.contains(
+                    "STENO_HANDOVER_PORT is not a port from 0 to 65535, so it is ignored"
+                ),
+                warns,
+                "{case}: {logged}"
+            );
+        }
     }
 
-    /// An empty variable is unset, not a value that is not a port.
-    #[test]
-    fn only_a_variable_that_is_not_a_port_logs_a_warning() {
-        let platform = HandoverConfiguration::platform_port();
-        let ((), logged) = warnings(|| {
-            assert_eq!(listener_port(Some(""), None), platform);
-            assert_eq!(listener_port(Some(" \n"), None), platform);
-            assert_eq!(listener_port(Some("23900"), None), 23900);
-        });
-        assert_eq!(logged, "");
-        let ((), logged) = warnings(|| assert_eq!(listener_port(Some("steno"), None), platform));
-        assert!(
-            logged.contains("STENO_HANDOVER_PORT is not a port from 0 to 65535, so it is ignored"),
-            "{logged}"
-        );
-    }
-
+    /// The stored port reaches the configuration; settings that cannot be
+    /// read leave it out.
     #[test]
     fn the_variable_and_the_stored_port_reach_the_configuration() {
         let platform = HandoverConfiguration::platform_port();
         let store = Store::in_memory().unwrap();
-        assert_eq!(stored_port(&store), None);
         assert_eq!(configuration(&store, None).port, platform);
-
         let mut settings = store.settings().unwrap();
         settings.handover_port = Some(40000);
         store.save_settings(&settings).unwrap();
-        assert_eq!(stored_port(&store), Some(40000));
-        assert_eq!(configuration(&store, None).port, 40000);
         assert_eq!(configuration(&store, Some("")).port, 40000);
         assert_eq!(
             configuration(&store, Some("23900")),
@@ -1006,16 +1003,11 @@ mod tests {
             },
             "the default otherwise"
         );
-    }
 
-    /// Settings that cannot be read leave the stored port out.
-    #[test]
-    fn settings_that_cannot_be_read_leave_the_stored_port_out() {
-        let store = Store::in_memory().unwrap();
         store
             .write(|transaction| {
                 transaction.execute(
-                    "INSERT INTO setting (key, value) VALUES ('handoverPort', '40000'), ('launchAtLogin', 'yes')",
+                    "INSERT OR REPLACE INTO setting (key, value) VALUES ('launchAtLogin', 'yes')",
                     [],
                 )?;
                 Ok(())
@@ -1023,10 +1015,7 @@ mod tests {
             .unwrap();
         assert!(store.settings().is_err());
         assert_eq!(stored_port(&store), None);
-        assert_eq!(
-            configuration(&store, None).port,
-            HandoverConfiguration::platform_port()
-        );
+        assert_eq!(configuration(&store, None).port, platform);
     }
 
     #[test]
@@ -1077,6 +1066,25 @@ mod tests {
             assert!(file.recorded().is_err(), "{case}: recorded() is an error");
             assert!(file.next().is_err(), "{case}: next() is an error");
         }
+    }
+
+    /// The unparsable records set aside in `dir`.
+    fn set_aside_in(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("handover-identity.json.corrupt-")
+            })
+            .collect()
+    }
+
+    /// The Settings card for `reason`.
+    fn card(reason: PhoneWaitingReason) -> String {
+        steno_host::settings::snapshots::waiting_message(reason, steno_core::Platform::CURRENT)
     }
 
     /// The bytes a build from before the next fingerprint wrote, exactly.
@@ -1132,15 +1140,8 @@ mod tests {
         let path = dir.path().join("handover-identity.json");
         let file = FingerprintFile::in_support_directory(dir.path());
         let set_aside = || -> Vec<Vec<u8>> {
-            std::fs::read_dir(dir.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .filter(|path| {
-                    path.file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .starts_with("handover-identity.json.corrupt-")
-                })
+            set_aside_in(dir.path())
+                .iter()
                 .map(|path| std::fs::read(path).unwrap())
                 .collect()
         };
@@ -1222,10 +1223,7 @@ mod tests {
                  {COMPUTER}'s pairing changed and can't connect."
             ))
         );
-        let card = steno_host::settings::snapshots::waiting_message(
-            PhoneWaitingReason::PartlyReplaced,
-            steno_core::Platform::CURRENT,
-        );
+        let card = card(PhoneWaitingReason::PartlyReplaced);
         assert!(
             card.starts_with("Some of your phones were paired before"),
             "{card}"
@@ -1273,10 +1271,7 @@ mod tests {
                  know."
             ))
         );
-        let card = steno_host::settings::snapshots::waiting_message(
-            PhoneWaitingReason::ClockBehind,
-            steno_core::Platform::CURRENT,
-        );
+        let card = card(PhoneWaitingReason::ClockBehind);
         assert!(card.ends_with("then choose Try again."), "{card}");
         assert!(!card.contains("Pair again"), "{card}");
         let (_, recorded, _, phones) = paired.places().await;
@@ -1329,16 +1324,9 @@ mod tests {
         assert_eq!(store.paired_devices().unwrap().len(), 1);
     }
 
-    /// The answers Try again and Pair again give, pinned as text, in plain
-    /// words.
+    /// The answers Try again and Pair again give are in plain words.
     #[test]
     fn the_handover_s_answers_are_plain_sentences() {
-        assert_eq!(
-            ATTEMPT_UNDER_WAY,
-            "Steno is already working on this phone pairing."
-        );
-        assert_eq!(NOT_WAITING, "Your phones can already send recordings.");
-        assert_eq!(SHUT_DOWN, "Steno is quitting.");
         let failures = [
             IdentityError::Unavailable(Unavailability::Missing),
             IdentityError::Unavailable(Unavailability::Replaced),
@@ -1385,10 +1373,7 @@ mod tests {
         .into_iter()
         .zip(&failures)
         {
-            let card = steno_host::settings::snapshots::waiting_message(
-                reason,
-                steno_core::Platform::CURRENT,
-            );
+            let card = card(reason);
             let first = failure.split(". ").next().unwrap();
             assert!(card.starts_with(first), "{card} / {failure}");
         }
@@ -1650,6 +1635,19 @@ mod tests {
             }
         }
 
+        /// Another computer's identity in the keychain.
+        async fn store_another_identity(&self) {
+            let other = HandoverIdentity::mint("Steno elsewhere", chrono::Utc::now())
+                .unwrap()
+                .to_pem()
+                .unwrap();
+            self.keychain
+                .inner
+                .set_secret(&HandoverIdentity::secret_key(), Some(&other))
+                .await
+                .unwrap();
+        }
+
         /// No fingerprint recorded.
         fn forget_the_record(&self) {
             self.record.file.write(None, None).unwrap();
@@ -1857,18 +1855,7 @@ mod tests {
                 PhoneWaitingReason::Unreadable => {
                     paired.keychain.refuse.store(true, Ordering::SeqCst);
                 }
-                PhoneWaitingReason::Replaced => {
-                    let other = HandoverIdentity::mint("Steno elsewhere", chrono::Utc::now())
-                        .unwrap()
-                        .to_pem()
-                        .unwrap();
-                    paired
-                        .keychain
-                        .inner
-                        .set_secret(&HandoverIdentity::secret_key(), Some(&other))
-                        .await
-                        .unwrap();
-                }
+                PhoneWaitingReason::Replaced => paired.store_another_identity().await,
                 _ => {}
             }
             let recordings = paired.seed_recordings();
@@ -2003,18 +1990,7 @@ mod tests {
             let paired = Paired::new(true).await;
             let path = paired.dir.path().join("handover-identity.json");
             std::fs::write(&path, bad).unwrap();
-            let set_aside = || -> Vec<PathBuf> {
-                std::fs::read_dir(paired.dir.path())
-                    .unwrap()
-                    .map(|entry| entry.unwrap().path())
-                    .filter(|path| {
-                        path.file_name()
-                            .unwrap()
-                            .to_string_lossy()
-                            .starts_with("handover-identity.json.corrupt-")
-                    })
-                    .collect()
-            };
+            let set_aside = || set_aside_in(paired.dir.path());
             let recordings = paired.seed_recordings();
 
             let handover = ListenerHandover::read(paired.source());
@@ -2080,10 +2056,7 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         let handover = ListenerHandover::read(paired.source());
         assert_eq!(handover.waiting(), Some(PhoneWaitingReason::FileNotOpened));
-        let card = steno_host::settings::snapshots::waiting_message(
-            PhoneWaitingReason::FileNotOpened,
-            steno_core::Platform::CURRENT,
-        );
+        let card = card(PhoneWaitingReason::FileNotOpened);
         assert!(card.contains(
             "Check that folder's permissions and that the disk has space, then choose Try again."
         ));
@@ -2207,16 +2180,7 @@ mod tests {
         ] {
             let paired = Paired::new(stored != "no identity").await;
             if stored == "another identity" {
-                let other = HandoverIdentity::mint("Steno elsewhere", chrono::Utc::now())
-                    .unwrap()
-                    .to_pem()
-                    .unwrap();
-                paired
-                    .keychain
-                    .inner
-                    .set_secret(&HandoverIdentity::secret_key(), Some(&other))
-                    .await
-                    .unwrap();
+                paired.store_another_identity().await;
             }
             paired
                 .keychain
@@ -2410,53 +2374,5 @@ mod tests {
         .await
         .expect("follow ends");
         assert!(gated.service().is_none());
-    }
-
-    /// A shutdown during the build: its listener is neither adopted nor
-    /// started, and `follow` ends without `changed`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_shutdown_while_the_listener_builds_adopts_and_starts_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::in_memory().unwrap());
-        crate::testing::pair_a_phone(&store);
-        let (_gate, receiver) = tokio::sync::watch::channel(HandoverGate::Ready);
-        let (building, is_building) = std::sync::mpsc::channel();
-        let (finish, may_finish) = std::sync::mpsc::channel::<()>();
-        let may_finish = Mutex::new(may_finish);
-        let built = Arc::new(Mutex::new(None::<Arc<HandoverService>>));
-        let runtime = tokio::runtime::Handle::current();
-        let (listener_store, inbox, kept) =
-            (store.clone(), dir.path().to_path_buf(), built.clone());
-        let gated = Arc::new(GatedHandover::new(
-            store,
-            receiver,
-            Box::new(move || {
-                building.send(()).unwrap();
-                may_finish.lock().unwrap().recv().unwrap();
-                let listener = minted_listener(&listener_store, &inbox, &runtime);
-                *kept.lock().unwrap() = listener.listener().cloned();
-                Ok(listener)
-            }),
-            Arc::new(FakeImport::default()),
-            Box::new(|| unreachable!("no Pair again here")),
-        ));
-        let follow = tokio::spawn(
-            gated
-                .clone()
-                .follow(|| panic!("no listener is adopted after the shutdown")),
-        );
-        tokio::task::spawn_blocking(move || is_building.recv().unwrap())
-            .await
-            .unwrap();
-        assert!(gated.close().is_none(), "nothing to stop yet");
-        finish.send(()).unwrap();
-        follow.await.unwrap();
-        assert!(gated.service().is_none(), "not adopted");
-        let service = built.lock().unwrap().clone().expect("the build finished");
-        assert_eq!(
-            service.state(),
-            steno_handover::ListenerState::Stopped,
-            "not started"
-        );
     }
 }

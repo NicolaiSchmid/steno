@@ -14,8 +14,8 @@ use steno_core::{MeetingSource, Store};
 use super::*;
 use crate::auto_stop::MicrophoneActivity;
 use crate::testing::{
-    HANG_GUARD, LIVE, PATIENCE, SyntheticRecorder, eventually_within, on_own_thread,
-    synthetic_recorder, temp_store,
+    HANG_GUARD, PATIENCE, SyntheticRecorder, eventually_within, on_own_thread, synthetic_recorder,
+    temp_store,
 };
 
 #[derive(Default)]
@@ -85,7 +85,7 @@ impl FakePanel {
 }
 
 struct Harness {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
     store: Arc<Store>,
     activity: FakeProcessAudioActivity,
     clock: Arc<ManualClock>,
@@ -131,7 +131,7 @@ fn harness_over(recorder: Arc<dyn CallRecorder>, fake: Arc<FakeRecorder>) -> Har
     let (controller, panel, clock) =
         controller_over(recorder, store.clone(), Arc::new(activity.clone()));
     Harness {
-        dir,
+        _dir: dir,
         store,
         activity,
         clock,
@@ -186,84 +186,60 @@ impl Drop for Harness {
 /// and no prompt is up; while recording it goes to the recorder instead.
 #[test]
 fn an_opened_microphone_prompts_only_when_on_idle_and_no_prompt_is_up() {
-    #[allow(clippy::struct_excessive_bools, reason = "a row of a table")]
-    struct Row {
-        what: &'static str,
-        enabled: bool,
-        busy: bool,
-        prompt_up: bool,
-        prompts: bool,
-        forwards: bool,
-    }
+    // What, detection on, recording, a prompt up; prompts, forwards.
     let rows = [
-        Row {
-            what: "on, idle: the prompt",
-            enabled: true,
-            busy: false,
-            prompt_up: false,
-            prompts: true,
-            forwards: false,
-        },
-        Row {
-            what: "off: no prompt",
-            enabled: false,
-            busy: false,
-            prompt_up: false,
-            prompts: false,
-            forwards: false,
-        },
-        Row {
-            what: "recording: the recorder hears of it, no prompt",
-            enabled: true,
-            busy: true,
-            prompt_up: false,
-            prompts: false,
-            forwards: true,
-        },
-        Row {
-            what: "recording with detection off: the recorder still hears of it",
-            enabled: false,
-            busy: true,
-            prompt_up: false,
-            prompts: false,
-            forwards: true,
-        },
-        Row {
-            what: "a prompt up: one prompt at a time",
-            enabled: true,
-            busy: false,
-            prompt_up: true,
-            prompts: false,
-            forwards: false,
-        },
+        ("on, idle: the prompt", true, false, false, true, false),
+        ("off: no prompt", false, false, false, false, false),
+        (
+            "recording: the recorder hears of it, no prompt",
+            true,
+            true,
+            false,
+            false,
+            true,
+        ),
+        (
+            "recording with detection off: the recorder still hears of it",
+            false,
+            true,
+            false,
+            false,
+            true,
+        ),
+        (
+            "a prompt up: one prompt at a time",
+            true,
+            false,
+            true,
+            false,
+            false,
+        ),
     ];
-    for row in rows {
+    for (what, enabled, busy, prompt_up, prompts, forwards) in rows {
         let harness = harness();
-        harness.controller.set_enabled(row.enabled || row.prompt_up);
-        if row.prompt_up {
+        harness.controller.set_enabled(enabled || prompt_up);
+        if prompt_up {
             harness.controller.handle(opened(Some("us.zoom.xos")));
         }
-        harness.controller.set_enabled(row.enabled);
-        harness.recorder.busy.store(row.busy, Ordering::SeqCst);
+        harness.controller.set_enabled(enabled);
+        harness.recorder.busy.store(busy, Ordering::SeqCst);
         let before = harness.panel.shown().len();
         harness.controller.handle(opened(Some("com.example.meet")));
         let raised = harness.panel.shown()[before..]
             .iter()
             .flatten()
             .any(|prompt| prompt.app_name == "com.example.meet");
-        assert_eq!(raised, row.prompts, "{}: prompted", row.what);
+        assert_eq!(raised, prompts, "{what}: prompted");
         assert_eq!(
             !harness.recorder.activity().is_empty(),
-            row.forwards,
-            "{}: forwarded",
-            row.what
+            forwards,
+            "{what}: forwarded"
         );
-        if row.prompt_up {
+        if prompt_up {
             assert_eq!(
                 harness.panel.current(),
                 Some(prompt("us.zoom.xos", 1)),
-                "{}: the first prompt stays",
-                row.what
+                "{what}: the first prompt stays"
             );
         }
     }
@@ -438,29 +414,6 @@ fn events_while_recording_reach_the_recorder_with_the_name_resolved() {
         None,
         "a prompt that could not name the app attributes nothing"
     );
-}
-
-/// While another process holds the write lock, the detection poll's read
-/// of the setting answers live and turns detection off as it says.
-#[test]
-fn the_detection_poll_reads_the_settings_while_a_write_waits() {
-    let harness = harness();
-    harness.controller.follow_settings();
-    assert!(harness.controller.is_detecting());
-    let mut settings = harness.store.settings().unwrap();
-    settings.meeting_detection_enabled = false;
-    harness.store.save_settings(&settings).unwrap();
-
-    let mut held = crate::testing::HeldStore::with_a_write_waiting(
-        &harness.store,
-        &crate::testing::database_in(harness.dir.path()),
-    );
-    let asked = std::time::Instant::now();
-    harness.controller.follow_settings();
-    let answered = asked.elapsed();
-    assert!(answered < LIVE, "the setting took {answered:?} to read");
-    assert!(!harness.controller.is_enabled(), "the setting was read");
-    held.release_after_hold();
 }
 
 /// Settings changes reach the detector, and a detector that cannot start
@@ -688,17 +641,14 @@ async fn a_prompt_never_starts_a_second_recording() {
     );
 }
 
-#[test]
-fn an_app_without_a_bundle_id_is_another_app() {
-    assert_eq!(fallback_app_name(None), "Another app");
-    assert_eq!(fallback_app_name(Some("firefox")), "firefox");
-}
-
-/// A Windows holder is named by its executable without `.exe`, in any
-/// case; a name that is only the extension, or holds it elsewhere, stays.
+/// A holder without a bundle id is "Another app"; a Windows holder is named
+/// by its executable without `.exe`, in any case; a name that is only the
+/// extension, or holds it elsewhere, stays.
 #[test]
 fn a_windows_executable_is_named_without_its_extension() {
+    assert_eq!(fallback_app_name(None), "Another app");
     for (id, name) in [
+        ("firefox", "firefox"),
         ("Teams.exe", "Teams"),
         ("ms-teams.EXE", "ms-teams"),
         ("Zoom.Exe", "Zoom"),

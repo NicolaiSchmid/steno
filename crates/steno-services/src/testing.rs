@@ -898,33 +898,15 @@ impl Hosted {
 
 /// A file system whose `exists`, which a shown detail's reload asks about
 /// its recording ([`shown_meeting`]), waits at a gate while it is armed,
-/// standing for a reload that waits on the store. Set with
-/// [`Self::gate_inside_reads_on`], it waits inside a read on that store.
+/// standing for a reload that waits on the store.
 #[derive(Default)]
 pub struct GatedFiles {
     pub gate: ReloadGate,
-    reader: std::sync::OnceLock<Arc<Store>>,
-}
-
-impl GatedFiles {
-    /// From now on the gate is passed inside a read on `store`; the first
-    /// call wins.
-    pub fn gate_inside_reads_on(&self, store: Arc<Store>) {
-        let _ = self.reader.set(store);
-    }
 }
 
 impl steno_host::services::FileSystem for GatedFiles {
     fn exists(&self, path: &std::path::Path) -> bool {
-        match self.reader.get() {
-            Some(store) => store
-                .read(|_| {
-                    self.gate.pass();
-                    Ok(())
-                })
-                .unwrap(),
-            None => self.gate.pass(),
-        }
+        self.gate.pass();
         path.exists()
     }
 

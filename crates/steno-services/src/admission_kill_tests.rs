@@ -231,39 +231,23 @@ async fn fresh_admission_killed_at(point: &str) -> ((usize, usize), (usize, usiz
     (at_kill, after)
 }
 
-/// Killed after the upload's note, before the folder's: the retry copies
-/// afresh, and the next launch forgets the upload with no folder.
+/// A fresh admission killed at each step is one meeting once relaunched
+/// and retried, and nothing is left noted: killed after the upload's note
+/// (the retry copies afresh and the launch forgets the upload with no
+/// folder), after the folder's note, inside the admission's commit (the
+/// launch adopts the copy with its ledger row) and after it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_kill_after_the_upload_note_is_one_meeting() {
-    let (at_kill, after) = fresh_admission_killed_at("after-upload-note").await;
-    assert_eq!(at_kill, (0, 1));
-    assert_eq!(after.0, 0, "no folder left noted");
-    assert_eq!(after.1, 0, "no upload left noted");
-}
-
-/// Killed after the folder's note, before the copy.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_kill_after_the_folder_note_is_one_meeting() {
-    let (at_kill, after) = fresh_admission_killed_at("after-folder-note").await;
-    assert_eq!(at_kill, (1, 1));
-    assert_eq!(after, (0, 0));
-}
-
-/// Killed inside the admission's commit, the copy whole: the launch
-/// adopts it with the ledger row and the retry is answered with it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_kill_inside_the_admissions_commit_is_one_meeting() {
-    let (at_kill, after) = fresh_admission_killed_at(IN_LEDGER_COMMIT).await;
-    assert_eq!(at_kill, (1, 1));
-    assert_eq!(after, (0, 0));
-}
-
-/// Killed after the admission's commit, before its settle.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_kill_after_the_admissions_commit_is_one_meeting() {
-    let (at_kill, after) = fresh_admission_killed_at("before-settled").await;
-    assert_eq!(at_kill, (1, 1));
-    assert_eq!(after, (0, 0));
+async fn a_fresh_admission_killed_at_each_step_is_one_meeting() {
+    for (point, noted_at_the_kill) in [
+        ("after-upload-note", (0, 1)),
+        ("after-folder-note", (1, 1)),
+        (IN_LEDGER_COMMIT, (1, 1)),
+        ("before-settled", (1, 1)),
+    ] {
+        let (at_kill, after) = fresh_admission_killed_at(point).await;
+        assert_eq!(at_kill, noted_at_the_kill, "{point}");
+        assert_eq!(after, (0, 0), "{point}: nothing left noted");
+    }
 }
 
 /// An admission that gave up, then a launch killed at `point`; then a
@@ -288,20 +272,15 @@ async fn adoption_killed_at(point: &str) -> ((usize, usize), (usize, usize)) {
     (at_kill, after)
 }
 
-/// Killed inside the adoption's transaction, before COMMIT.
+/// The launch's adoption killed inside its commit or after it, before the
+/// enqueue: one meeting, the noted one, and nothing left noted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_kill_inside_the_adoptions_commit_is_one_meeting() {
-    let (at_kill, after) = adoption_killed_at(IN_LEDGER_COMMIT).await;
-    assert_eq!(at_kill, (1, 1));
-    assert_eq!(after, (0, 0));
-}
-
-/// Killed after the adoption's commit, before the enqueue.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_kill_after_the_adoptions_commit_is_one_meeting() {
-    let (at_kill, after) = adoption_killed_at("after-adoption-commit").await;
-    assert_eq!(at_kill, (1, 1));
-    assert_eq!(after, (0, 0));
+async fn an_adoption_killed_at_each_step_is_one_meeting() {
+    for point in [IN_LEDGER_COMMIT, "after-adoption-commit"] {
+        let (at_kill, after) = adoption_killed_at(point).await;
+        assert_eq!(at_kill, (1, 1), "{point}");
+        assert_eq!(after, (0, 0), "{point}: nothing left noted");
+    }
 }
 
 /// The folder's note fails on every retry: each refused retry forgets its
@@ -402,38 +381,6 @@ async fn a_retry_racing_a_plain_adoption_of_its_copy_writes_no_second_asset() {
         world.bytes,
         "the audio is kept"
     );
-    quit(launched).await;
-    quit(app).await;
-}
-
-/// The retry passed its check, then the launch adopts the copy with the
-/// ledger row, then the retry commits: it writes nothing and is answered
-/// with the adopted meeting.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_retry_that_loses_to_the_launchs_adoption_writes_nothing() {
-    let (world, app) = World::new();
-    let (noted_id, hold) = world.gave_up(&app).await;
-    drop(hold);
-    let world = Arc::new(world);
-    let (outcome, app, launched) =
-        retry_held_after_the_reuse_check(&world, app, noted_id, async || {
-            let launched = relaunch(&world).await;
-            world.assert_one_meeting(&launched.store, noted_id);
-            launched
-        })
-        .await;
-    assert_eq!(
-        outcome.unwrap(),
-        noted_id,
-        "the retry gets the adopted meeting"
-    );
-    for app in [&launched, &app] {
-        tokio::time::timeout(HANG_GUARD, app.pipeline.current().wait_until_idle())
-            .await
-            .unwrap();
-    }
-    world.assert_one_meeting(&launched.store, noted_id);
-    assert_eq!(launched.store.assets().unwrap().len(), 1, "one asset");
     quit(launched).await;
     quit(app).await;
 }

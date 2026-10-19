@@ -402,30 +402,38 @@ fn another_identity() -> String {
         .unwrap()
 }
 
-/// The identity is gone: the launch and Try again wait with `missing`, a
-/// declined Pair again changes nothing, and once the item is back Try
-/// again starts the listener on the same identity.
+/// The identity is gone (`missing`) or the store holds another than the
+/// recorded one (`replaced`): the launch and Try again wait, neither
+/// adopting nor minting, a declined Pair again changes nothing, and once
+/// the known identity is back Try again starts the listener on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_emptied_keychain_waits_until_the_identity_is_back() {
-    let paired = Paired::new().await;
-    paired.empty_the_keychain();
+async fn a_keychain_without_the_known_identity_waits_until_it_is_back() {
+    for reason in ["missing", "replaced"] {
+        let paired = Paired::new().await;
+        let other = another_identity();
+        let stored = if reason == "missing" {
+            paired.empty_the_keychain();
+            None
+        } else {
+            paired.put(&other).await;
+            Some(other.as_str())
+        };
 
-    let launched = paired.launch();
-    paired.waits_untouched(&launched, "missing", None).await;
+        let launched = paired.launch();
+        paired.waits_untouched(&launched, reason, stored).await;
+        launched.try_again();
+        paired.waits_untouched(&launched, reason, stored).await;
+        let phone = launched.phone();
+        assert_eq!(phone["error"], TRY_AGAIN_FAILED, "{reason}: {phone}");
+        assert!(!launched.pair_again(), "{reason}: the user said no");
+        paired.waits_untouched(&launched, reason, stored).await;
 
-    launched.try_again();
-    paired.waits_untouched(&launched, "missing", None).await;
-    let phone = launched.phone();
-    assert_eq!(phone["error"], TRY_AGAIN_FAILED, "{phone}");
-
-    assert!(!launched.pair_again(), "the user said no");
-    paired.waits_untouched(&launched, "missing", None).await;
-
-    paired.put(&paired.pem).await;
-    launched.try_again();
-    paired.listens_on_the_known_identity(&launched).await;
-    drop(launched);
-    paired.loads_the_known_identity(&paired.launch()).await;
+        paired.put(&paired.pem).await;
+        launched.try_again();
+        paired.listens_on_the_known_identity(&launched).await;
+        drop(launched);
+        paired.loads_the_known_identity(&paired.launch()).await;
+    }
 }
 
 /// Pair again over an emptied store, confirmed, writes the import's
@@ -464,37 +472,6 @@ async fn pair_again_over_an_emptied_keychain_mints_once_the_user_confirms() {
         [],
         "no paired phone"
     );
-}
-
-/// The store holds another identity than the recorded one: the launch
-/// waits with `replaced`, neither adopting it nor minting, until the
-/// identity the phones know is back.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn another_identity_in_the_keychain_waits_until_the_known_one_is_back() {
-    let paired = Paired::new().await;
-    let other = another_identity();
-    paired.put(&other).await;
-
-    let launched = paired.launch();
-    paired
-        .waits_untouched(&launched, "replaced", Some(&other))
-        .await;
-    launched.try_again();
-    paired
-        .waits_untouched(&launched, "replaced", Some(&other))
-        .await;
-    let phone = launched.phone();
-    assert_eq!(phone["error"], TRY_AGAIN_FAILED, "{phone}");
-    assert!(!launched.pair_again(), "the user said no");
-    paired
-        .waits_untouched(&launched, "replaced", Some(&other))
-        .await;
-
-    paired.put(&paired.pem).await;
-    launched.try_again();
-    paired.listens_on_the_known_identity(&launched).await;
-    drop(launched);
-    paired.loads_the_known_identity(&paired.launch()).await;
 }
 
 /// A launch that finds the note of an unfinished Pair again decides it by

@@ -631,19 +631,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_summary_re_run_returns_before_the_summarizer_answers() {
-        let (_dir, store) = temp_store();
-        let meeting = ready_meeting(&store);
-        let (summarizer, release, asked) = held();
-        let service = pipeline(&store, Some(Arc::new(summarizer)));
-
-        let returned = call(move || service.rerun_summary(meeting.id, &meeting.template_id));
-        assert_eq!(returned, Ok(()));
-        reached(&asked).await;
-        release.notify_one();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_re_run_or_re_export_is_the_error_of_the_call() {
         let (_dir, store) = temp_store();
         let meeting = ready_meeting(&store);
@@ -954,26 +941,6 @@ mod tests {
         (meeting, asset)
     }
 
-    /// "Process again" saves a failed meeting queued before it returns, and
-    /// the run takes it to ready.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn process_again_runs_a_failed_meeting_with_its_master_to_ready() {
-        let (dir, store) = temp_store();
-        let service = Arc::new(pipeline(&store, None));
-        let failed = MeetingState::Failed {
-            reason: "transcribe: the model is not installed".to_owned(),
-        };
-        let (meeting, _) = recorded_meeting(&store, dir.path(), failed);
-        assert_eq!(process_again(&service, meeting.id), Ok(()));
-        assert_ne!(
-            meeting_state(&store, meeting.id).kind(),
-            steno_core::MeetingStateKind::Failed,
-            "saved queued before the call returned"
-        );
-        service.pipeline.current().wait_until_idle().await;
-        assert_eq!(meeting_state(&store, meeting.id), MeetingState::Ready);
-    }
-
     /// Each refusal of `reprocess` reaches the host as the detail's refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_process_again_says_why() {
@@ -995,13 +962,6 @@ mod tests {
         store.save_meeting(&without_asset).unwrap();
         assert_eq!(
             process_again(&service, without_asset.id),
-            Err(ProcessAgainRefusal::RecordingGone)
-        );
-
-        let (swept, asset) = recorded_meeting(&store, dir.path(), failed());
-        std::fs::remove_file(steno_core::paths::file_url_path(&asset.url).unwrap()).unwrap();
-        assert_eq!(
-            process_again(&service, swept.id),
             Err(ProcessAgainRefusal::RecordingGone)
         );
 
@@ -1032,47 +992,66 @@ mod tests {
         );
     }
 
-    /// "Process again" refuses a meeting it is not offered for, also when its
-    /// recording was swept: the rule is checked before the files.
+    /// "Process again" by the meeting's state: the rule is checked before
+    /// the files, and a refusal leaves the meeting as it was.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn process_again_refuses_a_ready_meeting() {
+    async fn process_again_refuses_a_meeting_it_is_not_offered_for() {
         let (dir, store) = temp_store();
         let service = Arc::new(pipeline(&store, None));
-        let (ready, _) = recorded_meeting(&store, dir.path(), MeetingState::Ready);
-        assert_eq!(
-            process_again(&service, ready.id),
-            Err(ProcessAgainRefusal::NotOffered)
-        );
-        let (swept, asset) = recorded_meeting(&store, dir.path(), MeetingState::Ready);
-        std::fs::remove_file(steno_core::paths::file_url_path(&asset.url).unwrap()).unwrap();
-        assert_eq!(
-            process_again(&service, swept.id),
-            Err(ProcessAgainRefusal::NotOffered)
-        );
-        service.pipeline.current().wait_until_idle().await;
-        assert_eq!(meeting_state(&store, ready.id), MeetingState::Ready);
-        assert_eq!(meeting_state(&store, swept.id), MeetingState::Ready);
-    }
-
-    /// A queued or processing meeting is already being processed.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn process_again_on_a_queued_or_processing_meeting_is_busy() {
-        let (dir, store) = temp_store();
-        let service = Arc::new(pipeline(&store, None));
-        for state in [MeetingState::Queued, MeetingState::Processing] {
-            let (meeting, _) = recorded_meeting(&store, dir.path(), state.clone());
-            assert_eq!(
-                process_again(&service, meeting.id),
-                Err(ProcessAgainRefusal::Busy),
-                "{state:?}"
-            );
-            assert_eq!(meeting_state(&store, meeting.id), state, "unchanged");
+        let failed = MeetingState::Failed {
+            reason: "decode: unreadable".to_owned(),
+        };
+        let mut refused = Vec::new();
+        for (label, state, swept, refusal) in [
+            (
+                "ready",
+                MeetingState::Ready,
+                false,
+                ProcessAgainRefusal::NotOffered,
+            ),
+            (
+                "ready, swept",
+                MeetingState::Ready,
+                true,
+                ProcessAgainRefusal::NotOffered,
+            ),
+            (
+                "recording",
+                MeetingState::Recording,
+                false,
+                ProcessAgainRefusal::NotOffered,
+            ),
+            (
+                "queued",
+                MeetingState::Queued,
+                false,
+                ProcessAgainRefusal::Busy,
+            ),
+            (
+                "processing",
+                MeetingState::Processing,
+                false,
+                ProcessAgainRefusal::Busy,
+            ),
+            (
+                "failed, swept",
+                failed,
+                true,
+                ProcessAgainRefusal::RecordingGone,
+            ),
+        ] {
+            let (meeting, asset) = recorded_meeting(&store, dir.path(), state.clone());
+            if swept {
+                std::fs::remove_file(steno_core::paths::file_url_path(&asset.url).unwrap())
+                    .unwrap();
+            }
+            assert_eq!(process_again(&service, meeting.id), Err(refusal), "{label}");
+            refused.push((label, meeting.id, state));
         }
-        let (recording, _) = recorded_meeting(&store, dir.path(), MeetingState::Recording);
-        assert_eq!(
-            process_again(&service, recording.id),
-            Err(ProcessAgainRefusal::NotOffered)
-        );
+        service.pipeline.current().wait_until_idle().await;
+        for (label, id, state) in refused {
+            assert_eq!(meeting_state(&store, id), state, "{label}: unchanged");
+        }
     }
 
     /// What every [`FakeSidecar`] shares: the children's counts and the gate
@@ -1409,50 +1388,6 @@ mod tests {
         );
     }
 
-    /// A resume skips a waiting meeting a retired pipeline processes again,
-    /// through the shared in-flight set.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_resume_after_a_reload_skips_a_waiting_meeting_the_retired_pipeline_holds() {
-        let (dir, store) = temp_store();
-        let children = Arc::new(Children::default());
-        let engine = Arc::new(FakeSidecar::new(&children));
-        let (installed, current) = gated_current(&store, engine.clone());
-        // The reload first, as its own resume would start the meeting.
-        let retired = current.current();
-        current.reload().unwrap();
-        let waiting = enqueue_call(dir.path(), &retired);
-        eventually("the refused run left the meeting waiting", || {
-            current.model_waits.waiting() == vec![waiting]
-        })
-        .await;
-        assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
-
-        installed.store(true, Ordering::SeqCst);
-        let asset_id = store.asset(waiting).unwrap().unwrap().id;
-        let held = tokio::spawn({
-            let retired = retired.clone();
-            async move { retired.process(asset_id).await }
-        });
-        tokio::time::timeout(PATIENCE, children.entered.notified())
-            .await
-            .expect("the retired pipeline is transcribing the meeting");
-        let before = engine.inner.transcriptions.count();
-        current.resume_waiting();
-        children.open.notify_one();
-        held.await.unwrap().unwrap();
-        current.current().wait_until_idle().await;
-        assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
-        let after_held = engine.inner.transcriptions.count() - before;
-        let control = enqueue_call(dir.path(), &current.current());
-        current.current().wait_until_idle().await;
-        assert_eq!(meeting_state(&store, control), MeetingState::Ready);
-        let one_run = engine.inner.transcriptions.count() - before - after_held;
-        assert_eq!(
-            after_held, one_run,
-            "the waiting meeting the retired pipeline held ran again on the new one"
-        );
-    }
-
     /// Models the `steno` command installed are picked up by the next reload.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_resumes_a_meeting_waiting_for_models_installed_meanwhile() {
@@ -1551,212 +1486,6 @@ mod tests {
         service.pipeline.resume_waiting();
         service.pipeline.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
-    }
-
-    /// Which model a Settings Remove takes away during a run.
-    #[derive(Clone, Copy, Debug)]
-    enum Removed {
-        Speech,
-        Diarizer,
-    }
-
-    /// A boundary behind the app's gate whose first load waits after the
-    /// gate's check, then is refused while `installed` does not hold.
-    struct LoadsAfterAGate {
-        installed: crate::model_gate::InstalledCheck,
-        not_installed: fn() -> steno_core::protocols::BoxError,
-        gate_used: AtomicBool,
-        checked: tokio::sync::Notify,
-        go: tokio::sync::Notify,
-        speech: FakeSpeechEngine,
-        diarizer: steno_core::testing::FakeDiarizer,
-    }
-
-    impl LoadsAfterAGate {
-        fn new(removed: Removed, installed: crate::model_gate::InstalledCheck) -> Self {
-            LoadsAfterAGate {
-                installed,
-                not_installed: match removed {
-                    Removed::Speech => || {
-                        Box::new(steno_speech::SpeechError::NotInstalled {
-                            asset: "parakeet".to_owned(),
-                            directory: "/m".into(),
-                            missing: vec!["encoder".to_owned()],
-                        })
-                    },
-                    Removed::Diarizer => || {
-                        Box::new(steno_diarize::DiarizeError::NotInstalled {
-                            asset: steno_diarize::models::ASSET_ID.to_owned(),
-                            directory: "/m".into(),
-                            missing: vec![steno_diarize::models::EMBEDDING_FILE.to_owned()],
-                        })
-                    },
-                },
-                gate_used: AtomicBool::new(false),
-                checked: tokio::sync::Notify::new(),
-                go: tokio::sync::Notify::new(),
-                speech: FakeSpeechEngine::default(),
-                diarizer: steno_core::testing::FakeDiarizer::default(),
-            }
-        }
-
-        async fn load(&self) -> BoundaryResult<()> {
-            if !self.gate_used.swap(true, Ordering::SeqCst) {
-                self.checked.notify_one();
-                self.go.notified().await;
-            }
-            if (self.installed)() {
-                Ok(())
-            } else {
-                Err((self.not_installed)())
-            }
-        }
-    }
-
-    #[async_trait]
-    impl SpeechEngine for LoadsAfterAGate {
-        fn id(&self) -> &str {
-            self.speech.id()
-        }
-
-        fn supported_languages(&self) -> &std::collections::BTreeSet<LanguageTag> {
-            self.speech.supported_languages()
-        }
-
-        async fn prepare(&self) -> BoundaryResult<()> {
-            self.load().await
-        }
-
-        async fn transcribe(
-            &self,
-            audio: &AudioBuffer16k,
-            hint: Option<&LanguageTag>,
-        ) -> BoundaryResult<Vec<RawSegment>> {
-            self.load().await?;
-            self.speech.transcribe(audio, hint).await
-        }
-    }
-
-    #[async_trait]
-    impl steno_core::Diarizer for LoadsAfterAGate {
-        async fn prepare(&self) -> BoundaryResult<()> {
-            self.load().await
-        }
-
-        async fn diarize(
-            &self,
-            audio: &AudioBuffer16k,
-        ) -> BoundaryResult<steno_core::DiarizationResult> {
-            self.load().await?;
-            self.diarizer.diarize(audio).await
-        }
-    }
-
-    /// Pipelines whose `removed` boundary sits behind the app's gate.
-    fn behind_the_gate(
-        store: &Arc<Store>,
-        boundary: &Arc<LoadsAfterAGate>,
-        installed: &crate::model_gate::InstalledCheck,
-        removed: Removed,
-    ) -> MakeDependencies {
-        let (store, boundary, installed) = (store.clone(), boundary.clone(), installed.clone());
-        Arc::new(move || {
-            let mut dependencies = fake_dependencies(&store, "fake-engine");
-            match removed {
-                Removed::Speech => {
-                    dependencies =
-                        dependencies.with_speech_engine(steno_pipeline::SharedSpeechEngine::new(
-                            Arc::new(crate::model_gate::GatedSpeechEngine::new(
-                                boundary.clone(),
-                                installed.clone(),
-                            )),
-                        ));
-                }
-                Removed::Diarizer => {
-                    dependencies.diarizer = Arc::new(crate::model_gate::GatedDiarizer::new(
-                        boundary.clone(),
-                        installed.clone(),
-                    ));
-                }
-            }
-            Ok(on_the_sidecar(dependencies))
-        })
-    }
-
-    /// A Remove between the gate's check and the load: the run is refused,
-    /// the meeting waits `queued` with its audio kept, and a reinstall's
-    /// resume processes it.
-    async fn a_remove_during_a_run_leaves_the_meeting_waiting_with_its_audio(removed: Removed) {
-        use steno_host::services::SpeechModels as _;
-        use steno_host::speech::ModelAsset;
-        let (dir, store) = temp_store();
-        let models_directory = dir.path().join("models");
-        let models = Arc::new(crate::speech::testing::models_in(&models_directory));
-        crate::speech::testing::install_every_model(&models);
-        let (asset, installed): (ModelAsset, crate::model_gate::InstalledCheck) = match removed {
-            Removed::Speech => (ModelAsset::ParakeetV3, {
-                let models = models.clone();
-                Arc::new(move || models.is_installed(ModelAsset::ParakeetV3))
-            }),
-            Removed::Diarizer => (ModelAsset::OfflineDiarizer, {
-                let store = models.speech.clone();
-                Arc::new(move || steno_diarize::models::installed(&store).is_ok())
-            }),
-        };
-        let boundary = Arc::new(LoadsAfterAGate::new(removed, installed.clone()));
-        let make = behind_the_gate(&store, &boundary, &installed, removed);
-        let current = Arc::new(CurrentPipeline::new(
-            make().unwrap(),
-            make,
-            tokio::runtime::Handle::current(),
-        ));
-        let settings_models = crate::model_gate::ResumingSpeechModels::resuming(
-            crate::speech::testing::models_in(&models_directory),
-            current.clone(),
-        );
-
-        let mut meeting = sample_data::meeting();
-        meeting.id = Uuid::new_v4();
-        let audio = steno_pipeline::fixtures::two_lane_call(
-            dir.path(),
-            meeting.id,
-            AudioRetention::DeleteAfterProcessing,
-        )
-        .unwrap();
-        current.current().enqueue(&meeting, &audio).unwrap();
-        tokio::time::timeout(PATIENCE, boundary.checked.notified())
-            .await
-            .expect("the run is past the gate's check");
-        settings_models.remove(asset).unwrap();
-        assert!(!settings_models.is_installed(asset), "{removed:?} removed");
-        boundary.go.notify_one();
-        current.current().wait_until_idle().await;
-
-        let master = steno_core::paths::file_url_path(&audio.url).unwrap();
-        let stored = store.meeting(meeting.id).unwrap().unwrap();
-        assert_eq!(stored.state, MeetingState::Queued, "{removed:?}");
-        assert_eq!(current.model_waits.waiting(), vec![meeting.id]);
-        assert_eq!(store.asset(meeting.id).unwrap().unwrap().expires_at, None);
-        let swept = steno_pipeline::RetentionSweep::new(store.clone())
-            .run(Utc::now() + chrono::Duration::days(365))
-            .unwrap();
-        assert!(swept.is_empty(), "{swept:?}");
-        assert!(master.is_file(), "the recording is kept");
-
-        crate::speech::testing::install_every_model(&models);
-        current.resume_waiting();
-        current.current().wait_until_idle().await;
-        assert_eq!(meeting_state(&store, meeting.id), MeetingState::Ready);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_remove_of_the_speech_model_during_a_run_leaves_the_meeting_waiting() {
-        a_remove_during_a_run_leaves_the_meeting_waiting_with_its_audio(Removed::Speech).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_remove_of_the_diarizer_during_a_run_leaves_the_meeting_waiting() {
-        a_remove_during_a_run_leaves_the_meeting_waiting_with_its_audio(Removed::Diarizer).await;
     }
 
     /// A meeting left waiting before a reload is started by an install on

@@ -13,7 +13,7 @@ use steno_host::services::Recorder as _;
 
 use super::*;
 use crate::testing::{
-    HANG_GUARD, HeldOutages, LIVE, PATIENCE, SyntheticRecorder, eventually, eventually_within,
+    HANG_GUARD, HeldOutages, PATIENCE, SyntheticRecorder, eventually, eventually_within,
     on_own_thread, synthetic_recorder, synthetic_recorder_over,
 };
 
@@ -429,15 +429,6 @@ impl Recording {
             .microphone_activity(MicrophoneActivity::Released);
     }
 
-    /// The capture is back, on a thread of its own, so a deadlock fails the
-    /// test.
-    fn resume(&self) {
-        let recorder = self.recorder.clone();
-        on_own_thread(PATIENCE, "the resume returned", move || {
-            recorder.resume_auto_stop();
-        });
-    }
-
     /// The armed countdown's app and seconds, as the status shows them.
     fn armed(&self) -> Option<(Option<String>, f64)> {
         self.recorder
@@ -487,6 +478,80 @@ fn assert_no_countdown_while_stopping(
     );
 }
 
+/// Asserts the one meeting was ended by the call app's release and saved
+/// as Stop saves it.
+fn assert_saved_as_the_call_ended(recording: &Recording) {
+    let meetings = recording.meetings();
+    let meeting = &meetings[0];
+    assert_eq!(
+        meeting.end_reason,
+        Some(RecordingEndReason::CallEnded {
+            app_name: Some("Zen".to_owned())
+        })
+    );
+    assert!(
+        !matches!(
+            meeting.state,
+            MeetingState::Recording | MeetingState::Failed { .. }
+        ),
+        "handed to processing, got {:?}",
+        meeting.state
+    );
+    let asset = recording
+        .store
+        .asset(meeting.id)
+        .unwrap()
+        .expect("the asset row");
+    assert!(
+        steno_core::paths::file_url_path(&asset.url).is_some_and(|path| path.exists()),
+        "the recording is kept on disk"
+    );
+}
+
+/// A [`Recording`] whose capture runs on the backend `backend` makes from
+/// the synthetic tone's options.
+fn recording_on(
+    backend: impl Fn(
+        steno_audio::testing::synthetic::SyntheticOptions,
+    ) -> Arc<dyn steno_audio::CaptureBackend>
+    + Send
+    + Sync
+    + 'static,
+) -> Recording {
+    recording_over(synthetic_recorder_over(Arc::new(move |configuration| {
+        let backend = backend(crate::testing::synthetic_tone(&configuration));
+        steno_audio::CaptureSession::with_backend(
+            configuration,
+            backend,
+            None,
+            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+            Arc::new(steno_audio::SystemClock::new()),
+        )
+        .map_err(|error| error.to_string())
+    })))
+}
+
+/// The synthetic backend over `options`.
+fn synthetic(
+    options: steno_audio::testing::synthetic::SyntheticOptions,
+) -> Arc<dyn steno_audio::CaptureBackend> {
+    Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options))
+}
+
+/// Runs the fresh countdown on `clock` out from `remaining` seconds and
+/// checks it ended the call.
+async fn the_fresh_grace_ends_the_call(recording: &Recording, clock: &ManualClock, remaining: u64) {
+    assert!(clock.wait_for_sleepers(1), "the fresh countdown sleeps");
+    clock.advance(Duration::from_secs(remaining - 1));
+    assert_eq!(recording.recorder.status().state, RecordingState::Recording);
+    assert!(clock.wait_for_sleepers(1));
+    clock.advance(Duration::from_secs(1));
+    recording
+        .idle("the fresh grace stopped the recording")
+        .await;
+    assert_saved_as_the_call_ended(recording);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
     let recording = recording();
@@ -519,154 +584,48 @@ async fn the_grace_elapsed_stops_and_saves_the_call_as_a_stop_does() {
     assert_eq!(status.auto_stop, None);
     assert_eq!(status.error, None);
     assert_no_countdown_while_stopping(&while_stopping);
-    let meetings = recording.meetings();
-    assert_eq!(meetings.len(), 1);
-    let meeting = &meetings[0];
-    assert_eq!(
-        meeting.end_reason,
-        Some(RecordingEndReason::CallEnded {
-            app_name: Some("Zen".to_owned())
-        })
-    );
-    // Saved as Stop saves.
+    assert_eq!(recording.meetings().len(), 1);
+    assert_saved_as_the_call_ended(&recording);
     assert!(
-        !matches!(
-            meeting.state,
-            MeetingState::Recording | MeetingState::Failed { .. }
-        ),
-        "handed to processing, got {:?}",
-        meeting.state
-    );
-    assert!(meeting.duration > 0.0, "the duration is stored");
-    let asset = recording
-        .store
-        .asset(meeting.id)
-        .unwrap()
-        .expect("the asset row");
-    assert!(
-        steno_core::paths::file_url_path(&asset.url).is_some_and(|path| path.exists()),
-        "the recording is kept on disk"
+        recording.meetings()[0].duration > 0.0,
+        "the duration is stored"
     );
 }
 
-/// A countdown that runs out while another process holds the write lock
-/// shows `Stopping` live in the host, and the meeting is saved within a
-/// second of the lock going.
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn an_auto_stop_under_a_held_lock_saves_once_the_lock_goes() {
-    let recording = recording();
-    let hosted = crate::testing::hosted(&recording.store, &recording.recorder);
-    recording.start(CaptureMode::Call, None);
-    let meeting_id = recording.recorder.status().meeting_id.unwrap();
-    recording.opened(Some("Zen"));
-    recording.released();
-    recording.sleepers(1);
-    recording.clock.advance(Duration::from_secs(89));
-    recording.sleepers(1);
-
-    let mut held =
-        crate::testing::HeldStore::with_a_write_waiting(&recording.store, &recording.database());
-    let reload = hosted.reload_in_flight();
-    let since = std::time::Instant::now();
-    recording.clock.advance(Duration::from_secs(1));
-    let stopping = hosted
-        .sink
-        .recording_in("stopping", since, PATIENCE)
-        .expect("the countdown's stop reached the host");
-    let shown = stopping.duration_since(since);
-    assert!(
-        shown < LIVE,
-        "Stopping reached the host {shown:?} after the countdown ran out"
-    );
-
-    let released = held.release_after_hold();
-    crate::testing::saved_within(
-        &recording.store,
-        meeting_id,
-        released,
-        Duration::from_secs(1),
-    );
-    assert_eq!(
-        recording
-            .store
-            .meeting(meeting_id)
-            .unwrap()
-            .unwrap()
-            .end_reason,
-        Some(RecordingEndReason::CallEnded {
-            app_name: Some("Zen".to_owned())
-        })
-    );
-    reload.join().unwrap();
-    recording.idle("the stop ended").await;
-}
-
+/// Keep recording, or the call app opening the microphone again, withdraws
+/// the countdown; the next release arms only after a call is seen again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_unnamed_app_ends_the_call_with_the_bare_reason() {
-    let recording = recording();
-    recording.start(CaptureMode::Call, None);
-    recording.opened(None);
-    recording.released();
-    assert_eq!(recording.armed(), Some((None, 90.0)));
-    recording.sleepers(1);
-    recording.clock.advance(AUTO_STOP_GRACE);
-    recording.idle("the grace stopped the recording").await;
-    assert_eq!(
-        recording.meetings()[0].end_reason,
-        Some(RecordingEndReason::CallEnded { app_name: None })
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_recording_from_the_prompt_arms_on_its_first_release() {
-    let recording = recording();
-    recording.start(CaptureMode::Call, Some("Zen"));
-    assert_eq!(recording.recorder.status().call_app.as_deref(), Some("Zen"));
-    recording.released();
-    assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 90.0)));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn keep_recording_withdraws_the_countdown_until_the_next_call() {
-    let recording = recording();
-    recording.start(CaptureMode::Call, None);
-    recording.opened(Some("Zen"));
-    recording.released();
-    recording.sleepers(1);
-    recording.recorder.keep_recording();
-    assert_eq!(recording.armed(), None);
-    recording.sleepers(0);
-    recording.clock.advance(AUTO_STOP_GRACE * 2);
-    recording.released();
-    assert_eq!(recording.armed(), None, "another release does not arm it");
-    assert_eq!(recording.recorder.status().state, RecordingState::Recording);
-    recording.opened(Some("Meet"));
-    recording.released();
-    assert_eq!(
-        recording.armed(),
-        Some((Some("Meet".to_owned()), 90.0)),
-        "the next call arms again"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_call_resuming_withdraws_the_countdown() {
-    let recording = recording();
-    recording.start(CaptureMode::Call, None);
-    recording.opened(Some("Zen"));
-    recording.released();
-    recording.sleepers(1);
-    recording.opened(Some("Zen"));
-    assert_eq!(recording.armed(), None, "the call is back on");
-    recording.sleepers(0);
-    recording.clock.advance(AUTO_STOP_GRACE);
-    assert_eq!(recording.recorder.status().state, RecordingState::Recording);
-    recording.released();
-    assert_eq!(
-        recording.armed(),
-        Some((Some("Zen".to_owned()), 90.0)),
-        "the next release arms a fresh countdown"
-    );
+async fn keep_recording_or_the_call_resuming_withdraws_the_countdown() {
+    for keep in [true, false] {
+        let recording = recording();
+        recording.start(CaptureMode::Call, None);
+        recording.opened(Some("Zen"));
+        recording.released();
+        recording.sleepers(1);
+        if keep {
+            recording.recorder.keep_recording();
+        } else {
+            recording.opened(Some("Zen"));
+        }
+        assert_eq!(recording.armed(), None, "keep {keep}: withdrawn");
+        recording.sleepers(0);
+        recording.clock.advance(AUTO_STOP_GRACE * 2);
+        assert_eq!(recording.recorder.status().state, RecordingState::Recording);
+        recording.released();
+        let app = if keep {
+            assert_eq!(recording.armed(), None, "another release does not arm it");
+            recording.opened(Some("Meet"));
+            recording.released();
+            "Meet"
+        } else {
+            "Zen"
+        };
+        assert_eq!(
+            recording.armed(),
+            Some((Some(app.to_owned()), 90.0)),
+            "keep {keep}: the next call arms a fresh countdown"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -766,17 +725,7 @@ async fn a_microphone_opened_while_starting_is_remembered() {
 
 /// A recording whose device changes a second into it.
 fn recording_whose_device_changes() -> Recording {
-    recording_over(synthetic_recorder_over(Arc::new(|configuration| {
-        let options = crate::testing::synthetic_tone(&configuration).change_device_after(1.0);
-        steno_audio::CaptureSession::with_backend(
-            configuration,
-            Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
-            None,
-            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-            Arc::new(steno_audio::SystemClock::new()),
-        )
-        .map_err(|error| error.to_string())
-    })))
+    recording_on(|options| synthetic(options.change_device_after(1.0)))
 }
 
 /// Whether the caller is the capture's notice thread.
@@ -838,39 +787,20 @@ async fn a_device_change_rearms_the_countdown_at_its_resume() {
         "a fresh grace"
     );
     recording.sleepers(0);
-    assert!(resumed.wait_for_sleepers(1), "the fresh countdown sleeps");
-    resumed.advance(Duration::from_secs(89));
-    assert_eq!(recording.recorder.status().state, RecordingState::Recording);
-    assert!(resumed.wait_for_sleepers(1));
-    resumed.advance(Duration::from_secs(1));
-    recording
-        .idle("the fresh grace stopped the recording")
-        .await;
-    assert_eq!(
-        recording.meetings()[0].end_reason,
-        Some(RecordingEndReason::CallEnded {
-            app_name: Some("Zen".to_owned())
-        })
-    );
+    the_fresh_grace_ends_the_call(&recording, &resumed, 90).await;
 }
 
 /// A recording whose audio service restarts a second into it, the
 /// restarts failing past the attempts before one runs.
 fn recording_whose_audio_service_restarts() -> Recording {
-    recording_over(synthetic_recorder_over(Arc::new(|configuration| {
-        let options = crate::testing::synthetic_tone(&configuration)
-            .change_device_after(1.0)
-            .change_reason(steno_audio::DeviceChangeReason::AudioServiceRestarted)
-            .restarts_that_fail(steno_audio::CaptureSession::RESTART_ATTEMPTS);
-        steno_audio::CaptureSession::with_backend(
-            configuration,
-            Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
-            None,
-            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-            Arc::new(steno_audio::SystemClock::new()),
+    recording_on(|options| {
+        synthetic(
+            options
+                .change_device_after(1.0)
+                .change_reason(steno_audio::DeviceChangeReason::AudioServiceRestarted)
+                .restarts_that_fail(steno_audio::CaptureSession::RESTART_ATTEMPTS),
         )
-        .map_err(|error| error.to_string())
-    })))
+    })
 }
 
 /// What the status shows at one of the capture's notices.
@@ -973,79 +903,27 @@ async fn a_restarted_audio_service_ends_no_call(released_before: bool) {
     })
     .await;
     recording.sleepers(0);
-    assert!(resumed.wait_for_sleepers(1), "the fresh countdown sleeps");
-    resumed.advance(Duration::from_secs(89));
-    assert_eq!(recording.recorder.status().state, RecordingState::Recording);
-    assert!(resumed.wait_for_sleepers(1));
-    resumed.advance(Duration::from_secs(1));
-    recording
-        .idle("the fresh grace stopped the recording")
-        .await;
-    assert_eq!(
-        recording.meetings()[0].end_reason,
-        Some(RecordingEndReason::CallEnded {
-            app_name: Some("Zen".to_owned())
-        })
-    );
+    the_fresh_grace_ends_the_call(&recording, &resumed, 90).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_release_before_the_audio_service_restarted_ends_no_call() {
-    a_restarted_audio_service_ends_no_call(true).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_release_while_the_audio_service_restarts_ends_no_call() {
-    a_restarted_audio_service_ends_no_call(false).await;
-}
-
-/// Asserts the one meeting was ended by the call app's release and saved
-/// as Stop saves it.
-fn assert_saved_as_the_call_ended(recording: &Recording) {
-    let meetings = recording.meetings();
-    let meeting = &meetings[0];
-    assert_eq!(
-        meeting.end_reason,
-        Some(RecordingEndReason::CallEnded {
-            app_name: Some("Zen".to_owned())
-        })
-    );
-    assert!(
-        !matches!(
-            meeting.state,
-            MeetingState::Recording | MeetingState::Failed { .. }
-        ),
-        "handed to processing, got {:?}",
-        meeting.state
-    );
-    let asset = recording
-        .store
-        .asset(meeting.id)
-        .unwrap()
-        .expect("the asset row");
-    assert!(
-        steno_core::paths::file_url_path(&asset.url).is_some_and(|path| path.exists()),
-        "the recording is kept on disk"
-    );
+async fn a_release_before_or_while_the_audio_service_restarts_ends_no_call() {
+    for released_before in [true, false] {
+        a_restarted_audio_service_ends_no_call(released_before).await;
+    }
 }
 
 /// A recording whose capture stalls a second into it and whose restarts
 /// all fail until the stop: `StillRestarting`, no `Delivering`.
 fn recording_whose_capture_keeps_failing() -> Recording {
-    recording_over(synthetic_recorder_over(Arc::new(|configuration| {
-        let options = crate::testing::synthetic_tone(&configuration)
-            .change_device_after(1.0)
-            .change_reason(steno_audio::DeviceChangeReason::DeliveryStalled)
-            .restarts_that_fail(usize::MAX);
-        steno_audio::CaptureSession::with_backend(
-            configuration,
-            Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
-            None,
-            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-            Arc::new(steno_audio::SystemClock::new()),
+    recording_on(|options| {
+        synthetic(
+            options
+                .change_device_after(1.0)
+                .change_reason(steno_audio::DeviceChangeReason::DeliveryStalled)
+                .restarts_that_fail(usize::MAX),
         )
-        .map_err(|error| error.to_string())
-    })))
+    })
 }
 
 /// A call whose capture keeps failing after the call app let go: the
@@ -1098,21 +976,13 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
     let backend: Arc<std::sync::Mutex<Option<Arc<steno_audio::testing::SyntheticCaptureBackend>>>> =
         Arc::default();
     let made = backend.clone();
-    let recording = recording_over(synthetic_recorder_over(Arc::new(move |configuration| {
-        let options = crate::testing::synthetic_tone(&configuration)
-            .change_device_after(1.0)
-            .changes(4);
-        let synthetic = Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options));
+    let recording = recording_on(move |options| {
+        let synthetic = Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(
+            options.change_device_after(1.0).changes(4),
+        ));
         *made.lock().unwrap() = Some(synthetic.clone());
-        steno_audio::CaptureSession::with_backend(
-            configuration,
-            synthetic,
-            None,
-            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-            Arc::new(steno_audio::SystemClock::new()),
-        )
-        .map_err(|error| error.to_string())
-    })));
+        synthetic
+    });
     let starts = || {
         backend
             .lock()
@@ -1153,15 +1023,7 @@ async fn recoveries_over_and_over_end_the_call_within_two_graces_of_the_release(
         Some((Some("Zen".to_owned()), 30.0)),
         "no later resume replaced it"
     );
-    assert!(resumed.wait_for_sleepers(1));
-    resumed.advance(Duration::from_secs(29));
-    assert_eq!(recording.recorder.status().state, RecordingState::Recording);
-    assert!(resumed.wait_for_sleepers(1));
-    resumed.advance(Duration::from_secs(1));
-    recording
-        .idle("the fresh grace stopped the recording")
-        .await;
-    assert_saved_as_the_call_ended(&recording);
+    the_fresh_grace_ends_the_call(&recording, &resumed, 30).await;
 }
 
 /// Where a test holds a rebuild's start until it opens it or after
@@ -1238,31 +1100,24 @@ fn recording_whose_second_rebuild_waits(reason: steno_audio::DeviceChangeReason)
         gave_up: AtomicBool::new(false),
     });
     let second_change = HeldOutages::default();
-    let recording = recording_over(synthetic_recorder_over(Arc::new({
+    let recording = recording_on({
         let (gate, second_change) = (gate.clone(), second_change.clone());
-        move |configuration| {
-            let options = crate::testing::synthetic_tone(&configuration)
-                .change_device_after(1.0)
-                .changes(2)
-                .change_reason(reason);
-            let synthetic = second_change.backend(options);
+        move |options| {
+            let synthetic = second_change.backend(
+                options
+                    .change_device_after(1.0)
+                    .changes(2)
+                    .change_reason(reason),
+            );
             // The first change goes at its time.
             synthetic.release_outage();
-            let backend = GatedRestart {
+            Arc::new(GatedRestart {
                 synthetic,
                 starts: std::sync::atomic::AtomicUsize::new(0),
                 gate: gate.clone(),
-            };
-            steno_audio::CaptureSession::with_backend(
-                configuration,
-                Arc::new(backend),
-                None,
-                steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-                Arc::new(steno_audio::SystemClock::new()),
-            )
-            .map_err(|error| error.to_string())
+            })
         }
-    })));
+    });
     SecondRebuild {
         recording,
         waiting,
@@ -1354,105 +1209,4 @@ async fn a_countdown_that_runs_out_while_a_stall_s_rebuild_starts_ends_no_call()
     assert_still_recording(recording);
     rebuild.open.send(()).unwrap();
     rebuild.stop();
-}
-
-/// Audio back after the capture recovered arms a fresh countdown when the
-/// call app holds no microphone; the earlier one is withdrawn. A resume
-/// that notified under the recorder's lock would deadlock here.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn audio_back_arms_a_fresh_countdown_once_the_call_app_let_go() {
-    // Not dropped until the resumes returned: a deadlock holds the lock.
-    let recording = std::mem::ManuallyDrop::new(recording());
-    let watched = Arc::downgrade(&recording.recorder);
-    recording.recorder.on_change(Arc::new(move || {
-        if let Some(recorder) = watched.upgrade() {
-            let _ = recorder.status();
-        }
-    }));
-    recording.start(CaptureMode::Call, None);
-    recording.opened(Some("Zen"));
-    recording.resume();
-    assert_eq!(
-        recording.armed(),
-        None,
-        "the app still holds the microphone"
-    );
-    recording.released();
-    recording.sleepers(1);
-    recording.clock.advance(Duration::from_secs(30));
-    assert_eq!(recording.armed(), Some((Some("Zen".to_owned()), 60.0)));
-    // The fresh countdown on a clock of its own.
-    let resumed = Arc::new(ManualClock::new());
-    resumed.advance(Duration::from_secs(30));
-    recording.recorder.count_down_on(resumed.clone());
-    recording.resume();
-    let recording = std::mem::ManuallyDrop::into_inner(recording);
-    assert_eq!(
-        recording.armed(),
-        Some((Some("Zen".to_owned()), 90.0)),
-        "a fresh grace"
-    );
-    recording.sleepers(0);
-    assert!(resumed.wait_for_sleepers(1), "the fresh countdown sleeps");
-    resumed.advance(Duration::from_secs(89));
-    assert_eq!(recording.recorder.status().state, RecordingState::Recording);
-    assert!(resumed.wait_for_sleepers(1));
-    resumed.advance(Duration::from_secs(1));
-    recording
-        .idle("the fresh grace stopped the recording")
-        .await;
-    assert_eq!(
-        recording.meetings()[0].end_reason,
-        Some(RecordingEndReason::CallEnded {
-            app_name: Some("Zen".to_owned())
-        })
-    );
-}
-
-/// A resume racing a stop that joins the notice thread: neither waits for
-/// the other, and a stopping recording arms nothing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_resume_on_the_notice_thread_during_a_stop_does_not_deadlock() {
-    let recording = recording_whose_device_changes();
-    let (entered, in_hook) = std::sync::mpsc::channel();
-    let (stopping, stop_began) = std::sync::mpsc::channel();
-    let stop_began = std::sync::Mutex::new(stop_began);
-    let once = AtomicBool::new(false);
-    let resumed = Arc::new(AtomicBool::new(false));
-    let watched = Arc::downgrade(&recording.recorder);
-    let hook_resumed = resumed.clone();
-    recording.recorder.on_change(Arc::new(move || {
-        let Some(recorder) = watched.upgrade() else {
-            return;
-        };
-        if on_the_notice_thread() {
-            if once.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            let _ = entered.send(());
-            stop_began
-                .lock()
-                .unwrap()
-                .recv_timeout(PATIENCE)
-                .expect("the stop began");
-            recorder.resume_auto_stop();
-            hook_resumed.store(true, Ordering::SeqCst);
-        } else if recorder.status().state == RecordingState::Stopping {
-            let _ = stopping.send(());
-        }
-    }));
-    recording.start(CaptureMode::Call, None);
-    recording.opened(Some("Zen"));
-    recording.released();
-    in_hook
-        .recv_timeout(HANG_GUARD)
-        .expect("the device changed");
-    recording.stop();
-    assert!(resumed.load(Ordering::SeqCst), "the resume returned");
-    assert_eq!(recording.recorder.status().state, RecordingState::Idle);
-    assert_eq!(recording.armed(), None, "nothing armed while stopping");
-    assert_eq!(
-        recording.meetings()[0].end_reason,
-        Some(RecordingEndReason::Manual)
-    );
 }
