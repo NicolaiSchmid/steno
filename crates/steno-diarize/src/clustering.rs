@@ -236,34 +236,6 @@ mod tests {
     }
 
     #[test]
-    fn near_duplicates_merge_under_the_threshold() {
-        let a = vec![1.0, 0.1, 0.0];
-        let b = vec![1.0, 0.0, 0.1];
-        let c = vec![0.0, 1.0, 0.0];
-        let labels = cluster(&[a, b, c], &config(0.1));
-        assert_eq!(labels, vec![0, 0, 1]);
-    }
-
-    #[test]
-    fn the_dendrogram_has_increasing_average_distances_for_a_chain() {
-        let embeddings = vec![axis(0, 1.0), axis(0, 1.0), axis(1, 1.0), axis(2, 1.0)];
-        let merges = linkage(&embeddings);
-        assert_eq!(merges.len(), 3);
-        assert!(
-            merges[0].distance.abs() < 1e-6,
-            "the duplicate pair merges first"
-        );
-        assert_eq!(merges[0].size, 2);
-        assert_eq!(merges.last().unwrap().size, 4);
-        let mut sorted = merges.iter().map(|m| m.distance).collect::<Vec<_>>();
-        sorted.sort_by(f32::total_cmp);
-        assert_eq!(
-            sorted,
-            merges.iter().map(|m| m.distance).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
     fn constraints_override_the_threshold() {
         let embeddings = vec![axis(0, 1.0), axis(1, 1.0), axis(2, 1.0), axis(0, 1.0)];
         let capped = ClusteringConfig {

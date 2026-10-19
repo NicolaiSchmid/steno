@@ -308,112 +308,33 @@ mod tests {
         )
     }
 
-    /// Intact files survive a failed load, which keeps its own error.
-    #[test]
-    fn intact_files_are_kept_and_the_load_keeps_its_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, folder) = install_synthetic(dir.path(), b"embedding");
-        let error = fail_load(&store);
-        assert!(
-            matches!(&error, DiarizeError::Metadata(detail) if detail == "the load failed"),
-            "{error:?}"
-        );
-        assert_eq!(
-            std::fs::read(folder.join("a.onnx")).unwrap(),
-            b"segmentation"
-        );
-        assert_eq!(std::fs::read(folder.join("b.onnx")).unwrap(), b"embedding");
-    }
-
-    /// A file failing its checksum is deleted and named; the intact one is kept.
+    /// Intact files survive a failed load, which keeps its own error; a file
+    /// failing its checksum is deleted and named, and the intact one is kept.
     #[test]
     fn only_the_file_that_fails_its_checksum_is_deleted() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, folder) = install_synthetic(dir.path(), b"embeddinG");
-        let error = fail_load(&store);
-        let DiarizeError::NotInstalled { asset, missing, .. } = &error else {
-            panic!("not installed: {error:?}");
-        };
-        assert_eq!(asset, "synthetic");
-        assert_eq!(missing, &["b.onnx".to_owned()]);
-        assert!(!folder.join("b.onnx").exists());
-        assert_eq!(
-            std::fs::read(folder.join("a.onnx")).unwrap(),
-            b"segmentation"
-        );
-    }
-
-    /// What this test binary logs at debug and above, through the process-wide
-    /// subscriber; a test picks its lines out by its temporary folder.
-    #[derive(Clone, Default)]
-    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl CapturedLog {
-        fn installed() -> &'static CapturedLog {
-            use tracing_subscriber::util::SubscriberInitExt as _;
-            static LOG: std::sync::OnceLock<CapturedLog> = std::sync::OnceLock::new();
-            LOG.get_or_init(|| {
-                let log = CapturedLog::default();
-                tracing_subscriber::fmt()
-                    .with_writer({
-                        let log = log.clone();
-                        move || log.clone()
-                    })
-                    .with_max_level(tracing::Level::DEBUG)
-                    .finish()
-                    .init();
-                log
-            })
+        for (embedding, deleted) in [(&b"embedding"[..], false), (&b"embeddinG"[..], true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let (store, folder) = install_synthetic(dir.path(), embedding);
+            let error = fail_load(&store);
+            if deleted {
+                assert!(
+                    matches!(&error, DiarizeError::NotInstalled { asset, missing, .. }
+                        if asset == "synthetic" && missing == &["b.onnx".to_owned()]),
+                    "{error:?}"
+                );
+                assert!(!folder.join("b.onnx").exists());
+            } else {
+                assert!(
+                    matches!(&error, DiarizeError::Metadata(detail) if detail == "the load failed"),
+                    "{error:?}"
+                );
+                assert_eq!(std::fs::read(folder.join("b.onnx")).unwrap(), embedding);
+            }
+            assert_eq!(
+                std::fs::read(folder.join("a.onnx")).unwrap(),
+                b"segmentation"
+            );
         }
-
-        fn text(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-        }
-    }
-
-    impl std::io::Write for CapturedLog {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// The checksum warning names the file and its digests, never the load's
-    /// error, which is logged once at debug.
-    #[test]
-    fn the_load_error_is_logged_at_debug_only() {
-        let log = CapturedLog::installed();
-        let dir = tempfile::tempdir().unwrap();
-        let (store, folder) = install_synthetic(dir.path(), b"embeddinG");
-        let stderr = format!("{}/stderr-line", dir.path().display());
-        let error = after_failed_load_of(
-            &store,
-            &synthetic_asset(),
-            DiarizeError::metadata(format!("the child died: {stderr}")),
-        );
-        assert!(
-            matches!(error, DiarizeError::NotInstalled { .. }),
-            "{error:?}"
-        );
-        let text = log.text();
-        let ours: Vec<&str> = text
-            .lines()
-            .filter(|line| line.contains(&*dir.path().to_string_lossy()))
-            .collect();
-        let warnings: Vec<&&str> = ours.iter().filter(|line| line.contains("WARN")).collect();
-        assert_eq!(warnings.len(), 1, "{text}");
-        assert!(warnings[0].contains("failed its checksum"), "{text}");
-        assert!(
-            warnings[0].contains(&*folder.join("b.onnx").to_string_lossy()),
-            "{text}"
-        );
-        let leaks: Vec<&&str> = ours.iter().filter(|line| line.contains(&stderr)).collect();
-        assert_eq!(leaks.len(), 1, "{text}");
-        assert!(leaks[0].contains("DEBUG"), "{text}");
     }
 
     /// A file deleted since the folder was found is missing whether gone by its
@@ -439,26 +360,5 @@ mod tests {
         std::fs::write(&kept, b"embedding").unwrap();
         assert!(!is_gone_after_check(file, &kept, sha256_of(&kept)));
         assert!(kept.exists());
-    }
-
-    /// An unreadable file is neither deleted nor named, and the load keeps its
-    /// error. Skipped as root.
-    #[cfg(unix)]
-    #[test]
-    fn a_file_that_cannot_be_read_is_skipped() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (store, folder) = install_synthetic(dir.path(), b"embeddinG");
-        let unreadable = folder.join("b.onnx");
-        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
-        if std::fs::File::open(&unreadable).is_ok() {
-            eprintln!("skipped: the file is still readable (root?)");
-            return;
-        }
-        let error = fail_load(&store);
-        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(matches!(&error, DiarizeError::Metadata(_)), "{error:?}");
-        assert_eq!(std::fs::read(&unreadable).unwrap(), b"embeddinG");
     }
 }

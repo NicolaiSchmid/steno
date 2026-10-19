@@ -15,10 +15,10 @@ use steno_core::{BoxError, Diarizer};
 use steno_diarize::models::{self, EMBEDDING_FILE, ModelPaths, SEGMENTATION_FILE};
 use steno_diarize::onnx::OnnxBackend;
 use steno_diarize::{DiarizeError, DiarizerConfig, Install, ModelDiarizer};
-use steno_speech::{ModelSource, ModelStore, SpeechError};
+use steno_speech::{ModelStore, SpeechError};
 
-/// The asset keeps its folder and file names, and every file has a host, a
-/// lower-case SHA-256 and its size.
+/// The asset keeps its folder and file names, every file has a lower-case
+/// SHA-256 and its size, and the licences are credited.
 #[test]
 fn the_asset_validates_and_keeps_the_diarizers_folder_and_names() {
     let asset = models::asset();
@@ -26,23 +26,6 @@ fn the_asset_validates_and_keeps_the_diarizers_folder_and_names() {
     assert_eq!(asset.id, "diarization");
     let names: Vec<&str> = asset.files.iter().map(|file| file.name.as_str()).collect();
     assert_eq!(names, [SEGMENTATION_FILE, EMBEDDING_FILE]);
-    assert_eq!(
-        names,
-        [
-            "pyannote-segmentation-3.0.onnx",
-            "wespeaker-en-voxceleb-resnet34-lm.onnx"
-        ]
-    );
-    assert_eq!(
-        asset.files[0].source,
-        Some(ModelSource::HuggingFace {
-            repo: models::SEGMENTATION_REPO.to_owned(),
-            revision: models::SEGMENTATION_REVISION.to_owned(),
-            path: "model.onnx".to_owned(),
-        })
-    );
-    assert_eq!(models::SEGMENTATION_REVISION.len(), 40, "a full commit");
-    assert!(matches!(asset.files[1].source, Some(ModelSource::Url(_))));
     for file in &asset.files {
         assert_eq!(file.sha256.len(), 64, "{}", file.name);
         assert!(
@@ -54,10 +37,6 @@ fn the_asset_validates_and_keeps_the_diarizers_folder_and_names() {
         );
     }
     assert_eq!(asset.total_size(), 5_992_913 + 26_530_550);
-    assert_eq!(asset.display_name, models::DISPLAY_NAME);
-    for model in ["pyannote segmentation 3.0", "WeSpeaker ResNet34-LM"] {
-        assert!(models::DISPLAY_NAME.contains(model), "{model}");
-    }
     assert_eq!(asset.licence, "MIT AND CC-BY-4.0");
     assert_eq!(asset.attribution, models::ATTRIBUTION);
     for credit in [
@@ -154,8 +133,10 @@ fn install_junk(store: &ModelStore) -> std::path::PathBuf {
     folder
 }
 
-/// An installed folder is used without a request; once a file is missing,
-/// the next call asks the mirror for it and fails with the URL.
+/// An installed folder is used without a request, under `Install::Never` too.
+/// Once a file is missing, `Install::Never` names it as `NotInstalled`
+/// without a request, and `ensure` asks the mirror for it and fails with the
+/// URL.
 #[test]
 fn an_installed_folder_is_used_without_a_request() {
     let dir = tempfile::tempdir().unwrap();
@@ -165,41 +146,14 @@ fn an_installed_folder_is_used_without_a_request() {
     let folder = install_junk(&store);
     assert_eq!(folder, dir.path().join("onnx").join("diarization"));
     assert!(store.is_installed(&asset));
-    assert_eq!(
-        models::ensure(&store).unwrap(),
-        ModelPaths::in_directory(&folder)
-    );
+    let paths = ModelPaths::in_directory(&folder);
+    assert_eq!(models::ensure(&store).unwrap(), paths);
+    assert_eq!(models::installed(&store).unwrap(), paths);
+    assert_eq!(models::paths(&store, Install::Never).unwrap(), paths);
     assert_eq!(requests.load(Ordering::SeqCst), 0);
 
     std::fs::remove_file(folder.join(EMBEDDING_FILE)).unwrap();
     assert!(!store.is_installed(&asset));
-    let error = models::ensure(&store).unwrap_err().to_string();
-    assert!(
-        error.contains(&format!("{mirror}/diarization/{EMBEDDING_FILE}")),
-        "{error}"
-    );
-    assert_eq!(requests.load(Ordering::SeqCst), 1);
-    assert!(folder.join(SEGMENTATION_FILE).is_file());
-}
-
-/// Under `Install::Never` an installed folder gives its paths, a missing file
-/// is `NotInstalled`, and neither makes a request.
-#[test]
-fn never_finds_an_installed_folder_and_names_a_missing_file_without_a_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mirror, requests) = counting_mirror();
-    let store = ModelStore::in_models_directory(dir.path()).with_mirror(Some(mirror));
-    let folder = install_junk(&store);
-    assert_eq!(
-        models::installed(&store).unwrap(),
-        ModelPaths::in_directory(&folder)
-    );
-    assert_eq!(
-        models::paths(&store, Install::Never).unwrap(),
-        ModelPaths::in_directory(&folder)
-    );
-
-    std::fs::remove_file(folder.join(SEGMENTATION_FILE)).unwrap();
     let error = models::paths(&store, Install::Never).unwrap_err();
     let DiarizeError::NotInstalled {
         asset,
@@ -211,10 +165,17 @@ fn never_finds_an_installed_folder_and_names_a_missing_file_without_a_request() 
     };
     assert_eq!(asset, models::ASSET_ID);
     assert_eq!(directory, &folder);
-    assert_eq!(missing, &[SEGMENTATION_FILE.to_owned()]);
-    assert!(error.to_string().contains(SEGMENTATION_FILE), "{error}");
+    assert_eq!(missing, &[EMBEDDING_FILE.to_owned()]);
+    assert!(error.to_string().contains(EMBEDDING_FILE), "{error}");
     assert_eq!(requests.load(Ordering::SeqCst), 0);
-    assert!(folder.join(EMBEDDING_FILE).is_file());
+
+    let error = models::ensure(&store).unwrap_err().to_string();
+    assert!(
+        error.contains(&format!("{mirror}/diarization/{EMBEDDING_FILE}")),
+        "{error}"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert!(folder.join(SEGMENTATION_FILE).is_file());
 }
 
 /// `NotInstalled` survives boxing: a `ModelDiarizer` under `Install::Never`

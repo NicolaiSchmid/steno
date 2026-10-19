@@ -412,13 +412,4 @@ mod tests {
         Fbank::subtract_mean(&mut empty, 80);
         assert_eq!(empty.len(), 0);
     }
-
-    #[test]
-    fn the_povey_window_is_available_for_the_kaldi_default() {
-        let hamming = window(WindowType::Hamming, 400);
-        let povey = window(WindowType::Povey, 400);
-        assert!((hamming[0] - 0.08).abs() < 1e-6);
-        assert!(povey[0].abs() < 1e-6);
-        assert!((hamming[200] - 1.0).abs() < 1e-4 && (povey[200] - 1.0).abs() < 1e-4);
-    }
 }

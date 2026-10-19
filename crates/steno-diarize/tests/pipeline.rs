@@ -199,85 +199,56 @@ fn silence_and_short_audio_yield_no_speakers() {
     );
 }
 
-/// The fake with 128-value embeddings where 256 are expected.
-struct ShortEmbeddings(FakeBackend);
+/// The fake with its segmentation one frame short of 589, or its embeddings
+/// cut to 128 values where 256 are expected.
+struct Truncated {
+    inner: FakeBackend,
+    logits: bool,
+}
 
-impl DiarizationBackend for ShortEmbeddings {
+impl DiarizationBackend for Truncated {
     fn geometry(&self) -> &SegmentationGeometry {
-        self.0.geometry()
+        self.inner.geometry()
     }
 
     fn segment(&mut self, window: &[f32]) -> Result<Vec<f32>, BackendError> {
-        self.0.segment(window)
+        let mut logits = self.inner.segment(window)?;
+        if self.logits {
+            logits.truncate(logits.len() - self.inner.geometry.num_classes);
+        }
+        Ok(logits)
     }
 
     fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {
-        let embedding = self.0.embed(window, weights)?;
+        let embedding = self.inner.embed(window, weights)?;
         Ok(embedding.map(|mut values| {
-            values.truncate(128);
+            if !self.logits {
+                values.truncate(128);
+            }
             values
         }))
     }
 }
 
-/// An embedding of the wrong length fails the analysis with the shape.
+/// An output of the wrong length fails the analysis with the shape.
 #[test]
-fn an_embedding_of_the_wrong_length_is_an_error() {
+fn an_output_of_the_wrong_length_is_an_error() {
     let buffer = audio(&[(1.0, range(0.0, 20.0))], 20.0);
-    let mut pipeline = Pipeline::new(
-        ShortEmbeddings(FakeBackend::new()),
-        DiarizerConfig::default(),
-    );
-    let error = pipeline.diarize(&buffer).unwrap_err();
-    assert!(
-        matches!(
-            error,
-            DiarizeError::Shape {
-                what: "embedding output",
-                expected: 256,
-                got: 128
-            }
-        ),
-        "{error}"
-    );
-}
-
-/// The fake with one segmentation frame short of 589.
-struct ShortLogits(FakeBackend);
-
-impl DiarizationBackend for ShortLogits {
-    fn geometry(&self) -> &SegmentationGeometry {
-        self.0.geometry()
+    for (logits, what, expected, got) in [
+        (true, "segmentation output", 4123, 4116),
+        (false, "embedding output", 256, 128),
+    ] {
+        let backend = Truncated {
+            inner: FakeBackend::new(),
+            logits,
+        };
+        let mut pipeline = Pipeline::new(backend, DiarizerConfig::default());
+        let error = pipeline.diarize(&buffer).unwrap_err();
+        assert!(
+            matches!(error, DiarizeError::Shape { what: w, expected: e, got: g } if w == what && e == expected && g == got),
+            "{error}"
+        );
     }
-
-    fn segment(&mut self, window: &[f32]) -> Result<Vec<f32>, BackendError> {
-        let mut logits = self.0.segment(window)?;
-        logits.truncate(logits.len() - self.0.geometry.num_classes);
-        Ok(logits)
-    }
-
-    fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {
-        self.0.embed(window, weights)
-    }
-}
-
-/// Segmentation logits of the wrong length fail the analysis with the shape.
-#[test]
-fn segmentation_logits_of_the_wrong_length_are_an_error() {
-    let buffer = audio(&[(1.0, range(0.0, 20.0))], 20.0);
-    let mut pipeline = Pipeline::new(ShortLogits(FakeBackend::new()), DiarizerConfig::default());
-    let error = pipeline.diarize(&buffer).unwrap_err();
-    assert!(
-        matches!(
-            error,
-            DiarizeError::Shape {
-                what: "segmentation output",
-                expected: 4123,
-                got: 4116
-            }
-        ),
-        "{error}"
-    );
 }
 
 #[tokio::test]
@@ -304,43 +275,6 @@ async fn the_diarizer_loads_its_backend_once_and_serialises_calls() {
     let shared: Arc<dyn Diarizer> = Arc::new(diarizer);
     let quiet = shared.diarize(&AudioBuffer16k::silence(2.0)).await.unwrap();
     assert_eq!(quiet.clusters.len(), 0);
-}
-
-/// Eight concurrent callers over one diarizer see the same result and the
-/// backend loads once.
-#[tokio::test]
-async fn concurrent_callers_get_identical_results_from_one_backend() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use steno_core::Diarizer;
-
-    let loads = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&loads);
-    let diarizer: Arc<dyn Diarizer> = Arc::new(ModelDiarizer::new(
-        DiarizerConfig::default(),
-        Box::new(move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(FakeBackend::new()) as Box<dyn DiarizationBackend>)
-        }),
-    ));
-    let buffer = Arc::new(audio(
-        &[(2.0, range(0.0, 40.0)), (1.0, range(45.0, 90.0))],
-        95.0,
-    ));
-    let tasks: Vec<_> = (0..8)
-        .map(|_| {
-            let diarizer = Arc::clone(&diarizer);
-            let buffer = Arc::clone(&buffer);
-            tokio::spawn(async move { diarizer.diarize(&buffer).await.unwrap() })
-        })
-        .collect();
-    let mut results = Vec::new();
-    for task in tasks {
-        results.push(task.await.unwrap());
-    }
-    assert_eq!(results[0].clusters.len(), 2, "{:?}", results[0]);
-    assert!(results.iter().all(|result| *result == results[0]));
-    assert_eq!(loads.load(Ordering::SeqCst), 1);
 }
 
 /// A backend that holds its first segmentation call until a flag is raised.

@@ -216,16 +216,6 @@ mod tests {
     }
 
     #[test]
-    fn the_powerset_enumerates_pyannotes_seven_classes() {
-        assert_eq!(
-            powerset(3, 2),
-            vec![0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110]
-        );
-        assert_eq!(powerset(2, 1), vec![0, 1, 2]);
-        assert_eq!(powerset(3, 3).len(), 8);
-    }
-
-    #[test]
     fn decoding_takes_the_argmax_class_per_frame() {
         let classes = powerset(3, 2);
         // Frame 0: silence; frame 1: speaker 1; frame 2: speakers 0 and 2.

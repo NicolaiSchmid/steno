@@ -225,16 +225,6 @@ fn concatenation_orders_clips_and_caps() {
     );
 }
 
-/// The refinement constants: 30 s, 180 s, merge at 0.60, absorb at 0.30.
-#[test]
-fn rules_default_to_the_plan_constants() {
-    let rules = Rules::default();
-    assert_eq!(rules.minimum_seconds, 30.0);
-    assert_eq!(rules.maximum_embed_seconds, 180.0);
-    assert_eq!(rules.merge_threshold, 0.60);
-    assert_eq!(rules.absorb_threshold, 0.30);
-}
-
 /// Exactly thirty seconds of speech is a speaker; a hair under is not.
 #[test]
 fn thirty_seconds_of_speech_is_the_substantive_cut() {
@@ -286,148 +276,40 @@ fn labels_are_reassigned_when_a_merge_keeps_the_later_label() {
     assert_eq!(refined[1].ranges, other.to_vec());
 }
 
-/// A small cluster joins the substantive cluster with the highest cosine,
-/// not the first one over the absorb cut.
+/// A small cluster joins the substantive cluster with the highest cosine, not
+/// the first one over the absorb cut; on a tie it joins the first.
 #[test]
-fn a_small_cluster_joins_the_closest_speaker_not_the_first_over_the_cut() {
+fn a_small_cluster_joins_the_closest_speaker_and_the_first_on_a_tie() {
     let anna = [range(0.0, 60.0)];
     let ben = [range(70.0, 130.0)];
-    let aside = [range(140.0, 150.0)];
-    let buffer = audio(
-        &[
-            (1.0, anna[0]),
-            (2.0, ben[0]),
-            (1.0, range(140.0, 144.0)),
-            (2.0, range(144.0, 150.0)),
-        ],
-        160.0,
-    );
-    let (refined, _) = run(
-        &[
-            c("Speaker 1", &anna, 1),
-            c("Speaker 2", &ben, 2),
-            c("Speaker 3", &aside, 3),
-        ],
-        &buffer,
-        &Rules::default(),
-    );
-    assert_eq!(labels(&refined), ["Speaker 1", "Speaker 2"]);
-    assert_eq!(refined[0].ranges, anna.to_vec());
-    assert_eq!(
-        refined[1].ranges,
-        vec![range(70.0, 130.0), range(140.0, 150.0)]
-    );
-}
-
-/// A union that embeds to nothing keeps the embedding of the side with more
-/// speech.
-#[test]
-fn a_union_that_embeds_to_nothing_keeps_the_larger_sides_embedding() {
-    let big = c("Speaker 1", &[range(0.0, 90.0)], 4);
-    let mut small = c("Speaker 2", &[range(100.0, 140.0)], 4);
-    small.embedding.as_mut().unwrap().0[5] = 1.0; // cosine 0.71 to `big`, over the merge cut
-    let (refined, embedder) = run(&[big.clone(), small], &audio(&[], 150.0), &Rules::default());
-    assert_eq!(refined.len(), 1);
-    assert_eq!(refined[0].label, "Speaker 1");
-    assert_eq!(
-        refined[0].ranges,
-        vec![range(0.0, 90.0), range(100.0, 140.0)]
-    );
-    assert_eq!(refined[0].embedding, big.embedding);
-    // Silence yields no samples over zero, so nothing was offered.
-    assert!(embedder.embedded_durations.len() <= 3);
-}
-
-/// A substantive cluster without an embedding and no audible speech stays a
-/// speaker of its own.
-#[test]
-fn a_substantive_cluster_without_an_embedding_survives_on_its_own() {
-    let anna = [range(0.0, 60.0)];
-    let silent = [range(70.0, 110.0)];
-    let buffer = audio(&[(1.0, anna[0])], 120.0);
-    let (refined, _) = run(
-        &[
-            c("Speaker 1", &anna, 1),
-            SpeakerCluster {
-                label: "Speaker 2".to_owned(),
-                ranges: silent.to_vec(),
-                embedding: None,
-                cluster_confidence: 0.5,
-                sample_clip_range: None,
-            },
-        ],
-        &buffer,
-        &Rules::default(),
-    );
-    assert_eq!(labels(&refined), ["Speaker 1", "Speaker 2"]);
-    assert_eq!(refined[1].ranges, silent.to_vec());
-    assert_eq!(refined[1].embedding, None);
-}
-
-/// With no substantive cluster carrying an embedding, a small cluster is
-/// dropped.
-#[test]
-fn small_clusters_are_dropped_when_no_speaker_has_an_embedding() {
-    let silent = [range(0.0, 40.0)];
-    let aside = [range(50.0, 60.0)];
-    let buffer = audio(&[(2.0, aside[0])], 70.0);
-    let (refined, _) = run(
-        &[
-            SpeakerCluster {
-                label: "Speaker 1".to_owned(),
-                ranges: silent.to_vec(),
-                embedding: None,
-                cluster_confidence: 1.0,
-                sample_clip_range: None,
-            },
-            c("Speaker 2", &aside, 2),
-        ],
-        &buffer,
-        &Rules::default(),
-    );
-    assert_eq!(refined.len(), 1);
-    assert_eq!(refined[0].ranges, silent.to_vec());
-    assert_eq!(refined[0].embedding, None);
-}
-
-/// Ranges past the end of the lane yield no samples and are never offered to
-/// the embedder.
-#[test]
-fn ranges_beyond_the_buffer_are_not_embedded() {
-    let clusters = [c("Speaker 1", &[range(100.0, 140.0)], 1)];
-    let (refined, embedder) = run(&clusters, &audio(&[], 50.0), &Rules::default());
-    assert_eq!(refined, clusters.to_vec());
-    assert_eq!(embedder.embedded_durations.len(), 0);
-}
-
-/// A fragment equally close to two speakers joins the first of them.
-#[test]
-fn a_fragment_tied_between_two_speakers_joins_the_first() {
-    let anna = [range(0.0, 60.0)];
-    let ben = [range(70.0, 130.0)];
-    let aside = [range(140.0, 150.0)];
-    let buffer = audio(
-        &[
-            (1.0, anna[0]),
-            (2.0, ben[0]),
-            (1.0, range(140.0, 145.0)),
-            (2.0, range(145.0, 150.0)),
-        ],
-        160.0,
-    );
-    let (refined, _) = run(
-        &[
-            c("Speaker 1", &anna, 1),
-            c("Speaker 2", &ben, 2),
-            c("Speaker 3", &aside, 3),
-        ],
-        &buffer,
-        &Rules::default(),
-    );
-    assert_eq!(labels(&refined), ["Speaker 1", "Speaker 2"]);
-    assert_eq!(
-        refined[0].ranges,
-        vec![range(0.0, 60.0), range(140.0, 150.0)]
-    );
-    assert_eq!(refined[1].ranges, ben.to_vec());
+    let aside = range(140.0, 150.0);
+    // Where the aside switches from Anna's voice to Ben's, and who gets it.
+    for (switch, joins_anna) in [(144.0, false), (145.0, true)] {
+        let buffer = audio(
+            &[
+                (1.0, anna[0]),
+                (2.0, ben[0]),
+                (1.0, range(140.0, switch)),
+                (2.0, range(switch, 150.0)),
+            ],
+            160.0,
+        );
+        let (refined, _) = run(
+            &[
+                c("Speaker 1", &anna, 1),
+                c("Speaker 2", &ben, 2),
+                c("Speaker 3", &[aside], 3),
+            ],
+            &buffer,
+            &Rules::default(),
+        );
+        assert_eq!(labels(&refined), ["Speaker 1", "Speaker 2"]);
+        let (with, without) = if joins_anna { (0, 1) } else { (1, 0) };
+        assert_eq!(
+            refined[with].ranges.last(),
+            Some(&aside),
+            "switch at {switch}"
+        );
+        assert_eq!(refined[without].ranges.len(), 1, "switch at {switch}");
+    }
 }

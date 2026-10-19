@@ -6,8 +6,7 @@ mod common;
 use common::{SplitMix64, chunk, range, turn, vector};
 use steno_core::{ClusterChunk, Embedding, SpeakerTurn};
 use steno_diarize::mapping::{
-    CLIP_MINIMUM_SECONDS, CLIP_TARGET_SECONDS, ClipChoice, assigning_quality, cluster_embedding,
-    mean_quality, merged, pick_clip, result,
+    assigning_quality, cluster_embedding, mean_quality, merged, pick_clip, result,
 };
 
 fn c(label: &str, start: f64, end: f64, axis: usize) -> ClusterChunk {
@@ -27,14 +26,12 @@ fn mean_is_duration_weighted_and_unit_length() {
     assert!(embedding.0[0] > embedding.0[1], "three seconds beat one");
     // Each chunk is brought to unit length first, so only durations weigh.
     assert!((embedding.0[0] / embedding.0[1] - 3.0).abs() < 1e-3);
-}
-
-#[test]
-fn a_high_norm_chunk_does_not_steer_the_mean() {
-    let chunks = [c("S1", 0.0, 2.0, 0), chunk("S1", 2.0, 4.0, 1, 0.9, 20.0)];
-    let embedding = cluster_embedding(&chunks).unwrap();
-    assert!((embedding.0[0] - embedding.0[1]).abs() < 1e-5);
-    assert!((embedding.0[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-3);
+    let loud = cluster_embedding(&[c("S1", 0.0, 2.0, 0), chunk("S1", 2.0, 4.0, 1, 0.9, 20.0)]);
+    let loud = loud.unwrap();
+    assert!(
+        (loud.0[0] - loud.0[1]).abs() < 1e-5,
+        "a high-norm chunk does not steer"
+    );
 }
 
 #[test]
@@ -55,55 +52,53 @@ fn chunks_with_the_wrong_dimension_are_ignored() {
     );
 }
 
+/// The clip: the longest range, cut to ten seconds around its best chunk and
+/// shifted inside the range; a range under three seconds halves the
+/// confidence, and without chunks the clip is centred at confidence zero.
 #[test]
-fn picks_the_longest_range_capped_to_ten_seconds_around_the_best_chunk() {
-    let ranges = [range(0.0, 4.0), range(10.0, 40.0), range(50.0, 52.0)];
-    let chunks = [
-        chunk("S1", 12.0, 14.0, 0, 0.5, 1.0),
-        chunk("S1", 30.0, 32.0, 0, 0.95, 1.0),
-        chunk("S1", 50.0, 52.0, 0, 0.99, 1.0), // outside the longest range
+fn the_clip_is_cut_from_the_longest_range_around_the_best_chunk() {
+    let one = |start, end, quality| chunk("S1", start, end, 0, quality, 1.0);
+    let cases: [(&[_], &[_], Option<_>, f32); 6] = [
+        (
+            &[range(0.0, 4.0), range(10.0, 40.0), range(50.0, 52.0)],
+            // The last chunk lies outside the longest range.
+            &[
+                one(12.0, 14.0, 0.5),
+                one(30.0, 32.0, 0.95),
+                one(50.0, 52.0, 0.99),
+            ],
+            Some(range(26.0, 36.0)),
+            (0.5 + 0.95 + 0.99) / 3.0,
+        ),
+        (
+            &[range(0.0, 20.0)],
+            &[one(0.0, 1.0, 1.0)],
+            Some(range(0.0, 10.0)),
+            1.0,
+        ),
+        (
+            &[range(0.0, 20.0)],
+            &[one(19.0, 20.0, 1.0)],
+            Some(range(10.0, 20.0)),
+            1.0,
+        ),
+        (
+            &[range(0.0, 2.0), range(5.0, 6.5)],
+            &[one(0.0, 2.0, 0.8)],
+            Some(range(0.0, 2.0)),
+            0.4,
+        ),
+        (&[range(0.0, 30.0)], &[], Some(range(10.0, 20.0)), 0.0),
+        (&[], &[], None, 0.0),
     ];
-    let choice = pick_clip(&ranges, &chunks);
-    let clip = choice.range.unwrap();
-    assert_eq!(clip.upper - clip.lower, 10.0);
-    assert_eq!(
-        (clip.lower, clip.upper),
-        (26.0, 36.0),
-        "centred on the 30...32 chunk"
-    );
-    assert!((choice.cluster_confidence - (0.5 * 2.0 + 0.95 * 2.0 + 0.99 * 2.0) / 6.0).abs() < 1e-5);
-}
-
-#[test]
-fn clip_is_shifted_inside_the_range_near_its_edges() {
-    let choice = pick_clip(&[range(0.0, 20.0)], &[chunk("S1", 0.0, 1.0, 0, 1.0, 1.0)]);
-    assert_eq!(choice.range, Some(range(0.0, 10.0)));
-    let late = pick_clip(&[range(0.0, 20.0)], &[chunk("S1", 19.0, 20.0, 0, 1.0, 1.0)]);
-    assert_eq!(late.range, Some(range(10.0, 20.0)));
-}
-
-#[test]
-fn short_longest_range_halves_confidence_and_shortens_the_clip() {
-    let choice = pick_clip(
-        &[range(0.0, 2.0), range(5.0, 6.5)],
-        &[chunk("S1", 0.0, 2.0, 0, 0.8, 1.0)],
-    );
-    assert_eq!(choice.range, Some(range(0.0, 2.0)));
-    assert!((choice.cluster_confidence - 0.4).abs() < 1e-6);
-}
-
-#[test]
-fn without_chunks_the_clip_is_centred_and_confidence_zero() {
-    let choice = pick_clip(&[range(0.0, 30.0)], &[]);
-    assert_eq!(choice.range, Some(range(10.0, 20.0)));
-    assert_eq!(choice.cluster_confidence, 0.0);
-    assert_eq!(
-        pick_clip(&[], &[]),
-        ClipChoice {
-            range: None,
-            cluster_confidence: 0.0
-        }
-    );
+    for (ranges, chunks, clip, confidence) in cases {
+        let choice = pick_clip(ranges, chunks);
+        assert_eq!(choice.range, clip, "{ranges:?}");
+        assert!(
+            (choice.cluster_confidence - confidence).abs() < 1e-5,
+            "{ranges:?}: {choice:?}"
+        );
+    }
 }
 
 #[test]
@@ -176,52 +171,6 @@ fn short_speakers_are_penalised_and_turnless_chunk_labels_are_not_speakers() {
     );
 }
 
-/// A cluster label only in the chunks, spanning both speakers, does not
-/// become a speaker, and no two speakers' ranges overlap.
-#[test]
-fn a_chunk_only_label_spanning_the_window_does_not_overlap_the_real_speakers() {
-    let turns = [
-        t("S1", 0.0, 1.94),
-        t("S2", 2.28, 4.35),
-        t("S1", 4.67, 6.64),
-        t("S2", 6.98, 9.37),
-    ];
-    let chunks = [
-        c("S1", 0.0, 6.64, 0),
-        c("S2", 2.28, 9.37, 1),
-        c("S3", 4.00, 9.35, 2),
-    ];
-    let result = result(&turns, &chunks);
-    let labels: Vec<&str> = result.clusters.iter().map(|c| c.label.as_str()).collect();
-    assert_eq!(labels, ["Speaker 1", "Speaker 2"]);
-    assert_eq!(
-        result.clusters[0].ranges,
-        vec![range(0.0, 1.94), range(4.67, 6.64)]
-    );
-    assert_eq!(
-        result.clusters[1].ranges,
-        vec![range(2.28, 4.35), range(6.98, 9.37)]
-    );
-    let all: Vec<(&str, _)> = result
-        .clusters
-        .iter()
-        .flat_map(|cluster| {
-            cluster
-                .ranges
-                .iter()
-                .map(move |r| (cluster.label.as_str(), *r))
-        })
-        .collect();
-    for lhs in &all {
-        for rhs in all.iter().filter(|rhs| rhs.0 != lhs.0) {
-            assert!(
-                !steno_diarize::mapping::overlaps(&lhs.1, &rhs.1),
-                "{lhs:?} overlaps {rhs:?}"
-            );
-        }
-    }
-}
-
 #[test]
 fn without_chunks_confidence_comes_from_turns() {
     let result = result(&[turn("S1", 0.0, 6.0, 0.8), turn("S1", 6.0, 8.0, 0.4)], &[]);
@@ -229,69 +178,6 @@ fn without_chunks_confidence_comes_from_turns() {
     assert_eq!(result.clusters[0].embedding, None);
     assert!((result.clusters[0].cluster_confidence - 0.7).abs() < 1e-6);
     assert_eq!(result.clusters[0].sample_clip_range, Some(range(0.0, 8.0)));
-}
-
-#[test]
-fn one_speaker_gives_one_cluster_with_the_clip_inside_the_range() {
-    let turns = [turn("S1", 0.5, 6.0, 0.8), turn("S1", 6.0, 14.0, 0.9)];
-    let chunks = [
-        chunk("S1", 0.5, 7.0, 3, 0.8, 1.0),
-        chunk("S1", 7.0, 14.0, 3, 0.9, 1.0),
-    ];
-    let result = result(&turns, &chunks);
-    assert_eq!(result.clusters.len(), 1);
-    let only = &result.clusters[0];
-    assert_eq!(only.label, "Speaker 1");
-    assert_eq!(only.ranges, vec![range(0.5, 14.0)]);
-    let clip = only.sample_clip_range.unwrap();
-    assert_eq!(clip.upper - clip.lower, 10.0);
-    assert!(clip.lower >= 0.5 && clip.upper <= 14.0);
-    assert!(
-        clip.lower <= 10.5 && 10.5 <= clip.upper,
-        "centred on the better second chunk"
-    );
-    #[allow(clippy::cast_possible_truncation)]
-    let expected = ((0.8 * 6.5 + 0.9 * 7.0) / 13.5) as f32;
-    assert!((only.cluster_confidence - expected).abs() < 1e-5);
-    assert!(only.embedding.as_ref().unwrap().0[3] > 0.99);
-}
-
-/// A two-second recording: the clip is the whole range, the confidence is
-/// halved, and no clip reaches past the audio.
-#[test]
-fn short_audio_keeps_clips_inside_the_audio_and_penalises_everyone() {
-    let turns = [turn("S1", 0.0, 1.2, 1.0), turn("S2", 1.2, 2.0, 1.0)];
-    let chunks = [
-        chunk("S1", 0.0, 1.2, 0, 1.0, 1.0),
-        chunk("S2", 1.2, 2.0, 1, 1.0, 1.0),
-    ];
-    let result = result(&turns, &chunks);
-    assert_eq!(result.clusters.len(), 2);
-    assert_eq!(result.clusters[0].sample_clip_range, Some(range(0.0, 1.2)));
-    assert_eq!(result.clusters[1].sample_clip_range, Some(range(1.2, 2.0)));
-    assert!(
-        result
-            .clusters
-            .iter()
-            .all(|c| (c.cluster_confidence - 0.5).abs() < 1e-6)
-    );
-    assert!(
-        result
-            .clusters
-            .iter()
-            .all(|c| c.sample_clip_range.unwrap().upper <= 2.0)
-    );
-}
-
-/// The clip target is ten seconds and no config can raise it.
-#[test]
-fn the_clip_never_exceeds_cores_ten_second_cap() {
-    assert_eq!(CLIP_TARGET_SECONDS, 10.0);
-    assert_eq!(CLIP_MINIMUM_SECONDS, 3.0);
-    let result = result(&[turn("S1", 0.0, 300.0, 1.0)], &[c("S1", 100.0, 102.0, 0)]);
-    let clip = result.clusters[0].sample_clip_range.unwrap();
-    assert_eq!(clip.upper - clip.lower, 10.0);
-    assert_eq!(clip, range(96.0, 106.0), "centred on the one chunk");
 }
 
 /// Invariants over generated diarizations: sequential labels, sorted

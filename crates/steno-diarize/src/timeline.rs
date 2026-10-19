@@ -260,6 +260,24 @@ mod tests {
 
     const GEOMETRY: SegmentationGeometry = SegmentationGeometry::PYANNOTE_3_0;
 
+    fn activity(window: usize, offset: usize, frames: Vec<u8>) -> WindowActivity {
+        WindowActivity {
+            window,
+            offset,
+            frames,
+        }
+    }
+
+    fn embedded(window: usize, local_speaker: usize, start: f64, end: f64) -> WindowEmbedding {
+        WindowEmbedding {
+            window,
+            local_speaker,
+            start,
+            end,
+            embedding: vec![1.0],
+        }
+    }
+
     fn run(cluster: usize, start: f64, end: f64, quality: f64) -> Run {
         Run {
             cluster,
@@ -339,34 +357,8 @@ mod tests {
         let analysis = Analysis {
             geometry: GEOMETRY.clone(),
             total_samples: 192_000,
-            activities: vec![
-                WindowActivity {
-                    window: 0,
-                    offset: 0,
-                    frames: frames_a,
-                },
-                WindowActivity {
-                    window: 1,
-                    offset: 32_000,
-                    frames: frames_b,
-                },
-            ],
-            embeddings: vec![
-                WindowEmbedding {
-                    window: 0,
-                    local_speaker: 0,
-                    start: 1.0,
-                    end: 9.0,
-                    embedding: vec![1.0],
-                },
-                WindowEmbedding {
-                    window: 1,
-                    local_speaker: 0,
-                    start: 2.0,
-                    end: 9.0,
-                    embedding: vec![1.0],
-                },
-            ],
+            activities: vec![activity(0, 0, frames_a), activity(1, 32_000, frames_b)],
+            embeddings: vec![embedded(0, 0, 1.0, 9.0), embedded(1, 0, 2.0, 9.0)],
         };
         let turns = turns(&analysis, &[Some(0), Some(0)], &TimelineRules::default());
         assert_eq!(turns.len(), 1);
@@ -412,34 +404,8 @@ mod tests {
         let analysis = Analysis {
             geometry: GEOMETRY.clone(),
             total_samples: 320_000,
-            activities: vec![
-                WindowActivity {
-                    window: 0,
-                    offset: 0,
-                    frames: frames_a,
-                },
-                WindowActivity {
-                    window: 1,
-                    offset: 160_000,
-                    frames: frames_b,
-                },
-            ],
-            embeddings: vec![
-                WindowEmbedding {
-                    window: 0,
-                    local_speaker: 0,
-                    start: 0.0,
-                    end: 8.0,
-                    embedding: vec![1.0],
-                },
-                WindowEmbedding {
-                    window: 1,
-                    local_speaker: 0,
-                    start: 12.0,
-                    end: 20.0,
-                    embedding: vec![1.0],
-                },
-            ],
+            activities: vec![activity(0, 0, frames_a), activity(1, 160_000, frames_b)],
+            embeddings: vec![embedded(0, 0, 0.0, 8.0), embedded(1, 0, 12.0, 20.0)],
         };
         let turns = turns(&analysis, &[Some(0), Some(0)], &TimelineRules::default());
         assert_eq!(turns.len(), 3, "{turns:?}");
@@ -459,26 +425,12 @@ mod tests {
             geometry: GEOMETRY.clone(),
             total_samples: 192_000,
             activities: vec![
-                WindowActivity {
-                    window: 0,
-                    offset: 0,
-                    frames: vec![0b11u8; 589],
-                },
-                WindowActivity {
-                    window: 1,
-                    offset: 32_000,
-                    frames: vec![0b01u8; 589],
-                },
+                activity(0, 0, vec![0b11u8; 589]),
+                activity(1, 32_000, vec![0b01u8; 589]),
             ],
             embeddings: [(0, 0), (0, 1), (1, 0)]
                 .into_iter()
-                .map(|(window, local_speaker)| WindowEmbedding {
-                    window,
-                    local_speaker,
-                    start: 0.0,
-                    end: 10.0,
-                    embedding: vec![1.0],
-                })
+                .map(|(window, local_speaker)| embedded(window, local_speaker, 0.0, 10.0))
                 .collect(),
         };
         let turns = turns(
@@ -509,40 +461,11 @@ mod tests {
         let analysis = Analysis {
             geometry: GEOMETRY.clone(),
             total_samples: 192_000,
-            activities: vec![
-                WindowActivity {
-                    window: 0,
-                    offset: 0,
-                    frames: frames_a,
-                },
-                WindowActivity {
-                    window: 1,
-                    offset: 32_000,
-                    frames: frames_b,
-                },
-            ],
+            activities: vec![activity(0, 0, frames_a), activity(1, 32_000, frames_b)],
             embeddings: vec![
-                WindowEmbedding {
-                    window: 0,
-                    local_speaker: 0,
-                    start: 2.0,
-                    end: 10.0,
-                    embedding: vec![1.0],
-                },
-                WindowEmbedding {
-                    window: 0,
-                    local_speaker: 1,
-                    start: 0.0,
-                    end: 10.0,
-                    embedding: vec![1.0],
-                },
-                WindowEmbedding {
-                    window: 1,
-                    local_speaker: 0,
-                    start: 2.0,
-                    end: 12.0,
-                    embedding: vec![1.0],
-                },
+                embedded(0, 0, 2.0, 10.0),
+                embedded(0, 1, 0.0, 10.0),
+                embedded(1, 0, 2.0, 12.0),
             ],
         };
         let turns = turns(
@@ -569,20 +492,10 @@ mod tests {
             geometry: GEOMETRY.clone(),
             total_samples: offset(windows - 1) + 160_000,
             activities: (0..windows)
-                .map(|window| WindowActivity {
-                    window,
-                    offset: offset(window),
-                    frames: vec![0b01u8; 589],
-                })
+                .map(|window| activity(window, offset(window), vec![0b01u8; 589]))
                 .collect(),
             embeddings: (0..windows)
-                .map(|window| WindowEmbedding {
-                    window,
-                    local_speaker: 0,
-                    start: 0.0,
-                    end: 10.0,
-                    embedding: vec![1.0],
-                })
+                .map(|window| embedded(window, 0, 0.0, 10.0))
                 .collect(),
         };
         let assignments: Vec<Option<usize>> = (0..windows)
@@ -608,18 +521,8 @@ mod tests {
         let analysis = Analysis {
             geometry: GEOMETRY.clone(),
             total_samples: 192_000,
-            activities: vec![WindowActivity {
-                window: 0,
-                offset: 64_000,
-                frames: vec![0b01u8; 589],
-            }],
-            embeddings: vec![WindowEmbedding {
-                window: 0,
-                local_speaker: 0,
-                start: 4.0,
-                end: 12.0,
-                embedding: vec![1.0],
-            }],
+            activities: vec![activity(0, 64_000, vec![0b01u8; 589])],
+            embeddings: vec![embedded(0, 0, 4.0, 12.0)],
         };
         let votes = Votes::tally(&analysis, &[Some(0)], 1, 711);
         assert_eq!(votes.coverage.len(), 711);
