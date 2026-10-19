@@ -73,11 +73,6 @@ exits reach the shutdown these ways:
   the pipeline, so its job could leave the meeting failed; unverified
   (WP10).
 
-On Linux an exit that went through ends the process two seconds later at
-the latest (`end_within` in `main.rs`): the single-instance plugin
-releases its bus name at the run loop's end and waits for the bus
-without a bound, so a frozen session bus would hold the exit.
-
 The speech sidecar ignores SIGINT, SIGTERM and SIGHUP on Linux and
 macOS: Ctrl-C, a closed terminal and systemd signal it with the app, and
 it would otherwise end its job first. It exits within a heartbeat once

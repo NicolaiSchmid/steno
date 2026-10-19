@@ -608,22 +608,13 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         // with no tray: the shutdown runs first.
         tauri::RunEvent::ExitRequested { code, api, .. } => {
             let handle = app.clone();
-            if exit_request(
+            if !exit_request(
                 code,
                 || tray_at_close(app),
                 &app.state::<steno_services::app::ExitGate>(),
                 exit_action(app),
                 move |code| handle.exit(code),
             ) {
-                #[cfg(target_os = "linux")]
-                if code != Some(tauri::RESTART_EXIT_CODE) {
-                    let code = code.unwrap_or(0);
-                    end_within(EXIT_GRACE, move || {
-                        steno_services::flush_logs();
-                        std::process::exit(code);
-                    });
-                }
-            } else {
                 api.prevent_exit();
             }
         }
@@ -813,24 +804,6 @@ fn exit_request(
 /// when no tray stands.
 fn exits_on(code: Option<i32>, has_tray: impl FnOnce() -> bool) -> bool {
     code.is_some() || !has_tray()
-}
-
-/// How long the run loop may take to end on Linux once an exit went
-/// through.
-#[cfg(target_os = "linux")]
-const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Calls `end` on a thread of its own `grace` from now, unless the process
-/// has ended. On Linux the single-instance plugin waits without a bound
-/// for the session bus at `RunEvent::Exit`, so a frozen bus would hold the
-/// exit; ending early loses nothing. An update's relaunch is left to the
-/// teardown.
-#[cfg(target_os = "linux")]
-fn end_within(grace: std::time::Duration, end: impl FnOnce() + Send + 'static) {
-    std::thread::spawn(move || {
-        std::thread::sleep(grace);
-        end();
-    });
 }
 
 /// Whether the session bus is named (`DBUS_SESSION_BUS_ADDRESS`).
@@ -1277,21 +1250,6 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "{status}");
-    }
-
-    /// An exit that went through ends the process `EXIT_GRACE` later at the
-    /// latest, never sooner.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn an_exit_ends_once_the_grace_has_passed() {
-        let grace = std::time::Duration::from_millis(100);
-        let started = std::time::Instant::now();
-        let (ended, seen) = std::sync::mpsc::channel();
-        end_within(grace, move || ended.send(started.elapsed()).unwrap());
-        let after = seen
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("ended");
-        assert!(after >= grace, "{after:?}");
     }
 
     #[test]
