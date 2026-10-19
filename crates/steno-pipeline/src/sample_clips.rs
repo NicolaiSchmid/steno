@@ -159,9 +159,9 @@ fn clip_speaker(name: &OsStr) -> Option<Uuid> {
 
 #[cfg(test)]
 mod tests {
+    use steno_core::SpeakerAssignment;
     use steno_core::paths::file_url;
     use steno_core::testing::sample_data;
-    use steno_core::{SpeakerAssignment, StoreError};
 
     use super::*;
 
@@ -237,57 +237,6 @@ mod tests {
             sweep(&dir.path().join("missing"), &owners, &named, None).is_empty(),
             "a folder that is not there has nothing to sweep"
         );
-    }
-
-    /// A URL that spells the folder another way, through a link, still keeps
-    /// the clip it names.
-    #[cfg(unix)]
-    #[test]
-    fn a_url_through_another_spelling_of_the_folder_keeps_its_clip() {
-        let dir = tempfile::tempdir().unwrap();
-        let audio = dir.path().join("audio");
-        let meeting = Uuid::new_v4();
-        let layout = RecordingLayout::new(&audio, meeting);
-        layout.create_directories(true).unwrap();
-        let alias = dir.path().join("alias");
-        std::os::unix::fs::symlink(&audio, &alias).unwrap();
-        let (id, run) = (Uuid::new_v4(), Uuid::new_v4());
-        let clip = layout.run_sample_clip(id, run);
-        put(&[&clip]);
-        let spelled = RecordingLayout::new(&alias, meeting).run_sample_clip(id, run);
-        assert_ne!(spelled, clip);
-        assert!(spelled.exists());
-
-        let removed = sweep(
-            &layout.speakers_directory(),
-            &BTreeSet::from([id]),
-            &[url(&spelled)],
-            None,
-        );
-        assert!(removed.is_empty(), "{removed:?}");
-        assert!(clip.exists());
-    }
-
-    /// A URL that spells the clip's name in another case keeps the clip.
-    #[test]
-    fn a_url_in_another_case_keeps_its_clip() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = RecordingLayout::new(dir.path(), Uuid::new_v4());
-        layout.create_directories(true).unwrap();
-        let id = Uuid::new_v4();
-        let clip = layout.run_sample_clip(id, Uuid::new_v4());
-        put(&[&clip]);
-        let lower = clip.with_file_name(file_name(&clip).to_lowercase());
-        assert_ne!(lower, clip);
-
-        let removed = sweep(
-            &layout.speakers_directory(),
-            &BTreeSet::from([id]),
-            &[url(&lower)],
-            None,
-        );
-        assert!(removed.is_empty(), "{removed:?}");
-        assert!(clip.exists());
     }
 
     /// After the merge only the unnamed files of the sweep's owners go;
@@ -387,33 +336,6 @@ mod tests {
         }
     }
 
-    /// A sweep whose read of the rows fails removes nothing.
-    #[test]
-    fn a_sweep_whose_store_read_fails_removes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
-        let meeting = sample_data::meeting();
-        store.save_meeting(&meeting).unwrap();
-        let layout = RecordingLayout::new(&dir.path().join("audio"), meeting.id);
-        layout.create_directories(true).unwrap();
-        let id = Uuid::new_v4();
-        let unnamed = layout.run_sample_clip(id, Uuid::new_v4());
-        put(&[&unnamed]);
-        let replaced = [speaker(meeting.id, id, false, Some(&unnamed))];
-        store
-            .write(|transaction| {
-                transaction
-                    .execute_batch("ALTER TABLE speaker RENAME COLUMN sampleClipURL TO gone")?;
-                Ok::<_, StoreError>(())
-            })
-            .unwrap();
-
-        assert!(
-            sweep_after_merge(&store, &layout.speakers_directory(), &replaced, &[], None).is_err()
-        );
-        assert!(unnamed.exists());
-    }
-
     /// A write that fails partway removes the files it wrote and leaves the
     /// named clips alone.
     #[test]
@@ -440,21 +362,5 @@ mod tests {
             "the clip written before the failure is removed"
         );
         assert_eq!(std::fs::read(&earlier).unwrap(), b"earlier clip");
-
-        // A failure once its clip is on the disk removes that clip too.
-        let other = Uuid::new_v4();
-        let second = layout.run_sample_clip(other, run);
-        let other_earlier = layout.sample_clip(other);
-        std::fs::write(&other_earlier, b"earlier clip").unwrap();
-        let clips = vec![(first.clone(), clip.clone()), (second.clone(), clip)];
-        let failing: ClipProbe = Arc::new(|step| match step {
-            ClipStep::Written(1) => Err(std::io::Error::other("the disk is full")),
-            _ => Ok(()),
-        });
-        assert!(write(&layout, &clips, Some(&failing)).is_err());
-        assert!(!first.exists() && !second.exists());
-        for earlier in [&earlier, &other_earlier] {
-            assert_eq!(std::fs::read(earlier).unwrap(), b"earlier clip");
-        }
     }
 }

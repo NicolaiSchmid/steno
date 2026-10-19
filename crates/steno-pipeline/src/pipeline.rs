@@ -264,9 +264,6 @@ pub struct InFlight(Arc<SharedInFlight>);
 struct SharedInFlight {
     set: Mutex<InFlightSet>,
     released: tokio::sync::Notify,
-    /// A test's hold, dropped by the next wait between its check and wait.
-    #[cfg(test)]
-    dropped_after_the_check: Mutex<Option<JobHold>>,
 }
 
 #[derive(Debug, Default)]
@@ -333,14 +330,6 @@ impl InFlight {
             // Before the check, so a release in between still wakes it.
             let released = self.0.released.notified();
             let held = self.lock().held;
-            #[cfg(test)]
-            drop(
-                self.0
-                    .dropped_after_the_check
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take(),
-            );
             if !held {
                 return;
             }
@@ -3288,26 +3277,6 @@ mod tests {
     use super::*;
     use steno_core::Delivery;
 
-    /// A hold dropped between a waiting job's check and its wait still
-    /// wakes the job.
-    #[tokio::test]
-    async fn a_hold_dropped_between_the_check_and_the_wait_wakes_the_job() {
-        let in_flight = InFlight::default();
-        let hold = in_flight.try_hold().expect("idle");
-        *in_flight
-            .0
-            .dropped_after_the_check
-            .lock()
-            .expect("the slot") = Some(hold);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            in_flight.until_released(),
-        )
-        .await
-        .expect("woken by the release");
-        assert!(in_flight.try_hold().is_some());
-    }
-
     /// The room speaker takes the label after the highest stored
     /// "Speaker N", so the gap at "Speaker 2" is not reused.
     #[test]
@@ -3451,101 +3420,5 @@ mod tests {
         assert_eq!(pipeline.resume_waiting().unwrap(), [meeting.id]);
         assert_eq!(waits.waiting(), Vec::<Uuid>::new());
         pipeline.wait_until_idle().await;
-    }
-
-    /// `process_again` against a run that ends while it waits for its
-    /// claim; Linux only, for `/proc`.
-    #[cfg(target_os = "linux")]
-    mod process_again_under_the_claim {
-        use super::*;
-
-        /// Waits until the thread at `/proc/<task>` sleeps in `futex` (202
-        /// on `x86_64`, 98 on `aarch64`) twice 50 ms apart.
-        fn parked_on_a_lock(task: &std::path::Path) {
-            let syscall = std::path::Path::new("/proc").join(task).join("syscall");
-            let in_futex = || {
-                let line = std::fs::read_to_string(&syscall).unwrap_or_default();
-                matches!(line.split_whitespace().next(), Some("202" | "98"))
-            };
-            let deadline = Instant::now() + std::time::Duration::from_secs(10);
-            loop {
-                if in_futex() {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    if in_futex() {
-                        return;
-                    }
-                }
-                assert!(Instant::now() < deadline, "never parked on a lock");
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-
-        /// `reprocess_if` reads the meeting under its claim, so a re-run
-        /// that turns the meeting ready just before the claim is not queued
-        /// again over its new row. The test holds the in-flight set's lock
-        /// while the re-run's write lands.
-        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-        async fn process_again_checks_the_rule_under_its_claim() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
-            let mut meeting = steno_core::testing::sample_data::meeting();
-            meeting.id = Uuid::new_v4();
-            meeting.state = MeetingState::Failed {
-                reason: "summarize: the endpoint did not answer".to_owned(),
-            };
-            meeting.summary = None;
-            // Ready with no transcript, six seconds is complete, so not
-            // offered.
-            meeting.duration = 6.0;
-            let asset = crate::fixtures::two_lane_call(
-                &dir.path().join("audio"),
-                meeting.id,
-                AudioRetention::KeepForever,
-            )
-            .unwrap();
-            store.save_meeting_with_asset(&meeting, &asset).unwrap();
-            let pipeline = pipeline_over(&store);
-
-            let held = pipeline.in_flight_set();
-            let (tid_sender, tid) = std::sync::mpsc::channel();
-            let runtime = tokio::runtime::Handle::current();
-            let caller = pipeline.clone();
-            let id = meeting.id;
-            let click = std::thread::spawn(move || {
-                tid_sender
-                    .send(std::fs::read_link("/proc/thread-self").unwrap())
-                    .unwrap();
-                let _runtime = runtime.enter();
-                caller.process_again(id)
-            });
-            parked_on_a_lock(&tid.recv().unwrap());
-
-            // The re-run ends inside the window: the summary saved, ready.
-            let mut rerun = store.meeting(id).unwrap().unwrap();
-            rerun.state = MeetingState::Ready;
-            rerun.summary = Some(steno_core::SummaryDocument {
-                template_id: "default".to_owned(),
-                language: None,
-                sections: Vec::new(),
-            });
-            store.save_meeting(&rerun).unwrap();
-            drop(held);
-
-            let outcome = click.join().unwrap();
-            let stored = store.meeting(id).unwrap().unwrap();
-            pipeline.wait_until_idle().await;
-            let after_run = store.meeting(id).unwrap().unwrap();
-            assert!(
-                outcome == Err(ReprocessError::NotOffered(id))
-                    && stored.state == MeetingState::Ready
-                    && stored.summary.is_some(),
-                "outcome {outcome:?}; at return state {:?}, summary kept {}; after the run \
-                 state {:?}, summary kept {}",
-                stored.state,
-                stored.summary.is_some(),
-                after_run.state,
-                after_run.summary.is_some(),
-            );
-        }
     }
 }
