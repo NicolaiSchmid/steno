@@ -2354,10 +2354,11 @@ enum Refusal {
     Diarize,
 }
 
-/// Fakes that refuse at one point with `PipelineFailure::models_missing`
-/// until `installed` is set.
+/// Fakes whose models go at one point: the first call there removes them
+/// and fails as a load of a missing file does; the pipeline's install check
+/// reads [`Self::installed`]. [`Self::missing`] starts without them.
 struct Uninstalled {
-    refusal: Refusal,
+    refusal: std::sync::Mutex<Option<Refusal>>,
     installed: std::sync::atomic::AtomicBool,
     engine: FakeSpeechEngine,
     diarizer: FakeDiarizer,
@@ -2366,11 +2367,24 @@ struct Uninstalled {
 impl Uninstalled {
     fn refusing(refusal: Refusal) -> Arc<Self> {
         Arc::new(Uninstalled {
-            refusal,
+            refusal: Some(refusal).into(),
+            installed: true.into(),
+            engine: FakeSpeechEngine::default(),
+            diarizer: FakeDiarizer::default(),
+        })
+    }
+
+    fn missing() -> Arc<Self> {
+        Arc::new(Uninstalled {
+            refusal: None.into(),
             installed: false.into(),
             engine: FakeSpeechEngine::default(),
             diarizer: FakeDiarizer::default(),
         })
+    }
+
+    fn installed(&self) -> bool {
+        self.installed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn install(&self) {
@@ -2378,15 +2392,21 @@ impl Uninstalled {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    fn check(
-        &self,
-        at: Refusal,
-        stage: PipelineStage,
-    ) -> steno_core::protocols::BoundaryResult<()> {
-        if at == self.refusal && !self.installed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(Box::new(steno_pipeline::PipelineFailure::models_missing(
-                stage,
-            )));
+    /// The pipeline over `world` on these fakes, checking [`Self::installed`].
+    fn dependencies(self: &Arc<Self>, world: &World) -> PipelineDependencies {
+        let mut dependencies = with_engine(world, self.clone());
+        dependencies.diarizer = Arc::new(UninstalledDiarizer(self.clone()));
+        let gate = self.clone();
+        dependencies.with_models_installed(Arc::new(move || gate.installed()))
+    }
+
+    fn check(&self, at: Refusal) -> steno_core::protocols::BoundaryResult<()> {
+        let mut refusal = self.refusal.lock().unwrap();
+        if *refusal == Some(at) {
+            *refusal = None;
+            self.installed
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err("loading the model: no such file".into());
         }
         Ok(())
     }
@@ -2403,7 +2423,7 @@ impl steno_core::SpeechEngine for Uninstalled {
     }
 
     async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
-        self.check(Refusal::SpeechPrepare, PipelineStage::Decode)?;
+        self.check(Refusal::SpeechPrepare)?;
         self.engine.prepare().await
     }
 
@@ -2412,7 +2432,7 @@ impl steno_core::SpeechEngine for Uninstalled {
         audio: &steno_core::AudioBuffer16k,
         hint: Option<&steno_core::LanguageTag>,
     ) -> steno_core::protocols::BoundaryResult<Vec<RawSegment>> {
-        self.check(Refusal::Transcribe, PipelineStage::Transcribe)?;
+        self.check(Refusal::Transcribe)?;
         self.engine.transcribe(audio, hint).await
     }
 }
@@ -2422,8 +2442,7 @@ struct UninstalledDiarizer(Arc<Uninstalled>);
 #[async_trait]
 impl steno_core::Diarizer for UninstalledDiarizer {
     async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
-        self.0
-            .check(Refusal::DiarizerPrepare, PipelineStage::Diarize)?;
+        self.0.check(Refusal::DiarizerPrepare)?;
         self.0.diarizer.prepare().await
     }
 
@@ -2431,26 +2450,27 @@ impl steno_core::Diarizer for UninstalledDiarizer {
         &self,
         audio: &steno_core::AudioBuffer16k,
     ) -> steno_core::protocols::BoundaryResult<steno_core::DiarizationResult> {
-        self.0.check(Refusal::Diarize, PipelineStage::Diarize)?;
+        self.0.check(Refusal::Diarize)?;
         self.0.diarizer.diarize(audio).await
     }
 }
 
-/// A run refused for a missing model, at any of the four gates, leaves the
-/// meeting `queued` with no failure reason and posts `ModelsMissing`; once
-/// installed, `resume_unfinished` takes it to `ready`.
+/// A run whose models are missing from the start, or go during the run at
+/// any of the four engine and diarizer calls, leaves the meeting `queued`
+/// with no failure reason and posts `ModelsMissing`; once installed,
+/// `resume_unfinished` takes it to `ready`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_refused_for_missing_models_stays_queued_and_resumes_once_they_are_installed() {
     for refusal in [
-        Refusal::SpeechPrepare,
-        Refusal::Transcribe,
-        Refusal::DiarizerPrepare,
-        Refusal::Diarize,
+        None,
+        Some(Refusal::SpeechPrepare),
+        Some(Refusal::Transcribe),
+        Some(Refusal::DiarizerPrepare),
+        Some(Refusal::Diarize),
     ] {
         let world = world(false, None, AudioRetention::KeepForever);
-        let gate = Uninstalled::refusing(refusal);
-        let mut dependencies = with_engine(&world, gate.clone());
-        dependencies.diarizer = Arc::new(UninstalledDiarizer(gate.clone()));
+        let gate = refusal.map_or_else(Uninstalled::missing, Uninstalled::refusing);
+        let dependencies = gate.dependencies(&world);
         let pipeline = ProcessingPipeline::new(dependencies);
         let mut events = world.events.subscribe();
         let meeting = enqueue_call(&world, &pipeline);
@@ -2470,6 +2490,9 @@ async fn a_run_refused_for_missing_models_stays_queued_and_resumes_once_they_are
             "{refusal:?}: {posted:?}"
         );
         assert!(pipeline.in_flight().is_empty(), "{refusal:?}");
+        if refusal.is_none() {
+            assert_eq!(gate.engine.preparations.count(), 0, "nothing loads");
+        }
 
         gate.install();
         assert_eq!(pipeline.resume_unfinished().unwrap(), [meeting]);
@@ -2488,7 +2511,7 @@ async fn a_run_refused_for_missing_models_stays_queued_and_resumes_once_they_are
 async fn process_returns_the_models_missing_refusal() {
     let world = world(false, None, AudioRetention::KeepForever);
     let gate = Uninstalled::refusing(Refusal::Transcribe);
-    let pipeline = ProcessingPipeline::new(with_engine(&world, gate));
+    let pipeline = ProcessingPipeline::new(gate.dependencies(&world));
     let mut meeting = call_meeting(world.now);
     meeting.id = Uuid::new_v4();
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
@@ -2509,8 +2532,8 @@ async fn process_returns_the_models_missing_refusal() {
 #[tokio::test(flavor = "multi_thread")]
 async fn process_again_with_models_missing_parks_the_failed_meeting_with_its_audio() {
     let world = world(false, None, AudioRetention::KeepDays(30));
-    let gate = Uninstalled::refusing(Refusal::Transcribe);
-    let pipeline = ProcessingPipeline::new(with_engine(&world, gate.clone()));
+    let gate = Uninstalled::missing();
+    let pipeline = ProcessingPipeline::new(gate.dependencies(&world));
     let already = enqueue_refused_call(&world, &pipeline).await;
     let mut meeting = call_meeting(world.now);
     meeting.state = MeetingState::Failed {

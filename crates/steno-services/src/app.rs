@@ -25,10 +25,10 @@ use crate::calendar::Calendar;
 use crate::detection::{DetectionController, DetectionOptions};
 use crate::handover::{GatedHandover, IdentitySource, ListenerHandover, start_if_paired};
 use crate::llm::{ClientLlmService, codex_store};
-use crate::model_gate::ResumingSpeechModels;
 use crate::permissions::SystemPermissions;
 use crate::pipeline::{
-    BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
+    BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies,
+    ResumingSpeechModels, run_sweep,
 };
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::qr::PngQrEncoder;
@@ -283,7 +283,8 @@ pub fn pipeline_dependencies(
         events.clone(),
     )
     .with_speech_engine(speech_engine)
-    .with_speech_in_process(engine_runtime.runs_in_process());
+    .with_speech_in_process(engine_runtime.runs_in_process())
+    .with_models_installed(engines.installed_check(engine_runtime));
     let dependencies = match passes {
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
         None => dependencies,
@@ -1938,11 +1939,8 @@ mod tests {
 
         let app = build(options_under(&dir.path().join("support"))).unwrap();
         let refused = async || {
-            let engine = app.pipeline.current().dependencies().speech_engine.clone();
-            let error = engine.prepare().await.unwrap_err();
-            error
-                .downcast_ref::<steno_pipeline::PipelineFailure>()
-                .is_some_and(steno_pipeline::PipelineFailure::is_models_missing)
+            let pipeline = app.pipeline.current();
+            pipeline.warm_up().await.unwrap_err().is_models_missing()
         };
         assert!(refused().await, "the empty directory");
 

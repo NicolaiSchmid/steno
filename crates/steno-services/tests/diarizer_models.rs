@@ -183,7 +183,7 @@ struct World {
 }
 
 /// [`world_with`] over the diarizer `diarizer_in` builds under `install`
-/// in a sidecar engine of its own, with no gate in front.
+/// in a sidecar engine of its own, with no install check.
 fn world(mirror: &Mirror, install: Install) -> World {
     world_with(mirror, &[], |setup| {
         steno_services::speech::diarizer_in(
@@ -194,11 +194,20 @@ fn world(mirror: &Mirror, install: Install) -> World {
 }
 
 /// [`world_with`] over the diarizer the app's pipelines run, its child
-/// started with `sidecar_args`.
+/// started with `sidecar_args`, and the app's install check.
 fn app_world(mirror: &Mirror, sidecar_args: &[&str]) -> World {
-    world_with(mirror, sidecar_args, |setup| {
+    let mut world = world_with(mirror, sidecar_args, |setup| {
         SpeechEngines::new(setup.clone()).diarizer()
-    })
+    });
+    let store = world.setup.model_store();
+    world.pipeline = ProcessingPipeline::new(
+        world
+            .pipeline
+            .dependencies()
+            .clone()
+            .with_models_installed(Arc::new(move || models::installed(&store).is_ok())),
+    );
+    world
 }
 
 /// A six-second call, kept forever, processed with the diarizer

@@ -20,7 +20,6 @@ use steno_speech::{
     ModelStore, OnnxSpeechEngine, SidecarConfig, SidecarSpeechEngine, SpeechRuntime, SpeechSettings,
 };
 
-use crate::model_gate::{GatedDiarizer, GatedSpeechEngine, InstalledCheck};
 use crate::pipeline::ModelsInstalled;
 
 /// Threads for one ONNX operator.
@@ -266,9 +265,9 @@ struct KeptEngines {
 }
 
 impl SpeechEngines {
-    /// The engines over `setup` and the diarizer, each behind a gate that
-    /// refuses a call while its models are not installed; no pipeline run
-    /// downloads a model ([`crate::model_gate`]).
+    /// The engines over `setup` and the diarizer, which never download; a
+    /// pipeline refuses to run while their models are not installed
+    /// ([`Self::installed_check`]).
     #[must_use]
     pub fn new(setup: SpeechSetup) -> Self {
         let speech = ModelStoreSpeechModels::new(&setup);
@@ -280,11 +279,11 @@ impl SpeechEngines {
         )
     }
 
-    /// [`Self::new`] with the gates' checks passed in, for the tests.
+    /// [`Self::new`] with the install checks passed in, for the tests.
     pub(crate) fn with_checks(
         mut setup: SpeechSetup,
         speech_installed: ModelsInstalled,
-        diarizer_installed: InstalledCheck,
+        diarizer_installed: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Self {
         // So a setup that allows downloads (the CLI's) never reaches the app's
         // engines.
@@ -292,21 +291,9 @@ impl SpeechEngines {
         let sidecar = Arc::new(sidecar_engine(&setup));
         #[cfg(test)]
         let for_tests = sidecar.clone();
-        let diarizer = Arc::new(GatedDiarizer::new(
-            Self::app_diarizer(sidecar.clone()),
-            diarizer_installed.clone(),
-        ));
+        let diarizer = Self::app_diarizer(sidecar.clone());
         let over = setup.clone();
-        let build = Box::new({
-            let speech_installed = speech_installed.clone();
-            move |runtime| {
-                let installed = speech_installed.clone();
-                Arc::new(GatedSpeechEngine::new(
-                    engine_on(runtime, &over, &sidecar),
-                    Arc::new(move || installed(runtime)),
-                )) as Arc<dyn SpeechEngine>
-            }
-        });
+        let build = Box::new(move |runtime| engine_on(runtime, &over, &sidecar));
         let installed = Arc::new(move |runtime| speech_installed(runtime) && diarizer_installed());
         Self {
             #[cfg(test)]
@@ -346,12 +333,18 @@ impl SpeechEngines {
         }
     }
 
-    /// Whether the gates would let a pipeline on `runtime` through now: its
-    /// speech models and the diarizer's are installed. Always for the tests'
-    /// ungated engines.
+    /// Whether a pipeline on `runtime` may run now: its speech models and
+    /// the diarizer's are installed. Always for the tests' engines.
     #[must_use]
     pub fn models_installed(&self, runtime: SpeechRuntime) -> bool {
         (self.installed)(runtime)
+    }
+
+    /// [`Self::models_installed`] for `runtime`, as the pipeline's check.
+    #[must_use]
+    pub fn installed_check(&self, runtime: SpeechRuntime) -> steno_pipeline::ModelsInstalled {
+        let installed = self.installed.clone();
+        Arc::new(move || installed(runtime))
     }
 
     /// What the engines are built from.
@@ -884,6 +877,48 @@ mod tests {
 
     use super::*;
 
+    /// The app's engines over an empty models directory, from a setup that
+    /// allows downloads: they report the models missing, every load fails,
+    /// and nothing asks the mirror for a file or writes one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_apps_engines_refuse_missing_models_and_download_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut setup = testing::setup(
+            dir.path(),
+            SpeechSettings {
+                models_mirror: Some(format!("http://{}", listener.local_addr().unwrap())),
+                ..SpeechSettings::default()
+            },
+        );
+        setup.sidecar.install = Install::Allowed;
+        let engines = SpeechEngines::new(setup);
+        assert_eq!(engines.setup().sidecar.install, Install::Never);
+        for runtime in [SpeechRuntime::CoreMlInProcess, SpeechRuntime::OnnxSidecar] {
+            assert!(!engines.models_installed(runtime), "{runtime:?}");
+            assert!(!(engines.installed_check(runtime))(), "{runtime:?}");
+            let engine = engines.engine(runtime);
+            assert!(engine.prepare().await.is_err(), "{runtime:?}");
+            assert!(
+                engine
+                    .transcribe(&AudioBuffer16k::silence(1.0), None)
+                    .await
+                    .is_err(),
+                "{runtime:?}"
+            );
+        }
+        assert!(engines.diarizer().prepare().await.is_err());
+        assert!(
+            matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "no download was asked for"
+        );
+        assert!(
+            testing::files_under(dir.path()).is_empty(),
+            "nothing was written to the models directory"
+        );
+    }
+
     /// The guard takes paths inside the temp directory and refuses the root,
     /// a look-alike sibling and a path that climbs out.
     #[test]
@@ -1175,7 +1210,7 @@ mod tests {
     }
 
     /// The pipelines' diarizer never downloads: over an empty directory its
-    /// `prepare` is the models-missing refusal and the mirror gets no
+    /// `prepare` says the models are not installed and the mirror gets no
     /// request.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_apps_diarizer_never_downloads_its_models() {
@@ -1193,11 +1228,11 @@ mod tests {
             Arc::new(|| true),
         );
         let error = engines.diarizer().prepare().await.unwrap_err();
-        assert_eq!(
-            error.downcast_ref::<steno_pipeline::PipelineFailure>(),
-            Some(&steno_pipeline::PipelineFailure::models_missing(
-                steno_core::PipelineStage::Diarize
-            )),
+        assert!(
+            matches!(
+                error.downcast_ref::<steno_diarize::DiarizeError>(),
+                Some(steno_diarize::DiarizeError::NotInstalled { .. })
+            ),
             "{error}"
         );
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
