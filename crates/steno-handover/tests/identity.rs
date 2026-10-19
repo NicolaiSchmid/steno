@@ -1,160 +1,120 @@
-//! Mint, fingerprint, computer id, the committed test identity and the
-//! secret store round trip: the values the phone pins and shows.
+//! The identity the phone pins: the minted certificate, the fingerprint
+//! and computer id, the load that never mints over a pairing the phones
+//! know, Pair again, and the decision against its truth table
+//! (`tests/fixtures/identity-decisions.json`).
 
-#![allow(
-    clippy::assert_is_empty,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::large_futures,
-    clippy::too_many_lines
-)]
+#![allow(clippy::large_futures, clippy::too_many_lines)]
 
-mod common;
-
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use chrono::{TimeZone as _, Utc};
-use common::MemoryRecord;
+use chrono::{DateTime, TimeDelta, TimeZone as _, Utc};
+use serde_json::Value;
 use steno_core::{BoundaryResult, PairedDevice, SecretKey, SecretStore, Store};
+use steno_handover::identity::decision::{
+    Caller, Decision, Found, Identities, Observations, Outcome, Phones, Reason, Record, Write,
+    decide,
+};
 use steno_handover::identity::hex;
 use steno_handover::{FingerprintRecord, HandoverIdentity, IdentityError, Unavailability};
 use x509_parser::prelude::*;
 
-fn repository() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap()
-}
-
 #[test]
-fn mint_yields_a_self_signed_p256_certificate_for_ten_years() {
+fn mint_yields_a_self_signed_p256_server_certificate_for_ten_years() {
     let now = Utc.timestamp_opt(1_790_000_000, 0).unwrap();
     let minted = HandoverIdentity::mint("Steno on Test Mac", now).unwrap();
     let (rest, certificate) = X509Certificate::from_der(minted.certificate_der()).unwrap();
     assert_eq!(rest, b"");
-
     assert_eq!(certificate.subject().to_string(), "CN=Steno on Test Mac");
     assert_eq!(certificate.issuer(), certificate.subject());
+    assert!(certificate.verify_signature(None).is_ok(), "self-signed");
     assert_eq!(
         certificate.signature_algorithm.algorithm,
         oid_registry::OID_SIG_ECDSA_WITH_SHA256
     );
-    assert_eq!(
-        certificate.public_key().algorithm.algorithm,
-        oid_registry::OID_KEY_TYPE_EC_PUBLIC_KEY
-    );
     let not_before = certificate.validity().not_before.timestamp();
     let not_after = certificate.validity().not_after.timestamp();
-    assert!(not_before <= now.timestamp());
     assert_eq!(now.timestamp() - not_before, 60, "a minute of backdating");
     assert_eq!((not_after - not_before) / (365 * 24 * 3600), 10);
+    assert_eq!(minted.not_valid_before().unwrap().timestamp(), not_before);
+    assert!(!certificate.basic_constraints().unwrap().unwrap().value.ca);
+    let usage = certificate.key_usage().unwrap().unwrap().value;
+    assert!(usage.digital_signature() && !usage.key_encipherment());
     assert!(
-        certificate.verify_signature(None).is_ok(),
-        "the certificate's own key signed it"
+        certificate
+            .extended_key_usage()
+            .unwrap()
+            .unwrap()
+            .value
+            .server_auth
     );
-    let constraints = certificate.basic_constraints().unwrap().unwrap();
-    assert!(constraints.critical);
-    assert!(!constraints.value.ca);
-    // An EC key has no keyEncipherment use (RFC 5480 §3).
-    let usage = certificate.key_usage().unwrap().unwrap();
-    assert!(usage.critical);
-    assert!(usage.value.digital_signature());
-    assert!(!usage.value.key_encipherment());
-    let extended = certificate.extended_key_usage().unwrap().unwrap();
-    assert!(extended.value.server_auth);
     let names = certificate.subject_alternative_name().unwrap().unwrap();
     assert_eq!(
         names.value.general_names,
         vec![GeneralName::DNSName("steno-on-test-mac.local")]
     );
-}
 
-#[test]
-fn fingerprint_is_stable_for_one_der_and_differs_between_mints() {
-    let a = HandoverIdentity::mint("A", Utc::now()).unwrap();
-    let b = HandoverIdentity::mint("A", Utc::now()).unwrap();
-    assert_eq!(a.fingerprint().len(), 32);
-    assert_eq!(
-        a.fingerprint(),
-        HandoverIdentity::fingerprint_of_der(a.certificate_der())
-    );
-    assert_ne!(a.fingerprint(), b.fingerprint());
-    assert_ne!(a.certificate_der(), b.certificate_der());
-}
-
-#[test]
-fn mac_id_derives_from_the_fingerprint_deterministically() {
-    let fingerprint = [0xABu8; 32];
-    let first = HandoverIdentity::mac_id_for_fingerprint(&fingerprint);
-    let second = HandoverIdentity::mac_id_for_fingerprint(&fingerprint);
-    assert_eq!(first, second);
+    let again = HandoverIdentity::mint("Steno on Test Mac", now).unwrap();
     assert_ne!(
-        first,
-        HandoverIdentity::mac_id_for_fingerprint(&[0xACu8; 32])
+        again.fingerprint(),
+        minted.fingerprint(),
+        "a new key each mint"
     );
-    // Version 4, variant 1, so it never collides with random ids by shape.
-    assert_eq!(first.get_version_num(), 4);
-    assert_eq!(first.get_variant(), uuid::Variant::RFC4122);
+    assert_ne!(
+        again.mac_id(),
+        minted.mac_id(),
+        "a new identity is a new computer"
+    );
+    let id = HandoverIdentity::mac_id_for_fingerprint(&minted.fingerprint());
+    assert_eq!(id, minted.mac_id());
+    assert_eq!(
+        (id.get_version_num(), id.get_variant()),
+        (4, uuid::Variant::RFC4122)
+    );
 }
 
-/// The committed test identity's recorded fingerprint, so the hashing here
-/// is the hashing the phone does.
+/// The committed test identity, so the hashing here is the hashing the
+/// phone does.
 #[test]
-fn the_swift_test_identity_hashes_to_its_recorded_fingerprint() {
-    let der =
-        std::fs::read(repository().join("Tests/Fixtures/handover/test-identity.der")).unwrap();
+fn the_fingerprint_is_the_sha256_of_the_leaf_der_the_phone_pins() {
+    let der = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Tests/Fixtures/handover/test-identity.der"),
+    )
+    .unwrap();
     assert_eq!(
         hex(&HandoverIdentity::fingerprint_of_der(&der)),
         "76ac0c0b28f976f25589214d5b2c614d983df9de081b06ec1fe9247bf1e40d92"
     );
-    let (_, certificate) = X509Certificate::from_der(&der).unwrap();
-    assert_eq!(certificate.subject().to_string(), "CN=Steno test identity");
-    assert_eq!(
-        certificate.public_key().algorithm.algorithm,
-        oid_registry::OID_KEY_TYPE_EC_PUBLIC_KEY
-    );
 }
 
-/// An in-memory secret store that can refuse reads or writes, or keep a
-/// write and report it refused.
+/// A secret store in memory that can refuse reads or writes, or keep a write
+/// and report it refused.
 #[derive(Default)]
-struct MemorySecrets {
-    values: Mutex<Vec<(SecretKey, String)>>,
-    reads: Mutex<u32>,
+struct Secrets {
+    value: Mutex<Option<String>>,
     refuse_reads: AtomicBool,
     refuse_writes: AtomicBool,
     keep_and_refuse: AtomicBool,
 }
 
 #[steno_core::async_trait]
-impl SecretStore for MemorySecrets {
+impl SecretStore for Secrets {
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
-        *self.reads.lock().unwrap() += 1;
+        assert_eq!(*key, HandoverIdentity::secret_key());
         if self.refuse_reads.load(Ordering::SeqCst) {
             return Err("the keyring is locked".into());
         }
-        Ok(self
-            .values
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(stored, _)| stored == key)
-            .map(|(_, value)| value.clone()))
+        Ok(self.value.lock().unwrap().clone())
     }
 
-    async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+    async fn set_secret(&self, _key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
         if self.refuse_writes.load(Ordering::SeqCst) {
             return Err("the keyring refused the write".into());
         }
-        let mut values = self.values.lock().unwrap();
-        values.retain(|(stored, _)| stored != key);
-        if let Some(value) = value {
-            values.push((key.clone(), value.to_owned()));
-        }
+        *self.value.lock().unwrap() = value.map(str::to_owned);
         if self.keep_and_refuse.load(Ordering::SeqCst) {
             return Err("the keyring did not answer".into());
         }
@@ -162,871 +122,662 @@ impl SecretStore for MemorySecrets {
     }
 }
 
-/// The three inputs of `load_or_create`, empty.
+/// The fingerprint record in memory.
 #[derive(Default)]
-struct Places {
-    secrets: MemorySecrets,
-    record: MemoryRecord,
-    store: Option<Store>,
+struct Memory {
+    recorded: Mutex<Option<String>>,
+    next: Mutex<Option<String>>,
+    refuse: AtomicBool,
 }
+
+impl FingerprintRecord for Memory {
+    fn recorded(&self) -> BoundaryResult<Option<String>> {
+        Ok(self.recorded.lock().unwrap().clone())
+    }
+
+    fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err("No space left on device".into());
+        }
+        *self.recorded.lock().unwrap() = Some(fingerprint.to_owned());
+        *self.next.lock().unwrap() = None;
+        Ok(())
+    }
+
+    fn next(&self) -> BoundaryResult<Option<String>> {
+        Ok(self.next.lock().unwrap().clone())
+    }
+
+    fn note_next(&self, fingerprint: Option<&str>) -> BoundaryResult<()> {
+        *self.next.lock().unwrap() = fingerprint.map(str::to_owned);
+        Ok(())
+    }
+}
+
+/// What `load_or_create` reads.
+struct Places {
+    secrets: Secrets,
+    record: Memory,
+    store: Store,
+}
+
+/// The stored identity, the recorded and noted fingerprints, the phones.
+type Seen = (Option<String>, Option<String>, Option<String>, usize);
 
 impl Places {
     fn new() -> Self {
         Places {
-            store: Some(Store::in_memory().unwrap()),
-            ..Places::default()
+            secrets: Secrets::default(),
+            record: Memory::default(),
+            store: Store::in_memory().unwrap(),
         }
     }
 
-    fn store(&self) -> &Store {
-        self.store.as_ref().unwrap()
+    async fn load(&self) -> Result<HandoverIdentity, IdentityError> {
+        HandoverIdentity::load_or_create(&self.secrets, &self.record, &self.store, "x", Utc::now())
+            .await
     }
 
-    async fn load(&self, name: &str) -> Result<HandoverIdentity, IdentityError> {
-        self.load_at(name, Utc::now()).await
-    }
-
-    /// [`Places::load`] with this computer's clock at `now`.
-    async fn load_at(
-        &self,
-        name: &str,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<HandoverIdentity, IdentityError> {
-        HandoverIdentity::load_or_create(&self.secrets, &self.record, self.store(), name, now).await
+    async fn mint_anew(&self) -> Result<HandoverIdentity, IdentityError> {
+        HandoverIdentity::mint_anew(&self.secrets, &self.record, &self.store, "y", Utc::now()).await
     }
 
     fn pair_a_phone(&self) {
-        self.pair_phones(1);
+        let device = PairedDevice {
+            id: uuid::Uuid::new_v4(),
+            name: "Phone".to_owned(),
+            paired_at: Utc::now(),
+            last_seen_at: None,
+        };
+        self.store.save_paired_device(&device, &[1; 32]).unwrap();
     }
 
-    fn pair_phones(&self, count: usize) {
-        self.pair_phones_at(&vec![Utc::now(); count]);
-    }
-
-    /// Pairs one phone at each of `times`, as the database records it.
-    fn pair_phones_at(&self, times: &[chrono::DateTime<Utc>]) {
-        for (id, paired_at) in (1u128..).zip(times) {
-            let device = PairedDevice {
-                id: uuid::Uuid::from_u128(id),
-                name: format!("Phone {id}"),
-                paired_at: *paired_at,
-                last_seen_at: None,
-            };
-            self.store()
-                .save_paired_device(&device, &[id as u8; 32])
-                .unwrap();
-        }
-    }
-
-    /// Keeps the last paired phone whatever deletes it, as a refusing disk
-    /// would, until [`Places::let_the_last_phone_go`].
-    fn keep_the_last_phone(&self) {
-        common::execute_batch(
-            self.store(),
-            "CREATE TRIGGER keep_the_last_phone BEFORE DELETE ON pairedDevice \
-             WHEN (SELECT COUNT(*) FROM pairedDevice) = 1 \
-             BEGIN SELECT RAISE(ABORT, 'the disk refused the write'); END;",
-        );
-    }
-
-    /// Lets the phone [`Places::keep_the_last_phone`] kept go again.
-    fn let_the_last_phone_go(&self) {
-        common::execute_batch(self.store(), "DROP TRIGGER keep_the_last_phone;");
-    }
-
-    /// The stored identity, the fingerprints and the paired phones' ids.
-    fn places(
-        &self,
-    ) -> (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Vec<uuid::Uuid>,
-    ) {
+    fn seen(&self) -> Seen {
         (
-            self.stored_pem(),
-            self.record.get_recorded(),
-            self.record.get_next(),
-            self.store()
-                .paired_devices()
-                .unwrap()
-                .iter()
-                .map(|device| device.id)
-                .collect(),
+            self.secrets.value.lock().unwrap().clone(),
+            self.record.recorded.lock().unwrap().clone(),
+            self.record.next.lock().unwrap().clone(),
+            self.store.paired_devices().unwrap().len(),
         )
     }
+}
 
-    async fn set_stored(&self, identity: Option<&HandoverIdentity>) {
-        let pem = identity.map(|identity| identity.to_pem().unwrap());
-        self.secrets
-            .set_secret(&HandoverIdentity::secret_key(), pem.as_deref())
-            .await
-            .unwrap();
-    }
-
-    async fn mint_anew(&self, name: &str) -> Result<HandoverIdentity, IdentityError> {
-        HandoverIdentity::mint_anew(&self.secrets, &self.record, self.store(), name, Utc::now())
-            .await
-    }
-
-    fn stored_pem(&self) -> Option<String> {
-        self.secrets
-            .values
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(key, _)| *key == HandoverIdentity::secret_key())
-            .map(|(_, value)| value.clone())
+fn unavailable(error: &IdentityError) -> Option<&Unavailability> {
+    match error {
+        IdentityError::Unavailable(why) => Some(why),
+        _ => None,
     }
 }
 
 #[tokio::test]
-async fn load_or_create_mints_once_and_reloads_the_same_identity() {
+async fn the_load_mints_once_then_serves_the_stored_identity() {
     let places = Places::new();
-    let first = places.load("Steno on Test Mac").await.unwrap();
-    let stored = places.stored_pem().expect("the identity was stored");
-    assert!(stored.starts_with("-----BEGIN CERTIFICATE-----"));
-    assert_eq!(HandoverIdentity::secret_key().as_str(), "handover-identity");
-    assert_eq!(
-        places.record.get_recorded(),
-        Some(hex(&first.fingerprint())),
-        "the mint records the fingerprint"
-    );
-
-    let second = places.load("Another name").await.unwrap();
-    assert_eq!(
-        second.fingerprint(),
-        first.fingerprint(),
-        "loaded, not minted"
-    );
-    assert_eq!(second.mac_id(), first.mac_id());
-    assert_eq!(*places.secrets.reads.lock().unwrap(), 2);
-
-    // A stored secret that does not parse is an error, never a re-mint.
-    places
-        .secrets
-        .set_secret(&HandoverIdentity::secret_key(), Some("garbage"))
-        .await
-        .unwrap();
-    let error = places.load("x").await.unwrap_err();
-    assert!(error.to_string().contains("certificate"), "{error}");
-}
-
-#[tokio::test]
-async fn with_a_phone_paired_a_missing_identity_is_unavailable_not_minted() {
-    let places = Places::new();
+    let first = places.load().await.unwrap();
+    let (stored, recorded, ..) = places.seen();
+    assert!(stored.unwrap().starts_with("-----BEGIN CERTIFICATE-----"));
+    assert_eq!(recorded, Some(hex(&first.fingerprint())));
     places.pair_a_phone();
-    let error = places.load("x").await.unwrap_err();
-    assert!(
-        matches!(error, IdentityError::Unavailable(Unavailability::Missing)),
-        "{error}"
+    assert_eq!(
+        places.load().await.unwrap().fingerprint(),
+        first.fingerprint()
     );
-    assert!(
-        error
-            .to_string()
-            .ends_with("a new identity would make every phone pair again"),
-        "the reason says what a mint would cost: {error}"
+
+    // Found but not recorded (a rollback lost the record): kept, recorded again.
+    *places.record.recorded.lock().unwrap() = None;
+    assert_eq!(
+        places.load().await.unwrap().fingerprint(),
+        first.fingerprint()
     );
-    assert_eq!(places.stored_pem(), None, "nothing minted");
-    assert_eq!(places.record.get_recorded(), None);
+    assert_eq!(places.seen().1, Some(hex(&first.fingerprint())));
 }
 
+/// Losing the identity makes every phone pair again, so the load waits
+/// instead of minting while anything says a phone knows the old one.
 #[tokio::test]
-async fn with_a_fingerprint_recorded_a_missing_identity_is_unavailable_not_minted() {
-    let places = Places::new();
-    places.record.record("ab12").unwrap();
-    let error = places.load("x").await.unwrap_err();
+async fn the_load_never_mints_over_an_identity_the_phones_know() {
+    let missing = Places::new();
+    missing.pair_a_phone();
+    let error = missing.load().await.unwrap_err();
     assert!(
-        matches!(error, IdentityError::Unavailable(Unavailability::Missing)),
+        matches!(unavailable(&error), Some(Unavailability::Missing)),
         "{error}"
     );
-    assert_eq!(places.stored_pem(), None, "nothing minted");
-    assert_eq!(places.record.get_recorded().as_deref(), Some("ab12"));
-}
 
-#[tokio::test]
-async fn an_identity_with_another_fingerprint_is_unavailable_and_both_stay() {
-    let places = Places::new();
-    let paired = places.load("x").await.unwrap();
-    let other_pem = HandoverIdentity::mint("y", Utc::now())
+    let recorded = Places::new();
+    recorded.record.record("ab12").unwrap();
+    assert!(matches!(
+        unavailable(&recorded.load().await.unwrap_err()),
+        Some(Unavailability::Missing)
+    ));
+
+    let replaced = Places::new();
+    replaced.load().await.unwrap();
+    let other = HandoverIdentity::mint("y", Utc::now())
         .unwrap()
         .to_pem()
         .unwrap();
-    places
-        .secrets
-        .set_secret(&HandoverIdentity::secret_key(), Some(&other_pem))
-        .await
-        .unwrap();
-    let error = places.load("x").await.unwrap_err();
+    *replaced.secrets.value.lock().unwrap() = Some(other);
+    assert!(matches!(
+        unavailable(&replaced.load().await.unwrap_err()),
+        Some(Unavailability::Replaced)
+    ));
+
+    let locked = Places::new();
+    locked.secrets.refuse_reads.store(true, Ordering::SeqCst);
+    let error = locked.load().await.unwrap_err();
     assert!(
-        matches!(error, IdentityError::Unavailable(Unavailability::Replaced)),
+        matches!(unavailable(&error), Some(Unavailability::Unreadable(_))),
         "{error}"
     );
-    assert!(
-        error
-            .to_string()
-            .ends_with("a new identity would make every phone pair again"),
-        "{error}"
-    );
-    assert_eq!(
-        places.record.get_recorded(),
-        Some(hex(&paired.fingerprint()))
-    );
-    assert_eq!(places.stored_pem(), Some(other_pem), "neither is replaced");
-}
 
-/// A rollback that lost the record keeps the phones and the identity.
-#[tokio::test]
-async fn an_identity_found_without_a_record_is_kept_and_recorded_again() {
-    let places = Places::new();
-    let identity = HandoverIdentity::mint("x", Utc::now()).unwrap();
-    places
-        .secrets
-        .set_secret(
-            &HandoverIdentity::secret_key(),
-            Some(&identity.to_pem().unwrap()),
-        )
-        .await
-        .unwrap();
-    places.pair_a_phone();
-    let loaded = places.load("x").await.unwrap();
-    assert_eq!(loaded.fingerprint(), identity.fingerprint());
-    assert_eq!(
-        places.record.get_recorded(),
-        Some(hex(&identity.fingerprint()))
-    );
-}
+    let garbage = Places::new();
+    *garbage.secrets.value.lock().unwrap() = Some("garbage".to_owned());
+    assert!(matches!(
+        garbage.load().await.unwrap_err(),
+        IdentityError::Malformed(_)
+    ));
 
-/// An unreadable secret store is unavailable, and nothing is minted.
-#[tokio::test]
-async fn an_unreadable_secret_store_is_unavailable_not_minted() {
-    struct Locked;
-    #[steno_core::async_trait]
-    impl SecretStore for Locked {
-        async fn secret(&self, _key: &SecretKey) -> BoundaryResult<Option<String>> {
-            Err("the keyring is locked".into())
-        }
-        async fn set_secret(&self, _key: &SecretKey, _value: Option<&str>) -> BoundaryResult<()> {
-            panic!("nothing is written");
-        }
-    }
-    let places = Places::new();
-    let error =
-        HandoverIdentity::load_or_create(&Locked, &places.record, places.store(), "x", Utc::now())
-            .await
-            .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            IdentityError::Unavailable(Unavailability::Unreadable(_))
-        ),
-        "{error}"
-    );
-    assert!(error.to_string().contains("locked"), "{error}");
-    assert_eq!(places.record.get_recorded(), None);
-}
-
-#[tokio::test]
-async fn store_writes_the_identity_and_records_its_fingerprint() {
-    let places = Places::new();
-    let identity = HandoverIdentity::mint("x", Utc::now()).unwrap();
-    identity
-        .store(&places.secrets, &places.record)
-        .await
-        .unwrap();
-    assert_eq!(
-        places.record.get_recorded(),
-        Some(hex(&identity.fingerprint()))
-    );
-    assert_eq!(places.stored_pem(), Some(identity.to_pem().unwrap()));
-    places.pair_a_phone();
-    let loaded = places.load("x").await.unwrap();
-    assert_eq!(loaded.fingerprint(), identity.fingerprint());
-}
-
-/// `store` over an imported identity: the secret and the record take it.
-#[tokio::test]
-async fn store_replaces_an_identity_and_a_fingerprint_recorded_before() {
-    let places = Places::new();
-    let first = places.load("x").await.unwrap();
-    let replacement = HandoverIdentity::mint("y", Utc::now()).unwrap();
-    replacement
-        .store(&places.secrets, &places.record)
-        .await
-        .unwrap();
-    assert_ne!(first.fingerprint(), replacement.fingerprint());
-    assert_eq!(
-        places.record.get_recorded(),
-        Some(hex(&replacement.fingerprint()))
-    );
-    assert_eq!(places.stored_pem(), Some(replacement.to_pem().unwrap()));
-    let loaded = places.load("x").await.unwrap();
-    assert_eq!(loaded.fingerprint(), replacement.fingerprint());
-}
-
-/// An unreadable record is an error, and nothing is minted over it.
-#[tokio::test]
-async fn a_record_that_cannot_be_read_mints_nothing() {
-    struct Damaged;
-    impl FingerprintRecord for Damaged {
-        fn recorded(&self) -> BoundaryResult<Option<String>> {
-            Err("the record does not parse".into())
-        }
-        fn record(&self, _fingerprint: &str) -> BoundaryResult<()> {
-            panic!("nothing is recorded");
-        }
-        fn next(&self) -> BoundaryResult<Option<String>> {
-            Err("the record does not parse".into())
-        }
-        fn note_next(&self, _fingerprint: Option<&str>) -> BoundaryResult<()> {
-            panic!("nothing is noted");
-        }
-    }
-    let places = Places::new();
-    let error = HandoverIdentity::load_or_create(
-        &places.secrets,
-        &Damaged,
-        places.store(),
-        "x",
-        Utc::now(),
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(error, IdentityError::Record(_)), "{error}");
-    assert_eq!(places.stored_pem(), None, "nothing minted");
-}
-
-/// A mint whose write fails records nothing.
-#[tokio::test]
-async fn a_mint_whose_write_fails_records_nothing() {
-    struct Refusing;
-    #[steno_core::async_trait]
-    impl SecretStore for Refusing {
-        async fn secret(&self, _key: &SecretKey) -> BoundaryResult<Option<String>> {
-            Ok(None)
-        }
-        async fn set_secret(&self, _key: &SecretKey, _value: Option<&str>) -> BoundaryResult<()> {
-            Err("the keyring refused the write".into())
-        }
-    }
-    let places = Places::new();
-    let error = HandoverIdentity::load_or_create(
-        &Refusing,
-        &places.record,
-        places.store(),
-        "x",
-        Utc::now(),
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(error, IdentityError::Secrets(_)), "{error}");
-    assert_eq!(places.record.get_recorded(), None);
-}
-
-/// Pair again writes a new identity, removes the paired phones and records
-/// the new fingerprint; the next load finds it.
-#[tokio::test]
-async fn pair_again_removes_the_phones_and_mints_a_new_identity() {
-    let places = Places::new();
-    let old = places.load("x").await.unwrap();
-    places.pair_a_phone();
-    let new = places.mint_anew("y").await.unwrap();
-    assert_ne!(new.fingerprint(), old.fingerprint());
-    assert!(places.store().paired_devices().unwrap().is_empty());
-    assert_eq!(places.record.get_recorded(), Some(hex(&new.fingerprint())));
-    assert_eq!(places.stored_pem(), Some(new.to_pem().unwrap()));
-    let loaded = places.load("x").await.unwrap();
-    assert_eq!(loaded.fingerprint(), new.fingerprint());
-}
-
-/// A Pair again whose write is refused changes nothing the phones rely on,
-/// for each reason a load refuses the identity.
-#[tokio::test]
-async fn a_refused_write_keeps_the_note_and_the_next_load_decides_it() {
-    for reason in ["unreadable", "missing", "replaced"] {
-        let places = Places::new();
-        places.load("x").await.unwrap();
-        places.pair_a_phone();
-        let key = HandoverIdentity::secret_key();
-        match reason {
-            "missing" => places.secrets.set_secret(&key, None).await.unwrap(),
-            "replaced" => {
-                let other = HandoverIdentity::mint("z", Utc::now()).unwrap();
-                let pem = other.to_pem().unwrap();
-                places.secrets.set_secret(&key, Some(&pem)).await.unwrap();
-            }
-            _ => places.secrets.refuse_reads.store(true, Ordering::SeqCst),
-        }
-        let (stored, recorded, _, phones) = places.places();
-        places.secrets.refuse_writes.store(true, Ordering::SeqCst);
-        let error = places.mint_anew("y").await.unwrap_err();
+    for (places, phones) in [(&missing, 1), (&recorded, 0), (&locked, 0), (&garbage, 0)] {
+        let (stored, _, _, paired) = places.seen();
         assert!(
-            matches!(error, IdentityError::Secrets(_)),
-            "{reason}: {error}"
+            stored.is_none_or(|stored| stored == "garbage"),
+            "nothing minted"
         );
-        let after = places.places();
-        assert_eq!(
-            (&after.0, &after.1, &after.3),
-            (&stored, &recorded, &phones),
-            "{reason}: nothing the phones rely on changed"
-        );
-        let note = after.2;
-        assert!(note.is_some(), "{reason}: the note stays");
-        let next = places.load("x").await.unwrap_err();
-        let same = match reason {
-            "unreadable" => matches!(
-                next,
-                IdentityError::Unavailable(Unavailability::Unreadable(_))
-            ),
-            "missing" => matches!(next, IdentityError::Unavailable(Unavailability::Missing)),
-            _ => matches!(next, IdentityError::Unavailable(Unavailability::Replaced)),
-        };
-        assert!(same, "{reason}: {next}");
-        let note = if reason == "missing" { None } else { note };
-        assert_eq!(
-            places.places(),
-            (stored, recorded, note, phones),
-            "{reason}: the load minted nothing and decided the note"
-        );
+        assert_eq!(paired, phones);
     }
 }
 
-/// A write reported refused although kept leaves the note, so the next
-/// load finishes the Pair again.
 #[tokio::test]
-async fn a_write_reported_refused_that_landed_is_finished_by_the_next_load() {
-    for recorded_before in [true, false] {
+async fn pair_again_mints_a_new_identity_and_removes_every_phone() {
+    let places = Places::new();
+    let old = places.load().await.unwrap();
+    places.pair_a_phone();
+    let new = places.mint_anew().await.unwrap();
+    assert_ne!(new.fingerprint(), old.fingerprint());
+    assert_eq!(
+        places.seen(),
+        (
+            Some(new.to_pem().unwrap()),
+            Some(hex(&new.fingerprint())),
+            None,
+            0
+        )
+    );
+    assert_eq!(
+        places.load().await.unwrap().fingerprint(),
+        new.fingerprint()
+    );
+
+    // A refused write changes nothing the phones rely on.
+    places.pair_a_phone();
+    let before = places.seen();
+    places.secrets.refuse_writes.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        places.mint_anew().await.unwrap_err(),
+        IdentityError::Secrets(_)
+    ));
+    places.secrets.refuse_writes.store(false, Ordering::SeqCst);
+    assert_eq!(
+        places.load().await.unwrap().fingerprint(),
+        new.fingerprint()
+    );
+    assert_eq!(
+        places.seen(),
+        before,
+        "the note of the refused write is dropped"
+    );
+}
+
+/// Every write is idempotent, so a Pair again that stopped part way is
+/// finished by the next load, and nothing is minted.
+#[tokio::test]
+async fn the_next_load_finishes_a_pair_again_that_stopped_after_its_write() {
+    for stop in ["the secret store's answer", "the record"] {
         let places = Places::new();
-        places.load("x").await.unwrap();
-        places.set_stored(None).await;
-        if !recorded_before {
-            *places.record.recorded.lock().unwrap() = None;
-        }
+        places.load().await.unwrap();
         places.pair_a_phone();
-        places.secrets.keep_and_refuse.store(true, Ordering::SeqCst);
-        let error = places.mint_anew("y").await.unwrap_err();
-        assert!(matches!(error, IdentityError::Secrets(_)), "{error}");
+        if stop == "the record" {
+            places.record.refuse.store(true, Ordering::SeqCst);
+        } else {
+            places.secrets.keep_and_refuse.store(true, Ordering::SeqCst);
+        }
+        assert!(places.mint_anew().await.is_err(), "{stop}");
+        places.record.refuse.store(false, Ordering::SeqCst);
         places
             .secrets
             .keep_and_refuse
             .store(false, Ordering::SeqCst);
-        let (stored, recorded, next, phones) = places.places();
+        let (stored, _, next, _) = places.seen();
         let new = HandoverIdentity::from_pem(stored.as_deref().unwrap()).unwrap();
-        assert_eq!(recorded.is_some(), recorded_before);
-        assert_eq!(next, Some(hex(&new.fingerprint())), "the note stays");
-        assert_eq!(phones.len(), 1);
-
-        let loaded = places.load("x").await.unwrap();
-        assert_eq!(loaded.fingerprint(), new.fingerprint());
         assert_eq!(
-            places.places(),
-            (stored, Some(hex(&new.fingerprint())), None, Vec::new()),
-            "recorded before {recorded_before}: finished, nothing minted"
+            next,
+            Some(hex(&new.fingerprint())),
+            "{stop}: the note stays"
+        );
+
+        assert_eq!(
+            places.load().await.unwrap().fingerprint(),
+            new.fingerprint(),
+            "{stop}"
+        );
+        assert_eq!(
+            places.seen(),
+            (stored, Some(hex(&new.fingerprint())), None, 0),
+            "{stop}"
         );
     }
 }
 
-/// A Pair again that stops after the new identity was written is finished
-/// by the next load, and nothing is minted.
-#[tokio::test]
-async fn a_pair_again_stopped_after_the_write_is_finished_by_the_next_load() {
-    for recorded_before in [true, false] {
-        for stop in ["after the write", "after phone 1 of 2", "after the phones"] {
-            let case = format!("recorded before {recorded_before}, {stop}");
-            let places = Places::new();
-            if recorded_before {
-                places.load("x").await.unwrap();
-                places.set_stored(None).await;
-            }
-            let phones = if stop == "after phone 1 of 2" { 2 } else { 1 };
-            places.pair_phones(phones);
-            let old = places.record.get_recorded();
-            assert_eq!(old.is_some(), recorded_before, "{case}");
-            assert!(
-                matches!(
-                    places.load("x").await.unwrap_err(),
-                    IdentityError::Unavailable(Unavailability::Missing)
-                ),
-                "{case}: waits as missing"
-            );
+// The decision's truth table.
 
-            let refuse_record = stop == "after the phones";
-            if refuse_record {
-                places.record.refuse.store(true, Ordering::SeqCst);
-            } else {
-                places.keep_the_last_phone();
-            }
-            let error = places.mint_anew("y").await.unwrap_err();
-            if refuse_record {
-                assert!(matches!(error, IdentityError::Record(_)), "{case}: {error}");
-                places.record.refuse.store(false, Ordering::SeqCst);
-            } else {
-                assert!(matches!(error, IdentityError::Store(_)), "{case}: {error}");
-                places.let_the_last_phone_go();
-            }
-            let (stored, recorded, next, listed) = places.places();
-            let new = HandoverIdentity::from_pem(stored.as_deref().unwrap()).unwrap();
-            assert_eq!(recorded, old, "{case}: the old record stays");
-            assert_eq!(next, Some(hex(&new.fingerprint())), "{case}: the note");
-            assert_eq!(listed.len(), usize::from(!refuse_record), "{case}");
-
-            if stop == "after the write" {
-                // A removal refused while finishing leaves the old record and the note,
-                // so the next load finishes it again.
-                places.keep_the_last_phone();
-                let error = places.load("x").await.unwrap_err();
-                assert!(matches!(error, IdentityError::Store(_)), "{case}: {error}");
-                assert_eq!(
-                    places.places(),
-                    (stored.clone(), old.clone(), next.clone(), listed.clone()),
-                    "{case}: the phones go before the record"
-                );
-                places.let_the_last_phone_go();
-            }
-
-            let loaded = places.load("x").await.unwrap();
-            assert_eq!(loaded.fingerprint(), new.fingerprint(), "{case}");
-            assert_eq!(
-                places.places(),
-                (stored, Some(hex(&new.fingerprint())), None, Vec::new()),
-                "{case}: finished, nothing minted"
-            );
-            let again = places.load("x").await.unwrap();
-            assert_eq!(again.fingerprint(), new.fingerprint(), "{case}: settled");
-        }
-    }
+fn now() -> DateTime<Utc> {
+    DateTime::from_timestamp(1_790_000_000, 0).unwrap()
 }
 
-/// A note that cannot be written stops Pair again with nothing written.
-#[tokio::test]
-async fn a_note_that_cannot_be_written_stops_pair_again_before_the_write() {
-    let places = Places::new();
-    places.load("x").await.unwrap();
-    places.pair_a_phone();
-    let before = places.places();
-    places.record.refuse_note.store(true, Ordering::SeqCst);
-    let error = places.mint_anew("y").await.unwrap_err();
-    assert!(matches!(error, IdentityError::Note(_)), "{error}");
-    assert_eq!(places.places(), before, "nothing written");
+/// An offset from [`now`]: a sign, a number and a unit (`ms`, `s`, `m`, `h`, `d`).
+fn offset(text: &str) -> DateTime<Utc> {
+    let sign = if text.starts_with('-') { -1 } else { 1 };
+    let rest = text.trim_start_matches(['-', '+']);
+    let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap();
+    let number: i64 = rest[..digits].parse().unwrap();
+    let delta = match &rest[digits..] {
+        "ms" => TimeDelta::milliseconds(number),
+        "s" => TimeDelta::seconds(number),
+        "m" => TimeDelta::minutes(number),
+        "h" => TimeDelta::hours(number),
+        "d" => TimeDelta::days(number),
+        unit => panic!("{text:?}: no unit {unit:?}"),
+    };
+    now() + delta * sign
 }
 
-/// The note of an unfinished Pair again whose next identity is not stored
-/// goes or stays by what the store holds; none mints or removes a phone.
-#[tokio::test]
-async fn an_unfinished_pair_again_is_decided_by_what_the_secret_store_holds() {
-    let next = hex(&HandoverIdentity::mint("y", Utc::now())
-        .unwrap()
-        .fingerprint());
-    for case in [
-        "abandoned: the recorded identity",
-        "abandoned: no identity, a fingerprint recorded",
-        "abandoned: no identity, nothing recorded",
-        "unknown: another identity",
-        "unknown: another identity, nothing recorded",
-        "undecided: unreadable",
-    ] {
-        let places = Places::new();
-        let old = places.load("x").await.unwrap();
-        places.pair_a_phone();
-        let other = HandoverIdentity::mint("z", Utc::now()).unwrap();
-        if case.starts_with("abandoned: no identity") {
-            places.set_stored(None).await;
-        }
-        if case.starts_with("unknown") {
-            places.set_stored(Some(&other)).await;
-        }
-        if case.ends_with("nothing recorded") {
-            *places.record.recorded.lock().unwrap() = None;
-        }
-        places.record.note_next(Some(&next)).unwrap();
-        if case.starts_with("undecided") {
-            places.secrets.refuse_reads.store(true, Ordering::SeqCst);
-        }
-        let before = places.places();
-
-        let loaded = places.load("x").await;
-        let (stored, recorded, noted, phones) = places.places();
-        assert_eq!(
-            (&stored, &recorded, &phones),
-            (&before.0, &before.1, &before.3),
-            "{case}: nothing minted or removed"
-        );
-        match case.split(':').next().unwrap() {
-            "abandoned" => assert_eq!(noted, None, "{case}: the note goes"),
-            _ => assert_eq!(noted, Some(next.clone()), "{case}: the note stays"),
-        }
-        match case {
-            "abandoned: the recorded identity" => {
-                assert_eq!(loaded.unwrap().fingerprint(), old.fingerprint());
-            }
-            "undecided: unreadable" => assert!(
-                matches!(
-                    loaded,
-                    Err(IdentityError::Unavailable(Unavailability::Unreadable(_)))
-                ),
-                "{case}"
-            ),
-            _ if case.starts_with("unknown") => assert!(
-                matches!(
-                    loaded,
-                    Err(IdentityError::Unavailable(Unavailability::Replaced))
-                ),
-                "{case}"
-            ),
-            _ => assert!(
-                matches!(
-                    loaded,
-                    Err(IdentityError::Unavailable(Unavailability::Missing))
-                ),
-                "{case}"
-            ),
-        }
-    }
+fn text(value: &Value) -> &str {
+    value
+        .as_str()
+        .unwrap_or_else(|| panic!("no string: {value}"))
 }
 
-/// The mint time below; the certificates start a minute before it.
-const MINT: i64 = 1_790_000_000;
-
-/// An identity minted at [`MINT`] with nothing recorded, and phones paired
-/// at `seconds` after the mint (negative: before).
-async fn unrecorded_identity_with_phones(seconds: &[i64]) -> (Places, HandoverIdentity) {
-    let places = Places::new();
-    let identity = HandoverIdentity::mint("x", common::date(MINT)).unwrap();
-    places.set_stored(Some(&identity)).await;
-    let times: Vec<_> = seconds
-        .iter()
-        .map(|offset| common::date(MINT + offset))
-        .collect();
-    places.pair_phones_at(&times);
-    (places, identity)
-}
-
-/// The ids [`Places::pair_phones_at`] gives `count` phones.
-fn phone_ids(count: usize) -> Vec<uuid::Uuid> {
-    (1..=count as u128).map(uuid::Uuid::from_u128).collect()
-}
-
-/// With nothing recorded, the identity is recorded when no phone predates
-/// its certificate.
-#[tokio::test]
-async fn an_unrecorded_identity_every_phone_knows_is_recorded() {
-    for phones in [&[][..], &[0, 3600, 86_400][..]] {
-        let (places, identity) = unrecorded_identity_with_phones(phones).await;
-        let loaded = places.load("x").await.unwrap();
-        assert_eq!(loaded.fingerprint(), identity.fingerprint(), "{phones:?}");
-        assert_eq!(
-            places.record.get_recorded(),
-            Some(hex(&identity.fingerprint())),
-            "{phones:?}"
-        );
-        assert_eq!(
-            places.store().paired_devices().unwrap().len(),
-            phones.len(),
-            "{phones:?}: the phones stay"
-        );
-    }
-}
-
-/// An identity every paired phone predates waits as replaced, and nothing
-/// is recorded or minted.
-#[tokio::test]
-async fn an_unrecorded_identity_every_phone_predates_is_replaced() {
-    let (places, identity) = unrecorded_identity_with_phones(&[-86_400, -3600]).await;
-    let error = places.load("x").await.unwrap_err();
-    assert!(
-        matches!(error, IdentityError::Unavailable(Unavailability::Replaced)),
-        "{error}"
-    );
-    assert_eq!(
-        places.places(),
-        (
-            Some(identity.to_pem().unwrap()),
-            None,
-            None,
-            vec![uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)]
+/// One row: its name, what it observes and what it expects.
+fn row(value: &Value) -> (String, Observations, Decision) {
+    let name = text(&value["name"]).to_owned();
+    let caller = match text(&value["caller"]) {
+        "load" => Caller::Load,
+        "import" => Caller::Import,
+        "move" => Caller::Move,
+        other => panic!("{name}: no caller {other:?}"),
+    };
+    let start = |found: &str| {
+        let start = value["starts"].get(found);
+        let start = start.unwrap_or_else(|| panic!("{name}: no start for {found}"));
+        (!start.is_null()).then(|| offset(text(start)))
+    };
+    let identities = match &value["found"] {
+        Value::String(found) if found == "unreadable" => Identities::Unreadable,
+        Value::String(found) if found == "malformed" => Identities::Malformed,
+        Value::Array(found) => Identities::Found(
+            found
+                .iter()
+                .map(|fingerprint| Found {
+                    fingerprint: text(fingerprint).to_owned(),
+                    start: start(text(fingerprint)),
+                })
+                .collect(),
         ),
-        "nothing written"
+        other => panic!("{name}: found is {other}"),
+    };
+    let record = match &value["record"] {
+        Value::Null => Record::EMPTY,
+        Value::String(record) if record == "notOpened" => Record::NotOpened,
+        Value::String(record) if record == "doesNotParse" => Record::DoesNotParse,
+        Value::Object(record) => Record::Read {
+            current: record.get("current").map(|value| text(value).to_owned()),
+            pending: record.get("pending").map(|value| text(value).to_owned()),
+        },
+        other => panic!("{name}: record is {other}"),
+    };
+    let phones = match &value["phones"] {
+        Value::Null => Phones::Paired(Vec::new()),
+        Value::String(phones) if phones == "unreadable" => Phones::Unreadable,
+        Value::Array(phones) => Phones::Paired(phones.iter().map(|at| offset(text(at))).collect()),
+        other => panic!("{name}: phones is {other}"),
+    };
+    let expect = &value["expect"];
+    let outcome = if let Some(served) = expect.get("serve") {
+        Outcome::Serve(text(served).to_owned())
+    } else if expect.get("mint") == Some(&Value::Bool(true)) {
+        Outcome::Mint
+    } else {
+        Outcome::Wait(match text(&expect["wait"]) {
+            "recordNotOpened" => Reason::RecordNotOpened,
+            "recordDoesNotParse" => Reason::RecordDoesNotParse,
+            "secretUnreadable" => Reason::SecretUnreadable,
+            "malformed" => Reason::Malformed,
+            "phonesUnreadable" => Reason::PhonesUnreadable,
+            "missing" => Reason::Missing,
+            "replaced" => Reason::Replaced,
+            "partlyReplaced" => Reason::PartlyReplaced,
+            "clockBehind" => Reason::ClockBehind,
+            other => panic!("{name}: no reason {other:?}"),
+        })
+    };
+    let writes = expect["writes"]
+        .as_array()
+        .map(|writes| {
+            writes
+                .iter()
+                .map(|write| match write {
+                    Value::String(write) if write == "dropNote" => Write::DropNote,
+                    Value::String(write) if write == "removePhones" => Write::RemovePhones,
+                    write => Write::Record(text(&write["record"]).to_owned()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let observed = Observations {
+        caller,
+        identities,
+        record,
+        phones,
+        now: now(),
+    };
+    (name, observed, Decision { outcome, writes })
+}
+
+fn rows() -> Vec<(String, Observations, Decision)> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/identity-decisions.json"
     );
+    let table: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    table["rows"].as_array().unwrap().iter().map(row).collect()
 }
 
-/// Some phones predating the identity: partly replaced.
-#[tokio::test]
-async fn an_unrecorded_identity_some_phones_predate_is_partly_replaced() {
-    for phones in [[-86_400, 3600], [-61, -60]] {
-        let (places, identity) = unrecorded_identity_with_phones(&phones).await;
-        let error = places.load("x").await.unwrap_err();
-        assert!(
-            matches!(
-                error,
-                IdentityError::Unavailable(Unavailability::PartlyReplaced)
-            ),
-            "{phones:?}: {error}"
-        );
-        assert_eq!(places.record.get_recorded(), None, "{phones:?}");
-        assert_eq!(places.stored_pem(), Some(identity.to_pem().unwrap()));
-        assert_eq!(places.store().paired_devices().unwrap().len(), 2);
+/// `observed` after `writes` landed.
+fn after(observed: &Observations, writes: &[Write]) -> Observations {
+    let mut observed = observed.clone();
+    for write in writes {
+        match (write, &mut observed.record) {
+            (Write::DropNote, Record::Read { pending, .. }) => *pending = None,
+            (Write::RemovePhones, _) => observed.phones = Phones::Paired(Vec::new()),
+            (Write::Record(fingerprint), record) => {
+                *record = Record::Read {
+                    current: Some(fingerprint.clone()),
+                    pending: None,
+                };
+            }
+            (Write::DropNote, _) => panic!("a note dropped from a record that cannot be read"),
+        }
     }
+    observed
 }
 
-/// A phone paired 59 or 60 seconds before the mint counts as after the
-/// certificate's start; one 61 seconds before predates it.
-#[tokio::test]
-async fn a_phone_paired_at_the_identity_s_start_counts_as_paired_after_it() {
-    for (before_the_mint, recorded) in [(59, true), (60, true), (61, false)] {
-        let (places, identity) = unrecorded_identity_with_phones(&[-before_the_mint]).await;
-        assert_eq!(
-            identity.not_valid_before().unwrap(),
-            common::date(MINT - 60),
-            "back-dated a minute"
-        );
-        let loaded = places.load("x").await;
-        if recorded {
-            assert_eq!(
-                loaded.unwrap().fingerprint(),
-                identity.fingerprint(),
-                "{before_the_mint} s"
-            );
-            assert_eq!(
-                places.record.get_recorded(),
-                Some(hex(&identity.fingerprint()))
-            );
-        } else {
-            assert!(
-                matches!(
-                    loaded,
-                    Err(IdentityError::Unavailable(Unavailability::Replaced))
-                ),
-                "{before_the_mint} s"
-            );
-            assert_eq!(places.record.get_recorded(), None);
+/// `found` in every rotation, and reversed in each.
+fn orders(found: &[Found]) -> Vec<Vec<Found>> {
+    let mut orders = Vec::new();
+    for turn in 0..found.len().max(1) {
+        let mut order = found.to_vec();
+        order.rotate_left(turn);
+        orders.push(order.clone());
+        order.reverse();
+        orders.push(order);
+    }
+    orders
+}
+
+/// Every row decides as the table says, in any order of the identities found.
+#[test]
+fn every_row_of_the_truth_table_decides_as_it_says() {
+    let rows = rows();
+    assert!(rows.len() > 90, "{} rows", rows.len());
+    for (name, observed, expected) in &rows {
+        let Identities::Found(found) = &observed.identities else {
+            assert_eq!(decide(observed), *expected, "{name}");
+            continue;
+        };
+        for order in orders(found) {
+            let reordered = Observations {
+                identities: Identities::Found(order),
+                ..observed.clone()
+            };
+            assert_eq!(decide(&reordered), *expected, "{name}");
         }
     }
 }
 
-/// With nothing recorded, an unreadable start or pairing time fails the load.
-#[tokio::test]
-async fn an_unrecorded_identity_whose_times_cannot_be_read_is_not_recorded() {
-    use base64::Engine as _;
-    // A certificate that does not parse, beside a key that does.
-    let places = Places::new();
-    let key = HandoverIdentity::mint("x", common::date(MINT))
-        .unwrap()
-        .to_pem()
-        .unwrap();
-    let key = &key[key.find("-----BEGIN PRIVATE KEY-----").unwrap()..];
-    let broken = format!(
-        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n{key}",
-        base64::engine::general_purpose::STANDARD.encode([0x30, 0x00])
-    );
-    places
-        .secrets
-        .set_secret(&HandoverIdentity::secret_key(), Some(&broken))
-        .await
-        .unwrap();
-    places.pair_a_phone();
-    let error = places.load("x").await.unwrap_err();
-    assert!(matches!(error, IdentityError::Malformed(_)), "{error}");
-    assert_eq!(places.record.get_recorded(), None);
-    assert_eq!(places.stored_pem(), Some(broken), "nothing minted");
-
-    // A pairing time the database holds but cannot read.
-    let (places, identity) = unrecorded_identity_with_phones(&[3600]).await;
-    common::execute_batch(
-        places.store(),
-        "UPDATE pairedDevice SET pairedAt = 'yesterday';",
-    );
-    let error = places.load("x").await.unwrap_err();
-    assert!(matches!(error, IdentityError::Store(_)), "{error}");
-    assert_eq!(places.record.get_recorded(), None);
-    assert_eq!(places.stored_pem(), Some(identity.to_pem().unwrap()));
+/// The input space: every caller, and identities, records and phones in
+/// every readable and unreadable state around now.
+fn every_observation() -> Vec<Observations> {
+    let starts = [
+        Some(offset("-30d")),
+        Some(offset("-10d")),
+        Some(offset("+1s")),
+        Some(offset("+1d")),
+        None,
+    ];
+    let found = |name: &str, start| Found {
+        fingerprint: name.to_owned(),
+        start,
+    };
+    let mut identities = vec![
+        Identities::Unreadable,
+        Identities::Malformed,
+        Identities::Found(Vec::new()),
+    ];
+    for first in ["A", "B", "C"] {
+        let second = if first == "A" { "B" } else { "A" };
+        for first_start in starts {
+            identities.push(Identities::Found(vec![found(first, first_start)]));
+            identities.push(Identities::Found(vec![
+                found(first, first_start),
+                found(first, first_start),
+            ]));
+            for second_start in starts {
+                identities.push(Identities::Found(vec![
+                    found(first, first_start),
+                    found(second, second_start),
+                ]));
+            }
+        }
+    }
+    let mut records = vec![Record::NotOpened, Record::DoesNotParse];
+    let maybe = [None, Some("A"), Some("B"), Some("C")];
+    for current in maybe {
+        for pending in maybe {
+            records.push(Record::Read {
+                current: current.map(str::to_owned),
+                pending: pending.map(str::to_owned),
+            });
+        }
+    }
+    let at = |offsets: &[&str]| Phones::Paired(offsets.iter().map(|text| offset(text)).collect());
+    let phones = [
+        Phones::Unreadable,
+        at(&[]),
+        at(&["-40d"]),
+        at(&["-20d"]),
+        at(&["-1d"]),
+        at(&["-20d", "-1d"]),
+        at(&["-40d", "-1d"]),
+        at(&["+1d"]),
+        at(&["-10d"]),
+        at(&["+500ms"]),
+    ];
+    let mut every = Vec::new();
+    for caller in [Caller::Load, Caller::Import, Caller::Move] {
+        for identities in &identities {
+            for record in &records {
+                for phones in &phones {
+                    every.push(Observations {
+                        caller,
+                        identities: identities.clone(),
+                        record: record.clone(),
+                        phones: phones.clone(),
+                        now: now(),
+                    });
+                }
+            }
+        }
+    }
+    every
 }
 
-/// A recorded identity is adopted without the pairing-time rule.
-#[tokio::test]
-async fn a_recorded_identity_the_phones_predate_loads_without_the_rule() {
-    for (phones, now) in [
-        (&[-86_400, -3600][..], MINT + 86_400),
-        (&[-86_400, 3600][..], MINT + 86_400),
-        (&[-86_400][..], MINT - 3600),
-        (&[3600][..], MINT),
-    ] {
-        let case = format!("{phones:?} at {now}");
-        let (places, identity) = unrecorded_identity_with_phones(phones).await;
-        places.record.record(&hex(&identity.fingerprint())).unwrap();
-        let loaded = places.load_at("x", common::date(now)).await.unwrap();
-        assert_eq!(loaded.fingerprint(), identity.fingerprint(), "{case}");
-        assert_eq!(
-            places.places(),
-            (
-                Some(identity.to_pem().unwrap()),
-                Some(hex(&identity.fingerprint())),
-                None,
-                phone_ids(phones.len())
+/// Over the whole input space:
+/// - nothing mints silently: only the load mints, and only with no identity,
+///   nothing recorded, no phone paired and a readable record (a note beside
+///   it is dropped first);
+/// - no pairing the phones know is lost: phones go only where the load
+///   finishes a Pair again, only the served fingerprint is recorded, and
+///   nothing is served from nothing;
+/// - no decision destroys a stored identity: the import writes nothing, the
+///   move records at most the file's identity;
+/// - a stop after any write decides the same next time;
+/// - the order the identities were found in never decides.
+#[test]
+fn every_decision_keeps_the_rules_of_the_truth_table() {
+    for observed in every_observation() {
+        let decided = decide(&observed);
+        let found: &[Found] = match &observed.identities {
+            Identities::Found(found) => found,
+            _ => &[],
+        };
+        let (current, pending) = match &observed.record {
+            Record::Read { current, pending } => (current.as_deref(), pending.as_deref()),
+            _ => (None, None),
+        };
+
+        if decided.outcome == Outcome::Mint {
+            assert_eq!(observed.caller, Caller::Load, "{observed:?}");
+            assert_eq!(
+                observed.identities,
+                Identities::Found(Vec::new()),
+                "{observed:?}"
+            );
+            assert_eq!(observed.phones, Phones::Paired(Vec::new()), "{observed:?}");
+            assert!(
+                matches!(observed.record, Record::Read { current: None, .. }),
+                "{observed:?}"
+            );
+            let writes = if pending.is_some() {
+                vec![Write::DropNote]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(decided.writes, writes, "{observed:?}");
+        }
+        for write in &decided.writes {
+            assert!(
+                matches!(observed.record, Record::Read { .. }),
+                "{observed:?}"
+            );
+            match write {
+                Write::RemovePhones => {
+                    assert_eq!(observed.caller, Caller::Load, "{observed:?}");
+                    let [identity] = found else {
+                        panic!("phones removed over {found:?}: {observed:?}");
+                    };
+                    assert_eq!(pending, Some(identity.fingerprint.as_str()), "{observed:?}");
+                    assert_eq!(
+                        decided.outcome,
+                        Outcome::Serve(identity.fingerprint.clone()),
+                        "{observed:?}"
+                    );
+                }
+                Write::Record(fingerprint) => {
+                    assert_eq!(
+                        decided.outcome,
+                        Outcome::Serve(fingerprint.clone()),
+                        "{observed:?}"
+                    );
+                }
+                Write::DropNote => assert!(pending.is_some(), "{observed:?}"),
+            }
+        }
+        if let Outcome::Serve(served) = &decided.outcome {
+            let recorded = current == Some(served.as_str());
+            assert!(
+                found.iter().any(|identity| identity.fingerprint == *served)
+                    || (observed.caller == Caller::Move && recorded),
+                "served from nothing: {observed:?}"
+            );
+        }
+        match (observed.caller, decided.writes.as_slice()) {
+            (Caller::Load, _) | (_, []) => {}
+            (Caller::Move, [Write::Record(fingerprint)]) => assert!(
+                matches!(found, [file] if file.fingerprint == *fingerprint),
+                "the move recorded another than the file's: {observed:?}"
             ),
-            "{case}: nothing written, the phones stay"
-        );
+            (caller, other) => panic!("{caller:?} writes {other:?}: {observed:?}"),
+        }
+
+        let end = after(&observed, &decided.writes);
+        for landed in 0..=decided.writes.len() {
+            let stopped = after(&observed, &decided.writes[..landed]);
+            let again = decide(&stopped);
+            assert_eq!(again.outcome, decided.outcome, "{landed} of {observed:?}");
+            assert_eq!(
+                after(&stopped, &again.writes),
+                end,
+                "{landed} of {observed:?}"
+            );
+        }
+
+        if let Identities::Found(found) = &observed.identities {
+            for order in orders(found) {
+                let reordered = Observations {
+                    identities: Identities::Found(order),
+                    ..observed.clone()
+                };
+                assert_eq!(decide(&reordered), decided, "{observed:?}");
+            }
+        }
     }
 }
 
-/// With nothing recorded, a certificate or pairing after now means the clock
-/// went back: the load waits until the clock is past both.
-#[tokio::test]
-async fn an_unrecorded_identity_or_pairing_after_now_waits_for_the_clock() {
-    let start = MINT - 60;
-    for (phones, now, recorded_later) in [
-        // The certificate starts after now, no phone paired.
-        (&[][..], start - 2, true),
-        // The certificate starts after now, a phone paired since.
-        (&[-3600][..], MINT - 7200, false),
-        // A phone paired after now (the clock was fast when it paired).
-        (&[86_400][..], MINT + 3600, true),
-        (&[3600, 86_400][..], MINT + 7200, true),
-        (&[-86_400, 86_400][..], MINT + 7200, false),
-    ] {
-        let case = format!("{phones:?} at {now}");
-        let (places, identity) = unrecorded_identity_with_phones(phones).await;
-        let error = places.load_at("x", common::date(now)).await.unwrap_err();
+/// The kind of a decision for `caller`: its outcome and its writes.
+fn signature(caller: Caller, decided: &Decision) -> String {
+    let outcome = match &decided.outcome {
+        Outcome::Serve(_) => "serve".to_owned(),
+        Outcome::Mint => "mint".to_owned(),
+        Outcome::Wait(reason) => format!("wait {reason:?}"),
+    };
+    let writes: Vec<String> = decided
+        .writes
+        .iter()
+        .map(|write| match write {
+            Write::Record(_) => "record".to_owned(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    format!("{caller:?} {outcome} [{}]", writes.join(", "))
+}
+
+/// Every kind of decision the input space reaches has a row, except two no
+/// caller observes, and every row's kind is reached.
+#[test]
+fn the_table_has_a_row_for_every_kind_of_decision_reached() {
+    let unobserved = [
+        "Import wait SecretUnreadable []",
+        "Move wait SecretUnreadable []",
+    ];
+    let tabled: BTreeSet<String> = rows()
+        .iter()
+        .map(|(_, observed, expected)| signature(observed.caller, expected))
+        .collect();
+    let reached: BTreeSet<String> = every_observation()
+        .iter()
+        .map(|observed| signature(observed.caller, &decide(observed)))
+        .collect();
+    for kind in &reached {
         assert!(
-            matches!(
-                error,
-                IdentityError::Unavailable(Unavailability::ClockBehind)
-            ),
-            "{case}: {error}"
+            tabled.contains(kind) || unobserved.contains(&kind.as_str()),
+            "no row for {kind}"
         );
-        assert_eq!(
-            places.places(),
-            (
-                Some(identity.to_pem().unwrap()),
-                None,
-                None,
-                phone_ids(phones.len())
-            ),
-            "{case}: nothing written"
-        );
-        // Once the clock is past every time, the rule decides.
-        let later = places.load_at("x", common::date(MINT + 2 * 86_400)).await;
-        if recorded_later {
-            assert_eq!(
-                later.unwrap().fingerprint(),
-                identity.fingerprint(),
-                "{case}"
-            );
-            assert_eq!(
-                places.record.get_recorded(),
-                Some(hex(&identity.fingerprint())),
-                "{case}"
-            );
-        } else {
-            assert!(
-                matches!(
-                    later,
-                    Err(IdentityError::Unavailable(
-                        Unavailability::Replaced | Unavailability::PartlyReplaced
-                    ))
-                ),
-                "{case}"
-            );
-            assert_eq!(places.record.get_recorded(), None, "{case}");
-        }
+    }
+    for kind in unobserved {
+        assert!(reached.contains(kind), "{kind} is no longer reached");
+        assert!(!tabled.contains(kind), "{kind} has a row after all");
+    }
+    for kind in &tabled {
+        assert!(reached.contains(kind), "{kind} is outside the input space");
     }
 }

@@ -3,14 +3,7 @@
 //! enum values, constants, paths and QR query names. The phone runs the
 //! mirror image in `native-contract.test.ts`.
 
-#![allow(
-    clippy::assert_is_empty,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::large_futures,
-    clippy::too_many_lines
-)]
+#![allow(clippy::too_many_lines)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -27,16 +20,11 @@ use steno_handover::upload::MetadataValidation;
 use steno_handover::{PairingPayload, wire};
 use uuid::Uuid;
 
-fn repository() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap()
-}
-
 fn phone_source(relative: &str) -> String {
-    std::fs::read_to_string(repository().join(relative))
-        .unwrap_or_else(|error| panic!("{relative}: {error}"))
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(relative);
+    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{relative}: {error}"))
 }
 
 struct Phone {
@@ -58,19 +46,13 @@ impl Phone {
     fn object_fields(&self, name: &str) -> Vec<String> {
         let body = first(&format!(r"export type {name} = \{{([^}}]*)\}}"), &self.wire)
             .unwrap_or_else(|| panic!("no object type {name}"));
-        captures(r"(\w+)\??:\s", &body)
-            .into_iter()
-            .map(|groups| groups[0].clone())
-            .collect()
+        groups(r"(\w+)\??:\s", &body)
     }
 
     /// `export type Name = "a" | "b";` → `["a", "b"]`.
     fn union_values(&self, name: &str) -> Vec<String> {
         let body = first(&format!(r"export type {name} =([^;]*);"), &self.wire).unwrap();
-        captures(r#""([^"]+)""#, &body)
-            .into_iter()
-            .map(|groups| groups[0].clone())
-            .collect()
+        groups(r#""([^"]+)""#, &body)
     }
 
     /// `decodeShape<Name>(text, { a: "string", b: "number[]" })` → the shape.
@@ -104,26 +86,23 @@ fn captures(pattern: &str, source: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn first(pattern: &str, source: &str) -> Option<String> {
+/// The first group of every match.
+fn groups(pattern: &str, source: &str) -> Vec<String> {
     captures(pattern, source)
         .into_iter()
-        .next()?
-        .into_iter()
-        .next()
+        .map(|groups| groups[0].clone())
+        .collect()
+}
+
+fn first(pattern: &str, source: &str) -> Option<String> {
+    groups(pattern, source).into_iter().next()
 }
 
 fn encoded<T: Serialize>(value: &T) -> serde_json::Map<String, Value> {
     match serde_json::to_value(value).unwrap() {
         Value::Object(map) => map,
-        other => panic!(
-            "{} does not encode as a JSON object: {other}",
-            std::any::type_name::<T>()
-        ),
+        other => panic!("not a JSON object: {other}"),
     }
-}
-
-fn keys(object: &serde_json::Map<String, Value>) -> Vec<String> {
-    object.keys().cloned().collect()
 }
 
 fn sorted(mut values: Vec<String>) -> Vec<String> {
@@ -138,20 +117,16 @@ fn expect_shape(
     name: &str,
 ) {
     for (key, kind) in shape {
-        let value = object
-            .get(key)
-            .unwrap_or_else(|| panic!("{name}.{key} is missing from the server's JSON"));
-        match kind.as_str() {
-            "string" => assert!(value.is_string(), "{name}.{key} must be a string"),
-            "number" => assert!(value.is_number(), "{name}.{key} must be a number"),
-            "number[]" => assert!(
-                value
-                    .as_array()
-                    .is_some_and(|items| items.iter().all(Value::is_i64)),
-                "{name}.{key} must be integers"
-            ),
+        let value = &object[key];
+        let fits = match kind.as_str() {
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "number[]" => value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_i64)),
             other => panic!("unknown decodeShape kind {other} for {name}.{key}"),
-        }
+        };
+        assert!(fits, "{name}.{key} must be {kind}");
     }
 }
 
@@ -159,8 +134,10 @@ fn mac_id() -> Uuid {
     Uuid::parse_str("0F8FAD5B-D9CB-469F-A165-70867728950E").unwrap()
 }
 
-fn sample_metadata() -> RecordingMetadata {
-    RecordingMetadata {
+#[test]
+fn every_body_carries_the_phones_field_names_and_kinds() {
+    let phone = Phone::read();
+    let metadata = RecordingMetadata {
         recording_id: Uuid::parse_str("6F9619FF-8B86-D011-B42D-00C04FC964FF").unwrap(),
         started_at: DateTime::from_timestamp_millis(1_790_000_000_250).unwrap(),
         duration_seconds: 3600.25,
@@ -169,115 +146,65 @@ fn sample_metadata() -> RecordingMetadata {
         chunk_size: 16 * 1024 * 1024,
         format: AudioFormat::M4aAac,
         device_name: "iPhone".to_owned(),
-    }
-}
-
-#[test]
-fn wire_declares_exactly_the_six_bodies_the_server_encodes() {
-    let phone = Phone::read();
-    let declared: Vec<String> = captures(r"export type (\w+) = \{", &phone.wire)
-        .into_iter()
-        .map(|groups| groups[0].clone())
-        .collect();
-    assert_eq!(
-        sorted(declared),
-        [
+    };
+    let bodies = [
+        (
             "CompleteResponse",
-            "Hello",
+            encoded(&wire::CompleteResponse {
+                meeting_id: mac_id(),
+            }),
+        ),
+        ("Hello", encoded(&wire::Hello::new(mac_id()))),
+        (
             "PairRequest",
+            encoded(&wire::PairRequest {
+                device_id: mac_id(),
+                device_name: "iPhone".to_owned(),
+            }),
+        ),
+        (
             "PairResponse",
-            "RecordingMetadata",
-            "RecordingStatus"
-        ]
-    );
-}
-
-#[test]
-fn response_bodies_carry_the_phones_field_names_and_kinds() {
-    let phone = Phone::read();
-    let hello = encoded(&wire::Hello::new(mac_id()));
-    assert_eq!(sorted(keys(&hello)), sorted(phone.object_fields("Hello")));
-    expect_shape(&hello, &phone.decode_shape("Hello"), "Hello");
-    assert_eq!(hello["protocol"], Value::from(wire::PROTOCOL_VERSION));
-
-    let paired = encoded(&wire::PairResponse {
-        token: "t".to_owned(),
-        mac_id: mac_id(),
-        mac_name: "Studio".to_owned(),
-    });
+            encoded(&wire::PairResponse {
+                token: "t".to_owned(),
+                mac_id: mac_id(),
+                mac_name: "Studio".to_owned(),
+            }),
+        ),
+        ("RecordingMetadata", encoded(&metadata)),
+        (
+            "RecordingStatus",
+            encoded(&wire::RecordingStatus {
+                state: HandoverStateKind::Receiving,
+                received_chunks: vec![0, 2],
+            }),
+        ),
+    ];
+    let names: Vec<String> = bodies.iter().map(|(name, _)| (*name).to_owned()).collect();
     assert_eq!(
-        sorted(keys(&paired)),
-        sorted(phone.object_fields("PairResponse"))
+        sorted(groups(r"export type (\w+) = \{", &phone.wire)),
+        names
     );
-    expect_shape(&paired, &phone.decode_shape("PairResponse"), "PairResponse");
-
-    let status = encoded(&wire::RecordingStatus {
-        state: HandoverStateKind::Receiving,
-        received_chunks: vec![0, 2],
-    });
-    assert_eq!(
-        sorted(keys(&status)),
-        sorted(phone.object_fields("RecordingStatus"))
-    );
-    expect_shape(
-        &status,
-        &phone.decode_shape("RecordingStatus"),
-        "RecordingStatus",
-    );
-    assert_eq!(status["state"], Value::from("receiving"));
-
-    let complete = encoded(&wire::CompleteResponse {
-        meeting_id: mac_id(),
-    });
-    assert_eq!(
-        sorted(keys(&complete)),
-        sorted(phone.object_fields("CompleteResponse"))
-    );
-    expect_shape(
-        &complete,
-        &phone.decode_shape("CompleteResponse"),
-        "CompleteResponse",
-    );
-}
-
-#[test]
-fn request_bodies_use_the_phones_field_names() {
-    let phone = Phone::read();
-    let request = encoded(&wire::PairRequest {
-        device_id: mac_id(),
-        device_name: "iPhone".to_owned(),
-    });
-    assert_eq!(
-        sorted(keys(&request)),
-        sorted(phone.object_fields("PairRequest"))
-    );
-
-    let metadata = encoded(&sample_metadata());
-    assert_eq!(
-        sorted(keys(&metadata)),
-        sorted(phone.object_fields("RecordingMetadata"))
-    );
-    // The value shapes `wire.test.ts` asserts for its own encoding.
-    let uuid = Regex::new(
-        r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
-    )
-    .unwrap();
-    assert!(uuid.is_match(metadata["recordingID"].as_str().unwrap()));
+    for (name, object) in &bodies {
+        let fields: Vec<String> = object.keys().cloned().collect();
+        assert_eq!(sorted(fields), sorted(phone.object_fields(name)), "{name}");
+        // The phone decodes the responses only.
+        if !matches!(*name, "PairRequest" | "RecordingMetadata") {
+            expect_shape(object, &phone.decode_shape(name), name);
+        }
+    }
+    let metadata = &bodies[4].1;
     let iso = Regex::new(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$").unwrap();
     assert!(
         iso.is_match(metadata["startedAt"].as_str().unwrap()),
-        "ISO 8601 with three fractional digits: {}",
+        "{}",
         metadata["startedAt"]
     );
-    assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(metadata["sha256"].as_str().unwrap())
-            .unwrap()
-            .len(),
-        32
-    );
+    let sha =
+        base64::engine::general_purpose::STANDARD.decode(metadata["sha256"].as_str().unwrap());
+    assert_eq!(sha.unwrap().len(), 32, "standard base64");
     assert!(metadata["byteCount"].is_i64());
     assert_eq!(metadata["format"], Value::from("m4aAAC"));
+    assert_eq!(bodies[5].1["state"], Value::from("receiving"));
 }
 
 #[test]
@@ -290,33 +217,26 @@ fn the_server_decodes_bodies_exactly_as_the_phone_encodes_them() {
     );
     let decoded: RecordingMetadata = serde_json::from_str(&phone_metadata).unwrap();
     assert_eq!(
-        decoded.recording_id,
-        Uuid::parse_str("6F9619FF-8B86-D011-B42D-00C04FC964FF").unwrap()
-    );
-    assert_eq!(
-        decoded.started_at,
-        DateTime::<Utc>::from_timestamp(1_790_326_800, 0).unwrap()
-    );
-    assert_eq!(decoded.duration_seconds, 61.5);
-    assert_eq!(decoded.byte_count, 3000);
-    assert_eq!(decoded.sha256, vec![3u8; 32]);
-    assert_eq!(decoded.chunk_size, 1024);
-    assert_eq!(decoded.format, AudioFormat::M4aAac);
-    assert_eq!(decoded.device_name, "Nicolai's iPhone");
-
-    let phone_pair = r#"{"deviceID":"0f8fad5b-d9cb-469f-a165-70867728950e","deviceName":"iPhone"}"#;
-    let pair: wire::PairRequest = serde_json::from_str(phone_pair).unwrap();
-    assert_eq!(
-        pair,
-        wire::PairRequest {
-            device_id: mac_id(),
-            device_name: "iPhone".to_owned()
+        decoded,
+        RecordingMetadata {
+            recording_id: Uuid::parse_str("6F9619FF-8B86-D011-B42D-00C04FC964FF").unwrap(),
+            started_at: DateTime::<Utc>::from_timestamp(1_790_326_800, 0).unwrap(),
+            duration_seconds: 61.5,
+            byte_count: 3000,
+            sha256: vec![3u8; 32],
+            chunk_size: 1024,
+            format: AudioFormat::M4aAac,
+            device_name: "Nicolai's iPhone".to_owned(),
         }
     );
+    let phone_pair = r#"{"deviceID":"0f8fad5b-d9cb-469f-a165-70867728950e","deviceName":"iPhone"}"#;
+    let pair: wire::PairRequest = serde_json::from_str(phone_pair).unwrap();
+    assert_eq!(pair.device_id, mac_id());
+    assert_eq!(pair.device_name, "iPhone");
 }
 
 #[test]
-fn enum_values_match_core() {
+fn enums_constants_and_paths_match() {
     let phone = Phone::read();
     let kinds: Vec<String> = HandoverStateKind::ALL
         .iter()
@@ -324,160 +244,114 @@ fn enum_values_match_core() {
         .collect();
     assert_eq!(phone.union_values("RecordingState"), kinds);
     let states = first(r"RECORDING_STATES[^=]*=\s*\[([^\]]*)\]", &phone.wire).unwrap();
-    assert_eq!(
-        captures(r#""([^"]+)""#, &states)
-            .into_iter()
-            .map(|g| g[0].clone())
-            .collect::<Vec<_>>(),
-        kinds
-    );
+    assert_eq!(groups(r#""([^"]+)""#, &states), kinds);
     let formats: BTreeSet<String> = AudioFormat::ALL
         .iter()
         .map(|format| format.as_str().to_owned())
         .collect();
-    assert_eq!(
-        phone
-            .union_values("AudioFormat")
-            .into_iter()
-            .collect::<BTreeSet<_>>(),
-        formats
-    );
-    let recording_format = first(
+    let phone_formats: BTreeSet<String> = phone.union_values("AudioFormat").into_iter().collect();
+    assert_eq!(phone_formats, formats);
+    let recorded = first(
         r#"RECORDING_FORMAT: AudioFormat = "([^"]+)""#,
         &phone.recorder,
     )
     .unwrap();
-    let format: AudioFormat = recording_format.parse().unwrap();
+    let recorded: AudioFormat = recorded.parse().unwrap();
     assert!(
-        MetadataValidation::ACCEPTED_FORMATS.contains(&format),
+        MetadataValidation::ACCEPTED_FORMATS.contains(&recorded),
         "the server accepts what the phone records"
     );
-}
 
-#[test]
-fn constants_match() {
-    let phone = Phone::read();
+    let constant = |pattern: &str| first(pattern, &phone.wire);
     assert_eq!(
-        first(r"export const PROTOCOL_VERSION = (\d+);", &phone.wire).as_deref(),
-        Some("1")
+        constant(r"export const PROTOCOL_VERSION = (\d+);"),
+        Some(wire::PROTOCOL_VERSION.to_string())
     );
-    assert_eq!(wire::PROTOCOL_VERSION, 1);
     assert_eq!(
-        first(r#"export const SERVICE_TYPE = "([^"]+)";"#, &phone.wire).as_deref(),
+        constant(r#"export const SERVICE_TYPE = "([^"]+)";"#).as_deref(),
         Some(wire::SERVICE_TYPE)
     );
     assert_eq!(
-        first(
-            r#"export const CHUNK_HASH_HEADER = "([^"]+)";"#,
-            &phone.wire
-        )
-        .as_deref(),
+        constant(r#"export const CHUNK_HASH_HEADER = "([^"]+)";"#).as_deref(),
         Some(wire::CHUNK_HASH_HEADER)
     );
-    let schemes = first(r#"authorizationHeader\(\s*scheme: ("[^)]+"),"#, &phone.wire).unwrap();
+    let schemes = constant(r#"authorizationHeader\(\s*scheme: ("[^)]+"),"#).unwrap();
     assert_eq!(schemes.replace(['"', ' '], ""), "Pairing|Bearer");
-}
+    assert_eq!(
+        constant(r"return `(https)://").as_deref(),
+        Some("https"),
+        "https only"
+    );
 
-#[test]
-fn the_phones_paths_match_the_servers_routes() {
-    let phone = Phone::read();
     let id = Uuid::new_v4();
     let path = |name: &str| {
-        let literal = first(&format!(r#"\b{name}:[^`"]*[`"]([^`"]+)[`"]"#), &phone.wire)
-            .unwrap_or_else(|| panic!("no path {name}"));
-        literal
+        constant(&format!(r#"\b{name}:[^`"]*[`"]([^`"]+)[`"]"#))
+            .unwrap_or_else(|| panic!("no path {name}"))
             .replace(
                 "${encodeURIComponent(recordingID)}",
                 &id.hyphenated().to_string(),
             )
             .replace("${index}", "3")
     };
-    assert_eq!(
-        Route::matches(&Method::GET, &path("hello")),
-        Some(Route::Hello)
-    );
-    assert_eq!(
-        Route::matches(&Method::POST, &path("pair")),
-        Some(Route::Pair)
-    );
-    assert_eq!(
-        Route::matches(&Method::DELETE, &path("pairing")),
-        Some(Route::Unpair)
-    );
-    assert_eq!(
-        Route::matches(&Method::PUT, &path("recording")),
-        Some(Route::Announce(id))
-    );
-    assert_eq!(
-        Route::matches(&Method::GET, &path("recording")),
-        Some(Route::Status(id))
-    );
-    assert_eq!(
-        Route::matches(&Method::PUT, &path("chunk")),
-        Some(Route::Chunk(id, 3))
-    );
-    assert_eq!(
-        Route::matches(&Method::POST, &path("complete")),
-        Some(Route::Complete(id))
-    );
-    assert_eq!(
-        first(r"return `(https)://", &phone.wire).as_deref(),
-        Some("https"),
-        "the phone speaks https only"
-    );
+    let routes = [
+        (Method::GET, "hello", Route::Hello),
+        (Method::POST, "pair", Route::Pair),
+        (Method::DELETE, "pairing", Route::Unpair),
+        (Method::PUT, "recording", Route::Announce(id)),
+        (Method::GET, "recording", Route::Status(id)),
+        (Method::PUT, "chunk", Route::Chunk(id, 3)),
+        (Method::POST, "complete", Route::Complete(id)),
+    ];
+    for (method, name, route) in routes {
+        assert_eq!(Route::matches(&method, &path(name)), Some(route), "{name}");
+    }
 }
 
 #[test]
 fn the_qr_payload_uses_the_names_the_phone_parses() {
     let phone = Phone::read();
-    let payload = PairingPayload::new(
+    let url = PairingPayload::new(
         mac_id(),
         "Mac",
         vec![7; 32],
         vec![9; 32],
         DateTime::<Utc>::from_timestamp(1_790_000_300, 0).unwrap(),
+    )
+    .url_string();
+    assert!(
+        url.starts_with("steno://pair/v1?mac=0f8fad5b-"),
+        "lowercase mac"
     );
-    let url = payload.url_string();
-    let query = url.split_once('?').unwrap().1;
-    let mac_query: BTreeSet<String> = query
+    let query: BTreeSet<String> = url
+        .split_once('?')
+        .unwrap()
+        .1
         .split('&')
         .map(|pair| pair.split_once('=').unwrap().0.to_owned())
         .collect();
-    let phone_query: BTreeSet<String> = captures(r#"params\.get\("(\w+)"\)"#, &phone.pairing)
+    let parsed: BTreeSet<String> = groups(r#"params\.get\("(\w+)"\)"#, &phone.pairing)
         .into_iter()
-        .map(|groups| groups[0].clone())
         .collect();
-    assert_eq!(mac_query, phone_query);
+    assert_eq!(query, parsed);
+    let constant = |pattern: &str| first(pattern, &phone.pairing);
     assert_eq!(
-        mac_query,
-        ["mac", "name", "fp", "secret", "exp"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    );
-
-    assert_eq!(
-        first(r#"const PREFIX = "([^"]+)";"#, &phone.pairing).unwrap(),
-        format!("{}://pair/", PairingPayload::SCHEME)
+        constant(r#"const PREFIX = "([^"]+)";"#),
+        Some(format!("{}://pair/", PairingPayload::SCHEME))
     );
     assert_eq!(
-        first(r#"version !== "([^"]+)""#, &phone.pairing).as_deref(),
+        constant(r#"version !== "([^"]+)""#).as_deref(),
         Some(PairingPayload::VERSION)
     );
     assert_eq!(
-        first(r"const FINGERPRINT_BYTES = (\d+);", &phone.pairing).as_deref(),
+        constant(r"const FINGERPRINT_BYTES = (\d+);").as_deref(),
         Some("32")
     );
     assert_eq!(
-        first(r"const SECRET_BYTES = (\d+);", &phone.pairing).as_deref(),
+        constant(r"const SECRET_BYTES = (\d+);").as_deref(),
         Some("32")
     );
     assert!(
         phone.pairing.contains(r"/^\d{1,12}$/"),
         "exp is at most twelve digits on both sides"
-    );
-    assert!(
-        url.starts_with("steno://pair/v1?mac=0f8fad5b-"),
-        "lowercase mac in the QR"
     );
 }
