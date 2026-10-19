@@ -57,21 +57,17 @@ describe("waitForMac", () => {
 	beforeEach(() => vi.useFakeTimers());
 	afterEach(() => vi.useRealTimers());
 
-	it("resolves immediately when the Mac is already known", async () => {
-		const registry = createMacRegistry();
-		registry.found(studio);
-		await expect(registry.waitForMac(studio.macID, 1000)).resolves.toEqual(
-			studio,
-		);
-	});
-
-	it("resolves when the Mac appears later and stops listening afterwards", async () => {
+	it("resolves when the Mac appears, or at once when it is known", async () => {
 		const registry = createMacRegistry();
 		const pending = registry.waitForMac(studio.macID, 5000);
 		registry.found(laptop);
 		registry.found(studio);
 		await expect(pending).resolves.toEqual(studio);
 		vi.advanceTimersByTime(10_000);
+		// Once known, it resolves at once.
+		await expect(registry.waitForMac(studio.macID, 1000)).resolves.toEqual(
+			studio,
+		);
 	});
 
 	it("rejects after the timeout", async () => {

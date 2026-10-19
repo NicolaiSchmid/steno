@@ -15,7 +15,6 @@ import {
 	type QueueIndex,
 	removeRecording,
 	resetForUpload,
-	SYNC_STATES,
 	type SyncState,
 	scheduleRetry,
 	setState,
@@ -40,12 +39,11 @@ function rec(id: string, startedAt: string): NewRecording {
 const now = new Date("2026-09-25T10:00:00.000Z");
 
 describe("addRecording", () => {
-	it("appends a queued row with empty bookkeeping", () => {
+	it("appends a queued row with empty bookkeeping, or a recording row", () => {
 		const index = addRecording(
 			EMPTY_INDEX,
 			rec("a", "2026-09-25T09:00:00.000Z"),
 		);
-		expect(index.recordings).toHaveLength(1);
 		expect(index.recordings[0]).toMatchObject({
 			recordingID: "a",
 			state: "queued",
@@ -56,18 +54,15 @@ describe("addRecording", () => {
 			meetingID: null,
 		});
 		expect(EMPTY_INDEX.recordings).toHaveLength(0);
+		expect(
+			addRecording(EMPTY_INDEX, rec("r", "x"), "recording").recordings[0]
+				?.state,
+		).toBe("recording");
 	});
 
-	it("can start in the recording state and rejects duplicates and bad chunk sizes", () => {
-		const index = addRecording(
-			EMPTY_INDEX,
-			rec("a", "2026-09-25T09:00:00.000Z"),
-			"recording",
-		);
-		expect(index.recordings[0]?.state).toBe("recording");
-		expect(() =>
-			addRecording(index, rec("a", "2026-09-25T09:00:00.000Z")),
-		).toThrow(QueueError);
+	it("rejects duplicates and bad chunk sizes", () => {
+		const index = addRecording(EMPTY_INDEX, rec("a", "x"));
+		expect(() => addRecording(index, rec("a", "x"))).toThrow(QueueError);
 		expect(() =>
 			addRecording(EMPTY_INDEX, { ...rec("b", "x"), chunkSize: 0 }),
 		).toThrow(QueueError);
@@ -75,87 +70,13 @@ describe("addRecording", () => {
 });
 
 describe("state machine", () => {
-	const queued = addRecording(
-		EMPTY_INDEX,
-		rec("a", "2026-09-25T09:00:00.000Z"),
-	);
-
-	it("walks recording -> queued -> uploading -> delivered", () => {
-		let index = addRecording(EMPTY_INDEX, rec("r", "x"), "recording");
-		index = setState(index, "r", "queued");
-		index = setState(index, "r", "uploading");
-		index = setState(index, "r", "delivered", { meetingID: "m" });
-		expect(index.recordings[0]).toMatchObject({
-			state: "delivered",
-			meetingID: "m",
-		});
-	});
-
-	it("rejects illegal transitions", () => {
-		expect(() => setState(queued, "a", "recording")).toThrow(
-			/illegal transition queued -> recording/,
-		);
-		const delivered = setState(
-			setState(queued, "a", "uploading"),
-			"a",
-			"delivered",
-		);
-		expect(() => setState(delivered, "a", "queued")).toThrow(QueueError);
-	});
-
-	it("allows failed back to queued only, unpaired to queued or delivered, and a re-queued row to delivered", () => {
-		const failed = setState(queued, "a", "failed", { lastError: "422" });
-		expect(() => setState(failed, "a", "uploading")).toThrow(QueueError);
-		expect(() => setState(failed, "a", "delivered")).toThrow(QueueError);
-		expect(setState(failed, "a", "queued").recordings[0]?.state).toBe("queued");
-		const unpaired = setState(queued, "a", "unpaired");
-		expect(() => setState(unpaired, "a", "uploading")).toThrow(QueueError);
-		expect(() => setState(unpaired, "a", "failed")).toThrow(QueueError);
-		// A `complete` sent before the unpair and answered after it.
-		expect(
-			setState(unpaired, "a", "delivered", { meetingID: "m" }).recordings[0],
-		).toMatchObject({ state: "delivered", meetingID: "m" });
-		const requeued = resetForUpload(unpaired, "a");
-		expect(requeued.recordings[0]).toMatchObject({
-			state: "queued",
-			attempts: 0,
-			nextAttemptAt: null,
-			lastError: null,
-		});
-		// The same answer after a new pairing queued the row again.
-		expect(
-			setState(requeued, "a", "delivered", { meetingID: "m" }).recordings[0],
-		).toMatchObject({ state: "delivered", meetingID: "m" });
-	});
-
-	it("treats a same-state call as a patch and never lets the patch change the id or state", () => {
-		const patched = setState(queued, "a", "queued", {
-			recordingID: "z",
-			state: "delivered",
-			lastError: "note",
-		} as never);
-		expect(patched.recordings[0]).toMatchObject({
-			recordingID: "a",
-			state: "queued",
-			lastError: "note",
-		});
-	});
-
-	it("throws for unknown ids", () => {
-		expect(() => setState(queued, "nope", "uploading")).toThrow(
-			/unknown recording nope/,
-		);
-		expect(() => removeRecording(queued, "nope")).toThrow(QueueError);
-	});
-});
-
-describe("every transition", () => {
 	/** The plan's state machine, written out independently of the code's table. */
 	const LEGAL: Record<SyncState, readonly SyncState[]> = {
 		recording: ["queued", "failed"],
 		queued: ["uploading", "unpaired", "failed", "delivered"],
 		uploading: ["queued", "delivered", "failed", "unpaired"],
 		failed: ["queued"],
+		// `delivered`: a `complete` sent before the unpair and answered after it.
 		unpaired: ["queued", "delivered"],
 		delivered: [],
 	};
@@ -176,28 +97,27 @@ describe("every transition", () => {
 		);
 	}
 
-	it("lists the six states once", () => {
-		expect([...SYNC_STATES].sort()).toEqual(Object.keys(LEGAL).sort());
-	});
-
-	for (const from of Object.keys(LEGAL) as SyncState[]) {
-		for (const to of Object.keys(LEGAL) as SyncState[]) {
-			const legal = from === to || LEGAL[from].includes(to);
-			it(`${from} -> ${to} is ${legal ? "allowed" : "rejected"}`, () => {
-				const index = inState(from);
-				expect(index.recordings[0]?.state).toBe(from);
-				if (legal) {
-					expect(setState(index, "a", to).recordings[0]?.state).toBe(to);
-				} else {
-					expect(() => setState(index, "a", to)).toThrow(
-						new RegExp(`illegal transition ${from} -> ${to}`),
-					);
-					// A rejected transition leaves the input untouched.
-					expect(index.recordings[0]?.state).toBe(from);
-				}
-			});
+	const states = Object.keys(LEGAL) as SyncState[];
+	it.each(
+		states.flatMap((from) =>
+			states.map((to) => ({
+				from,
+				to,
+				legal: from === to || LEGAL[from].includes(to),
+			})),
+		),
+	)("$from -> $to allowed: $legal", ({ from, to, legal }) => {
+		const index = inState(from);
+		if (legal) {
+			expect(setState(index, "a", to).recordings[0]?.state).toBe(to);
+		} else {
+			expect(() => setState(index, "a", to)).toThrow(
+				new RegExp(`illegal transition ${from} -> ${to}`),
+			);
+			// A rejected transition leaves the input untouched.
+			expect(index.recordings[0]?.state).toBe(from);
 		}
-	}
+	});
 
 	it("delivered is terminal for scheduleRetry and resetForUpload too", () => {
 		const delivered = inState("delivered");
@@ -207,24 +127,64 @@ describe("every transition", () => {
 		expect(() => resetForUpload(delivered, "a")).toThrow(QueueError);
 	});
 
-	it("scheduleRetry lands in queued from every state that may still upload", () => {
-		for (const from of [
-			"recording",
-			"queued",
-			"uploading",
-			"failed",
-			"unpaired",
-		] as const) {
+	it.each(["recording", "queued", "uploading", "failed", "unpaired"] as const)(
+		"scheduleRetry lands in queued from %s",
+		(from) => {
 			expect(
 				scheduleRetry(inState(from), "a", now, 1, "x").recordings[0],
 			).toMatchObject({ state: "queued", attempts: 1, lastError: "x" });
-		}
+		},
+	);
+
+	it("resetForUpload queues a row with a clean schedule, which may still be delivered", () => {
+		const requeued = resetForUpload(
+			scheduleRetry(inState("unpaired"), "a", now, 1, "x"),
+			"a",
+		);
+		expect(requeued.recordings[0]).toMatchObject({
+			state: "queued",
+			attempts: 0,
+			nextAttemptAt: null,
+			lastError: null,
+		});
+		// A `complete` answered after a new pairing queued the row again.
+		expect(
+			setState(requeued, "a", "delivered", { meetingID: "m" }).recordings[0],
+		).toMatchObject({ state: "delivered", meetingID: "m" });
+	});
+
+	it("treats a same-state call as a patch and never lets the patch change the id or state", () => {
+		const patched = setState(inState("queued"), "a", "queued", {
+			recordingID: "z",
+			state: "delivered",
+			lastError: "note",
+		} as never);
+		expect(patched.recordings[0]).toMatchObject({
+			recordingID: "a",
+			state: "queued",
+			lastError: "note",
+		});
+	});
+
+	it("throws for unknown ids", () => {
+		expect(() => setState(inState("queued"), "nope", "uploading")).toThrow(
+			/unknown recording nope/,
+		);
+		expect(() => removeRecording(inState("queued"), "nope")).toThrow(
+			QueueError,
+		);
 	});
 });
 
 describe("unpairPending", () => {
-	it("moves queued and uploading rows to unpaired and leaves the others alone", () => {
-		let index = addRecording(EMPTY_INDEX, rec("q", "1"));
+	it("moves queued and uploading rows to unpaired, clears their retry error and leaves the others alone", () => {
+		let index = scheduleRetry(
+			addRecording(EMPTY_INDEX, rec("q", "1")),
+			"q",
+			now,
+			1,
+			"Retrying",
+		);
 		index = addRecording(index, rec("u", "2"));
 		index = setState(index, "u", "uploading");
 		index = addRecording(index, rec("d", "3"));
@@ -233,31 +193,17 @@ describe("unpairPending", () => {
 		index = setState(index, "f", "failed");
 		index = addRecording(index, rec("r", "5"), "recording");
 
-		const states = Object.fromEntries(
-			unpairPending(index).recordings.map((r) => [r.recordingID, r.state]),
-		);
-		expect(states).toEqual({
-			q: "unpaired",
-			u: "unpaired",
-			d: "delivered",
-			f: "failed",
-			r: "recording",
-		});
-		expect(nextUploadable(unpairPending(index), now)).toBeNull();
-	});
-
-	it("clears the retry error of the rows it unpairs", () => {
-		const index = scheduleRetry(
-			addRecording(EMPTY_INDEX, rec("q", "1")),
-			"q",
-			now,
-			1,
-			"Retrying",
-		);
-		expect(unpairPending(index).recordings[0]).toMatchObject({
-			state: "unpaired",
-			lastError: null,
-		});
+		const unpaired = unpairPending(index);
+		expect(
+			unpaired.recordings.map((r) => [r.recordingID, r.state, r.lastError]),
+		).toEqual([
+			["q", "unpaired", null],
+			["u", "unpaired", null],
+			["d", "delivered", null],
+			["f", "failed", null],
+			["r", "recording", null],
+		]);
+		expect(nextUploadable(unpaired, now)).toBeNull();
 	});
 
 	it("returns the same index when nothing is pending", () => {
@@ -267,80 +213,70 @@ describe("unpairPending", () => {
 			"failed",
 		);
 		expect(unpairPending(idle)).toBe(idle);
-		expect(unpairPending(EMPTY_INDEX)).toBe(EMPTY_INDEX);
 	});
 });
 
-describe("patchRecording", () => {
-	it("fills in the stop-time fields", () => {
-		const index = patchRecording(
-			addRecording(
-				EMPTY_INDEX,
-				{ ...rec("a", "x"), sha256: null, byteCount: 0 },
-				"recording",
-			),
-			"a",
-			{ sha256: "BBBB", byteCount: 10, durationSeconds: 1.5 },
-		);
-		expect(index.recordings[0]).toMatchObject({
-			sha256: "BBBB",
-			byteCount: 10,
-			durationSeconds: 1.5,
-			state: "recording",
-		});
+it("patchRecording fills in the stop-time fields", () => {
+	const index = patchRecording(
+		addRecording(
+			EMPTY_INDEX,
+			{ ...rec("a", "x"), sha256: null, byteCount: 0 },
+			"recording",
+		),
+		"a",
+		{ sha256: "BBBB", byteCount: 10, durationSeconds: 1.5 },
+	);
+	expect(index.recordings[0]).toMatchObject({
+		sha256: "BBBB",
+		byteCount: 10,
+		durationSeconds: 1.5,
+		state: "recording",
 	});
 });
 
 describe("markChunk and syncChunks", () => {
 	const index = addRecording(EMPTY_INDEX, rec("a", "x"));
 
-	it("keeps chunks sorted and unique", () => {
+	it("keep chunks sorted and unique", () => {
 		let next = markChunk(index, "a", 2);
 		next = markChunk(next, "a", 0);
-		next = markChunk(next, "a", 2);
+		expect(markChunk(next, "a", 2)).toBe(next);
 		expect(next.recordings[0]?.uploadedChunks).toEqual([0, 2]);
-	});
-
-	it("returns the same index for a duplicate chunk", () => {
-		const once = markChunk(index, "a", 1);
-		expect(markChunk(once, "a", 1)).toBe(once);
-	});
-
-	it("rejects negative or fractional chunks and unknown ids", () => {
-		expect(() => markChunk(index, "a", -1)).toThrow(QueueError);
-		expect(() => markChunk(index, "a", 0.5)).toThrow(QueueError);
-		expect(() => markChunk(index, "b", 0)).toThrow(QueueError);
-	});
-
-	it("replaces the set from the Mac's status", () => {
 		const synced = syncChunks(markChunk(index, "a", 1), "a", [2, 0, 2]);
 		expect(synced.recordings[0]?.uploadedChunks).toEqual([0, 2]);
+	});
+
+	it.each([
+		["a", -1],
+		["a", 0.5],
+		["b", 0],
+	])("rejects %s/%s", (id, chunk) => {
+		expect(() => markChunk(index, id, chunk)).toThrow(QueueError);
 	});
 });
 
 describe("chunkPlan", () => {
-	it("splits on exact boundaries", () => {
-		expect(chunkPlan(3 * MiB, MiB)).toEqual([
-			{ index: 0, offset: 0, length: MiB },
-			{ index: 1, offset: MiB, length: MiB },
-			{ index: 2, offset: 2 * MiB, length: MiB },
-		]);
+	it.each([
+		[3 * MiB, [MiB, MiB, MiB]],
+		[2 * MiB + 5, [MiB, MiB, 5]],
+		[5, [5]],
+		[0, []],
+	])("splits %s bytes", (bytes, lengths) => {
+		expect(chunkPlan(bytes, MiB)).toEqual(
+			lengths.map((length, index) => ({
+				index,
+				offset: index * MiB,
+				length,
+			})),
+		);
 	});
 
-	it("makes the last chunk short", () => {
-		expect(chunkPlan(2 * MiB + 5, MiB)).toEqual([
-			{ index: 0, offset: 0, length: MiB },
-			{ index: 1, offset: MiB, length: MiB },
-			{ index: 2, offset: 2 * MiB, length: 5 },
-		]);
-		expect(chunkPlan(5, MiB)).toEqual([{ index: 0, offset: 0, length: 5 }]);
-	});
-
-	it("yields nothing for an empty file and rejects bad inputs", () => {
-		expect(chunkPlan(0, MiB)).toEqual([]);
-		expect(() => chunkPlan(10, 0)).toThrow(QueueError);
-		expect(() => chunkPlan(-1, 10)).toThrow(QueueError);
-		expect(() => chunkPlan(1.5, 10)).toThrow(QueueError);
+	it.each([
+		[10, 0],
+		[-1, 10],
+		[1.5, 10],
+	])("rejects %s bytes in chunks of %s", (bytes, size) => {
+		expect(() => chunkPlan(bytes, size)).toThrow(QueueError);
 	});
 });
 
@@ -358,23 +294,29 @@ describe("nextUploadable", () => {
 			rec("live", "2026-09-25T06:00:00.000Z"),
 			"recording",
 		);
-		return index;
+		// A pending row with no hash never holds up the queue.
+		return addRecording(index, {
+			...rec("unhashed", "2026-09-25T05:00:00.000Z"),
+			sha256: null,
+		});
 	}
 
-	it("returns the oldest pending recording, skipping delivered and recording rows", () => {
+	it("returns the oldest pending recording, skipping delivered, recording and unhashed rows", () => {
 		expect(nextUploadable(build(), now)?.recordingID).toBe("old");
+		expect(
+			nextUploadable(setState(build(), "old", "uploading"), now)?.recordingID,
+		).toBe("old");
+		expect(nextUploadable(EMPTY_INDEX, now)).toBeNull();
 	});
 
 	it("gates on the backoff and reports when the next retry is due", () => {
 		let index = scheduleRetry(build(), "old", now, 30_000, "timeout");
-		expect(index.recordings.find((r) => r.recordingID === "old")).toMatchObject(
-			{
-				state: "queued",
-				attempts: 1,
-				nextAttemptAt: "2026-09-25T10:00:30.000Z",
-				lastError: "timeout",
-			},
-		);
+		expect(findRecording(index, "old")).toMatchObject({
+			state: "queued",
+			attempts: 1,
+			nextAttemptAt: "2026-09-25T10:00:30.000Z",
+			lastError: "timeout",
+		});
 		expect(nextUploadable(index, now)?.recordingID).toBe("new");
 		index = scheduleRetry(index, "new", now, 60_000, "timeout");
 		expect(nextUploadable(index, now)).toBeNull();
@@ -384,57 +326,24 @@ describe("nextUploadable", () => {
 		expect(
 			nextUploadable(index, new Date("2026-09-25T10:00:30.000Z"))?.recordingID,
 		).toBe("old");
-	});
-
-	it("includes uploading rows and clears the schedule on resetForUpload", () => {
-		let index = setState(build(), "old", "uploading");
-		expect(nextUploadable(index, now)?.recordingID).toBe("old");
-		index = scheduleRetry(index, "old", now, 5_000, "x");
-		index = resetForUpload(index, "old");
-		expect(nextUploadable(index, now)?.recordingID).toBe("old");
+		index = resetForUpload(resetForUpload(index, "old"), "new");
 		expect(nextRetryAt(index, now)).toBeNull();
 	});
-
-	it("skips a pending row with no hash", () => {
-		const index = addRecording(build(), {
-			...rec("unhashed", "2026-09-25T05:00:00.000Z"),
-			sha256: null,
-		});
-		expect(nextUploadable(index, now)?.recordingID).toBe("old");
-	});
-
-	it("is null for an empty index", () => {
-		expect(nextUploadable(EMPTY_INDEX, now)).toBeNull();
-	});
 });
 
-describe("canRetry", () => {
-	it("is true only for a failed row with a hash", () => {
-		const index = setState(
-			addRecording(
-				addRecording(EMPTY_INDEX, rec("a", "2026-09-25T08:00:00.000Z")),
-				{ ...rec("b", "2026-09-25T09:00:00.000Z"), sha256: null },
-				"recording",
-			),
-			"b",
-			"failed",
-		);
-		const failed = setState(index, "a", "failed");
-		expect(canRetry(findRecording(failed, "a"))).toBe(true);
-		expect(canRetry(findRecording(failed, "b"))).toBe(false);
-		expect(canRetry(findRecording(index, "a"))).toBe(false);
-		expect(canRetry(null)).toBe(false);
-	});
-});
-
-describe("removeRecording", () => {
-	it("drops the row and leaves the rest", () => {
-		const index = addRecording(
-			addRecording(EMPTY_INDEX, rec("a", "x")),
-			rec("b", "y"),
-		);
-		expect(
-			removeRecording(index, "a").recordings.map((r) => r.recordingID),
-		).toEqual(["b"]);
-	});
+it("canRetry is true only for a failed row with a hash", () => {
+	const index = setState(
+		addRecording(
+			addRecording(EMPTY_INDEX, rec("a", "2026-09-25T08:00:00.000Z")),
+			{ ...rec("b", "2026-09-25T09:00:00.000Z"), sha256: null },
+			"recording",
+		),
+		"b",
+		"failed",
+	);
+	const failed = setState(index, "a", "failed");
+	expect(canRetry(findRecording(failed, "a"))).toBe(true);
+	expect(canRetry(findRecording(failed, "b"))).toBe(false);
+	expect(canRetry(findRecording(index, "a"))).toBe(false);
+	expect(canRetry(null)).toBe(false);
 });

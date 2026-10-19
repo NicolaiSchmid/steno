@@ -47,9 +47,7 @@ describe("pinnedRequest", () => {
 			fingerprint: endpoint.fingerprint,
 			timeoutMs: 10_000,
 		});
-	});
-
-	it("omits the body key entirely for bodiless calls", async () => {
+		// A bodiless call omits the body key entirely.
 		answer(200);
 		await pinnedRequest(endpoint, "GET", "/x");
 		expect("body" in lastRequest()).toBe(false);
@@ -71,22 +69,20 @@ describe("pinnedRequest", () => {
 });
 
 describe("failureFor", () => {
-	it("maps status codes to failure kinds and passes 2xx and 3xx", () => {
-		const of = (status: number) =>
-			failureFor({ status, headers: {}, body: "" })?.kind ?? null;
-		expect(of(200)).toBeNull();
-		expect(of(204)).toBeNull();
-		expect(of(304)).toBeNull();
-		expect(of(401)).toBe("unauthorized");
-		expect(of(403)).toBe("forbidden");
-		expect(of(404)).toBe("not-found");
-		expect(of(409)).toBe("server");
-		expect(of(413)).toBe("server");
-		expect(of(500)).toBe("server");
-		expect(failureFor({ status: 413, headers: {}, body: "" })).toMatchObject({
-			status: 413,
-			message: /413/,
-		});
+	it.each([
+		[200, null],
+		[204, null],
+		[304, null],
+		[401, "unauthorized"],
+		[403, "forbidden"],
+		[404, "not-found"],
+		[409, "server"],
+		[413, "server"],
+		[500, "server"],
+	])("maps %s to %s", (status, kind) => {
+		const failure = failureFor({ status, headers: {}, body: "" });
+		expect(failure?.kind ?? null).toBe(kind);
+		if (failure) expect(failure).toMatchObject({ status, message: /\d{3}/ });
 	});
 });
 

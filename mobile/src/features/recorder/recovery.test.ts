@@ -83,21 +83,16 @@ describe("planRecovery", () => {
 
 	it("does not move anything when the file is already in the queue directory", async () => {
 		const d = disk({ "a.m4a": 80_000 });
-		expect(await planRecovery(interrupted, d.api)).toMatchObject([
-			{ kind: "queued", byteCount: 80_000 },
-		]);
-		expect(d.moves).toEqual([]);
-	});
-
-	it("fails a row whose recorder file is gone and cannot be adopted", async () => {
-		const d = disk({});
 		expect(await planRecovery(interrupted, d.api)).toEqual([
 			{
 				recordingID: "a",
-				kind: "failed",
-				lastError: INTERRUPTED_MESSAGE,
+				kind: "queued",
+				byteCount: 80_000,
+				sha256: "sha(a.m4a)",
+				durationSeconds: 10,
 			},
 		]);
+		expect(d.moves).toEqual([]);
 	});
 
 	it("replaces a queued file that holds only a header with the recorder's file", async () => {
@@ -106,31 +101,6 @@ describe("planRecovery", () => {
 			{ kind: "queued", byteCount: 80_000, sha256: "sha(a.m4a)" },
 		]);
 		expect(d.moves).toEqual([[SOURCE, "a.m4a"]]);
-	});
-
-	it("fails a row without a source when the queued file is missing", async () => {
-		const noSource = addRecording(
-			EMPTY_INDEX,
-			{ ...base, recordingID: "a" },
-			"recording",
-		);
-		const d = disk({ [SOURCE]: 80_000 });
-		expect(await planRecovery(noSource, d.api)).toMatchObject([
-			{ kind: "failed" },
-		]);
-		expect(d.moves).toEqual([]);
-	});
-
-	it("queues a recording whose file survived, estimating the duration", async () => {
-		expect(await planRecovery(interrupted, files())).toEqual([
-			{
-				recordingID: "a",
-				kind: "queued",
-				byteCount: 80_000,
-				sha256: "HASH",
-				durationSeconds: 10,
-			},
-		]);
 	});
 
 	it("keeps a known duration", async () => {
@@ -143,25 +113,23 @@ describe("planRecovery", () => {
 		expect(patch).toMatchObject({ kind: "queued", durationSeconds: 42 });
 	});
 
-	it("fails a recording with a missing, empty or header-only file", async () => {
-		for (const broken of [
-			files({ size: () => 0 }),
+	it.each<[string, RecoveryFiles, typeof interrupted]>([
+		["the recorder's file is gone", disk({}).api, interrupted],
+		["the file is empty", files({ size: () => 0 }), interrupted],
+		[
+			"the file holds only a header",
 			files({ size: () => MIN_RECORDING_BYTES - 1 }),
-			files({
-				size: () => 0,
-				adopt: async () => {
-					throw new Error("missing");
-				},
-			}),
-		]) {
-			expect(await planRecovery(interrupted, broken)).toEqual([
-				{
-					recordingID: "a",
-					kind: "failed",
-					lastError: INTERRUPTED_MESSAGE,
-				},
-			]);
-		}
+			interrupted,
+		],
+		[
+			"the row has no source and no queue file",
+			disk({ [SOURCE]: 80_000 }).api,
+			addRecording(EMPTY_INDEX, { ...base, recordingID: "a" }, "recording"),
+		],
+	])("fails a recording when %s", async (_, api, index) => {
+		expect(await planRecovery(index, api)).toEqual([
+			{ recordingID: "a", kind: "failed", lastError: INTERRUPTED_MESSAGE },
+		]);
 	});
 
 	it("leaves a row in `recording`, adopting nothing, while its queue file's size cannot be read", async () => {

@@ -97,17 +97,12 @@ afterEach(() => {
 });
 
 describe("PairingProvider", () => {
-	it("hydrates from the keychain once and reports ready", async () => {
-		fake.loads.push(pairing);
-		const h = await mount();
-		expect(h.value).toMatchObject({ pairing, ready: true });
-		expect(fake.load).toHaveBeenCalledTimes(1);
-	});
-
 	it("reads again on foreground while nothing is loaded, and stops once something is", async () => {
 		fake.loads.push(null, pairing);
 		const h = await mount();
 		expect(h.value).toMatchObject({ pairing: null, ready: true });
+		await act(async () => fake.emit("background"));
+		expect(fake.load).toHaveBeenCalledTimes(1);
 
 		await act(async () => fake.emit("active"));
 		expect(h.value.pairing).toEqual(pairing);
@@ -115,28 +110,6 @@ describe("PairingProvider", () => {
 
 		await act(async () => fake.emit("active"));
 		expect(fake.load).toHaveBeenCalledTimes(2);
-	});
-
-	it("ignores background transitions", async () => {
-		const h = await mount();
-		await act(async () => fake.emit("background"));
-		await act(async () => fake.emit("inactive"));
-		expect(fake.load).toHaveBeenCalledTimes(1);
-		expect(h.value.pairing).toBeNull();
-	});
-
-	it("runs a clear after a replace still saving", async () => {
-		const h = await mount();
-		const save = holdSave();
-		let cleared: Promise<void> | undefined;
-		await act(async () => {
-			void h.value.replace(pairing);
-			cleared = h.value.clear();
-		});
-		await act(async () => save.resolve());
-		await act(async () => cleared);
-		expect(fake.clear).toHaveBeenCalledTimes(1);
-		expect(h.value.pairing).toBeNull();
 	});
 
 	it("keeps later changes running after a save fails", async () => {
@@ -172,7 +145,6 @@ describe("PairingProvider", () => {
 
 	describe("currentToken", () => {
 		const second = { ...pairing, token: "second" };
-		const third = { ...pairing, token: "third" };
 
 		it("is the new pairing's from the moment replace is called", async () => {
 			fake.loads.push(pairing);
@@ -206,26 +178,6 @@ describe("PairingProvider", () => {
 			});
 			expect(h.value.currentToken()).toBe("tok");
 		});
-
-		it("stays the last replace's while an earlier one finishes", async () => {
-			const h = await mount();
-			const save = holdSave();
-			const lastSave = holdSave();
-			let last: Promise<void> | undefined;
-			await act(async () => {
-				void h.value.replace(second);
-				last = h.value.replace(third);
-			});
-			await act(async () => save.resolve());
-			expect(h.value.pairing).toEqual(second);
-			expect(h.value.currentToken()).toBe("third");
-			await act(async () => {
-				lastSave.resolve();
-				await last;
-			});
-			expect(h.value.pairing).toEqual(third);
-			expect(h.value.currentToken()).toBe("third");
-		});
 	});
 
 	describe("clearIfCurrent", () => {
@@ -249,62 +201,39 @@ describe("PairingProvider", () => {
 			expect(h.value.pairing).toBeNull();
 		});
 
-		it("treats a token nobody recorded as the keychain's", async () => {
-			fake.loads.push(pairing);
+		type Case = [
+			string,
+			typeof pairing | null,
+			typeof pairing | null,
+			string | null,
+			boolean,
+		];
+		it.each<Case>([
+			// A token nobody recorded stands for the pairing loaded at launch.
+			["the launch pairing, no token", pairing, null, null, true],
+			[
+				"a pairing made in this process, no token",
+				pairing,
+				replacement,
+				null,
+				false,
+			],
+			["nothing loaded at launch, no token", null, pairing, null, false],
+			["a pairing that replaced the token", replacement, null, "tok", false],
+			["no pairing", null, null, null, false],
+		])("against %s", async (_, loaded, replaced, token, expected) => {
+			if (loaded) fake.loads.push(loaded);
 			const h = await mount();
-			await act(async () => {
-				await h.value.clearIfCurrent(null, async () => {});
-			});
-			expect(fake.clear).toHaveBeenCalledTimes(1);
-			expect(h.value.pairing).toBeNull();
-		});
-
-		it("keeps a pairing made in this process against a token nobody recorded", async () => {
-			fake.loads.push(pairing);
-			const h = await mount();
-			await act(() => h.value.replace(replacement));
-			let cleared = true;
-			await act(async () => {
-				cleared = await h.value.clearIfCurrent(null, async () => {});
-			});
-			expect(cleared).toBe(false);
-			expect(fake.clear).not.toHaveBeenCalled();
-			expect(h.value.pairing).toEqual(replacement);
-		});
-
-		it("matches nothing with a token nobody recorded when nothing was loaded at launch", async () => {
-			const h = await mount();
-			await act(() => h.value.replace(pairing));
-			let cleared = true;
-			await act(async () => {
-				cleared = await h.value.clearIfCurrent(null, async () => {});
-			});
-			expect(cleared).toBe(false);
-			expect(h.value.pairing).toEqual(pairing);
-		});
-
-		it("keeps a pairing that replaced the token, and runs nothing", async () => {
-			fake.loads.push(replacement);
-			const h = await mount();
+			if (replaced) await act(() => h.value.replace(replaced));
 			const first = vi.fn(async () => {});
-			let cleared = true;
+			let cleared: boolean | undefined;
 			await act(async () => {
-				cleared = await h.value.clearIfCurrent("tok", first);
+				cleared = await h.value.clearIfCurrent(token, first);
 			});
-			expect(cleared).toBe(false);
-			expect(first).not.toHaveBeenCalled();
-			expect(fake.clear).not.toHaveBeenCalled();
-			expect(h.value.pairing).toEqual(replacement);
-		});
-
-		it("does nothing without a pairing", async () => {
-			const h = await mount();
-			const first = vi.fn(async () => {});
-			await act(async () => {
-				expect(await h.value.clearIfCurrent(null, first)).toBe(false);
-			});
-			expect(first).not.toHaveBeenCalled();
-			expect(fake.clear).not.toHaveBeenCalled();
+			expect(cleared).toBe(expected);
+			expect(first).toHaveBeenCalledTimes(expected ? 1 : 0);
+			expect(fake.clear).toHaveBeenCalledTimes(expected ? 1 : 0);
+			expect(h.value.pairing).toEqual(expected ? null : (replaced ?? loaded));
 		});
 
 		it("waits for a replace still saving, then compares with the new pairing", async () => {

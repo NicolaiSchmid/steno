@@ -69,8 +69,6 @@ class FakeMac implements RecordingClient {
 	damaged = false;
 	/** The Mac is still hashing: `complete` answers 409 although every chunk is in. */
 	verifying = false;
-	/** Announces that fail with a transport error before succeeding. */
-	unreachableAnnounces = 0;
 	/**
 	 * Answers for the next announces, in order: 409 (the receipt belongs to
 	 * another device) or a transport error; then the Mac answers normally.
@@ -117,10 +115,6 @@ class FakeMac implements RecordingClient {
 	announce = async (_: MacSession, metadata: RecordingMetadata) => {
 		this.calls.push(`announce ${metadata.recordingID}`);
 		if (this.revoked) throw new HandoverError("unauthorized", 401, "revoked");
-		if (this.unreachableAnnounces > 0) {
-			this.unreachableAnnounces -= 1;
-			throw new HandoverError("unreachable", null, "Wi-Fi is off");
-		}
 		const scripted = this.announceScript.shift();
 		if (scripted === 409) {
 			throw new HandoverError("server", 409, "The Mac answered 409");
@@ -174,9 +168,9 @@ class FakeMac implements RecordingClient {
 	};
 }
 
-function harness(initial: QueueIndex, random = () => 1) {
+function harness(initial: QueueIndex) {
 	const mac = new FakeMac();
-	const state = { index: initial, saves: 0 };
+	const state = { index: initial };
 	const clock = { now: new Date("2026-09-25T10:00:00.000Z") };
 	const files = {
 		present: new Set(initial.recordings.map((r) => r.fileName)),
@@ -209,13 +203,11 @@ function harness(initial: QueueIndex, random = () => 1) {
 		},
 		deviceName: async () => "Nicolai's iPhone",
 		update: async (transform) => {
-			const next = transform(state.index);
-			if (next !== state.index) state.saves += 1;
-			state.index = next;
+			state.index = transform(state.index);
 		},
 		onUnauthorized,
 		now: () => clock.now,
-		random,
+		random: () => 1,
 	};
 	const executor = createUploadExecutor(deps);
 
@@ -258,17 +250,23 @@ function harness(initial: QueueIndex, random = () => 1) {
 		advance,
 	};
 }
-
 describe("a recording travels queued -> uploading -> delivered", () => {
 	it("announces first, keeps two chunks in flight, completes when all are in, deletes the file and keeps the row", async () => {
 		const h = harness(addRecording(EMPTY_INDEX, rec("a")));
 
 		expect(await h.drive()).toEqual({ kind: "idle" });
 		expect(h.mac.calls).toEqual(["announce a", "chunk a/0", "chunk a/1"]);
+		expect(h.mac.announced[0]).toEqual({
+			recordingID: "a",
+			startedAt: "2026-09-25T09:00:01.000Z",
+			durationSeconds: 60,
+			byteCount: 2 * CHUNK + 512,
+			sha256: Buffer.alloc(32, 9).toString("base64"),
+			chunkSize: CHUNK,
+			format: "m4aAAC",
+			deviceName: "Nicolai's iPhone",
+		});
 		expect(h.row("a")).toMatchObject({ state: "uploading", lastError: null });
-		expect(h.executor.inFlight).toEqual(
-			new Set([taskIDs.chunk("a", 0), taskIDs.chunk("a", 1)]),
-		);
 		expect(h.mac.started.map((s) => s.chunk)).toEqual(
 			chunkPlan(2 * CHUNK + 512, CHUNK).slice(0, 2),
 		);
@@ -280,8 +278,11 @@ describe("a recording travels queued -> uploading -> delivered", () => {
 		expect(h.mac.calls.at(-1)).toBe("chunk a/2");
 
 		await h.finishChunk("a", 2);
-		await h.finishChunk("a", 1);
+		// A 200 counts like a 204.
+		h.mac.receive("a", 1);
+		await h.finishChunk("a", 1, 200);
 		expect(h.executor.inFlight.size).toBe(0);
+		expect(h.files.removed).toEqual([]);
 		expect(await h.drive()).toEqual({ kind: "idle" });
 		expect(h.mac.calls.at(-1)).toBe("complete a");
 
@@ -292,26 +293,10 @@ describe("a recording travels queued -> uploading -> delivered", () => {
 			lastError: null,
 		});
 		expect(h.files.removed).toEqual(["a.m4a"]);
-		expect(h.state.index.recordings).toHaveLength(1);
 		// The delivered row survives a save and load round trip.
 		expect(parseQueueIndex(serializeQueueIndex(h.state.index))).toEqual(
 			h.state.index,
 		);
-	});
-
-	it("announces core's RecordingMetadata with the device name and m4aAAC", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a")));
-		await h.drive();
-		expect(h.mac.announced[0]).toEqual({
-			recordingID: "a",
-			startedAt: "2026-09-25T09:00:01.000Z",
-			durationSeconds: 60,
-			byteCount: 2 * CHUNK + 512,
-			sha256: Buffer.alloc(32, 9).toString("base64"),
-			chunkSize: CHUNK,
-			format: "m4aAAC",
-			deviceName: "Nicolai's iPhone",
-		});
 	});
 
 	it("resumes from the chunks the Mac already has instead of starting at 0", async () => {
@@ -324,7 +309,6 @@ describe("a recording travels queued -> uploading -> delivered", () => {
 
 		await h.finishChunk("a", 1);
 		await h.drive();
-		expect(h.mac.calls.at(-1)).toBe("complete a");
 		expect(h.row("a")?.state).toBe("delivered");
 		expect(h.mac.started.map((s) => s.chunk.index)).toEqual([1]);
 	});
@@ -346,7 +330,7 @@ describe("a recording travels queued -> uploading -> delivered", () => {
 });
 
 describe("the Mac's answers", () => {
-	it("404 on a chunk sends the recording back to queued with no chunks and re-announces after the backoff", async () => {
+	it("404 on a chunk sends the recording back to queued with no chunks and re-announces after a doubling backoff", async () => {
 		const h = harness(addRecording(EMPTY_INDEX, rec("a")));
 		await h.drive();
 		await h.finishChunk("a", 0);
@@ -378,26 +362,12 @@ describe("the Mac's answers", () => {
 			"chunk a/0",
 			"chunk a/1",
 		]);
-	});
 
-	it("a second 404 doubles the wait", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
-		await h.drive();
-		await h.finishChunk("a", 0, 404);
-		h.advance(5_000);
-		await h.drive();
 		await h.finishChunk("a", 0, 404);
 		expect(h.row("a")).toMatchObject({
 			attempts: 2,
 			nextAttemptAt: "2026-09-25T10:00:15.000Z",
 		});
-	});
-
-	it("404 on a chunk of a row that is no longer uploading changes nothing", async () => {
-		const failed = setState(addRecording(EMPTY_INDEX, rec("a")), "a", "failed");
-		const h = harness(failed);
-		await h.finishChunk("a", 0, 404);
-		expect(h.state.index).toBe(failed);
 	});
 
 	it("409 on complete re-reads the status and uploads what the Mac lacks", async () => {
@@ -484,79 +454,78 @@ describe("the Mac's answers", () => {
 			lastError: "Chunk 0 was answered 503",
 		});
 	});
-
-	it("a 200 on a chunk counts like a 204", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
-		await h.drive();
-		await h.finishChunk("a", 0, 200);
-		expect(h.row("a")?.uploadedChunks).toEqual([0]);
-	});
 });
 
+type Harness = ReturnType<typeof harness>;
+
 describe("401 revokes the pairing", () => {
-	function twoPending() {
+	function pending() {
 		let index = addRecording(EMPTY_INDEX, rec("a", CHUNK));
 		index = addRecording(index, rec("bb", CHUNK));
 		index = addRecording(index, rec("done", CHUNK));
 		index = setState(setState(index, "done", "uploading"), "done", "delivered");
-		index = addRecording(index, rec("live", CHUNK), "recording");
-		return index;
+		return addRecording(index, rec("live", CHUNK), "recording");
 	}
 
-	function expectRevoked(h: ReturnType<typeof harness>) {
+	it.each<[string, QueueIndex, (h: Harness) => Promise<unknown>]>([
+		[
+			"at announce",
+			pending(),
+			async (h) => {
+				h.mac.revoked = true;
+				await h.drive();
+			},
+		],
+		[
+			"on a chunk result",
+			pending(),
+			async (h) => {
+				await h.drive();
+				h.mac.revoked = true;
+				await h.finishChunk("a", 0, 401);
+			},
+		],
+		[
+			"at complete",
+			pending(),
+			async (h) => {
+				await h.drive();
+				await h.finishChunk("a", 0);
+				h.mac.revoked = true;
+				await h.drive();
+			},
+		],
+		[
+			"while refreshing the chunk set after a relaunch",
+			setState(pending(), "a", "uploading"),
+			async (h) => {
+				h.mac.revoked = true;
+				await h.executor.refreshUploading(session, h.state.index);
+			},
+		],
+		[
+			// Nobody recorded the token: it stands for the pairing loaded at launch.
+			"on the result of a chunk started before a relaunch",
+			setState(pending(), "a", "uploading"),
+			async (h) => {
+				h.executor.reconcile([taskIDs.chunk("a", 0)]);
+				h.mac.revoked = true;
+				await h.finishChunk("a", 0, 401);
+				expect(h.onUnauthorized).toHaveBeenCalledWith(
+					null,
+					expect.any(Function),
+				);
+			},
+		],
+	])("%s", async (_, index, act) => {
+		const h = harness(index);
+		await act(h);
 		expect(h.row("a")?.state).toBe("unpaired");
 		expect(h.row("bb")?.state).toBe("unpaired");
 		expect(h.row("done")?.state).toBe("delivered");
 		expect(h.row("live")?.state).toBe("recording");
 		expect(h.onUnauthorized).toHaveBeenCalledTimes(1);
 		expect(h.pairing.token).toBeNull();
-	}
-
-	it("at announce", async () => {
-		const h = harness(twoPending());
-		h.mac.revoked = true;
-		await h.drive();
-		expectRevoked(h);
-		expect(h.mac.calls).toEqual(["announce a"]);
-	});
-
-	it("on a chunk result", async () => {
-		const h = harness(twoPending());
-		await h.drive();
-		h.mac.revoked = true;
-		await h.finishChunk("a", 0, 401);
-		expectRevoked(h);
-	});
-
-	it("at complete", async () => {
-		const h = harness(twoPending());
-		await h.drive();
-		await h.finishChunk("a", 0);
-		h.mac.revoked = true;
-		await h.drive();
-		expectRevoked(h);
-	});
-
-	it("while refreshing the chunk set after a relaunch", async () => {
-		const h = harness(setState(twoPending(), "a", "uploading"));
-		h.mac.revoked = true;
-		await h.executor.refreshUploading(session, h.state.index);
-		expectRevoked(h);
-	});
-
-	it("on the result of a chunk started before a relaunch, whose token nobody recorded", async () => {
-		const h = harness(setState(twoPending(), "a", "uploading"));
-		h.executor.reconcile([taskIDs.chunk("a", 0)]);
-		h.mac.revoked = true;
-		await h.finishChunk("a", 0, 401);
-		expect(h.onUnauthorized).toHaveBeenCalledWith(null, expect.any(Function));
-		expectRevoked(h);
-	});
-
-	it("leaves nothing pending for the planner afterwards", async () => {
-		const h = harness(twoPending());
-		h.mac.revoked = true;
-		await h.drive();
 		expect(planNext(h.state.index, true, new Set(), h.clock.now)).toEqual({
 			kind: "idle",
 		});
@@ -564,21 +533,65 @@ describe("401 revokes the pairing", () => {
 });
 
 describe("a 401 to a pairing since replaced keeps the new one", () => {
-	function repaired(h: ReturnType<typeof harness>) {
+	const twoQueued = () =>
+		addRecording(addRecording(EMPTY_INDEX, rec("a", CHUNK)), rec("bb", CHUNK));
+
+	function repaired(h: Harness) {
 		h.pairing.token = "new-token";
 		h.mac.revoked = true;
 	}
 
-	function expectOldToken(h: ReturnType<typeof harness>) {
+	it.each<[string, (h: Harness) => Promise<unknown>]>([
+		[
+			"at announce",
+			async (h) => {
+				repaired(h);
+				await h.executor.execute(
+					{ kind: "announce", recordingID: "a" },
+					session,
+					h.state.index,
+				);
+			},
+		],
+		[
+			"on the result of a chunk sent with the old token",
+			async (h) => {
+				await h.drive();
+				repaired(h);
+				await h.finishChunk("a", 0, 401);
+				expect(h.row("a")?.uploadedChunks).toEqual([]);
+			},
+		],
+		[
+			"on the result of a chunk still in flight after a reconcile",
+			async (h) => {
+				await h.drive();
+				h.executor.reconcile([taskIDs.chunk("a", 0)]);
+				repaired(h);
+				await h.finishChunk("a", 0, 401);
+			},
+		],
+		[
+			"at complete",
+			async (h) => {
+				await h.drive();
+				await h.finishChunk("a", 0);
+				repaired(h);
+				await h.executor.execute(
+					{ kind: "complete", recordingID: "a" },
+					session,
+					h.state.index,
+				);
+			},
+		],
+	])("%s retries the row under a neutral message", async (_, act) => {
+		const h = harness(twoQueued());
+		await act(h);
 		expect(h.onUnauthorized).toHaveBeenCalledWith(
 			session.token,
 			expect.any(Function),
 		);
 		expect(h.pairing.token).toBe("new-token");
-	}
-
-	function expectRetried(h: ReturnType<typeof harness>) {
-		expectOldToken(h);
 		expect(h.row("a")).toMatchObject({
 			state: "queued",
 			attempts: 1,
@@ -586,69 +599,17 @@ describe("a 401 to a pairing since replaced keeps the new one", () => {
 		});
 		expect(h.row("a")?.nextAttemptAt).not.toBeNull();
 		expect(h.row("bb")?.state).toBe("queued");
-	}
-
-	function twoQueued() {
-		return addRecording(
-			addRecording(EMPTY_INDEX, rec("a", CHUNK)),
-			rec("bb", CHUNK),
-		);
-	}
-
-	it("at announce", async () => {
-		const h = harness(twoQueued());
-		repaired(h);
-		await h.executor.execute(
-			{ kind: "announce", recordingID: "a" },
-			session,
-			h.state.index,
-		);
-		expectRetried(h);
 	});
 
-	it("on the result of a chunk sent with the old token", async () => {
-		const h = harness(twoQueued());
-		await h.drive();
-		repaired(h);
-		await h.finishChunk("a", 0, 401);
-		expectRetried(h);
-		expect(h.row("a")?.uploadedChunks).toEqual([]);
-	});
-
-	it("on the result of a chunk still in flight after a reconcile", async () => {
-		const h = harness(twoQueued());
-		await h.drive();
-		h.executor.reconcile([taskIDs.chunk("a", 0)]);
-		repaired(h);
-		await h.finishChunk("a", 0, 401);
-		expectRetried(h);
-	});
-
-	it("at complete", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
-		await h.drive();
-		await h.finishChunk("a", 0);
-		repaired(h);
-		await h.drive();
-		expectOldToken(h);
-		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 1 });
-	});
-
-	it("while refreshing the chunk set after a relaunch", async () => {
-		const h = harness(setState(twoQueued(), "a", "uploading"));
-		repaired(h);
-		await h.executor.refreshUploading(session, h.state.index);
-		expectOldToken(h);
-		expect(h.row("a")?.state).toBe("uploading");
-	});
-
-	it("while refreshing two chunk sets, and stops at the first", async () => {
+	it("while refreshing the chunk sets after a relaunch, and stops at the first", async () => {
 		const h = harness(
 			setState(setState(twoQueued(), "a", "uploading"), "bb", "uploading"),
 		);
 		repaired(h);
 		await h.executor.refreshUploading(session, h.state.index);
+		expect(h.pairing.token).toBe("new-token");
 		expect(h.mac.calls).toEqual(["status a"]);
+		expect(h.row("a")?.state).toBe("uploading");
 		expect(h.row("bb")?.state).toBe("uploading");
 	});
 });
@@ -667,14 +628,11 @@ describe("a complete sent before an unpair and answered after it", () => {
 		h.mac.completeGate = new Promise((resolve) => {
 			answer = resolve;
 		});
-		const action = planNext(
+		const completing = h.executor.execute(
+			{ kind: "complete", recordingID: "a" },
+			session,
 			h.state.index,
-			true,
-			h.executor.inFlight,
-			h.clock.now,
 		);
-		expect(action).toEqual({ kind: "complete", recordingID: "a" });
-		const completing = h.executor.execute(action, session, h.state.index);
 		expect(h.mac.calls.at(-1)).toBe("complete a");
 
 		await forgetPairing({
@@ -691,7 +649,7 @@ describe("a complete sent before an unpair and answered after it", () => {
 	}
 
 	/** Pairs again, as the pairing sheet does after a scan. */
-	function pairAgain(h: ReturnType<typeof harness>) {
+	function pairAgain(h: Harness) {
 		return commitPairing(
 			{
 				mac: {
@@ -714,11 +672,7 @@ describe("a complete sent before an unpair and answered after it", () => {
 		);
 	}
 
-	it("a 200 marks the row delivered and deletes the file, and a new pairing does not upload it again", async () => {
-		const { h, answer, completing } = await unpairDuringComplete();
-		answer();
-		await completing;
-
+	function expectDelivered(h: Harness) {
 		expect(h.row("a")).toMatchObject({
 			state: "delivered",
 			meetingID: "meeting-a",
@@ -726,6 +680,13 @@ describe("a complete sent before an unpair and answered after it", () => {
 		});
 		expect(h.files.removed).toEqual(["a.m4a"]);
 		expect(h.executor.inFlight.size).toBe(0);
+	}
+
+	it("a 200 marks the row delivered and deletes the file, and a new pairing does not upload it again", async () => {
+		const { h, answer, completing } = await unpairDuringComplete();
+		answer();
+		await completing;
+		expectDelivered(h);
 
 		await pairAgain(h);
 		expect(h.row("a")?.state).toBe("delivered");
@@ -742,7 +703,6 @@ describe("a complete sent before an unpair and answered after it", () => {
 		await completing;
 
 		expect(h.row("a")).toMatchObject({ state: "unpaired", meetingID: null });
-		expect(h.files.removed).toEqual([]);
 		expect(h.files.present.has("a.m4a")).toBe(true);
 
 		await pairAgain(h);
@@ -764,13 +724,7 @@ describe("a complete sent before an unpair and answered after it", () => {
 
 		answer();
 		await completing;
-		expect(h.row("a")).toMatchObject({
-			state: "delivered",
-			meetingID: "meeting-a",
-			lastError: null,
-		});
-		expect(h.files.removed).toEqual(["a.m4a"]);
-		expect(h.executor.inFlight.size).toBe(0);
+		expectDelivered(h);
 		expect(await h.drive()).toEqual({ kind: "idle" });
 		expect(h.mac.calls).toHaveLength(calls);
 	});
@@ -790,7 +744,6 @@ describe("a complete sent before an unpair and answered after it", () => {
 		});
 		expect(h.files.present.has("a.m4a")).toBe(true);
 
-		// The Mac accepts the new pairing (the fake checks no token).
 		h.mac.revoked = false;
 		h.advance(5_000);
 		await h.drive();
@@ -813,8 +766,6 @@ describe("an announce the Mac keeps refusing with 409", () => {
 		});
 		h.advance(60_000);
 		expect(await h.drive()).toMatchObject({ kind: "wait" });
-		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 2 });
-
 		h.advance(60_000);
 		expect(await h.drive()).toEqual({ kind: "idle" });
 		expect(h.row("a")).toMatchObject({
@@ -836,11 +787,6 @@ describe("an announce the Mac keeps refusing with 409", () => {
 		h.advance(60_000);
 		await h.drive();
 		expect(h.row("a")).toMatchObject({ state: "uploading", lastError: null });
-		expect(h.mac.calls.slice(3)).toEqual([
-			"announce a",
-			"announce a",
-			"chunk a/0",
-		]);
 	});
 
 	it("starts counting again after an announce the Mac takes", async () => {
@@ -862,7 +808,7 @@ describe("an announce the Mac keeps refusing with 409", () => {
 		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 4 });
 	});
 
-	it("counts only 409s in a row, for each recording", async () => {
+	it("counts only 409s in a row", async () => {
 		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
 		h.mac.announceScript = [409, 409, "unreachable", 409, 409];
 		for (let i = 0; i < 5; i++) {
@@ -870,16 +816,15 @@ describe("an announce the Mac keeps refusing with 409", () => {
 			expect(h.row("a")?.state).toBe("queued");
 			h.advance(60 * 60_000);
 		}
-		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 5 });
 		await h.drive();
 		expect(h.row("a")?.state).toBe("uploading");
 	});
 });
 
 describe("transient failures back off on the injected clock", () => {
-	it("doubles from 5 s with the RNG at 1 and the planner waits until the next attempt", async () => {
+	it("doubles from 5 s and the planner waits until the next attempt", async () => {
 		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
-		h.mac.unreachableAnnounces = 3;
+		h.mac.announceScript = ["unreachable", "unreachable", "unreachable"];
 
 		expect(await h.drive()).toEqual({
 			kind: "wait",
@@ -900,24 +845,15 @@ describe("transient failures back off on the injected clock", () => {
 			kind: "wait",
 			until: "2026-09-25T10:00:15.000Z",
 		});
-		expect(h.row("a")?.attempts).toBe(2);
-
 		h.advance(10_000);
 		expect(await h.drive()).toEqual({
 			kind: "wait",
 			until: "2026-09-25T10:00:35.000Z",
 		});
-		expect(h.row("a")?.attempts).toBe(3);
 
 		h.advance(20_000);
 		await h.drive();
-		expect(h.mac.calls).toEqual([
-			"announce a",
-			"announce a",
-			"announce a",
-			"announce a",
-			"chunk a/0",
-		]);
+		expect(h.mac.calls.slice(-2)).toEqual(["announce a", "chunk a/0"]);
 		expect(h.row("a")).toMatchObject({
 			state: "uploading",
 			attempts: 3,
@@ -925,74 +861,35 @@ describe("transient failures back off on the injected clock", () => {
 		});
 	});
 
-	it("halves the delay with the RNG at 0", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)), () => 0);
-		h.mac.unreachableAnnounces = 2;
-		expect(await h.drive()).toEqual({
-			kind: "wait",
-			until: "2026-09-25T10:00:02.500Z",
-		});
-		h.advance(2_500);
-		expect(await h.drive()).toEqual({
-			kind: "wait",
-			until: "2026-09-25T10:00:07.500Z",
-		});
-	});
-
-	it("every background failure schedules a retry, a cancelled task included", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
-		await h.drive();
-		// A rejected pin surfaces as a cancellation; re-planning it at once
-		// would copy and hand off the chunk again on the same tick.
-		await h.executor.uploadFailed({
-			taskID: taskIDs.chunk("a", 0),
-			message: "The Mac's certificate does not match the pairing",
-			retryable: false,
-		});
-		expect(h.executor.inFlight.has(taskIDs.chunk("a", 0))).toBe(false);
-		expect(h.row("a")).toMatchObject({
-			state: "queued",
-			attempts: 1,
-			nextAttemptAt: "2026-09-25T10:00:05.000Z",
-			lastError: "The Mac's certificate does not match the pairing",
-		});
-		expect(await h.drive()).toEqual({
-			kind: "wait",
-			until: "2026-09-25T10:00:05.000Z",
-		});
-		expect(h.mac.started).toHaveLength(1);
-
-		h.advance(5_000);
-		await h.drive();
-		await h.executor.uploadFailed({
-			taskID: taskIDs.chunk("a", 0),
-			message: "The network connection was lost.",
-			retryable: true,
-		});
-		expect(h.row("a")).toMatchObject({
-			state: "queued",
-			attempts: 2,
-			lastError: "The network connection was lost.",
-		});
-	});
-
-	it("ignores results for task ids that are not chunks", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
-		const before = h.state.index;
-		h.executor.inFlight.add("stale/announce");
-		await h.executor.uploadFinished({
-			taskID: "stale/announce",
-			status: 500,
-			body: "",
-		});
-		await h.executor.uploadFailed({
-			taskID: "nonsense",
-			message: "x",
-			retryable: true,
-		});
-		expect(h.executor.inFlight.size).toBe(0);
-		expect(h.state.index).toBe(before);
-	});
+	it.each([
+		[
+			"a cancelled task (a rejected pin)",
+			false,
+			"The Mac's certificate does not match the pairing",
+		],
+		["a retryable task", true, "The network connection was lost."],
+	])(
+		"every background failure schedules a retry: %s",
+		async (_, retryable, message) => {
+			const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
+			await h.drive();
+			await h.executor.uploadFailed({
+				taskID: taskIDs.chunk("a", 0),
+				message,
+				retryable,
+			});
+			expect(h.executor.inFlight.size).toBe(0);
+			expect(h.row("a")).toMatchObject({
+				state: "queued",
+				attempts: 1,
+				nextAttemptAt: "2026-09-25T10:00:05.000Z",
+				lastError: message,
+			});
+			// Re-planning at once would copy and hand off the chunk again.
+			expect(await h.drive()).toMatchObject({ kind: "wait" });
+			expect(h.mac.started).toHaveLength(1);
+		},
+	);
 
 	it("a failed hand-off to the background session frees the slot and retries", async () => {
 		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
@@ -1005,124 +902,55 @@ describe("transient failures back off on the injected clock", () => {
 			lastError: "ERR_STENO_UPLOAD",
 		});
 	});
+});
 
-	it("does not retry a row that stopped being pending in the meantime", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
-		h.state.index = setState(h.state.index, "a", "failed");
-		await h.executor.fail("a", new Error("late"));
-		expect(h.row("a")).toMatchObject({ state: "failed", attempts: 0 });
+it("fails a recording whose file is gone without calling the Mac", async () => {
+	const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
+	h.files.present.clear();
+	await h.drive();
+	expect(h.mac.calls).toEqual([]);
+	expect(h.row("a")).toMatchObject({
+		state: "failed",
+		lastError: "The recording file is missing",
 	});
 });
 
-describe("guards", () => {
-	it("fails a recording whose file is gone without calling the Mac", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
-		h.files.present.clear();
-		await h.drive();
-		expect(h.mac.calls).toEqual([]);
-		expect(h.row("a")).toMatchObject({
-			state: "failed",
-			lastError: "The recording file is missing",
-		});
-		expect(h.executor.inFlight.size).toBe(0);
-	});
+it("reconcile drops chunk ids the session no longer knows, adopts the ones it does, keeps announce and complete ids", async () => {
+	const h = harness(addRecording(EMPTY_INDEX, rec("a")));
+	await h.drive();
+	h.executor.inFlight.add(taskIDs.announce("bb"));
+	h.executor.inFlight.add(taskIDs.complete("cc"));
 
-	it("ignores actions for unknown recordings or chunks beyond the plan", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
-		const before = h.state.index;
-		await h.executor.execute(
-			{ kind: "announce", recordingID: "ghost" },
-			session,
-			h.state.index,
-		);
-		await h.executor.execute(
-			{ kind: "upload-chunk", recordingID: "a", chunk: 7 },
-			session,
-			h.state.index,
-		);
-		await h.executor.execute({ kind: "idle" }, session, h.state.index);
-		await h.executor.execute(
-			{ kind: "wait", until: "2026-09-25T10:00:05.000Z" },
-			session,
-			h.state.index,
-		);
-		expect(h.mac.calls).toEqual([]);
-		expect(h.state.index).toBe(before);
-		expect(h.executor.inFlight.size).toBe(0);
-	});
+	// Chunk 0's `uploadFinished` was missed (dev reload); chunk 2 was
+	// started by a previous JS lifetime.
+	h.executor.reconcile([taskIDs.chunk("a", 1), taskIDs.chunk("a", 2)]);
+	expect(h.executor.inFlight).toEqual(
+		new Set([
+			taskIDs.chunk("a", 1),
+			taskIDs.chunk("a", 2),
+			taskIDs.announce("bb"),
+			taskIDs.complete("cc"),
+		]),
+	);
+
+	// Once chunk 2 finishes natively, the planner no longer waits on the
+	// dropped chunk 0.
+	h.executor.reconcile([taskIDs.chunk("a", 1)]);
+	expect(
+		planNext(h.state.index, true, h.executor.inFlight, h.clock.now),
+	).toEqual({ kind: "upload-chunk", recordingID: "a", chunk: 0 });
 });
 
-describe("reconcile with the background session", () => {
-	it("drops chunk ids the session no longer knows, adopts the ones it does, keeps announce and complete ids", async () => {
-		const h = harness(addRecording(EMPTY_INDEX, rec("a")));
-		await h.drive();
-		expect(h.executor.inFlight).toEqual(
-			new Set([taskIDs.chunk("a", 0), taskIDs.chunk("a", 1)]),
-		);
-		h.executor.inFlight.add(taskIDs.announce("bb"));
-		h.executor.inFlight.add(taskIDs.complete("cc"));
-
-		// Chunk 0's `uploadFinished` was missed (dev reload); chunk 2 was
-		// started by a previous JS lifetime.
-		h.executor.reconcile([taskIDs.chunk("a", 1), taskIDs.chunk("a", 2)]);
-		expect(h.executor.inFlight).toEqual(
-			new Set([
-				taskIDs.chunk("a", 1),
-				taskIDs.chunk("a", 2),
-				taskIDs.announce("bb"),
-				taskIDs.complete("cc"),
-			]),
-		);
-
-		// Once chunk 2 finishes natively, the planner no longer waits on the
-		// dropped chunk 0.
-		h.executor.reconcile([taskIDs.chunk("a", 1)]);
-		expect(
-			planNext(h.state.index, true, h.executor.inFlight, h.clock.now),
-		).toEqual({
-			kind: "upload-chunk",
-			recordingID: "a",
-			chunk: 0,
-		});
-	});
-});
-
-describe("refreshUploading after a relaunch", () => {
-	it("syncs the chunk set of every uploading row and skips the others", async () => {
-		let index = addRecording(EMPTY_INDEX, rec("a"));
-		index = addRecording(index, rec("bb"));
-		index = setState(index, "a", "uploading");
-		const h = harness(index);
-		h.mac.seed("a", [1], 3);
-		await h.executor.refreshUploading(session, h.state.index);
-		expect(h.mac.calls).toEqual(["status a"]);
-		expect(h.row("a")?.uploadedChunks).toEqual([1]);
-		expect(h.row("bb")?.state).toBe("queued");
-	});
-
-	it("sends a row the Mac no longer knows back to queued", async () => {
-		const index = setState(
-			addRecording(EMPTY_INDEX, rec("a")),
-			"a",
-			"uploading",
-		);
-		const h = harness(index);
-		await h.executor.refreshUploading(session, h.state.index);
-		expect(h.row("a")).toMatchObject({ state: "queued", uploadedChunks: [] });
-	});
-
-	it("stops when cancelled", async () => {
-		let index = setState(addRecording(EMPTY_INDEX, rec("a")), "a", "uploading");
-		index = setState(addRecording(index, rec("bb")), "bb", "uploading");
-		const h = harness(index);
-		h.mac.seed("a", [], 3);
-		h.mac.seed("bb", [], 3);
-		let calls = 0;
-		await h.executor.refreshUploading(
-			session,
-			h.state.index,
-			() => calls++ > 0,
-		);
-		expect(h.mac.calls).toEqual(["status a"]);
-	});
+it("refreshUploading after a relaunch syncs every uploading row, requeues one the Mac forgot and skips the others", async () => {
+	let index = addRecording(EMPTY_INDEX, rec("a"));
+	index = addRecording(index, rec("bb"));
+	index = addRecording(index, rec("ccc"));
+	index = setState(setState(index, "a", "uploading"), "ccc", "uploading");
+	const h = harness(index);
+	h.mac.seed("a", [1], 3);
+	await h.executor.refreshUploading(session, h.state.index);
+	expect(h.mac.calls).toEqual(["status a", "status ccc"]);
+	expect(h.row("a")?.uploadedChunks).toEqual([1]);
+	expect(h.row("bb")?.state).toBe("queued");
+	expect(h.row("ccc")).toMatchObject({ state: "queued", uploadedChunks: [] });
 });

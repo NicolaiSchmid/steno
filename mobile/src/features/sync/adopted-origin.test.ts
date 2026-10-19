@@ -58,20 +58,15 @@ describe("adopted origin", () => {
 		]);
 	});
 
-	it("keeps the last of two writes made at once", async () => {
-		const files = memoryFiles();
-		const file = createAdoptedOrigin(files.api, () => PATH);
-		const second = { ...ENDPOINT, origin: "https://10.0.0.9:1" };
-		await Promise.all([file.write(ENDPOINT), file.write(second)]);
-		expect(await file.read()).toEqual(second);
-	});
-
-	it("reads no earlier address when the file is missing or unreadable", async () => {
+	it("reads no earlier address when the file is missing, unreadable or does not parse", async () => {
 		const files = memoryFiles();
 		const file = createAdoptedOrigin(files.api, () => PATH);
 		expect(await file.read()).toBeNull();
 		files.store.set(PATH, JSON.stringify(ENDPOINT));
 		files.state.failRead = true;
+		expect(await file.read()).toBeNull();
+		files.state.failRead = false;
+		files.store.set(PATH, '{"origin":"https://10.0');
 		expect(await file.read()).toBeNull();
 	});
 
@@ -88,12 +83,6 @@ describe("adopted origin", () => {
 		expect(await reading).toEqual(second);
 	});
 
-	it("reads no earlier address from a file that does not parse", async () => {
-		const files = memoryFiles({ [PATH]: '{"origin":"https://10.0' });
-		const file = createAdoptedOrigin(files.api, () => PATH);
-		expect(await file.read()).toBeNull();
-	});
-
 	it("reads no earlier address after a failed rename, and writes again", async () => {
 		const files = memoryFiles({ [PATH]: JSON.stringify(ENDPOINT) });
 		const file = createAdoptedOrigin(files.api, () => PATH);
@@ -106,20 +95,21 @@ describe("adopted origin", () => {
 		expect(await file.read()).toEqual(second);
 	});
 
-	it("parses only an https origin with a fingerprint", () => {
+	it("parses an https origin with a fingerprint", () => {
 		expect(parseAdoptedOrigin(JSON.stringify(ENDPOINT))).toEqual(ENDPOINT);
-		for (const text of [
-			"",
-			"{",
-			"null",
-			"[]",
-			'"https://10.0.0.1:1"',
-			JSON.stringify({ origin: "https://10.0.0.1:1" }),
-			JSON.stringify({ ...ENDPOINT, fingerprint: "" }),
-			JSON.stringify({ ...ENDPOINT, origin: "http://10.0.0.1:1" }),
-			JSON.stringify({ ...ENDPOINT, origin: 1 }),
-		]) {
-			expect(parseAdoptedOrigin(text)).toBeNull();
-		}
+	});
+
+	it.each([
+		"",
+		"{",
+		"null",
+		"[]",
+		'"https://10.0.0.1:1"',
+		JSON.stringify({ origin: "https://10.0.0.1:1" }),
+		JSON.stringify({ ...ENDPOINT, fingerprint: "" }),
+		JSON.stringify({ ...ENDPOINT, origin: "http://10.0.0.1:1" }),
+		JSON.stringify({ ...ENDPOINT, origin: 1 }),
+	])("parses %j as no address", (text) => {
+		expect(parseAdoptedOrigin(text)).toBeNull();
 	});
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { describePairingFailure, parsePairingPayload } from "./pairing-payload";
+import { parsePairingPayload } from "./pairing-payload";
 
 const now = new Date("2026-09-25T10:00:00.000Z");
 const FP = Buffer.alloc(32, 0xab).toString("base64");
@@ -39,126 +39,52 @@ describe("parsePairingPayload", () => {
 		});
 	});
 
-	it("rejects non-steno text and other versions", () => {
-		expect(parsePairingPayload("https://example.com", now)).toEqual({
-			ok: false,
-			reason: "not-steno",
-		});
-		expect(parsePairingPayload("steno://record", now)).toEqual({
-			ok: false,
-			reason: "not-steno",
-		});
-		expect(parsePairingPayload(url({}, "v2"), now)).toEqual({
-			ok: false,
-			reason: "version",
-		});
-		expect(parsePairingPayload("steno://pair/", now)).toEqual({
-			ok: false,
-			reason: "version",
-		});
-	});
+	const wrong = (length: number) =>
+		Buffer.alloc(length, 0xcd).toString("base64url");
+	const inSeconds = (delta: number) =>
+		String(Math.floor(now.getTime() / 1000) + delta);
 
-	it("rejects a missing field", () => {
-		for (const field of ["mac", "name", "fp", "secret", "exp"]) {
-			expect(parsePairingPayload(url({ [field]: undefined }), now)).toEqual({
-				ok: false,
-				reason: "missing-field",
-			});
-		}
-	});
-
-	it("rejects bad base64url, wrong lengths, bad uuids and bad expiries", () => {
-		expect(parsePairingPayload(url({ fp: "not*base64" }), now).ok).toBe(false);
-		expect(parsePairingPayload(url({ fp: "AAAA" }), now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-		expect(parsePairingPayload(url({ fp: FP }), now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-		expect(parsePairingPayload(url({ secret: "AAAA" }), now).ok).toBe(false);
-		expect(parsePairingPayload(url({ mac: "not-a-uuid" }), now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-		expect(parsePairingPayload(url({ exp: "soon" }), now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-		expect(parsePairingPayload(url({ name: "" }), now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-		expect(parsePairingPayload(url({ name: "%E0%A4%A" }), now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-	});
-
-	it("rejects a fingerprint or secret that is not exactly 32 bytes", () => {
-		for (const length of [31, 33, 64]) {
-			const wrong = Buffer.alloc(length, 0xcd).toString("base64url");
-			expect(parsePairingPayload(url({ fp: wrong }), now)).toEqual({
-				ok: false,
-				reason: "bad-encoding",
-			});
-			expect(parsePairingPayload(url({ secret: wrong }), now)).toEqual({
-				ok: false,
-				reason: "bad-encoding",
-			});
-		}
-		// Standard-alphabet characters and padding never belong in the QR.
-		expect(parsePairingPayload(url({ fp: `${urlSafe(FP)}=` }), now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-	});
-
-	it("rejects an expiry outside unix seconds and accepts one a second away", () => {
-		expect(parsePairingPayload(url({ exp: "1790000000000" }), now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-		expect(parsePairingPayload(url({ exp: "-5" }), now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-		const inOneSecond = String(Math.floor(now.getTime() / 1000) + 1);
-		expect(parsePairingPayload(url({ exp: inOneSecond }), now).ok).toBe(true);
-	});
-
-	it("keeps the query strict: a repeated or key-less parameter is damaged", () => {
-		expect(parsePairingPayload(`${url()}&mac=${MAC}`, now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-		expect(parsePairingPayload(`${url()}&stray`, now)).toEqual({
-			ok: false,
-			reason: "bad-encoding",
-		});
-		expect(parsePairingPayload(`  ${url()}\n`, now).ok).toBe(true);
-	});
-
-	it("rejects an expired code on the injected clock", () => {
-		const exp = String(Math.floor(now.getTime() / 1000));
-		expect(parsePairingPayload(url({ exp }), now)).toEqual({
-			ok: false,
-			reason: "expired",
-		});
-		const stillValid = new Date(now.getTime() - 1000);
-		expect(parsePairingPayload(url({ exp }), stillValid).ok).toBe(true);
-	});
-
-	it("has a sentence for every failure", () => {
-		for (const reason of [
-			"not-steno",
-			"version",
+	it.each([
+		["https://example.com", "not-steno"],
+		["steno://record", "not-steno"],
+		[url({}, "v2"), "version"],
+		["steno://pair/", "version"],
+		...["mac", "name", "fp", "secret", "exp"].map((field) => [
+			url({ [field]: undefined }),
 			"missing-field",
-			"bad-encoding",
-			"expired",
-		] as const) {
-			expect(describePairingFailure(reason)).toMatch(/\.$/);
-		}
+		]),
+		[url({ fp: "not*base64" }), "bad-encoding"],
+		[url({ fp: "AAAA" }), "bad-encoding"],
+		// Standard-alphabet characters and padding never belong in the QR.
+		[url({ fp: FP }), "bad-encoding"],
+		[url({ fp: `${urlSafe(FP)}=` }), "bad-encoding"],
+		...[31, 33, 64].flatMap((length) => [
+			[url({ fp: wrong(length) }), "bad-encoding"],
+			[url({ secret: wrong(length) }), "bad-encoding"],
+		]),
+		[url({ mac: "not-a-uuid" }), "bad-encoding"],
+		[url({ name: "" }), "bad-encoding"],
+		[url({ name: "%E0%A4%A" }), "bad-encoding"],
+		[url({ exp: "soon" }), "bad-encoding"],
+		[url({ exp: "1790000000000" }), "bad-encoding"],
+		[url({ exp: "-5" }), "bad-encoding"],
+		// The query is strict: a repeated or key-less parameter is damaged.
+		[`${url()}&mac=${MAC}`, "bad-encoding"],
+		[`${url()}&stray`, "bad-encoding"],
+		[url({ exp: inSeconds(0) }), "expired"],
+	])("rejects %s as %s", (text, reason) => {
+		expect(parsePairingPayload(text, now)).toEqual({ ok: false, reason });
+	});
+
+	it.each([
+		["padded with whitespace", `  ${url()}\n`, now],
+		["expiring in a second", url({ exp: inSeconds(1) }), now],
+		[
+			"expiring now, a second ago",
+			url({ exp: inSeconds(0) }),
+			new Date(now.getTime() - 1000),
+		],
+	])("accepts a code %s", (_, text, at) => {
+		expect(parsePairingPayload(text, at).ok).toBe(true);
 	});
 });

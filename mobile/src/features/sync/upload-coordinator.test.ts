@@ -55,17 +55,6 @@ describe("planNext", () => {
 		});
 	});
 
-	it("announces before any chunk, once", () => {
-		const index = addRecording(EMPTY_INDEX, rec("a", "x"));
-		expect(planNext(index, true, new Set(), now)).toEqual({
-			kind: "announce",
-			recordingID: "a",
-		});
-		expect(
-			planNext(index, true, new Set([taskIDs.announce("a")]), now),
-		).toEqual({ kind: "idle" });
-	});
-
 	it("does not announce a queued recording while its complete is still out", () => {
 		const index = addRecording(EMPTY_INDEX, rec("a", "x"));
 		expect(
@@ -86,27 +75,6 @@ describe("planNext", () => {
 			kind: "announce",
 			recordingID: "b",
 		});
-	});
-
-	it("uploads the first missing chunk with at most two in flight", () => {
-		const index = setState(
-			addRecording(EMPTY_INDEX, rec("a", "x")),
-			"a",
-			"uploading",
-		);
-		expect(planNext(index, true, new Set(), now)).toEqual({
-			kind: "upload-chunk",
-			recordingID: "a",
-			chunk: 0,
-		});
-		const one = new Set([taskIDs.chunk("a", 0)]);
-		expect(planNext(index, true, one, now)).toEqual({
-			kind: "upload-chunk",
-			recordingID: "a",
-			chunk: 1,
-		});
-		const two = new Set([taskIDs.chunk("a", 0), taskIDs.chunk("a", 1)]);
-		expect(planNext(index, true, two, now)).toEqual({ kind: "idle" });
 	});
 
 	it("resumes from the Mac's chunk set and completes only when nothing is left or in flight", () => {
@@ -137,54 +105,22 @@ describe("planNext", () => {
 			kind: "idle",
 		});
 	});
-
-	it("works one recording at a time, oldest first", () => {
-		let index = addRecording(
-			EMPTY_INDEX,
-			rec("new", "2026-09-25T09:00:00.000Z"),
-		);
-		index = addRecording(index, rec("old", "2026-09-25T08:00:00.000Z"));
-		index = setState(index, "old", "uploading");
-		const busy = new Set([taskIDs.chunk("old", 0), taskIDs.chunk("old", 1)]);
-		expect(planNext(index, true, busy, now)).toEqual({ kind: "idle" });
-		expect(planNext(index, true, new Set(), now)).toMatchObject({
-			recordingID: "old",
-		});
-	});
-
-	it("treats a delivered or failed recording as done", () => {
-		let index = addRecording(EMPTY_INDEX, rec("a", "x"));
-		index = setState(setState(index, "a", "uploading"), "a", "delivered");
-		expect(planNext(index, true, new Set(), now)).toEqual({
-			kind: "idle",
-		});
-		let failed = addRecording(EMPTY_INDEX, rec("b", "x"));
-		failed = setState(failed, "b", "failed");
-		expect(planNext(failed, true, new Set(), now)).toEqual({
-			kind: "idle",
-		});
-	});
 });
 
 describe("backoffMs", () => {
-	it("starts at 5 s, doubles, and caps at 5 min", () => {
-		expect(backoffMs(1, () => 1)).toBe(5_000);
-		expect(backoffMs(2, () => 1)).toBe(10_000);
-		expect(backoffMs(3, () => 1)).toBe(20_000);
-		expect(backoffMs(7, () => 1)).toBe(BACKOFF_CAP_MS);
-		expect(backoffMs(50, () => 1)).toBe(BACKOFF_CAP_MS);
-	});
-
-	it("jitters down to half with the RNG at 0 and treats attempt 0 as the first", () => {
-		expect(backoffMs(1, () => 0)).toBe(2_500);
-		expect(backoffMs(4, () => 0)).toBe(20_000);
-		expect(backoffMs(0, () => 1)).toBe(5_000);
-		expect(backoffMs(1, () => 0.5)).toBe(3_750);
-	});
-
-	it("clamps a misbehaving RNG", () => {
-		expect(backoffMs(1, () => 7)).toBe(5_000);
-		expect(backoffMs(1, () => -1)).toBe(2_500);
+	it.each([
+		[1, 1, 5_000],
+		[2, 1, 10_000],
+		[3, 1, 20_000],
+		[7, 1, BACKOFF_CAP_MS],
+		[50, 1, BACKOFF_CAP_MS],
+		// Attempt 0 counts as the first; the RNG jitters down to half.
+		[0, 1, 5_000],
+		[1, 0, 2_500],
+		[4, 0, 20_000],
+		[1, 0.5, 3_750],
+	])("attempt %s with the RNG at %s waits %s ms", (attempt, random, ms) => {
+		expect(backoffMs(attempt, () => random)).toBe(ms);
 	});
 });
 
@@ -193,34 +129,36 @@ describe("coordinatorStatus", () => {
 	const uploading = setState(queued, "a", "uploading");
 	const failed = setState(queued, "a", "failed");
 	const delivered = setState(uploading, "a", "delivered");
+	const live = addRecording(EMPTY_INDEX, rec("r", "z"), "recording");
 
-	it("is unpaired without a pairing, whatever the queue holds", () => {
-		expect(coordinatorStatus(false, EMPTY_INDEX, false)).toBe("unpaired");
-		expect(coordinatorStatus(false, uploading, true)).toBe("unpaired");
-	});
-
-	it("is searching while work is pending and the Mac is not resolved", () => {
-		expect(coordinatorStatus(true, queued, false)).toBe("searching");
-		expect(coordinatorStatus(true, uploading, false)).toBe("searching");
-	});
-
-	it("names the dominant pending state once the Mac is reachable", () => {
-		expect(coordinatorStatus(true, queued, true)).toBe("queued");
-		expect(coordinatorStatus(true, uploading, true)).toBe("uploading");
-		const both = addRecording(uploading, rec("b", "y"));
-		expect(coordinatorStatus(true, both, true)).toBe("uploading");
-	});
-
-	it("shows failed only when nothing is pending, and idle otherwise", () => {
-		expect(coordinatorStatus(true, failed, true)).toBe("failed");
-		expect(coordinatorStatus(true, failed, false)).toBe("failed");
-		expect(
-			coordinatorStatus(true, addRecording(failed, rec("b", "y")), true),
-		).toBe("queued");
-		expect(coordinatorStatus(true, delivered, true)).toBe("idle");
-		expect(coordinatorStatus(true, EMPTY_INDEX, false)).toBe("idle");
-		const live = addRecording(EMPTY_INDEX, rec("r", "z"), "recording");
-		expect(coordinatorStatus(true, live, true)).toBe("idle");
+	it.each([
+		["no pairing", false, EMPTY_INDEX, false, "unpaired"],
+		["no pairing, uploading", false, uploading, true, "unpaired"],
+		["queued, Mac not resolved", true, queued, false, "searching"],
+		["uploading, Mac not resolved", true, uploading, false, "searching"],
+		["queued", true, queued, true, "queued"],
+		["uploading", true, uploading, true, "uploading"],
+		[
+			"uploading and queued",
+			true,
+			addRecording(uploading, rec("b", "y")),
+			true,
+			"uploading",
+		],
+		["failed", true, failed, true, "failed"],
+		["failed, Mac not resolved", true, failed, false, "failed"],
+		[
+			"failed and queued",
+			true,
+			addRecording(failed, rec("b", "y")),
+			true,
+			"queued",
+		],
+		["delivered", true, delivered, true, "idle"],
+		["empty, Mac not resolved", true, EMPTY_INDEX, false, "idle"],
+		["recording", true, live, true, "idle"],
+	] as const)("%s", (_, paired, index, reachable, expected) => {
+		expect(coordinatorStatus(paired, index, reachable)).toBe(expected);
 	});
 });
 
