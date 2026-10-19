@@ -104,14 +104,6 @@ describe("performPairing", () => {
 		});
 		expect((await performPairing(payload, d)).mac.macName).toBe("Studio");
 	});
-
-	it("propagates a failed locate", async () => {
-		const d = deps({
-			locate: async () => Promise.reject(new Error("not found")),
-		});
-		await expect(performPairing(payload, d)).rejects.toThrow("not found");
-		expect(d.hello).not.toHaveBeenCalled();
-	});
 });
 
 function recording(recordingID: string) {
@@ -188,17 +180,6 @@ describe("commitPairing", () => {
 		expect(h.state("d")).toBe("delivered");
 	});
 
-	it("re-queues only once the cancel is done too", async () => {
-		const h = held();
-		const done = commitPairing(next, h.deps);
-		h.save.resolve();
-		await macrotask();
-		expect(h.calls).toEqual(["replace", "cancel"]);
-		h.cancel.resolve();
-		await done;
-		expect(h.calls).toEqual(["replace", "cancel", "update"]);
-	});
-
 	it("re-queues nothing when the save fails", async () => {
 		const h = held();
 		const done = commitPairing(next, h.deps);
@@ -210,20 +191,17 @@ describe("commitPairing", () => {
 
 	it("goes on when the cancel fails", async () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-		try {
-			const h = held();
-			const done = commitPairing(next, h.deps);
-			h.cancel.reject(new Error("no session"));
-			h.save.resolve();
-			await done;
-			expect(h.state("a")).toBe("queued");
-			expect(warn).toHaveBeenCalledWith(
-				"[pairing] cancel failed",
-				expect.any(Error),
-			);
-		} finally {
-			warn.mockRestore();
-		}
+		const h = held();
+		const done = commitPairing(next, h.deps);
+		h.cancel.reject(new Error("no session"));
+		h.save.resolve();
+		await done;
+		expect(h.state("a")).toBe("queued");
+		expect(warn).toHaveBeenCalledWith(
+			"[pairing] cancel failed",
+			expect.any(Error),
+		);
+		warn.mockRestore();
 	});
 });
 

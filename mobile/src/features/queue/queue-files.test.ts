@@ -83,7 +83,12 @@ describe("expoQueueFiles.move and rename", () => {
 	beforeEach(() => fake.files.clear());
 
 	it("move never replaces a file, and rename does", async () => {
+		fake.files.set(FROM, "free");
+		await expoQueueFiles.move(FROM, TO);
+		expect([fake.files.has(FROM), fake.files.get(TO)]).toEqual([false, "free"]);
+
 		fake.files.set(FROM, "new");
+		fake.files.set(TO, "old");
 		fake.files.set(TO, "old");
 		await expect(expoQueueFiles.move(FROM, TO)).rejects.toThrow(
 			"Destination already exists",
@@ -91,12 +96,6 @@ describe("expoQueueFiles.move and rename", () => {
 		expect([fake.files.get(FROM), fake.files.get(TO)]).toEqual(["new", "old"]);
 
 		await expoQueueFiles.rename(FROM, TO);
-		expect([fake.files.has(FROM), fake.files.get(TO)]).toEqual([false, "new"]);
-	});
-
-	it("move moves a file to a free name", async () => {
-		fake.files.set(FROM, "new");
-		await expoQueueFiles.move(FROM, TO);
 		expect([fake.files.has(FROM), fake.files.get(TO)]).toEqual([false, "new"]);
 	});
 });

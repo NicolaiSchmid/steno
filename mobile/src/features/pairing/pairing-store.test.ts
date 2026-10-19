@@ -59,13 +59,16 @@ beforeEach(() => {
 });
 
 describe("pairingStore", () => {
-	it("keeps the Mac record and the token in one keychain item", async () => {
+	it("keeps the Mac record and the token in one keychain item until clear removes it", async () => {
 		await pairingStore.save(pairing);
 		expect([...keychain.items.keys()]).toEqual(["steno.pairing.v1"]);
 		expect(JSON.parse(keychain.items.get("steno.pairing.v1") ?? "")).toEqual(
 			pairing,
 		);
 		expect(await pairingStore.load()).toEqual(pairing);
+		await pairingStore.clear();
+		expect(keychain.items.size).toBe(0);
+		expect(await pairingStore.load()).toBeNull();
 	});
 
 	it("reads and writes every item as available after the first unlock", async () => {
@@ -82,26 +85,12 @@ describe("pairingStore", () => {
 		}
 	});
 
-	it("returns null for a missing, damaged or tokenless item", async () => {
-		expect(await pairingStore.load()).toBeNull();
-		keychain.items.set("steno.pairing.v1", "{not json");
-		expect(await pairingStore.load()).toBeNull();
-		keychain.items.set(
-			"steno.pairing.v1",
-			JSON.stringify({ mac: pairing.mac, token: "" }),
-		);
-		expect(await pairingStore.load()).toBeNull();
-		keychain.items.set(
-			"steno.pairing.v1",
-			JSON.stringify({ mac: { macID: "x" }, token: "tok" }),
-		);
-		expect(await pairingStore.load()).toBeNull();
-	});
-
-	it("clear removes the item so load is null afterwards", async () => {
-		await pairingStore.save(pairing);
-		await pairingStore.clear();
-		expect(keychain.items.size).toBe(0);
+	it.each([
+		["damaged", "{not json"],
+		["tokenless", JSON.stringify({ mac: pairing.mac, token: "" })],
+		["Mac-less", JSON.stringify({ mac: { macID: "x" }, token: "tok" })],
+	])("loads null for a %s item", async (_, text) => {
+		keychain.items.set("steno.pairing.v1", text);
 		expect(await pairingStore.load()).toBeNull();
 	});
 });

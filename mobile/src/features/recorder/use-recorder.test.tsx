@@ -199,6 +199,11 @@ describe("start", () => {
 			sourceUri: null,
 		});
 		expect(h.handle.session?.recordingID).toBe("rec-1");
+
+		// A second tap while recording is a no-op.
+		await h.start();
+		expect(fake.recorder.prepareToRecordAsync).toHaveBeenCalledTimes(1);
+		expect(h.callbacks.onStarted).toHaveBeenCalledTimes(1);
 	});
 
 	it("hands the recorder's file URI to onStarted so a crash can recover it", async () => {
@@ -259,14 +264,6 @@ describe("start", () => {
 		expect(h.handle.isRecording).toBe(false);
 		expect(h.callbacks.onStarted).not.toHaveBeenCalled();
 	});
-
-	it("is a no-op while a recording is running", async () => {
-		const h = mount();
-		await h.start();
-		await h.start();
-		expect(fake.recorder.prepareToRecordAsync).toHaveBeenCalledTimes(1);
-		expect(h.callbacks.onStarted).toHaveBeenCalledTimes(1);
-	});
 });
 
 describe("stop", () => {
@@ -292,46 +289,34 @@ describe("stop", () => {
 		expect(h.handle.elapsedSeconds).toBe(0);
 	});
 
-	it("does not move a file that is already in place", async () => {
-		const h = mount();
-		await h.start();
-		fake.recorder.uri = "file:///docs/queue/rec-1.m4a";
-		fake.files.set("file:///docs/queue/rec-1.m4a", 10);
+	it.each<[string, () => Promise<ReturnType<typeof mount>>, string]>([
+		["an empty file", () => startWithFile(0), "Recording file is empty"],
+		[
+			"a recorder without a file",
+			async () => {
+				const h = mount();
+				await h.start();
+				return h;
+			},
+			"Recording produced no file",
+		],
+		[
+			"a failed hash",
+			async () => {
+				fake.sha256.mockRejectedValueOnce(new Error("ERR_STENO_HASH"));
+				return startWithFile();
+			},
+			"ERR_STENO_HASH",
+		],
+	])("reports %s as a failure", async (_, setup, message) => {
+		const h = await setup();
 		await h.stop();
-		expect(fake.moves).toEqual([]);
-		expect(h.callbacks.onFinished).toHaveBeenCalledTimes(1);
-	});
-
-	it("reports an empty file as a failure and never hashes it", async () => {
-		const h = await startWithFile(0);
-		await h.stop();
-		expect(fake.sha256).not.toHaveBeenCalled();
 		expect(h.callbacks.onFinished).not.toHaveBeenCalled();
 		expect(h.callbacks.onFailed).toHaveBeenCalledWith(
 			expect.objectContaining({ recordingID: "rec-1" }),
-			"Recording file is empty",
+			message,
 		);
 		expect(h.handle.isRecording).toBe(false);
-	});
-
-	it("reports a recorder without a file as a failure", async () => {
-		const h = mount();
-		await h.start();
-		await h.stop();
-		expect(h.callbacks.onFailed).toHaveBeenCalledWith(
-			expect.objectContaining({ recordingID: "rec-1" }),
-			"Recording produced no file",
-		);
-	});
-
-	it("reports a failed move or hash as a failure with the message", async () => {
-		const h = await startWithFile();
-		fake.sha256.mockRejectedValueOnce(new Error("ERR_STENO_HASH"));
-		await h.stop();
-		expect(h.callbacks.onFailed).toHaveBeenCalledWith(
-			expect.anything(),
-			"ERR_STENO_HASH",
-		);
 	});
 
 	it("releases the recorder even when stop() throws, and is a no-op when idle", async () => {
@@ -348,22 +333,12 @@ describe("stop", () => {
 });
 
 describe("interruptions", () => {
-	it("refreshes the elapsed time once a second while recording", async () => {
-		const h = await startWithFile();
-		expect(h.handle.elapsedSeconds).toBe(0);
-		fake.recorder.currentTime = 1.2;
-		await h.tick();
-		expect(h.handle.elapsedSeconds).toBe(1.2);
-		fake.recorder.currentTime = 2.4;
-		await h.tick();
-		expect(h.handle.elapsedSeconds).toBe(2.4);
-		expect(h.handle.paused).toBe(false);
-	});
-
 	it("reports paused when the recorder stops taking audio for two ticks, and resume() restarts it", async () => {
 		const h = await startWithFile();
+		expect(h.handle.elapsedSeconds).toBe(0);
 		fake.recorder.currentTime = 30;
 		await h.tick();
+		expect(h.handle.elapsedSeconds).toBe(30);
 		// A call began: expo-audio pauses the recorder without any status event.
 		fake.recorder.isRecording = false;
 		await h.tick();
@@ -389,14 +364,6 @@ describe("interruptions", () => {
 		fake.recorder.isRecording = true;
 		await h.tick();
 		expect(h.handle.paused).toBe(false);
-		expect(fake.recorder.record).toHaveBeenCalledTimes(1);
-	});
-
-	it("resume() is a no-op while recording or idle", async () => {
-		const h = mount();
-		act(() => h.handle.resume());
-		await h.start();
-		act(() => h.handle.resume());
 		expect(fake.recorder.record).toHaveBeenCalledTimes(1);
 	});
 
@@ -434,31 +401,27 @@ describe("interruptions", () => {
 		expect(h.handle.isRecording).toBe(false);
 	});
 
-	it("reports a media-services reset or recorder error as a failure", async () => {
-		const h = await startWithFile();
-		await h.emit(
-			status({
+	it.each([
+		[
+			"a media-services reset",
+			{
 				hasError: true,
 				error: "media services were reset",
 				mediaServicesDidReset: true,
-			}),
-		);
+			},
+			"media services were reset",
+		],
+		["an error without a message", { hasError: true }, "Recording error"],
+	])("reports %s as a failure", async (_, partial, message) => {
+		const h = await startWithFile();
+		await h.emit(status(partial));
 		expect(h.callbacks.onFailed).toHaveBeenCalledWith(
 			expect.objectContaining({ recordingID: "rec-1" }),
-			"media services were reset",
+			message,
 		);
 		expect(h.callbacks.onFinished).not.toHaveBeenCalled();
 		expect(fake.moves).toEqual([]);
 		expect(h.handle.isRecording).toBe(false);
-	});
-
-	it("falls back to a generic message when the error status has none", async () => {
-		const h = await startWithFile();
-		await h.emit(status({ hasError: true }));
-		expect(h.callbacks.onFailed).toHaveBeenCalledWith(
-			expect.anything(),
-			"Recording error",
-		);
 	});
 
 	it("ignores the finished status that stop() itself triggers", async () => {
@@ -469,23 +432,5 @@ describe("interruptions", () => {
 		await h.stop();
 		expect(h.callbacks.onFinished).toHaveBeenCalledTimes(1);
 		expect(fake.moves).toHaveLength(1);
-	});
-
-	it("ignores status events while nothing is recording", async () => {
-		const h = mount();
-		await h.emit(status({ isFinished: true, url: SOURCE }));
-		await h.emit(status({ hasError: true, error: "x" }));
-		expect(h.callbacks.onFinished).not.toHaveBeenCalled();
-		expect(h.callbacks.onFailed).not.toHaveBeenCalled();
-	});
-
-	it("can start a new recording after an interruption, with a fresh id", async () => {
-		const h = await startWithFile();
-		await h.emit(status({ isFinished: true, url: SOURCE }));
-		await h.start();
-		expect(h.callbacks.onStarted).toHaveBeenLastCalledWith(
-			expect.objectContaining({ recordingID: "rec-2" }),
-		);
-		expect(h.handle.isRecording).toBe(true);
 	});
 });

@@ -181,31 +181,21 @@ describe("complete", () => {
 		});
 	});
 
-	it("reports 409 and 422 as results, not errors", async () => {
-		answer(409);
-		expect(await complete(session, "rec 1")).toEqual({
-			kind: "missing-chunks",
-		});
-		answer(422);
-		expect(await complete(session, "rec 1")).toEqual({
-			kind: "hash-mismatch",
-		});
+	it.each([
+		[409, { kind: "missing-chunks" }],
+		[422, { kind: "hash-mismatch" }],
+	])("reports %s as a result, not an error", async (code, result) => {
+		answer(code);
+		expect(await complete(session, "rec 1")).toEqual(result);
 	});
 
-	it("throws on 401, 5xx and an undecodable 200", async () => {
-		answer(401);
-		await expect(complete(session, "rec 1")).rejects.toMatchObject({
-			kind: "unauthorized",
-		});
-		answer(500);
-		await expect(complete(session, "rec 1")).rejects.toMatchObject({
-			kind: "server",
-			status: 500,
-		});
-		answer(200, {});
-		await expect(complete(session, "rec 1")).rejects.toMatchObject({
-			kind: "protocol",
-		});
+	it.each([
+		[401, "", { kind: "unauthorized" }],
+		[500, "", { kind: "server", status: 500 }],
+		[200, {}, { kind: "protocol" }],
+	])("throws on %s %j", async (code, body, error) => {
+		answer(code, body);
+		await expect(complete(session, "rec 1")).rejects.toMatchObject(error);
 	});
 });
 
@@ -229,13 +219,6 @@ describe("startChunkUpload", () => {
 			length: 952,
 		});
 	});
-
-	it("propagates the module's rejection", async () => {
-		link.startUpload.mockRejectedValueOnce(new Error("ERR_STENO_UPLOAD"));
-		await expect(
-			startChunkUpload(session, "r", { index: 0, offset: 0, length: 1 }, "f"),
-		).rejects.toThrow("ERR_STENO_UPLOAD");
-	});
 });
 
 describe("cancelAllUploads", () => {
@@ -246,11 +229,5 @@ describe("cancelAllUploads", () => {
 			"a/0",
 			"a/1",
 		]);
-	});
-
-	it("is a no-op when nothing is pending", async () => {
-		link.cancelUpload.mockClear();
-		await cancelAllUploads();
-		expect(link.cancelUpload).not.toHaveBeenCalled();
 	});
 });

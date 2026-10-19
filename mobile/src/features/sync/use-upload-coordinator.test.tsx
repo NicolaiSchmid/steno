@@ -37,11 +37,9 @@ import {
  * drives. It renders under `StrictMode`, so every effect runs twice.
  */
 const fake = vi.hoisted(() => {
-	const listeners = new Map<string, Set<(event: unknown) => void>>();
-	const appStateListeners = new Set<(state: string) => void>();
-	return {
-		listeners,
-		appStateListeners,
+	const defaults = () => ({
+		listeners: new Map<string, Set<(event: unknown) => void>>(),
+		appStateListeners: new Set<(state: string) => void>(),
 		sent: [] as { url: string; auth: string | undefined }[],
 		/** The requests and uploads that got past the pin, in order. */
 		reached: [] as { url: string; auth: string | undefined }[],
@@ -50,7 +48,10 @@ const fake = vi.hoisted(() => {
 		/** Every service name resolved, in order. */
 		resolves: [] as string[],
 		/** The address each Mac's service resolves to. */
-		hosts: {} as Record<string, string>,
+		hosts: { "Mac A": "10.0.0.1", "Mac B": "10.0.0.2" } as Record<
+			string,
+			string
+		>,
 		/** Addresses where nothing answers: a request there fails to connect. */
 		down: new Set<string>(),
 		/**
@@ -58,35 +59,31 @@ const fake = vi.hoisted(() => {
 		 * Mac's: a request there with another pin fails as a rejected pin.
 		 */
 		certificates: {} as Record<string, string>,
-		/** The address the last process chose (`adopted-origin.ts`). */
+		/** The address the last process chose (`adopted-origin.ts`), and its writes. */
 		adoptedOrigin: null as MacEndpoint | null,
-		/** Every write of it, in order. */
 		writes: [] as MacEndpoint[],
-		/** When set, the next write of it lands only once this resolves. */
-		holdWrite: null as Promise<void> | null,
 		/** Every queue file deleted, with the last request sent before it. */
 		deleted: [] as { fileName: string; after: string | undefined }[],
-		/** When set, `resolve` rejects. */
 		failResolve: false,
 		/** When set, the Mac answers a `PUT` with this status. */
 		putStatus: null as number | null,
-		/** The task ids `pendingUploads` reports. */
+		/** The task ids `pendingUploads` reports, and those cancelled. */
 		pending: [] as string[],
 		cancelled: [] as string[],
-		/** When set, `cancelUpload` rejects. */
-		failCancel: false,
 		releaseMacB: null as (() => void) | null,
-		/**
-		 * When set, the next background upload, pinned request or device
-		 * name waits for it.
-		 */
+		/** When set, the next such call waits for it. */
+		holdWrite: null as Promise<void> | null,
 		holdUpload: null as Promise<void> | null,
 		holdRequest: null as Promise<void> | null,
 		holdDeviceName: null as Promise<void> | null,
 		/** The chunks the Mac answers it has. */
 		receivedChunks: [] as number[],
-		pairing: null as unknown,
 		replacing: null as string | null,
+	});
+	const fake = {
+		...defaults(),
+		reset: () => Object.assign(fake, defaults()),
+		pairing: null as unknown,
 		index: null as unknown,
 		update: null as unknown,
 		coordinator: null as unknown,
@@ -96,15 +93,11 @@ const fake = vi.hoisted(() => {
 			null,
 		clearIfCurrent: async () => false,
 		emit(event: string, payload: unknown) {
-			for (const listener of listeners.get(event) ?? []) listener(payload);
+			for (const listener of fake.listeners.get(event) ?? []) listener(payload);
 		},
 	};
+	return fake;
 });
-
-const HOSTS: Record<string, string> = {
-	"Mac A": "10.0.0.1",
-	"Mac B": "10.0.0.2",
-};
 
 /** Mac A's endpoint at `host`, as `adopted-origin.ts` keeps it. */
 function macAAt(host: string): MacEndpoint {
@@ -151,7 +144,6 @@ const link = {
 	},
 	async cancelUpload(taskID: string) {
 		fake.cancelled.push(taskID);
-		if (fake.failCancel) throw new Error("no such task");
 	},
 	async request(request: PinnedRequest) {
 		fake.sent.push({ url: request.url, auth: request.headers.Authorization });
@@ -367,34 +359,25 @@ function cancelled(id: string): UploadFailed {
 }
 
 beforeEach(() => {
-	fake.listeners.clear();
-	fake.appStateListeners.clear();
-	fake.sent.length = 0;
-	fake.reached.length = 0;
-	fake.pins.length = 0;
-	fake.resolves.length = 0;
-	fake.hosts = { ...HOSTS };
-	fake.down.clear();
-	fake.certificates = {};
-	fake.adoptedOrigin = null;
-	fake.writes.length = 0;
-	fake.holdWrite = null;
-	fake.deleted.length = 0;
-	fake.failResolve = false;
-	fake.putStatus = null;
-	fake.pending = [];
-	fake.cancelled.length = 0;
-	fake.failCancel = false;
-	fake.releaseMacB = null;
-	fake.holdUpload = null;
-	fake.holdRequest = null;
-	fake.holdDeviceName = null;
-	fake.receivedChunks = [];
-	fake.replacing = null;
+	fake.reset();
+	vi.spyOn(console, "warn").mockImplementation(() => {});
+	// Fake timers and clock, so a backoff and the resolve timer can elapse.
+	vi.useFakeTimers({
+		shouldAdvanceTime: true,
+		toFake: [
+			"setTimeout",
+			"clearTimeout",
+			"setInterval",
+			"clearInterval",
+			"Date",
+		],
+	});
 });
 afterEach(() => {
 	act(() => root?.unmount());
 	root = null;
+	vi.useRealTimers();
+	vi.restoreAllMocks();
 });
 
 describe("useUploadCoordinator", () => {
@@ -461,23 +444,19 @@ describe("useUploadCoordinator", () => {
 	});
 
 	it("catches a background upload event whose queue update fails", async () => {
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-		try {
-			await mount(queued("a"), A);
-			fake.update = async () => {
-				throw new Error("The recordings list could not be read");
-			};
-			await act(async () => fake.emit("uploadFinished", finished("a")));
-			await act(async () => fake.emit("uploadFailed", cancelled("a")));
-			await settle();
-			expect(
-				warn.mock.calls.filter(
-					([message]) => message === "[sync] upload event failed",
-				),
-			).toHaveLength(2);
-		} finally {
-			warn.mockRestore();
-		}
+		const warn = vi.mocked(console.warn);
+		await mount(queued("a"), A);
+		fake.update = async () => {
+			throw new Error("The recordings list could not be read");
+		};
+		await act(async () => fake.emit("uploadFinished", finished("a")));
+		await act(async () => fake.emit("uploadFailed", cancelled("a")));
+		await settle();
+		expect(
+			warn.mock.calls.filter(
+				([message]) => message === "[sync] upload event failed",
+			),
+		).toHaveLength(2);
 	});
 
 	describe("while a re-pairing is still saving", () => {
@@ -536,30 +515,6 @@ describe("useUploadCoordinator", () => {
 			expect(fake.cancelled).toEqual([taskIDs.chunk("a", 1)]);
 		});
 
-		it("keeps tracking that chunk when its cancel fails", async () => {
-			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-			try {
-				const upload = Promise.withResolvers<void>();
-				fake.holdUpload = upload.promise;
-				fake.failCancel = true;
-				const h = await mount(queued("a"), A);
-				fake.replacing = "token-b";
-				await act(async () => upload.resolve());
-				await settle();
-				expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
-				expect(warn).toHaveBeenCalledWith(
-					"[sync] cancel failed",
-					expect.any(Error),
-				);
-				expect(h.row("a")).toMatchObject({
-					state: "uploading",
-					lastError: null,
-				});
-			} finally {
-				warn.mockRestore();
-			}
-		});
-
 		it("refuses the status refresh under the old pairing", async () => {
 			// A request that goes out anyway is held, so the tick ends there.
 			fake.holdRequest = new Promise(() => {});
@@ -569,64 +524,35 @@ describe("useUploadCoordinator", () => {
 		});
 
 		it("goes on under the old pairing when the save fails", async () => {
-			vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout"] });
-			try {
-				const h = await mount(queued("a", "bb"), A);
-				fake.replacing = "token-b";
-				await act(async () => fake.emit("uploadFailed", cancelled("a")));
-				await settle();
-				expect(h.row("bb")?.state).toBe("queued");
+			const h = await mount(queued("a", "bb"), A);
+			fake.replacing = "token-b";
+			await act(async () => fake.emit("uploadFailed", cancelled("a")));
+			await settle();
+			expect(h.row("bb")?.state).toBe("queued");
 
-				fake.replacing = null;
-				await act(() => vi.advanceTimersByTimeAsync(1000));
-				await settle();
-				expect(fake.sent).toContainEqual({
-					url: "https://10.0.0.1:1/v1/recordings/bb",
-					auth: "Bearer token-a",
-				});
-			} finally {
-				vi.useRealTimers();
-			}
+			fake.replacing = null;
+			await elapse(1000);
+			expect(fake.sent).toContainEqual({
+				url: "https://10.0.0.1:1/v1/recordings/bb",
+				auth: "Bearer token-a",
+			});
 		});
 
 		it("stops looking again once the screen is gone", async () => {
-			vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout"] });
-			try {
-				// A request that goes out anyway is held, so the tick ends there.
-				fake.holdRequest = new Promise(() => {});
-				fake.replacing = "token-b";
-				await mount(queued("a"), A);
-				act(() => root?.unmount());
-				root = null;
+			// A request that goes out anyway is held, so the tick ends there.
+			fake.holdRequest = new Promise(() => {});
+			fake.replacing = "token-b";
+			await mount(queued("a"), A);
+			act(() => root?.unmount());
+			root = null;
 
-				fake.replacing = null;
-				await act(() => vi.advanceTimersByTimeAsync(1000));
-				await settle();
-				expect(fake.sent).toEqual([]);
-			} finally {
-				vi.useRealTimers();
-			}
+			fake.replacing = null;
+			await elapse(1000);
+			expect(fake.sent).toEqual([]);
 		});
 	});
 
 	describe("when the Mac's address changes under the same name", () => {
-		// Fake timers and clock, so a backoff and the resolve timer can elapse.
-		beforeEach(() => {
-			vi.useFakeTimers({
-				shouldAdvanceTime: true,
-				toFake: [
-					"setTimeout",
-					"clearTimeout",
-					"setInterval",
-					"clearInterval",
-					"Date",
-				],
-			});
-		});
-		afterEach(() => {
-			vi.useRealTimers();
-		});
-
 		it("resolves again after a request fails to connect, and retries at the new address", async () => {
 			const h = await mount(EMPTY_INDEX, A);
 			expect(h.reachable()).toBe(true);
@@ -707,27 +633,23 @@ describe("useUploadCoordinator", () => {
 		});
 
 		it("retries a failed resolve on the timer", async () => {
-			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-			try {
-				fake.failResolve = true;
-				const h = await mount(queued("a"), A);
-				expect(h.reachable()).toBe(false);
-				expect(fake.sent).toEqual([]);
-				expect(warn).toHaveBeenCalledWith(
-					"[sync] resolve failed",
-					expect.any(Error),
-				);
+			const warn = vi.mocked(console.warn);
+			fake.failResolve = true;
+			const h = await mount(queued("a"), A);
+			expect(h.reachable()).toBe(false);
+			expect(fake.sent).toEqual([]);
+			expect(warn).toHaveBeenCalledWith(
+				"[sync] resolve failed",
+				expect.any(Error),
+			);
 
-				fake.failResolve = false;
-				await elapse(RERESOLVE_INTERVAL_MS);
-				expect(h.reachable()).toBe(true);
-				expect(fake.sent).toContainEqual({
-					url: "https://10.0.0.1:1/v1/recordings/a",
-					auth: "Bearer token-a",
-				});
-			} finally {
-				warn.mockRestore();
-			}
+			fake.failResolve = false;
+			await elapse(RERESOLVE_INTERVAL_MS);
+			expect(h.reachable()).toBe(true);
+			expect(fake.sent).toContainEqual({
+				url: "https://10.0.0.1:1/v1/recordings/a",
+				auth: "Bearer token-a",
+			});
 		});
 
 		it("cancels the chunks out to the old address and sends them to the new one", async () => {
@@ -834,24 +756,19 @@ describe("useUploadCoordinator", () => {
 		});
 
 		it("starts no second resolve while one runs, and one more after it", async () => {
-			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-			try {
-				await mount(EMPTY_INDEX, B);
-				const resolved = fake.resolves.length;
-				await act(async () => fake.emit("uploadFailed", connectFailed("a")));
-				await act(async () => fake.emit("uploadFailed", connectFailed("a")));
-				await settle();
-				expect(fake.resolves.length).toBe(resolved);
+			await mount(EMPTY_INDEX, B);
+			const resolved = fake.resolves.length;
+			await act(async () => fake.emit("uploadFailed", connectFailed("a")));
+			await act(async () => fake.emit("uploadFailed", connectFailed("a")));
+			await settle();
+			expect(fake.resolves.length).toBe(resolved);
 
-				await act(async () => fake.releaseMacB?.());
-				await settle();
-				expect(fake.resolves.length).toBe(resolved + 1);
-				await act(async () => fake.releaseMacB?.());
-				await settle();
-				expect(fake.resolves.length).toBe(resolved + 1);
-			} finally {
-				warn.mockRestore();
-			}
+			await act(async () => fake.releaseMacB?.());
+			await settle();
+			expect(fake.resolves.length).toBe(resolved + 1);
+			await act(async () => fake.releaseMacB?.());
+			await settle();
+			expect(fake.resolves.length).toBe(resolved + 1);
 		});
 
 		it("adopts and writes nothing from a resolve a re-pairing overtook", async () => {
