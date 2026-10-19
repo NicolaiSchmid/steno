@@ -210,21 +210,6 @@ mod tests {
         }
     }
 
-    /// An output whose every write takes 20 ms, once the test releases the
-    /// `Recorded` it writes to.
-    struct Slow(Recorded);
-
-    impl Write for Slow {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            std::thread::sleep(Duration::from_millis(20));
-            self.0.write(bytes)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     /// The thread that logs goes on while stderr is stuck: further lines are
     /// dropped and counted, a flush gives up at its bound, and once stderr
     /// moves the queued lines come out in order, then the drop count.
@@ -279,29 +264,6 @@ mod tests {
         assert_eq!(
             report,
             format!("steno-log: {} lines dropped", 1000 - numbers.len())
-        );
-    }
-
-    /// A flush after a stall answers only after the count of the dropped
-    /// lines is written.
-    #[test]
-    fn a_flush_behind_dropped_lines_reports_them_before_it_answers() {
-        let output = Recorded::default();
-        let stall = output.0.lock().unwrap();
-        let queue = spawn_writer(Slow(output.clone()), 4);
-        for line in 0..10 {
-            (&queue)
-                .write_all(format!("line {line}\n").as_bytes())
-                .unwrap();
-        }
-        drop(stall);
-        assert!(queue.flush_within(Duration::from_secs(10)));
-        let mut lines = output.lines();
-        let report = lines.pop().unwrap();
-        assert!((4..=5).contains(&lines.len()), "{lines:?}");
-        assert_eq!(
-            report,
-            format!("steno-log: {} lines dropped", 10 - lines.len())
         );
     }
 

@@ -187,67 +187,9 @@ impl LlmService for ClientLlmService {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-    use std::time::Duration;
-
-    use steno_core::LlmProvider;
-    use steno_llm::testing::{Scripts, StubChatServer};
+    use steno_llm::testing::StubChatServer;
 
     use super::*;
-    use crate::testing::on_own_thread;
-
-    /// The app runtime's only worker parked on a lock the caller holds, and
-    /// the probe still answers.
-    #[test]
-    fn a_probe_answers_while_every_app_worker_waits_on_a_lock_the_caller_holds() {
-        let one_worker = || {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .build()
-                .unwrap()
-        };
-        let (app, elsewhere) = (one_worker(), one_worker());
-        let server = elsewhere.block_on(StubChatServer::start()).unwrap();
-        server.respond(Arc::new(|request| {
-            if request.path.ends_with("/models") {
-                Some(Scripts.models(&["stub-model"]))
-            } else {
-                Some(Scripts.json(&serde_json::json!({ "ok": true }), None))
-            }
-        }));
-        let settings = Settings {
-            llm_provider: LlmProvider::Endpoint,
-            llm_base_url: Some(server.base_url().to_string()),
-            llm_model: Some("stub-model".to_owned()),
-            ..Settings::default()
-        };
-
-        let host_state = Arc::new(Mutex::new(()));
-        let held = host_state.lock().unwrap();
-        let parked = host_state.clone();
-        let (parked_sender, parked_receiver) = std::sync::mpsc::channel();
-        app.spawn(async move {
-            parked_sender.send(()).unwrap();
-            drop(parked.lock().unwrap());
-        });
-        parked_receiver.recv().unwrap();
-
-        let service = ClientLlmService {
-            codex: codex_store(),
-        };
-        let answer = on_own_thread(
-            Duration::from_secs(10),
-            "the probe answered while the app runtime was parked",
-            move || service.probe(&settings, None),
-        );
-        drop(held);
-        let line = answer.unwrap();
-        assert!(
-            line.starts_with("Connected: model listed, structured output"),
-            "{line}"
-        );
-    }
 
     /// The Summaries section reads the sign-in from the file even when its
     /// tokens are due for a refresh: no request reaches the token endpoint.

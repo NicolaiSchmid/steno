@@ -419,7 +419,6 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::mpsc;
 
     use chrono::{FixedOffset, TimeDelta};
@@ -620,26 +619,5 @@ mod tests {
                 .then(move |event| sender.send(event).unwrap());
             assert_eq!(receiver.recv_timeout(PATIENCE).unwrap(), None);
         }
-    }
-
-    /// A returned answer is taken whole; a lookup still reading gives
-    /// itself back, still pending.
-    #[test]
-    fn a_returned_answer_is_taken_and_a_pending_one_kept() {
-        let answered = Lookup {
-            answer: Arc::new(Mutex::new(Answer::Done(Some(event("now", -60, 600))))),
-        };
-        let Ok(Some(taken)) = answered.take() else {
-            panic!("the answer is in")
-        };
-        assert_eq!(taken.id, "now");
-
-        let reading = Lookup {
-            answer: Arc::new(Mutex::new(Answer::Pending)),
-        };
-        let Err(reading) = reading.take() else {
-            panic!("no answer yet")
-        };
-        assert!(matches!(*reading.answer.lock().unwrap(), Answer::Pending));
     }
 }

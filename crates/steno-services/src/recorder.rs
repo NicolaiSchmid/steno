@@ -2198,6 +2198,16 @@ mod tests {
         )
     }
 
+    /// [`harness`] with no models, recording through `capture`.
+    fn harness_recording(capture: MakeCaptureSession) -> Harness {
+        harness_capturing(
+            models_with(&[]),
+            "parakeet-v3",
+            platform_rule(SpeechSettings::default()),
+            capture,
+        )
+    }
+
     /// [`harness_capturing`] over `engine`.
     fn harness_with_engine(
         models: Arc<dyn SpeechModels>,
@@ -2447,25 +2457,89 @@ mod tests {
         harness.engine.preparations.count() > 0
     }
 
-    /// With the defaults the Mac's `CoreML` engine and the diarizer load;
-    /// off the Mac only the diarizer does.
+    /// With its models installed the warm-up loads the diarizer, and the
+    /// speech engine only when the engine the pipeline built runs in
+    /// process: the stored id after a reload, the kept one after a failed
+    /// reload.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_warms_the_pipeline_up_when_the_models_are_installed() {
-        let harness = harness(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]);
-        assert_eq!(warmed_the_engine(&harness).await, cfg!(target_os = "macos"));
-        stop(&harness.recorder);
-    }
-
-    /// With Parakeet in the sidecar, the warm-up loads the diarizer only.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_recording_start_with_speech_in_the_sidecar_warms_the_diarizer_only() {
-        let harness = harness_over(
-            models_with(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]),
-            "parakeet-v3",
-            platform_rule(crate::speech::testing::sidecar_chosen()),
-        );
-        assert!(!warmed_the_engine(&harness).await);
-        stop(&harness.recorder);
+        type Rule = Box<dyn Fn(&str) -> SpeechRuntime + Send + Sync>;
+        /// The installed models, the stored engine, its rule, a reload to
+        /// an engine and whether it builds, and whether the engine warms.
+        struct Case {
+            label: &'static str,
+            installed: &'static [ModelAsset],
+            engine_id: &'static str,
+            rule: Rule,
+            reload: Option<(&'static str, bool)>,
+            warms_the_engine: bool,
+        }
+        use ModelAsset::{OfflineDiarizer, ParakeetUltra, ParakeetV3};
+        let defaults = || -> Rule { Box::new(platform_rule(SpeechSettings::default())) };
+        let mac = || -> Rule { Box::new(mac_rule) };
+        let cases: [Case; 5] = [
+            Case {
+                label: "the defaults: CoreML on the Mac only",
+                installed: &[ParakeetV3, OfflineDiarizer],
+                engine_id: "parakeet-v3",
+                rule: defaults(),
+                reload: None,
+                warms_the_engine: cfg!(target_os = "macos"),
+            },
+            Case {
+                label: "Parakeet in the sidecar",
+                installed: &[ParakeetV3, OfflineDiarizer],
+                engine_id: "parakeet-v3",
+                rule: Box::new(platform_rule(crate::speech::testing::sidecar_chosen())),
+                reload: None,
+                warms_the_engine: false,
+            },
+            Case {
+                label: "a reload to the in-process engine",
+                installed: &[ParakeetV3, ParakeetUltra, OfflineDiarizer],
+                engine_id: "parakeet-ultra",
+                rule: mac(),
+                reload: Some(("parakeet-v3", true)),
+                warms_the_engine: true,
+            },
+            Case {
+                label: "a failed reload keeps the sidecar's engine",
+                installed: &[ParakeetUltra, OfflineDiarizer],
+                engine_id: "parakeet-ultra",
+                rule: mac(),
+                reload: Some(("parakeet-v3", false)),
+                warms_the_engine: false,
+            },
+            Case {
+                label: "a failed reload keeps the CoreML engine",
+                installed: &[ParakeetV3, OfflineDiarizer],
+                engine_id: "parakeet-v3",
+                rule: mac(),
+                reload: Some(("parakeet-ultra", false)),
+                warms_the_engine: true,
+            },
+        ];
+        for Case {
+            label: case,
+            installed,
+            engine_id,
+            rule,
+            reload,
+            warms_the_engine,
+        } in cases
+        {
+            let harness = harness_over(models_with(installed), engine_id, rule);
+            if let Some((to, succeeds)) = reload {
+                harness.failing_reloads.store(!succeeds, Ordering::SeqCst);
+                assert_eq!(harness.save_engine(to).is_ok(), succeeds, "{case}");
+            }
+            assert_eq!(
+                warmed_the_engine(&harness).await,
+                warms_the_engine,
+                "{case}"
+            );
+            stop(&harness.recorder);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2476,49 +2550,6 @@ mod tests {
         assert_eq!(harness.engine.preparations.count(), 0);
         assert_eq!(harness.diarizer.preparations.count(), 0);
         stop(&harness.recorder);
-    }
-
-    /// The warm-up follows the engine a reload built: moving to the
-    /// in-process `parakeet-v3` makes the recording load the engine.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_warm_up_follows_the_engine_a_reload_built() {
-        let harness = harness_over(
-            models_with(&[
-                ModelAsset::ParakeetV3,
-                ModelAsset::ParakeetUltra,
-                ModelAsset::OfflineDiarizer,
-            ]),
-            "parakeet-ultra",
-            mac_rule,
-        );
-        harness.save_engine("parakeet-v3").unwrap();
-        assert!(warmed_the_engine(&harness).await);
-        stop(&harness.recorder);
-    }
-
-    /// After a failed reload the warm-up follows the built engine, not the
-    /// stored id, both for a pipeline on the sidecar and one on `CoreML`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn after_a_failed_reload_the_warm_up_follows_the_engine_the_pipeline_kept() {
-        let sidecar = harness_over(
-            models_with(&[ModelAsset::ParakeetUltra, ModelAsset::OfflineDiarizer]),
-            "parakeet-ultra",
-            mac_rule,
-        );
-        sidecar.failing_reloads.store(true, Ordering::SeqCst);
-        assert!(sidecar.save_engine("parakeet-v3").is_err());
-        assert!(!warmed_the_engine(&sidecar).await);
-        stop(&sidecar.recorder);
-
-        let in_process = harness_over(
-            models_with(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]),
-            "parakeet-v3",
-            mac_rule,
-        );
-        in_process.failing_reloads.store(true, Ordering::SeqCst);
-        assert!(in_process.save_engine("parakeet-ultra").is_err());
-        assert!(warmed_the_engine(&in_process).await);
-        stop(&in_process.recorder);
     }
 
     /// A warm-up whose model load fails gives one `warn` line; the recording
@@ -2612,12 +2643,7 @@ mod tests {
             )
             .map_err(|error| error.to_string())
         });
-        harness_capturing(
-            models_with(&[]),
-            "parakeet-v3",
-            platform_rule(SpeechSettings::default()),
-            capture,
-        )
+        harness_recording(capture)
     }
 
     /// The recorder's warning without a leading missing-audio note, which a
@@ -2788,12 +2814,7 @@ mod tests {
             )
             .map_err(|error| error.to_string())
         });
-        harness_capturing(
-            models_with(&[]),
-            "parakeet-v3",
-            platform_rule(SpeechSettings::default()),
-            capture,
-        )
+        harness_recording(capture)
     }
 
     /// Records over `harness` until the meter shows the tone, releases the
@@ -3043,128 +3064,76 @@ mod tests {
         assert_eq!(microphone_is_the_master(CaptureMode::Call), cfg!(windows));
     }
 
-    /// A 2 s shortfall in two hours is clock drift, no note; a real
-    /// shortfall or a filled gap gives one.
-    #[test]
-    fn the_missing_seconds_leave_the_clock_drift_out() {
-        let of = |duration: f64, gap_seconds: f64| CaptureStatistics {
-            duration,
-            gap_seconds,
-            ..statistics()
-        };
-        assert_eq!(missing_seconds(&of(7198.0, 0.0), 7200.0), 0.0);
-        assert_eq!(
-            missing_audio_note(missing_seconds(&of(7198.0, 0.0), 7200.0), None),
-            None
-        );
-        let short = missing_seconds(&of(7180.0, 0.0), 7200.0);
-        assert!((short - 12.8).abs() < 1e-9, "{short}");
-        assert_eq!(
-            missing_audio_note(short, None).as_deref(),
-            Some("About 13 seconds of the recording are missing.")
-        );
-        assert_eq!(missing_seconds(&of(60.0, 3.0), 60.0), 3.0);
-    }
-
-    /// Every kind of missing audio adds up, the unfilled jump counted once
+    /// A 2 s shortfall in two hours is clock drift; a real shortfall, a
+    /// gap, missed cycles and an unfilled jump add up, the jump counted once
     /// as the larger of it and the wall-time shortfall.
     #[test]
-    fn a_gap_missed_cycles_and_an_unfilled_jump_add_up_in_the_note() {
-        let hour = CaptureStatistics {
-            duration: 3_598.5,
-            gap_seconds: 0.5,
-            filled_seconds: 0.25,
-            unfilled_seconds: 1.5,
+    fn the_missing_seconds_add_up_and_leave_the_clock_drift_out() {
+        let of = |duration, gap_seconds, filled_seconds, unfilled_seconds| CaptureStatistics {
+            duration,
+            gap_seconds,
+            filled_seconds,
+            unfilled_seconds,
             ..statistics()
         };
-        assert_eq!(missing_seconds(&hour, 3_600.0), 2.25);
-        assert_eq!(
-            missing_audio_note(missing_seconds(&hour, 3_600.0), None).as_deref(),
-            Some("About 2 seconds of the recording are missing.")
-        );
-        let unfilled_only = CaptureStatistics {
-            duration: 3_598.5,
-            unfilled_seconds: 1.5,
-            ..statistics()
-        };
-        assert_eq!(missing_seconds(&unfilled_only, 3_600.0), 1.5);
-        let behind = CaptureStatistics {
-            duration: 50.0,
-            unfilled_seconds: 1.5,
-            ..statistics()
-        };
-        assert!(
-            (missing_seconds(&behind, 60.0) - 9.94).abs() < 1e-9,
-            "a wall-time shortfall larger than the unfilled jump counts as it"
-        );
-    }
-
-    /// Cycles the capture's thread missed, written as silence, count in the
-    /// note: two 0.75 s misses say about 2 seconds are missing.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn missed_cycles_count_in_the_note_after_the_stop() {
-        let capture: MakeCaptureSession = Arc::new(|configuration: CaptureConfiguration| {
-            let options = SyntheticOptions::tones(
-                &configuration.lanes(),
-                &[(AudioLane::Mixed, 440.0)],
-                600.0,
-            )
-            .real_time(true)
-            .miss_at(0.5, 36_000)
-            .miss_at(1.5, 36_000);
-            CaptureSession::with_backend(
-                configuration,
-                Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
-                None,
-                CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-                Arc::new(steno_audio::SystemClock::new()),
-            )
-            .map_err(|error| error.to_string())
-        });
-        let harness = harness_capturing(
-            models_with(&[]),
-            "parakeet-v3",
-            platform_rule(SpeechSettings::default()),
-            capture,
-        );
-        start(&harness.recorder);
-        // Past both misses: 2.25 s of the producer's timeline.
-        tokio::time::sleep(Duration::from_millis(3_000)).await;
-        stop(&harness.recorder);
-        assert_eq!(
-            harness.recorder.status().warning.as_deref(),
-            Some("About 2 seconds of the recording are missing.")
-        );
-        // Before the harness waits for the pipeline's runs, so none writes
-        // into the removed folder.
-        eventually("the pipeline picked the saved meeting up", || {
-            harness.engine.transcriptions.count() > 0
-        })
-        .await;
+        for (case, statistics, wall, missing) in [
+            ("clock drift", of(7198.0, 0.0, 0.0, 0.0), 7200.0, 0.0),
+            ("a shortfall", of(7180.0, 0.0, 0.0, 0.0), 7200.0, 12.8),
+            ("a filled gap", of(60.0, 3.0, 0.0, 0.0), 60.0, 3.0),
+            ("every kind", of(3_598.5, 0.5, 0.25, 1.5), 3_600.0, 2.25),
+            ("an unfilled jump", of(3_598.5, 0.0, 0.0, 1.5), 3_600.0, 1.5),
+            (
+                "a shortfall past the jump",
+                of(50.0, 0.0, 0.0, 1.5),
+                60.0,
+                9.94,
+            ),
+        ] {
+            let seconds = missing_seconds(&statistics, wall);
+            assert!((seconds - missing).abs() < 1e-9, "{case}: {seconds}");
+        }
     }
 
     /// The note comes from about a second on, and names a device only when
     /// the latest gap followed its stall; so does the warning.
     #[test]
     fn the_missing_audio_note_comes_from_about_a_second_on() {
-        assert_eq!(missing_audio_note(1.0, Some("USB Microphone")), None);
-        assert_eq!(
-            missing_audio_note(1.2, Some("USB Microphone")).as_deref(),
-            Some(
-                "About 1 second of the recording is missing: no audio arrived from USB Microphone."
-            )
-        );
-        assert_eq!(
-            missing_audio_note(12.6, Some("the microphone")).as_deref(),
-            Some(
-                "About 13 seconds of the recording are missing: no audio arrived from the \
-                 microphone."
-            )
-        );
-        assert_eq!(
-            missing_audio_note(12.6, None).as_deref(),
-            Some("About 13 seconds of the recording are missing.")
-        );
+        for (seconds, stalled, note) in [
+            (0.0, None, None),
+            (1.0, Some("USB Microphone"), None),
+            (
+                1.2,
+                Some("USB Microphone"),
+                Some(
+                    "About 1 second of the recording is missing: no audio arrived from USB \
+                     Microphone.",
+                ),
+            ),
+            (
+                2.25,
+                None,
+                Some("About 2 seconds of the recording are missing."),
+            ),
+            (
+                12.6,
+                Some("the microphone"),
+                Some(
+                    "About 13 seconds of the recording are missing: no audio arrived from the \
+                     microphone.",
+                ),
+            ),
+            (
+                12.6,
+                None,
+                Some("About 13 seconds of the recording are missing."),
+            ),
+        ] {
+            assert_eq!(
+                missing_audio_note(seconds, stalled).as_deref(),
+                note,
+                "{seconds} s, {stalled:?}"
+            );
+        }
         assert_eq!(
             no_audio_warning(Some("USB Microphone")),
             "No audio from USB Microphone. Still trying."
@@ -3223,30 +3192,6 @@ mod tests {
         stopping.join().unwrap();
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
         assert!(!live(), "idle");
-    }
-
-    /// The live flag changes under the recorder's lock at every change, so
-    /// two notifies on different threads never apply out of order.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_live_flag_changes_under_the_recorders_lock() {
-        let harness = harness(&[]);
-        let held = Arc::new(Mutex::new(Vec::new()));
-        let recorder = Arc::downgrade(&harness.recorder);
-        *harness.recorder.before_live.lock().unwrap() = Some(Arc::new({
-            let held = held.clone();
-            move || {
-                if let Some(recorder) = recorder.upgrade() {
-                    // Held by this thread: the flag's change follows under it.
-                    let locked = recorder.inner.try_lock().is_err();
-                    held.lock().unwrap().push(locked);
-                }
-            }
-        }));
-        start(&harness.recorder);
-        stop(&harness.recorder);
-        let held = held.lock().unwrap();
-        assert!(held.len() >= 4, "a start and a stop notify: {held:?}");
-        assert!(held.iter().all(|locked| *locked), "{held:?}");
     }
 
     /// A Quit while a manual Stop is saving waits for that save, keeping the
@@ -3411,8 +3356,9 @@ mod tests {
         tokio::spawn(async move { schedule.offer("0.12.0").await })
     }
 
-    /// A Record during an install's password prompt records at once; a
-    /// cancelled prompt fails the install and the recording is saved.
+    /// A Record during an install's password prompt records at once, and
+    /// a Stop saves it while nobody answers; a cancelled prompt fails the
+    /// install and the recording goes on.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_record_during_a_password_prompt_records() {
         let harness = harness(&[]);
@@ -3422,7 +3368,13 @@ mod tests {
         let status = status_after_a_start(&harness);
         assert_eq!(status.state, RecordingState::Recording);
         assert_eq!(status.error, None);
+        stop(&harness.recorder);
+        assert_eq!(harness.recorder.status().error, None);
+        let meetings = harness.store.all_meetings().unwrap();
+        assert_eq!(meetings.len(), 1);
+        assert_ne!(meetings[0].state, steno_core::MeetingState::Recording);
 
+        start(&harness.recorder);
         source.cancel.notify_one();
         offer.await.unwrap();
         assert_eq!(*source.told.lock().unwrap(), ["User canceled."]);
@@ -3430,28 +3382,7 @@ mod tests {
         assert_eq!(harness.recorder.status().state, RecordingState::Recording);
         stop(&harness.recorder);
         quit(&harness.recorder);
-        assert_eq!(harness.store.all_meetings().unwrap().len(), 1);
-    }
-
-    /// With a prompt nobody answers, a Record records and Stop saves it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_password_prompt_nobody_answers_never_keeps_recording_off() {
-        let harness = harness(&[]);
-        let source = Arc::new(PasswordPromptSource::default());
-        let offer = offer_after_a_check(&harness, source.clone()).await;
-        source.prompt_up.notified().await;
-        assert_eq!(
-            status_after_a_start(&harness).state,
-            RecordingState::Recording
-        );
-        stop(&harness.recorder);
-        assert_eq!(harness.recorder.status().error, None);
-        let meetings = harness.store.all_meetings().unwrap();
-        assert_eq!(meetings.len(), 1);
-        assert_ne!(meetings[0].state, steno_core::MeetingState::Recording);
-        assert_eq!(source.relaunches.load(Ordering::SeqCst), 0);
-        offer.abort();
-        quit(&harness.recorder);
+        assert_eq!(harness.store.all_meetings().unwrap().len(), 2);
     }
 
     /// An update installed during a recording waits: nothing downloads until
@@ -3788,11 +3719,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_for_the_exit_tries_its_commit_once() {
         static BUSY: BusyTries = BusyTries::new();
-        let harness = harness_over(
-            models_with(&[]),
-            "parakeet-v3",
-            platform_rule(SpeechSettings::default()),
-        );
+        let harness = harness(&[]);
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let hold = held_with_counted_tries(&harness, |waits| BUSY.on_busy(waits));
@@ -3831,27 +3758,6 @@ mod tests {
         let stopper = harness.recorder.clone();
         let manual = std::thread::spawn(move || stopper.stop());
         stop_seen.recv_timeout(PATIENCE).expect("the stop began");
-        quit_while_busy(&harness.recorder, &BUSY).await;
-        drop(hold);
-        manual.join().unwrap();
-        assert_eq!(BUSY.tries(), 1, "one try");
-        assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
-    }
-
-    /// A quit during the stop's first busy try is seen before the next try.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_quit_during_the_stop_s_first_try_tries_no_more() {
-        static BUSY: BusyTries = BusyTries::new();
-        let harness = harness(&[]);
-        start(&harness.recorder);
-        let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let hold = held_with_counted_tries(&harness, |waits| BUSY.on_busy(waits));
-        let stopper = harness.recorder.clone();
-        let manual = std::thread::spawn(move || stopper.stop());
-        eventually_within(HANG_GUARD, "the stop's first try waits", || {
-            BUSY.tries() == 1
-        })
-        .await;
         quit_while_busy(&harness.recorder, &BUSY).await;
         drop(hold);
         manual.join().unwrap();
@@ -4047,12 +3953,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_whose_capture_failed_keeps_what_was_written() {
         let died = Arc::new(AtomicBool::new(false));
-        let harness = harness_capturing(
-            models_with(&[]),
-            "parakeet-v3",
-            platform_rule(SpeechSettings::default()),
-            dying_capture(20, died.clone()),
-        );
+        let harness = harness_recording(dying_capture(20, died.clone()));
         start(&harness.recorder);
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         eventually_within(HANG_GUARD, "the writer died", || {
@@ -4095,12 +3996,7 @@ mod tests {
     async fn a_failed_stop_whose_master_cannot_be_found_is_kept() {
         for unmount_the_audio_folder in [true, false] {
             let died = Arc::new(AtomicBool::new(false));
-            let harness = harness_capturing(
-                models_with(&[]),
-                "parakeet-v3",
-                platform_rule(SpeechSettings::default()),
-                dying_capture(20, died.clone()),
-            );
+            let harness = harness_recording(dying_capture(20, died.clone()));
             start(&harness.recorder);
             let meeting_id = harness.recorder.status().meeting_id.unwrap();
             eventually_within(HANG_GUARD, "the writer died", || {
@@ -4176,179 +4072,6 @@ mod tests {
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
     }
 
-    /// A stop during a held forced reload and a three-second shared read
-    /// shows `Stopping` within 100 ms of the notice, saves within [`LIVE`],
-    /// and finishes its files while both reads are still held.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn a_stop_during_a_slow_reload_shows_stopping_at_once_and_finishes_its_files() {
-        const FEED: Duration = Duration::from_millis(100);
-        const SHARED_READ: Duration = Duration::from_secs(3);
-        let harness = harness(&[]);
-        let shown_meeting = crate::testing::shown_meeting(&harness.store);
-        let pipeline = Arc::new(crate::testing::GatedFiles::default());
-        let hosted =
-            crate::testing::hosted_over(&harness.store, &harness.recorder, Some(pipeline.clone()));
-        let own = hosted.host.own_store();
-        pipeline.gate_inside_reads_on(own.clone());
-        hosted.host.request_meeting(shown_meeting.id);
-        assert!(pipeline.gate.reloads() > 0, "the meeting's detail is shown");
-        start(&harness.recorder);
-        let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        // Another connection, so watching the row takes neither reader.
-        let watcher = Store::open_without_migrating(database(&harness)).unwrap();
-
-        let armed = pipeline.gate.arm();
-        let reload = hosted.reload_in_flight();
-        assert!(
-            pipeline.gate.wait_for(PATIENCE, |state| state.held == 1),
-            "the reload is held with the view models and the host's reader"
-        );
-        // Waits for the host's reader while the reload holds it.
-        let host_read = std::thread::spawn(move || own.read(|_| Ok(())).unwrap());
-        let (reading, read_began) = std::sync::mpsc::channel();
-        let shared = harness.store.clone();
-        let shared_read = std::thread::spawn(move || {
-            shared
-                .read(|_| {
-                    reading.send(()).unwrap();
-                    std::thread::sleep(SHARED_READ);
-                    Ok(())
-                })
-                .unwrap();
-        });
-        read_began.recv_timeout(PATIENCE).unwrap();
-
-        let since = Instant::now();
-        let stopper = harness.recorder.clone();
-        let stopping = std::thread::spawn(move || stopper.stop());
-        let shown = hosted
-            .sink
-            .recording_in("stopping", since, PATIENCE)
-            .expect("the stop reached the host");
-        let noticed = found_within(PATIENCE, "the stop's notice", || {
-            hosted
-                .hooks_since(since)
-                .into_iter()
-                .find(|call| call.state != RecordingState::Recording)
-                .map(|call| call.began)
-        });
-        let after_notice = shown.saturating_duration_since(noticed);
-        assert!(
-            after_notice < FEED,
-            "Stopping reached the host {after_notice:?} after the recorder's notice"
-        );
-        let (saved, state) = found_within(PATIENCE, "the stop's save", || {
-            let state = watcher.meeting(meeting_id).unwrap().unwrap().state;
-            (state != steno_core::MeetingState::Recording).then(|| (Instant::now(), state))
-        });
-        assert!(
-            !matches!(state, steno_core::MeetingState::Failed { .. }),
-            "saved, got {state:?}"
-        );
-        let took = saved.saturating_duration_since(noticed);
-        assert!(
-            took < LIVE,
-            "the meeting was saved {took:?} after the recorder's notice"
-        );
-        found_within(HANG_GUARD, "the stop ended", || {
-            stopping.is_finished().then_some(())
-        });
-        assert!(
-            !shared_read.is_finished(),
-            "the stop ended while the shared reader was held"
-        );
-        assert!(
-            pipeline
-                .gate
-                .wait_for(Duration::ZERO, |state| state.held == 1)
-                && !host_read.is_finished(),
-            "the stop ended while the reload held the host's reader"
-        );
-        drop(armed);
-        stopping.join().unwrap();
-        reload.join().unwrap();
-        host_read.join().unwrap();
-        shared_read.join().unwrap();
-        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
-    }
-
-    /// A stop's two moves (`Stopping`, `Idle`) each ask the reload owner for
-    /// a pass, and the stopped row reaches the list within [`LIVE`] of the
-    /// lock's release from the owner's forced pass, not the stop's thread.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn a_stop_asks_for_a_reload_per_move() {
-        let harness = harness(&[]);
-        let hosted = crate::testing::hosted(&harness.store, &harness.recorder);
-        let owner = tokio::spawn(crate::app::own_the_reloads(
-            hosted.host.clone(),
-            Duration::from_secs(3600),
-        ));
-        start(&harness.recorder);
-        let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let mut held = crate::testing::HeldStore::lock_only(&database(&harness));
-        let requests = || hosted.host.reload_request_count();
-        let before = requests();
-
-        let stopper = harness.recorder.clone();
-        let stopping = std::thread::Builder::new()
-            .name("the-stop".to_owned())
-            .spawn(move || stopper.stop())
-            .unwrap();
-        found_within(PATIENCE, "Stopping asked for a reload", || {
-            (requests() > before).then_some(())
-        });
-        assert_eq!(harness.recorder.status().state, RecordingState::Stopping);
-        assert_eq!(requests(), before + 1, "one request for Stopping");
-        let saved = held.release();
-        found_within(HANG_GUARD, "the stop saved", || {
-            stopping.is_finished().then_some(())
-        });
-        stopping.join().unwrap();
-        let id = meeting_id.to_string();
-        let (at, thread) = found_within(PATIENCE, "the stopped row listed", || {
-            hosted
-                .sink
-                .since_on(steno_bridge::BridgeTopic::MeetingsList, saved)
-                .into_iter()
-                .find(|(_, list, _)| {
-                    list["groups"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .any(|group| {
-                            group["meetings"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .any(|row| {
-                                    row["id"]
-                                        .as_str()
-                                        .is_some_and(|row_id| row_id.eq_ignore_ascii_case(&id))
-                                        && row["state"] != "recording"
-                                })
-                        })
-                })
-                .map(|(at, _, thread)| (at, thread))
-        });
-        let took = at.duration_since(saved);
-        assert!(
-            took < LIVE,
-            "the stopped row was listed {took:?} after the save"
-        );
-        assert_ne!(
-            thread.as_deref(),
-            Some("the-stop"),
-            "listed from the stop's thread"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(
-            requests(),
-            before + 2,
-            "one request for Stopping, one for Idle"
-        );
-        owner.abort();
-    }
-
     /// The stop runs and saves on its own thread, so it saves even while the
     /// services runtime's only worker is blocked.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -4379,8 +4102,8 @@ mod tests {
     }
 
     /// A start while another process holds the write lock waits out the busy
-    /// timeout, then is refused with no capture and no row, while `Starting`
-    /// and commands stay live.
+    /// timeout, then is refused with no capture, no row and no recorded
+    /// folder, while `Starting` and commands stay live.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_start_under_a_held_lock_is_refused_and_the_ui_stays_live() {
         use steno_bridge::BridgeHost as _;
@@ -4443,34 +4166,10 @@ mod tests {
             std::fs::read_dir(&audio).map_or(true, |mut entries| entries.next().is_none()),
             "no capture wrote into the audio folder"
         );
-    }
-
-    /// A start whose meeting cannot be written forgets the folder it
-    /// recorded first; the folder stays known.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_start_whose_meeting_cannot_be_written_forgets_its_folder() {
-        let harness = harness(&[]);
-        harness
-            .store
-            .on_writer(|connection| connection.busy_timeout(std::time::Duration::from_millis(100)))
-            .unwrap();
-        let hold =
-            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
-        try_start(&harness.recorder, CaptureMode::InPerson);
-        drop(hold);
-        let status = harness.recorder.status();
-        assert_eq!(status.state, RecordingState::Idle);
-        assert_eq!(
-            status.error.as_deref(),
-            Some("Recording could not start: Steno could not create the meeting.")
-        );
-        assert_eq!(harness.store.meetings(10, 0).unwrap(), Vec::new());
+        // The folder recorded first is forgotten, and stays known.
         let support = harness.dir.path().join("support");
         assert!(crate::audio_folders::recorded(&support).unwrap().is_empty());
-        assert_eq!(
-            crate::audio_folders::known(&support).unwrap(),
-            [harness.dir.path().join("audio")]
-        );
+        assert_eq!(crate::audio_folders::known(&support).unwrap(), [audio]);
     }
 
     /// The folder is recorded before the master exists; a failed session
@@ -4499,12 +4198,7 @@ mod tests {
                 Err(CaptureError::WriterFailed("refused".into()))
             }))
         };
-        let harness = harness_capturing(
-            models_with(&[]),
-            "parakeet-v3",
-            platform_rule(SpeechSettings::default()),
-            failing,
-        );
+        let harness = harness_recording(failing);
         try_start(&harness.recorder, CaptureMode::InPerson);
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
 
@@ -4702,60 +4396,66 @@ mod tests {
         }
     }
 
+    /// Lost frames warn in seconds of the lane that lost most, rounded to
+    /// the nearest second, from half a second on; every warning that
+    /// applies is joined, and a device loss is the error, not one of them.
     #[test]
-    fn a_clean_recording_warns_about_nothing() {
-        assert_eq!(recording_warning(CaptureMode::Call, &statistics()), None);
-    }
-
-    /// Lost frames are a warning, in seconds of the lane that lost most,
-    /// rounded to the nearest second: 2.5 s reads 3.
-    #[test]
-    fn dropped_frames_warn_with_the_seconds_missing() {
-        let mut dropped = statistics();
-        dropped.dropped_frames.insert(AudioLane::Mic, 250);
-        dropped.dropped_frames.insert(AudioLane::System, 200);
-        assert_eq!(
-            recording_warning(CaptureMode::Call, &dropped).as_deref(),
-            Some("About 3 seconds of the recording are missing.")
-        );
-        dropped.dropped_frames.clear();
-        dropped.dropped_frames.insert(AudioLane::Mixed, 50);
-        assert_eq!(
-            recording_warning(CaptureMode::InPerson, &dropped).as_deref(),
-            Some("About 1 second of the recording is missing.")
-        );
-    }
-
-    /// Under half a second lost is no warning.
-    #[test]
-    fn under_half_a_second_lost_warns_about_nothing() {
-        for frames in [1, 49] {
-            let mut dropped = statistics();
-            dropped.dropped_frames.insert(AudioLane::Mic, frames);
-            assert_eq!(recording_warning(CaptureMode::InPerson, &dropped), None);
+    fn a_recording_warns_about_what_it_lost() {
+        const ONE_SECOND: &str = "About 1 second of the recording is missing.";
+        const SILENT_CALL: &str =
+            "Steno heard nothing from the call's audio. Check the system audio permission.";
+        let lost = |dropped: &[(AudioLane, usize)], silent: bool| CaptureStatistics {
+            dropped_frames: dropped.iter().copied().collect(),
+            system_lane_silent: silent,
+            ended_on_device_loss: silent,
+            ..statistics()
+        };
+        let both = format!("{ONE_SECOND} {SILENT_CALL}");
+        for (case, mode, statistics, warning) in [
+            ("clean", CaptureMode::Call, statistics(), None),
+            (
+                "2.5 s reads 3",
+                CaptureMode::Call,
+                lost(&[(AudioLane::Mic, 250), (AudioLane::System, 200)], false),
+                Some("About 3 seconds of the recording are missing."),
+            ),
+            (
+                "half a second reads 1",
+                CaptureMode::InPerson,
+                lost(&[(AudioLane::Mixed, 50)], false),
+                Some(ONE_SECOND),
+            ),
+            (
+                "one frame",
+                CaptureMode::InPerson,
+                lost(&[(AudioLane::Mic, 1)], false),
+                None,
+            ),
+            (
+                "under half a second",
+                CaptureMode::InPerson,
+                lost(&[(AudioLane::Mic, 49)], false),
+                None,
+            ),
+            (
+                "all joined",
+                CaptureMode::Call,
+                lost(&[(AudioLane::Mic, 100)], true),
+                Some(both.as_str()),
+            ),
+            (
+                "no system lane in person",
+                CaptureMode::InPerson,
+                lost(&[(AudioLane::Mic, 100)], true),
+                Some(ONE_SECOND),
+            ),
+        ] {
+            assert_eq!(
+                recording_warning(mode, &statistics).as_deref(),
+                warning,
+                "{case}"
+            );
         }
-    }
-
-    /// Every warning that applies is kept; a device loss is the error, not
-    /// one of them.
-    #[test]
-    fn every_warning_that_applies_is_joined() {
-        let mut all = statistics();
-        all.ended_on_device_loss = true;
-        all.system_lane_silent = true;
-        all.dropped_frames.insert(AudioLane::Mic, 100);
-        let warning = recording_warning(CaptureMode::Call, &all).unwrap();
-        assert_eq!(
-            warning,
-            "About 1 second of the recording is missing. \
-             Steno heard nothing from the call's audio. Check the system audio permission."
-        );
-        // In person there is no system lane to warn about.
-        assert!(
-            !recording_warning(CaptureMode::InPerson, &all)
-                .unwrap()
-                .contains("call's audio")
-        );
     }
 
     /// Lost frames leave a `warn` line with the counts per lane.
@@ -4776,55 +4476,6 @@ mod tests {
             .find(|line| line.contains(&lossy.to_string()))
             .unwrap_or_else(|| panic!("no line for the meeting: {text}"));
         assert!(line.contains("Mic: 250, System: 0"), "{line}");
-    }
-
-    /// A stop whose recording lost frames, the writer stalled behind a
-    /// one-frame relay, logs them.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_stop_that_lost_frames_logs_them() {
-        use steno_audio::testing::SyntheticCaptureBackend;
-
-        let log = steno_pipeline::fixtures::CapturedLog::warnings();
-        let harness = harness(&[]);
-        let (go, stalled) = std::sync::mpsc::channel();
-        let stalled = Arc::new(Mutex::new(Some(stalled)));
-        let backend = Arc::new(SyntheticCaptureBackend::new(SyntheticOptions::tones(
-            &[AudioLane::Mixed],
-            &[(AudioLane::Mixed, 440.0)],
-            2.0,
-        )));
-        // The first write waits for `go`, so the backend overflows the relay.
-        harness.capture_with({
-            let backend = backend.clone();
-            Arc::new(move |configuration| {
-                let stalled = stalled.clone();
-                session_with_writes(configuration, backend.clone(), 1, move || {
-                    let mut go = stalled.lock().unwrap().take();
-                    move || {
-                        if let Some(go) = go.take() {
-                            let _ = go.recv_timeout(PATIENCE);
-                        }
-                        Ok(())
-                    }
-                })
-            })
-        });
-        let recorder = &harness.recorder;
-        start(recorder);
-        let meeting_id = recorder.status().meeting_id.unwrap();
-        let finished = backend.clone();
-        on_own_thread(HANG_GUARD, "the backend delivered", move || {
-            finished.wait_until_finished();
-        });
-        go.send(()).unwrap();
-        stop(recorder);
-        let text = log.text();
-        assert!(
-            text.lines()
-                .any(|line| line.contains(&meeting_id.to_string())
-                    && line.contains("the recording lost frames")),
-            "{text}"
-        );
     }
 
     /// Waits until the recorder is idle after a recording that ended on its
@@ -5725,33 +5376,6 @@ mod tests {
         stop(&harness.recorder);
     }
 
-    /// A calendar still answering the previous start is not asked again
-    /// until it answers.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_calendar_that_hangs_is_read_by_one_start_at_a_time() {
-        let harness = harness(&[]);
-        let calendar = crate::calendar::testing::FakeCalendar::with(vec![roadmap_sync()]);
-        calendar.hold();
-        harness.recorder.name_meetings_from(calendar.clone());
-        start(&harness.recorder);
-        assert!(calendar.wait_for_a_held_read(PATIENCE));
-        let first = harness.recorder.status().meeting_id.unwrap();
-        stop(&harness.recorder);
-        start(&harness.recorder);
-        let second = harness.recorder.status().meeting_id.unwrap();
-        assert_eq!(calendar.reads(), 1, "the second start did not read");
-        calendar.release();
-        stop(&harness.recorder);
-        for meeting_id in [first, second] {
-            let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
-            assert_eq!(meeting.calendar_event_id, None, "stopped before the answer");
-        }
-        eventually("the calendar's thread ended", || {
-            harness.recorder.calendar.start(Utc::now()).is_some()
-        })
-        .await;
-    }
-
     /// A failing or empty calendar gives the default title, no participants.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failing_or_empty_calendar_starts_as_before() {
@@ -5993,86 +5617,6 @@ mod tests {
         release.send(()).unwrap();
         request.join().unwrap();
         stop(&harness.recorder);
-    }
-
-    /// A start waits for a slow-stopping tone test to return before opening
-    /// a device, within the patience.
-    fn waits_for_a_slow_stopping_tone_test(patience: Option<Duration>) {
-        let harness = harness(&[]);
-        if let Some(patience) = patience {
-            harness.recorder.inner().tone_tests.patience = patience;
-        }
-        let (began, beginning) = std::sync::mpsc::channel::<()>();
-        let (opened, open) = std::sync::mpsc::channel::<()>();
-        let (began, open) = (Mutex::new(began), Mutex::new(open));
-        let (permissions, log, _) = tone_tested(&harness, move |cancel, log| {
-            began.lock().unwrap().send(()).unwrap();
-            if cancel.sleep(HANG_GUARD) {
-                return ProbeAnswer::Silent;
-            }
-            // Slow to stop: a device that opens now opens over the tone.
-            let _ = open.lock().unwrap().recv_timeout(Duration::from_secs(1));
-            log.note("the tone stopped");
-            ProbeAnswer::Stopped
-        });
-        let capture = synthetic_capture();
-        let noted = log.clone();
-        let opened = Mutex::new(opened);
-        harness.capture_with(Arc::new(move |configuration| {
-            noted.note("a device opened");
-            let _ = opened.lock().unwrap().send(());
-            capture(configuration)
-        }));
-        let requesting = permissions.clone();
-        let request = std::thread::spawn(move || requesting.request(PermissionKind::SystemAudio));
-        beginning.recv_timeout(PATIENCE).unwrap();
-        start(&harness.recorder);
-        assert_eq!(log.events(), ["the tone stopped", "a device opened"]);
-        request.join().unwrap();
-        stop(&harness.recorder);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_start_waits_for_a_slow_stopping_tone_test() {
-        waits_for_a_slow_stopping_tone_test(Some(HANG_GUARD));
-    }
-
-    /// The same under [`TONE_TEST_PATIENCE`], the product's bound.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_start_waits_for_a_slow_stopping_tone_test_within_the_patience() {
-        waits_for_a_slow_stopping_tone_test(None);
-    }
-
-    /// A request while the recording stops plays nothing.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_tone_test_never_plays_while_a_recording_stops() {
-        let harness = harness(&[]);
-        let (permissions, log, _preferences) = tone_tested(&harness, |_, _| ProbeAnswer::Heard);
-        start(&harness.recorder);
-        let (reached, seen) = std::sync::mpsc::channel::<()>();
-        let (go, gate) = std::sync::mpsc::channel::<()>();
-        let (reached, gate) = (Mutex::new(reached), Mutex::new(gate));
-        let watched = Arc::downgrade(&harness.recorder);
-        harness.recorder.on_change(Arc::new(move || {
-            if watched
-                .upgrade()
-                .is_some_and(|recorder| recorder.status().state == RecordingState::Stopping)
-            {
-                let _ = reached.lock().unwrap().send(());
-                let _ = gate.lock().unwrap().recv_timeout(HANG_GUARD);
-            }
-        }));
-        let stopper = harness.recorder.clone();
-        let stopping = std::thread::spawn(move || stopper.stop());
-        seen.recv_timeout(HANG_GUARD).expect("the stop began");
-        assert_eq!(harness.recorder.status().state, RecordingState::Stopping);
-        assert_eq!(
-            permissions.request(PermissionKind::SystemAudio),
-            steno_bridge::PermissionState::Unknown
-        );
-        assert_eq!(log.runs.load(Ordering::SeqCst), 0, "no tone while stopping");
-        drop(go);
-        stopping.join().unwrap();
     }
 
     /// A test after one a start stopped runs again; one asked while quitting

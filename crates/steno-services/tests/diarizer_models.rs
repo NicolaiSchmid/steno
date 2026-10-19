@@ -489,61 +489,42 @@ async fn junk_where_settings_installs_is_deleted_so_settings_offers_download() {
     assert_eq!(mirror.seen(), []);
 }
 
-/// The app's diarizer over an empty models directory: the job waits for
-/// the models with its recording, and nothing is downloaded.
+/// The app's diarizer with no models, with files of the right size that
+/// fail their checksum, or with a child that aborts while it loads them:
+/// the job waits for the models with its recording, the files are deleted
+/// (the crash checked like a refusal), and nothing is downloaded.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_apps_diarizer_without_its_models_parks_the_job_and_fetches_nothing() {
-    let mirror = Mirror::start(None);
-    let world = app_world(&mirror, &[]);
-    let before = world.run_the_job().await;
-    world.assert_waiting_for_the_models();
-    world.assert_recording_kept(&before);
-    assert_eq!(mirror.seen(), []);
-    assert!(!world.models.directory(&models::asset()).exists());
-}
+async fn the_apps_diarizer_without_loadable_models_parks_the_job_and_fetches_nothing() {
+    let abort: &[&str] = &["--fake-engine", "--fault", "abort-on-diarizer-load"];
+    for (what, junk, sidecar_args) in [
+        ("no models", false, &[][..]),
+        ("files that do not load", true, &[][..]),
+        ("a child that aborts while it loads them", true, abort),
+    ] {
+        let mirror = Mirror::start(None);
+        let world = app_world(&mirror, sidecar_args);
+        let asset = models::asset();
+        let folder = world.models.directory(&asset);
+        if junk {
+            std::fs::create_dir_all(&folder).unwrap();
+            for file in &asset.files {
+                std::fs::File::create(folder.join(&file.name))
+                    .unwrap()
+                    .set_len(file.size)
+                    .unwrap();
+            }
+            assert!(models::installed(&world.models).is_ok(), "{what}");
+        }
 
-/// Files of the right size that the child cannot load fail their checksum
-/// and are deleted; the gate takes that as the models-missing refusal.
-#[tokio::test(flavor = "multi_thread")]
-async fn files_the_apps_diarizer_cannot_load_in_its_child_park_the_job() {
-    park_the_job_over_files_that_do_not_load(&[]).await;
-}
-
-/// The same files in a child that aborts while it loads them: the crash is
-/// checked like a refusal, and the job waits for the models.
-#[tokio::test(flavor = "multi_thread")]
-async fn files_whose_load_aborts_the_apps_diarizer_child_park_the_job() {
-    park_the_job_over_files_that_do_not_load(&[
-        "--fake-engine",
-        "--fault",
-        "abort-on-diarizer-load",
-    ])
-    .await;
-}
-
-/// The app's diarizer over files that fail their checksum: the job waits,
-/// the files are deleted, and no request is made.
-async fn park_the_job_over_files_that_do_not_load(sidecar_args: &[&str]) {
-    let mirror = Mirror::start(None);
-    let world = app_world(&mirror, sidecar_args);
-    let asset = models::asset();
-    let folder = world.models.directory(&asset);
-    std::fs::create_dir_all(&folder).unwrap();
-    for file in &asset.files {
-        std::fs::File::create(folder.join(&file.name))
-            .unwrap()
-            .set_len(file.size)
-            .unwrap();
+        let before = world.run_the_job().await;
+        world.assert_waiting_for_the_models();
+        world.assert_recording_kept(&before);
+        for file in &asset.files {
+            assert!(!folder.join(&file.name).exists(), "{what}: {}", file.name);
+        }
+        assert!(junk || !folder.exists(), "{what}: nothing installed");
+        assert_eq!(mirror.seen(), [], "{what}");
     }
-    assert!(models::installed(&world.models).is_ok());
-
-    let before = world.run_the_job().await;
-    world.assert_waiting_for_the_models();
-    world.assert_recording_kept(&before);
-    for file in &asset.files {
-        assert!(!folder.join(&file.name).exists(), "{}", file.name);
-    }
-    assert_eq!(mirror.seen(), []);
 }
 
 /// Settings downloads the models through the mirror; the pipeline's

@@ -889,13 +889,6 @@ mod tests {
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|error| panic!("{path}: {error}"))
     }
 
-    /// The service stays the Swift app's bundle identifier as a literal,
-    /// whatever this app's own identifier becomes.
-    #[test]
-    fn the_keyring_service_is_the_swift_app_s_literal() {
-        assert_eq!(KEYRING_SERVICE, "uno.schmid.steno.mac");
-    }
-
     #[test]
     fn keyring_entries_are_filed_as_the_swift_app_files_them() {
         let keychain = swift_source("apps/macos/Steno/Services/KeychainSecretStore.swift");

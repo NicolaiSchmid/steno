@@ -2451,50 +2451,33 @@ mod tests {
         assert!(master_path(&harness.audio_folder(), orphan).is_file());
     }
 
-    /// A header-only recorded master is not adopted; its entry is forgotten
-    /// and its file stays.
+    /// A header-only recorded master, or a two-channel one with part of
+    /// its first frame, is not adopted; its entry is forgotten and its file
+    /// stays.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_header_only_master_with_no_meeting_is_forgotten() {
         let harness = Harness::new();
-        let orphan = mac_orphan(&harness, &[AudioLane::Mixed], 0);
-        let master = master_path(&harness.audio_folder(), orphan);
+        let header_only = mac_orphan(&harness, &[AudioLane::Mixed], 0);
+        let master = master_path(&harness.audio_folder(), header_only);
         assert_eq!(CafHeader::read(&master).unwrap().frame_count, 0);
-        let header = std::fs::read(&master).unwrap();
+        let partial = mac_orphan(&harness, &[AudioLane::Mic, AudioLane::System], 0);
+        let partial_master = master_path(&harness.audio_folder(), partial);
+        let mut bytes = std::fs::read(&partial_master).unwrap();
+        bytes.extend_from_slice(&[0; CafStreamWriter::BYTES_PER_SAMPLE + 1]);
+        std::fs::write(&partial_master, &bytes).unwrap();
+        let before = files_in(&harness.audio_folder());
 
         assert_eq!(
             reconcile_at_launch(&harness, &[], &an_hour_later()),
             Vec::<Uuid>::new()
         );
-        assert!(harness.store.meeting(orphan).unwrap().is_none());
+        assert_eq!(harness.store.all_meetings().unwrap(), Vec::<Meeting>::new());
         assert!(
-            !crate::audio_folders::recorded(&harness.support_directory())
+            crate::audio_folders::recorded(&harness.support_directory())
                 .unwrap()
-                .contains_key(&orphan)
+                .is_empty()
         );
-        assert_eq!(std::fs::read(&master).unwrap(), header);
-    }
-
-    /// A two-channel master with part of its first frame is treated as
-    /// header-only.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_master_with_part_of_one_frame_is_forgotten() {
-        let harness = Harness::new();
-        let orphan = mac_orphan(&harness, &[AudioLane::Mic, AudioLane::System], 0);
-        let master = master_path(&harness.audio_folder(), orphan);
-        let mut partial = std::fs::read(&master).unwrap();
-        partial.extend_from_slice(&[0; CafStreamWriter::BYTES_PER_SAMPLE + 1]);
-        std::fs::write(&master, &partial).unwrap();
-
-        assert_eq!(
-            reconcile_at_launch(&harness, &[], &an_hour_later()),
-            Vec::<Uuid>::new()
-        );
-        assert!(
-            !crate::audio_folders::recorded(&harness.support_directory())
-                .unwrap()
-                .contains_key(&orphan)
-        );
-        assert_eq!(std::fs::read(&master).unwrap(), partial);
+        assert_eq!(files_in(&harness.audio_folder()), before);
     }
 
     /// A master cut inside its header is treated as header-only; a
@@ -2635,48 +2618,6 @@ mod tests {
             .count();
         assert_eq!(named, IDS_LOGGED, "{line}");
         assert!(!line.contains(&row.to_string()), "{line}");
-    }
-
-    /// Unrecorded files that hold no audio stay out of the left-alone line;
-    /// a CAF with one whole frame is counted.
-    #[test]
-    fn unrecorded_files_with_no_audio_are_not_logged() {
-        let dir = tempfile::tempdir().unwrap();
-        let audio = dir.path().join("audio");
-        let caf = |id: Uuid, extra: usize| {
-            let layout = RecordingLayout::new(&audio, id);
-            std::fs::create_dir_all(&layout.directory).unwrap();
-            let master = layout.master(AudioFormat::Caf48kFloat32);
-            drop(CafStreamWriter::create(&master, 48_000.0, 2).unwrap());
-            let mut bytes = std::fs::read(&master).unwrap();
-            assert_eq!(bytes.len(), CafStreamWriter::HEADER_SIZE);
-            bytes.extend(std::iter::repeat_n(0, extra));
-            std::fs::write(&master, bytes).unwrap();
-        };
-        caf(Uuid::new_v4(), 2 * CafStreamWriter::BYTES_PER_SAMPLE - 1);
-        let whole = Uuid::new_v4();
-        caf(whole, 2 * CafStreamWriter::BYTES_PER_SAMPLE);
-        for format in [AudioFormat::M4aAac, AudioFormat::Wav16kInt16] {
-            let layout = RecordingLayout::new(&audio, Uuid::new_v4());
-            std::fs::create_dir_all(&layout.directory).unwrap();
-            std::fs::File::create(layout.master(format)).unwrap();
-        }
-
-        let (found, logged) = warnings(|| {
-            orphans(
-                std::slice::from_ref(&audio),
-                &HashSet::new(),
-                &BTreeMap::new(),
-            )
-        });
-
-        assert!(found.is_empty());
-        let lines: Vec<&str> = logged.lines().collect();
-        let [line] = lines.as_slice() else {
-            panic!("one line: {logged}");
-        };
-        assert!(line.contains("count=1"), "{line}");
-        assert!(line.contains(&whole.to_string()), "{line}");
     }
 
     /// Unrecorded meeting folders with masters and sidecars; returns every

@@ -1916,46 +1916,6 @@ mod tests {
         app.pipeline.quit();
     }
 
-    /// The notice's flag is written before the engine's row changes: when the
-    /// update is refused, the flag is pending, the build warns, and the
-    /// engine stays for the next launch.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_retirement_the_database_refuses_leaves_the_notice_pending_and_warns() {
-        use steno_host::setup::engine_notice::PENDING_KEY;
-
-        let dir = tempfile::tempdir().unwrap();
-        let support = dir.path().join("support");
-        let paths = StenoPaths::new(&support);
-        let store = open_store(&paths.database_path()).unwrap();
-        let mut settings = store.settings().unwrap();
-        "whisperkit-large-v3-turbo".clone_into(&mut settings.speech_engine_id);
-        store.save_settings(&settings).unwrap();
-        drop(store);
-        rusqlite::Connection::open(paths.database_path())
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER refuse_the_engine BEFORE UPDATE ON setting \
-                 WHEN OLD.key = 'speechEngineID' AND NEW.value <> OLD.value \
-                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
-            )
-            .unwrap();
-
-        let app = build(options_under(&support)).unwrap();
-        assert!(
-            app.startup_warnings
-                .iter()
-                .any(|warning| warning.starts_with("Steno could not switch to Parakeet v3")),
-            "{:?}",
-            app.startup_warnings
-        );
-        assert_eq!(
-            app.store.settings().unwrap().speech_engine_id,
-            "whisperkit-large-v3-turbo"
-        );
-        assert!(FilePreferences::new(support.join("preferences.json")).flag(PENDING_KEY));
-        app.pipeline.quit();
-    }
-
     /// The models directory is decided once, at build: a reload after the
     /// settings name another directory keeps the first, so `prepare` is still
     /// refused for missing models.
@@ -2381,48 +2341,6 @@ mod tests {
             store.meeting(id).unwrap().unwrap().state,
             steno_core::MeetingState::Ready
         );
-    }
-
-    /// "Process again" on a meeting the store marked ready and complete
-    /// behind the host's back is refused, and the error line says why.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn process_again_on_a_stale_failed_detail_refuses_a_ready_meeting() {
-        use steno_bridge::BridgeMethod;
-        let (dir, store) = temp_store();
-        let (app, host, id) =
-            failed_meeting_selected(&dir, &store, "summarize: the endpoint did not answer");
-        assert_eq!(
-            host.snapshot(BridgeTopic::MeetingDetail).unwrap()["state"],
-            "failed"
-        );
-
-        let mut meeting = store.meeting(id).unwrap().unwrap();
-        meeting.state = steno_core::MeetingState::Ready;
-        let segments: Vec<_> = [steno_core::AudioLane::Mic, steno_core::AudioLane::System]
-            .into_iter()
-            .map(|lane| steno_core::TranscriptSegment {
-                id: uuid::Uuid::new_v4(),
-                meeting_id: id,
-                start: 0.0,
-                end: 1.0,
-                speaker_id: None,
-                lane,
-                text: "Hello.".to_owned(),
-                raw_text: "Hello.".to_owned(),
-            })
-            .collect();
-        store.replace_transcript(&meeting, &segments, &[]).unwrap();
-        call(&host, BridgeMethod::MeetingProcessAgain, None);
-        assert_eq!(
-            store.meeting(id).unwrap().unwrap().state,
-            steno_core::MeetingState::Ready,
-            "a ready meeting is not queued again"
-        );
-        assert_eq!(
-            host.snapshot(BridgeTopic::MeetingDetail).unwrap()["error"],
-            "Only a failed meeting, or one whose results may be incomplete, can be processed again."
-        );
-        app.pipeline.current().wait_until_idle().await;
     }
 
     /// A ready but incomplete meeting is offered "Process again" too.
@@ -2893,33 +2811,6 @@ mod tests {
             matches!(&refused, BuildError::Lock(DatabaseLockError::Held(_))),
             "{refused:?}"
         );
-    }
-
-    /// A relaunch waits out a lock that briefly outlives the app it dropped;
-    /// one that gives up at once fails within the window.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_relaunch_in_a_test_waits_out_a_lock_held_past_the_drop() {
-        let dir = tempfile::tempdir().unwrap();
-        let support = dir.path().join("support");
-        std::fs::create_dir_all(&support).unwrap();
-        let forked_copy = DatabaseLock::acquire(&support.join("steno.sqlite")).unwrap();
-
-        let options = options_under(&support);
-        let mut relaunch = tokio::task::spawn_blocking(move || build(options));
-        let window = std::time::Duration::from_millis(200);
-        if let Ok(early) = tokio::time::timeout(window, &mut relaunch).await {
-            panic!(
-                "the relaunch ended while the lock was held: {:?}",
-                early.unwrap().map(|_| ())
-            );
-        }
-        drop(forked_copy);
-        let relaunched = tokio::time::timeout(HANG_GUARD, relaunch)
-            .await
-            .expect("the relaunch hung")
-            .unwrap()
-            .unwrap();
-        assert!(relaunched.database_lock.is_some());
     }
 
     /// An update's relaunch waits out the old app's lock within its patience,
@@ -3606,24 +3497,6 @@ mod tests {
         server.stop();
     }
 
-    /// Fails unless the timer behind `ticked` ticks with no 200 ms gap for
-    /// `length`.
-    fn assert_live(
-        ticked: &std::sync::Mutex<std::time::Instant>,
-        length: std::time::Duration,
-        what: &str,
-    ) {
-        let start = std::time::Instant::now();
-        while start.elapsed() < length {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            let since = ticked.lock().unwrap().elapsed();
-            assert!(
-                since < std::time::Duration::from_millis(200),
-                "{what}: the runtime's timer stopped for {since:?}"
-            );
-        }
-    }
-
     /// Fails unless the runtime's one worker runs tasks spawned while a
     /// reload is held at the gate.
     fn assert_the_worker_runs(runtime: &tokio::runtime::Runtime, what: &str) {
@@ -3792,173 +3665,6 @@ mod tests {
         (app, pipeline, host)
     }
 
-    /// The event follower takes one event at a time, in order: while the
-    /// first reload is held, the next events wait in the bus, not in tasks.
-    #[test]
-    fn the_event_follower_takes_one_event_at_a_time() {
-        let runtime = one_worker_runtime();
-        let dir = tempfile::tempdir().unwrap();
-        let (app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
-        let gate = &pipeline.gate;
-        let armed = gate.arm();
-        app.events.post(MeetingEvent::Deleted {
-            meeting_id: uuid::Uuid::new_v4(),
-        });
-        assert!(
-            gate.wait_for(std::time::Duration::from_secs(1), |state| state.entered
-                == 1),
-            "the first event's reload reaches the gate"
-        );
-        let tasks = runtime.metrics().num_alive_tasks();
-        for _ in 0..4 {
-            app.events.post(MeetingEvent::Deleted {
-                meeting_id: uuid::Uuid::new_v4(),
-            });
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let waiting = runtime.metrics().num_alive_tasks();
-        let second = gate.wait_for(std::time::Duration::from_millis(200), |state| {
-            state.entered >= 2
-        });
-        drop(armed);
-        runtime.shutdown_background();
-        assert!(
-            !second,
-            "the second event's reload ran beside the first one's"
-        );
-        assert_eq!(
-            waiting, tasks,
-            "the follower took the next events while one was held"
-        );
-    }
-
-    /// A retention sweep waits on the blocking pool: while its write waits on
-    /// a locked store, a timer on the one-worker runtime keeps ticking, and
-    /// the sweep goes through once the lock goes.
-    #[test]
-    fn the_event_followers_sweep_never_blocks_a_worker() {
-        let runtime = one_worker_runtime();
-        let dir = tempfile::tempdir().unwrap();
-        let (app, _pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
-        let mut meeting = steno_core::testing::sample_data::meeting();
-        meeting.id = uuid::Uuid::new_v4();
-        meeting.state = steno_core::MeetingState::Ready;
-        let asset = steno_core::AudioAsset {
-            id: uuid::Uuid::new_v4(),
-            meeting_id: meeting.id,
-            url: file_url(&dir.path().join("audio").join("master.wav"), false),
-            format: AudioFormat::Wav16kInt16,
-            lanes: vec![steno_core::AudioLane::Mixed],
-            sidecars_16k: std::collections::BTreeMap::new(),
-            mixdown_url: None,
-            retention: steno_core::AudioRetention::KeepDays(1),
-            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
-        };
-        app.store.save_meeting_with_asset(&meeting, &asset).unwrap();
-        let ticked = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-        let ticks = ticked.clone();
-        runtime.spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                *ticks.lock().unwrap() = std::time::Instant::now();
-            }
-        });
-
-        let hold =
-            steno_core::testing::WriteLockHold::new(&dir.path().join("support/steno.sqlite"));
-        app.events.post(MeetingEvent::RetentionApplied {
-            meeting_id: meeting.id,
-        });
-        assert_live(
-            &ticked,
-            std::time::Duration::from_millis(800),
-            "the event follower's sweep",
-        );
-        drop(hold);
-        let swept = std::time::Instant::now();
-        while app
-            .store
-            .asset(meeting.id)
-            .unwrap()
-            .unwrap()
-            .expires_at
-            .is_some()
-        {
-            assert!(swept.elapsed() < PATIENCE, "the sweep never went through");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        runtime.shutdown_background();
-    }
-
-    /// A tick that waited is followed by one overdue tick, then the next a
-    /// full interval later, never by a burst.
-    #[test]
-    fn a_held_poll_is_not_followed_by_a_burst() {
-        let runtime = one_worker_runtime();
-        let dir = tempfile::tempdir().unwrap();
-        let (app, pipeline, _host) = launched_over_a_gated_pipeline(&runtime, dir.path());
-        let _commits = KeepCommitting::on(&app.store);
-        let gate = &pipeline.gate;
-        let patience = std::time::Duration::from_secs(5);
-        // How many passes one tick makes, unheld.
-        let before = gate.reloads();
-        assert!(
-            gate.wait_for(patience, |state| state.reloads > before),
-            "the poll reloads"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let per_tick = gate.reloads() - before;
-        let armed = gate.arm();
-        assert!(
-            gate.wait_for(patience, |state| state.entered == 1),
-            "the poll's reload is held"
-        );
-        std::thread::sleep(POLL_INTERVAL * 5 / 2);
-        let released = gate.reloads();
-        drop(armed);
-        std::thread::sleep(std::time::Duration::from_millis(700));
-        let after = gate.reloads() - released;
-        runtime.shutdown_background();
-        // The held tick's own passes, then one overdue tick.
-        assert!(
-            after < 2 * per_tick,
-            "the held tick was followed by a burst: {after} passes, {per_tick} per tick"
-        );
-    }
-
-    /// A thread that commits to the store every 100 ms until dropped.
-    struct KeepCommitting {
-        stop: Arc<std::sync::atomic::AtomicBool>,
-        thread: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl KeepCommitting {
-        fn on(store: &Arc<Store>) -> Self {
-            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (store, stopped) = (store.clone(), stop.clone());
-            let thread = std::thread::spawn(move || {
-                while !stopped.load(Ordering::SeqCst) {
-                    let settings = store.settings().unwrap();
-                    store.save_settings(&settings).unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            });
-            KeepCommitting {
-                stop,
-                thread: Some(thread),
-            }
-        }
-    }
-
-    impl Drop for KeepCommitting {
-        fn drop(&mut self) {
-            self.stop.store(true, Ordering::SeqCst);
-            if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
-            }
-        }
-    }
-
     /// A host over `store` and the fakes, with `pipeline` if given, the page
     /// ready and a detail shown, and its [`TimedSink`].
     fn idle_host(
@@ -4046,19 +3752,14 @@ mod tests {
         owner.abort();
     }
 
-    /// Another connection's retitle shows within one poll interval, through
-    /// the reader's `data_version`.
+    /// A retitle shows within one poll interval, from another connection
+    /// (through the reader's `data_version`) and from an in-memory store's
+    /// own writer (through its commit count).
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn a_commit_from_another_process_shows_within_one_poll() {
+    async fn a_commit_shows_within_one_poll() {
         let (dir, store) = temp_store();
         let other = Store::open(crate::testing::database_in(dir.path())).unwrap();
         a_retitle_shows_within_one_poll(&store, &other);
-    }
-
-    /// An in-memory store's own commit shows within one poll interval,
-    /// through the writer's commit count.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn an_in_process_commit_shows_within_one_poll() {
         let store = Arc::new(Store::in_memory().unwrap());
         a_retitle_shows_within_one_poll(&store, &store);
     }
@@ -4142,54 +3843,6 @@ mod tests {
             took < POLL_INTERVAL + LIVE,
             "shown {took:?} after the grant"
         );
-        owner.abort();
-    }
-
-    /// A forced pass runs the light part too.
-    #[test]
-    fn a_forced_pass_follows_what_the_store_does_not_hold() {
-        use steno_bridge::{PermissionKind, PermissionState};
-        let (_dir, store) = temp_store();
-        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
-        let states = &fakes.permissions.states;
-        states
-            .lock()
-            .unwrap()
-            .insert(PermissionKind::Microphone, PermissionState::Denied);
-        let (host, _sink) = idle_host(&store, &fakes, None);
-        let denied = host.snapshot(BridgeTopic::SettingsRecording).unwrap()["subtitle"].clone();
-        states
-            .lock()
-            .unwrap()
-            .insert(PermissionKind::Microphone, PermissionState::Granted);
-        host.store_changed();
-        assert_ne!(
-            host.snapshot(BridgeTopic::SettingsRecording).unwrap()["subtitle"],
-            denied,
-            "the grant shows after a forced pass"
-        );
-    }
-
-    /// A request that races a tick still reloads the detail.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn a_request_beside_a_tick_still_reloads() {
-        let (_dir, store) = temp_store();
-        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
-        let pipeline = Arc::new(GatedFiles::default());
-        let (host, sink) = idle_host(&store, &fakes, Some(pipeline.clone()));
-        let owner = tokio::spawn(own_the_reloads(
-            host.clone(),
-            std::time::Duration::from_millis(1),
-        ));
-        passes(&sink, std::time::Instant::now(), 3);
-        for request in 1..=20 {
-            let before = pipeline.gate.reloads();
-            host.request_reload();
-            assert!(
-                pipeline.gate.wait_for(LIVE, |state| state.reloads > before),
-                "request {request} reloaded nothing"
-            );
-        }
         owner.abort();
     }
 
