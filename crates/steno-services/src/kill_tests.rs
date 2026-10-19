@@ -787,19 +787,20 @@ fn master_of(directory: &Path, meeting_id: uuid::Uuid) -> PathBuf {
         .master(steno_core::AudioFormat::Caf48kFloat32)
 }
 
-/// Asserts that the launch lists the meeting once, ready, with its
+/// Asserts that the launch lists the meeting once, in `state`, with its
 /// recording on disk.
 fn assert_listed_with_its_recording(
     directory: &Path,
     meeting_id: uuid::Uuid,
     listed: &[steno_core::Meeting],
+    state: &MeetingState,
 ) {
     assert_eq!(
         listed.iter().map(|meeting| meeting.id).collect::<Vec<_>>(),
         [meeting_id],
         "the meeting, listed once"
     );
-    assert_eq!(listed[0].state, MeetingState::Ready);
+    assert_eq!(&listed[0].state, state);
     let store = Store::open(directory.join("steno.sqlite")).unwrap();
     let asset = store.asset(meeting_id).unwrap().expect("its recording");
     assert_eq!(
@@ -818,7 +819,7 @@ fn assert_listed_with_its_recording(
 async fn a_kill_after_the_entry_is_forgotten_keeps_the_meeting() {
     let dir = tempfile::tempdir().unwrap();
     let (meeting_id, listed) = delete_killed_at(dir.path(), DeleteGate::BeforeCommit).await;
-    assert_listed_with_its_recording(dir.path(), meeting_id, &listed);
+    assert_listed_with_its_recording(dir.path(), meeting_id, &listed, &MeetingState::Ready);
 }
 
 /// Killed after the delete committed and before its files went: the next
@@ -835,13 +836,16 @@ async fn a_kill_after_the_delete_commits_never_brings_the_meeting_back() {
 }
 
 /// A refused delete killed before the forgotten entry was recorded again:
-/// the next launch lists the kept meeting with its recording, once, and
-/// processes it.
+/// the next launch lists the kept meeting with its recording, once, failed
+/// as one the kill ended mid-run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_before_a_kept_meetings_entry_is_restored_keeps_it() {
     let dir = tempfile::tempdir().unwrap();
     let (meeting_id, listed) = delete_killed_at(dir.path(), DeleteGate::BeforeRestore).await;
-    assert_listed_with_its_recording(dir.path(), meeting_id, &listed);
+    let failed = MeetingState::Failed {
+        reason: steno_pipeline::CLOSED_WHILE_PROCESSING.to_owned(),
+    };
+    assert_listed_with_its_recording(dir.path(), meeting_id, &listed, &failed);
 }
 
 /// The child's decoder for the reading test: a decode writes `reading` and
@@ -948,10 +952,11 @@ async fn launched(app: crate::App) -> crate::App {
     app
 }
 
-/// A process killed while it reads a recording costs that meeting
-/// nothing: the next launch processes it again.
+/// A process killed while it reads a recording leaves that meeting
+/// `processing`: the next launch fails it, keeps its files and still
+/// processes the other queued meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_read_killed_once_is_processed_at_the_next_launch() {
+async fn a_read_killed_fails_its_meeting_at_the_next_launch() {
     let dir = tempfile::tempdir().unwrap();
     let (bad, bad_asset, good) = {
         let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
@@ -962,10 +967,15 @@ async fn a_read_killed_once_is_processed_at_the_next_launch() {
     killed_in_the_decode(dir.path(), &bad_asset);
 
     let (store, _app) = launched_after(dir.path()).await;
-    for meeting in [bad.id, good.id] {
-        assert_eq!(
-            store.meeting(meeting).unwrap().unwrap().state,
-            MeetingState::Ready
-        );
-    }
+    assert_eq!(
+        store.meeting(bad.id).unwrap().unwrap().state,
+        MeetingState::Failed {
+            reason: steno_pipeline::CLOSED_WHILE_PROCESSING.to_owned()
+        }
+    );
+    assert!(file_url_path(&bad_asset.url).unwrap().exists());
+    assert_eq!(
+        store.meeting(good.id).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
 }

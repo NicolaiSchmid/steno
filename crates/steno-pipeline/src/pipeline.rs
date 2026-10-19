@@ -1009,6 +1009,10 @@ async fn unless_it_panics<T>(
         .unwrap_or_else(|_| Err(PipelineFailure::new(stage(), OPERATION_PANICKED)))
 }
 
+/// The failure reason launch recovery gives a meeting the last process
+/// ended mid-run; one sentence, as the list shows only the first.
+pub const CLOSED_WHILE_PROCESSING: &str = "Steno closed while processing. Process again.";
+
 /// How long after its last attempt a failed export is retried at launch.
 pub const REDELIVER_AFTER: chrono::TimeDelta = chrono::TimeDelta::hours(24);
 
@@ -1075,10 +1079,25 @@ impl ProcessingPipeline {
         self.in_flight_set().meetings.iter().copied().collect()
     }
 
-    /// Sets the [`QuitLatch`] for the app's exit. `enqueue` still saves its
-    /// meeting `queued`.
+    /// Sets the [`QuitLatch`] for the app's exit and saves the meetings in
+    /// flight or waiting for the store that read `processing` back as
+    /// `queued`, so the next launch
+    /// resumes them instead of failing them as a crash; best effort, and it
+    /// writes the store, so async callers use `spawn_blocking`. `enqueue`
+    /// still saves its meeting `queued`.
     pub fn quit(&self) {
         self.inner.dependencies.quit_latch.set();
+        let waiting = self.inner.dependencies.model_waits.waiting_for_store();
+        for meeting_id in self.in_flight().into_iter().chain(waiting) {
+            let _ = self
+                .store()
+                .update_meeting(meeting_id, self.now(), |meeting| {
+                    if meeting.state == MeetingState::Processing {
+                        meeting.state = MeetingState::Queued;
+                    }
+                    Ok(())
+                });
+        }
     }
 
     fn quitting(&self) -> bool {
@@ -1298,7 +1317,10 @@ impl ProcessingPipeline {
 
     /// Launch recovery: every meeting left `queued` or `processing` is
     /// processed again from `decode`, oldest first, in the background. A
-    /// meeting whose asset row is missing is marked failed. Counts as a resume of the
+    /// meeting whose asset row is missing is marked failed, and so is one
+    /// still `processing`, which the last process ended mid-run
+    /// ([`CLOSED_WHILE_PROCESSING`]), so a recording that crashes the app
+    /// is not read again at every launch. Counts as a resume of the
     /// meetings waiting for models; one the busy store refuses is owed to
     /// [`resume_waiting_for_store`](Self::resume_waiting_for_store).
     /// Returns the meetings started.
@@ -1432,7 +1454,8 @@ impl ProcessingPipeline {
                 busy.push(meeting.id);
                 continue;
             }
-            let Some(asset) = attributing(PipelineStage::Decode, self.store().asset(meeting.id))?
+            let Some(mut asset) =
+                attributing(PipelineStage::Decode, self.store().asset(meeting.id))?
             else {
                 attributing(
                     PipelineStage::Decode,
@@ -1448,6 +1471,23 @@ impl ProcessingPipeline {
                 )?;
                 continue;
             };
+            // Only the launch's own resume: a run of this process that met
+            // the busy store may still read `processing`.
+            if among.is_none() && meeting.state == MeetingState::Processing {
+                tracing::warn!(meeting_id = %meeting.id, "processing ended with the app; marked failed");
+                // An earlier run's stamp must not let the sweep take it.
+                if asset.expires_at.take().is_some() {
+                    attributing(PipelineStage::Retention, self.store().save_asset(&asset))?;
+                }
+                let failed = MeetingState::Failed {
+                    reason: CLOSED_WHILE_PROCESSING.to_owned(),
+                };
+                attributing(
+                    PipelineStage::Decode,
+                    self.store().set_state(meeting.id, failed, self.now()),
+                )?;
+                continue;
+            }
             let Some(claim) = self.claim_start(meeting.id, asset.id) else {
                 busy.push(meeting.id);
                 continue;
@@ -2513,7 +2553,9 @@ impl ProcessingPipeline {
 
     /// Per lane: decode, then transcribe with the previous lane's dominant
     /// language as the hint; only the last buffer survives, for `diarize`.
-    /// What any lane's decoder replaced by silence is logged.
+    /// What any lane's decoder replaced by silence is logged, and a damaged
+    /// recording under a finite rule is kept forever, so the sweep never
+    /// takes it; the user can still delete it.
     async fn decode_and_transcribe(
         &self,
         asset: &AudioAsset,
@@ -2558,6 +2600,22 @@ impl ProcessingPipeline {
                 seconds = damage.seconds,
                 "parts of the recording did not decode and were replaced by silence"
             );
+            if asset.retention != AudioRetention::KeepForever {
+                let asset_id = asset.id;
+                attributing(
+                    PipelineStage::Decode,
+                    self.store()
+                        .writing(move |store| {
+                            let Some(mut kept) = store.asset_by_id(asset_id)? else {
+                                return Ok(());
+                            };
+                            kept.retention = AudioRetention::KeepForever;
+                            kept.expires_at = None;
+                            store.save_asset_durably(&kept)
+                        })
+                        .await,
+                )?;
+            }
         }
         let language = elect_language(lanes.values().flatten());
         Ok((
@@ -3121,7 +3179,6 @@ impl Drop for SpeechClaim {
     }
 }
 
-/// When a background run starts ([`ProcessingPipeline::start`]).
 /// The debug line of a run the exit kept from starting.
 fn not_started(asset_id: Uuid) -> Option<Refused> {
     tracing::debug!(

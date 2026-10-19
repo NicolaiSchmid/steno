@@ -176,6 +176,8 @@ fn world_with(
 #[derive(Default)]
 struct WavDecoder {
     decodes: Mutex<Vec<AudioLane>>,
+    /// What each decode reports it replaced by silence; none by default.
+    damage: Mutex<steno_core::AudioDamage>,
 }
 
 fn read_wav(path: &Path) -> std::io::Result<Vec<f32>> {
@@ -198,7 +200,9 @@ impl steno_core::AudioDecoder for WavDecoder {
         self.decodes.lock().unwrap().push(lane);
         let url = asset.sidecars_16k.get(&lane).unwrap_or(&asset.url);
         let path = file_url_path(url).ok_or("not a file URL")?;
-        Ok(steno_core::AudioBuffer16k::new(read_wav(&path)?))
+        let mut buffer = steno_core::AudioBuffer16k::new(read_wav(&path)?);
+        buffer.damage = *self.damage.lock().unwrap();
+        Ok(buffer)
     }
 
     fn mixdown_format(&self) -> AudioFormat {
@@ -1903,8 +1907,8 @@ async fn a_job_that_panics_gives_its_claim_on_the_engine_back() {
     assert_eq!(engine.inner.releases.count(), 1);
 }
 
-/// A job failing after quit leaves its meeting `processing`, warns
-/// nothing, and the next launch processes it again.
+/// A job failing after quit leaves its meeting `queued`, warns nothing,
+/// and the next launch processes it again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch() {
     let log = steno_pipeline::fixtures::CapturedLog::warnings();
@@ -1919,7 +1923,9 @@ async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch
     let dependencies = with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default());
     let pipeline = ProcessingPipeline::new(dependencies);
     // Its own meeting id picks this run's log lines out.
-    let (meeting, asset) = saved_processing(&world);
+    let (mut meeting, asset) = saved_processing(&world);
+    meeting.state = MeetingState::Queued;
+    world.store.save_meeting(&meeting).unwrap();
     assert_eq!(pipeline.resume_unfinished().unwrap(), [meeting.id]);
     engine.wait_until_entered().await;
 
@@ -1927,7 +1933,7 @@ async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch
     engine.open.notify_one();
     pipeline.wait_until_idle().await;
     assert_eq!(engine.inner.transcriptions.count(), 1, "the job failed");
-    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Processing);
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Queued);
     assert!(
         !log.text().contains(&asset.id.to_string()),
         "debug only: {}",
@@ -3223,11 +3229,13 @@ async fn a_decoder_panic_fails_the_meeting_and_keeps_its_audio() {
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
 
-    // A meeting left processing at the last quit, resumed at launch.
+    // A meeting left queued at the last quit, resumed at launch.
     decoder
         .panics
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let (resumed, resumed_asset) = saved_processing(&world);
+    let (mut resumed, resumed_asset) = saved_processing(&world);
+    resumed.state = MeetingState::Queued;
+    world.store.save_meeting(&resumed).unwrap();
     let before = audio_files(&resumed_asset);
     assert_eq!(pipeline.resume_unfinished().unwrap(), [resumed.id]);
     pipeline.wait_until_idle().await;
@@ -3560,6 +3568,58 @@ async fn launch_recovery_resumes_queued_meetings_and_fails_those_without_an_asse
         world.store.meeting(orphan.id).unwrap().unwrap().state,
         MeetingState::Failed { .. }
     ));
+}
+
+/// A meeting the last process left `processing` fails at launch with its
+/// recording stamp cleared, so a recording that crashes the app is not read
+/// at every launch; a `queued` one still runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn launch_recovery_fails_a_meeting_left_processing_and_runs_a_queued_one() {
+    let world = world(false, None, AudioRetention::DeleteAfterProcessing);
+    let (crashed, mut crashed_asset) = saved_processing(&world);
+    crashed_asset.expires_at = Some(world.now);
+    world.store.save_asset(&crashed_asset).unwrap();
+    let (mut queued, _) = saved_processing(&world);
+    queued.state = MeetingState::Queued;
+    world.store.save_meeting(&queued).unwrap();
+
+    assert_eq!(world.pipeline.resume_unfinished().unwrap(), [queued.id]);
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(
+        meeting_state(&world, crashed.id),
+        MeetingState::Failed {
+            reason: steno_pipeline::CLOSED_WHILE_PROCESSING.to_owned()
+        }
+    );
+    assert_eq!(
+        world.store.asset(crashed.id).unwrap().unwrap().expires_at,
+        None
+    );
+    assert_eq!(meeting_state(&world, queued.id), MeetingState::Ready);
+}
+
+/// A decode that replaced parts by silence keeps the recording forever
+/// under a finite rule.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_recording_is_kept_forever() {
+    let world = world(false, None, AudioRetention::DeleteAfterProcessing);
+    *world.decoder.damage.lock().unwrap() = steno_core::AudioDamage {
+        parts: 3,
+        seconds: 0.07,
+        salvaged: false,
+    };
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(
+        &world.audio,
+        meeting.id,
+        AudioRetention::DeleteAfterProcessing,
+    );
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    let asset = world.store.asset(meeting.id).unwrap().unwrap();
+    assert_eq!(asset.retention, AudioRetention::KeepForever);
+    assert_eq!(asset.expires_at, None);
 }
 
 #[tokio::test(flavor = "multi_thread")]

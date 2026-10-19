@@ -139,6 +139,12 @@ fn write_durably(
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
+    // Windows opens no folder for a flush; flushing the renamed file
+    // commits the rename instead. Best effort.
+    #[cfg(windows)]
+    if let Ok(renamed) = OpenOptions::new().write(true).open(path) {
+        let _ = renamed.sync_all();
+    }
     sync_directory(directory);
     Ok(())
 }
