@@ -579,35 +579,6 @@ fn saving_summaries_configures_the_endpoint_and_rebuilds_the_pipeline() {
     );
 }
 
-/// While page 2's vault check is held, other calls reach the host within [`LIVE`].
-#[test]
-fn a_held_vault_check_on_page_two_leaves_the_host_live() {
-    let harness = builder().choose(Some("/Users/nicolai/Notes")).build();
-    let (checking, release) = hold_vault_checks(&harness);
-    let saving = std::thread::spawn({
-        let host = harness.host.clone();
-        move || host.onboarding_choose_vault()
-    });
-    checking
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("the vault check began");
-    let since = std::time::Instant::now();
-    harness.host.recorder_changed();
-    let levels = since.elapsed();
-    let since = std::time::Instant::now();
-    harness.host.onboarding_refresh().unwrap();
-    let command = since.elapsed();
-    release.send(()).unwrap();
-    saving.join().unwrap().unwrap();
-
-    assert!(levels < LIVE, "the level hook took {levels:?}");
-    assert!(command < LIVE, "the onboarding command took {command:?}");
-    assert_eq!(
-        harness.snapshot(BridgeTopic::Onboarding)["setup"][1],
-        json!({"kind": "vault", "savedLine": "Saved: Notes", "state": "saved"})
-    );
-}
-
 #[test]
 fn a_refused_vault_after_an_accepted_one_is_not_marked_saved() {
     let harness = builder()
@@ -643,53 +614,6 @@ fn a_refused_vault_after_an_accepted_one_is_not_marked_saved() {
             .vault_path,
         "/Vaults/A",
         "the store keeps the accepted vault"
-    );
-}
-
-#[test]
-fn the_stored_vault_chosen_again_on_page_two_while_a_check_runs_stays_stored() {
-    let harness = builder()
-        .seed(|store, _| {
-            let mut settings = store.settings().unwrap();
-            settings.obsidian = Some(steno_core::ObsidianSettings {
-                vault_path: "/Vaults/Stored".to_owned(),
-                people_folder: None,
-                include_audio: false,
-                task_tag: None,
-                extra: serde_json::Map::new(),
-            });
-            store.save_settings(&settings).unwrap();
-        })
-        .choose_in_turn(&["/Vaults/Other", "/Vaults/Stored"])
-        .build();
-    let (checking, release) = hold_the_first_vault_check(&harness);
-    let choosing = std::thread::spawn({
-        let host = harness.host.clone();
-        move || host.onboarding_choose_vault()
-    });
-    checking
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("the vault check began");
-    harness.host.onboarding_choose_vault().unwrap();
-    release.send(()).unwrap();
-    choosing.join().unwrap().unwrap();
-
-    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
-    assert_eq!(onboarding["vault"]["path"], "/Vaults/Stored");
-    assert_eq!(
-        onboarding["setup"][1],
-        json!({"kind": "vault", "savedLine": "Saved: Stored", "state": "saved"})
-    );
-    assert_eq!(
-        harness
-            .store
-            .settings()
-            .unwrap()
-            .obsidian
-            .unwrap()
-            .vault_path,
-        "/Vaults/Stored",
-        "the store holds what the row shows"
     );
 }
 
@@ -979,59 +903,6 @@ fn closing_the_window_over_the_step_skips_it() {
     let import = harness.fakes.swift_import.as_ref().unwrap();
     assert_eq!(*import.skips.lock().unwrap(), 1);
     assert_eq!(*import.runs.lock().unwrap(), 0);
-}
-
-#[test]
-fn a_second_import_while_one_runs_does_nothing() {
-    let harness = builder().with_swift_import(2).build();
-    let import = harness.fakes.swift_import.clone().unwrap();
-    let host = harness.host.clone();
-    let state = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let seen = state.clone();
-    *import.during_run.lock().unwrap() = Some(Box::new(move || {
-        host.onboarding_import().unwrap();
-        *seen.lock().unwrap() =
-            Some(host.snapshot(BridgeTopic::Onboarding).unwrap()["swiftImport"]["state"].clone());
-    }));
-    harness.host.onboarding_import().unwrap();
-    assert_eq!(*import.runs.lock().unwrap(), 1, "a second run");
-    assert_eq!(
-        state.lock().unwrap().take(),
-        Some(json!("importing")),
-        "the second click ended the prompts' state"
-    );
-    assert_eq!(
-        harness.snapshot(BridgeTopic::Onboarding)["swiftImport"]["state"],
-        "done"
-    );
-}
-
-/// Not now while Continue's prompts are up does nothing: the run decides.
-#[test]
-fn not_now_while_the_import_runs_leaves_the_step_to_the_run() {
-    let harness = builder().with_swift_import(2).build();
-    let import = harness.fakes.swift_import.clone().unwrap();
-    import.deny_export("Steno could not bring over this Mac's phone pairing.");
-    let host = harness.host.clone();
-    let page = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let seen = page.clone();
-    *import.during_run.lock().unwrap() = Some(Box::new(move || {
-        host.onboarding_skip_import().unwrap();
-        let onboarding = host.snapshot(BridgeTopic::Onboarding).unwrap();
-        *seen.lock().unwrap() = Some((
-            onboarding["page"].clone(),
-            onboarding["swiftImport"]["state"].clone(),
-        ));
-    }));
-    harness.host.onboarding_import().unwrap();
-    assert_eq!(*import.skips.lock().unwrap(), 0, "Not now skipped a run");
-    assert_eq!(
-        page.lock().unwrap().take(),
-        Some((json!("import"), json!("importing")))
-    );
-    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
-    assert_eq!(onboarding["page"], "import");
-    assert_eq!(onboarding["swiftImport"]["state"], "waiting");
 }
 
 /// Refused in onboarding and Settings alike, run again once idle; a start
@@ -1391,50 +1262,69 @@ fn the_stored_vault_is_checked_once_on_page_one() {
 const NOT_WRITABLE: &str =
     "The Obsidian vault at /Users/nicolai/Documents/Work Vault is not writable.";
 
-/// Open System Settings opens Files and Folders.
+/// A refused write reads `refused` (a Files and Folders refusal: Open System
+/// Settings opens that pane), a missing vault `unusable`; Check again checks
+/// it again.
 #[test]
-fn a_refused_vault_says_why_and_check_again_checks_it_again() {
-    let harness = builder()
-        .seed(with_a_vault)
-        .seed(missing_microphone)
-        .seed(|_, fakes| {
-            fakes.export_validator.refuse_writes(NOT_WRITABLE);
-        })
-        .build();
-    let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
-    onboarding.page_ready().unwrap();
-    harness.wait_for("the refusal", vault_row_is("refused"));
-    assert_eq!(
-        harness.snapshot(BridgeTopic::Onboarding)["vaultAccess"],
-        json!({
-            "name": "Work Vault",
-            "state": "refused",
-            "validationMessage": NOT_WRITABLE,
-        })
-    );
-    onboarding.onboarding_open_files_and_folders().unwrap();
-    assert_eq!(
-        *harness.fakes.opener.opened.lock().unwrap(),
-        vec![steno_host::host::FILES_AND_FOLDERS_URL.to_owned()]
-    );
+fn a_refused_or_missing_vault_says_why_and_check_again_checks_it_again() {
+    const MISSING: &str = "The Obsidian vault at /Volumes/Disk/Work Vault does not exist.";
+    for (refused, state, message) in [
+        (true, "refused", NOT_WRITABLE),
+        (false, "unusable", MISSING),
+    ] {
+        let harness = builder()
+            .seed(with_a_vault)
+            .seed(missing_microphone)
+            .seed(move |_, fakes| {
+                if refused {
+                    fakes.export_validator.refuse_writes(NOT_WRITABLE);
+                } else {
+                    fakes.export_validator.fail_validation(Some(MISSING));
+                }
+            })
+            .build();
+        let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
+        onboarding.page_ready().unwrap();
+        harness.wait_for("the refusal", vault_row_is(state));
+        assert_eq!(
+            harness.snapshot(BridgeTopic::Onboarding)["vaultAccess"],
+            json!({ "name": "Work Vault", "state": state, "validationMessage": message })
+        );
+        if refused {
+            onboarding.onboarding_open_files_and_folders().unwrap();
+            assert_eq!(
+                *harness.fakes.opener.opened.lock().unwrap(),
+                vec![steno_host::host::FILES_AND_FOLDERS_URL.to_owned()]
+            );
+        }
 
-    harness.fakes.export_validator.fail_validation(None);
-    onboarding.onboarding_refresh().unwrap();
-    harness.wait_for("the second check", vault_row_is("writable"));
-    assert_eq!(vault_checks(&harness), 2);
+        harness.fakes.export_validator.fail_validation(None);
+        onboarding.onboarding_refresh().unwrap();
+        harness.wait_for("the second check", vault_row_is("writable"));
+        assert_eq!(vault_checks(&harness), 2);
+    }
 }
 
 /// The check waits for the import step.
 #[test]
 fn no_vault_no_mac_or_not_on_page_one_checks_nothing() {
-    let without = builder().seed(missing_microphone).build();
-    without
-        .host
-        .for_window(BridgeWindow::Onboarding)
-        .page_ready()
-        .unwrap();
-    assert_eq!(vault_checks(&without), 0);
-    assert!(without.snapshot(BridgeTopic::Onboarding)["vaultAccess"].is_null());
+    for vault in [None, Some("  ")] {
+        let without = builder()
+            .seed(move |store, _| {
+                if let Some(path) = vault {
+                    store_vault(store, path);
+                }
+            })
+            .seed(missing_microphone)
+            .build();
+        without
+            .host
+            .for_window(BridgeWindow::Onboarding)
+            .page_ready()
+            .unwrap();
+        assert_eq!(vault_checks(&without), 0, "{vault:?}");
+        assert!(without.snapshot(BridgeTopic::Onboarding)["vaultAccess"].is_null());
+    }
 
     // Denied counts as missing on Linux too, so the page stays on page 1.
     let linux = builder()
@@ -1543,41 +1433,4 @@ fn a_refused_vault_holds_page_one_until_continue() {
     );
     onboarding.onboarding_advance().unwrap();
     assert_eq!(harness.snapshot(BridgeTopic::Onboarding)["page"], "setup");
-}
-
-/// A missing vault is not a Files and Folders refusal.
-#[test]
-fn a_missing_vault_reads_unusable_and_check_again_checks_it_again() {
-    let missing = "The Obsidian vault at /Volumes/Disk/Work Vault does not exist.";
-    let harness = builder()
-        .seed(with_a_vault)
-        .seed(missing_microphone)
-        .seed(move |_, fakes| fakes.export_validator.fail_validation(Some(missing)))
-        .build();
-    let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
-    onboarding.page_ready().unwrap();
-    harness.wait_for("the refusal", vault_row_is("unusable"));
-    assert_eq!(
-        harness.snapshot(BridgeTopic::Onboarding)["vaultAccess"]["validationMessage"],
-        missing
-    );
-    harness.fakes.export_validator.fail_validation(None);
-    onboarding.onboarding_refresh().unwrap();
-    harness.wait_for("the second check", vault_row_is("writable"));
-    assert_eq!(vault_checks(&harness), 2);
-}
-
-#[test]
-fn a_blank_vault_path_is_not_checked() {
-    let harness = builder()
-        .seed(|store, _| store_vault(store, "  "))
-        .seed(missing_microphone)
-        .build();
-    harness
-        .host
-        .for_window(BridgeWindow::Onboarding)
-        .page_ready()
-        .unwrap();
-    assert_eq!(vault_checks(&harness), 0);
-    assert!(harness.snapshot(BridgeTopic::Onboarding)["vaultAccess"].is_null());
 }

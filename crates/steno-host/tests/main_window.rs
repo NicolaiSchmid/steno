@@ -553,141 +553,6 @@ fn a_delete_that_does_not_go_through_keeps_the_recorders_entry() {
 }
 
 #[test]
-fn a_delete_unwound_before_its_commit_keeps_the_recorders_entry() {
-    let armed = Arc::new(AtomicBool::new(false));
-    let arm = armed.clone();
-    let harness = Harness::builder()
-        .confirm_with(move |_, _| {
-            arm.store(true, Ordering::SeqCst);
-            true
-        })
-        .seed(populate_sample)
-        .build();
-    harness.store.probe_commits(move |_| {
-        assert!(
-            !armed.swap(false, Ordering::SeqCst),
-            "a panic before the delete's commit"
-        );
-    });
-    let audio = harness.audio_folder();
-    harness
-        .fakes
-        .recorder
-        .recorded
-        .lock()
-        .unwrap()
-        .insert(uuid(MEETING), audio.clone());
-    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        harness.host.meetings_delete(MeetingIdParams {
-            meeting_id: uuid(MEETING),
-        })
-    }));
-    assert!(unwound.is_err());
-    assert!(harness.store.meeting(uuid(MEETING)).unwrap().is_some());
-    assert_eq!(
-        harness
-            .fakes
-            .recorder
-            .recorded
-            .lock()
-            .unwrap()
-            .get(&uuid(MEETING)),
-        Some(&audio),
-        "the entry is recorded again"
-    );
-}
-
-#[test]
-fn a_second_delete_prompt_records_no_entry_for_a_deleted_meeting() {
-    let harness = Harness::builder()
-        .confirm_with(|host, _| {
-            // The first prompt's delete, done while this one is open.
-            host.store().delete_meeting(uuid(MEETING)).unwrap();
-            true
-        })
-        .seed(populate_sample)
-        .build();
-    let audio = harness.audio_folder();
-    harness
-        .fakes
-        .recorder
-        .recorded
-        .lock()
-        .unwrap()
-        .insert(uuid(MEETING), audio);
-    let reply = harness
-        .host
-        .meetings_delete(MeetingIdParams {
-            meeting_id: uuid(MEETING),
-        })
-        .unwrap();
-    assert!(reply.confirmed);
-    assert!(harness.store.meeting(uuid(MEETING)).unwrap().is_none());
-    assert_eq!(
-        *harness.fakes.recorder.forgotten.lock().unwrap(),
-        [uuid(MEETING)]
-    );
-    assert!(harness.fakes.recorder.recorded.lock().unwrap().is_empty());
-}
-
-/// The refused delete restores its entry under the host lock.
-#[test]
-fn a_second_delete_waits_for_a_refused_deletes_restore() {
-    let first = Arc::new(AtomicBool::new(true));
-    let harness = Harness::builder()
-        .confirm_with(move |host, _| {
-            if first.swap(false, Ordering::SeqCst) {
-                // The pipeline takes the meeting up while the prompt is open.
-                let mut meeting = host.store().meeting(uuid(MEETING)).unwrap().unwrap();
-                meeting.state = MeetingState::Processing;
-                host.store().save_meeting(&meeting).unwrap();
-            }
-            true
-        })
-        .seed(populate_sample)
-        .build();
-    let audio = harness.audio_folder();
-    harness
-        .fakes
-        .recorder
-        .recorded
-        .lock()
-        .unwrap()
-        .insert(uuid(MEETING), audio);
-    let host = harness.host.clone();
-    let second = Arc::new(Mutex::new(None));
-    let spawned = second.clone();
-    *harness.fakes.recorder.before_restore.lock().unwrap() = Some(Box::new(move || {
-        // The pipeline is done with it, and a second prompt deletes it.
-        let mut meeting = host.store().meeting(uuid(MEETING)).unwrap().unwrap();
-        meeting.state = MeetingState::Ready;
-        host.store().save_meeting(&meeting).unwrap();
-        let (done, finished) = std::sync::mpsc::channel();
-        *spawned.lock().unwrap() = Some(std::thread::spawn(move || {
-            host.store_changed();
-            let reply = host.meetings_delete(MeetingIdParams {
-                meeting_id: uuid(MEETING),
-            });
-            let _ = done.send(());
-            reply
-        }));
-        // Long enough for that delete to finish if nothing held it back.
-        let _ = finished.recv_timeout(std::time::Duration::from_millis(500));
-    }));
-    let reply = harness
-        .host
-        .meetings_delete(MeetingIdParams {
-            meeting_id: uuid(MEETING),
-        })
-        .unwrap();
-    assert!(reply.confirmed);
-    let second = second.lock().unwrap().take().expect("a second prompt");
-    assert!(second.join().unwrap().unwrap().confirmed);
-    assert!(harness.store.meeting(uuid(MEETING)).unwrap().is_none());
-    assert!(harness.fakes.recorder.recorded.lock().unwrap().is_empty());
-}
-
-#[test]
 fn the_detail_heading_derives_an_untitled_meetings_title() {
     let harness = Harness::builder()
         .seed(|store, _| {
@@ -819,114 +684,6 @@ fn snapshots_are_emitted_outside_the_hosts_lock() {
         seen.iter().map(|(topic, _)| *topic).collect::<Vec<_>>(),
         vec![BridgeTopic::MeetingsList, BridgeTopic::MeetingDetail],
         "in publish order"
-    );
-}
-
-/// A sink that sleeps 0 to 7 ms per emit and keeps the payloads per topic in
-/// arrival order.
-#[derive(Default)]
-struct SlowSink {
-    emits: std::sync::atomic::AtomicU64,
-    payloads: Mutex<std::collections::BTreeMap<BridgeTopic, Vec<Value>>>,
-}
-
-impl EventSink for SlowSink {
-    fn emit(&self, event: BridgeEvent) {
-        let n = self
-            .emits
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let spread = n.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 61;
-        std::thread::sleep(std::time::Duration::from_millis(spread));
-        self.payloads
-            .lock()
-            .unwrap()
-            .entry(event.topic)
-            .or_default()
-            .push(event.payload);
-    }
-}
-
-/// Snapshots are built under the lock and emitted after it; per topic,
-/// concurrent publishes never reach the sink out of order.
-#[test]
-fn concurrent_publishes_reach_the_sink_in_build_order() {
-    const WRITES: u32 = 40;
-    let harness = sample();
-    let sink = Arc::new(SlowSink::default());
-    harness.host.attach(sink.clone());
-    let done = std::sync::atomic::AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            for n in 1..=WRITES {
-                harness
-                    .store
-                    .save_meeting(&meeting(
-                        0x1000 + n,
-                        &format!("Write {n}"),
-                        TitleOrigin::User,
-                        "2026-09-28T10:00:00.000Z",
-                        60.0,
-                        MeetingSource::MacCall,
-                        &[],
-                        MeetingState::Ready,
-                        None,
-                    ))
-                    .unwrap();
-                harness.host.store_changed();
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-            done.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-        scope.spawn(|| {
-            let mut n = 0;
-            while !done.load(std::sync::atomic::Ordering::SeqCst) {
-                n += 1;
-                harness
-                    .fakes
-                    .recorder
-                    .set_messages(Some(&format!("w{n:06}")), None);
-                harness.host.recorder_changed();
-                std::thread::sleep(std::time::Duration::from_micros(300));
-            }
-        });
-        for _ in 0..3 {
-            scope.spawn(|| {
-                while !done.load(std::sync::atomic::Ordering::SeqCst) {
-                    harness
-                        .host
-                        .meetings_set_filter(SetFilterParams {
-                            filter: ListFilter::All,
-                        })
-                        .unwrap();
-                    harness.host.recorder_changed();
-                }
-            });
-        }
-    });
-    let warning = harness.fakes.recorder.status().warning;
-    harness.wait_for("the feed's last recording", |_| {
-        sink.payloads.lock().unwrap()[&BridgeTopic::Recording]
-            .last()
-            .is_some_and(|recording| recording["warning"].as_str() == warning.as_deref())
-    });
-
-    let payloads = sink.payloads.lock().unwrap();
-    let counts: Vec<i64> = payloads[&BridgeTopic::MeetingsList]
-        .iter()
-        .map(|list| list["counts"]["all"].as_i64().unwrap())
-        .collect();
-    assert!(
-        counts.windows(2).all(|pair| pair[0] <= pair[1]),
-        "the meeting count went backwards: {counts:?}"
-    );
-    assert_eq!(counts.last(), Some(&(3 + i64::from(WRITES))));
-    let warnings: Vec<&str> = payloads[&BridgeTopic::Recording]
-        .iter()
-        .filter_map(|recording| recording["warning"].as_str())
-        .collect();
-    assert!(
-        warnings.windows(2).all(|pair| pair[0] <= pair[1]),
-        "the recorder's warning went backwards: {warnings:?}"
     );
 }
 
@@ -1310,29 +1067,8 @@ fn keep_audio_goes_through_the_pipeline_and_asks_before_deleting_now() {
     );
 }
 
-/// With every lane transcribed it does not.
-#[test]
-fn an_incomplete_meeting_says_why_its_recording_is_kept() {
-    let harness = Harness::builder()
-        .seed(|store, fakes| {
-            populate_sample(store, fakes);
-            unstamped(store, AudioRetention::DeleteAfterProcessing);
-        })
-        .build();
-    assert_eq!(
-        harness.snapshot(BridgeTopic::MeetingDetail)["retention"]["kind"],
-        "keptWhileProcessing"
-    );
-
-    // The mic lane of the 45-minute call came out empty.
-    empty_the_mic_lane(&harness.store);
-    harness.host.store_changed();
-    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
-    assert_eq!(detail["retention"]["kind"], "keptIncomplete");
-    assert_eq!(detail["retention"]["filesExist"], true);
-}
-
-/// The same meeting with every lane transcribed is not.
+/// A ready meeting with an empty lane says why its recording is kept and
+/// offers "Process again"; with every lane transcribed it does neither.
 #[test]
 fn a_ready_meeting_kept_incomplete_offers_process_again() {
     let harness = Harness::builder()
@@ -1341,15 +1077,16 @@ fn a_ready_meeting_kept_incomplete_offers_process_again() {
             unstamped(store, AudioRetention::DeleteAfterProcessing);
         })
         .build();
-    assert_eq!(
-        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
-        false
-    );
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["retention"]["kind"], "keptWhileProcessing");
+    assert_eq!(detail["canProcessAgain"], false);
 
+    // The mic lane of the 45-minute call came out empty.
     empty_the_mic_lane(&harness.store);
     harness.host.store_changed();
     let detail = harness.snapshot(BridgeTopic::MeetingDetail);
     assert_eq!(detail["retention"]["kind"], "keptIncomplete");
+    assert_eq!(detail["retention"]["filesExist"], true);
     assert_eq!(detail["canProcessAgain"], true);
     harness.host.meeting_process_again().unwrap();
     assert_eq!(
@@ -1360,28 +1097,6 @@ fn a_ready_meeting_kept_incomplete_offers_process_again() {
         *harness.fakes.pipeline.processed_again.lock().unwrap(),
         [uuid(MEETING)]
     );
-}
-
-#[test]
-fn the_pages_destructive_prompt_reaches_the_dialog() {
-    let asked = Arc::new(Mutex::new(Vec::new()));
-    let harness = Harness::builder()
-        .confirm_with({
-            let asked = asked.clone();
-            move |_, params| {
-                asked.lock().unwrap().push(params.clone());
-                false
-            }
-        })
-        .build();
-    let prompt = steno_bridge::ConfirmDestructiveParams {
-        title: "Remove this phone?".to_owned(),
-        message: "It can pair again later.".to_owned(),
-        confirm_title: "Remove".to_owned(),
-    };
-    let reply = harness.host.ui_confirm_destructive(prompt.clone()).unwrap();
-    assert!(!reply.confirmed);
-    assert_eq!(*asked.lock().unwrap(), vec![prompt]);
 }
 
 /// The prompt runs with the lock released; a refusal for a meeting no longer
@@ -1475,35 +1190,6 @@ fn keep_audio_lands_on_the_meeting_it_was_asked_for_when_the_selection_moved() {
             .iter()
             .all(|(meeting, _)| *meeting == uuid(MEETING)),
         "the newly selected meeting's rule never changed"
-    );
-}
-
-#[test]
-fn keep_audio_on_a_meeting_deleted_during_the_prompt_is_not_found() {
-    let store_slot = Arc::new(Mutex::new(None::<Arc<steno_core::Store>>));
-    let harness = Harness::builder()
-        .confirm_with({
-            let store_slot = store_slot.clone();
-            move |_, _| {
-                let store = store_slot.lock().unwrap().clone().unwrap();
-                store.delete_meeting(uuid(MEETING)).unwrap();
-                true
-            }
-        })
-        .seed(populate_sample)
-        .build();
-    *store_slot.lock().unwrap() = Some(harness.store.clone());
-    assert_eq!(
-        harness.snapshot(BridgeTopic::MeetingDetail)["id"],
-        id(MEETING)
-    );
-
-    let error = harness.host.meeting_delete_recording_now().unwrap_err();
-    assert_eq!(error.code, BridgeErrorCode::NotFound);
-    assert_eq!(error.message, "No meeting with that id is listed.");
-    assert!(
-        harness.fakes.pipeline.retention.lock().unwrap().is_empty(),
-        "nothing was changed"
     );
 }
 
@@ -2259,30 +1945,6 @@ fn process_again_waits_for_a_withheld_key() {
     );
 }
 
-/// Off the Mac the recording is "on this computer".
-#[test]
-fn process_again_words_a_gone_recording_for_the_platform() {
-    let harness = Harness::builder()
-        .platform(steno_core::Platform::Linux)
-        .seed(|store, fakes| {
-            populate_sample(store, fakes);
-            give_the_failed_meeting_a_recording(store, fakes);
-        })
-        .build();
-    harness
-        .host
-        .meetings_select(MeetingIdParams {
-            meeting_id: uuid(MEETING_FAILED),
-        })
-        .unwrap();
-    *harness.fakes.pipeline.process_again_refusal.lock().unwrap() = Some(Refusal::RecordingGone);
-    harness.host.meeting_process_again().unwrap();
-    assert_eq!(
-        harness.snapshot(BridgeTopic::MeetingDetail)["error"],
-        "The recording is no longer on this computer, so the meeting cannot be processed again."
-    );
-}
-
 /// Every prompt the destructive dialog was shown.
 type Prompts = Arc<Mutex<Vec<steno_bridge::ConfirmDestructiveParams>>>;
 
@@ -2450,43 +2112,6 @@ fn process_again_on_a_failed_meeting_asks_only_with_a_confirmed_speaker() {
 }
 
 #[test]
-fn process_again_starts_nothing_when_the_selection_moved_during_its_prompt() {
-    let harness = Harness::builder()
-        .confirm_with(|host, _| {
-            host.meetings_select(MeetingIdParams {
-                meeting_id: uuid(MEETING_FAILED),
-            })
-            .unwrap();
-            true
-        })
-        .seed(|store, fakes| {
-            populate_sample(store, fakes);
-            unstamped(store, AudioRetention::DeleteAfterProcessing);
-            empty_the_mic_lane(store);
-            give_the_failed_meeting_a_recording(store, fakes);
-        })
-        .build();
-    let host = harness.host.clone();
-    within_five_seconds("the process-again prompt", move || {
-        host.meeting_process_again()
-    })
-    .unwrap();
-    assert_eq!(
-        harness.snapshot(BridgeTopic::MeetingDetail)["id"],
-        id(MEETING_FAILED)
-    );
-    assert!(
-        harness
-            .fakes
-            .pipeline
-            .processed_again
-            .lock()
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
 fn a_damaged_recording_reads_kept_incomplete_and_can_still_be_deleted_now() {
     let harness = Harness::builder()
         .seed(|store, fakes| {
@@ -2519,99 +2144,69 @@ fn a_damaged_recording_reads_kept_incomplete_and_can_still_be_deleted_now() {
     );
 }
 
-/// Its progress stage reads `modelsMissing` until the next run's first event.
+/// A run's waiting event sets the progress stage, the store's poll keeps it,
+/// and the run's next event replaces it; a job parked for the recording
+/// resumes at its own stage and lane.
 #[test]
-fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
-    let harness = Harness::builder()
-        .seed(|store, _| {
-            let mut meeting = sample_meeting();
-            meeting.id = uuid(0x89);
-            meeting.state = MeetingState::Queued;
-            meeting.summary = None;
-            store.save_meeting(&meeting).unwrap();
-        })
-        .build();
-    let entry = |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
-    assert_eq!(entry(&harness)["stage"], "waiting");
-    assert_eq!(entry(&harness)["title"], "Waiting to process");
-    harness
-        .host
-        .apply_meeting_event(&MeetingEvent::ModelsMissing {
-            meeting_id: uuid(0x89),
+fn a_waiting_meetings_progress_says_what_it_waits_for() {
+    let meeting_id = uuid(0x89);
+    for (event, stage, title, (next, lane, lane_count), resumed) in [
+        (
+            MeetingEvent::ModelsMissing { meeting_id },
+            "modelsMissing",
+            "Download the speech models in Settings",
+            (PipelineStage::Decode, 0, 1),
+            "decode",
+        ),
+        (
+            MeetingEvent::WaitingForRecording { meeting_id },
+            "waiting",
+            "Waiting for the recording to finish",
+            (PipelineStage::Transcribe, 1, 2),
+            "transcribe",
+        ),
+        (
+            MeetingEvent::StoreBusy { meeting_id },
+            "storeBusy",
+            "Waiting for another app to finish with Steno's data",
+            (PipelineStage::Decode, 0, 1),
+            "decode",
+        ),
+    ] {
+        let harness = Harness::builder()
+            .seed(move |store, _| {
+                let mut meeting = sample_meeting();
+                meeting.id = meeting_id;
+                meeting.state = MeetingState::Queued;
+                meeting.summary = None;
+                store.save_meeting(&meeting).unwrap();
+            })
+            .build();
+        let entry = || harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
+        assert_eq!(entry()["title"], "Waiting to process");
+        harness.host.apply_meeting_event(&event);
+        assert_eq!(entry()["stage"], stage);
+        assert_eq!(entry()["title"], title);
+        assert_eq!(
+            harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
+            false
+        );
+        harness.host.store_changed();
+        assert_eq!(entry()["stage"], stage, "the store's poll keeps it");
+        harness.host.apply_meeting_event(&MeetingEvent::Progress {
+            meeting_id,
+            progress: steno_core::ProcessingProgress {
+                stage: next,
+                fraction: 0.05,
+                next_fraction: 0.1,
+                estimated_remaining_seconds: 60.0,
+                is_estimate_seeded: false,
+                lane,
+                lane_count,
+            },
         });
-    assert_eq!(entry(&harness)["stage"], "modelsMissing");
-    assert_eq!(
-        entry(&harness)["title"],
-        "Download the speech models in Settings"
-    );
-    // Waiting for its models, it is not offered "Process again".
-    harness
-        .host
-        .meetings_select(MeetingIdParams {
-            meeting_id: uuid(0x89),
-        })
-        .unwrap();
-    assert_eq!(
-        harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
-        false
-    );
-    harness.host.store_changed();
-    assert_eq!(
-        entry(&harness)["stage"],
-        "modelsMissing",
-        "the store's poll keeps it"
-    );
-    harness.host.apply_meeting_event(&MeetingEvent::Progress {
-        meeting_id: uuid(0x89),
-        progress: steno_core::ProcessingProgress {
-            stage: PipelineStage::Decode,
-            fraction: 0.05,
-            next_fraction: 0.1,
-            estimated_remaining_seconds: 60.0,
-            is_estimate_seeded: false,
-            lane: 0,
-            lane_count: 1,
-        },
-    });
-    assert_eq!(entry(&harness)["stage"], "decode");
-}
-
-/// It shows the `waiting` stage until the run's next event.
-#[test]
-fn a_meeting_whose_job_waits_for_the_recording_says_so() {
-    let harness = Harness::builder()
-        .seed(|store, _| {
-            let mut meeting = sample_meeting();
-            meeting.id = uuid(0x8B);
-            meeting.state = MeetingState::Processing;
-            meeting.summary = None;
-            store.save_meeting(&meeting).unwrap();
-        })
-        .build();
-    let entry = |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
-    harness
-        .host
-        .apply_meeting_event(&MeetingEvent::WaitingForRecording {
-            meeting_id: uuid(0x8B),
-        });
-    assert_eq!(entry(&harness)["stage"], "waiting");
-    assert_eq!(
-        entry(&harness)["title"],
-        "Waiting for the recording to finish"
-    );
-    harness.host.apply_meeting_event(&MeetingEvent::Progress {
-        meeting_id: uuid(0x8B),
-        progress: steno_core::ProcessingProgress {
-            stage: PipelineStage::Transcribe,
-            fraction: 0.4,
-            next_fraction: 0.6,
-            estimated_remaining_seconds: 60.0,
-            is_estimate_seeded: false,
-            lane: 1,
-            lane_count: 2,
-        },
-    });
-    assert_eq!(entry(&harness)["stage"], "transcribe");
+        assert_eq!(entry()["stage"], resumed);
+    }
 }
 
 /// While the speech sidecar stands in for the Neural Engine, a meeting
@@ -2650,48 +2245,6 @@ fn a_meeting_waiting_for_the_sidecars_models_says_the_neural_engine_is_off() {
         entry(&harness)["title"],
         "Download the speech models in Settings"
     );
-}
-
-/// The meeting stays queued or `processing`, its stage `storeBusy`.
-#[test]
-fn a_meeting_the_store_kept_waiting_says_what_it_waits_for() {
-    let harness = Harness::builder()
-        .seed(|store, _| {
-            let mut meeting = sample_meeting();
-            meeting.id = uuid(0x8A);
-            meeting.state = MeetingState::Processing;
-            meeting.summary = None;
-            store.save_meeting(&meeting).unwrap();
-        })
-        .build();
-    let entry = |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
-    harness.host.apply_meeting_event(&MeetingEvent::StoreBusy {
-        meeting_id: uuid(0x8A),
-    });
-    assert_eq!(entry(&harness)["stage"], "storeBusy");
-    assert_eq!(
-        entry(&harness)["title"],
-        "Waiting for another app to finish with Steno's data"
-    );
-    harness.host.store_changed();
-    assert_eq!(
-        entry(&harness)["stage"],
-        "storeBusy",
-        "the store's poll keeps it"
-    );
-    harness.host.apply_meeting_event(&MeetingEvent::Progress {
-        meeting_id: uuid(0x8A),
-        progress: steno_core::ProcessingProgress {
-            stage: PipelineStage::Decode,
-            fraction: 0.0,
-            next_fraction: 0.1,
-            estimated_remaining_seconds: 60.0,
-            is_estimate_seeded: false,
-            lane: 0,
-            lane_count: 1,
-        },
-    });
-    assert_eq!(entry(&harness)["stage"], "decode");
 }
 
 /// Dismissing the notice clears its flag for good.

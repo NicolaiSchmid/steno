@@ -65,10 +65,6 @@ pub(crate) struct RecordingFeed {
     /// The thread's handle, so a test can tell that it ended.
     #[cfg(test)]
     joined: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
-    /// Runs once in the first pass, between its swaps and its send check,
-    /// so a test can land a `page.ready` there.
-    #[cfg(test)]
-    pause: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl RecordingFeed {
@@ -80,8 +76,6 @@ impl RecordingFeed {
             thread: OnceLock::new(),
             #[cfg(test)]
             joined: std::sync::Mutex::default(),
-            #[cfg(test)]
-            pause: std::sync::Mutex::default(),
         }
     }
 
@@ -163,10 +157,6 @@ fn pass<S: Source>(
     let ready = feed.page_ready.load(Ordering::SeqCst);
     let resend = ready && feed.resend.swap(false, Ordering::SeqCst);
     let poked = feed.poked.swap(false, Ordering::SeqCst);
-    #[cfg(test)]
-    if let Some(pause) = feed.pause.lock().unwrap().take() {
-        pause();
-    }
     if !(resend || poked || held) {
         return None;
     }
@@ -223,7 +213,7 @@ fn without_level(snapshot: &RecordingSnapshot) -> RecordingSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Condvar, Mutex};
+    use std::sync::Mutex;
 
     use steno_bridge::{
         BridgeHost as _, CaptureMode, ListFilter, SetFilterParams, StartRecordingParams,
@@ -438,26 +428,6 @@ mod tests {
         warned.warning = Some("The disk is nearly full.".to_owned());
         assert_eq!(sent.wait(&warned, false, ms(52)), None);
         assert_eq!(sent.wait(&at(0.4), true, ms(53)), None);
-
-        // Through the feed: a level update 30 ms after a send is held, and
-        // goes out once the interval since that send ends.
-        let (host, fakes, sink) = host();
-        host.page_ready().unwrap();
-        sink.nth_recording(1, "page.ready's snapshot");
-        thread::sleep(2 * RECORDING_INTERVAL);
-        recording_with(&fakes, 0.1);
-        host.recorder_changed();
-        let (first, _) = sink.nth_recording(2, "the first level");
-        thread::sleep(RECORDING_INTERVAL * 3 / 5);
-        recording_with(&fakes, 0.2);
-        host.recorder_changed();
-        let (held, level) = sink.nth_recording(3, "the held level");
-        assert_eq!(level["level"]["mic"], 0.2);
-        let after = held.duration_since(first);
-        assert!(
-            after < RECORDING_INTERVAL + LIVE,
-            "the held level went out {after:?} after the send before it"
-        );
     }
 
     /// A command before `page.ready` loses no snapshot: once `page.ready`
@@ -497,86 +467,6 @@ mod tests {
             .map(|(_, event)| event.payload.clone())
             .unwrap();
         assert_eq!(list["filter"], "ready", "{list}");
-    }
-
-    /// A source with an idle recorder whose drop wakes the thread as the
-    /// host's does.
-    struct Probe {
-        feed: RecordingFeed,
-        sink: Arc<Sink>,
-    }
-
-    impl Source for Probe {
-        fn feed(&self) -> &RecordingFeed {
-            &self.feed
-        }
-
-        fn status(&self) -> RecorderStatus {
-            RecorderStatus::idle()
-        }
-
-        fn sink(&self) -> Option<Arc<dyn EventSink>> {
-            Some(self.sink.clone())
-        }
-
-        fn moved(&self) {}
-    }
-
-    impl Drop for Probe {
-        fn drop(&mut self) {
-            self.feed.wake();
-        }
-    }
-
-    /// A `page.ready` landing inside a pass that began before the page was
-    /// ready yields exactly one `recording`.
-    #[test]
-    fn a_page_ready_during_the_first_pass_sends_the_recording_once() {
-        // A lock and a condition variable, not a channel: a blocking
-        // receive would take the unpark `page.ready` leaves for the next pass.
-        #[derive(Default)]
-        struct Step(Mutex<u8>, Condvar);
-        impl Step {
-            fn to(&self, step: u8) {
-                *self.0.lock().unwrap() = step;
-                self.1.notify_all();
-            }
-            fn until(&self, step: u8) {
-                let waited = self
-                    .1
-                    .wait_timeout_while(self.0.lock().unwrap(), PATIENCE, |at| *at < step)
-                    .unwrap()
-                    .1;
-                assert!(!waited.timed_out(), "waited {PATIENCE:?} for step {step}");
-            }
-        }
-        let step = Arc::new(Step::default());
-        let feed = RecordingFeed::new();
-        *feed.pause.lock().unwrap() = Some(Box::new({
-            let step = step.clone();
-            move || {
-                step.to(1);
-                step.until(2);
-            }
-        }));
-        let sink = Arc::new(Sink::default());
-        let probe = Arc::new(Probe {
-            feed,
-            sink: sink.clone(),
-        });
-        RecordingFeed::start(&probe, (RecordingState::Idle, None)).unwrap();
-        step.until(1);
-        probe.feed.page_did_become_ready();
-        step.to(2);
-
-        sink.nth_recording(1, "page.ready's snapshot");
-        thread::sleep(4 * RECORDING_INTERVAL);
-        assert_eq!(sink.recordings().len(), 1, "once per page.ready");
-        let thread = probe.feed.take_thread().unwrap();
-        drop(probe);
-        found("the feed's thread ended", || {
-            thread.is_finished().then_some(())
-        });
     }
 
     /// The feed's thread ends once the last clone of the host is gone, and

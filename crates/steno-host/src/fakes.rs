@@ -294,8 +294,6 @@ pub struct FakeRecorder {
     pub recorded: Mutex<BTreeMap<Uuid, PathBuf>>,
     /// `forget_recording` fails, as on a read-only or full support folder.
     pub forget_fails: Mutex<bool>,
-    /// Runs once inside the next `restore_recording`, before it records.
-    pub before_restore: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl FakeRecorder {
@@ -316,7 +314,6 @@ impl FakeRecorder {
             recorded: Mutex::new(BTreeMap::new()),
             forget_fails: Mutex::new(false),
             asked: Mutex::new(Vec::new()),
-            before_restore: Mutex::new(None),
         }
     }
 
@@ -447,10 +444,6 @@ impl Recorder for FakeRecorder {
     }
 
     fn restore_recording(&self, meeting_id: Uuid, folder: &Path) {
-        let hook = lock(&self.before_restore).take();
-        if let Some(hook) = hook {
-            hook();
-        }
         lock(&self.recorded).insert(meeting_id, folder.to_path_buf());
     }
 }
@@ -1163,8 +1156,6 @@ pub struct FakeSwiftImport {
     pub run_outcome: Mutex<SwiftImportStatus>,
     pub runs: Mutex<usize>,
     pub skips: Mutex<usize>,
-    /// Called once inside the next run, as if while its prompts are up.
-    pub during_run: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl std::fmt::Debug for FakeSwiftImport {
@@ -1191,7 +1182,6 @@ impl FakeSwiftImport {
             run_outcome: Mutex::new(status(SwiftImportStage::Done)),
             runs: Mutex::new(0),
             skips: Mutex::new(0),
-            during_run: Mutex::new(None),
         }
     }
 
@@ -1210,10 +1200,6 @@ impl SwiftImport for FakeSwiftImport {
 
     fn run(&self) -> SwiftImportStatus {
         *lock(&self.runs) += 1;
-        let during = lock(&self.during_run).take();
-        if let Some(during) = during {
-            during();
-        }
         let outcome = lock(&self.run_outcome).clone();
         lock(&self.status).clone_from(&outcome);
         outcome

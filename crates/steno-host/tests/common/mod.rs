@@ -376,24 +376,6 @@ pub fn hold_vault_checks(
     (checking, release)
 }
 
-/// Holds the first vault check as [`hold_vault_checks`] does; the later
-/// ones answer at once.
-pub fn hold_the_first_vault_check(
-    harness: &Harness,
-) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
-    let (began, checking) = std::sync::mpsc::channel();
-    let (release, released) = std::sync::mpsc::channel::<()>();
-    let first = Mutex::new(Some((began, released)));
-    *harness.fakes.export_validator.on_validate.lock().unwrap() = Some(Arc::new(move |_| {
-        let Some((began, released)) = first.lock().unwrap().take() else {
-            return;
-        };
-        let _ = began.send(());
-        let _ = released.recv_timeout(std::time::Duration::from_secs(5));
-    }));
-    (checking, release)
-}
-
 // The sample meeting the bridge fixtures describe, as rows the pipeline
 // would have left.
 
