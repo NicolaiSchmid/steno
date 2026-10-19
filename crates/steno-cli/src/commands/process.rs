@@ -47,7 +47,7 @@ pub struct Process {
     pub input: Option<PathBuf>,
     /// Process a stored meeting again from its recording, instead of a new
     /// one from <INPUT>: a failed meeting, or a ready one whose speakers or
-    /// transcript may be incomplete or whose recording may be damaged.
+    /// transcript may be incomplete.
     #[arg(
         long,
         value_name = "ID",
@@ -248,19 +248,15 @@ impl Process {
         let events = MeetingEventBus::new();
         let mut receiver = events.subscribe();
         let models = settings.models_directory.as_deref().and_then(file_url_path);
-        let pipeline = ProcessingPipeline::new(
-            crate::wiring::dependencies(
-                store.clone(),
-                settings,
-                self.speech.engine.as_deref(),
-                models.as_deref(),
-                None,
-                llm,
-                events.clone(),
-            )?
-            .with_damaged_audio(self.database.damaged_audio()?)
-            .with_reading_marks(self.database.reading_marks(store)?),
-        );
+        let pipeline = ProcessingPipeline::new(crate::wiring::dependencies(
+            store.clone(),
+            settings,
+            self.speech.engine.as_deref(),
+            models.as_deref(),
+            None,
+            llm,
+            events.clone(),
+        )?);
         let printer = tokio::spawn(async move {
             while let Ok(event) = receiver.recv().await {
                 if let MeetingEvent::Progress {

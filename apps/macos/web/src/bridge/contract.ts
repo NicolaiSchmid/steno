@@ -97,7 +97,6 @@ export const bridgeMethods = [
 	"settings.transcription.setEngine",
 	"settings.transcription.download",
 	"settings.transcription.remove",
-	"settings.transcription.useNeuralEngine",
 	"settings.summaries.selectPreset",
 	"settings.summaries.update",
 	"settings.summaries.save",
@@ -359,7 +358,7 @@ export const meetingDetailSnapshot = z
 		state: meetingState,
 		failureReason: z.string().optional(),
 		endReason: z.string().optional(),
-		/** Sent by the Rust host when parts of the recording could not be decoded and were replaced by silence. */
+		/** Sent by the Swift app when parts of the recording could not be decoded and were replaced by silence. */
 		audioWarning: z.string().optional(),
 		tags: z.array(z.string()),
 		tab: detailTab,
@@ -541,8 +540,6 @@ export const recordingSettingsSnapshot = z
 		inputDeviceUID: z.string().optional(),
 		audioFolderPath: z.string(),
 		audioFolderName: z.string(),
-		/** Sent by the Rust host for a Windows drive that is neither NTFS nor ReFS, or a network drive or mount. */
-		audioFolderWarning: z.string().optional(),
 		folderUsage: z.enum(["measuring", "measured", "unavailable"]),
 		folderUsageBytes: z.number().optional(),
 		retention,
@@ -587,8 +584,6 @@ export const transcriptionSettingsSnapshot = z
 				.strict(),
 		),
 		allInstalled: z.boolean(),
-		/** Rust host only: Steno closed while it was using the Neural Engine, so the processor transcribes until the user turns it back on. */
-		neuralEngineOff: z.boolean().optional(),
 		...errorFields,
 	})
 	.strict();
@@ -958,7 +953,6 @@ export const methodParams = {
 	"settings.transcription.setEngine": setStringParams,
 	"settings.transcription.download": assetIDParams,
 	"settings.transcription.remove": assetIDParams,
-	"settings.transcription.useNeuralEngine": null,
 	"settings.summaries.selectPreset": setStringParams,
 	"settings.summaries.update": summariesUpdateParams,
 	"settings.summaries.save": null,

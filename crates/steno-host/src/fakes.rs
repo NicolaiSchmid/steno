@@ -478,10 +478,6 @@ pub struct FakePipeline {
     pub reloads: Mutex<usize>,
     pub kept_forever: Mutex<i64>,
     pub failure: Mutex<Option<String>>,
-    /// The meetings `export_keeps_failing` answers yes for.
-    pub keeps_failing: Mutex<Vec<Uuid>>,
-    /// What `damaged_audio` answers per meeting; none for the others.
-    pub damaged_audio: Mutex<BTreeMap<Uuid, steno_core::AudioDamage>>,
 }
 
 impl FakePipeline {
@@ -513,10 +509,6 @@ impl Pipeline for FakePipeline {
         self.outcome()
     }
 
-    fn export_keeps_failing(&self, meeting_id: Uuid) -> bool {
-        lock(&self.keeps_failing).contains(&meeting_id)
-    }
-
     fn process_again(&self, meeting_id: Uuid) -> Result<(), ProcessAgainRefusal> {
         lock(&self.processed_again).push(meeting_id);
         if let Some(refusal) = lock(&self.process_again_refusal).clone() {
@@ -524,18 +516,6 @@ impl Pipeline for FakePipeline {
         }
         self.outcome()
             .map_err(|error| ProcessAgainRefusal::CouldNotStart(error.to_string()))
-    }
-
-    fn damaged_audio(&self, meeting_id: Uuid) -> steno_core::AudioDamage {
-        lock(&self.damaged_audio)
-            .get(&meeting_id)
-            .copied()
-            .unwrap_or_default()
-    }
-
-    /// Yes for the meetings `damaged_audio` answers some damage for.
-    fn audio_may_be_damaged(&self, meeting_id: Uuid) -> bool {
-        !self.damaged_audio(meeting_id).is_none()
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
@@ -566,10 +546,6 @@ pub struct FakeSpeechModels {
     pub progress: Mutex<Vec<(f64, String)>>,
     pub download_failure: Mutex<Option<String>>,
     pub on_download: Mutex<Option<DownloadHook>>,
-    /// What [`SpeechModels::speech_fallback`] answers.
-    pub speech_fallback: std::sync::atomic::AtomicBool,
-    /// While set, [`SpeechModels::end_speech_fallback`] fails with it.
-    pub end_fallback_failure: Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for FakeSpeechModels {
@@ -592,8 +568,6 @@ impl Default for FakeSpeechModels {
             ]),
             download_failure: Mutex::new(None),
             on_download: Mutex::new(None),
-            speech_fallback: std::sync::atomic::AtomicBool::new(false),
-            end_fallback_failure: Mutex::new(None),
         }
     }
 }
@@ -655,20 +629,6 @@ impl SpeechModels for FakeSpeechModels {
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()> {
         lock(&self.removals).push(asset);
         lock(&self.installed).remove(&asset);
-        Ok(())
-    }
-
-    fn speech_fallback(&self) -> bool {
-        self.speech_fallback
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    fn end_speech_fallback(&self) -> BoundaryResult<()> {
-        if let Some(failure) = lock(&self.end_fallback_failure).clone() {
-            return Err(failure.into());
-        }
-        self.speech_fallback
-            .store(false, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }
@@ -996,12 +956,11 @@ impl AudioDevices for FakeAudioDevices {
     }
 }
 
-/// The folder size a test sets, and whether its drive may lose recent writes.
+/// The folder size a test sets.
 #[derive(Debug)]
 pub struct FakeFolderUsage {
     pub bytes: Mutex<Result<i64, String>>,
     pub measured: Mutex<Vec<PathBuf>>,
-    pub may_lose_recent_writes: Mutex<bool>,
 }
 
 impl FakeFolderUsage {
@@ -1010,7 +969,6 @@ impl FakeFolderUsage {
         FakeFolderUsage {
             bytes: Mutex::new(Ok(bytes)),
             measured: Mutex::new(Vec::new()),
-            may_lose_recent_writes: Mutex::new(false),
         }
     }
 
@@ -1024,10 +982,6 @@ impl FolderUsage for FakeFolderUsage {
     fn measure(&self, folder: &Path) -> BoundaryResult<i64> {
         lock(&self.measured).push(folder.to_path_buf());
         lock(&self.bytes).clone().map_err(Into::into)
-    }
-
-    fn may_lose_recent_writes(&self, _folder: &Path) -> bool {
-        *lock(&self.may_lose_recent_writes)
     }
 }
 

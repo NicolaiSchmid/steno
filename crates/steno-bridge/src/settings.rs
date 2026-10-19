@@ -161,11 +161,6 @@ pub struct RecordingSettingsSnapshot {
     pub input_device_uid: Option<String>,
     pub audio_folder_path: String,
     pub audio_folder_name: String,
-    /// The warning under the folder when a power cut may lose recent
-    /// recordings there: a Windows drive that is neither NTFS nor `ReFS`, or
-    /// a network drive or mount.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audio_folder_warning: Option<String>,
     pub folder_usage: RecordingFolderUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_usage_bytes: Option<i64>,
@@ -229,11 +224,6 @@ pub struct TranscriptionSettingsSnapshot {
     pub shows_engine_picker: bool,
     pub assets: Vec<TranscriptionAsset>,
     pub all_installed: bool,
-    /// Steno closed while it was using the Neural Engine, so the speech
-    /// sidecar transcribes until the user turns it back on. Left out when
-    /// false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub neural_engine_off: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

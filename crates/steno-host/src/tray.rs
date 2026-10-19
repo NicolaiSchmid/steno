@@ -54,7 +54,7 @@ pub fn tray_meetings(
             let entry = progress.entry(meeting.id);
             let stage = entry.map_or_else(
                 || crate::main_window::ProgressEntry::WAITING_TITLE.to_owned(),
-                |entry| entry.title(progress.speech_fallback),
+                crate::main_window::ProgressEntry::title,
             );
             let percent = entry
                 .filter(|entry| entry.progress.is_some())

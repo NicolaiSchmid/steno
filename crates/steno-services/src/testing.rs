@@ -14,7 +14,6 @@ use steno_audio::SymphoniaAudioCodec;
 use steno_core::Store;
 use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory};
 use steno_host::services::Recorder as _;
-use steno_host::speech::ModelAsset;
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
 use steno_speech::SpeechRuntime;
 
@@ -319,35 +318,6 @@ pub fn app_over_fakes(
     )
 }
 
-/// [`app_over_fakes`] with `engine` run in this process, as `CoreML` is on
-/// the Mac, its models and the diarizer's installed, and the warm-up mark
-/// of `root/support` read as a launch reads it.
-pub fn app_warming_up(
-    root: &std::path::Path,
-    store: &Arc<Store>,
-    make_session: MakeCaptureSession,
-    engine: Arc<dyn steno_core::SpeechEngine>,
-) -> crate::App {
-    let dependencies = fake_dependencies(store, "parakeet-v3")
-        .with_speech_engine(steno_pipeline::SharedSpeechEngine::new(engine))
-        .with_warm_up_mark(Arc::new(steno_pipeline::WarmUpMark::at_launch(
-            &root.join("support"),
-        )))
-        .with_speech_in_process(true);
-    let in_process = BuiltPipeline {
-        dependencies,
-        engine: BuiltEngine {
-            engine_id: "parakeet-v3".to_owned(),
-            runtime: SpeechRuntime::CoreMlInProcess,
-        },
-    };
-    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
-    for asset in [ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer] {
-        fakes.speech_models.set_installed(asset, None);
-    }
-    app_over_build(root, store, make_session, in_process, &fakes)
-}
-
 /// [`app_over_fakes`] reading every recording through `decoder`.
 pub fn app_decoding(
     root: &std::path::Path,
@@ -366,95 +336,14 @@ pub fn app_decoding(
     )
 }
 
-/// The app's launch over `root/support` with two speech engines: `coreml`
-/// in this process and `sidecar` in its place, with the speech fallback
-/// over the reading marks as `build_with_import` builds it.
-pub fn app_falling_back(
-    root: &std::path::Path,
-    store: &Arc<Store>,
-    coreml: Arc<dyn steno_core::SpeechEngine>,
-    sidecar: Arc<dyn steno_core::SpeechEngine>,
-) -> crate::App {
-    let support = root.join("support");
-    let warm_up_mark = Arc::new(steno_pipeline::WarmUpMark::at_launch(&support));
-    let reading_marks = Arc::new(steno_pipeline::ReadingMarks::at_launch(
-        &support,
-        store,
-        chrono::Utc::now(),
-    ));
-    let fallback = Arc::new(steno_pipeline::SpeechFallback::at_launch(
-        &support,
-        warm_up_mark.clone(),
-        &reading_marks,
-    ));
-    let setup = crate::speech::testing::setup(
-        &root.join("models"),
-        steno_speech::SpeechSettings::default(),
-    )
-    .with_fallback(fallback);
-    let models = crate::speech::ModelStoreSpeechModels::new(&setup);
-    crate::speech::testing::install_every_model(&models);
-    let engines = Arc::new(crate::speech::SpeechEngines::with_builder(
-        setup,
-        Box::new(move |runtime| match runtime {
-            SpeechRuntime::CoreMlInProcess => coreml.clone(),
-            SpeechRuntime::OnnxSidecar => sidecar.clone(),
-        }),
-    ));
-    let make: MakeDependencies = {
-        let store = store.clone();
-        Arc::new(move || {
-            let runtime = if engines.setup().fallback.is_on() {
-                SpeechRuntime::OnnxSidecar
-            } else {
-                SpeechRuntime::CoreMlInProcess
-            };
-            Ok(BuiltPipeline {
-                dependencies: fake_dependencies(&store, "parakeet-v3")
-                    .with_speech_engine(engines.engine(runtime))
-                    .with_warm_up_mark(warm_up_mark.clone())
-                    .with_reading_marks(reading_marks.clone())
-                    .with_speech_in_process(runtime.runs_in_process()),
-                engine: BuiltEngine {
-                    engine_id: "parakeet-v3".to_owned(),
-                    runtime,
-                },
-            })
-        })
-    };
-    let pipeline = Arc::new(CurrentPipeline::new(
-        make().unwrap(),
-        make,
-        tokio::runtime::Handle::current(),
-    ));
-    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
-    app_over_pipeline(
-        root,
-        store,
-        synthetic_capture(),
-        pipeline,
-        Arc::new(models),
-        &fakes,
-    )
-}
-
-/// [`app_over_fakes`] over the build `first` and the host's `fakes`, its
-/// reads marked in `root/support`.
+/// [`app_over_fakes`] over the build `first` and the host's `fakes`.
 fn app_over_build(
     root: &std::path::Path,
     store: &Arc<Store>,
     make_session: MakeCaptureSession,
-    mut first: BuiltPipeline,
+    first: BuiltPipeline,
     fakes: &steno_host::fakes::FakeServices,
 ) -> crate::App {
-    first.dependencies =
-        first
-            .dependencies
-            .with_reading_marks(Arc::new(steno_pipeline::ReadingMarks::at_launch(
-                &root.join("support"),
-                store,
-                chrono::Utc::now(),
-            )));
     app_over_pipeline(
         root,
         store,
@@ -499,7 +388,6 @@ fn app_over_pipeline(
         events: MeetingEventBus::new(),
         pipeline,
         sweep: steno_pipeline::RetentionSweep::new(store.clone()),
-        export_retries: Arc::new(steno_pipeline::ExportRetries::in_memory()),
         services,
         updates: None,
         handover: None,
@@ -946,17 +834,17 @@ pub fn hosted(store: &Arc<Store>, recorder: &Arc<crate::recorder::CaptureRecorde
     hosted_over(store, recorder, None)
 }
 
-/// [`hosted`], over `pipeline` in place of the fake's when there is one.
+/// [`hosted`], over `files` in place of the fake's when there is one.
 pub fn hosted_over(
     store: &Arc<Store>,
     recorder: &Arc<crate::recorder::CaptureRecorder>,
-    pipeline: Option<Arc<dyn steno_host::services::Pipeline>>,
+    files: Option<Arc<dyn steno_host::services::FileSystem>>,
 ) -> Hosted {
     use steno_bridge::BridgeHost as _;
     let mut services = steno_host::fakes::FakeServices::new(chrono::Utc::now()).services();
     services.recorder = recorder.clone();
-    if let Some(pipeline) = pipeline {
-        services.pipeline = pipeline;
+    if let Some(files) = files {
+        services.file_system = files;
     }
     let host = Arc::new(
         steno_host::Host::new(store.clone(), services, steno_host::HostConfig::default()).unwrap(),
@@ -1008,22 +896,61 @@ impl Hosted {
     }
 }
 
-/// A pipeline whose `export_keeps_failing` waits at a gate while it is
-/// armed, standing for a reload that waits on the store. Set with
+/// A file system whose `exists`, which a shown detail's reload asks about
+/// its recording ([`shown_meeting`]), waits at a gate while it is armed,
+/// standing for a reload that waits on the store. Set with
 /// [`Self::gate_inside_reads_on`], it waits inside a read on that store.
 #[derive(Default)]
-pub struct GatedPipeline {
-    fake: steno_host::fakes::FakePipeline,
+pub struct GatedFiles {
     pub gate: ReloadGate,
     reader: std::sync::OnceLock<Arc<Store>>,
 }
 
-impl GatedPipeline {
+impl GatedFiles {
     /// From now on the gate is passed inside a read on `store`; the first
     /// call wins.
     pub fn gate_inside_reads_on(&self, store: Arc<Store>) {
         let _ = self.reader.set(store);
     }
+}
+
+impl steno_host::services::FileSystem for GatedFiles {
+    fn exists(&self, path: &std::path::Path) -> bool {
+        match self.reader.get() {
+            Some(store) => store
+                .read(|_| {
+                    self.gate.pass();
+                    Ok(())
+                })
+                .unwrap(),
+            None => self.gate.pass(),
+        }
+        path.exists()
+    }
+
+    fn remove(&self, path: &std::path::Path) -> steno_core::protocols::BoundaryResult<()> {
+        steno_host::services::RealFileSystem.remove(path)
+    }
+}
+
+/// The sample meeting saved ready in `store` with an asset, so its shown detail asks
+/// the file system about the recording at every reload.
+pub fn shown_meeting(store: &Store) -> steno_core::Meeting {
+    let mut meeting = steno_core::testing::sample_data::meeting();
+    meeting.state = steno_core::MeetingState::Ready;
+    let asset = steno_core::AudioAsset {
+        id: uuid::Uuid::new_v4(),
+        meeting_id: meeting.id,
+        url: steno_core::paths::file_url(std::path::Path::new("/no-such-folder/master.wav"), false),
+        format: steno_core::AudioFormat::Wav16kInt16,
+        lanes: vec![steno_core::AudioLane::Mixed],
+        sidecars_16k: std::collections::BTreeMap::new(),
+        mixdown_url: None,
+        retention: steno_core::AudioRetention::KeepForever,
+        expires_at: None,
+    };
+    store.save_meeting_with_asset(&meeting, &asset).unwrap();
+    meeting
 }
 
 #[derive(Default)]
@@ -1093,63 +1020,5 @@ impl Drop for ArmedGate<'_> {
     fn drop(&mut self) {
         self.0.state().armed = false;
         self.0.changed.notify_all();
-    }
-}
-
-impl steno_host::services::Pipeline for GatedPipeline {
-    fn rerun_summary(
-        &self,
-        meeting_id: uuid::Uuid,
-        template_id: &str,
-    ) -> steno_core::protocols::BoundaryResult<()> {
-        self.fake.rerun_summary(meeting_id, template_id)
-    }
-
-    fn redeliver(&self, meeting_id: uuid::Uuid) -> steno_core::protocols::BoundaryResult<()> {
-        self.fake.redeliver(meeting_id)
-    }
-
-    fn export_keeps_failing(&self, meeting_id: uuid::Uuid) -> bool {
-        match self.reader.get() {
-            Some(store) => store
-                .read(|_| {
-                    self.gate.pass();
-                    Ok(())
-                })
-                .unwrap(),
-            None => self.gate.pass(),
-        }
-        self.fake.export_keeps_failing(meeting_id)
-    }
-
-    fn process_again(
-        &self,
-        meeting_id: uuid::Uuid,
-    ) -> Result<(), steno_host::services::ProcessAgainRefusal> {
-        self.fake.process_again(meeting_id)
-    }
-
-    fn damaged_audio(&self, meeting_id: uuid::Uuid) -> steno_core::AudioDamage {
-        self.fake.damaged_audio(meeting_id)
-    }
-
-    fn audio_may_be_damaged(&self, meeting_id: uuid::Uuid) -> bool {
-        self.fake.audio_may_be_damaged(meeting_id)
-    }
-
-    fn apply_retention(
-        &self,
-        meeting_id: uuid::Uuid,
-        rule: steno_core::AudioRetention,
-    ) -> steno_core::protocols::BoundaryResult<()> {
-        self.fake.apply_retention(meeting_id, rule)
-    }
-
-    fn reload(&self) -> steno_core::protocols::BoundaryResult<()> {
-        self.fake.reload()
-    }
-
-    fn keep_all_recordings(&self) -> steno_core::protocols::BoundaryResult<i64> {
-        self.fake.keep_all_recordings()
     }
 }

@@ -78,8 +78,6 @@ string_enum! {
         SettingsTranscriptionSetEngine = "settings.transcription.setEngine",
         SettingsTranscriptionDownload = "settings.transcription.download",
         SettingsTranscriptionRemove = "settings.transcription.remove",
-        /// The Neural Engine again, after the speech sidecar stood in for it.
-        SettingsTranscriptionUseNeuralEngine = "settings.transcription.useNeuralEngine",
         SettingsSummariesSelectPreset = "settings.summaries.selectPreset",
         SettingsSummariesUpdate = "settings.summaries.update",
         SettingsSummariesSave = "settings.summaries.save",

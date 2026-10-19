@@ -581,64 +581,6 @@ fn the_detail_heading_derives_an_untitled_meetings_title() {
     );
 }
 
-/// A clean recording carries no warning.
-#[test]
-fn the_detail_warns_about_a_recording_replaced_in_parts_by_silence() {
-    let harness = Harness::builder()
-        .seed(|store, _| {
-            store
-                .save_meeting(&meeting(
-                    0x67,
-                    "Standup",
-                    TitleOrigin::User,
-                    "2026-09-28T08:06:00.000Z",
-                    60.0,
-                    MeetingSource::Phone,
-                    &[],
-                    MeetingState::Ready,
-                    None,
-                ))
-                .unwrap();
-        })
-        .build();
-    let _ = harness.snapshot(BridgeTopic::MeetingsList);
-    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
-    assert_eq!(detail["id"], id(0x67));
-    assert!(detail.get("audioWarning").is_none(), "{detail}");
-    for (parts, seconds, salvaged, warning) in [
-        (
-            3,
-            0.07,
-            false,
-            "About 0.1 seconds of the phone recording could not be read and was replaced by silence.",
-        ),
-        (
-            1_200,
-            27.9,
-            false,
-            "About 28 seconds of the phone recording could not be read and was replaced by silence.",
-        ),
-        (
-            0,
-            0.0,
-            true,
-            "The phone recording was cut off unexpectedly, and its end may be missing.",
-        ),
-    ] {
-        harness.fakes.pipeline.damaged_audio.lock().unwrap().insert(
-            uuid(0x67),
-            steno_core::AudioDamage {
-                parts,
-                seconds,
-                salvaged,
-            },
-        );
-        harness.host.store_changed();
-        let detail = harness.snapshot(BridgeTopic::MeetingDetail);
-        assert_eq!(detail["audioWarning"], warning);
-    }
-}
-
 /// A sink that reads the host back from inside `emit`: the host must not
 /// hold its lock while it emits.
 struct ReentrantSink {
@@ -1282,22 +1224,6 @@ fn the_detail_footer_and_summary_rows_follow_the_store() {
         "Obsidian · Failed: vault missing"
     );
     assert_eq!(detail["export"]["canReveal"], false);
-    // Once the launch stopped retrying it, the line says it keeps failing.
-    harness
-        .fakes
-        .pipeline
-        .keeps_failing
-        .lock()
-        .unwrap()
-        .push(uuid(MEETING));
-    harness.host.store_changed();
-    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
-    assert_eq!(detail["export"]["status"], "failed");
-    assert_eq!(
-        detail["export"]["message"],
-        "Export to Obsidian keeps failing: vault missing"
-    );
-    harness.fakes.pipeline.keeps_failing.lock().unwrap().clear();
     assert_eq!(
         harness.host.meeting_reveal_export().unwrap_err().code,
         BridgeErrorCode::NotFound
@@ -2111,39 +2037,6 @@ fn process_again_on_a_failed_meeting_asks_only_with_a_confirmed_speaker() {
     );
 }
 
-#[test]
-fn a_damaged_recording_reads_kept_incomplete_and_can_still_be_deleted_now() {
-    let harness = Harness::builder()
-        .seed(|store, fakes| {
-            populate_sample(store, fakes);
-            unstamped(store, AudioRetention::DeleteAfterProcessing);
-        })
-        .build();
-    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
-    assert_eq!(detail["retention"]["kind"], "keptWhileProcessing");
-    assert_eq!(detail["canProcessAgain"], false);
-
-    harness.fakes.pipeline.damaged_audio.lock().unwrap().insert(
-        uuid(MEETING),
-        steno_core::AudioDamage {
-            parts: 3,
-            seconds: 0.07,
-            salvaged: false,
-        },
-    );
-    harness.host.store_changed();
-    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
-    assert_eq!(detail["retention"]["kind"], "keptIncomplete");
-    assert_eq!(detail["canProcessAgain"], true);
-
-    let reply = harness.host.meeting_delete_recording_now().unwrap();
-    assert!(reply.confirmed);
-    assert_eq!(
-        *harness.fakes.pipeline.retention.lock().unwrap(),
-        [(uuid(MEETING), AudioRetention::DeleteAfterProcessing)]
-    );
-}
-
 /// A run's waiting event sets the progress stage, the store's poll keeps it,
 /// and the run's next event replaces it; a job parked for the recording
 /// resumes at its own stage and lane.
@@ -2207,44 +2100,6 @@ fn a_waiting_meetings_progress_says_what_it_waits_for() {
         });
         assert_eq!(entry()["stage"], resumed);
     }
-}
-
-/// While the speech sidecar stands in for the Neural Engine, a meeting
-/// waiting for models says why; once the Neural Engine is back, it does not.
-#[test]
-fn a_meeting_waiting_for_the_sidecars_models_says_the_neural_engine_is_off() {
-    let harness = Harness::builder()
-        .seed(|store, fakes| {
-            let mut meeting = sample_meeting();
-            meeting.id = uuid(0x8C);
-            meeting.state = MeetingState::Queued;
-            meeting.summary = None;
-            store.save_meeting(&meeting).unwrap();
-            fakes
-                .speech_models
-                .speech_fallback
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        })
-        .build();
-    let entry = |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
-    harness
-        .host
-        .apply_meeting_event(&MeetingEvent::ModelsMissing {
-            meeting_id: uuid(0x8C),
-        });
-    assert_eq!(entry(&harness)["stage"], "modelsMissing");
-    assert_eq!(
-        entry(&harness)["title"],
-        "Neural Engine off after a crash: download the speech models in Settings"
-    );
-    harness
-        .host
-        .settings_transcription_use_neural_engine()
-        .unwrap();
-    assert_eq!(
-        entry(&harness)["title"],
-        "Download the speech models in Settings"
-    );
 }
 
 /// Dismissing the notice clears its flag for good.
@@ -2458,37 +2313,5 @@ fn the_host_reads_on_a_reader_of_its_own() {
             ))
         ),
         "a second host while the first lives"
-    );
-}
-
-/// A failed rebuild after "Use again" leaves this run on the speech sidecar.
-#[test]
-fn a_failed_rebuild_keeps_the_neural_engine_off_title() {
-    let harness = Harness::builder()
-        .seed(|store, fakes| {
-            let mut meeting = sample_meeting();
-            meeting.id = uuid(0x8C);
-            meeting.state = MeetingState::Queued;
-            meeting.summary = None;
-            store.save_meeting(&meeting).unwrap();
-            fakes
-                .speech_models
-                .speech_fallback
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        })
-        .build();
-    harness
-        .host
-        .apply_meeting_event(&MeetingEvent::ModelsMissing {
-            meeting_id: uuid(0x8C),
-        });
-    harness.fakes.pipeline.fail_calls(Some("the store is busy"));
-    harness
-        .host
-        .settings_transcription_use_neural_engine()
-        .unwrap();
-    assert_eq!(
-        harness.snapshot(BridgeTopic::Progress)["entries"][0]["title"],
-        "Neural Engine off after a crash: download the speech models in Settings"
     );
 }

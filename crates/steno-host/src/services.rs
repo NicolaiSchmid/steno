@@ -268,26 +268,11 @@ pub struct LeftRecording {
 pub trait Pipeline: Send + Sync {
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()>;
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()>;
-    /// Whether the launch stopped re-exporting the meeting after its export
-    /// failed too many launches in a row; the user's next export restarts
-    /// it.
-    fn export_keeps_failing(&self, _meeting_id: Uuid) -> bool {
-        false
-    }
     /// "Process again": saves the meeting queued and starts its run from
     /// `decode`, returning once it started. Refused without a change for
     /// the reason [`ProcessAgainRefusal`] gives, including a stored meeting
     /// that is not offered ([`steno_core::Meeting::offers_process_again`]).
     fn process_again(&self, meeting_id: Uuid) -> Result<(), ProcessAgainRefusal>;
-    /// What of the recording its last decode replaced by silence.
-    fn damaged_audio(&self, _meeting_id: Uuid) -> steno_core::AudioDamage {
-        steno_core::AudioDamage::default()
-    }
-    /// Whether the recording may have parts its last decode replaced by
-    /// silence (or the record of them is unreadable), so retention keeps it.
-    fn audio_may_be_damaged(&self, _meeting_id: Uuid) -> bool {
-        false
-    }
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()>;
     /// Rebuilds the pipeline from the stored settings and the API key.
     fn reload(&self) -> BoundaryResult<()>;
@@ -376,15 +361,6 @@ pub trait SpeechModels: Send + Sync {
     fn expected_bytes(&self, asset: ModelAsset) -> i64 {
         asset.approximate_bytes()
     }
-
-    /// Whether speech runs in the sidecar because the in-process engine
-    /// (`CoreML` on the Mac) ended the app, until the user turns it back on
-    /// ([`Self::end_speech_fallback`]).
-    fn speech_fallback(&self) -> bool;
-
-    /// Ends the fallback, so the pipeline's next build runs the in-process
-    /// engine again. An error leaves the fallback on.
-    fn end_speech_fallback(&self) -> BoundaryResult<()>;
 }
 
 /// One line of the Acknowledgements dialog for a model: what it is and who
@@ -504,9 +480,6 @@ pub trait AudioDevices: Send + Sync {
 /// Sums a folder.
 pub trait FolderUsage: Send + Sync {
     fn measure(&self, folder: &Path) -> BoundaryResult<i64>;
-    /// Whether a power cut may lose a recording just written into `folder`
-    /// (a Windows drive neither NTFS nor `ReFS`, or a network drive).
-    fn may_lose_recent_writes(&self, folder: &Path) -> bool;
 }
 
 /// The files the view models touch. [`RealFileSystem`] is the product's;

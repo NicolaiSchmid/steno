@@ -599,10 +599,7 @@ impl ModelStore {
             destination,
             format!("{:x}", partial.hasher.clone().finalize()),
         )?;
-        // A freshly written model is what an antivirus client scans first,
-        // so on Windows the rename is tried again while it holds the file.
-        steno_core::busy_file::rename(&partial.path, destination)
-            .map_err(|e| SpeechError::io(destination, e))?;
+        std::fs::rename(&partial.path, destination).map_err(|e| SpeechError::io(destination, e))?;
         partial.done = true;
         sync_parent(destination);
         Ok(())

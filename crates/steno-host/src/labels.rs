@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Datelike, FixedOffset, Utc};
 use steno_core::{
-    AudioDamage, AudioRetention, Delivery, Meeting, MeetingSource, MeetingStateKind, PipelineStage,
+    AudioRetention, Delivery, Meeting, MeetingSource, MeetingStateKind, PipelineStage,
     RecordingEndReason,
 };
 
@@ -121,51 +121,6 @@ pub fn end_reason_sentence(reason: &RecordingEndReason) -> Option<String> {
     }
 }
 
-/// The detail's warning when the decoder replaced parts of the recording
-/// by silence, or read a phone recording without its index up to where it
-/// was cut off; `None` for a clean decode. Says how long the silence
-/// lasts, rounded.
-#[must_use]
-pub fn damaged_audio_warning(damage: AudioDamage, source: MeetingSource) -> Option<String> {
-    if damage.is_none() {
-        return None;
-    }
-    let (recording, the_recording) = match source {
-        MeetingSource::Phone => ("the phone recording", "The phone recording"),
-        MeetingSource::MacCall | MeetingSource::MacInPerson => ("the recording", "The recording"),
-    };
-    let replaced = |of: &str| {
-        format!(
-            "{} of {of} could not be read and was replaced by silence.",
-            silence_length(damage.seconds)
-        )
-    };
-    let cut_off = format!("{the_recording} was cut off unexpectedly, and its end may be missing.");
-    Some(match (damage.salvaged, damage.parts > 0) {
-        (false, _) => replaced(recording),
-        (true, false) => cut_off,
-        (true, true) => format!("{cut_off} {}", replaced("it")),
-    })
-}
-
-/// `seconds` of silence in words, rounded: tenths of a second below a
-/// second ("About 0.1 seconds", "Less than 0.1 seconds" below 0.05), whole
-/// seconds below a minute, whole minutes from there.
-fn silence_length(seconds: f64) -> String {
-    // Rounded and never negative, far below 2^52: the casts are exact.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let round = |value: f64| value.round().max(0.0) as u64;
-    let tenths = round(seconds * 10.0);
-    match (tenths, round(seconds), round(seconds / 60.0)) {
-        (0, _, _) => "Less than 0.1 seconds".to_owned(),
-        (1..=9, _, _) => format!("About 0.{tenths} seconds"),
-        (_, 1, _) => "About 1 second".to_owned(),
-        (_, whole @ 2..=59, _) => format!("About {whole} seconds"),
-        (_, _, 1) => "About 1 minute".to_owned(),
-        (_, _, minutes) => format!("About {minutes} minutes"),
-    }
-}
-
 /// What the rule does to the files, as Settings > Recording says it.
 #[must_use]
 pub fn retention_footnote(retention: AudioRetention) -> String {
@@ -248,69 +203,6 @@ pub fn utc() -> FixedOffset {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The silence rounds to tenths below a second, whole seconds below a
-    /// minute and whole minutes after.
-    #[test]
-    fn the_silence_reads_in_seconds_or_minutes() {
-        for (seconds, words) in [
-            (0.0, "Less than 0.1 seconds"),
-            (0.049, "Less than 0.1 seconds"),
-            (0.07, "About 0.1 seconds"),
-            (0.94, "About 0.9 seconds"),
-            (0.96, "About 1 second"),
-            (1.49, "About 1 second"),
-            (1.5, "About 2 seconds"),
-            (59.4, "About 59 seconds"),
-            (59.6, "About 1 minute"),
-            (89.0, "About 1 minute"),
-            (91.0, "About 2 minutes"),
-            (7_200.0, "About 120 minutes"),
-        ] {
-            assert_eq!(silence_length(seconds), words, "{seconds}");
-        }
-        let damage = AudioDamage {
-            parts: 3,
-            seconds: 0.07,
-            salvaged: false,
-        };
-        assert_eq!(
-            damaged_audio_warning(damage, MeetingSource::Phone).as_deref(),
-            Some(
-                "About 0.1 seconds of the phone recording could not be read and was replaced by silence."
-            )
-        );
-        let salvaged = AudioDamage {
-            salvaged: true,
-            ..AudioDamage::default()
-        };
-        assert_eq!(
-            damaged_audio_warning(salvaged, MeetingSource::Phone).as_deref(),
-            Some("The phone recording was cut off unexpectedly, and its end may be missing.")
-        );
-        assert_eq!(
-            damaged_audio_warning(
-                AudioDamage {
-                    salvaged: true,
-                    ..damage
-                },
-                MeetingSource::Phone
-            )
-            .as_deref(),
-            Some(
-                "The phone recording was cut off unexpectedly, and its end may be missing. About 0.1 \
-                 seconds of it could not be read and was replaced by silence."
-            )
-        );
-        assert_eq!(
-            damaged_audio_warning(salvaged, MeetingSource::MacCall).as_deref(),
-            Some("The recording was cut off unexpectedly, and its end may be missing.")
-        );
-        assert_eq!(
-            damaged_audio_warning(AudioDamage::default(), MeetingSource::Phone),
-            None
-        );
-    }
 
     #[test]
     fn file_sizes_follow_the_file_style() {

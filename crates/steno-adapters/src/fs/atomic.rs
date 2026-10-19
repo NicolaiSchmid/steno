@@ -4,7 +4,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use steno_core::busy_file;
 use thiserror::Error;
 
 /// A write that did not complete. `path` is the caller's target, never the
@@ -19,8 +18,7 @@ pub struct WriteFailure {
 /// Writes a file so a reader never sees a half-written one: the bytes go to
 /// `.steno-tmp-<8 hex>-<name>` beside the target, are `fsync`ed and renamed
 /// over it; then the directory (Unix) or the renamed file (Windows) is
-/// synced. Windows retries while another handle briefly holds the file. A
-/// failure before the rename leaves the target as it was.
+/// synced. A failure before the rename leaves the target as it was.
 pub struct AtomicFileWriter;
 
 impl AtomicFileWriter {
@@ -30,8 +28,7 @@ impl AtomicFileWriter {
     pub fn write(data: &[u8], target: &Path) -> Result<(), WriteFailure> {
         let temporary = Self::temporary_path(target);
         let outcome = Self::write_bytes(data, &temporary, target).and_then(|()| {
-            busy_file::rename(&temporary, target)
-                .map_err(|error| Self::failure(target, "rename", &error))
+            fs::rename(&temporary, target).map_err(|error| Self::failure(target, "rename", &error))
         });
         if outcome.is_err() {
             let _ = fs::remove_file(&temporary);
@@ -62,7 +59,9 @@ impl AtomicFileWriter {
     /// mixdown may be the only audio left after the sweep.
     #[cfg(not(unix))]
     fn make_rename_durable(target: &Path) -> Result<(), WriteFailure> {
-        busy_file::retried(|| OpenOptions::new().write(true).open(target))
+        OpenOptions::new()
+            .write(true)
+            .open(target)
             .map_err(|error| Self::failure(target, "open", &error))?
             .sync_all()
             .map_err(|error| Self::failure(target, "fsync", &error))

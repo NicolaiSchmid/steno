@@ -1,10 +1,9 @@
-import { FolderIcon, RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
+import { FolderIcon, RefreshCwIcon } from "lucide-react";
 import type { RecordingSettingsSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import { PermissionRow } from "@/components/permission-row";
 import {
 	Button,
-	Callout,
 	FormCard,
 	FormRow,
 	FormValue,
@@ -242,16 +241,6 @@ export function RecordingSection() {
 					retention={recording.retention}
 				/>
 			</FormCard>
-
-			{recording.audioFolderWarning ? (
-				<Callout
-					data-testid="audio-folder-warning"
-					description={`Choose a folder on your ${words.computer}'s main drive to keep them safe.`}
-					icon={<TriangleAlertIcon aria-hidden="true" />}
-					title={recording.audioFolderWarning}
-					variant="warning"
-				/>
-			) : null}
 		</SectionPage>
 	);
 }

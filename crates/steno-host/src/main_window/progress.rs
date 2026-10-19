@@ -40,13 +40,9 @@ pub enum Parked {
 }
 
 impl Parked {
-    /// What the entry says instead of a stage; `speech_fallback` when the
-    /// sidecar stands in for the in-process engine.
-    pub(crate) const fn title(self, speech_fallback: bool) -> &'static str {
+    /// What the entry says instead of a stage.
+    pub(crate) const fn title(self) -> &'static str {
         match self {
-            Parked::ModelsMissing if speech_fallback => {
-                ProgressEntry::FALLBACK_MODELS_MISSING_TITLE
-            }
             Parked::ModelsMissing => ProgressEntry::MODELS_MISSING_TITLE,
             Parked::StoreBusy => ProgressEntry::STORE_BUSY_TITLE,
             Parked::ForRecording => ProgressEntry::WAITING_FOR_RECORDING_TITLE,
@@ -80,11 +76,6 @@ impl ProgressEntry {
     /// current meeting finishes" for it.
     pub const MODELS_MISSING_STAGE: &'static str = "modelsMissing";
 
-    /// [`Self::MODELS_MISSING_TITLE`] while the sidecar stands in for the
-    /// Neural Engine, which ended the app.
-    pub const FALLBACK_MODELS_MISSING_TITLE: &'static str =
-        "Neural Engine off after a crash: download the speech models in Settings";
-
     /// The title of a meeting whose job waits for the recording under way.
     pub const WAITING_FOR_RECORDING_TITLE: &'static str = "Waiting for the recording to finish";
 
@@ -104,9 +95,9 @@ impl ProgressEntry {
     /// `stage_label` plus an ellipsis, "Transcribing…", or the waiting or
     /// parked title before the run's first event.
     #[must_use]
-    pub fn title(&self, speech_fallback: bool) -> String {
+    pub fn title(&self) -> String {
         if let Some(parked) = self.parked {
-            return parked.title(speech_fallback).to_owned();
+            return parked.title().to_owned();
         }
         self.progress.as_ref().map_or_else(
             || Self::WAITING_TITLE.to_owned(),
@@ -133,9 +124,6 @@ impl ProgressEntry {
 #[derive(Debug, Default)]
 pub struct ProcessingProgressModel {
     pub entries: BTreeMap<Uuid, ProgressEntry>,
-    /// The sidecar stands in for the in-process engine, which ended the
-    /// app: a meeting waiting for models says so.
-    pub speech_fallback: bool,
 }
 
 impl ProcessingProgressModel {

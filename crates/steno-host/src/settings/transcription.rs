@@ -40,14 +40,6 @@ pub struct SpeechSettingsViewModel {
     /// asset absent and detaches the thread, so its late progress cannot
     /// mark it downloading again; a second download reattaches to it.
     downloads: BTreeSet<ModelAsset>,
-    /// The sidecar stands in for the Neural Engine, which ended the app
-    /// ([`SpeechModels::speech_fallback`]); the section offers to use it
-    /// again.
-    pub speech_fallback: bool,
-    /// The fallback ended but the rebuild on the Neural Engine failed, so
-    /// the offer stays ([`Self::speech_fallback`]) until a reload succeeds
-    /// ([`Self::pipeline_rebuilt`]).
-    rebuild_pending: bool,
     pub errors: SectionError,
 }
 
@@ -58,8 +50,6 @@ impl SpeechSettingsViewModel {
             engine_id: SpeechEngineId::ParakeetV3,
             asset_states: BTreeMap::new(),
             downloads: BTreeSet::new(),
-            speech_fallback: false,
-            rebuild_pending: false,
             errors: SectionError::default(),
         }
     }
@@ -102,7 +92,6 @@ impl SpeechSettingsViewModel {
     }
 
     pub fn refresh_states(&mut self, services: &Services) {
-        self.speech_fallback = self.rebuild_pending || services.speech_models.speech_fallback();
         for asset in ModelAsset::ALL {
             if matches!(
                 self.asset_states.get(asset),
@@ -194,7 +183,7 @@ impl SpeechSettingsViewModel {
         match outcome {
             Ok(()) => {
                 self.errors.clear();
-                self.pipeline_rebuilt(services);
+                self.refresh_states(services);
             }
             Err(error) => {
                 self.errors
@@ -202,13 +191,6 @@ impl SpeechSettingsViewModel {
                 self.refresh_states(services);
             }
         }
-    }
-
-    /// Another section rebuilt the pipeline: a rebuild "Use again" left
-    /// pending is done, so the offer goes.
-    pub fn pipeline_rebuilt(&mut self, services: &Services) {
-        self.rebuild_pending = false;
-        self.refresh_states(services);
     }
 
     /// Marks the download started: whether the caller should run it. When
@@ -270,33 +252,6 @@ impl SpeechSettingsViewModel {
             Err(error) => AssetState::Failed(error.to_string()),
         };
         self.asset_states.insert(asset, state);
-    }
-
-    /// The user turned the Neural Engine back on: the fallback ends
-    /// ([`SpeechModels::end_speech_fallback`]) and the pipeline is rebuilt
-    /// on it. A failed end keeps everything; a failed rebuild keeps the row
-    /// until a reload succeeds (a second press or another section's save).
-    /// Either way the section says why.
-    pub fn use_neural_engine(&mut self, services: &Services) {
-        let ended = services.speech_models.end_speech_fallback();
-        match ended.map(|()| services.pipeline.reload()) {
-            Err(error) => self
-                .errors
-                .fail("The Neural Engine could not be turned back on.", error),
-            Ok(Err(error)) => {
-                self.rebuild_pending = true;
-                self.errors.fail(
-                    "The Neural Engine could not be turned back on yet. Try again, or quit and \
-                     reopen Steno.",
-                    error,
-                );
-            }
-            Ok(Ok(())) => {
-                self.rebuild_pending = false;
-                self.errors.clear();
-            }
-        }
-        self.refresh_states(services);
     }
 
     pub fn remove(&mut self, asset: ModelAsset, services: &Services) {

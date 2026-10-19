@@ -18,10 +18,7 @@ use steno_host::services::{
 };
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
-use steno_pipeline::{
-    DamagedAudio, ExportRetries, MeetingEventBus, PipelineDependencies, ReadingMarks,
-    RecordingIntake, RetentionSweep, SpeechFallback, WarmUpMark,
-};
+use steno_pipeline::{MeetingEventBus, PipelineDependencies, RecordingIntake, RetentionSweep};
 
 use crate::block_on;
 use crate::calendar::Calendar;
@@ -149,8 +146,6 @@ pub struct App {
     pub events: MeetingEventBus,
     pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
-    /// The launch re-exports in a row per meeting.
-    pub export_retries: Arc<ExportRetries>,
     pub services: Services,
     /// The update schedule, when the shell passed an update source.
     pub updates: Option<Arc<UpdateSchedule>>,
@@ -254,7 +249,6 @@ pub fn pipeline_dependencies(
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
-    support: &SupportFiles,
 ) -> Result<BuiltPipeline, BuildError> {
     let settings = store.settings()?;
     let api_key = api_key(secrets.secrets.as_ref(), runtime).unwrap_or_else(|warning| {
@@ -289,9 +283,6 @@ pub fn pipeline_dependencies(
         events.clone(),
     )
     .with_speech_engine(speech_engine)
-    .with_damaged_audio(support.damaged_audio.clone())
-    .with_warm_up_mark(support.warm_up_mark.clone())
-    .with_reading_marks(support.reading_marks.clone())
     .with_speech_in_process(engine_runtime.runs_in_process());
     let dependencies = match passes {
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
@@ -306,28 +297,6 @@ pub fn pipeline_dependencies(
     })
 }
 
-/// What every build of the pipeline shares from the support directory.
-#[derive(Debug, Clone)]
-pub struct SupportFiles {
-    /// What of each recording the decode stage replaced by silence.
-    pub damaged_audio: Arc<DamagedAudio>,
-    pub warm_up_mark: Arc<WarmUpMark>,
-    /// The reads of a recording, marked.
-    pub reading_marks: Arc<ReadingMarks>,
-}
-
-impl SupportFiles {
-    /// Both in memory, writing nothing: for the tests.
-    #[must_use]
-    pub fn in_memory() -> Self {
-        SupportFiles {
-            damaged_audio: Arc::new(DamagedAudio::in_memory()),
-            warm_up_mark: Arc::new(WarmUpMark::in_memory()),
-            reading_marks: Arc::new(ReadingMarks::in_memory()),
-        }
-    }
-}
-
 /// [`pipeline_dependencies`] over clones of its inputs, for the reloads.
 fn make_dependencies(
     store: &Arc<Store>,
@@ -336,22 +305,16 @@ fn make_dependencies(
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
-    support: &SupportFiles,
 ) -> MakeDependencies {
-    let (store, engines, secrets, codex, events, runtime, support) = (
+    let (store, engines, secrets, codex, events, runtime) = (
         store.clone(),
         engines.clone(),
         secrets.clone(),
         codex.clone(),
         events.clone(),
         runtime.clone(),
-        support.clone(),
     );
-    Arc::new(move || {
-        pipeline_dependencies(
-            &store, &engines, &secrets, &codex, &events, &runtime, &support,
-        )
-    })
+    Arc::new(move || pipeline_dependencies(&store, &engines, &secrets, &codex, &events, &runtime))
 }
 
 /// The phone intake over whichever pipeline is current when a recording
@@ -624,42 +587,13 @@ pub fn build_with_import(
         }
         other => BuildError::Store(other),
     })?;
-    let damaged_audio = Arc::new(DamagedAudio::in_directory(&paths.support_directory));
-    damaged_audio.retain(|meeting_id| store.meeting(meeting_id).map_or(true, |m| m.is_some()));
-    // Before anything reads a recording: a leftover warm-up mark turns the
-    // warm-up off and a leftover read mark quarantines its meeting; either
-    // turns the speech sidecar on in place of `CoreML`.
-    let support = SupportFiles {
-        damaged_audio,
-        warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
-        reading_marks: Arc::new(ReadingMarks::at_launch(
-            &paths.support_directory,
-            &store,
-            chrono::Utc::now(),
-        )),
-    };
-    let fallback = Arc::new(SpeechFallback::at_launch(
-        &paths.support_directory,
-        support.warm_up_mark.clone(),
-        &support.reading_marks,
-    ));
-    let engines = Arc::new(SpeechEngines::new(
-        SpeechSetup::new(&settings, &paths).with_fallback(fallback),
-    ));
+    let engines = Arc::new(SpeechEngines::new(SpeechSetup::new(&settings, &paths)));
     let speech = engines.setup();
     let withheld_api_key = graph_secrets
         .key_gate
         .clone()
         .map(|gate| gate as Arc<dyn steno_host::services::WithheldApiKey>);
-    let make = make_dependencies(
-        &store,
-        &engines,
-        &graph_secrets,
-        &codex,
-        &events,
-        &runtime,
-        &support,
-    );
+    let make = make_dependencies(&store, &engines, &graph_secrets, &codex, &events, &runtime);
     let pipeline = Arc::new(
         CurrentPipeline::new(make()?, make, runtime.clone()).resuming_when({
             let engines = engines.clone();
@@ -667,7 +601,6 @@ pub fn build_with_import(
         }),
     );
     let sweep = RetentionSweep::new(store.clone());
-    let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
 
     let system_permissions = options
         .permissions
@@ -759,7 +692,6 @@ pub fn build_with_import(
         pipeline: Arc::new(HostPipeline {
             pipeline: pipeline.clone(),
             sweep: sweep.clone(),
-            export_retries: export_retries.clone(),
         }),
         speech_models,
         llm: Arc::new(ClientLlmService { codex }),
@@ -784,7 +716,6 @@ pub fn build_with_import(
         events,
         pipeline,
         sweep,
-        export_retries,
         services,
         updates,
         handover,
@@ -1305,7 +1236,7 @@ impl App {
     /// The launch's crash recovery: queued or processing meetings processed
     /// again, then unfinished exports re-exported.
     fn recover_unfinished(&self) -> impl FnOnce() + Send + 'static {
-        let (pipeline, export_retries) = (self.pipeline.clone(), self.export_retries.clone());
+        let pipeline = self.pipeline.clone();
         move || {
             let pipeline = pipeline.current();
             match pipeline.resume_unfinished() {
@@ -1316,7 +1247,7 @@ impl App {
                 Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
             }
             // After `resume_unfinished`, whose runs export what they resumed.
-            match pipeline.redeliver_unfinished(&export_retries) {
+            match pipeline.redeliver_unfinished() {
                 Ok(owed) if !owed.is_empty() => {
                     tracing::info!(count = owed.len(), "re-exporting unfinished exports");
                 }
@@ -1403,8 +1334,8 @@ mod tests {
     use super::*;
     use crate::secrets::KeyringUnavailable;
     use crate::testing::{
-        GatedPipeline, HANG_GUARD, LIVE, PATIENCE, TimedSink, built, fake_dependencies,
-        found_within, on_own_thread, options_under, temp_store,
+        GatedFiles, HANG_GUARD, LIVE, PATIENCE, TimedSink, built, fake_dependencies, found_within,
+        on_own_thread, options_under, shown_meeting, temp_store,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1643,111 +1574,6 @@ mod tests {
         let app = build(options).unwrap();
         let disk = app.recorder.disk();
         assert_eq!(disk.database_folder.as_deref(), database.parent());
-    }
-
-    /// A meeting whose read ended with the app twice in a row is failed and
-    /// held by the pipeline the build makes.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_build_quarantines_a_meeting_whose_reads_ended_with_the_app_twice() {
-        let dir = tempfile::tempdir().unwrap();
-        let support = dir.path().join("support");
-        let app = build(options_under(&support)).unwrap();
-        let mut meeting = steno_core::testing::sample_data::meeting();
-        meeting.state = steno_core::MeetingState::Processing;
-        app.store.save_meeting(&meeting).unwrap();
-        let store = app.store.clone();
-        drop(app);
-        let master = support.join("recording.m4a");
-        for _ in 0..2 {
-            let killed = Arc::new(ReadingMarks::at_launch(
-                &support,
-                &store,
-                chrono::Utc::now(),
-            ));
-            std::mem::forget(killed.reading(
-                meeting.id,
-                None,
-                &master,
-                steno_pipeline::ReadStage::Decode,
-            ));
-        }
-        let app = build(options_under(&support)).unwrap();
-        assert!(
-            app.pipeline
-                .current()
-                .dependencies()
-                .reading_marks
-                .holds(meeting.id)
-        );
-        assert_eq!(
-            app.store.meeting(meeting.id).unwrap().unwrap().state,
-            steno_core::MeetingState::Failed {
-                reason: steno_pipeline::READ_STOPPED.to_owned()
-            }
-        );
-    }
-
-    /// The build drops the damage marks of deleted meetings and keeps the
-    /// others.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_build_drops_the_damage_marks_of_deleted_meetings() {
-        let dir = tempfile::tempdir().unwrap();
-        let support = dir.path().join("support");
-        let app = build(options_under(&support)).unwrap();
-        let kept = steno_core::testing::sample_data::meeting();
-        app.store.save_meeting(&kept).unwrap();
-        drop(app);
-        let deleted = uuid::Uuid::new_v4();
-        let damage = steno_core::AudioDamage {
-            parts: 3,
-            seconds: 0.07,
-            salvaged: false,
-        };
-        let marks = DamagedAudio::in_directory(&support);
-        marks.record(kept.id, damage).unwrap();
-        marks.record(deleted, damage).unwrap();
-        let app = build(options_under(&support)).unwrap();
-        assert_eq!(
-            app.pipeline
-                .current()
-                .dependencies()
-                .damaged_audio
-                .damage(kept.id),
-            damage
-        );
-        assert!(
-            app.pipeline
-                .current()
-                .dependencies()
-                .damaged_audio
-                .damage(deleted)
-                .is_none()
-        );
-        let marks = DamagedAudio::in_directory(&support);
-        assert_eq!(marks.damage(kept.id), damage);
-        assert!(marks.damage(deleted).is_none());
-        drop(app);
-    }
-
-    /// A leftover warm-up mark turns the warm-up off; without one it stays on.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_build_reads_the_warm_up_mark_a_crash_left() {
-        let dir = tempfile::tempdir().unwrap();
-        let support = dir.path().join("support");
-        let skipping = |app: &App| {
-            app.pipeline
-                .current()
-                .dependencies()
-                .warm_up_mark
-                .skipping()
-        };
-        let app = build(options_under(&support)).unwrap();
-        assert!(!skipping(&app));
-        drop(app);
-        std::fs::write(support.join(WarmUpMark::FILE_NAME), b"1\n").unwrap();
-        let app = build(options_under(&support)).unwrap();
-        assert!(skipping(&app), "the mark left over turns the warm-up off");
-        drop(app);
     }
 
     /// The launch removes a tone file a crashed probe left, and leaves a file
@@ -2508,7 +2334,6 @@ mod tests {
         app.services.pipeline = Arc::new(HostPipeline {
             pipeline: app.pipeline.clone(),
             sweep: RetentionSweep::new(store.clone()),
-            export_retries: app.export_retries.clone(),
         });
         app.services.file_system = Arc::new(steno_host::services::RealFileSystem);
         let mut meeting = steno_core::testing::sample_data::meeting();
@@ -3683,7 +3508,6 @@ mod tests {
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
-            &SupportFiles::in_memory(),
         )
         .expect("the graph builds without the key");
         assert!(built.dependencies.cleaner.is_none());
@@ -3703,41 +3527,6 @@ mod tests {
         }
     }
 
-    /// Every build of the pipeline records damage in the store the app reads.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn every_build_records_damage_in_the_apps_store() {
-        let (dir, store) = temp_store();
-        let paths = StenoPaths::new(dir.path().join("support"));
-        let support = SupportFiles {
-            damaged_audio: Arc::new(DamagedAudio::in_directory(&paths.support_directory)),
-            warm_up_mark: Arc::new(WarmUpMark::at_launch(&paths.support_directory)),
-            reading_marks: Arc::new(ReadingMarks::in_memory()),
-        };
-        let make = make_dependencies(
-            &store,
-            &Arc::new(SpeechEngines::new(SpeechSetup::new(
-                &store.settings().unwrap(),
-                &paths,
-            ))),
-            &ungated(Arc::new(BrokenSecrets)),
-            &codex_store(),
-            &MeetingEventBus::new(),
-            &tokio::runtime::Handle::current(),
-            &support,
-        );
-        for _build in 0..2 {
-            let built = make().unwrap();
-            assert!(Arc::ptr_eq(
-                &built.dependencies.damaged_audio,
-                &support.damaged_audio
-            ));
-            assert!(Arc::ptr_eq(
-                &built.dependencies.warm_up_mark,
-                &support.warm_up_mark
-            ));
-        }
-    }
-
     /// The Authorization header a reload's pipeline over `secrets` sends
     /// to `server`.
     async fn authorization_sent(
@@ -3753,7 +3542,6 @@ mod tests {
             &codex_store(),
             &MeetingEventBus::new(),
             &tokio::runtime::Handle::current(),
-            &SupportFiles::in_memory(),
         )
         .unwrap();
         let cleaner = built.dependencies.cleaner.expect("an endpoint is set");
@@ -3981,19 +3769,17 @@ mod tests {
             .unwrap()
     }
 
-    /// The launch on `runtime` over a [`GatedPipeline`], with a detail shown
-    /// so each reload asks the gate, its own reloads over.
+    /// The launch on `runtime` over [`GatedFiles`], with a detail shown so
+    /// each reload asks the gate, its own reloads over.
     fn launched_over_a_gated_pipeline(
         runtime: &tokio::runtime::Runtime,
         dir: &std::path::Path,
-    ) -> (App, Arc<GatedPipeline>, Arc<Host>) {
+    ) -> (App, Arc<GatedFiles>, Arc<Host>) {
         let mut app =
             runtime.block_on(async { build(options_under(&dir.join("support"))).unwrap() });
-        let pipeline = Arc::new(GatedPipeline::default());
-        app.services.pipeline = pipeline.clone();
-        let mut meeting = steno_core::testing::sample_data::meeting();
-        meeting.state = steno_core::MeetingState::Ready;
-        app.store.save_meeting(&meeting).unwrap();
+        let pipeline = Arc::new(GatedFiles::default());
+        app.services.file_system = pipeline.clone();
+        let meeting = shown_meeting(&app.store);
         let host = Arc::new(app.host().unwrap());
         host.request_meeting(meeting.id);
         assert!(pipeline.gate.reloads() > 0, "the meeting's detail is shown");
@@ -4178,14 +3964,13 @@ mod tests {
     fn idle_host(
         store: &Arc<Store>,
         fakes: &steno_host::fakes::FakeServices,
-        pipeline: Option<Arc<GatedPipeline>>,
+        pipeline: Option<Arc<GatedFiles>>,
     ) -> (Arc<Host>, Arc<TimedSink>) {
         use steno_bridge::BridgeHost as _;
-        let meeting = steno_core::testing::sample_data::meeting();
-        store.save_meeting(&meeting).unwrap();
+        let meeting = shown_meeting(store);
         let mut services = fakes.services();
         if let Some(pipeline) = pipeline {
-            services.pipeline = pipeline;
+            services.file_system = pipeline;
         }
         let host = Arc::new(
             Host::new(store.clone(), services, steno_host::HostConfig::default()).unwrap(),
@@ -4390,7 +4175,7 @@ mod tests {
     async fn a_request_beside_a_tick_still_reloads() {
         let (_dir, store) = temp_store();
         let fakes = steno_host::fakes::FakeServices::new(Utc::now());
-        let pipeline = Arc::new(GatedPipeline::default());
+        let pipeline = Arc::new(GatedFiles::default());
         let (host, sink) = idle_host(&store, &fakes, Some(pipeline.clone()));
         let owner = tokio::spawn(own_the_reloads(
             host.clone(),
@@ -4413,7 +4198,7 @@ mod tests {
     async fn reload_requests_during_a_pass_run_one_more_pass() {
         let (_dir, store) = temp_store();
         let fakes = steno_host::fakes::FakeServices::new(Utc::now());
-        let pipeline = Arc::new(GatedPipeline::default());
+        let pipeline = Arc::new(GatedFiles::default());
         let (host, sink) = idle_host(&store, &fakes, Some(pipeline.clone()));
         let gate = &pipeline.gate;
         let owner = tokio::spawn(own_the_reloads(
@@ -4451,42 +4236,5 @@ mod tests {
             "the ten requests ran one more reload, {per_reload} gate calls each"
         );
         owner.abort();
-    }
-
-    /// A transcription mark a crash left turns the fallback on, and its end
-    /// through the model service holds this run's warm-up off.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_build_turns_the_fallback_on_and_its_end_holds_this_runs_warm_up_off() {
-        let dir = tempfile::tempdir().unwrap();
-        let support = dir.path().join("support");
-        std::fs::create_dir_all(&support).unwrap();
-        {
-            let store = steno_core::Store::in_memory().unwrap();
-            let marks = Arc::new(ReadingMarks::at_launch(&support, &store, Utc::now()));
-            let audio = support.join("master.caf");
-            std::fs::write(&audio, b"audio").unwrap();
-            std::mem::forget(marks.reading(
-                uuid::Uuid::new_v4(),
-                None,
-                &audio,
-                steno_pipeline::ReadStage::Transcribe,
-            ));
-        }
-        let app = build(options_under(&support)).unwrap();
-        let skipping = |app: &App| {
-            app.pipeline
-                .current()
-                .dependencies()
-                .warm_up_mark
-                .skipping()
-        };
-        assert!(
-            app.services.speech_models.speech_fallback(),
-            "the mark turned it on"
-        );
-        assert!(!skipping(&app), "no warm-up mark was left");
-        app.services.speech_models.end_speech_fallback().unwrap();
-        assert!(skipping(&app), "this run's warm-up is held off");
-        drop(app);
     }
 }

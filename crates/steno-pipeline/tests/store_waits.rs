@@ -671,36 +671,16 @@ async fn left_processing_by_the_lock() -> (World, Uuid, WriteLockHold, usize) {
     (world, meeting, lock, segments)
 }
 
-/// A quit, then the lock goes, and the next launch resumes the meeting to
-/// `ready` without doubling its transcript.
+/// The lock goes, then a quit saves the meeting `queued` again, and the
+/// next launch resumes it to `ready` without doubling its transcript.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_meeting_the_lock_left_processing_runs_at_the_next_launch() {
     let (world, meeting, lock, segments) = left_processing_by_the_lock().await;
-    world.pipeline.quit();
     drop(lock);
+    world.pipeline.quit();
+    assert_eq!(world.state(meeting), MeetingState::Queued);
     let launch = world.launch();
     assert_eq!(launch.resume_unfinished().unwrap(), [meeting]);
-    launch.wait_until_idle().await;
-    assert_eq!(world.state(meeting), MeetingState::Ready);
-    assert_eq!(world.store.segments(meeting).unwrap().len(), segments);
-}
-
-/// A next launch while the lock is still held waits for the store again and
-/// its retry processes the meeting.
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn a_meeting_the_lock_left_processing_waits_again_at_a_launch_under_the_lock() {
-    let (world, meeting, lock, segments) = left_processing_by_the_lock().await;
-    world.pipeline.quit();
-    let launch = world.launch();
-    assert_eq!(launch.resume_unfinished().unwrap(), [meeting]);
-    until_parked(&launch, meeting).await;
-    let state = world.state(meeting);
-    assert!(
-        matches!(state, MeetingState::Processing | MeetingState::Queued),
-        "{state:?}"
-    );
-    drop(lock);
-    assert_eq!(launch.resume_waiting_for_store().unwrap(), [meeting]);
     launch.wait_until_idle().await;
     assert_eq!(world.state(meeting), MeetingState::Ready);
     assert_eq!(world.store.segments(meeting).unwrap().len(), segments);

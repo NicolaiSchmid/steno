@@ -9,9 +9,8 @@ use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, MeetingStateKind};
 use steno_host::services::{Pipeline, ProcessAgainRefusal};
 use steno_pipeline::{
-    ExportRetries, InFlight, LiveRecording, ModelWaits, Operation, PipelineDependencies,
-    PipelineFailure, ProcessingPipeline, QuitLatch, ReprocessError, RetentionSweep,
-    SweepIncomplete,
+    InFlight, LiveRecording, ModelWaits, Operation, PipelineDependencies, PipelineFailure,
+    ProcessingPipeline, QuitLatch, ReprocessError, RetentionSweep, SweepIncomplete,
 };
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
@@ -351,32 +350,19 @@ async fn retry_the_store(current: Weak<Mutex<Current>>, waits: ModelWaits, retry
 pub struct HostPipeline {
     pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
-    /// Reset by any re-export the user causes; read for the "keeps failing"
-    /// line.
-    pub export_retries: Arc<ExportRetries>,
 }
 
 impl Pipeline for HostPipeline {
-    /// Once claimed, a summary re-run resets the meeting's count of launch
-    /// re-exports, as `redeliver` does.
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()> {
-        self.pipeline
-            .claim_and_spawn(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?;
-        self.export_retries.reset(meeting_id);
-        Ok(())
+        Ok(self
+            .pipeline
+            .claim_and_spawn(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?)
     }
 
-    /// Export again. Once claimed, the meeting's count of launch re-exports
-    /// starts again from 0; a refused one leaves it.
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()> {
-        self.pipeline
-            .claim_and_spawn(|pipeline| pipeline.claim_redeliver(meeting_id))?;
-        self.export_retries.reset(meeting_id);
-        Ok(())
-    }
-
-    fn export_keeps_failing(&self, meeting_id: Uuid) -> bool {
-        self.export_retries.stopped(meeting_id)
+        Ok(self
+            .pipeline
+            .claim_and_spawn(|pipeline| pipeline.claim_redeliver(meeting_id))?)
     }
 
     fn process_again(&self, meeting_id: Uuid) -> Result<(), ProcessAgainRefusal> {
@@ -387,22 +373,6 @@ impl Pipeline for HostPipeline {
             .current()
             .process_again(meeting_id)
             .map_err(process_again_refusal)
-    }
-
-    fn damaged_audio(&self, meeting_id: Uuid) -> steno_core::AudioDamage {
-        self.pipeline
-            .current()
-            .dependencies()
-            .damaged_audio
-            .damage(meeting_id)
-    }
-
-    fn audio_may_be_damaged(&self, meeting_id: Uuid) -> bool {
-        self.pipeline
-            .current()
-            .dependencies()
-            .damaged_audio
-            .may_be_damaged(meeting_id)
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
@@ -546,7 +516,6 @@ mod tests {
         HostPipeline {
             pipeline: current_pipeline(dependencies),
             sweep: RetentionSweep::new(store.clone()),
-            export_retries: Arc::new(ExportRetries::in_memory()),
         }
     }
 
@@ -719,27 +688,6 @@ mod tests {
         meeting
     }
 
-    /// The phone meeting of `fixture`, copied into `dir`, processed through
-    /// the real decoder.
-    async fn process_phone_fixture(
-        service: &HostPipeline,
-        store: &Store,
-        dir: &std::path::Path,
-        meeting: &steno_core::Meeting,
-        fixture: &str,
-    ) -> MeetingState {
-        let upload = dir.join(format!("{fixture}-{}.m4a", Uuid::new_v4()));
-        std::fs::copy(fixture_path(fixture), &upload).unwrap();
-        process_phone_upload(
-            service,
-            store,
-            meeting,
-            &upload,
-            AudioRetention::KeepForever,
-        )
-        .await
-    }
-
     fn fixture_path(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../Tests/Fixtures/audio")
@@ -772,63 +720,12 @@ mod tests {
         store.meeting(meeting.id).unwrap().unwrap().state
     }
 
-    /// Damage the real decoder counts reaches the detail, after a reload
-    /// too; the same meeting from a clean file answers none.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_damage_of_a_recording_reaches_the_detail() {
-        let (dir, store) = temp_store();
-        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(dir.path()));
-        let service = pipeline_over(
-            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
-            &store,
-        );
-        let meeting = phone_meeting();
-        let state = process_phone_fixture(
-            &service,
-            &store,
-            dir.path(),
-            &meeting,
-            "tone-440-44k1-500ms-damaged.m4a",
-        )
-        .await;
-        assert_eq!(state, MeetingState::Ready);
-        let damage = service.damaged_audio(meeting.id);
-        assert_eq!(damage.parts, 3);
-        assert!(service.audio_may_be_damaged(meeting.id));
-        assert!((damage.seconds - 3.0 * 1_024.0 / 44_100.0).abs() < 1e-9);
-        service.pipeline.reload().unwrap();
-        assert_eq!(service.damaged_audio(meeting.id), damage, "after a reload");
-        assert_eq!(
-            steno_pipeline::DamagedAudio::in_directory(dir.path()).parts(meeting.id),
-            3,
-            "on disk"
-        );
-        assert!(service.damaged_audio(Uuid::new_v4()).is_none());
-        assert!(!service.audio_may_be_damaged(Uuid::new_v4()));
-
-        let state = process_phone_fixture(
-            &service,
-            &store,
-            dir.path(),
-            &meeting,
-            "tone-440-44k1-500ms.m4a",
-        )
-        .await;
-        assert_eq!(state, MeetingState::Ready);
-        assert!(service.damaged_audio(meeting.id).is_none());
-        assert!(!service.audio_may_be_damaged(meeting.id));
-    }
-
-    /// A phone recording with no `moov` is salvaged, warns and is kept; the
-    /// same file with another app's major brand fails, untouched.
+    /// A phone recording with no `moov` is salvaged and kept; the same file
+    /// with another app's major brand fails, untouched.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_killed_phone_recording_is_salvaged_into_a_ready_meeting() {
         let (dir, store) = temp_store();
-        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(dir.path()));
-        let service = pipeline_over(
-            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
-            &store,
-        );
+        let service = pipeline_over(fake_dependencies(&store, "fake-engine"), &store);
         let killed = std::fs::read(fixture_path("speech-44k1-avaudiofile-killed.m4a")).unwrap();
         let meeting = phone_meeting();
         let upload = dir.path().join("killed.m4a");
@@ -842,10 +739,6 @@ mod tests {
         )
         .await;
         assert_eq!(state, MeetingState::Ready);
-        let damage = service.damaged_audio(meeting.id);
-        assert!(damage.salvaged, "{damage:?}");
-        assert_eq!(damage.parts, 0);
-        assert!(service.audio_may_be_damaged(meeting.id));
         assert_eq!(
             std::fs::read(&upload).unwrap(),
             killed,
@@ -873,164 +766,6 @@ mod tests {
             other,
             "the recording is kept as it was"
         );
-        assert!(service.damaged_audio(second.id).is_none());
-    }
-
-    /// A salvaged recording under "delete after processing" is kept: the
-    /// damage record stops the retention stamp and the detail says why. Its
-    /// clean twin is stamped.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_salvaged_recording_is_kept_incomplete_and_never_swept() {
-        let (dir, store) = temp_store();
-        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(dir.path()));
-        let service = pipeline_over(
-            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
-            &store,
-        );
-        for (fixture, salvaged) in [
-            ("speech-44k1-avaudiofile-killed.m4a", true),
-            ("speech-44k1-avaudiofile.m4a", false),
-        ] {
-            let bytes = std::fs::read(fixture_path(fixture)).unwrap();
-            let meeting = phone_meeting();
-            let upload = dir.path().join(format!("{}.m4a", meeting.id));
-            std::fs::write(&upload, &bytes).unwrap();
-            let state = process_phone_upload(
-                &service,
-                &store,
-                &meeting,
-                &upload,
-                AudioRetention::DeleteAfterProcessing,
-            )
-            .await;
-            assert_eq!(state, MeetingState::Ready, "{fixture}");
-            assert_eq!(
-                service.damaged_audio(meeting.id).salvaged,
-                salvaged,
-                "{fixture}"
-            );
-            let stamped = store.asset(meeting.id).unwrap().unwrap().expires_at;
-            assert_eq!(stamped.is_none(), salvaged, "{fixture}: {stamped:?}");
-
-            let mut detail = steno_host::main_window::MeetingDetailViewModel::new(
-                meeting.id,
-                Some(&store.settings().unwrap()),
-            );
-            detail.reload(&store, &steno_host::services::RealFileSystem, &service);
-            let status = detail.recording_status();
-            if salvaged {
-                assert_eq!(
-                    status,
-                    Some(steno_host::main_window::RecordingStatus::KeptIncomplete),
-                    "{fixture}"
-                );
-                run_sweep(&RetentionSweep::new(store.clone()));
-                assert_eq!(std::fs::read(&upload).unwrap(), bytes, "kept as it was");
-            } else {
-                assert!(
-                    matches!(
-                        status,
-                        Some(steno_host::main_window::RecordingStatus::DeletesOn(_))
-                    ),
-                    "{fixture}: {status:?}"
-                );
-            }
-        }
-    }
-
-    /// An unparsable damage record makes every recording possibly damaged,
-    /// while the warning shows no damage.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_unreadable_damage_record_makes_every_recording_possibly_damaged() {
-        let (dir, store) = temp_store();
-        std::fs::write(
-            dir.path().join(steno_pipeline::DamagedAudio::FILE_NAME),
-            b"{",
-        )
-        .unwrap();
-        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(dir.path()));
-        let service = pipeline_over(
-            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
-            &store,
-        );
-        let meeting = Uuid::new_v4();
-        assert!(service.audio_may_be_damaged(meeting));
-        assert!(service.damaged_audio(meeting).is_none());
-    }
-
-    /// Damage that cannot be written down fails the meeting at decode, so
-    /// the recording stays; a clean one processes.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn damage_that_cannot_be_written_fails_the_meeting() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let (dir, store) = temp_store();
-        let support = dir.path().join("support");
-        std::fs::create_dir(&support).unwrap();
-        let damaged = Arc::new(steno_pipeline::DamagedAudio::in_directory(&support));
-        let service = pipeline_over(
-            fake_dependencies(&store, "fake-engine").with_damaged_audio(damaged),
-            &store,
-        );
-        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let meeting = phone_meeting();
-        let clean = process_phone_fixture(
-            &service,
-            &store,
-            dir.path(),
-            &meeting,
-            "tone-440-44k1-500ms.m4a",
-        )
-        .await;
-        let second = phone_meeting();
-        let damaged = process_phone_fixture(
-            &service,
-            &store,
-            dir.path(),
-            &second,
-            "tone-440-44k1-500ms-damaged.m4a",
-        )
-        .await;
-        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(clean, MeetingState::Ready);
-        // Root writes anywhere: then the meeting is ready.
-        if support
-            .join(steno_pipeline::DamagedAudio::FILE_NAME)
-            .exists()
-        {
-            return;
-        }
-        assert!(
-            damaged.failure_reason().is_some_and(|reason| reason
-                .contains("what could not be read in the recording could not be saved")),
-            "{damaged:?}"
-        );
-        let asset = store.asset(second.id).unwrap().expect("the asset");
-        let master = steno_core::paths::file_url_path(&asset.url).unwrap();
-        assert!(master.exists(), "the recording stays");
-    }
-
-    /// A summary re-run starts the count of launch re-exports from 0.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_re_run_resets_the_launch_re_export_count() {
-        let (dir, store) = temp_store();
-        let id = ready_meeting(&store).id;
-        let path = dir.path().join(ExportRetries::FILE_NAME);
-        std::fs::write(&path, format!("{{\"{id}\": {}}}", ExportRetries::LIMIT)).unwrap();
-        let (summarizer, release, asked) = held();
-        let mut service = pipeline(&store, Some(Arc::new(summarizer)));
-        service.export_retries = Arc::new(ExportRetries::new(&path));
-        let service = Arc::new(service);
-        let first = service.clone();
-        assert_eq!(call(move || first.rerun_summary(id, "default")), Ok(()));
-        assert!(!service.export_keeps_failing(id));
-        assert_eq!(ExportRetries::new(&path).count(id), 0);
-        reached(&asked).await;
-        release.notify_one();
-        eventually("the re-run released its meeting", || {
-            service.pipeline.current().in_flight().is_empty()
-        })
-        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1118,7 +853,6 @@ mod tests {
                 tokio::runtime::Handle::current(),
             )),
             sweep: RetentionSweep::new(store.clone()),
-            export_retries: Arc::new(ExportRetries::in_memory()),
         });
         let first = service.clone();
         assert_eq!(call(move || first.redeliver(id)), Ok(()));
@@ -1132,41 +866,6 @@ mod tests {
         );
         release.notify_one();
         eventually("the retired re-export released its meeting", || {
-            service.pipeline.current().in_flight().is_empty()
-        })
-        .await;
-    }
-
-    /// Export again resets the count of launch re-exports, on disk too; a
-    /// refused one leaves it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn export_again_resets_the_launch_re_export_count() {
-        let (dir, store) = temp_store();
-        let id = ready_meeting(&store).id;
-        let path = dir.path().join(ExportRetries::FILE_NAME);
-        std::fs::write(&path, format!("{{\"{id}\": {}}}", ExportRetries::LIMIT)).unwrap();
-        let (mut service, release, asked) = held_re_exports(&store, false);
-        service.export_retries = Arc::new(ExportRetries::new(&path));
-        let service = Arc::new(service);
-        assert!(service.export_keeps_failing(id));
-
-        let busy = service.pipeline.current().claim_redeliver(id).unwrap();
-        let refused = service.clone();
-        assert!(call(move || refused.redeliver(id)).is_err());
-        assert!(
-            service.export_keeps_failing(id),
-            "a refused one resets nothing"
-        );
-        assert_eq!(ExportRetries::new(&path).count(id), ExportRetries::LIMIT);
-        drop(busy);
-
-        let first = service.clone();
-        assert_eq!(call(move || first.redeliver(id)), Ok(()));
-        assert!(!service.export_keeps_failing(id));
-        assert_eq!(ExportRetries::new(&path).count(id), 0);
-        reached(&asked).await;
-        release.notify_one();
-        eventually("the re-export released its meeting", || {
             service.pipeline.current().in_flight().is_empty()
         })
         .await;
@@ -1819,7 +1518,6 @@ mod tests {
         let service = Arc::new(HostPipeline {
             pipeline: Arc::new(current),
             sweep: RetentionSweep::new(store.clone()),
-            export_retries: Arc::new(ExportRetries::in_memory()),
         });
         let waiting = enqueue_call(dir.path(), &service.pipeline.current());
         service.pipeline.current().wait_until_idle().await;
@@ -2465,7 +2163,6 @@ mod tests {
                 },
             ),
             sweep: RetentionSweep::new(store.clone()),
-            export_retries: Arc::new(ExportRetries::in_memory()),
         });
         store
             .on_writer(|connection| connection.busy_timeout(Duration::ZERO))

@@ -20,8 +20,7 @@ use steno_host::services::{FileSystem, LeftRecording, Recorder};
 
 use crate::recorder::MakeCaptureSession;
 use crate::testing::{
-    an_hour_later, app_decoding, app_falling_back, app_over_fakes, app_warming_up,
-    synthetic_capture, synthetic_capture_through,
+    an_hour_later, app_decoding, app_over_fakes, synthetic_capture, synthetic_capture_through,
 };
 
 /// The directory the child records under; unset outside a child.
@@ -570,417 +569,6 @@ async fn a_kill_after_the_folder_changed_recovers_from_the_folder_it_started_in(
     );
 }
 
-/// The child's speech engine for the warm-up test: its load writes
-/// `loading`, saying whether the warm-up's mark was on disk, and waits for
-/// the kill, as a load a `CoreML` abort ends would never return.
-struct LoadUntilKilled {
-    inner: steno_core::testing::FakeSpeechEngine,
-    loading: PathBuf,
-    mark: PathBuf,
-}
-
-impl LoadUntilKilled {
-    /// What `loading` says when the mark was on disk as the load started.
-    const MARKED: &[u8] = b"marked";
-    /// What `loading` says when it was not.
-    const UNMARKED: &[u8] = b"unmarked";
-}
-
-#[steno_core::async_trait]
-impl steno_core::SpeechEngine for LoadUntilKilled {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-
-    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
-        self.inner.supported_languages()
-    }
-
-    async fn prepare(&self) -> steno_core::BoundaryResult<()> {
-        let marked = self.mark.exists();
-        Reports::append(
-            &self.loading,
-            if marked { Self::MARKED } else { Self::UNMARKED },
-        );
-        loop {
-            std::thread::park();
-        }
-    }
-
-    async fn transcribe(
-        &self,
-        audio: &steno_core::AudioBuffer16k,
-        hint: Option<&steno_core::LanguageTag>,
-    ) -> steno_core::BoundaryResult<Vec<steno_core::RawSegment>> {
-        self.inner.transcribe(audio, hint).await
-    }
-}
-
-/// The child's app over `directory`, on a [`LoadUntilKilled`] engine in
-/// this process ([`app_warming_up`]).
-fn loading_until_killed(directory: &Path) -> crate::App {
-    let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
-    let engine = Arc::new(LoadUntilKilled {
-        inner: steno_core::testing::FakeSpeechEngine::default(),
-        loading: directory.join("loading"),
-        mark: warm_up_mark(directory),
-    });
-    app_warming_up(directory, &store, synthetic_capture(), engine)
-}
-
-/// The warm-up's mark in the support directory of `directory`.
-fn warm_up_mark(directory: &Path) -> PathBuf {
-    directory
-        .join("support")
-        .join(steno_pipeline::WarmUpMark::FILE_NAME)
-}
-
-/// The child: starts a recording whose warm-up loads the in-process
-/// engine, and is killed in that load. Passes at once outside a child.
-#[test]
-#[ignore = "the kill tests run it in a child process"]
-fn child_warms_up_until_killed() {
-    let Ok(directory) = std::env::var(DIRECTORY) else {
-        return;
-    };
-    die_with_the_parent();
-    let directory = PathBuf::from(directory);
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let _entered = runtime.enter();
-    let app = loading_until_killed(&directory);
-    app.recorder.start(CaptureMode::InPerson, None);
-    assert_eq!(app.recorder.status().error, None);
-    loop {
-        std::thread::park();
-    }
-}
-
-/// Records in person for `seconds`; the meeting's id.
-fn record(app: &crate::App, seconds: f64) -> uuid::Uuid {
-    tokio::task::block_in_place(|| {
-        app.recorder.start(CaptureMode::InPerson, None);
-        let status = app.recorder.status();
-        assert_eq!(status.error, None);
-        std::thread::sleep(Duration::from_secs_f64(seconds));
-        assert_eq!(
-            app.recorder.status().state,
-            steno_bridge::RecordingState::Recording
-        );
-        app.recorder.stop();
-        status.meeting_id.expect("a meeting")
-    })
-}
-
-/// A warm-up killed in its model load leaves its mark, so the next launch
-/// skips the warm-up; the recording's processing loads the engine, clears
-/// the mark, and the recording after it warms up again. This app has no
-/// speech fallback, to show the mark alone.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_warm_up_killed_turns_the_warm_up_off_until_a_meeting_loads_the_models() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut child = spawn_test(
-        "kill_tests::child_warms_up_until_killed",
-        dir.path(),
-        Gate::Open.name(),
-    );
-    let loading = dir.path().join("loading");
-    kill_when(&mut child, dir.path(), "the warm-up's load", || {
-        std::fs::read(&loading).is_ok_and(|said| !said.is_empty())
-    });
-    assert_eq!(
-        std::fs::read(&loading).unwrap(),
-        LoadUntilKilled::MARKED,
-        "the mark was on disk before the load started"
-    );
-    assert!(
-        warm_up_mark(dir.path()).exists(),
-        "the mark outlived the kill"
-    );
-
-    let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
-    let engine = Arc::new(steno_core::testing::FakeSpeechEngine::default());
-    let app = app_warming_up(dir.path(), &store, synthetic_capture(), engine.clone());
-    let current = app.pipeline.current();
-    assert!(current.dependencies().warm_up_mark.skipping());
-
-    let skipped = record(&app, 0.5);
-    current.wait_until_idle().await;
-    let meeting = store.meeting(skipped).unwrap().unwrap();
-    assert_eq!(meeting.end_reason, Some(RecordingEndReason::Manual));
-    assert_eq!(meeting.state, MeetingState::Ready);
-    assert!(meeting.duration > 0.0);
-    assert_eq!(
-        engine.preparations.count(),
-        1,
-        "the processing's load alone: no warm-up while recording"
-    );
-    assert!(
-        !warm_up_mark(dir.path()).exists(),
-        "the load cleared the mark"
-    );
-    assert!(!current.dependencies().warm_up_mark.skipping());
-
-    let warmed = record(&app, 0.5);
-    current.wait_until_idle().await;
-    assert_eq!(
-        store.meeting(warmed).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
-    assert_eq!(
-        engine.preparations.count(),
-        3,
-        "this recording's warm-up and its processing's load"
-    );
-    assert!(!warm_up_mark(dir.path()).exists());
-}
-
-/// The child: processes the asset in `bad` on an in-process engine whose
-/// load never returns, and is killed in it. Passes at once outside a child.
-#[test]
-#[ignore = "the kill tests run it in a child process"]
-fn child_loads_the_engine_until_killed() {
-    let Ok(directory) = std::env::var(DIRECTORY) else {
-        return;
-    };
-    die_with_the_parent();
-    let directory = PathBuf::from(directory);
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let _entered = runtime.enter();
-    let app = loading_until_killed(&directory);
-    let asset_id: uuid::Uuid = std::fs::read_to_string(directory.join("bad"))
-        .unwrap()
-        .parse()
-        .unwrap();
-    let _ = runtime.block_on(app.pipeline.current().process(asset_id));
-    unreachable!("the load never returns");
-}
-
-/// A speech engine that counts its calls, and whether a recording was
-/// under way at each.
-#[derive(Default)]
-struct Counting {
-    inner: steno_core::testing::FakeSpeechEngine,
-    /// The pipelines' view of the recorder of the app the engine runs in.
-    live: std::sync::Mutex<Option<steno_pipeline::LiveRecording>>,
-    beside_a_recording: std::sync::atomic::AtomicUsize,
-}
-
-impl Counting {
-    fn calls(&self) -> usize {
-        self.inner.preparations.count() + self.inner.transcriptions.count()
-    }
-
-    /// The calls made while a recording was under way.
-    fn beside_a_recording(&self) -> usize {
-        self.beside_a_recording
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    fn note(&self) {
-        if self
-            .live
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(steno_pipeline::LiveRecording::is_live)
-        {
-            self.beside_a_recording
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-}
-
-#[steno_core::async_trait]
-impl steno_core::SpeechEngine for Counting {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-
-    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
-        self.inner.supported_languages()
-    }
-
-    async fn prepare(&self) -> steno_core::BoundaryResult<()> {
-        self.note();
-        self.inner.prepare().await
-    }
-
-    async fn transcribe(
-        &self,
-        audio: &steno_core::AudioBuffer16k,
-        hint: Option<&steno_core::LanguageTag>,
-    ) -> steno_core::BoundaryResult<Vec<steno_core::RawSegment>> {
-        self.note();
-        self.inner.transcribe(audio, hint).await
-    }
-}
-
-/// The app after `dir`'s child over two counting engines, `CoreML`'s and
-/// the sidecar's ([`app_falling_back`]).
-fn falling_back(
-    dir: &Path,
-    coreml: &Arc<Counting>,
-    sidecar: &Arc<Counting>,
-) -> (Arc<Store>, crate::App) {
-    let store = Arc::new(Store::open(dir.join("steno.sqlite")).unwrap());
-    let app = app_falling_back(dir, &store, coreml.clone(), sidecar.clone());
-    for engine in [coreml, sidecar] {
-        *engine.live.lock().unwrap() = Some(app.pipeline.live_recording().clone());
-    }
-    (store, app)
-}
-
-/// [`falling_back`], launched, its queued meetings processed.
-async fn falling_back_after(
-    dir: &Path,
-    coreml: &Arc<Counting>,
-    sidecar: &Arc<Counting>,
-) -> (Arc<Store>, crate::App) {
-    let (store, app) = falling_back(dir, coreml, sidecar);
-    (store, launched(app).await)
-}
-
-/// Records half a second on `app` and waits for its processing to succeed.
-async fn recorded_and_processed(app: &crate::App, store: &Store) {
-    let recorded = record(app, 0.5);
-    app.pipeline.current().wait_until_idle().await;
-    assert_eq!(
-        store.meeting(recorded).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
-}
-
-/// A process killed in `CoreML`'s load during processing turns the speech
-/// sidecar on in its place: the next launch processes that meeting in the
-/// sidecar, and later recordings load nothing in the app's process. Only
-/// the user turns `CoreML` back on; then a launch does not turn the
-/// sidecar on again for the same marks.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_coreml_load_killed_moves_the_meetings_to_the_speech_sidecar_until_the_user_says() {
-    let dir = tempfile::tempdir().unwrap();
-    let (bad, bad_asset) = {
-        let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
-        queued_call(&store, dir.path())
-    };
-    std::fs::write(dir.path().join("bad"), bad_asset.id.to_string()).unwrap();
-    let mut child = spawn_test(
-        "kill_tests::child_loads_the_engine_until_killed",
-        dir.path(),
-        Gate::Open.name(),
-    );
-    let loading = dir.path().join("loading");
-    kill_when(&mut child, dir.path(), "the job's load", || {
-        std::fs::read(&loading).is_ok_and(|said| !said.is_empty())
-    });
-    let marks = dir
-        .path()
-        .join("support")
-        .join(steno_pipeline::ReadingMarks::FOLDER);
-    assert_eq!(
-        std::fs::read_dir(&marks).unwrap().count(),
-        1,
-        "the load's mark outlived the kill"
-    );
-
-    let coreml = Arc::new(Counting::default());
-    let sidecar = Arc::new(Counting::default());
-    let (store, app) = falling_back_after(dir.path(), &coreml, &sidecar).await;
-    assert!(app.services.speech_models.speech_fallback());
-    assert_eq!(
-        store.meeting(bad.id).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
-    assert_eq!(coreml.calls(), 0, "nothing ran in the app's process");
-    assert_eq!(sidecar.inner.transcriptions.count(), 2, "both lanes");
-
-    recorded_and_processed(&app, &store).await;
-    assert_eq!(coreml.calls(), 0, "no warm-up and no load in the app");
-    assert_eq!(sidecar.inner.transcriptions.count(), 3);
-    drop(app);
-
-    let (_, app) = falling_back_after(dir.path(), &coreml, &sidecar).await;
-    assert!(app.services.speech_models.speech_fallback(), "it stays on");
-
-    app.services.speech_models.end_speech_fallback().unwrap();
-    app.pipeline.reload().unwrap();
-    assert!(!app.services.speech_models.speech_fallback());
-    recorded_and_processed(&app, &store).await;
-    assert_eq!(coreml.inner.transcriptions.count(), 1, "CoreML again");
-    assert_eq!(
-        coreml.beside_a_recording(),
-        0,
-        "no warm-up beside the recording until a job has loaded CoreML"
-    );
-    recorded_and_processed(&app, &store).await;
-    assert_eq!(
-        coreml.beside_a_recording(),
-        1,
-        "the job's load brought the warm-up back"
-    );
-    drop(app);
-
-    let (_, app) = falling_back_after(dir.path(), &coreml, &sidecar).await;
-    assert!(
-        !app.services.speech_models.speech_fallback(),
-        "the marks it saw do not turn it on again"
-    );
-}
-
-/// A warm-up killed in its load turns the speech sidecar on too. Once the
-/// user turns `CoreML` back on, the warm-up stays off until a meeting's
-/// processing has loaded it, so that first load never runs beside a
-/// recording.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_warm_up_killed_moves_the_meetings_to_the_speech_sidecar_until_the_user_says() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut child = spawn_test(
-        "kill_tests::child_warms_up_until_killed",
-        dir.path(),
-        Gate::Open.name(),
-    );
-    let loading = dir.path().join("loading");
-    kill_when(&mut child, dir.path(), "the warm-up's load", || {
-        std::fs::read(&loading).is_ok_and(|said| !said.is_empty())
-    });
-
-    let coreml = Arc::new(Counting::default());
-    let sidecar = Arc::new(Counting::default());
-    let (store, app) = falling_back(dir.path(), &coreml, &sidecar);
-    assert!(app.services.speech_models.speech_fallback());
-    recorded_and_processed(&app, &store).await;
-    assert_eq!(coreml.calls(), 0, "nothing ran in the app's process");
-    assert_eq!(sidecar.inner.transcriptions.count(), 1);
-
-    app.services.speech_models.end_speech_fallback().unwrap();
-    app.pipeline.reload().unwrap();
-    recorded_and_processed(&app, &store).await;
-    assert_eq!(
-        coreml.inner.preparations.count(),
-        1,
-        "the processing's load, not a warm-up"
-    );
-    assert_eq!(
-        coreml.beside_a_recording(),
-        0,
-        "nothing ran in the app's process beside the recording"
-    );
-    assert!(!warm_up_mark(dir.path()).exists(), "the load cleared it");
-
-    recorded_and_processed(&app, &store).await;
-    assert_eq!(coreml.beside_a_recording(), 1, "this recording's warm-up");
-    drop(app);
-    let (_, app) = falling_back(dir.path(), &coreml, &sidecar);
-    assert!(!app.services.speech_models.speech_fallback());
-}
-
 /// Where the child's delete waits to be killed, between two of the
 /// delete's steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1199,19 +787,20 @@ fn master_of(directory: &Path, meeting_id: uuid::Uuid) -> PathBuf {
         .master(steno_core::AudioFormat::Caf48kFloat32)
 }
 
-/// Asserts that the launch lists the meeting once, ready, with its
+/// Asserts that the launch lists the meeting once, in `state`, with its
 /// recording on disk.
 fn assert_listed_with_its_recording(
     directory: &Path,
     meeting_id: uuid::Uuid,
     listed: &[steno_core::Meeting],
+    state: &MeetingState,
 ) {
     assert_eq!(
         listed.iter().map(|meeting| meeting.id).collect::<Vec<_>>(),
         [meeting_id],
         "the meeting, listed once"
     );
-    assert_eq!(listed[0].state, MeetingState::Ready);
+    assert_eq!(&listed[0].state, state);
     let store = Store::open(directory.join("steno.sqlite")).unwrap();
     let asset = store.asset(meeting_id).unwrap().expect("its recording");
     assert_eq!(
@@ -1230,7 +819,7 @@ fn assert_listed_with_its_recording(
 async fn a_kill_after_the_entry_is_forgotten_keeps_the_meeting() {
     let dir = tempfile::tempdir().unwrap();
     let (meeting_id, listed) = delete_killed_at(dir.path(), DeleteGate::BeforeCommit).await;
-    assert_listed_with_its_recording(dir.path(), meeting_id, &listed);
+    assert_listed_with_its_recording(dir.path(), meeting_id, &listed, &MeetingState::Ready);
 }
 
 /// Killed after the delete committed and before its files went: the next
@@ -1247,13 +836,16 @@ async fn a_kill_after_the_delete_commits_never_brings_the_meeting_back() {
 }
 
 /// A refused delete killed before the forgotten entry was recorded again:
-/// the next launch lists the kept meeting with its recording, once, and
-/// processes it.
+/// the next launch lists the kept meeting with its recording, once, failed
+/// as one the kill ended mid-run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_before_a_kept_meetings_entry_is_restored_keeps_it() {
     let dir = tempfile::tempdir().unwrap();
     let (meeting_id, listed) = delete_killed_at(dir.path(), DeleteGate::BeforeRestore).await;
-    assert_listed_with_its_recording(dir.path(), meeting_id, &listed);
+    let failed = MeetingState::Failed {
+        reason: steno_pipeline::CLOSED_WHILE_PROCESSING.to_owned(),
+    };
+    assert_listed_with_its_recording(dir.path(), meeting_id, &listed, &failed);
 }
 
 /// The child's decoder for the reading test: a decode writes `reading` and
@@ -1332,46 +924,16 @@ fn queued_call(store: &Store, directory: &Path) -> (steno_core::Meeting, steno_c
     (meeting, asset)
 }
 
-/// Every file of `asset`'s meeting folder with its bytes.
-fn recording_files(asset: &steno_core::AudioAsset) -> Vec<(PathBuf, Vec<u8>)> {
-    let master = file_url_path(&asset.url).unwrap();
-    let mut files: Vec<_> = std::fs::read_dir(master.parent().unwrap())
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .map(|path| {
-            let bytes = std::fs::read(&path).unwrap();
-            (path, bytes)
-        })
-        .collect();
-    files.sort();
-    files
-}
-
-/// Children that each process `bad` and are killed in its decode, `kills`
-/// in a row over the marks the one before left. Returns the marks' folder.
-fn killed_in_the_decode(dir: &Path, bad: &steno_core::AudioAsset, kills: usize) -> PathBuf {
-    let marks = dir
-        .join("support")
-        .join(steno_pipeline::ReadingMarks::FOLDER);
+/// A child that processes `bad` and is killed in its decode.
+fn killed_in_the_decode(dir: &Path, bad: &steno_core::AudioAsset) {
     std::fs::write(dir.join("bad"), bad.id.to_string()).unwrap();
-    for kill in 1..=kills {
-        let reading = dir.join("reading");
-        let _ = std::fs::remove_file(&reading);
-        let mut child = spawn_test(
-            "kill_tests::child_decodes_until_killed",
-            dir,
-            Gate::Open.name(),
-        );
-        kill_when(&mut child, dir, "the decode", || reading.exists());
-        assert_eq!(
-            std::fs::read_dir(&marks).unwrap().count(),
-            kill,
-            "each kill's mark outlived it"
-        );
-    }
-    marks
+    let reading = dir.join("reading");
+    let mut child = spawn_test(
+        "kill_tests::child_decodes_until_killed",
+        dir,
+        Gate::Open.name(),
+    );
+    kill_when(&mut child, dir, "the decode", || reading.exists());
 }
 
 /// The next launch over the database the children used.
@@ -1390,10 +952,11 @@ async fn launched(app: crate::App) -> crate::App {
     app
 }
 
-/// A process killed once while it reads a recording costs that meeting
-/// nothing: the next launch processes it again, and its mark goes.
+/// A process killed while it reads a recording leaves that meeting
+/// `processing`: the next launch fails it, keeps its files and still
+/// processes the other queued meeting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_read_killed_once_is_processed_at_the_next_launch() {
+async fn a_read_killed_fails_its_meeting_at_the_next_launch() {
     let dir = tempfile::tempdir().unwrap();
     let (bad, bad_asset, good) = {
         let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
@@ -1401,142 +964,18 @@ async fn a_read_killed_once_is_processed_at_the_next_launch() {
         let (good, _) = queued_call(&store, dir.path());
         (bad, bad_asset, good)
     };
-    let marks = killed_in_the_decode(dir.path(), &bad_asset, 1);
-
-    let (store, app) = launched_after(dir.path()).await;
-    for meeting in [bad.id, good.id] {
-        assert_eq!(
-            store.meeting(meeting).unwrap().unwrap().state,
-            MeetingState::Ready
-        );
-    }
-    assert!(
-        !app.pipeline
-            .current()
-            .dependencies()
-            .reading_marks
-            .holds(bad.id)
-    );
-    assert_eq!(std::fs::read_dir(&marks).unwrap().count(), 0);
-}
-
-/// Killed twice in a row while reading the same recording, the meeting is
-/// quarantined at the next launch: it fails, its files are kept, and
-/// nothing reads it again until Process again, which clears the marks.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_read_killed_twice_quarantines_its_meeting_and_the_launch_runs_the_others() {
-    let dir = tempfile::tempdir().unwrap();
-    let (bad, bad_asset, good) = {
-        let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
-        let (bad, bad_asset) = queued_call(&store, dir.path());
-        let (good, _) = queued_call(&store, dir.path());
-        (bad, bad_asset, good)
-    };
-    let before = recording_files(&bad_asset);
-    let marks = killed_in_the_decode(dir.path(), &bad_asset, 2);
-
-    let (store, app) = launched_after(dir.path()).await;
-    let current = app.pipeline.current();
-    assert_eq!(
-        store.meeting(bad.id).unwrap().unwrap().state,
-        MeetingState::Failed {
-            reason: steno_pipeline::READ_STOPPED.to_owned()
-        }
-    );
-    assert_eq!(recording_files(&bad_asset), before, "kept as it was");
-    assert_eq!(
-        store.meeting(good.id).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
-    assert!(current.dependencies().reading_marks.holds(bad.id));
-
-    current.process_again(bad.id).unwrap();
-    current.wait_until_idle().await;
-    assert_eq!(
-        store.meeting(bad.id).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
-    assert!(!current.dependencies().reading_marks.holds(bad.id));
-    assert_eq!(std::fs::read_dir(&marks).unwrap().count(), 0);
-}
-
-/// The decoder of the quit test: a decode writes `reading` and waits until
-/// `open` is there, or for 30 seconds.
-struct DecodeUntilOpened {
-    reading: PathBuf,
-    open: PathBuf,
-}
-
-#[steno_core::async_trait]
-impl steno_core::AudioDecoder for DecodeUntilOpened {
-    async fn decode(
-        &self,
-        _: &steno_core::AudioAsset,
-        _: steno_core::AudioLane,
-    ) -> steno_core::BoundaryResult<steno_core::AudioBuffer16k> {
-        Reports::append(&self.reading, b"1");
-        let started = Instant::now();
-        while !self.open.exists() && started.elapsed() < Duration::from_secs(30) {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        Err("the app quit".into())
-    }
-
-    fn mixdown_format(&self) -> steno_core::AudioFormat {
-        steno_core::AudioFormat::Wav16kInt16
-    }
-
-    async fn mixdown(
-        &self,
-        _: &steno_core::AudioAsset,
-        _: &Path,
-    ) -> steno_core::BoundaryResult<()> {
-        Ok(())
-    }
-}
-
-/// The app's own quit during a read removes its mark, so the next launch
-/// counts nothing against the meeting.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_apps_quit_during_a_read_leaves_no_mark() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
-    let (meeting, asset) = queued_call(&store, dir.path());
-    let reading = dir.path().join("reading");
-    let open = dir.path().join("open");
-    let decoder = Arc::new(DecodeUntilOpened {
-        reading: reading.clone(),
-        open: open.clone(),
-    });
-    let app = app_decoding(dir.path(), &store, decoder);
-    let pipeline = app.pipeline.current();
-    let processing = tokio::spawn(async move { pipeline.process(asset.id).await });
-    let marks = dir
-        .path()
-        .join("support")
-        .join(steno_pipeline::ReadingMarks::FOLDER);
-    let started = Instant::now();
-    while !reading.exists() {
-        assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "the decode began"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    assert_eq!(std::fs::read_dir(&marks).unwrap().count(), 1);
-    app.shutdown();
-    assert_eq!(
-        std::fs::read_dir(&marks).unwrap().count(),
-        0,
-        "the quit removed it"
-    );
-    std::fs::write(&open, b"").unwrap();
-    let _ = processing.await;
-    drop(app);
+    killed_in_the_decode(dir.path(), &bad_asset);
 
     let (store, _app) = launched_after(dir.path()).await;
     assert_eq!(
-        store.meeting(meeting.id).unwrap().unwrap().state,
+        store.meeting(bad.id).unwrap().unwrap().state,
+        MeetingState::Failed {
+            reason: steno_pipeline::CLOSED_WHILE_PROCESSING.to_owned()
+        }
+    );
+    assert!(file_url_path(&bad_asset.url).unwrap().exists());
+    assert_eq!(
+        store.meeting(good.id).unwrap().unwrap().state,
         MeetingState::Ready
     );
 }

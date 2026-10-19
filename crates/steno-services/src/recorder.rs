@@ -1200,12 +1200,9 @@ impl CaptureRecorder {
     /// ([`BuiltEngine`]) and the diarizer are installed, so it never
     /// downloads. Where the speech sidecar runs the engine
     /// ([`SpeechRuntime`]), only the diarizer's check runs: the child would
-    /// hold its 2.2 GB through the whole recording. The in-process warm-up
-    /// is marked on disk while it runs ([`WarmUpMark`]), so one that took
-    /// the app down turns itself off until processing loads the models.
+    /// hold its 2.2 GB through the whole recording.
     ///
     /// [`BuiltEngine`]: crate::pipeline::BuiltEngine
-    /// [`WarmUpMark`]: steno_pipeline::WarmUpMark
     fn warm_up_if_installed(&self) {
         let (pipeline, engine) = self.pipeline.current_with_engine();
         if !(self.speech_models.engine_installed(&engine.engine_id)
@@ -1216,7 +1213,7 @@ impl CaptureRecorder {
         let in_process = engine.runtime == SpeechRuntime::CoreMlInProcess;
         self.runtime.spawn(async move {
             let warmed = if in_process {
-                pipeline.warm_up_while_recording().await
+                pipeline.warm_up().await
             } else {
                 pipeline.warm_up_diarizer().await
             };
@@ -4187,9 +4184,8 @@ mod tests {
         const FEED: Duration = Duration::from_millis(100);
         const SHARED_READ: Duration = Duration::from_secs(3);
         let harness = harness(&[]);
-        let shown_meeting = steno_core::testing::sample_data::meeting();
-        harness.store.save_meeting(&shown_meeting).unwrap();
-        let pipeline = Arc::new(crate::testing::GatedPipeline::default());
+        let shown_meeting = crate::testing::shown_meeting(&harness.store);
+        let pipeline = Arc::new(crate::testing::GatedFiles::default());
         let hosted =
             crate::testing::hosted_over(&harness.store, &harness.recorder, Some(pipeline.clone()));
         let own = hosted.host.own_store();

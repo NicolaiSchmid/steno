@@ -1,6 +1,6 @@
 //! Where one meeting's audio files live: `<audio folder>/<MEETING-UUID>/`
 //! with `recording.caf`, one `<lane>.wav` per lane, `audio.<ext>` for the
-//! mixdown, `speakers/` for the sample clips and `.processing-runs`.
+//! mixdown and `speakers/` for the sample clips.
 
 use std::path::{Path, PathBuf};
 
@@ -95,12 +95,6 @@ impl RecordingLayout {
             uuid_string(speaker_id),
             uuid_string(run_id)
         ))
-    }
-
-    /// `.processing-runs`, the count of runs that ended with the app mid-processing.
-    #[must_use]
-    pub fn processing_runs(&self) -> PathBuf {
-        self.directory.join(".processing-runs")
     }
 
     /// Creates `directory` (and `speakers/` when asked) if needed.
