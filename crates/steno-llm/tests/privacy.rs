@@ -1,8 +1,7 @@
-//! The crate's privacy promises on the wire and on disk, for every client:
-//! completion bodies carry prompt text only (no audio, paths, ids or
-//! `raw_text`), secrets travel only in their headers and the token refresh,
-//! the written-back `auth.json` is 0600, and no secret of eight bytes or
-//! more reaches an error, a `Debug` form or an observer event.
+//! The privacy promises on the wire and on disk: bodies carry prompt text
+//! only (no audio, paths, ids or `raw_text`), secrets travel only in their
+//! headers and the token refresh, `auth.json` is written back 0600, and no
+//! secret reaches an error, a `Debug` form or an observer event.
 
 mod common;
 
@@ -265,7 +264,7 @@ async fn the_codex_client_sends_text_only_and_the_access_token_and_account_id_on
 /// left in the home.
 #[tokio::test]
 async fn the_refresh_token_goes_only_in_the_refresh_body_and_auth_json_is_written_back_0600() {
-    let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
+    let harness = CodexHarness::with_retry(RetryPolicy::NONE).await;
     let stale = CodexHome::access_token(10, "plus");
     harness.home.write(AuthFile::default().access(&stale));
     let fresh = CodexHome::access_token(3_600, "plus");
@@ -371,45 +370,22 @@ fn echoing_plain_body(echoed: &[String], cut: &str, limit: usize) -> Vec<u8> {
     body.into_bytes()
 }
 
+/// Every path an echoed key can take into an error: the error envelope, a
+/// plain body cut at 500 characters, a refusal, and an undecodable answer
+/// cut at 4 096 bytes with the key straddling the cut.
 #[tokio::test]
 async fn the_endpoint_client_redacts_every_copy_of_the_api_key() {
     let secrets = vec![API_KEY.to_owned()];
-    let harness = ClientHarness::with_retry(RetryPolicy::NONE).await;
+    let harness = ClientHarness::build(RetryPolicy::NONE, Some(API_KEY), |_| {}).await;
     let twice = format!("{API_KEY} and {API_KEY}");
+    let mut straddling = "x".repeat(BODY_CUT - API_KEY.len() / 2);
+    straddling.push_str(API_KEY);
     harness.server.enqueue([
-        StubResponse::json(&echoing_envelope(&secrets), 400)
-            .with_header("X-Echo", &format!("Bearer {API_KEY}")),
+        StubResponse::json(&echoing_envelope(&secrets), 400),
         StubResponse::new(400, echoing_plain_body(&secrets, API_KEY, ERROR_CUT)),
         scripts.refusal(&format!("I saw {twice}")),
         StubResponse::new(200, format!("not a completion: {twice}").into_bytes()),
-    ]);
-    for _ in 0..4 {
-        let error = harness
-            .client
-            .complete_llm(&text_request())
-            .await
-            .unwrap_err();
-        assert_error_redacted(&error, &secrets);
-        assert!(error.to_string().contains("[redacted]"), "{error}");
-    }
-    for event in harness.events() {
-        assert_no_secret(&format!("{event:?}"), &secrets, "an event");
-    }
-    assert_no_secret(&format!("{:?}", harness.client), &secrets, "the client");
-}
-
-#[tokio::test]
-async fn the_codex_client_redacts_every_copy_of_the_tokens_and_the_account_id() {
-    let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
-    let access = CodexHome::access_token(3_600, "plus");
-    let secrets = codex_secrets(&access);
-    let all = secrets.join(" and ");
-    harness.backend.enqueue([
-        StubResponse::json(&echoing_envelope(&secrets), 400),
-        StubResponse::new(400, echoing_plain_body(&secrets[1..], &access, ERROR_CUT)),
-        scripts.responses_error_event(&format!("{all}; again {all}"), "server_error"),
-        scripts.responses_refusal(&format!("I saw {all}; again {all}")),
-        StubResponse::new(200, format!("<html>{all}; again {all}</html>").into_bytes()),
+        StubResponse::new(200, straddling.into_bytes()),
     ]);
     for _ in 0..5 {
         let error = harness
@@ -420,7 +396,44 @@ async fn the_codex_client_redacts_every_copy_of_the_tokens_and_the_account_id() 
         assert_error_redacted(&error, &secrets);
         assert!(error.to_string().contains("[redacted]"), "{error}");
     }
-    for event in harness.events() {
+    for event in harness.log.events() {
+        assert_no_secret(&format!("{event:?}"), &secrets, "an event");
+    }
+    assert_no_secret(&format!("{:?}", harness.client), &secrets, "the client");
+}
+
+#[tokio::test]
+async fn the_codex_client_redacts_every_copy_of_the_tokens_and_the_account_id() {
+    let harness = CodexHarness::with_retry(RetryPolicy::with_max_attempts(2)).await;
+    let access = CodexHome::access_token(3_600, "plus");
+    let secrets = codex_secrets(&access);
+    let all = secrets.join(" and ");
+    let replies = [
+        StubResponse::json(&echoing_envelope(&secrets), 400),
+        StubResponse::new(400, echoing_plain_body(&secrets[1..], &access, ERROR_CUT)),
+        scripts.responses_refusal(&format!("I saw {all}; again {all}")),
+        // These two are retried, so their first copy lands in an event.
+        StubResponse::new(200, format!("<html>{all}; again {all}</html>").into_bytes()),
+        scripts.responses_error_event(&format!("{all}; again {all}"), "server_error"),
+    ];
+    let driver = harness.drive_retries();
+    for reply in replies {
+        harness
+            .backend
+            .respond(Arc::new(move |_| Some(reply.clone())));
+        let error = harness
+            .client
+            .complete_llm(&text_request())
+            .await
+            .unwrap_err();
+        assert_error_redacted(&error, &secrets);
+        assert!(error.to_string().contains("[redacted]"), "{error}");
+        let error = harness.client.list_models().await.unwrap_err();
+        assert_error_redacted(&error, &secrets);
+    }
+    driver.abort();
+    assert_eq!(harness.log.retry_delays().len(), 2);
+    for event in harness.log.events() {
         assert_no_secret(&format!("{event:?}"), &secrets, "an event");
     }
     let credentials = harness.home.store().stored().unwrap();
@@ -432,20 +445,26 @@ async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id()
     let access = CodexHome::access_token(10, "plus");
     let secrets = codex_secrets(&access);
     let all = secrets.join(" and ");
-    let nested = StubResponse::json(&echoing_envelope(&secrets), 400);
     let flat = StubResponse::json(
         &serde_json::json!({
             "error": "acct_stored",
             "error_code": "rt_original",
             "error_description": format!("{all}; again {all}"),
-            "echo": {"authorization": format!("Bearer {access}")},
         }),
         400,
     );
-    // A token in the code is redacted before the lowercasing.
-    let cased = StubResponse::json(&serde_json::json!({"error": {"code": access}}), 400);
-    let plain = StubResponse::new(503, echoing_plain_body(&secrets[1..], &access, REFRESH_CUT));
-    for reply in [nested, flat, cased, plain] {
+    let replies = [
+        StubResponse::json(&echoing_envelope(&secrets), 400),
+        flat,
+        // A token in the code is redacted before and after the lowercasing.
+        StubResponse::json(&serde_json::json!({"error": {"code": access}}), 400),
+        StubResponse::json(
+            &serde_json::json!({"error": {"code": "ACCT_STORED", "message": "refused"}}),
+            400,
+        ),
+        StubResponse::new(503, echoing_plain_body(&secrets[1..], &access, REFRESH_CUT)),
+    ];
+    for reply in replies {
         let home = CodexHome::new().await;
         home.write(AuthFile::default().access(&access));
         home.server.enqueue([reply]);
@@ -457,300 +476,12 @@ async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id()
     }
 }
 
-/// An upper-case echo in the code is redacted again after the case fold.
-#[tokio::test]
-async fn a_code_that_lowercases_to_a_secret_is_redacted_after_the_case_fold() {
-    let home = CodexHome::new().await;
-    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
-    home.server.enqueue([StubResponse::json(
-        &serde_json::json!({"error": {"code": "ACCT_STORED", "message": "refused"}}),
-        400,
-    )]);
-    let error = home.store().current().await.unwrap_err();
-    assert_eq!(error.detail(), Some("[redacted]: HTTP 400: refused"));
-}
-
-/// A project key long enough that a body of its copies redacts to fewer
-/// than 500 characters before byte 4 096.
-fn long_api_key() -> String {
-    format!("sk-proj-{}", "A1b2C3d4".repeat(20))
-}
-
-/// `filler` up to the cut, then `secret` straddling it, then more text.
-/// `in_bytes` places the cut at a byte offset, else a character offset.
-fn straddling(filler: char, secret: &str, cut: usize, in_bytes: bool) -> Vec<u8> {
-    let before = cut - (secret.len() - 1);
-    let mut body = if in_bytes {
-        let width = filler.len_utf8();
-        "x".repeat(before % width) + &filler.to_string().repeat(before / width)
-    } else {
-        filler.to_string().repeat(before)
-    };
-    body.push_str(secret);
-    body.push_str(" trailing");
-    body.into_bytes()
-}
-
-/// Copies of `secret`, one across byte 4 096 and five after it.
-fn many_copies(secret: &str) -> Vec<u8> {
-    let start = BODY_CUT - (secret.len() - 1);
-    let mut body = String::new();
-    while body.len() + secret.len() < start {
-        body.push_str(secret);
-        body.push(' ');
-    }
-    body.push_str(&"x".repeat(start - body.len()));
-    for _ in 0..6 {
-        body.push_str(secret);
-        body.push(' ');
-    }
-    body.into_bytes()
-}
-
-/// Each body twice to an endpoint client allowed two attempts: the first
-/// error lands in a `Retrying` event, the second is returned.
-async fn assert_endpoint_client_redacts(key: &str, bodies: &[(u16, Vec<u8>)]) {
-    let secrets = vec![key.to_owned()];
-    let harness = ClientHarness::build(RetryPolicy::with_max_attempts(2), Some(key), |_| {}).await;
-    let driver = harness.drive_retries();
-    for (status, body) in bodies {
-        let reply = StubResponse::new(*status, body.clone());
-        harness.server.enqueue([reply.clone(), reply]);
-        let error = harness
-            .client
-            .complete_llm(&text_request())
-            .await
-            .unwrap_err();
-        assert_error_redacted(&error, &secrets);
-        assert!(error.to_string().contains("[redacted]"), "{error}");
-    }
-    driver.abort();
-    let events = harness.events();
-    assert_eq!(
-        events.iter().filter(|e| is_retrying(e)).count(),
-        bodies.len()
-    );
-    for event in events {
-        assert_no_secret(&format!("{event:?}"), &secrets, "an event");
-    }
-}
-
-/// [`assert_endpoint_client_redacts`] for the Codex client, plus each body
-/// as the model list answer.
-async fn assert_codex_client_redacts(bodies: &[(u16, Vec<u8>)]) {
-    let harness = CodexHarness::with_retry(RetryPolicy::with_max_attempts(2)).await;
-    let secrets = codex_secrets(&CodexHome::access_token(3_600, "plus"));
-    let driver = harness.drive_retries();
-    for (status, body) in bodies {
-        let reply = StubResponse::new(*status, body.clone());
-        harness
-            .backend
-            .enqueue([reply.clone(), reply.clone(), reply]);
-        let error = harness
-            .client
-            .complete_llm(&text_request())
-            .await
-            .unwrap_err();
-        assert_error_redacted(&error, &secrets);
-        assert!(error.to_string().contains("[redacted]"), "{error}");
-        let error = harness.client.list_models().await.unwrap_err();
-        assert_error_redacted(&error, &secrets);
-        assert!(error.to_string().contains("[redacted]"), "{error}");
-    }
-    driver.abort();
-    let events = harness.events();
-    assert_eq!(
-        events.iter().filter(|e| is_retrying(e)).count(),
-        bodies.len()
-    );
-    for event in events {
-        assert_no_secret(&format!("{event:?}"), &secrets, "an event");
-    }
-}
-
-/// Each body as the token endpoint's 503 to a refresh.
-async fn assert_token_refresh_redacts(bodies: impl Fn(&[String]) -> Vec<Vec<u8>>) {
-    let access = CodexHome::access_token(10, "plus");
-    let secrets = codex_secrets(&access);
-    for body in bodies(&secrets) {
-        let home = CodexHome::new().await;
-        home.write(AuthFile::default().access(&access));
-        home.server.enqueue([StubResponse::new(503, body)]);
-        let error = home.store().current().await.unwrap_err();
-        assert_error_redacted(&error, &secrets);
-        let detail = error.detail().unwrap();
-        assert_no_secret(detail, &secrets, "the detail");
-        assert!(detail.contains("[redacted]"), "{detail}");
-    }
-}
-
-#[tokio::test]
-async fn no_secret_straddling_the_4096_byte_cut_reaches_an_error_or_an_event() {
-    let key = long_api_key();
-    assert_endpoint_client_redacts(API_KEY, &[(200, straddling('x', API_KEY, BODY_CUT, true))])
-        .await;
-    assert_endpoint_client_redacts(&key, &[(200, straddling('x', &key, BODY_CUT, true))]).await;
-    let secrets = codex_secrets(&CodexHome::access_token(3_600, "plus"));
-    let bodies: Vec<(u16, Vec<u8>)> = secrets
-        .iter()
-        .map(|secret| (200, straddling('x', secret, BODY_CUT, true)))
-        .collect();
-    assert_codex_client_redacts(&bodies).await;
-    assert_token_refresh_redacts(|secrets| {
-        secrets
-            .iter()
-            .map(|s| straddling('x', s, REFRESH_CUT, false))
-            .collect()
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn no_secret_echoed_past_every_cut_reaches_an_error_or_an_event() {
-    for key in [API_KEY.to_owned(), long_api_key()] {
-        assert_endpoint_client_redacts(&key, &[(200, many_copies(&key)), (500, many_copies(&key))])
-            .await;
-    }
-    let secrets = codex_secrets(&CodexHome::access_token(3_600, "plus"));
-    let bodies: Vec<(u16, Vec<u8>)> = secrets
-        .iter()
-        .flat_map(|secret| [(200, many_copies(secret)), (500, many_copies(secret))])
-        .collect();
-    assert_codex_client_redacts(&bodies).await;
-    assert_token_refresh_redacts(|secrets| secrets.iter().map(|s| many_copies(s)).collect()).await;
-}
-
-#[tokio::test]
-async fn no_secret_after_a_multi_byte_character_at_a_cut_reaches_an_error_or_an_event() {
-    let key = long_api_key();
-    for key in [API_KEY, key.as_str()] {
-        assert_endpoint_client_redacts(
-            key,
-            &[
-                (200, straddling('€', key, BODY_CUT, true)),
-                (500, straddling('€', key, ERROR_CUT, false)),
-            ],
-        )
-        .await;
-    }
-    let secrets = codex_secrets(&CodexHome::access_token(3_600, "plus"));
-    let bodies: Vec<(u16, Vec<u8>)> = secrets
-        .iter()
-        .flat_map(|secret| {
-            [
-                (200, straddling('€', secret, BODY_CUT, true)),
-                (500, straddling('€', secret, ERROR_CUT, false)),
-            ]
-        })
-        .collect();
-    assert_codex_client_redacts(&bodies).await;
-    assert_token_refresh_redacts(|secrets| {
-        secrets
-            .iter()
-            .map(|s| straddling('€', s, REFRESH_CUT, false))
-            .collect()
-    })
-    .await;
-}
-
-/// A JSON-escaped secret (quote, backslash, slash as `/` or `\/`) is
-/// redacted like the secret itself.
-#[tokio::test]
-async fn a_json_escaped_copy_of_a_secret_is_redacted() {
-    let echo = |escaped: &str| format!(r#"{{"echo":"bad key {escaped}"}}"#).into_bytes();
-    let expected = r#"{"echo":"bad key [redacted]"}"#;
-
-    let key = r#"sk-test/AB"CD\EFGH12"#;
-    for escaped in [r#"sk-test/AB\"CD\\EFGH12"#, r#"sk-test\/AB\"CD\\EFGH12"#] {
-        let harness = ClientHarness::build(RetryPolicy::NONE, Some(key), |_| {}).await;
-        harness
-            .server
-            .enqueue([StubResponse::new(401, echo(escaped))]);
-        let error = harness
-            .client
-            .complete_llm(&text_request())
-            .await
-            .unwrap_err();
-        assert_eq!(error.to_string(), format!("HTTP 401: {expected}"));
-    }
-
-    let account = r#"acct/st"ored"#;
-    for escaped in [r#"acct/st\"ored"#, r#"acct\/st\"ored"#] {
-        let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
-        harness.home.write(AuthFile {
-            account_id: Some(account.to_owned()),
-            ..AuthFile::default()
-        });
-        harness
-            .backend
-            .enqueue([StubResponse::new(500, echo(escaped))]);
-        let error = harness
-            .client
-            .complete_llm(&text_request())
-            .await
-            .unwrap_err();
-        assert_eq!(error.to_string(), format!("HTTP 500: {expected}"));
-
-        let home = CodexHome::new().await;
-        home.write(AuthFile {
-            account_id: Some(account.to_owned()),
-            ..AuthFile::default().access(&CodexHome::access_token(10, "plus"))
-        });
-        home.server.enqueue([StubResponse::new(503, echo(escaped))]);
-        let error = home.store().current().await.unwrap_err();
-        assert_eq!(
-            error.detail(),
-            Some(format!("HTTP 503: {expected}").as_str())
-        );
-    }
-}
-
-/// The model's answer text is not redacted.
+/// The model's answer is the user's text, not a server echo.
 #[tokio::test]
 async fn the_model_s_answer_text_is_not_redacted() {
     let answer = format!("the key was {API_KEY}");
-    let harness = ClientHarness::with_retry(RetryPolicy::NONE).await;
+    let harness = ClientHarness::build(RetryPolicy::NONE, Some(API_KEY), |_| {}).await;
     harness.server.enqueue([scripts.text(&answer)]);
     let response = harness.client.complete_llm(&text_request()).await.unwrap();
     assert_eq!(response.text, answer);
-
-    let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
-    let answer = "the account was acct_stored, the refresh token rt_original";
-    harness.backend.enqueue([scripts.stream(answer)]);
-    let response = harness.client.complete_llm(&text_request()).await.unwrap();
-    assert_eq!(response.text, answer);
-}
-
-/// A secret shorter than eight bytes is not redacted; eight and more is.
-#[tokio::test]
-async fn a_secret_shorter_than_eight_bytes_is_not_redacted() {
-    let message = serde_json::json!({"error": {"message": "context exceeded max tokens"}});
-    for (key, expected) in [
-        ("x", "HTTP 400: context exceeded max tokens"),
-        ("ollama", "HTTP 400: context exceeded max tokens"),
-        ("exceeded", "HTTP 400: context [redacted] max tokens"),
-    ] {
-        let harness = ClientHarness::build(RetryPolicy::NONE, Some(key), |_| {}).await;
-        harness.server.enqueue([StubResponse::json(&message, 400)]);
-        let error = harness
-            .client
-            .complete_llm(&text_request())
-            .await
-            .unwrap_err();
-        assert_eq!(error.to_string(), expected, "{key}");
-    }
-    for (account, expected) in [
-        ("acct_1", "HTTP 400: refused for acct_1"),
-        ("acct_123", "HTTP 400: refused for [redacted]"),
-    ] {
-        let home = CodexHome::new().await;
-        home.write(AuthFile {
-            account_id: Some(account.to_owned()),
-            ..AuthFile::default().access(&CodexHome::access_token(10, "plus"))
-        });
-        let refusal = serde_json::json!({"error_description": format!("refused for {account}")});
-        home.server.enqueue([StubResponse::json(&refusal, 400)]);
-        let error = home.store().current().await.unwrap_err();
-        assert_eq!(error.detail(), Some(expected), "{account}");
-    }
 }

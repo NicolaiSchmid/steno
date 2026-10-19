@@ -26,8 +26,6 @@ pub struct RecordedRequest {
     pub responses: Option<ResponsesRequest>,
     /// The `X-Steno-Purpose` header the client sends with every completion.
     pub purpose: Option<String>,
-    /// Requests in flight, this one included, when it arrived.
-    pub in_flight_on_arrival: usize,
 }
 
 impl RecordedRequest {
@@ -133,7 +131,6 @@ impl Inner {
 /// and a latch that holds responses so tests can observe concurrency.
 pub struct StubChatServer {
     inner: Arc<Inner>,
-    port: u16,
     base_url: Url,
     accept_loop: tokio::task::JoinHandle<()>,
 }
@@ -156,15 +153,9 @@ impl StubChatServer {
         });
         Ok(StubChatServer {
             inner,
-            port,
             base_url,
             accept_loop,
         })
-    }
-
-    #[must_use]
-    pub fn port(&self) -> u16 {
-        self.port
     }
 
     #[must_use]
@@ -201,11 +192,6 @@ impl StubChatServer {
     #[must_use]
     pub fn request_count(&self) -> usize {
         self.inner.state().requests.len()
-    }
-
-    #[must_use]
-    pub fn in_flight(&self) -> usize {
-        self.inner.state().in_flight
     }
 
     /// The largest number of simultaneously open requests so far.
@@ -314,7 +300,6 @@ fn record(inner: &Inner, raw: RawRequest) -> RecordedRequest {
             purpose: raw.headers.get("x-steno-purpose").cloned(),
             headers: raw.headers,
             body: raw.body,
-            in_flight_on_arrival: state.in_flight,
         };
         state.requests.push(request.clone());
         request

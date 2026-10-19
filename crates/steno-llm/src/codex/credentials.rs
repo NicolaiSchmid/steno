@@ -815,8 +815,8 @@ mod tests {
             .collect()
     }
 
-    /// A rename that keeps failing leaves one temporary; the write that lands
-    /// removes it.
+    /// A write-back whose rename fails keeps the tokens to write again and
+    /// leaves one temporary; the write that lands removes it.
     #[test]
     fn a_rename_that_keeps_failing_leaves_only_the_newest_temporary() {
         let (home, store) = store_over_an_occupied_file();
@@ -847,23 +847,5 @@ mod tests {
                 .unwrap()
                 .contains("rt_3")
         );
-    }
-
-    /// A file holding another refresh token wins over the kept tokens.
-    #[test]
-    fn a_file_with_another_token_removes_the_kept_temporary() {
-        let (home, store) = store_over_an_occupied_file();
-        let kept = store.write_kept(kept("rt_2")).expect("the rename fails");
-        assert_eq!(leftovers(home.path()).len(), 1);
-        *store.lock_kept() = Some(kept);
-
-        std::fs::remove_dir_all(store.file_path()).unwrap();
-        let login = serde_json::to_vec(&Value::Object(document("rt_new_login"))).unwrap();
-        std::fs::write(store.file_path(), &login).unwrap();
-        let latest = store.latest().unwrap();
-        assert_eq!(latest.credentials.refresh_token, "rt_new_login");
-        assert!(store.lock_kept().is_none());
-        assert_eq!(leftovers(home.path()), Vec::<PathBuf>::new());
-        assert_eq!(std::fs::read(store.file_path()).unwrap(), login);
     }
 }

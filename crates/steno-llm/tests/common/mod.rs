@@ -1,10 +1,10 @@
 //! Shared harnesses: the fixtures, a client over the stub server on a manual
-//! clock with an event recorder, a temporary Codex home, and the golden
+//! clock with an event log, a temporary Codex home, and the golden
 //! comparison.
 
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,9 +12,8 @@ use steno_core::{LanguageTag, LlmMessage, LlmRequest, LlmResponseFormat, LlmRole
 use steno_llm::testing::{ManualClock, STALL_DEADLINE, StubChatServer};
 use steno_llm::{
     CodexCredentialStore, CodexResponsesClient, JwtClaims, LlmClientEvent, LlmEndpoint,
-    OpenAiCompatibleClient, RetryPolicy, StructuredOutputMode,
+    OpenAiCompatibleClient, RetryPolicy,
 };
-use tokio::sync::mpsc;
 
 pub const API_KEY: &str = "sk-test-secret-0123456789";
 
@@ -26,24 +25,22 @@ pub fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
-pub fn fixtures_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Tests/Fixtures/llm")
-}
-
 pub fn fixture_text(relative: &str) -> String {
-    std::fs::read_to_string(fixtures_root().join(relative))
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Tests/Fixtures/llm");
+    std::fs::read_to_string(path.join(relative))
         .unwrap_or_else(|error| panic!("fixture {relative}: {error}"))
 }
 
-pub fn export(name: &str) -> MeetingExport {
-    serde_json::from_str(&fixture_text(&format!("transcripts/{name}.json")))
-        .unwrap_or_else(|error| panic!("transcript fixture {name}: {error}"))
+fn export(name: &str) -> MeetingExport {
+    serde_json::from_str(&fixture_text(&format!("transcripts/{name}.json"))).unwrap()
 }
 
+/// 24 German segments, three speakers, the `daily-standup` template.
 pub fn standup() -> MeetingExport {
     export("denglish-standup")
 }
 
+/// 900 segments over an hour; "Me" on the mic lane.
 pub fn customer_call() -> MeetingExport {
     export("customer-call-60min")
 }
@@ -52,13 +49,9 @@ pub fn canned(name: &str) -> String {
     fixture_text(&format!("responses/{name}.json"))
 }
 
-pub fn uuid(text: &str) -> uuid::Uuid {
-    uuid::Uuid::parse_str(text).unwrap()
-}
-
 /// The fixtures' sample UUID `number`: the number in the last group.
 pub fn sample_uuid(number: u32) -> uuid::Uuid {
-    uuid(&format!("00000000-0000-0000-0000-{number:012X}"))
+    uuid::Uuid::parse_str(&format!("00000000-0000-0000-0000-{number:012X}")).unwrap()
 }
 
 pub const PERSON_NICOLAI: u32 = 0xA;
@@ -69,33 +62,37 @@ pub const STANDUP_SPEAKER_THREE: u32 = 112;
 
 /// The golden comparison: `STENO_UPDATE_SNAPSHOTS=1` rewrites the file.
 pub fn assert_golden(rendered: &str, relative: &str) {
-    let path = fixtures_root().join(relative);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../Tests/Fixtures/llm")
+        .join(relative);
     if std::env::var("STENO_UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
         std::fs::write(&path, rendered).unwrap();
         return;
     }
-    let expected =
-        std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("golden {relative}: {error}"));
-    if expected != rendered {
-        let diff: Vec<String> = expected
-            .lines()
-            .zip(rendered.lines())
-            .enumerate()
-            .filter(|(_, (a, b))| a != b)
-            .take(5)
-            .map(|(n, (a, b))| format!("line {}:\n  golden: {a}\n  actual: {b}", n + 1))
-            .collect();
+    let expected = std::fs::read_to_string(&path).unwrap();
+    if let Some((line, (golden, actual))) = expected
+        .lines()
+        .zip(rendered.lines())
+        .enumerate()
+        .find(|(_, (a, b))| a != b)
+    {
         panic!(
-            "{relative} differs ({} vs {} lines):\n{}",
-            expected.lines().count(),
-            rendered.lines().count(),
-            diff.join("\n")
+            "{relative} differs at line {}:\n  golden: {golden}\n  actual: {actual}",
+            line + 1
         );
     }
+    assert_eq!(expected, rendered, "{relative} differs in length");
 }
 
 /// One readable file per request: parameters, then each message.
 pub fn render(request: &LlmRequest) -> String {
+    let format = match &request.response_format {
+        LlmResponseFormat::Text => "text".to_owned(),
+        LlmResponseFormat::JsonObject => "json_object".to_owned(),
+        LlmResponseFormat::JsonSchema { name, strict, .. } => {
+            format!("json_schema {name} strict={strict}")
+        }
+    };
     let mut lines = vec![
         format!("purpose: {}", request.purpose),
         format!(
@@ -110,7 +107,7 @@ pub fn render(request: &LlmRequest) -> String {
                 .max_tokens
                 .map_or("default".to_owned(), |t| t.to_string())
         ),
-        format!("responseFormat: {}", describe(&request.response_format)),
+        format!("responseFormat: {format}"),
     ];
     for message in &request.messages {
         lines.push(String::new());
@@ -118,16 +115,6 @@ pub fn render(request: &LlmRequest) -> String {
         lines.push(message.content.clone());
     }
     lines.join("\n") + "\n"
-}
-
-fn describe(format: &LlmResponseFormat) -> String {
-    match format {
-        LlmResponseFormat::Text => "text".to_owned(),
-        LlmResponseFormat::JsonObject => "json_object".to_owned(),
-        LlmResponseFormat::JsonSchema { name, strict, .. } => {
-            format!("json_schema {name} strict={strict}")
-        }
-    }
 }
 
 pub fn schema_format(name: &str) -> LlmResponseFormat {
@@ -165,113 +152,48 @@ pub fn text_request() -> LlmRequest {
     request("test", LlmResponseFormat::Text)
 }
 
-/// Every event logged for assertions and streamed for `drive_retries`.
-pub struct EventRecorder {
-    log: Arc<Mutex<Vec<LlmClientEvent>>>,
-    sender: mpsc::UnboundedSender<LlmClientEvent>,
-    receiver: Mutex<Option<mpsc::UnboundedReceiver<LlmClientEvent>>>,
-}
+/// Every event a client reported.
+#[derive(Clone, Default)]
+pub struct EventLog(Arc<Mutex<Vec<LlmClientEvent>>>);
 
-impl EventRecorder {
-    pub fn new() -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        EventRecorder {
-            log: Arc::new(Mutex::new(Vec::new())),
-            sender,
-            receiver: Mutex::new(Some(receiver)),
-        }
-    }
-
+impl EventLog {
     pub fn observer(&self) -> steno_llm::Observer {
-        let log = Arc::clone(&self.log);
-        let sender = self.sender.clone();
-        Arc::new(move |event| {
-            log.lock().unwrap().push(event.clone());
-            let _ = sender.send(event);
-        })
+        let log = Arc::clone(&self.0);
+        Arc::new(move |event| log.lock().unwrap().push(event))
     }
 
     pub fn events(&self) -> Vec<LlmClientEvent> {
-        self.log.lock().unwrap().clone()
+        self.0.lock().unwrap().clone()
     }
 
-    pub fn take_receiver(&self) -> mpsc::UnboundedReceiver<LlmClientEvent> {
-        self.receiver.lock().unwrap().take().expect("one consumer")
+    pub fn retry_delays(&self) -> Vec<Duration> {
+        self.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                LlmClientEvent::Retrying { after, .. } => Some(after),
+                _ => None,
+            })
+            .collect()
     }
 
-    /// Consumes events in the background and advances the clock by each
-    /// announced backoff once the client is asleep.
+    /// Advances `clock` through every backoff in the background: whenever
+    /// a new `Retrying` event is logged and the client sleeps, by its delay.
     pub fn drive_retries(&self, clock: Arc<ManualClock>) -> tokio::task::JoinHandle<()> {
-        let mut receiver = self.take_receiver();
+        let log = self.clone();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
-                if let LlmClientEvent::Retrying { after, .. } = event {
+            let mut driven = 0;
+            loop {
+                let delays = log.retry_delays();
+                if let Some(delay) = delays.get(driven) {
                     clock.wait_for_sleepers(1, STALL_DEADLINE).await;
-                    clock.advance(after);
+                    clock.advance(*delay);
+                    driven += 1;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             }
         })
     }
-
-    /// The next event matching `predicate`, consuming earlier ones.
-    pub async fn next(
-        receiver: &mut mpsc::UnboundedReceiver<LlmClientEvent>,
-        predicate: impl Fn(&LlmClientEvent) -> bool,
-    ) -> Option<LlmClientEvent> {
-        let find = async {
-            while let Some(event) = receiver.recv().await {
-                if predicate(&event) {
-                    return Some(event);
-                }
-            }
-            None
-        };
-        tokio::time::timeout(STALL_DEADLINE, find)
-            .await
-            .ok()
-            .flatten()
-    }
-}
-
-/// The mode of every `Request` event, in order.
-pub fn request_modes(events: &[LlmClientEvent]) -> Vec<StructuredOutputMode> {
-    events
-        .iter()
-        .filter_map(|event| match event {
-            LlmClientEvent::Request { mode, .. } => Some(*mode),
-            _ => None,
-        })
-        .collect()
-}
-
-/// No request goes out under a mode above an earlier request's.
-pub fn assert_modes_never_go_up(events: &[LlmClientEvent]) {
-    let rank = |mode: &StructuredOutputMode| {
-        StructuredOutputMode::ALL
-            .iter()
-            .position(|candidate| candidate == mode)
-            .unwrap()
-    };
-    let modes = request_modes(events);
-    let mut reached = 0;
-    for mode in &modes {
-        assert!(rank(mode) >= reached, "the mode went back up: {modes:?}");
-        reached = rank(mode);
-    }
-}
-
-pub fn is_retrying(event: &LlmClientEvent) -> bool {
-    matches!(event, LlmClientEvent::Retrying { .. })
-}
-
-pub fn retry_delays(events: &[LlmClientEvent]) -> Vec<Duration> {
-    events
-        .iter()
-        .filter_map(|event| match event {
-            LlmClientEvent::Retrying { after, .. } => Some(*after),
-            _ => None,
-        })
-        .collect()
 }
 
 /// A stub server, a manual clock, an event log and a client wired to them.
@@ -280,24 +202,12 @@ pub struct ClientHarness {
     pub clock: Arc<ManualClock>,
     pub client: OpenAiCompatibleClient,
     pub endpoint: LlmEndpoint,
-    pub recorder: EventRecorder,
+    pub log: EventLog,
 }
 
 impl ClientHarness {
     pub async fn new() -> Self {
         Self::build(RetryPolicy::default(), Some(API_KEY), |_| {}).await
-    }
-
-    pub async fn with_retry(retry: RetryPolicy) -> Self {
-        Self::build(retry, Some(API_KEY), |_| {}).await
-    }
-
-    pub async fn with_key(api_key: Option<&str>) -> Self {
-        Self::build(RetryPolicy::default(), api_key, |_| {}).await
-    }
-
-    pub async fn configured(configure: impl FnOnce(&mut LlmEndpoint)) -> Self {
-        Self::build(RetryPolicy::default(), Some(API_KEY), configure).await
     }
 
     pub async fn build(
@@ -309,38 +219,34 @@ impl ClientHarness {
         let mut endpoint = LlmEndpoint::new(server.base_url().clone(), "stub-model");
         configure(&mut endpoint);
         let clock = ManualClock::new();
-        let recorder = EventRecorder::new();
+        let log = EventLog::default();
         let client = OpenAiCompatibleClient::new(endpoint.clone(), api_key)
             .with_retry(retry)
             .with_clock(clock.clone())
-            .with_observer(recorder.observer());
+            .with_observer(log.observer());
         ClientHarness {
             server,
             clock,
             client,
             endpoint,
-            recorder,
+            log,
         }
     }
 
-    pub fn events(&self) -> Vec<LlmClientEvent> {
-        self.recorder.events()
-    }
-
     pub fn drive_retries(&self) -> tokio::task::JoinHandle<()> {
-        self.recorder.drive_retries(self.clock.clone())
+        self.log.drive_retries(self.clock.clone())
     }
+}
+
+/// A fixed "now" the store reads; the tokens are minted relative to it.
+pub fn codex_now() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap()
 }
 
 /// A temporary `CODEX_HOME` and a stub token endpoint.
 pub struct CodexHome {
     pub directory: tempfile::TempDir,
     pub server: StubChatServer,
-}
-
-/// A fixed "now" the store reads; the tokens are minted relative to it.
-pub fn codex_now() -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap()
 }
 
 impl CodexHome {
@@ -383,10 +289,13 @@ impl CodexHome {
         }))
     }
 
-    /// Writes an `auth.json` like the CLI's, plus an unknown key that must
-    /// survive a write-back.
     pub fn write(&self, auth: AuthFile) {
         write_auth(&self.file(), auth);
+    }
+
+    /// The default sign-in with an access token inside the expiry window.
+    pub fn write_expiring(&self) {
+        self.write(AuthFile::default().access(&Self::access_token(10, "plus")));
     }
 
     pub fn document(&self) -> serde_json::Map<String, serde_json::Value> {
@@ -394,6 +303,18 @@ impl CodexHome {
             serde_json::Value::Object(object) => object,
             _ => panic!("not an object"),
         }
+    }
+
+    /// The refresh tokens the token endpoint was sent, in order.
+    pub fn posted_refresh_tokens(&self) -> Vec<String> {
+        self.server
+            .requests()
+            .iter()
+            .map(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                body["refresh_token"].as_str().unwrap().to_owned()
+            })
+            .collect()
     }
 }
 
@@ -405,7 +326,7 @@ pub const ERROR_CUT: usize = 500;
 pub const REFRESH_CUT: usize = 300;
 
 /// The names in `directory`, sorted.
-pub fn file_names(directory: &std::path::Path) -> Vec<String> {
+pub fn file_names(directory: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(directory)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -415,42 +336,36 @@ pub fn file_names(directory: &std::path::Path) -> Vec<String> {
 }
 
 /// Writes `auth` to `path` the way the CLI would (compact JSON).
-pub fn write_auth(path: &std::path::Path, auth: AuthFile) {
-    {
-        let mut tokens = serde_json::Map::new();
-        tokens.insert("access_token".to_owned(), auth.access.into());
-        tokens.insert("refresh_token".to_owned(), auth.refresh.into());
-        if let Some(id) = auth.id {
-            tokens.insert("id_token".to_owned(), id.into());
-        }
-        if let Some(account_id) = auth.account_id {
-            tokens.insert("account_id".to_owned(), account_id.into());
-        }
-        let mut document = serde_json::Map::new();
-        document.insert("OPENAI_API_KEY".to_owned(), serde_json::Value::Null);
-        document.insert("tokens".to_owned(), tokens.into());
-        if let Some(mode) = auth.auth_mode {
-            document.insert("auth_mode".to_owned(), mode.into());
-        }
-        if let Some(last_refresh) = auth.last_refresh {
-            document.insert(
-                "last_refresh".to_owned(),
-                steno_core::json::format_date(last_refresh).into(),
-            );
-        }
-        for (key, value) in auth.extra {
-            document.insert(key, value);
-        }
-        std::fs::write(
-            path,
-            serde_json::to_vec(&serde_json::Value::Object(document)).unwrap(),
-        )
-        .unwrap();
+pub fn write_auth(path: &Path, auth: AuthFile) {
+    let mut tokens = serde_json::Map::new();
+    tokens.insert("access_token".to_owned(), auth.access.into());
+    tokens.insert("refresh_token".to_owned(), auth.refresh.into());
+    if let Some(id) = auth.id {
+        tokens.insert("id_token".to_owned(), id.into());
     }
+    if let Some(account_id) = auth.account_id {
+        tokens.insert("account_id".to_owned(), account_id.into());
+    }
+    let mut document = serde_json::Map::new();
+    document.insert("OPENAI_API_KEY".to_owned(), serde_json::Value::Null);
+    document.insert("tokens".to_owned(), tokens.into());
+    if let Some(mode) = auth.auth_mode {
+        document.insert("auth_mode".to_owned(), mode.into());
+    }
+    if let Some(last_refresh) = auth.last_refresh {
+        document.insert(
+            "last_refresh".to_owned(),
+            steno_core::json::format_date(last_refresh).into(),
+        );
+    }
+    for (key, value) in auth.extra {
+        document.insert(key, value);
+    }
+    std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
 }
 
 /// What `CodexHome::write` puts in the file; `Default` is a fresh `ChatGPT`
-/// login an hour ago.
+/// login an hour ago with an unknown key that must survive a write-back.
 pub struct AuthFile {
     pub access: String,
     pub refresh: String,
@@ -497,52 +412,52 @@ pub struct CodexHarness {
     pub clock: Arc<ManualClock>,
     pub client: CodexResponsesClient,
     pub endpoint: LlmEndpoint,
-    pub recorder: EventRecorder,
+    pub log: EventLog,
 }
 
 impl CodexHarness {
     pub async fn new() -> Self {
-        Self::build(RetryPolicy::default(), "gpt-stub", |_| {}).await
+        Self::with_retry(RetryPolicy::default()).await
     }
 
     pub async fn with_retry(retry: RetryPolicy) -> Self {
-        Self::build(retry, "gpt-stub", |_| {}).await
-    }
-
-    pub async fn build(
-        retry: RetryPolicy,
-        model: &str,
-        configure: impl FnOnce(&mut LlmEndpoint),
-    ) -> Self {
         let home = CodexHome::new().await;
         home.write(AuthFile::default());
         let backend = StubChatServer::start().await.unwrap();
-        let mut endpoint = LlmEndpoint::codex(model, 200_000);
+        let mut endpoint = LlmEndpoint::codex("gpt-stub", 200_000);
         endpoint.base_url = backend.base_url().clone();
-        configure(&mut endpoint);
         let clock = ManualClock::new();
-        let recorder = EventRecorder::new();
+        let log = EventLog::default();
         let client = CodexResponsesClient::new(endpoint.clone(), Arc::new(home.store()))
             .with_retry(retry)
             .with_clock(clock.clone())
-            .with_observer(recorder.observer());
+            .with_observer(log.observer());
         CodexHarness {
             home,
             backend,
             clock,
             client,
             endpoint,
-            recorder,
+            log,
         }
     }
 
-    pub fn events(&self) -> Vec<LlmClientEvent> {
-        self.recorder.events()
+    pub fn drive_retries(&self) -> tokio::task::JoinHandle<()> {
+        self.log.drive_retries(self.clock.clone())
     }
 
-    pub fn drive_retries(&self) -> tokio::task::JoinHandle<()> {
-        self.recorder.drive_retries(self.clock.clone())
+    /// The `Authorization` header of every backend request, in order.
+    pub fn authorizations(&self) -> Vec<String> {
+        self.backend
+            .requests()
+            .iter()
+            .map(|r| r.authorization().unwrap_or_default().to_owned())
+            .collect()
     }
+}
+
+pub fn bearer(token: &str) -> String {
+    format!("Bearer {token}")
 }
 
 /// The error a boundary returned, downcast to `T`.

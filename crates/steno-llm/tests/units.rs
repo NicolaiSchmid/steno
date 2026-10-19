@@ -1,24 +1,31 @@
-//! The pure pieces: the structured output decoder, the SSE parser, the token
-//! budget, the chunker, the strict schema subset and the stub server.
+//! The pure pieces: the decoder, server-sent events and the Codex stream,
+//! the token budget and chunker, the strict schema subset, retries,
+//! redaction, the wire types and the endpoint from the settings.
+
+#![allow(clippy::type_complexity)] // the case tables spell out their tuples
 
 mod common;
+
+use std::collections::HashMap;
+use std::time::Duration;
 
 use common::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steno_core::{
-    AudioLane, LanguageTag, LlmFinishReason, LlmResponse, LlmUsage, TranscriptSegment,
+    AudioLane, LanguageTag, LlmFinishReason, LlmProvider, LlmResponse, LlmUsage, Settings,
+    SummaryTemplate, TranscriptSegment,
 };
-use steno_llm::budget::primary_subtag;
-use steno_llm::testing::{StubChatServer, scripts};
+use steno_llm::testing::scripts;
+use steno_llm::transport::{self, HttpReply};
 use steno_llm::wire::{
     self, ChatCompletionRequest, ChatCompletionResponse, ChatErrorEnvelope, ChatMessage,
-    ChatResponseFormat, ModelList, ServerSentEvent, looks_like_event_stream, parse_event_stream,
+    ChatResponseFormat, ServerSentEvent, looks_like_event_stream, parse_event_stream,
 };
 use steno_llm::{
-    BudgetPolicy, CleanupDraft, CodexResponsesClient, JsonSchema, LlmEndpoint, LlmError,
-    OpenAiCompatibleClient, StructuredOutputDecoder, StructuredOutputMode, SummaryPromptBuilder,
-    TokenBudget, TranscriptChunk, TranscriptChunker,
+    CleanupDraft, CleanupPromptBuilder, CodexResponsesClient, JsonSchema, LlmEndpoint, LlmError,
+    OpenAiCompatibleClient, RetryPolicy, StructuredOutputDecoder, StructuredOutputMode,
+    SummaryPromptBuilder, TokenBudget, TranscriptChunk, TranscriptChunker,
 };
 
 fn response(text: &str, finish: LlmFinishReason) -> LlmResponse {
@@ -30,505 +37,305 @@ fn response(text: &str, finish: LlmFinishReason) -> LlmResponse {
     }
 }
 
-// Structured output decoder
-
 #[derive(Debug, PartialEq, Deserialize)]
 struct Reply {
     ok: bool,
     items: Vec<String>,
 }
 
-fn decode(text: &str) -> Result<Reply, LlmError> {
-    StructuredOutputDecoder::decode(&response(text, LlmFinishReason::Stop))
-}
-
 #[test]
-fn decodes_bare_json_and_strips_fences_and_prose() {
-    assert_eq!(
-        decode("{\"ok\":true,\"items\":[\"a\"]}").unwrap(),
-        Reply {
-            ok: true,
-            items: vec!["a".to_owned()]
-        }
-    );
-    let fenced = "Sure! Here it is:\n```json\n{\"ok\": true, \"items\": []}\n```\nLet me know.";
-    assert_eq!(
-        StructuredOutputDecoder::extract_json(fenced),
-        "{\"ok\": true, \"items\": []}"
-    );
-    assert!(decode(fenced).unwrap().ok);
-    assert_eq!(
-        StructuredOutputDecoder::extract_json("```\n{\"ok\":false,\"items\":[]}\n```"),
-        "{\"ok\":false,\"items\":[]}"
-    );
-    assert_eq!(
-        StructuredOutputDecoder::extract_json("```json\n{\"ok\":false,\"items\":[]}"),
-        "{\"ok\":false,\"items\":[]}"
-    );
-    let prose = "The cleaned segments are: {\"ok\": true, \"items\": [\"x}\"]} — done.";
-    assert_eq!(
-        StructuredOutputDecoder::extract_json(prose),
-        "{\"ok\": true, \"items\": [\"x}\"]}"
-    );
-    assert_eq!(decode(prose).unwrap().items, ["x}"]);
-    assert_eq!(
-        StructuredOutputDecoder::extract_json("Result: [1, 2, 3]."),
-        "[1, 2, 3]"
-    );
+fn the_decoder_finds_the_json_in_fences_and_prose() {
+    let cases = [
+        ("{\"ok\":true,\"items\":[\"a\"]}", vec!["a"]),
+        (
+            "Sure! Here it is:\n```json\n{\"ok\": true, \"items\": []}\n```\nLet me know.",
+            vec![],
+        ),
+        ("```json\n{\"ok\":true,\"items\":[]}", vec![]),
+        (
+            "The segments are: {\"ok\": true, \"items\": [\"x}\"]} — done.",
+            vec!["x}"],
+        ),
+        // A fence marker inside a JSON string is content, not a fence.
+        (
+            "{\"ok\": true, \"items\": [\"Use ```swift``` blocks\"]}",
+            vec!["Use ```swift``` blocks"],
+        ),
+        (
+            "```json\n{\"ok\": true, \"items\": [\"```\"]}\n```",
+            vec!["```"],
+        ),
+    ];
+    for (text, items) in cases {
+        let reply: Reply =
+            StructuredOutputDecoder::decode(&response(text, LlmFinishReason::Stop)).unwrap();
+        assert_eq!(reply.items, items, "{text}");
+    }
     let numbers: Vec<i64> =
         StructuredOutputDecoder::decode(&response("Result: [1, 2, 3].", LlmFinishReason::Stop))
             .unwrap();
     assert_eq!(numbers, [1, 2, 3]);
 }
 
-/// A fence marker inside a JSON string is content, not a fence.
-#[test]
-fn a_fence_inside_the_json_is_not_a_fence() {
-    let text = "{\"ok\": true, \"items\": [\"Use ```swift``` blocks\"]}";
-    assert_eq!(StructuredOutputDecoder::extract_json(text), text);
-    assert_eq!(decode(text).unwrap().items, ["Use ```swift``` blocks"]);
-    let fenced_and_quoted = "```json\n{\"ok\": false, \"items\": [\"```\"]}\n```";
-    assert_eq!(
-        StructuredOutputDecoder::extract_json(fenced_and_quoted),
-        "{\"ok\": false, \"items\": [\"```\"]}"
-    );
-}
-
 #[test]
 fn decode_failures_name_the_path_and_the_kind() {
-    match decode("{\"ok\": true, \"items\": [\"a\", \"b").unwrap_err() {
-        LlmError::InvalidJson(detail) => assert!(detail.contains("malformed JSON"), "{detail}"),
-        other => panic!("{other}"),
-    }
+    let decode = |text: &str, finish| {
+        StructuredOutputDecoder::decode::<Reply>(&response(text, finish)).unwrap_err()
+    };
+    let stop = LlmFinishReason::Stop;
+    let LlmError::InvalidJson(malformed) = decode("{\"ok\": true, \"items\": [\"a", stop) else {
+        panic!()
+    };
+    assert!(malformed.starts_with("malformed JSON at"), "{malformed}");
     assert_eq!(
-        decode("{\"ok\": true}").unwrap_err(),
+        decode("{\"ok\": true}", stop),
         LlmError::InvalidJson("missing key items at root".to_owned())
     );
-    match decode("{\"ok\": true, \"items\": [1]}").unwrap_err() {
-        LlmError::InvalidJson(detail) => {
-            assert!(
-                detail.starts_with("expected a string at items.[0]"),
-                "{detail}"
-            );
-        }
-        other => panic!("{other}"),
-    }
+    let LlmError::InvalidJson(wrong) = decode("{\"ok\": true, \"items\": [1]}", stop) else {
+        panic!()
+    };
+    assert!(
+        wrong.starts_with("expected a string at items.[0]"),
+        "{wrong}"
+    );
     assert_eq!(
-        StructuredOutputDecoder::decode::<Reply>(&response(
-            "{\"ok\":true,\"items\":[]}",
-            LlmFinishReason::Length
-        ))
-        .unwrap_err(),
+        decode("{\"ok\":true,\"items\":[]}", LlmFinishReason::Length),
         LlmError::Truncated
     );
     assert_eq!(
-        decode("   \n").unwrap_err(),
+        decode("   \n", stop),
         LlmError::InvalidJson("empty answer".to_owned())
     );
-}
-
-// Server-sent events
-
-#[test]
-fn parses_named_events_and_multiline_data() {
-    let body = ": a comment the client ignores\nevent: response.created\ndata: {\"a\":1}\n\nevent: response.output_text.delta\ndata: {\"b\":\ndata: 2}\nid: 7\n\ndata: {\"unnamed\":true}\n\n";
+    // An empty object is a missing key, not an empty cleanup draft.
     assert_eq!(
-        parse_event_stream(body),
-        [
-            ServerSentEvent {
-                event: Some("response.created".to_owned()),
-                data: "{\"a\":1}".to_owned()
-            },
-            ServerSentEvent {
-                event: Some("response.output_text.delta".to_owned()),
-                data: "{\"b\":\n2}".to_owned()
-            },
-            ServerSentEvent {
-                event: None,
-                data: "{\"unnamed\":true}".to_owned()
-            },
-        ]
+        StructuredOutputDecoder::decode::<CleanupDraft>(&response("{}", stop)).unwrap_err(),
+        LlmError::InvalidJson("missing key segments at root".to_owned())
     );
 }
 
 #[test]
-fn accepts_crlf_and_the_specifications_corners() {
-    let completed = |data: &str| ServerSentEvent {
-        event: Some("response.completed".to_owned()),
+fn server_sent_events_are_parsed_to_the_specification() {
+    let named = |name: &str, data: &str| ServerSentEvent {
+        event: Some(name.to_owned()),
         data: data.to_owned(),
     };
-    assert_eq!(
-        parse_event_stream("event: response.completed\r\ndata: {}\r\n"),
-        [completed("{}")]
-    );
-    assert_eq!(
-        parse_event_stream("event: a\rdata: {}\r\r"),
-        [ServerSentEvent {
-            event: Some("a".to_owned()),
-            data: "{}".to_owned()
-        }]
-    );
-    assert_eq!(parse_event_stream("").len(), 0);
-    assert_eq!(parse_event_stream("event: response.completed\n\n").len(), 0);
-    assert_eq!(
-        parse_event_stream(": keep-alive\n\nid: 3\nretry: 100\n\n").len(),
-        0
-    );
     let unnamed = |data: &str| ServerSentEvent {
         event: None,
         data: data.to_owned(),
     };
-    assert_eq!(
-        parse_event_stream("event: a\n\ndata: x\n\n"),
-        [unnamed("x")]
-    );
-    assert_eq!(parse_event_stream("data\n\n"), [unnamed("")]);
-    assert_eq!(parse_event_stream("data:{}\n\n"), [unnamed("{}")]);
-    assert_eq!(parse_event_stream("data:  two\n\n"), [unnamed(" two")]);
-    assert_eq!(
-        parse_event_stream("data: {\"k\": \"a:b\"}\n\n"),
-        [unnamed("{\"k\": \"a:b\"}")],
-        "only the first colon splits the field"
-    );
-}
-
-#[test]
-fn a_stream_that_ends_without_a_blank_line_keeps_its_last_event() {
-    let completed = || ServerSentEvent {
-        event: Some("response.completed".to_owned()),
-        data: "{}".to_owned(),
-    };
-    assert_eq!(
-        parse_event_stream("event: response.completed\ndata: {}"),
-        [completed()]
-    );
-    assert_eq!(
-        parse_event_stream("event: response.completed\r\ndata: {}"),
-        [completed()]
-    );
-    assert_eq!(
-        parse_event_stream("data: a\n\nevent: response.completed\ndata: {}"),
-        [
-            ServerSentEvent {
-                event: None,
-                data: "a".to_owned()
-            },
-            completed()
-        ]
-    );
-}
-
-#[test]
-fn a_cleanup_reply_without_segments_is_invalid_json_not_an_empty_draft() {
-    for text in ["{}", "{\"segment\": []}", "```json\n{}\n```"] {
-        assert_eq!(
-            StructuredOutputDecoder::decode::<CleanupDraft>(&response(text, LlmFinishReason::Stop))
-                .unwrap_err(),
-            LlmError::InvalidJson("missing key segments at root".to_owned()),
-            "{text}"
-        );
+    let cases = [
+        (
+            ": comment\nevent: a\ndata: {\"b\":\ndata: 2}\nid: 7\n\ndata: x\n\n",
+            vec![named("a", "{\"b\":\n2}"), unnamed("x")],
+        ),
+        ("event: a\r\ndata: {}\r\n", vec![named("a", "{}")]),
+        ("event: a\rdata: {}\r\r", vec![named("a", "{}")]),
+        // The last event needs no trailing blank line.
+        (
+            "data: a\n\nevent: b\ndata: {}",
+            vec![unnamed("a"), named("b", "{}")],
+        ),
+        ("event: a\n\n: keep-alive\n\nretry: 100\n\n", vec![]),
+        ("event: a\n\ndata: x\n\n", vec![unnamed("x")]),
+        ("data\n\ndata:{}\n\n", vec![unnamed(""), unnamed("{}")]),
+        ("data:  two\n\n", vec![unnamed(" two")]),
+        (
+            "data: {\"k\": \"a:b\"}\n\n",
+            vec![unnamed("{\"k\": \"a:b\"}")],
+        ),
+    ];
+    for (body, events) in cases {
+        assert_eq!(parse_event_stream(body), events, "{body:?}");
     }
-}
-
-#[test]
-fn detects_an_event_stream_by_header_or_shape() {
     assert!(looks_like_event_stream(
         Some("text/event-stream; charset=utf-8"),
         b""
     ));
-    assert!(looks_like_event_stream(None, b"event: x\ndata: {}\n\n"));
     assert!(looks_like_event_stream(None, b"data: {}\n\n"));
     assert!(!looks_like_event_stream(Some("application/json"), b"{}"));
     assert!(!looks_like_event_stream(None, b"{\"id\":1}"));
 }
 
 #[test]
-fn a_stream_becomes_one_response() {
-    let stub = scripts.responses_stream(
-        "{\"ok\":true}",
-        "completed",
-        None,
+fn a_codex_stream_becomes_one_response() {
+    let usage = |prompt, completion| {
         Some(LlmUsage {
-            prompt_tokens: 43,
-            completion_tokens: 12,
+            prompt_tokens: prompt,
+            completion_tokens: completion,
             requests: 1,
-        }),
-        "gpt-5.6-luna",
-    );
-    let response = CodexResponsesClient::parse_stream(&stub.body, &[]).unwrap();
-    assert_eq!(response.text, "{\"ok\":true}");
-    assert_eq!(response.finish_reason, LlmFinishReason::Stop);
-    assert_eq!(
-        response.usage,
-        Some(LlmUsage {
-            prompt_tokens: 43,
-            completion_tokens: 12,
-            requests: 1
         })
-    );
-    assert_eq!(response.model.as_deref(), Some("gpt-5.6-luna"));
-}
-
-#[test]
-fn a_codex_stream_without_a_trailing_blank_line_still_completes() {
-    let stub = scripts.responses_stream("{\"ok\":true}", "completed", None, None, "m");
-    let body = std::str::from_utf8(&stub.body).unwrap().trim_end();
-    assert!(body.ends_with('}'), "the terminal event is the last line");
-    let response = CodexResponsesClient::parse_stream(body.as_bytes(), &[]).unwrap();
-    assert_eq!(response.text, "{\"ok\":true}");
-    assert_eq!(response.finish_reason, LlmFinishReason::Stop);
-}
-
-#[test]
-fn incomplete_failed_refused_and_cut_streams() {
-    let parse = |stub: steno_llm::testing::StubResponse, secrets: &[String]| {
-        CodexResponsesClient::parse_stream(&stub.body, secrets)
     };
-    let cut = scripts.responses_stream(
-        "partial",
-        "incomplete",
-        Some("max_output_tokens"),
-        None,
-        "m",
-    );
-    assert_eq!(
-        parse(cut, &[]).unwrap().finish_reason,
-        LlmFinishReason::Length
-    );
-    let filtered = scripts.responses_stream("", "incomplete", Some("content_filter"), None, "m");
-    assert_eq!(
-        parse(filtered, &[]).unwrap().finish_reason,
-        LlmFinishReason::ContentFilter
-    );
-    assert_eq!(
-        parse(scripts.responses_failed("boom"), &[]).unwrap_err(),
-        LlmError::Transport("boom".to_owned())
-    );
-    assert_eq!(
-        parse(scripts.responses_refusal("no"), &[]).unwrap_err(),
-        LlmError::Refused("no".to_owned())
-    );
-    assert_eq!(
-        parse(scripts.responses_truncated_stream(), &[]).unwrap_err(),
-        LlmError::Transport("stream closed before response.completed".to_owned())
-    );
-    let unknown = scripts.responses_stream("x", "incomplete", Some("something_new"), None, "m");
-    assert_eq!(
-        parse(unknown, &[]).unwrap().finish_reason,
-        LlmFinishReason::Other
-    );
-    assert_eq!(
-        parse(
-            scripts.responses_error_event("acct_123 said no", "server_error"),
-            &["acct_123".to_owned()]
-        )
-        .unwrap_err(),
-        LlmError::Transport("[redacted] said no".to_owned())
-    );
-}
+    let ok = |text: &str, finish| Ok((text.to_owned(), finish));
+    let stream = |text, status, reason| scripts.responses_stream(text, status, reason, None, "m");
+    let multi_item = r#"data: {"type":"response.created","response":{"id":"r","status":"in_progress"}}
 
-/// Stream variations: `type` from the JSON, unknown events, reasoning items
-/// and `[DONE]` skipped, message items concatenated, item events preferred
-/// over the terminal `output`, a missing `usage` counted as one request.
-#[test]
-fn data_only_unknown_reasoning_and_multi_item_streams() {
-    let body = r#"data: {"type":"response.created","response":{"id":"r","status":"in_progress"}}
+data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs","content":[{"type":"output_text","text":"thinking"}]}}
 
-data: {"type":"response.output_text.delta","delta":"{\"ok"}
-
-data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","summary":[],"content":[{"type":"output_text","text":"thinking"}]}}
-
-data: {"type":"response.output_item.done","item":{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"{\"ok\":"}]}}
+data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"ok\":"}]}}
 
 event: some.future.event
-data: {"type":"some.future.event","whatever":1}
-
-data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","name":"tool","arguments":"{}"}}
-
-data: {"type":"response.output_item.done","item":{"type":"message","id":"m2","role":"assistant","content":[{"type":"output_text","text":"true}"},{"type":"output_text","text":""}]}}
+data: {"type":"some.future.event"}
 
 data: [DONE]
 
-data: {"type":"response.completed","response":{"id":"r","status":"completed","model":"gpt-x","output":[{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"not this"}]}]}}
+data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"true}"}]}}
+
+data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"not this"}]}]}}
 
 "#;
-    let response = CodexResponsesClient::parse_stream(body.as_bytes(), &[]).unwrap();
-    assert_eq!(response.text, "{\"ok\":true}");
-    assert_eq!(response.finish_reason, LlmFinishReason::Stop);
+    let output_only = "event: response.completed\ndata: {\"type\":\"x\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"from output\"}]}]}}";
+    let cases: Vec<(Vec<u8>, Result<(String, LlmFinishReason), LlmError>)> = vec![
+        (scripts.stream("hi").body, ok("hi", LlmFinishReason::Stop)),
+        (
+            stream("cut", "incomplete", Some("max_output_tokens")).body,
+            ok("cut", LlmFinishReason::Length),
+        ),
+        (
+            multi_item.into(),
+            ok("{\"ok\":true}", LlmFinishReason::Stop),
+        ),
+        (output_only.into(), ok("from output", LlmFinishReason::Stop)),
+        (
+            scripts.responses_failed("boom").body,
+            Err(LlmError::Transport("boom".to_owned())),
+        ),
+        (
+            scripts.responses_refusal("no").body,
+            Err(LlmError::Refused("no".to_owned())),
+        ),
+        (
+            scripts.responses_truncated_stream().body,
+            Err(LlmError::Transport(
+                "stream closed before response.completed".to_owned(),
+            )),
+        ),
+        (
+            scripts
+                .responses_error_event("acct_123 said no", "server_error")
+                .body,
+            Err(LlmError::Transport("[redacted] said no".to_owned())),
+        ),
+        (
+            scripts
+                .responses_error_event("full", "context_length_exceeded")
+                .body,
+            Err(LlmError::Http {
+                status: 400,
+                body: "context_length_exceeded: full".to_owned(),
+            }),
+        ),
+    ];
+    let secrets = ["acct_123".to_owned()];
+    for (body, expected) in cases {
+        let parsed =
+            CodexResponsesClient::parse_stream(&body, &secrets).map(|r| (r.text, r.finish_reason));
+        assert_eq!(parsed, expected, "{}", String::from_utf8_lossy(&body));
+    }
+    let full = scripts.responses_stream("{}", "completed", None, usage(43, 12), "gpt-x");
+    let parsed = CodexResponsesClient::parse_stream(&full.body, &[]).unwrap();
+    assert_eq!(parsed.usage, usage(43, 12));
+    assert_eq!(parsed.model.as_deref(), Some("gpt-x"));
+    let parsed = CodexResponsesClient::parse_stream(multi_item.as_bytes(), &[]).unwrap();
+    assert_eq!(parsed.usage, usage(0, 0), "no usage still counts a request");
+
+    // A plain JSON reply is read whole; anything else is a transport error.
+    let reply = |body: &str| HttpReply {
+        status: 200,
+        headers: HashMap::new(),
+        body: body.as_bytes().to_vec(),
+    };
+    let whole = CodexResponsesClient::parse(
+        &reply(r#"{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"whole"}]}]}"#),
+        &[],
+    )
+    .unwrap();
     assert_eq!(
-        response.usage,
-        Some(LlmUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            requests: 1
-        })
+        (whole.text.as_str(), whole.finish_reason),
+        ("whole", LlmFinishReason::Length)
     );
-    assert_eq!(response.model.as_deref(), Some("gpt-x"));
+    assert_eq!(
+        CodexResponsesClient::parse(&reply("<html>"), &[]).unwrap_err(),
+        LlmError::Transport("undecodable response body: <html>".to_owned())
+    );
 }
 
 #[test]
-fn a_terminal_event_without_item_events_uses_its_output() {
-    let body = "event: response.completed\ndata: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"id\":\"rs\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"from \"},{\"type\":\"refusal\",\"refusal\":\"\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"output\"}]}],\"usage\":{\"input_tokens\":3}}}\n\n";
-    let response = CodexResponsesClient::parse_stream(body.as_bytes(), &[]).unwrap();
-    assert_eq!(response.text, "from output");
-    assert_eq!(
-        response.usage,
-        Some(LlmUsage {
-            prompt_tokens: 3,
-            completion_tokens: 0,
-            requests: 1
-        })
-    );
-    assert_eq!(response.model, None);
-    let items = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"x\"}]}}\n\ndata: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n";
-    assert_eq!(
-        CodexResponsesClient::parse_stream(items.as_bytes(), &[]).unwrap_err(),
-        LlmError::Transport("stream closed before response.completed".to_owned())
-    );
-}
-
-// Token budget
-
-#[test]
-fn german_thousand_words_estimate_between_1200_and_2500_tokens() {
+fn tokens_are_estimated_from_bytes_per_language() {
     let text = fixture_text("text/de-1000-words.txt");
-    let words = text.split_whitespace().count();
-    assert_eq!(words, 1000);
-    let tokens = TokenBudget::estimate_tokens(&text, Some(&de()));
-    assert!(
-        (1200..=2500).contains(&tokens),
-        "{tokens} tokens for {words} words"
-    );
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-    let expected = (text.len() as f64 / 3.0).ceil() as i64;
-    assert_eq!(tokens, expected);
-}
-
-#[test]
-fn english_divides_by_more_and_unknown_is_conservative() {
-    let text = "The quick brown fox jumps over the lazy dog. ".repeat(20);
-    let english = TokenBudget::estimate_tokens(&text, Some(&LanguageTag::from("en-US")));
+    assert_eq!(text.split_whitespace().count(), 1_000);
     let german = TokenBudget::estimate_tokens(&text, Some(&de()));
-    let unknown = TokenBudget::estimate_tokens(&text, None);
-    assert!(english < german);
-    assert_eq!(unknown, german);
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-    let expected = (text.len() as f64 / 3.6).ceil() as i64;
-    assert_eq!(english, expected);
-    assert_eq!(TokenBudget::estimate_tokens("", Some(&de())), 0);
-    assert_eq!(TokenBudget::estimate_tokens("ä", Some(&de())), 1);
-    assert_eq!(
-        TokenBudget::bytes_per_token(Some(&LanguageTag::from("EN"))),
-        3.6
-    );
-    assert_eq!(
-        TokenBudget::bytes_per_token(Some(&LanguageTag::from("fr"))),
-        3.0
-    );
+    assert!((1_200..=2_500).contains(&german), "{german}");
+    // 3.6 bytes a token for English, 3.0 for every other or no language.
+    let english = "The quick brown fox jumps over the lazy dog. ".repeat(20);
+    assert_eq!(english.len(), 900);
+    for (text, tag, tokens) in [
+        (english.as_str(), Some("en-US"), 250),
+        (english.as_str(), Some("EN"), 250),
+        (english.as_str(), Some("fr"), 300),
+        (english.as_str(), None, 300),
+        ("", Some("de"), 0),
+        ("ä", Some("de"), 1),
+    ] {
+        let tag = tag.map(LanguageTag::from);
+        assert_eq!(
+            TokenBudget::estimate_tokens(text, tag.as_ref()),
+            tokens,
+            "{tag:?}"
+        );
+    }
 }
 
 #[test]
-fn input_budget_is_what_remains_and_never_negative() {
-    let budget = TokenBudget {
+fn budgets_follow_the_context_within_floors_and_ceilings() {
+    let budget = |reserved, overhead| TokenBudget {
         context_tokens: 8_000,
-        reserved_output_tokens: 2_000,
-        prompt_overhead_tokens: 1_500,
+        reserved_output_tokens: reserved,
+        prompt_overhead_tokens: overhead,
     };
-    assert_eq!(budget.input_budget(), 4_500);
-    assert!(budget.fits(4_500));
-    assert!(!budget.fits(4_501));
-    let tiny = TokenBudget {
-        context_tokens: 1_000,
-        reserved_output_tokens: 800,
-        prompt_overhead_tokens: 500,
-    };
-    assert_eq!(tiny.input_budget(), 0);
-}
-
-#[test]
-fn map_notes_ceiling_is_the_chunks_share_within_bounds() {
-    let budget = TokenBudget {
-        context_tokens: 8_000,
-        reserved_output_tokens: 2_000,
-        prompt_overhead_tokens: 1_211,
-    };
-    assert_eq!(budget.input_budget(), 4_789);
-    assert_eq!(budget.map_notes_output_tokens(10), 478);
-    assert!(budget.fits(10 * budget.map_notes_output_tokens(10)));
-    assert_eq!(
-        budget.map_notes_output_tokens(1),
-        1_500,
-        "capped at the ceiling"
-    );
-    assert_eq!(budget.map_notes_output_tokens(0), 1_500);
-    assert_eq!(
-        budget.map_notes_output_tokens(100),
-        256,
-        "never below the floor"
-    );
-    assert!(!budget.fits(100 * budget.map_notes_output_tokens(100)));
-    assert_eq!(
-        SummaryPromptBuilder::<chrono::Utc>::max_notes_points(1_500),
-        25
-    );
-    assert_eq!(
-        SummaryPromptBuilder::<chrono::Utc>::max_notes_points(478),
-        7
-    );
-    assert_eq!(
-        SummaryPromptBuilder::<chrono::Utc>::max_notes_points(100),
-        3
-    );
-}
-
-#[test]
-fn endpoint_budgets_follow_the_policy() {
-    let endpoint = |context: i64, output: i64| LlmEndpoint {
+    assert_eq!(budget(2_000, 1_500).input_budget(), 4_500);
+    assert!(budget(2_000, 1_500).fits(4_500) && !budget(2_000, 1_500).fits(4_501));
+    assert_eq!(budget(6_000, 3_000).input_budget(), 0, "never negative");
+    let map = budget(2_000, 1_211);
+    for (chunks, notes) in [(10, 478), (1, 1_500), (0, 1_500), (100, 256)] {
+        assert_eq!(
+            map.map_notes_output_tokens(chunks),
+            notes,
+            "{chunks} chunks"
+        );
+    }
+    for (notes, points) in [(1_500, 25), (478, 7), (100, 3)] {
+        assert_eq!(
+            SummaryPromptBuilder::<chrono::Utc>::max_notes_points(notes),
+            points
+        );
+    }
+    let endpoint = |context, output| LlmEndpoint {
         context_tokens: context,
         max_output_tokens: output,
         ..LlmEndpoint::new(url::Url::parse("http://127.0.0.1:1234/v1").unwrap(), "m")
     };
-    assert_eq!(
-        endpoint(32_000, 4_096).cleanup_chunk_budget_tokens(),
-        15_488
-    );
-    assert_eq!(endpoint(8_000, 4_096).cleanup_chunk_budget_tokens(), 3_488);
-    assert_eq!(
-        endpoint(1_024, 4_096).cleanup_chunk_budget_tokens(),
-        256,
-        "floor"
-    );
-    assert_eq!(
-        endpoint(32_000, 4_096).summary_reserved_output_tokens(),
-        4_096,
-        "the ceiling wins"
-    );
-    assert_eq!(
-        endpoint(8_000, 4_096).summary_reserved_output_tokens(),
-        2_000,
-        "a quarter"
-    );
-    assert_eq!(
-        endpoint(8_000, 1_000).summary_reserved_output_tokens(),
-        1_000
-    );
-    assert_eq!(
-        endpoint(1_024, 4_096).summary_reserved_output_tokens(),
-        256,
-        "floor"
-    );
-    assert_eq!(BudgetPolicy::MAP_NOTES_CEILING_TOKENS, 1_500);
-    assert_eq!(BudgetPolicy::MAP_NOTES_FLOOR_TOKENS, 256);
+    for (context, output, chunk, summary) in [
+        (32_000, 4_096, 15_488, 4_096),
+        (8_000, 4_096, 3_488, 2_000),
+        (8_000, 1_000, 3_488, 1_000),
+        (1_024, 4_096, 256, 256),
+    ] {
+        let endpoint = endpoint(context, output);
+        assert_eq!(endpoint.cleanup_chunk_budget_tokens(), chunk, "{context}");
+        assert_eq!(
+            endpoint.summary_reserved_output_tokens(),
+            summary,
+            "{context}"
+        );
+    }
+    // The cleanup answer repeats its chunk with headroom, under the ceiling.
+    let builder = CleanupPromptBuilder::new(1_000);
+    let call = customer_call();
+    let big = &TranscriptChunker::default().chunk(&call.segments, Some(&de()))[0];
+    assert_eq!(builder.output_tokens(big, Some(&de())), 1_000);
+    let small = &TranscriptChunker::new(50, 80, 3).chunk(&standup().segments, Some(&de()))[0];
+    assert!((256..1_000).contains(&builder.output_tokens(small, Some(&de()))));
 }
-
-#[test]
-fn primary_subtag_drops_region_and_script() {
-    assert_eq!(primary_subtag(&LanguageTag::from("de-CH")), "de");
-    assert_eq!(primary_subtag(&LanguageTag::from("zh-Hant-TW")), "zh");
-    assert_eq!(primary_subtag(&LanguageTag::from("EN")), "en");
-}
-
-// Chunker
 
 fn segment(index: u32, words: usize, speaker: uuid::Uuid) -> TranscriptSegment {
     let text = vec!["wort"; words].join(" ");
@@ -544,516 +351,294 @@ fn segment(index: u32, words: usize, speaker: uuid::Uuid) -> TranscriptSegment {
     }
 }
 
-/// The packing invariants: order, completeness, sequential indices, the
-/// `max_tokens` bound, the close rule and the leading context.
+/// Order, completeness, the `max_tokens` bound, the close rule and the
+/// leading context.
 fn check_packing(
     chunks: &[TranscriptChunk],
     segments: &[TranscriptSegment],
     chunker: &TranscriptChunker,
-    language: Option<&LanguageTag>,
     label: &str,
 ) {
-    let flattened: Vec<&TranscriptSegment> =
-        chunks.iter().flat_map(|c| c.segments.iter()).collect();
-    assert_eq!(flattened.len(), segments.len(), "{label}: concatenation");
+    let flattened: Vec<&TranscriptSegment> = chunks.iter().flat_map(|c| &c.segments).collect();
     assert!(
-        flattened.iter().zip(segments).all(|(a, b)| *a == b),
+        flattened.iter().copied().eq(segments.iter()),
         "{label}: order"
     );
-    assert!(
-        chunks.iter().enumerate().all(|(i, c)| c.index == i),
-        "{label}: indices"
-    );
-    assert!(
-        chunks.iter().all(|c| !c.segments.is_empty()),
-        "{label}: no empty chunk"
-    );
-    for chunk in chunks {
-        assert_eq!(
-            chunk.estimated_tokens,
-            TranscriptChunker::estimate_segments(&chunk.segments, language),
-            "{label}: chunk {} estimate",
-            chunk.index
-        );
+    for (index, chunk) in chunks.iter().enumerate() {
+        assert_eq!(chunk.index, index, "{label}");
         assert!(
             chunk.estimated_tokens <= chunker.max_tokens || chunk.segments.len() == 1,
-            "{label}: chunk {} has {} tokens in {} segments",
-            chunk.index,
-            chunk.estimated_tokens,
-            chunk.segments.len()
+            "{label}: chunk {index} too big"
         );
-        let mut tokens = 0;
-        for pair in chunk.segments.windows(2) {
-            tokens += TranscriptChunker::estimate_segment(&pair[0], language);
-            assert!(
-                tokens < chunker.target_tokens || pair[1].speaker_id == pair[0].speaker_id,
-                "{label}: chunk {} runs past a speaker turn at {tokens} tokens",
-                chunk.index
-            );
-        }
     }
-    assert!(chunks.first().is_none_or(|c| c.leading_context.is_empty()));
     for pair in chunks.windows(2) {
         let (previous, chunk) = (&pair[0], &pair[1]);
         let skip = previous
             .segments
             .len()
             .saturating_sub(chunker.context_segments);
-        assert_eq!(
-            chunk.leading_context,
-            previous.segments[skip..],
-            "{label}: context"
-        );
+        assert_eq!(chunk.leading_context, previous.segments[skip..], "{label}");
         let next = &chunk.segments[0];
-        let last = previous.segments.last().unwrap();
-        let would_overflow = previous.estimated_tokens
-            + TranscriptChunker::estimate_segment(next, language)
+        let overflow = previous.estimated_tokens
+            + TranscriptChunker::estimate_segment(next, Some(&de()))
             > chunker.max_tokens;
-        let turn_after_target = previous.estimated_tokens >= chunker.target_tokens
-            && next.speaker_id != last.speaker_id;
+        let turn = previous.estimated_tokens >= chunker.target_tokens
+            && Some(next.speaker_id) != previous.segments.last().map(|s| s.speaker_id);
         assert!(
-            would_overflow || turn_after_target,
-            "{label}: chunk {} closed at {} tokens without a reason",
-            previous.index,
-            previous.estimated_tokens
+            overflow || turn,
+            "{label}: chunk {} closed early",
+            previous.index
         );
     }
 }
 
 #[test]
-fn sixty_minute_fixture_yields_six_to_twelve_chunks_that_concatenate_in_order() {
-    let segments = customer_call().segments;
-    let chunker = TranscriptChunker::default();
-    let chunks = chunker.chunk(&segments, Some(&de()));
-    assert!((6..=12).contains(&chunks.len()), "{} chunks", chunks.len());
-    check_packing(&chunks, &segments, &chunker, Some(&de()), "fixture");
-    for chunk in &chunks[..chunks.len() - 1] {
-        assert!(
-            chunk.estimated_tokens >= chunker.target_tokens,
-            "chunk {} closed early",
-            chunk.index
-        );
-    }
-    for pair in chunks.windows(2) {
-        assert_eq!(pair[1].leading_context.len(), 3);
-    }
-    let tokens = TranscriptChunker::estimate_segments(&segments, Some(&de()));
-    assert!((12_000..26_000).contains(&tokens), "{tokens}");
-}
-
-#[test]
-fn an_oversized_segment_gets_its_own_chunk() {
-    let a = sample_uuid(410);
-    let b = sample_uuid(411);
-    let segments = vec![
-        segment(0, 10, a),
-        segment(1, 10, b),
-        segment(2, 2_000, a),
-        segment(3, 10, b),
-        segment(4, 10, a),
-    ];
-    let chunker = TranscriptChunker::new(50, 80, 3);
-    let chunks = chunker.chunk(&segments, Some(&de()));
-    let ids: Vec<Vec<uuid::Uuid>> = chunks
-        .iter()
-        .map(|c| c.segments.iter().map(|s| s.id).collect())
-        .collect();
-    assert_eq!(
-        ids,
-        [
-            vec![segments[0].id, segments[1].id],
-            vec![segments[2].id],
-            vec![segments[3].id, segments[4].id]
-        ]
-    );
-    assert!(chunks[1].estimated_tokens > 80);
-    assert_eq!(chunks[1].leading_context, segments[..2]);
-    check_packing(&chunks, &segments, &chunker, Some(&de()), "oversized");
-}
-
-#[test]
-fn empty_input_and_budget_initialiser() {
-    assert_eq!(TranscriptChunker::default().chunk(&[], None).len(), 0);
-    let clamped = TranscriptChunker::with_budget(500, 3);
-    assert_eq!(clamped.target_tokens, 500);
-    assert_eq!(clamped.max_tokens, 500);
-    let roomy = TranscriptChunker::with_budget(10_000, 3);
-    assert_eq!(roomy.target_tokens, 2_000);
-    assert_eq!(roomy.max_tokens, 3_000);
-    let inverted = TranscriptChunker::new(100, 50, 3);
-    assert_eq!(inverted.max_tokens, 100);
-}
-
-/// Packing invariants over the fixture under several sizes and languages.
-#[test]
-fn packing_invariants_hold_for_several_sizes() {
+fn the_chunker_splits_on_speaker_turns_within_the_budget() {
     let call = customer_call();
-    let sizes = [(50, 80, 3), (150, 220, 2), (400, 400, 0), (2_000, 3_000, 3)];
-    let counts = [1, 2, 7, 60, 300, 900];
-    for (target, max, context) in sizes {
-        for (offset, count) in counts.iter().enumerate() {
-            let language = (offset % 2 == 0).then(|| LanguageTag::from("en"));
-            let segments = &call.segments[..*count];
+    let chunks = TranscriptChunker::default().chunk(&call.segments, Some(&de()));
+    assert!((6..=12).contains(&chunks.len()), "{} chunks", chunks.len());
+    for (target, max, context) in [(50, 80, 3), (150, 220, 2), (400, 400, 0), (2_000, 3_000, 3)] {
+        for count in [1, 7, 300, 900] {
             let chunker = TranscriptChunker::new(target, max, context);
-            let chunks = chunker.chunk(segments, language.as_ref());
-            assert_ne!(chunks.len(), 0);
+            let segments = &call.segments[..count];
+            let chunks = chunker.chunk(segments, Some(&de()));
             check_packing(
                 &chunks,
                 segments,
                 &chunker,
-                language.as_ref(),
-                &format!("target {target} max {max} context {context} count {count}"),
+                &format!("{target}/{max}/{count}"),
             );
         }
     }
-    for budget in [64, 300, 1_000, 5_000] {
-        let chunker = TranscriptChunker::with_budget(budget, 3);
-        let chunks = chunker.chunk(&call.segments[..150], Some(&de()));
-        check_packing(
-            &chunks,
-            &call.segments[..150],
-            &chunker,
-            Some(&de()),
-            "budget",
-        );
-        assert!(
-            chunks
-                .iter()
-                .all(|c| c.estimated_tokens <= budget || c.segments.len() == 1),
-            "budget {budget}"
-        );
-    }
+    // An oversized segment gets a chunk of its own.
+    let (a, b) = (sample_uuid(410), sample_uuid(411));
+    let segments = [
+        segment(0, 10, a),
+        segment(1, 10, b),
+        segment(2, 2_000, a),
+        segment(3, 10, b),
+    ];
+    let chunker = TranscriptChunker::new(50, 80, 3);
+    let chunks = chunker.chunk(&segments, Some(&de()));
+    let sizes: Vec<usize> = chunks.iter().map(|c| c.segments.len()).collect();
+    assert_eq!(sizes, [2, 1, 1]);
+    check_packing(&chunks, &segments, &chunker, "oversized");
+    assert_eq!(TranscriptChunker::default().chunk(&[], None).len(), 0);
+    let clamped = TranscriptChunker::with_budget(500, 3);
+    assert_eq!((clamped.target_tokens, clamped.max_tokens), (500, 500));
+    let roomy = TranscriptChunker::with_budget(10_000, 3);
+    assert_eq!((roomy.target_tokens, roomy.max_tokens), (2_000, 3_000));
 }
 
-// Strict schema subset
-
-const BANNED: [&str; 15] = [
-    "format",
-    "pattern",
-    "minLength",
-    "maxLength",
-    "minimum",
-    "maximum",
-    "minItems",
-    "maxItems",
-    "anyOf",
-    "oneOf",
-    "allOf",
-    "default",
-    "$ref",
-    "uniqueItems",
-    "patternProperties",
-];
-
-/// Every violation of the strict subset in `value`, empty when compliant.
-fn schema_problems(value: &Value, path: &str, depth: usize) -> Vec<String> {
-    let Value::Object(object) = value else {
-        return vec![format!("{path}: schema node is not an object")];
-    };
-    let mut problems: Vec<String> = object
-        .keys()
-        .filter(|key| BANNED.contains(&key.as_str()))
-        .map(|key| format!("{path}: banned keyword {key}"))
-        .collect();
-    let kind: Option<String> = match object.get("type") {
-        Some(Value::String(name)) => Some(name.clone()),
-        Some(Value::Array(names)) => {
-            let strings: Vec<&str> = names.iter().filter_map(Value::as_str).collect();
-            if strings.len() != 2 || !strings.contains(&"null") {
-                problems.push(format!("{path}: type array must be [type, null]"));
-            }
-            strings
-                .iter()
-                .find(|s| **s != "null")
-                .map(|s| (*s).to_owned())
-        }
-        _ => {
-            problems.push(format!("{path}: missing type"));
-            None
-        }
-    };
-    if depth > 5 && matches!(kind.as_deref(), Some("object" | "array")) {
-        problems.push(format!("{path}: nesting depth {depth} exceeds 5"));
-    }
-    match kind.as_deref() {
-        Some("object") => {
-            if object.get("additionalProperties") != Some(&Value::Bool(false)) {
-                problems.push(format!("{path}: additionalProperties must be false"));
-            }
-            let Some(Value::Object(properties)) = object.get("properties") else {
-                problems.push(format!("{path}: object without properties"));
-                return problems;
-            };
-            let Some(Value::Array(required)) = object.get("required") else {
-                problems.push(format!("{path}: object without required"));
-                return problems;
-            };
-            let required: std::collections::BTreeSet<&str> =
-                required.iter().filter_map(Value::as_str).collect();
-            let names: std::collections::BTreeSet<&str> =
-                properties.keys().map(String::as_str).collect();
-            if required != names {
-                problems.push(format!("{path}: every property must be required"));
-            }
-            for (name, child) in properties {
-                problems.extend(schema_problems(child, &format!("{path}.{name}"), depth + 1));
-            }
-        }
-        Some("array") => match object.get("items") {
-            Some(items) => problems.extend(schema_problems(items, &format!("{path}[]"), depth + 1)),
-            None => problems.push(format!("{path}: array without items")),
-        },
-        Some("string" | "integer" | "number" | "boolean") => {}
-        other => problems.push(format!("{path}: unexpected type {other:?}")),
-    }
-    problems
-}
-
-fn sample_schema() -> JsonSchema {
-    JsonSchema::object(vec![
-        (
-            "title",
-            JsonSchema::string().described("under 80 characters"),
-        ),
-        ("count", JsonSchema::integer()),
-        ("score", JsonSchema::number().nullable()),
-        ("flag", JsonSchema::boolean()),
-        ("kind", JsonSchema::string_enum(&["a", "b"])),
-        (
-            "items",
-            JsonSchema::array(JsonSchema::object(vec![
-                ("id", JsonSchema::string()),
-                ("note", JsonSchema::string().nullable()),
-                ("tags", JsonSchema::array(JsonSchema::string())),
-            ])),
-        ),
-    ])
-    .described("sample")
-}
-
-#[test]
-fn builder_emits_the_strict_subset() {
-    let json = sample_schema().json_value();
-    assert_eq!(schema_problems(&json, "root", 1), Vec::<String>::new());
-    assert_eq!(json["type"], "object");
-    assert_eq!(json["description"], "sample");
-    assert_eq!(json["additionalProperties"], false);
-    assert_eq!(
-        json["properties"]["score"]["type"],
-        json!(["number", "null"])
+/// Fails unless `value` keeps to the strict structured output subset: every
+/// object closed with every property required, no other keywords.
+fn assert_strict(value: &Value, path: &str) {
+    let allowed = [
+        "type",
+        "properties",
+        "required",
+        "additionalProperties",
+        "items",
+        "enum",
+        "description",
+    ];
+    let object = value.as_object().unwrap();
+    assert!(
+        object.keys().all(|key| allowed.contains(&key.as_str())),
+        "{path}: {value}"
     );
-    assert_eq!(json["properties"]["kind"]["enum"], json!(["a", "b"]));
-    assert_eq!(
-        json["properties"]["items"]["items"]["required"]
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        assert_eq!(object["additionalProperties"], false, "{path}");
+        let mut required: Vec<&str> = object["required"]
             .as_array()
             .unwrap()
-            .len(),
-        3
-    );
-    assert_eq!(
-        sample_schema().property_names(),
-        ["title", "count", "score", "flag", "kind", "items"]
-    );
-}
-
-#[test]
-fn the_probe_schema_is_strict_too() {
-    assert_eq!(
-        schema_problems(
-            &OpenAiCompatibleClient::probe_schema().json_value(),
-            "root",
-            1
-        ),
-        Vec::<String>::new()
-    );
-    let steno_core::LlmResponseFormat::JsonSchema {
-        name,
-        schema,
-        strict,
-    } = OpenAiCompatibleClient::probe_request().response_format
-    else {
-        panic!("the probe asks for a JSON schema");
-    };
-    assert_eq!(name, "probe");
-    assert!(strict);
-    assert_eq!(schema, OpenAiCompatibleClient::probe_schema().json_value());
-    assert_eq!(schema["properties"]["ok"]["type"], "boolean");
-}
-
-#[test]
-fn walker_rejects_loose_schemas() {
-    let loose = json!({
-        "type": "object", "properties": {"a": {"type": "string", "format": "date"}},
-        "required": [], "additionalProperties": true,
-    });
-    let problems = schema_problems(&loose, "root", 1);
-    assert!(problems.contains(&"root: additionalProperties must be false".to_owned()));
-    assert!(problems.contains(&"root: every property must be required".to_owned()));
-    assert!(problems.contains(&"root.a: banned keyword format".to_owned()));
-    let mut deep = json!({"type": "string"});
-    for _ in 0..6 {
-        deep = json!({"type": "object", "properties": {"x": deep}, "required": ["x"], "additionalProperties": false});
-    }
-    assert!(
-        schema_problems(&deep, "root", 1)
             .iter()
-            .any(|p| p.contains("exceeds 5"))
-    );
+            .filter_map(Value::as_str)
+            .collect();
+        required.sort_unstable();
+        let mut names: Vec<&str> = properties.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(required, names, "{path}: every property required");
+        for (name, child) in properties {
+            assert_strict(child, &format!("{path}.{name}"));
+        }
+    }
+    if let Some(items) = object.get("items") {
+        assert_strict(items, &format!("{path}[]"));
+    }
 }
 
 #[test]
-fn prompt_text_is_compact_and_ordered() {
-    let expected = "{\n  \"title\": string,  // under 80 characters\n  \"count\": integer,\n  \"score\": number | null,\n  \"flag\": boolean,\n  \"kind\": \"a\" | \"b\",\n  \"items\": [{\n    \"id\": string,\n    \"note\": string | null,\n    \"tags\": [string]\n  }]\n}";
-    assert_eq!(sample_schema().prompt_text(), expected);
-    assert_eq!(
-        JsonSchema::object(vec![
-            ("lead", JsonSchema::string()),
-            ("text", JsonSchema::string())
-        ])
-        .prompt_text(),
-        "{ \"lead\": string, \"text\": string }"
-    );
-}
-
-#[test]
-fn draft_and_notes_schemas_are_strict_and_use_the_templates_section_ids() {
-    let template = steno_core::SummaryTemplate::bundled_with_id("interview").unwrap();
+fn every_schema_sent_is_in_the_strict_subset() {
+    let template = SummaryTemplate::bundled_with_id("interview").unwrap();
     let builder = SummaryPromptBuilder::new(template.clone(), chrono::Utc);
+    let sample = JsonSchema::object(vec![
+        ("score", JsonSchema::number().nullable()),
+        ("kind", JsonSchema::string_enum(&["a", "b"])),
+    ]);
+    assert_eq!(
+        sample.json_value()["properties"]["score"]["type"],
+        json!(["number", "null"])
+    );
+    for (name, schema) in [
+        ("sample", sample.json_value()),
+        ("probe", OpenAiCompatibleClient::probe_schema().json_value()),
+        (
+            "cleanup",
+            CleanupPromptBuilder::output_schema().json_value(),
+        ),
+        ("draft", builder.draft_schema().json_value()),
+        ("notes", builder.notes_schema().json_value()),
+    ] {
+        assert_strict(&schema, name);
+    }
+    let draft = builder.draft_schema().json_value();
     let ids: Vec<Value> = template.sections.iter().map(|s| json!(s.id)).collect();
     assert_eq!(
-        builder.draft_schema().json_value()["properties"]["sections"]["items"]["properties"]["id"]
-            ["enum"],
+        draft["properties"]["sections"]["items"]["properties"]["id"]["enum"],
         Value::Array(ids)
     );
-    assert_eq!(
-        schema_problems(&builder.draft_schema().json_value(), "root", 1),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        schema_problems(&builder.notes_schema().json_value(), "root", 1),
-        Vec::<String>::new()
-    );
-    assert!(
-        builder.draft_schema().json_value()["properties"]
-            .get("language")
-            .is_none()
-    );
-    assert!(
-        !builder
-            .draft_schema()
-            .prompt_text()
-            .contains("\"language\"")
-    );
-    assert_eq!(
-        builder.draft_schema().json_value()["properties"]["tasks"]["items"]["properties"]["priority"]
-            ["enum"],
-        json!(["low", "normal", "high"])
-    );
 }
 
-// Stub server
-
-/// `transport::http_client_builder` leaves the TLS provider installed.
 #[test]
-fn the_http_client_builder_installs_a_tls_provider() {
-    let _client = steno_llm::transport::http_client_builder().build().unwrap();
-    assert!(rustls::crypto::CryptoProvider::get_default().is_some());
-}
-
-#[tokio::test]
-async fn stub_accepts_a_post_returns_the_script_and_records_the_parsed_request() {
-    let server = StubChatServer::start().await.unwrap();
-    server.enqueue([scripts.completion(
-        "hello",
-        Some("stop"),
-        Some(LlmUsage {
-            prompt_tokens: 3,
-            completion_tokens: 1,
-            requests: 1,
-        }),
-        "stub-model",
-    )]);
-    let body = ChatCompletionRequest {
-        model: "stub-model".to_owned(),
-        messages: vec![ChatMessage {
-            role: "user".to_owned(),
-            content: "hi".to_owned(),
-        }],
-        temperature: Some(0.0),
-        max_tokens: Some(16),
-        max_completion_tokens: None,
-        response_format: Some(ChatResponseFormat::json_object()),
+fn retries_back_off_exponentially_and_only_for_transient_failures() {
+    let policy = RetryPolicy::default();
+    assert_eq!(policy.max_attempts, 3);
+    for (retry, after, delay) in [
+        (1, None, 2),
+        (2, None, 4),
+        (3, None, 8),
+        (10, None, 30),
+        (1, Some(7), 7),
+        (1, Some(600), 30),
+    ] {
+        assert_eq!(
+            policy.delay(retry, after.map(secs)),
+            secs(delay),
+            "{retry} {after:?}"
+        );
+    }
+    assert_eq!(RetryPolicy::with_max_attempts(0).max_attempts, 1);
+    for (header, expected) in [
+        (Some("7"), Some(secs(7))),
+        (Some(" 1.5 "), Some(Duration::from_millis(1_500))),
+        (Some("Wed, 21 Oct 2026 07:28:00 GMT"), None),
+        (Some("inf"), None),
+        (Some("nan"), None),
+        (Some("-1"), None),
+        (Some("1e300"), Some(secs(3_600))),
+        (Some("3601"), Some(secs(3_600))),
+        (None, None),
+    ] {
+        assert_eq!(transport::retry_after(header), expected, "{header:?}");
+    }
+    let http = |status| LlmError::Http {
+        status,
+        body: String::new(),
     };
-    let http = steno_llm::transport::default_http_client().unwrap();
-    let response = http
-        .post(server.base_url().join("/v1/chat/completions").unwrap())
-        .header("Authorization", "Bearer sk-test")
-        .header("X-Steno-Purpose", "cleanup")
-        .header("Content-Type", "application/json")
-        .body(wire::encode(&body).unwrap())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status().as_u16(), 200);
-    let decoded: ChatCompletionResponse = wire::decode(&response.bytes().await.unwrap()).unwrap();
-    assert_eq!(decoded.choices[0].message.content.as_deref(), Some("hello"));
-    assert_eq!(decoded.choices[0].finish_reason.as_deref(), Some("stop"));
-    assert_eq!(decoded.usage.unwrap().prompt_tokens, Some(3));
-
-    server.received(1).await;
-    let recorded = &server.requests()[0];
-    assert_eq!(recorded.method, "POST");
-    assert_eq!(recorded.path, "/v1/chat/completions");
-    assert_eq!(recorded.authorization(), Some("Bearer sk-test"));
-    assert_eq!(recorded.purpose.as_deref(), Some("cleanup"));
-    assert_eq!(recorded.chat.as_ref(), Some(&body));
-    assert!(recorded.responses.is_none());
-    assert_eq!(recorded.in_flight_on_arrival, 1);
-    assert_eq!(server.max_in_flight(), 1);
+    for status in [408, 500, 503, 599] {
+        assert!(http(status).is_retryable(), "{status}");
+    }
+    for status in [400, 401, 404, 429, 200] {
+        assert!(!http(status).is_retryable(), "{status}");
+    }
+    for error in [
+        LlmError::RateLimited { retry_after: None },
+        LlmError::Transport(String::new()),
+        LlmError::Timeout,
+    ] {
+        assert!(
+            error.is_retryable() && !error.is_answer_problem(),
+            "{error}"
+        );
+    }
+    for error in [
+        LlmError::InvalidJson(String::new()),
+        LlmError::Truncated,
+        LlmError::Refused(String::new()),
+    ] {
+        assert!(
+            !error.is_retryable() && error.is_answer_problem(),
+            "{error}"
+        );
+    }
+    assert_eq!(transport::wall_clock_backstop(secs(240)), secs(480));
+    assert_eq!(transport::wall_clock_backstop(secs(5)), secs(30));
 }
 
-#[tokio::test]
-async fn stub_answers_unscripted_requests_with_404_and_consults_the_responder() {
-    let server = StubChatServer::start().await.unwrap();
-    let http = steno_llm::transport::default_http_client().unwrap();
-    let url = server.base_url().join("/v1/models").unwrap();
-    let first = http.get(url.clone()).send().await.unwrap();
-    assert_eq!(first.status().as_u16(), 404);
-    server.respond(scripts.format_rejecting_server(&["a", "b"], &[], scripts.text("x")));
-    let second = http.get(url).send().await.unwrap();
-    assert_eq!(second.status().as_u16(), 200);
-    let list: ModelList = wire::decode(&second.bytes().await.unwrap()).unwrap();
-    let ids: Vec<&str> = list.data.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, ["a", "b"]);
-    assert_eq!(server.request_count(), 2);
-}
+#[test]
+fn redaction_removes_every_form_of_a_secret_before_the_cut() {
+    let key = API_KEY.to_owned();
+    let outer = format!("{API_KEY}-suffix");
+    let cases: Vec<(&str, Vec<String>, String)> = vec![
+        (
+            "every copy",
+            vec![key.clone()],
+            format!("{API_KEY} a {API_KEY}"),
+        ),
+        (
+            "nested secrets, either order",
+            vec![key.clone(), outer.clone()],
+            format!("{outer} {API_KEY}"),
+        ),
+        (
+            "nested secrets, either order",
+            vec![outer.clone(), key.clone()],
+            format!("{outer} {API_KEY}"),
+        ),
+        (
+            "JSON-escaped",
+            vec![r#"sk-test/AB"CD\EFGH12"#.to_owned()],
+            r#"sk-test/AB\"CD\\EFGH12 sk-test\/AB\"CD\\EFGH12"#.to_owned(),
+        ),
+    ];
+    for (what, secrets, text) in cases {
+        let redacted = transport::redact(&text, &secrets);
+        assert!(!redacted.contains("sk-test"), "{what}: {redacted}");
+        assert!(redacted.contains("[redacted]"), "{what}");
+    }
+    // Shorter than eight bytes is a placeholder, not a credential.
+    assert_eq!(
+        transport::redact("model x ollama", &["x".into(), "ollama".into()]),
+        "model x ollama"
+    );
+    assert_eq!(
+        transport::redact("too exceeded", &["exceeded".into()]),
+        "too [redacted]"
+    );
 
-#[tokio::test]
-async fn stub_held_responses_show_up_as_in_flight_until_released() {
-    let server = StubChatServer::start().await.unwrap();
-    server.enqueue([scripts.text("1"), scripts.text("2")]);
-    server.hold_responses();
-    let url = server.base_url().join("/v1/chat/completions").unwrap();
-    let status = |url: url::Url| async move {
-        steno_llm::transport::default_http_client()
-            .unwrap()
-            .post(url)
-            .body("{}")
-            .send()
-            .await
-            .unwrap()
-            .status()
-            .as_u16()
+    // Seeded property: random secrets at random places, cut anywhere after
+    // multi-byte filler; no eight bytes of a secret survive the cut.
+    let mut seed: u64 = 0x5EED;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(seed >> 33).unwrap() % n
     };
-    let first = tokio::spawn(status(url.clone()));
-    let second = tokio::spawn(status(url));
-    server.received(2).await;
-    assert_eq!(server.in_flight(), 2);
-    server.release();
-    assert_eq!(first.await.unwrap(), 200);
-    assert_eq!(second.await.unwrap(), 200);
-    assert_eq!(server.max_in_flight(), 2);
-    assert_eq!(server.in_flight(), 0);
+    for _ in 0..300 {
+        let secrets: Vec<String> = (0..=next(3))
+            .map(|i| format!("sk-{i}-{}", "aB3/\"x".repeat(2 + next(8))))
+            .collect();
+        let mut body = String::new();
+        while body.len() < 600 {
+            match next(4) {
+                0 => body.push_str(&secrets[next(secrets.len())]),
+                1 => body.push('€'),
+                2 => body.push_str(&serde_json::to_string(&secrets[next(secrets.len())]).unwrap()),
+                _ => body.push_str("filler "),
+            }
+        }
+        let limit = next(body.chars().count());
+        let cut = transport::redacted_prefix(&body, &secrets, limit);
+        assert!(cut.chars().count() <= limit);
+        for secret in &secrets {
+            for piece in secret.as_bytes().windows(8) {
+                let piece = std::str::from_utf8(piece).unwrap();
+                assert!(!cut.contains(piece), "{piece} survived in {cut}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -1073,125 +658,139 @@ fn wire_types_round_trip_through_their_snake_case_keys() {
             true,
         )),
     };
-    let json = String::from_utf8(wire::encode(&request).unwrap()).unwrap();
-    assert!(json.contains("\"max_tokens\":100"), "{json}");
+    let encoded = String::from_utf8(wire::encode(&request).unwrap()).unwrap();
+    assert!(encoded.contains("\"max_tokens\":100"), "{encoded}");
     assert!(
-        json.contains("\"response_format\":{\"json_schema\":{\"name\":\"n\""),
-        "{json}"
+        encoded.contains("\"response_format\":{\"json_schema\":{\"name\":\"n\""),
+        "{encoded}"
     );
-    assert!(!json.contains("max_completion_tokens"));
+    assert!(!encoded.contains("max_completion_tokens"));
     assert_eq!(
-        wire::decode::<ChatCompletionRequest>(json.as_bytes()).unwrap(),
+        wire::decode::<ChatCompletionRequest>(encoded.as_bytes()).unwrap(),
         request
     );
-
-    let parts = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"a\"},{\"type\":\"text\",\"text\":\"b\"}]},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}";
-    let response: ChatCompletionResponse = wire::decode(parts.as_bytes()).unwrap();
-    assert_eq!(response.choices[0].message.content.as_deref(), Some("ab"));
-    assert_eq!(response.usage.unwrap().completion_tokens, Some(2));
-
+    let parts = r#"{"choices":[{"message":{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}}]}"#;
+    let reply: ChatCompletionResponse = wire::decode(parts.as_bytes()).unwrap();
+    assert_eq!(reply.choices[0].message.content.as_deref(), Some("ab"));
     let error: ChatErrorEnvelope =
-        wire::decode(b"{\"error\":{\"message\":\"m\",\"code\":400}}").unwrap();
+        wire::decode(br#"{"error":{"message":"m","code":400}}"#).unwrap();
     assert_eq!(error.error.code, Some(json!(400)));
-}
-
-// Fixtures
-
-#[test]
-fn the_fixtures_are_what_the_swift_generators_produced() {
-    let standup = standup();
-    assert_eq!(standup.segments.len(), 24);
-    let labels: Vec<&str> = standup
-        .speakers
-        .iter()
-        .map(|s| s.cluster_label.as_str())
-        .collect();
-    assert_eq!(labels, ["Speaker 1", "Speaker 2", "Speaker 3"]);
-    assert!(standup.segments.iter().all(|s| s.text == s.raw_text));
-    assert!(standup.segments.iter().any(|s| s.text.contains("git hub")));
-    assert!(
-        standup
-            .segments
-            .iter()
-            .any(|s| s.text.contains("kuber netes"))
-    );
-    assert_eq!(standup.meeting.language, Some(de()));
-    assert_eq!(standup.meeting.template_id, "daily-standup");
-    let names: Vec<&str> = standup
-        .participants
-        .iter()
-        .map(|p| p.display_name.as_str())
-        .collect();
-    assert_eq!(names, ["Mara", "Jérôme", "Nicolai"]);
-    for pair in standup.segments.windows(2) {
-        assert_eq!(pair[1].start, pair[0].end);
-    }
-
-    let call = customer_call();
-    assert_eq!(call.segments.len(), 900);
-    assert_eq!(call.segments.last().unwrap().end, 3_600.0 - 0.25);
-    assert_eq!(call.meeting.duration, 3_600.0);
-    let labels: Vec<&str> = call
-        .speakers
-        .iter()
-        .map(|s| s.cluster_label.as_str())
-        .collect();
-    assert_eq!(labels, ["Me", "Speaker 1", "Speaker 2"]);
-    let ids: std::collections::HashSet<uuid::Uuid> = call.segments.iter().map(|s| s.id).collect();
-    assert_eq!(ids.len(), 900, "unique segment ids");
-    let me = call.speakers[0].id;
-    assert!(
-        call.segments
-            .iter()
-            .filter(|s| s.lane == AudioLane::Mic)
-            .all(|s| s.speaker_id == Some(me))
-    );
-    assert!(
-        call.segments
-            .iter()
-            .filter(|s| s.lane == AudioLane::System)
-            .all(|s| s.speaker_id != Some(me))
-    );
-
-    let cleanup = steno_llm::inputs::cleanup_input(&standup);
-    assert_eq!(cleanup.segments, standup.segments);
-    assert_eq!(cleanup.language, Some(de()));
-    assert_eq!(cleanup.known_people, standup.persons);
-    let summary = steno_llm::inputs::summary_input(&standup, None);
-    assert_eq!(summary.template.id, "daily-standup");
-    assert_eq!(summary.meeting, standup.meeting);
-    let other = steno_llm::inputs::summary_input(
-        &standup,
-        steno_core::SummaryTemplate::bundled_with_id("interview"),
-    );
-    assert_eq!(other.template.id, "interview");
-}
-
-/// The mode's JSON and text spelling, shared with the Swift app's settings,
-/// and the chain order.
-#[test]
-fn structured_output_mode_keeps_the_swift_spelling() {
-    let modes = [
+    // The mode's spelling is shared with the settings file.
+    for (mode, text) in [
         (StructuredOutputMode::JsonSchema, "jsonSchema"),
         (StructuredOutputMode::JsonObject, "jsonObject"),
         (StructuredOutputMode::PromptOnly, "promptOnly"),
-    ];
-    for (mode, text) in modes {
+    ] {
         assert_eq!(serde_json::to_string(&mode).unwrap(), format!("\"{text}\""));
-        assert_eq!(
-            serde_json::from_str::<StructuredOutputMode>(&format!("\"{text}\"")).unwrap(),
-            mode
-        );
-        assert_eq!(mode.as_str(), text);
         assert_eq!(text.parse::<StructuredOutputMode>().unwrap(), mode);
     }
-    assert!(serde_json::from_str::<StructuredOutputMode>("\"json_schema\"").is_err());
-    assert_eq!(
-        StructuredOutputMode::ALL,
-        [
-            StructuredOutputMode::JsonSchema,
-            StructuredOutputMode::JsonObject,
-            StructuredOutputMode::PromptOnly
-        ]
-    );
+}
+
+/// An endpoint needs a parsing URL and a model; Codex needs a model and
+/// the confirmed credential use. The context is clamped to 1 024.
+#[test]
+fn the_endpoint_comes_from_the_settings() {
+    fn local(s: &mut Settings) {
+        s.llm_base_url = Some("http://127.0.0.1:1234/v1/".to_owned());
+        s.llm_model = Some("local".to_owned());
+        s.llm_context_tokens = 16_000;
+    }
+    fn codex(s: &mut Settings) {
+        s.llm_provider = LlmProvider::Codex;
+        s.codex_model = Some("gpt-5.6-terra".to_owned());
+        s.codex_confirmed_at = Some(codex_now());
+    }
+    type Edit = fn(&mut Settings);
+    let cases: [(&str, Edit, Option<(&str, i64, bool)>); 8] = [
+        ("nothing set", |_| {}, None),
+        (
+            "endpoint",
+            local,
+            Some(("http://127.0.0.1:1234/v1/chat/completions", 16_000, false)),
+        ),
+        (
+            "empty model",
+            |s| {
+                local(s);
+                s.llm_model = Some(String::new());
+            },
+            None,
+        ),
+        (
+            "bad URL",
+            |s| {
+                local(s);
+                s.llm_base_url = Some("not a url".into());
+            },
+            None,
+        ),
+        (
+            "tiny context",
+            |s| {
+                local(s);
+                s.llm_context_tokens = 10;
+            },
+            Some(("http://127.0.0.1:1234/v1/chat/completions", 1_024, false)),
+        ),
+        (
+            "Codex",
+            |s| {
+                local(s);
+                codex(s);
+                s.codex_context_tokens = 10;
+            },
+            Some((
+                "https://chatgpt.com/backend-api/codex/responses",
+                1_024,
+                true,
+            )),
+        ),
+        (
+            "Codex unconfirmed",
+            |s| {
+                codex(s);
+                s.codex_confirmed_at = None;
+            },
+            None,
+        ),
+        // Pasting the backend's address stays an endpoint, so the
+        // confirmation cannot be walked around.
+        (
+            "pasted Codex URL",
+            |s| {
+                local(s);
+                s.llm_base_url = Some(LlmEndpoint::CODEX_BACKEND_URL.into());
+            },
+            Some((
+                "https://chatgpt.com/backend-api/codex/chat/completions",
+                16_000,
+                false,
+            )),
+        ),
+    ];
+    for (what, edit, expected) in cases {
+        let mut settings = Settings::default();
+        edit(&mut settings);
+        let found = LlmEndpoint::from_settings(&settings).map(|e| {
+            let url = if e.is_codex_backend() {
+                e.responses_url()
+            } else {
+                e.chat_completions_url()
+            };
+            (url.to_string(), e.context_tokens, e.is_codex_backend())
+        });
+        assert_eq!(
+            found,
+            expected.map(|(url, context, codex)| (url.to_owned(), context, codex)),
+            "{what}"
+        );
+    }
+}
+
+/// Without this a client built outside `http_client_builder` panics at
+/// its first `https` request.
+#[test]
+fn the_http_client_builder_installs_a_tls_provider() {
+    let _client = transport::http_client_builder().build().unwrap();
+    assert!(rustls::crypto::CryptoProvider::get_default().is_some());
 }

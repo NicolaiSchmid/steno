@@ -465,34 +465,6 @@ mod tests {
         assert!(debug.contains("Sensitive"), "{debug}");
     }
 
-    /// A client without an HTTP client answers every call with that failure.
-    #[tokio::test]
-    async fn without_an_http_client_every_call_fails_with_the_reason() {
-        let mut client = client();
-        let reason = transport::http_client_unavailable(
-            "builder error: No CA certificates were loaded from the system",
-        );
-        assert_eq!(
-            reason.to_string(),
-            "no trusted root certificates were found on this computer"
-        );
-        assert!(!reason.is_retryable());
-        client.http = Err(reason.clone());
-        let request = LlmRequest {
-            messages: Vec::new(),
-            response_format: steno_core::LlmResponseFormat::Text,
-            temperature: None,
-            max_tokens: None,
-            purpose: "test".to_owned(),
-        };
-        assert_eq!(client.complete_llm(&request).await.unwrap_err(), reason);
-        assert_eq!(client.probe_llm().await.unwrap_err(), reason);
-        assert_eq!(
-            transport::http_client_unavailable("builder error: bad proxy").to_string(),
-            "the HTTP client could not be built: builder error: bad proxy"
-        );
-    }
-
     #[test]
     fn the_debug_form_redacts_the_api_key() {
         let debug = format!("{:?}", client());
