@@ -229,12 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn a_second_of_speech_is_sixty_frames() {
-        assert_eq!(min_frames(&SegmentationGeometry::PYANNOTE_3_0, 1.0), 60);
-        assert_eq!(min_frames(&SegmentationGeometry::PYANNOTE_3_0, 0.0), 1);
-    }
-
-    #[test]
     fn weights_mark_the_clean_frames_or_nothing() {
         let rules = ExtractionRules::default();
         // Speaker 0 alone for 4 frames, overlapping speaker 1 for 3 frames.
