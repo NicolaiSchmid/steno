@@ -1,7 +1,6 @@
 //! The delivery policy with no I/O in it.
 
 use std::collections::{BTreeMap, HashSet};
-use std::convert::Infallible;
 use std::path::{Component, Path, PathBuf};
 
 use steno_core::content_hash::sha256;
@@ -289,24 +288,6 @@ impl DeliveryLedger {
         let mut components = Path::new(path).components().peekable();
         components.peek().is_some()
             && components.all(|component| matches!(component, Component::Normal(_)))
-    }
-
-    /// [`DeliveryLedger::claim_folder`] with a lookup: a missing candidate
-    /// counts as claimed and nothing is created. For tests.
-    #[must_use]
-    pub fn resolve_folder(
-        base: &str,
-        meeting_id: Uuid,
-        exists: impl Fn(&str) -> bool,
-        meeting_of: impl Fn(&str) -> Option<Uuid>,
-    ) -> String {
-        let Ok(folder) = Self::claim_folder(
-            base,
-            meeting_id,
-            |candidate| Ok::<_, Infallible>(!exists(candidate)),
-            meeting_of,
-        );
-        folder
     }
 
     /// The folder of a delivery without one: `base`, then `-2`, `-3`, …

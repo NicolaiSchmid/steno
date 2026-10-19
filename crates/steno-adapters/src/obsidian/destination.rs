@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError, TryLockError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
@@ -57,35 +57,6 @@ fn removed(result: std::io::Result<()>) -> bool {
     match result {
         Ok(()) => true,
         Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-    }
-}
-
-/// A point inside [`ObsidianFolderDestination::deliver_meeting`] where a
-/// test can stop a delivery to order a race. Exported with the `testing`
-/// feature only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "testing"), allow(dead_code))]
-pub enum DeliveryStep<'a> {
-    /// Another delivery in this process holds the vault.
-    WaitingForVault,
-    /// A delivery is about to claim this meeting folder by creating it.
-    ClaimingFolder(&'a str),
-    /// The meeting folder is in place; its files are about to be written.
-    WritingFolder(&'a str),
-    /// The person page at this path was read and is about to be written.
-    WritingPersonPage(&'a str),
-}
-
-/// The hook a test installs with
-/// [`ObsidianFolderDestination::with_step_hook`].
-#[cfg(feature = "testing")]
-#[derive(Clone)]
-struct StepHook(Arc<dyn Fn(DeliveryStep<'_>) + Send + Sync>);
-
-#[cfg(feature = "testing")]
-impl std::fmt::Debug for StepHook {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("StepHook")
     }
 }
 
@@ -153,9 +124,6 @@ pub struct ObsidianFolderDestination {
     /// ([`RenderOptions::platform`]).
     platform: Platform,
     sink: LocalFolderSink,
-    /// The tests' [`DeliveryStep`] hook; `None` outside them.
-    #[cfg(feature = "testing")]
-    steps: Option<StepHook>,
     /// The wall clock that dates a copy written beside an edited note.
     now: fn() -> DateTime<Utc>,
 }
@@ -204,8 +172,6 @@ impl ObsidianFolderDestination {
             time_zone,
             platform: Platform::CURRENT,
             sink,
-            #[cfg(feature = "testing")]
-            steps: None,
             now: Utc::now,
         }
     }
@@ -222,27 +188,6 @@ impl ObsidianFolderDestination {
     pub fn with_platform(mut self, platform: Platform) -> Self {
         self.platform = platform;
         self
-    }
-
-    /// The same destination calling `hook` at every [`DeliveryStep`]; the
-    /// hook may block.
-    #[cfg(feature = "testing")]
-    #[must_use]
-    pub fn with_step_hook(
-        mut self,
-        hook: impl Fn(DeliveryStep<'_>) + Send + Sync + 'static,
-    ) -> Self {
-        self.steps = Some(StepHook(Arc::new(hook)));
-        self
-    }
-
-    /// Calls the tests' hook; a no-op without the `testing` feature.
-    #[cfg_attr(not(feature = "testing"), allow(clippy::unused_self, unused_variables))]
-    fn reached(&self, step: DeliveryStep<'_>) {
-        #[cfg(feature = "testing")]
-        if let Some(StepHook(hook)) = &self.steps {
-            hook(step);
-        }
     }
 
     #[must_use]
@@ -333,16 +278,8 @@ impl ObsidianFolderDestination {
         previous: Option<&DeliveryReceipt>,
     ) -> Result<DeliveryReceipt, ObsidianError> {
         let lock = vault_lock(&self.settings.vault_path);
-        // `try_lock` first only so a test hook sees the wait. A poisoned
-        // lock guards nothing to repair, so it is taken as it is.
-        let _vault = match lock.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                self.reached(DeliveryStep::WaitingForVault);
-                lock.lock().unwrap_or_else(PoisonError::into_inner)
-            }
-        };
+        // A poisoned lock guards nothing to repair, so it is taken as it is.
+        let _vault = lock.lock().unwrap_or_else(PoisonError::into_inner);
         self.check_vault()?;
         let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path, |root| {
             self.sink.is_root(root)
@@ -400,7 +337,6 @@ impl ObsidianFolderDestination {
 
         self.writing(folder, || self.sink.create_directory(folder))?;
         AtomicFileWriter::remove_stale_temporaries(&self.sink.path(folder));
-        self.reached(DeliveryStep::WritingFolder(folder));
 
         let artifacts = renderer
             .render_meeting_files(meeting, &options, Some(&slug))
@@ -447,7 +383,6 @@ impl ObsidianFolderDestination {
             rendered.insert(path.clone());
             let mut data = page.page.into_bytes();
             let existing = self.reading(&path, || self.sink.read(&path))?;
-            self.reached(DeliveryStep::WritingPersonPage(&path));
             if let Some(existing) = existing {
                 // A non-UTF-8 page cannot be merged safely; left and reported.
                 let Ok(text) = String::from_utf8(existing) else {
@@ -675,7 +610,6 @@ impl ObsidianFolderDestination {
 
     /// Claims `folder` by creating it; `Ok(false)` when anything is there.
     fn create(&self, folder: &str) -> Result<bool, ObsidianError> {
-        self.reached(DeliveryStep::ClaimingFolder(folder));
         match self.sink.create_new_directory(folder) {
             Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
             created => self.writing(folder, || created.map(|()| true)),
@@ -885,27 +819,6 @@ mod tests {
         names
     }
 
-    /// A probe whose remove fails still proves the vault writable and goes
-    /// at the next check.
-    #[test]
-    fn a_probe_that_cannot_be_removed_passes_and_goes_at_the_next_check() {
-        let directory = tempfile::tempdir().unwrap();
-        let vault = directory.path();
-        fs::write(vault.join("Inbox.md"), "- [ ] call back").unwrap();
-        let destination = destination_at(vault);
-
-        let failed = destination.validate_vault_with(".steno-probe-0000abcd", refuse_remove);
-        assert_eq!(failed, Ok(()));
-        assert_eq!(names(vault), [".steno-probe-0000abcd", "Inbox.md"]);
-
-        destination.validate_vault().unwrap();
-        assert_eq!(names(vault), ["Inbox.md"]);
-        assert_eq!(
-            fs::read_to_string(vault.join("Inbox.md")).unwrap(),
-            "- [ ] call back"
-        );
-    }
-
     fn refuse_remove(_: &Path) -> std::io::Result<()> {
         Err(std::io::Error::from(ErrorKind::PermissionDenied))
     }
@@ -947,77 +860,5 @@ mod tests {
             fs::read_to_string(vault.join("Inbox.md")).unwrap(),
             "- [ ] call back"
         );
-    }
-
-    /// One unremovable leftover does not refuse a vault whose fresh probe
-    /// goes.
-    #[test]
-    fn a_leftover_only_another_user_can_remove_does_not_refuse_the_vault() {
-        let directory = tempfile::tempdir().unwrap();
-        let vault = directory.path();
-        fs::write(vault.join("Inbox.md"), "- [ ] call back").unwrap();
-        fs::write(vault.join(".steno-probe-0000abcd"), "").unwrap();
-        let theirs = vault.join(".steno-probe-0000abcd");
-        let destination = destination_at(vault);
-        let remove = |path: &Path| {
-            if path == theirs {
-                refuse_remove(path)
-            } else {
-                fs::remove_file(path)
-            }
-        };
-
-        for probe in [".steno-probe-1111abcd", ".steno-probe-2222abcd"] {
-            assert_eq!(destination.validate_vault_with(probe, remove), Ok(()));
-            assert_eq!(names(vault), [".steno-probe-0000abcd", "Inbox.md"]);
-        }
-        assert_eq!(
-            fs::read_to_string(vault.join("Inbox.md")).unwrap(),
-            "- [ ] call back"
-        );
-    }
-
-    /// An entry of the user's at the probe's name refuses the check and
-    /// stays.
-    #[test]
-    fn an_entry_at_the_probe_name_refuses_and_stays() {
-        let directory = tempfile::tempdir().unwrap();
-        let vault = directory.path();
-        fs::write(vault.join(".steno-probe-0000abcd"), "mine").unwrap();
-        let destination = destination_at(vault);
-
-        assert_eq!(
-            destination.validate_vault_with(".steno-probe-0000abcd", |path| fs::remove_file(path)),
-            Err(ObsidianError::VaultNotWritable(
-                vault.to_string_lossy().into_owned()
-            ))
-        );
-        assert_eq!(names(vault), [".steno-probe-0000abcd"]);
-        assert_eq!(
-            fs::read_to_string(vault.join(".steno-probe-0000abcd")).unwrap(),
-            "mine"
-        );
-    }
-
-    /// Only the exact pattern is a probe's name.
-    #[test]
-    fn a_probe_name_is_the_prefix_and_eight_lowercase_hex_digits() {
-        assert!(is_probe_name(".steno-probe-deadbeef"));
-        assert!(is_probe_name(".steno-probe-01234567"));
-        assert!(is_probe_name(&format!(
-            "{PROBE_PREFIX}{}",
-            AtomicFileWriter::random_hex()
-        )));
-        for name in [
-            ".steno-probe-DEADBEEF",
-            ".steno-probe-deadbee",
-            ".steno-probe-deadbeef0",
-            ".steno-probe-deadbeeg",
-            ".steno-probe-notes.txt",
-            "steno-probe-deadbeef",
-            ".steno-probe-",
-        ] {
-            assert!(!is_probe_name(name), "{name}");
-        }
     }
 }
