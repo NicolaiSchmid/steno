@@ -5573,7 +5573,6 @@ dependencies = [
  "steno-speech",
  "tempfile",
  "tokio",
- "tracing-subscriber",
 ]
 
 [[package]]

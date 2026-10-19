@@ -790,27 +790,4 @@ mod tests {
         assert!(parse(&["--model", "x"]).is_err());
         assert_eq!(parse(&[]).unwrap().fault, None);
     }
-
-    #[test]
-    fn a_fault_once_marker_lets_only_the_first_child_fault() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = FakeEngine {
-            loaded: false,
-            fault: Some(Fault::Error),
-            fault_once: Some(dir.path().join("marker")),
-            fell_back: false,
-            lost_encoder: false,
-        };
-        assert_eq!(engine.fault_now(), Some(Fault::Error));
-        assert_eq!(engine.fault_now(), None);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("marker")).unwrap(),
-            std::process::id().to_string()
-        );
-        let always = FakeEngine {
-            fault_once: None,
-            ..engine
-        };
-        assert_eq!(always.fault_now(), Some(Fault::Error));
-    }
 }

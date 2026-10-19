@@ -30,8 +30,6 @@ libc.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
-# The diarizer tests read what the engine logs.
-tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
