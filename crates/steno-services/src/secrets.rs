@@ -14,7 +14,7 @@ use steno_core::{
 
 use crate::files::{Access, replace_file, restrict_new_file};
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 mod credentials;
 #[cfg(all(test, target_os = "linux"))]
 mod fake_service;
@@ -166,18 +166,11 @@ impl KeyringSecretStore {
 #[cfg(windows)]
 impl KeyringSecretStore {
     fn read(key: &SecretKey) -> BoundaryResult<Option<String>> {
-        Ok(credentials::read_secret(
-            &mut *credentials::credential_set(),
-            key,
-        )?)
+        Ok(credentials::read_secret(key)?)
     }
 
     fn write(key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
-        Ok(credentials::write_secret(
-            &mut *credentials::credential_set(),
-            key,
-            value,
-        )?)
+        Ok(credentials::write_secret(key, value)?)
     }
 }
 

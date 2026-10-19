@@ -117,11 +117,12 @@ pipewire = "0.10"
 # themselves (the crate's own Secret Service stores bring a second `zbus`
 # or libdbus; `linux-native` is the kernel keyring, which does not survive
 # a reboot); the feature stays so the crate builds there without a mock.
-# On Windows the services write the credential store over `windows-sys`,
-# as the crate keeps every credential with the roaming profile
-# (`CRED_PERSIST_ENTERPRISE`); `windows-native` is a Windows dev-dependency
-# of the services only, whose tests read and write through the crate.
 keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native"] }
+# The Windows credential store: `keyring` 3 keeps every credential with the
+# roaming profile (`CRED_PERSIST_ENTERPRISE`); the split crates take a
+# `persistence` modifier, so the services keep theirs on this computer.
+keyring-core = "1"
+windows-native-keyring-store = { version = "1", default-features = false }
 # The `steno` CLI's argument parser.
 clap = { version = "4", features = ["derive"] }
 # Build only

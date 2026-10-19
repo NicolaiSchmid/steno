@@ -14,7 +14,7 @@ code; propose changes as a new plan file first.
 
 | Area | Path | Description |
 |------|------|-------------|
-| Rust core | `Cargo.toml`, `crates/` | Cargo workspace that replaces the Swift package at the Mac cutover (plan `.plans/2026-10-02-rust-core-and-tauri-shell.md`): `steno-core` (domain types, store over the Swift schema, settings, traits for the pluggable boundaries), `steno-bridge` (web UI contract), `steno-host` (view models, bridge host), `steno-pipeline` (post-meeting pipeline, intakes), `steno-services` (object graph from the settings; `unsafe` only in its `secrets/credentials/windows.rs` module), `steno-audio` (capture on Core Audio, PipeWire and WASAPI, echo cancellation, writer, meeting detection), `steno-speech` (VAD, chunker, decoder, ONNX backend, sidecar client, model store), `steno-speech-coreml` (Mac CoreML backend; `unsafe` only in its `coreml` module), `steno-diarize` (speaker diarization), `steno-llm` (LLM client, cleanup and summary passes), `steno-adapters` (destinations, meeting export), `steno-handover` (phone handover server), `steno-macos` (safe wrappers over the Mac framework calls without a safe binding: EventKit's calendar access and events, the keychain's PKCS#12 export, a volume's free space for important use), `steno-cli` (the `steno` binary) |
+| Rust core | `Cargo.toml`, `crates/` | Cargo workspace that replaces the Swift package at the Mac cutover (plan `.plans/2026-10-02-rust-core-and-tauri-shell.md`): `steno-core` (domain types, store over the Swift schema, settings, traits for the pluggable boundaries), `steno-bridge` (web UI contract), `steno-host` (view models, bridge host), `steno-pipeline` (post-meeting pipeline, intakes), `steno-services` (object graph from the settings), `steno-audio` (capture on Core Audio, PipeWire and WASAPI, echo cancellation, writer, meeting detection), `steno-speech` (VAD, chunker, decoder, ONNX backend, sidecar client, model store), `steno-speech-coreml` (Mac CoreML backend; `unsafe` only in its `coreml` module), `steno-diarize` (speaker diarization), `steno-llm` (LLM client, cleanup and summary passes), `steno-adapters` (destinations, meeting export), `steno-handover` (phone handover server), `steno-macos` (safe wrappers over the Mac framework calls without a safe binding: EventKit's calendar access and events, the keychain's PKCS#12 export, a volume's free space for important use), `steno-cli` (the `steno` binary) |
 | Speech sidecar | `crates/steno-speech-sidecar/` | Child process that runs ONNX speech and the ONNX diarizer outside the app, driven by `steno-speech` over stdin and stdout, the only way audio reaches it. Bundled beside the desktop binary by `apps/desktop/scripts/stage-sidecar.sh` |
 | Desktop app | `apps/desktop/` | Tauri 2 shell for macOS, Linux and Windows: windows, tray, floating panels, autostart, updater, installer bundles, smoke and release scripts (`apps/desktop/scripts/`). No logic: it answers the bridge from `steno-host` over `steno-services`, or from the recorded fixtures behind the `fixture-host` feature for UI work without a database. Own README |
 | Swift core | `Package.swift`, `Sources/`, `Tests/` | Swift package, shipping until the Mac cutover: `StenoCore`, `StenoAudio`, `StenoSpeech`, `StenoLLM`, `StenoAdapters`, `StenoHandover`, `StenoBridge` and the `steno` CLI |
@@ -143,9 +143,8 @@ missing local setup, run it. Do not ask first.
 - `unsafe` only in these places, each wrapped in a safe module with a
   comment on every invariant: the platform backends (`steno-audio`, the
   CoreML backends in `steno-speech-coreml`'s `coreml.rs` and
-  `steno-diarize`'s `coreml/binding.rs`); `steno-macos`; `steno-services`'
-  `secrets/credentials/windows.rs` (the Windows credential store); the
-  desktop shell's `permissions.rs` and `main.rs`; `steno-handover`'s
+  `steno-diarize`'s `coreml/binding.rs`); `steno-macos`; the desktop
+  shell's `permissions.rs` and `main.rs`; `steno-handover`'s
   `server/advertise.rs` and `upload/receiving_file.rs`;
   `steno-speech-sidecar`'s `lib.rs`; and the test targets
   `steno-speech-sidecar/tests/isolation.rs` and
