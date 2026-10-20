@@ -5202,7 +5202,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "steno-adapters"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5219,7 +5219,7 @@ dependencies = [
 
 [[package]]
 name = "steno-audio"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "cc",
  "chrono",
@@ -5247,7 +5247,7 @@ dependencies = [
 
 [[package]]
 name = "steno-bridge"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -5261,7 +5261,7 @@ dependencies = [
 
 [[package]]
 name = "steno-cli"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "chrono",
  "clap",
@@ -5287,7 +5287,7 @@ dependencies = [
 
 [[package]]
 name = "steno-core"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5311,7 +5311,7 @@ dependencies = [
 
 [[package]]
 name = "steno-desktop"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "async-trait",
  "block2",
@@ -5350,7 +5350,7 @@ dependencies = [
 
 [[package]]
 name = "steno-diarize"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "hound",
  "objc2",
@@ -5370,7 +5370,7 @@ dependencies = [
 
 [[package]]
 name = "steno-handover"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -5409,7 +5409,7 @@ dependencies = [
 
 [[package]]
 name = "steno-host"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5427,7 +5427,7 @@ dependencies = [
 
 [[package]]
 name = "steno-llm"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -5451,7 +5451,7 @@ dependencies = [
 
 [[package]]
 name = "steno-macos"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "block2",
  "core-foundation 0.10.1",
@@ -5466,7 +5466,7 @@ dependencies = [
 
 [[package]]
 name = "steno-pipeline"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5486,7 +5486,7 @@ dependencies = [
 
 [[package]]
 name = "steno-services"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5531,7 +5531,7 @@ dependencies = [
 
 [[package]]
 name = "steno-speech"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "ort",
  "realfft",
@@ -5550,7 +5550,7 @@ dependencies = [
 
 [[package]]
 name = "steno-speech-coreml"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "objc2",
  "objc2-core-ml",
@@ -5565,7 +5565,7 @@ dependencies = [
 
 [[package]]
 name = "steno-speech-sidecar"
-version = "0.1.0-rc.3"
+version = "0.11.0-rc.1"
 dependencies = [
  "libc",
  "memory-stats",
