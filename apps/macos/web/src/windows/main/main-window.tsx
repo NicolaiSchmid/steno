@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { send, useBridge, usePageReady } from "@/bridge/hooks";
 import { ColumnResizer } from "@/components/ui";
 import {
@@ -30,9 +30,10 @@ const RESIZER_LABELS: Record<ColumnName, string> = {
  * The main window: sidebar (256 by default), meeting list (300) and the
  * reading column, with a divider on the trailing edge of the first two that
  * drags, takes arrow keys and resets on a double-click (`column-widths.ts`
- * for the limits and where the widths are kept). Tells the host the page is ready once and reports the window size
- * after a resize settles. A deep link to a meeting is the host's to follow:
- * it selects the meeting and the page shows `list.selection`.
+ * for the limits and where the widths are kept). Tells the host the page is
+ * ready once and reports the window size after a resize settles. A deep link
+ * to a meeting is the host's to follow: it selects the meeting and the page
+ * shows `list.selection`.
  */
 export function MainWindow({
 	menuOpen = false,
@@ -64,17 +65,20 @@ export function MainWindow({
 		};
 	}, [client]);
 
-	const resizer = (name: ColumnName) => (
-		<ColumnResizer
-			aria-label={RESIZER_LABELS[name]}
-			data-testid={`resize-${name}`}
-			defaultValue={COLUMNS[name].default}
-			max={columnMax(name, widths, windowWidth)}
-			min={COLUMNS[name].min}
-			onChange={(width) => update(name, width)}
-			onCommit={(width) => commit(name, width)}
-			value={widths[name]}
-		/>
+	const column = (name: ColumnName, content: ReactNode) => (
+		<div className="relative grid min-h-0 min-w-0">
+			{content}
+			<ColumnResizer
+				aria-label={RESIZER_LABELS[name]}
+				data-testid={`resize-${name}`}
+				defaultValue={COLUMNS[name].default}
+				max={columnMax(name, widths, windowWidth)}
+				min={COLUMNS[name].min}
+				onChange={(width) => update(name, width)}
+				onCommit={(width) => commit(name, width)}
+				value={widths[name]}
+			/>
+		</div>
 	);
 
 	return (
@@ -85,14 +89,8 @@ export function MainWindow({
 				gridTemplateColumns: `${widths.sidebar}px ${widths.list}px minmax(0,1fr)`,
 			}}
 		>
-			<div className="relative grid min-h-0 min-w-0">
-				<Sidebar />
-				{resizer("sidebar")}
-			</div>
-			<div className="relative grid min-h-0 min-w-0">
-				<MeetingList />
-				{resizer("list")}
-			</div>
+			{column("sidebar", <Sidebar />)}
+			{column("list", <MeetingList />)}
 			<MeetingDetail
 				initialMenuOpen={menuOpen}
 				initialPickerOpen={pickerOpen}
