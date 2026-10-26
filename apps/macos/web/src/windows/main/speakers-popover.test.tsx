@@ -63,7 +63,7 @@ describe("SpeakersPopover", () => {
 			within(list)
 				.getAllByRole("group")
 				.map((group) => group.getAttribute("aria-label")),
-		).toEqual(["In this meeting", "Recent people"]);
+		).toEqual(["In this meeting", "Recent people", "New person"]);
 		expect(within(list).queryByText("Leave unnamed")).toBeNull();
 
 		await user.keyboard("{ArrowDown}{Enter}");
