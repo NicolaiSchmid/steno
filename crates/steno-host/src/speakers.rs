@@ -9,11 +9,12 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use steno_core::{
     MeetingExport, ParticipantRole, Person, Speaker, SpeakerAssignment, SpeakerNameSuggestion,
-    Store, TranscriptSegment, fold_name, paths::file_url_path,
+    Store, TranscriptSegment, fold_name, me_speaker_id, paths::file_url_path,
 };
 use uuid::Uuid;
 
 use crate::services::{ClipPlayer, FileSystem};
+use crate::settings::update_settings;
 
 /// What choosing a row does.
 #[derive(Debug, Clone, PartialEq)]
@@ -324,6 +325,20 @@ impl SpeakerRow {
     }
 }
 
+/// Makes `person` the user's own
+/// ([`Settings::self_person_id`](steno_core::Settings::self_person_id)) unless one
+/// is set already, and confirms as them every meeting's "me" speaker that
+/// is still unknown ([`Store::confirm_unnamed_me_speakers`]). Those
+/// meetings are not exported again; their next export carries the name.
+pub fn adopt_self_person(person: &Person, store: &Store) -> steno_core::store::Result<()> {
+    if store.settings()?.self_person_id.is_some() {
+        return Ok(());
+    }
+    update_settings(store, |settings| settings.self_person_id = Some(person.id))?;
+    store.confirm_unnamed_me_speakers(person)?;
+    Ok(())
+}
+
 #[must_use]
 pub fn clip_path(speaker: &Speaker) -> Option<PathBuf> {
     speaker.sample_clip_url.as_deref().and_then(file_url_path)
@@ -442,8 +457,9 @@ impl SpeakersViewModel {
     /// The one write: a person option confirms that person (merging when
     /// they own another speaker here); a create option resolves the name
     /// first, taking a same-named attendee's email. The speaker's own person
-    /// again changes nothing; an unlisted speaker is ignored. Returns
-    /// whether a speaker changed.
+    /// again changes nothing; an unlisted speaker is ignored. The first
+    /// person the user names a "me" speaker as becomes the user's own
+    /// ([`adopt_self_person`]). Returns whether a speaker changed.
     pub fn select(
         &mut self,
         option: &SpeakerOption,
@@ -454,7 +470,7 @@ impl SpeakersViewModel {
         let Some(row) = self.row(speaker_id).cloned() else {
             return false;
         };
-        let outcome = (|| -> steno_core::store::Result<bool> {
+        let outcome = (|| -> steno_core::store::Result<Option<Person>> {
             let person = match &option.kind {
                 OptionKind::Person(known) => known.clone(),
                 OptionKind::Create(name) => {
@@ -476,16 +492,24 @@ impl SpeakersViewModel {
                     person_id: person.id,
                 })
             {
-                return Ok(false);
+                return Ok(None);
             }
             let clips = store.confirm_speaker(speaker_id, &person)?;
             for clip in clips.iter().filter_map(|clip| file_url_path(clip)) {
                 let _ = std::fs::remove_file(clip);
             }
-            Ok(true)
+            Ok(Some(person))
         })();
         match outcome {
-            Ok(wrote) => wrote,
+            Ok(Some(person)) => {
+                if speaker_id == me_speaker_id(row.speaker.meeting_id)
+                    && let Err(error) = adopt_self_person(&person, store)
+                {
+                    self.error = Some(format!("Steno could not remember who you are: {error}"));
+                }
+                true
+            }
+            Ok(None) => false,
             Err(error) => {
                 self.error = Some(format!("Speaker could not be named: {error}"));
                 false
