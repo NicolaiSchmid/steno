@@ -326,14 +326,19 @@ impl SpeakerRow {
 }
 
 /// Makes `person` [`Settings::self_person_id`](steno_core::Settings::self_person_id)
-/// unless one is set, and confirms them as every still-unknown "me" speaker
-/// ([`Store::confirm_unnamed_me_speakers`]) without exporting again.
+/// unless a stored person is set, after confirming them as every
+/// still-unknown "me" speaker ([`Store::confirm_unnamed_me_speakers`])
+/// without exporting again, so a failed backfill is retried at the next
+/// naming.
 pub fn adopt_self_person(person: &Person, store: &Store) -> steno_core::store::Result<()> {
-    if store.settings()?.self_person_id.is_some() {
+    if let Some(id) = store.settings()?.self_person_id
+        && store.person(id)?.is_some()
+    {
         return Ok(());
     }
+    store.confirm_unnamed_me_speakers(person)?;
     update_settings(store, |settings| settings.self_person_id = Some(person.id))?;
-    store.confirm_unnamed_me_speakers(person)
+    Ok(())
 }
 
 #[must_use]
