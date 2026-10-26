@@ -15,38 +15,35 @@ export const COLUMNS = {
 } as const;
 
 /** The reading column never gets narrower than this while a divider moves. */
-export const DETAIL_MIN = 400;
+const DETAIL_MIN = 400;
 
 export const COLUMN_WIDTHS_KEY = "steno.main.columnWidths";
 
 export type ColumnName = keyof typeof COLUMNS;
-export type ColumnWidths = Record<ColumnName, number>;
+type ColumnWidths = Record<ColumnName, number>;
 
-const defaults: ColumnWidths = {
-	sidebar: COLUMNS.sidebar.default,
-	list: COLUMNS.list.default,
-};
-
-function inRange(name: ColumnName, value: unknown): value is number {
-	const { min, max } = COLUMNS[name];
-	return typeof value === "number" && value >= min && value <= max;
+/** `value` if it is a width within `name`'s limits, otherwise its default. */
+function validWidth(name: ColumnName, value: unknown) {
+	const { default: fallback, min, max } = COLUMNS[name];
+	return typeof value === "number" && value >= min && value <= max
+		? value
+		: fallback;
 }
 
 /** The stored widths, each falling back to its default when missing or out of range. */
-export function loadColumnWidths(): ColumnWidths {
+function loadColumnWidths(): ColumnWidths {
+	let stored: Partial<Record<ColumnName, unknown>> | null = null;
 	try {
-		const stored = JSON.parse(
-			window.localStorage.getItem(COLUMN_WIDTHS_KEY) ?? "{}",
-		) as Partial<Record<ColumnName, unknown>>;
-		return {
-			sidebar: inRange("sidebar", stored.sidebar)
-				? stored.sidebar
-				: defaults.sidebar,
-			list: inRange("list", stored.list) ? stored.list : defaults.list,
-		};
+		stored = JSON.parse(
+			window.localStorage.getItem(COLUMN_WIDTHS_KEY) ?? "null",
+		);
 	} catch {
-		return { ...defaults };
+		// Storage refused or unreadable: every column opens at its default.
 	}
+	return {
+		sidebar: validWidth("sidebar", stored?.sidebar),
+		list: validWidth("list", stored?.list),
+	};
 }
 
 function saveColumnWidths(widths: ColumnWidths) {
