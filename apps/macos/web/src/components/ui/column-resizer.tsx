@@ -115,7 +115,11 @@ export function ColumnResizer({
 				dragging && "after:bg-ring/60",
 				className,
 			)}
-			onDoubleClick={() => set(defaultValue, true)}
+			onDoubleClick={() => {
+				// Stored even when a narrow window clamps it, so it is what comes back.
+				set(defaultValue, false);
+				onCommit?.(defaultValue);
+			}}
 			onKeyDown={onKeyDown}
 			onLostPointerCapture={endDrag}
 			onPointerCancel={endDrag}

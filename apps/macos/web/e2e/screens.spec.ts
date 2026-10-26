@@ -237,12 +237,17 @@ for (const scheme of SCHEMES) {
 			await page.mouse.move(x, 300);
 			await page.mouse.down();
 			await page.mouse.move(x + dx, 300, { steps: 8 });
-			return x;
 		};
 
-		const start = await drag("resize-sidebar", 0);
+		const divider = await page.getByTestId("resize-sidebar").boundingBox();
+		if (!divider) {
+			throw new Error("resize-sidebar has no box");
+		}
+		const start = divider.x + divider.width / 2;
+		await page.mouse.move(start, 300);
 		await page.waitForTimeout(300);
 		await shot("hover");
+		await page.mouse.down();
 		await page.mouse.move(start + 64, 300, { steps: 8 });
 		await shot("dragging");
 		await page.mouse.up();
