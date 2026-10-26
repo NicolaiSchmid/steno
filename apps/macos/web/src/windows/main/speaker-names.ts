@@ -8,7 +8,7 @@ export type Turn = MeetingDetailSnapshot["transcript"][number];
  * computer (`ME_SPEAKER_LABEL` in `steno-pipeline`). It has no sample clip:
  * the mic is the user's own voice.
  */
-export const ME_LABEL = "Me";
+const ME_LABEL = "Me";
 
 export function isMe(speaker: Speaker): boolean {
 	return speaker.clusterLabel === ME_LABEL;
@@ -112,7 +112,7 @@ export function groupSpeakers(speakers: readonly Speaker[]): SpeakerGroups {
 }
 
 /** The speakers in the order the popover lists them, for moving to the next. */
-export function listedOrder(groups: SpeakerGroups): Speaker[] {
+function listedOrder(groups: SpeakerGroups): Speaker[] {
 	return [
 		...groups.named.flatMap(({ speaker, also }) => [speaker, ...also]),
 		...groups.unnamed,
@@ -133,10 +133,8 @@ export function nextToName(
 	return rotated.find((speaker) => speaker.id !== current && !isNamed(speaker));
 }
 
-export type OptionGroupID = "meeting" | "people" | "create";
-
 export interface OptionGroup {
-	id: OptionGroupID;
+	id: "meeting" | "people" | "create";
 	/** The heading; the create group has none on screen. */
 	label: string;
 	options: SpeakerOption[];

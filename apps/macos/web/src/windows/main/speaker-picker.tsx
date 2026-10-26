@@ -11,8 +11,6 @@ import {
 import { SpeakerNameField } from "./speaker-name-field";
 import { canPlay, isMe, isNamed, type Speaker } from "./speaker-names";
 
-export type { Speaker } from "./speaker-names";
-
 export interface SpeakerPlayButtonProps {
 	speaker: Speaker;
 	/** Suffix of the test id, so two hosts on one page stay apart. */

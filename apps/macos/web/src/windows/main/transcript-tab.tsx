@@ -3,13 +3,8 @@ import { useEffect, useState } from "react";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
 import { Button, EmptyState } from "@/components/ui";
 import { format } from "./format";
-import {
-	type Speaker,
-	SpeakerPicker,
-	SpeakerPlayButton,
-} from "./speaker-picker";
-
-export type Turn = MeetingDetailSnapshot["transcript"][number];
+import type { Speaker, Turn } from "./speaker-names";
+import { SpeakerPicker, SpeakerPlayButton } from "./speaker-picker";
 
 export interface TranscriptTabProps {
 	detail: MeetingDetailSnapshot;

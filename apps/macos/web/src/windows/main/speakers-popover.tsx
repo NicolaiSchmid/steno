@@ -55,6 +55,14 @@ function TriggerContent({
 	groups: SpeakerGroups;
 	total: number;
 }) {
+	if (groups.namedCount === 0) {
+		return (
+			<>
+				<UserPlusIcon aria-hidden="true" />
+				Name speakers
+			</>
+		);
+	}
 	const missing = total - groups.namedCount;
 	return (
 		<>
@@ -142,14 +150,7 @@ export function SpeakersPopover({
 					/>
 				}
 			>
-				{groups.namedCount === 0 ? (
-					<>
-						<UserPlusIcon aria-hidden="true" />
-						Name speakers
-					</>
-				) : (
-					<TriggerContent groups={groups} total={total} />
-				)}
+				<TriggerContent groups={groups} total={total} />
 			</PopoverTrigger>
 			<PopoverPopup align="start" size="lg">
 				<div className="flex items-center gap-2">
@@ -297,27 +298,27 @@ function SpeakerRow({
 							</Tooltip>
 						) : null}
 						{suggested ? (
-							<Button
-								data-testid={`speakers-popover-confirm-${speaker.id}`}
-								onClick={confirmSuggestion}
-								size="xs"
-								variant="outline"
-							>
-								<CheckIcon aria-hidden="true" />
-								Confirm
-							</Button>
-						) : null}
-						{suggested ? (
-							<Tooltip label="Change">
+							<>
 								<Button
-									aria-label={`Change ${speaker.displayName}`}
-									onClick={onEdit}
-									size="icon-xs"
-									variant="ghost-muted"
+									data-testid={`speakers-popover-confirm-${speaker.id}`}
+									onClick={confirmSuggestion}
+									size="xs"
+									variant="outline"
 								>
-									<PencilIcon aria-hidden="true" />
+									<CheckIcon aria-hidden="true" />
+									Confirm
 								</Button>
-							</Tooltip>
+								<Tooltip label="Change">
+									<Button
+										aria-label={`Change ${speaker.displayName}`}
+										onClick={onEdit}
+										size="icon-xs"
+										variant="ghost-muted"
+									>
+										<PencilIcon aria-hidden="true" />
+									</Button>
+								</Tooltip>
+							</>
 						) : null}
 					</>
 				) : (

@@ -14,7 +14,7 @@ import { Input } from "@/components/ui";
 import { menuItemVariants } from "@/components/ui/menu";
 import { groupOptions, optionText, type Speaker } from "./speaker-names";
 
-export const SPEAKER_QUERY_DEBOUNCE_MS = 150;
+const SPEAKER_QUERY_DEBOUNCE_MS = 150;
 
 export interface SpeakerNameFieldProps {
 	speaker: Speaker;
@@ -85,7 +85,8 @@ export function SpeakerNameField({
 
 	const groups = groupOptions(answered.options, answered.query);
 	const flat = groups.flatMap((group) => group.options);
-	const highlighted = flat[Math.min(active, flat.length - 1)];
+	const highlightedAt = Math.min(active, flat.length - 1);
+	const highlighted = flat[highlightedAt];
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: the preview follows the highlighted row only.
 	useEffect(() => {
@@ -157,7 +158,7 @@ export function SpeakerNameField({
 		<div className={className} onBlur={onBlur}>
 			<Input
 				aria-activedescendant={
-					highlighted ? optionID(flat.indexOf(highlighted)) : undefined
+					highlighted ? optionID(highlightedAt) : undefined
 				}
 				aria-autocomplete="list"
 				aria-controls={listID}
