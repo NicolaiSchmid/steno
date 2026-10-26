@@ -30,7 +30,7 @@ permissions:
 jobs:
   site:
     name: Check and build
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-4
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

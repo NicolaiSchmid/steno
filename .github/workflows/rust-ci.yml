@@ -19,7 +19,9 @@ name: Rust CI
 #     previous run's incremental state on the same runner and nothing is
 #     uploaded; `rust-cache` is skipped there.
 #
-#   • GitHub-hosted. Fresh machine every run, so `Swatinem/rust-cache`
+#   • Fresh machine every run: GitHub-hosted, and the Ubicloud Linux
+#     runners. Ubicloud registers its runners as self-hosted, so the Forge
+#     steps check `runner.os == 'macOS'` as well. `Swatinem/rust-cache`
 #     restores the compiled dependencies in every run and saves only from
 #     pushes to `main`.
 #
@@ -136,7 +138,7 @@ jobs:
       matrix:
         include:
           - name: linux
-            os: ubuntu-latest
+            os: ubicloud-standard-8
           - name: windows
             os: windows-latest
           # `MACOS_RUNS_ON` is a JSON label list for the Forge runners, the
@@ -152,8 +154,8 @@ jobs:
         if: matrix.name == 'linux'
         run: scripts/setup-linux.sh
 
-      - name: Use the installed rustup (self-hosted runners only)
-        if: runner.environment == 'self-hosted'
+      - name: Use the installed rustup (self-hosted Mac only)
+        if: runner.os == 'macOS' && runner.environment == 'self-hosted'
         run: |
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "/run/current-system/sw/bin" >> "$GITHUB_PATH"
@@ -162,8 +164,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Target directory outside the workspace (self-hosted runners only)
-        if: runner.environment == 'self-hosted'
+      - name: Target directory outside the workspace (self-hosted Mac only)
+        if: runner.os == 'macOS' && runner.environment == 'self-hosted'
         run: |
           target="$HOME/Library/Caches/steno-ci/$RUNNER_NAME/cargo-target"
           mkdir -p "$target"
@@ -171,7 +173,7 @@ jobs:
           echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
-        if: runner.environment == 'github-hosted'
+        if: runner.os != 'macOS' || runner.environment == 'github-hosted'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -442,7 +444,7 @@ jobs:
   # an unrelated pull request; desktop-release.yml blocks on all four.
   deny:
     name: cargo deny (${{ matrix.checks }})
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -457,7 +459,7 @@ jobs:
 
   msrv:
     name: msrv
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-4
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -482,7 +484,7 @@ jobs:
 
   tsan:
     name: tsan
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-8
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

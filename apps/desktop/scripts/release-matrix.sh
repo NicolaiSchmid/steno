@@ -22,7 +22,7 @@ mac="${MACOS_RUNS_ON:-\"macos-15\"}"
 # artifact. Every updater artifact's .sig is uploaded beside it (the
 # workflow adds them).
 all='[
-  {"name":"linux","os":"ubuntu-latest","bundles":"deb,appimage",
+  {"name":"linux","os":"ubicloud-standard-8","bundles":"deb,appimage",
    "artifacts":"target/release/bundle/deb/*.deb\ntarget/release/bundle/appimage/*.AppImage"},
   {"name":"windows","os":"windows-latest","bundles":"msi,nsis",
    "artifacts":"target/release/bundle/msi/*.msi\ntarget/release/bundle/nsis/*.exe"},

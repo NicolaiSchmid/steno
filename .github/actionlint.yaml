@@ -1,0 +1,8 @@
+# Runner labels actionlint does not know: the Ubicloud Linux runners the
+# workflows name directly (ubicloud.com/docs/github-actions-integration).
+self-hosted-runner:
+  labels:
+    - ubicloud-standard-2
+    - ubicloud-standard-4
+    - ubicloud-standard-8
+    - ubicloud-standard-16
