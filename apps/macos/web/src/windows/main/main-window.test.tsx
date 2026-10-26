@@ -48,7 +48,9 @@ describe("MainWindow", () => {
 			expect(list).toHaveAttribute("aria-valuenow", "332");
 			fireEvent.keyDown(list, { key: "Home" });
 			expect(list).toHaveAttribute("aria-valuenow", "240");
-			expect(JSON.parse(window.localStorage.getItem(COLUMN_WIDTHS_KEY) ?? "")).toEqual({
+			expect(
+				JSON.parse(window.localStorage.getItem(COLUMN_WIDTHS_KEY) ?? ""),
+			).toEqual({
 				sidebar: 300,
 				list: 240,
 			});
