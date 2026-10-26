@@ -7,6 +7,7 @@ import type {
 	OnboardingSnapshot,
 	PhoneSettingsSnapshot,
 	RecordingSnapshot,
+	SpeakerOptionsReply,
 	SummariesSettingsSnapshot,
 	TranscriptionSettingsSnapshot,
 } from "./contract";
@@ -30,8 +31,11 @@ export type FixtureMap = Record<string, unknown>;
 export interface MockTransportOptions {
 	/** Snapshots by topic, emitted on the first subscribe. */
 	snapshots?: FixtureMap | (() => Promise<FixtureMap>);
-	/** Replies by method. A value that is an `Error` rejects the call. */
-	replies?: FixtureMap;
+	/**
+	 * Replies by method. A value that is an `Error` rejects the call; a
+	 * function is called with the params and its result is the reply.
+	 */
+	replies?: FixtureMap | (() => Promise<FixtureMap>);
 }
 
 export interface RecordedCall {
@@ -250,8 +254,10 @@ function bareDetail(
  * recording kept because the speakers or the transcript may be
  * incomplete), `summary-key-withheld` (the selected meeting's summary
  * skipped while the API key was withheld, from
- * `meeting.detail.keyWithheld`). `tab=` picks the detail tab. Without
- * either, the fixtures pass through unchanged.
+ * `meeting.detail.keyWithheld`), and the speaker naming states
+ * (`speakersScenario`): `speakers-none`, `speakers-me` and
+ * `speakers-split`. `tab=` picks the detail tab. Without either, the
+ * fixtures pass through unchanged.
  */
 export function applyScenario(
 	snapshots: FixtureMap,
@@ -305,6 +311,10 @@ export function applyScenario(
 				canReveal: false,
 			},
 		} satisfies MeetingDetailSnapshot;
+	}
+
+	if (scenario?.startsWith("speakers-") && detail) {
+		result["meeting.detail"] = speakersScenario(detail, scenario);
 	}
 
 	const damagedAudio = snapshots["meeting.detail.damagedAudio"];
@@ -749,6 +759,91 @@ function applySettingsScenario(
 	}
 }
 
+type DetailSpeaker = MeetingDetailSnapshot["speakers"][number];
+
+/**
+ * The selected meeting's speakers bent into a naming state, its turns
+ * handed out among them: `speakers-none` (Me and two speakers, nobody
+ * named), `speakers-me` (Me named as the fixture's first person, one
+ * speaker left), `speakers-split` (the fixture's unnamed speaker suggested
+ * as a person already named here: one person heard as two speakers).
+ */
+function speakersScenario(
+	detail: MeetingDetailSnapshot,
+	scenario: string,
+): MeetingDetailSnapshot {
+	const [first, second, third, fourth] = detail.speakers;
+	if (!first || !second || !third || !fourth) {
+		return detail;
+	}
+	if (scenario === "speakers-split") {
+		const { suggestionName: _name, ...rest } = fourth;
+		const split: DetailSpeaker = {
+			...rest,
+			assignment: "suggested",
+			displayName: first.displayName,
+			...(first.personID ? { personID: first.personID } : {}),
+			hasClip: true,
+		};
+		return { ...detail, speakers: [first, second, third, split] };
+	}
+	const unnamed = (speaker: DetailSpeaker, label: string): DetailSpeaker => ({
+		id: speaker.id,
+		clusterLabel: label,
+		displayName: label,
+		assignment: "unknown",
+		colorIndex: speaker.colorIndex,
+		hasClip: label !== "Me",
+		isPlaying: false,
+	});
+	const me =
+		scenario === "speakers-me"
+			? { ...first, clusterLabel: "Me", hasClip: false }
+			: unnamed(first, "Me");
+	const speakers =
+		scenario === "speakers-me"
+			? [me, unnamed(second, "Speaker 1")]
+			: [me, unnamed(second, "Speaker 1"), unnamed(third, "Speaker 2")];
+	const transcript = detail.transcript.map((turn, index) => {
+		const speaker = speakers[index % speakers.length] ?? me;
+		return {
+			...turn,
+			speakerID: speaker.id,
+			speakerName: speaker.displayName,
+		};
+	});
+	return { ...detail, speakers, transcript };
+}
+
+/**
+ * `speakers.options` answered the way the host ranks them, from the
+ * recorded reply: its people whose name contains the query, then, once
+ * something is typed and no one is called exactly that, a row creating the
+ * typed name. The recorded create and unknown rows stand for labels the
+ * host never sends (`crates/steno-host/tests/parity.rs`), so they are left
+ * out. Used by the page outside the app; the unit tests keep the recording.
+ */
+export function answerSpeakerOptions(
+	recorded: SpeakerOptionsReply | undefined,
+	params: unknown,
+): SpeakerOptionsReply {
+	const query =
+		typeof params === "object" && params !== null && "query" in params
+			? String(params.query).trim()
+			: "";
+	const fold = (text: string) =>
+		text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+	const people = (recorded?.options ?? []).filter(
+		(option) =>
+			option.kind === "person" && fold(option.label).includes(fold(query)),
+	);
+	const exact = people.some((option) => fold(option.label) === fold(query));
+	return {
+		options:
+			query && !exact ? [...people, { kind: "create", label: query }] : people,
+	};
+}
+
 export function createMockTransport(
 	options: MockTransportOptions = {},
 ): MockTransport {
@@ -756,9 +851,13 @@ export function createMockTransport(
 	const calls: RecordedCall[] = [];
 	// One load shared by every call, so a command that arrives while the
 	// replies are still loading waits for them instead of seeing an empty map.
-	let replies: Promise<FixtureMap> | undefined = options.replies
-		? Promise.resolve(options.replies)
-		: undefined;
+	const recorded = options.replies;
+	let replies: Promise<FixtureMap> | undefined =
+		typeof recorded === "function"
+			? recorded()
+			: recorded
+				? Promise.resolve(recorded)
+				: undefined;
 
 	const loading: Promise<void> = (async () => {
 		const source = options.snapshots;
@@ -783,6 +882,9 @@ export function createMockTransport(
 			calls.push({ method, params: params ?? null });
 			replies ??= loadFixtureReplies().catch(() => ({}));
 			const reply = (await replies)[method];
+			if (typeof reply === "function") {
+				return reply(params);
+			}
 			if (reply instanceof Error) {
 				throw new BridgeError(method, "mock", reply.message);
 			}

@@ -5,7 +5,6 @@ import { Button, EmptyState } from "@/components/ui";
 import { format } from "./format";
 import {
 	type Speaker,
-	SpeakerBadge,
 	SpeakerPicker,
 	SpeakerPlayButton,
 } from "./speaker-picker";
@@ -14,8 +13,8 @@ export type Turn = MeetingDetailSnapshot["transcript"][number];
 
 export interface TranscriptTabProps {
 	detail: MeetingDetailSnapshot;
-	/** Opens the picker on this speaker's first turn when it changes. */
-	pickerRequest?: { speakerID: string; nonce: number } | undefined;
+	/** Opens the picker on this speaker's first turn on mount (the screens). */
+	initialPickerSpeakerID?: string | undefined;
 }
 
 /** The transcript as text: one line per turn, `Name: words`. */
@@ -32,26 +31,20 @@ function firstTurnOf(
 
 /**
  * The turns in two columns: who and when on the left, the words on the
- * right. A speaker's name opens the picker, confirmed or not, so a wrong
- * name can be taken back where it is read; a speaker with a clip gets a
- * play button.
+ * right. A speaker's name opens the picker, named or not, so a wrong name
+ * can be taken back where it is read; a speaker with a clip gets a play
+ * button (Me never has one).
  */
-export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
+export function TranscriptTab({
+	detail,
+	initialPickerSpeakerID,
+}: TranscriptTabProps) {
 	const [openTurnID, setOpenTurnID] = useState<string | null>(() =>
-		pickerRequest
-			? (firstTurnOf(detail.transcript, pickerRequest.speakerID) ?? null)
+		initialPickerSpeakerID
+			? (firstTurnOf(detail.transcript, initialPickerSpeakerID) ?? null)
 			: null,
 	);
 	const [copied, setCopied] = useState(false);
-
-	useEffect(() => {
-		if (!pickerRequest) {
-			return;
-		}
-		setOpenTurnID(
-			firstTurnOf(detail.transcript, pickerRequest.speakerID) ?? null,
-		);
-	}, [pickerRequest, detail.transcript]);
 
 	useEffect(() => {
 		if (!copied) {
@@ -122,9 +115,6 @@ export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 							<span className="font-mono font-normal text-2xs text-faint tabular-nums">
 								{format.range(turn.startSeconds, turn.endSeconds)}
 							</span>
-							{speaker ? (
-								<SpeakerBadge className="mt-1 self-start" speaker={speaker} />
-							) : null}
 							{speaker ? (
 								<SpeakerPlayButton
 									className="mt-1 -ml-[7px] self-start"

@@ -333,46 +333,37 @@ describe("MeetingDetail header", () => {
 		expect(stop).toHaveTextContent(/^Stopping…$/);
 	});
 
-	it("opens the transcript from Confirm speakers", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness("tab=summary");
+	it("names speakers from one header button that reads how far naming got", async () => {
+		const harness = await createBridgeHarness("scenario=speakers-none");
 		renderWithBridge(<MeetingDetail />, harness);
-		await user.click(screen.getByRole("button", { name: "Confirm speakers" }));
-		expect(callsTo(harness.transport, "meeting.setTab")).toEqual([
-			{ method: "meeting.setTab", params: { tab: "transcript" } },
-		]);
-		expect(screen.getByTestId("tab-transcript")).toHaveAttribute(
-			"aria-selected",
-			"true",
+		expect(screen.getByTestId("speakers-trigger")).toHaveTextContent(
+			/^Name speakers$/,
 		);
-	});
+		expect(screen.queryByText(/Confirm speaker/)).not.toBeInTheDocument();
 
-	it("reads Confirm speaker for one and hides it with nothing to confirm", async () => {
-		const detail = await fixtureDetail();
-		const [a, b, c, d] = detail.speakers;
-		if (!a || !b || !c || !d) {
-			throw new Error("fixture has fewer than four speakers");
-		}
-		const harness = await createBridgeHarness("", {
-			"meeting.detail": {
-				...detail,
-				speakers: [a, b, { ...c, assignment: "confirmed" }, d],
-			} satisfies MeetingDetailSnapshot,
-		});
-		renderWithBridge(<MeetingDetail />, harness);
-		expect(screen.getByTestId("confirm-speaker")).toHaveTextContent(
-			"Confirm speaker",
+		const detail = applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams("scenario=speakers-me"),
+		)["meeting.detail"] as MeetingDetailSnapshot;
+		act(() => harness.transport.emit("meeting.detail", detail));
+		expect(screen.getByTestId("speakers-trigger")).toHaveTextContent(
+			"1 needs a name",
 		);
-		act(() => {
+
+		act(() =>
 			harness.transport.emit("meeting.detail", {
 				...detail,
 				speakers: detail.speakers.map((speaker) => ({
 					...speaker,
 					assignment: "confirmed",
+					displayName:
+						speaker.clusterLabel === "Me" ? speaker.displayName : "Jérôme Roux",
 				})),
-			} satisfies MeetingDetailSnapshot);
-		});
-		expect(screen.queryByTestId("confirm-speaker")).not.toBeInTheDocument();
+			} satisfies MeetingDetailSnapshot),
+		);
+		expect(screen.getByTestId("speakers-trigger")).toHaveTextContent(
+			"Nicolai, Jérôme",
+		);
 	});
 
 	it("shows the empty state with nothing selected", async () => {

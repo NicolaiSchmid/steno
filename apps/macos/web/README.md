@@ -33,7 +33,11 @@ Outside the app, the mock transport answers a `?scenario=` in the page's query b
 fixtures (`applyScenario` in `src/bridge/mock-transport.ts`): `empty` clears
 the list, `recording` makes `recording.live` the recording, `failed` selects
 the failed meeting, `processing` adds and selects a meeting in the progress
-entry. `?tab=` picks the detail tab. For Settings: `settings-error` (an error
+entry, and three bend the selected meeting's speakers for naming:
+`speakers-none` (Me and two speakers, nobody named), `speakers-me` (Me
+named, one speaker left) and `speakers-split` (a speaker suggested as a
+person already named there). Outside the app the speaker field's options
+follow what is typed (`answerSpeakerOptions`). `?tab=` picks the detail tab. For Settings: `settings-error` (an error
 with its details, a login item awaiting approval, an update available),
 `download-failed`, `summaries-connected`, `summaries-failed`, `codex-consent`,
 `codex` (from `settings.summaries.codex`), `export-on`, `pairing` (from

@@ -68,8 +68,9 @@ function isTab(value: unknown): value is Tab {
 }
 
 /**
- * The speaker "Confirm speaker" opens the picker on: the first unconfirmed
- * one who speaks in the transcript, else the first unconfirmed one.
+ * The speaker the `picker` flag opens the transcript's picker on: the first
+ * unconfirmed one who speaks in the transcript, else the first unconfirmed
+ * one.
  */
 function firstPickable(detail: MeetingDetailSnapshot) {
 	const unconfirmed = detail.speakers.filter(
@@ -394,12 +395,9 @@ function DetailBody({
 	const progress = useSnapshot("progress");
 	const [tab, setTab] = useState<Tab>(detail.tab);
 	const [menuOpen, setMenuOpen] = useState(initialMenuOpen);
-	const [pickerRequest, setPickerRequest] = useState<
-		{ speakerID: string; nonce: number } | undefined
-	>(() => {
-		const first = initialPickerOpen ? firstPickable(detail) : undefined;
-		return first ? { speakerID: first.id, nonce: 0 } : undefined;
-	});
+	const [pickerSpeakerID] = useState(() =>
+		initialPickerOpen ? firstPickable(detail)?.id : undefined,
+	);
 
 	useEffect(() => {
 		setTab(detail.tab);
@@ -410,27 +408,12 @@ function DetailBody({
 		send(client, "meeting.setTab", { tab: next });
 	}
 
-	const unconfirmed = detail.speakers.filter(
-		(speaker) => speaker.assignment !== "confirmed",
-	);
 	const entry = progress?.entries.find((item) => item.meetingID === detail.id);
 	const working = detail.state === "processing" || detail.state === "queued";
 	const holdsRecorder =
 		recording !== undefined &&
 		recording.meetingID === detail.id &&
 		(recording.state === "recording" || recording.state === "stopping");
-
-	function confirmSpeaker() {
-		const first = firstPickable(detail);
-		if (!first) {
-			return;
-		}
-		changeTab("transcript");
-		setPickerRequest((previous) => ({
-			speakerID: first.id,
-			nonce: (previous?.nonce ?? 0) + 1,
-		}));
-	}
 
 	function openSummaries() {
 		send(client, "window.open", { window: "settings", section: "summaries" });
@@ -507,7 +490,12 @@ function DetailBody({
 					/>
 				);
 			case "transcript":
-				return <TranscriptTab detail={detail} pickerRequest={pickerRequest} />;
+				return (
+					<TranscriptTab
+						detail={detail}
+						initialPickerSpeakerID={pickerSpeakerID}
+					/>
+				);
 			case "tasks":
 				return <TasksTab tasks={detail.tasks} />;
 		}
@@ -652,23 +640,15 @@ function DetailBody({
 				data-testid="speakers-row"
 			>
 				{detail.speakers.length > 0 ? (
-					<SpeakersPopover speakers={detail.speakers} />
+					<SpeakersPopover
+						speakers={detail.speakers}
+						transcript={detail.transcript}
+					/>
 				) : (
 					<span className="text-muted-foreground text-sm">
 						{formatPeople(detail.speakers)}
 					</span>
 				)}
-				{unconfirmed.length > 0 && detail.transcript.length > 0 ? (
-					<Button
-						data-testid="confirm-speaker"
-						onClick={confirmSpeaker}
-						size="xs"
-						variant="warning-outline"
-					>
-						<CheckCircle2Icon aria-hidden="true" />
-						{unconfirmed.length === 1 ? "Confirm speaker" : "Confirm speakers"}
-					</Button>
-				) : null}
 				{detail.tags.map((tag) => (
 					<Badge key={tag}>#{tag}</Badge>
 				))}
