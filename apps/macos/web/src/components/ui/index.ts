@@ -12,6 +12,8 @@ export type { CardProps } from "./card";
 export { Card, cardVariants } from "./card";
 export type { CheckboxProps } from "./checkbox";
 export { Checkbox } from "./checkbox";
+export type { ColumnResizerProps } from "./column-resizer";
+export { ColumnResizer } from "./column-resizer";
 export type { ContentColumnProps } from "./content-column";
 export { ContentColumn } from "./content-column";
 export type {
