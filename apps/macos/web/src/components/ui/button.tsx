@@ -36,6 +36,12 @@ export const buttonLook = {
 		filled,
 		"border-destructive bg-destructive text-white hover:bg-destructive/90",
 	],
+	/** An invitation to fill something in ("Name speakers"): a dashed outline, no fill. */
+	dashed: [
+		"border-dashed border-foreground/24 bg-transparent text-foreground",
+		"hover:border-foreground/40 hover:bg-accent data-popup-open:bg-accent",
+		"[&_svg:not([class*='text-'])]:text-muted-foreground",
+	],
 	"warning-outline": [
 		"border-warning/32 bg-warning-surface text-warning-foreground shadow-xs",
 		"hover:border-warning/40 hover:bg-warning/16 dark:hover:bg-warning/24",

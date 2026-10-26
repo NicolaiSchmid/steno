@@ -5,8 +5,9 @@ import { expect, type Page, test } from "@playwright/test";
  * Renders the main window in every state at both reference window sizes,
  * the Settings window's sections and states at its 960 by 640 default size,
  * the onboarding window at its fixed 560 by 620 and the stories, each in
- * light and dark, to screens/. Every page must make zero requests to anything
- * but the preview server. `scenario=` and `tab=` bend the fixtures
+ * light and dark, to screens/, and the speakers popover in each naming
+ * state. Every page must make zero requests to anything but the preview
+ * server. `scenario=` and `tab=` bend the fixtures
  * (`src/bridge/mock-transport.ts`).
  */
 
@@ -213,4 +214,87 @@ for (const scheme of SCHEMES) {
 		await page.screenshot({ path: `${OUT}/stories-${scheme}.png` });
 		expect(external).toEqual([]);
 	});
+}
+
+/** A naming state: its name, the query, and what to do before the shot. */
+type SpeakersState = readonly [
+	name: string,
+	query: string,
+	act: (page: Page) => Promise<void>,
+];
+
+const openSpeakers = async (page: Page) => {
+	await page.getByTestId("speakers-trigger").click();
+	await expect(page.getByRole("dialog")).toBeVisible();
+};
+
+const SPEAKERS_STATES: readonly SpeakersState[] = [
+	["none-closed", "scenario=speakers-none", async () => {}],
+	["none", "scenario=speakers-none", openSpeakers],
+	["me-closed", "scenario=speakers-me", async () => {}],
+	["me", "scenario=speakers-me", openSpeakers],
+	[
+		"me-editing",
+		"scenario=speakers-me",
+		async (page) => {
+			await openSpeakers(page);
+			await page.getByRole("button", { name: "Name Speaker 1" }).click();
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+	],
+	[
+		"me-typing",
+		"scenario=speakers-me",
+		async (page) => {
+			await openSpeakers(page);
+			await page.getByRole("button", { name: "Name Speaker 1" }).click();
+			await page.keyboard.type("Ann");
+			await expect(page.getByRole("option", { name: /Create/ })).toBeVisible();
+		},
+	],
+	["partly", "", openSpeakers],
+	["split", "scenario=speakers-split", openSpeakers],
+	[
+		"transcript-rename",
+		"scenario=speakers-me&tab=transcript",
+		async (page) => {
+			await page
+				.getByRole("button", { name: "Speaker 1", exact: true })
+				.first()
+				.click();
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+	],
+	[
+		"transcript-tooltip",
+		"scenario=speakers-me&tab=transcript",
+		async (page) => {
+			await page
+				.getByRole("button", { name: "Nicolai", exact: true })
+				.first()
+				.hover();
+			await expect(page.getByText("Click to rename")).toBeVisible();
+		},
+	],
+];
+
+/** The speakers button and popover, at 1200 by 760, in each naming state. */
+for (const scheme of SCHEMES) {
+	for (const [name, query, act] of SPEAKERS_STATES) {
+		test(`main ${scheme} speakers-${name}`, async ({ page }) => {
+			const external = watchExternalRequests(page);
+			await page.setViewportSize({ width: 1200, height: 760 });
+			const params = [query, scheme === "dark" ? "dark" : ""]
+				.filter(Boolean)
+				.join("&");
+			await page.goto(`/#/main${params ? `?${params}` : ""}`);
+			await settle(page);
+			await act(page);
+			await settle(page);
+			await page.screenshot({
+				path: `${OUT}/main-${scheme}-speakers-${name}.png`,
+			});
+			expect(external).toEqual([]);
+		});
+	}
 }

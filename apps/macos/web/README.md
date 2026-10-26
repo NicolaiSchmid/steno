@@ -13,7 +13,7 @@ draws snapshots and sends commands over the bridge (`src/bridge/`).
 | `pnpm check` | `lint`, `lint:ui`, `typecheck`, `test`. Must pass before a PR. |
 | `pnpm build` | Writes `dist/`, the bundle the app ships, with relative asset URLs and without the mock bridge or the fixtures; then `scripts/check-offline.mjs` greps it for fetchable URLs and `scripts/check-bundle.mjs` for any trace of the mock or a fixture. |
 | `pnpm build:screens` | Writes `dist-screens/`: the same pages over the fixture bridge (`vite build --mode screens`), for the screens and `vite preview --mode screens`. |
-| `pnpm screens` | Builds the screens bundle, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760, the Settings window's sections and states at its default 960 by 640, the onboarding window's two pages and their states at its fixed 560 by 620, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
+| `pnpm screens` | Builds the screens bundle, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760 (and the speakers popover in each naming state), the Settings window's sections and states at its default 960 by 640, the onboarding window's two pages and their states at its fixed 560 by 620, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
 
 ## Layout
 
@@ -33,7 +33,11 @@ Outside the app, the mock transport answers a `?scenario=` in the page's query b
 fixtures (`applyScenario` in `src/bridge/mock-transport.ts`): `empty` clears
 the list, `recording` makes `recording.live` the recording, `failed` selects
 the failed meeting, `processing` adds and selects a meeting in the progress
-entry. `?tab=` picks the detail tab. For Settings: `settings-error` (an error
+entry, and three bend the selected meeting's speakers for naming:
+`speakers-none` (Me and two speakers, nobody named), `speakers-me` (Me
+named, one speaker left) and `speakers-split` (a speaker suggested as a
+person already named there). Outside the app the speaker field's options
+follow what is typed (`answerSpeakerOptions`). `?tab=` picks the detail tab. For Settings: `settings-error` (an error
 with its details, a login item awaiting approval, an update available),
 `download-failed`, `summaries-connected`, `summaries-failed`, `codex-consent`,
 `codex` (from `settings.summaries.codex`), `export-on`, `pairing` (from

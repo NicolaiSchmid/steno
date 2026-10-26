@@ -101,6 +101,7 @@ const buttonVariantNames = [
 	"ghost-muted",
 	"destructive",
 	"warning-outline",
+	"dashed",
 ] as const;
 
 const badgeVariantNames = ["outline", "warning", "success"] as const;

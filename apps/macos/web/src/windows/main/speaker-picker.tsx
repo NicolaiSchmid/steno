@@ -1,60 +1,15 @@
-import {
-	PlayIcon,
-	PlusIcon,
-	SquareIcon,
-	UserIcon,
-	UserXIcon,
-} from "lucide-react";
-import {
-	type ChangeEvent,
-	type KeyboardEvent,
-	useEffect,
-	useRef,
-	useState,
-} from "react";
-import type { MeetingDetailSnapshot, SpeakerOption } from "@/bridge/contract";
+import { PlayIcon, SquareIcon } from "lucide-react";
 import { send, useBridge } from "@/bridge/hooks";
 import {
-	Badge,
+	Avatar,
 	Button,
-	Input,
 	Popover,
 	PopoverPopup,
 	PopoverTrigger,
+	Tooltip,
 } from "@/components/ui";
-import { menuItemVariants } from "@/components/ui/menu";
-
-export type Speaker = MeetingDetailSnapshot["speakers"][number];
-
-export const SPEAKER_QUERY_DEBOUNCE_MS = 150;
-
-function optionIcon(kind: SpeakerOption["kind"]) {
-	switch (kind) {
-		case "person":
-			return <UserIcon aria-hidden="true" />;
-		case "create":
-			return <PlusIcon aria-hidden="true" />;
-		case "unknown":
-			return <UserXIcon aria-hidden="true" />;
-	}
-}
-
-export interface SpeakerBadgeProps {
-	speaker: Speaker;
-	className?: string;
-}
-
-/** "Suggested" or "Who is this?" on an unconfirmed speaker; nothing else. */
-export function SpeakerBadge({ speaker, className }: SpeakerBadgeProps) {
-	if (speaker.assignment === "confirmed") {
-		return null;
-	}
-	return (
-		<Badge {...(className ? { className } : {})} size="sm" variant="warning">
-			{speaker.assignment === "suggested" ? "Suggested" : "Who is this?"}
-		</Badge>
-	);
-}
+import { SpeakerNameField } from "./speaker-name-field";
+import { canPlay, isMe, isNamed, type Speaker } from "./speaker-names";
 
 export interface SpeakerPlayButtonProps {
 	speaker: Speaker;
@@ -67,7 +22,7 @@ export interface SpeakerPlayButtonProps {
 
 /**
  * Plays or stops the speaker's sample clip (`speakers.play`,
- * `speakers.stop`); renders nothing without a clip.
+ * `speakers.stop`); renders nothing without a clip, and never for Me.
  */
 export function SpeakerPlayButton({
 	speaker,
@@ -76,7 +31,7 @@ export function SpeakerPlayButton({
 	className,
 }: SpeakerPlayButtonProps) {
 	const client = useBridge();
-	if (!speaker.hasClip) {
+	if (!canPlay(speaker)) {
 		return null;
 	}
 	function toggle() {
@@ -96,7 +51,7 @@ export function SpeakerPlayButton({
 			{...(className ? { className } : {})}
 			data-testid={testID}
 			onClick={toggle}
-			size={iconOnly ? "icon-sm" : "xs"}
+			size={iconOnly ? "icon-xs" : "xs"}
 			variant="ghost"
 		>
 			{speaker.isPlaying ? (
@@ -109,136 +64,6 @@ export function SpeakerPlayButton({
 	);
 }
 
-export interface SpeakerPickerPanelProps {
-	speaker: Speaker;
-	/** Called once the pick was sent, so the owner can close. */
-	onPicked: () => void;
-	className?: string;
-}
-
-/**
- * The field and the option list that name one speaker, any speaker: the
- * host is asked for options as the query changes (`speakers.options`) and
- * the pick is sent as `speakers.select`. Mounting it is opening it: the
- * first request runs at once and takes the host's prefill (the suggested
- * name) into the field. `SpeakerPicker` wraps it in a popover for the
- * transcript; the Speakers popover expands it inline under a row.
- */
-export function SpeakerPickerPanel({
-	speaker,
-	onPicked,
-	className,
-}: SpeakerPickerPanelProps) {
-	const client = useBridge();
-	const [query, setQuery] = useState("");
-	const [options, setOptions] = useState<readonly SpeakerOption[]>([]);
-	const [loading, setLoading] = useState(false);
-	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-	const request = useRef(0);
-
-	function load(text: string, prefill: boolean) {
-		const id = ++request.current;
-		setLoading(true);
-		client
-			.call("speakers.options", { speakerID: speaker.id, query: text })
-			.then((reply) => {
-				if (id !== request.current) {
-					return;
-				}
-				setOptions(reply.options);
-				if (prefill && reply.prefill) {
-					setQuery(reply.prefill);
-				}
-			})
-			.catch((cause: unknown) => {
-				console.error("bridge: speakers.options failed", cause);
-			})
-			.finally(() => {
-				if (id === request.current) {
-					setLoading(false);
-				}
-			});
-	}
-
-	// biome-ignore lint/correctness/useExhaustiveDependencies: `load` reads the latest speaker id through the closure; the query fires once per speaker.
-	useEffect(() => {
-		setQuery("");
-		setOptions([]);
-		load("", true);
-		return () => {
-			clearTimeout(timer.current);
-			request.current += 1;
-		};
-	}, [speaker.id]);
-
-	function onQueryChange(event: ChangeEvent<HTMLInputElement>) {
-		const value = event.target.value;
-		setQuery(value);
-		clearTimeout(timer.current);
-		timer.current = setTimeout(
-			() => load(value, false),
-			SPEAKER_QUERY_DEBOUNCE_MS,
-		);
-	}
-
-	function pick(option: SpeakerOption) {
-		send(client, "speakers.select", { speakerID: speaker.id, option });
-		onPicked();
-	}
-
-	function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
-		if (event.key === "Enter" && options[0]) {
-			event.preventDefault();
-			pick(options[0]);
-		}
-	}
-
-	return (
-		<div className={className}>
-			<Input
-				aria-label={`Name for ${speaker.clusterLabel}`}
-				autoFocus
-				data-testid={`speaker-field-${speaker.id}`}
-				onChange={onQueryChange}
-				onKeyDown={onKeyDown}
-				placeholder="Who is this?"
-				size="sm"
-				value={query}
-			/>
-			<div
-				aria-busy={loading || undefined}
-				aria-label="People"
-				className="mt-2 flex flex-col gap-0.5"
-				role="listbox"
-			>
-				{options.map((option, index) => (
-					<button
-						aria-selected={index === 0}
-						className={menuItemVariants()}
-						key={`${option.kind}-${option.label}`}
-						onClick={() => pick(option)}
-						role="option"
-						type="button"
-					>
-						{optionIcon(option.kind)}
-						<span className="min-w-0 flex-1 truncate">{option.label}</span>
-						{option.detail ? (
-							<span className="shrink-0 text-faint text-xs">
-								{option.detail}
-							</span>
-						) : null}
-					</button>
-				))}
-				{!loading && options.length === 0 ? (
-					<p className="my-0 px-2 py-1.5 text-faint text-xs">
-						No one matches yet.
-					</p>
-				) : null}
-			</div>
-		</div>
-	);
-}
-
 export interface SpeakerPickerProps {
 	speaker: Speaker;
 	open: boolean;
@@ -246,29 +71,51 @@ export interface SpeakerPickerProps {
 }
 
 /**
- * Names a speaker from the transcript: the trigger is the speaker's name
- * on a turn, the popover holds the `SpeakerPickerPanel`. Confirmed
- * speakers open it too, so a wrong name can be taken back where it is read.
+ * A speaker's name on a transcript turn: a button ("Click to rename") that
+ * opens a small popover with the speaker, the sample clip's play button
+ * and the same name field as the Speakers popover. A pick applies to every
+ * turn of the speaker, since the host re-publishes the meeting.
  */
 export function SpeakerPicker({
 	speaker,
 	open,
 	onOpenChange,
 }: SpeakerPickerProps) {
+	const named = isNamed(speaker);
 	return (
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
-			<PopoverTrigger
-				className="-ml-[7px] max-w-full self-start"
-				data-testid={`speaker-picker-${speaker.id}`}
-				render={<Button size="xs" variant="ghost" />}
-			>
-				<span className="truncate">{speaker.displayName}</span>
-			</PopoverTrigger>
+			<Tooltip label={named ? "Click to rename" : "Click to name"}>
+				<PopoverTrigger
+					className="-ml-[7px] max-w-full self-start"
+					data-testid={`speaker-picker-${speaker.id}`}
+					render={<Button size="xs" variant="ghost" />}
+				>
+					<span className="truncate">{speaker.displayName}</span>
+				</PopoverTrigger>
+			</Tooltip>
 			<PopoverPopup align="start" padding="sm" size="sm">
-				<SpeakerPickerPanel
-					onPicked={() => onOpenChange(false)}
-					speaker={speaker}
-				/>
+				<div className="mb-2 flex min-w-0 items-center gap-2">
+					<Avatar
+						index={speaker.colorIndex}
+						name={speaker.displayName}
+						size="md"
+						unknown={!named && speaker.assignment === "unknown"}
+					/>
+					<span className="min-w-0 flex-1 truncate font-medium text-sm">
+						{isMe(speaker) && !named ? "You" : speaker.displayName}
+					</span>
+					<SpeakerPlayButton
+						iconOnly
+						speaker={speaker}
+						testID={`speaker-popover-play-${speaker.id}`}
+					/>
+				</div>
+				{open ? (
+					<SpeakerNameField
+						onDone={() => onOpenChange(false)}
+						speaker={speaker}
+					/>
+				) : null}
 			</PopoverPopup>
 		</Popover>
 	);

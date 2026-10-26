@@ -1,71 +1,77 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
-import { loadFixtureSnapshots } from "@/bridge/mock-transport";
+import { applyScenario, loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
-import { SpeakersPopover } from "./speakers-popover";
+import { SPLIT_HINT, SpeakersPopover } from "./speakers-popover";
 
-const NICOLAI = "00000000-0000-0000-0000-000000000014";
+const ME = "00000000-0000-0000-0000-000000000014";
+// The fixture's first speaker: Me in the speakers-* scenarios, Nicolai in speakers-split.
+const SPEAKER_1 = "00000000-0000-0000-0000-000000000015";
+const SPEAKER_2 = "00000000-0000-0000-0000-000000000016";
+const ANNA = "00000000-0000-0000-0000-000000000016";
 const UNNAMED = "00000000-0000-0000-0000-000000000017";
 
-async function speakers(): Promise<MeetingDetailSnapshot["speakers"]> {
-	const detail = (await loadFixtureSnapshots())[
-		"meeting.detail"
-	] as MeetingDetailSnapshot;
-	return detail.speakers;
+async function detail(scenario = ""): Promise<MeetingDetailSnapshot> {
+	return applyScenario(
+		await loadFixtureSnapshots(),
+		new URLSearchParams(scenario && `scenario=${scenario}`),
+	)["meeting.detail"] as MeetingDetailSnapshot;
+}
+
+async function open(scenario = "") {
+	const user = userEvent.setup();
+	const harness = await createBridgeHarness();
+	const { speakers, transcript } = await detail(scenario);
+	renderWithBridge(
+		<SpeakersPopover speakers={speakers} transcript={transcript} />,
+		harness,
+	);
+	await user.click(screen.getByTestId("speakers-trigger"));
+	return { user, harness, popover: await screen.findByRole("dialog") };
 }
 
 describe("SpeakersPopover", () => {
-	it("opens from the header row with one row per speaker", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness();
-		renderWithBridge(<SpeakersPopover speakers={await speakers()} />, harness);
-		const trigger = screen.getByTestId("speakers-trigger");
-		expect(trigger).toHaveTextContent("Nicolai, Jérôme, Anna +1");
-		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-
-		await user.click(trigger);
-		const popover = await screen.findByRole("dialog");
-		expect(within(popover).getAllByRole("listitem")).toHaveLength(4);
-		const nicolai = within(popover).getByTestId(
-			`speakers-popover-row-${NICOLAI}`,
-		);
-		expect(within(nicolai).queryByText("Who is this?")).toBeNull();
-		const unnamed = within(popover).getByTestId(
-			`speakers-popover-row-${UNNAMED}`,
-		);
-		expect(within(unnamed).getByText("Who is this?")).toBeInTheDocument();
+	it("lists the unnamed with a line they said, and Me without a clip", async () => {
+		const { popover } = await open("speakers-none");
+		expect(within(popover).getByText("0 of 3 named")).toBeInTheDocument();
+		const me = within(popover).getByTestId(`speakers-popover-row-${ME}`);
 		expect(
-			within(unnamed).queryByTestId(`speakers-popover-play-${UNNAMED}`),
-		).toBeNull();
+			within(me).getByRole("button", { name: "Name yourself" }),
+		).toBeInTheDocument();
+		expect(within(me).queryByRole("button", { name: /Play/ })).toBeNull();
+		const other = within(popover).getByTestId(
+			`speakers-popover-row-${SPEAKER_1}`,
+		);
+		expect(within(other).getByText(/^“.+”$/)).toBeInTheDocument();
+		expect(
+			within(other).getByRole("button", { name: /Play a sample/ }),
+		).toBeInTheDocument();
+		expect(within(popover).queryByText("Who is this?")).toBeNull();
 	});
 
-	it("renames a confirmed speaker inline", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness();
-		renderWithBridge(<SpeakersPopover speakers={await speakers()} />, harness);
-		await user.click(screen.getByTestId("speakers-trigger"));
-		await user.click(
-			await screen.findByTestId(`speakers-popover-picker-${NICOLAI}`),
-		);
-
-		const field = await screen.findByTestId(`speaker-field-${NICOLAI}`);
+	it("names by typing and Enter, then moves on to the next speaker", async () => {
+		const { user, harness } = await open("speakers-me");
+		await user.click(screen.getByRole("button", { name: "Name Speaker 1" }));
+		const field = screen.getByTestId(`speaker-field-${SPEAKER_1}`);
 		expect(field).toHaveFocus();
-		await screen.findAllByRole("option");
-		expect(callsTo(harness.transport, "speakers.options")).toEqual([
-			{
-				method: "speakers.options",
-				params: { speakerID: NICOLAI, query: "" },
-			},
-		]);
+		expect(field).toHaveValue("");
+		const list = await screen.findByRole("listbox");
+		await within(list).findAllByRole("option");
+		expect(
+			within(list)
+				.getAllByRole("group")
+				.map((group) => group.getAttribute("aria-label")),
+		).toEqual(["In this meeting", "Recent people", "New person"]);
+		expect(within(list).queryByText("Leave unnamed")).toBeNull();
 
-		await user.click(screen.getByRole("option", { name: /^Nicolai/ }));
+		await user.keyboard("{ArrowDown}{Enter}");
 		expect(callsTo(harness.transport, "speakers.select")).toEqual([
 			{
 				method: "speakers.select",
 				params: {
-					speakerID: NICOLAI,
+					speakerID: SPEAKER_1,
 					option: {
 						kind: "person",
 						label: "Nicolai",
@@ -74,36 +80,55 @@ describe("SpeakersPopover", () => {
 				},
 			},
 		]);
-		await vi.waitFor(() =>
-			expect(screen.queryByRole("listbox")).not.toBeInTheDocument(),
-		);
+	});
+
+	it("moves to the next unnamed speaker after a pick, and Escape gives up", async () => {
+		const { user, harness } = await open("speakers-none");
+		await user.click(screen.getByRole("button", { name: "Name Speaker 1" }));
+		await screen.findAllByRole("option");
+		await user.keyboard("Jo{Enter}");
+		expect(callsTo(harness.transport, "speakers.select").at(-1)).toEqual({
+			method: "speakers.select",
+			params: { speakerID: SPEAKER_1, option: { kind: "create", label: "Jo" } },
+		});
+		expect(screen.getByTestId(`speaker-field-${SPEAKER_2}`)).toHaveFocus();
+
+		await user.keyboard("{Escape}");
+		expect(screen.queryByTestId(`speaker-field-${SPEAKER_2}`)).toBeNull();
 		expect(screen.getByRole("dialog")).toBeInTheDocument();
 	});
 
-	it("expands one picker at a time", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness();
-		renderWithBridge(<SpeakersPopover speakers={await speakers()} />, harness);
-		await user.click(screen.getByTestId("speakers-trigger"));
+	it("confirms a suggestion with its own button", async () => {
+		const { user, harness, popover } = await open();
 		await user.click(
-			await screen.findByTestId(`speakers-popover-picker-${UNNAMED}`),
+			within(popover).getByTestId(`speakers-popover-confirm-${ANNA}`),
 		);
-		expect(screen.getByTestId(`speaker-field-${UNNAMED}`)).toBeInTheDocument();
-		await user.click(screen.getByTestId(`speakers-popover-picker-${NICOLAI}`));
-		expect(screen.queryByTestId(`speaker-field-${UNNAMED}`)).toBeNull();
-		expect(screen.getByTestId(`speaker-field-${NICOLAI}`)).toBeInTheDocument();
+		expect(callsTo(harness.transport, "speakers.select")).toEqual([
+			{
+				method: "speakers.select",
+				params: {
+					speakerID: ANNA,
+					option: {
+						kind: "person",
+						label: "Anna",
+						personID: "00000000-0000-0000-0000-00000000000C",
+					},
+				},
+			},
+		]);
 	});
 
-	it("plays a speaker's clip from the row", async () => {
-		const user = userEvent.setup();
-		const harness = await createBridgeHarness();
-		renderWithBridge(<SpeakersPopover speakers={await speakers()} />, harness);
-		await user.click(screen.getByTestId("speakers-trigger"));
-		await user.click(
-			await screen.findByTestId(`speakers-popover-play-${NICOLAI}`),
-		);
-		expect(callsTo(harness.transport, "speakers.play")).toEqual([
-			{ method: "speakers.play", params: { speakerID: NICOLAI } },
+	it("puts a person heard as two speakers under the first, with the reason", async () => {
+		const { popover } = await open("speakers-split");
+		const rows = within(popover)
+			.getAllByRole("listitem")
+			.map((row) => row.getAttribute("data-testid"));
+		expect(rows.slice(0, 2)).toEqual([
+			`speakers-popover-row-${ME}`,
+			`speakers-popover-row-${UNNAMED}`,
 		]);
+		expect(
+			within(popover).getByRole("button", { name: SPLIT_HINT }),
+		).toBeInTheDocument();
 	});
 });
