@@ -6,8 +6,8 @@ import { expect, type Page, test } from "@playwright/test";
  * the Settings window's sections and states at its 960 by 640 default size,
  * the onboarding window at its fixed 560 by 620 and the stories, each in
  * light and dark, to screens/, and the main window's column dividers. Every
- * page must make zero requests to anything but the preview server. `scenario=` and `tab=` bend the fixtures
- * (`src/bridge/mock-transport.ts`).
+ * page must make zero requests to anything but the preview server.
+ * `scenario=` and `tab=` bend the fixtures (`src/bridge/mock-transport.ts`).
  */
 
 const OUT = "screens";

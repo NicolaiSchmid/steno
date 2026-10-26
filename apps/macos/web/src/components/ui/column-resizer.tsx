@@ -105,7 +105,6 @@ export function ColumnResizer({
 				dragging && "after:bg-ring/60",
 				className,
 			)}
-			data-dragging={dragging ? "" : undefined}
 			onDoubleClick={() => set(defaultValue, true)}
 			onKeyDown={onKeyDown}
 			onLostPointerCapture={endDrag}
