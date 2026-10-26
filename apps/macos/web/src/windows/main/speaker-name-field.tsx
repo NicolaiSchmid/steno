@@ -115,7 +115,8 @@ export function SpeakerNameField({
 	}
 
 	function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
-		if (event.nativeEvent.isComposing) {
+		// WebKit sends the Enter that ends a composition as keyCode 229.
+		if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
 			return;
 		}
 		const last = flat.length - 1;
