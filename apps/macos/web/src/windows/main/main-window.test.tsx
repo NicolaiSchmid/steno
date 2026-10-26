@@ -45,7 +45,9 @@ describe("MainWindow", () => {
 				name: "Resize meeting list",
 			});
 			fireEvent.keyDown(list, { key: "ArrowRight", shiftKey: true });
-			expect(list).toHaveAttribute("aria-valuenow", "332");
+			// 332 would leave the reading column less than 400 of jsdom's 1024.
+			expect(window.innerWidth).toBe(1024);
+			expect(list).toHaveAttribute("aria-valuenow", "324");
 			fireEvent.keyDown(list, { key: "Home" });
 			expect(list).toHaveAttribute("aria-valuenow", "240");
 			expect(
