@@ -261,6 +261,7 @@ mod tests {
             codex_model: Some("codex".to_owned()),
             codex_confirmed_at: Some(chrono::DateTime::UNIX_EPOCH),
             handover_port: Some(23820),
+            self_person_id: Some(uuid::Uuid::nil()),
             obsidian: Some(ObsidianSettings {
                 vault_path: "/vault".to_owned(),
                 people_folder: None,

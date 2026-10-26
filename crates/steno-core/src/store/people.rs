@@ -9,8 +9,8 @@ use uuid::Uuid;
 use super::convert::{DbDate, DbEmbedding, DbEnum, DbUuid, RowExt as _};
 use super::{Result, Store, StoreError, assets, execute_cached, insert_sql, query_all, upsert_sql};
 use crate::model::{
-    Embedding, Participant, Person, Speaker, SpeakerAssignment, SpeakerAssignmentKind,
-    SpeakerNameSuggestion, TimeRange,
+    Embedding, Participant, ParticipantRole, Person, Speaker, SpeakerAssignment,
+    SpeakerAssignmentKind, SpeakerNameSuggestion, TimeRange, me_speaker_id,
 };
 use crate::paths::file_url_path;
 
@@ -258,6 +258,20 @@ pub(super) fn refresh_voice(connection: &Connection, person_id: Uuid) -> Result<
     person.embedding = Embedding::mean(&embeddings);
     person.sample_count = i64::try_from(embeddings.len()).unwrap_or(i64::MAX);
     save_person(connection, &person)
+}
+
+/// The meeting's "me" participant takes `person`'s id and name.
+fn name_me_participant(connection: &Connection, meeting_id: Uuid, person: &Person) -> Result<()> {
+    connection.execute(
+        "UPDATE participant SET personID = ?1, displayName = ?2 WHERE meetingID = ?3 AND role = ?4",
+        params![
+            DbUuid(person.id),
+            person.display_name,
+            DbUuid(meeting_id),
+            DbEnum(ParticipantRole::Me)
+        ],
+    )?;
+    Ok(())
 }
 
 pub(super) fn speakers_of_meeting(
@@ -517,7 +531,8 @@ impl Store {
     /// drops the speaker's name suggestion. The same person again changes
     /// nothing else; a person who already owns another speaker of this
     /// meeting takes this one over (a merge); otherwise the speaker becomes
-    /// `confirmed(person)`. The voices of the new and the previous person
+    /// `confirmed(person)`. Naming the "me" speaker names the meeting's "me"
+    /// participant too. The voices of the new and the previous person
     /// are recomputed. The clip stays while the meeting's master exists.
     /// Returns the clip URLs to remove once the transaction committed.
     pub fn confirm_speaker(&self, speaker_id: Uuid, person: &Person) -> Result<Vec<String>> {
@@ -569,10 +584,55 @@ impl Store {
                 speaker_id
             };
             clips.extend(drop_clip_when_audio_is_gone(transaction, kept)?);
+            if speaker_id == me_speaker_id(speaker.meeting_id) {
+                name_me_participant(transaction, speaker.meeting_id, person)?;
+            }
             for person_id in person_ids {
                 refresh_voice(transaction, person_id)?;
             }
             Ok(clips)
+        })
+    }
+
+    /// Confirms as `person` every meeting's still-unknown "me" speaker and
+    /// names its "me" participant; rows only, nothing is exported. A meeting
+    /// where `person` owns another speaker is skipped: that would be a
+    /// merge, which only the user decides.
+    pub fn confirm_unnamed_me_speakers(&self, person: &Person) -> Result<()> {
+        self.write(|transaction| {
+            if fetch_person(transaction, person.id)?.is_none() {
+                save_person(transaction, person)?;
+            }
+            let unknown = query_all(
+                transaction,
+                &format!(
+                    "SELECT {SPEAKER_COLUMNS} FROM speaker WHERE assignment = ?1 \
+                     AND NOT EXISTS (SELECT 1 FROM speaker AS owner \
+                     WHERE owner.meetingID = speaker.meetingID AND owner.personID = ?2 \
+                     AND owner.assignment = ?3) ORDER BY meetingID"
+                ),
+                params![
+                    SpeakerAssignmentKind::Unknown.as_str(),
+                    DbUuid(person.id),
+                    SpeakerAssignmentKind::Confirmed.as_str()
+                ],
+                speaker_from_row,
+            )?;
+            for mut speaker in unknown
+                .into_iter()
+                .filter(|speaker| speaker.id == me_speaker_id(speaker.meeting_id))
+            {
+                transaction.execute(
+                    "DELETE FROM speakerNameSuggestion WHERE speakerID = ?1",
+                    [DbUuid(speaker.id)],
+                )?;
+                speaker.assignment = SpeakerAssignment::Confirmed {
+                    person_id: person.id,
+                };
+                save_speaker(transaction, &speaker)?;
+                name_me_participant(transaction, speaker.meeting_id, person)?;
+            }
+            Ok(())
         })
     }
 
