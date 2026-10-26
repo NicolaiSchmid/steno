@@ -31,9 +31,11 @@ function clamp(value: number, min: number, max: number) {
 }
 
 /**
- * The divider on the trailing edge of a column: a 9 px strip centred on the
- * column's hairline, invisible until hovered (a col-resize cursor and a
- * hairline in the ring colour), dragged with pointer capture, a focusable
+ * The divider on the trailing edge of a column: a 9 px strip over the
+ * column's hairline that reaches only 2 px into the column (a scroll bar at
+ * its edge stays grabbable) and the rest into the next one. Invisible until
+ * hovered (a col-resize cursor and a hairline in the ring colour), dragged
+ * with pointer capture (a move without the button down ends it), a focusable
  * `separator` that arrow keys, Home and End move, and a double-click puts
  * back to `defaultValue`. Its parent is the column, positioned `relative`.
  */
@@ -52,22 +54,20 @@ export function ColumnResizer({
 
 	const set = (width: number, commit: boolean) => {
 		const next = clamp(width, min, max);
-		if (next !== value) onChange(next);
-		if (commit) onCommit?.(next);
+		// A key that cannot move a narrowed column leaves the stored width alone.
+		if (next !== value) {
+			onChange(next);
+			if (commit) onCommit?.(next);
+		}
 		return next;
 	};
 
 	const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
-		if (event.button !== 0) return;
+		if (event.button !== 0 || event.ctrlKey) return;
 		event.preventDefault();
 		event.currentTarget.setPointerCapture?.(event.pointerId);
 		drag.current = { x: event.clientX, width: value, last: value };
 		setDragging(true);
-	};
-	const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
-		const start = drag.current;
-		if (!start) return;
-		start.last = set(start.width + event.clientX - start.x, false);
 	};
 	const endDrag = (event: PointerEvent<HTMLDivElement>) => {
 		const start = drag.current;
@@ -76,6 +76,16 @@ export function ColumnResizer({
 		setDragging(false);
 		event.currentTarget.releasePointerCapture?.(event.pointerId);
 		if (start.last !== start.width) onCommit?.(start.last);
+	};
+	const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+		const start = drag.current;
+		if (!start) return;
+		// The release went missing (a context menu, a lost window): end here.
+		if ((event.buttons & 1) === 0) {
+			endDrag(event);
+			return;
+		}
+		start.last = set(start.width + event.clientX - start.x, false);
 	};
 	const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
 		const step = event.shiftKey ? KEY_STEP * 4 : KEY_STEP;
@@ -98,8 +108,8 @@ export function ColumnResizer({
 			aria-valuemin={min}
 			aria-valuenow={value}
 			className={cn(
-				"absolute inset-y-0 right-0 z-20 w-[9px] translate-x-1/2 cursor-col-resize touch-none select-none outline-none",
-				"after:absolute after:inset-y-0 after:left-1/2 after:w-px after:-translate-x-1/2 after:bg-transparent",
+				"absolute inset-y-0 -right-[7px] z-20 w-[9px] cursor-col-resize touch-none select-none outline-none",
+				"after:absolute after:inset-y-0 after:left-px after:w-px after:bg-transparent",
 				"after:transition-[background-color] after:duration-(--duration-functional) after:ease-standard",
 				"hover:after:bg-ring/30 focus-visible:after:bg-ring/60",
 				dragging && "after:bg-ring/60",

@@ -237,12 +237,13 @@ for (const scheme of SCHEMES) {
 			await page.mouse.move(x, 300);
 			await page.mouse.down();
 			await page.mouse.move(x + dx, 300, { steps: 8 });
+			return x;
 		};
 
-		await drag("resize-sidebar", 0);
+		const start = await drag("resize-sidebar", 0);
 		await page.waitForTimeout(300);
 		await shot("hover");
-		await page.mouse.move(256 + 64, 300, { steps: 8 });
+		await page.mouse.move(start + 64, 300, { steps: 8 });
 		await shot("dragging");
 		await page.mouse.up();
 		await drag("resize-list", 80);

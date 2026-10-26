@@ -36,7 +36,7 @@ describe("MainWindow", () => {
 			expect(sidebar).toHaveAttribute("aria-valuenow", "256");
 
 			fireEvent.pointerDown(sidebar, { button: 0, clientX: 256 });
-			fireEvent.pointerMove(sidebar, { clientX: 300 });
+			fireEvent.pointerMove(sidebar, { buttons: 1, clientX: 300 });
 			fireEvent.pointerUp(sidebar, { clientX: 300 });
 			expect(sidebar).toHaveAttribute("aria-valuenow", "300");
 			expect(columns()).toBe("300px 300px minmax(0,1fr)");
