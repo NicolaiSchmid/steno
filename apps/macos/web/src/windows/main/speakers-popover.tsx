@@ -133,9 +133,7 @@ export function SpeakersPopover({
 	return (
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
 			<PopoverTrigger
-				className={
-					groups.namedCount === 0 ? undefined : "-ml-[7px] min-w-0 max-w-full"
-				}
+				className={cn(groups.namedCount > 0 && "-ml-[7px] min-w-0 max-w-full")}
 				data-testid="speakers-trigger"
 				render={
 					<Button
@@ -250,7 +248,7 @@ function SpeakerRow({
 				}
 			>
 				<Avatar
-					className={editing ? "mt-px" : undefined}
+					className={cn(editing && "mt-px")}
 					index={speaker.colorIndex}
 					name={preview ?? speaker.displayName}
 					size="lg"
