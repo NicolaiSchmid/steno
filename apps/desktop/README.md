@@ -1625,7 +1625,7 @@ resizing, and a size set from code goes through.
 ### Debian and Ubuntu
 
 `scripts/setup-linux.sh` installs the packages (the list is in the script);
-CI runs it on `ubuntu-latest`.
+CI runs it on Ubicloud runners (Ubuntu 24.04, the GitHub `ubuntu-24.04` image).
 
 ### NixOS
 

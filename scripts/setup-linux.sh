@@ -6,7 +6,7 @@
 # crate's PipeWire backend needs the libpipewire headers and libclang (its
 # bindings are generated at build time), and its live tests the daemon,
 # its command-line tools and WirePlumber (scripts/pipewire-headless.sh).
-# Used by rust-ci.yml on ubuntu-latest; run it once on a fresh Ubuntu
+# Used by rust-ci.yml on Ubicloud (Ubuntu 24.04); run it once on a fresh Ubuntu
 # machine. On NixOS, use the nix-shell apps/desktop/README.md names instead,
 # plus pipewire, wireplumber and dbus for the audio crate, with
 # LIBCLANG_PATH pointing at llvmPackages.libclang's lib directory.

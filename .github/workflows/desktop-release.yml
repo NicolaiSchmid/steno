@@ -84,7 +84,7 @@ jobs:
   # list.
   plan:
     name: plan
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -155,7 +155,7 @@ jobs:
 
   deny:
     name: cargo deny
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -206,8 +206,8 @@ jobs:
         if: matrix.name == 'linux'
         run: scripts/setup-linux.sh
 
-      - name: Use the installed rustup (self-hosted runners only)
-        if: runner.environment == 'self-hosted'
+      - name: Use the installed rustup (self-hosted Mac only)
+        if: runner.os == 'macOS' && runner.environment == 'self-hosted'
         run: |
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "/run/current-system/sw/bin" >> "$GITHUB_PATH"
@@ -234,8 +234,8 @@ jobs:
           echo "CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=steno$sep--remap-path-prefix=$cargo_home=cargo" >> "$GITHUB_ENV"
           echo "STENO_CARGO_HOME=$cargo_home" >> "$GITHUB_ENV"
 
-      - name: Target directory outside the workspace (self-hosted runners only)
-        if: runner.environment == 'self-hosted'
+      - name: Target directory outside the workspace (self-hosted Mac only)
+        if: runner.os == 'macOS' && runner.environment == 'self-hosted'
         run: |
           target="$HOME/Library/Caches/steno-ci/$RUNNER_NAME/cargo-target"
           mkdir -p "$target"
@@ -243,7 +243,7 @@ jobs:
           echo "STENO_TARGET_DIR=$target" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        if: runner.environment == 'github-hosted'
+        if: runner.os != 'macOS' || runner.environment == 'github-hosted'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -427,7 +427,7 @@ jobs:
   assets:
     name: assets
     needs: [plan, bundle]
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 20
     env:
       VERSION: ${{ needs.plan.outputs.version }}
@@ -548,7 +548,7 @@ jobs:
     concurrency:
       group: desktop-publish
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 20
     # contents for the release, the lanes and the AUR bump's branch;
     # pull-requests for the AUR bump's pull request.
@@ -742,7 +742,7 @@ jobs:
     concurrency:
       group: desktop-handoff
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 10
     # actions: read is what the environments API asks of the token (GET
     # .../environments/<name>, the "Actions" repository permission);

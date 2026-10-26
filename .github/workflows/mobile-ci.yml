@@ -41,7 +41,7 @@ defaults:
 jobs:
   checks:
     name: Lint, typecheck & tests (serial)
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-4
     steps:
       - uses: actions/checkout@v4
 
@@ -80,7 +80,7 @@ jobs:
 
   delivery-preview:
     name: Delivery preview (OTA vs native build)
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-4
     steps:
       - uses: actions/checkout@v4
         with:

@@ -18,7 +18,7 @@ permissions:
 jobs:
   workflows:
     name: GitHub Actions workflows
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +33,7 @@ jobs:
 
   shell:
     name: Shell scripts
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

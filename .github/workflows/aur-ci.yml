@@ -39,7 +39,7 @@ permissions:
 jobs:
   aur:
     name: AUR package
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 15
     # Unpinned on purpose: the package targets current Arch, and
     # check-aur.sh runs pacman -Syu anyway.

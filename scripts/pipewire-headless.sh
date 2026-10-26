@@ -29,7 +29,7 @@
 # `pw-metadata` and `pw-play` on PATH, `stdbuf` and `timeout` (coreutils),
 # and `dbus-daemon` for WirePlumber 0.4 (Ubuntu: pipewire, pipewire-bin,
 # wireplumber, dbus; Nix: pipewire, wireplumber, dbus). Used by rust-ci.yml
-# on ubuntu-latest.
+# on its Ubicloud runner (Ubuntu 24.04).
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
