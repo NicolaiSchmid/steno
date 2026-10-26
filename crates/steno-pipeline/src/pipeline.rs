@@ -3267,11 +3267,9 @@ impl Drop for Running {
 }
 
 /// The participant with `role == me`, created as `Me` when none exists.
-/// While it names nobody, it takes the person the meeting's "me" speaker
-/// was confirmed as, else the user's own person
-/// ([`Settings::self_person_id`]), so
-/// the merge confirms the mic lane as them and a name the user gave this
-/// meeting's "me" speaker is never replaced.
+/// While it names nobody it takes the person the meeting's "me" speaker
+/// was confirmed as, else [`Settings::self_person_id`], so the merge
+/// confirms the mic lane as them.
 pub fn ensure_me_participant(
     store: &Store,
     meeting_id: Uuid,
@@ -3285,23 +3283,16 @@ pub fn ensure_me_participant(
     {
         return Ok(me.clone());
     }
-    let me_speaker = LaneMerger::me_speaker_id(meeting_id);
-    let named = store
+    let person = store
         .speakers(meeting_id)?
         .into_iter()
-        .find(|speaker| speaker.id == me_speaker)
-        .and_then(|speaker| speaker.person_id());
-    // Unreadable settings leave the mic lane unnamed rather than fail the run.
-    let person_id = named.or_else(|| {
-        store
-            .settings()
-            .ok()
-            .and_then(|settings| settings.self_person_id)
-    });
-    let person = match person_id {
-        Some(id) => store.person(id)?,
-        None => None,
-    };
+        .find(|speaker| speaker.id == LaneMerger::me_speaker_id(meeting_id))
+        .and_then(|speaker| speaker.person_id())
+        // Unreadable settings leave the mic lane unnamed rather than fail the run.
+        .or_else(|| store.settings().ok()?.self_person_id)
+        .map(|id| store.person(id))
+        .transpose()?
+        .flatten();
     let mut me = existing.clone().unwrap_or_else(|| Participant {
         id: LaneMerger::me_participant_id(meeting_id),
         meeting_id,

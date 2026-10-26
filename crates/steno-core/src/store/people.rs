@@ -594,12 +594,11 @@ impl Store {
         })
     }
 
-    /// Confirms as `person` the "me" speaker of every meeting where it is
-    /// still unknown, and names that meeting's "me" participant. A meeting
-    /// where `person` already owns another speaker is left out: naming its
-    /// "me" speaker would merge the two, which only the user decides. Rows
-    /// only: nothing is exported. Returns the changed meetings.
-    pub fn confirm_unnamed_me_speakers(&self, person: &Person) -> Result<Vec<Uuid>> {
+    /// Confirms as `person` every meeting's still-unknown "me" speaker and
+    /// names its "me" participant; rows only, nothing is exported. A meeting
+    /// where `person` owns another speaker is skipped: that would be a
+    /// merge, which only the user decides.
+    pub fn confirm_unnamed_me_speakers(&self, person: &Person) -> Result<()> {
         self.write(|transaction| {
             if fetch_person(transaction, person.id)?.is_none() {
                 save_person(transaction, person)?;
@@ -619,7 +618,6 @@ impl Store {
                 ],
                 speaker_from_row,
             )?;
-            let mut changed = Vec::new();
             for mut speaker in unknown
                 .into_iter()
                 .filter(|speaker| speaker.id == me_speaker_id(speaker.meeting_id))
@@ -633,9 +631,8 @@ impl Store {
                 };
                 save_speaker(transaction, &speaker)?;
                 name_me_participant(transaction, speaker.meeting_id, person)?;
-                changed.push(speaker.meeting_id);
             }
-            Ok(changed)
+            Ok(())
         })
     }
 

@@ -35,8 +35,7 @@ pub fn room_speaker_id(meeting_id: Uuid) -> Uuid {
     derived_uuid(meeting_id, "speaker-room")
 }
 
-/// The id of a meeting's "me" speaker, the mic lane's: stable across
-/// re-runs, so a confirmation of it survives them.
+/// The mic lane's "me" speaker id for a meeting, stable across re-runs.
 #[must_use]
 pub fn me_speaker_id(meeting_id: Uuid) -> Uuid {
     derived_uuid(meeting_id, "speaker-me")

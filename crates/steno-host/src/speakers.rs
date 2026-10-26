@@ -325,18 +325,15 @@ impl SpeakerRow {
     }
 }
 
-/// Makes `person` the user's own
-/// ([`Settings::self_person_id`](steno_core::Settings::self_person_id)) unless one
-/// is set already, and confirms as them every meeting's "me" speaker that
-/// is still unknown ([`Store::confirm_unnamed_me_speakers`]). Those
-/// meetings are not exported again; their next export carries the name.
+/// Makes `person` [`Settings::self_person_id`](steno_core::Settings::self_person_id)
+/// unless one is set, and confirms them as every still-unknown "me" speaker
+/// ([`Store::confirm_unnamed_me_speakers`]) without exporting again.
 pub fn adopt_self_person(person: &Person, store: &Store) -> steno_core::store::Result<()> {
     if store.settings()?.self_person_id.is_some() {
         return Ok(());
     }
     update_settings(store, |settings| settings.self_person_id = Some(person.id))?;
-    store.confirm_unnamed_me_speakers(person)?;
-    Ok(())
+    store.confirm_unnamed_me_speakers(person)
 }
 
 #[must_use]
