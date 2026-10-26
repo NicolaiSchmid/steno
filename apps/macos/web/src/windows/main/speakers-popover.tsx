@@ -122,7 +122,10 @@ export function SpeakersPopover({
 			if (current !== speaker.id) {
 				return current;
 			}
-			return picked ? (nextToName(speakers, speaker.id)?.id ?? null) : null;
+			// Naming moves on to whoever is next; a rename stays put.
+			return picked && !isNamed(speaker)
+				? (nextToName(speakers, speaker.id)?.id ?? null)
+				: null;
 		});
 	}
 
@@ -280,7 +283,7 @@ function SpeakerRow({
 									{speaker.email}
 								</span>
 							) : null}
-							{suggested ? (
+							{suggested && !split ? (
 								<Badge className="shrink-0" size="sm" variant="warning">
 									Suggested
 								</Badge>

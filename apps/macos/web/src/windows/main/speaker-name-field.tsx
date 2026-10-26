@@ -115,6 +115,9 @@ export function SpeakerNameField({
 	}
 
 	function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+		if (event.nativeEvent.isComposing) {
+			return;
+		}
 		const last = flat.length - 1;
 		const move: Record<string, number> = {
 			ArrowDown: Math.min(active + 1, last),
@@ -177,6 +180,8 @@ export function SpeakerNameField({
 				aria-label="People"
 				className="mt-1.5 flex max-h-64 flex-col gap-0.5 overflow-y-auto"
 				id={listID}
+				// Clicks in the list keep focus in the field, so the edit goes on.
+				onMouseDown={(event) => event.preventDefault()}
 				role="listbox"
 			>
 				{groups.map((group) => (
@@ -207,7 +212,6 @@ export function SpeakerNameField({
 									id={optionID(at)}
 									key={`${option.kind}-${option.personID ?? option.label}`}
 									onClick={() => pick(option)}
-									onMouseDown={(event) => event.preventDefault()}
 									onMouseMove={() => setActive(at)}
 									role="option"
 									tabIndex={-1}

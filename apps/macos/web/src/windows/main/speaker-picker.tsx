@@ -84,7 +84,7 @@ export function SpeakerPicker({
 	const named = isNamed(speaker);
 	return (
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
-			<Tooltip label={named ? "Click to rename" : "Click to name"} side="left">
+			<Tooltip label={named ? "Click to rename" : "Click to name"}>
 				<PopoverTrigger
 					className="-ml-[7px] max-w-full self-start"
 					data-testid={`speaker-picker-${speaker.id}`}
