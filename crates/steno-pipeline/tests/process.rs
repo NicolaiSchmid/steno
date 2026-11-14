@@ -621,6 +621,64 @@ async fn a_rerun_that_falls_back_to_the_mic_lane_removes_the_pipelines_me_partic
     assert!(second.segments.iter().all(|s| s.speaker_id.is_some()));
 }
 
+/// Once the user's own person is set, the mic lane is them: in a new
+/// meeting and in a re-run of one whose "me" is still unknown, and the
+/// summary names them. A "me" the user named otherwise stays through a
+/// re-run.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mic_lane_is_the_users_own_person_unless_the_meeting_named_it_otherwise() {
+    let world = world(true, None, AudioRetention::KeepForever);
+    let anna = sample_data::person(0, "Anna");
+    let ben = sample_data::person(1, "Ben");
+    let me_of = |meeting_id: Uuid| {
+        let export = world.store.export(meeting_id).unwrap();
+        let me = export
+            .speakers
+            .iter()
+            .find(|speaker| speaker.id == LaneMerger::me_speaker_id(meeting_id))
+            .unwrap()
+            .person_id();
+        let participant = export
+            .participants
+            .iter()
+            .find(|participant| participant.role == ParticipantRole::Me)
+            .unwrap();
+        (
+            me,
+            participant.person_id,
+            steno_core::summary::render(&export),
+        )
+    };
+    let older = call_meeting(world.now);
+    let older_asset = call_asset(&world.audio, older.id, AudioRetention::KeepForever);
+    world.pipeline.enqueue(&older, &older_asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let (me, participant, summary) = me_of(older.id);
+    assert_eq!((me, participant), (None, None));
+    assert!(summary.contains("**Me**:"), "{summary}");
+
+    let mut settings = world.store.settings().unwrap();
+    settings.self_person_id = Some(anna.id);
+    world.store.save_settings(&settings).unwrap();
+    let newer = enqueue_call(&world, &world.pipeline);
+    world.pipeline.wait_until_idle().await;
+    world.pipeline.process(older_asset.id).await.unwrap();
+    for meeting_id in [newer, older.id] {
+        let (me, participant, summary) = me_of(meeting_id);
+        assert_eq!((me, participant), (Some(anna.id), Some(anna.id)));
+        assert!(summary.contains("**Anna**:"), "{summary}");
+        assert!(!summary.contains("**Me**"), "{summary}");
+    }
+
+    world
+        .store
+        .confirm_speaker(LaneMerger::me_speaker_id(older.id), &ben)
+        .unwrap();
+    world.pipeline.process(older_asset.id).await.unwrap();
+    let (me, participant, _) = me_of(older.id);
+    assert_eq!((me, participant), (Some(ben.id), Some(ben.id)));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn without_an_llm_the_meeting_is_ready_with_no_summary() {
     let world = world(false, None, AudioRetention::KeepForever);

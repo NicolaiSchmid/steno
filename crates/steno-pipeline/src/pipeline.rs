@@ -3267,26 +3267,47 @@ impl Drop for Running {
 }
 
 /// The participant with `role == me`, created as `Me` when none exists.
+/// While it names nobody it takes the person the meeting's "me" speaker
+/// was confirmed as, else [`Settings::self_person_id`], so the merge
+/// confirms the mic lane as them.
 pub fn ensure_me_participant(
     store: &Store,
     meeting_id: Uuid,
 ) -> std::result::Result<Participant, StoreError> {
-    if let Some(existing) = store
+    let existing = store
         .participants(meeting_id)?
         .into_iter()
-        .find(|participant| participant.role == ParticipantRole::Me)
+        .find(|participant| participant.role == ParticipantRole::Me);
+    if let Some(me) = &existing
+        && me.person_id.is_some()
     {
-        return Ok(existing);
+        return Ok(me.clone());
     }
-    let me = Participant {
+    let person = store
+        .speakers(meeting_id)?
+        .into_iter()
+        .find(|speaker| speaker.id == LaneMerger::me_speaker_id(meeting_id))
+        .and_then(|speaker| speaker.person_id())
+        // Unreadable settings leave the mic lane unnamed rather than fail the run.
+        .or_else(|| store.settings().ok()?.self_person_id)
+        .map(|id| store.person(id))
+        .transpose()?
+        .flatten();
+    let mut me = existing.clone().unwrap_or_else(|| Participant {
         id: LaneMerger::me_participant_id(meeting_id),
         meeting_id,
         person_id: None,
         display_name: LaneMerger::ME_SPEAKER_LABEL.to_owned(),
         role: ParticipantRole::Me,
         email: None,
-    };
-    store.save_participant(&me)?;
+    });
+    if let Some(person) = person {
+        me.person_id = Some(person.id);
+        me.display_name = person.display_name;
+    }
+    if existing.as_ref() != Some(&me) {
+        store.save_participant(&me)?;
+    }
     Ok(me)
 }
 
