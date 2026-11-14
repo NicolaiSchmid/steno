@@ -508,9 +508,12 @@ impl Store {
     /// tunes it or reads its pragmas. `body` must not call the store.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
-    pub fn on_writer<T>(&self, body: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
+    pub fn on_writer<T>(
+        &self,
+        body: impl FnOnce(&mut Connection) -> rusqlite::Result<T>,
+    ) -> Result<T> {
         let _inside = Inside::enter(&self.connections);
-        Ok(body(&self.writer())?)
+        Ok(body(&mut self.writer())?)
     }
 
     /// The migration identifiers recorded in `grdb_migrations`, in
