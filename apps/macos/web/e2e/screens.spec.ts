@@ -5,9 +5,9 @@ import { expect, type Page, test } from "@playwright/test";
  * Renders the main window in every state at both reference window sizes,
  * the Settings window's sections and states at its 960 by 640 default size,
  * the onboarding window at its fixed 560 by 620 and the stories, each in
- * light and dark, to screens/. Every page must make zero requests to anything
- * but the preview server. `scenario=` and `tab=` bend the fixtures
- * (`src/bridge/mock-transport.ts`).
+ * light and dark, to screens/, and the main window's column dividers. Every
+ * page must make zero requests to anything but the preview server.
+ * `scenario=` and `tab=` bend the fixtures (`src/bridge/mock-transport.ts`).
  */
 
 const OUT = "screens";
@@ -211,6 +211,67 @@ for (const scheme of SCHEMES) {
 		await page.setViewportSize({ width: 1200, height: Math.min(height, 8000) });
 		await settle(page);
 		await page.screenshot({ path: `${OUT}/stories-${scheme}.png` });
+		expect(external).toEqual([]);
+	});
+}
+
+/**
+ * The column dividers at 1200 by 760: the sidebar's under the pointer, then
+ * mid-drag, both columns dragged wider, and the same widths after a reload
+ * (they are kept in `localStorage`).
+ */
+for (const scheme of SCHEMES) {
+	test(`main ${scheme} columns`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		await page.goto(`/#/main${scheme === "dark" ? "?dark" : ""}`);
+		await settle(page);
+		const shot = (name: string) =>
+			page.screenshot({ path: `${OUT}/main-${scheme}-columns-${name}.png` });
+		const drag = async (testID: string, dx: number) => {
+			const box = await page.getByTestId(testID).boundingBox();
+			if (!box) {
+				throw new Error(`${testID} has no box`);
+			}
+			const x = box.x + box.width / 2;
+			await page.mouse.move(x, 300);
+			await page.mouse.down();
+			await page.mouse.move(x + dx, 300, { steps: 8 });
+		};
+
+		const divider = await page.getByTestId("resize-sidebar").boundingBox();
+		if (!divider) {
+			throw new Error("resize-sidebar has no box");
+		}
+		const start = divider.x + divider.width / 2;
+		await page.mouse.move(start, 300);
+		await page.waitForTimeout(300);
+		await shot("hover");
+		await page.mouse.down();
+		await page.mouse.move(start + 64, 300, { steps: 8 });
+		await shot("dragging");
+		await page.mouse.up();
+		await drag("resize-list", 80);
+		await page.mouse.up();
+		await page.mouse.move(1100, 700);
+		await expect(page.getByTestId("resize-sidebar")).toHaveAttribute(
+			"aria-valuenow",
+			"320",
+		);
+		await expect(page.getByTestId("resize-list")).toHaveAttribute(
+			"aria-valuenow",
+			"380",
+		);
+		await page.waitForTimeout(300);
+		await shot("dragged");
+
+		await page.reload();
+		await settle(page);
+		await expect(page.getByTestId("main-window")).toHaveCSS(
+			"grid-template-columns",
+			/^320px 380px /,
+		);
+		await shot("after-reload");
 		expect(external).toEqual([]);
 	});
 }

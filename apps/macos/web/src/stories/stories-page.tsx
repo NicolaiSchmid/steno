@@ -25,6 +25,7 @@ import {
 	Callout,
 	Card,
 	Checkbox,
+	ColumnResizer,
 	Dialog,
 	DialogBody,
 	DialogClose,
@@ -515,6 +516,21 @@ export function StoriesPage() {
 						<SidebarRow active variant="tag">
 							q4
 						</SidebarRow>
+					</div>
+				)}
+			</ThemePair>
+
+			<ThemePair title="ColumnResizer on a column's trailing edge (invisible until hovered)">
+				{() => (
+					<div className="relative h-24 w-56 rounded-lg border-sidebar-border border-r bg-sidebar">
+						<ColumnResizer
+							aria-label="Resize sidebar"
+							defaultValue={224}
+							max={360}
+							min={200}
+							onChange={() => {}}
+							value={224}
+						/>
 					</div>
 				)}
 			</ThemePair>
