@@ -464,3 +464,120 @@ fn confirming_after_the_audio_is_gone_removes_the_run_clip_the_row_names() {
         .unwrap();
     assert_eq!(row.sample_clip_url, None);
 }
+
+/// Naming a meeting's "me" speaker the first time makes that person the
+/// user's own: every other meeting whose "me" is still unknown is
+/// confirmed as them, except one where they already own another speaker;
+/// a "me" named otherwise stays, and a later naming changes nothing.
+#[test]
+fn naming_me_the_first_time_makes_that_person_you_in_every_unnamed_meeting() {
+    use steno_core::{Speaker, Store, me_speaker_id, testing::sample_data};
+    use steno_host::speakers::{OptionKind, SpeakersViewModel};
+    use uuid::Uuid;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+    let anna = sample_data::person(0, "Anna");
+    let ben = sample_data::person(1, "Ben");
+    for person in [&anna, &ben] {
+        store.save_person(person).unwrap();
+    }
+    let speaker = |meeting_id: Uuid, id: Uuid, label: &str, assignment| Speaker {
+        id,
+        meeting_id,
+        cluster_label: label.to_owned(),
+        assignment,
+        embedding: None,
+        sample_clip_range: None,
+        sample_clip_url: None,
+        cluster_confidence: 1.0,
+    };
+    let confirmed = |person: &steno_core::Person| SpeakerAssignment::Confirmed {
+        person_id: person.id,
+    };
+    // The meeting named here, one unnamed, one named Ben, one where Anna
+    // owns "Speaker 1".
+    let [named_here, unnamed, named_ben, anna_elsewhere] = std::array::from_fn(|_| Uuid::new_v4());
+    for (meeting_id, me, other) in [
+        (named_here, SpeakerAssignment::Unknown, None),
+        (unnamed, SpeakerAssignment::Unknown, None),
+        (named_ben, confirmed(&ben), None),
+        (
+            anna_elsewhere,
+            SpeakerAssignment::Unknown,
+            Some(confirmed(&anna)),
+        ),
+    ] {
+        let mut meeting = sample_data::meeting();
+        meeting.id = meeting_id;
+        store.save_meeting(&meeting).unwrap();
+        store
+            .save_participant(&Participant {
+                id: Uuid::new_v4(),
+                meeting_id,
+                person_id: None,
+                display_name: "Me".to_owned(),
+                role: ParticipantRole::Me,
+                email: None,
+            })
+            .unwrap();
+        store
+            .save_speaker(&speaker(meeting_id, me_speaker_id(meeting_id), "Me", me))
+            .unwrap();
+        if let Some(assignment) = other {
+            store
+                .save_speaker(&speaker(
+                    meeting_id,
+                    Uuid::new_v4(),
+                    "Speaker 1",
+                    assignment,
+                ))
+                .unwrap();
+        }
+    }
+    let name_me = |meeting_id: Uuid, person: &steno_core::Person| {
+        let mut speakers = SpeakersViewModel::default();
+        speakers.update(
+            store.export(meeting_id).unwrap(),
+            &store,
+            &steno_host::services::RealFileSystem,
+        );
+        let option = steno_host::speakers::SpeakerOption {
+            kind: OptionKind::Person(person.clone()),
+            tag: None,
+        };
+        assert!(speakers.select(
+            &option,
+            me_speaker_id(meeting_id),
+            &store,
+            sample_data::started_at()
+        ));
+        assert_eq!(speakers.error, None);
+    };
+    let me_of = |meeting_id: Uuid| {
+        let export = store.export(meeting_id).unwrap();
+        let me = export
+            .speakers
+            .iter()
+            .find(|speaker| speaker.id == me_speaker_id(meeting_id))
+            .unwrap()
+            .person_id();
+        let participant = &export.participants[0];
+        (me, participant.person_id, participant.display_name.clone())
+    };
+
+    name_me(named_here, &anna);
+    assert_eq!(store.settings().unwrap().self_person_id, Some(anna.id));
+    let you = (Some(anna.id), Some(anna.id), "Anna".to_owned());
+    assert_eq!(me_of(named_here), you);
+    assert_eq!(me_of(unnamed), you);
+    assert_eq!(me_of(named_ben), (Some(ben.id), None, "Me".to_owned()));
+    assert_eq!(me_of(anna_elsewhere), (None, None, "Me".to_owned()));
+
+    name_me(anna_elsewhere, &ben);
+    assert_eq!(
+        store.settings().unwrap().self_person_id,
+        Some(anna.id),
+        "a later naming keeps the first"
+    );
+}

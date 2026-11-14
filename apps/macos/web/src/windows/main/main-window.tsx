@@ -1,5 +1,13 @@
-import { useEffect } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { send, useBridge, usePageReady } from "@/bridge/hooks";
+import { ColumnResizer } from "@/components/ui";
+import {
+	COLUMNS,
+	type ColumnName,
+	columnMax,
+	fitColumns,
+	useColumnWidths,
+} from "./column-widths";
 import { MeetingDetail } from "./meeting-detail";
 import { MeetingList } from "./meeting-list";
 import { Sidebar } from "./sidebar";
@@ -13,11 +21,19 @@ export interface MainWindowProps {
 	pickerOpen?: boolean;
 }
 
+const RESIZER_LABELS: Record<ColumnName, string> = {
+	sidebar: "Resize sidebar",
+	list: "Resize meeting list",
+};
+
 /**
- * The main window: sidebar (256), meeting list (300) and the reading
- * column. Tells the host the page is ready once and reports the window size
- * after a resize settles. A deep link to a meeting is the host's to follow:
- * it selects the meeting and the page shows `list.selection`.
+ * The main window: sidebar (256 by default), meeting list (300) and the
+ * reading column, with a divider on the trailing edge of the first two that
+ * drags, takes arrow keys and resets on a double-click (`column-widths.ts`
+ * for the limits and where the widths are kept). Tells the host the page is
+ * ready once and reports the window size after a resize settles. A deep link
+ * to a meeting is the host's to follow: it selects the meeting and the page
+ * shows `list.selection`.
  */
 export function MainWindow({
 	menuOpen = false,
@@ -25,6 +41,9 @@ export function MainWindow({
 }: MainWindowProps) {
 	const client = useBridge();
 	usePageReady(client);
+	const { widths: stored, update, commit } = useColumnWidths();
+	const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
+	const widths = fitColumns(stored, windowWidth);
 
 	useEffect(() => {
 		let timer: ReturnType<typeof setTimeout> | undefined;
@@ -35,6 +54,7 @@ export function MainWindow({
 				height: window.innerHeight,
 			});
 		const onResize = () => {
+			setWindowWidth(window.innerWidth);
 			clearTimeout(timer);
 			timer = setTimeout(report, LAYOUT_DEBOUNCE_MS);
 		};
@@ -45,13 +65,32 @@ export function MainWindow({
 		};
 	}, [client]);
 
+	const column = (name: ColumnName, content: ReactNode) => (
+		<div className="relative grid min-h-0 min-w-0">
+			{content}
+			<ColumnResizer
+				aria-label={RESIZER_LABELS[name]}
+				data-testid={`resize-${name}`}
+				defaultValue={COLUMNS[name].default}
+				max={columnMax(name, widths, windowWidth)}
+				min={COLUMNS[name].min}
+				onChange={(width) => update(name, width)}
+				onCommit={(width) => commit(name, width)}
+				value={widths[name]}
+			/>
+		</div>
+	);
+
 	return (
 		<div
-			className="grid h-full min-h-0 grid-cols-[256px_300px_minmax(0,1fr)] overflow-hidden bg-background text-foreground"
+			className="grid h-full min-h-0 overflow-hidden bg-background text-foreground"
 			data-testid="main-window"
+			style={{
+				gridTemplateColumns: `${widths.sidebar}px ${widths.list}px minmax(0,1fr)`,
+			}}
 		>
-			<Sidebar />
-			<MeetingList />
+			{column("sidebar", <Sidebar />)}
+			{column("list", <MeetingList />)}
 			<MeetingDetail
 				initialMenuOpen={menuOpen}
 				initialPickerOpen={pickerOpen}

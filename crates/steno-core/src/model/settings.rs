@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::{AudioRetention, Meeting};
 use crate::json;
@@ -72,6 +73,16 @@ pub struct Settings {
     /// platform's. Not shown in Settings; `STENO_HANDOVER_PORT` wins over it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handover_port: Option<u16>,
+    /// The person who is "me": the mic lane's speaker of every new meeting
+    /// is confirmed as them. Set the first time the user names a meeting's
+    /// "me" speaker; not shown in Settings.
+    #[serde(
+        rename = "selfPersonID",
+        default,
+        with = "json::uuid_text_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub self_person_id: Option<Uuid>,
 }
 
 impl Settings {
@@ -99,6 +110,7 @@ impl Settings {
             launch_at_login: true,
             obsidian: None,
             handover_port: None,
+            self_person_id: None,
         }
     }
 }

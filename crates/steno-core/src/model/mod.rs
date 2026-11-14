@@ -31,7 +31,7 @@ pub use calendar::{CALENDAR_LOOKAHEAD, CalendarAttendee, CalendarEvent, pick_eve
 pub use delivery::{
     DeliveredFile, Delivery, DeliveryReceipt, DeliveryStatus, DeliveryStatusKind, FileOwnership,
 };
-pub use derived_uuid::{derived_uuid, room_speaker_id};
+pub use derived_uuid::{derived_uuid, me_speaker_id, room_speaker_id};
 pub use events::{MeetingEvent, MeetingOperation, ProcessingProgress};
 pub use handover::{
     HandoverReceipt, HandoverState, HandoverStateKind, PairedDevice, RecordingMetadata,

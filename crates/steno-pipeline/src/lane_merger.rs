@@ -27,7 +27,7 @@ impl LaneMerger {
     /// The "me" speaker's id for a meeting, stable across re-runs.
     #[must_use]
     pub fn me_speaker_id(meeting_id: Uuid) -> Uuid {
-        derived_uuid(meeting_id, "speaker-me")
+        steno_core::me_speaker_id(meeting_id)
     }
 
     /// The "me" participant's id for a meeting.
