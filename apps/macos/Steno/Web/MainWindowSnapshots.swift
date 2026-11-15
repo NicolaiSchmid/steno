@@ -80,11 +80,13 @@ enum MainWindowSnapshots {
   }
 
   /// Segments grouped into speaker turns: consecutive segments of one
-  /// speaker become one turn spanning them; a segment without a speaker is
-  /// always its own turn. `displayName` names a speaker id (nil reads as
-  /// "Unknown" through `MeetingDetailViewModel.displayName(forSpeaker:)`).
+  /// speaker become one turn spanning them, its `segmentIDs` every folded
+  /// segment in time order; a segment without a speaker is always its own
+  /// turn. `displayName` names a speaker id (nil reads as "Unknown" through
+  /// `MeetingDetailViewModel.displayName(forSpeaker:)`). The turn whose
+  /// first segment is `playingTurn` reads as playing.
   static func turns(
-    _ segments: [TranscriptSegment], displayName: (UUID?) -> String
+    _ segments: [TranscriptSegment], playingTurn: UUID? = nil, displayName: (UUID?) -> String
   ) -> [MeetingDetailSnapshot.Turn] {
     var turns: [MeetingDetailSnapshot.Turn] = []
     for segment in segments.sorted(by: { $0.start < $1.start }) {
@@ -93,12 +95,13 @@ enum MainWindowSnapshots {
       {
         turns[index].text += " " + segment.text
         turns[index].endSeconds = max(turns[index].endSeconds, segment.end)
+        turns[index].segmentIDs.append(segment.id)
       } else {
         turns.append(
           MeetingDetailSnapshot.Turn(
             id: segment.id, speakerID: segment.speakerID,
             speakerName: displayName(segment.speakerID), startSeconds: segment.start,
-            endSeconds: segment.end, text: segment.text))
+            endSeconds: segment.end, text: segment.text, isPlaying: segment.id == playingTurn))
       }
     }
     return turns
@@ -349,7 +352,12 @@ extension MeetingDetailSnapshot {
         quote: row.excerptInClip && !row.excerpt.isEmpty ? row.excerpt : nil,
         context: !row.excerptInClip && !row.excerpt.isEmpty ? row.excerpt : nil,
         colorIndex: MainWindowSnapshots.colorIndex(for: row.person?.id ?? row.id),
-        hasClip: row.canPlay, isPlaying: playing == row.id, dismissed: row.speaker.dismissed)
+        hasClip: row.canPlay, isPlaying: playing == row.id, dismissed: row.speaker.dismissed,
+        combined: speakers.combinedVoices(into: row.id).map { voice in
+          CombinedVoice(
+            id: voice.id, clusterLabel: voice.merged.speaker.clusterLabel, quote: voice.excerpt,
+            hasClip: voice.canPlay, isPlaying: playing == voice.id)
+        })
     }
 
     let retentionKind: Retention.Kind
@@ -421,8 +429,11 @@ extension MeetingDetailSnapshot {
           id: section.id, heading: section.heading,
           bullets: section.bullets.map(MainWindowSnapshots.bullet))
       },
-      transcript: MainWindowSnapshots.turns(export.segments) { detail.displayName(forSpeaker: $0) },
-      tasks: tasks, decisions: export.decisions.map(\.text), notes: meeting.scratchpad,
+      transcript: MainWindowSnapshots.turns(export.segments, playingTurn: speakers.playingTurn) {
+        detail.displayName(forSpeaker: $0)
+      },
+      transcriptGeneration: detail.transcriptGeneration, tasks: tasks,
+      decisions: export.decisions.map(\.text), notes: meeting.scratchpad,
       export: exportSnapshot,
       // Never offered: the Swift app ships no further release (D9 of the
       // stable promotion plan), so it refuses "Process again".

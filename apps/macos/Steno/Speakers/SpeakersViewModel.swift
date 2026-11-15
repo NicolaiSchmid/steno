@@ -5,11 +5,12 @@ import StenoCore
 /// transcript pickers show them: one row per speaker from the current
 /// export, the options a picker offers, and the writes: naming (`select`),
 /// No to a suggestion (`reject`), Remove name (`clear`) and Not a person
-/// (`setDismissed`). `MeetingDetailViewModel` feeds it on every export tick
-/// (`update(export:)`); it then loads the name suggestions, the user's
+/// (`setDismissed`), plus "This paragraph" (`moveTurn`) and Separate again
+/// (`separate`). `MeetingDetailViewModel` feeds it on every export tick
+/// (`update(export:combined:)`); it then loads the name suggestions, the user's
 /// Noes, the recent people and the full people list in one cancellable
 /// task. Naming goes through `MeetingStore.confirm(speakerID:person:)`,
-/// which merges, recomputes the voice and keeps the clip; the UI re-renders
+/// which combines, recomputes the voice and keeps the clip; the UI re-renders
 /// from the store observation, so nothing here is optimistic. A failed
 /// write throws, so the bridge replies with it. Rust: `SpeakersViewModel`
 /// in `steno-host`'s `speakers.rs`.
@@ -38,7 +39,32 @@ final class SpeakersViewModel {
     }
   }
 
+  /// A voice combined into one of the rows, which Separate again makes its
+  /// own voice again.
+  struct Combined: Identifiable, Equatable {
+    var merged: MergedSpeaker
+    /// What the voice says in its own clip (`SpeakerExcerpts.clipText`).
+    var excerpt: String?
+    /// Whether its clip file exists.
+    var canPlay: Bool
+
+    var id: UUID { merged.speaker.id }
+  }
+
+  /// Why a turn's audio does not play.
+  enum PlayTurnError: Error, Equatable {
+    /// The meeting's recording is not on disk (retention removed it, or it
+    /// was never kept).
+    case recordingGone
+    /// None of the turn's segments is in the transcript.
+    case noSuchSegment
+    /// The recording exists but did not play.
+    case unplayable
+  }
+
   private(set) var rows: [Row] = []
+  /// Every voice combined into another, by cluster label.
+  private(set) var combined: [Combined] = []
   private(set) var export: MeetingExport?
   private(set) var recent: [Person] = []
   private(set) var persons: [Person] = []
@@ -71,11 +97,17 @@ final class SpeakersViewModel {
     rows.first { $0.id == id }
   }
 
-  /// A new export from the store observation: rows are rebuilt at once, the
-  /// suggestions, the user's Noes and the people lists reload in the
-  /// background (the previous load is dropped). A voice match below
-  /// `VoiceStrength.floor` reads as unknown everywhere.
-  func update(export: MeetingExport) {
+  /// The voices combined into the row `id`, by cluster label.
+  func combinedVoices(into id: UUID) -> [Combined] {
+    combined.filter { $0.merged.root == id }
+  }
+
+  /// A new export from the store observation, with the meeting's combined
+  /// voices read beside it: rows are rebuilt at once, the suggestions, the
+  /// user's Noes and the people lists reload in the background (the
+  /// previous load is dropped). A voice match below `VoiceStrength.floor`
+  /// reads as unknown everywhere.
+  func update(export: MeetingExport, combined merged: [MergedSpeaker] = []) {
     var export = export
     export.speakers = export.speakers.map(Self.shown)
     self.export = export
@@ -88,6 +120,14 @@ final class SpeakersViewModel {
         excerptInClip: excerpt.inClip,
         canPlay: speaker.sampleClipURL.map { FileManager.default.fileExists(atPath: $0.path) }
           ?? false)
+    }
+    combined = merged.map { merged in
+      Combined(
+        merged: merged,
+        excerpt: SpeakerExcerpts.clipText(for: merged.speaker, in: export.segments),
+        canPlay: merged.speaker.sampleClipURL.map {
+          FileManager.default.fileExists(atPath: $0.path)
+        } ?? false)
     }
     loadTask?.cancel()
     let meetingID = export.meeting.id
@@ -161,7 +201,8 @@ final class SpeakersViewModel {
   /// The one write: a person option confirms that person; a create option
   /// resolves the name to an existing or new person first, taking the email
   /// of a calendar attendee of that name. A person who owns another speaker
-  /// here is merged into (inside `confirm`) only with `combine`, else
+  /// here is combined into (inside `confirm`, undone by `separate`) only
+  /// with `combine`, else
   /// `SelectError.wouldCombine` is thrown. Selecting the speaker's own person
   /// again changes nothing. A speaker the export does not list is ignored.
   /// Store errors are thrown, for the bridge to reply with.
@@ -169,16 +210,7 @@ final class SpeakersViewModel {
     async throws
   {
     guard let row = row(speakerID) else { return }
-    let person: Person
-    switch option.kind {
-    case .person(let known):
-      person = known
-    case .create(let name):
-      let attendee = export?.participants.first {
-        $0.role == .them && Person.namesMatch($0.displayName, name)
-      }
-      person = try await store.resolvePerson(named: name, email: attendee?.email, now: now())
-    }
+    let person = try await person(for: option)
     if row.speaker.assignment == .confirmed(personID: person.id) { return }
     if !combine,
       let owner = try await combinedVoice(of: row.speaker, personID: person.id)
@@ -186,6 +218,44 @@ final class SpeakersViewModel {
       throw SelectError.wouldCombine(person: person.displayName, voice: owner.clusterLabel)
     }
     try await store.confirm(speakerID: speakerID, person: person)
+    onWrite?()
+  }
+
+  /// The person an option stands for: a person option's person, or a create
+  /// option's name resolved to an existing or new person, taking the email
+  /// of a calendar attendee of that name. Nothing is saved.
+  private func person(for option: SpeakerOptions.Option) async throws -> Person {
+    switch option.kind {
+    case .person(let known):
+      return known
+    case .create(let name):
+      let attendee = export?.participants.first {
+        $0.role == .them && Person.namesMatch($0.displayName, name)
+      }
+      return try await store.resolvePerson(named: name, email: attendee?.email, now: now())
+    }
+  }
+
+  /// "This paragraph": the turn's segments move to the option's person in
+  /// this meeting (`MeetingStore.moveTurn`), against the transcript of
+  /// `generation`; `MeetingStoreError.staleTranscript` is thrown when it
+  /// changed since. Nothing happens without an export.
+  func moveTurn(
+    segments: [TurnSegmentMove], generation: Int, to option: SpeakerOptions.Option
+  ) async throws {
+    guard let meetingID = export?.meeting.id else { return }
+    let person = try await person(for: option)
+    try await store.moveTurn(
+      meetingID: meetingID, generation: generation, segments: segments, to: person)
+    onWrite?()
+  }
+
+  /// Undo after a combine, and Separate again
+  /// (`MeetingStore.separateSpeaker`): the combined voice is its own voice
+  /// again. The store's refusals (`notCombined`, `staleTranscript`) are
+  /// thrown.
+  func separate(speakerID: UUID) async throws {
+    try await store.separateSpeaker(speakerID)
     onWrite?()
   }
 
@@ -227,8 +297,10 @@ final class SpeakersViewModel {
 
   // MARK: - Playback
 
+  /// Plays the sample clip of a row or of a voice combined into one.
   func play(_ id: UUID) {
-    guard let row = row(id), let url = row.speaker.sampleClipURL else {
+    let speaker = row(id)?.speaker ?? combined.first { $0.id == id }?.merged.speaker
+    guard let url = speaker?.sampleClipURL else {
       error = "This speaker has no sample clip."
       return
     }
@@ -237,12 +309,35 @@ final class SpeakersViewModel {
     }
   }
 
+  /// Plays one turn's own audio from the meeting's recording: from the
+  /// earliest start to the latest end among `segmentIDs` the transcript
+  /// has, at most `limit` seconds. The turn reads as playing (`playingTurn`)
+  /// under the first id given, until it ends or anything else plays.
+  func playTurn(segmentIDs: [UUID], limit: TimeInterval) throws {
+    guard let export, let recording = export.audio?.url,
+      FileManager.default.fileExists(atPath: recording.path)
+    else { throw PlayTurnError.recordingGone }
+    let listed = Set(segmentIDs)
+    let segments = export.segments.filter { listed.contains($0.id) }
+    guard let first = segmentIDs.first, let start = segments.map(\.start).min(),
+      let end = segments.map(\.end).max()
+    else { throw PlayTurnError.noSuchSegment }
+    guard player.play(recording, from: start, until: min(end, start + limit), turn: first) else {
+      throw PlayTurnError.unplayable
+    }
+  }
+
   func stopPlayback() {
     player.stop()
   }
 
+  /// The row or combined voice whose clip plays; nil while a turn plays.
   var playing: UUID? {
-    guard let url = player.playingURL else { return nil }
+    guard player.playingTurn == nil, let url = player.playingURL else { return nil }
     return rows.first { $0.speaker.sampleClipURL == url }?.id
+      ?? combined.first { $0.merged.speaker.sampleClipURL == url }?.id
   }
+
+  /// The turn whose audio plays, by the first segment id it was played with.
+  var playingTurn: UUID? { player.playingTurn }
 }

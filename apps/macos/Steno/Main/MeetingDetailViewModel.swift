@@ -59,6 +59,9 @@ final class MeetingDetailViewModel: Identifiable {
   /// the recording now; the view asks first.
   var confirmsDeleteNow = false
   let speakers: SpeakersViewModel
+  /// The meeting's `transcriptGeneration`, read with every export: what a
+  /// paragraph move is made against.
+  private(set) var transcriptGeneration = 0
   /// A speaker was named or reassigned since the last re-export.
   private(set) var speakersDirty = false
   /// The last re-export was refused because the pipeline held the meeting;
@@ -100,14 +103,25 @@ final class MeetingDetailViewModel: Identifiable {
 
   /// Follows the export until cancelled (one view `.task`), feeding the
   /// speakers and retrying a refused re-export once the meeting is ready.
+  /// The combined voices and the transcript generation are read beside each
+  /// export, before anything is set, so a snapshot never mixes two ticks.
   func observe() async {
     do {
       for try await export in store.observeMeeting(id: id) {
+        var combined: [MergedSpeaker] = []
+        if export != nil {
+          // A meeting deleted in between reads as nothing combined; the
+          // next tick says it is gone.
+          combined = (try? await store.mergedSpeakers(meetingID: id)) ?? []
+          if let generation = try? await store.transcriptGeneration(meetingID: id) {
+            transcriptGeneration = generation
+          }
+        }
         self.export = export
         recordingFilesExist =
           export?.audio.map { FileManager.default.fileExists(atPath: $0.url.path) } ?? false
         guard let export else { continue }
-        speakers.update(export: export)
+        speakers.update(export: export, combined: combined)
         if retryRedeliverWhenReady, export.meeting.state == .ready {
           retryRedeliverWhenReady = false
           await redeliverSpeakerChanges()
