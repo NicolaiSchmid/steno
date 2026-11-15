@@ -1,127 +1,9 @@
+# TEMPORARY smoke bisect workflow (tmp/smoke-bisect-*): only the Linux steps
+# the close-without-tray smoke needs. Never merged.
 name: Rust CI
-
-# Formats, lints and tests the Cargo workspace on the three target platforms.
-# Apple-only backends compile behind `cfg(target_os = "macos")`, so every
-# crate builds everywhere. The macOS job follows `MACOS_RUNS_ON` like Swift CI.
-# Path-gated so it does nothing for unrelated changes. The phone's
-# recording preset is in the paths because steno-audio's salvage assumes
-# its rate and a test there pins it (`salvage::SAMPLE_RATE`).
-#
-# Toolchain and build directories, two regimes (as in swift-ci.yml):
-#
-#   • Self-hosted (Forge). rustup and the stable toolchain are installed on
-#     the machine but the runner's PATH does not reach them, so a step puts
-#     `~/.cargo/bin` and the nix system profile on PATH before
-#     `dtolnay/rust-toolchain`; without it the action downloaded rustup on
-#     every run (86 s on 2026-10-02). The target directory lives outside the
-#     workspace under `~/Library/Caches/steno-ci/<runner name>/cargo-target`,
-#     which checkout's clean never touches, so each run starts from the
-#     previous run's incremental state on the same runner and nothing is
-#     uploaded; `rust-cache` is skipped there.
-#
-#   • Fresh machine every run: GitHub-hosted, and the Ubicloud Linux
-#     runners. Ubicloud registers its runners as self-hosted, so the Forge
-#     steps check `runner.os == 'macOS'` as well. `Swatinem/rust-cache`
-#     restores the compiled dependencies in every run and saves only from
-#     pushes to `main`.
-#
-# Linux also builds the web UI (its bridge transports are the shell's other
-# half), checks it, runs the Tauri shell's headless smoke under Xvfb
-# (apps/desktop/scripts/smoke-linux.sh; the screenshots are uploaded as
-# `desktop-smoke-screens`), closes the main window
-# under a recording on a session bus with no tray host and requires the
-# app to quit and save it, and beside a stand-in host requires the close
-# to hide the window and the tray menu's Quit to save it
-# (apps/desktop/scripts/close-without-tray-linux.sh), stops a recording from
-# the tray's menu while another process holds the store's write lock and
-# requires the tray to read Stopping at once and the recording saved once
-# the lock goes (apps/desktop/scripts/locked-store-linux.sh), and bundles a
-# `.deb` with the speech sidecar
-# (apps/desktop/scripts/check-bundle.sh finds it beside the app) so a
-# packaging regression (the bundle config, the icons, the plists, the
-# release profile, the sidecar) fails here and not in desktop-release.yml.
-# The `deny` job runs `cargo deny` over deny.toml. macOS builds
-# the web UI after its tests and runs the same smoke in the runner's login
-# session (apps/desktop/scripts/smoke-macos.sh), where the panels are
-# `NSPanel`s. Windows, and macOS up to that step, build the shell without
-# the web dist: build.rs points `frontendDist` at
-# `apps/desktop/src-tauri/placeholder/` so the build goes through; the
-# binary they produce would still load the Vite dev server, as every build
-# without `custom-protocol` does.
-#
-# The `msrv` job checks the workspace against `rust-version` from Cargo.toml
-# on Linux, so the number stays true.
-#
-# `steno-speech-coreml` (WP4b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`):
-# its CoreML half compiles on macOS only and its unit tests need no models,
-# so `cargo test --workspace` covers them on all three `workspace` jobs (the
-# platform-independent half on Linux and Windows too). The parity harness
-# against the Swift transcripts needs the Parakeet models and the calibration
-# corpus on Forge; it is the ignored test
-# `crates/steno-speech-coreml/tests/parity.rs` and the `steno-coreml-parity`
-# binary, run by hand, never here.
-#
-# steno-audio's PipeWire backend (WP5b of
-# .plans/2026-10-02-rust-core-and-tauri-shell.md) builds on Linux against
-# the libpipewire headers (scripts/setup-linux.sh installs them). The Linux
-# job also runs its live tests, `crates/steno-audio/tests/pipewire.rs`,
-# against a private headless daemon with WirePlumber and null devices that
-# `scripts/pipewire-headless.sh` starts: real links and cycles,
-# device-change reports, the teardown, and the allocation count on
-# PipeWire's own data-loop thread.
-#
-# The `tsan` job runs the audio ring tests under ThreadSanitizer: the
-# two-thread accounting test in `crates/steno-audio/tests/ring.rs` is what
-# catches a weakened memory ordering on the ring indices, and only a
-# sanitizer sees that on x86. `tests/split_streams.rs` runs there too: its
-# two-thread test drives the WASAPI backend's follower staging ring. It
-# needs nightly and `-Zbuild-std`, so it is its own job and is not a
-# required check: a nightly breakage must not block the workspace jobs.
 
 on:
   pull_request:
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'rustfmt.toml'
-      - 'deny.toml'
-      - 'crates/**'
-      - 'apps/desktop/**'
-      - 'apps/macos/web/fixtures/bridge/**'
-      - 'apps/macos/web/src/bridge/**'
-      - 'apps/macos/web/package.json'
-      - 'apps/macos/web/pnpm-lock.yaml'
-      - 'mobile/src/features/recorder/recording-options.ts'
-      - 'scripts/setup-linux.sh'
-      - 'scripts/pipewire-headless.sh'
-      - 'apps/macos/scripts/merge-appcast.py'
-      - 'packaging/aur/PKGBUILD'
-      - 'packaging/aur/.SRCINFO'
-      - '.github/workflows/desktop-release.yml'
-      - '.github/workflows/rust-ci.yml'
-  push:
-    branches: ['main']
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'rustfmt.toml'
-      - 'deny.toml'
-      - 'crates/**'
-      - 'apps/desktop/**'
-      - 'apps/macos/web/fixtures/bridge/**'
-      - 'apps/macos/web/src/bridge/**'
-      - 'apps/macos/web/package.json'
-      - 'apps/macos/web/pnpm-lock.yaml'
-      - 'mobile/src/features/recorder/recording-options.ts'
-      - 'scripts/setup-linux.sh'
-      - 'scripts/pipewire-headless.sh'
-      - 'apps/macos/scripts/merge-appcast.py'
-      - 'packaging/aur/PKGBUILD'
-      - 'packaging/aur/.SRCINFO'
-      - '.github/workflows/desktop-release.yml'
-      - '.github/workflows/rust-ci.yml'
 
 concurrency:
   group: rust-ci-${{ github.ref }}
@@ -132,375 +14,53 @@ permissions:
 
 jobs:
   workspace:
-    name: ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux
-            os: ubicloud-standard-8
-          - name: windows
-            os: windows-latest
-          # `MACOS_RUNS_ON` is a JSON label list for the Forge runners, the
-          # same variable Swift CI reads; the hosted image when it is unset.
-          - name: macos
-            os: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}
-    runs-on: ${{ matrix.os }}
+    name: linux
+    runs-on: ubicloud-standard-8
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-
       - name: Linux prerequisites
-        if: matrix.name == 'linux'
         run: scripts/setup-linux.sh
-
-      - name: Use the installed rustup (self-hosted Mac only)
-        if: runner.os == 'macOS' && runner.environment == 'self-hosted'
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "/run/current-system/sw/bin" >> "$GITHUB_PATH"
-
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Target directory outside the workspace (self-hosted Mac only)
-        if: runner.os == 'macOS' && runner.environment == 'self-hosted'
-        run: |
-          target="$HOME/Library/Caches/steno-ci/$RUNNER_NAME/cargo-target"
-          mkdir -p "$target"
-          du -sh "$target"
-          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
-
       - uses: Swatinem/rust-cache@v2
-        if: runner.os != 'macOS' || runner.environment == 'github-hosted'
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      # The web UI, so the shell embeds the real bundle and the Tauri
-      # transport's tests run beside the shell's; on macOS for the smoke
-      # only, and without the pnpm cache, whose upload from Forge costs more
-      # than the install it saves.
-      # `dest` per job: the default `~/setup-pnpm` is shared by every runner
-      # on a self-hosted machine, and two concurrent installs collide there.
+          save-if: false
       - uses: pnpm/action-setup@v4
-        if: matrix.name != 'windows'
         with:
           dest: ${{ runner.temp }}/setup-pnpm
           package_json_file: apps/macos/web/package.json
       - uses: actions/setup-node@v4
-        if: matrix.name != 'windows'
         with:
           node-version: 24
-          cache: ${{ matrix.name == 'linux' && 'pnpm' || '' }}
+          cache: pnpm
           cache-dependency-path: apps/macos/web/pnpm-lock.yaml
-      - name: Web install, check and build
-        if: matrix.name == 'linux'
-        run: pnpm install --frozen-lockfile && pnpm check && pnpm build
+      - name: Web install and build
+        run: pnpm install --frozen-lockfile && pnpm build
         working-directory: apps/macos/web
-
-      # The handover interface test connects to the runner's own LAN
-      # address. Linux and Windows deliver that connection, so a skip there
-      # fails the test; on macOS the application firewall holds the
-      # connection back and the test skips.
-      - name: Require the LAN interface test (Linux and Windows)
-        if: matrix.name != 'macos'
-        shell: bash
-        run: echo "STENO_REQUIRE_LAN_TEST=1" >> "$GITHUB_ENV"
-
-      # The shell's tray host tests and the services' Secret Service
-      # tests run their fakes on a private `dbus-daemon`
-      # (scripts/setup-linux.sh installs it); on Linux a missing daemon
-      # fails them instead of skipping them.
-      - name: Require the D-Bus tests (Linux)
-        if: matrix.name == 'linux'
-        run: echo "STENO_REQUIRE_DBUS_TEST=1" >> "$GITHUB_ENV"
-
-      - name: Format
-        run: cargo fmt --all --check
-      - name: Lint
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # `--no-fail-fast`: every crate's tests run and report even when an
-      # earlier crate fails, so one red crate does not hide the others.
-      - name: Test
-        run: cargo test --workspace --locked --no-fail-fast
-      - name: Test the core fakes
-        run: cargo test -p steno-core --features testing --locked
-      # The shell answers from the real host by default since WP6b; its
-      # opt-in fixture host (the fixture table, the mock replies) is linted
-      # and tested with the feature on. Only the shell rebuilds.
-      - name: Lint and test the shell's fixture host
-        run: |
-          cargo clippy -p steno-desktop --features fixture-host --all-targets --locked -- -D warnings
-          cargo test -p steno-desktop --features fixture-host --locked
-      # The handover tests that read the host's network, again with their
-      # output, so the log shows the LAN addresses found and whether the
-      # interface test ran or printed SKIPPED. `--workspace` keeps the Test
-      # step's feature set, which `-p steno-handover` would change; Windows
-      # and macOS rebuild nothing here, Linux part of the tree (about 30 s).
-      # The Windows-only test exists only there. A rename would leave
-      # `--exact` matching nothing, which passes, so the step greps the log
-      # for each test's start line, `test <path> ... `, which proves it ran,
-      # and fails on `... ignored`. The pass is cargo's exit code: Bash runs
-      # with `pipefail`, so `tee` keeps it. The step does not grep for
-      # `... ok`: with `--nocapture` another test's output can land between
-      # a start line and its `ok`. The two interface tests print SKIPPED on
-      # macOS and then pass.
-      - name: Handover network tests, with output
-        shell: bash
-        run: |
-          log="$RUNNER_TEMP/handover-network.log"
-          interfaces=(
-            server::tests::the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte
-            server::tests::an_address_gained_after_start_is_served_and_the_listener_keeps_an_open_connection_when_it_leaves
-          )
-          windows=server::advertise::tests::on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
-          cargo test --workspace --lib --locked -- --exact --nocapture \
-            "${interfaces[@]}" \
-            server::advertise::tests::the_system_lan_addresses_can_be_read \
-            "$windows" \
-            | tee "$log"
-          ran() {
-            grep -qF "test $1 ... " "$log" || { echo "::error::$1 did not run"; exit 1; }
-            if grep -qF "test $1 ... ignored" "$log"; then echo "::error::$1 is ignored"; exit 1; fi
-          }
-          for test in "${interfaces[@]}"; do ran "$test"; done
-          if [ "$RUNNER_OS" = Windows ]; then ran "$windows"; fi
-
-      # The credential store tests against the runner's own credential
-      # store, again with their output and with the start-line greps of the
-      # step above (`--workspace` keeps the Test step's feature set). Each
-      # test writes only under `steno-test-<uuid>` target names and deletes
-      # them again; `cmdkey /list` then shows that none is left.
-      - name: Credential store tests, with output (Windows)
-        if: matrix.name == 'windows'
-        shell: bash
-        run: |
-          log="$RUNNER_TEMP/credentials.log"
-          tests=(
-            secrets::credentials::tests::a_written_secret_is_filed_as_before_and_kept_on_this_computer
-            secrets::credentials::tests::a_roaming_credential_reads_and_moves_to_this_computer
-            secrets::credentials::tests::a_blob_that_is_not_text_is_an_error_and_left_alone
-            secrets::credentials::tests::a_minted_identity_fits_the_credential_store
-          )
-          cargo test --workspace --lib --locked -- --exact --nocapture \
-            "${tests[@]}" 2>&1 | tee "$log"
-          for test in "${tests[@]}"; do
-            grep -qF "test $test ... " "$log" || { echo "::error::$test did not run"; exit 1; }
-            if grep -qF "test $test ... ignored" "$log"; then echo "::error::$test is ignored"; exit 1; fi
-          done
-          list=$(cmdkey.exe /list) || { echo "::error::cmdkey.exe /list failed"; exit 1; }
-          if grep -F "steno-test-" <<<"$list"; then
-            echo "::error::a credential store test left its credential behind"; exit 1
-          fi
-
-      # The step fails unless as many tests passed as the file has live
-      # tests: a `cfg` or a filter that left none to run would pass with
-      # "0 passed". A live test is one whose `#[ignore]` reason starts
-      # "needs a PipeWire daemon"; give new ones the same reason. Bash runs
-      # with `pipefail`, so `tee` keeps the exit code.
-      - name: PipeWire live tests
-        if: matrix.name == 'linux'
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          log="$RUNNER_TEMP/pipewire-live.log"
-          scripts/pipewire-headless.sh \
-            cargo test -p steno-audio --test pipewire --locked \
-            -- --ignored --test-threads=1 --nocapture | tee "$log"
-          expected=$(grep -c '^#\[ignore = "needs a PipeWire daemon' crates/steno-audio/tests/pipewire.rs)
-          grep -qF "test result: ok. $expected passed" "$log" \
-            || { echo "::error::expected $expected PipeWire live tests to pass"; exit 1; }
-
-      # Every apps/desktop/scripts/*.test.sh: the desktop release
-      # workflow's platform filter, MSI version, updater manifest and lanes,
-      # asset gathering, checksums and signatures, release notes, the bundle
-      # check's `app` and `--handoff` checks over stub bundles, the handoff
-      # item and appcast, the AUR bump, the cask bump's token check, and
-      # the workflow itself. Each runs, and the step fails naming every one
-      # that failed.
-      - name: Desktop release scripts
-        if: matrix.name == 'linux'
-        run: |
-          failed=()
-          for test in apps/desktop/scripts/*.test.sh; do
-            echo "::group::$test"
-            "$test" || failed+=("$test")
-            echo "::endgroup::"
-          done
-          if [ "${#failed[@]}" -gt 0 ]; then
-            echo "::error::failed: ${failed[*]}"
-            exit 1
-          fi
-
-      # The WASAPI smoke tests again with their output, so the log shows what
-      # COM answered on the runner (endpoints, sessions, why a capture
-      # failed).
-      - name: WASAPI smoke tests, with output
-        if: matrix.name == 'windows'
-        run: cargo test -p steno-audio --test live_windows --locked -- --nocapture
-
-      # The DirectML probe test again, with its output, so the log shows
-      # what the runner (no GPU) makes of it. `--workspace` keeps the Test
-      # step's feature set, so nothing rebuilds. A renamed test would match
-      # the filter to nothing and pass, so the step checks for the test's
-      # `provider chosen:` line. Without a GPU that line must say `cpu`
-      # after a `NoDevice` refusal: a session labelled DirectML here would
-      # mean the provider was dropped without an error (`error_on_failure`
-      # gone) and the session ran on the CPU under the wrong name.
-      - name: DirectML probe, with output
-        if: matrix.name == 'windows'
-        shell: bash
-        run: |
-          log="$RUNNER_TEMP/directml-probe.log"
-          cargo test --workspace --lib --locked -- --exact --nocapture \
-            onnx::tests::directml_probe_opens_a_working_session_on_whatever_this_machine_has \
-            | tee "$log"
-          grep -qF "provider chosen:" "$log" || { echo "::error::the DirectML probe did not run"; exit 1; }
-          grep -qF "provider chosen: cpu" "$log" || { echo "::error::without a GPU the probe must choose the CPU"; exit 1; }
-          grep -qF "(NoDevice)" "$log" || { echo "::error::without a GPU DirectML must refuse to start (NoDevice)"; exit 1; }
-
-      # A debug build loads devUrl; the smoke needs the embedded bundle, so
-      # the dev URL is dropped through Tauri's configuration merge. Each run
-      # ends itself after 15 s; the step limit catches a hang before that.
-      - name: Desktop smoke
-        if: matrix.name == 'linux'
-        timeout-minutes: 5
+      - name: Desktop build
         env:
           TAURI_CONFIG: '{"build":{"devUrl":null}}'
-        run: |
-          cargo build -p steno-desktop --locked
-          apps/desktop/scripts/smoke-linux.sh target/debug/steno-desktop 15
-      # The smoke's binary again, on the headless PipeWire's session bus,
-      # where no status notifier watcher runs, as on GNOME without the
-      # AppIndicator extension: closing the main window under a recording must quit
-      # through Quit's path and save it (the meeting `queued`, ended by
-      # `quit`), not hide the window behind a tray nothing shows.
+        run: cargo build -p steno-desktop --locked
       - name: Desktop close without a tray
-        if: matrix.name == 'linux'
         timeout-minutes: 5
         run: |
+          mkdir -p apps/desktop/screens
           scripts/pipewire-headless.sh \
             apps/desktop/scripts/close-without-tray-linux.sh target/debug/steno-desktop
-      # Beside a stand-in watcher with a host
-      # (apps/desktop/scripts/tray-watcher-linux.py): the tray's menu must
-      # hold every action in order, the close must hide the main window
-      # while the recording goes on, and Quit Steno in the menu must save
-      # it.
       - name: Desktop close beside a tray host
-        if: matrix.name == 'linux'
         timeout-minutes: 5
         run: |
           scripts/pipewire-headless.sh \
             apps/desktop/scripts/close-without-tray-linux.sh --with-host target/debug/steno-desktop
-      # Beside the stand-in tray host again: Stop recording in the tray's
-      # menu while Python's sqlite3 holds the store's write lock for 8 s.
-      # The stop runs off the main thread (P40), so the menu's row reads
-      # Stopping… within 3 s, and the save lands within 2 s of the release.
-      # About 25 s, here and on atlas (P40's plan, check 7).
       - name: Desktop stop under a locked store
-        if: matrix.name == 'linux'
         timeout-minutes: 5
         run: |
           scripts/pipewire-headless.sh \
             apps/desktop/scripts/locked-store-linux.sh target/debug/steno-desktop
-      # The same smoke on macOS, after the tests so they build as before.
-      # It shows the windows on the runner's screen for 15 s and runs with a
-      # fresh HOME; the script waits for another runner's smoke to end.
-      - name: Desktop smoke (macOS)
-        if: matrix.name == 'macos'
-        timeout-minutes: 10
-        env:
-          TAURI_CONFIG: '{"build":{"devUrl":null}}'
-        run: |
-          (cd apps/macos/web && pnpm install --frozen-lockfile && pnpm build)
-          cargo build -p steno-desktop --locked
-          apps/desktop/scripts/smoke-macos.sh "${CARGO_TARGET_DIR:-target}/debug/steno-desktop" 15
-      - name: Upload smoke screenshots
-        if: matrix.name == 'linux' && always()
+      - name: Upload screenshots
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-smoke-screens
+          name: close-screens
           path: apps/desktop/screens
           if-no-files-found: ignore
-
-      # The release build as desktop-release.yml drives it (`tauri build
-      # --no-bundle`, then `tauri bundle`), bundled as a .deb (the quickest
-      # installer) and checked for the sidecar beside the app. The web dist
-      # is built above, so beforeBuildCommand goes; pull requests get no
-      # signing key, so the updater artifacts go too.
-      - name: Desktop release bundle (deb, with the sidecar)
-        if: matrix.name == 'linux'
-        run: |
-          apps/desktop/scripts/stage-sidecar.sh
-          configs=(--config tauri.release.conf.json
-            --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":false}}')
-          (cd apps/desktop/src-tauri \
-            && pnpm dlx @tauri-apps/cli@2.12.1 build --ci --no-bundle "${configs[@]}" \
-            && pnpm dlx @tauri-apps/cli@2.12.1 bundle --ci --bundles deb "${configs[@]}")
-          apps/desktop/scripts/check-bundle.sh target/release/bundle deb
-
-  # Advisories only warn here, so one published overnight does not block
-  # an unrelated pull request; desktop-release.yml blocks on all four.
-  deny:
-    name: cargo deny (${{ matrix.checks }})
-    runs-on: ubicloud-standard-2
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        checks: [advisories, bans licenses sources]
-    continue-on-error: ${{ matrix.checks == 'advisories' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check ${{ matrix.checks }}
-
-  msrv:
-    name: msrv
-    runs-on: ubicloud-standard-4
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      # The shell's GTK and WebKitGTK crates run pkg-config in their build
-      # scripts, so the check needs the same libraries as the Linux job.
-      - name: Linux prerequisites
-        run: scripts/setup-linux.sh
-      - name: Read rust-version from Cargo.toml
-        id: msrv
-        run: |
-          version="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)"
-          test -n "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.msrv.outputs.version }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Check on the minimum supported Rust
-        run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-targets --locked
-
-  tsan:
-    name: tsan
-    runs-on: ubicloud-standard-8
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
-      # steno-audio links libpipewire on Linux and generates its bindings
-      # with libclang at build time.
-      - name: PipeWire headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Ring tests under ThreadSanitizer
-        env:
-          RUSTFLAGS: -Zsanitizer=thread
-        run: cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --locked -p steno-audio --test ring --test split_streams
