@@ -228,3 +228,64 @@ Nicolai for D1–D5 rather than a fourth round.
   warning. Plan reverted from amber failures; destructive confirms red as in
   June. Error text #b91c1c light (5.01 on its tint over #ededed), #fca5a5
   dark (6.00 on its tint over #313131).
+
+## 2026-11-15 — built milestone 1 (round 1 on built UI)
+
+Request IDs `steno-built-m1-astra-r1`, `steno-built-m1-fable-r1`. Evidence:
+`pnpm screens` before and after each of design steps 1-3 (#354, #355, #356),
+the landing page (#351) and the diff of speaker step 1 (#352).
+
+**GPT-6-Astra: visual 7/10, accessibility and UX detail 6/10.** Ranked:
+1. #352 advances after an uncommitted pick, even when Combine is cancelled
+   (`speaker-name-field.tsx:143` calls `finish(true)` at once;
+   `selectSpeaker()` does not distinguish cancel from success); errors still
+   reach only the console. Return committed/cancelled, await, inline error.
+2. Failures still look like warnings: amber errors, or an amber icon beside
+   grey text (settings general error, summaries failed, export failed).
+   Step 6: red tinted result rows; amber for permission and setup.
+3. Onboarding stacking adds scrolling: Local network falls below the
+   viewport, the Allowed badge stacks (`form-row.tsx:78`). Keep status-only
+   rows horizontal.
+4. Dark record mark on the white Stop button is 2.77, was 3.76
+   (`record-mark.tsx:20`); measure a live colour for the primary fill.
+5. 960x600 transcript still cramped by the 140 px gutter (step 5).
+6. Naming still hides evidence; the avatar previews before commit (speaker
+   step 2).
+Lessons: blanket stacking too indiscriminate; the contrast matrix misses live
+marks on primary fills; keyboard, 200 % text and announcement checks not
+done; design captures still show the old "87% match" fixture (fixed only on
+#352's branch); the Call dot turned green through the person palette.
+#351: inherited eyebrow `--fg-dim` #71717a on #09090b 4.12
+(`apps/site/src/app/globals.css:39`).
+
+**Claude Fable 5.1: visual 6.5/10, accessibility and UX detail 7/10** (before
+about 5 and 4). Ranked:
+1. Regression: the source dot uses person colours (`source.tsx:13-15`); p4
+   remapped to green, so "Call" carries a green or lime dot. Make it neutral.
+2. `--dashed-outline` (24 % foreground, `theme.css:166`) is 1.62 light, 2.12
+   dark and unmeasured; use `--outline`, hover `--focus`, add to the test.
+3. Light warning #92400e reads brown, 1.10 from the error red; split icon and
+   text tokens, raise the light tint toward 16 %, re-measure.
+4. Focused fields draw three lines (`input.tsx:17` border plus ring plus
+   offset); tabs use another focus style (`tabs.tsx:55`).
+5. Meta line wraps with a dangling dot at 960 (`meeting-detail.tsx:632`).
+6. "Deletes Oct 29" twice (meta line and footer); keep the footer.
+7. Failures red in the list, amber in the detail; should not ship split.
+8. Active tab as an outlined button beside an outlined Template select;
+   Template wraps under the tabs at 960.
+9. "Set up · Not now" equal links; Not now should be a muted button.
+10. Lone "Copy transcript" row; fold into the ⋯ menu.
+11. Story sheet: dark "Sidebar card" story unreadable (story scoping).
+Plan lessons: dark sidebar-to-canvas step 1.08 reads as one surface once the
+hairline goes (expect #1c1c1c-#1d1d1d); no keyboard walk, 200 % or
+announcement checks in any PR; no dialog in the screens. Unbuilt steps:
+cut meta items and move Template for 960; fix warning before reds; rebase
+screens on #352. #351 nothing wrong (mono not preloaded, unchanged).
+#352 correct; Confirm path still logs to the console; merge target picked by
+label string.
+
+### Responses
+
+All accepted. Fixes go on top of the stack before milestone 2; failures turn
+red now rather than in step 6; the keyboard walk, a 200 % screen and an
+announcement check are added as captured screens.
