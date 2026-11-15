@@ -359,3 +359,151 @@ for (const scheme of SCHEMES) {
 		expect(external).toEqual([]);
 	});
 }
+
+/**
+ * The keyboard walk: Tab through the main window from the page's start and
+ * shoot each kind of control the first time it holds focus, clipped to the
+ * control and its surroundings so the ring and its offset are legible.
+ */
+const FOCUS_STOPS: Record<string, string> = {
+	"sidebar-record": "button-primary",
+	"nav-all": "sidebar-row",
+	"search-meetings": "field-search",
+	"meeting-00000000-0000-0000-0000-000000000001": "list-row",
+	"meeting-actions": "button-icon",
+	"speakers-trigger": "header-pill",
+	"tab-summary": "tab",
+	"template-select": "select-template",
+	"setup-summaries": "link",
+	"banner-not-now": "text-button",
+	checkbox: "checkbox",
+	"keep-audio": "switch",
+};
+
+for (const scheme of SCHEMES) {
+	test(`main ${scheme} keyboard walk`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		await page.goto(`/#/main?tab=summary${scheme === "dark" ? "&dark" : ""}`);
+		await settle(page);
+		const seen = new Set<string>();
+		for (let press = 0; press < 80 && seen.size < 12; press += 1) {
+			await page.keyboard.press("Tab");
+			const stop = await page.evaluate(() => {
+				const active = document.activeElement;
+				if (!(active instanceof HTMLElement)) {
+					return null;
+				}
+				const box = active.getBoundingClientRect();
+				return {
+					key:
+						active.getAttribute("role") === "checkbox"
+							? "checkbox"
+							: (active.closest("[data-testid]")?.getAttribute("data-testid") ??
+								""),
+					box: { x: box.x, y: box.y, width: box.width, height: box.height },
+				};
+			});
+			const name = stop ? FOCUS_STOPS[stop.key] : undefined;
+			if (!stop || !name || seen.has(name)) {
+				continue;
+			}
+			seen.add(name);
+			await page.waitForTimeout(200);
+			const pad = 40;
+			const x = Math.max(0, stop.box.x - pad);
+			const y = Math.max(0, stop.box.y - pad);
+			await page.screenshot({
+				clip: {
+					x,
+					y,
+					width: Math.min(1200 - x, stop.box.width + pad * 2),
+					height: Math.min(760 - y, stop.box.height + pad * 2),
+				},
+				path: `${OUT}/main-${scheme}-focus-${name}.png`,
+			});
+		}
+		expect([...seen].sort()).toEqual(Object.values(FOCUS_STOPS).sort());
+		expect(external).toEqual([]);
+	});
+
+	/**
+	 * 200 % text: the 1200 by 760 window at 200 % browser zoom, which is a
+	 * 600 by 380 CSS-pixel viewport (the shot keeps the 2x device scale, so
+	 * it is 1200 by 760 pixels). Zoom rather than a 200 % root font size,
+	 * because the kit sizes type in rem but spacing and some controls in px,
+	 * and zoom scales both, as WebKit's page zoom does.
+	 */
+	test(`main ${scheme} zoom-200`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 600, height: 380 });
+		await page.goto(`/#/main?tab=summary${scheme === "dark" ? "&dark" : ""}`);
+		await settle(page);
+		await expect(page.getByTestId("main-window")).toBeVisible();
+		await page.screenshot({ path: `${OUT}/main-${scheme}-zoom-200.png` });
+		expect(external).toEqual([]);
+	});
+
+	/** A dialog open with keyboard focus on its primary action. */
+	test(`settings ${scheme} dialog`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize(SETTINGS_SIZE);
+		await page.goto(
+			`/#/settings?section=general${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		await page.getByTestId("acknowledgements").click();
+		const dialog = page.getByRole("dialog");
+		await expect(dialog).toBeVisible();
+		await dialog.getByRole("button", { name: "Done" }).focus();
+		await page.keyboard.press("Shift+Tab");
+		await page.keyboard.press("Tab");
+		await settle(page);
+		await page.screenshot({ path: `${OUT}/settings-${scheme}-dialog.png` });
+		expect(external).toEqual([]);
+	});
+}
+
+/**
+ * Results are announced: each result line shown today sits in a live
+ * region. The toast region does not exist yet (step 6 of
+ * .plans/2026-11-14-design-contrast-and-calm.md adds it with `ResultLine`).
+ * `UNANNOUNCED` lists the result lines that are not announced today; step 6
+ * moves them onto `ResultLine`, and this test fails once one is announced
+ * so the list only shrinks.
+ */
+const RESULTS: readonly (readonly [
+	window: "main" | "settings" | "onboarding",
+	query: string,
+	testId: string,
+])[] = [
+	["settings", "section=export&scenario=export-on", "export-status"],
+	["settings", "section=general&scenario=settings-error", "section-error"],
+	["onboarding", "scenario=onboarding-setup", "onboarding-vault-validation"],
+	["main", "scenario=export-failed&tab=summary", "export-status"],
+	[
+		"settings",
+		"section=summaries&scenario=summaries-failed",
+		"summaries-status",
+	],
+];
+const UNANNOUNCED = new Set([
+	"main export-status",
+	"settings summaries-status",
+]);
+
+for (const [window, query, testId] of RESULTS) {
+	test(`${window} live region ${testId}`, async ({ page }) => {
+		await page.goto(`/#/${window}?${query}`);
+		await settle(page);
+		const line = page.getByTestId(testId).first();
+		await expect(line).toBeVisible();
+		const announced = await line.evaluate(
+			(element) =>
+				element.closest("[role=status],[role=alert],[aria-live]") !== null ||
+				element.querySelector("[role=status],[role=alert],[aria-live]") !==
+					null,
+		);
+		expect(announced).toBe(!UNANNOUNCED.has(`${window} ${testId}`));
+	});
+}
