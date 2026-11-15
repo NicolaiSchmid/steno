@@ -248,13 +248,10 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Card: default, group, sidebar; interactive">
+			<ThemePair title="Card: default, sidebar; interactive">
 				{() => (
 					<>
 						<Card padding="md">Default card</Card>
-						<Card padding="md" variant="group">
-							Group card
-						</Card>
 						<div className="rounded-lg bg-sidebar p-2">
 							<Card padding="sm" variant="sidebar">
 								Sidebar card

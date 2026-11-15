@@ -64,6 +64,8 @@ export const buttonVariants = cva(
 			// x-padding is `--spacing(n)` minus the 1 px border so text aligns with borderless controls
 			size: {
 				xs: "h-6 gap-1 rounded-md px-[7px] text-meta [&_svg]:size-3.5",
+				/** A name leading a paragraph (a transcript turn's speaker): title type in bold. */
+				name: "h-6 gap-1 rounded-md px-[7px] font-semibold text-title [&_svg]:size-3.5",
 				sm: "h-8 gap-1.5 px-[11px]",
 				md: "h-9 px-[15px]",
 				"icon-xs": "size-6 rounded-md p-0 [&_svg]:size-3.5",

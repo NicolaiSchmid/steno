@@ -13,10 +13,9 @@ export interface SectionPageProps {
 }
 
 /**
- * The shape every section shares: the one sentence of purpose (the
- * breadcrumb in the header row carries the title), the section's error (if
- * any) with its details folded away, then the form cards at the settings
- * rhythm.
+ * The shape every section shares: the page title and its one sentence of
+ * purpose, the section's error (if any) with its details folded away, then
+ * the flat groups at the settings rhythm.
  */
 export function SectionPage({
 	id,
@@ -28,12 +27,17 @@ export function SectionPage({
 	const { words } = usePlatform();
 	return (
 		<div className="flex flex-col gap-8" data-testid={`section-${id}`}>
-			<p
-				className="m-0 text-body text-muted-foreground"
-				data-testid={`section-purpose-${id}`}
-			>
-				{info.purpose(words)}
-			</p>
+			<header className="flex flex-col gap-1">
+				<h1 className="m-0 text-display" data-testid={`section-title-${id}`}>
+					{info.title}
+				</h1>
+				<p
+					className="m-0 text-body text-muted-foreground"
+					data-testid={`section-purpose-${id}`}
+				>
+					{info.purpose(words)}
+				</p>
+			</header>
 			{error ? (
 				<div className="flex flex-col gap-1.5" data-testid="section-error">
 					<Callout

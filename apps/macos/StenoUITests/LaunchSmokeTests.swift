@@ -234,7 +234,7 @@ final class LaunchSmokeTests: XCTestCase {
   /// Page 1's intro sentence (`permissions-page.tsx`) and page 2's heading
   /// (`setup-page.tsx`): what the onboarding pages are found by.
   private static let onboardingIntro =
-    "A few permissions, then where summaries come from and where meetings go. Audio never leaves this Mac."
+    "A few permissions first. Audio never leaves this Mac."
   private static let setupTitle = "Summaries and export"
   private static let summariesSentence =
     "Steno sends the transcript text, never audio, to a model to clean it up and write the summary, tasks and decisions: a server or API key of your choice, or your ChatGPT plan through the Codex sign-in on this Mac. Without one, meetings keep a raw transcript and no summary."

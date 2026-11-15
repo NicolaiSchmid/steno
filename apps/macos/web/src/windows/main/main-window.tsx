@@ -1,15 +1,17 @@
-import { type ReactNode, useEffect, useState } from "react";
-import { send, useBridge, usePageReady } from "@/bridge/hooks";
-import { ColumnResizer } from "@/components/ui";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { send, useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
+import { ColumnResizer, Drawer, DrawerPopup } from "@/components/ui";
 import {
 	COLUMNS,
 	type ColumnName,
 	columnMax,
 	fitColumns,
+	isNarrow,
 	useColumnWidths,
 } from "./column-widths";
 import { MeetingDetail } from "./meeting-detail";
 import { MeetingList } from "./meeting-list";
+import { NarrowLayoutContext } from "./narrow-layout";
 import { Sidebar } from "./sidebar";
 
 export const LAYOUT_DEBOUNCE_MS = 150;
@@ -34,6 +36,11 @@ const RESIZER_LABELS: Record<ColumnName, string> = {
  * ready once and reports the window size after a resize settles. A deep link
  * to a meeting is the host's to follow: it selects the meeting and the page
  * shows `list.selection`.
+ *
+ * In a window too narrow for all three (`isNarrow`, under 840 CSS px, as a
+ * 1200 px window at 200 % zoom is), the reading column takes the window and
+ * the sidebar and list open as a drawer from the header's Meetings button;
+ * picking a meeting closes it.
  */
 export function MainWindow({
 	menuOpen = false,
@@ -44,6 +51,23 @@ export function MainWindow({
 	const { widths: stored, update, commit } = useColumnWidths();
 	const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
 	const widths = fitColumns(stored, windowWidth);
+	const narrow = isNarrow(windowWidth);
+	const [drawerOpen, setDrawerOpen] = useState(false);
+	const selection = useSnapshot("meetings.list")?.selection;
+	const layout = useMemo(
+		() => ({
+			narrow,
+			openMeetings: () => setDrawerOpen(true),
+			closeMeetings: () => setDrawerOpen(false),
+		}),
+		[narrow],
+	);
+
+	// A pick in the drawer, or a window wide enough again, closes it.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: the selection changing is the trigger.
+	useEffect(() => {
+		setDrawerOpen(false);
+	}, [selection, narrow]);
 
 	useEffect(() => {
 		let timer: ReturnType<typeof setTimeout> | undefined;
@@ -81,20 +105,50 @@ export function MainWindow({
 		</div>
 	);
 
+	const detail = (
+		<MeetingDetail initialMenuOpen={menuOpen} initialPickerOpen={pickerOpen} />
+	);
+
+	if (narrow) {
+		return (
+			<NarrowLayoutContext.Provider value={layout}>
+				<div
+					className="grid h-full min-h-0 grid-cols-[minmax(0,1fr)] overflow-hidden bg-background text-foreground"
+					data-narrow=""
+					data-testid="main-window"
+				>
+					{detail}
+				</div>
+				<Drawer onOpenChange={setDrawerOpen} open={drawerOpen}>
+					<DrawerPopup aria-label="Meetings" data-testid="meetings-drawer">
+						<div
+							className="grid h-full min-h-0"
+							style={{
+								gridTemplateColumns: `${COLUMNS.sidebar.min}px ${COLUMNS.list.min}px`,
+							}}
+						>
+							<Sidebar />
+							<MeetingList />
+						</div>
+					</DrawerPopup>
+				</Drawer>
+			</NarrowLayoutContext.Provider>
+		);
+	}
+
 	return (
-		<div
-			className="grid h-full min-h-0 overflow-hidden bg-background text-foreground"
-			data-testid="main-window"
-			style={{
-				gridTemplateColumns: `${widths.sidebar}px ${widths.list}px minmax(0,1fr)`,
-			}}
-		>
-			{column("sidebar", <Sidebar />)}
-			{column("list", <MeetingList />)}
-			<MeetingDetail
-				initialMenuOpen={menuOpen}
-				initialPickerOpen={pickerOpen}
-			/>
-		</div>
+		<NarrowLayoutContext.Provider value={layout}>
+			<div
+				className="grid h-full min-h-0 overflow-hidden bg-background text-foreground"
+				data-testid="main-window"
+				style={{
+					gridTemplateColumns: `${widths.sidebar}px ${widths.list}px minmax(0,1fr)`,
+				}}
+			>
+				{column("sidebar", <Sidebar />)}
+				{column("list", <MeetingList />)}
+				{detail}
+			</div>
+		</NarrowLayoutContext.Provider>
 	);
 }

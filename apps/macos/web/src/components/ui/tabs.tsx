@@ -5,8 +5,12 @@ import { cn } from "@/lib/cn";
 import { focusRingClass } from "./focus-ring";
 
 /**
- * Segmented tabs: a 2 px frame on the field tint, each tab a 24 px segment;
- * the active one lifts onto the canvas colour (a translucent lift in dark).
+ * Underline tabs: the labels in the muted colour, the active one in the
+ * foreground with a 2 px bar under it (`--tab-indicator`, 3:1 on the
+ * canvas). No track and no outline. When the column is too narrow for every
+ * tab the row scrolls sideways; its 4 px padding keeps the focus ring
+ * inside the scroll box, and a negative margin keeps the first label on the
+ * column's edge.
  */
 export const Tabs = BaseTabs.Root;
 
@@ -26,7 +30,7 @@ export function TabsList({
 		<BaseTabs.List
 			activateOnFocus={activateOnFocus}
 			className={cn(
-				"inline-flex w-max shrink-0 gap-0.5 rounded-lg bg-tab-track p-0.5",
+				"-m-1 flex min-w-0 max-w-[calc(100%+0.5rem)] gap-3 overflow-x-auto p-1 [scrollbar-width:thin]",
 				className,
 			)}
 			{...props}
@@ -50,11 +54,11 @@ export function TabsTab({
 	return (
 		<BaseTabs.Tab
 			className={cn(
-				"inline-flex h-6 min-w-0 cursor-default select-none items-center gap-1 rounded-md px-2.5 text-label text-muted-foreground outline-none",
-				"transition-[background-color,color,box-shadow] duration-(--duration-functional) ease-standard",
-				"hover:bg-tab-hover hover:text-foreground",
+				"relative inline-flex h-8 shrink-0 cursor-default select-none items-center gap-1 whitespace-nowrap rounded-xs px-1 text-label text-muted-foreground outline-none",
+				"transition-colors duration-(--duration-functional) ease-standard hover:text-foreground",
+				"after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-full after:content-['']",
 				focusRingClass,
-				"data-active:inset-ring data-active:inset-ring-tab-indicator data-active:bg-tab-active data-active:text-foreground",
+				"data-active:text-foreground data-active:after:bg-tab-indicator",
 				className,
 			)}
 			{...props}

@@ -14,8 +14,9 @@ export interface SidebarColumnProps extends ComponentProps<"aside"> {
 }
 
 /**
- * The sidebar column of a window: the sidebar surface with its
- * trailing hairline, a header-high spacer under the traffic lights of an
+ * The sidebar column of a window: the sidebar surface, stepped from the
+ * canvas beside it without a rule (`--sidebar` to `--background` is
+ * measured at 1.07 or more), a header-high spacer under the traffic lights of an
  * overlay title bar, then the rows at a 1 px gap inside 8 px of padding,
  * and the footer pinned at the bottom in the same padding.
  */
@@ -30,7 +31,7 @@ export function SidebarColumn({
 	return (
 		<Tag
 			className={cn(
-				"surface-sidebar flex min-h-0 flex-col border-sidebar-border border-r bg-sidebar",
+				"surface-sidebar flex min-h-0 flex-col bg-sidebar",
 				className,
 			)}
 			{...props}

@@ -231,20 +231,10 @@
 	);
 	--resizer-hover: color-mix(in srgb, var(--focus) 30%, transparent);
 	--resizer-active: color-mix(in srgb, var(--focus) 60%, transparent);
-	/* Settings groups. */
-	--group: color-mix(in srgb, var(--card) 40%, transparent);
-	--group-border: color-mix(in srgb, var(--border) 60%, transparent);
-	--group-divider: color-mix(in srgb, var(--border) 50%, transparent);
 	/* The sidebar's group hairline. */
 	--sidebar-rule: color-mix(in srgb, var(--sidebar-border) 60%, transparent);
-	/*
-	 * Segmented tabs: the track, a hovered and the active segment, and the
-	 * active segment's 1 px ring, which is what shows which tab is active.
-	 */
-	--tab-track: var(--canvas-row-selected);
-	--tab-hover: color-mix(in srgb, var(--background) 55%, transparent);
-	--tab-active: var(--background);
-	--tab-indicator: var(--outline);
+	/* Underline tabs: the active tab's 2 px bar, 3:1 on the canvas. */
+	--tab-indicator: var(--foreground);
 	--item-selected: color-mix(in srgb, var(--foreground) 8%, transparent);
 	--band: color-mix(in srgb, var(--muted) 72%, transparent);
 	--countdown: color-mix(in srgb, var(--foreground) 40%, transparent);
@@ -312,9 +302,6 @@
 	--field: var(--canvas-accent);
 	--control: var(--canvas-accent);
 	--control-hover: var(--canvas-row-selected);
-	--tab-track: var(--canvas-accent);
-	--tab-hover: color-mix(in srgb, var(--canvas-row-selected) 55%, transparent);
-	--tab-active: var(--canvas-row-selected);
 
 	--shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.6);
 	--shadow-sm:
@@ -396,13 +383,7 @@
 	--color-primary-part-focus: var(--primary-part-focus);
 	--color-resizer-hover: var(--resizer-hover);
 	--color-resizer-active: var(--resizer-active);
-	--color-group: var(--group);
-	--color-group-border: var(--group-border);
-	--color-group-divider: var(--group-divider);
 	--color-sidebar-rule: var(--sidebar-rule);
-	--color-tab-track: var(--tab-track);
-	--color-tab-hover: var(--tab-hover);
-	--color-tab-active: var(--tab-active);
 	--color-tab-indicator: var(--tab-indicator);
 	--color-item-selected: var(--item-selected);
 	--color-band: var(--band);

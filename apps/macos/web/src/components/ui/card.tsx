@@ -3,17 +3,14 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
 
 /**
- * A bordered surface. `default` is the white card with the 1 px shadow;
- * `group` is the settings group (a lighter border and fill at 14 px, its
- * rows divided by hairlines); `sidebar` is the alert surface on the sidebar
- * (the paired iPhone).
+ * A bordered surface. `default` is the card in a hairline box; `sidebar`
+ * is the control surface on the sidebar (the paired iPhone). Settings
+ * groups are flat (`FormCard`) and draw no card.
  */
 export const cardVariants = cva("border text-foreground", {
 	variants: {
 		variant: {
 			default: "surface-card rounded-surface border-border bg-card",
-			group:
-				"rounded-surface border-group-border bg-group [&>*+*]:border-group-divider [&>*+*]:border-t",
 			sidebar: "rounded-lg border-sidebar-border bg-sidebar-control-surface",
 		},
 		padding: {

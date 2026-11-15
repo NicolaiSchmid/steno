@@ -3,6 +3,7 @@ import {
 	CheckCircle2Icon,
 	CircleAlertIcon,
 	ClockIcon,
+	CopyIcon,
 	EllipsisIcon,
 	FolderIcon,
 	RefreshCwIcon,
@@ -28,12 +29,15 @@ import {
 	EmptyState,
 	focusRingClass,
 	Menu,
+	MenuGroup,
+	MenuGroupLabel,
 	MenuItem,
 	MenuPopup,
+	MenuRadioGroup,
+	MenuRadioItem,
 	MenuSeparator,
 	MenuTrigger,
 	RecordMark,
-	Select,
 	StatusIcon,
 	Switch,
 	Tabs,
@@ -52,13 +56,14 @@ import {
 	formatRetention,
 	formatSource,
 } from "./format";
+import { MeetingsToggle } from "./narrow-layout";
 import { NotesTab } from "./notes-tab";
 import { ProcessingCard } from "./processing-card";
 import { SpeakersPopover } from "./speakers-popover";
 import { SummaryTab } from "./summary-tab";
 import { TagEditor } from "./tag-editor";
 import { TasksTab } from "./tasks-tab";
-import { TranscriptTab } from "./transcript-tab";
+import { TranscriptTab, transcriptText } from "./transcript-tab";
 
 type Tab = MeetingDetailSnapshot["tab"];
 const TABS: readonly Tab[] = detailTab.options;
@@ -391,7 +396,7 @@ export function MeetingDetail({
 					setupBanner={app?.setupBanner}
 				/>
 			) : list && !hasSelection ? (
-				<ContentColumn crumbs={["Meetings"]}>
+				<ContentColumn crumbs={["Meetings"]} leading={<MeetingsToggle />}>
 					<SetupBanner banner={app?.setupBanner} />
 					<EmptyState
 						body="Pick a meeting on the left to read its summary, transcript and tasks."
@@ -450,6 +455,14 @@ function DetailBody({
 
 	function rerun() {
 		send(client, "meeting.rerunSummary");
+	}
+
+	function copyTranscript() {
+		navigator.clipboard
+			?.writeText(transcriptText(detail.transcript))
+			.catch((cause: unknown) => {
+				console.error("copy transcript failed", cause);
+			});
 	}
 
 	const canReexport = detail.export.canReexport && !detail.isBusy;
@@ -559,12 +572,47 @@ function DetailBody({
 					<EllipsisIcon aria-hidden="true" />
 				</MenuTrigger>
 				<MenuPopup align="end" sideOffset={4}>
+					{detail.templates.length > 0 ? (
+						<>
+							<MenuGroup>
+								<MenuGroupLabel>Summary template</MenuGroupLabel>
+								<MenuRadioGroup
+									data-testid="template-select"
+									disabled={detail.isBusy}
+									onValueChange={(templateID: unknown) => {
+										if (
+											typeof templateID === "string" &&
+											templateID !== detail.templateID
+										) {
+											send(client, "meeting.setTemplate", { templateID });
+										}
+									}}
+									value={detail.templateID}
+								>
+									{detail.templates.map((template) => (
+										<MenuRadioItem key={template.id} value={template.id}>
+											{template.name}
+										</MenuRadioItem>
+									))}
+								</MenuRadioGroup>
+							</MenuGroup>
+						</>
+					) : null}
 					<MenuItem
 						disabled={!detail.canRerunSummary || detail.isBusy}
 						icon={<RefreshCwIcon />}
 						onClick={rerun}
 					>
 						Re-run summary
+					</MenuItem>
+					<MenuSeparator />
+					<MenuItem
+						data-testid="copy-transcript"
+						disabled={detail.transcript.length === 0}
+						icon={<CopyIcon />}
+						onClick={copyTranscript}
+					>
+						Copy transcript
 					</MenuItem>
 					<MenuItem
 						disabled={!canReexport}
@@ -615,7 +663,11 @@ function DetailBody({
 	);
 
 	return (
-		<ContentColumn actions={actions} crumbs={["Meetings", detail.title]}>
+		<ContentColumn
+			actions={actions}
+			crumbs={["Meetings", detail.title]}
+			leading={<MeetingsToggle />}
+		>
 			<SetupBanner banner={setupBanner} />
 			{detail.error ? (
 				<Callout
@@ -634,30 +686,30 @@ function DetailBody({
 					variant="warning"
 				/>
 			) : null}
+			<h2 className="m-0 text-display" data-testid="meeting-title">
+				{detail.title}
+			</h2>
 			{/*
-			 * Each item after the first leads with its separator dot, so a
-			 * narrow column wraps the dot with its item instead of leaving it
-			 * at the end of the line, and no item breaks inside itself
-			 * ("Tuesday, Sep 29 · 14:50" stays whole at 200 % text).
+			 * One meta line under the title: source, date and length. Each
+			 * item after the first leads with its separator dot, so a narrow
+			 * column wraps the dot with its item instead of leaving it at the
+			 * end of the line, and no item breaks inside itself ("Tuesday,
+			 * Sep 29 · 14:50" stays whole at 200 % text). The language and the
+			 * retention are not here: the footer says what happens to the
+			 * recording.
 			 */}
 			<div
-				className="flex flex-wrap items-center gap-x-2 gap-y-1 text-meta text-muted-foreground [&>span+span]:before:size-[3px] [&>span+span]:before:rounded-full [&>span+span]:before:bg-border [&>span+span]:before:content-[''] [&>span]:inline-flex [&>span]:items-center [&>span]:gap-2 [&>span]:whitespace-nowrap"
+				className="mt-1 mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-meta text-muted-foreground [&>span+span]:before:size-[3px] [&>span+span]:before:rounded-full [&>span+span]:before:bg-border [&>span+span]:before:content-[''] [&>span]:inline-flex [&>span]:items-center [&>span]:gap-2 [&>span]:whitespace-nowrap"
 				data-testid="meeting-meta"
 			>
-				<span className="font-medium">{formatSource(detail.source)}</span>
+				<span>{formatSource(detail.source)}</span>
 				<span>{format.when(detail.startedAt)}</span>
 				<span className="tabular-nums">
 					{format.duration(detail.durationSeconds)}
 				</span>
-				{detail.language ? (
-					<span>{format.language(detail.language)}</span>
-				) : null}
 			</div>
-			<h2 className="mt-2 mb-3 text-display" data-testid="meeting-title">
-				{detail.title}
-			</h2>
 			<div
-				className="mb-6 flex flex-wrap items-center gap-2"
+				className="@container/speakers mb-5 flex flex-wrap items-center gap-2"
 				data-testid="speakers-row"
 			>
 				{detail.speakers.length > 0 ? (
@@ -684,7 +736,7 @@ function DetailBody({
 				}}
 				value={tab}
 			>
-				<div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+				<div className="mb-6 flex min-w-0">
 					<TabsList>
 						<TabsTab data-testid="tab-summary" value="summary">
 							Summary
@@ -707,31 +759,6 @@ function DetailBody({
 							Notes
 						</TabsTab>
 					</TabsList>
-					{tab === "summary" && detail.templates.length > 0 ? (
-						<span
-							className="flex items-center gap-2 text-meta text-muted-foreground"
-							data-testid="template-row"
-						>
-							Template
-							<Select
-								aria-label="Summary template"
-								className="max-w-45"
-								data-testid="template-select"
-								disabled={detail.isBusy}
-								onValueChange={(templateID) => {
-									if (templateID && templateID !== detail.templateID) {
-										send(client, "meeting.setTemplate", { templateID });
-									}
-								}}
-								options={detail.templates.map((template) => ({
-									value: template.id,
-									label: template.name,
-								}))}
-								size="xs"
-								value={detail.templateID}
-							/>
-						</span>
-					) : null}
 				</div>
 				{TABS.map((item) => (
 					<TabsPanel key={item} value={item} variant="reading">
