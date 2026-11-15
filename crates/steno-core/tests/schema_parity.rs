@@ -38,11 +38,11 @@ fn identifiers_match_migrations_swift() {
         .iter()
         .map(|migration| migration.identifier)
         .collect();
-    assert_eq!(identifiers, ["v1", "v2", "v3", "v4", "v5", "v6"]);
+    assert_eq!(identifiers, ["v1", "v2", "v3", "v4", "v5", "v6", "v7"]);
     let store = Store::in_memory().unwrap();
     assert_eq!(
         store.applied_migrations().unwrap(),
-        ["v1", "v2", "v3", "v4", "v5", "v6"]
+        ["v1", "v2", "v3", "v4", "v5", "v6", "v7"]
     );
 }
 
@@ -52,7 +52,7 @@ fn reopening_applies_nothing_and_sets_the_grdb_pragmas() {
     let path = directory.path().join("nested").join("steno.sqlite");
     drop(Store::open(&path).unwrap());
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.applied_migrations().unwrap().len(), 6);
+    assert_eq!(store.applied_migrations().unwrap().len(), 7);
     let (journal, foreign_keys, synchronous, busy_timeout): (String, i64, i64, i64) = store
         .read(|connection| {
             Ok((
@@ -98,7 +98,7 @@ fn recorded_identifiers_are_honoured() {
     let store = Store::open(&path).unwrap();
     assert_eq!(
         store.applied_migrations().unwrap(),
-        ["v1", "v2", "v3", "v4", "v5", "v6"]
+        ["v1", "v2", "v3", "v4", "v5", "v6", "v7"]
     );
     drop(store);
 
@@ -112,6 +112,6 @@ fn recorded_identifiers_are_honoured() {
     let store = Store::open(&path).expect("a newer schema opens");
     assert_eq!(
         store.applied_migrations().unwrap(),
-        ["v1", "v2", "v3", "v4", "v5", "v6", "v99"]
+        ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v99"]
     );
 }

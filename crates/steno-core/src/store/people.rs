@@ -29,7 +29,7 @@ fn person_from_row(row: &Row<'_>) -> rusqlite::Result<Person> {
     })
 }
 
-fn fetch_person(connection: &Connection, id: Uuid) -> Result<Option<Person>> {
+pub(super) fn fetch_person(connection: &Connection, id: Uuid) -> Result<Option<Person>> {
     Ok(connection
         .query_row(
             &format!("SELECT {PERSON_COLUMNS} FROM person WHERE id = ?1"),
@@ -151,65 +151,79 @@ fn fetch_speaker(connection: &Connection, id: Uuid) -> Result<Option<Speaker>> {
         .optional()?)
 }
 
-/// What a merge leaves for the caller: the clip to remove once the
-/// transaction commits (`None` when it moved to the target) and the persons
-/// whose voices it touched.
-struct SpeakerMerge {
-    clip_to_remove: Option<String>,
-    person_ids: BTreeSet<Uuid>,
+/// How far [`root_of`] follows `mergedInto` (the recursive reads stop at
+/// the same depth): a longer chain, or a cycle written by hand, stops there.
+const MERGE_DEPTH: usize = 64;
+
+/// The voice a combined row joined: `None` for a root or a missing row.
+fn merged_into(connection: &Connection, id: Uuid) -> Result<Option<Uuid>> {
+    Ok(connection
+        .query_row(
+            "SELECT mergedInto FROM speaker WHERE id = ?1",
+            [DbUuid(id)],
+            |row| row.col::<Option<DbUuid>>("mergedInto"),
+        )
+        .optional()?
+        .flatten())
 }
 
-/// Two clusters inside one meeting: moves `source`'s segments to `target`,
-/// averages the embeddings, keeps `target`'s assignment (or `source`'s when
-/// `target` is unknown) and deletes `source`. `source`'s clip moves to
-/// `target` when it has none, else is returned for removal. Voices are not
-/// refreshed here.
+/// The speaker `id` reads as: the end of its `mergedInto` chain, or `id`
+/// itself. A dangling reference or a cycle stops where it breaks.
+pub(super) fn root_of(connection: &Connection, id: Uuid) -> Result<Uuid> {
+    let mut current = id;
+    for _ in 0..MERGE_DEPTH {
+        match merged_into(connection, current)? {
+            Some(next) if next != id && fetch_speaker(connection, next)?.is_some() => {
+                current = next;
+            }
+            _ => break,
+        }
+    }
+    Ok(current)
+}
+
+/// Two clusters inside one meeting, combined so it can be undone:
+/// `source` reads as `target`'s root from now on (`mergedInto`). Nothing
+/// else changes on either row: `source` keeps its segments, embedding,
+/// clip, assignment, dismissal and answers, so [`Store::separate_speaker`]
+/// only clears the column. Returns the persons whose voices the combine
+/// touched; voices are not refreshed here.
 fn merge_speaker_rows(
     connection: &Connection,
     source: Uuid,
     target: Uuid,
     meeting_id: Uuid,
-) -> Result<SpeakerMerge> {
-    let mut merge = SpeakerMerge {
-        clip_to_remove: None,
-        person_ids: BTreeSet::new(),
-    };
+) -> Result<BTreeSet<Uuid>> {
+    let mut person_ids = BTreeSet::new();
     if source == target {
-        return Ok(merge);
+        return Ok(person_ids);
     }
     let merged = fetch_speaker(connection, source)?.ok_or(StoreError::SpeakerNotFound(source))?;
-    let mut kept = fetch_speaker(connection, target)?.ok_or(StoreError::SpeakerNotFound(target))?;
+    let kept = fetch_speaker(connection, target)?.ok_or(StoreError::SpeakerNotFound(target))?;
     if merged.meeting_id != meeting_id || kept.meeting_id != meeting_id {
         return Err(StoreError::SpeakersInDifferentMeetings(source, target));
     }
-    if let SpeakerAssignment::Confirmed { person_id } = merged.assignment {
-        merge.person_ids.insert(person_id);
+    let root = root_of(connection, target)?;
+    if root == source {
+        return Ok(person_ids);
     }
-    kept.embedding = match (&kept.embedding, &merged.embedding) {
-        (Some(lhs), Some(rhs)) => Some(Embedding::weighted_mean(lhs, 1.0, rhs, 1.0)),
-        (None, Some(rhs)) => Some(rhs.clone()),
-        (lhs, None) => lhs.clone(),
-    };
-    if kept.assignment == SpeakerAssignment::Unknown {
-        kept.assignment = merged.assignment.clone();
+    person_ids.extend(confirmed_person(&merged));
+    if let Some(root_speaker) = fetch_speaker(connection, root)? {
+        person_ids.extend(confirmed_person(&root_speaker));
     }
-    if let SpeakerAssignment::Confirmed { person_id } = kept.assignment {
-        merge.person_ids.insert(person_id);
-    }
-    merge.clip_to_remove.clone_from(&merged.sample_clip_url);
-    if kept.sample_clip_range.is_none() {
-        kept.sample_clip_range = merged.sample_clip_range;
-        kept.sample_clip_url = merged.sample_clip_url;
-        merge.clip_to_remove = None;
-    }
-    kept.cluster_confidence = kept.cluster_confidence.max(merged.cluster_confidence);
-    save_speaker(connection, &kept)?;
     connection.execute(
-        "UPDATE transcriptSegment SET speakerID = ?1 WHERE speakerID = ?2",
-        params![DbUuid(target), DbUuid(source)],
+        "UPDATE speaker SET mergedInto = ?1 WHERE id = ?2",
+        params![DbUuid(root), DbUuid(source)],
     )?;
-    connection.execute("DELETE FROM speaker WHERE id = ?1", [DbUuid(source)])?;
-    Ok(merge)
+    Ok(person_ids)
+}
+
+/// The person a speaker is confirmed as.
+fn confirmed_person(speaker: &Speaker) -> Option<Uuid> {
+    match speaker.assignment {
+        SpeakerAssignment::Confirmed { person_id } => Some(person_id),
+        _ => None,
+    }
 }
 
 /// Nulls a confirmed speaker's `sampleClipURL` and returns it for removal
@@ -241,17 +255,23 @@ const VOICE_WINDOW: usize = 50;
 
 /// Recomputes a person's voice: the normalised mean of the newest
 /// `VOICE_WINDOW` confirmed embeddings by `meeting.startedAt`, and their
-/// count; a dismissed voice never counts. A missing person is ignored.
+/// count: each voice confirmed as the person and every speaker combined
+/// into one; a dismissed voice never counts. A missing person is ignored.
 pub(super) fn refresh_voice(connection: &Connection, person_id: Uuid) -> Result<()> {
     let Some(mut person) = fetch_person(connection, person_id)? else {
         return Ok(());
     };
+    // Every root confirmed as the person, and every row combined into one
+    // of them, whatever its own assignment.
     let embeddings: Vec<Embedding> = query_all(
         connection,
-        "SELECT speaker.embedding AS embedding FROM speaker \
-         JOIN meeting ON meeting.id = speaker.meetingID \
-         WHERE speaker.personID = ?1 AND speaker.assignment = ?2 AND speaker.embedding IS NOT NULL \
-         AND speaker.dismissed = 0 \
+        "WITH RECURSIVE voice(id, depth) AS ( \
+         SELECT id, 0 FROM speaker WHERE personID = ?1 AND assignment = ?2 AND dismissed = 0 \
+         AND mergedInto IS NULL \
+         UNION ALL SELECT speaker.id, voice.depth + 1 FROM speaker \
+         JOIN voice ON speaker.mergedInto = voice.id WHERE voice.depth < 64) \
+         SELECT speaker.embedding AS embedding FROM voice JOIN speaker ON speaker.id = voice.id \
+         JOIN meeting ON meeting.id = speaker.meetingID WHERE speaker.embedding IS NOT NULL \
          ORDER BY meeting.startedAt DESC, speaker.id",
         params![DbUuid(person_id), SpeakerAssignmentKind::Confirmed.as_str()],
         |row| row.col::<DbEmbedding<Embedding>>("embedding"),
@@ -438,7 +458,25 @@ pub(super) fn restore_suggestion_rejections(
     Ok(())
 }
 
+/// The meeting's voices: every speaker not combined into another.
 pub(super) fn speakers_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<Vec<Speaker>> {
+    query_all(
+        connection,
+        &format!(
+            "SELECT {SPEAKER_COLUMNS} FROM speaker WHERE meetingID = ?1 AND mergedInto IS NULL \
+             ORDER BY clusterLabel, id"
+        ),
+        [DbUuid(meeting_id)],
+        speaker_from_row,
+    )
+}
+
+/// Every speaker row of the meeting, combined ones included: what names
+/// files on the disk.
+pub(super) fn all_speakers_of_meeting(
     connection: &Connection,
     meeting_id: Uuid,
 ) -> Result<Vec<Speaker>> {
@@ -450,6 +488,41 @@ pub(super) fn speakers_of_meeting(
         [DbUuid(meeting_id)],
         speaker_from_row,
     )
+}
+
+/// A speaker combined into another voice of its meeting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergedSpeaker {
+    /// The row as it is, with its own assignment, clip and embedding.
+    pub speaker: Speaker,
+    /// The voice it joined.
+    pub into: Uuid,
+    /// The voice it reads as: the end of the `mergedInto` chain.
+    pub root: Uuid,
+}
+
+pub(super) fn merged_speakers_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<Vec<MergedSpeaker>> {
+    let rows = query_all(
+        connection,
+        &format!(
+            "SELECT {SPEAKER_COLUMNS}, mergedInto FROM speaker \
+             WHERE meetingID = ?1 AND mergedInto IS NOT NULL ORDER BY clusterLabel, id"
+        ),
+        [DbUuid(meeting_id)],
+        |row| Ok((speaker_from_row(row)?, row.col::<DbUuid>("mergedInto")?)),
+    )?;
+    rows.into_iter()
+        .map(|(speaker, into)| {
+            Ok(MergedSpeaker {
+                root: root_of(connection, speaker.id)?,
+                speaker,
+                into,
+            })
+        })
+        .collect()
 }
 
 const SUGGESTION_COLUMNS: &str = "speakerID, meetingID, name, confidence, evidence";
@@ -558,6 +631,86 @@ pub(super) fn persons_with_ids(connection: &Connection, ids: &[Uuid]) -> Result<
     )
 }
 
+/// The voice of this meeting confirmed as `person_id`, other than
+/// `except`: the one a confirmation combines into.
+pub(super) fn owner_of(
+    connection: &Connection,
+    meeting_id: Uuid,
+    person_id: Uuid,
+    except: Uuid,
+) -> Result<Option<Uuid>> {
+    Ok(connection
+        .query_row(
+            "SELECT id FROM speaker WHERE meetingID = ?1 AND personID = ?2 \
+             AND assignment = ?3 AND id != ?4 AND mergedInto IS NULL \
+             ORDER BY clusterLabel, id LIMIT 1",
+            params![
+                DbUuid(meeting_id),
+                DbUuid(person_id),
+                SpeakerAssignmentKind::Confirmed.as_str(),
+                DbUuid(except)
+            ],
+            |row| row.col::<DbUuid>("id"),
+        )
+        .optional()?)
+}
+
+/// Whether a segment carries `speaker_id`, or the id of a speaker combined
+/// into it at any depth.
+fn owns_segments(connection: &Connection, speaker_id: Uuid) -> Result<bool> {
+    Ok(connection.query_row(
+        "WITH RECURSIVE tree(id, depth) AS (SELECT ?1, 0 \
+         UNION ALL SELECT speaker.id, tree.depth + 1 FROM speaker \
+         JOIN tree ON speaker.mergedInto = tree.id WHERE tree.depth < 64) \
+         SELECT EXISTS (SELECT 1 FROM transcriptSegment WHERE speakerID IN (SELECT id FROM tree))",
+        [DbUuid(speaker_id)],
+        |row| row.get(0),
+    )?)
+}
+
+/// Deletes each of `candidates`, and then each deleted row's former
+/// `mergedInto`, that no segment carries and no row is combined into: a
+/// voice a paragraph move left empty. Recomputes the voice of every person
+/// a deleted row counted for (its own, and its root's for a combined row).
+/// Returns the deleted rows' clip URLs for removal once the transaction
+/// committed.
+pub(super) fn prune_emptied_speakers(
+    connection: &Connection,
+    candidates: BTreeSet<Uuid>,
+) -> Result<Vec<String>> {
+    let mut queue: Vec<Uuid> = candidates.into_iter().collect();
+    let mut clips = Vec::new();
+    let mut person_ids = BTreeSet::new();
+    while let Some(id) = queue.pop() {
+        let Some(speaker) = fetch_speaker(connection, id)? else {
+            continue;
+        };
+        let used: bool = connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM transcriptSegment WHERE speakerID = ?1) \
+             OR EXISTS (SELECT 1 FROM speaker WHERE mergedInto = ?1)",
+            [DbUuid(id)],
+            |row| row.get(0),
+        )?;
+        if used {
+            continue;
+        }
+        let into = merged_into(connection, id)?;
+        person_ids.extend(confirmed_person(&speaker));
+        if into.is_some()
+            && let Some(root) = fetch_speaker(connection, root_of(connection, id)?)?
+        {
+            person_ids.extend(confirmed_person(&root));
+        }
+        connection.execute("DELETE FROM speaker WHERE id = ?1", [DbUuid(id)])?;
+        clips.extend(speaker.sample_clip_url);
+        queue.extend(into);
+    }
+    for person_id in person_ids {
+        refresh_voice(connection, person_id)?;
+    }
+    Ok(clips)
+}
+
 impl Store {
     pub fn persons(&self) -> Result<Vec<Person>> {
         self.read(|connection| {
@@ -629,7 +782,7 @@ impl Store {
                 connection,
                 &format!(
                     "SELECT {SPEAKER_COLUMNS} FROM speaker WHERE meetingID IN ({placeholders}) \
-                     ORDER BY meetingID, clusterLabel, id"
+                     AND mergedInto IS NULL ORDER BY meetingID, clusterLabel, id"
                 ),
                 params_from_iter(meeting_ids.iter().map(|id| DbUuid(*id))),
                 speaker_from_row,
@@ -651,7 +804,7 @@ impl Store {
                 "SELECT person.id, person.displayName, person.email, person.embedding, \
                  person.sampleCount, person.createdAt FROM person \
                  JOIN speaker ON speaker.personID = person.id AND speaker.assignment = ?1 \
-                 AND speaker.dismissed = 0 \
+                 AND speaker.dismissed = 0 AND speaker.mergedInto IS NULL \
                  JOIN meeting ON meeting.id = speaker.meetingID \
                  GROUP BY person.id \
                  ORDER BY MAX(meeting.startedAt) DESC, person.displayName COLLATE NOCASE, person.id",
@@ -692,26 +845,50 @@ impl Store {
         })
     }
 
-    /// The one operation that sets `confirmed`. Saves an unknown person,
-    /// drops the speaker's name suggestion and any No to this person, and
-    /// undoes a dismissal. The same person again changes
-    /// nothing else; a person who already owns another speaker of this
-    /// meeting takes this one over (a merge); otherwise the speaker becomes
-    /// `confirmed(person)`. Naming the "me" speaker names the meeting's "me"
-    /// participant too. The voices of the new and the previous person
-    /// are recomputed. The clip stays while the meeting's master exists.
-    /// Returns the clip URLs to remove once the transaction committed.
+    /// The one operation that sets `confirmed`. Saves an unknown person.
+    /// When the person already owns another voice of this meeting, the
+    /// speaker is combined into it ([`merge_speaker_rows`]): its row is
+    /// kept as it is, with `mergedInto` set, so
+    /// [`Store::separate_speaker`] undoes it. Otherwise it drops the
+    /// speaker's name suggestion and any No to this person, undoes a
+    /// dismissal, and the speaker becomes `confirmed(person)`; the same
+    /// person again changes nothing else. Naming the "me" speaker names the
+    /// meeting's "me" participant too. The voices of the new and the
+    /// previous person are recomputed. The clip stays while the meeting's
+    /// master exists. Returns the clip URLs to remove once the transaction
+    /// committed.
     pub fn confirm_speaker(&self, speaker_id: Uuid, person: &Person) -> Result<Vec<String>> {
         self.write(|transaction| {
             let mut speaker = fetch_speaker(transaction, speaker_id)?
                 .ok_or(StoreError::SpeakerNotFound(speaker_id))?;
+            if fetch_person(transaction, person.id)?.is_none() {
+                save_person(transaction, person)?;
+            }
+            let confirmed_as_person = speaker.assignment
+                == (SpeakerAssignment::Confirmed {
+                    person_id: person.id,
+                });
+            let owner = if confirmed_as_person {
+                None
+            } else {
+                owner_of(transaction, speaker.meeting_id, person.id, speaker_id)?
+            };
+            if let Some(owner) = owner {
+                let mut person_ids =
+                    merge_speaker_rows(transaction, speaker_id, owner, speaker.meeting_id)?;
+                person_ids.insert(person.id);
+                if speaker_id == me_speaker_id(speaker.meeting_id) {
+                    name_me_participant(transaction, speaker.meeting_id, person)?;
+                }
+                for person_id in person_ids {
+                    refresh_voice(transaction, person_id)?;
+                }
+                return Ok(Vec::new());
+            }
             transaction.execute(
                 "DELETE FROM speakerNameSuggestion WHERE speakerID = ?1",
                 [DbUuid(speaker_id)],
             )?;
-            if fetch_person(transaction, person.id)?.is_none() {
-                save_person(transaction, person)?;
-            }
             // Naming a voice answers an earlier No to this person (on the
             // "me" speaker every one, all from Remove name) and makes a
             // dismissed voice a person again.
@@ -728,48 +905,21 @@ impl Store {
                 speaker.dismissed = false;
                 save_speaker(transaction, &speaker)?;
             }
-            if speaker.assignment
-                == (SpeakerAssignment::Confirmed {
-                    person_id: person.id,
-                })
-            {
+            if confirmed_as_person {
                 return Ok(Vec::new());
             }
             let mut person_ids = BTreeSet::from([person.id]);
-            if let SpeakerAssignment::Confirmed { person_id } = speaker.assignment {
-                person_ids.insert(person_id);
-            }
-            let mut clips = Vec::new();
-            let owner: Option<Uuid> = transaction
-                .query_row(
-                    "SELECT id FROM speaker WHERE meetingID = ?1 AND personID = ?2 \
-                     AND assignment = ?3 AND id != ?4 ORDER BY clusterLabel, id LIMIT 1",
-                    params![
-                        DbUuid(speaker.meeting_id),
-                        DbUuid(person.id),
-                        SpeakerAssignmentKind::Confirmed.as_str(),
-                        DbUuid(speaker_id)
-                    ],
-                    |row| row.col::<DbUuid>("id"),
-                )
-                .optional()?;
-            let kept = if let Some(owner) = owner {
-                let merge = merge_speaker_rows(transaction, speaker_id, owner, speaker.meeting_id)?;
-                clips.extend(merge.clip_to_remove);
-                person_ids.extend(merge.person_ids);
-                owner
-            } else {
-                let stored =
-                    fetch_person(transaction, person.id)?.unwrap_or_else(|| person.clone());
-                let similarity = answer_similarity(&speaker, &stored);
-                speaker.assignment = SpeakerAssignment::Confirmed {
-                    person_id: person.id,
-                };
-                save_speaker(transaction, &speaker)?;
-                set_confirmed_similarity(transaction, speaker_id, similarity)?;
-                speaker_id
+            person_ids.extend(confirmed_person(&speaker));
+            let stored = fetch_person(transaction, person.id)?.unwrap_or_else(|| person.clone());
+            let similarity = answer_similarity(&speaker, &stored);
+            speaker.assignment = SpeakerAssignment::Confirmed {
+                person_id: person.id,
             };
-            clips.extend(drop_clip_when_audio_is_gone(transaction, kept)?);
+            save_speaker(transaction, &speaker)?;
+            set_confirmed_similarity(transaction, speaker_id, similarity)?;
+            let clips: Vec<String> = drop_clip_when_audio_is_gone(transaction, speaker_id)?
+                .into_iter()
+                .collect();
             if speaker_id == me_speaker_id(speaker.meeting_id) {
                 name_me_participant(transaction, speaker.meeting_id, person)?;
             }
@@ -777,6 +927,55 @@ impl Store {
                 refresh_voice(transaction, person_id)?;
             }
             Ok(clips)
+        })
+    }
+
+    /// The meeting's voices combined into others, by cluster label: each
+    /// with the voice it joined and the voice it reads as.
+    pub fn merged_speakers(&self, meeting_id: Uuid) -> Result<Vec<MergedSpeaker>> {
+        self.read(|connection| merged_speakers_of_meeting(connection, meeting_id))
+    }
+
+    /// Undo a combine, or "Separate again": the combined speaker is its own
+    /// voice again, exactly as it was before (its row was kept), with the
+    /// paragraphs that still carry it; a paragraph moved away since stays
+    /// where it was moved. The voices of the person it read as and of its
+    /// own person are recomputed, and for the "me" speaker the meeting's
+    /// "me" participant follows its own assignment again. Refused with
+    /// [`StoreError::NotCombined`] when it is not combined, and with
+    /// [`StoreError::StaleTranscript`] when nothing of it is left.
+    pub fn separate_speaker(&self, speaker_id: Uuid) -> Result<()> {
+        self.write(|transaction| {
+            let speaker = fetch_speaker(transaction, speaker_id)?
+                .ok_or(StoreError::NotCombined(speaker_id))?;
+            if merged_into(transaction, speaker_id)?.is_none() {
+                return Err(StoreError::NotCombined(speaker_id));
+            }
+            if !owns_segments(transaction, speaker_id)? {
+                return Err(StoreError::StaleTranscript);
+            }
+            let root = root_of(transaction, speaker_id)?;
+            let mut person_ids: BTreeSet<Uuid> = confirmed_person(&speaker).into_iter().collect();
+            if let Some(root_speaker) = fetch_speaker(transaction, root)? {
+                person_ids.extend(confirmed_person(&root_speaker));
+            }
+            transaction.execute(
+                "UPDATE speaker SET mergedInto = NULL WHERE id = ?1",
+                [DbUuid(speaker_id)],
+            )?;
+            if speaker_id == me_speaker_id(speaker.meeting_id) {
+                match confirmed_person(&speaker).map(|id| fetch_person(transaction, id)) {
+                    Some(Ok(Some(person))) => {
+                        name_me_participant(transaction, speaker.meeting_id, &person)?;
+                    }
+                    Some(Err(error)) => return Err(error),
+                    _ => unname_me_participant(transaction, speaker.meeting_id)?,
+                }
+            }
+            for person_id in person_ids {
+                refresh_voice(transaction, person_id)?;
+            }
+            Ok(())
         })
     }
 
@@ -794,9 +993,9 @@ impl Store {
                 transaction,
                 &format!(
                     "SELECT {SPEAKER_COLUMNS} FROM speaker WHERE assignment = ?1 AND dismissed = 0 \
-                     AND NOT EXISTS (SELECT 1 FROM speaker AS owner \
+                     AND mergedInto IS NULL AND NOT EXISTS (SELECT 1 FROM speaker AS owner \
                      WHERE owner.meetingID = speaker.meetingID AND owner.personID = ?2 \
-                     AND owner.assignment = ?3) \
+                     AND owner.assignment = ?3 AND owner.mergedInto IS NULL) \
                      AND NOT EXISTS (SELECT 1 FROM speakerSuggestionRejection AS cleared \
                      WHERE cleared.speakerID = speaker.id AND cleared.personID = ?2) \
                      ORDER BY meetingID"
@@ -829,7 +1028,18 @@ impl Store {
     /// The model's guess who each speaker is, at most one per speaker, in
     /// speaker id order.
     pub fn name_suggestions(&self, meeting_id: Uuid) -> Result<Vec<SpeakerNameSuggestion>> {
-        self.read(|connection| name_suggestions_of_meeting(connection, meeting_id))
+        self.read(|connection| {
+            // A combined voice keeps its suggestion for Separate again, but
+            // reads as the voice it joined meanwhile.
+            let roots: BTreeSet<Uuid> = speakers_of_meeting(connection, meeting_id)?
+                .into_iter()
+                .map(|speaker| speaker.id)
+                .collect();
+            Ok(name_suggestions_of_meeting(connection, meeting_id)?
+                .into_iter()
+                .filter(|suggestion| roots.contains(&suggestion.speaker_id))
+                .collect())
+        })
     }
 
     /// "Remove name", beside [`Store::confirm_speaker`]: the speaker goes

@@ -408,12 +408,16 @@ fn every_open_backfills_the_ledger_from_admitted_receipts() {
         ..receipt(HandoverState::Receiving)
     };
     store.save_handover_receipt(&unfinished).unwrap();
-    // Back to v4: no table, the rows the older build wrote; v6 goes too,
-    // as it came after.
+    // Back to v4: no table, the rows the older build wrote; v6 and v7 go
+    // too, as they came after.
     store
         .write(|transaction| {
             transaction.execute_batch(
-                "DROP TABLE speakerSuggestionRejection;
+                "DROP INDEX speaker_mergedInto;
+                 ALTER TABLE speaker DROP COLUMN mergedInto;
+                 ALTER TABLE meeting DROP COLUMN transcriptGeneration;
+                 DELETE FROM grdb_migrations WHERE identifier = 'v7';
+                 DROP TABLE speakerSuggestionRejection;
                  ALTER TABLE speaker DROP COLUMN dismissed;
                  ALTER TABLE speaker DROP COLUMN confirmedSimilarity;
                  DELETE FROM grdb_migrations WHERE identifier = 'v6';

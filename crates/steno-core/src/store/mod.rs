@@ -32,6 +32,7 @@ use uuid::Uuid;
 pub use assets::ExpiredAsset;
 pub use handover::AdmissionCommit;
 pub use meetings::DeletedMeeting;
+pub use people::MergedSpeaker;
 pub use search::{SearchHit, fts5_pattern};
 pub use settings::{PARAKEET_V3_ENGINE_ID, SettingProblem};
 pub use timings::StageRateRow;
@@ -81,6 +82,15 @@ pub enum StoreError {
     /// is `clear_speaker`.
     #[error("speaker {0} is confirmed as person {1}, which a No cannot answer")]
     RejectedConfirmedPerson(Uuid, Uuid),
+    /// [`Store::separate_speaker`] on a speaker that is not combined into
+    /// another (or no longer exists).
+    #[error("speaker {0} is not combined into another voice")]
+    NotCombined(Uuid),
+    /// A paragraph move or a Separate again made against a transcript that
+    /// changed since: processed again, or a paragraph under another voice
+    /// than the caller saw.
+    #[error("the transcript changed since it was read")]
+    StaleTranscript,
     /// `resolve_person` with nothing but whitespace.
     #[error("a person needs a name")]
     BlankPersonName,

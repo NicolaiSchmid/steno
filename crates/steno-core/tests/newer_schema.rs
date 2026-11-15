@@ -7,7 +7,7 @@ mod common;
 use common::logged;
 use steno_core::Store;
 
-/// Here a v7 that adds a table; opening without migrating passes too.
+/// Here a v8 that adds a table; opening without migrating passes too.
 #[test]
 fn a_migration_this_build_does_not_know_is_ignored_with_a_warning() {
     let directory = tempfile::tempdir().unwrap();
@@ -17,18 +17,18 @@ fn a_migration_this_build_does_not_know_is_ignored_with_a_warning() {
         .unwrap()
         .execute_batch(
             "CREATE TABLE later (id INTEGER PRIMARY KEY);
-             INSERT INTO grdb_migrations (identifier) VALUES ('v7');",
+             INSERT INTO grdb_migrations (identifier) VALUES ('v8');",
         )
         .unwrap();
 
     let (store, log) = logged(|| Store::open(&path).unwrap());
     assert!(
-        log.contains("WARN") && log.contains("migration v7"),
-        "the warning names v7: {log}"
+        log.contains("WARN") && log.contains("migration v8"),
+        "the warning names v8: {log}"
     );
     assert_eq!(
         store.applied_migrations().unwrap(),
-        ["v1", "v2", "v3", "v4", "v5", "v6", "v7"]
+        ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"]
     );
     let meeting = common::meeting();
     store.save_meeting(&meeting).unwrap();
@@ -37,5 +37,5 @@ fn a_migration_this_build_does_not_know_is_ignored_with_a_warning() {
 
     let (checked, log) = logged(|| Store::open_without_migrating(&path));
     checked.unwrap();
-    assert!(log.contains("migration v7"), "{log}");
+    assert!(log.contains("migration v8"), "{log}");
 }

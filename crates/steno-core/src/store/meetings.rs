@@ -466,7 +466,13 @@ impl Store {
     ) -> Result<Vec<Speaker>> {
         self.write_durably(|transaction| {
             write_processing_results(transaction, meeting)?;
+            transcript::bump_transcript_generation(transaction, meeting.id)?;
+            // The voices answers can follow; a voice combined into another
+            // comes back uncombined, as its own row.
             let replaced = people::speakers_of_meeting(transaction, meeting.id)?;
+            // Every row, combined ones too, for the voices to recompute and
+            // the sweep, which must see every clip they named.
+            let every = people::all_speakers_of_meeting(transaction, meeting.id)?;
             // Deleting the speakers cascades to their suggestions and the
             // user's Noes.
             let suggestions = people::name_suggestions_of_meeting(transaction, meeting.id)?;
@@ -480,7 +486,7 @@ impl Store {
                 .collect();
             // Kept or dropped, each stored confirmation's person is
             // recomputed.
-            let voices: BTreeSet<Uuid> = replaced
+            let voices: BTreeSet<Uuid> = every
                 .iter()
                 .filter(|speaker| speaker.assignment.is_confirmed())
                 .filter_map(Speaker::person_id)
@@ -548,7 +554,7 @@ impl Store {
             for person_id in voices {
                 people::refresh_voice(transaction, person_id)?;
             }
-            Ok(replaced)
+            Ok(every)
         })
     }
 
@@ -646,7 +652,7 @@ impl Store {
                 MeetingStateKind::Queued | MeetingStateKind::Ready | MeetingStateKind::Failed => {}
             }
             let assets = assets::assets_of_meeting(transaction, id)?;
-            let clips = people::speakers_of_meeting(transaction, id)?
+            let clips = people::all_speakers_of_meeting(transaction, id)?
                 .into_iter()
                 .filter_map(|speaker| speaker.sample_clip_url)
                 .collect();
