@@ -274,17 +274,16 @@ import Testing
     #expect(restored.embedding == SampleData.embedding(axis: 0))
   }
 
-  /// The "me" voice, dismissed and unnamed, combined into Nicolai's
-  /// Speaker 1: the dismissal stays on the row, and separating unnames the
-  /// "me" participant again (the Rust host named it when it combined).
-  @Test func separatingMeRestoresItsDismissalAndItsParticipant() async throws {
+  /// The "me" voice, unnamed (it cannot be dismissed), combined into
+  /// Nicolai's Speaker 1: its row stays as it was, and separating unnames
+  /// the "me" participant again (the Rust host named it when it combined).
+  @Test func separatingMeRestoresItsRowAndItsParticipant() async throws {
     let meID = LaneMerger.meSpeakerID(meetingID: Self.meetingID)
     var me = LaneMerger.meSpeaker(meetingID: Self.meetingID, personID: nil)
     me.embedding = SampleData.embedding(axis: 3)
     var segments = SampleData.segments()
     segments[2].speakerID = meID
     let store = try await Self.seeded(speakers: SampleData.speakers() + [me], segments: segments)
-    try await store.setDismissed(speakerID: meID, true)
     var participant = try #require(SampleData.participants().first { $0.role == .me })
     participant.personID = nil
     participant.displayName = LaneMerger.meSpeakerLabel
@@ -297,7 +296,7 @@ import Testing
     #expect(try await store.mergedSpeakers(meetingID: Self.meetingID).map(\.speaker) == [rowBefore])
     #expect(
       try await store.person(id: nicolai.id)?.sampleCount == 2,
-      "a combined row counts whatever its own dismissal")
+      "a combined row counts whatever its own assignment")
     var named = participant
     named.personID = nicolai.id
     named.displayName = nicolai.displayName
@@ -474,8 +473,10 @@ import Testing
     var two = SampleData.speakers()[1]
     var segments = SampleData.segments()
     for index in segments.indices { segments[index].speakerID = Self.one }
-    #expect(
-      SpeakerExcerpts.clipText(for: two, in: segments) == "…Ich prüfe das Budget bis Freitag.")
+    // A segment reaching outside the clip is context, not its quote.
+    #expect(SpeakerExcerpts.clipText(for: two, in: segments) == nil)
+    two.sampleClipRange = 2.5...5.5
+    #expect(SpeakerExcerpts.clipText(for: two, in: segments) == "Ich prüfe das Budget bis Freitag.")
     two.sampleClipRange = nil
     #expect(SpeakerExcerpts.clipText(for: two, in: segments) == nil)
     two.sampleClipRange = 10...12

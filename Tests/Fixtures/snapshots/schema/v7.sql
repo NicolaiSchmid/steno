@@ -82,7 +82,7 @@ CREATE TABLE "speakerNameSuggestion" ("speakerID" TEXT PRIMARY KEY NOT NULL REFE
 
 CREATE INDEX "speakerNameSuggestion_meetingID" ON "speakerNameSuggestion"("meetingID");
 
-CREATE TABLE "speakerSuggestionRejection" ("speakerID" TEXT NOT NULL REFERENCES "speaker"("id") ON DELETE CASCADE, "personID" TEXT NOT NULL REFERENCES "person"("id") ON DELETE CASCADE, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, PRIMARY KEY ("speakerID", "personID"));
+CREATE TABLE "speakerSuggestionRejection" ("speakerID" TEXT NOT NULL REFERENCES "speaker"("id") ON DELETE CASCADE, "personID" TEXT NOT NULL REFERENCES "person"("id") ON DELETE CASCADE, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "similarity" DOUBLE, PRIMARY KEY ("speakerID", "personID"));
 
 CREATE INDEX "speakerSuggestionRejection_meetingID" ON "speakerSuggestionRejection"("meetingID");
 

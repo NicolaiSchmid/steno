@@ -75,9 +75,12 @@ public enum SpeakerExcerpts {
   }
 
   /// What a combined voice says in its own clip: the text of the segments
-  /// that overlap its clip range, cut and marked as `text(for:in:)` does.
-  /// The segments are matched by time, not by speaker, since they now read
-  /// as the voice it joined. nil without a range or an overlapping segment.
+  /// that overlap its clip range, cut as `excerpt(for:in:)` cuts it, and only
+  /// when they all lie inside the clip, so it is a quote of what plays. The
+  /// segments are matched by time, not by speaker, since they now read as
+  /// the voice it joined. nil without a range, an overlapping segment, or a
+  /// segment reaching outside the clip. Rust: `combined_excerpt` in
+  /// `steno-host`.
   public static func clipText(for speaker: Speaker, in segments: [TranscriptSegment]) -> String? {
     guard let range = speaker.sampleClipRange else { return nil }
     let overlapping = segments.filter { $0.start < range.upperBound && $0.end > range.lowerBound }
@@ -86,7 +89,7 @@ public enum SpeakerExcerpts {
         segment.speakerID = speaker.id
         return segment
       }
-    let text = text(for: speaker, in: overlapping)
-    return text.isEmpty ? nil : text
+    let excerpt = excerpt(for: speaker, in: overlapping)
+    return excerpt.inClip && !excerpt.text.isEmpty ? excerpt.text : nil
   }
 }
