@@ -3,6 +3,7 @@ import { cva } from "class-variance-authority";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { focusRingClass } from "./focus-ring";
 import { fieldFrameClass } from "./input";
 import { popupSurfaceClass } from "./menu";
 
@@ -20,7 +21,7 @@ const selectTriggerVariants = cva(
 	[
 		fieldFrameClass,
 		"inline-flex min-w-0 select-none items-center justify-between gap-2 text-left text-sm outline-none",
-		"focus-visible:border-focus focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface",
+		focusRingClass,
 		"data-disabled:pointer-events-none data-placeholder:text-muted-foreground data-disabled:opacity-64",
 		"[&_svg]:pointer-events-none [&_svg]:shrink-0",
 	],
