@@ -304,29 +304,9 @@ fn meetings_list() {
                 "the preview is the summary's first bullet (`lead: text`); the fixture's sentence is not in its own detail summary",
             ),
             deviation(
-                "/groups/0/meetings/0/speakers/0/colorIndex",
-                json!(7),
-                "`colorIndex` is the FNV fold of the person id; the fixture counts 0, 1, 2, 3",
-            ),
-            deviation(
-                "/groups/0/meetings/0/speakers/1/colorIndex",
-                json!(4),
-                "as above",
-            ),
-            deviation(
-                "/groups/0/meetings/0/speakers/2/colorIndex",
-                json!(1),
-                "as above",
-            ),
-            deviation(
                 "/groups/0/meetings/0/speakers/2/isConfirmed",
                 json!(false),
                 "the chip follows the speaker's assignment, and the fixture's own detail has Speaker 3 suggested",
-            ),
-            deviation(
-                "/groups/0/meetings/0/speakers/3/colorIndex",
-                json!(0),
-                "as above (the speaker's own id)",
             ),
             deviation(
                 "/tags",
@@ -345,24 +325,6 @@ fn meeting_detail() {
         "meeting.detail",
         &harness.snapshot(BridgeTopic::MeetingDetail),
         &[
-            deviation(
-                "/speakers/0/colorIndex",
-                json!(7),
-                "`colorIndex` is the FNV fold of the person id; the fixture counts 0, 1, 2, 3",
-            ),
-            deviation("/speakers/1/colorIndex", json!(4), "as above"),
-            deviation("/speakers/2/colorIndex", json!(1), "as above"),
-            deviation(
-                "/speakers/3/colorIndex",
-                json!(0),
-                "as above (the speaker's own id)",
-            ),
-            deviation("/tasks/0/assigneeColorIndex", json!(4), "as above (Jérôme)"),
-            deviation(
-                "/tasks/1/assigneeColorIndex",
-                json!(7),
-                "as above (Nicolai)",
-            ),
             deviation(
                 "/templates",
                 json!([

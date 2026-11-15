@@ -613,6 +613,31 @@
 	}
 
 	/*
+	 * A popup that scrolls on its own (`PopupScroll`): while content is
+	 * left below, its last 2 rem fade out, the top fade's curve upside
+	 * down, so a panel cut short says it scrolls. At the end nothing fades.
+	 */
+	.scroll-fade-bottom[data-overflow-y-end] {
+		mask-image:
+			linear-gradient(
+				to top,
+				transparent 0%,
+				rgba(0, 0, 0, 0.1) 10%,
+				rgba(0, 0, 0, 0.3) 24%,
+				rgba(0, 0, 0, 0.58) 42%,
+				rgba(0, 0, 0, 0.82) 62%,
+				rgba(0, 0, 0, 0.96) 82%,
+				black 100%
+			),
+			linear-gradient(black, black);
+		mask-size:
+			100% 2rem,
+			100% calc(100% - 2rem);
+		mask-position: bottom, top;
+		mask-repeat: no-repeat;
+	}
+
+	/*
 	 * Under a scroll edge's hairline (`ScrollArea edge`), once the content
 	 * has scrolled: the cut line fades in over 0.5 rem after 2 px, so no sliver of a
 	 * glyph cut at the hairline shows under it. At rest nothing fades.

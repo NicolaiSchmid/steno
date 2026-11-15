@@ -94,7 +94,7 @@ export function SpeakerPlayButton({
 				<Kbd
 					aria-hidden="true"
 					className="hidden group-focus-visible/row:inline-flex"
-					variant="plain"
+					variant="cap"
 				>
 					P
 				</Kbd>
@@ -135,22 +135,25 @@ export function announceNamed(speaker: Speaker, name: string) {
  * What a transcript pick changes: every paragraph of the voice in this
  * meeting, until paragraphs can move on their own. "Changes all 4
  * paragraphs of Speaker 3 in this meeting.", the person named too once the
- * voice is confirmed ("of Nicolai (Speaker 3)").
+ * voice is confirmed ("of Nicolai (Speaker 3)"); for one paragraph
+ * "Changes Speaker 3’s only paragraph in this meeting."
  */
 export function scopeLine(speaker: Speaker, paragraphs: number): string {
 	const named = isNamed(speaker);
 	if (isMe(speaker)) {
-		const whose = named ? `of ${speaker.displayName} (you)` : "of yours";
 		return paragraphs === 1
-			? `Changes the one paragraph ${whose} in this meeting.`
-			: `Changes all ${paragraphs} paragraphs ${whose} in this meeting.`;
+			? "Changes your only paragraph in this meeting."
+			: `Changes all ${paragraphs} paragraphs ${named ? `of ${speaker.displayName} (you)` : "of yours"} in this meeting.`;
+	}
+	if (paragraphs === 1) {
+		return named
+			? `Changes ${speaker.displayName}’s only paragraph (${speaker.clusterLabel}) in this meeting.`
+			: `Changes ${speaker.clusterLabel}’s only paragraph in this meeting.`;
 	}
 	const whose = named
 		? `${speaker.displayName} (${speaker.clusterLabel})`
 		: speaker.clusterLabel;
-	return paragraphs === 1
-		? `Changes the one paragraph of ${whose} in this meeting.`
-		: `Changes all ${paragraphs} paragraphs of ${whose} in this meeting.`;
+	return `Changes all ${paragraphs} paragraphs of ${whose} in this meeting.`;
 }
 
 export interface SpeakerPickerProps {
@@ -174,7 +177,7 @@ export interface SpeakerPickerProps {
  * turn's paragraph: the voice, its clip, Yes for a suggestion, and the
  * same field as the Speakers panel. A pick names the voice in this meeting,
  * so every turn of it follows (all of them, until paragraphs can move on
- * their own), and the line under the field says so; the result is
+ * their own), and the line above the field says so; the result is
  * announced and focus goes back to the name. A suggestion carries the grey
  * "?" bubble of the pill and the avatars, and says why it is offered.
  */
@@ -333,34 +336,35 @@ export function SpeakerPicker({
 						</span>
 					</p>
 				) : open ? (
-					<SpeakerNameField
-						className="mt-2"
-						initialText={draft.text}
-						key={draft.attempt}
-						listClassName="max-h-56"
-						notice={
-							<>
-								<p
-									className="m-0 mt-1.5 px-2 text-meta text-muted-foreground"
-									data-testid={`speaker-panel-scope-${speaker.id}`}
-								>
-									{scopeLine(speaker, paragraphs)}
-								</p>
-								{failure ? (
+					<>
+						{/* What the pick changes, read before typing it. */}
+						<p
+							className="m-0 mt-2 text-meta text-muted-foreground"
+							data-testid={`speaker-panel-scope-${speaker.id}`}
+						>
+							{scopeLine(speaker, paragraphs)}
+						</p>
+						<SpeakerNameField
+							className="mt-1.5"
+							initialText={draft.text}
+							key={draft.attempt}
+							listClassName="max-h-56"
+							notice={
+								failure ? (
 									<SelectFailure
 										className="mt-1.5"
 										message={failure.message}
 										onRetry={() => void commit(failure.option, failure.text)}
 										testID="speaker-panel-failure"
 									/>
-								) : null}
-							</>
-						}
-						onCancel={() => change(false)}
-						onSubmit={(option, text) => void commit(option, text)}
-						speaker={speaker}
-						speakers={speakers}
-					/>
+								) : null
+							}
+							onCancel={() => change(false)}
+							onSubmit={(option, text) => void commit(option, text)}
+							speaker={speaker}
+							speakers={speakers}
+						/>
+					</>
 				) : null}
 				{dialog}
 			</PopoverPopup>

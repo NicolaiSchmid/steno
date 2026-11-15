@@ -547,6 +547,12 @@ for (const scheme of SCHEMES) {
 					viewport.width,
 				);
 			}
+			if (name === "zoom-200-editing" || name === "zoom-200-transcript") {
+				// Cut short at 200 %, the panel says it scrolls: its end fades.
+				await expect(
+					page.locator('[data-testid="popup-scroll"][data-overflow-y-end]'),
+				).toBeVisible();
+			}
 			await page.screenshot({
 				path: `${OUT}/main-${scheme}-speakers-${name}.png`,
 			});

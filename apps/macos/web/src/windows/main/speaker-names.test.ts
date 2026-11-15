@@ -66,7 +66,8 @@ describe("pillState", () => {
 		);
 		expect(state.kind).toBe("needs");
 		if (state.kind === "needs") {
-			expect(state.count).toBe(2);
+			// Speaker 4 and Me need names, and Anna's suggestion a check.
+			expect(state.count).toBe(3);
 			expect(state.avatars.map((speaker) => speaker.displayName)).toEqual([
 				"Nicolai",
 				"Jérôme",
@@ -225,6 +226,23 @@ describe("groupOptions", () => {
 			// A Create has no person yet, so no colour (a plus, not an avatar).
 			Ann: undefined,
 		});
+	});
+
+	it("shows the person a confirmed voice already is as Current, not as a suggestion", () => {
+		const anna = voice(2, "confirmed", "Anna", 3);
+		const groups = groupOptions(options, "", anna, [
+			speakers[0] as Speaker,
+			anna,
+		]);
+		expect(groups.find((group) => group.id === "suggested")?.rows).toEqual([
+			expect.objectContaining({ reason: "Invited" }),
+		]);
+		expect(groups.find((group) => group.id === "people")?.rows[0]).toEqual(
+			expect.objectContaining({
+				option: expect.objectContaining({ label: "Anna" }),
+				reason: "Current",
+			}),
+		);
 	});
 
 	it("leaves out the excluded person", () => {

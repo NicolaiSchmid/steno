@@ -99,7 +99,8 @@ function distinctPeople(speakers: readonly Speaker[]): Speaker[] {
  * What the header pill says. While the pipeline finds the meeting's
  * speakers it says so; without speech there is no pill. Nobody named and
  * nothing suggested is the dashed "Name speakers"; once anything is named
- * or suggested, unnamed voices are amber work ("2 need names"), and when
+ * or suggested, every voice not yet confirmed is amber work ("2 need
+ * names": an unnamed voice and a suggestion both need a name), and when
  * only suggestions are left it asks to check them. All confirmed, it lists
  * the people.
  */
@@ -124,10 +125,10 @@ export function pillState(
 		return { kind: "none" };
 	}
 	const avatars = known.slice(0, 2);
-	if (unknown.length > 0) {
-		return { kind: "needs", count: unknown.length, avatars };
-	}
 	const suggested = speakers.filter(isSuggested).length;
+	if (unknown.length > 0) {
+		return { kind: "needs", count: unknown.length + suggested, avatars };
+	}
 	if (suggested > 0) {
 		return { kind: "check", count: suggested, avatars };
 	}
@@ -356,8 +357,9 @@ export function optionColor(
  * "Sounds like" is voice evidence), Also speaking here (people who already
  * own another confirmed voice of this meeting, from the snapshot's
  * `personID`, each saying which voice it would combine with), People
- * ("Recent" while nothing is typed), and the row that creates the typed
- * name. `excluded` leaves a person out ("Someone else").
+ * ("Recent" while nothing is typed; the person a confirmed voice already
+ * is leads it as "Current"), and the row that creates the typed name.
+ * `excluded` leaves a person out ("Someone else").
  */
 export function groupOptions(
 	options: readonly SpeakerOption[],
@@ -395,6 +397,13 @@ export function groupOptions(
 		const colorIndex = color === undefined ? {} : { colorIndex: color };
 		if (option.kind === "create") {
 			create.rows.push({ option });
+		} else if (
+			isNamed(speaker) &&
+			option.personID &&
+			option.personID === speaker.personID
+		) {
+			// Who the voice is confirmed as already: no suggestion of itself.
+			people.rows.unshift({ option, reason: "Current", ...colorIndex });
 		} else if (owner) {
 			also.rows.push({
 				option,

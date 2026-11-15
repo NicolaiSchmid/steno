@@ -110,7 +110,8 @@ const row = (id: string) => screen.getByTestId(`speakers-popover-name-${id}`);
 describe("the speakers pill", () => {
 	it.each([
 		["speakers-none", /^Name speakers$/],
-		["", "1 needs a name"],
+		// Speaker 4 needs a name and Anna's suggestion a check: both count.
+		["", "2 need names"],
 		["speakers-check", "Check 1 name"],
 		["speakers-done", "Nicolai, Jérôme, Anna"],
 	])("in %s reads %s", async (scenario, words) => {
@@ -393,6 +394,48 @@ describe("the speakers panel", () => {
 		await user.tab({ shift: true });
 		expect(row(SPEAKER_1)).toHaveFocus();
 		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(0);
+	});
+
+	it("walks every row with Tab and Shift+Tab, and leaves the panel past the last", async () => {
+		const { user } = await open();
+		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
+		const order = [ANNA, UNNAMED, NICOLAI, SPEAKER_1];
+		for (const id of order.slice(1)) {
+			await user.tab();
+			expect(row(id)).toHaveFocus();
+		}
+		await user.tab({ shift: true });
+		expect(row(NICOLAI)).toHaveFocus();
+		await user.tab();
+		await user.tab();
+		expect(
+			screen.queryByTestId("speakers-panel")?.contains(document.activeElement),
+		).not.toBe(true);
+	});
+
+	it("reopens a confirmed row with its name as the placeholder and the header Checked", async () => {
+		const { user, speakers, republish } = await open();
+		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
+		await user.keyboard("y");
+		await vi.waitFor(() =>
+			expect(
+				screen.queryByTestId(`speakers-popover-saving-${ANNA}`),
+			).toBeNull(),
+		);
+		republish(
+			speakers.map((speaker) =>
+				speaker.id === ANNA ? named(speaker, "Anna") : speaker,
+			),
+		);
+		expect(
+			within(screen.getByTestId("speakers-section-check")).getByRole("heading"),
+		).toHaveTextContent("Checked");
+		row(ANNA).focus();
+		await user.keyboard("{Enter}");
+		expect(screen.getByTestId(`speaker-field-${ANNA}`)).toHaveAttribute(
+			"placeholder",
+			"Anna",
+		);
 	});
 
 	it("shows a row's keys, hidden until keyboard focus is on the row", async () => {

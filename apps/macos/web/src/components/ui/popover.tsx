@@ -1,6 +1,12 @@
 import { Popover as BasePopover } from "@base-ui/react/popover";
 import { cva, type VariantProps } from "class-variance-authority";
-import type { ComponentProps } from "react";
+import {
+	type ComponentProps,
+	type ReactNode,
+	useLayoutEffect,
+	useRef,
+	useState,
+} from "react";
 import { cn } from "@/lib/cn";
 import { popupSurfaceClass } from "./menu";
 
@@ -37,28 +43,96 @@ export const popoverPopupVariants = cva(
 				/**
 				 * The speakers panel: 368 px, at most 440 px tall and never
 				 * past the space the positioner leaves (`--available-*`, a
-				 * zoomed or short window), scrolling on its own.
+				 * zoomed or short window), scrolling on its own
+				 * (`PopupScroll`).
 				 */
 				panel:
-					"max-h-[min(27.5rem,var(--available-height))] w-92 max-w-(--available-width) overflow-y-auto overscroll-contain",
+					"flex max-h-[min(27.5rem,var(--available-height))] w-92 max-w-(--available-width) flex-col overflow-hidden",
 				/** The transcript's speaker panel: 320 px, inside the reading column. */
 				picker:
-					"max-h-(--available-height) w-80 max-w-(--available-width) overflow-y-auto overscroll-contain",
-			},
-			padding: {
-				md: "p-4",
-				sm: "px-3 py-2",
-				panel: "px-2 py-2",
+					"flex max-h-(--available-height) w-80 max-w-(--available-width) flex-col overflow-hidden",
 			},
 		},
-		defaultVariants: { size: "md", padding: "md" },
+		defaultVariants: { size: "md" },
 	},
 );
 
+/** The popup's padding; on a scrolling popup it pads the scrolled content. */
+const popoverPaddingVariants = cva("", {
+	variants: {
+		padding: {
+			md: "p-4",
+			sm: "px-3 py-2",
+			panel: "px-2 py-2",
+		},
+	},
+	defaultVariants: { padding: "md" },
+});
+
+/** The sizes that scroll on their own, inside the surface. */
+const SCROLLING = new Set(["panel", "picker"]);
+
+/**
+ * The scrolling inside of a popup: while content is left below, its last
+ * 2 rem fade out (`scroll-fade-bottom`), so a panel cut short by a zoomed
+ * or short window says it scrolls. The surface's border and shadow stay
+ * whole: the mask is on the content, not the popup.
+ */
+function PopupScroll({
+	className,
+	children,
+}: {
+	className: string;
+	children: ReactNode;
+}) {
+	const scroller = useRef<HTMLDivElement>(null);
+	const content = useRef<HTMLDivElement>(null);
+	const [more, setMore] = useState(false);
+	useLayoutEffect(() => {
+		const element = scroller.current;
+		if (!element) {
+			return;
+		}
+		const measure = () =>
+			setMore(
+				element.scrollTop + element.clientHeight < element.scrollHeight - 1,
+			);
+		measure();
+		element.addEventListener("scroll", measure, { passive: true });
+		const observer =
+			typeof ResizeObserver === "undefined"
+				? undefined
+				: new ResizeObserver(measure);
+		observer?.observe(element);
+		if (content.current) {
+			observer?.observe(content.current);
+		}
+		return () => {
+			element.removeEventListener("scroll", measure);
+			observer?.disconnect();
+		};
+	}, []);
+	return (
+		<div
+			className={cn(
+				"scroll-fade-bottom min-h-0 overflow-y-auto overscroll-contain",
+				className,
+			)}
+			data-overflow-y-end={more ? "" : undefined}
+			data-testid="popup-scroll"
+			ref={scroller}
+		>
+			<div ref={content}>{children}</div>
+		</div>
+	);
+}
+
 export interface PopoverPopupProps
 	extends Omit<ComponentProps<typeof BasePopover.Popup>, "className">,
-		VariantProps<typeof popoverPopupVariants> {
+		VariantProps<typeof popoverPopupVariants>,
+		VariantProps<typeof popoverPaddingVariants> {
 	className?: string;
+	children?: ReactNode;
 	side?: ComponentProps<typeof BasePopover.Positioner>["side"];
 	align?: ComponentProps<typeof BasePopover.Positioner>["align"];
 	sideOffset?: number;
@@ -86,6 +160,7 @@ export function PopoverPopup({
 	anchor,
 	collisionAvoidance,
 	container,
+	children,
 	...props
 }: PopoverPopupProps) {
 	return (
@@ -99,10 +174,27 @@ export function PopoverPopup({
 				side={side}
 				sideOffset={sideOffset}
 			>
-				<BasePopover.Popup
-					className={cn(popoverPopupVariants({ size, padding }), className)}
-					{...props}
-				/>
+				{size && SCROLLING.has(size) ? (
+					<BasePopover.Popup
+						className={cn(popoverPopupVariants({ size }), className)}
+						{...props}
+					>
+						<PopupScroll className={popoverPaddingVariants({ padding })}>
+							{children}
+						</PopupScroll>
+					</BasePopover.Popup>
+				) : (
+					<BasePopover.Popup
+						className={cn(
+							popoverPopupVariants({ size }),
+							popoverPaddingVariants({ padding }),
+							className,
+						)}
+						{...props}
+					>
+						{children}
+					</BasePopover.Popup>
+				)}
 			</BasePopover.Positioner>
 		</BasePopover.Portal>
 	);

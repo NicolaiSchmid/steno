@@ -928,6 +928,7 @@ function speakersScenario(
 			assignment: "confirmed" as const,
 			displayName: name,
 			personID: person,
+			colorIndex: personColor(person),
 		};
 	};
 	const renamed = (speakers: DetailSpeaker[]) => ({
@@ -948,7 +949,9 @@ function speakersScenario(
 			assignment: "suggested",
 			displayName: first.displayName,
 			suggestionName: first.displayName,
-			...(first.personID ? { personID: first.personID } : {}),
+			...(first.personID
+				? { personID: first.personID, colorIndex: personColor(first.personID) }
+				: {}),
 			hasClip: true,
 		};
 		return spread(renamed([first, second, third, split]));
@@ -987,7 +990,8 @@ function speakersScenario(
 		clusterLabel: label,
 		displayName: label,
 		assignment: "unknown",
-		colorIndex: speaker.colorIndex,
+		// A voice without a person has its own colour, as the hosts fold it.
+		colorIndex: personColor(speaker.id),
 		hasClip: label !== "Me",
 		isPlaying: false,
 	});
@@ -1156,9 +1160,7 @@ export function answerSpeakerSelect(
 		displayName: option.label,
 		personID,
 		// A voice takes its person's colour, as the hosts fold it.
-		colorIndex:
-			detail.speakers.find((row) => row.personID === personID)?.colorIndex ??
-			personColor(personID),
+		colorIndex: personColor(personID),
 	};
 	return {
 		...detail,

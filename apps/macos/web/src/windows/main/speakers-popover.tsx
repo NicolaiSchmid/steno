@@ -167,8 +167,9 @@ interface Saving {
  * suggestion; a failure reopens the row with its text and a red line with
  * Retry. Combining two voices confirms first (`useSpeakerSelect`).
  *
- * Keyboard: the pill opens on the first row with work; Up and Down move
- * between rows, each one tab stop; on a row Enter names, Y confirms, N
+ * Keyboard: the pill opens on the first row with work; Up and Down, or
+ * Tab and Shift+Tab, move between rows, each one tab stop (Tab past the
+ * last row leaves the panel); on a row Enter names, Y confirms, N
  * changes and P plays, the keys shown while keyboard focus is on the row.
  * Tab and Shift+Tab leave the field for the next or previous row without a
  * pick. Escape closes the field and returns to its row; a second Escape
@@ -420,7 +421,15 @@ export function SpeakersPopover({
 			End: order.length - 1,
 		};
 		const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-		if (key in move) {
+		// Tab walks the rows too, so each one is reached without the
+		// arrows; past the last (or before the first) it leaves the panel.
+		const tabTo =
+			key === "Tab" ? order[at + (event.shiftKey ? -1 : 1)] : undefined;
+		if (tabTo) {
+			event.preventDefault();
+			setActive(tabTo.id);
+			rows.current.get(tabTo.id)?.focus();
+		} else if (key in move) {
 			event.preventDefault();
 			const target = order[move[key] ?? at];
 			if (target) {
@@ -527,7 +536,15 @@ function Sections({
 			{layout.me ? (
 				<ul className="m-0 list-none p-0">{row(layout.me, "me")}</ul>
 			) : null}
-			<Section label="Is this right?" testID="speakers-section-check">
+			<Section
+				// Every match answered during the visit: the heading says so.
+				label={
+					layout.check.length > 0 && layout.check.every(isNamed)
+						? "Checked"
+						: "Is this right?"
+				}
+				testID="speakers-section-check"
+			>
 				{layout.check.map((speaker) => row(speaker, "check"))}
 			</Section>
 			<Section label="Need names" testID="speakers-section-need">
@@ -644,8 +661,9 @@ function KeyHint({ children }: { children: string }) {
 	return (
 		<Kbd
 			aria-hidden="true"
-			className="hidden group-focus-visible/row:inline-flex"
-			variant="plain"
+			// 6 px from the button's word: its own 4 px gap and 2 more.
+			className="ml-0.5 hidden group-focus-visible/row:inline-flex"
+			variant="cap"
 		>
 			{children}
 		</Kbd>

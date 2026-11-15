@@ -2,7 +2,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
 
-/** A key hint: a filled 20 px chip without a border, set in the UI font. */
+/** A key hint: a filled 20 px chip without a border, set in the UI font, or a bordered mono keycap. */
 export const kbdVariants = cva(
 	"inline-flex shrink-0 select-none items-center justify-center gap-1 font-medium font-sans text-meta text-muted-foreground leading-none",
 	{
@@ -11,6 +11,11 @@ export const kbdVariants = cva(
 				key: "h-5 min-w-5 rounded-xs bg-accent px-1",
 				/** Bare text at the trailing edge of a menu row. */
 				plain: "tracking-widest",
+				/**
+				 * A bordered mono keycap, a 16 px key beside a control's
+				 * own words ("Yes Y") so it never reads as part of them.
+				 */
+				cap: "h-4 min-w-4 rounded-[4px] border border-border px-1 font-mono text-caption",
 			},
 		},
 		defaultVariants: { variant: "key" },

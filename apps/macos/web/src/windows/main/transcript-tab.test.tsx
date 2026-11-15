@@ -38,9 +38,7 @@ describe("TranscriptTab", () => {
 		// The pick changes the whole voice, and the panel says so.
 		expect(
 			within(panel).getByTestId(`speaker-panel-scope-${UNNAMED}`),
-		).toHaveTextContent(
-			"Changes the one paragraph of Speaker 4 in this meeting.",
-		);
+		).toHaveTextContent("Changes Speaker 4’s only paragraph in this meeting.");
 		const options = await within(panel).findAllByRole("option");
 		expect(options.map((option) => option.textContent)).toEqual([
 			"AAnnaSounds like",
@@ -49,6 +47,14 @@ describe("TranscriptTab", () => {
 			"Create “a”",
 		]);
 		expect(screen.getByTestId(`speaker-field-${UNNAMED}`)).toHaveFocus();
+		// The scope is read under the voice, before the field.
+		expect(
+			within(panel)
+				.getByTestId(`speaker-panel-scope-${UNNAMED}`)
+				.compareDocumentPosition(
+					screen.getByTestId(`speaker-field-${UNNAMED}`),
+				) & Node.DOCUMENT_POSITION_FOLLOWING,
+		).toBeTruthy();
 
 		await user.click(screen.getByRole("option", { name: /^Anna/ }));
 		expect(callsTo(harness.transport, "speakers.select")).toEqual([
@@ -154,6 +160,15 @@ describe("scopeLine", () => {
 		);
 		expect(scopeLine({ ...nicolai, clusterLabel: "Me" }, 4)).toBe(
 			"Changes all 4 paragraphs of Nicolai (you) in this meeting.",
+		);
+		expect(scopeLine(anna, 1)).toBe(
+			"Changes Speaker 3’s only paragraph in this meeting.",
+		);
+		expect(scopeLine(nicolai, 1)).toBe(
+			"Changes Nicolai’s only paragraph (Speaker 1) in this meeting.",
+		);
+		expect(scopeLine({ ...nicolai, clusterLabel: "Me" }, 1)).toBe(
+			"Changes your only paragraph in this meeting.",
 		);
 	});
 });

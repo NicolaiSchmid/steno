@@ -322,7 +322,9 @@ function checks(mode: Mode): Check[] {
 	// outline there (both measured on every host above). So are "No sample"
 	// and the P key hint beside a play, muted on a row and its hover, and
 	// the N hint in Change, muted on the accent hover; the Y hint sits in
-	// Yes, muted on the control fill, measured below.
+	// Yes, muted on the control fill, measured below. The hints are
+	// bordered keycaps (`Kbd variant="cap"`): the letter carries them, the
+	// `--border` outline only sets them apart from the button's word.
 	for (const person of PEOPLE) {
 		on(
 			person,

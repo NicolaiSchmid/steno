@@ -25,6 +25,7 @@ import { cn } from "@/lib/cn";
 import {
 	groupOptions,
 	isMe,
+	isNamed,
 	type OptionRow,
 	optionText,
 	type Speaker,
@@ -366,7 +367,13 @@ export function SpeakerNameField({
 				data-testid={`speaker-field-${speaker.id}`}
 				onChange={onChange}
 				onKeyDown={onKeyDown}
-				placeholder={isMe(speaker) ? "Your name" : voiceLabel(speaker)}
+				placeholder={
+					isNamed(speaker)
+						? speaker.displayName
+						: isMe(speaker)
+							? "Your name"
+							: voiceLabel(speaker)
+				}
 				role="combobox"
 				size="sm"
 				value={query}

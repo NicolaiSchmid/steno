@@ -587,6 +587,7 @@ export function StoriesPage() {
 						<Kbd>⌘F</Kbd>
 						<Kbd>⇧⌘E</Kbd>
 						<Kbd variant="plain">⌘,</Kbd>
+						<Kbd variant="cap">Y</Kbd>
 					</>
 				)}
 			</ThemePair>
