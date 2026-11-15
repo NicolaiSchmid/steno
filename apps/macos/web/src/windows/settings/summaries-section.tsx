@@ -159,7 +159,8 @@ function statusOf(summaries: SummariesSettingsSnapshot): {
 
 /**
  * Summaries: the service preset, the server, model and key for an endpoint,
- * or the ChatGPT consent and model; then the connection status.
+ * or the ChatGPT consent and model; then the connection status, so a test's
+ * result sits under the fields it tested; then Advanced.
  */
 export function SummariesSection() {
 	const client = useBridge();
@@ -214,26 +215,6 @@ export function SummariesSection() {
 				/>
 			) : null}
 
-			{codex ? null : (
-				<FormCard
-					footer={`How much text the model can read at once. Leave the default of ${summaries.defaultContextTokens.toLocaleString()} unless the service reports a shorter limit.`}
-					title="Advanced"
-				>
-					<FormRow
-						control={
-							<DraftField
-								className="w-40"
-								label="Context size"
-								onCommit={(contextTokens) => update({ contextTokens })}
-								testId="context-tokens"
-								value={summaries.contextTokens}
-							/>
-						}
-						label="Context size"
-					/>
-				</FormCard>
-			)}
-
 			<FormCard title="Connection">
 				<ResultLine
 					actions={
@@ -275,6 +256,26 @@ export function SummariesSection() {
 					{status.title}
 				</ResultLine>
 			</FormCard>
+
+			{codex ? null : (
+				<FormCard
+					footer={`How much text the model can read at once. Leave the default of ${summaries.defaultContextTokens.toLocaleString()} unless the service reports a shorter limit.`}
+					title="Advanced"
+				>
+					<FormRow
+						control={
+							<DraftField
+								className="w-40"
+								label="Context size"
+								onCommit={(contextTokens) => update({ contextTokens })}
+								testId="context-tokens"
+								value={summaries.contextTokens}
+							/>
+						}
+						label="Context size"
+					/>
+				</FormCard>
+			)}
 		</SectionPage>
 	);
 }

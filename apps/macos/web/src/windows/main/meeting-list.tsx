@@ -316,11 +316,12 @@ const LABEL: Record<RowState, string> = {
  * The dot before the title while a meeting is not simply done: red and
  * pulsing while it records, red once it failed, blue while it works, amber
  * for a recording left unsaved (not `live`), which Steno processes at its
- * next start. The preview line says the same in words.
+ * next start. The preview line says the same in words. A ready meeting
+ * keeps the empty slot, so every title starts at the same edge.
  */
 function StateDot({ meeting, live }: { meeting: MeetingRow; live: boolean }) {
 	if (meeting.state === "ready") {
-		return null;
+		return <span aria-hidden="true" className="size-2" />;
 	}
 	const unsaved = meeting.state === "recording" && !live;
 	return (
@@ -343,7 +344,8 @@ function StateDot({ meeting, live }: { meeting: MeetingRow; live: boolean }) {
 
 /**
  * One meeting in two lines: the state dot and the title, then the start
- * time and the preview in the meta size.
+ * time and the preview in the meta size, both lines after the dot's 8 px
+ * slot.
  */
 function MeetingRowView({
 	meeting,
@@ -383,23 +385,23 @@ function MeetingRowView({
 					ref={row}
 					type="button"
 				>
-					<div className="flex min-w-0 items-center gap-2">
+					<div className="grid grid-cols-[0.5rem_minmax(0,1fr)] items-center gap-x-2">
 						<StateDot live={live} meeting={meeting} />
-						<span className="min-w-0 flex-1 truncate text-foreground text-title">
+						<span className="min-w-0 truncate text-foreground text-title">
 							{meeting.title}
 						</span>
-					</div>
-					<div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
-						<time
-							className="shrink-0 tabular-nums"
-							dateTime={meeting.startedAt}
-						>
-							{format.time(meeting.startedAt)}
-						</time>
-						<span aria-hidden="true">·</span>
-						<span className="min-w-0 flex-1 truncate">
-							{rowPreview(meeting, progress, live)}
-						</span>
+						<div className="col-start-2 mt-0.5 flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
+							<time
+								className="shrink-0 tabular-nums"
+								dateTime={meeting.startedAt}
+							>
+								{format.time(meeting.startedAt)}
+							</time>
+							<span aria-hidden="true">·</span>
+							<span className="min-w-0 flex-1 truncate">
+								{rowPreview(meeting, progress, live)}
+							</span>
+						</div>
 					</div>
 				</button>
 			</ContextMenuTrigger>

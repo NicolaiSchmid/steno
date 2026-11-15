@@ -89,6 +89,26 @@ describe("PermissionsPage", () => {
 		expect(callsTo(harness.transport, "onboarding.advance")).toHaveLength(1);
 	});
 
+	it.each([
+		["onboarding-unknown", "permission-microphone-request"],
+		["onboarding-denied", "permission-microphone-open"],
+	])(
+		"fills only the first required step's action (%s)",
+		async (scenario, lead) => {
+			const harness = await createBridgeHarness(`scenario=${scenario}`);
+			renderWithBridge(<OnboardingWindow />, harness);
+			expect(screen.getByTestId(lead)).toHaveClass("bg-primary");
+			expect(
+				screen.getByTestId("permission-systemAudio-request"),
+			).not.toHaveClass("bg-primary");
+			expect(
+				screen
+					.getAllByRole("button")
+					.filter((button) => button.classList.contains("bg-primary")),
+			).toHaveLength(1);
+		},
+	);
+
 	it("sends a denied permission to System Settings and checks again", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=onboarding-denied");

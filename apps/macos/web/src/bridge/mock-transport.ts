@@ -149,6 +149,7 @@ export function loadFixtureReplies(): Promise<FixtureMap> {
 export const scenarios = [
 	"empty",
 	"recording",
+	"recording-elsewhere",
 	"denied",
 	"failed",
 	"processing",
@@ -204,6 +205,8 @@ const PROCESSING_MEETING_ID = "00000000-0000-0000-0000-000000000002";
 const FAILED_MEETING_ID = "00000000-0000-0000-0000-000000000044";
 /** How long the live recording has run when the page opens: 12:34. */
 const RECORDING_ELAPSED_MS = 754_000;
+/** The meeting `recording-elsewhere` records: not the one selected. */
+const RECORDING_ELSEWHERE_ID = "00000000-0000-0000-0000-000000000003";
 
 function findRow(list: MeetingsListSnapshot, id: string): MeetingRow | null {
 	for (const group of list.groups) {
@@ -245,7 +248,8 @@ function bareDetail(
 /**
  * Overrides the fixture snapshots for a scenario named in the query:
  * `empty` (no meetings, no selection), `recording` (`recording.live` as the
- * recording, started 12:34 ago, its auto-stop counting down), `denied` (idle
+ * recording, started 12:34 ago, its auto-stop counting down),
+ * `recording-elsewhere` (that, while another meeting is selected), `denied` (idle
  * with the microphone denied), `failed` (the failed meeting selected),
  * `processing` (a meeting in the progress entry, selected), `export-failed`
  * (the selected meeting's export failed), `damaged-audio`
@@ -281,11 +285,14 @@ export function applyScenario(
 		delete result["meeting.detail"];
 	}
 
-	if (scenario === "recording") {
+	if (scenario === "recording" || scenario === "recording-elsewhere") {
 		const live = snapshots["recording.live"] as RecordingSnapshot | undefined;
 		if (live) {
 			result.recording = {
 				...live,
+				...(scenario === "recording-elsewhere"
+					? { meetingID: RECORDING_ELSEWHERE_ID }
+					: {}),
 				startedAt: new Date(Date.now() - RECORDING_ELAPSED_MS).toISOString(),
 			} satisfies RecordingSnapshot;
 		}
@@ -346,7 +353,8 @@ export function applyScenario(
 					filesExist: true,
 				},
 				canProcessAgain: true,
-				canRerunSummary: true,
+				// No transcript, so no summary to re-run (the host's rule).
+				canRerunSummary: false,
 			});
 		}
 	}

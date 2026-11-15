@@ -1,5 +1,5 @@
 import { PanelLeftIcon } from "lucide-react";
-import { createContext, useContext } from "react";
+import { createContext, type RefObject, useContext } from "react";
 import { Button } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { usePlatform } from "@/lib/platform";
@@ -14,6 +14,8 @@ export interface NarrowLayout {
 	openMeetings: () => void;
 	/** A meeting was picked in the drawer: it closes. */
 	closeMeetings: () => void;
+	/** The Meetings button, which takes the focus back when the drawer closes. */
+	toggleRef?: RefObject<HTMLButtonElement | null>;
 }
 
 export const NarrowLayoutContext = createContext<NarrowLayout>({
@@ -27,7 +29,7 @@ export const NarrowLayoutContext = createContext<NarrowLayout>({
  * traffic lights where the title bar overlays the page; nothing otherwise.
  */
 export function MeetingsToggle() {
-	const { narrow, openMeetings } = useContext(NarrowLayoutContext);
+	const { narrow, openMeetings, toggleRef } = useContext(NarrowLayoutContext);
 	const { titleBarInset } = usePlatform();
 	if (!narrow) {
 		return null;
@@ -38,6 +40,7 @@ export function MeetingsToggle() {
 				aria-label="Show meetings"
 				data-testid="show-meetings"
 				onClick={openMeetings}
+				ref={toggleRef}
 				size="icon-sm"
 				variant="ghost"
 			>

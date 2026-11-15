@@ -6,6 +6,7 @@ import {
 	CopyIcon,
 	EllipsisIcon,
 	FolderIcon,
+	InfoIcon,
 	RefreshCwIcon,
 	RotateCcwIcon,
 	ShareIcon,
@@ -13,7 +14,7 @@ import {
 	TextAlignStartIcon,
 	Trash2Icon,
 } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useContext, useEffect, useState } from "react";
 import type {
 	AppSnapshot,
 	MeetingDetailSnapshot,
@@ -58,9 +59,10 @@ import {
 	formatRetention,
 	formatSource,
 } from "./format";
-import { MeetingsToggle } from "./narrow-layout";
+import { MeetingsToggle, NarrowLayoutContext } from "./narrow-layout";
 import { NotesTab } from "./notes-tab";
 import { ProcessingCard } from "./processing-card";
+import { RecorderBar } from "./recorder-notices";
 import { SpeakersPopover } from "./speakers-popover";
 import { SummaryTab } from "./summary-tab";
 import { TagEditor } from "./tag-editor";
@@ -136,15 +138,10 @@ const lineLinkClass = cn(
 	focusRingClass,
 );
 
-/** The line's dismissal: a muted text button, quieter than the link. */
-const quietButtonClass = cn(
-	"ml-2 rounded-xs text-muted-foreground hover:text-foreground",
-	focusRingClass,
-);
-
 /**
  * Summaries or export still need setting up: one muted line over the
- * summary, with Set up (Settings at the section that needs it) and Not now.
+ * summary, led by the info glyph, with Set up (Settings at the section that
+ * needs it) and Not now, a ghost text button as onboarding's Skip is.
  * Nothing on the other tabs.
  */
 function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
@@ -158,13 +155,14 @@ function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 			? "export"
 			: null;
 	return (
-		<p
-			className="mt-0 mb-6 text-body text-muted-foreground"
+		<div
+			className="mt-0 mb-6 flex flex-wrap items-center gap-x-2 gap-y-1 text-body text-muted-foreground"
 			data-testid="setup-line"
 		>
-			{banner.title}{" "}
-			{section ? (
-				<>
+			<InfoIcon aria-hidden="true" className="size-4 shrink-0 text-info" />
+			<span className="min-w-0">
+				{banner.title}{" "}
+				{section ? (
 					<button
 						className={lineLinkClass}
 						data-testid={
@@ -176,22 +174,25 @@ function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 						type="button"
 					>
 						Set up
-					</button>{" "}
-				</>
-			) : null}
-			<button
-				className={quietButtonClass}
+					</button>
+				) : null}
+			</span>
+			<Button
 				data-testid="banner-not-now"
 				onClick={() => send(client, "setup.dismissBanner")}
-				type="button"
+				size="sm"
+				variant="ghost"
 			>
 				Not now
-			</button>
-		</p>
+			</Button>
+		</div>
 	);
 }
 
-/** The Stop control in the header row while the recorder holds this meeting. */
+/**
+ * The Stop control in the header row while the recorder holds this meeting
+ * in a wide window; a narrow one has the recorder bar's.
+ */
 function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
 	const client = useBridge();
 	const elapsed = useElapsedSeconds(
@@ -221,9 +222,10 @@ function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
  * "Process again" runs the meeting from the start with its recording; the
  * host says when it is offered (`canProcessAgain`) and words any refusal on
  * the error line. The button stays disabled until the host answers, so a
- * second click cannot start a second run.
+ * second click cannot start a second run. It sits in the header row, or on
+ * the failure line when processing failed.
  */
-function HeaderProcessAgain({ disabled }: { disabled: boolean }) {
+function ProcessAgainButton({ disabled }: { disabled: boolean }) {
 	const client = useBridge();
 	const [starting, setStarting] = useState(false);
 	async function processAgain() {
@@ -248,6 +250,52 @@ function HeaderProcessAgain({ disabled }: { disabled: boolean }) {
 			<RotateCcwIcon aria-hidden="true" />
 			Process again
 		</Button>
+	);
+}
+
+/**
+ * Processing failed: a red result line in the tab's place, with the one
+ * action that recovers from where it failed. With no transcript the
+ * transcription failed, and only Process again (the whole run) helps; with
+ * a transcript the summary failed, and Re-run summary is enough, or
+ * Process again where the host does not allow that.
+ */
+function FailureLine({
+	detail,
+	onRerunSummary,
+}: {
+	detail: MeetingDetailSnapshot;
+	onRerunSummary: () => void;
+}) {
+	const summaryFailed = detail.transcript.length > 0;
+	let action: ReactNode;
+	if (summaryFailed && detail.canRerunSummary) {
+		action = (
+			<Button
+				data-testid="failure-rerun-summary"
+				disabled={detail.isBusy}
+				onClick={onRerunSummary}
+				size="sm"
+				variant="outline"
+			>
+				<RefreshCwIcon aria-hidden="true" />
+				Re-run summary
+			</Button>
+		);
+	} else if (detail.canProcessAgain) {
+		action = <ProcessAgainButton disabled={detail.isBusy} />;
+	}
+	return (
+		<ResultLine
+			actions={action}
+			data-testid="processing-failed"
+			tone="destructive"
+		>
+			<span className="font-medium">Processing failed.</span>{" "}
+			{detail.failureReason
+				? firstSentence(detail.failureReason)
+				: "No reason was reported."}
+		</ResultLine>
 	);
 }
 
@@ -412,7 +460,11 @@ export function MeetingDetail({
 					setupBanner={app?.setupBanner}
 				/>
 			) : list && !hasSelection ? (
-				<ContentColumn crumbs={["Meetings"]} leading={<MeetingsToggle />}>
+				<ContentColumn
+					bar={<RecorderBar />}
+					crumbs={["Meetings"]}
+					leading={<MeetingsToggle />}
+				>
 					<SetupBanner banner={app?.setupBanner} />
 					<EmptyState
 						body="Pick a meeting on the left to read its summary, transcript and tasks."
@@ -458,6 +510,8 @@ function DetailBody({
 		send(client, "meeting.setTab", { tab: next });
 	}
 
+	// A narrow window's recorder bar holds Stop for every meeting.
+	const { narrow } = useContext(NarrowLayoutContext);
 	const entry = progress?.entries.find((item) => item.meetingID === detail.id);
 	const working = detail.state === "processing" || detail.state === "queued";
 	const holdsRecorder =
@@ -519,30 +573,7 @@ function DetailBody({
 			return <ProcessingCard entry={entry} state={detail.state} />;
 		}
 		if (detail.state === "failed") {
-			return (
-				<EmptyState
-					action={
-						<Button
-							data-testid={`${current}-try-again`}
-							disabled={!detail.canRerunSummary || detail.isBusy}
-							onClick={rerun}
-							variant="outline"
-						>
-							<RefreshCwIcon aria-hidden="true" />
-							Try again
-						</Button>
-					}
-					body={
-						detail.failureReason
-							? firstSentence(detail.failureReason)
-							: "No reason was reported."
-					}
-					icon={<CircleAlertIcon aria-hidden="true" />}
-					id={`empty-${current}`}
-					title="Processing failed"
-					variant="destructive"
-				/>
-			);
+			return <FailureLine detail={detail} onRerunSummary={rerun} />;
 		}
 		switch (current) {
 			case "summary":
@@ -570,9 +601,11 @@ function DetailBody({
 
 	const actions = (
 		<div className="flex shrink-0 items-center gap-2">
-			{holdsRecorder && recording ? <HeaderStop recording={recording} /> : null}
-			{detail.canProcessAgain ? (
-				<HeaderProcessAgain disabled={detail.isBusy} />
+			{holdsRecorder && recording && !narrow ? (
+				<HeaderStop recording={recording} />
+			) : null}
+			{detail.canProcessAgain && detail.state !== "failed" ? (
+				<ProcessAgainButton disabled={detail.isBusy} />
 			) : null}
 			<Button
 				data-testid="export-meeting"
@@ -595,28 +628,31 @@ function DetailBody({
 				</MenuTrigger>
 				<MenuPopup align="end" sideOffset={4}>
 					{detail.templates.length > 0 ? (
-						<MenuGroup>
-							<MenuGroupLabel>Summary template</MenuGroupLabel>
-							<MenuRadioGroup
-								data-testid="template-select"
-								disabled={detail.isBusy}
-								onValueChange={(templateID: unknown) => {
-									if (
-										typeof templateID === "string" &&
-										templateID !== detail.templateID
-									) {
-										send(client, "meeting.setTemplate", { templateID });
-									}
-								}}
-								value={detail.templateID}
-							>
-								{detail.templates.map((template) => (
-									<MenuRadioItem key={template.id} value={template.id}>
-										{template.name}
-									</MenuRadioItem>
-								))}
-							</MenuRadioGroup>
-						</MenuGroup>
+						<>
+							<MenuGroup>
+								<MenuGroupLabel>Summary template</MenuGroupLabel>
+								<MenuRadioGroup
+									data-testid="template-select"
+									disabled={detail.isBusy}
+									onValueChange={(templateID: unknown) => {
+										if (
+											typeof templateID === "string" &&
+											templateID !== detail.templateID
+										) {
+											send(client, "meeting.setTemplate", { templateID });
+										}
+									}}
+									value={detail.templateID}
+								>
+									{detail.templates.map((template) => (
+										<MenuRadioItem key={template.id} value={template.id}>
+											{template.name}
+										</MenuRadioItem>
+									))}
+								</MenuRadioGroup>
+							</MenuGroup>
+							<MenuSeparator />
+						</>
 					) : null}
 					<MenuItem
 						disabled={!detail.canRerunSummary || detail.isBusy}
@@ -685,6 +721,7 @@ function DetailBody({
 	return (
 		<ContentColumn
 			actions={actions}
+			bar={<RecorderBar />}
 			crumbs={["Meetings", detail.title]}
 			leading={<MeetingsToggle />}
 		>

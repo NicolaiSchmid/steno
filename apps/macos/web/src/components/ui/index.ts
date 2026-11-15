@@ -53,8 +53,12 @@ export {
 } from "./dialog";
 export type { DisclosureProps } from "./disclosure";
 export { Disclosure } from "./disclosure";
-export type { DrawerPopupProps, DrawerProps } from "./drawer";
-export { Drawer, DrawerPopup } from "./drawer";
+export type {
+	DrawerCloseButtonProps,
+	DrawerPopupProps,
+	DrawerProps,
+} from "./drawer";
+export { Drawer, DrawerCloseButton, DrawerPopup } from "./drawer";
 export type { EmptyStateProps } from "./empty-state";
 export { EmptyState, emptyStateIconVariants } from "./empty-state";
 export { focusRingClass, focusWithinRingClass } from "./focus-ring";

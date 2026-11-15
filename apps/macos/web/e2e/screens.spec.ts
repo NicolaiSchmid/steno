@@ -31,7 +31,7 @@ const MAIN_STATES: readonly State[] = [
 	["empty", "scenario=empty", "empty-detail-title"],
 	["recording", "scenario=recording", "auto-stop"],
 	["denied", "scenario=denied", "denied-microphone"],
-	["failed", "scenario=failed", "summary-try-again"],
+	["failed", "scenario=failed", "processing-failed"],
 	["processing", "scenario=processing", "processing-card"],
 	// The footer sits below the fold; the shot scrolls it into view.
 	["export-failed", "scenario=export-failed&tab=summary", "export-again"],
@@ -115,7 +115,12 @@ const ONBOARDING_STATES: readonly State[] = [
 /** Clicked before the shot: the trigger of a dialog state. */
 const CLICKS: Record<string, string> = { acknowledgements: "acknowledgements" };
 /** Scrolled into view before the shot. */
-const SCROLLS: Record<string, string> = { "export-failed": "meeting-footer" };
+const SCROLLS: Record<string, string> = {
+	"export-failed": "meeting-footer",
+	summaries: "summaries-status",
+	"summaries-connected": "summaries-status",
+	"summaries-failed": "summaries-status",
+};
 
 mkdirSync(OUT, { recursive: true });
 
@@ -467,13 +472,84 @@ for (const scheme of SCHEMES) {
 		await expect(page.getByTestId("meetings-drawer")).toBeVisible();
 		await expect(page.getByTestId("meeting-list")).toBeVisible();
 		await settle(page);
+		await expect(page.getByTestId("close-meetings")).toBeInViewport({
+			ratio: 1,
+		});
 		await page.screenshot({
 			path: `${OUT}/main-${scheme}-zoom-200-meetings.png`,
 		});
+		// Close gives the focus back to the Meetings button; so does a pick.
+		await page.getByTestId("close-meetings").click();
+		await expect(page.getByTestId("meetings-drawer")).toHaveCount(0);
+		await expect(page.getByTestId("show-meetings")).toBeFocused();
+		await page.getByTestId("show-meetings").click();
 		await page
 			.getByTestId("meeting-00000000-0000-0000-0000-000000000003")
 			.click();
 		await expect(page.getByTestId("meetings-drawer")).toHaveCount(0);
+		await expect(page.getByTestId("show-meetings")).toBeFocused();
+		await expect(page.getByTestId("recorder-bar")).toHaveCount(0);
+		expect(external).toEqual([]);
+	});
+
+	/**
+	 * Recording in a narrow window (200 % text), another meeting open: the
+	 * sidebar is in the closed drawer, so the recorder bar under the header
+	 * row holds the status, Stop, the auto-stop countdown and Keep
+	 * recording, all in view without opening the drawer.
+	 */
+	test(`main ${scheme} narrow recording`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 600, height: 380 });
+		await page.goto(
+			`/#/main?scenario=recording-elsewhere${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		await expect(page.getByTestId("meeting-list")).toHaveCount(0);
+		await expect(page.getByTestId("header-stop")).toHaveCount(0);
+		const bar = page.getByTestId("recorder-bar");
+		await expect(bar).toContainText("Recording");
+		for (const id of ["bar-stop", "auto-stop", "keep-recording"]) {
+			await expect(bar.getByTestId(id)).toBeInViewport({ ratio: 1 });
+		}
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-narrow-recording.png`,
+		});
+		expect(external).toEqual([]);
+	});
+
+	/**
+	 * The ⋯ menu opened from the keyboard: the first template choice holds
+	 * the focus, its check in the leading slot, a separator before Re-run
+	 * summary.
+	 */
+	test(`main ${scheme} focus menu radio`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		await page.goto(`/#/main?tab=summary${scheme === "dark" ? "&dark" : ""}`);
+		await settle(page);
+		await page.getByTestId("meeting-actions").focus();
+		await page.keyboard.press("Enter");
+		const menu = page.getByRole("menu");
+		await expect(menu).toBeVisible();
+		const radio = menu.getByRole("menuitemradio").first();
+		await expect(radio).toBeFocused();
+		await expect(radio).toHaveAttribute("data-highlighted", "");
+		await settle(page);
+		const box = await menu.boundingBox();
+		if (!box) {
+			throw new Error("the menu has no box");
+		}
+		const pad = 24;
+		await page.screenshot({
+			clip: {
+				x: box.x - pad,
+				y: box.y - pad,
+				width: box.width + pad * 2,
+				height: Math.min(760 - box.y + pad, box.height + pad * 2),
+			},
+			path: `${OUT}/main-${scheme}-focus-menu-radio.png`,
+		});
 		expect(external).toEqual([]);
 	});
 

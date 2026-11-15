@@ -69,8 +69,14 @@ export interface PermissionRowProps {
 	 * it", which skips the step.
 	 */
 	acknowledgeOnly?: boolean;
-	/** The row's action is the page's main one (onboarding): a primary button. */
+	/**
+	 * Onboarding's compact row. Its action is a primary button while the row
+	 * `leads` (the first required step not yet allowed), an outline one
+	 * otherwise, so the page shows one primary at a time.
+	 */
 	prominent?: boolean;
+	/** The page's next step (see `prominent`); true unless the page says. */
+	leads?: boolean;
 	/**
 	 * Another row's request is in flight: the host handles one at a time, so
 	 * every Allow waits while one runs (the test recording takes 30 s).
@@ -104,6 +110,7 @@ export function PermissionRow({
 	onCheckAgain,
 	acknowledgeOnly = false,
 	prominent = false,
+	leads = true,
 	requestDisabled = false,
 	waitsForRecording = false,
 }: PermissionRowProps) {
@@ -130,7 +137,7 @@ export function PermissionRow({
 	} else if (waitsForRecording && state !== "granted") {
 		description = TONE_TEST_WAITS;
 	}
-	const action = prominent && !optional ? "primary" : "outline";
+	const action = prominent && leads && !optional ? "primary" : "outline";
 	const openSettings = (variant: typeof action) => (
 		<Button
 			data-testid={`permission-${kind}-open`}

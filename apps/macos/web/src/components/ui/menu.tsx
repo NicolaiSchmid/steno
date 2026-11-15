@@ -169,7 +169,12 @@ export interface MenuRadioItemProps
 	className?: string;
 }
 
-/** A choice in a `MenuRadioGroup`: the words, a check at the trailing edge when chosen. */
+/**
+ * A choice in a `MenuRadioGroup`: a leading 16 px slot, in the place an
+ * item's icon takes so the words line up with the items around it, with a
+ * check in it when chosen; then the words. End the group with a
+ * `MenuSeparator`, so the item after it does not read as another choice.
+ */
 export function MenuRadioItem({
 	className,
 	children,
@@ -180,10 +185,15 @@ export function MenuRadioItem({
 			className={cn(menuItemVariants(), className)}
 			{...props}
 		>
+			<span
+				className="-mx-0.5 flex size-4 shrink-0 items-center justify-center"
+				data-slot="indicator"
+			>
+				<BaseMenu.RadioItemIndicator className="flex">
+					<CheckIcon aria-hidden="true" className="size-4 text-foreground" />
+				</BaseMenu.RadioItemIndicator>
+			</span>
 			<span className="min-w-0 flex-1 truncate">{children}</span>
-			<BaseMenu.RadioItemIndicator className="ml-auto flex">
-				<CheckIcon aria-hidden="true" className="size-4 text-foreground" />
-			</BaseMenu.RadioItemIndicator>
 		</BaseMenu.RadioItem>
 	);
 }

@@ -1,13 +1,17 @@
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
+import { XIcon } from "lucide-react";
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
+import { Button } from "./button";
 
 /**
  * A panel that slides in from the window's leading edge over a dimmed
  * backdrop: the main window's sidebar and meeting list when the window is
  * too narrow to show them beside the reading column. Modal, so focus stays
- * inside and Escape or a click on the backdrop closes it. Solid sidebar
- * surface, the dialog shadow in light; the content lays itself out.
+ * inside and Escape, a click on the backdrop or `DrawerCloseButton` closes
+ * it. Solid sidebar surface, the dialog shadow in light; the content lays
+ * itself out. Opened from a button that is not its trigger, it takes
+ * `finalFocus` to give the focus back to that button.
  */
 export const Drawer = BaseDialog.Root;
 
@@ -37,5 +41,36 @@ export function DrawerPopup({ className, ...props }: DrawerPopupProps) {
 				{...props}
 			/>
 		</BaseDialog.Portal>
+	);
+}
+
+export interface DrawerCloseButtonProps
+	extends Omit<ComponentProps<typeof BaseDialog.Close>, "className"> {
+	className?: string;
+}
+
+/**
+ * The drawer's visible Close: a ghost ✕ at the trailing edge of the first
+ * 52 px header row inside it, labelled for a screen reader.
+ */
+export function DrawerCloseButton({
+	className,
+	"aria-label": ariaLabel = "Close",
+	...props
+}: DrawerCloseButtonProps) {
+	return (
+		<BaseDialog.Close
+			render={
+				<Button
+					aria-label={ariaLabel}
+					className={cn("absolute top-3 right-3", className)}
+					size="icon-sm"
+					variant="ghost"
+				/>
+			}
+			{...props}
+		>
+			<XIcon aria-hidden="true" />
+		</BaseDialog.Close>
 	);
 }

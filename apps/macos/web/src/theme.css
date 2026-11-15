@@ -602,4 +602,17 @@
 		mask-position: top, bottom;
 		mask-repeat: no-repeat;
 	}
+
+	/*
+	 * Under a scroll edge's hairline (`ScrollArea edge`), once the content
+	 * has scrolled: the cut line fades in over 0.5 rem after 2 px, so no sliver of a
+	 * glyph cut at the hairline shows under it. At rest nothing fades.
+	 */
+	.scroll-edge-fade[data-overflow-y-start] {
+		mask-image: linear-gradient(
+			to bottom,
+			transparent 0.125rem,
+			black 0.625rem
+		);
+	}
 }
