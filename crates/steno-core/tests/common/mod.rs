@@ -110,6 +110,15 @@ pub fn speakers(meeting_id: Uuid) -> Vec<Speaker> {
     ]
 }
 
+/// A voice unlike the sample's Speaker 1 (cosine 0 with it).
+pub fn other_voice() -> Embedding {
+    Embedding(
+        (0..Embedding::DIMENSION)
+            .map(|index| if index % 2 == 0 { 0.25 } else { -0.25 })
+            .collect(),
+    )
+}
+
 pub fn segments(meeting_id: Uuid, speakers: &[Speaker]) -> Vec<TranscriptSegment> {
     vec![
         TranscriptSegment {

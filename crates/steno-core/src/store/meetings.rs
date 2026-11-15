@@ -15,7 +15,8 @@ use super::{
 use crate::model::{
     AudioAsset, AudioRetention, Decision, LanguageTag, Meeting, MeetingState, MeetingStateKind,
     MeetingTask, Participant, RecordingEndReason, Speaker, SpeakerAssignment,
-    SpeakerNameSuggestion, SummaryDocument, TitleOrigin, TranscriptSegment, derived_uuid,
+    SpeakerNameSuggestion, SummaryDocument, TitleOrigin, TranscriptSegment, VoiceStrength,
+    derived_uuid, me_speaker_id, room_speaker_id,
 };
 use crate::paths::file_url_path;
 
@@ -439,15 +440,17 @@ impl Store {
     /// One transaction: the meeting's processing columns plus every speaker
     /// and segment, replaced. The merge stage calls this.
     ///
-    /// A confirmed speaker keeps its confirmation and its name suggestion
-    /// when its id comes back (ids derive from the meeting id and the
-    /// cluster label), and every person with a confirmed speaker here has
-    /// their voice recomputed. A kept confirmation whose new row has no
-    /// clip keeps the stored `sampleClipURL` and `sampleClipRange`, so the
-    /// clip the user confirmed stays playable and is not swept. The user's
-    /// other answers come back with the id too: a dismissed voice stays
-    /// dismissed, and a No to a person stays, so a new suggestion of a
-    /// person the user said No to for that voice is dropped.
+    /// The user's answers about the stored voices come back on the new rows
+    /// that are the same voice ([`same_voices`]), never by id alone: ids
+    /// derive from "Speaker n", which counts by first speech, so another
+    /// run can give a label to another voice. A kept confirmation keeps its
+    /// person and, when the new row has no clip, the stored
+    /// `sampleClipURL` and `sampleClipRange`, so the clip the user
+    /// confirmed stays playable and is not swept; a dismissed voice stays
+    /// dismissed; a No to a person stays, so a new suggestion of that
+    /// person for that voice is dropped. An answer whose voice is not found
+    /// again is dropped, and the voice shows for review. Every person with
+    /// a confirmed speaker before has their voice recomputed.
     ///
     /// Commits durably ([`Store::write_durably`]): the pipeline removes the
     /// clips the earlier rows named once this returns, and a power loss
@@ -462,27 +465,32 @@ impl Store {
         self.write_durably(|transaction| {
             write_processing_results(transaction, meeting)?;
             let replaced = people::speakers_of_meeting(transaction, meeting.id)?;
-            // The stored confirmed rows, by id: a row this run writes under
-            // one of their ids takes the confirmation, and the stored clip
-            // only when this run gives none.
-            let confirmed: BTreeMap<Uuid, &Speaker> = replaced
-                .iter()
-                .filter(|speaker| speaker.assignment.is_confirmed())
-                .map(|speaker| (speaker.id, speaker))
-                .collect();
-            let voices: BTreeSet<Uuid> = confirmed
-                .values()
-                .filter_map(|speaker| speaker.person_id())
-                .collect();
-            let dismissed: BTreeSet<Uuid> = replaced
-                .iter()
-                .filter(|speaker| speaker.dismissed)
-                .map(|speaker| speaker.id)
-                .collect();
             // Deleting the speakers cascades to their suggestions and the
             // user's Noes.
             let suggestions = people::name_suggestions_of_meeting(transaction, meeting.id)?;
             let rejections = people::suggestion_rejections_of_meeting(transaction, meeting.id)?;
+            let answered: Vec<&Speaker> = replaced
+                .iter()
+                .filter(|speaker| {
+                    speaker.assignment.is_confirmed()
+                        || speaker.dismissed
+                        || rejections
+                            .iter()
+                            .any(|rejection| rejection.speaker_id == speaker.id)
+                })
+                .collect();
+            // New id -> the stored row whose answers it takes.
+            let earlier: BTreeMap<Uuid, &Speaker> = same_voices(meeting.id, &answered, speakers)
+                .into_iter()
+                .map(|(old, new)| (new, old))
+                .collect();
+            // Kept or dropped, each stored confirmation's person is
+            // recomputed.
+            let voices: BTreeSet<Uuid> = replaced
+                .iter()
+                .filter(|speaker| speaker.assignment.is_confirmed())
+                .filter_map(Speaker::person_id)
+                .collect();
             transaction.execute(
                 "DELETE FROM transcriptSegment WHERE meetingID = ?1",
                 [DbUuid(meeting.id)],
@@ -491,30 +499,43 @@ impl Store {
                 "DELETE FROM speaker WHERE meetingID = ?1",
                 [DbUuid(meeting.id)],
             )?;
+            let mut kept_rejections = Vec::new();
             for speaker in speakers {
                 let mut speaker = speaker.clone();
                 speaker.meeting_id = meeting.id;
-                if let Some(kept) = confirmed.get(&speaker.id) {
-                    speaker.assignment = kept.assignment.clone();
-                    if speaker.sample_clip_url.is_none() && kept.sample_clip_url.is_some() {
-                        speaker.sample_clip_url.clone_from(&kept.sample_clip_url);
-                        speaker.sample_clip_range = kept.sample_clip_range;
+                if let Some(kept) = earlier.get(&speaker.id) {
+                    let rejected: BTreeSet<Uuid> = rejections
+                        .iter()
+                        .filter(|rejection| rejection.speaker_id == kept.id)
+                        .map(|rejection| {
+                            kept_rejections.push(people::Rejection {
+                                speaker_id: speaker.id,
+                                ..*rejection
+                            });
+                            rejection.person_id
+                        })
+                        .collect();
+                    if kept.assignment.is_confirmed() {
+                        speaker.assignment = kept.assignment.clone();
+                        if speaker.sample_clip_url.is_none() && kept.sample_clip_url.is_some() {
+                            speaker.sample_clip_url.clone_from(&kept.sample_clip_url);
+                            speaker.sample_clip_range = kept.sample_clip_range;
+                        }
+                    } else if let SpeakerAssignment::Suggested { person_id, .. } =
+                        speaker.assignment
+                        && rejected.contains(&person_id)
+                    {
+                        speaker.assignment = SpeakerAssignment::Unknown;
                     }
-                } else if let SpeakerAssignment::Suggested { person_id, .. } = speaker.assignment
-                    && rejections
-                        .get(&speaker.id)
-                        .is_some_and(|rejected| rejected.contains(&person_id))
-                {
-                    speaker.assignment = SpeakerAssignment::Unknown;
-                }
-                if dismissed.contains(&speaker.id) {
-                    speaker.dismissed = true;
-                    speaker.assignment = SpeakerAssignment::Unknown;
+                    if kept.dismissed {
+                        speaker.dismissed = true;
+                        speaker.assignment = SpeakerAssignment::Unknown;
+                    }
                 }
                 people::insert_speaker(transaction, &speaker)?;
             }
             people::replace_name_suggestions(transaction, meeting.id, &suggestions)?;
-            people::restore_suggestion_rejections(transaction, meeting.id, &rejections)?;
+            people::restore_suggestion_rejections(transaction, meeting.id, &kept_rejections)?;
             for segment in segments {
                 let mut segment = segment.clone();
                 segment.meeting_id = meeting.id;
@@ -635,6 +656,62 @@ impl Store {
     }
 }
 
+/// Pairs each of `earlier` (stored rows the user answered) with the new
+/// row that is the same voice, one to one, best match first: the cosine of
+/// their embeddings, from [`VoiceStrength::FLOOR`] up; the same id wins a
+/// tie. The "me" speaker and the room row of a run without diarization
+/// are lanes, not clusters, so each pairs only with itself, whatever its
+/// embedding. A row without an embedding pairs with nothing else. Returns
+/// `(earlier row, new id)`.
+pub(super) fn same_voices<'a>(
+    meeting_id: Uuid,
+    earlier: &[&'a Speaker],
+    speakers: &[Speaker],
+) -> Vec<(&'a Speaker, Uuid)> {
+    let lanes = [me_speaker_id(meeting_id), room_speaker_id(meeting_id)];
+    let mut pairs: Vec<(f32, &'a Speaker, Uuid)> = Vec::new();
+    for &old in earlier {
+        for new in speakers {
+            let score = if lanes.contains(&old.id) || lanes.contains(&new.id) {
+                if old.id == new.id {
+                    f32::INFINITY
+                } else {
+                    continue;
+                }
+            } else if let (Some(lhs), Some(rhs)) = (&old.embedding, &new.embedding) {
+                let similarity = lhs.cosine_similarity(rhs);
+                if similarity < VoiceStrength::FLOOR {
+                    continue;
+                }
+                similarity
+            } else {
+                continue;
+            };
+            pairs.push((score, old, new.id));
+        }
+    }
+    pairs.sort_by(|lhs, rhs| {
+        rhs.0
+            .total_cmp(&lhs.0)
+            .then_with(|| (rhs.1.id == rhs.2).cmp(&(lhs.1.id == lhs.2)))
+            .then_with(|| (lhs.1.id, lhs.2).cmp(&(rhs.1.id, rhs.2)))
+    });
+    let mut taken_old = BTreeSet::new();
+    let mut taken_new = BTreeSet::new();
+    pairs
+        .into_iter()
+        .filter(|&(_, old, new)| {
+            let free = !taken_old.contains(&old.id) && !taken_new.contains(&new);
+            if free {
+                taken_old.insert(old.id);
+                taken_new.insert(new);
+            }
+            free
+        })
+        .map(|(_, old, new)| (old, new))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -716,7 +793,10 @@ mod tests {
             meeting_id: meeting.id,
             cluster_label: "Speaker 1".to_owned(),
             assignment: SpeakerAssignment::Confirmed { person_id: anna.id },
-            embedding: None,
+            // The voice the re-run finds again.
+            embedding: Some(crate::model::Embedding(
+                vec![0.5; crate::model::Embedding::DIMENSION],
+            )),
             sample_clip_range: None,
             sample_clip_url: Some("file:///audio/speakers/earlier.wav".to_owned()),
             cluster_confidence: 1.0,

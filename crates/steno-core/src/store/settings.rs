@@ -166,6 +166,14 @@ pub(super) fn default_retention(connection: &Connection) -> Result<AudioRetentio
     }))
 }
 
+/// Who the user is ([`Settings::self_person_id`]), inside a caller's
+/// transaction; `None` when unset or the settings do not read.
+pub(super) fn self_person_id(connection: &Connection) -> Option<uuid::Uuid> {
+    overlaid(&Settings::default(), stored_rows(connection).ok()?)
+        .ok()?
+        .self_person_id
+}
+
 impl Store {
     pub fn settings(&self) -> Result<Settings> {
         self.settings_with_defaults(&Settings::default())

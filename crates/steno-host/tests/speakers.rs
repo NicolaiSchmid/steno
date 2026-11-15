@@ -742,8 +742,8 @@ fn no_to_a_suggestion_records_it_and_leaves_voice_memory() {
     assert!(
         options(&harness, SPEAKER_ANNA, "ann")
             .iter()
-            .any(|option| option.person_id == Some(uuid(PERSON_ANNA))),
-        "still found when typed"
+            .any(|option| option.person_id == Some(uuid(PERSON_ANNA)) && option.reason.is_none()),
+        "still found when typed, without a reason"
     );
     assert!(
         options(&harness, SPEAKER_UNKNOWN, "")
@@ -795,6 +795,47 @@ fn the_last_invitee_left_is_offered_as_such() {
             .filter(|option| option.label == "Maya" || option.label == "Tom")
             .all(|option| option.reason == Some(SpeakerOptionReason::Invited))
     );
+}
+
+/// The last invitee is counted once per name, however many participant
+/// rows name them, and outranks the summary having mentioned them.
+#[test]
+fn the_last_invitee_counts_names_once_and_outranks_mentioned() {
+    let harness = sample();
+    let invitee = |n: u32, name: &str| Participant {
+        id: uuid(n),
+        meeting_id: uuid(MEETING),
+        person_id: None,
+        display_name: name.to_owned(),
+        role: ParticipantRole::Them,
+        email: None,
+    };
+    for (n, name) in [(0x31, "Maya"), (0x32, " maya ")] {
+        harness.store.save_participant(&invitee(n, name)).unwrap();
+    }
+    let meeting = harness.store.meeting(uuid(MEETING)).unwrap().unwrap();
+    harness
+        .store
+        .replace_summary(
+            &meeting,
+            &[],
+            &[],
+            &[SpeakerNameSuggestion {
+                speaker_id: uuid(SPEAKER_UNKNOWN),
+                name: Some("Maya".to_owned()),
+                confidence: 0.9,
+                evidence: "Danke, Maya.".to_owned(),
+            }],
+        )
+        .unwrap();
+    select(&harness, SPEAKER_ANNA, person_option(PERSON_ANNA, "Anna")).unwrap();
+    let offered = options(&harness, SPEAKER_UNKNOWN, "");
+    let mayas: Vec<_> = offered
+        .iter()
+        .filter(|option| option.label.trim().eq_ignore_ascii_case("maya"))
+        .collect();
+    assert_eq!(mayas.len(), 1, "{offered:?}");
+    assert_eq!(mayas[0].reason, Some(SpeakerOptionReason::LastInvitee));
 }
 
 /// Not a person: the voice leaves the counts and the chips, its turn keeps
@@ -869,24 +910,43 @@ fn remove_name_unnames_the_voice() {
     assert_eq!(harness.fakes.pipeline.redeliveries.lock().unwrap().len(), 1);
 }
 
-/// The quote is what the clip says: the voice's words inside the clip
-/// range.
+/// The quote is what the clip plays: the voice's words when every segment
+/// used lies inside the clip range. A segment only partly inside it, or
+/// the longest segment of a voice without a clip, is context, never a
+/// quote.
 #[test]
-fn the_quote_is_the_clips_words() {
+fn the_quote_is_the_clips_words_and_anything_else_is_context() {
     let harness = sample();
     let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    let said = "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen.";
     assert_eq!(
-        detail["speakers"][0]["quote"],
-        "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen."
+        detail["speakers"][0]["context"], said,
+        "12-41 s around a 12-22 s clip"
     );
+    assert!(detail["speakers"][0].get("quote").is_none());
     assert!(
-        detail["speakers"][2].get("quote").is_none(),
-        "a voice that says nothing has no quote"
+        detail["speakers"][2].get("quote").is_none()
+            && detail["speakers"][2].get("context").is_none(),
+        "a voice that says nothing has neither"
     );
     assert_eq!(
         detail["speakers"][2]["suggestionStrength"],
         json!(VoiceStrength::of(0.87))
     );
+
+    let meeting = harness.store.meeting(uuid(MEETING)).unwrap().unwrap();
+    let speakers = harness.store.speakers(meeting.id).unwrap();
+    let mut segments = harness.store.segments(meeting.id).unwrap();
+    segments[0].start = 13.0;
+    segments[0].end = 21.0;
+    harness
+        .store
+        .replace_transcript(&meeting, &segments, &speakers)
+        .unwrap();
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["speakers"][0]["quote"], said, "inside the clip");
+    assert!(detail["speakers"][0].get("context").is_none());
 }
 
 /// A voice match below the floor is not shown: the speaker reads as

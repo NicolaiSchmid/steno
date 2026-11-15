@@ -88,8 +88,16 @@ impl OptionList<'_> {
     /// Appends the option unless the person is excluded or already listed,
     /// an option of the same name is already listed (create rows), the user
     /// said No to them for this voice and nothing is typed, or the query
-    /// filters it out.
+    /// filters it out. A person the user said No to comes back, when typed,
+    /// without a reason.
     fn add(&mut self, kind: OptionKind, tag: Option<OptionTag>) {
+        let tag = tag.filter(|_| {
+            let name = match &kind {
+                OptionKind::Person(person) => &person.display_name,
+                OptionKind::Create(text) => text,
+            };
+            !self.is_rejected(name)
+        });
         match &kind {
             OptionKind::Person(person) => {
                 if Some(person.id) == self.excluded_person_id
@@ -113,6 +121,29 @@ impl OptionList<'_> {
             self.listed_person_ids.push(person.id);
         }
         self.options.push(option);
+    }
+
+    /// The invitees not yet offered, tagged `invited`. One already offered
+    /// as mentioned takes `LastInvitee`, the stronger reason; a voice match
+    /// stays one.
+    fn add_invitees(&mut self, invitees: Vec<OptionKind>, invited: OptionTag) {
+        for invitee in invitees {
+            let name = match &invitee {
+                OptionKind::Person(person) => &person.display_name,
+                OptionKind::Create(name) => name,
+            };
+            if let Some(listed) = self
+                .options
+                .iter_mut()
+                .find(|option| Person::names_match(option.display_name(), name))
+            {
+                if invited == OptionTag::LastInvitee && listed.tag == Some(OptionTag::Mentioned) {
+                    listed.tag = Some(invited);
+                }
+            } else {
+                self.add(invitee, Some(invited));
+            }
+        }
     }
 
     fn contains_name(&self, name: &str) -> bool {
@@ -139,7 +170,8 @@ fn open_voices(speakers: &[Speaker]) -> impl Iterator<Item = &Speaker> {
 }
 
 /// The meeting's invitees nobody's voice is named or suggested as here,
-/// and not answered No for this voice, as a person when Steno knows them.
+/// and not answered No for this voice, as a person when Steno knows them;
+/// each once, however many participant rows name them.
 fn invitees(
     participants: &[steno_core::Participant],
     persons: &[Person],
@@ -170,7 +202,19 @@ fn invitees(
                 None => Some(OptionKind::Create(name.to_owned())),
             }
         })
-        .collect()
+        .fold(Vec::new(), |mut unique: Vec<OptionKind>, invitee| {
+            let name = |kind: &OptionKind| match kind {
+                OptionKind::Person(person) => person.display_name.clone(),
+                OptionKind::Create(name) => name.clone(),
+            };
+            if !unique
+                .iter()
+                .any(|listed| Person::names_match(&name(listed), &name(&invitee)))
+            {
+                unique.push(invitee);
+            }
+            unique
+        })
 }
 
 /// What [`build_options`] ranks from besides the speaker and the query.
@@ -264,15 +308,7 @@ pub fn build_options(
     } else {
         OptionTag::Invited
     };
-    for invitee in invitees {
-        let name = match &invitee {
-            OptionKind::Person(person) => &person.display_name,
-            OptionKind::Create(name) => name,
-        };
-        if !list.contains_name(name) {
-            list.add(invitee, Some(invited));
-        }
-    }
+    list.add_invitees(invitees, invited);
 
     for other in speakers
         .iter()
@@ -307,22 +343,39 @@ pub fn build_options(
 /// Characters kept before an excerpt is cut and "…" appended.
 pub const EXCERPT_MAX_LENGTH: usize = 160;
 
-/// What a speaker says in their sample clip, so the quote is what plays:
-/// their segments overlapping the clip range; without a clip range (or,
-/// which the diarizer never produces, one over none of their speech),
-/// their longest segment; "" without one. A leading "…" marks text that starts
-/// before the clip; text over [`EXCERPT_MAX_LENGTH`] is cut with "…".
+/// What a speaker's row shows of what they said.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Excerpt {
+    pub text: String,
+    /// Whether `text` is exactly what the sample clip plays: every segment
+    /// used lies inside the clip. Segments carry no word timings, so a
+    /// segment only partly inside the clip makes the text context around
+    /// it, as does the longest segment of a voice without a clip.
+    pub in_clip: bool,
+}
+
+/// Slack at the clip's edges for a segment to count as inside it, in
+/// seconds.
+const CLIP_EDGE: f64 = 0.25;
+
+/// What a speaker says in their sample clip: their segments overlapping the
+/// clip range, a quote when all of them lie inside it ([`Excerpt::in_clip`]);
+/// without a clip range (or, which the diarizer never produces, one over
+/// none of their speech), their longest segment as context; empty without
+/// one. A leading "…" marks text that starts before the clip; text over
+/// [`EXCERPT_MAX_LENGTH`] is cut with "…".
 #[must_use]
-pub fn excerpt(speaker: &Speaker, segments: &[TranscriptSegment]) -> String {
+pub fn excerpt(speaker: &Speaker, segments: &[TranscriptSegment]) -> Excerpt {
     let own: Vec<&TranscriptSegment> = segments
         .iter()
         .filter(|segment| segment.speaker_id == Some(speaker.id))
         .collect();
     if own.is_empty() {
-        return String::new();
+        return Excerpt::default();
     }
     let mut used: Vec<&TranscriptSegment> = Vec::new();
     let mut cut_at_start = false;
+    let mut in_clip = false;
     if let Some(range) = speaker.sample_clip_range {
         used = own
             .iter()
@@ -333,6 +386,9 @@ pub fn excerpt(speaker: &Speaker, segments: &[TranscriptSegment]) -> String {
         if used.first().is_some_and(|first| first.start < range.lower) {
             cut_at_start = true;
         }
+        in_clip = used.iter().all(|segment| {
+            segment.start >= range.lower - CLIP_EDGE && segment.end <= range.upper + CLIP_EDGE
+        });
     }
     if used.is_empty() {
         let longest = own
@@ -342,6 +398,7 @@ pub fn excerpt(speaker: &Speaker, segments: &[TranscriptSegment]) -> String {
             .expect("own is not empty");
         used = vec![longest];
         cut_at_start = false;
+        in_clip = false;
     }
     let mut text = used
         .iter()
@@ -356,7 +413,7 @@ pub fn excerpt(speaker: &Speaker, segments: &[TranscriptSegment]) -> String {
     if cut_at_start && !text.is_empty() {
         text = format!("…{text}");
     }
-    text
+    Excerpt { text, in_clip }
 }
 
 /// One speaker as the rows show it.
@@ -365,8 +422,8 @@ pub struct SpeakerRow {
     pub speaker: Speaker,
     /// The confirmed or suggested person, when the export has them.
     pub person: Option<Person>,
-    /// What the speaker says in the sample clip ([`excerpt`]).
-    pub excerpt: String,
+    /// What the speaker says in or around the sample clip ([`excerpt`]).
+    pub excerpt: Excerpt,
     /// Whether the sample clip file exists.
     pub can_play: bool,
 }

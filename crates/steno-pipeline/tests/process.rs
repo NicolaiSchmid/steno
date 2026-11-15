@@ -677,6 +677,17 @@ async fn the_mic_lane_is_the_users_own_person_unless_the_meeting_named_it_otherw
     world.pipeline.process(older_asset.id).await.unwrap();
     let (me, participant, _) = me_of(older.id);
     assert_eq!((me, participant), (Some(ben.id), Some(ben.id)));
+
+    // Remove name on the mic lane survives processing again: it does not
+    // fall back to the user's own person either.
+    world
+        .store
+        .clear_speaker(LaneMerger::me_speaker_id(older.id))
+        .unwrap();
+    world.pipeline.process(older_asset.id).await.unwrap();
+    let (me, participant, summary) = me_of(older.id);
+    assert_eq!((me, participant), (None, None));
+    assert!(summary.contains("**Me**:"), "{summary}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

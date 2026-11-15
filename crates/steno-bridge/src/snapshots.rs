@@ -307,11 +307,15 @@ pub struct DetailSpeaker {
     /// How strongly a `suggested` voice matches its person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion_strength: Option<crate::VoiceStrength>,
-    /// The words the voice says in its sample clip, so the quote is what
-    /// plays; the longest thing it said when it has no clip. Absent without
-    /// any.
+    /// The words the voice says in its sample clip, exactly what plays.
+    /// Absent when the clip's words are not known on their own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote: Option<String>,
+    /// Without a `quote`: what the voice said around its clip (segments
+    /// only partly inside it), or its longest segment without a clip.
+    /// Context, never shown as a quotation. Absent when it said nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     pub color_index: i64,
     pub has_clip: bool,
     pub is_playing: bool,

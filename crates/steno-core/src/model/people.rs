@@ -390,10 +390,15 @@ pub struct Speaker {
     /// The user marked the voice "Not a person" (music, noise): it leaves
     /// the counts and the voice memory, its segments keep their text. Kept
     /// apart from `assignment`, which every build reads as one of three
-    /// cases; not part of `meeting.json`.
-    #[serde(skip)]
+    /// cases; in `meeting.json` only when set, so an export without a
+    /// dismissed voice is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dismissed: bool,
 }
+
+/// What a dismissed voice's turns read instead of a name, in the app and
+/// in the exported notes.
+pub const NOT_A_PERSON: &str = "Not a person";
 
 impl Speaker {
     #[must_use]

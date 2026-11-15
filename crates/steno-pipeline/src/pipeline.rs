@@ -22,7 +22,8 @@ use steno_core::{
     MeetingOperation, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer,
     Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
     SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
-    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid,
+    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, VoiceStrength,
+    derived_uuid,
     paths::{file_url, file_url_path},
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
     room_speaker_id,
@@ -885,6 +886,46 @@ struct Merged {
     speakers: Vec<Speaker>,
     /// The rows the merge replaced, as its transaction read them.
     replaced: Vec<Speaker>,
+    /// The rows as stored after the merge, with the user's answers the
+    /// store carried over: what the cleanup sees.
+    stored: Vec<Speaker>,
+}
+
+/// The voice match threshold: `speaker_match_threshold`, never below
+/// [`VoiceStrength::FLOOR`], so the store holds no suggestion the speakers
+/// view would hide.
+fn match_threshold(settings: &Settings) -> f32 {
+    settings.speaker_match_threshold.max(VoiceStrength::FLOOR)
+}
+
+/// Without the voices the user marked "Not a person": their segments
+/// (whose text stays as transcribed) and their rows. The cleanup and the
+/// summary see only people.
+fn without_dismissed(
+    segments: &[TranscriptSegment],
+    speakers: &[Speaker],
+) -> (Vec<TranscriptSegment>, Vec<Speaker>) {
+    let dismissed: BTreeSet<Uuid> = speakers
+        .iter()
+        .filter(|speaker| speaker.dismissed)
+        .map(|speaker| speaker.id)
+        .collect();
+    (
+        segments
+            .iter()
+            .filter(|segment| {
+                segment
+                    .speaker_id
+                    .is_none_or(|speaker_id| !dismissed.contains(&speaker_id))
+            })
+            .cloned()
+            .collect(),
+        speakers
+            .iter()
+            .filter(|speaker| !speaker.dismissed)
+            .cloned()
+            .collect(),
+    )
 }
 
 /// The sample clip is at most ten seconds.
@@ -2026,7 +2067,7 @@ impl ProcessingPipeline {
         self.sweep_sample_clips(asset, &merged).await;
         // Starts from the cleanup pass's usage; summarize adds its own.
         current.llm_usage = self
-            .cleanup(&current, merged.segments, &merged.speakers)
+            .cleanup(&current, merged.segments, &merged.stored)
             .await?;
         // What the user changed since the run started wins: the template,
         // a typed title or attached event, and the speakers they named or
@@ -2750,8 +2791,9 @@ impl ProcessingPipeline {
         .await
     }
 
-    /// `SpeakerMemory::match_voice` for every speaker with an embedding: a
-    /// hit becomes `suggested`, a miss stays `unknown`.
+    /// `SpeakerMemory::match_voice` for every speaker with an embedding, at
+    /// `speaker_match_threshold` but never below [`VoiceStrength::FLOOR`]:
+    /// a hit becomes `suggested`, a miss stays `unknown`.
     async fn match_speakers(
         &self,
         speakers: &[Speaker],
@@ -2759,7 +2801,7 @@ impl ProcessingPipeline {
         settings: &Settings,
     ) -> Result<Vec<Speaker>> {
         let memory = &self.inner.dependencies.speaker_memory;
-        let threshold = settings.speaker_match_threshold;
+        let threshold = match_threshold(settings);
         self.run(PipelineStage::MatchSpeakers, 0, meeting_id, async {
             let mut matched = Vec::with_capacity(speakers.len());
             for speaker in speakers {
@@ -2832,6 +2874,7 @@ impl ProcessingPipeline {
                 segments,
                 speakers: all_speakers,
                 replaced,
+                stored: store.speakers(meeting_id)?,
             })
         });
         self.run(PipelineStage::Merge, 0, meeting_id, merged).await
@@ -2839,14 +2882,17 @@ impl ProcessingPipeline {
 
     /// Runs the `TranscriptCleaner` and persists the cleaned `text` by
     /// segment id; `raw_text`, ids, order and count must come back intact.
-    /// The speakers are not rewritten. Returns the pass's usage; without a
-    /// cleaner it writes nothing.
+    /// The speakers are not rewritten, and a dismissed voice's segments are
+    /// neither sent nor cleaned ([`without_dismissed`]). Returns the pass's
+    /// usage; without a cleaner it writes nothing.
     async fn cleanup(
         &self,
         meeting: &Meeting,
         segments: Vec<TranscriptSegment>,
         speakers: &[Speaker],
     ) -> Result<Option<LlmUsage>> {
+        let (segments, speakers) = without_dismissed(&segments, speakers);
+        let speakers = speakers.as_slice();
         self.revise(ProcessingEstimator::token_count(&segments), meeting.id);
         let store = self.store();
         let cleaner = self.inner.dependencies.cleaner.clone();
@@ -2913,12 +2959,16 @@ impl ProcessingPipeline {
     /// summary, tasks, decisions and name suggestions with the title,
     /// language and usage in one transaction. A calendar or typed title
     /// stays. Without a summarizer only the processing columns are written.
+    /// A dismissed voice's segments are not summarized
+    /// ([`without_dismissed`]).
     async fn summarize(
         &self,
         meeting: Meeting,
         segments: &[TranscriptSegment],
         speakers: &[Speaker],
     ) -> Result<Meeting> {
+        let (segments, speakers) = without_dismissed(segments, speakers);
+        let (segments, speakers) = (segments.as_slice(), speakers.as_slice());
         let store = self.store();
         let summarizer = self.inner.dependencies.summarizer.clone();
         let now = self.now();
@@ -3273,7 +3323,8 @@ impl Drop for Running {
 /// The participant with `role == me`, created as `Me` when none exists.
 /// While it names nobody it takes the person the meeting's "me" speaker
 /// was confirmed as, else [`Settings::self_person_id`], so the merge
-/// confirms the mic lane as them.
+/// confirms the mic lane as them; not when the user removed that person's
+/// name from this meeting's "me" speaker ([`Store::clear_speaker`]).
 pub fn ensure_me_participant(
     store: &Store,
     meeting_id: Uuid,
@@ -3293,7 +3344,15 @@ pub fn ensure_me_participant(
         .find(|speaker| speaker.id == LaneMerger::me_speaker_id(meeting_id))
         .and_then(|speaker| speaker.person_id())
         // Unreadable settings leave the mic lane unnamed rather than fail the run.
-        .or_else(|| store.settings().ok()?.self_person_id)
+        .or_else(|| {
+            let person_id = store.settings().ok()?.self_person_id?;
+            let cleared = store
+                .suggestion_rejections(meeting_id)
+                .ok()?
+                .get(&LaneMerger::me_speaker_id(meeting_id))
+                .is_some_and(|rejected| rejected.contains(&person_id));
+            (!cleared).then_some(person_id)
+        })
         .map(|id| store.person(id))
         .transpose()?
         .flatten();
@@ -3338,6 +3397,53 @@ pub fn write_wav_16k(path: &Path, buffer: &AudioBuffer16k) -> std::io::Result<()
 mod tests {
     use super::*;
     use steno_core::Delivery;
+
+    #[test]
+    fn the_match_threshold_never_drops_below_the_floor() {
+        let mut settings = Settings::default();
+        for (stored, used) in [
+            (0.5, VoiceStrength::FLOOR),
+            (0.8, 0.8),
+            (f32::NAN, VoiceStrength::FLOOR),
+        ] {
+            settings.speaker_match_threshold = stored;
+            assert!(
+                (match_threshold(&settings) - used).abs() < f32::EPSILON,
+                "{stored}"
+            );
+        }
+    }
+
+    /// A dismissed voice's segments and row reach neither the cleanup nor
+    /// the summary; segments without a speaker do.
+    #[test]
+    fn dismissed_voices_are_left_out_of_the_llm_input() {
+        let meeting_id = Uuid::new_v4();
+        let room = Diarization::room_speaker(meeting_id, &[]);
+        let noise = Speaker {
+            id: Uuid::new_v4(),
+            dismissed: true,
+            ..room.clone()
+        };
+        let segment = |speaker_id: Option<Uuid>| TranscriptSegment {
+            id: Uuid::new_v4(),
+            meeting_id,
+            start: 0.0,
+            end: 1.0,
+            speaker_id,
+            lane: AudioLane::System,
+            text: "text".to_owned(),
+            raw_text: "text".to_owned(),
+        };
+        let segments = [
+            segment(Some(room.id)),
+            segment(Some(noise.id)),
+            segment(None),
+        ];
+        let (kept, speakers) = without_dismissed(&segments, &[room.clone(), noise]);
+        assert_eq!(kept, [segments[0].clone(), segments[2].clone()]);
+        assert_eq!(speakers, [room]);
+    }
 
     /// The room speaker takes the label after the highest stored
     /// "Speaker N", so the gap at "Speaker 2" is not reused.

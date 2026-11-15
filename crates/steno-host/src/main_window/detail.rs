@@ -19,7 +19,7 @@ use crate::setup::{ExportStatus, SummaryStatus, all_delivered, llm_configured, v
 use crate::speakers::SpeakersViewModel;
 
 /// What a turn of a dismissed voice reads instead of a name.
-pub const NOT_A_PERSON: &str = "Not a person";
+pub use steno_core::NOT_A_PERSON;
 
 /// What the header's "Recording" line says; `None` for the one case
 /// Settings already covers: kept forever with the files present.

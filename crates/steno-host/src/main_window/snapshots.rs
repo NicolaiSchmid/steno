@@ -497,7 +497,10 @@ fn speaker_rows(detail: &MeetingDetailViewModel, playing: Option<Uuid>) -> Vec<D
             suggestion_name: speakers.prefill(row.id()),
             color_index: color_index(row.person.as_ref().map_or(row.id(), |person| person.id)),
             suggestion_strength: row.suggestion_strength(),
-            quote: Some(row.excerpt.clone()).filter(|quote| !quote.is_empty()),
+            quote: Some(row.excerpt.text.clone())
+                .filter(|text| row.excerpt.in_clip && !text.is_empty()),
+            context: Some(row.excerpt.text.clone())
+                .filter(|text| !row.excerpt.in_clip && !text.is_empty()),
             has_clip: row.can_play,
             is_playing: playing == Some(row.id()),
             dismissed: row.speaker.dismissed,

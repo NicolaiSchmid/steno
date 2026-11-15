@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use steno_core::{MeetingExport, MeetingTask, Speaker};
+use steno_core::{MeetingExport, MeetingTask, NOT_A_PERSON, Speaker};
 use uuid::Uuid;
 
 use super::RenderOptions;
@@ -16,9 +16,18 @@ pub(crate) struct Names<'a> {
 }
 
 impl Names<'_> {
-    /// The display name of a segment's speaker; `"Unknown"` for none.
+    /// The display name of a segment's speaker; `"Unknown"` for none,
+    /// [`NOT_A_PERSON`] for a voice the user dismissed.
     pub fn speaker(&self, speaker_id: Option<Uuid>) -> String {
         match speaker_id {
+            Some(id)
+                if self
+                    .export
+                    .speaker(id)
+                    .is_some_and(|speaker| speaker.dismissed) =>
+            {
+                NOT_A_PERSON.to_owned()
+            }
             Some(id) => self.export.display_name_for_speaker(id),
             None => "Unknown".to_owned(),
         }
@@ -69,7 +78,7 @@ impl Names<'_> {
     }
 
     /// Everybody once: participants in export order, then speakers that
-    /// resolved to nobody, by cluster label.
+    /// resolved to nobody, by cluster label; a dismissed voice is nobody.
     pub fn participants(&self) -> Vec<String> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut names = Vec::new();
@@ -83,7 +92,12 @@ impl Names<'_> {
                 self.person(&participant.display_name)
             });
         }
-        for speaker in &self.export.speakers {
+        for speaker in self
+            .export
+            .speakers
+            .iter()
+            .filter(|speaker| !speaker.dismissed)
+        {
             let name = self.export.display_name_for_speaker(speaker.id);
             if !seen.insert(name.clone()) {
                 continue;
