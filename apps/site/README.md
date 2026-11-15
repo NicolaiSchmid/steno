@@ -46,8 +46,9 @@ gaps that page lists, delete its row.
 
 ## Design
 
-The page follows t3.codes: dark only on `#09090b`, DM Sans and JetBrains Mono
-(self-hosted from `public/fonts`, OFL), a five-step neutral text ladder, hairline
+The page follows t3.codes: dark only on `#09090b`, Geist and Geist Mono
+(self-hosted from `public/fonts`, OFL; the share card reads the TTFs in
+`src/app/og-fonts`), a five-step neutral text ladder, hairline
 borders at 8 and 14 % white, white primary buttons, a `[data-rise]` entrance.
 Tokens and the few shared classes (`.btn`, `.tile`, `.eyebrow`, `.display`)
 are in `src/app/globals.css`. Red, the app's live colour, is the only hue.

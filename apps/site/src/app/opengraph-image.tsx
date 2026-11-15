@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { ImageResponse } from "next/og";
 import { site } from "@/lib/site";
 
@@ -7,7 +9,13 @@ export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
 /** The share card: black canvas, the four-bar mark, the headline, three chips. */
-export default function OpenGraphImage() {
+export default async function OpenGraphImage() {
+	// The share card is rendered at build time; Satori takes TTF, not woff2.
+	const fonts = join(process.cwd(), "src/app/og-fonts");
+	const [regular, medium] = await Promise.all([
+		readFile(join(fonts, "geist-regular.ttf")),
+		readFile(join(fonts, "geist-medium.ttf")),
+	]);
 	const bars = [14, 36, 22, 28];
 	return new ImageResponse(
 		<div
@@ -20,7 +28,7 @@ export default function OpenGraphImage() {
 				padding: 72,
 				background: "#09090b",
 				color: "#ffffff",
-				fontFamily: "ui-sans-serif, system-ui, sans-serif",
+				fontFamily: "Geist",
 			}}
 		>
 			<div style={{ display: "flex", alignItems: "center", gap: 20 }}>
@@ -93,6 +101,12 @@ export default function OpenGraphImage() {
 				)}
 			</div>
 		</div>,
-		size,
+		{
+			...size,
+			fonts: [
+				{ name: "Geist", data: regular, weight: 400, style: "normal" },
+				{ name: "Geist", data: medium, weight: 500, style: "normal" },
+			],
+		},
 	);
 }
