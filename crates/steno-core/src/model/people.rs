@@ -188,12 +188,13 @@ string_enum! {
 }
 
 impl VoiceStrength {
-    /// From this cosine similarity up a match is `Strong`. Measured on the
-    /// calibration corpus (`.plans/2026-11-14-speaker-identification.md`,
-    /// S4); see the pull request that set it.
+    /// From this cosine similarity up a match is `Strong`: only true
+    /// matches reached it on the calibration corpus
+    /// (`.plans/2026-11-14-speaker-identification.md`, S4).
     pub const STRONG: f32 = VOICE_STRONG;
-    /// Below this similarity a voice match is not shown at all; from it up
-    /// it is `Likely` until [`VoiceStrength::STRONG`].
+    /// Below this similarity a voice match is not shown at all, 0.06 above
+    /// the highest wrong match measured; from it up it is `Likely` until
+    /// [`VoiceStrength::STRONG`]. Equal to today's default match threshold.
     pub const FLOOR: f32 = VOICE_FLOOR;
 
     /// The word for a match of `similarity`; `None` below
@@ -210,8 +211,13 @@ impl VoiceStrength {
     }
 }
 
-const VOICE_STRONG: f32 = 0.0;
-const VOICE_FLOOR: f32 = 0.0;
+// Measured on the calibration corpus (seven real calls, 2026-11-15), each
+// cluster against voices built from the person's other meetings: true
+// matches 0.77-0.91 for the two people with labels in several calls, the
+// best wrong person never above 0.54 (95th percentile of all wrong pairs
+// 0.43). Swift and Rust embeddings agree within 0.03.
+const VOICE_STRONG: f32 = 0.75;
+const VOICE_FLOOR: f32 = 0.60;
 
 /// How a diarization cluster maps to a person.
 #[derive(Debug, Clone, PartialEq)]
@@ -443,6 +449,15 @@ pub struct SpeakerNameSuggestion {
 mod tests {
     use super::*;
     use crate::json::to_column_string;
+
+    #[test]
+    fn voice_strength_is_hidden_below_the_floor_and_strong_from_its_threshold() {
+        assert_eq!(VoiceStrength::of(0.59), None);
+        assert_eq!(VoiceStrength::of(0.60), Some(VoiceStrength::Likely));
+        assert_eq!(VoiceStrength::of(0.74), Some(VoiceStrength::Likely));
+        assert_eq!(VoiceStrength::of(0.75), Some(VoiceStrength::Strong));
+        assert_eq!(VoiceStrength::of(f32::NAN), None);
+    }
 
     #[test]
     fn embeddings_round_trip_as_little_endian_bytes() {

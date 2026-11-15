@@ -888,3 +888,39 @@ fn the_quote_is_the_clips_words() {
         json!(VoiceStrength::of(0.87))
     );
 }
+
+/// A voice match below the floor is not shown: the speaker reads as
+/// unnamed and the options carry no voice reason; between the floor and
+/// the strong threshold it is "likely".
+#[test]
+fn a_weak_voice_match_is_hidden_and_a_middling_one_is_likely() {
+    let harness = sample();
+    let mut speaker = harness.store.speakers(uuid(MEETING)).unwrap()[2].clone();
+    speaker.assignment = SpeakerAssignment::Suggested {
+        person_id: uuid(PERSON_ANNA),
+        similarity: 0.55,
+    };
+    harness.store.save_speaker(&speaker).unwrap();
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["speakers"][2]["assignment"], "unknown");
+    assert_eq!(detail["speakers"][2]["displayName"], "Speaker 3");
+    assert!(
+        options(&harness, SPEAKER_ANNA, "")
+            .iter()
+            .all(|option| option.reason != Some(SpeakerOptionReason::Voice))
+    );
+
+    speaker.assignment = SpeakerAssignment::Suggested {
+        person_id: uuid(PERSON_ANNA),
+        similarity: 0.66,
+    };
+    harness.store.save_speaker(&speaker).unwrap();
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["speakers"][2]["suggestionStrength"], "likely");
+    assert_eq!(
+        options(&harness, SPEAKER_ANNA, "")[0].strength,
+        Some(VoiceStrength::Likely)
+    );
+}
