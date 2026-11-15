@@ -1,6 +1,7 @@
 import { Switch as BaseSwitch } from "@base-ui/react/switch";
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
+import { focusRingClass } from "./focus-ring";
 
 export interface SwitchProps
 	extends Omit<ComponentProps<typeof BaseSwitch.Root>, "className"> {
@@ -18,7 +19,7 @@ export function Switch({ className, ...props }: SwitchProps) {
 				"group relative inline-flex h-4.5 w-7.5 shrink-0 items-center rounded-full p-0.5 outline-none",
 				"transition-[background-color,box-shadow] duration-(--duration-surface) ease-standard",
 				"data-checked:bg-primary data-unchecked:bg-outline",
-				"focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface",
+				focusRingClass,
 				"data-disabled:opacity-64",
 				className,
 			)}

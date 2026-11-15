@@ -2,6 +2,7 @@ import { Button as BaseButton } from "@base-ui/react/button";
 import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
+import { focusRingClass } from "./focus-ring";
 
 /** Ghost buttons: no border, the accent fill on hover and while a menu is open. */
 const ghost = "border-transparent hover:bg-accent data-popup-open:bg-accent";
@@ -48,10 +49,10 @@ export const buttonLook = {
 export const buttonVariants = cva(
 	[
 		"inline-flex shrink-0 select-none items-center justify-center gap-2 whitespace-nowrap",
-		"rounded-control border font-medium text-sm leading-none outline-none",
+		"rounded-control border font-medium text-sm leading-none",
 		"transition-[background-color,border-color,color,opacity]",
 		"duration-(--duration-functional) ease-standard",
-		"focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface",
+		focusRingClass,
 		"disabled:pointer-events-none disabled:opacity-64",
 		"[&_svg]:pointer-events-none [&_svg]:-mx-0.5 [&_svg]:size-4 [&_svg]:shrink-0",
 	],

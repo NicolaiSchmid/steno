@@ -53,6 +53,7 @@ export type { DisclosureProps } from "./disclosure";
 export { Disclosure } from "./disclosure";
 export type { EmptyStateProps } from "./empty-state";
 export { EmptyState, emptyStateIconVariants } from "./empty-state";
+export { focusRingClass, focusWithinRingClass } from "./focus-ring";
 export type { FormCardProps, FormRowProps, FormValueProps } from "./form-row";
 export { FormCard, FormRow, FormValue, formValueVariants } from "./form-row";
 export type { BreadcrumbProps, HeaderRowProps } from "./header";

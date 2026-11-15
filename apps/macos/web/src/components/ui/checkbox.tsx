@@ -2,6 +2,7 @@ import { Checkbox as BaseCheckbox } from "@base-ui/react/checkbox";
 import { CheckIcon } from "lucide-react";
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
+import { focusRingClass } from "./focus-ring";
 
 export interface CheckboxProps
 	extends Omit<ComponentProps<typeof BaseCheckbox.Root>, "className"> {
@@ -20,7 +21,7 @@ export function Checkbox({ className, ...props }: CheckboxProps) {
 				"transition-[background-color,border-color,box-shadow] duration-(--duration-functional) ease-standard",
 				"data-checked:border-primary data-checked:bg-primary",
 				"data-indeterminate:border-primary data-indeterminate:bg-primary",
-				"focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface",
+				focusRingClass,
 				"data-disabled:opacity-64",
 				className,
 			)}

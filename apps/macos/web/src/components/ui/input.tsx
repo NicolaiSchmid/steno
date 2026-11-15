@@ -3,6 +3,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { SearchIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { focusWithinRingClass } from "./focus-ring";
 import { Kbd } from "./kbd";
 
 /**
@@ -13,9 +14,14 @@ import { Kbd } from "./kbd";
 export const fieldFrameClass =
 	"relative rounded-control border border-outline bg-field text-foreground transition-[border-color,box-shadow] duration-(--duration-functional) ease-standard";
 
-/** The frame while its field has focus, and while the field is disabled. */
-export const fieldStateClass =
-	"focus-within:border-focus focus-within:ring-2 focus-within:ring-focus focus-within:ring-offset-2 focus-within:ring-offset-surface has-[:disabled]:opacity-64";
+/**
+ * The frame while its field has focus (the kit's one ring, the outline
+ * unchanged under it), and while the field is disabled.
+ */
+export const fieldStateClass = cn(
+	focusWithinRingClass,
+	"has-[:disabled]:opacity-64",
+);
 
 /** The single-line field. Heights: sm 26, md 36 (the default button's). */
 export const inputVariants = cva(
@@ -66,6 +72,7 @@ const searchInputVariants = cva("", {
 				"flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 font-medium text-sidebar-muted-foreground text-sm",
 				"transition-colors duration-(--duration-functional) ease-standard",
 				"focus-within:bg-row-hover focus-within:text-foreground hover:bg-row-hover hover:text-foreground",
+				focusWithinRingClass,
 				"[&>svg]:text-sidebar-icon [&_input]:font-medium [&_input]:placeholder:text-current",
 			],
 		},
