@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MeetingDetailSnapshot, ProgressSnapshot } from "./contract";
 import {
+	answerSpeakerChange,
+	answerSpeakerOptions,
 	answerSpeakerSelect,
 	applyScenario,
 	createMockTransport,
@@ -100,6 +102,71 @@ describe("speaker naming outside the app", () => {
 		expect(after.transcript.some((turn) => turn.speakerID === SPEAKER_4)).toBe(
 			false,
 		);
+	});
+
+	it("answers No, Not a person, Restore and Remove name as the hosts do", async () => {
+		const ANNA = "00000000-0000-0000-0000-000000000016";
+		const ANNA_PERSON = "00000000-0000-0000-0000-00000000000C";
+		const before = await detail("speakers-partly");
+		const rejected = answerSpeakerChange(before, "speakers.reject", {
+			speakerID: ANNA,
+			personID: ANNA_PERSON,
+		});
+		expect(rejected.speakers.find((row) => row.id === ANNA)).toMatchObject({
+			assignment: "unknown",
+			displayName: "Speaker 3",
+		});
+		expect(
+			rejected.speakers.find((row) => row.id === ANNA)?.suggestionName,
+		).toBeUndefined();
+
+		const dismissed = answerSpeakerChange(before, "speakers.dismiss", {
+			speakerID: SPEAKER_4,
+		});
+		expect(
+			dismissed.speakers.find((row) => row.id === SPEAKER_4)?.dismissed,
+		).toBe(true);
+		expect(
+			dismissed.transcript
+				.filter((turn) => turn.speakerID === SPEAKER_4)
+				.map((turn) => turn.speakerName),
+		).toEqual(["Not a person"]);
+		const restored = answerSpeakerChange(dismissed, "speakers.restore", {
+			speakerID: SPEAKER_4,
+		});
+		expect(restored.speakers.find((row) => row.id === SPEAKER_4)).toMatchObject(
+			{
+				dismissed: false,
+				assignment: "unknown",
+			},
+		);
+
+		const cleared = answerSpeakerChange(before, "speakers.clear", {
+			speakerID: "00000000-0000-0000-0000-000000000014",
+		});
+		expect(cleared.speakers[0]).toMatchObject({
+			assignment: "unknown",
+			displayName: "Speaker 1",
+		});
+	});
+
+	it("keeps a person answered No to out of that voice's options until typed", () => {
+		const recorded = {
+			options: [
+				{ kind: "person" as const, label: "Anna", personID: "p-anna" },
+				{ kind: "person" as const, label: "Lea", personID: "p-lea" },
+			],
+		};
+		const rejected = new Set(["s-3 p-anna"]);
+		const labels = (query: string, speakerID = "s-3") =>
+			(
+				answerSpeakerOptions(recorded, { speakerID, query }, "", rejected) as {
+					options: { label: string }[];
+				}
+			).options.map((option) => option.label);
+		expect(labels("")).toEqual(["Lea"]);
+		expect(labels("", "s-4")).toEqual(["Anna", "Lea"]);
+		expect(labels("ann")).toEqual(["Anna", "ann"]);
 	});
 
 	it("reports the Diarize stage for the processing meeting", async () => {

@@ -906,6 +906,14 @@ fn a_weak_voice_match_is_hidden_and_a_middling_one_is_likely() {
     assert_eq!(detail["speakers"][2]["assignment"], "unknown");
     assert_eq!(detail["speakers"][2]["displayName"], "Speaker 3");
     assert!(
+        detail["transcript"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|turn| turn["speakerName"] != "Anna"),
+        "nor in the transcript"
+    );
+    assert!(
         options(&harness, SPEAKER_ANNA, "")
             .iter()
             .all(|option| option.reason != Some(SpeakerOptionReason::Voice))

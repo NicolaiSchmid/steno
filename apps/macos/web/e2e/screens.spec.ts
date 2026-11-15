@@ -462,7 +462,7 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 		async (page) => {
 			await transcriptName(page, "Anna").hover();
 			await expect(
-				page.getByText("Sounds like Anna. Click to confirm or change"),
+				page.getByText("Sounds like Anna · strong. Click to confirm or change"),
 			).toBeVisible();
 		},
 	],
@@ -479,6 +479,83 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 		"scenario=speakers-partly&tab=transcript",
 		async (page) => {
 			await transcriptName(page, "Speaker 4").click();
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+	],
+	// The voice match's strength in words: "Sounds like Anna · likely".
+	["likely", "scenario=speakers-likely", openSpeakers],
+	[
+		// N on the voice match: the suggestion goes, the voice moves to Need
+		// names and its field opens without Anna.
+		"rejected",
+		"scenario=speakers-partly",
+		async (page) => {
+			await page.getByTestId("speakers-trigger").focus();
+			await page.keyboard.press("Enter");
+			await expect(page.getByTestId("speakers-panel")).toBeVisible();
+			await page.keyboard.press("n");
+			await expect(page.getByRole("combobox")).toBeFocused();
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+	],
+	[
+		// Not a person from the field: the row keeps its place, says so,
+		// and offers Restore.
+		"dismissing",
+		"scenario=speakers-none",
+		async (page) => {
+			await nameFirst(page);
+			await page.getByTestId("speaker-action-dismiss").click();
+			await expect(
+				page.getByRole("button", { name: /^Restore/ }),
+			).toBeVisible();
+		},
+	],
+	["dismissed-closed", "scenario=speakers-dismissed", async () => {}],
+	["dismissed", "scenario=speakers-dismissed", openSpeakers],
+	[
+		"transcript-dismissed",
+		"scenario=speakers-dismissed&tab=transcript",
+		async (page) => {
+			await expect(
+				page.getByTestId("tab-content-transcript").getByText("Not a person"),
+			).not.toHaveCount(0);
+		},
+	],
+	[
+		// A confirmed person's field ends with Remove name.
+		"remove-name",
+		"scenario=speakers-done",
+		async (page) => {
+			await openSpeakers(page);
+			await page
+				.getByTestId("speakers-section-people")
+				.getByRole("group")
+				.first()
+				.click();
+			await expect(page.getByTestId("speaker-action-clear")).toBeVisible();
+		},
+	],
+	[
+		// The one voice left and the one invitee nobody is named as.
+		"last-invitee",
+		"scenario=speakers-last-invitee",
+		async (page) => {
+			await openSpeakers(page);
+			await page
+				.getByTestId("speakers-section-need")
+				.getByRole("group")
+				.first()
+				.click();
+			await expect(page.getByText("Last invitee left")).toBeVisible();
+		},
+	],
+	[
+		"transcript-no",
+		"scenario=speakers-partly&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Anna").click();
+			await page.getByRole("button", { name: "No", exact: true }).click();
 			await expect(page.getByRole("option").first()).toBeVisible();
 		},
 	],

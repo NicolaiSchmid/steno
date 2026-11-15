@@ -1,4 +1,9 @@
-import type { MeetingDetailSnapshot, SpeakerOption } from "@/bridge/contract";
+import type {
+	MeetingDetailSnapshot,
+	SpeakerOption,
+	SpeakerOptionReason,
+	VoiceStrength,
+} from "@/bridge/contract";
 import { personColor } from "@/lib/person-color";
 
 export type Speaker = MeetingDetailSnapshot["speakers"][number];
@@ -26,6 +31,14 @@ export function isSuggested(speaker: Speaker): boolean {
 	return speaker.assignment === "suggested";
 }
 
+/** Not a person (music, noise): out of the counts and the work. */
+export function isDismissed(speaker: Speaker): boolean {
+	return speaker.dismissed;
+}
+
+/** What a voice's own turns read once it is not a person. */
+export const NOT_A_PERSON = "Not a person";
+
 /** Whether the row may offer the sample clip: never for Me, else with a clip. */
 export function canPlay(speaker: Speaker): boolean {
 	return speaker.hasClip && !isMe(speaker);
@@ -35,9 +48,35 @@ export function firstName(name: string): string {
 	return name.trim().split(/\s+/)[0] ?? name;
 }
 
-/** Why a suggestion is offered, in the host's words: "Sounds like Anna". */
+/** A voice match's strength as a word after its reason: " · strong". */
+function strengthSuffix(strength: VoiceStrength | undefined): string {
+	return strength ? ` · ${strength}` : "";
+}
+
+/**
+ * Why a suggestion is offered, in the host's words, with how strongly the
+ * voice matches: "Sounds like Anna · strong".
+ */
 export function suggestionReason(speaker: Speaker): string {
-	return `Sounds like ${speaker.suggestionName ?? speaker.displayName}`;
+	return `Sounds like ${speaker.suggestionName ?? speaker.displayName}${strengthSuffix(speaker.suggestionStrength)}`;
+}
+
+/**
+ * The voice back to unnamed, as the host republishes it after a No: no
+ * person, no suggestion, its label for a name.
+ */
+export function unsuggested(speaker: Speaker): Speaker {
+	const {
+		suggestionName: _name,
+		suggestionStrength: _strength,
+		personID: _person,
+		...rest
+	} = speaker;
+	return {
+		...rest,
+		assignment: "unknown",
+		displayName: speaker.clusterLabel,
+	};
 }
 
 /** What the transcript's name and the field's placeholder call a voice. */
@@ -45,31 +84,12 @@ export function voiceLabel(speaker: Speaker): string {
 	return isMe(speaker) ? "You" : speaker.clusterLabel;
 }
 
-const SNIPPET_MIN_WORDS = 8;
-const SNIPPET_MAX_LENGTH = 90;
-
 /**
- * Something the speaker said, to tell who it is: their first turn of eight
- * words or more, else their longest, cut at a word with "…" past 90
- * characters. Empty when they have no turn.
+ * What the voice says in its sample clip, so the quote is what plays (the
+ * host's `quote`); empty when it says nothing.
  */
-export function snippet(speaker: Speaker, turns: readonly Turn[]): string {
-	const own = turns
-		.filter((turn) => turn.speakerID === speaker.id)
-		.map((turn) => turn.text.trim())
-		.filter((text) => text.length > 0);
-	const text =
-		own.find((line) => line.split(/\s+/).length >= SNIPPET_MIN_WORDS) ??
-		own.reduce(
-			(longest, line) => (line.length > longest.length ? line : longest),
-			"",
-		);
-	if (text.length <= SNIPPET_MAX_LENGTH) {
-		return text;
-	}
-	const cut = text.slice(0, SNIPPET_MAX_LENGTH);
-	const space = cut.lastIndexOf(" ");
-	return `${(space > SNIPPET_MAX_LENGTH / 2 ? cut.slice(0, space) : cut).replace(/[\s,.;:!?-]+$/, "")}…`;
+export function quote(speaker: Speaker): string {
+	return speaker.quote?.trim() ?? "";
 }
 
 /* ---- The header pill --------------------------------------------------- */
@@ -102,19 +122,20 @@ function distinctPeople(speakers: readonly Speaker[]): Speaker[] {
  * or suggested, every voice not yet confirmed is amber work ("2 need
  * names": an unnamed voice and a suggestion both need a name), and when
  * only suggestions are left it asks to check them. All confirmed, it lists
- * the people.
+ * the people. A voice that is not a person counts for nothing.
  */
 export function pillState(
-	speakers: readonly Speaker[],
+	all: readonly Speaker[],
 	hasSpeech: boolean,
 	finding: boolean,
 ): PillState {
 	if (finding) {
 		return { kind: "finding" };
 	}
-	if (speakers.length === 0 || !hasSpeech) {
+	if (all.length === 0 || !hasSpeech) {
 		return { kind: "hidden" };
 	}
+	const speakers = all.filter((speaker) => !isDismissed(speaker));
 	const unknown = speakers.filter(
 		(speaker) => speaker.assignment === "unknown",
 	);
@@ -158,12 +179,12 @@ export function peopleLabel(people: readonly Speaker[]): string {
 
 /**
  * Where a speaker sits in the panel: the unnamed-Me line, "Is this right?"
- * (a voice match), "Need names", or under a person in "Speakers", as that
+ * (a voice match), "Need names", under a person in "Speakers", as that
  * person's lead row, another confirmed voice of theirs, or a voice that
- * sounds like them ("Also Nicolai?").
+ * sounds like them ("Also Nicolai?"), or at the bottom under "Not people".
  */
 export type Placement =
-	| { section: "me" | "check" | "need" }
+	| { section: "me" | "check" | "need" | "dismissed" }
 	| { section: "people"; personID: string; role: "lead" | "voice" | "also" };
 
 export interface PersonEntry {
@@ -179,6 +200,8 @@ export interface PanelLayout {
 	check: Speaker[];
 	need: Speaker[];
 	people: PersonEntry[];
+	/** Not people: dismissed voices, each with Restore. */
+	dismissed: Speaker[];
 }
 
 /** Where each speaker belongs now, in cluster order. */
@@ -188,7 +211,12 @@ export function placements(
 	const owners = new Map<string, string>();
 	const result = new Map<string, Placement>();
 	for (const speaker of speakers) {
-		if (!isNamed(speaker)) {
+		if (isDismissed(speaker)) {
+			result.set(speaker.id, { section: "dismissed" });
+		}
+	}
+	for (const speaker of speakers) {
+		if (!isNamed(speaker) || isDismissed(speaker)) {
 			continue;
 		}
 		const personID = speaker.personID ?? speaker.id;
@@ -197,7 +225,7 @@ export function placements(
 		result.set(speaker.id, { section: "people", personID, role });
 	}
 	for (const speaker of speakers) {
-		if (isNamed(speaker)) {
+		if (isNamed(speaker) || isDismissed(speaker)) {
 			continue;
 		}
 		if (speaker.personID && owners.has(speaker.personID)) {
@@ -219,9 +247,10 @@ export function placements(
 
 /**
  * The panel's sections. `frozen` holds where each speaker sat when the
- * panel opened, so a row confirmed during the visit stays in its section
- * (marked done) instead of jumping; a speaker the host merged away is
- * gone, and one the panel has not seen yet goes where it belongs now.
+ * panel opened, so a row confirmed, dismissed or restored during the visit
+ * stays in its section (drawn as it is now) instead of jumping; a speaker
+ * the host merged away is gone, and one the panel has not seen yet goes
+ * where it belongs now.
  */
 export function panelLayout(
 	speakers: readonly Speaker[],
@@ -233,6 +262,7 @@ export function panelLayout(
 		check: [],
 		need: [],
 		people: [],
+		dismissed: [],
 	};
 	const people = new Map<string, PersonEntry>();
 	const place = (speaker: Speaker) =>
@@ -280,12 +310,15 @@ export function rowOrder(layout: PanelLayout): Speaker[] {
 			...voices,
 			...also,
 		]),
+		...layout.dismissed,
 	];
 }
 
 /** The first row with work: unnamed Me, a suggestion, an unnamed voice. */
 export function firstWithWork(layout: PanelLayout): Speaker | undefined {
-	return rowOrder(layout).find((speaker) => !isNamed(speaker));
+	return rowOrder(layout).find(
+		(speaker) => !isNamed(speaker) && !isDismissed(speaker),
+	);
 }
 
 /**
@@ -303,7 +336,10 @@ export function nextToName(
 	return order
 		.slice(at + 1)
 		.find(
-			(speaker) => speaker.assignment === "unknown" && !pending.has(speaker.id),
+			(speaker) =>
+				speaker.assignment === "unknown" &&
+				!isDismissed(speaker) &&
+				!pending.has(speaker.id),
 		);
 }
 
@@ -326,12 +362,22 @@ export interface OptionGroup {
 	rows: OptionRow[];
 }
 
-/** The host's option tags as the field shows them. */
-const REASONS: Record<string, string> = {
-	"Sounds like": "Sounds like",
-	Mentioned: "Mentioned",
-	Attendee: "Invited",
+/**
+ * The host's reasons as the field shows them; a person who owns another
+ * voice here is "Also speaking here" instead, by the snapshot.
+ */
+const REASONS: Partial<Record<SpeakerOptionReason, string>> = {
+	voice: "Sounds like",
+	mentioned: "Mentioned",
+	invited: "Invited",
+	lastInvitee: "Last invitee left",
 };
+
+/** An option's reason in words, a voice match with its strength. */
+export function optionReason(option: SpeakerOption): string | undefined {
+	const reason = option.reason ? REASONS[option.reason] : undefined;
+	return reason && `${reason}${strengthSuffix(option.strength)}`;
+}
 
 /**
  * The colour a voice will have once `option` is confirmed: that of the
@@ -392,11 +438,15 @@ export function groupOptions(
 						other.personID === option.personID,
 				)
 			: undefined;
-		const reason = option.detail ? REASONS[option.detail] : undefined;
+		const reason = optionReason(option);
 		const color = optionColor(option, speakers);
 		const colorIndex = color === undefined ? {} : { colorIndex: color };
 		if (option.kind === "create") {
-			create.rows.push({ option });
+			// An invitee or a heard name Steno does not know yet is still a
+			// suggestion, with its reason.
+			(reason ? suggested : create).rows.push(
+				reason ? { option, reason } : { option },
+			);
 		} else if (
 			isNamed(speaker) &&
 			option.personID &&

@@ -26,6 +26,7 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import {
+	type FieldAction,
 	SelectFailure,
 	SpeakerNameField,
 	useSpeakerSelect,
@@ -33,8 +34,10 @@ import {
 import {
 	checkLabel,
 	firstWithWork,
+	isDismissed,
 	isMe,
 	isNamed,
+	NOT_A_PERSON,
 	needsLabel,
 	nextToName,
 	optionColor,
@@ -45,13 +48,20 @@ import {
 	peopleLabel,
 	pillState,
 	placements,
+	quote,
 	rowOrder,
 	type Speaker,
-	snippet,
 	suggestionReason,
-	type Turn,
+	unsuggested,
 } from "./speaker-names";
-import { announceNamed, SpeakerPlayButton, togglePlay } from "./speaker-picker";
+import {
+	announceAction,
+	announceNamed,
+	SpeakerPlayButton,
+	sendAction,
+	sendReject,
+	togglePlay,
+} from "./speaker-picker";
 
 export interface SpeakersPopoverProps {
 	speakers: MeetingDetailSnapshot["speakers"];
@@ -139,7 +149,8 @@ interface Editing {
 
 interface Failure {
 	message: string;
-	option: SpeakerOption;
+	/** Sends the same pick, No or action again. */
+	retry: () => void;
 	text: string;
 }
 
@@ -154,12 +165,17 @@ interface Saving {
  * The header's one entry point to naming: a pill whose look says whether
  * work is left, and the panel it opens. The panel lists, in this order, an
  * unnamed Me as one line, "Is this right?" (voice matches, each with the
- * line the voice said, its clip, Yes and Change), "Need names" (the whole
- * row opens naming) and "Speakers" (confirmed people; a person's second
- * voice nests under them, and a voice that sounds like them asks "Also
- * Nicolai?"). Rows stay where they were while the panel is open; a row
- * named during the visit is marked done and can be opened again to
- * correct it, but not confirmed twice.
+ * clip's own words, its clip, Yes and No), "Need names" (the whole row
+ * opens naming), "Speakers" (confirmed people; a person's second voice
+ * nests under them, and a voice that sounds like them asks "Also
+ * Nicolai?") and "Not people" (voices dismissed as music or noise, each
+ * with Restore). Rows stay where they were while the panel is open; a row
+ * named, dismissed or restored during the visit is drawn as it is now in
+ * its old place, and a named one can be opened again to correct it, but
+ * not confirmed twice. No is the exception: the suggestion goes at once,
+ * the voice moves to "Need names" and its field opens without that
+ * person. The field's last row is the voice's action (Not a person,
+ * Remove name, Restore).
  *
  * Naming keeps the voice's evidence on screen and opens the field under
  * it. A pick shows the name with "Saving"; once the host took it the field
@@ -169,8 +185,9 @@ interface Saving {
  *
  * Keyboard: the pill opens on the first row with work; Up and Down, or
  * Tab and Shift+Tab, move between rows, each one tab stop (Tab past the
- * last row leaves the panel); on a row Enter names, Y confirms, N
- * changes and P plays, the keys shown while keyboard focus is on the row.
+ * last row leaves the panel); on a row Enter names, Y confirms, N says
+ * No, R restores and P plays, the keys shown while keyboard focus is on
+ * the row.
  * Tab and Shift+Tab leave the field for the next or previous row without a
  * pick. Escape closes the field and returns to its row; a second Escape
  * closes the panel and returns to the pill. Test ids carry a
@@ -191,6 +208,9 @@ export function SpeakersPopover({
 	const [failures, setFailures] = useState<ReadonlyMap<string, Failure>>(
 		new Map(),
 	);
+	// Voices answered No during this visit: their suggestion is gone at
+	// once, before the host republishes.
+	const [rejected, setRejected] = useState<ReadonlySet<string>>(new Set());
 	const rows = useRef(new Map<string, HTMLElement>());
 	const focusNext = useRef<string | null>(null);
 	// Read after a pick's await: whether this visit is still open, and
@@ -201,8 +221,13 @@ export function SpeakersPopover({
 	// reads it, not the layout from before its await.
 	const latest = useRef<PanelLayout | undefined>(undefined);
 
-	const state = pillState(speakers, transcript.length > 0, finding);
-	const layout = panelLayout(speakers, frozen);
+	const shown = speakers.map((speaker) =>
+		rejected.has(speaker.id) && speaker.assignment === "suggested"
+			? unsuggested(speaker)
+			: speaker,
+	);
+	const state = pillState(shown, transcript.length > 0, finding);
+	const layout = panelLayout(shown, frozen);
 	latest.current = layout;
 	const order = rowOrder(layout);
 	const current =
@@ -259,6 +284,7 @@ export function SpeakersPopover({
 		isOpen.current = next;
 		setEditing(null);
 		setFailures(new Map());
+		setRejected(new Set());
 		if (next) {
 			const fresh = placements(speakers);
 			setFrozen(fresh);
@@ -362,7 +388,12 @@ export function SpeakersPopover({
 			return;
 		}
 		if (outcome.kind === "failed") {
-			const failure = { message: outcome.message, option, text };
+			const failure = {
+				message: outcome.message,
+				retry: () =>
+					void commit(speaker, option, text, editing?.speakerID === speaker.id),
+				text,
+			};
 			setFailures((map) => new Map(map).set(speaker.id, failure));
 		}
 		setActive(speaker.id);
@@ -396,6 +427,101 @@ export function SpeakersPopover({
 			"",
 			false,
 		);
+	}
+
+	/** Shows "Saving" on the row, or clears it. */
+	function markSaving(speaker: Speaker, label: string | null) {
+		if (label === null) {
+			savingNow.current.delete(speaker.id);
+		} else {
+			savingNow.current.add(speaker.id);
+		}
+		setSaving((map) => {
+			const next = new Map(map);
+			if (label === null) {
+				next.delete(speaker.id);
+			} else {
+				next.set(speaker.id, { label, colorIndex: speaker.colorIndex });
+			}
+			return next;
+		});
+	}
+
+	function fail(speaker: Speaker, message: string, retry: () => void) {
+		setFailures((map) =>
+			new Map(map).set(speaker.id, { message, retry, text: "" }),
+		);
+	}
+
+	function clearFailure(speaker: Speaker) {
+		setFailures((map) => {
+			const next = new Map(map);
+			next.delete(speaker.id);
+			return next;
+		});
+	}
+
+	/**
+	 * No to "Sounds like Anna": the suggestion goes at once, the voice moves
+	 * to "Need names" and its field opens without Anna, while the host
+	 * records the No (`speakers.reject`). On failure the suggestion comes
+	 * back with the red line and Retry.
+	 */
+	async function reject(speaker: Speaker) {
+		const personID = speaker.personID;
+		if (!personID || isNamed(speaker) || savingNow.current.has(speaker.id)) {
+			return;
+		}
+		const before = frozen?.get(speaker.id);
+		clearFailure(speaker);
+		setRejected((set) => new Set(set).add(speaker.id));
+		setFrozen(
+			(map) => map && new Map(map).set(speaker.id, { section: "need" }),
+		);
+		startNaming(speaker, personID);
+		const failure = await sendReject(client, speaker.id, personID);
+		if (failure === null || !isOpen.current) {
+			return;
+		}
+		setRejected((set) => {
+			const next = new Set(set);
+			next.delete(speaker.id);
+			return next;
+		});
+		setFrozen(
+			(map) =>
+				map && (before ? new Map(map).set(speaker.id, before) : new Map(map)),
+		);
+		setEditing((now) => (now?.speakerID === speaker.id ? null : now));
+		setActive(speaker.id);
+		focusNext.current = speaker.id;
+		fail(speaker, failure, () => void reject(speaker));
+	}
+
+	/**
+	 * Not a person, Remove name or Restore: "Saving" on the row, which keeps
+	 * its place and is drawn as the host republishes it; the result is
+	 * announced, a failure is the red line with Retry.
+	 */
+	async function act(speaker: Speaker, action: FieldAction) {
+		if (savingNow.current.has(speaker.id)) {
+			return;
+		}
+		clearFailure(speaker);
+		setEditing((now) => (now?.speakerID === speaker.id ? null : now));
+		setActive(speaker.id);
+		focusNext.current = speaker.id;
+		markSaving(
+			speaker,
+			action === "dismiss" ? NOT_A_PERSON : speaker.clusterLabel,
+		);
+		const failure = await sendAction(client, speaker.id, action);
+		markSaving(speaker, null);
+		if (failure === null) {
+			announceAction(speaker, action);
+		} else if (isOpen.current) {
+			fail(speaker, failure, () => void act(speaker, action));
+		}
 	}
 
 	function onRowKey(
@@ -438,6 +564,14 @@ export function SpeakersPopover({
 			}
 		} else if (inert && key !== "p") {
 			return;
+		} else if (kind === "dismissed" && (key === "Enter" || key === "r")) {
+			event.preventDefault();
+			void act(speaker, "restore");
+		} else if (kind === "dismissed") {
+			if (key === "p") {
+				event.preventDefault();
+				togglePlay(client, speaker);
+			}
 		} else if (key === "Enter" || key === " ") {
 			event.preventDefault();
 			startNaming(speaker);
@@ -448,52 +582,59 @@ export function SpeakersPopover({
 		) {
 			event.preventDefault();
 			confirm(speaker);
-		} else if (key === "n" && (kind === "check" || kind === "also")) {
+		} else if (
+			key === "n" &&
+			(kind === "check" || kind === "also") &&
+			!isNamed(speaker)
+		) {
 			event.preventDefault();
-			startNaming(speaker, kind === "also" ? speaker.personID : undefined);
+			void reject(speaker);
 		} else if (key === "p") {
 			event.preventDefault();
 			togglePlay(client, speaker);
 		}
 	}
 
-	const row = (speaker: Speaker, kind: RowKind, person?: Speaker) => (
-		<PanelRow
-			editing={editing?.speakerID === speaker.id ? editing : null}
-			failure={failures.get(speaker.id)}
-			key={speaker.id}
-			kind={kind}
-			onCancel={() => stopNaming(speaker)}
-			onConfirm={() => confirm(speaker)}
-			onFocus={() => setActive(speaker.id)}
-			onKeyDown={(event) => onRowKey(event, speaker, kind)}
-			onLeave={(to) => leaveNaming(speaker, to)}
-			onName={(excluded) => startNaming(speaker, excluded)}
-			onRetry={(failure) =>
-				void commit(
-					speaker,
-					failure.option,
-					failure.text,
-					editing?.speakerID === speaker.id,
-				)
-			}
-			onSubmit={(option, text) => void commit(speaker, option, text)}
-			onTab={(backward) => tabFrom(speaker, backward)}
-			person={person}
-			rowRef={(element) => {
-				if (element) {
-					rows.current.set(speaker.id, element);
-				} else {
-					rows.current.delete(speaker.id);
-				}
-			}}
-			saving={saving.get(speaker.id)}
-			speaker={speaker}
-			speakers={speakers}
-			tabIndex={speaker.id === current ? 0 : -1}
-			transcript={transcript}
-		/>
-	);
+	const row = (speaker: Speaker, placed: RowKind, person?: Speaker) => {
+		// Drawn as it is now: dismissed during the visit in its old place,
+		// or restored while still listed under "Not people".
+		const kind: RowKind = isDismissed(speaker)
+			? "dismissed"
+			: placed === "dismissed"
+				? "need"
+				: placed;
+		return (
+			<PanelRow
+				editing={editing?.speakerID === speaker.id ? editing : null}
+				failure={failures.get(speaker.id)}
+				key={speaker.id}
+				kind={kind}
+				onAction={(action) => void act(speaker, action)}
+				onCancel={() => stopNaming(speaker)}
+				onConfirm={() => confirm(speaker)}
+				onFocus={() => setActive(speaker.id)}
+				onKeyDown={(event) => onRowKey(event, speaker, kind)}
+				onLeave={(to) => leaveNaming(speaker, to)}
+				onName={() => startNaming(speaker)}
+				onReject={() => void reject(speaker)}
+				onRetry={(failure) => failure.retry()}
+				onSubmit={(option, text) => void commit(speaker, option, text)}
+				onTab={(backward) => tabFrom(speaker, backward)}
+				person={person}
+				rowRef={(element) => {
+					if (element) {
+						rows.current.set(speaker.id, element);
+					} else {
+						rows.current.delete(speaker.id);
+					}
+				}}
+				saving={saving.get(speaker.id)}
+				speaker={speaker}
+				speakers={shown}
+				tabIndex={speaker.id === current ? 0 : -1}
+			/>
+		);
+	};
 
 	return (
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
@@ -570,6 +711,9 @@ function Sections({
 					);
 				})}
 			</Section>
+			<Section label="Not people" testID="speakers-section-dismissed">
+				{layout.dismissed.map((speaker) => row(speaker, "dismissed"))}
+			</Section>
 		</>
 	);
 }
@@ -596,7 +740,14 @@ function Section({
 	);
 }
 
-type RowKind = "me" | "check" | "need" | "person" | "voice" | "also";
+type RowKind =
+	| "me"
+	| "check"
+	| "need"
+	| "person"
+	| "voice"
+	| "also"
+	| "dismissed";
 
 interface PanelRowProps {
 	speaker: Speaker;
@@ -604,7 +755,6 @@ interface PanelRowProps {
 	/** The person a nested voice belongs to, or sounds like. */
 	person: Speaker | undefined;
 	speakers: readonly Speaker[];
-	transcript: readonly Turn[];
 	editing: Editing | null;
 	saving: Saving | undefined;
 	failure: Failure | undefined;
@@ -612,8 +762,12 @@ interface PanelRowProps {
 	rowRef: (element: HTMLElement | null) => void;
 	onFocus: () => void;
 	onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
-	onName: (excluded?: string) => void;
+	onName: () => void;
 	onConfirm: () => void;
+	/** No to the suggestion (or "Someone else"). */
+	onReject: () => void;
+	/** Not a person, Remove name or Restore. */
+	onAction: (action: FieldAction) => void;
 	onSubmit: (option: SpeakerOption, text: string) => void;
 	onCancel: () => void;
 	onLeave: (to: Element | null) => void;
@@ -638,6 +792,8 @@ function rowLabel(speaker: Speaker, kind: RowKind, person?: Speaker): string {
 			return `${speaker.clusterLabel}, needs a name`;
 		case "also":
 			return `${speaker.clusterLabel}. Also ${person?.displayName ?? speaker.displayName}?`;
+		case "dismissed":
+			return `${speaker.clusterLabel}, not a person`;
 		case "voice":
 			return `${speaker.clusterLabel}, ${speaker.displayName}`;
 		default:
@@ -654,6 +810,7 @@ const KEYS: Record<RowKind, string> = {
 	person: "Enter P",
 	voice: "Enter P",
 	also: "Enter Y N P",
+	dismissed: "Enter R P",
 };
 
 /** A row's key, shown only while keyboard focus is on the row. */
@@ -673,16 +830,16 @@ function KeyHint({ children }: { children: string }) {
 /**
  * One row of the panel: one tab stop (its buttons are reached by the
  * row's keys, hinted while the row has keyboard focus, or the pointer),
- * with the voice's evidence (a line it said, its clip) on screen while it
- * is named, the field under them. A row named during the visit is done:
- * it opens again to correct the name, and offers no second Yes.
+ * with the voice's evidence (the clip's own words, its clip) on screen
+ * while it is named, the field under them. A row named during the visit
+ * is done: it opens again to correct the name, and offers no second Yes.
+ * A voice that is not a person reads so, with Restore.
  */
 function PanelRow({
 	speaker,
 	kind,
 	person,
 	speakers,
-	transcript,
 	editing,
 	saving,
 	failure,
@@ -692,6 +849,8 @@ function PanelRow({
 	onKeyDown,
 	onName,
 	onConfirm,
+	onReject,
+	onAction,
 	onSubmit,
 	onCancel,
 	onLeave,
@@ -705,12 +864,10 @@ function PanelRow({
 		(kind === "me" || kind === "check" || kind === "need" || kind === "also");
 	// A confirmed person's line shows while they are renamed, as evidence.
 	const said =
-		(kind === "person" || kind === "me") && !editing
-			? ""
-			: snippet(speaker, transcript);
-	// The whole row opens naming, except where Yes and Change sit.
+		(kind === "person" || kind === "me") && !editing ? "" : quote(speaker);
+	// The whole row opens naming, except where Yes and No, or Restore, sit.
 	const opens =
-		(done || (kind !== "check" && kind !== "also")) &&
+		(done || (kind !== "check" && kind !== "also" && kind !== "dismissed")) &&
 		!editing &&
 		saving === undefined;
 
@@ -752,6 +909,13 @@ function PanelRow({
 			<Badge className="min-w-0" size="chip" variant="dashed">
 				<span className="truncate">{speaker.clusterLabel}</span>
 			</Badge>
+		) : kind === "dismissed" ? (
+			<>
+				<span className="shrink-0 text-title">{speaker.clusterLabel}</span>
+				<span className="min-w-0 truncate text-meta text-muted-foreground">
+					{NOT_A_PERSON}
+				</span>
+			</>
 		) : kind === "check" ? (
 			<>
 				<span className="shrink-0 font-medium text-title">
@@ -811,10 +975,26 @@ function PanelRow({
 		/>
 	) : null;
 	const actions =
-		(kind === "check" || kind === "also") &&
-		!done &&
-		saving === undefined &&
-		!editing ? (
+		kind === "dismissed" && saving === undefined ? (
+			<div className="mt-1.5 flex gap-2">
+				<Button
+					data-testid={`speakers-popover-restore-${speaker.id}`}
+					onClick={(event) => {
+						event.stopPropagation();
+						onAction("restore");
+					}}
+					size="xs"
+					tabIndex={-1}
+					variant="outline"
+				>
+					Restore
+					<KeyHint>R</KeyHint>
+				</Button>
+			</div>
+		) : (kind === "check" || kind === "also") &&
+			!done &&
+			saving === undefined &&
+			!editing ? (
 			<div className="mt-1.5 flex gap-2">
 				<Button
 					data-testid={`speakers-popover-yes-${speaker.id}`}
@@ -830,16 +1010,16 @@ function PanelRow({
 					<KeyHint>Y</KeyHint>
 				</Button>
 				<Button
-					data-testid={`speakers-popover-change-${speaker.id}`}
+					data-testid={`speakers-popover-no-${speaker.id}`}
 					onClick={(event) => {
 						event.stopPropagation();
-						onName(kind === "also" ? speaker.personID : undefined);
+						onReject();
 					}}
 					size="xs"
 					tabIndex={-1}
 					variant="ghost"
 				>
-					{kind === "also" ? "Someone else" : "Change"}
+					{kind === "also" ? "Someone else" : "No"}
 					<KeyHint>N</KeyHint>
 				</Button>
 			</div>
@@ -901,6 +1081,7 @@ function PanelRow({
 					initialText={editing.text}
 					listClassName="max-h-40"
 					notice={failureLine}
+					onAction={onAction}
 					onCancel={onCancel}
 					onLeave={onLeave}
 					onSubmit={onSubmit}

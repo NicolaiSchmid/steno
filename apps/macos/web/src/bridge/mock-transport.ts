@@ -903,14 +903,45 @@ export const SELECT_FAILURE = "Speaker could not be named: database is locked";
  * named person and an unnamed voice), `speakers-split` (the fixture's
  * unnamed speaker suggested as a person already named there: one person
  * heard as two speakers), `speakers-check` (only the voice match left),
- * `speakers-done` (everyone confirmed) and `speakers-long` (the fixture
- * with a long confirmed name). Without one of these the fixture's own
- * speakers stay: two named, a suggestion and an unnamed voice without a
- * clip; `speakers-partly` keeps them and gives each a paragraph. All but
+ * `speakers-done` (everyone confirmed), `speakers-long` (the fixture
+ * with a long confirmed name), `speakers-dismissed` (the unnamed voice not
+ * a person), `speakers-likely` (the voice match only likely) and
+ * `speakers-last-invitee` (Anna confirmed, so the unnamed voice is the only
+ * one left). Without one of these the fixture's own speakers stay: two
+ * named, a suggestion and an unnamed voice without a clip;
+ * `speakers-partly` keeps them and gives each a paragraph. All but
  * `speakers-none`, `speakers-me` and `speakers-me-unnamed` spread the
- * turns over every voice (`spread`).
+ * turns over every voice (`spread`). Each voice quotes its first
+ * paragraph, as the host quotes its clip.
  */
 function speakersScenario(
+	detail: MeetingDetailSnapshot,
+	requested: string,
+): MeetingDetailSnapshot {
+	return withQuotes(bendSpeakers(detail, requested));
+}
+
+/** Every voice's quote: its first paragraph, cut as the host cuts it. */
+function withQuotes(detail: MeetingDetailSnapshot): MeetingDetailSnapshot {
+	return {
+		...detail,
+		speakers: detail.speakers.map((speaker) => {
+			const said = detail.transcript.find(
+				(turn) => turn.speakerID === speaker.id,
+			)?.text;
+			const { quote: _quote, ...rest } = speaker;
+			if (!said) {
+				return rest;
+			}
+			return {
+				...rest,
+				quote: said.length > 160 ? `${said.slice(0, 160).trim()}…` : said,
+			};
+		}),
+	};
+}
+
+function bendSpeakers(
 	detail: MeetingDetailSnapshot,
 	requested: string,
 ): MeetingDetailSnapshot {
@@ -941,6 +972,27 @@ function speakersScenario(
 	});
 	if (scenario === "speakers-partly") {
 		return spread({ ...detail });
+	}
+	if (scenario === "speakers-last-invitee") {
+		return spread(
+			renamed([
+				first,
+				second,
+				confirmed(third, "Anna", third.personID ?? MOCK_PERSON_ID),
+				fourth,
+			]),
+		);
+	}
+	if (scenario === "speakers-dismissed") {
+		return answerSpeakerChange(spread({ ...detail }), "speakers.dismiss", {
+			speakerID: fourth.id,
+		});
+	}
+	if (scenario === "speakers-likely") {
+		return spread({
+			...detail,
+			speakers: [first, second, { ...third, suggestionStrength: "likely" }],
+		});
 	}
 	if (scenario === "speakers-split") {
 		const { suggestionName: _name, ...rest } = fourth;
@@ -994,6 +1046,7 @@ function speakersScenario(
 		colorIndex: personColor(speaker.id),
 		hasClip: label !== "Me",
 		isPlaying: false,
+		dismissed: false,
 	});
 	const me =
 		scenario === "speakers-me"
@@ -1072,10 +1125,15 @@ export function answerSpeakerOptions(
 	recorded: SpeakerOptionsReply | undefined,
 	params: unknown,
 	scenario = "",
+	rejected: ReadonlySet<string> = new Set(),
 ): SpeakerOptionsReply | Promise<SpeakerOptionsReply> {
 	const query =
 		typeof params === "object" && params !== null && "query" in params
 			? String(params.query).trim()
+			: "";
+	const speakerID =
+		typeof params === "object" && params !== null && "speakerID" in params
+			? String(params.speakerID)
 			: "";
 	if (query && scenario === "speakers-options-slow") {
 		return new Promise(() => {});
@@ -1087,12 +1145,88 @@ export function answerSpeakerOptions(
 		text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
 	const people = (recorded?.options ?? []).filter(
 		(option) =>
-			option.kind === "person" && fold(option.label).includes(fold(query)),
+			option.kind === "person" &&
+			fold(option.label).includes(fold(query)) &&
+			// A person answered No to is found only when typed.
+			!(rejected.has(`${speakerID} ${option.personID}`) && !query),
 	);
 	const exact = people.some((option) => fold(option.label) === fold(query));
+	if (scenario === "speakers-last-invitee" && !query) {
+		// Anna owns Speaker 3 now, so no voice match; Maya is the one
+		// invitee nobody is named as, for the one voice left.
+		people.splice(
+			0,
+			people.length,
+			{ kind: "create", label: "Maya", reason: "lastInvitee" },
+			...people.map(({ reason: _reason, strength: _strength, ...option }) => ({
+				...option,
+				reason: "inThisMeeting" as const,
+			})),
+		);
+	}
 	return {
 		options:
 			query && !exact ? [...people, { kind: "create", label: query }] : people,
+	};
+}
+
+/**
+ * `speakers.reject`, `speakers.clear`, `speakers.dismiss` and
+ * `speakers.restore` outside the app, as the hosts republish the meeting:
+ * a No or Remove name leaves the voice unnamed; Not a person also reads its
+ * turns "Not a person"; Restore brings it back unnamed.
+ */
+export function answerSpeakerChange(
+	detail: MeetingDetailSnapshot,
+	method: string,
+	params: unknown,
+): MeetingDetailSnapshot {
+	const { speakerID, personID } = params as {
+		speakerID: string;
+		personID?: string;
+	};
+	const speaker = detail.speakers.find((row) => row.id === speakerID);
+	if (!speaker) {
+		return detail;
+	}
+	if (
+		method === "speakers.reject" &&
+		(speaker.assignment !== "suggested" || speaker.personID !== personID)
+	) {
+		return detail;
+	}
+	const {
+		suggestionName: _name,
+		suggestionStrength: _strength,
+		personID: _person,
+		email: _email,
+		...rest
+	} = speaker;
+	const changed: DetailSpeaker =
+		method === "speakers.restore"
+			? { ...speaker, dismissed: false }
+			: {
+					...rest,
+					assignment: "unknown",
+					displayName: speaker.clusterLabel,
+					colorIndex: personColor(speaker.id),
+					dismissed: method === "speakers.dismiss" || speaker.dismissed,
+				};
+	return {
+		...detail,
+		speakers: detail.speakers.map((row) =>
+			row.id === speakerID ? changed : row,
+		),
+		transcript: detail.transcript.map((turn) =>
+			turn.speakerID === speakerID
+				? {
+						...turn,
+						speakerName: changed.dismissed
+							? "Not a person"
+							: changed.displayName,
+					}
+				: turn,
+		),
 	};
 }
 

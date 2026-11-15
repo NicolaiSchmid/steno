@@ -2,14 +2,19 @@ import { describe, expect, it } from "vitest";
 import type { SpeakerOption } from "@/bridge/contract";
 import { personColor } from "@/lib/person-color";
 import {
+	firstWithWork,
 	groupOptions,
 	nextToName,
+	optionReason,
 	panelLayout,
 	peopleLabel,
 	pillState,
 	placements,
+	quote,
 	rowOrder,
 	type Speaker,
+	suggestionReason,
+	unsuggested,
 } from "./speaker-names";
 
 const id = (n: number) =>
@@ -32,8 +37,15 @@ function voice(
 		colorIndex: n,
 		hasClip: true,
 		isPlaying: false,
+		dismissed: false,
 	};
 }
+
+/** `speaker` dismissed as not a person. */
+const notPerson = (speaker: Speaker): Speaker => ({
+	...speaker,
+	dismissed: true,
+});
 
 const ME: Speaker = { ...voice(9, "unknown", "Me"), clusterLabel: "Me" };
 
@@ -179,14 +191,15 @@ describe("groupOptions", () => {
 			kind: "person",
 			label: "Anna",
 			personID: person(3),
-			detail: "Sounds like",
+			reason: "voice",
+			strength: "strong",
 		},
-		{ kind: "person", label: "Lea", personID: person(4), detail: "Attendee" },
+		{ kind: "person", label: "Lea", personID: person(4), reason: "invited" },
 		{
 			kind: "person",
 			label: "Nicolai",
 			personID: person(1),
-			detail: "In this meeting",
+			reason: "inThisMeeting",
 		},
 		{ kind: "person", label: "Paul", personID: person(5) },
 		{ kind: "create", label: "Ann" },
@@ -201,13 +214,24 @@ describe("groupOptions", () => {
 			"New person",
 		]);
 		expect(groups[0]?.rows.map((row) => row.reason)).toEqual([
-			"Sounds like",
+			"Sounds like · strong",
 			"Invited",
 		]);
 		expect(groups[1]?.rows[0]?.combines).toBe("combines with Speaker 1");
 		expect(
 			groupOptions(options, "a", voice(2, "unknown"), speakers)[2]?.label,
 		).toBe("People");
+	});
+
+	it("keeps a suggested name Steno does not know yet with the suggestions", () => {
+		const groups = groupOptions(
+			[{ kind: "create", label: "Maya", reason: "lastInvitee" }],
+			"",
+			voice(2, "unknown"),
+			speakers,
+		);
+		expect(groups.map((group) => group.id)).toEqual(["suggested"]);
+		expect(groups[0]?.rows[0]?.reason).toBe("Last invitee left");
 	});
 
 	it("shows each person in the colour the voice will take once picked", () => {
@@ -262,5 +286,91 @@ describe("personColor", () => {
 		// The same ID and index as `colours_are_stable_fnv_folds` in steno-host.
 		expect(personColor("00000000-0000-0000-0000-00000000000C")).toBe(1);
 		expect(personColor("00000000-0000-0000-0000-00000000000c")).toBe(1);
+	});
+});
+
+describe("voices that are not people", () => {
+	const speakers = [
+		voice(1, "confirmed", "Nicolai", 1),
+		notPerson(voice(2, "unknown")),
+		voice(3, "unknown"),
+	];
+
+	it("count for nothing in the pill", () => {
+		expect(pillState(speakers, true, false)).toMatchObject({
+			kind: "needs",
+			count: 1,
+		});
+		expect(pillState([notPerson(voice(2, "unknown"))], true, false).kind).toBe(
+			"none",
+		);
+	});
+
+	it("sit last, under Not people, and are no work", () => {
+		const layout = panelLayout(speakers);
+		expect(layout.dismissed.map((speaker) => speaker.id)).toEqual([id(2)]);
+		expect(layout.need.map((speaker) => speaker.id)).toEqual([id(3)]);
+		expect(rowOrder(layout).at(-1)?.id).toBe(id(2));
+		expect(firstWithWork(panelLayout([notPerson(voice(2, "unknown"))]))).toBe(
+			undefined,
+		);
+		// Past Nicolai only the voice that is not a person is left: no one.
+		expect(nextToName(layout, id(1))).toBeUndefined();
+	});
+
+	it("keep the place they had when the panel opened", () => {
+		const frozen = placements([voice(2, "unknown"), voice(3, "unknown")]);
+		const layout = panelLayout(speakers, frozen);
+		expect(layout.need.map((speaker) => speaker.id)).toEqual([id(2), id(3)]);
+		expect(layout.dismissed).toEqual([]);
+	});
+});
+
+describe("the evidence and the reasons", () => {
+	it("quotes the clip's own words", () => {
+		expect(quote({ ...voice(1, "unknown"), quote: " Hallo zusammen. " })).toBe(
+			"Hallo zusammen.",
+		);
+		expect(quote(voice(1, "unknown"))).toBe("");
+	});
+
+	it("says how strongly a voice matches, in words", () => {
+		const anna = {
+			...voice(3, "suggested", "Anna", 3),
+			suggestionName: "Anna",
+		};
+		expect(suggestionReason(anna)).toBe("Sounds like Anna");
+		expect(suggestionReason({ ...anna, suggestionStrength: "likely" })).toBe(
+			"Sounds like Anna · likely",
+		);
+		expect(
+			optionReason({
+				kind: "person",
+				label: "Anna",
+				reason: "voice",
+				strength: "strong",
+			}),
+		).toBe("Sounds like · strong");
+		expect(
+			optionReason({ kind: "create", label: "Maya", reason: "lastInvitee" }),
+		).toBe("Last invitee left");
+		expect(
+			optionReason({
+				kind: "person",
+				label: "Nicolai",
+				reason: "inThisMeeting",
+			}),
+		).toBeUndefined();
+	});
+
+	it("drops a suggestion answered No as the host republishes it", () => {
+		const anna = {
+			...voice(3, "suggested", "Anna", 3),
+			suggestionName: "Anna",
+			suggestionStrength: "strong" as const,
+		};
+		expect(unsuggested(anna)).toEqual({
+			...voice(3, "unknown"),
+		});
 	});
 });

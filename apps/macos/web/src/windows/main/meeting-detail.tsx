@@ -78,7 +78,7 @@ function isTab(value: unknown): value is Tab {
  */
 function firstPickable(detail: MeetingDetailSnapshot) {
 	const unconfirmed = detail.speakers.filter(
-		(speaker) => speaker.assignment !== "confirmed",
+		(speaker) => speaker.assignment !== "confirmed" && !speaker.dismissed,
 	);
 	return (
 		unconfirmed.find((speaker) =>
