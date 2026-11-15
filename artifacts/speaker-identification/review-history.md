@@ -236,3 +236,47 @@ Accepted from both:
 
 Final scores: Astra 8, Fable 8 (from 5.5 and 5 for #348). Remaining
 disagreement: S2 (Astra: always This paragraph). Handed to Nicolai.
+
+## 2026-11-15 — built speaker step 2 (#360 on #352 on the design stack)
+
+Request IDs `steno-built-speakers2-astra-r1`, `steno-built-speakers2-fable-r1`.
+Evidence: `speakers-2/{before,after}/` (31 states per theme) against the
+#348 screens and the Jamie teardown.
+
+**GPT-6-Astra: 7/10 (Jamie 7.5); not yet equal.** Resolved: hidden merges,
+Enter on an unseen person, advance before success; largely: visual noise.
+Partly: evidence (confirmed-person editing drops the quote), suggestion
+honesty, keyboard. Not: transcript scope. Ranked:
+1. Transcript picker hides that it changes the whole voice
+   (`speaker-picker.tsx:165,225`): say "Changes all N paragraphs of
+   Speaker 3 in this meeting"; label play "Voice sample".
+2. A confirmed row cannot be reopened right away
+   (`speakers-popover.tsx:362,759`): freeze placement, not editability.
+3. Keyboard: blur cancels and Tab does not move to the next row
+   (`speaker-name-field.tsx:326`, `speakers-popover.tsx:263`); no visible
+   Y/N/P hints.
+4. Confirmed-person editing suppresses the snippet (`speakers-popover.tsx:609`).
+5. "No clip" only in the accessible label (`speaker-picker.tsx:70`).
+Departures: web combine dialog right; voice-first title right; No clip right
+in intent; locking completed rows wrong.
+
+**Claude Fable 5.1: 8/10 (Jamie 7.5); at least as good, ahead on honesty.**
+Short of Jamie on paragraph moves (step 4) and clip words (step 3).
+Resolved: trigger, controls per row, vocabularies, split row, silent merges,
+optimistic and error state, focus and tab stops, play twice, avatars.
+Partly: a wrong match reads as fact (the bare "?" is weak). Ranked:
+1. Me toast reads "You is now Nicolai." (`speaker-picker.tsx:101`).
+2. Out-of-order picks reopen a named voice: stale `layout` after the await
+   (`speakers-popover.tsx:306-307`).
+3. Transcript "?" as the same grey bubble used in the pill.
+4. Combine copy leaves "Their" dangling (`speaker-name-field.tsx:76`).
+5. The headline "partly" capture uses the raw fixture (no line, greyed
+   play); no capture of a named Me row (`e2e/screens.spec.ts:265-266`).
+6. Option avatar colour flips after the pick.
+Departures: all right.
+
+### Responses
+
+All accepted, one fix build on #360; Astra's "Changes all N paragraphs"
+copy and visible "No clip" are taken. Steps 3-4 must-haves recorded for
+those builds.
