@@ -621,7 +621,7 @@ pub fn populate_sample(store: &Store, fakes: &FakeServices) {
         Speaker {
             sample_clip_range: Some(TimeRange {
                 lower: 30.0,
-                upper: 40.0,
+                upper: 41.0,
             }),
             ..speaker(
                 SPEAKER_COMBINED,

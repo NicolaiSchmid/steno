@@ -3173,16 +3173,25 @@ async fn the_room_row_feeds_no_voice() {
         assert_ne!(speaker.person_id(), Some(cleo.id), "{speaker:?}");
     }
 
-    // A diarized speaker confirmed to Cleo merges into the room row.
+    // A diarized speaker confirmed to Cleo is combined into the room row,
+    // keeping its own row and embedding.
     let two = speaker(&first.speakers, "Speaker 2");
     world.store.confirm_speaker(two.id, &cleo).unwrap();
     let after = world.store.export(meeting.id).unwrap();
-    assert!(after.speaker(two.id).is_none(), "merged into the room row");
-    let row = after.speaker(room).expect("the room row and the mark stay");
-    assert_eq!(
-        row.embedding, two.embedding,
-        "the merge copied its embedding"
+    assert!(
+        after.speaker(two.id).is_none(),
+        "combined into the room row"
     );
+    let row = after.speaker(room).expect("the room row and the mark stay");
+    assert_eq!(row.embedding, None, "the room row learns nothing");
+    let combined = world.store.merged_speakers(meeting.id).unwrap();
+    assert_eq!(combined.len(), 1);
+    assert_eq!(
+        (combined[0].speaker.id, combined[0].root),
+        (two.id, room),
+        "Speaker 2 is kept, combined"
+    );
+    assert_eq!(combined[0].speaker.embedding, two.embedding);
     let voice = world.store.person(cleo.id).unwrap().unwrap();
     assert_eq!(voice.sample_count, 1);
     assert_eq!(

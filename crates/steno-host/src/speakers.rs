@@ -470,16 +470,16 @@ pub struct CombinedRow {
     pub root: Uuid,
     /// The words of its own clip: the transcript's text over the clip's
     /// range, since its paragraphs read as the root's.
-    pub excerpt: String,
+    pub excerpt: Excerpt,
     /// Whether its clip file exists.
     pub can_play: bool,
 }
 
 /// What a combined voice's clip says: the meeting's segments over the clip
 /// range, cut as [`excerpt`] cuts them; nothing without a clip range.
-fn combined_excerpt(speaker: &Speaker, segments: &[TranscriptSegment]) -> String {
+fn combined_excerpt(speaker: &Speaker, segments: &[TranscriptSegment]) -> Excerpt {
     let Some(range) = speaker.sample_clip_range else {
-        return String::new();
+        return Excerpt::default();
     };
     let own: Vec<TranscriptSegment> = segments
         .iter()

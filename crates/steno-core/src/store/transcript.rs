@@ -170,8 +170,13 @@ impl Store {
         person: &Person,
     ) -> Result<Vec<String>> {
         self.write(|transaction| {
-            if segments.is_empty() || transcript_generation(transaction, meeting_id)? != generation
-            {
+            // A meeting deleted since is as stale as one processed again.
+            let current = match transcript_generation(transaction, meeting_id) {
+                Ok(current) => Some(current),
+                Err(StoreError::MeetingNotFound(_)) => None,
+                Err(error) => return Err(error),
+            };
+            if segments.is_empty() || current != Some(generation) {
                 return Err(StoreError::StaleTranscript);
             }
             let shown: BTreeMap<Uuid, Option<Uuid>> = segments_of_meeting(transaction, meeting_id)?

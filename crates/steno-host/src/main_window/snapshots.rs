@@ -522,7 +522,10 @@ fn speaker_rows(detail: &MeetingDetailViewModel, playing: Option<Uuid>) -> Vec<D
                 .map(|combined| DetailCombinedVoice {
                     id: combined.speaker.id,
                     cluster_label: combined.speaker.cluster_label.clone(),
-                    quote: Some(combined.excerpt.clone()).filter(|quote| !quote.is_empty()),
+                    // Only the clip's own words: a combined voice shows no
+                    // context.
+                    quote: Some(combined.excerpt.text.clone())
+                        .filter(|quote| combined.excerpt.in_clip && !quote.is_empty()),
                     has_clip: combined.can_play,
                     is_playing: playing == Some(combined.speaker.id),
                 })
