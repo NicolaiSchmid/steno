@@ -5,12 +5,19 @@
  * radius, shadow, padding) belongs in the component itself, behind `variant`
  * and `size`.
  *
- * Usage: node scripts/check-ui-restyle.mjs [--root src] [--ui src/components/ui]
+ * And nothing anywhere, the kit included, paints a colour the contrast test
+ * (src/theme/contrast.test.ts) cannot see: no `/NN` on a colour token (name
+ * the veil in src/theme.css instead), and no `opacity-*` on what holds text
+ * or icons, except in a disabled state, on `aria-hidden` decoration, and the
+ * 0 and 100 a transition starts or ends at.
+ *
+ * Usage: node scripts/check-ui-restyle.mjs [--root src] [--ui src/components/ui] [--theme src/theme.css]
  * Exit 1 lists every offending class as `file:line: <Component> "class"`.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const LAYOUT_TOKENS = [
 	"w-",
@@ -55,7 +62,11 @@ const LAYOUT_TOKENS = [
 ];
 
 function parseArgs(argv) {
-	const options = { root: "src", ui: "src/components/ui" };
+	const options = {
+		root: "src",
+		ui: "src/components/ui",
+		theme: "src/theme.css",
+	};
 	for (let index = 0; index < argv.length; index += 1) {
 		const argument = argv[index];
 		if (argument === "--root") {
@@ -63,6 +74,9 @@ function parseArgs(argv) {
 			index += 1;
 		} else if (argument === "--ui") {
 			options.ui = argv[index + 1] ?? options.ui;
+			index += 1;
+		} else if (argument === "--theme") {
+			options.theme = argv[index + 1] ?? options.theme;
 			index += 1;
 		}
 	}
@@ -240,10 +254,109 @@ export function checkSource(source, file, uiNames) {
 	return findings;
 }
 
-export function run({ root, ui, cwd = process.cwd() }) {
+/** The colour tokens Tailwind knows: every `--color-<name>` in the theme. */
+export function collectColourTokens(themeSource) {
+	return new Set(
+		[...themeSource.matchAll(/--color-([a-z0-9-]+)\s*:/g)]
+			.map((match) => match[1])
+			.filter((name) => name !== "*"),
+	);
+}
+
+/** The variant chain in front of a class (`hover:data-disabled:`). */
+function variantsOf(token) {
+	const base = baseClass(token);
+	return token.slice(0, token.length - base.length);
+}
+
+/**
+ * Why a class paints a colour the contrast test cannot see, or null: a
+ * colour token with an opacity modifier, or an element opacity between 0
+ * and 100 outside a disabled state.
+ */
+export function paintProblem(token, colours, hidden = false) {
+	const base = baseClass(token).replace(/!$/, "");
+	const slash = base.lastIndexOf("/");
+	if (slash > 0 && !base.slice(0, slash).includes("[")) {
+		const prefix = base.slice(0, slash);
+		for (const colour of colours) {
+			if (prefix.endsWith(`-${colour}`)) {
+				return `veils --${colour}; name the veil in src/theme.css`;
+			}
+		}
+	}
+	const opacity = /^opacity-(.+)$/.exec(base);
+	if (opacity && opacity[1] !== "0" && opacity[1] !== "100" && !hidden) {
+		if (!variantsOf(token).includes("disabled")) {
+			return "fades text or icons below their measured contrast";
+		}
+	}
+	return null;
+}
+
+function hasAriaHidden(element) {
+	return element.attributes.properties.some(
+		(attribute) =>
+			ts.isJsxAttribute(attribute) &&
+			attribute.name.getText() === "aria-hidden" &&
+			attribute.initializer?.getText() !== "{false}",
+	);
+}
+
+/** Every class-like token in the file's string literals that paints unseen. */
+export function checkPaint(source, file, colours) {
+	const sourceFile = ts.createSourceFile(
+		file,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+	);
+	const findings = [];
+	const report = (text, node, hidden) => {
+		for (const token of text.split(/\s+/).filter(Boolean)) {
+			const problem = paintProblem(token, colours, hidden);
+			if (problem) {
+				const { line } = sourceFile.getLineAndCharacterOfPosition(
+					node.getStart(sourceFile),
+				);
+				findings.push({ file, line: line + 1, token, problem });
+			}
+		}
+	};
+	const visit = (node, hidden) => {
+		let inside = hidden;
+		if (ts.isJsxElement(node) && hasAriaHidden(node.openingElement)) {
+			inside = true;
+		} else if (ts.isJsxSelfClosingElement(node) && hasAriaHidden(node)) {
+			inside = true;
+		}
+		if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+			report(node.text, node, inside);
+		} else if (ts.isTemplateExpression(node)) {
+			report(node.head.text, node, inside);
+			for (const span of node.templateSpans) {
+				report(span.literal.text, node, inside);
+			}
+		}
+		ts.forEachChild(node, (child) => visit(child, inside));
+	};
+	visit(sourceFile, false);
+	return findings;
+}
+
+export function run({
+	root,
+	ui,
+	theme = "src/theme.css",
+	cwd = process.cwd(),
+}) {
 	const rootDirectory = resolve(cwd, root);
 	const uiDirectory = resolve(cwd, ui);
 	const uiNames = collectUiExports(uiDirectory);
+	const colours = collectColourTokens(
+		readFileSync(resolve(cwd, theme), "utf8"),
+	);
 	const files = walk(
 		rootDirectory,
 		(path) => path.endsWith(".tsx") && !path.startsWith(`${uiDirectory}/`),
@@ -254,7 +367,18 @@ export function run({ root, ui, cwd = process.cwd() }) {
 			...checkSource(readFileSync(file, "utf8"), relative(cwd, file), uiNames),
 		);
 	}
-	return { files: files.length, uiNames, findings };
+	// The paint rule covers the kit too, and plain modules that build classes.
+	const painted = walk(
+		rootDirectory,
+		(path) => /\.tsx?$/.test(path) && !/\.test\.tsx?$/.test(path),
+	);
+	const paint = [];
+	for (const file of painted) {
+		paint.push(
+			...checkPaint(readFileSync(file, "utf8"), relative(cwd, file), colours),
+		);
+	}
+	return { files: files.length, uiNames, findings, paint };
 }
 
 const invokedDirectly =
@@ -264,18 +388,23 @@ const invokedDirectly =
 if (invokedDirectly) {
 	const options = parseArgs(process.argv.slice(2));
 	const result = run(options);
-	if (result.findings.length > 0) {
-		for (const finding of result.findings) {
-			console.error(
-				`${finding.file}:${finding.line}: <${finding.name}> className "${finding.token}" restyles a ui component; pick a variant or move the look into src/components/ui`,
-			);
-		}
+	for (const finding of result.findings) {
 		console.error(
-			`\n${result.findings.length} restyle(s) in ${result.files} file(s). Callers may add layout classes only.`,
+			`${finding.file}:${finding.line}: <${finding.name}> className "${finding.token}" restyles a ui component; pick a variant or move the look into src/components/ui`,
+		);
+	}
+	for (const finding of result.paint) {
+		console.error(
+			`${finding.file}:${finding.line}: "${finding.token}" ${finding.problem}`,
+		);
+	}
+	if (result.findings.length > 0 || result.paint.length > 0) {
+		console.error(
+			`\n${result.findings.length} restyle(s) in ${result.files} file(s); callers may add layout classes only. ${result.paint.length} unmeasured paint(s).`,
 		);
 		process.exit(1);
 	}
 	console.log(
-		`lint:ui ok: ${result.files} file(s) checked against ${result.uiNames.size} ui exports`,
+		`lint:ui ok: ${result.files} file(s) checked against ${result.uiNames.size} ui exports, no unmeasured paint`,
 	);
 }

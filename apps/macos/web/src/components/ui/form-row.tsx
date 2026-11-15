@@ -30,13 +30,13 @@ export function FormCard({
 			{...props}
 		>
 			{title ? (
-				<h3 className="m-0 flex min-h-7 select-none items-center px-4 font-normal text-foreground/70 text-sm">
+				<h3 className="m-0 flex min-h-7 select-none items-center px-4 font-normal text-form-heading text-sm">
 					{title}
 				</h3>
 			) : null}
 			<Card variant="group">{children}</Card>
 			{footer ? (
-				<p className="m-0 px-4 text-muted-foreground/80 text-xs leading-normal">
+				<p className="m-0 px-4 text-form-note text-xs leading-normal">
 					{footer}
 				</p>
 			) : null}
@@ -81,7 +81,7 @@ export function FormRow({
 							{label}
 						</span>
 						{description ? (
-							<span className="max-w-xl text-muted-foreground/80 text-xs leading-normal">
+							<span className="max-w-xl text-form-note text-xs leading-normal">
 								{description}
 							</span>
 						) : null}

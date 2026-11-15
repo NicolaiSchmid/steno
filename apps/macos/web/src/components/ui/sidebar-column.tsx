@@ -30,7 +30,7 @@ export function SidebarColumn({
 	return (
 		<Tag
 			className={cn(
-				"surface-grain flex min-h-0 flex-col border-sidebar-border border-r bg-sidebar",
+				"surface-grain surface-sidebar flex min-h-0 flex-col border-sidebar-border border-r bg-sidebar",
 				className,
 			)}
 			{...props}

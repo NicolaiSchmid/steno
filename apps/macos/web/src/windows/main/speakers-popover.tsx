@@ -237,11 +237,7 @@ function SpeakerRow({
 
 	return (
 		<li
-			className={cn(
-				"flex flex-col",
-				split && "ml-8",
-				split && !editing && "opacity-64",
-			)}
+			className={cn("flex flex-col", split && "ml-8")}
 			data-testid={`speakers-popover-row-${speaker.id}`}
 		>
 			<div
@@ -273,7 +269,7 @@ function SpeakerRow({
 							data-testid={`speakers-popover-name-${speaker.id}`}
 							onClick={onEdit}
 							size="sm"
-							variant="ghost"
+							variant={split ? "ghost-muted" : "ghost"}
 						>
 							<span className="truncate">{speaker.displayName}</span>
 							{named && isMe(speaker) ? (

@@ -19,12 +19,11 @@ const ghost = "border-transparent hover:bg-accent data-popup-open:bg-accent";
 export const buttonLook = {
 	primary: [
 		filled,
-		"border-primary bg-primary text-primary-foreground hover:bg-primary/90",
+		"border-primary bg-primary text-primary-foreground hover:bg-primary-hover",
 	],
 	outline: [
-		"edge-highlight border-input bg-popover text-foreground shadow-xs",
-		"hover:bg-accent/50 active:shadow-none active:before:shadow-none disabled:before:shadow-none",
-		"dark:bg-input/32 dark:hover:bg-input/64",
+		"edge-highlight border-outline bg-control text-foreground shadow-xs",
+		"hover:bg-control-hover active:shadow-none active:before:shadow-none disabled:before:shadow-none",
 		"[&_svg:not([class*='text-'])]:text-muted-foreground",
 	],
 	ghost: [
@@ -34,17 +33,17 @@ export const buttonLook = {
 	"ghost-muted": [ghost, "text-muted-foreground hover:text-foreground"],
 	destructive: [
 		filled,
-		"border-destructive bg-destructive text-white hover:bg-destructive/90",
+		"border-destructive bg-destructive text-on-destructive hover:bg-destructive-hover",
 	],
 	/** An invitation to fill something in ("Name speakers"): a dashed outline, no fill. */
 	dashed: [
-		"border-dashed border-foreground/24 bg-transparent text-foreground",
-		"hover:border-foreground/40 hover:bg-accent data-popup-open:bg-accent",
+		"border-dashed border-dashed-outline bg-transparent text-foreground",
+		"hover:border-dashed-outline-hover hover:bg-accent data-popup-open:bg-accent",
 		"[&_svg:not([class*='text-'])]:text-muted-foreground",
 	],
 	"warning-outline": [
-		"border-warning/32 bg-warning-surface text-warning-foreground shadow-xs",
-		"hover:border-warning/40 hover:bg-warning/16 dark:hover:bg-warning/24",
+		"border-warning-border bg-warning-surface text-warning-foreground shadow-xs",
+		"hover:border-warning-border-hover hover:bg-warning-surface-hover",
 	],
 } as const;
 
@@ -59,7 +58,7 @@ export const buttonVariants = cva(
 		"rounded-control border font-medium text-sm leading-none outline-none",
 		"transition-[background-color,border-color,box-shadow,color,scale,opacity]",
 		"duration-(--duration-functional) ease-standard",
-		"focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+		"focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-1 focus-visible:ring-offset-surface",
 		"active:scale-[0.97] active:duration-(--duration-press-in)",
 		"disabled:pointer-events-none disabled:opacity-64",
 		"[&_svg]:pointer-events-none [&_svg]:-mx-0.5 [&_svg]:size-4 [&_svg]:shrink-0",

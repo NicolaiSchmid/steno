@@ -16,13 +16,12 @@ export function Checkbox({ className, ...props }: CheckboxProps) {
 	return (
 		<BaseCheckbox.Root
 			className={cn(
-				"edge-highlight inline-grid size-4 shrink-0 place-items-center rounded-xs border border-input bg-background shadow-xs outline-none",
+				"edge-highlight inline-grid size-4 shrink-0 place-items-center rounded-xs border border-outline bg-field shadow-xs outline-none",
 				"transition-[background-color,border-color,box-shadow] duration-(--duration-functional) ease-standard",
 				"data-checked:border-primary data-checked:bg-primary data-checked:shadow-none data-checked:before:shadow-none",
 				"data-indeterminate:border-primary data-indeterminate:bg-primary",
-				"focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+				"focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-1 focus-visible:ring-offset-surface",
 				"data-disabled:opacity-64",
-				"dark:not-data-checked:bg-input/32",
 				className,
 			)}
 			{...props}

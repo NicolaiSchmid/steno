@@ -11,11 +11,11 @@ import { Kbd } from "./kbd";
  * shadow in motion at the functional tempo.
  */
 export const fieldFrameClass =
-	"relative rounded-lg border border-input bg-background text-foreground shadow-xs edge-highlight transition-[border-color,box-shadow] duration-(--duration-functional) ease-standard dark:bg-input/32";
+	"relative rounded-lg border border-outline bg-field text-foreground shadow-xs edge-highlight transition-[border-color,box-shadow] duration-(--duration-functional) ease-standard";
 
 /** The frame while its field has focus, and while the field is disabled. */
 export const fieldStateClass =
-	"focus-within:border-ring focus-within:shadow-none focus-within:ring-[3px] focus-within:ring-ring/24 focus-within:before:shadow-none has-[:disabled]:opacity-64 has-[:disabled]:shadow-none";
+	"focus-within:border-focus focus-within:shadow-none focus-within:ring-[3px] focus-within:ring-focus-field focus-within:before:shadow-none has-[:disabled]:opacity-64 has-[:disabled]:shadow-none";
 
 /** The single-line field. Heights: sm 26, md 30, lg 34. */
 export const inputVariants = cva(

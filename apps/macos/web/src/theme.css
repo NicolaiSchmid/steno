@@ -4,6 +4,10 @@
  * @theme inline. Nothing here loads from the network: the system font stack
  * only, the grain is an inline SVG.
  *
+ * src/theme/contrast.test.ts measures every colour here on every surface
+ * it can sit on; colours painted anywhere else are invisible to it, so the
+ * kit names its veils here instead of writing `/NN` (`pnpm lint:ui`).
+ *
  * The web canvas colour (`--background`) is mirrored by `WebCanvas` in
  * apps/macos/Steno/Web/WebWindowView.swift and pinned by ThemeTokensTests.
  */
@@ -20,14 +24,31 @@
 	--card: #ffffff;
 	--popover: #ffffff;
 	--muted: #fafafa;
-	--accent: #f4f4f5;
 	--foreground: #27272a;
 	--muted-foreground: #71717a;
 	/* Derived from the muted text and the canvas so it tracks both appearances. */
 	--faint: color-mix(in srgb, var(--muted-foreground) 60%, var(--background));
 	--border: #e4e4e7;
-	--input: #d4d4d8;
-	--ring: var(--primary);
+	/* Field and checkbox outlines and the switch's off track. */
+	--outline: #d4d4d8;
+	--focus: var(--primary);
+
+	/*
+	 * Each surface's row fills. The surface utilities below (`surface-sidebar`
+	 * and the others) point `--surface`, `--accent`, `--row-hover` and
+	 * `--row-selected` at their own for the subtree; the root is the canvas.
+	 */
+	--canvas-accent: #f4f4f5;
+	--canvas-row-hover: #fcfcfc;
+	--canvas-row-selected: #ffffff;
+	--sidebar-accent: #f4f4f5;
+	--sidebar-row-hover: #fcfcfc;
+	--sidebar-row-selected: #ffffff;
+	--surface: var(--background);
+	--accent: var(--canvas-accent);
+	--row-hover: var(--canvas-row-hover);
+	--row-selected: var(--canvas-row-selected);
+	--row-pressed: #ffffff;
 
 	/* The sidebar: rows hover lighter than the surface, the selected one is white. */
 	--sidebar-border: var(--border);
@@ -38,9 +59,6 @@
 		var(--sidebar)
 	);
 	--sidebar-control-surface: #f4f4f5;
-	--row-hover: #fcfcfc;
-	--row-pressed: #ffffff;
-	--row-selected: #ffffff;
 
 	/*
 	 * The primary is achromatic (near-black on light, white on dark), as in
@@ -61,6 +79,8 @@
 	--destructive: #ef4444;
 	--destructive-foreground: #b91c1c;
 	--destructive-surface: rgba(239, 68, 68, 0.08);
+	/* Text on the destructive fill. */
+	--on-destructive: #ffffff;
 	--success: #10b981;
 	--success-foreground: #047857;
 	--success-surface: rgba(16, 185, 129, 0.08);
@@ -73,6 +93,87 @@
 	--p2: #d97706;
 	--p3: #059669;
 	--p4: #4f46e5;
+
+	/*
+	 * Veils: every translucent colour the kit paints, named so the contrast
+	 * test (src/theme/contrast.test.ts) sees it. Nothing adds `/NN` to a
+	 * colour at a call site or in the kit (`pnpm lint:ui`).
+	 */
+	--p1-surface: color-mix(in srgb, var(--p1) 16%, transparent);
+	--p2-surface: color-mix(in srgb, var(--p2) 16%, transparent);
+	--p3-surface: color-mix(in srgb, var(--p3) 16%, transparent);
+	--p4-surface: color-mix(in srgb, var(--p4) 16%, transparent);
+	--warning-border: color-mix(in srgb, var(--warning) 32%, transparent);
+	--warning-border-hover: color-mix(in srgb, var(--warning) 40%, transparent);
+	--warning-surface-hover: color-mix(in srgb, var(--warning) 16%, transparent);
+	--info-border: color-mix(in srgb, var(--info) 32%, transparent);
+	--success-border: color-mix(in srgb, var(--success) 32%, transparent);
+	--destructive-border: color-mix(in srgb, var(--destructive) 32%, transparent);
+	/* Callout bodies under their title. */
+	--warning-body: color-mix(
+		in srgb,
+		var(--warning-foreground) 80%,
+		transparent
+	);
+	--destructive-body: color-mix(
+		in srgb,
+		var(--destructive-foreground) 80%,
+		transparent
+	);
+	/* Fields, outline buttons and their hover. */
+	--field: var(--background);
+	--control: var(--popover);
+	--control-hover: color-mix(in srgb, var(--canvas-accent) 50%, transparent);
+	--primary-hover: color-mix(in srgb, var(--primary) 90%, transparent);
+	--destructive-hover: color-mix(in srgb, var(--destructive) 90%, transparent);
+	--dashed-outline: color-mix(in srgb, var(--foreground) 24%, transparent);
+	--dashed-outline-hover: color-mix(
+		in srgb,
+		var(--foreground) 40%,
+		transparent
+	);
+	/* The split button's chevron half on the primary fill. */
+	--primary-part-hover: color-mix(
+		in srgb,
+		var(--primary-foreground) 10%,
+		transparent
+	);
+	--primary-part-focus: color-mix(
+		in srgb,
+		var(--primary-foreground) 60%,
+		transparent
+	);
+	--focus-field: color-mix(in srgb, var(--focus) 24%, transparent);
+	--resizer-hover: color-mix(in srgb, var(--focus) 30%, transparent);
+	--resizer-active: color-mix(in srgb, var(--focus) 60%, transparent);
+	/* Settings groups and their words. */
+	--group: color-mix(in srgb, var(--card) 40%, transparent);
+	--group-border: color-mix(in srgb, var(--border) 60%, transparent);
+	--group-divider: color-mix(in srgb, var(--border) 50%, transparent);
+	--form-heading: color-mix(in srgb, var(--foreground) 70%, transparent);
+	--form-note: color-mix(in srgb, var(--muted-foreground) 80%, transparent);
+	/* The sidebar's quieter words and its group hairline. */
+	--sidebar-row-foreground: color-mix(
+		in srgb,
+		var(--sidebar-muted-foreground) 80%,
+		transparent
+	);
+	--sidebar-label: color-mix(
+		in srgb,
+		var(--sidebar-muted-foreground) 60%,
+		transparent
+	);
+	--sidebar-rule: color-mix(in srgb, var(--sidebar-border) 60%, transparent);
+	/* Segmented tabs: the track, a hovered and the active segment, its count. */
+	--tab-track: color-mix(in srgb, var(--outline) 40%, transparent);
+	--tab-hover: color-mix(in srgb, var(--background) 55%, transparent);
+	--tab-active: var(--background);
+	/* The active segment's fill is its only indicator. */
+	--tab-indicator: var(--tab-active);
+	--tab-count: color-mix(in srgb, var(--muted-foreground) 70%, transparent);
+	--item-selected: color-mix(in srgb, var(--foreground) 8%, transparent);
+	--band: color-mix(in srgb, var(--muted) 72%, transparent);
+	--countdown: color-mix(in srgb, var(--foreground) 40%, transparent);
 
 	--radius: 10px;
 	--control-radius: 8px;
@@ -114,20 +215,24 @@
 	--sidebar: #000000;
 	--card: #111111;
 	--popover: #111111;
-	/* Opaque (the dark card) so a `bg-muted/72` band still reads. */
+	/* Opaque (the dark card) so the dialog band still reads. */
 	--muted: #111111;
-	--accent: rgba(255, 255, 255, 0.04);
 	--foreground: #f5f5f5;
 	--muted-foreground: #818181;
 	--border: rgba(255, 255, 255, 0.06);
-	--input: rgba(255, 255, 255, 0.08);
+	--outline: rgba(255, 255, 255, 0.08);
+
+	--canvas-accent: rgba(255, 255, 255, 0.04);
+	--canvas-row-hover: rgba(255, 255, 255, 0.08);
+	--canvas-row-selected: rgba(255, 255, 255, 0.07);
+	--sidebar-accent: rgba(255, 255, 255, 0.04);
+	--sidebar-row-hover: rgba(255, 255, 255, 0.08);
+	--sidebar-row-selected: rgba(255, 255, 255, 0.07);
+	--row-pressed: rgba(255, 255, 255, 0.11);
 
 	--sidebar-border: rgba(255, 255, 255, 0.08);
 	--sidebar-muted-foreground: #a3a3a3;
 	--sidebar-control-surface: #0a0a0a;
-	--row-hover: rgba(255, 255, 255, 0.08);
-	--row-pressed: rgba(255, 255, 255, 0.11);
-	--row-selected: rgba(255, 255, 255, 0.07);
 
 	--primary: #ffffff;
 	--primary-2: #e5e5e5;
@@ -147,6 +252,13 @@
 	--p2: #fbbf24;
 	--p3: #34d399;
 	--p4: #818cf8;
+
+	--warning-surface-hover: color-mix(in srgb, var(--warning) 24%, transparent);
+	--field: color-mix(in srgb, var(--outline) 32%, transparent);
+	--control: var(--field);
+	--control-hover: color-mix(in srgb, var(--outline) 64%, transparent);
+	--tab-hover: color-mix(in srgb, var(--outline) 32%, transparent);
+	--tab-active: color-mix(in srgb, var(--outline) 72%, transparent);
 
 	--glass-blur: 16px;
 	--glass-sat: 1.08;
@@ -173,20 +285,21 @@
 	--color-card: var(--card);
 	--color-popover: var(--popover);
 	--color-muted: var(--muted);
-	--color-accent: var(--accent);
 	--color-foreground: var(--foreground);
 	--color-muted-foreground: var(--muted-foreground);
 	--color-faint: var(--faint);
 	--color-border: var(--border);
-	--color-input: var(--input);
-	--color-ring: var(--ring);
+	--color-outline: var(--outline);
+	--color-focus: var(--focus);
+	--color-surface: var(--surface);
+	--color-accent: var(--accent);
+	--color-row-hover: var(--row-hover);
+	--color-row-selected: var(--row-selected);
+	--color-row-pressed: var(--row-pressed);
 	--color-sidebar-border: var(--sidebar-border);
 	--color-sidebar-muted-foreground: var(--sidebar-muted-foreground);
 	--color-sidebar-icon: var(--sidebar-icon);
 	--color-sidebar-control-surface: var(--sidebar-control-surface);
-	--color-row-hover: var(--row-hover);
-	--color-row-pressed: var(--row-pressed);
-	--color-row-selected: var(--row-selected);
 	--color-primary: var(--primary);
 	--color-primary-2: var(--primary-2);
 	--color-primary-foreground: var(--primary-foreground);
@@ -199,6 +312,7 @@
 	--color-destructive: var(--destructive);
 	--color-destructive-foreground: var(--destructive-foreground);
 	--color-destructive-surface: var(--destructive-surface);
+	--color-on-destructive: var(--on-destructive);
 	--color-success: var(--success);
 	--color-success-foreground: var(--success-foreground);
 	--color-success-surface: var(--success-surface);
@@ -209,6 +323,46 @@
 	--color-p2: var(--p2);
 	--color-p3: var(--p3);
 	--color-p4: var(--p4);
+	--color-p1-surface: var(--p1-surface);
+	--color-p2-surface: var(--p2-surface);
+	--color-p3-surface: var(--p3-surface);
+	--color-p4-surface: var(--p4-surface);
+	--color-warning-border: var(--warning-border);
+	--color-warning-border-hover: var(--warning-border-hover);
+	--color-warning-surface-hover: var(--warning-surface-hover);
+	--color-info-border: var(--info-border);
+	--color-success-border: var(--success-border);
+	--color-destructive-border: var(--destructive-border);
+	--color-warning-body: var(--warning-body);
+	--color-destructive-body: var(--destructive-body);
+	--color-field: var(--field);
+	--color-control: var(--control);
+	--color-control-hover: var(--control-hover);
+	--color-primary-hover: var(--primary-hover);
+	--color-destructive-hover: var(--destructive-hover);
+	--color-dashed-outline: var(--dashed-outline);
+	--color-dashed-outline-hover: var(--dashed-outline-hover);
+	--color-primary-part-hover: var(--primary-part-hover);
+	--color-primary-part-focus: var(--primary-part-focus);
+	--color-focus-field: var(--focus-field);
+	--color-resizer-hover: var(--resizer-hover);
+	--color-resizer-active: var(--resizer-active);
+	--color-group: var(--group);
+	--color-group-border: var(--group-border);
+	--color-group-divider: var(--group-divider);
+	--color-form-heading: var(--form-heading);
+	--color-form-note: var(--form-note);
+	--color-sidebar-row-foreground: var(--sidebar-row-foreground);
+	--color-sidebar-label: var(--sidebar-label);
+	--color-sidebar-rule: var(--sidebar-rule);
+	--color-tab-track: var(--tab-track);
+	--color-tab-hover: var(--tab-hover);
+	--color-tab-active: var(--tab-active);
+	--color-tab-indicator: var(--tab-indicator);
+	--color-tab-count: var(--tab-count);
+	--color-item-selected: var(--item-selected);
+	--color-band: var(--band);
+	--color-countdown: var(--countdown);
 	/* The QR code's quiet zone stays white in dark. */
 	--color-white: #ffffff;
 
@@ -280,6 +434,34 @@
 		border-radius: inherit;
 		box-shadow: var(--edge-highlight);
 	}
+}
+
+/*
+ * The surfaces. Each points the scoped tokens at its own for its subtree, so
+ * a control knows what it sits on: the focus ring's offset is `--surface`,
+ * a row's hover and selected fill are the surface's. The contrast test reads
+ * these blocks and measures every pair on every surface.
+ */
+@utility surface-canvas {
+	--surface: var(--background);
+	--accent: var(--canvas-accent);
+	--row-hover: var(--canvas-row-hover);
+	--row-selected: var(--canvas-row-selected);
+}
+
+@utility surface-sidebar {
+	--surface: var(--sidebar);
+	--accent: var(--sidebar-accent);
+	--row-hover: var(--sidebar-row-hover);
+	--row-selected: var(--sidebar-row-selected);
+}
+
+@utility surface-card {
+	--surface: var(--card);
+}
+
+@utility surface-popover {
+	--surface: var(--popover);
 }
 
 @layer base {
