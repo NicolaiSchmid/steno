@@ -179,6 +179,10 @@ export function SpeakersPopover({
 	);
 	const rows = useRef(new Map<string, HTMLElement>());
 	const focusNext = useRef<string | null>(null);
+	// Read after a pick's await: whether this visit is still open, and
+	// which rows are saving now.
+	const isOpen = useRef(false);
+	const savingNow = useRef(new Set<string>());
 
 	const state = pillState(speakers, transcript.length > 0, finding);
 	const layout = panelLayout(speakers, frozen);
@@ -190,7 +194,13 @@ export function SpeakersPopover({
 		const id = focusNext.current;
 		if (id && editing?.speakerID !== id) {
 			focusNext.current = null;
-			rows.current.get(id)?.focus();
+			// A voice combined away has no row; its place goes to the
+			// current row, else the first.
+			const row =
+				rows.current.get(id) ??
+				(current ? rows.current.get(current) : undefined) ??
+				rows.current.values().next().value;
+			row?.focus();
 		}
 	});
 
@@ -228,6 +238,9 @@ export function SpeakersPopover({
 			return;
 		}
 		setOpen(next);
+		isOpen.current = next;
+		setEditing(null);
+		setFailures(new Map());
 		if (next) {
 			const fresh = placements(speakers);
 			setFrozen(fresh);
@@ -235,8 +248,6 @@ export function SpeakersPopover({
 			setActive((firstWithWork(opened) ?? rowOrder(opened)[0])?.id);
 		} else {
 			setFrozen(undefined);
-			setEditing(null);
-			setFailures(new Map());
 		}
 	}
 
@@ -266,6 +277,9 @@ export function SpeakersPopover({
 		fromField = true,
 	) {
 		const work = speaker.assignment === "unknown";
+		const excluded =
+			editing?.speakerID === speaker.id ? editing.excluded : undefined;
+		savingNow.current.add(speaker.id);
 		setFailures((map) => {
 			const next = new Map(map);
 			next.delete(speaker.id);
@@ -275,6 +289,7 @@ export function SpeakersPopover({
 		setEditing((now) => (now?.speakerID === speaker.id ? null : now));
 		focusNext.current = speaker.id;
 		const outcome = await select(speaker, option);
+		savingNow.current.delete(speaker.id);
 		setSaving((map) => {
 			const next = new Map(map);
 			next.delete(speaker.id);
@@ -282,8 +297,14 @@ export function SpeakersPopover({
 		});
 		if (outcome.kind === "committed") {
 			announceNamed(speaker, option.label);
+		}
+		if (!isOpen.current) {
+			// The panel closed while saving: the next visit starts clean.
+			return;
+		}
+		if (outcome.kind === "committed") {
 			const next = work
-				? nextToName(layout, speaker.id, new Set(saving.keys()))
+				? nextToName(layout, speaker.id, savingNow.current)
 				: undefined;
 			if (next) {
 				focusNext.current = null;
@@ -300,7 +321,11 @@ export function SpeakersPopover({
 		if (fromField) {
 			// Failed or cancelled: the row reopens with what was typed.
 			focusNext.current = null;
-			setEditing({ speakerID: speaker.id, text });
+			setEditing({
+				speakerID: speaker.id,
+				text,
+				...(excluded ? { excluded } : {}),
+			});
 		}
 	}
 
@@ -325,9 +350,18 @@ export function SpeakersPopover({
 		speaker: Speaker,
 		kind: RowKind,
 	) {
-		if (event.target !== event.currentTarget) {
+		if (
+			event.target !== event.currentTarget ||
+			event.metaKey ||
+			event.ctrlKey ||
+			event.altKey
+		) {
 			return;
 		}
+		// A row saving, or settled during this visit, takes no new pick.
+		const settled =
+			saving.has(speaker.id) ||
+			(isNamed(speaker) && kind !== "person" && kind !== "voice");
 		const at = order.findIndex((row) => row.id === speaker.id);
 		const move: Record<string, number> = {
 			ArrowDown: Math.min(at + 1, order.length - 1),
@@ -343,6 +377,8 @@ export function SpeakersPopover({
 				setActive(target.id);
 				rows.current.get(target.id)?.focus();
 			}
+		} else if (settled && key !== "p") {
+			return;
 		} else if (key === "Enter" || key === " ") {
 			event.preventDefault();
 			startNaming(speaker);
@@ -712,10 +748,18 @@ function PanelRow({
 				className={cn(
 					"flex min-w-0 gap-2.5 rounded-md px-2 py-1.5",
 					focusRowClass,
-					wholeRow && !editing && "cursor-default hover:bg-row-hover",
+					wholeRow &&
+						!editing &&
+						!done &&
+						saving === undefined &&
+						"cursor-default hover:bg-row-hover",
 				)}
 				data-testid={`speakers-popover-name-${speaker.id}`}
-				onClick={wholeRow && !editing ? () => onName() : undefined}
+				onClick={
+					wholeRow && !editing && !done && saving === undefined
+						? () => onName()
+						: undefined
+				}
 				onFocus={onFocus}
 				onKeyDown={onKeyDown}
 				ref={rowRef}

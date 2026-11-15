@@ -382,8 +382,10 @@ export function groupOptions(
 		const reason = option.detail ? REASONS[option.detail] : undefined;
 		const colorIndex =
 			owner?.colorIndex ??
-			speakers.find((other) => other.personID === option.personID)
-				?.colorIndex ??
+			(option.personID
+				? speakers.find((other) => other.personID === option.personID)
+						?.colorIndex
+				: undefined) ??
 			nameColor(option.label);
 		if (option.kind === "create") {
 			create.rows.push({ option, colorIndex });

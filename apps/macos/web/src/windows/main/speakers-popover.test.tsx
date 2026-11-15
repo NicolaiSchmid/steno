@@ -220,6 +220,30 @@ describe("the speakers panel", () => {
 		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(2);
 	});
 
+	it("starts the next visit clean when the panel closed while a pick saved", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		let refuse: (cause: Error) => void = () => {};
+		const { user } = await open("speakers-none", {
+			"speakers.select": () =>
+				new Promise((_, reject) => {
+					refuse = reject;
+				}),
+		});
+		await user.click(row(SPEAKER_1));
+		await screen.findAllByRole("option");
+		await user.keyboard("{Enter}");
+		await screen.findByTestId(`speakers-popover-saving-${SPEAKER_1}`);
+		await user.keyboard("{Escape}");
+		await vi.waitFor(() =>
+			expect(screen.queryByTestId("speakers-panel")).toBeNull(),
+		);
+		refuse(new Error("Speaker could not be named: busy"));
+		await user.click(screen.getByTestId("speakers-trigger"));
+		await screen.findByTestId("speakers-panel");
+		expect(screen.queryByRole("combobox")).toBeNull();
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
 	it("closes the field with Escape, then the panel, focus going back each time", async () => {
 		const { user } = await open("speakers-none");
 		await user.click(row(SPEAKER_1));

@@ -1012,6 +1012,15 @@ function speakersScenario(
 }
 
 const MOCK_PERSON_ID = "00000000-0000-0000-0000-0000000000FF";
+
+/** A person created outside the app: an ID of its own, from the name. */
+function mockPersonID(name: string): string {
+	let hash = 0;
+	for (const char of name.trim().toLowerCase()) {
+		hash = (hash * 31 + (char.codePointAt(0) ?? 0)) % 0xffffffffff;
+	}
+	return `00000000-0000-0000-0001-${hash.toString(16).padStart(12, "0")}`;
+}
 const SPREAD_TURNS = 6;
 
 /**
@@ -1143,7 +1152,7 @@ export function answerSpeakerSelect(
 		...rest,
 		assignment: "confirmed",
 		displayName: option.label,
-		personID: option.personID ?? MOCK_PERSON_ID,
+		personID: option.personID ?? mockPersonID(option.label),
 	};
 	return {
 		...detail,

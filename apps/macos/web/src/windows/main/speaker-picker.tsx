@@ -136,6 +136,8 @@ export function SpeakerPicker({
 }: SpeakerPickerProps) {
 	const { select, asking, dialog } = useSpeakerSelect();
 	const [saving, setSaving] = useState<string | null>(null);
+	// What the field reopens with after a cancelled combine or a failure.
+	const [draft, setDraft] = useState({ text: "", attempt: 0 });
 	const [failure, setFailure] = useState<{
 		message: string;
 		option: SpeakerOption;
@@ -155,6 +157,7 @@ export function SpeakerPicker({
 		}
 		if (!next) {
 			setFailure(null);
+			setDraft({ text: "", attempt: 0 });
 		}
 		onOpenChange(next);
 	}
@@ -167,8 +170,11 @@ export function SpeakerPicker({
 		if (outcome.kind === "committed") {
 			announceNamed(speaker, option.label);
 			onOpenChange(false);
-		} else if (outcome.kind === "failed") {
-			setFailure({ message: outcome.message, option, text });
+		} else {
+			setDraft((now) => ({ text, attempt: now.attempt + 1 }));
+			if (outcome.kind === "failed") {
+				setFailure({ message: outcome.message, option, text });
+			}
 		}
 	}
 
@@ -273,8 +279,8 @@ export function SpeakerPicker({
 				) : open ? (
 					<SpeakerNameField
 						className="mt-2"
-						initialText={failure?.text ?? ""}
-						key={failure ? `failed-${failure.message}` : "field"}
+						initialText={draft.text}
+						key={draft.attempt}
 						listClassName="max-h-56"
 						notice={
 							failure ? (

@@ -357,7 +357,12 @@ export function SpeakerNameField({
 				size="sm"
 				value={query}
 			/>
-			{notice}
+			{notice ? (
+				// WebKit focuses no button on click; without this the field
+				// would lose focus to the popup and close before Retry ran.
+				// biome-ignore lint/a11y/noStaticElementInteractions: keeps focus in the field; the buttons inside take the click.
+				<div onMouseDown={(event) => event.preventDefault()}>{notice}</div>
+			) : null}
 			{loading ? (
 				<p
 					className="m-0 mt-1.5 px-2 py-1 text-body text-muted-foreground"
