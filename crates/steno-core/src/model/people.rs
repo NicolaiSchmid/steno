@@ -192,9 +192,10 @@ impl VoiceStrength {
     /// matches reached it on the calibration corpus
     /// (`.plans/2026-11-14-speaker-identification.md`, S4).
     pub const STRONG: f32 = VOICE_STRONG;
-    /// Below this similarity a voice match is not shown at all, 0.06 above
-    /// the highest wrong match measured; from it up it is `Likely` until
-    /// [`VoiceStrength::STRONG`]. Equal to today's default match threshold.
+    /// Below this similarity a voice match is not shown at all, nor stored
+    /// (the pipeline never matches below it), 0.11 above the highest wrong
+    /// match measured; from it up it is `Likely` until
+    /// [`VoiceStrength::STRONG`].
     pub const FLOOR: f32 = VOICE_FLOOR;
 
     /// The word for a match of `similarity`; `None` below
@@ -215,9 +216,13 @@ impl VoiceStrength {
 // cluster against voices built from the person's other meetings: true
 // matches 0.77-0.91 for the two people with labels in several calls, the
 // best wrong person never above 0.54 (95th percentile of all wrong pairs
-// 0.43). Swift and Rust embeddings agree within 0.03.
+// 0.43). Swift and Rust embeddings agree within 0.03. The floor is 0.65,
+// not the 0.60 the measurement allowed, provisionally: with few anchored
+// positives, a wrong suggestion costs more than a missed one, and 0.65
+// loses none of the six measured true matches. The score of every No is
+// stored to revisit it.
 const VOICE_STRONG: f32 = 0.75;
-const VOICE_FLOOR: f32 = 0.60;
+const VOICE_FLOOR: f32 = 0.65;
 
 /// How a diarization cluster maps to a person.
 #[derive(Debug, Clone, PartialEq)]
@@ -457,8 +462,8 @@ mod tests {
 
     #[test]
     fn voice_strength_is_hidden_below_the_floor_and_strong_from_its_threshold() {
-        assert_eq!(VoiceStrength::of(0.59), None);
-        assert_eq!(VoiceStrength::of(0.60), Some(VoiceStrength::Likely));
+        assert_eq!(VoiceStrength::of(0.64), None);
+        assert_eq!(VoiceStrength::of(0.65), Some(VoiceStrength::Likely));
         assert_eq!(VoiceStrength::of(0.74), Some(VoiceStrength::Likely));
         assert_eq!(VoiceStrength::of(0.75), Some(VoiceStrength::Strong));
         assert_eq!(VoiceStrength::of(f32::NAN), None);
