@@ -304,9 +304,20 @@ pub struct DetailSpeaker {
     pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion_name: Option<String>,
+    /// How strongly a `suggested` voice matches its person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion_strength: Option<crate::VoiceStrength>,
+    /// The words the voice says in its sample clip, so the quote is what
+    /// plays; the longest thing it said when it has no clip. Absent without
+    /// any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
     pub color_index: i64,
     pub has_clip: bool,
     pub is_playing: bool,
+    /// Not a person: out of the counts and voice memory, its turns read
+    /// "Not a person".
+    pub dismissed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

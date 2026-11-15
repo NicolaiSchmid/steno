@@ -1,16 +1,17 @@
 {
   "options" : [
     {
-      "detail" : "Sounds like",
       "kind" : "person",
       "label" : "Anna",
-      "personID" : "00000000-0000-0000-0000-00000000000C"
+      "personID" : "00000000-0000-0000-0000-00000000000C",
+      "reason" : "voice",
+      "strength" : "strong"
     },
     {
-      "detail" : "In this meeting",
       "kind" : "person",
       "label" : "Nicolai",
-      "personID" : "00000000-0000-0000-0000-00000000000A"
+      "personID" : "00000000-0000-0000-0000-00000000000A",
+      "reason" : "inThisMeeting"
     },
     {
       "kind" : "create",

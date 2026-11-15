@@ -11,8 +11,9 @@ use steno_host::services::FileSystem as _;
 use common::*;
 use serde_json::json;
 use steno_bridge::{
-    BridgeErrorCode, BridgeHost, BridgeTopic, SelectSpeakerParams, SpeakerIdParams, SpeakerOption,
-    SpeakerOptionKind, SpeakerOptionsParams,
+    BridgeErrorCode, BridgeHost, BridgeTopic, RejectSpeakerParams, SelectSpeakerParams,
+    SpeakerIdParams, SpeakerOption, SpeakerOptionKind, SpeakerOptionReason, SpeakerOptionsParams,
+    VoiceStrength,
 };
 use steno_core::{Participant, ParticipantRole, SpeakerAssignment, SpeakerNameSuggestion};
 
@@ -35,7 +36,8 @@ fn person_option(n: u32, label: &str) -> SpeakerOption {
     SpeakerOption {
         kind: SpeakerOptionKind::Person,
         label: label.to_owned(),
-        detail: None,
+        reason: None,
+        strength: None,
         person_id: Some(uuid(n)),
     }
 }
@@ -44,7 +46,8 @@ fn create_option(label: &str) -> SpeakerOption {
     SpeakerOption {
         kind: SpeakerOptionKind::Create,
         label: label.to_owned(),
-        detail: None,
+        reason: None,
+        strength: None,
         person_id: None,
     }
 }
@@ -106,13 +109,24 @@ fn options_start_with_the_voice_match_and_never_list_the_own_person() {
         .unwrap();
     assert_eq!(reply.prefill.as_deref(), Some("Anna"));
     assert_eq!(reply.options[0].person_id, Some(uuid(PERSON_ANNA)));
-    assert_eq!(reply.options[0].detail.as_deref(), Some("Sounds like"));
+    assert_eq!(reply.options[0].reason, Some(SpeakerOptionReason::Voice));
+    assert_eq!(
+        reply.options[0].strength,
+        VoiceStrength::of(0.87),
+        "the strength is the match's"
+    );
     assert!(
         reply
             .options
             .iter()
             .any(|option| option.person_id == Some(uuid(PERSON_NICOLAI))
-                && option.detail.as_deref() == Some("In this meeting"))
+                && option.reason == Some(SpeakerOptionReason::InThisMeeting))
+    );
+    assert!(
+        reply.options[1..]
+            .iter()
+            .all(|option| option.strength.is_none()),
+        "only a voice match has a strength"
     );
     assert!(
         reply
@@ -280,7 +294,8 @@ fn selecting_a_person_confirms_and_re_exports_once() {
         SpeakerOption {
             kind: SpeakerOptionKind::Person,
             label: "Ghost".to_owned(),
-            detail: None,
+            reason: None,
+            strength: None,
             person_id: Some(uuid(0xEE)),
         },
     )
@@ -316,7 +331,11 @@ fn selecting_create_names_a_new_person_reuses_an_existing_name_and_takes_an_atte
         .find(|option| option.label == "Maya")
         .unwrap();
     assert_eq!(maya.kind, SpeakerOptionKind::Create);
-    assert_eq!(maya.detail.as_deref(), Some("Attendee"));
+    assert_eq!(
+        maya.reason,
+        Some(SpeakerOptionReason::Invited),
+        "Speaker 3 is a suggestion, so two voices are left"
+    );
 
     select(&harness, SPEAKER_UNKNOWN, create_option(" Maya ")).unwrap();
     let speakers = harness.store.speakers(uuid(MEETING)).unwrap();
@@ -393,7 +412,8 @@ fn an_llm_name_suggestion_is_a_mentioned_option() {
         SpeakerOption {
             kind: SpeakerOptionKind::Create,
             label: "Anna Berger".to_owned(),
-            detail: Some("Mentioned".to_owned()),
+            reason: Some(SpeakerOptionReason::Mentioned),
+            strength: None,
             person_id: None
         }
     );
@@ -405,7 +425,7 @@ fn an_llm_name_suggestion_is_a_mentioned_option() {
     assert!(
         !options(&harness, SPEAKER_NICOLAI, "")
             .iter()
-            .any(|option| option.detail.as_deref() == Some("Mentioned"))
+            .any(|option| option.reason == Some(SpeakerOptionReason::Mentioned))
     );
 }
 
@@ -673,5 +693,198 @@ fn naming_me_the_first_time_makes_that_person_you_in_every_unnamed_meeting() {
         store.settings().unwrap().self_person_id,
         Some(anna.id),
         "a later naming keeps the first"
+    );
+}
+
+fn reject(harness: &Harness, speaker: u32, person: u32) -> Result<(), steno_bridge::BridgeError> {
+    harness.host.speakers_reject(RejectSpeakerParams {
+        speaker_id: uuid(speaker),
+        person_id: uuid(person),
+    })
+}
+
+fn speaker_id(n: u32) -> SpeakerIdParams {
+    SpeakerIdParams {
+        speaker_id: uuid(n),
+    }
+}
+
+/// No to "Sounds like Anna": the voice is unnamed, Anna is never suggested
+/// for it again (only found when typed), and her voice is untouched.
+#[test]
+fn no_to_a_suggestion_records_it_and_leaves_voice_memory() {
+    let harness = sample();
+    let anna = harness.store.person(uuid(PERSON_ANNA)).unwrap().unwrap();
+    harness.sink.clear();
+    reject(&harness, SPEAKER_ANNA, PERSON_ANNA).unwrap();
+
+    let detail = harness.sink.last(BridgeTopic::MeetingDetail).unwrap();
+    assert_eq!(detail["speakers"][2]["assignment"], "unknown");
+    assert!(detail["speakers"][2].get("suggestionName").is_none());
+    assert!(detail["speakers"][2].get("suggestionStrength").is_none());
+    assert_eq!(detail["speakers"][2]["displayName"], "Speaker 3");
+    assert_eq!(
+        harness.store.person(uuid(PERSON_ANNA)).unwrap().unwrap(),
+        anna,
+        "a No never touches voice memory"
+    );
+    assert_eq!(
+        *harness.fakes.pipeline.redeliveries.lock().unwrap(),
+        vec![uuid(MEETING)],
+        "one re-export"
+    );
+    assert!(
+        !options(&harness, SPEAKER_ANNA, "")
+            .iter()
+            .any(|option| option.person_id == Some(uuid(PERSON_ANNA))),
+        "never suggested again"
+    );
+    assert!(
+        options(&harness, SPEAKER_ANNA, "ann")
+            .iter()
+            .any(|option| option.person_id == Some(uuid(PERSON_ANNA))),
+        "still found when typed"
+    );
+    assert!(
+        options(&harness, SPEAKER_UNKNOWN, "")
+            .iter()
+            .all(|option| option.person_id != Some(uuid(PERSON_ANNA))
+                || option.reason != Some(SpeakerOptionReason::Voice)),
+        "the No is about Speaker 3 only"
+    );
+
+    let missing = reject(&harness, SPEAKER_ANNA, 0xEE).unwrap_err();
+    assert_eq!(missing.code, BridgeErrorCode::Failed);
+}
+
+/// With one voice left unnamed and one invitee nobody is named as, that
+/// invitee is the last one left; a second invitee makes them plain invited.
+#[test]
+fn the_last_invitee_left_is_offered_as_such() {
+    let harness = sample();
+    let invitee = |n: u32, name: &str| Participant {
+        id: uuid(n),
+        meeting_id: uuid(MEETING),
+        person_id: None,
+        display_name: name.to_owned(),
+        role: ParticipantRole::Them,
+        email: None,
+    };
+    harness
+        .store
+        .save_participant(&invitee(0x31, "Maya"))
+        .unwrap();
+    select(&harness, SPEAKER_ANNA, person_option(PERSON_ANNA, "Anna")).unwrap();
+    let offered = options(&harness, SPEAKER_UNKNOWN, "");
+    let maya = offered
+        .iter()
+        .find(|option| option.label == "Maya")
+        .unwrap();
+    assert_eq!(maya.reason, Some(SpeakerOptionReason::LastInvitee));
+    assert_eq!(maya.strength, None);
+
+    harness
+        .store
+        .save_participant(&invitee(0x32, "Tom"))
+        .unwrap();
+    harness.host.store_changed();
+    let offered = options(&harness, SPEAKER_UNKNOWN, "");
+    assert!(
+        offered
+            .iter()
+            .filter(|option| option.label == "Maya" || option.label == "Tom")
+            .all(|option| option.reason == Some(SpeakerOptionReason::Invited))
+    );
+}
+
+/// Not a person: the voice leaves the counts and the chips, its turn keeps
+/// its text and reads "Not a person"; Restore brings it back unnamed.
+#[test]
+fn not_a_person_reads_so_and_restore_brings_it_back() {
+    let harness = sample();
+    harness.sink.clear();
+    harness
+        .host
+        .speakers_dismiss(speaker_id(SPEAKER_UNKNOWN))
+        .unwrap();
+    let detail = harness.sink.last(BridgeTopic::MeetingDetail).unwrap();
+    assert_eq!(detail["speakers"][3]["dismissed"], true);
+    assert_eq!(detail["speakers"][3]["assignment"], "unknown");
+    let turn = detail["transcript"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["speakerID"] == json!(uuid(SPEAKER_UNKNOWN).to_string().to_uppercase()))
+        .unwrap();
+    assert_eq!(turn["speakerName"], "Not a person");
+    assert_eq!(
+        turn["text"],
+        "Die Partner sollten das nicht aus zweiter Hand hören."
+    );
+    let list = harness.sink.last(BridgeTopic::MeetingsList).unwrap();
+    assert_eq!(
+        list["groups"][0]["meetings"][0]["speakers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+        "no chip for it"
+    );
+    assert!(harness.store.speakers(uuid(MEETING)).unwrap()[3].dismissed);
+
+    harness
+        .host
+        .speakers_restore(speaker_id(SPEAKER_UNKNOWN))
+        .unwrap();
+    let detail = harness.sink.last(BridgeTopic::MeetingDetail).unwrap();
+    assert_eq!(detail["speakers"][3]["dismissed"], false);
+    assert_eq!(detail["transcript"][2]["speakerName"], "Speaker 4");
+    assert_eq!(
+        harness.fakes.pipeline.redeliveries.lock().unwrap().len(),
+        2,
+        "one re-export per change"
+    );
+}
+
+/// Remove name: the voice is unnamed in this meeting, the person keeps
+/// their name and their voice forgets it.
+#[test]
+fn remove_name_unnames_the_voice() {
+    let harness = sample();
+    harness
+        .host
+        .speakers_clear(speaker_id(SPEAKER_JEROME))
+        .unwrap();
+    let detail = harness.sink.last(BridgeTopic::MeetingDetail).unwrap();
+    assert_eq!(detail["speakers"][1]["assignment"], "unknown");
+    assert_eq!(detail["speakers"][1]["displayName"], "Speaker 2");
+    let jerome = harness.store.person(uuid(PERSON_JEROME)).unwrap().unwrap();
+    assert_eq!(jerome.display_name, "Jérôme");
+    assert_eq!(jerome.sample_count, 0);
+    // An unnamed voice again changes nothing.
+    harness
+        .host
+        .speakers_clear(speaker_id(SPEAKER_JEROME))
+        .unwrap();
+    assert_eq!(harness.fakes.pipeline.redeliveries.lock().unwrap().len(), 1);
+}
+
+/// The quote is what the clip says: the voice's words inside the clip
+/// range.
+#[test]
+fn the_quote_is_the_clips_words() {
+    let harness = sample();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(
+        detail["speakers"][0]["quote"],
+        "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen."
+    );
+    assert!(
+        detail["speakers"][2].get("quote").is_none(),
+        "a voice that says nothing has no quote"
+    );
+    assert_eq!(
+        detail["speakers"][2]["suggestionStrength"],
+        json!(VoiceStrength::of(0.87))
     );
 }

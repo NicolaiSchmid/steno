@@ -177,6 +177,42 @@ string_enum! {
     }
 }
 
+string_enum! {
+    /// How strongly a voice match speaks for its person, the word a voice
+    /// suggestion carries ("Sounds like Anna · strong"). Never shown as a
+    /// percentage.
+    pub enum VoiceStrength {
+        Strong = "strong",
+        Likely = "likely",
+    }
+}
+
+impl VoiceStrength {
+    /// From this cosine similarity up a match is `Strong`. Measured on the
+    /// calibration corpus (`.plans/2026-11-14-speaker-identification.md`,
+    /// S4); see the pull request that set it.
+    pub const STRONG: f32 = VOICE_STRONG;
+    /// Below this similarity a voice match is not shown at all; from it up
+    /// it is `Likely` until [`VoiceStrength::STRONG`].
+    pub const FLOOR: f32 = VOICE_FLOOR;
+
+    /// The word for a match of `similarity`; `None` below
+    /// [`VoiceStrength::FLOOR`], where no voice suggestion is shown.
+    #[must_use]
+    pub fn of(similarity: f32) -> Option<VoiceStrength> {
+        if similarity >= Self::STRONG {
+            Some(VoiceStrength::Strong)
+        } else if similarity >= Self::FLOOR {
+            Some(VoiceStrength::Likely)
+        } else {
+            None
+        }
+    }
+}
+
+const VOICE_STRONG: f32 = 0.0;
+const VOICE_FLOOR: f32 = 0.0;
+
 /// How a diarization cluster maps to a person.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpeakerAssignment {

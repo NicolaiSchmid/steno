@@ -27,42 +27,50 @@
       "assignment" : "confirmed",
       "clusterLabel" : "Speaker 1",
       "colorIndex" : 7,
+      "dismissed" : false,
       "displayName" : "Nicolai",
       "email" : "nicolai@example.com",
       "hasClip" : true,
       "id" : "00000000-0000-0000-0000-000000000014",
       "isPlaying" : false,
-      "personID" : "00000000-0000-0000-0000-00000000000A"
+      "personID" : "00000000-0000-0000-0000-00000000000A",
+      "quote" : "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen."
     },
     {
       "assignment" : "confirmed",
       "clusterLabel" : "Speaker 2",
       "colorIndex" : 4,
+      "dismissed" : false,
       "displayName" : "Jérôme",
       "hasClip" : true,
       "id" : "00000000-0000-0000-0000-000000000015",
       "isPlaying" : false,
-      "personID" : "00000000-0000-0000-0000-00000000000B"
+      "personID" : "00000000-0000-0000-0000-00000000000B",
+      "quote" : "Das geht nur, wenn wir das Budget entsprechend umschichten. Ich rechne bis Freitag zwei Szenarien."
     },
     {
       "assignment" : "suggested",
       "clusterLabel" : "Speaker 3",
       "colorIndex" : 1,
+      "dismissed" : false,
       "displayName" : "Anna",
       "hasClip" : true,
       "id" : "00000000-0000-0000-0000-000000000016",
       "isPlaying" : false,
       "personID" : "00000000-0000-0000-0000-00000000000C",
-      "suggestionName" : "Anna"
+      "suggestionName" : "Anna",
+      "suggestionStrength" : "strong"
     },
     {
       "assignment" : "unknown",
       "clusterLabel" : "Speaker 4",
       "colorIndex" : 0,
+      "dismissed" : false,
       "displayName" : "Speaker 4",
       "hasClip" : false,
       "id" : "00000000-0000-0000-0000-000000000017",
-      "isPlaying" : false
+      "isPlaying" : false,
+      "quote" : "Die Partner sollten das nicht aus zweiter Hand hören."
     }
   ],
   "startedAt" : "2026-09-29T12:50:00.000Z",

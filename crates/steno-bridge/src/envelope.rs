@@ -54,6 +54,15 @@ string_enum! {
         SpeakersSelect = "speakers.select",
         SpeakersPlay = "speakers.play",
         SpeakersStop = "speakers.stop",
+        /// No to a voice suggestion: the person is not suggested for that
+        /// voice again.
+        SpeakersReject = "speakers.reject",
+        /// Remove name: the voice is unnamed again in this meeting.
+        SpeakersClear = "speakers.clear",
+        /// Not a person: the voice leaves the counts and voice memory.
+        SpeakersDismiss = "speakers.dismiss",
+        /// A dismissed voice back among the people to name.
+        SpeakersRestore = "speakers.restore",
 
         RecordingStart = "recording.start",
         RecordingStop = "recording.stop",

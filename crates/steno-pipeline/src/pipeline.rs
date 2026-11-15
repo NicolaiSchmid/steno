@@ -3036,7 +3036,9 @@ impl ProcessingPipeline {
                         let unconfirmed: Vec<Uuid> = store
                             .speakers(meeting_id)?
                             .into_iter()
-                            .filter(|speaker| !speaker.assignment.is_confirmed())
+                            .filter(|speaker| {
+                                !speaker.assignment.is_confirmed() && !speaker.dismissed
+                            })
                             .map(|speaker| speaker.id)
                             .collect();
                         // The export is owed before the meeting is ready, so

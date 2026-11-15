@@ -18,6 +18,9 @@ use crate::services::{ClipPlayer, FileSystem, Pipeline, ProcessAgainRefusal};
 use crate::setup::{ExportStatus, SummaryStatus, all_delivered, llm_configured, vault_configured};
 use crate::speakers::SpeakersViewModel;
 
+/// What a turn of a dismissed voice reads instead of a name.
+pub const NOT_A_PERSON: &str = "Not a person";
+
 /// What the header's "Recording" line says; `None` for the one case
 /// Settings already covers: kept forever with the files present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,10 +239,18 @@ impl MeetingDetailViewModel {
     }
 
     /// The confirmed or suggested person's name, else the cluster label;
-    /// "Unknown" without a speaker.
+    /// [`NOT_A_PERSON`] for a dismissed voice, "Unknown" without a speaker.
     #[must_use]
     pub fn display_name(&self, speaker_id: Option<Uuid>) -> String {
         match (speaker_id, &self.export) {
+            (Some(id), Some(export))
+                if export
+                    .speakers
+                    .iter()
+                    .any(|speaker| speaker.id == id && speaker.dismissed) =>
+            {
+                NOT_A_PERSON.to_owned()
+            }
             (Some(id), Some(export)) => export.display_name_for_speaker(id),
             _ => "Unknown".to_owned(),
         }

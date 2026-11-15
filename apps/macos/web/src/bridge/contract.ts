@@ -76,6 +76,10 @@ export const bridgeMethods = [
 	"speakers.select",
 	"speakers.play",
 	"speakers.stop",
+	"speakers.reject",
+	"speakers.clear",
+	"speakers.dismiss",
+	"speakers.restore",
 	"recording.start",
 	"recording.stop",
 	"recording.toggle",
@@ -288,6 +292,10 @@ export const progressSnapshot = z
 	.strict();
 export type ProgressSnapshot = z.infer<typeof progressSnapshot>;
 
+/** The word a voice suggestion carries; never a percentage. */
+export const voiceStrength = z.enum(["strong", "likely"]);
+export type VoiceStrength = z.infer<typeof voiceStrength>;
+
 export const speakerChip = z
 	.object({
 		id: uuid,
@@ -390,9 +398,15 @@ export const meetingDetailSnapshot = z
 					personID: uuid.optional(),
 					email: z.string().optional(),
 					suggestionName: z.string().optional(),
+					/** How strongly a suggested voice matches its person. */
+					suggestionStrength: voiceStrength.optional(),
+					/** The words the voice says in its sample clip, what plays. */
+					quote: z.string().optional(),
 					colorIndex: z.number().int(),
 					hasClip: z.boolean(),
 					isPlaying: z.boolean(),
+					/** Not a person: out of the counts, its turns read "Not a person". */
+					dismissed: z.boolean(),
 				})
 				.strict(),
 		),
@@ -847,11 +861,24 @@ export const saveNotesParams = z
 export const speakerOptionsParams = z
 	.object({ speakerID: uuid, query: z.string() })
 	.strict();
+/**
+ * Why an option is offered. Only `voice` is voice evidence and only it
+ * carries a `strength`.
+ */
+export const speakerOptionReason = z.enum([
+	"voice",
+	"mentioned",
+	"invited",
+	"lastInvitee",
+	"inThisMeeting",
+]);
+export type SpeakerOptionReason = z.infer<typeof speakerOptionReason>;
 export const speakerOption = z
 	.object({
 		kind: z.enum(["person", "create"]),
 		label: z.string(),
-		detail: z.string().optional(),
+		reason: speakerOptionReason.optional(),
+		strength: voiceStrength.optional(),
 		personID: uuid.optional(),
 	})
 	.strict();
@@ -868,6 +895,10 @@ export const selectSpeakerParams = z
 	.object({ speakerID: uuid, option: speakerOption, combine: z.boolean() })
 	.strict();
 export const speakerIDParams = z.object({ speakerID: uuid }).strict();
+/** No to the suggestion that the voice is `personID`. */
+export const rejectSpeakerParams = z
+	.object({ speakerID: uuid, personID: uuid })
+	.strict();
 export const startRecordingParams = z.object({ mode: captureMode }).strict();
 export const setRetentionParams = z.object({ retention }).strict();
 export const permissionKindParams = z.object({ kind: permissionKind }).strict();
@@ -937,6 +968,10 @@ export const methodParams = {
 	"speakers.select": selectSpeakerParams,
 	"speakers.play": speakerIDParams,
 	"speakers.stop": null,
+	"speakers.reject": rejectSpeakerParams,
+	"speakers.clear": speakerIDParams,
+	"speakers.dismiss": speakerIDParams,
+	"speakers.restore": speakerIDParams,
 	"recording.start": startRecordingParams,
 	"recording.stop": null,
 	"recording.toggle": null,
@@ -1053,6 +1088,7 @@ export const fixtureSchemas = {
 	"params.meeting.saveNotes": saveNotesParams,
 	"params.speakers.options": speakerOptionsParams,
 	"params.speakers.select": selectSpeakerParams,
+	"params.speakers.reject": rejectSpeakerParams,
 	"params.speakerID": speakerIDParams,
 	"params.recording.start": startRecordingParams,
 	"params.settings.recording.setRetention": setRetentionParams,

@@ -91,12 +91,33 @@ string_enum! {
     }
 }
 
+string_enum! {
+    /// Why an option is offered. Only `Voice` is voice evidence.
+    pub enum SpeakerOptionReason {
+        /// The voice matches this person's voice memory.
+        Voice = "voice",
+        /// The summary heard the name for this speaker.
+        Mentioned = "mentioned",
+        /// A calendar invitee nobody's voice is named as yet.
+        Invited = "invited",
+        /// The only invitee left for the only voice left unnamed.
+        LastInvitee = "lastInvitee",
+        /// The person already owns another voice of this meeting.
+        InThisMeeting = "inThisMeeting",
+    }
+}
+
+pub use steno_core::VoiceStrength;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpeakerOption {
     pub kind: SpeakerOptionKind,
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
+    pub reason: Option<SpeakerOptionReason>,
+    /// For a `voice` reason only: how strongly the voice matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<VoiceStrength>,
     #[serde(
         rename = "personID",
         default,
@@ -122,6 +143,15 @@ pub struct SelectSpeakerParams {
     /// Whether the pick may join another voice of this meeting; without it
     /// such a pick is refused as `wouldCombine`.
     pub combine: bool,
+}
+
+/// `speakers.reject`: No to the suggestion that this voice is `person_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectSpeakerParams {
+    #[serde(rename = "speakerID", with = "uuid_text")]
+    pub speaker_id: Uuid,
+    #[serde(rename = "personID", with = "uuid_text")]
+    pub person_id: Uuid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

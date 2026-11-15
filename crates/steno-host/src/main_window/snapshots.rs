@@ -222,6 +222,7 @@ fn meeting_row(
         .map(Vec::as_slice)
         .unwrap_or_default()
         .iter()
+        .filter(|speaker| !speaker.dismissed)
         .map(|speaker| {
             chip(
                 speaker,
@@ -495,8 +496,11 @@ fn speaker_rows(detail: &MeetingDetailViewModel, playing: Option<Uuid>) -> Vec<D
             email: row.person.as_ref().and_then(|person| person.email.clone()),
             suggestion_name: speakers.prefill(row.id()),
             color_index: color_index(row.person.as_ref().map_or(row.id(), |person| person.id)),
+            suggestion_strength: row.suggestion_strength(),
+            quote: Some(row.excerpt.clone()).filter(|quote| !quote.is_empty()),
             has_clip: row.can_play,
             is_playing: playing == Some(row.id()),
+            dismissed: row.speaker.dismissed,
         })
         .collect()
 }
