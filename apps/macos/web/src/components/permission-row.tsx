@@ -140,11 +140,14 @@ export function PermissionRow({
 	);
 
 	let control: ReactNode;
+	// A badge alone stays beside the title; buttons go under the text when narrow.
+	let statusOnly = true;
 	if (state === "granted") {
 		control = <Badge variant="success">Allowed</Badge>;
 	} else if (skipped) {
 		control = <Badge data-testid={`permission-${kind}-skipped`}>Skipped</Badge>;
 	} else if (state === "denied") {
+		statusOnly = !words.opensSystemSettings && !onCheckAgain;
 		control = (
 			<>
 				{words.opensSystemSettings ? (
@@ -165,6 +168,7 @@ export function PermissionRow({
 			</>
 		);
 	} else if (untilRecording) {
+		statusOnly = !words.opensSystemSettings;
 		control = words.opensSystemSettings ? (
 			openSettings("outline")
 		) : (
@@ -173,6 +177,7 @@ export function PermissionRow({
 			</Badge>
 		);
 	} else if (acknowledgeOnly && onSkip) {
+		statusOnly = false;
 		control = (
 			<Button
 				data-testid={`permission-${kind}-skip`}
@@ -184,6 +189,7 @@ export function PermissionRow({
 			</Button>
 		);
 	} else {
+		statusOnly = false;
 		control = (
 			<>
 				<Button
@@ -237,6 +243,7 @@ export function PermissionRow({
 					copy.title
 				)
 			}
+			statusOnly={statusOnly}
 			tone={
 				state === "granted"
 					? "success"

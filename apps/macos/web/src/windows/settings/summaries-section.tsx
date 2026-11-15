@@ -108,7 +108,7 @@ function CodexFields({ codex }: { codex: CodexState }) {
 						icon={<TriangleAlertIcon aria-hidden="true" />}
 						size="sm"
 						title={codex.modelsError}
-						variant="warning"
+						variant="destructive"
 					/>
 				) : null}
 			</FormRow>
@@ -262,7 +262,7 @@ export function SummariesSection() {
 						status.kind === "ok"
 							? "success"
 							: status.kind === "failed"
-								? "warning"
+								? "destructive"
 								: "muted"
 					}
 				>

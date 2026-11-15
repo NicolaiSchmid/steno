@@ -142,6 +142,7 @@ function SetupRow({ row, children }: { row: SetupStep; children: ReactNode }) {
 						<Badge>Optional</Badge>
 					</span>
 				}
+				statusOnly={row.state === "saved" || row.state === "skipped"}
 				tone={row.state === "saved" ? "success" : "muted"}
 			>
 				{open ? children : null}
@@ -223,7 +224,7 @@ function SummariesFields({
 									icon={<TriangleAlertIcon aria-hidden="true" />}
 									size="sm"
 									title={codex.modelsError}
-									variant="warning"
+									variant="destructive"
 								/>
 							) : null}
 							<div className="flex items-center gap-2">
@@ -280,7 +281,7 @@ function SummariesFields({
 							}
 							size="sm"
 							title={summaries.testResult.message}
-							variant={summaries.testResult.ok ? "success" : "warning"}
+							variant={summaries.testResult.ok ? "success" : "destructive"}
 						/>
 					) : null}
 					<div className="flex items-center gap-2">
@@ -316,7 +317,7 @@ function SummariesFields({
 					icon={<CircleAlertIcon aria-hidden="true" />}
 					size="sm"
 					title={summaries.error}
-					variant="warning"
+					variant="destructive"
 				/>
 			) : null}
 		</div>
@@ -366,7 +367,7 @@ function VaultFields({
 						icon={<CircleAlertIcon aria-hidden="true" />}
 						size="sm"
 						title={vault.error}
-						variant="warning"
+						variant="destructive"
 					/>
 					{vault.errorDetails ? (
 						<Disclosure>{vault.errorDetails}</Disclosure>

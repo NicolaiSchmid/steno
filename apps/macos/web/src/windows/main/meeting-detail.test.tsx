@@ -21,7 +21,11 @@ describe("MeetingDetail", () => {
 		const setup = await createBridgeHarness();
 		const first = renderWithBridge(<MeetingDetail />, setup);
 		expect(await screen.findByTestId("setup-line")).toHaveTextContent(
-			"Summaries are off. Set up · Not now",
+			"Summaries are off. Set up Not now",
+		);
+		// The retention line lives in the footer only, beside its switch.
+		expect(screen.getByTestId("meeting-meta")).not.toHaveTextContent(
+			/Deletes|Recording/,
 		);
 		expect(screen.queryByTestId("setup-banner")).not.toBeInTheDocument();
 		await user.click(screen.getByTestId("setup-summaries"));

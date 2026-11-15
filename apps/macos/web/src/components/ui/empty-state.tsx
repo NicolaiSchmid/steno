@@ -34,6 +34,7 @@ export const emptyStateIconVariants = cva(
 			variant: {
 				quiet: "text-muted-foreground",
 				warning: "text-warning",
+				destructive: "text-destructive",
 			},
 		},
 		defaultVariants: { variant: "quiet" },

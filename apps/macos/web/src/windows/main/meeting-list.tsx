@@ -242,7 +242,7 @@ export function MeetingList() {
 					variant="row"
 				/>
 				{list?.error ? (
-					<p className="my-0 px-2 text-warning-foreground text-xs">
+					<p className="my-0 px-2 text-destructive-foreground text-xs">
 						{list.error}
 					</p>
 				) : null}

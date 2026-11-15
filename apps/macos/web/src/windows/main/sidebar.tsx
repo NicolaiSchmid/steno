@@ -102,7 +102,7 @@ function RecordButton({
 				onClick={busy ? undefined : () => send(client, "recording.stop")}
 				variant="primary"
 			>
-				<RecordMark pulse={state === "recording"} />
+				<RecordMark onPrimary pulse={state === "recording"} />
 				{state === "recording"
 					? "Stop"
 					: state === "starting"
@@ -218,7 +218,7 @@ function RecorderMessage({
 			icon={<CircleAlertIcon aria-hidden="true" />}
 			size="sm"
 			title={message}
-			variant="warning"
+			variant={kind === "error" ? "destructive" : "warning"}
 		/>
 	);
 }
