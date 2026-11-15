@@ -76,7 +76,7 @@ export function TranscriptTab({
 
 	return (
 		<div data-testid="tab-content-transcript">
-			<div className="mb-6 flex items-center gap-4 text-muted-foreground text-sm">
+			<div className="mb-6 flex items-center gap-4 text-body text-muted-foreground">
 				<Button
 					data-testid="copy-transcript"
 					onClick={copy}
@@ -97,7 +97,7 @@ export function TranscriptTab({
 					: undefined;
 				return (
 					<div className="mb-5 grid grid-cols-[140px_1fr] gap-4" key={turn.id}>
-						<div className="flex flex-col gap-0.5 pt-0.5 font-medium text-sm">
+						<div className="flex flex-col gap-0.5 pt-0.5 text-title">
 							{speaker ? (
 								<SpeakerPicker
 									onOpenChange={(open) => setOpenTurnID(open ? turn.id : null)}
@@ -107,7 +107,7 @@ export function TranscriptTab({
 							) : (
 								<span className="truncate">{turn.speakerName}</span>
 							)}
-							<span className="font-mono font-normal text-2xs text-muted-foreground tabular-nums">
+							<span className="font-mono font-normal text-meta text-muted-foreground tabular-nums">
 								{format.range(turn.startSeconds, turn.endSeconds)}
 							</span>
 							{speaker ? (

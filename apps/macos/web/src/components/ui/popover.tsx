@@ -86,10 +86,7 @@ export function PopoverTitle({
 	...props
 }: ComponentProps<typeof BasePopover.Title> & { className?: string }) {
 	return (
-		<BasePopover.Title
-			className={cn("m-0 font-semibold text-sm leading-none", className)}
-			{...props}
-		/>
+		<BasePopover.Title className={cn("m-0 text-title", className)} {...props} />
 	);
 }
 
@@ -99,7 +96,7 @@ export function PopoverDescription({
 }: ComponentProps<typeof BasePopover.Description> & { className?: string }) {
 	return (
 		<BasePopover.Description
-			className={cn("mt-2 mb-0 text-muted-foreground text-sm", className)}
+			className={cn("mt-2 mb-0 text-body text-muted-foreground", className)}
 			{...props}
 		/>
 	);

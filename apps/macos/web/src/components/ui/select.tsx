@@ -20,7 +20,7 @@ export interface SelectOption<V extends string = string> {
 const selectTriggerVariants = cva(
 	[
 		fieldFrameClass,
-		"inline-flex min-w-0 select-none items-center justify-between gap-2 text-left text-sm outline-none",
+		"inline-flex min-w-0 select-none items-center justify-between gap-2 text-left text-body outline-none",
 		focusRingClass,
 		"data-disabled:pointer-events-none data-placeholder:text-muted-foreground data-disabled:opacity-64",
 		"[&_svg]:pointer-events-none [&_svg]:shrink-0",
@@ -28,7 +28,7 @@ const selectTriggerVariants = cva(
 	{
 		variants: {
 			size: {
-				xs: "h-6 gap-1 rounded-md px-[7px] text-xs",
+				xs: "h-6 gap-1 rounded-md px-[7px] text-meta",
 				sm: "h-8 px-[11px]",
 				md: "h-9 px-[11px]",
 			},
@@ -115,7 +115,7 @@ export function Select<V extends string = string>({
 							{options.map((option) => (
 								<BaseSelect.Item
 									className={cn(
-										"grid min-h-7 cursor-default select-none grid-cols-[1fr_14px] items-center gap-2 rounded-sm px-2 py-1 text-foreground text-sm outline-none",
+										"grid min-h-7 cursor-default select-none grid-cols-[1fr_14px] items-center gap-2 rounded-sm px-2 py-1 text-body text-foreground outline-none",
 										"data-highlighted:bg-accent data-selected:bg-item-selected data-disabled:opacity-64",
 									)}
 									disabled={option.disabled}

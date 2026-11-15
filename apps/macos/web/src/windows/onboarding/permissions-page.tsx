@@ -78,7 +78,7 @@ function SpeechModelsRow({ models }: { models: SpeechModels }) {
 		case "downloading":
 			control = (
 				<span
-					className="font-mono text-muted-foreground text-xs tabular-nums"
+					className="font-mono text-meta text-muted-foreground tabular-nums"
 					data-testid="onboarding-models-progress"
 				>
 					{percent === null ? "…" : `${percent}%`}

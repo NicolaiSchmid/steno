@@ -9,7 +9,9 @@
  * (src/theme/contrast.test.ts) cannot see: no `/NN` on a colour token (name
  * the veil in src/theme.css instead), and no `opacity-*` on what holds text
  * or icons, except in a disabled state, on `aria-hidden` decoration, and the
- * 0 and 100 a transition starts or ends at.
+ * 0 and 100 a transition starts or ends at. Text is sized from the type
+ * scale in src/theme.css only: Tailwind's own sizes and arbitrary sizes are
+ * rejected everywhere.
  *
  * Usage: node scripts/check-ui-restyle.mjs [--root src] [--ui src/components/ui] [--theme src/theme.css]
  * Exit 1 lists every offending class as `file:line: <Component> "class"`.
@@ -263,6 +265,10 @@ export function collectColourTokens(themeSource) {
 	);
 }
 
+/** Tailwind's default sizes and arbitrary lengths: not on the type scale. */
+const OFF_SCALE =
+	/^text-(?:[2-9]?xs|sm|base|lg|[2-9]?xl|\[\d[\d.]*(?:px|rem|em)\])$/;
+
 /** The variant chain in front of a class (`hover:data-disabled:`). */
 function variantsOf(token) {
 	const base = baseClass(token);
@@ -270,9 +276,10 @@ function variantsOf(token) {
 }
 
 /**
- * Why a class paints a colour the contrast test cannot see, or null: a
- * colour token with an opacity modifier, or an element opacity between 0
- * and 100 outside a disabled state.
+ * Why a class paints a colour the contrast test cannot see, or sizes text
+ * off the scale, or null: a colour token with an opacity modifier, an
+ * element opacity between 0 and 100 outside a disabled state, a Tailwind
+ * or arbitrary text size.
  */
 export function paintProblem(token, colours, hidden = false) {
 	const base = baseClass(token).replace(/!$/, "");
@@ -284,6 +291,9 @@ export function paintProblem(token, colours, hidden = false) {
 				return `veils --${colour}; name the veil in src/theme.css`;
 			}
 		}
+	}
+	if (OFF_SCALE.test(base)) {
+		return "sizes text off the type scale; use text-display, text-headline, text-reading, text-title, text-body, text-label, text-meta or text-caption";
 	}
 	const opacity = /^opacity-(.+)$/.exec(base);
 	if (opacity && opacity[1] !== "0" && opacity[1] !== "100" && !hidden) {

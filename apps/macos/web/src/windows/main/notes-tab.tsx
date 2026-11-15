@@ -64,7 +64,7 @@ export function NotesTab({ meetingID, notes }: NotesTabProps) {
 				variant="reading"
 			/>
 			<p
-				className="my-0 text-muted-foreground text-xs"
+				className="my-0 text-meta text-muted-foreground"
 				data-testid="scratchpad-hint"
 			>
 				Saved with the meeting and exported alongside the summary.

@@ -11,7 +11,7 @@ import { focusRingClass } from "./focus-ring";
  */
 export const sidebarRowVariants = cva(
 	[
-		"flex h-8 w-full shrink-0 select-none items-center gap-2 rounded-control px-2.5 py-1.5 text-left font-medium text-sidebar-muted-foreground text-sm outline-none",
+		"flex h-8 w-full shrink-0 select-none items-center gap-2 rounded-control px-2.5 py-1.5 text-left text-label text-sidebar-muted-foreground outline-none",
 		"transition-[background-color,color] duration-(--duration-functional) ease-standard",
 		"hover:bg-row-hover hover:text-foreground active:bg-row-pressed",
 		focusRingClass,
@@ -59,7 +59,7 @@ export function SidebarRow({
 			{icon}
 			<span className="min-w-0 flex-1 truncate">{children}</span>
 			{count !== undefined ? (
-				<span className="text-sidebar-muted-foreground text-xs tabular-nums">
+				<span className="text-meta text-sidebar-muted-foreground tabular-nums">
 					{count}
 				</span>
 			) : null}

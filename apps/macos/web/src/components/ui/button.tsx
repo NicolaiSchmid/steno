@@ -49,7 +49,7 @@ export const buttonLook = {
 export const buttonVariants = cva(
 	[
 		"inline-flex shrink-0 select-none items-center justify-center gap-2 whitespace-nowrap",
-		"rounded-control border font-medium text-sm leading-none",
+		"rounded-control border text-label leading-none",
 		"transition-[background-color,border-color,color,opacity]",
 		"duration-(--duration-functional) ease-standard",
 		focusRingClass,
@@ -61,7 +61,7 @@ export const buttonVariants = cva(
 			variant: buttonLook,
 			// x-padding is `--spacing(n)` minus the 1 px border so text aligns with borderless controls
 			size: {
-				xs: "h-6 gap-1 rounded-md px-[7px] text-xs [&_svg]:size-3.5",
+				xs: "h-6 gap-1 rounded-md px-[7px] text-meta [&_svg]:size-3.5",
 				sm: "h-8 gap-1.5 px-[11px]",
 				md: "h-9 px-[15px]",
 				"icon-xs": "size-6 rounded-md p-0 [&_svg]:size-3.5",

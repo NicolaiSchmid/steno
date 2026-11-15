@@ -44,16 +44,26 @@ describe("the paint rule", () => {
 		const result = runScript(["--root", "scripts/__fixtures__"]);
 		expect(result.status).toBe(1);
 		expect(result.output).toContain(
-			'scripts/__fixtures__/paint-violation.tsx:7: "bg-foreground/40" veils --foreground',
+			'scripts/__fixtures__/paint-violation.tsx:8: "bg-foreground/40" veils --foreground',
 		);
 		expect(result.output).toContain('"text-muted-foreground/80" veils');
 		expect(result.output).toContain(
-			'paint-violation.tsx:8: "opacity-50" fades text or icons',
+			'paint-violation.tsx:9: "opacity-50" fades text or icons',
 		);
 		expect(result.output).not.toContain('"w-1/2"');
 		expect(result.output).not.toContain('"disabled:opacity-64"');
 		expect(result.output).not.toContain('"data-starting-style:opacity-0"');
 		expect(result.output).not.toContain('"opacity-70"');
+	});
+
+	it("reports type off the scale", () => {
+		const result = runScript(["--root", "scripts/__fixtures__"]);
+		expect(result.output).toContain(
+			'paint-violation.tsx:13: "text-sm" sizes text off the type scale',
+		);
+		expect(result.output).toContain('"text-[13px]" sizes text off');
+		expect(result.output).not.toContain('"text-meta"');
+		expect(result.output).not.toContain('"text-muted-foreground"');
 	});
 
 	it("passes the app", () => {

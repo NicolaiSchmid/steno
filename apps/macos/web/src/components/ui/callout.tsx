@@ -16,8 +16,8 @@ export const calloutVariants = cva(
 	{
 		variants: {
 			size: {
-				md: "gap-x-3 gap-y-2 px-3.5 py-3 text-sm",
-				sm: "gap-x-2.5 gap-y-1.5 rounded-lg px-2.5 py-2 text-xs",
+				md: "gap-x-3 gap-y-2 px-3.5 py-3 text-body",
+				sm: "gap-x-2.5 gap-y-1.5 rounded-lg px-2.5 py-2 text-meta",
 			},
 			variant: {
 				/** A quiet notice on the card surface (T3's default alert). */
@@ -101,7 +101,7 @@ export function Callout({
 				<span className="flex shrink-0" data-slot="icon">
 					{icon}
 				</span>
-				<span className="min-w-0 leading-[1.4]">
+				<span className="min-w-0">
 					<span className="font-medium">{title}</span>
 					{description ? (
 						<>

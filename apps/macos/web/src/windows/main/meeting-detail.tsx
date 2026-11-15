@@ -152,7 +152,7 @@ function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 			: null;
 	return (
 		<p
-			className="mt-0 mb-6 text-muted-foreground text-sm"
+			className="mt-0 mb-6 text-body text-muted-foreground"
 			data-testid="setup-line"
 		>
 			{banner.title}{" "}
@@ -202,7 +202,7 @@ function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
 			<RecordMark onPrimary pulse={!stopping} />
 			{stopping ? "Stopping…" : "Stop"}
 			{!stopping ? (
-				<span className="font-mono font-normal text-xs tabular-nums">
+				<span className="font-mono font-normal text-meta tabular-nums">
 					{format.duration(elapsed)}
 				</span>
 			) : null}
@@ -276,7 +276,7 @@ function KeepAudioToggle({
 	}
 
 	return (
-		<span className="flex shrink-0 items-center gap-2 text-foreground text-sm">
+		<span className="flex shrink-0 items-center gap-2 text-body text-foreground">
 			<Switch
 				aria-label="Keep the recording"
 				checked={keeps}
@@ -313,7 +313,7 @@ function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 	const status = EXPORT_ICON[detail.export.status];
 	return (
 		<footer
-			className="mt-10 flex flex-col gap-3 border-border border-t pt-4 text-muted-foreground text-sm"
+			className="mt-10 flex flex-col gap-3 border-border border-t pt-4 text-body text-muted-foreground"
 			data-testid="meeting-footer"
 		>
 			{detail.retention.showsKeepToggle ? (
@@ -641,7 +641,7 @@ function DetailBody({
 			 * person colours are for people.
 			 */}
 			<div
-				className="flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground text-xs [&>span+span]:before:size-[3px] [&>span+span]:before:rounded-full [&>span+span]:before:bg-border [&>span+span]:before:content-[''] [&>span]:inline-flex [&>span]:items-center [&>span]:gap-2"
+				className="flex flex-wrap items-center gap-x-2 gap-y-1 text-meta text-muted-foreground [&>span+span]:before:size-[3px] [&>span+span]:before:rounded-full [&>span+span]:before:bg-border [&>span+span]:before:content-[''] [&>span]:inline-flex [&>span]:items-center [&>span]:gap-2"
 				data-testid="meeting-meta"
 			>
 				<span className="gap-[5px]! font-medium before:size-1.5 before:rounded-full before:bg-outline before:content-['']">
@@ -655,10 +655,7 @@ function DetailBody({
 					<span>{format.language(detail.language)}</span>
 				) : null}
 			</div>
-			<h2
-				className="mt-2 mb-3 font-semibold text-2xl leading-tight tracking-tight"
-				data-testid="meeting-title"
-			>
+			<h2 className="mt-2 mb-3 text-display" data-testid="meeting-title">
 				{detail.title}
 			</h2>
 			<div
@@ -671,7 +668,7 @@ function DetailBody({
 						transcript={detail.transcript}
 					/>
 				) : (
-					<span className="text-muted-foreground text-sm">
+					<span className="text-body text-muted-foreground">
 						{formatPeople(detail.speakers)}
 					</span>
 				)}
@@ -714,7 +711,7 @@ function DetailBody({
 					</TabsList>
 					{tab === "summary" && detail.templates.length > 0 ? (
 						<span
-							className="flex items-center gap-2 text-muted-foreground text-xs"
+							className="flex items-center gap-2 text-meta text-muted-foreground"
 							data-testid="template-row"
 						>
 							Template
