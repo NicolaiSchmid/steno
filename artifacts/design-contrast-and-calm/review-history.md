@@ -289,3 +289,48 @@ label string.
 All accepted. Fixes go on top of the stack before milestone 2; failures turn
 red now rather than in step 6; the keyboard walk, a 200 % screen and an
 announcement check are added as captured screens.
+
+## 2026-11-15 — built milestone 1, round 2 (after the fixes on #356, #352, #351)
+
+Request IDs `steno-built-m1-astra-r2`, `steno-built-m1-fable-r2`. Evidence:
+`design-fix1/after/` (156 screens incl. keyboard focus walk, 200 % zoom,
+dialog).
+
+**GPT-6-Astra: visual 7.5/10, accessibility and UX 6.5/10.** Resolved: #352
+outcomes, record mark on primary, neutral Call dot, #351 dim text 5.22.
+Partly: failures red but several are only a red icon beside neutral text;
+onboarding granted fits, denied/unknown still scroll. Remaining:
+1. HIGH: 200 % zoom breaks the layout (Export over the breadcrumb, clipped
+   title and pill, tabs offscreen; the two columns take 440 of 600 px).
+2. Enter can still create an unseen person when options lag
+   (`speaker-name-field.tsx:229`); speaker step 2.
+3. Export-failed and connection-failed rows neutral and not announced
+   (`screens.spec.ts:492` exemption); step 6.
+4. Naming hides evidence; screens still show the old fixture (not rebased on
+   #352).
+5. 960 transcript gutter; step 5.
+6. Onboarding denied state cuts Calendar's actions, Local network below the
+   fold.
+Responses: 1, 3 and 6 sent to the design steps 4-6 build as requirements
+(narrow-window reflow with a real zoom assertion; ResultLines; onboarding
+spacing). 2 and 4 belong to speaker step 2.
+
+**Claude Fable 5.1: visual 7.5/10, accessibility and UX 7.5/10** (round 1:
+6.5 and 7). Resolved: source dot, dashed outline, warning hue, one focus
+ring, meta line at 960, Deletes once, failures red, Set up vs Not now, dark
+stories, dark step 1.11, evidence captures, #352 outcomes. Partly: meta line
+breaks inside the date at 200 %; pill tabs with ring plus inset outline.
+Not: lone Copy transcript row. Ranked:
+1. Header actions overlap the breadcrumb at 200 % and, with a held
+   recording, at 960 ("Meetings / P"; `header.tsx:63`,
+   `content-column.tsx:29`).
+2. Meta line wraps inside "Tuesday, Sep 29 · 14:50" (`meeting-detail.tsx:651`).
+3. Speakers pill clips "2 need names" at 200 % (`speakers-popover.tsx:80`).
+4. Dark disabled primary is a bright grey block.
+5. Callout bodies differ by tone (`callout.tsx:27-35, 54`).
+6. The grey source dot now encodes nothing.
+7. Dialog body has no edge under the header when scrolled.
+8. Stale "Summaries are off" story.
+9. Step 6 reminders (export-failed tone in the icon only; two rows not
+   announced).
+Responses: all sent to the design steps 4-6 build as requirements.
