@@ -8,7 +8,9 @@ export interface ContentColumnProps {
 	crumbs: ReactNode[];
 	/** The controls at the header row's trailing edge. */
 	actions?: ReactNode;
-	/** `reading` (the meeting, 768 px) or `settings` (the form cards, 896 px). */
+	/** A control before the breadcrumb (the narrow window's Meetings button). */
+	leading?: ReactNode;
+	/** `reading` (the meeting, 768 px) or `settings` (the flat sections, 720 px). */
 	width?: "reading" | "settings";
 	children: ReactNode;
 }
@@ -21,12 +23,14 @@ export interface ContentColumnProps {
 export function ContentColumn({
 	crumbs,
 	actions,
+	leading,
 	width = "reading",
 	children,
 }: ContentColumnProps) {
 	return (
 		<>
 			<HeaderRow>
+				{leading}
 				<Breadcrumb items={crumbs} />
 				{actions}
 			</HeaderRow>
@@ -34,7 +38,7 @@ export function ContentColumn({
 				<div
 					className={cn(
 						"mx-auto w-full px-6 pt-6 pb-12",
-						width === "reading" ? "max-w-3xl" : "max-w-4xl",
+						width === "reading" ? "max-w-3xl" : "max-w-180",
 					)}
 				>
 					{children}

@@ -2,6 +2,7 @@ import { AudioWaveformIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import {
 	type ChangeEvent,
 	type KeyboardEvent,
+	useContext,
 	useEffect,
 	useRef,
 	useState,
@@ -13,9 +14,6 @@ import type {
 } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import {
-	Avatar,
-	AvatarStack,
-	Badge,
 	Button,
 	ContextMenu,
 	ContextMenuItem,
@@ -36,9 +34,9 @@ import {
 	useShortcut,
 } from "@/lib/platform";
 import { deleteMeeting } from "./delete-meeting";
-import { firstSentence, format, formatSource } from "./format";
+import { firstSentence, format } from "./format";
+import { NarrowLayoutContext } from "./narrow-layout";
 import { isParked } from "./processing-card";
-import { SOURCE } from "./source";
 
 export const QUERY_DEBOUNCE_MS = 200;
 
@@ -142,9 +140,9 @@ function flatIDs(list: MeetingsListSnapshot): string[] {
 }
 
 /**
- * The 300 px column on the sidebar surface: the header row and the search
- * row, then the day groups
- * with one row per meeting. The selected row is filled and stays in view.
+ * The 300 px column on the canvas, beside the sidebar with no rule between
+ * them and a hairline before the reading column: the header row and the
+ * search row, then the day groups with one two-line row per meeting. The selected row is filled and stays in view.
  * Right-click or the Delete key deletes behind the host's confirmation; the
  * arrow keys move the selection.
  */
@@ -221,7 +219,7 @@ export function MeetingList() {
 	return (
 		<section
 			aria-label="Meetings"
-			className="surface-sidebar flex min-h-0 flex-col overflow-hidden border-sidebar-border border-r bg-sidebar"
+			className="surface-canvas flex min-h-0 flex-col overflow-hidden border-border border-r bg-background"
 			data-testid="meeting-list"
 			onKeyDown={onKeyDown}
 		>
@@ -298,13 +296,15 @@ export function MeetingList() {
 
 type RowState = Exclude<MeetingRow["state"], "ready">;
 
-const TONE: Record<RowState, string> = {
-	recording: "text-live-foreground",
-	failed: "text-destructive-foreground",
-	processing: "text-info-foreground",
-	queued: "text-info-foreground",
+/** The state dot's colour; a ready meeting has none. */
+const DOT: Record<RowState, string> = {
+	recording: "bg-live",
+	failed: "bg-destructive",
+	processing: "bg-info",
+	queued: "bg-info",
 };
 
+/** The state in words for a screen reader; the meta line says it to the eye. */
 const LABEL: Record<RowState, string> = {
 	recording: "Live",
 	failed: "Failed",
@@ -313,45 +313,38 @@ const LABEL: Record<RowState, string> = {
 };
 
 /**
- * Line 1's trailing slot: the start time, led by the row's state word while
- * it is not simply done. A `recording` row that is not `live` carries no
- * live dot and says it is not processed.
+ * The dot before the title while a meeting is not simply done: red and
+ * pulsing while it records, red once it failed, blue while it works, amber
+ * for a recording left unsaved (not `live`), which Steno processes at its
+ * next start. The preview line says the same in words.
  */
-function RowStatus({ meeting, live }: { meeting: MeetingRow; live: boolean }) {
-	const time = (
-		<time
-			className="text-muted-foreground tabular-nums"
-			dateTime={meeting.startedAt}
-		>
-			{format.time(meeting.startedAt)}
-		</time>
-	);
+function StateDot({ meeting, live }: { meeting: MeetingRow; live: boolean }) {
 	if (meeting.state === "ready") {
-		return time;
+		return null;
 	}
 	const unsaved = meeting.state === "recording" && !live;
 	return (
-		<span className="inline-flex items-center gap-1.5">
+		<>
 			<span
+				aria-hidden="true"
 				className={cn(
-					"inline-flex items-center gap-1 font-medium",
-					unsaved ? "text-warning-foreground" : TONE[meeting.state],
+					"size-2 shrink-0 rounded-full",
+					unsaved ? "bg-warning" : DOT[meeting.state],
+					meeting.state === "recording" && live && "animate-status-pulse",
 				)}
-			>
-				{meeting.state === "recording" && live ? (
-					<span
-						aria-hidden="true"
-						className="size-1.5 animate-status-pulse rounded-full bg-live"
-					/>
-				) : null}
-				{unsaved ? "Not processed" : LABEL[meeting.state]}
+				data-testid={`meeting-state-${meeting.id}`}
+			/>
+			<span className="sr-only">
+				{unsaved ? "Not processed" : LABEL[meeting.state]}:{" "}
 			</span>
-			{time}
-		</span>
+		</>
 	);
 }
 
-/** One meeting as T3 Code's thread card row: source and state, title, meta. */
+/**
+ * One meeting in two lines: the state dot and the title, then the start
+ * time and the preview in the meta size.
+ */
 function MeetingRowView({
 	meeting,
 	active,
@@ -364,6 +357,7 @@ function MeetingRowView({
 	progress: ProgressSnapshot["entries"][number] | undefined;
 }) {
 	const client = useBridge();
+	const { closeMeetings } = useContext(NarrowLayoutContext);
 	const row = useRef<HTMLButtonElement>(null);
 
 	useEffect(() => {
@@ -382,48 +376,30 @@ function MeetingRowView({
 						active ? "bg-row-selected text-foreground" : "hover:bg-row-hover",
 					)}
 					data-testid={`meeting-${meeting.id}`}
-					onClick={() =>
-						send(client, "meetings.select", { meetingID: meeting.id })
-					}
+					onClick={() => {
+						send(client, "meetings.select", { meetingID: meeting.id });
+						closeMeetings();
+					}}
 					ref={row}
 					type="button"
 				>
-					<div className="flex h-5 min-w-0 items-center gap-1.5 text-meta [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-icon">
-						{SOURCE[meeting.source].icon}
-						<span className="min-w-0 flex-1 truncate font-medium text-muted-foreground">
-							{formatSource(meeting.source)}
+					<div className="flex min-w-0 items-center gap-2">
+						<StateDot live={live} meeting={meeting} />
+						<span className="min-w-0 flex-1 truncate text-foreground text-title">
+							{meeting.title}
 						</span>
-						<RowStatus live={live} meeting={meeting} />
-					</div>
-					<div className="mt-1 truncate text-foreground text-title">
-						{meeting.title}
 					</div>
 					<div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
+						<time
+							className="shrink-0 tabular-nums"
+							dateTime={meeting.startedAt}
+						>
+							{format.time(meeting.startedAt)}
+						</time>
+						<span aria-hidden="true">·</span>
 						<span className="min-w-0 flex-1 truncate">
 							{rowPreview(meeting, progress, live)}
 						</span>
-						<span className="shrink-0 tabular-nums">
-							{format.duration(meeting.durationSeconds)}
-						</span>
-						{meeting.state === "ready" && !meeting.hasSummary ? (
-							<Badge size="sm" variant="warning">
-								No summary
-							</Badge>
-						) : null}
-						{meeting.speakers.length > 0 ? (
-							<AvatarStack className="shrink-0" ring="sidebar">
-								{meeting.speakers.map((chip) => (
-									<Avatar
-										index={chip.colorIndex}
-										initial={chip.initial}
-										key={chip.id}
-										name={chip.isConfirmed ? chip.initial : "Unnamed speaker"}
-										size="sm"
-										unknown={!chip.isConfirmed}
-									/>
-								))}
-							</AvatarStack>
-						) : null}
 					</div>
 				</button>
 			</ContextMenuTrigger>

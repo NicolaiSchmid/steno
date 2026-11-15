@@ -36,7 +36,12 @@ export interface BreadcrumbProps
 	items: ReactNode[];
 }
 
-/** The trail in a header row: muted parents, a muted slash, the page in full colour. */
+/**
+ * The trail in a header row: muted parents, a muted slash, the page in full
+ * colour. The trail is a container: once it is narrower than 14 rem (the
+ * header's actions took the rest) the parents go, so the page keeps its
+ * words instead of shrinking to a letter.
+ */
 export function Breadcrumb({
 	className,
 	items,
@@ -47,7 +52,7 @@ export function Breadcrumb({
 	return (
 		<nav
 			aria-label={ariaLabel}
-			className={cn("min-w-0 flex-1", className)}
+			className={cn("@container/crumbs min-w-0 flex-1", className)}
 			{...props}
 		>
 			<ol className="m-0 flex min-w-0 list-none items-center gap-3 p-0 text-title">
@@ -64,10 +69,13 @@ export function Breadcrumb({
 						</li>
 					) : (
 						<Fragment key={key}>
-							<li className="max-w-40 shrink-0 truncate text-muted-foreground">
+							<li className="@max-[14rem]/crumbs:hidden max-w-40 shrink-0 truncate text-muted-foreground">
 								{item}
 							</li>
-							<li aria-hidden="true" className="text-muted-foreground">
+							<li
+								aria-hidden="true"
+								className="@max-[14rem]/crumbs:hidden text-muted-foreground"
+							>
 								/
 							</li>
 						</Fragment>

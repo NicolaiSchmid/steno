@@ -1,5 +1,6 @@
 import { Menu as BaseMenu } from "@base-ui/react/menu";
 import { cva, type VariantProps } from "class-variance-authority";
+import { CheckIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { Kbd } from "./kbd";
@@ -134,5 +135,55 @@ export function MenuSeparator({ className, ...props }: MenuSeparatorProps) {
 			className={cn("mx-2 my-1 h-px bg-border", className)}
 			{...props}
 		/>
+	);
+}
+
+/** A labelled group of items. */
+export function MenuGroup(props: ComponentProps<typeof BaseMenu.Group>) {
+	return <BaseMenu.Group {...props} />;
+}
+
+/** A group's heading: the meta size in the muted colour, not an item. */
+export function MenuGroupLabel({
+	className,
+	...props
+}: Omit<ComponentProps<typeof BaseMenu.GroupLabel>, "className"> & {
+	className?: string;
+}) {
+	return (
+		<BaseMenu.GroupLabel
+			className={cn(
+				"px-2 pt-1.5 pb-0.5 text-meta text-muted-foreground",
+				className,
+			)}
+			{...props}
+		/>
+	);
+}
+
+/** One choice of several (a summary template); `value` and `onValueChange`. */
+export const MenuRadioGroup = BaseMenu.RadioGroup;
+
+export interface MenuRadioItemProps
+	extends Omit<ComponentProps<typeof BaseMenu.RadioItem>, "className"> {
+	className?: string;
+}
+
+/** A choice in a `MenuRadioGroup`: the words, a check at the trailing edge when chosen. */
+export function MenuRadioItem({
+	className,
+	children,
+	...props
+}: MenuRadioItemProps) {
+	return (
+		<BaseMenu.RadioItem
+			className={cn(menuItemVariants(), className)}
+			{...props}
+		>
+			<span className="min-w-0 flex-1 truncate">{children}</span>
+			<BaseMenu.RadioItemIndicator className="ml-auto flex">
+				<CheckIcon aria-hidden="true" className="size-4 text-foreground" />
+			</BaseMenu.RadioItemIndicator>
+		</BaseMenu.RadioItem>
 	);
 }

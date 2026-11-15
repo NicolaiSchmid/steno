@@ -5,6 +5,7 @@ import type { AppSnapshot, MeetingDetailSnapshot } from "@/bridge/contract";
 import { applyScenario, loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { MeetingDetail } from "./meeting-detail";
+import { transcriptText } from "./transcript-tab";
 
 const FIRST = "00000000-0000-0000-0000-000000000001";
 
@@ -298,14 +299,15 @@ describe("MeetingDetail", () => {
 		expect(callsTo(harness.transport, "meeting.revealExport")).toHaveLength(1);
 	});
 
-	it("lets the template be changed beside the summary tab", async () => {
+	it("lets the template be changed from the actions menu", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("tab=summary");
 		renderWithBridge(<MeetingDetail />, harness);
-		const trigger = screen.getByTestId("template-select");
-		expect(trigger).toHaveTextContent("Meeting notes");
-		await user.click(trigger);
-		await user.click(await screen.findByRole("option", { name: "Standup" }));
+		await user.click(screen.getByTestId("meeting-actions"));
+		expect(
+			await screen.findByRole("menuitemradio", { name: "Meeting notes" }),
+		).toHaveAttribute("aria-checked", "true");
+		await user.click(screen.getByRole("menuitemradio", { name: "Standup" }));
 		await vi.waitFor(() =>
 			expect(callsTo(harness.transport, "meeting.setTemplate")).toEqual([
 				{ method: "meeting.setTemplate", params: { templateID: "standup" } },
@@ -313,10 +315,28 @@ describe("MeetingDetail", () => {
 		);
 	});
 
-	it("hides the template picker away from the summary tab", async () => {
-		const harness = await createBridgeHarness("tab=transcript");
+	it("copies the transcript from the actions menu, one line per turn", async () => {
+		const user = userEvent.setup();
+		const writeText = vi.fn().mockResolvedValue(undefined);
+		Object.defineProperty(navigator, "clipboard", {
+			value: { writeText },
+			configurable: true,
+		});
+		const harness = await createBridgeHarness("tab=summary");
 		renderWithBridge(<MeetingDetail />, harness);
-		expect(screen.queryByTestId("template-select")).not.toBeInTheDocument();
+		await user.click(screen.getByTestId("meeting-actions"));
+		await user.click(await screen.findByTestId("copy-transcript"));
+		expect(writeText).toHaveBeenCalledWith(
+			transcriptText((await fixtureDetail()).transcript),
+		);
+	});
+
+	it("keeps the meta line to source, date and length", async () => {
+		const harness = await createBridgeHarness("tab=summary");
+		renderWithBridge(<MeetingDetail />, harness);
+		expect(screen.getByTestId("meeting-meta")).not.toHaveTextContent(
+			/German|Deletes/,
+		);
 	});
 });
 

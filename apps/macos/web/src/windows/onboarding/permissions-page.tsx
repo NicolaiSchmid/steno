@@ -29,7 +29,7 @@ function permissionsIntro(
 	permissions: number,
 ): string {
 	const asked = permissions === 1 ? "One permission" : "A few permissions";
-	return `${asked}, then where summaries come from and where meetings go. Audio never leaves this ${computer}.`;
+	return `${asked} first. Audio never leaves this ${computer}.`;
 }
 
 type SpeechModels = NonNullable<OnboardingSnapshot["speechModels"]>;

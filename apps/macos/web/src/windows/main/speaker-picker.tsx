@@ -86,9 +86,9 @@ export function SpeakerPicker({
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
 			<Tooltip label={named ? "Click to rename" : "Click to name"}>
 				<PopoverTrigger
-					className="-ml-[7px] max-w-full self-start"
+					className="-ml-[7px] min-w-0 max-w-full"
 					data-testid={`speaker-picker-${speaker.id}`}
-					render={<Button size="xs" variant="ghost" />}
+					render={<Button size="name" variant="ghost" />}
 				>
 					<span className="truncate">{speaker.displayName}</span>
 				</PopoverTrigger>

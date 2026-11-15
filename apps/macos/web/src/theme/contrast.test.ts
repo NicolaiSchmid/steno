@@ -195,17 +195,6 @@ function checks(mode: Mode): Check[] {
 		on(name, everyHost(mode), TEXT);
 	}
 	on("--sidebar-muted-foreground", sidebar, TEXT);
-	const tabs = tinted(mode, "--tab-track", ["canvas", "card"]);
-	on("--muted-foreground", tabs, TEXT);
-	on(
-		"--foreground",
-		tabs.map((host) => ({
-			name: `--tab-active over ${host.name}`,
-			colour: layers(host.colour, token(mode, "--tab-active")),
-		})),
-		TEXT,
-	);
-
 	// Status and live: text and icons bare, and on their own tint over every host.
 	for (const tone of TONES) {
 		const where = [
@@ -293,18 +282,8 @@ function checks(mode: Mode): Check[] {
 		NON_TEXT,
 	);
 
-	// The tab indicator against the canvas and against its own track.
-	const track = layers(canvas, token(mode, "--tab-track"));
-	for (const [name, colour] of [
-		["canvas", canvas],
-		["--tab-track over canvas", track],
-	] as const) {
-		list.push({
-			name: `${mode}: --tab-indicator on ${name}`,
-			ratio: contrast(layers(colour, token(mode, "--tab-indicator")), colour),
-			minimum: NON_TEXT,
-		});
-	}
+	// The underline tab's indicator on the canvas and a card.
+	on("--tab-indicator", everyHost(mode, ["canvas", "card"]), NON_TEXT);
 
 	// Steps: the sidebar to the canvas, the canvas to each raised surface.
 	const step = (name: string, a: Rgba, b: Rgba) =>

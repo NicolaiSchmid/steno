@@ -206,23 +206,26 @@ describe("MeetingList rows", () => {
 		}
 	});
 
-	it("flags a ready meeting without a summary, and only that one", async () => {
+	it("draws two lines: the title, then the time and the preview", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<MeetingList />, harness);
-		expect(screen.getByTestId(`meeting-${THIRD}`)).toHaveTextContent(
-			/^In person.*No summary/,
+		const row = screen.getByTestId(`meeting-${THIRD}`);
+		// No source line, duration, avatars or "No summary" badge any more.
+		expect(row).toHaveTextContent(
+			/^Tuesday 10:08\d{1,2}:\d{2}·Transcript ready\.$/,
 		);
-		expect(screen.getByTestId(`meeting-${FAILED}`)).not.toHaveTextContent(
-			"No summary",
-		);
-		expect(screen.getAllByText("No summary")).toHaveLength(1);
+		expect(screen.queryByText("No summary")).not.toBeInTheDocument();
+		expect(screen.queryByTestId(`meeting-state-${THIRD}`)).toBeNull();
 	});
 
-	it("shows Failed before the time and the reason as the preview", async () => {
+	it("leads a failed row with a dot and says Failed to a screen reader", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<MeetingList />, harness);
 		const row = screen.getByTestId(`meeting-${FAILED}`);
-		expect(row).toHaveTextContent(/^CallFailed\d{1,2}:\d{2}/);
+		expect(screen.getByTestId(`meeting-state-${FAILED}`)).toHaveClass(
+			"bg-destructive",
+		);
+		expect(row).toHaveTextContent(/^Failed: Investor update prep/);
 		expect(row).toHaveTextContent("Transcription failed: model not installed");
 	});
 
@@ -231,7 +234,7 @@ describe("MeetingList rows", () => {
 		renderWithBridge(<MeetingList />, harness);
 		const row = screen.getByTestId(`meeting-${PROCESSING}`);
 		expect(row).toHaveAttribute("aria-current", "true");
-		expect(row).toHaveTextContent(/^CallWorking\d{1,2}:\d{2}/);
+		expect(row).toHaveTextContent(/^Working: /);
 		expect(row).toHaveTextContent("Standup");
 	});
 
@@ -291,11 +294,11 @@ describe("MeetingList rows", () => {
 			});
 			renderWithBridge(<MeetingList />, harness);
 			const element = screen.getByTestId(`meeting-${FIRST}`);
-			expect(element).toHaveTextContent(
-				new RegExp(`^Call${badge}\\d{1,2}:\\d{2}`),
+			expect(element).toHaveTextContent(new RegExp(`^${badge}: `));
+			expect(screen.getByTestId(`meeting-state-${FIRST}`)).toHaveClass(
+				state === "idle" ? "bg-warning" : "bg-live",
 			);
 			expect(element).toHaveTextContent(preview);
-			expect(element).not.toHaveTextContent("No summary");
 		},
 	);
 });
