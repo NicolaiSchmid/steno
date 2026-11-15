@@ -23,7 +23,6 @@ import {
 	Avatar,
 	activeInsetClass,
 	Button,
-	ConfirmDialog,
 	Input,
 	ResultLine,
 } from "@/components/ui";
@@ -37,6 +36,7 @@ import {
 	NOT_A_PERSON,
 	type OptionRow,
 	optionText,
+	type PickScope,
 	type Speaker,
 	voiceLabel,
 } from "./speaker-names";
@@ -44,53 +44,41 @@ import {
 const SPEAKER_QUERY_DEBOUNCE_MS = 150;
 
 /**
- * How a pick ended: the host took it, the user cancelled the combine, or it
- * failed with the host's message.
+ * How a pick ended: the host took it, took it by combining the voice into
+ * the person's other voice of the meeting, or it failed with the host's
+ * message.
  */
 export type SelectOutcome =
 	| { kind: "committed" }
-	| { kind: "cancelled" }
+	| { kind: "combined" }
 	| { kind: "failed"; message: string };
-
-/** Asks before combining two voices; resolves whether to go on. */
-export type ConfirmCombine = (ask: {
-	title: string;
-	consequence: string;
-}) => Promise<boolean>;
 
 /**
  * Sends a pick as `speakers.select` without `combine`. When the host
  * refuses it as `wouldCombine` (the person already owns another voice of
- * the meeting, so naming would merge the two), `confirm` asks first, with
- * the host's words and what it costs, and the pick goes again with
- * `combine: true`; Cancel leaves it. Whether a pick combines is the host's
- * call, so a Create or a Suggested pick that resolves to an owner asks too.
- * Never rejects: any failure comes back as `failed`.
+ * the meeting, so naming would merge the two), the pick goes again with
+ * `combine: true`: combining is undoable (`speakers.separate`), so it asks
+ * nothing first, and the caller offers Undo. Whether a pick combines is the
+ * host's call, so a Create or a Suggested pick that resolves to an owner
+ * combines too. Never rejects: any failure comes back as `failed`.
  */
 export async function selectSpeaker(
 	client: BridgeClient,
 	speaker: Speaker,
 	option: SpeakerOption,
-	confirm: ConfirmCombine,
 ): Promise<SelectOutcome> {
 	const params = { speakerID: speaker.id, option };
 	try {
 		try {
 			await client.call("speakers.select", { ...params, combine: false });
+			return { kind: "committed" };
 		} catch (cause) {
 			if (!(cause instanceof BridgeError) || cause.code !== "wouldCombine") {
 				throw cause;
 			}
-			const confirmed = await confirm({
-				title: `Combine ${speaker.clusterLabel} with ${option.label}?`,
-				consequence: `${cause.message} ${isMe(speaker) ? "Your" : `${speaker.clusterLabel}’s`} paragraphs become ${option.label}’s. This cannot be undone.`,
-			});
-			if (!confirmed) {
-				return { kind: "cancelled" };
-			}
-			await client.call("speakers.select", { ...params, combine: true });
 		}
-		return { kind: "committed" };
+		await client.call("speakers.select", { ...params, combine: true });
+		return { kind: "combined" };
 	} catch (cause) {
 		console.error("bridge: speakers.select failed", cause);
 		return {
@@ -98,53 +86,6 @@ export async function selectSpeaker(
 			message: cause instanceof Error ? cause.message : String(cause),
 		};
 	}
-}
-
-/**
- * `selectSpeaker` with its combine confirm: `select` sends a pick, and
- * `dialog`, rendered once by the caller, is the confirm it may open (the
- * consequence in words, Cancel first, a red Combine).
- */
-export function useSpeakerSelect(): {
-	select: (speaker: Speaker, option: SpeakerOption) => Promise<SelectOutcome>;
-	asking: boolean;
-	dialog: ReactNode;
-} {
-	const client = useBridge();
-	const [ask, setAsk] = useState<{
-		title: string;
-		consequence: string;
-		resolve: (confirmed: boolean) => void;
-	} | null>(null);
-
-	const confirm: ConfirmCombine = (question) =>
-		new Promise((resolve) => setAsk({ ...question, resolve }));
-
-	function close(confirmed: boolean) {
-		ask?.resolve(confirmed);
-		setAsk(null);
-	}
-
-	return {
-		select: (speaker, option) =>
-			selectSpeaker(client, speaker, option, confirm),
-		asking: ask !== null,
-		dialog: (
-			<ConfirmDialog
-				confirmLabel="Combine"
-				confirmTestId="speakers-combine"
-				consequence={ask?.consequence ?? ""}
-				onConfirm={() => close(true)}
-				onOpenChange={(open) => {
-					if (!open && ask) {
-						close(false);
-					}
-				}}
-				open={ask !== null}
-				title={ask?.title ?? ""}
-			/>
-		),
-	};
 }
 
 /**
@@ -207,6 +148,24 @@ export function fieldAction(speaker: Speaker): FieldAction | undefined {
 	return isMe(speaker) ? undefined : "dismiss";
 }
 
+/**
+ * Options asked for on another voice's behalf (a turn without a voice):
+ * that voice's own evidence ("Sounds like", "Last invitee left") says
+ * nothing about this paragraph, so it goes; a name heard in the meeting or
+ * an invitee stays.
+ */
+function withoutVoiceReasons(
+	options: readonly SpeakerOption[],
+): SpeakerOption[] {
+	return options.map((option) => {
+		if (option.reason !== "voice" && option.reason !== "lastInvitee") {
+			return option;
+		}
+		const { reason: _reason, strength: _strength, ...rest } = option;
+		return rest;
+	});
+}
+
 interface ActionRow {
 	action: FieldAction;
 }
@@ -218,7 +177,17 @@ function isAction(entry: Entry | undefined): entry is ActionRow {
 }
 
 export interface SpeakerNameFieldProps {
-	speaker: Speaker;
+	/** The voice named; none for a transcript turn without a voice. */
+	speaker: Speaker | undefined;
+	/**
+	 * Whose options to ask for when `speaker` is none: another voice of the
+	 * meeting, its voice-only reasons left out; without one, only Create.
+	 */
+	optionsSpeakerID?: string | undefined;
+	/** A transcript pick for one paragraph names no voice (`groupOptions`). */
+	scope?: PickScope;
+	/** The placeholder when `speaker` is none: the turn's name. */
+	placeholder?: string;
 	/** Every speaker of the meeting, for "Also speaking here". */
 	speakers: readonly Speaker[];
 	/** Called with the highlighted option and the typed text on Enter or a click. */
@@ -274,6 +243,9 @@ type Answer =
  */
 export function SpeakerNameField({
 	speaker,
+	optionsSpeakerID,
+	scope = "voice",
+	placeholder,
 	speakers,
 	onSubmit,
 	onCancel,
@@ -301,13 +273,31 @@ export function SpeakerNameField({
 	const request = useRef(0);
 	const list = useRef<HTMLDivElement>(null);
 
+	const askID = speaker?.id ?? optionsSpeakerID;
+
 	function load(text: string) {
 		const ticket = ++request.current;
+		if (askID === undefined) {
+			// Nobody to ask: the typed name can only be created.
+			const typed = text.trim();
+			setAnswer({
+				query: text,
+				kind: "options",
+				options: typed ? [{ kind: "create", label: typed }] : [],
+			});
+			return;
+		}
 		client
-			.call("speakers.options", { speakerID: speaker.id, query: text })
+			.call("speakers.options", { speakerID: askID, query: text })
 			.then((reply) => {
 				if (ticket === request.current) {
-					setAnswer({ query: text, kind: "options", options: reply.options });
+					setAnswer({
+						query: text,
+						kind: "options",
+						options: speaker
+							? reply.options
+							: withoutVoiceReasons(reply.options),
+					});
 					setActive(0);
 					setMoved(false);
 				}
@@ -329,7 +319,7 @@ export function SpeakerNameField({
 			clearTimeout(timer.current);
 			request.current += 1;
 		};
-	}, [speaker.id]);
+	}, [askID]);
 
 	const typed = query.trim();
 	const loading = answer === null || answer.query !== query;
@@ -337,7 +327,14 @@ export function SpeakerNameField({
 	const groups = loading
 		? []
 		: answer.kind === "options"
-			? groupOptions(answer.options, query, speaker, speakers, excludedPersonID)
+			? groupOptions(
+					answer.options,
+					query,
+					speaker,
+					speakers,
+					excludedPersonID,
+					scope,
+				)
 			: typed
 				? [
 						{
@@ -348,7 +345,9 @@ export function SpeakerNameField({
 					]
 				: [];
 	const action =
-		onAction && !loading && !typed ? fieldAction(speaker) : undefined;
+		speaker && onAction && !loading && !typed
+			? fieldAction(speaker)
+			: undefined;
 	const flat: Entry[] = [
 		...groups.flatMap((group) => group.rows),
 		...(action ? [{ action }] : []),
@@ -441,17 +440,23 @@ export function SpeakerNameField({
 				aria-busy={loading}
 				aria-controls={listID}
 				aria-expanded={flat.length > 0}
-				aria-label={`Name for ${speaker.clusterLabel}`}
+				aria-label={
+					speaker && scope === "voice"
+						? `Name for ${speaker.clusterLabel}`
+						: "Name for this paragraph"
+				}
 				autoFocus
-				data-testid={`speaker-field-${speaker.id}`}
+				data-testid={`speaker-field-${speaker?.id ?? "turn"}`}
 				onChange={onChange}
 				onKeyDown={onKeyDown}
 				placeholder={
-					isNamed(speaker)
-						? speaker.displayName
-						: isMe(speaker)
-							? "Your name"
-							: voiceLabel(speaker)
+					!speaker
+						? (placeholder ?? "")
+						: isNamed(speaker)
+							? speaker.displayName
+							: isMe(speaker)
+								? "Your name"
+								: voiceLabel(speaker)
 				}
 				role="combobox"
 				size="sm"

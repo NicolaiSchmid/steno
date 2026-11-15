@@ -8,6 +8,13 @@ import { personColor } from "@/lib/person-color";
 
 export type Speaker = MeetingDetailSnapshot["speakers"][number];
 export type Turn = MeetingDetailSnapshot["transcript"][number];
+/** A voice combined into a speaker, which Separate again makes its own again. */
+export type CombinedVoice = Speaker["combined"][number];
+/** What plays a voice sample: a speaker, or a voice combined into one. */
+export type Voice = Pick<
+	Speaker,
+	"id" | "clusterLabel" | "hasClip" | "isPlaying"
+>;
 
 /**
  * The cluster label of the microphone's speaker, the person at this
@@ -19,7 +26,7 @@ const ME_LABEL = "Me";
 /** The progress stage while the pipeline finds the meeting's speakers. */
 export const DIARIZE_STAGE = "diarize";
 
-export function isMe(speaker: Speaker): boolean {
+export function isMe(speaker: Pick<Speaker, "clusterLabel">): boolean {
 	return speaker.clusterLabel === ME_LABEL;
 }
 
@@ -40,7 +47,9 @@ export function isDismissed(speaker: Speaker): boolean {
 export const NOT_A_PERSON = "Not a person";
 
 /** Whether the row may offer the sample clip: never for Me, else with a clip. */
-export function canPlay(speaker: Speaker): boolean {
+export function canPlay(
+	speaker: Pick<Speaker, "clusterLabel" | "hasClip">,
+): boolean {
 	return speaker.hasClip && !isMe(speaker);
 }
 
@@ -100,6 +109,56 @@ export function quote(speaker: Speaker): string {
  */
 export function context(speaker: Speaker): string {
 	return quote(speaker) ? "" : (speaker.context?.trim() ?? "");
+}
+
+/* ---- A transcript turn's panel ------------------------------------------ */
+
+/**
+ * What a pick on a transcript turn changes: this paragraph only
+ * (`transcript.setTurnSpeaker`), or the voice in the whole meeting
+ * (`speakers.select`).
+ */
+export type PickScope = "turn" | "voice";
+
+/**
+ * The scope a turn's panel opens on (S2): all of the voice while it is
+ * unnamed or only suggested, this paragraph once it is confirmed (Me
+ * included). A turn without a voice has only this paragraph.
+ */
+export function defaultScope(speaker: Speaker | undefined): PickScope {
+	return speaker && !isNamed(speaker) ? "voice" : "turn";
+}
+
+/**
+ * The segmented choice's All: "All 4 paragraphs of Speaker 2", of the
+ * confirmed person by name ("All 4 paragraphs of Nicolai"), "All of yours"
+ * for Me, and "All of Speaker 2" for a voice with one paragraph.
+ */
+export function allScopeLabel(speaker: Speaker, paragraphs: number): string {
+	if (isMe(speaker)) {
+		return "All of yours";
+	}
+	const who = isNamed(speaker) ? speaker.displayName : speaker.clusterLabel;
+	return paragraphs === 1
+		? `All of ${who}`
+		: `All ${paragraphs} paragraphs of ${who}`;
+}
+
+/** The scope line under This paragraph: what moves, and what undoes it. */
+export const TURN_SCOPE_LINE =
+	"Moves this paragraph only. Processing the meeting again redoes the speakers and drops this move.";
+
+/** The red line when the host refused a move as `stale`. */
+export const STALE_MOVE = "The transcript changed since you opened this.";
+
+/**
+ * The turn's segments as `transcript.setTurnSpeaker` takes them, each with
+ * the voice the page shows it under (none for a turn without one).
+ */
+export function turnSegments(turn: Turn): { id: string; speakerID?: string }[] {
+	return turn.segmentIDs.map((id) =>
+		turn.speakerID ? { id, speakerID: turn.speakerID } : { id },
+	);
 }
 
 /* ---- The header pill --------------------------------------------------- */
@@ -329,6 +388,30 @@ export function rowOrder(layout: PanelLayout): Speaker[] {
 	];
 }
 
+/** The voices combined into a person's voices, nested under the person. */
+export function combinedOf(entry: PersonEntry): CombinedVoice[] {
+	return [entry.speaker, ...entry.voices].flatMap((voice) => voice.combined);
+}
+
+/**
+ * Every row's ID top to bottom, for the keyboard: the speakers in
+ * `rowOrder`, a person's combined voices after their own voices.
+ */
+export function rowIDs(layout: PanelLayout): string[] {
+	return [
+		...(layout.me ? [layout.me.id] : []),
+		...layout.check.map((speaker) => speaker.id),
+		...layout.need.map((speaker) => speaker.id),
+		...layout.people.flatMap((entry) => [
+			entry.speaker.id,
+			...entry.voices.map((voice) => voice.id),
+			...combinedOf(entry).map((voice) => voice.id),
+			...entry.also.map((voice) => voice.id),
+		]),
+		...layout.dismissed.map((speaker) => speaker.id),
+	];
+}
+
 /** The first row with work: unnamed Me, a suggestion, an unnamed voice. */
 export function firstWithWork(layout: PanelLayout): Speaker | undefined {
 	return rowOrder(layout).find(
@@ -423,14 +506,17 @@ export function optionColor(
  * `excluded` leaves out the person the user just said No to, while
  * nothing is typed: typed, they are offered again among the people, never
  * as a suggestion, as the hosts offer a person answered No for this voice
- * only when typed.
+ * only when typed. For one paragraph (`scope` "turn") nothing combines:
+ * the paragraph joins that person's voice, so no row says it combines.
+ * `speaker` is none for a turn without a voice.
  */
 export function groupOptions(
 	options: readonly SpeakerOption[],
 	query: string,
-	speaker: Speaker,
+	speaker: Speaker | undefined,
 	speakers: readonly Speaker[],
 	excluded?: string,
+	scope: PickScope = "voice",
 ): OptionGroup[] {
 	const typed = query.trim() !== "";
 	const groups: OptionGroup[] = [
@@ -452,7 +538,7 @@ export function groupOptions(
 		const owner = option.personID
 			? speakers.find(
 					(other) =>
-						other.id !== speaker.id &&
+						other.id !== speaker?.id &&
 						isNamed(other) &&
 						other.personID === option.personID,
 				)
@@ -470,6 +556,7 @@ export function groupOptions(
 				reason ? { option, reason } : { option },
 			);
 		} else if (
+			speaker &&
 			isNamed(speaker) &&
 			option.personID &&
 			option.personID === speaker.personID
@@ -477,11 +564,15 @@ export function groupOptions(
 			// Who the voice is confirmed as already: no suggestion of itself.
 			people.rows.unshift({ option, reason: "Current", ...colorIndex });
 		} else if (owner) {
-			also.rows.push({
-				option,
-				combines: `combines with ${owner.clusterLabel}`,
-				...colorIndex,
-			});
+			also.rows.push(
+				scope === "voice"
+					? {
+							option,
+							combines: `combines with ${owner.clusterLabel}`,
+							...colorIndex,
+						}
+					: { option, ...colorIndex },
+			);
 		} else if (reason) {
 			suggested.rows.push({ option, reason, ...colorIndex });
 		} else {

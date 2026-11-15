@@ -437,14 +437,43 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 	],
 	["split", "scenario=speakers-split", openSpeakers],
 	[
-		"combine",
+		// Same person combines at once; the toast offers Undo, and the voice
+		// nests under Nicolai's with Separate again.
+		"combine-undo",
 		"scenario=speakers-split",
 		async (page) => {
 			await openSpeakers(page);
 			await page.getByRole("button", { name: "Same person" }).click();
-			await expect(page.getByTestId("confirm-dialog")).toContainText(
-				"cannot be undone",
+			await expect(page.getByTestId("toast")).toContainText(
+				"Speaker 4 combined with Nicolai.",
 			);
+			await expect(
+				page.getByTestId("toast").getByRole("button", { name: "Undo" }),
+			).toBeVisible();
+		},
+	],
+	[
+		// Speaker 5, combined into Nicolai's voice before this visit.
+		"separate-again",
+		"scenario=speakers-partly",
+		async (page) => {
+			await openSpeakers(page);
+			const combined = page.getByTestId(/^speakers-popover-combined-/);
+			await combined.scrollIntoViewIfNeeded();
+			await expect(
+				combined.getByRole("button", { name: /^Separate again/ }),
+			).toBeVisible();
+		},
+	],
+	[
+		"separate-again-failed",
+		"scenario=speakers-separate-failed",
+		async (page) => {
+			await openSpeakers(page);
+			await page.getByRole("button", { name: /^Separate again/ }).click();
+			const failure = page.getByTestId("speakers-panel").getByRole("alert");
+			await expect(failure).toContainText("Nothing to separate.");
+			await failure.scrollIntoViewIfNeeded();
 		},
 	],
 	[
@@ -479,6 +508,85 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 		"scenario=speakers-partly&tab=transcript",
 		async (page) => {
 			await transcriptName(page, "Speaker 4").click();
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+	],
+	[
+		// An unnamed voice opens on All.
+		"transcript-scope-all",
+		"scenario=speakers-partly&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Speaker 4").click();
+			await expect(
+				page.getByRole("radio", { name: "All of Speaker 4" }),
+			).toBeChecked();
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+	],
+	[
+		// A confirmed one opens on This paragraph, its scope line saying so.
+		"transcript-scope-paragraph",
+		"scenario=speakers-partly&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Jérôme").click();
+			await expect(
+				page.getByRole("radio", { name: "This paragraph" }),
+			).toBeChecked();
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+	],
+	[
+		// After a move: the toast, and the paragraph under its new voice.
+		"transcript-moved",
+		"scenario=speakers-partly&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Jérôme").click();
+			await page.keyboard.type("Lea");
+			await expect(page.getByRole("option", { name: /Create/ })).toBeVisible();
+			await page.keyboard.press("Enter");
+			await expect(page.getByTestId("toast")).toContainText(
+				"This paragraph is now Lea’s.",
+			);
+		},
+	],
+	[
+		"transcript-stale",
+		"scenario=speakers-move-stale&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Jérôme").click();
+			await page.keyboard.type("Ann");
+			await expect(page.getByRole("option", { name: /Create/ })).toBeVisible();
+			await page.keyboard.press("Enter");
+			await expect(page.getByTestId("speaker-panel-stale")).toBeVisible();
+			await expect(page.getByRole("combobox")).toHaveValue("Ann");
+		},
+	],
+	[
+		"transcript-no-voice",
+		"scenario=speakers-no-voice&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Unknown").click();
+			await expect(page.getByRole("option").first()).toBeVisible();
+			await expect(page.getByRole("radiogroup")).toHaveCount(0);
+		},
+	],
+	[
+		"transcript-playing",
+		"scenario=speakers-partly&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Nicolai").click();
+			await page.getByRole("button", { name: "Play this paragraph" }).click();
+			await expect(
+				page.getByRole("button", { name: "Stop this paragraph" }),
+			).toBeVisible();
+		},
+	],
+	[
+		"transcript-no-recording",
+		"scenario=speakers-no-recording&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Nicolai").click();
+			await expect(page.getByText("No recording")).toBeVisible();
 			await expect(page.getByRole("option").first()).toBeVisible();
 		},
 	],

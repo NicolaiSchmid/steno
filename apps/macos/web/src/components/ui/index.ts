@@ -127,6 +127,8 @@ export type { ScrollAreaProps } from "./scroll-area";
 export { ScrollArea } from "./scroll-area";
 export type { SectionLabelProps } from "./section-label";
 export { SectionLabel } from "./section-label";
+export type { SegmentedOption, SegmentedProps } from "./segmented";
+export { Segmented } from "./segmented";
 export type { SelectOption, SelectProps } from "./select";
 export { Select } from "./select";
 export type { SidebarColumnProps } from "./sidebar-column";

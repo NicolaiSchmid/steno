@@ -2,6 +2,7 @@ import { CheckIcon, PlayIcon, SquareIcon } from "lucide-react";
 import { type KeyboardEvent, type RefObject, useState } from "react";
 import type { SpeakerOption } from "@/bridge/contract";
 import { send, useBridge } from "@/bridge/hooks";
+import { BridgeError } from "@/bridge/transport";
 import {
 	Avatar,
 	Button,
@@ -10,6 +11,8 @@ import {
 	Popover,
 	PopoverPopup,
 	PopoverTrigger,
+	ResultLine,
+	Segmented,
 	Tooltip,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
@@ -17,22 +20,31 @@ import {
 	type FieldAction,
 	SelectFailure,
 	SpeakerNameField,
-	useSpeakerSelect,
+	selectSpeaker,
 } from "./speaker-name-field";
 import {
+	allScopeLabel,
 	canPlay,
+	defaultScope,
 	isDismissed,
 	isMe,
 	isNamed,
 	isSuggested,
 	NOT_A_PERSON,
+	type PickScope,
 	type Speaker,
+	STALE_MOVE,
 	suggestionReason,
+	TURN_SCOPE_LINE,
+	type Turn,
+	turnSegments,
+	type Voice,
 	voiceLabel,
 } from "./speaker-names";
 
 export interface SpeakerPlayButtonProps {
-	speaker: Speaker;
+	/** A speaker, or a voice combined into one. */
+	speaker: Voice;
 	/** Suffix of the test id, so two hosts on one page stay apart. */
 	testID: string;
 	/** -1 inside a row that is one tab stop (its P key plays). */
@@ -47,7 +59,7 @@ export interface SpeakerPlayButtonProps {
 /** Plays or stops the voice's sample clip, or says there is none. */
 export function togglePlay(
 	client: ReturnType<typeof useBridge>,
-	speaker: Speaker,
+	speaker: Voice,
 ) {
 	if (!canPlay(speaker)) {
 		return;
@@ -192,6 +204,52 @@ export function announceAction(speaker: Speaker, action: FieldAction) {
 	notify({ title });
 }
 
+/**
+ * Undo after a combine and Separate again (`speakers.separate`): the voice
+ * is its own again. Resolves with the failure's message, or null once the
+ * host took it.
+ */
+export async function sendSeparate(
+	client: ReturnType<typeof useBridge>,
+	speakerID: string,
+): Promise<string | null> {
+	try {
+		await client.call("speakers.separate", { speakerID });
+		return null;
+	} catch (cause) {
+		return failureMessage("speakers.separate", cause);
+	}
+}
+
+/**
+ * "Speaker 3 combined with Nicolai." once the host combined a pick, with
+ * Undo, which separates the voice again; a failed Undo says so in a toast.
+ */
+export function announceCombined(
+	client: ReturnType<typeof useBridge>,
+	speaker: Speaker,
+	name: string,
+) {
+	const who = isMe(speaker) ? "Your voice" : speaker.clusterLabel;
+	notify({
+		title: `${who} combined with ${name}.`,
+		action: {
+			label: "Undo",
+			onClick: () => {
+				void sendSeparate(client, speaker.id).then((message) => {
+					if (message !== null) {
+						notify({
+							title: `${who} is still combined with ${name}.`,
+							description: message,
+							tone: "destructive",
+						});
+					}
+				});
+			},
+		},
+	});
+}
+
 /** "Speaker 1 is now Anna.", "You are Nicolai.", once the host took a pick. */
 export function announceNamed(speaker: Speaker, name: string) {
 	notify({
@@ -202,8 +260,8 @@ export function announceNamed(speaker: Speaker, name: string) {
 }
 
 /**
- * What a transcript pick changes: every paragraph of the voice in this
- * meeting, until paragraphs can move on their own. "Changes all 4
+ * What a transcript pick for All changes: every paragraph of the voice in
+ * this meeting. "Changes all 4
  * paragraphs of Speaker 3 in this meeting.", the person named too once the
  * voice is confirmed ("of Nicolai (Speaker 3)"); for one paragraph
  * "Changes Speaker 3’s only paragraph in this meeting."
@@ -226,11 +284,95 @@ export function scopeLine(speaker: Speaker, paragraphs: number): string {
 	return `Changes all ${paragraphs} paragraphs of ${whose} in this meeting.`;
 }
 
+/**
+ * The turn's own audio (`transcript.playTurn` over its segments, at most a
+ * minute; `speakers.stop` stops it), "Paragraph" beside the icon. Once the
+ * recording is gone it keeps the slot as a disabled play with a muted "No
+ * recording", as a voice without a clip says "No sample".
+ */
+function TurnPlayButton({
+	turn,
+	meetingID,
+	recording,
+	onFailure,
+}: {
+	turn: Turn;
+	meetingID: string;
+	recording: boolean;
+	/** The host could not play it ("The recording is gone."), or null. */
+	onFailure: (message: string | null) => void;
+}) {
+	const client = useBridge();
+	if (!recording) {
+		return (
+			<span className="flex shrink-0 items-center gap-1.5">
+				<span
+					aria-hidden="true"
+					className="text-meta text-muted-foreground"
+					data-testid={`turn-play-${turn.id}-none`}
+				>
+					No recording
+				</span>
+				<Button
+					aria-label="No recording"
+					data-testid={`turn-play-${turn.id}`}
+					disabled
+					size="icon-xs"
+					variant="ghost"
+				>
+					<PlayIcon aria-hidden="true" />
+				</Button>
+			</span>
+		);
+	}
+	async function toggle() {
+		if (turn.isPlaying) {
+			send(client, "speakers.stop");
+			return;
+		}
+		onFailure(null);
+		try {
+			await client.call("transcript.playTurn", {
+				meetingID,
+				segmentIDs: turn.segmentIDs,
+			});
+		} catch (cause) {
+			onFailure(failureMessage("transcript.playTurn", cause));
+		}
+	}
+	return (
+		<Button
+			aria-label={
+				turn.isPlaying ? "Stop this paragraph" : "Play this paragraph"
+			}
+			className="shrink-0"
+			data-testid={`turn-play-${turn.id}`}
+			onClick={() => void toggle()}
+			size="xs"
+			variant="ghost"
+		>
+			{turn.isPlaying ? (
+				<SquareIcon aria-hidden="true" />
+			) : (
+				<PlayIcon aria-hidden="true" />
+			)}
+			Paragraph
+		</Button>
+	);
+}
+
 export interface SpeakerPickerProps {
-	speaker: Speaker;
+	turn: Turn;
+	/** The turn's voice; none for a turn without one. */
+	speaker: Speaker | undefined;
 	speakers: readonly Speaker[];
-	/** How many of the meeting's paragraphs the voice leads, for the scope line. */
+	/** How many of the meeting's paragraphs the voice leads, for All. */
 	paragraphs: number;
+	meetingID: string;
+	/** The transcript's generation, which a move is checked against. */
+	generation: number;
+	/** The meeting's recording is still there, so the paragraph can play. */
+	recording: boolean;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	/** The turn the popup sits under, so its paragraph stays in view. */
@@ -242,19 +384,41 @@ export interface SpeakerPickerProps {
 	triggerRef: (element: HTMLButtonElement | null) => void;
 }
 
+/** A failed pick, No or action, with what reopens the field. */
+interface Failure {
+	message: string;
+	text: string;
+	/** Sends it again; a stale move has Refresh instead. */
+	retry: () => void;
+	/** The host refused a move as `stale`: the line offers Refresh. */
+	stale?: boolean;
+}
+
 /**
- * A voice's name on a transcript turn, which opens a small panel under the
- * turn's paragraph: the voice, its clip, Yes for a suggestion, and the
- * same field as the Speakers panel. A pick names the voice in this meeting,
- * so every turn of it follows (all of them, until paragraphs can move on
- * their own), and the line above the field says so; the result is
- * announced and focus goes back to the name. A suggestion carries the grey
- * "?" bubble of the pill and the avatars, and says why it is offered.
+ * A turn's name, which opens a small panel under the turn's paragraph:
+ * the voice, the paragraph's own audio, then the scope as a segmented
+ * choice, This paragraph or All of the voice (preselected by
+ * `defaultScope` each time the panel opens), the line saying what a pick
+ * changes, and the same field as the Speakers panel. This paragraph moves
+ * the turn's segments (`transcript.setTurnSpeaker`) against the transcript
+ * as it was when the panel opened; the host refusing it as stale shows a
+ * red line with Refresh, which takes the turn as it is now and keeps the
+ * typed text. All names the voice in this meeting, and only All offers the
+ * voice's own Yes and No and its action (Not a person, Remove name,
+ * Restore). A turn without a voice has only This paragraph. A pick is
+ * saved at once with "Saving"; the result is announced and focus goes back
+ * to the name, a failure reopens the field with its text and a red line
+ * with Retry. A suggestion carries the grey "?" bubble of the pill and the
+ * avatars, and says why it is offered.
  */
 export function SpeakerPicker({
+	turn,
 	speaker,
 	speakers,
 	paragraphs,
+	meetingID,
+	generation,
+	recording,
 	open,
 	onOpenChange,
 	anchor,
@@ -263,66 +427,134 @@ export function SpeakerPicker({
 	onFocus,
 	triggerRef,
 }: SpeakerPickerProps) {
-	const { select, asking, dialog } = useSpeakerSelect();
+	const client = useBridge();
 	const [saving, setSaving] = useState<string | null>(null);
-	// What the field reopens with after a cancelled combine or a failure.
+	// What the field reopens with after a failure.
 	const [draft, setDraft] = useState({ text: "", attempt: 0 });
-	const [failure, setFailure] = useState<{
-		message: string;
-		retry: () => void;
-		text: string;
-	} | null>(null);
+	const [failure, setFailure] = useState<Failure | null>(null);
+	const [playFailure, setPlayFailure] = useState<string | null>(null);
+	// Not remembered between turns: each opening starts on the default.
+	const [chosen, setChosen] = useState<PickScope>(() => defaultScope(speaker));
+	// The turn as it was when the panel opened: what a move is checked against.
+	const [opened, setOpened] = useState(() => ({
+		segments: turnSegments(turn),
+		generation,
+	}));
 	// The person answered No to while the popup is open: the field leaves
 	// them out until the options are asked for again.
 	const [rejected, setRejected] = useState<string | null>(null);
-	const client = useBridge();
-	const named = isNamed(speaker);
-	const suggested = isSuggested(speaker) && rejected === null;
-	const dismissed = isDismissed(speaker);
-	const tooltip = suggested
-		? `${suggestionReason(speaker)}. Click to confirm or change`
-		: dismissed
-			? `${NOT_A_PERSON}. Click to name or restore`
-			: named
-				? "Click to change"
-				: "Click to name";
+	const scope: PickScope = speaker ? chosen : "turn";
+	const named = speaker ? isNamed(speaker) : false;
+	const suggested = speaker ? isSuggested(speaker) && rejected === null : false;
+	const dismissed = speaker ? isDismissed(speaker) : false;
+	const tooltip =
+		suggested && speaker
+			? `${suggestionReason(speaker)}. Click to confirm or change`
+			: dismissed
+				? `${NOT_A_PERSON}. Click to name or restore`
+				: named
+					? "Click to change"
+					: "Click to name";
+	const name = speaker ? speaker.displayName : turn.speakerName;
+	const testID = speaker?.id ?? `turn-${turn.id}`;
+	// Whom the field asks for options when the turn has no voice.
+	const asked =
+		speakers.find((other) => !isDismissed(other))?.id ?? speakers[0]?.id;
 
 	function change(next: boolean) {
-		if (!next && (asking || saving !== null)) {
+		if (!next && saving !== null) {
 			return;
 		}
-		if (!next) {
-			setFailure(null);
-			setRejected(null);
-			setDraft({ text: "", attempt: 0 });
+		setFailure(null);
+		setPlayFailure(null);
+		setRejected(null);
+		setDraft({ text: "", attempt: 0 });
+		if (next) {
+			setChosen(defaultScope(speaker));
+			setOpened({ segments: turnSegments(turn), generation });
 		}
 		onOpenChange(next);
 	}
 
+	/** Fails the pick: the field reopens with its text and the red line. */
+	function fail(next: Failure) {
+		setDraft((now) => ({ text: next.text, attempt: now.attempt + 1 }));
+		setFailure(next);
+	}
+
+	/** The turn as it is now, the typed text kept, the stale line gone. */
+	function refresh() {
+		setOpened({ segments: turnSegments(turn), generation });
+		setFailure(null);
+	}
+
 	async function commit(option: SpeakerOption, text: string) {
+		if (scope === "turn") {
+			await move(option, text);
+		} else if (speaker) {
+			await nameVoice(speaker, option, text);
+		}
+	}
+
+	/** This paragraph: "This paragraph is now Anna’s." */
+	async function move(option: SpeakerOption, text: string) {
 		setFailure(null);
 		setSaving(option.label);
-		const outcome = await select(speaker, option);
-		setSaving(null);
-		if (outcome.kind === "committed") {
-			announceNamed(speaker, option.label);
+		try {
+			await client.call("transcript.setTurnSpeaker", {
+				meetingID,
+				generation: opened.generation,
+				segments: opened.segments,
+				option,
+			});
+			setSaving(null);
+			notify({ title: `This paragraph is now ${option.label}’s.` });
 			onOpenChange(false);
-		} else {
-			setDraft((now) => ({ text, attempt: now.attempt + 1 }));
-			if (outcome.kind === "failed") {
-				setFailure({
-					message: outcome.message,
-					retry: () => void commit(option, text),
+		} catch (cause) {
+			setSaving(null);
+			if (cause instanceof BridgeError && cause.code === "stale") {
+				console.error("bridge: transcript.setTurnSpeaker is stale", cause);
+				fail({ message: STALE_MOVE, text, retry: refresh, stale: true });
+			} else {
+				fail({
+					message: failureMessage("transcript.setTurnSpeaker", cause),
 					text,
+					retry: () => void commit(option, text),
 				});
 			}
 		}
 	}
 
+	/** All of the voice: named, or combined with Undo. */
+	async function nameVoice(
+		voice: Speaker,
+		option: SpeakerOption,
+		text: string,
+	) {
+		setFailure(null);
+		setSaving(option.label);
+		const outcome = await selectSpeaker(client, voice, option);
+		setSaving(null);
+		if (outcome.kind === "failed") {
+			fail({
+				message: outcome.message,
+				text,
+				retry: () => void commit(option, text),
+			});
+			return;
+		}
+		if (outcome.kind === "combined") {
+			announceCombined(client, voice, option.label);
+		} else {
+			announceNamed(voice, option.label);
+		}
+		onOpenChange(false);
+	}
+
 	/** No: the suggestion goes at once and the field offers everyone else. */
 	async function reject() {
-		const personID = speaker.personID;
-		if (!personID) {
+		const personID = speaker?.personID;
+		if (!speaker || !personID) {
 			return;
 		}
 		setFailure(null);
@@ -336,6 +568,9 @@ export function SpeakerPicker({
 
 	/** Not a person, Remove name or Restore: announced, and the popup closes. */
 	async function act(action: FieldAction) {
+		if (!speaker) {
+			return;
+		}
 		setFailure(null);
 		setSaving(action === "dismiss" ? NOT_A_PERSON : speaker.clusterLabel);
 		const message = await sendAction(client, speaker.id, action);
@@ -344,13 +579,12 @@ export function SpeakerPicker({
 			announceAction(speaker, action);
 			onOpenChange(false);
 		} else {
-			setDraft((now) => ({ text: "", attempt: now.attempt + 1 }));
-			setFailure({ message, retry: () => void act(action), text: "" });
+			fail({ message, retry: () => void act(action), text: "" });
 		}
 	}
 
 	function confirmSuggestion() {
-		if (speaker.personID) {
+		if (speaker?.personID) {
 			void commit(
 				{
 					kind: "person",
@@ -362,17 +596,42 @@ export function SpeakerPicker({
 		}
 	}
 
+	const notice = failure ? (
+		failure.stale ? (
+			<ResultLine
+				actions={
+					<Button
+						data-testid="speaker-panel-refresh"
+						onClick={refresh}
+						size="xs"
+						variant="outline"
+					>
+						Refresh
+					</Button>
+				}
+				className="mt-1.5"
+				data-testid="speaker-panel-stale"
+				tone="destructive"
+			>
+				{failure.message}
+			</ResultLine>
+		) : (
+			<SelectFailure
+				className="mt-1.5"
+				message={failure.message}
+				onRetry={failure.retry}
+				testID="speaker-panel-failure"
+			/>
+		)
+	) : null;
+
 	return (
 		<Popover modal={false} onOpenChange={change} open={open}>
 			<Tooltip label={tooltip}>
 				<PopoverTrigger
-					aria-label={
-						suggested
-							? `${speaker.displayName}, suggested. ${tooltip}`
-							: speaker.displayName
-					}
+					aria-label={suggested ? `${name}, suggested. ${tooltip}` : name}
 					className="-ml-[7px] min-w-0 max-w-full shrink"
-					data-testid={`speaker-picker-${speaker.id}`}
+					data-testid={`speaker-picker-${testID}`}
 					onFocus={onFocus}
 					onKeyDown={onKeyDown}
 					ref={triggerRef}
@@ -381,11 +640,11 @@ export function SpeakerPicker({
 				>
 					<span
 						className={cn("truncate", dismissed && "text-muted-foreground")}
-						title={speaker.displayName}
+						title={name}
 					>
-						{dismissed ? NOT_A_PERSON : speaker.displayName}
+						{dismissed ? NOT_A_PERSON : name}
 					</span>
-					{suggested ? (
+					{suggested && speaker ? (
 						<Avatar
 							aria-hidden="true"
 							data-testid={`speaker-suggested-${speaker.id}`}
@@ -401,58 +660,50 @@ export function SpeakerPicker({
 				// Under the paragraph, or over the name when there is more
 				// room there, never beside it in the reading column.
 				collisionAvoidance={{ side: "flip", fallbackAxisSide: "none" }}
-				data-testid={`speaker-panel-${speaker.id}`}
+				data-testid={`speaker-panel-${testID}`}
 				padding="sm"
 				size="picker"
 			>
 				<div className="flex min-h-8 min-w-0 items-center gap-2">
 					<Avatar
-						index={speaker.colorIndex}
-						name={speaker.displayName}
+						{...(speaker ? { index: speaker.colorIndex } : {})}
+						name={name}
 						size="md"
-						unknown={speaker.assignment === "unknown" || rejected !== null}
+						unknown={
+							!speaker || speaker.assignment === "unknown" || rejected !== null
+						}
 					/>
 					<span className="min-w-0 flex-1 truncate font-medium text-title">
-						{named ? speaker.displayName : voiceLabel(speaker)}
+						{!speaker
+							? name
+							: named
+								? speaker.displayName
+								: voiceLabel(speaker)}
 						{dismissed ? (
 							<span className="font-normal text-muted-foreground">
 								{" "}
 								{NOT_A_PERSON}
 							</span>
 						) : null}
-						{named && isMe(speaker) ? (
+						{named && speaker && isMe(speaker) ? (
 							<span className="font-normal text-muted-foreground"> You</span>
 						) : null}
 					</span>
-					<SpeakerPlayButton
-						labelled
-						speaker={speaker}
-						testID={`speaker-panel-play-${speaker.id}`}
+					<TurnPlayButton
+						meetingID={meetingID}
+						onFailure={setPlayFailure}
+						recording={recording}
+						turn={turn}
 					/>
 				</div>
-				{suggested && saving === null ? (
-					<div className="mt-1 flex min-w-0 items-center gap-2">
-						<span className="min-w-0 flex-1 truncate text-meta text-muted-foreground">
-							{suggestionReason(speaker)}
-						</span>
-						<Button
-							data-testid={`speaker-panel-yes-${speaker.id}`}
-							onClick={confirmSuggestion}
-							size="xs"
-							variant="outline"
-						>
-							<CheckIcon aria-hidden="true" />
-							Yes
-						</Button>
-						<Button
-							data-testid={`speaker-panel-no-${speaker.id}`}
-							onClick={() => void reject()}
-							size="xs"
-							variant="ghost"
-						>
-							No
-						</Button>
-					</div>
+				{playFailure ? (
+					<ResultLine
+						className="mt-1.5"
+						data-testid="turn-play-failure"
+						tone="destructive"
+					>
+						{playFailure}
+					</ResultLine>
 				) : null}
 				{saving !== null ? (
 					<p className="m-0 mt-2 flex min-w-0 items-baseline gap-2 text-body">
@@ -466,38 +717,81 @@ export function SpeakerPicker({
 					</p>
 				) : open ? (
 					<>
+						{speaker ? (
+							<Segmented
+								aria-label="What the name changes"
+								className="mt-2"
+								data-testid={`speaker-panel-scope-choice-${testID}`}
+								onValueChange={setChosen}
+								options={[
+									{
+										value: "turn",
+										label: "This paragraph",
+										className: "shrink-0",
+									},
+									{
+										value: "voice",
+										label: allScopeLabel(speaker, paragraphs),
+									},
+								]}
+								value={scope}
+							/>
+						) : null}
 						{/* What the pick changes, read before typing it. */}
 						<p
-							className="m-0 mt-2 text-meta text-muted-foreground"
-							data-testid={`speaker-panel-scope-${speaker.id}`}
+							className="m-0 mt-1.5 text-meta text-muted-foreground"
+							data-testid={`speaker-panel-scope-${testID}`}
 						>
-							{scopeLine(speaker, paragraphs)}
+							{scope === "turn" || !speaker
+								? TURN_SCOPE_LINE
+								: scopeLine(speaker, paragraphs)}
 						</p>
+						{scope === "voice" && suggested && speaker ? (
+							<div className="mt-1.5 flex min-w-0 items-center gap-2">
+								<span className="min-w-0 flex-1 truncate text-meta text-muted-foreground">
+									{suggestionReason(speaker)}
+								</span>
+								<Button
+									data-testid={`speaker-panel-yes-${speaker.id}`}
+									onClick={confirmSuggestion}
+									size="xs"
+									variant="outline"
+								>
+									<CheckIcon aria-hidden="true" />
+									Yes
+								</Button>
+								<Button
+									data-testid={`speaker-panel-no-${speaker.id}`}
+									onClick={() => void reject()}
+									size="xs"
+									variant="ghost"
+								>
+									No
+								</Button>
+							</div>
+						) : null}
 						<SpeakerNameField
 							className="mt-1.5"
-							{...(rejected ? { excludedPersonID: rejected } : {})}
+							{...(rejected && scope === "voice"
+								? { excludedPersonID: rejected }
+								: {})}
 							initialText={draft.text}
 							key={draft.attempt}
 							listClassName="max-h-56"
-							notice={
-								failure ? (
-									<SelectFailure
-										className="mt-1.5"
-										message={failure.message}
-										onRetry={failure.retry}
-										testID="speaker-panel-failure"
-									/>
-								) : null
-							}
-							onAction={(action) => void act(action)}
+							notice={notice}
+							{...(scope === "voice"
+								? { onAction: (action: FieldAction) => void act(action) }
+								: {})}
 							onCancel={() => change(false)}
 							onSubmit={(option, text) => void commit(option, text)}
+							optionsSpeakerID={asked}
+							placeholder={turn.speakerName}
+							scope={scope}
 							speaker={speaker}
 							speakers={speakers}
 						/>
 					</>
 				) : null}
-				{dialog}
 			</PopoverPopup>
 		</Popover>
 	);
