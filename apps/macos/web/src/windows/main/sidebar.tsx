@@ -100,7 +100,6 @@ function RecordButton({
 				data-testid={state === "starting" ? "sidebar-record" : "sidebar-stop"}
 				disabled={busy}
 				onClick={busy ? undefined : () => send(client, "recording.stop")}
-				size="lg"
 				variant="primary"
 			>
 				<RecordMark pulse={state === "recording"} />
@@ -144,7 +143,6 @@ function RecordButton({
 			menuLabel="Other ways to record"
 			menuTestId="sidebar-record-menu"
 			onClick={() => send(client, "recording.start", { mode: "call" })}
-			size="lg"
 			variant="primary"
 		>
 			<RecordMark />

@@ -91,59 +91,27 @@ export interface MeetingDetailProps {
 }
 
 /**
- * The notice at the top of the reading column: summaries or export still
- * need setting up, or a one-time notice (`isNotice`) the host records as
- * seen once it is dismissed with OK.
+ * A one-time notice (`isNotice`) at the top of the reading column, which
+ * the host records as seen once it is dismissed with OK. Setup that is
+ * still open is not a notice: `SetupLine` says it once, quietly, in the
+ * summary tab.
  */
 function SetupBanner({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 	const client = useBridge();
-	if (!banner) {
+	if (!banner?.isNotice) {
 		return null;
 	}
-	const notice = banner.isNotice === true;
 	return (
 		<Callout
 			actions={
-				<>
-					{banner.offersSummaries ? (
-						<Button
-							data-testid="setup-summaries"
-							onClick={() =>
-								send(client, "window.open", {
-									window: "settings",
-									section: "summaries",
-								})
-							}
-							size="xs"
-							variant="primary"
-						>
-							Set up summaries
-						</Button>
-					) : null}
-					{banner.offersVault ? (
-						<Button
-							data-testid="choose-vault"
-							onClick={() =>
-								send(client, "window.open", {
-									window: "settings",
-									section: "export",
-								})
-							}
-							size="xs"
-							variant={banner.offersSummaries ? "outline" : "primary"}
-						>
-							Choose vault
-						</Button>
-					) : null}
-					<Button
-						data-testid="banner-not-now"
-						onClick={() => send(client, "setup.dismissBanner")}
-						size="xs"
-						variant={notice ? "outline" : "ghost"}
-					>
-						{notice ? "OK" : "Not now"}
-					</Button>
-				</>
+				<Button
+					data-testid="banner-not-now"
+					onClick={() => send(client, "setup.dismissBanner")}
+					size="xs"
+					variant="outline"
+				>
+					OK
+				</Button>
 			}
 			className="mb-6"
 			data-testid="setup-banner"
@@ -152,6 +120,60 @@ function SetupBanner({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 			title={banner.title}
 			variant="default"
 		/>
+	);
+}
+
+/** A text link on a muted line: the words in full colour, underlined. */
+const lineLinkClass =
+	"rounded-xs text-foreground underline underline-offset-2 outline-none hover:no-underline focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface";
+
+/**
+ * Summaries or export still need setting up: one muted line over the
+ * summary, with Set up (Settings at the section that needs it) and Not now.
+ * Nothing on the other tabs.
+ */
+function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
+	const client = useBridge();
+	if (!banner || banner.isNotice) {
+		return null;
+	}
+	const section = banner.offersSummaries
+		? "summaries"
+		: banner.offersVault
+			? "export"
+			: null;
+	return (
+		<p
+			className="mt-0 mb-6 text-muted-foreground text-sm"
+			data-testid="setup-line"
+		>
+			{banner.title}{" "}
+			{section ? (
+				<>
+					<button
+						className={lineLinkClass}
+						data-testid={
+							section === "summaries" ? "setup-summaries" : "choose-vault"
+						}
+						onClick={() =>
+							send(client, "window.open", { window: "settings", section })
+						}
+						type="button"
+					>
+						Set up
+					</button>
+					{" · "}
+				</>
+			) : null}
+			<button
+				className={lineLinkClass}
+				data-testid="banner-not-now"
+				onClick={() => send(client, "setup.dismissBanner")}
+				type="button"
+			>
+				Not now
+			</button>
+		</p>
 	);
 }
 
@@ -352,7 +374,7 @@ export function MeetingDetail({
 	const hasSelection = list?.selection !== undefined;
 
 	return (
-		<main className="surface-grain relative flex min-h-0 min-w-0 flex-col">
+		<main className="relative flex min-h-0 min-w-0 flex-col">
 			{hasSelection && detail ? (
 				<DetailBody
 					detail={detail}
@@ -483,11 +505,14 @@ function DetailBody({
 		switch (current) {
 			case "summary":
 				return (
-					<SummaryTab
-						detail={detail}
-						onRerunSummary={rerun}
-						onSetUpSummaries={openSummaries}
-					/>
+					<>
+						<SetupLine banner={setupBanner} />
+						<SummaryTab
+							detail={detail}
+							onRerunSummary={rerun}
+							onSetUpSummaries={openSummaries}
+						/>
+					</>
 				);
 			case "transcript":
 				return (

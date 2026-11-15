@@ -62,9 +62,12 @@ screens and `WebShellTests` find them by the same names.
 
 ## Two rules
 
-**Offline.** The bundle runs from the app with `connect-src 'none'`. No web
-fonts, no CDN, no fetch. The system font stack only; icons from
-`lucide-react`; the grain is an inline SVG. `grep -rE "https?://" dist` finds
+**Offline.** The bundle runs from the app with `connect-src 'none'`. No CDN,
+no fetch. The type is Geist and Geist Mono (400, 500, 600 and the mono 400,
+500), woff2 files from the `geist` npm package (1.9.2) kept in `src/fonts`
+with their licence (`Geist-OFL.txt`) and bundled beside the app, with the
+system stack as the fallback; `check-bundle.mjs` holds them to a 256 KiB
+budget. Icons come from `lucide-react`. `grep -rE "https?://" dist` finds
 nothing but the SVG namespace.
 
 **No restyling.** `src/components/ui` owns every look. Callers pick a

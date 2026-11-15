@@ -5,7 +5,7 @@ import { cn } from "@/lib/cn";
 import { popupSurfaceClass } from "./menu";
 
 /**
- * A glass surface anchored to its trigger for a small form or explanation.
+ * A popup surface anchored to its trigger for a small form or explanation.
  * Unlike menus, popovers scale in from 0.98 at the surface tempo.
  */
 export const Popover = BasePopover.Root;
@@ -24,7 +24,7 @@ export function PopoverTrigger(props: PopoverTriggerProps) {
 export const popoverPopupVariants = cva(
 	[
 		popupSurfaceClass,
-		"edge-highlight origin-(--transform-origin) transition-[opacity,scale] duration-(--duration-surface) ease-standard",
+		"origin-(--transform-origin) transition-[opacity,scale] duration-(--duration-surface) ease-standard",
 		"data-starting-style:scale-[0.98] data-starting-style:opacity-0",
 		"data-ending-style:scale-[0.98] data-ending-style:opacity-0",
 	],

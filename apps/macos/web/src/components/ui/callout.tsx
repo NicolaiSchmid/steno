@@ -12,7 +12,7 @@ import { cn } from "@/lib/cn";
  * surface, the icon slot and the description slot from the root.
  */
 export const calloutVariants = cva(
-	"flex flex-wrap items-center rounded-xl border",
+	"flex flex-wrap items-center rounded-surface border",
 	{
 		variants: {
 			size: {

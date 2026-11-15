@@ -9,8 +9,11 @@
  * no evidence), and the literals only `src/bridge/mock-transport.ts`
  * carries. The screens bundle (`vite build --mode screens`, `dist-screens/`)
  * is meant to carry them and is never checked here.
+ *
+ * It also holds the bundled fonts to their budget: the five Geist and
+ * Geist Mono cuts in src/fonts and nothing else, together under 256 KiB.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
 const FIXTURES = "fixtures/bridge";
@@ -101,19 +104,63 @@ function findings(root, markers, chunkPattern) {
 	return found;
 }
 
+/** The cuts `src/theme.css` declares, by the name Vite keeps before the hash. */
+const FONTS = [
+	"Geist-Regular",
+	"Geist-Medium",
+	"Geist-SemiBold",
+	"GeistMono-Regular",
+	"GeistMono-Medium",
+];
+const FONT_BUDGET = 256 * 1024;
+
+/** Every font file in the bundle that is not one of the cuts, and the total over budget. */
+function fontFindings(root) {
+	const found = [];
+	let total = 0;
+	const seen = new Set();
+	for (const file of walk(root)) {
+		if (!/\.(woff2?|ttf|otf)$/.test(file)) continue;
+		const name = relative(process.cwd(), file);
+		const cut = FONTS.find((font) =>
+			new RegExp(`^${font}-[\\w-]+\\.woff2$`).test(basename(file)),
+		);
+		if (!cut) {
+			found.push(`${name}: a font outside the budget`);
+			continue;
+		}
+		seen.add(cut);
+		total += statSync(file).size;
+	}
+	for (const font of FONTS) {
+		if (!seen.has(font)) found.push(`${root}: ${font} is missing`);
+	}
+	if (total > FONT_BUDGET) {
+		found.push(
+			`${root}: fonts weigh ${Math.round(total / 1024)} KiB, over the ${FONT_BUDGET / 1024} KiB budget`,
+		);
+	}
+	return found;
+}
+
 const root = process.argv[2] ?? "dist";
-const found = findings(
-	root,
-	fixtureMarkers(FIXTURES, pageSources()),
-	fixtureChunkPattern(FIXTURES),
-);
+const found = [
+	...findings(
+		root,
+		fixtureMarkers(FIXTURES, pageSources()),
+		fixtureChunkPattern(FIXTURES),
+	),
+	...fontFindings(root),
+];
 if (found.length > 0) {
 	for (const finding of found) {
 		console.error(finding);
 	}
 	console.error(
-		`\n${found.length} mock or fixture trace(s) in ${root}. The app bundle must not carry the mock bridge; see vite.config.ts.`,
+		`\n${found.length} problem(s) in ${root}. The app bundle must not carry the mock bridge (see vite.config.ts), and its fonts are the five Geist cuts.`,
 	);
 	process.exit(1);
 }
-console.log(`check:bundle ok: no mock transport or fixture in ${root}`);
+console.log(
+	`check:bundle ok: no mock transport or fixture in ${root}, fonts within budget`,
+);
