@@ -120,7 +120,7 @@ fn a_turn_moves_to_the_voice_the_person_already_has() {
             &m.jerome,
         )
         .unwrap();
-    assert!(clips.is_empty());
+    assert_eq!(clips, Vec::<String>::new());
     assert_eq!(
         m.shown(),
         [
@@ -297,7 +297,10 @@ fn processing_again_raises_the_generation_and_drops_combines() {
         )
         .unwrap();
     assert_eq!(m.generation(), generation + 1);
-    assert!(m.store.merged_speakers(m.meeting.id).unwrap().is_empty());
+    assert_eq!(
+        m.store.merged_speakers(m.meeting.id).unwrap(),
+        Vec::<MergedSpeaker>::new()
+    );
     assert!(matches!(
         m.store.move_turn(
             m.meeting.id,
@@ -379,7 +382,10 @@ fn separate_again_restores_the_combined_row_exactly() {
         "every row as before the combine"
     );
     assert_eq!(m.store.person(m.jerome.id).unwrap().unwrap(), voice_before);
-    assert!(m.store.merged_speakers(m.meeting.id).unwrap().is_empty());
+    assert_eq!(
+        m.store.merged_speakers(m.meeting.id).unwrap(),
+        Vec::<MergedSpeaker>::new()
+    );
 
     assert!(matches!(
         m.store.separate_speaker(source),
@@ -475,7 +481,10 @@ fn separate_again_keeps_a_later_move_and_refuses_when_nothing_is_left() {
         .move_turn(m.meeting.id, m.generation(), &[(m.id("b"), root)], &anna)
         .unwrap();
     assert!(clips.is_empty(), "Speaker 2 had no clip");
-    assert!(m.store.merged_speakers(m.meeting.id).unwrap().is_empty());
+    assert_eq!(
+        m.store.merged_speakers(m.meeting.id).unwrap(),
+        Vec::<MergedSpeaker>::new()
+    );
     assert!(matches!(
         m.store.separate_speaker(source),
         Err(StoreError::NotCombined(_))
@@ -555,7 +564,10 @@ fn a_v6_database_has_no_combined_voices() {
         .unwrap();
     drop(connection);
     let store = Store::open(&path).unwrap();
-    assert!(store.merged_speakers(meeting_id).unwrap().is_empty());
+    assert_eq!(
+        store.merged_speakers(meeting_id).unwrap(),
+        Vec::<MergedSpeaker>::new()
+    );
     assert_eq!(store.transcript_generation(meeting_id).unwrap(), 0);
     assert_eq!(store.speakers(meeting_id).unwrap().len(), 1);
     assert_eq!(
