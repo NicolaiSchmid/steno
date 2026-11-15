@@ -7,6 +7,7 @@ import {
 	DrawerPopup,
 	ToastRegion,
 } from "@/components/ui";
+import { SHORTCUTS, usePlatform, useShortcut } from "@/lib/platform";
 import {
 	COLUMNS,
 	type ColumnName,
@@ -47,7 +48,7 @@ const RESIZER_LABELS: Record<ColumnName, string> = {
  * 1200 px window at 200 % zoom is), the reading column takes the window and
  * the sidebar and list open as a drawer from the header's Meetings button;
  * picking a meeting or its Close closes it, and the focus goes back to the
- * Meetings button. The recorder's status, Stop and its urgent notices stay
+ * Meetings button. The record shortcut is bound here, in both layouts. The recorder's status, Stop and its urgent notices stay
  * outside the drawer, in the reading column's recorder bar.
  */
 export function MainWindow({
@@ -56,6 +57,14 @@ export function MainWindow({
 }: MainWindowProps) {
 	const client = useBridge();
 	usePageReady(client);
+	const platform = usePlatform();
+	// Bound here, not in the sidebar, which a narrow window keeps in the
+	// closed drawer.
+	useShortcut(
+		SHORTCUTS.record,
+		() => send(client, "recording.toggle"),
+		platform.bindsRecordShortcut,
+	);
 	const { widths: stored, update, commit } = useColumnWidths();
 	const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
 	const widths = fitColumns(stored, windowWidth);
