@@ -334,3 +334,51 @@ Not: lone Copy transcript row. Ranked:
 9. Step 6 reminders (export-failed tone in the icon only; two rows not
    announced).
 Responses: all sent to the design steps 4-6 build as requirements.
+
+## 2026-11-15 — built milestone 2 (design steps 4-6: #357, #358, #359)
+
+Request IDs `steno-built-m2-astra-r1`, `steno-built-m2-fable-r1`. Evidence:
+`design-{4,5,6}/after/`.
+
+**GPT-6-Astra: visual 8.5/10, accessibility and UX 7.5/10.** Resolved: 960
+transcript gutter, onboarding denied fits, 200 % view no longer overlaps,
+underline tabs, focus rings. Partly: failure feedback (export red and live;
+processing failure neutral and unannounced). Remaining:
+1. HIGH: the narrow-layout drawer hides recording status, the auto-stop
+   countdown, Keep recording and recorder errors; reading another meeting
+   hides Stop (`main-window.tsx:127`, `sidebar.tsx:268`,
+   `meeting-detail.tsx:463`). Keep them outside the drawer.
+2. Processing failure neutral, unannounced (`meeting-detail.tsx:521`); "Try
+   again" reruns the summary for a transcription failure.
+3. Drawer has no visible Close; restore focus to Show meetings.
+4. Settings summaries: the connection result sits below the viewport; put
+   Connection before Advanced.
+For speaker step 2 (sent to that build): evidence kept while naming, Enter
+on visible highlight only, panel fits at 200 % incl. height, stable rows,
+focus on Escape, advance after ack, announced Retry, long names in 400 px.
+
+**Claude Fable 5.1: visual 8.5/10, accessibility and UX 8/10.** All its
+earlier items resolved (crumbs, meta line, pill at 200 %, disabled primary,
+callout bodies, source dot, dialog edge, stale story, underline tabs, Copy
+in the ⋯ menu). Ranked:
+1. List titles misaligned by the state dot (`meeting-list.tsx:321-342`).
+2. ⋯ menu: radio items without a leading slot, Re-run summary read as a
+   third template (`menu.tsx:173-189`, `meeting-detail.tsx:598-627`).
+3. Evidence gap: the summaries-failed ResultLine is cut off in the capture.
+4. "Summaries are off" line without tone icon; Not now reads as prose.
+5. Two filled primaries on onboarding page 1.
+6. Dialog edge a few px below the clip top.
+7. Failed meeting: Process again and Try again duplicate.
+8. "Meetings" three times on one screen.
+9. Keyboard walk lost the template stop.
+For speaker step 2 (sent to that build): a stable play slot for voices
+without a clip, picker anchored below the name, no "87% match", roving
+tabindex across transcript names, announced rename with focus back, one
+identity signal (avatar before the transcript name), the count-only pill
+opens the panel and is not trapped by the drawer.
+
+### Responses
+
+All accepted: design findings from both reviewers go to one fix build on
+#359 (council round 3 there); speaker items to the speaker step 2 build,
+which rebases onto the fixed design stack before finishing.
