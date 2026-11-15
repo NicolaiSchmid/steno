@@ -379,6 +379,7 @@ export function groupOptions(
 						other.personID === option.personID,
 				)
 			: undefined;
+		const reason = option.detail ? REASONS[option.detail] : undefined;
 		const colorIndex =
 			owner?.colorIndex ??
 			speakers.find((other) => other.personID === option.personID)
@@ -392,12 +393,8 @@ export function groupOptions(
 				combines: `combines with ${owner.clusterLabel}`,
 				colorIndex,
 			});
-		} else if (option.detail && REASONS[option.detail]) {
-			suggested.rows.push({
-				option,
-				reason: REASONS[option.detail],
-				colorIndex,
-			});
+		} else if (reason) {
+			suggested.rows.push({ option, reason, colorIndex });
 		} else {
 			people.rows.push({ option, colorIndex });
 		}
