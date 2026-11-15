@@ -57,6 +57,7 @@ import {
 	ProgressBar,
 	QRCode,
 	RecordMark,
+	ResultLine,
 	ScrollArea,
 	SearchInput,
 	SectionLabel,
@@ -602,6 +603,25 @@ export function StoriesPage() {
 							title="The microphone went quiet."
 							variant="destructive"
 						/>
+					</div>
+				)}
+			</ThemePair>
+
+			<ThemePair title="ResultLine: muted, success, destructive with actions">
+				{() => (
+					<div className="flex w-full flex-col gap-3">
+						<ResultLine>Not checked yet.</ResultLine>
+						<ResultLine tone="success">Connected.</ResultLine>
+						<ResultLine
+							actions={
+								<Button size="sm" variant="outline">
+									Export again
+								</Button>
+							}
+							tone="destructive"
+						>
+							Export failed: the vault folder is gone.
+						</ResultLine>
 					</div>
 				)}
 			</ThemePair>

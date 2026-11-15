@@ -53,9 +53,10 @@ describe("SummariesSection", () => {
 			"placeholder",
 			"Saved in your keychain",
 		);
-		expect(screen.getByTestId("summaries-status")).toHaveTextContent(
-			"Connected.",
-		);
+		const status = screen.getByTestId("summaries-status");
+		expect(status).toHaveTextContent("Connected.");
+		expect(status).toHaveAttribute("role", "status");
+		expect(status).toHaveAttribute("data-tone", "success");
 		await user.click(screen.getByTestId("test-connection"));
 		expect(callsTo(harness.transport, "settings.summaries.test")).toHaveLength(
 			1,
@@ -65,9 +66,11 @@ describe("SummariesSection", () => {
 	it("shows a failed test with the report open", async () => {
 		const harness = await createBridgeHarness("scenario=summaries-failed");
 		renderWithBridge(<SummariesSection />, harness);
-		expect(screen.getByTestId("summaries-status")).toHaveTextContent(
-			"Could not connect to the service.",
-		);
+		const status = screen.getByTestId("summaries-status");
+		expect(status).toHaveTextContent("Could not connect to the service.");
+		// A failure is a red result line that announces itself.
+		expect(status).toHaveAttribute("role", "alert");
+		expect(status).toHaveAttribute("data-tone", "destructive");
 		expect(screen.getByText(/HTTP 401/)).toBeInTheDocument();
 	});
 

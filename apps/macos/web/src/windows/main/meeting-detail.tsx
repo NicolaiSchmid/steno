@@ -37,8 +37,9 @@ import {
 	MenuRadioItem,
 	MenuSeparator,
 	MenuTrigger,
+	notify,
 	RecordMark,
-	StatusIcon,
+	ResultLine,
 	Switch,
 	Tabs,
 	TabsList,
@@ -47,6 +48,7 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { SHORTCUTS, usePlatform, useShortcut } from "@/lib/platform";
+import { useCommitToast } from "@/lib/use-commit-toast";
 import { useElapsedSeconds } from "@/lib/use-now";
 import { deleteMeeting } from "./delete-meeting";
 import {
@@ -228,6 +230,7 @@ function HeaderProcessAgain({ disabled }: { disabled: boolean }) {
 		setStarting(true);
 		try {
 			await client.call("meeting.processAgain");
+			notify({ title: "Processing the meeting again." });
 		} catch (cause: unknown) {
 			console.error("bridge: meeting.processAgain failed", cause);
 		} finally {
@@ -296,14 +299,15 @@ function KeepAudioToggle({
 	);
 }
 
-const EXPORT_ICON: Record<
+/** Where the export stands, as a result line: a tint once it ran. */
+const EXPORT_RESULT: Record<
 	MeetingDetailSnapshot["export"]["status"],
 	{ icon: ReactNode; tone: "muted" | "success" | "destructive" }
 > = {
-	notConfigured: { icon: <ShareIcon />, tone: "muted" },
-	pending: { icon: <ClockIcon />, tone: "muted" },
-	delivered: { icon: <CheckCircle2Icon />, tone: "success" },
-	failed: { icon: <CircleAlertIcon />, tone: "destructive" },
+	notConfigured: { icon: <ShareIcon aria-hidden="true" />, tone: "muted" },
+	pending: { icon: <ClockIcon aria-hidden="true" />, tone: "muted" },
+	delivered: { icon: <CheckCircle2Icon aria-hidden="true" />, tone: "success" },
+	failed: { icon: <CircleAlertIcon aria-hidden="true" />, tone: "destructive" },
 };
 
 /**
@@ -312,10 +316,16 @@ const EXPORT_ICON: Record<
  * Reveal in Finder (the platform's file manager) and Export again when
  * they apply.
  */
-function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
+function DetailFooter({
+	detail,
+	onExport,
+}: {
+	detail: MeetingDetailSnapshot;
+	onExport: () => void;
+}) {
 	const client = useBridge();
 	const { words } = usePlatform();
-	const status = EXPORT_ICON[detail.export.status];
+	const status = EXPORT_RESULT[detail.export.status];
 	return (
 		<footer
 			className="mt-10 flex flex-col gap-3 border-border border-t pt-4 text-body text-muted-foreground"
@@ -336,36 +346,42 @@ function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 					/>
 				</div>
 			) : null}
-			<div
-				className="flex flex-wrap items-center gap-x-3 gap-y-2"
+			<ResultLine
+				actions={
+					detail.export.canReveal || detail.export.canReexport ? (
+						<>
+							{detail.export.canReveal ? (
+								<Button
+									data-testid="reveal-export"
+									onClick={() => send(client, "meeting.revealExport")}
+									size="sm"
+									variant="ghost"
+								>
+									<FolderIcon aria-hidden="true" />
+									{words.revealInFileManager}
+								</Button>
+							) : null}
+							{detail.export.canReexport ? (
+								<Button
+									data-testid="export-again"
+									disabled={detail.isBusy}
+									onClick={onExport}
+									size="sm"
+									variant="outline"
+								>
+									<ShareIcon aria-hidden="true" />
+									Export again
+								</Button>
+							) : null}
+						</>
+					) : undefined
+				}
 				data-testid="export-status"
+				icon={status.icon}
+				tone={status.tone}
 			>
-				<StatusIcon tone={status.tone}>{status.icon}</StatusIcon>
-				<span className="min-w-0 flex-1">{detail.export.message}</span>
-				{detail.export.canReveal ? (
-					<Button
-						data-testid="reveal-export"
-						onClick={() => send(client, "meeting.revealExport")}
-						size="sm"
-						variant="ghost"
-					>
-						<FolderIcon aria-hidden="true" />
-						{words.revealInFileManager}
-					</Button>
-				) : null}
-				{detail.export.canReexport ? (
-					<Button
-						data-testid="export-again"
-						disabled={detail.isBusy}
-						onClick={() => send(client, "meeting.reexport")}
-						size="sm"
-						variant="outline"
-					>
-						<ShareIcon aria-hidden="true" />
-						Export again
-					</Button>
-				) : null}
-			</div>
+				{detail.export.message}
+			</ResultLine>
 		</footer>
 	);
 }
@@ -460,17 +476,23 @@ function DetailBody({
 	function copyTranscript() {
 		navigator.clipboard
 			?.writeText(transcriptText(detail.transcript))
+			.then(() => notify({ title: "Transcript copied." }))
 			.catch((cause: unknown) => {
 				console.error("copy transcript failed", cause);
 			});
 	}
 
 	const canReexport = detail.export.canReexport && !detail.isBusy;
-	useShortcut(
-		SHORTCUTS.exportAgain,
-		() => send(client, "meeting.reexport"),
-		canReexport,
+	const startExport = useCommitToast(
+		detail.export.status === "delivered",
+		detail.export.status === "failed",
+		{ title: "Exported.", description: detail.export.message },
 	);
+	function reexport() {
+		startExport();
+		send(client, "meeting.reexport");
+	}
+	useShortcut(SHORTCUTS.exportAgain, reexport, canReexport);
 
 	function panel(current: Tab) {
 		if (current === "notes") {
@@ -555,7 +577,7 @@ function DetailBody({
 			<Button
 				data-testid="export-meeting"
 				disabled={!canReexport}
-				onClick={() => send(client, "meeting.reexport")}
+				onClick={reexport}
 				size="sm"
 				variant="outline"
 			>
@@ -573,30 +595,28 @@ function DetailBody({
 				</MenuTrigger>
 				<MenuPopup align="end" sideOffset={4}>
 					{detail.templates.length > 0 ? (
-						<>
-							<MenuGroup>
-								<MenuGroupLabel>Summary template</MenuGroupLabel>
-								<MenuRadioGroup
-									data-testid="template-select"
-									disabled={detail.isBusy}
-									onValueChange={(templateID: unknown) => {
-										if (
-											typeof templateID === "string" &&
-											templateID !== detail.templateID
-										) {
-											send(client, "meeting.setTemplate", { templateID });
-										}
-									}}
-									value={detail.templateID}
-								>
-									{detail.templates.map((template) => (
-										<MenuRadioItem key={template.id} value={template.id}>
-											{template.name}
-										</MenuRadioItem>
-									))}
-								</MenuRadioGroup>
-							</MenuGroup>
-						</>
+						<MenuGroup>
+							<MenuGroupLabel>Summary template</MenuGroupLabel>
+							<MenuRadioGroup
+								data-testid="template-select"
+								disabled={detail.isBusy}
+								onValueChange={(templateID: unknown) => {
+									if (
+										typeof templateID === "string" &&
+										templateID !== detail.templateID
+									) {
+										send(client, "meeting.setTemplate", { templateID });
+									}
+								}}
+								value={detail.templateID}
+							>
+								{detail.templates.map((template) => (
+									<MenuRadioItem key={template.id} value={template.id}>
+										{template.name}
+									</MenuRadioItem>
+								))}
+							</MenuRadioGroup>
+						</MenuGroup>
 					) : null}
 					<MenuItem
 						disabled={!detail.canRerunSummary || detail.isBusy}
@@ -617,7 +637,7 @@ function DetailBody({
 					<MenuItem
 						disabled={!canReexport}
 						icon={<ShareIcon />}
-						onClick={() => send(client, "meeting.reexport")}
+						onClick={reexport}
 						shortcut={platform.label(SHORTCUTS.exportAgain)}
 					>
 						Export again
@@ -766,7 +786,7 @@ function DetailBody({
 					</TabsPanel>
 				))}
 			</Tabs>
-			<DetailFooter detail={detail} />
+			<DetailFooter detail={detail} onExport={reexport} />
 		</ContentColumn>
 	);
 }

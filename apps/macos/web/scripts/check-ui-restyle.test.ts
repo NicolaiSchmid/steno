@@ -73,6 +73,18 @@ describe("the paint rule", () => {
 	});
 });
 
+describe("the announce rule", () => {
+	it("reports live regions outside the kit", () => {
+		const result = runScript(["--root", "scripts/__fixtures__"]);
+		expect(result.status).toBe(1);
+		expect(result.output).toContain(
+			'announce-violation.tsx:8: "role="status"" declares a live region outside the kit',
+		);
+		expect(result.output).toContain('announce-violation.tsx:9: "aria-live=');
+		expect(result.output).not.toContain('role="note"');
+	});
+});
+
 describe("isLayoutClass", async () => {
 	const { isLayoutClass } = await import("./check-ui-restyle.mjs");
 

@@ -196,13 +196,25 @@ function checks(mode: Mode): Check[] {
 	}
 	on("--sidebar-muted-foreground", sidebar, TEXT);
 	// Status and live: text and icons bare, and on their own tint over every host.
+	// The popover hosts the toasts; a callout's description and a toast's
+	// words are the foreground on the tint.
 	for (const tone of TONES) {
+		const tints = tinted(mode, `--${tone}-surface`, [
+			"sidebar",
+			"canvas",
+			"card",
+			"popover",
+		]);
 		const where = [
-			...everyHost(mode, ["sidebar", "canvas", "card"]),
-			...tinted(mode, `--${tone}-surface`, ["sidebar", "canvas", "card"]),
+			...everyHost(mode, ["sidebar", "canvas", "card", "popover"]),
+			...tints,
 		];
 		on(`--${tone}-foreground`, where, TEXT);
 		on(`--${tone}`, where, NON_TEXT);
+		on("--foreground", tints, TEXT);
+		// Muted is no text colour on a tint (4.2 in light); only the toast's
+		// dismiss glyph sits there in it.
+		on("--muted-foreground", tints, NON_TEXT);
 	}
 	// The warning-outline button's hover.
 	on(

@@ -1,14 +1,17 @@
 import { CircleAlertIcon, SmartphoneIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { PhoneSettingsSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import {
 	Button,
 	Callout,
 	Card,
+	ConfirmDialog,
 	Disclosure,
 	FormCard,
 	FormRow,
 	FormValue,
+	notify,
 	ProgressBar,
 	QRCode,
 } from "@/components/ui";
@@ -123,15 +126,41 @@ function WaitingCard({
 }
 
 /**
+ * Toasts "<name> paired." when a pairing the user began ends with a new
+ * phone in the list. Returns what Pair an iPhone calls before it asks.
+ */
+function usePairedToast(devices: PhoneSettingsSnapshot["devices"] | undefined) {
+	const before = useRef<readonly string[] | null>(null);
+	useEffect(() => {
+		if (!before.current || !devices) {
+			return;
+		}
+		const known = before.current;
+		const added = devices.find((device) => !known.includes(device.id));
+		if (added) {
+			before.current = null;
+			notify({ title: `${added.name} paired.` });
+		}
+	}, [devices]);
+	return () => {
+		before.current = (devices ?? []).map((device) => device.id);
+	};
+}
+
+/**
  * iPhone: the paired phones, the pairing code, transfers arriving, and the
  * listener's failure when it has one. While phone handover waits, Try again
  * and Pair again take the place of a new pairing, and the paired phones are
- * listed without Remove.
+ * listed without Remove. Remove asks first and says what it costs.
  */
 export function PhoneSection() {
 	const client = useBridge();
 	const { words } = usePlatform();
 	const phone = useSnapshot("settings.iphone");
+	const startPairing = usePairedToast(phone?.devices);
+	const [removing, setRemoving] = useState<
+		PhoneSettingsSnapshot["devices"][number] | null
+	>(null);
 	if (!phone) {
 		return <SectionPage id="iphone" />;
 	}
@@ -183,11 +212,7 @@ export function PhoneSection() {
 								<Button
 									aria-label={`Remove ${device.name}`}
 									data-testid={`revoke-${device.id}`}
-									onClick={() =>
-										send(client, "settings.iphone.revoke", {
-											deviceID: device.id,
-										})
-									}
+									onClick={() => setRemoving(device)}
 									size="sm"
 									variant="ghost"
 								>
@@ -208,7 +233,10 @@ export function PhoneSection() {
 							<Button
 								data-testid="begin-pairing"
 								disabled={phone.pairing !== undefined}
-								onClick={() => send(client, "settings.iphone.beginPairing")}
+								onClick={() => {
+									startPairing();
+									send(client, "settings.iphone.beginPairing");
+								}}
 								size="sm"
 								variant="primary"
 							>
@@ -265,6 +293,24 @@ export function PhoneSection() {
 					})}
 				</FormCard>
 			) : null}
+
+			<ConfirmDialog
+				confirmLabel="Remove iPhone"
+				confirmTestId="confirm-revoke"
+				consequence={`It can no longer send recordings to this ${words.computer}. To use it again, pair it with a new code.`}
+				onConfirm={() => {
+					if (removing) {
+						send(client, "settings.iphone.revoke", { deviceID: removing.id });
+					}
+				}}
+				onOpenChange={(open) => {
+					if (!open) {
+						setRemoving(null);
+					}
+				}}
+				open={removing !== null}
+				title={`Remove ${removing?.name ?? "this iPhone"}?`}
+			/>
 
 			{phone.listener.state === "failed" && !waiting ? (
 				<div className="flex flex-col gap-1.5" data-testid="listener-failed">

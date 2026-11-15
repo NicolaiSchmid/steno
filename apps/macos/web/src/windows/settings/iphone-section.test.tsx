@@ -10,7 +10,7 @@ import { PhoneSection } from "./iphone-section";
 const PHONE_ID = "00000000-0000-0000-0000-000000000028";
 
 describe("PhoneSection", () => {
-	it("lists the paired phone and removes it through the host", async () => {
+	it("lists the paired phone and removes it through the host after a confirm", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
 		renderWithBridge(<PhoneSection />, harness);
@@ -19,6 +19,13 @@ describe("PhoneSection", () => {
 		expect(row).toHaveTextContent(/Paired .* · last seen /);
 		expect(screen.queryByTestId("pairing-card")).not.toBeInTheDocument();
 		await user.click(screen.getByTestId(`revoke-${PHONE_ID}`));
+		// Nothing is revoked until the red button says so.
+		expect(callsTo(harness.transport, "settings.iphone.revoke")).toEqual([]);
+		const dialog = await screen.findByTestId("confirm-dialog");
+		expect(dialog).toHaveTextContent("Remove Nicolai's iPhone?");
+		expect(dialog).toHaveTextContent("It can no longer send recordings");
+		expect(screen.getByTestId("confirm-revoke")).toHaveClass("bg-destructive");
+		await user.click(screen.getByTestId("confirm-revoke"));
 		expect(callsTo(harness.transport, "settings.iphone.revoke")).toEqual([
 			{ method: "settings.iphone.revoke", params: { deviceID: PHONE_ID } },
 		]);

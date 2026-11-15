@@ -8,7 +8,12 @@ import {
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { useBridge, usePageReady } from "@/bridge/hooks";
-import { ContentColumn, SidebarColumn, SidebarRow } from "@/components/ui";
+import {
+	ContentColumn,
+	SidebarColumn,
+	SidebarRow,
+	ToastRegion,
+} from "@/components/ui";
 import { usePlatform } from "@/lib/platform";
 import { ExportSection } from "./export-section";
 import { GeneralSection } from "./general-section";
@@ -115,6 +120,7 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 					{page}
 				</ContentColumn>
 			</div>
+			<ToastRegion />
 		</div>
 	);
 }
