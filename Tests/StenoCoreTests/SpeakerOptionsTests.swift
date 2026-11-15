@@ -162,12 +162,18 @@ import Testing
   @Test func theLLMGuessIsAPersonWhenOneExists() {
     var speaker = Self.speakerTwo
     speaker.assignment = .unknown
-    let options = Self.build(speaker: speaker, suggestion: Self.suggestion("jerome"))
+    // Without invitees: the sample's only one is Jérôme, whom being the
+    // last invitee left would tag more strongly.
+    let options = Self.build(
+      speaker: speaker, participants: [], suggestion: Self.suggestion("jerome"))
     #expect(
       options == [
         Option(kind: .person(Self.jerome), tag: .mentioned),
         Option(kind: .person(Self.nicolai), tag: .inThisMeeting),
       ])
+    #expect(
+      Self.build(speaker: speaker, suggestion: Self.suggestion("jerome")).first
+        == Option(kind: .person(Self.jerome), tag: .lastInvitee))
   }
 
   @Test func theLLMGuessIsACreateRowWhenNobodyHasTheName() {
@@ -211,8 +217,8 @@ import Testing
   // MARK: - Voice strength, the user's Noes and the last invitee
 
   @Test func voiceStrengthHasAFloorAndAStrongThreshold() {
-    #expect(VoiceStrength.of(0.59) == nil)
-    #expect(VoiceStrength.of(0.60) == .likely)
+    #expect(VoiceStrength.of(0.64) == nil)
+    #expect(VoiceStrength.of(0.65) == .likely)
     #expect(VoiceStrength.of(0.74) == .likely)
     #expect(VoiceStrength.of(0.75) == .strong)
   }
@@ -236,7 +242,9 @@ import Testing
     #expect(options == [Option(kind: .person(Self.nicolai), tag: .inThisMeeting)])
 
     let typed = Self.build(rejected: [Self.jerome.id], query: "jér")
-    #expect(typed.contains { $0.id == Self.jerome.id.uuidString })
+    #expect(
+      typed.contains(Option(kind: .person(Self.jerome))),
+      "typed, without a reason: the voice match was answered No")
   }
 
   @Test func aRejectedNameHidesANamesakeToo() {
@@ -282,5 +290,20 @@ import Testing
       Self.build(speakers: Self.speakers + [me], participants: [mia])
         .contains(Option(kind: .create("Mia Kurz"), tag: .lastInvitee)),
       "no invitee is me")
+  }
+
+  /// The last invitee is counted once per name, however many participant
+  /// rows name them, and outranks the summary having mentioned them. Rust:
+  /// `the_last_invitee_counts_names_once_and_outranks_mentioned`.
+  @Test func theLastInviteeCountsNamesOnceAndOutranksMentioned() {
+    let mia = Participant(
+      id: SampleData.uuid(33), meetingID: SampleData.meetingID, displayName: "Mia Kurz",
+      role: .them)
+    let again = Participant(
+      id: SampleData.uuid(34), meetingID: SampleData.meetingID, displayName: " mia kurz ",
+      role: .them)
+    let options = Self.build(participants: [mia, again], suggestion: Self.suggestion("Mia Kurz"))
+    let mias = options.filter { Person.namesMatch($0.displayName, "Mia Kurz") }
+    #expect(mias == [Option(kind: .create("Mia Kurz"), tag: .lastInvitee)])
   }
 }

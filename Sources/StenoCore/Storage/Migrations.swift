@@ -281,6 +281,7 @@ public enum Migrations {
       t.column("speakerID", .text).notNull().references("speaker", onDelete: .cascade)
       t.column("personID", .text).notNull().references("person", onDelete: .cascade)
       t.column("meetingID", .text).notNull().references("meeting", onDelete: .cascade)
+      t.column("similarity", .double)
       t.primaryKey(["speakerID", "personID"])
     }
     try db.create(

@@ -128,14 +128,7 @@ public enum SpeakerOptions {
     let open = openVoices(speakers)
     let lastVoice = open.count == 1 && open.first?.id == speaker.id
     let invited: Option.Tag = lastVoice && invitees.count == 1 ? .lastInvitee : .invited
-    for invitee in invitees {
-      let name =
-        switch invitee {
-        case .person(let person): person.displayName
-        case .create(let name): name
-        }
-      if !list.containsName(name) { list.add(invitee, tag: invited) }
-    }
+    list.addInvitees(invitees, tag: invited)
 
     for other in speakers where other.id != speaker.id && !other.dismissed {
       if let personID = other.assignment.personID, let person = personsByID[personID] {
@@ -169,12 +162,13 @@ public enum SpeakerOptions {
   }
 
   /// The meeting's invitees nobody's voice is named or suggested as here,
-  /// and not answered No for this voice, as a person when Steno knows them.
+  /// and not answered No for this voice, as a person when Steno knows them;
+  /// each once, however many participant rows name them.
   private static func invitees(
     participants: [Participant], persons: [Person], personsByID: [UUID: Person],
     othersPersonIDs: Set<UUID>, rejected: Set<UUID>
   ) -> [Option.Kind] {
-    participants.filter { $0.role == .them }.compactMap { participant in
+    let all: [Option.Kind] = participants.filter { $0.role == .them }.compactMap { participant in
       let name = participant.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !name.isEmpty else { return nil }
       let person =
@@ -183,6 +177,19 @@ public enum SpeakerOptions {
       guard let person else { return .create(name) }
       if othersPersonIDs.contains(person.id) || rejected.contains(person.id) { return nil }
       return .person(person)
+    }
+    var unique: [Option.Kind] = []
+    for invitee in all
+    where !unique.contains(where: { Person.namesMatch(name(of: $0), name(of: invitee)) }) {
+      unique.append(invitee)
+    }
+    return unique
+  }
+
+  private static func name(of kind: Option.Kind) -> String {
+    switch kind {
+    case .person(let person): person.displayName
+    case .create(let text): text
     }
   }
 
@@ -216,9 +223,11 @@ public enum SpeakerOptions {
     /// Appends the option unless the person is excluded or already listed,
     /// an option of the same name is already listed (create rows), the user
     /// said No to them for this voice and nothing is typed, or the query
-    /// filters it out.
+    /// filters it out. A person the user said No to comes back, when typed,
+    /// without a reason.
     mutating func add(_ kind: Option.Kind, tag: Option.Tag?) {
-      let option = Option(kind: kind, tag: tag)
+      let option = Option(
+        kind: kind, tag: isRejected(SpeakerOptions.name(of: kind)) ? nil : tag)
       switch kind {
       case .person(let person):
         if person.id == excludedPersonID || listedPersonIDs.contains(person.id)
@@ -232,6 +241,22 @@ public enum SpeakerOptions {
       if !query.isEmpty, !SpeakerOptions.contains(option.displayName, query) { return }
       if case .person(let person) = kind { listedPersonIDs.insert(person.id) }
       options.append(option)
+    }
+
+    /// The invitees not yet offered, tagged `tag`. One already offered as
+    /// mentioned takes `.lastInvitee`, the stronger reason; a voice match
+    /// stays one.
+    mutating func addInvitees(_ invitees: [Option.Kind], tag: Option.Tag) {
+      for invitee in invitees {
+        let name = SpeakerOptions.name(of: invitee)
+        if let index = options.firstIndex(where: { Person.namesMatch($0.displayName, name) }) {
+          if tag == .lastInvitee, options[index].tag == .mentioned {
+            options[index].tag = tag
+          }
+        } else {
+          add(invitee, tag: tag)
+        }
+      }
     }
 
     /// Whether a listed option's display name equals `name` by

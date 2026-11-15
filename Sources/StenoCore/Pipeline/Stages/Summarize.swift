@@ -7,7 +7,8 @@ extension ProcessingPipeline {
   /// unknown template id fails the stage; nothing is substituted. A calendar
   /// title and a title the user typed (`titleOrigin == .user`) stay; a
   /// default title is replaced by the model's. The caller folds earlier usage
-  /// (cleanup) into `meeting.llmUsage` first.
+  /// (cleanup) into `meeting.llmUsage` first. A dismissed voice's segments
+  /// are not summarized (`withoutDismissed`).
   ///
   /// Without a summarizer (no LLM endpoint) the stage posts its progress,
   /// leaves title, language and usage as given, and persists the meeting
@@ -31,9 +32,11 @@ extension ProcessingPipeline {
       }
       let participants = try await store.participants(meetingID: meeting.id)
       let people = try await store.persons()
+      let (heard, voices) = try await Self.withoutDismissed(
+        segments, speakers, meetingID: meeting.id, store: store)
       let output = try await summarizer.summarize(
         SummaryInput(
-          meeting: meeting, segments: segments, speakers: speakers, participants: participants,
+          meeting: meeting, segments: heard, speakers: voices, participants: participants,
           knownPeople: people, template: template))
 
       updated.summary = output.summary

@@ -29,8 +29,23 @@ import Testing
       Self.segment(3, 20, 25, "Später reden wir über das Budget."),
       Self.segment(4, 10.5, 13, "Ja.", speaker: Self.otherSpeakerID),
     ]
-    let text = SpeakerExcerpts.text(for: Self.speaker(range: 10...14), in: segments)
-    #expect(text == "Wir setzen neunzig Prozent auf den Kern.")
+    let excerpt = SpeakerExcerpts.excerpt(for: Self.speaker(range: 10...14), in: segments)
+    #expect(excerpt.text == "Wir setzen neunzig Prozent auf den Kern.")
+    #expect(excerpt.inClip, "every segment lies inside the clip: what plays")
+  }
+
+  /// Only words wholly inside the clip are a quote; a segment partly inside
+  /// it, or the longest segment of a voice without a clip, is context. Rust:
+  /// `the_quote_is_the_clips_words_and_anything_else_is_context`.
+  @Test func onlyWordsInsideTheClipAreAQuote() {
+    let segments = [Self.segment(1, 9.9, 14.2, "Knapp drin."), Self.segment(2, 20, 30, "Lang.")]
+    #expect(
+      SpeakerExcerpts.excerpt(for: Self.speaker(range: 10...14), in: segments).inClip,
+      "a quarter second of slack at either edge")
+    let partly = [Self.segment(1, 8, 12, "Halb drin.")]
+    #expect(!SpeakerExcerpts.excerpt(for: Self.speaker(range: 10...14), in: partly).inClip)
+    #expect(!SpeakerExcerpts.excerpt(for: Self.speaker(range: nil), in: segments).inClip)
+    #expect(!SpeakerExcerpts.excerpt(for: Self.speaker(range: 40...43), in: segments).inClip)
   }
 
   @Test func aNilRangeUsesTheLongestSegment() {

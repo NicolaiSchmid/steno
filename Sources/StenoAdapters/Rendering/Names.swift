@@ -9,9 +9,11 @@ struct Names {
   let export: MeetingExport
   let options: RenderOptions
 
-  /// The display name of a segment's speaker; `"Unknown"` for none.
+  /// The display name of a segment's speaker; `"Unknown"` for none,
+  /// `Speaker.notAPerson` for a voice the user dismissed.
   func speaker(_ speakerID: UUID?) -> String {
     guard let speakerID else { return "Unknown" }
+    if export.speaker(id: speakerID)?.dismissed == true { return Speaker.notAPerson }
     return export.displayName(forSpeaker: speakerID)
   }
 
@@ -46,7 +48,7 @@ struct Names {
 
   /// Everybody in the meeting, once each: participants in export order
   /// (linked when they are a person), then speakers that resolved to nobody
-  /// under their cluster label.
+  /// under their cluster label; a dismissed voice is nobody.
   func participants() -> [String] {
     var seen = Set<String>()
     var names: [String] = []
@@ -54,7 +56,7 @@ struct Names {
       names.append(
         participant.personID == nil ? participant.displayName : person(participant.displayName))
     }
-    for speaker in export.speakers {
+    for speaker in export.speakers where !speaker.dismissed {
       let name = export.displayName(forSpeaker: speaker.id)
       guard seen.insert(name).inserted else { continue }
       names.append(speaker.personID == nil ? name : person(name))

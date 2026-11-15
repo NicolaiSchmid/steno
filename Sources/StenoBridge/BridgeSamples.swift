@@ -103,14 +103,14 @@ public enum BridgeSamples {
         id: speakerNicolai, clusterLabel: "Speaker 1", displayName: "Nicolai",
         assignment: .confirmed,
         personID: personNicolai, email: "nicolai@example.com",
-        quote:
+        context:
           "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig "
           + "Prozent auf den Kern setzen.",
         colorIndex: 7, hasClip: true, isPlaying: false, dismissed: false),
       .init(
         id: speakerJerome, clusterLabel: "Speaker 2", displayName: "Jérôme", assignment: .confirmed,
         personID: personJerome,
-        quote:
+        context:
           "Das geht nur, wenn wir das Budget entsprechend umschichten. Ich rechne bis Freitag "
           + "zwei Szenarien.",
         colorIndex: 4, hasClip: true, isPlaying: false, dismissed: false),
@@ -120,7 +120,7 @@ public enum BridgeSamples {
         hasClip: true, isPlaying: false, dismissed: false),
       .init(
         id: speakerUnknown, clusterLabel: "Speaker 4", displayName: "Speaker 4",
-        assignment: .unknown, quote: "Die Partner sollten das nicht aus zweiter Hand hören.",
+        assignment: .unknown, context: "Die Partner sollten das nicht aus zweiter Hand hören.",
         colorIndex: 0, hasClip: false, isPlaying: false, dismissed: false),
     ],
     templates: [

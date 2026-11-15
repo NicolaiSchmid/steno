@@ -308,10 +308,13 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     public var suggestionName: String?
     /// How strongly a `suggested` voice matches its person.
     public var suggestionStrength: VoiceStrength?
-    /// The words the voice says in its sample clip, so the quote is what
-    /// plays; the longest thing it said when it has no clip. Absent without
-    /// any.
+    /// The words the voice says in its sample clip, exactly what plays.
+    /// Absent when the clip's words are not known on their own.
     public var quote: String?
+    /// Without a `quote`: what the voice said around its clip (segments only
+    /// partly inside it), or its longest segment without a clip. Context,
+    /// never shown as a quotation. Absent when it said nothing.
+    public var context: String?
     public var colorIndex: Int
     public var hasClip: Bool
     public var isPlaying: Bool
@@ -322,8 +325,8 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     public init(
       id: UUID, clusterLabel: String, displayName: String, assignment: Assignment,
       personID: UUID? = nil, email: String? = nil, suggestionName: String? = nil,
-      suggestionStrength: VoiceStrength? = nil, quote: String? = nil, colorIndex: Int,
-      hasClip: Bool, isPlaying: Bool, dismissed: Bool
+      suggestionStrength: VoiceStrength? = nil, quote: String? = nil, context: String? = nil,
+      colorIndex: Int, hasClip: Bool, isPlaying: Bool, dismissed: Bool
     ) {
       self.id = id
       self.clusterLabel = clusterLabel
@@ -334,6 +337,7 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
       self.suggestionName = suggestionName
       self.suggestionStrength = suggestionStrength
       self.quote = quote
+      self.context = context
       self.colorIndex = colorIndex
       self.hasClip = hasClip
       self.isPlaying = isPlaying

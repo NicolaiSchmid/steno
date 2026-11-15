@@ -298,6 +298,8 @@ struct SpeakerSuggestionRejectionRow: StenoRecord {
   var speakerID: UUID
   var personID: UUID
   var meetingID: UUID
+  /// The voice match's score when the user said No, when there was one.
+  var similarity: Float?
 
   enum Columns {
     static let speakerID = Column(CodingKeys.speakerID)
