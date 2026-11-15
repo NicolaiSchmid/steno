@@ -40,8 +40,10 @@ suggested), `speakers-me` (Me named, one speaker left), `speakers-me-unnamed`
 (the fixture's speakers, each leading a paragraph), `speakers-check` (only a
 voice match left), `speakers-done` (everyone confirmed), `speakers-long` (a
 long confirmed name), `speakers-split` (a speaker suggested as a person
-already named there) and `speakers-finding` (the processing meeting in the
-Diarize stage). Four bend the host's answers instead, from `speakers-none`:
+already named there), `speakers-not-people` (no voice a person),
+`speakers-context` (no voice's words exactly what its clip plays, so each
+row shows its nearby words) and `speakers-finding` (the processing meeting
+in the Diarize stage). Four bend the host's answers instead, from `speakers-none`:
 `speakers-saving` (a pick never acknowledged), `speakers-select-failed`,
 `speakers-options-slow` and `speakers-options-failed` (the options for typed
 text never arrive, or fail). Outside the app the speaker field's options

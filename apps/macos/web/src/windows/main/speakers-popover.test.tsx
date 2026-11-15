@@ -119,6 +119,23 @@ describe("the speakers pill", () => {
 		expect(screen.getByTestId("speakers-trigger")).toHaveTextContent(words);
 	});
 
+	it("reads No speakers, with nothing to do, when no voice is a person", async () => {
+		const harness = await createBridgeHarness();
+		const { speakers, transcript } = await detail("speakers-dismissed");
+		renderWithBridge(
+			<SpeakersPopover
+				speakers={speakers
+					.filter((speaker) => speaker.clusterLabel !== "Me")
+					.map((speaker) => ({ ...speaker, dismissed: true }))}
+				transcript={transcript}
+			/>,
+			harness,
+		);
+		const pill = screen.getByTestId("speakers-trigger");
+		expect(pill).toHaveTextContent(/^No speakers$/);
+		expect(pill.querySelector("[aria-label='Unnamed']")).toBeNull();
+	});
+
 	it("says it is finding speakers, disabled, while the pipeline diarizes", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(
@@ -532,6 +549,19 @@ describe("the speakers panel", () => {
 		);
 	});
 
+	it("offers the person said No to again once their name is typed", async () => {
+		const { user, panel } = await open();
+		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
+		await user.keyboard("n");
+		await within(panel).findAllByRole("option");
+		expect(within(panel).queryByRole("option", { name: /Anna/ })).toBeNull();
+		await user.keyboard("Ann");
+		const anna = await within(panel).findByRole("option", { name: /Anna/ });
+		expect(anna).toBeVisible();
+		// A person to pick again, not a voice match.
+		expect(anna).not.toHaveTextContent("Sounds like");
+	});
+
 	it("brings a suggestion back with Retry when the No fails", async () => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
 		const { user, harness } = await open("", {
@@ -583,6 +613,27 @@ describe("the speakers panel", () => {
 		]);
 	});
 
+	it("draws a voice being dismissed muted, never as needing a name", async () => {
+		const { user, speakers, republish } = await open("speakers-none", {
+			"speakers.dismiss": () => new Promise(() => {}),
+		});
+		await user.click(row(SPEAKER_1));
+		await user.click(await screen.findByTestId("speaker-action-dismiss"));
+		// On its way: already not a person, saving, in its old place.
+		expect(row(SPEAKER_1)).toHaveAccessibleName("Speaker 1, not a person");
+		expect(row(SPEAKER_1)).toHaveTextContent(/^Speaker 1Not a personSaving/);
+		expect(within(row(SPEAKER_1)).queryByText("?")).toBeNull();
+		republish(
+			speakers.map((speaker) =>
+				speaker.id === SPEAKER_1 ? { ...speaker, dismissed: true } : speaker,
+			),
+		);
+		// Saved: still in Need names for the visit, but no work there.
+		expect(row(SPEAKER_1)).toHaveAccessibleName("Speaker 1, not a person");
+		expect(within(row(SPEAKER_1)).queryByText("?")).toBeNull();
+		expect(row(SPEAKER_1)).not.toHaveTextContent("Name");
+	});
+
 	it("lists voices that are not people last, under Not people, and restores with R", async () => {
 		const { user, harness, panel } = await open("speakers-dismissed");
 		expect(
@@ -599,6 +650,19 @@ describe("the speakers panel", () => {
 		expect(callsTo(harness.transport, "speakers.restore")).toEqual([
 			{ method: "speakers.restore", params: { speakerID: UNNAMED } },
 		]);
+	});
+
+	it("quotes only what the clip plays; nearby words go unquoted", async () => {
+		await open("speakers-context");
+		const anna = screen.getByTestId(`speakers-popover-snippet-${ANNA}`);
+		expect(anna.textContent).toMatch(/^Around the sample: \S/);
+		expect(anna.textContent).not.toMatch(/[“”]/);
+		// Without a clip it sits beside "No sample", with nothing to anchor.
+		const unnamed = screen.getByTestId(`speakers-popover-snippet-${UNNAMED}`);
+		expect(unnamed.textContent).not.toMatch(/Around the sample|[“”]/);
+		expect(
+			screen.getByTestId(`speakers-popover-play-${UNNAMED}-none`),
+		).toHaveTextContent("No sample");
 	});
 
 	it("removes a confirmed name from the person's field", async () => {

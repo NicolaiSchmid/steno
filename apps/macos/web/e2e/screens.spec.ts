@@ -499,6 +499,20 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 		},
 	],
 	[
+		// After No, typing her name offers Anna again.
+		"rejected-typed",
+		"scenario=speakers-partly",
+		async (page) => {
+			await page.getByTestId("speakers-trigger").focus();
+			await page.keyboard.press("Enter");
+			await expect(page.getByTestId("speakers-panel")).toBeVisible();
+			await page.keyboard.press("n");
+			await expect(page.getByRole("combobox")).toBeFocused();
+			await page.keyboard.type("Ann");
+			await expect(page.getByRole("option", { name: /Anna/ })).toBeVisible();
+		},
+	],
+	[
 		// Not a person from the field: the row keeps its place, says so,
 		// and offers Restore.
 		"dismissing",
@@ -513,6 +527,12 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 	],
 	["dismissed-closed", "scenario=speakers-dismissed", async () => {}],
 	["dismissed", "scenario=speakers-dismissed", openSpeakers],
+	// No voice is a person: the pill is done, "No speakers".
+	["not-people-closed", "scenario=speakers-not-people", async () => {}],
+	["not-people", "scenario=speakers-not-people", openSpeakers],
+	// No voice's words are exactly its clip: nearby words, unquoted,
+	// "Around the sample:" where a clip plays, bare beside "No sample".
+	["context-quote", "scenario=speakers-context", openSpeakers],
 	[
 		"transcript-dismissed",
 		"scenario=speakers-dismissed&tab=transcript",

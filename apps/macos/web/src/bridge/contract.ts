@@ -402,6 +402,11 @@ export const meetingDetailSnapshot = z
 					suggestionStrength: voiceStrength.optional(),
 					/** The words the voice says in its sample clip, what plays. */
 					quote: z.string().optional(),
+					/**
+					 * Without an exact `quote`: the voice's words near its clip,
+					 * or its longest turn when it has no clip. Never quoted.
+					 */
+					context: z.string().optional(),
 					colorIndex: z.number().int(),
 					hasClip: z.boolean(),
 					isPlaying: z.boolean(),

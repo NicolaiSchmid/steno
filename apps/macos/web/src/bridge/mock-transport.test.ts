@@ -153,7 +153,13 @@ describe("speaker naming outside the app", () => {
 	it("keeps a person answered No to out of that voice's options until typed", () => {
 		const recorded = {
 			options: [
-				{ kind: "person" as const, label: "Anna", personID: "p-anna" },
+				{
+					kind: "person" as const,
+					label: "Anna",
+					personID: "p-anna",
+					reason: "voice" as const,
+					strength: "strong" as const,
+				},
 				{ kind: "person" as const, label: "Lea", personID: "p-lea" },
 			],
 		};
@@ -167,6 +173,35 @@ describe("speaker naming outside the app", () => {
 		expect(labels("")).toEqual(["Lea"]);
 		expect(labels("", "s-4")).toEqual(["Anna", "Lea"]);
 		expect(labels("ann")).toEqual(["Anna", "ann"]);
+		// Typed, no longer a suggestion: no reason, no strength.
+		expect(
+			(
+				answerSpeakerOptions(
+					recorded,
+					{ speakerID: "s-3", query: "ann" },
+					"",
+					rejected,
+				) as { options: object[] }
+			).options[0],
+		).toEqual({ kind: "person", label: "Anna", personID: "p-anna" });
+	});
+
+	it("quotes what a clip plays, else gives the voice's nearby words", async () => {
+		const partly = await detail("speakers-partly");
+		const speaker4 = partly.speakers.find((row) => row.id === SPEAKER_4);
+		// Speaker 4 has no clip: nothing plays, so nothing is quoted.
+		expect(speaker4?.quote).toBeUndefined();
+		expect(speaker4?.context).toBeTruthy();
+		const withClip = partly.speakers.filter((row) => row.hasClip);
+		expect(withClip.every((row) => row.quote && !row.context)).toBe(true);
+		const near = await detail("speakers-context");
+		expect(near.speakers.every((row) => !row.quote && row.context)).toBe(true);
+	});
+
+	it("makes every voice not a person", async () => {
+		const meeting = await detail("speakers-not-people");
+		expect(meeting.speakers.length).toBeGreaterThan(0);
+		expect(meeting.speakers.every((row) => row.dismissed)).toBe(true);
 	});
 
 	it("reports the Diarize stage for the processing meeting", async () => {

@@ -905,38 +905,51 @@ export const SELECT_FAILURE = "Speaker could not be named: database is locked";
  * heard as two speakers), `speakers-check` (only the voice match left),
  * `speakers-done` (everyone confirmed), `speakers-long` (the fixture
  * with a long confirmed name), `speakers-dismissed` (the unnamed voice not
- * a person), `speakers-likely` (the voice match only likely) and
- * `speakers-last-invitee` (Anna confirmed, so the unnamed voice is the only
- * one left). Without one of these the fixture's own speakers stay: two
- * named, a suggestion and an unnamed voice without a clip;
+ * a person), `speakers-not-people` (no voice a person),
+ * `speakers-likely` (the voice match only likely), `speakers-context`
+ * (the fixture's speakers, no voice's words exactly what its clip plays)
+ * and `speakers-last-invitee` (Anna confirmed, so the unnamed voice is the
+ * only one left). Without one of these the fixture's own speakers stay:
+ * two named, a suggestion and an unnamed voice without a clip;
  * `speakers-partly` keeps them and gives each a paragraph. All but
  * `speakers-none`, `speakers-me` and `speakers-me-unnamed` spread the
- * turns over every voice (`spread`). Each voice quotes its first
- * paragraph, as the host quotes its clip.
+ * turns over every voice (`spread`). Each voice with a clip quotes its
+ * first paragraph, as the host quotes its clip; one without a clip, or
+ * any under `speakers-context`, has it as its nearby words instead.
  */
 function speakersScenario(
 	detail: MeetingDetailSnapshot,
 	requested: string,
 ): MeetingDetailSnapshot {
-	return withQuotes(bendSpeakers(detail, requested));
+	return withQuotes(
+		bendSpeakers(detail, requested),
+		requested === "speakers-context",
+	);
 }
 
-/** Every voice's quote: its first paragraph, cut as the host cuts it. */
-function withQuotes(detail: MeetingDetailSnapshot): MeetingDetailSnapshot {
+/**
+ * Every voice's evidence: its first paragraph, cut as the host cuts it, as
+ * the `quote` of what its clip plays, or as `context` (nearby words) when
+ * it has no clip or `inexact`.
+ */
+function withQuotes(
+	detail: MeetingDetailSnapshot,
+	inexact: boolean,
+): MeetingDetailSnapshot {
 	return {
 		...detail,
 		speakers: detail.speakers.map((speaker) => {
 			const said = detail.transcript.find(
 				(turn) => turn.speakerID === speaker.id,
 			)?.text;
-			const { quote: _quote, ...rest } = speaker;
+			const { quote: _quote, context: _context, ...rest } = speaker;
 			if (!said) {
 				return rest;
 			}
-			return {
-				...rest,
-				quote: said.length > 160 ? `${said.slice(0, 160).trim()}…` : said,
-			};
+			const words = said.length > 160 ? `${said.slice(0, 160).trim()}…` : said;
+			return speaker.hasClip && !inexact
+				? { ...rest, quote: words }
+				: { ...rest, context: words };
 		}),
 	};
 }
@@ -970,7 +983,7 @@ function bendSpeakers(
 			return speaker ? { ...turn, speakerName: speaker.displayName } : turn;
 		}),
 	});
-	if (scenario === "speakers-partly") {
+	if (scenario === "speakers-partly" || scenario === "speakers-context") {
 		return spread({ ...detail });
 	}
 	if (scenario === "speakers-last-invitee") {
@@ -987,6 +1000,15 @@ function bendSpeakers(
 		return answerSpeakerChange(spread({ ...detail }), "speakers.dismiss", {
 			speakerID: fourth.id,
 		});
+	}
+	if (scenario === "speakers-not-people") {
+		return detail.speakers.reduce(
+			(bent, speaker) =>
+				answerSpeakerChange(bent, "speakers.dismiss", {
+					speakerID: speaker.id,
+				}),
+			spread({ ...detail }),
+		);
 	}
 	if (scenario === "speakers-likely") {
 		return spread({
@@ -1143,13 +1165,24 @@ export function answerSpeakerOptions(
 	}
 	const fold = (text: string) =>
 		text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-	const people = (recorded?.options ?? []).filter(
-		(option) =>
-			option.kind === "person" &&
-			fold(option.label).includes(fold(query)) &&
-			// A person answered No to is found only when typed.
-			!(rejected.has(`${speakerID} ${option.personID}`) && !query),
-	);
+	const answeredNo = (option: SpeakerOption) =>
+		rejected.has(`${speakerID} ${option.personID}`);
+	const people: SpeakerOption[] = (recorded?.options ?? [])
+		.filter(
+			(option) =>
+				option.kind === "person" &&
+				fold(option.label).includes(fold(query)) &&
+				// A person answered No to is found only when typed,
+				!(answeredNo(option) && !query),
+		)
+		// and then with no reason: no longer a suggestion.
+		.map((option) => {
+			if (!answeredNo(option)) {
+				return option;
+			}
+			const { reason: _reason, strength: _strength, ...rest } = option;
+			return rest;
+		});
 	const exact = people.some((option) => fold(option.label) === fold(query));
 	if (scenario === "speakers-last-invitee" && !query) {
 		// Anna owns Speaker 3 now, so no voice match; Maya is the one

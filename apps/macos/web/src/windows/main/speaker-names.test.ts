@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SpeakerOption } from "@/bridge/contract";
 import { personColor } from "@/lib/person-color";
 import {
+	context,
 	firstWithWork,
 	groupOptions,
 	nextToName,
@@ -279,6 +280,41 @@ describe("groupOptions", () => {
 		);
 		expect(groups.some((group) => group.id === "also")).toBe(false);
 	});
+
+	it("offers the excluded person again once their name is typed", () => {
+		const groups = groupOptions(
+			options,
+			"Nic",
+			voice(2, "unknown"),
+			speakers,
+			person(1),
+		);
+		expect(
+			groups.find((group) => group.id === "also")?.rows[0]?.option.label,
+		).toBe("Nicolai");
+		// Said No to as a voice match: typed, a person, not a suggestion.
+		const anna = groupOptions(
+			options,
+			"Ann",
+			voice(2, "unknown"),
+			speakers,
+			person(3),
+		);
+		expect(anna.find((group) => group.id === "suggested")?.rows).toEqual([
+			expect.objectContaining({ reason: "Invited" }),
+		]);
+		expect(
+			anna
+				.find((group) => group.id === "people")
+				?.rows.map((row) => row.option.label),
+		).toContain("Anna");
+		// Whitespace is not typing: still left out.
+		expect(
+			groupOptions(options, "  ", voice(2, "unknown"), speakers, person(1))
+				.flatMap((group) => group.rows)
+				.some((row) => row.option.personID === person(1)),
+		).toBe(false);
+	});
 });
 
 describe("personColor", () => {
@@ -301,9 +337,11 @@ describe("voices that are not people", () => {
 			kind: "needs",
 			count: 1,
 		});
-		expect(pillState([notPerson(voice(2, "unknown"))], true, false).kind).toBe(
-			"none",
-		);
+		// No voice is a person: done, with nobody to list ("No speakers").
+		expect(pillState([notPerson(voice(2, "unknown"))], true, false)).toEqual({
+			kind: "done",
+			avatars: [],
+		});
 	});
 
 	it("sit last, under Not people, and are no work", () => {
@@ -332,6 +370,14 @@ describe("the evidence and the reasons", () => {
 			"Hallo zusammen.",
 		);
 		expect(quote(voice(1, "unknown"))).toBe("");
+	});
+
+	it("gives the nearby words only when there is no exact quote", () => {
+		const near = { ...voice(1, "unknown"), context: " Also ich denke " };
+		expect(context(near)).toBe("Also ich denke");
+		expect(quote(near)).toBe("");
+		expect(context({ ...near, quote: "Hallo zusammen." })).toBe("");
+		expect(context(voice(1, "unknown"))).toBe("");
 	});
 
 	it("says how strongly a voice matches, in words", () => {

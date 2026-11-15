@@ -92,6 +92,16 @@ export function quote(speaker: Speaker): string {
 	return speaker.quote?.trim() ?? "";
 }
 
+/**
+ * The voice's nearby words when no exact quote exists (the host's
+ * `context`: turns only partly inside the clip, or its longest turn when
+ * it has no clip); empty when there is a quote or nothing. Never shown in
+ * quotation marks: it is not what plays.
+ */
+export function context(speaker: Speaker): string {
+	return quote(speaker) ? "" : (speaker.context?.trim() ?? "");
+}
+
 /* ---- The header pill --------------------------------------------------- */
 
 export type PillState =
@@ -122,7 +132,8 @@ function distinctPeople(speakers: readonly Speaker[]): Speaker[] {
  * or suggested, every voice not yet confirmed is amber work ("2 need
  * names": an unnamed voice and a suggestion both need a name), and when
  * only suggestions are left it asks to check them. All confirmed, it lists
- * the people. A voice that is not a person counts for nothing.
+ * the people. A voice that is not a person counts for nothing; when no
+ * voice is a person the pill is done with nobody ("No speakers").
  */
 export function pillState(
 	all: readonly Speaker[],
@@ -136,6 +147,10 @@ export function pillState(
 		return { kind: "hidden" };
 	}
 	const speakers = all.filter((speaker) => !isDismissed(speaker));
+	if (speakers.length === 0) {
+		// Every voice is music or noise: nothing to name, nobody to list.
+		return { kind: "done", avatars: [] };
+	}
 	const unknown = speakers.filter(
 		(speaker) => speaker.assignment === "unknown",
 	);
@@ -405,7 +420,10 @@ export function optionColor(
  * `personID`, each saying which voice it would combine with), People
  * ("Recent" while nothing is typed; the person a confirmed voice already
  * is leads it as "Current"), and the row that creates the typed name.
- * `excluded` leaves a person out ("Someone else").
+ * `excluded` leaves out the person the user just said No to, while
+ * nothing is typed: typed, they are offered again among the people, never
+ * as a suggestion, as the hosts offer a person answered No for this voice
+ * only when typed.
  */
 export function groupOptions(
 	options: readonly SpeakerOption[],
@@ -414,10 +432,11 @@ export function groupOptions(
 	speakers: readonly Speaker[],
 	excluded?: string,
 ): OptionGroup[] {
+	const typed = query.trim() !== "";
 	const groups: OptionGroup[] = [
 		{ id: "suggested", label: "Suggested", rows: [] },
 		{ id: "also", label: "Also speaking here", rows: [] },
-		{ id: "people", label: query.trim() ? "People" : "Recent", rows: [] },
+		{ id: "people", label: typed ? "People" : "Recent", rows: [] },
 		{ id: "create", label: "New person", rows: [] },
 	];
 	const [suggested, also, people, create] = groups as [
@@ -427,7 +446,7 @@ export function groupOptions(
 		OptionGroup,
 	];
 	for (const option of options) {
-		if (option.personID && option.personID === excluded) {
+		if (!typed && option.personID && option.personID === excluded) {
 			continue;
 		}
 		const owner = option.personID
@@ -438,7 +457,10 @@ export function groupOptions(
 						other.personID === option.personID,
 				)
 			: undefined;
-		const reason = optionReason(option);
+		// Said No to and typed again: a person to pick, no longer a suggestion.
+		const answered =
+			option.personID !== undefined && option.personID === excluded;
+		const reason = answered ? undefined : optionReason(option);
 		const color = optionColor(option, speakers);
 		const colorIndex = color === undefined ? {} : { colorIndex: color };
 		if (option.kind === "create") {

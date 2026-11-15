@@ -239,7 +239,10 @@ export interface SpeakerNameFieldProps {
 	onAction?: (action: FieldAction) => void;
 	/** The text to reopen with after a failed or cancelled pick. */
 	initialText?: string;
-	/** A person not to offer ("Someone else" after "Also Nicolai?"). */
+	/**
+	 * The person just answered No (No, or "Someone else" after "Also
+	 * Nicolai?"): not offered until typed.
+	 */
 	excludedPersonID?: string;
 	/** Under the field, above the options: a failed pick's line with Retry. */
 	notice?: ReactNode;

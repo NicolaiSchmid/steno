@@ -3,6 +3,7 @@ import {
 	ChevronDownIcon,
 	LoaderCircleIcon,
 	UserPlusIcon,
+	UserXIcon,
 } from "lucide-react";
 import {
 	type KeyboardEvent,
@@ -32,7 +33,9 @@ import {
 	useSpeakerSelect,
 } from "./speaker-name-field";
 import {
+	canPlay,
 	checkLabel,
+	context,
 	firstWithWork,
 	isDismissed,
 	isMe,
@@ -104,6 +107,15 @@ function PillContent({ state }: { state: PillState }) {
 	if (state.kind === "hidden" || state.kind === "finding") {
 		return null;
 	}
+	if (state.kind === "done" && state.avatars.length === 0) {
+		// Every voice is not a person: nothing to do, nobody to show.
+		return (
+			<>
+				No speakers
+				<ChevronDownIcon aria-hidden="true" />
+			</>
+		);
+	}
 	const [words, count] = pillWords(state);
 	const avatars =
 		state.kind === "done" ? state.avatars.slice(0, 4) : state.avatars;
@@ -159,6 +171,8 @@ interface Saving {
 	label: string;
 	/** None for a Create: the new person's colour is the host's to fold. */
 	colorIndex: number | undefined;
+	/** Not a person, Remove name or Restore on its way, not a pick. */
+	action?: FieldAction;
 }
 
 /**
@@ -429,19 +443,26 @@ export function SpeakersPopover({
 		);
 	}
 
-	/** Shows "Saving" on the row, or clears it. */
-	function markSaving(speaker: Speaker, label: string | null) {
-		if (label === null) {
+	/**
+	 * Shows "Saving" on the row while `action` is on its way, or clears it.
+	 * Each action leaves the voice unnamed, so the row shows no colour.
+	 */
+	function markSaving(speaker: Speaker, action: FieldAction | null) {
+		if (action === null) {
 			savingNow.current.delete(speaker.id);
 		} else {
 			savingNow.current.add(speaker.id);
 		}
 		setSaving((map) => {
 			const next = new Map(map);
-			if (label === null) {
+			if (action === null) {
 				next.delete(speaker.id);
 			} else {
-				next.set(speaker.id, { label, colorIndex: speaker.colorIndex });
+				next.set(speaker.id, {
+					label: speaker.clusterLabel,
+					colorIndex: undefined,
+					action,
+				});
 			}
 			return next;
 		});
@@ -511,10 +532,7 @@ export function SpeakersPopover({
 		setEditing((now) => (now?.speakerID === speaker.id ? null : now));
 		setActive(speaker.id);
 		focusNext.current = speaker.id;
-		markSaving(
-			speaker,
-			action === "dismiss" ? NOT_A_PERSON : speaker.clusterLabel,
-		);
+		markSaving(speaker, action);
 		const failure = await sendAction(client, speaker.id, action);
 		markSaving(speaker, null);
 		if (failure === null) {
@@ -596,13 +614,16 @@ export function SpeakersPopover({
 	}
 
 	const row = (speaker: Speaker, placed: RowKind, person?: Speaker) => {
-		// Drawn as it is now: dismissed during the visit in its old place,
-		// or restored while still listed under "Not people".
-		const kind: RowKind = isDismissed(speaker)
-			? "dismissed"
-			: placed === "dismissed"
-				? "need"
-				: placed;
+		// Drawn as it is now, or as it will be once its action is saved:
+		// dismissed during the visit in its old place, or restored while
+		// still listed under "Not people".
+		const action = saving.get(speaker.id)?.action;
+		const kind: RowKind =
+			action === "dismiss" || (isDismissed(speaker) && action !== "restore")
+				? "dismissed"
+				: placed === "dismissed"
+					? "need"
+					: placed;
 		return (
 			<PanelRow
 				editing={editing?.speakerID === speaker.id ? editing : null}
@@ -863,8 +884,10 @@ function PanelRow({
 		named &&
 		(kind === "me" || kind === "check" || kind === "need" || kind === "also");
 	// A confirmed person's line shows while they are renamed, as evidence.
-	const said =
-		(kind === "person" || kind === "me") && !editing ? "" : quote(speaker);
+	const evidence = !((kind === "person" || kind === "me") && !editing);
+	const said = evidence ? quote(speaker) : "";
+	// Without an exact quote, the words near the clip, never in quotes.
+	const near = evidence ? context(speaker) : "";
 	// The whole row opens naming, except where Yes and No, or Restore, sit.
 	const opens =
 		(done || (kind !== "check" && kind !== "also" && kind !== "dismissed")) &&
@@ -872,7 +895,25 @@ function PanelRow({
 		saving === undefined;
 
 	const title: ReactNode =
-		saving !== undefined ? (
+		kind === "dismissed" ? (
+			// Muted, with nothing to name: no chip, no call to action.
+			<>
+				<span className="shrink-0 text-muted-foreground text-title">
+					{speaker.clusterLabel}
+				</span>
+				<span className="min-w-0 truncate text-meta text-muted-foreground">
+					{NOT_A_PERSON}
+				</span>
+				{saving !== undefined ? (
+					<span
+						className="shrink-0 text-meta text-muted-foreground"
+						data-testid={`speakers-popover-saving-${speaker.id}`}
+					>
+						Saving
+					</span>
+				) : null}
+			</>
+		) : saving !== undefined ? (
 			<>
 				<span className="min-w-0 truncate font-medium text-title">
 					{saving.label}
@@ -909,13 +950,6 @@ function PanelRow({
 			<Badge className="min-w-0" size="chip" variant="dashed">
 				<span className="truncate">{speaker.clusterLabel}</span>
 			</Badge>
-		) : kind === "dismissed" ? (
-			<>
-				<span className="shrink-0 text-title">{speaker.clusterLabel}</span>
-				<span className="min-w-0 truncate text-meta text-muted-foreground">
-					{NOT_A_PERSON}
-				</span>
-			</>
 		) : kind === "check" ? (
 			<>
 				<span className="shrink-0 font-medium text-title">
@@ -953,7 +987,11 @@ function PanelRow({
 		);
 
 	const avatar =
-		kind === "voice" || kind === "also" || kind === "me" ? null : (
+		kind === "voice" || kind === "also" || kind === "me" ? null : kind ===
+			"dismissed" ? (
+			// Grey, without the unnamed voice's question mark.
+			<Avatar aria-hidden="true" icon={<UserXIcon />} size="lg" unknown />
+		) : (
 			<Avatar
 				aria-hidden="true"
 				index={saving ? (saving.colorIndex ?? 0) : speaker.colorIndex}
@@ -1069,6 +1107,15 @@ function PanelRow({
 							data-testid={`speakers-popover-snippet-${speaker.id}`}
 						>
 							“{said}”
+						</p>
+					) : near ? (
+						<p
+							className="m-0 line-clamp-2 text-meta text-muted-foreground"
+							data-testid={`speakers-popover-snippet-${speaker.id}`}
+						>
+							{/* Beside "No sample" the words need no anchor. */}
+							{canPlay(speaker) ? "Around the sample: " : null}
+							{near}
 						</p>
 					) : null}
 					{actions}
