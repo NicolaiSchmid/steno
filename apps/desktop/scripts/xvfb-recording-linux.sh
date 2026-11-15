@@ -5,12 +5,13 @@
 # [seconds]). Sourcing it checks them and the tools (Xvfb, xdotool,
 # python3; exit 2 on a usage error or a missing tool) and makes the work
 # directory. `start_recording` runs the built shell on an Xvfb server of
-# its own with a fresh HOME and starts a recording from the main window
-# (Ctrl+Shift+R, the record shortcut); `await_exit` waits for the app to
-# end; `require_saved` checks the store holds the recording, saved.
-# `fail` ends a failed check with the app's log, `meetings` lists the
-# store's rows, and `cleanup` (the EXIT trap) ends what it started; a
-# script that sets its own trap calls it.
+# its own with a fresh HOME, its automatic update checks off, and starts
+# a recording from the main window (Ctrl+Shift+R, the record shortcut);
+# `await_exit` waits for the app to end; `require_saved` checks the
+# store holds the recording, saved. `fail` ends a failed check with the
+# windows shown and the app's log, `meetings` lists the store's rows, and
+# `cleanup` (the EXIT trap) ends what it started; a script that sets its
+# own trap calls it.
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 binary="${1:-$root/target/debug/steno-desktop}"
@@ -37,6 +38,12 @@ trap cleanup EXIT
 
 fail() {
   echo "$name: FAILED, $*" >&2
+  # A dialog over the main window shows here as another window.
+  if [[ -n "${DISPLAY:-}" ]]; then
+    for window in $(xdotool search --onlyvisible --name . 2>/dev/null); do
+      echo "$name: window shown: $(xdotool getwindowname "$window")" >&2
+    done
+  fi
   echo "$name: the app's log:" >&2
   sed 's/^/  /' "$work/app.log" >&2 || true
   exit 1
@@ -86,6 +93,11 @@ start_recording() {
   export WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 LIBGL_ALWAYS_SOFTWARE=1
   export RUST_LOG=info
   store="$XDG_DATA_HOME/Steno/steno.sqlite"
+  # A launch checks the release feed, and a build older than the latest
+  # release (any branch behind it) offers the update in a modal dialog
+  # over the main window, which then takes no key press.
+  mkdir -p "$XDG_DATA_HOME/Steno"
+  echo '{"steno.updates.automaticChecks": false}' >"$XDG_DATA_HOME/Steno/preferences.json"
 
   "$binary" >"$work/app.log" 2>&1 &
   app=$!
