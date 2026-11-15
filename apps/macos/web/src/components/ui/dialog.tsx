@@ -6,8 +6,9 @@ import { Button } from "./button";
 
 /**
  * An in-page dialog (destructive confirmations stay native, Decision 6). The
- * popup is glass at 2xl with its own deep shadow over a blurred backdrop and
- * carries no padding of its own: `DialogHeader`, `DialogBody` and
+ * popup is solid at the surface radius (the dialog shadow in light, a
+ * lighter surface in dark) over a dimmed backdrop and carries no padding of
+ * its own: `DialogHeader`, `DialogBody` and
  * `DialogFooter` lay out the content (the body wraps a `ScrollArea` when it
  * can grow). Widths come from the caller as `max-w-lg` or `max-w-xl`;
  * `max-w-md` is the default. 200 ms ease-in-out, scale from 0.98.
@@ -46,7 +47,7 @@ export function DialogPopup({
 			/>
 			<BaseDialog.Popup
 				className={cn(
-					"dialog-glass surface-canvas fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-32px)] w-full max-w-md -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border text-foreground shadow-dialog outline-none",
+					"surface-popover fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-32px)] w-full max-w-md -translate-x-1/2 -translate-y-1/2 flex-col rounded-surface border border-border bg-popover text-foreground shadow-dialog outline-none",
 					"transition-[opacity,scale] duration-(--duration-surface) ease-in-out",
 					"data-starting-style:scale-[0.98] data-starting-style:opacity-0",
 					"data-ending-style:scale-[0.98] data-ending-style:opacity-0",
@@ -147,7 +148,7 @@ export function DialogFooter({ className, ...props }: ComponentProps<"div">) {
 		<div
 			className={cn(
 				bandClass,
-				"rounded-b-[calc(var(--radius-2xl)-1px)]",
+				"rounded-b-[calc(var(--surface-radius)-1px)]",
 				className,
 			)}
 			{...props}

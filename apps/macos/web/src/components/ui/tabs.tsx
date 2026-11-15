@@ -52,7 +52,7 @@ export function TabsTab({
 				"inline-flex h-6 min-w-0 cursor-default select-none items-center gap-1 rounded-md px-2.5 font-medium text-muted-foreground text-xs outline-none",
 				"transition-[background-color,color,box-shadow] duration-(--duration-functional) ease-standard",
 				"hover:bg-tab-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus",
-				"data-active:inset-ring data-active:inset-ring-tab-indicator data-active:bg-tab-active data-active:text-foreground data-active:shadow-xs",
+				"data-active:inset-ring data-active:inset-ring-tab-indicator data-active:bg-tab-active data-active:text-foreground",
 				className,
 			)}
 			{...props}
