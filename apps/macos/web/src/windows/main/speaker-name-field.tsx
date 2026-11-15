@@ -12,7 +12,7 @@ import type { BridgeClient } from "@/bridge/client";
 import type { SpeakerOption } from "@/bridge/contract";
 import { useBridge } from "@/bridge/hooks";
 import { BridgeError } from "@/bridge/transport";
-import { Input } from "@/components/ui";
+import { Input, ResultLine } from "@/components/ui";
 import { menuItemVariants } from "@/components/ui/menu";
 import { cn } from "@/lib/cn";
 import { groupOptions, optionText, type Speaker } from "./speaker-names";
@@ -92,15 +92,9 @@ export function SelectError({
 	className?: string;
 }) {
 	return message ? (
-		<p
-			className={cn(
-				"mt-1.5 mb-0 text-destructive-foreground text-xs",
-				className,
-			)}
-			role="alert"
-		>
+		<ResultLine className={cn("mt-1.5", className)} tone="destructive">
 			{message}
-		</p>
+		</ResultLine>
 	) : null;
 }
 
