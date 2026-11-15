@@ -248,6 +248,7 @@ mod tests {
             sample_clip_range: None,
             sample_clip_url: None,
             cluster_confidence: 0.0,
+            dismissed: false,
         }
     }
 

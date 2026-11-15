@@ -345,6 +345,12 @@ pub struct Speaker {
     pub sample_clip_url: Option<String>,
     /// Diarizer cluster quality in `0...1`, not the match score.
     pub cluster_confidence: f32,
+    /// The user marked the voice "Not a person" (music, noise): it leaves
+    /// the counts and the voice memory, its segments keep their text. Kept
+    /// apart from `assignment`, which every build reads as one of three
+    /// cases; not part of `meeting.json`.
+    #[serde(skip)]
+    pub dismissed: bool,
 }
 
 impl Speaker {

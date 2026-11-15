@@ -81,7 +81,7 @@ pub(super) fn save_participant(connection: &Connection, participant: &Participan
 }
 
 const SPEAKER_COLUMNS: &str = "id, meetingID, clusterLabel, assignment, personID, similarity, \
-     embedding, sampleClipStart, sampleClipEnd, sampleClipURL, clusterConfidence";
+     embedding, sampleClipStart, sampleClipEnd, sampleClipURL, clusterConfidence, dismissed";
 
 fn speaker_from_row(row: &Row<'_>) -> rusqlite::Result<Speaker> {
     let kind = row.col::<DbEnum<_>>("assignment")?;
@@ -106,6 +106,7 @@ fn speaker_from_row(row: &Row<'_>) -> rusqlite::Result<Speaker> {
         },
         sample_clip_url: row.get("sampleClipURL")?,
         cluster_confidence: narrow(confidence),
+        dismissed: row.get("dismissed")?,
     })
 }
 
@@ -125,6 +126,7 @@ fn write_speaker(connection: &Connection, speaker: &Speaker, sql: &str) -> Resul
             speaker.sample_clip_range.map(|range| range.upper),
             speaker.sample_clip_url,
             f64::from(speaker.cluster_confidence),
+            speaker.dismissed,
         ],
     )
 }
@@ -237,7 +239,7 @@ const VOICE_WINDOW: usize = 50;
 
 /// Recomputes a person's voice: the normalised mean of the newest
 /// `VOICE_WINDOW` confirmed embeddings by `meeting.startedAt`, and their
-/// count. A missing person is ignored.
+/// count; a dismissed voice never counts. A missing person is ignored.
 pub(super) fn refresh_voice(connection: &Connection, person_id: Uuid) -> Result<()> {
     let Some(mut person) = fetch_person(connection, person_id)? else {
         return Ok(());
@@ -247,6 +249,7 @@ pub(super) fn refresh_voice(connection: &Connection, person_id: Uuid) -> Result<
         "SELECT speaker.embedding AS embedding FROM speaker \
          JOIN meeting ON meeting.id = speaker.meetingID \
          WHERE speaker.personID = ?1 AND speaker.assignment = ?2 AND speaker.embedding IS NOT NULL \
+         AND speaker.dismissed = 0 \
          ORDER BY meeting.startedAt DESC, speaker.id",
         params![DbUuid(person_id), SpeakerAssignmentKind::Confirmed.as_str()],
         |row| row.col::<DbEmbedding<Embedding>>("embedding"),
@@ -271,6 +274,91 @@ fn name_me_participant(connection: &Connection, meeting_id: Uuid, person: &Perso
             DbEnum(ParticipantRole::Me)
         ],
     )?;
+    Ok(())
+}
+
+/// The label the meeting's "me" participant and speaker carry while the
+/// user is unnamed (`LaneMerger::ME_SPEAKER_LABEL` in `steno-pipeline`).
+const ME_LABEL: &str = "Me";
+
+/// The meeting's "me" participant back to unnamed: no person, named
+/// [`ME_LABEL`]. Who the user is (`Settings::self_person_id`) stays.
+fn unname_me_participant(connection: &Connection, meeting_id: Uuid) -> Result<()> {
+    connection.execute(
+        "UPDATE participant SET personID = NULL, displayName = ?1 WHERE meetingID = ?2 AND role = ?3",
+        params![ME_LABEL, DbUuid(meeting_id), DbEnum(ParticipantRole::Me)],
+    )?;
+    Ok(())
+}
+
+/// The speaker back to `unknown`, inside a caller's transaction: the voice
+/// of the person it was confirmed to is recomputed without it, and a "me"
+/// speaker's participant is unnamed again. A speaker that is already
+/// unknown is left alone. Returns the speaker as written.
+fn unassign_speaker(connection: &Connection, speaker_id: Uuid) -> Result<Speaker> {
+    let mut speaker =
+        fetch_speaker(connection, speaker_id)?.ok_or(StoreError::SpeakerNotFound(speaker_id))?;
+    let previous = speaker.assignment.clone();
+    if previous == SpeakerAssignment::Unknown {
+        return Ok(speaker);
+    }
+    speaker.assignment = SpeakerAssignment::Unknown;
+    save_speaker(connection, &speaker)?;
+    if let SpeakerAssignment::Confirmed { person_id } = previous {
+        refresh_voice(connection, person_id)?;
+        if speaker_id == me_speaker_id(speaker.meeting_id) {
+            unname_me_participant(connection, speaker.meeting_id)?;
+        }
+    }
+    Ok(speaker)
+}
+
+const REJECTION_COLUMNS: &str = "speakerID, personID, meetingID";
+
+/// The persons the user answered No to, per speaker of the meeting.
+pub(super) fn suggestion_rejections_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<BTreeMap<Uuid, BTreeSet<Uuid>>> {
+    let pairs = query_all(
+        connection,
+        "SELECT speakerID, personID FROM speakerSuggestionRejection WHERE meetingID = ?1 \
+         ORDER BY speakerID, personID",
+        [DbUuid(meeting_id)],
+        |row| {
+            Ok((
+                row.col::<DbUuid>("speakerID")?,
+                row.col::<DbUuid>("personID")?,
+            ))
+        },
+    )?;
+    let mut rejections: BTreeMap<Uuid, BTreeSet<Uuid>> = BTreeMap::new();
+    for (speaker_id, person_id) in pairs {
+        rejections.entry(speaker_id).or_default().insert(person_id);
+    }
+    Ok(rejections)
+}
+
+/// Writes rejections back for the meeting's speakers and persons that
+/// exist; the others went with their rows.
+pub(super) fn restore_suggestion_rejections(
+    connection: &Connection,
+    meeting_id: Uuid,
+    rejections: &BTreeMap<Uuid, BTreeSet<Uuid>>,
+) -> Result<()> {
+    for (speaker_id, person_ids) in rejections {
+        for person_id in person_ids {
+            execute_cached(
+                connection,
+                &format!(
+                    "INSERT OR IGNORE INTO speakerSuggestionRejection ({REJECTION_COLUMNS}) \
+                     SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM speaker WHERE id = ?1) \
+                     AND EXISTS (SELECT 1 FROM person WHERE id = ?2)"
+                ),
+                params![DbUuid(*speaker_id), DbUuid(*person_id), DbUuid(meeting_id)],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -487,6 +575,7 @@ impl Store {
                 "SELECT person.id, person.displayName, person.email, person.embedding, \
                  person.sampleCount, person.createdAt FROM person \
                  JOIN speaker ON speaker.personID = person.id AND speaker.assignment = ?1 \
+                 AND speaker.dismissed = 0 \
                  JOIN meeting ON meeting.id = speaker.meetingID \
                  GROUP BY person.id \
                  ORDER BY MAX(meeting.startedAt) DESC, person.displayName COLLATE NOCASE, person.id",
@@ -527,8 +616,9 @@ impl Store {
         })
     }
 
-    /// The one operation that sets `confirmed`. Saves an unknown person and
-    /// drops the speaker's name suggestion. The same person again changes
+    /// The one operation that sets `confirmed`. Saves an unknown person,
+    /// drops the speaker's name suggestion and any No to this person, and
+    /// undoes a dismissal. The same person again changes
     /// nothing else; a person who already owns another speaker of this
     /// meeting takes this one over (a merge); otherwise the speaker becomes
     /// `confirmed(person)`. Naming the "me" speaker names the meeting's "me"
@@ -545,6 +635,16 @@ impl Store {
             )?;
             if fetch_person(transaction, person.id)?.is_none() {
                 save_person(transaction, person)?;
+            }
+            // Naming a voice answers an earlier No to this person and makes
+            // a dismissed voice a person again.
+            transaction.execute(
+                "DELETE FROM speakerSuggestionRejection WHERE speakerID = ?1 AND personID = ?2",
+                params![DbUuid(speaker_id), DbUuid(person.id)],
+            )?;
+            if speaker.dismissed {
+                speaker.dismissed = false;
+                save_speaker(transaction, &speaker)?;
             }
             if speaker.assignment
                 == (SpeakerAssignment::Confirmed {
@@ -606,7 +706,7 @@ impl Store {
             let unknown = query_all(
                 transaction,
                 &format!(
-                    "SELECT {SPEAKER_COLUMNS} FROM speaker WHERE assignment = ?1 \
+                    "SELECT {SPEAKER_COLUMNS} FROM speaker WHERE assignment = ?1 AND dismissed = 0 \
                      AND NOT EXISTS (SELECT 1 FROM speaker AS owner \
                      WHERE owner.meetingID = speaker.meetingID AND owner.personID = ?2 \
                      AND owner.assignment = ?3) ORDER BY meetingID"
@@ -640,6 +740,77 @@ impl Store {
     /// speaker id order.
     pub fn name_suggestions(&self, meeting_id: Uuid) -> Result<Vec<SpeakerNameSuggestion>> {
         self.read(|connection| name_suggestions_of_meeting(connection, meeting_id))
+    }
+
+    /// "Remove name", beside [`Store::confirm_speaker`]: the speaker goes
+    /// back to `unknown` in this meeting. The person it was confirmed to
+    /// keeps their name and has their voice recomputed without it; for the
+    /// "me" speaker the meeting's "me" participant is unnamed again, while
+    /// who the user is (`Settings::self_person_id`) stays. A suggestion is
+    /// dropped the same way, without a No.
+    pub fn clear_speaker(&self, speaker_id: Uuid) -> Result<()> {
+        self.write(|transaction| unassign_speaker(transaction, speaker_id).map(drop))
+    }
+
+    /// No to a suggestion: `person_id` is recorded as not this voice and is
+    /// not suggested for it again, here or when the meeting is processed
+    /// again. A speaker still suggested as that person goes back to
+    /// `unknown`. Voice memory is not touched: nobody's voice learns from a
+    /// No.
+    pub fn reject_suggestion(&self, speaker_id: Uuid, person_id: Uuid) -> Result<()> {
+        self.write(|transaction| {
+            let mut speaker = fetch_speaker(transaction, speaker_id)?
+                .ok_or(StoreError::SpeakerNotFound(speaker_id))?;
+            if fetch_person(transaction, person_id)?.is_none() {
+                return Err(StoreError::PersonNotFound(person_id));
+            }
+            transaction.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO speakerSuggestionRejection ({REJECTION_COLUMNS}) \
+                     VALUES (?1, ?2, ?3)"
+                ),
+                params![
+                    DbUuid(speaker_id),
+                    DbUuid(person_id),
+                    DbUuid(speaker.meeting_id)
+                ],
+            )?;
+            if speaker.assignment.kind() == SpeakerAssignmentKind::Suggested
+                && speaker.assignment.person_id() == Some(person_id)
+            {
+                speaker.assignment = SpeakerAssignment::Unknown;
+                save_speaker(transaction, &speaker)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The persons the user answered No to, per speaker of the meeting.
+    pub fn suggestion_rejections(
+        &self,
+        meeting_id: Uuid,
+    ) -> Result<BTreeMap<Uuid, BTreeSet<Uuid>>> {
+        self.read(|connection| suggestion_rejections_of_meeting(connection, meeting_id))
+    }
+
+    /// "Not a person", or a person again. Dismissing also takes back a
+    /// suggestion or confirmation as [`Store::clear_speaker`] does, so the
+    /// voice leaves voice memory; its segments keep their text and their
+    /// speaker. Restoring leaves the voice unnamed.
+    pub fn set_speaker_dismissed(&self, speaker_id: Uuid, dismissed: bool) -> Result<()> {
+        self.write(|transaction| {
+            let mut speaker = if dismissed {
+                unassign_speaker(transaction, speaker_id)?
+            } else {
+                fetch_speaker(transaction, speaker_id)?
+                    .ok_or(StoreError::SpeakerNotFound(speaker_id))?
+            };
+            if speaker.dismissed != dismissed {
+                speaker.dismissed = dismissed;
+                save_speaker(transaction, &speaker)?;
+            }
+            Ok(())
+        })
     }
 }
 

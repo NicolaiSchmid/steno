@@ -875,6 +875,7 @@ impl Diarization {
             sample_clip_range: None,
             sample_clip_url: None,
             cluster_confidence: 0.0,
+            dismissed: false,
         }
     }
 }
@@ -2720,6 +2721,7 @@ impl ProcessingPipeline {
                     sample_clip_range: cluster.sample_clip_range,
                     sample_clip_url: clip_url,
                     cluster_confidence: cluster.cluster_confidence,
+                    dismissed: false,
                 });
                 cluster_speakers.push(ClusterSpeaker {
                     speaker_id: id,

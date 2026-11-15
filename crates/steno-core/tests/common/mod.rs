@@ -94,6 +94,7 @@ pub fn speakers(meeting_id: Uuid) -> Vec<Speaker> {
             }),
             sample_clip_url: Some("file:///tmp/clip-1.wav".to_owned()),
             cluster_confidence: 0.9,
+            dismissed: false,
         },
         Speaker {
             id: derived_uuid(meeting_id, "speaker-Speaker 2"),
@@ -104,6 +105,7 @@ pub fn speakers(meeting_id: Uuid) -> Vec<Speaker> {
             sample_clip_range: None,
             sample_clip_url: None,
             cluster_confidence: 0.6,
+            dismissed: false,
         },
     ]
 }

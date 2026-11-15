@@ -520,6 +520,7 @@ fn speaker(
         }),
         sample_clip_url: clip.map(|path| file_url(&path, false)),
         cluster_confidence: 0.9,
+        dismissed: false,
     }
 }
 

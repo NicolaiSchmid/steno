@@ -521,6 +521,7 @@ fn confirming_after_the_audio_is_gone_removes_the_run_clip_the_row_names() {
                 sample_clip_range: None,
                 sample_clip_url: Some(file_url(&clip, false)),
                 cluster_confidence: 1.0,
+                dismissed: false,
             })
             .unwrap();
     }
@@ -578,6 +579,7 @@ fn naming_me_the_first_time_makes_that_person_you_in_every_unnamed_meeting() {
         sample_clip_range: None,
         sample_clip_url: None,
         cluster_confidence: 1.0,
+        dismissed: false,
     };
     let confirmed = |person: &steno_core::Person| SpeakerAssignment::Confirmed {
         person_id: person.id,

@@ -51,6 +51,7 @@ impl LaneMerger {
             sample_clip_range: None,
             sample_clip_url: None,
             cluster_confidence: 1.0,
+            dismissed: false,
         }
     }
 

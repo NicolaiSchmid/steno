@@ -14,8 +14,8 @@ use super::{
 };
 use crate::model::{
     AudioAsset, AudioRetention, Decision, LanguageTag, Meeting, MeetingState, MeetingStateKind,
-    MeetingTask, Participant, RecordingEndReason, Speaker, SpeakerNameSuggestion, SummaryDocument,
-    TitleOrigin, TranscriptSegment, derived_uuid,
+    MeetingTask, Participant, RecordingEndReason, Speaker, SpeakerAssignment,
+    SpeakerNameSuggestion, SummaryDocument, TitleOrigin, TranscriptSegment, derived_uuid,
 };
 use crate::paths::file_url_path;
 
@@ -444,7 +444,10 @@ impl Store {
     /// cluster label), and every person with a confirmed speaker here has
     /// their voice recomputed. A kept confirmation whose new row has no
     /// clip keeps the stored `sampleClipURL` and `sampleClipRange`, so the
-    /// clip the user confirmed stays playable and is not swept.
+    /// clip the user confirmed stays playable and is not swept. The user's
+    /// other answers come back with the id too: a dismissed voice stays
+    /// dismissed, and a No to a person stays, so a new suggestion of a
+    /// person the user said No to for that voice is dropped.
     ///
     /// Commits durably ([`Store::write_durably`]): the pipeline removes the
     /// clips the earlier rows named once this returns, and a power loss
@@ -471,8 +474,15 @@ impl Store {
                 .values()
                 .filter_map(|speaker| speaker.person_id())
                 .collect();
-            // Deleting the speakers cascades to their suggestions.
+            let dismissed: BTreeSet<Uuid> = replaced
+                .iter()
+                .filter(|speaker| speaker.dismissed)
+                .map(|speaker| speaker.id)
+                .collect();
+            // Deleting the speakers cascades to their suggestions and the
+            // user's Noes.
             let suggestions = people::name_suggestions_of_meeting(transaction, meeting.id)?;
+            let rejections = people::suggestion_rejections_of_meeting(transaction, meeting.id)?;
             transaction.execute(
                 "DELETE FROM transcriptSegment WHERE meetingID = ?1",
                 [DbUuid(meeting.id)],
@@ -490,10 +500,21 @@ impl Store {
                         speaker.sample_clip_url.clone_from(&kept.sample_clip_url);
                         speaker.sample_clip_range = kept.sample_clip_range;
                     }
+                } else if let SpeakerAssignment::Suggested { person_id, .. } = speaker.assignment
+                    && rejections
+                        .get(&speaker.id)
+                        .is_some_and(|rejected| rejected.contains(&person_id))
+                {
+                    speaker.assignment = SpeakerAssignment::Unknown;
+                }
+                if dismissed.contains(&speaker.id) {
+                    speaker.dismissed = true;
+                    speaker.assignment = SpeakerAssignment::Unknown;
                 }
                 people::insert_speaker(transaction, &speaker)?;
             }
             people::replace_name_suggestions(transaction, meeting.id, &suggestions)?;
+            people::restore_suggestion_rejections(transaction, meeting.id, &rejections)?;
             for segment in segments {
                 let mut segment = segment.clone();
                 segment.meeting_id = meeting.id;
@@ -699,6 +720,7 @@ mod tests {
             sample_clip_range: None,
             sample_clip_url: Some("file:///audio/speakers/earlier.wav".to_owned()),
             cluster_confidence: 1.0,
+            dismissed: false,
         };
         store.save_speaker(&speaker).unwrap();
         let seen: Arc<Mutex<Vec<Commit>>> = Arc::default();
