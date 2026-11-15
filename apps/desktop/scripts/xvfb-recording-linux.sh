@@ -37,6 +37,15 @@ trap cleanup EXIT
 
 fail() {
   echo "$name: FAILED, $*" >&2
+  # TEMPORARY diagnostics (tmp/smoke-bisect-*).
+  if [[ -n "${DISPLAY:-}" ]] && command -v import >/dev/null; then
+    import -window root "$root/apps/desktop/screens/close-fail.png" || true
+  fi
+  echo "$name: store rows: $(meetings "${store:-/nonexistent}")" >&2
+  echo "$name: focused: $(xdotool getwindowfocus getwindowname 2>&1)" >&2
+  for w in $(xdotool search --onlyvisible --name '.' 2>/dev/null); do
+    echo "$name: window $w '$(xdotool getwindowname "$w")' $(xdotool getwindowgeometry "$w" | tr '\n' ' ')" >&2
+  done
   echo "$name: the app's log:" >&2
   sed 's/^/  /' "$work/app.log" >&2 || true
   exit 1
