@@ -392,7 +392,8 @@ final class SpeakersViewModelTests: XCTestCase {
   }
 
   /// Naming Speaker 2 Nicolai combines it into Speaker 1, where it nests
-  /// with its own clip's words; Separate again gives it back, and a second
+  /// (with its own clip's words when they lie inside the clip, which the
+  /// sample's do not); Separate again gives it back, and a second
   /// Separate is refused by the store.
   func testCombiningNestsTheVoiceAndSeparateGivesItBack() async throws {
     let environment = try await TestSupport.environment()
@@ -407,7 +408,9 @@ final class SpeakersViewModelTests: XCTestCase {
     XCTAssertEqual(model.rows.map(\.id), [SampleData.speakerOneID])
     let combined = try XCTUnwrap(model.combinedVoices(into: SampleData.speakerOneID).first)
     XCTAssertEqual(combined.id, SampleData.speakerTwoID)
-    XCTAssertEqual(combined.excerpt, "…Ich prüfe das Budget bis Freitag.")
+    XCTAssertNil(
+      combined.excerpt,
+      "its paragraph reaches outside its clip: context, which a combined voice does not show")
     XCTAssertFalse(combined.canPlay, "the fixture's clip path is not on disk")
 
     try await model.separate(speakerID: SampleData.speakerTwoID)

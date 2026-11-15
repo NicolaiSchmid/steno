@@ -285,7 +285,10 @@ mod tests {
         assert!(player.play(clip.path()));
         assert_eq!(player.playing().as_deref(), Some(clip.path()));
         drop(player);
-        assert!(!second.exists(), "dropping the player removes the last span");
+        assert!(
+            !second.exists(),
+            "dropping the player removes the last span"
+        );
     }
 
     #[test]
