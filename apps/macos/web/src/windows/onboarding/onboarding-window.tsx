@@ -1,4 +1,5 @@
 import { useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
+import { ToastRegion } from "@/components/ui";
 import { ImportPage } from "./import-page";
 import { PermissionsPage } from "./permissions-page";
 import { SetupPage } from "./setup-page";
@@ -29,6 +30,7 @@ export function OnboardingWindow() {
 					<SetupPage onboarding={onboarding} />
 				)
 			) : null}
+			<ToastRegion />
 		</div>
 	);
 }

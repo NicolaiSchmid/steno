@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AppSnapshot, MeetingDetailSnapshot } from "@/bridge/contract";
 import { applyScenario, loadFixtureSnapshots } from "@/bridge/mock-transport";
+import { ToastRegion } from "@/components/ui";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { MeetingDetail } from "./meeting-detail";
 import { transcriptText } from "./transcript-tab";
@@ -280,7 +281,10 @@ describe("MeetingDetail", () => {
 		const detail = await fixtureDetail();
 		const harness = await createBridgeHarness("scenario=export-failed");
 		renderWithBridge(<MeetingDetail />, harness);
-		expect(screen.getByTestId("export-status")).toHaveTextContent("Failed");
+		const status = screen.getByTestId("export-status");
+		expect(status).toHaveTextContent("Failed");
+		expect(status).toHaveAttribute("role", "alert");
+		expect(status).toHaveAttribute("data-tone", "destructive");
 		await user.click(screen.getByTestId("export-again"));
 		await user.click(screen.getByTestId("export-meeting"));
 		expect(callsTo(harness.transport, "meeting.reexport")).toHaveLength(2);
@@ -297,6 +301,39 @@ describe("MeetingDetail", () => {
 		});
 		await user.click(screen.getByTestId("reveal-export"));
 		expect(callsTo(harness.transport, "meeting.revealExport")).toHaveLength(1);
+	});
+
+	it("toasts once an export the user asked for has run", async () => {
+		const user = userEvent.setup();
+		const detail = await fixtureDetail();
+		const harness = await createBridgeHarness("scenario=export-failed");
+		renderWithBridge(
+			<>
+				<MeetingDetail />
+				<ToastRegion />
+			</>,
+			harness,
+		);
+		await user.click(screen.getByTestId("export-again"));
+		const publish = (status: "pending" | "delivered") =>
+			act(() => {
+				harness.transport.emit("meeting.detail", {
+					...detail,
+					export: {
+						status,
+						message:
+							status === "pending" ? "Exporting…" : "Obsidian · Exported 10:02",
+						canReexport: true,
+						canReveal: status === "delivered",
+					},
+				} satisfies MeetingDetailSnapshot);
+			});
+		publish("pending");
+		expect(screen.queryByTestId("toast")).not.toBeInTheDocument();
+		publish("delivered");
+		expect(await screen.findByTestId("toast")).toHaveTextContent(
+			"Exported.Obsidian · Exported 10:02",
+		);
 	});
 
 	it("lets the template be changed from the actions menu", async () => {

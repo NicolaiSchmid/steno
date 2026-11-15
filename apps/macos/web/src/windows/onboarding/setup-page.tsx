@@ -27,6 +27,7 @@ import {
 	FormValue,
 } from "@/components/ui";
 import { type PlatformWords, usePlatform } from "@/lib/platform";
+import { useCommitToast } from "@/lib/use-commit-toast";
 import { OnboardingPage } from "./onboarding-page";
 
 type SetupStep = OnboardingSnapshot["setup"][number];
@@ -185,6 +186,12 @@ function SummariesFields({
 }) {
 	const { words } = usePlatform();
 	const summaries = onboarding.summaries;
+	const row = onboarding.setup.find((item) => item.kind === "summaries");
+	const startSave = useCommitToast(
+		row?.state === "saved",
+		summaries?.error !== undefined,
+		{ title: "Summaries saved.", description: row?.savedLine },
+	);
 	const skip = <SkipButton client={client} step="summaries" />;
 	if (!summaries) {
 		return <div className="flex items-center gap-2">{skip}</div>;
@@ -301,7 +308,10 @@ function SummariesFields({
 						<Button
 							data-testid="onboarding-save-summaries"
 							disabled={!onboarding.canSaveSummaries}
-							onClick={() => send(client, "onboarding.saveSummaries")}
+							onClick={() => {
+								startSave();
+								send(client, "onboarding.saveSummaries");
+							}}
 							size="sm"
 							variant="primary"
 						>

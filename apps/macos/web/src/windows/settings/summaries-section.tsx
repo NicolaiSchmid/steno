@@ -1,9 +1,4 @@
-import {
-	CheckCircle2Icon,
-	CircleAlertIcon,
-	InfoIcon,
-	TriangleAlertIcon,
-} from "lucide-react";
+import { CircleAlertIcon, TriangleAlertIcon } from "lucide-react";
 import type { SummariesSettingsSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import {
@@ -23,9 +18,11 @@ import {
 	Disclosure,
 	FormCard,
 	FormRow,
+	ResultLine,
 	Select,
 } from "@/components/ui";
 import { keyHome, usePlatform } from "@/lib/platform";
+import { useCommitToast } from "@/lib/use-commit-toast";
 import { SectionPage } from "./section-page";
 
 /** The consent card until confirmed, then the account line and the model. */
@@ -169,6 +166,11 @@ export function SummariesSection() {
 	const platform = usePlatform();
 	const { words } = platform;
 	const summaries = useSnapshot("settings.summaries");
+	const startTest = useCommitToast(
+		summaries?.isTesting === false && summaries.testResult?.ok === true,
+		summaries?.isTesting === false && summaries.testResult?.ok === false,
+		{ title: "Connected.", description: summaries?.testResult?.message },
+	);
 	if (!summaries) {
 		return <SectionPage id="summaries" />;
 	}
@@ -233,13 +235,16 @@ export function SummariesSection() {
 			)}
 
 			<FormCard title="Connection">
-				<FormRow
-					control={
+				<ResultLine
+					actions={
 						summaries.isConfigured ? (
 							<Button
 								data-testid="test-connection"
 								disabled={summaries.isTesting}
-								onClick={() => send(client, "settings.summaries.test")}
+								onClick={() => {
+									startTest();
+									send(client, "settings.summaries.test");
+								}}
 								size="sm"
 								variant="outline"
 							>
@@ -247,17 +252,18 @@ export function SummariesSection() {
 							</Button>
 						) : undefined
 					}
+					className="my-2"
 					data-testid="summaries-status"
-					icon={
-						status.kind === "ok" ? (
-							<CheckCircle2Icon aria-hidden="true" />
-						) : status.kind === "failed" ? (
-							<CircleAlertIcon aria-hidden="true" />
-						) : (
-							<InfoIcon aria-hidden="true" />
-						)
+					details={
+						status.detail ? (
+							<Disclosure
+								data-testid="test-result-details"
+								defaultOpen={status.kind === "failed"}
+							>
+								{status.detail}
+							</Disclosure>
+						) : undefined
 					}
-					label={status.title}
 					tone={
 						status.kind === "ok"
 							? "success"
@@ -266,15 +272,8 @@ export function SummariesSection() {
 								: "muted"
 					}
 				>
-					{status.detail ? (
-						<Disclosure
-							data-testid="test-result-details"
-							defaultOpen={status.kind === "failed"}
-						>
-							{status.detail}
-						</Disclosure>
-					) : null}
-				</FormRow>
+					{status.title}
+				</ResultLine>
 			</FormCard>
 		</SectionPage>
 	);

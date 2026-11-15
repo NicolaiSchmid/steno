@@ -541,12 +541,9 @@ for (const scheme of SCHEMES) {
 }
 
 /**
- * Results are announced: each result line shown today sits in a live
- * region. The toast region does not exist yet (step 6 of
- * .plans/2026-11-14-design-contrast-and-calm.md adds it with `ResultLine`).
- * `UNANNOUNCED` lists the result lines that are not announced today; step 6
- * moves them onto `ResultLine`, and this test fails once one is announced
- * so the list only shrinks.
+ * Results are announced: each result line shown sits in a live region (a
+ * `ResultLine`, a `Callout`), and a toast lands in the region's polite live
+ * viewport. The Remove confirm names what it costs on a red button.
  */
 const RESULTS: readonly (readonly [
 	window: "main" | "settings" | "onboarding",
@@ -563,10 +560,6 @@ const RESULTS: readonly (readonly [
 		"summaries-status",
 	],
 ];
-const UNANNOUNCED = new Set([
-	"main export-status",
-	"settings summaries-status",
-]);
 
 for (const [window, query, testId] of RESULTS) {
 	test(`${window} live region ${testId}`, async ({ page }) => {
@@ -580,6 +573,43 @@ for (const [window, query, testId] of RESULTS) {
 				element.querySelector("[role=status],[role=alert],[aria-live]") !==
 					null,
 		);
-		expect(announced).toBe(!UNANNOUNCED.has(`${window} ${testId}`));
+		expect(announced).toBe(true);
+	});
+}
+
+for (const scheme of SCHEMES) {
+	const dark = scheme === "dark" ? "&dark" : "";
+
+	test(`main ${scheme} toast`, async ({ page, context }) => {
+		await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		await page.goto(`/#/main?tab=transcript${dark}`);
+		await settle(page);
+		await page.getByTestId("meeting-actions").click();
+		await page.getByTestId("copy-transcript").click();
+		const toast = page.getByTestId("toast");
+		await expect(toast).toContainText("Transcript copied.");
+		expect(
+			await toast.evaluate(
+				(element) => element.closest("[aria-live]") !== null,
+			),
+		).toBe(true);
+		await page.waitForTimeout(300);
+		await page.screenshot({ path: `${OUT}/main-${scheme}-toast.png` });
+	});
+
+	test(`settings ${scheme} confirm remove`, async ({ page }) => {
+		await page.setViewportSize(SETTINGS_SIZE);
+		await page.goto(`/#/settings?section=iphone${dark}`);
+		await settle(page);
+		await page.locator("[data-testid^=revoke-]").first().click();
+		const dialog = page.getByTestId("confirm-dialog");
+		await expect(dialog).toBeVisible();
+		await expect(dialog).toContainText("can no longer send recordings");
+		await expect(page.getByTestId("confirm-cancel")).toBeFocused();
+		await settle(page);
+		await page.screenshot({
+			path: `${OUT}/settings-${scheme}-confirm-remove.png`,
+		});
 	});
 }

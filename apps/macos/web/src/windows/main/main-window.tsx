@@ -1,6 +1,11 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { send, useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
-import { ColumnResizer, Drawer, DrawerPopup } from "@/components/ui";
+import {
+	ColumnResizer,
+	Drawer,
+	DrawerPopup,
+	ToastRegion,
+} from "@/components/ui";
 import {
 	COLUMNS,
 	type ColumnName,
@@ -132,6 +137,7 @@ export function MainWindow({
 						</div>
 					</DrawerPopup>
 				</Drawer>
+				<ToastRegion />
 			</NarrowLayoutContext.Provider>
 		);
 	}
@@ -149,6 +155,7 @@ export function MainWindow({
 				{column("list", <MeetingList />)}
 				{detail}
 			</div>
+			<ToastRegion />
 		</NarrowLayoutContext.Provider>
 	);
 }

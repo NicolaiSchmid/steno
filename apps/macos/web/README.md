@@ -84,6 +84,16 @@ Tailwind's own sizes and arbitrary ones. Hierarchy comes from size, weight
 and the muted colour, never opacity. `cn()` knows the names, so a size and
 a colour do not merge away.
 
+**Results are announced.** A result shows where it happened as a
+`ResultLine` (a tinted row, the tone's icon, its own `status` or `alert`
+role), and an explicit commit (onboarding's Save, an export, a pairing, a
+connection test, Process again, a copy) confirms in a toast through
+`notify()`, whose region each window mounts once (`ToastRegion`). Controls
+that save on change confirm nothing. A destructive action the host does
+not ask about asks through `ConfirmDialog`, naming the consequence on a red
+button. `pnpm lint:ui` rejects `role="status"`, `role="alert"` and
+`aria-live` outside the kit.
+
 **Measured contrast.** `src/theme/contrast.test.ts` reads `src/theme.css`
 and measures, in light and dark, every text token at 4.5:1 and every
 outline, icon and focus ring at 3:1 on each surface it can sit on (the
