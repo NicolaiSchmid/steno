@@ -140,7 +140,7 @@ export function SummaryTab({
 function Section({ title, children }: { title: string; children: ReactNode }) {
 	return (
 		<>
-			<h3 className="mt-6 mb-2 font-semibold text-base first:mt-0">{title}</h3>
+			<h3 className="mt-6 mb-2 text-headline first:mt-0">{title}</h3>
 			{children}
 		</>
 	);

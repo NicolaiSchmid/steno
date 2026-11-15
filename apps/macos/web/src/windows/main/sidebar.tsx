@@ -109,7 +109,7 @@ function RecordButton({
 						? "Starting…"
 						: "Stopping…"}
 				{state === "recording" ? (
-					<span className="ml-auto font-mono font-normal text-xs tabular-nums">
+					<span className="ml-auto font-mono font-normal text-meta tabular-nums">
 						{format.duration(elapsed)}
 					</span>
 				) : null}
@@ -312,8 +312,8 @@ export function Sidebar() {
 								aria-hidden="true"
 								className="size-4 shrink-0 text-sidebar-icon"
 							/>
-							<span className="min-w-0 flex-1 text-2xs text-sidebar-muted-foreground">
-								<span className="block truncate font-medium text-foreground text-xs">
+							<span className="min-w-0 flex-1 text-meta text-sidebar-muted-foreground">
+								<span className="block truncate text-foreground text-label">
 									{phone.name}
 								</span>
 								{phone.lastSyncAt

@@ -14,7 +14,7 @@ const textareaVariants = cva(
 	{
 		variants: {
 			variant: {
-				default: "min-h-17.5 text-sm leading-5",
+				default: "min-h-17.5 text-body",
 				/** The notes: the reading type. */
 				reading: "text-reading",
 			},

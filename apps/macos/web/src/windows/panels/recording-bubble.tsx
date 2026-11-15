@@ -118,14 +118,14 @@ export function RecordingBubble() {
 						<RecordMark pulse={recording?.state === "recording"} />
 					</span>
 					{presentation.text ? (
-						<span className="text-muted-foreground text-xs">
+						<span className="text-meta text-muted-foreground">
 							{presentation.text}
 						</span>
 					) : (
 						<>
 							{presentation.showsBars ? <LiveBars history={history} /> : null}
 							<span
-								className="font-mono text-muted-foreground text-xs tabular-nums"
+								className="font-mono text-meta text-muted-foreground tabular-nums"
 								data-testid="bubble-elapsed"
 							>
 								{format.duration(elapsed)}
@@ -179,7 +179,7 @@ function AutoStopLine({
 	return (
 		<>
 			<p
-				className="truncate px-1.5 pt-1 pb-2 text-foreground text-sm"
+				className="truncate px-1.5 pt-1 pb-2 text-body text-foreground"
 				data-testid="bubble-auto-stop"
 			>
 				{autoStop.reason.replace(/[.!?]$/, "")}: stops in{" "}

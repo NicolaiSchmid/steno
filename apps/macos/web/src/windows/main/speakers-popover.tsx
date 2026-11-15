@@ -176,7 +176,7 @@ export function SpeakersPopover({
 				) : null}
 				{groups.unnamed.length > 0 ? (
 					<>
-						<h3 className="mt-4 mb-0 font-medium text-muted-foreground text-xs">
+						<h3 className="mt-4 mb-0 font-medium text-meta text-muted-foreground">
 							Need names
 						</h3>
 						<ul className="my-0 mt-1.5 flex list-none flex-col gap-0.5 p-0">
@@ -345,7 +345,7 @@ function SpeakerRow({
 			</div>
 			{said && !editing ? (
 				<p
-					className="my-0 mb-1 ml-[42px] line-clamp-2 text-muted-foreground text-xs"
+					className="my-0 mb-1 ml-[42px] line-clamp-2 text-meta text-muted-foreground"
 					data-testid={`speakers-popover-snippet-${speaker.id}`}
 				>
 					“{said}”

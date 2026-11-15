@@ -46,8 +46,8 @@ const ghostClass = cn(tileClass, "absolute inset-0 -z-10");
 const emptyStateTitleVariants = cva("m-0 font-semibold text-foreground", {
 	variants: {
 		size: {
-			md: "text-base",
-			lg: "text-xl",
+			md: "text-title",
+			lg: "text-headline",
 		},
 	},
 	defaultVariants: { size: "md" },
@@ -102,7 +102,7 @@ export function EmptyState({
 					{title}
 				</p>
 				{body ? (
-					<p className="m-0 text-muted-foreground text-sm">{body}</p>
+					<p className="m-0 text-body text-muted-foreground">{body}</p>
 				) : null}
 			</div>
 			{action ? <div className="flex gap-2">{action}</div> : null}

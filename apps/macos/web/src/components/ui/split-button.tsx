@@ -15,7 +15,7 @@ import { Menu, type MenuProps, MenuTrigger } from "./menu";
 export const splitButtonVariants = cva(
 	[
 		"relative inline-flex shrink-0 select-none items-stretch overflow-hidden whitespace-nowrap",
-		"rounded-control border font-medium text-sm leading-none",
+		"rounded-control border text-label leading-none",
 		"transition-[background-color,border-color,color,opacity]",
 		"duration-(--duration-functional) ease-standard",
 		"has-[button:disabled]:pointer-events-none has-[button:disabled]:opacity-64",

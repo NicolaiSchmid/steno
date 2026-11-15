@@ -101,7 +101,7 @@ export function SpeakerPicker({
 						size="md"
 						unknown={!named && speaker.assignment === "unknown"}
 					/>
-					<span className="min-w-0 flex-1 truncate font-medium text-sm">
+					<span className="min-w-0 flex-1 truncate text-title">
 						{isMe(speaker) && !named ? "You" : speaker.displayName}
 					</span>
 					<SpeakerPlayButton

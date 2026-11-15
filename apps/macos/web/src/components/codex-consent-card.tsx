@@ -62,7 +62,7 @@ export function CodexConsentCard({
 	const consent = codexConsent(usePlatform().words);
 	const signedIn = codex.signIn === "signedIn";
 	const points = (
-		<ul className="m-0 flex list-disc flex-col gap-1 pl-4 text-muted-foreground text-xs">
+		<ul className="m-0 flex list-disc flex-col gap-1 pl-4 text-meta text-muted-foreground">
 			{consent.points.map((point) => (
 				<li key={point}>{point}</li>
 			))}
@@ -75,8 +75,8 @@ export function CodexConsentCard({
 			padding="lg"
 		>
 			<div className="flex flex-col gap-1.5">
-				<h3 className="m-0 font-semibold text-sm">{consent.title}</h3>
-				<p className="m-0 text-muted-foreground text-sm">{consent.body}</p>
+				<h3 className="m-0 text-title">{consent.title}</h3>
+				<p className="m-0 text-body text-muted-foreground">{consent.body}</p>
 			</div>
 			{compact ? (
 				<Disclosure data-testid="codex-points" summary="What this means">

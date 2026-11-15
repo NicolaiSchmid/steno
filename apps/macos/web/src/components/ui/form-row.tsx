@@ -33,15 +33,13 @@ export function FormCard({
 			{...props}
 		>
 			{title ? (
-				<h3 className="m-0 flex min-h-7 select-none items-center px-4 font-normal text-muted-foreground text-sm">
+				<h3 className="m-0 flex min-h-7 select-none items-center px-4 text-body text-muted-foreground">
 					{title}
 				</h3>
 			) : null}
 			<Card variant="group">{children}</Card>
 			{footer ? (
-				<p className="m-0 px-4 text-muted-foreground text-xs leading-normal">
-					{footer}
-				</p>
+				<p className="m-0 px-4 text-body text-muted-foreground">{footer}</p>
 			) : null}
 		</section>
 	);
@@ -93,11 +91,11 @@ export function FormRow({
 				<div className="flex min-w-0 items-start gap-3">
 					{icon ? <StatusIcon tone={tone}>{icon}</StatusIcon> : null}
 					<div className="flex min-w-0 flex-col gap-0.5">
-						<span className="flex min-h-5 items-center gap-1.5 font-medium text-foreground text-sm">
+						<span className="flex min-h-5 items-center gap-1.5 text-foreground text-title">
 							{label}
 						</span>
 						{description ? (
-							<span className="max-w-xl text-muted-foreground text-xs leading-normal">
+							<span className="max-w-xl text-body text-muted-foreground">
 								{description}
 							</span>
 						) : null}
@@ -124,7 +122,7 @@ export function FormRow({
  * a licence, a percentage. `mono` for figures that change width.
  */
 export const formValueVariants = cva(
-	"inline-flex max-w-50 items-center gap-1.5 text-xs [&>svg]:size-3.5 [&>svg]:shrink-0",
+	"inline-flex max-w-50 items-center gap-1.5 text-meta [&>svg]:size-3.5 [&>svg]:shrink-0",
 	{
 		variants: {
 			variant: {

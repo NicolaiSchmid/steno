@@ -27,7 +27,7 @@ export const fieldStateClass = cn(
 export const inputVariants = cva(
 	[
 		fieldFrameClass,
-		"flex w-full min-w-0 items-center gap-2 text-sm",
+		"flex w-full min-w-0 items-center gap-2 text-body",
 		fieldStateClass,
 	],
 	{
@@ -69,7 +69,7 @@ const searchInputVariants = cva("", {
 			 * in the muted weight until something is typed.
 			 */
 			row: [
-				"flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 font-medium text-sidebar-muted-foreground text-sm",
+				"flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-label text-sidebar-muted-foreground",
 				"transition-colors duration-(--duration-functional) ease-standard",
 				"focus-within:bg-row-hover focus-within:text-foreground hover:bg-row-hover hover:text-foreground",
 				focusWithinRingClass,

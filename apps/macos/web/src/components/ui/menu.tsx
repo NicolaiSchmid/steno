@@ -70,7 +70,7 @@ export function MenuPopup({
 /** A 28 px row: icon at 80 percent, the words, a shortcut at the trailing edge. */
 export const menuItemVariants = cva(
 	[
-		"flex min-h-7 cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-sm outline-none",
+		"flex min-h-7 cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-body outline-none",
 		"[&>svg]:-mx-0.5 [&>svg]:size-4 [&>svg]:shrink-0",
 		"data-highlighted:bg-accent data-disabled:opacity-64",
 	],

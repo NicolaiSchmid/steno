@@ -48,27 +48,24 @@ export function OnboardingPage({
 					<header className="flex flex-col gap-2">
 						{step ? (
 							<p
-								className="m-0 text-muted-foreground text-xs"
+								className="m-0 text-meta text-muted-foreground"
 								data-testid="onboarding-step"
 							>
 								Step {step} of 2
 							</p>
 						) : null}
-						<h1
-							className="m-0 font-semibold text-2xl leading-tight tracking-tight"
-							data-testid="onboarding-title"
-						>
+						<h1 className="m-0 text-display" data-testid="onboarding-title">
 							{title}
 						</h1>
 						<p
-							className="m-0 text-muted-foreground text-sm"
+							className="m-0 text-body text-muted-foreground"
 							data-testid="onboarding-intro"
 						>
 							{intro}
 						</p>
 						{aside ? (
 							<p
-								className="m-0 text-muted-foreground text-xs"
+								className="m-0 text-meta text-muted-foreground"
 								data-testid="onboarding-retention"
 							>
 								{aside}
