@@ -346,7 +346,8 @@ extension MeetingDetailSnapshot {
         assignment: row.speaker.assignment.kind, personID: row.speaker.assignment.personID,
         email: row.person?.email, suggestionName: speakers.prefill(for: row.id),
         suggestionStrength: row.suggestionStrength,
-        quote: row.excerpt.isEmpty ? nil : row.excerpt,
+        quote: row.excerptInClip && !row.excerpt.isEmpty ? row.excerpt : nil,
+        context: !row.excerptInClip && !row.excerpt.isEmpty ? row.excerpt : nil,
         colorIndex: MainWindowSnapshots.colorIndex(for: row.person?.id ?? row.id),
         hasClip: row.canPlay, isPlaying: playing == row.id, dismissed: row.speaker.dismissed)
     }

@@ -195,7 +195,7 @@ final class MeetingDetailViewModel: Identifiable {
   }
 
   /// What a turn of a dismissed voice reads instead of a name.
-  static let notAPerson = "Not a person"
+  static let notAPerson = Speaker.notAPerson
 
   /// The confirmed or suggested person's name, else the cluster label;
   /// `notAPerson` for a dismissed voice, the label for a voice match below

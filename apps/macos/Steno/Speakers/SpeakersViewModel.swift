@@ -20,8 +20,11 @@ final class SpeakersViewModel {
     var speaker: Speaker
     /// The confirmed or suggested person, when the export has them.
     var person: Person?
-    /// What the speaker says in the sample clip (`SpeakerExcerpts`).
+    /// What the speaker says in or around the sample clip (`SpeakerExcerpts`).
     var excerpt: String
+    /// Whether `excerpt` is exactly what the clip plays, a quote; else it is
+    /// context (`SpeakerExcerpts.Excerpt.inClip`).
+    var excerptInClip = false
     /// Whether the sample clip file exists.
     var canPlay: Bool
 
@@ -77,10 +80,12 @@ final class SpeakersViewModel {
     export.speakers = export.speakers.map(Self.shown)
     self.export = export
     rows = export.speakers.map { speaker in
-      Row(
+      let excerpt = SpeakerExcerpts.excerpt(for: speaker, in: export.segments)
+      return Row(
         speaker: speaker,
         person: speaker.personID.flatMap { id in export.persons.first { $0.id == id } },
-        excerpt: SpeakerExcerpts.text(for: speaker, in: export.segments),
+        excerpt: excerpt.text,
+        excerptInClip: excerpt.inClip,
         canPlay: speaker.sampleClipURL.map { FileManager.default.fileExists(atPath: $0.path) }
           ?? false)
     }

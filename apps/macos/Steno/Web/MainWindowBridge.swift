@@ -305,6 +305,7 @@ final class MainWindowBridge: BridgeHost, TopicSource {
       // The page has no "picker closed" moment the host can see; one
       // re-export per change is idempotent and the model retries a refusal.
       await detail.pickerClosed()
+      list.reloadSpeakers()
       try selected.get()
     case .speakersReject:
       let answer = try request.params(RejectSpeakerParams.self)
@@ -378,7 +379,8 @@ final class MainWindowBridge: BridgeHost, TopicSource {
   /// One speaker write other than naming: replied as `failed` when the
   /// store refuses, re-exported once when a speaker changed (the model's
   /// `onWrite` marks it), and republished from the store observation either
-  /// way. Rust: `Host::speakers_write`.
+  /// way; the list's speaker chips are reloaded, so a dismissed voice leaves
+  /// them at once. Rust: `Host::speakers_write`.
   private func speakersWrite(
     _ write: @MainActor (SpeakersViewModel) async throws -> Void
   ) async throws {
@@ -392,6 +394,7 @@ final class MainWindowBridge: BridgeHost, TopicSource {
         BridgeError(code: .failed, message: "Speaker could not be changed: \(error)"))
     }
     await detail.pickerClosed()
+    list.reloadSpeakers()
     try written.get()
   }
 
