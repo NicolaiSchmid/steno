@@ -23,7 +23,7 @@ describe("MeetingDetail", () => {
 		const setup = await createBridgeHarness();
 		const first = renderWithBridge(<MeetingDetail />, setup);
 		expect(await screen.findByTestId("setup-line")).toHaveTextContent(
-			"Summaries are off. Set up Not now",
+			/^Summaries are off\. Set up\s*Not now$/,
 		);
 		// The retention line lives in the footer only, beside its switch.
 		expect(screen.getByTestId("meeting-meta")).not.toHaveTextContent(
@@ -136,15 +136,19 @@ describe("MeetingDetail", () => {
 			} satisfies MeetingDetailSnapshot);
 		});
 		expect(screen.getByTestId("process-again")).toBeDisabled();
-		// Not offered (the recording is gone, or the host is the Swift app).
+		// Not offered (the recording is gone, or the host is the Swift app):
+		// the failure says so in red, with nothing to run.
 		act(() => {
 			harness.transport.emit("meeting.detail", {
 				...failed,
 				canProcessAgain: false,
 			} satisfies MeetingDetailSnapshot);
 		});
-		expect(screen.getByTestId("summary-try-again")).toBeInTheDocument();
+		expect(screen.getByTestId("processing-failed")).toBeInTheDocument();
 		expect(screen.queryByTestId("process-again")).not.toBeInTheDocument();
+		expect(
+			screen.queryByTestId("failure-rerun-summary"),
+		).not.toBeInTheDocument();
 		// A plain ready meeting: not offered.
 		act(() => {
 			harness.transport.emit("meeting.detail", ready);
@@ -160,6 +164,46 @@ describe("MeetingDetail", () => {
 			} satisfies MeetingDetailSnapshot);
 		});
 		expect(screen.getByTestId("process-again")).toBeEnabled();
+	});
+
+	it("announces a failed transcription in red with Process again, once", async () => {
+		const harness = await createBridgeHarness("scenario=failed");
+		renderWithBridge(<MeetingDetail />, harness);
+		const line = await screen.findByTestId("processing-failed");
+		expect(line).toHaveAttribute("role", "alert");
+		expect(line).toHaveAttribute("data-tone", "destructive");
+		expect(line).toHaveTextContent(
+			"Processing failed. Transcription failed: model not installed",
+		);
+		// One recovery: the line's Process again, none in the header.
+		expect(screen.getAllByTestId("process-again")).toHaveLength(1);
+		expect(within(line).getByTestId("process-again")).toBeEnabled();
+		expect(
+			screen.queryByTestId("failure-rerun-summary"),
+		).not.toBeInTheDocument();
+	});
+
+	it("offers Re-run summary when only the summary failed", async () => {
+		const user = userEvent.setup();
+		const snapshots = await loadFixtureSnapshots();
+		const failed = applyScenario(
+			snapshots,
+			new URLSearchParams("scenario=failed"),
+		)["meeting.detail"] as MeetingDetailSnapshot;
+		const ready = await fixtureDetail();
+		const harness = await createBridgeHarness("scenario=failed", {
+			"meeting.detail": {
+				...failed,
+				transcript: ready.transcript,
+				failureReason: "Summary failed: the server answered 500.",
+				canRerunSummary: true,
+			} satisfies MeetingDetailSnapshot,
+		});
+		renderWithBridge(<MeetingDetail />, harness);
+		const line = await screen.findByTestId("processing-failed");
+		await user.click(within(line).getByTestId("failure-rerun-summary"));
+		expect(callsTo(harness.transport, "meeting.rerunSummary")).toHaveLength(1);
+		expect(screen.queryByTestId("process-again")).not.toBeInTheDocument();
 	});
 
 	it("says a summary was skipped because the API key is not available yet", async () => {

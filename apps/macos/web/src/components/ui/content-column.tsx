@@ -10,6 +10,8 @@ export interface ContentColumnProps {
 	actions?: ReactNode;
 	/** A control before the breadcrumb (the narrow window's Meetings button). */
 	leading?: ReactNode;
+	/** Held under the header row, outside the scroll (the narrow window's recorder bar). */
+	bar?: ReactNode;
 	/** `reading` (the meeting, 768 px) or `settings` (the flat sections, 720 px). */
 	width?: "reading" | "settings";
 	children: ReactNode;
@@ -17,13 +19,15 @@ export interface ContentColumnProps {
 
 /**
  * The content column of a window: the header row with the breadcrumb and
- * the actions at its trailing edge, then the content scrolling under it,
+ * the actions at its trailing edge, any bar held under it, then the
+ * content scrolling under them,
  * centred at `width`, its first line clear of the scroll fade.
  */
 export function ContentColumn({
 	crumbs,
 	actions,
 	leading,
+	bar,
 	width = "reading",
 	children,
 }: ContentColumnProps) {
@@ -34,6 +38,7 @@ export function ContentColumn({
 				<Breadcrumb items={crumbs} />
 				{actions}
 			</HeaderRow>
+			{bar}
 			<ScrollArea className="flex-1" fade>
 				<div
 					className={cn(

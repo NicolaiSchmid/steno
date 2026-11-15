@@ -11,8 +11,10 @@ export interface ScrollAreaProps
 	/** Fade the top 1.5 rem of content scrolling under a header row. */
 	fade?: boolean;
 	/**
-	 * A hairline at the top once the content has scrolled, the edge under a
-	 * dialog's header; nothing while the first line is in place.
+	 * A hairline at the scroll viewport's top once the content has scrolled,
+	 * the edge under a dialog's header, with the content fading in under it
+	 * so a cut line shows no sliver; nothing while the first line is in
+	 * place.
 	 */
 	edge?: boolean;
 }
@@ -51,6 +53,7 @@ export function ScrollArea({
 				className={cn(
 					"size-full overscroll-contain outline-none",
 					fade && "scroll-fade-top",
+					edge && "scroll-edge-fade",
 					viewportClassName,
 				)}
 			>

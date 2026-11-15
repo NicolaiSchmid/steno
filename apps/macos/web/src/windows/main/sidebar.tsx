@@ -7,7 +7,6 @@ import {
 	PhoneIcon,
 	SettingsIcon,
 	SmartphoneIcon,
-	TimerIcon,
 	UsersIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -35,8 +34,9 @@ import {
 	usePlatform,
 	useShortcut,
 } from "@/lib/platform";
-import { useCountdownSeconds, useElapsedSeconds } from "@/lib/use-now";
+import { useElapsedSeconds } from "@/lib/use-now";
 import { format } from "./format";
+import { RecorderNotices } from "./recorder-notices";
 
 type Filter = MeetingsListSnapshot["filter"];
 type PermissionKind = RecordingSnapshot["deniedPermissions"][number];
@@ -151,78 +151,6 @@ function RecordButton({
 	);
 }
 
-/**
- * The recorder is about to stop on its own (the call ended): the seconds
- * left, counted down from the snapshot's figure, and a way to keep going.
- */
-function AutoStopNotice({
-	autoStop,
-}: {
-	autoStop: NonNullable<RecordingSnapshot["autoStop"]>;
-}) {
-	const client = useBridge();
-	// The host's figure is taken as of the moment it arrived; the page counts
-	// down from there until a snapshot with a new figure resets it.
-	const remaining = useCountdownSeconds(autoStop.remainingSeconds);
-	const countdown = (
-		<span className="font-mono tabular-nums">
-			{format.countdown(remaining)}
-		</span>
-	);
-	return (
-		<Callout
-			actions={
-				<Button
-					data-testid="keep-recording"
-					onClick={() => send(client, "recording.keepGoing")}
-					size="sm"
-					variant="outline"
-				>
-					Keep recording
-				</Button>
-			}
-			data-testid="auto-stop"
-			description={
-				/[.!?]$/.test(autoStop.reason) ? autoStop.reason : `${autoStop.reason}.`
-			}
-			icon={<TimerIcon aria-hidden="true" />}
-			size="sm"
-			title={<>Stops in {countdown}</>}
-			variant="live"
-		/>
-	);
-}
-
-/** A warning or error from the recorder, kept until the user dismisses it. */
-function RecorderMessage({
-	message,
-	kind,
-}: {
-	message: string;
-	kind: "warning" | "error";
-}) {
-	const client = useBridge();
-	return (
-		<Callout
-			actions={
-				<Button
-					data-testid="dismiss-recorder-message"
-					onClick={() => send(client, "recording.clearMessages")}
-					size="sm"
-					variant="ghost"
-				>
-					Dismiss
-				</Button>
-			}
-			data-testid={`recorder-${kind}`}
-			icon={<CircleAlertIcon aria-hidden="true" />}
-			size="sm"
-			title={message}
-			variant={kind === "error" ? "destructive" : "warning"}
-		/>
-	);
-}
-
 /** A permission the recorder needs and does not have. */
 function DeniedPermission({ kind }: { kind: PermissionKind }) {
 	const client = useBridge();
@@ -254,7 +182,8 @@ function DeniedPermission({ kind }: { kind: PermissionKind }) {
 
 /**
  * The Record control and what the recorder has to say beneath it: the
- * auto-stop countdown, a warning or error, and any permission it is missing.
+ * auto-stop countdown, a warning or error (`RecorderNotices`), and any
+ * permission it is missing.
  */
 function RecordControl({
 	recording,
@@ -264,14 +193,7 @@ function RecordControl({
 	return (
 		<>
 			<RecordButton recording={recording} />
-			{recording?.autoStop && recording.state === "recording" ? (
-				<AutoStopNotice autoStop={recording.autoStop} />
-			) : null}
-			{recording?.error ? (
-				<RecorderMessage kind="error" message={recording.error} />
-			) : recording?.warning ? (
-				<RecorderMessage kind="warning" message={recording.warning} />
-			) : null}
+			<RecorderNotices recording={recording} size="sm" />
 			{recording?.deniedPermissions.map((kind) => (
 				<DeniedPermission key={kind} kind={kind} />
 			))}
@@ -281,8 +203,9 @@ function RecordControl({
 
 /**
  * The 256 px column: a header-high spacer under the traffic lights on the
- * Mac, the Record control, the filters with counts, the tags, then the
- * paired iPhone and Settings at the foot.
+ * Mac, the Record control, the filters with counts (no heading: the list
+ * beside them is titled Meetings), the tags, then the paired iPhone and
+ * Settings at the foot.
  */
 export function Sidebar() {
 	const client = useBridge();
@@ -344,21 +267,22 @@ export function Sidebar() {
 			titleBarInset={platform.titleBarInset}
 		>
 			<RecordControl recording={recording} />
-			<SectionLabel>Meetings</SectionLabel>
-			{FILTERS.map((item) => (
-				<SidebarRow
-					active={list?.filter === item.id}
-					count={list?.counts[item.id]}
-					data-testid={`nav-${item.id}`}
-					icon={item.icon}
-					key={item.id}
-					onClick={() =>
-						send(client, "meetings.setFilter", { filter: item.id })
-					}
-				>
-					{item.label}
-				</SidebarRow>
-			))}
+			<nav aria-label="Filters" className="mt-3 flex flex-col gap-1">
+				{FILTERS.map((item) => (
+					<SidebarRow
+						active={list?.filter === item.id}
+						count={list?.counts[item.id]}
+						data-testid={`nav-${item.id}`}
+						icon={item.icon}
+						key={item.id}
+						onClick={() =>
+							send(client, "meetings.setFilter", { filter: item.id })
+						}
+					>
+						{item.label}
+					</SidebarRow>
+				))}
+			</nav>
 			{list && list.tags.length > 0 ? (
 				<>
 					<SectionLabel>Tags</SectionLabel>
