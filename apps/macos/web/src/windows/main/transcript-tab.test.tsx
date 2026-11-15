@@ -16,7 +16,7 @@ async function detail(): Promise<MeetingDetailSnapshot> {
 }
 
 describe("TranscriptTab", () => {
-	it("asks the host for options, then sends the pick", async () => {
+	it("renames from a turn's name in a small popover", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
 		renderWithBridge(<TranscriptTab detail={await detail()} />, harness);
@@ -26,10 +26,10 @@ describe("TranscriptTab", () => {
 		expect(options.map((option) => option.textContent)).toEqual([
 			"AnnaSuggested, 87% match",
 			"Nicolai",
-			"Add “Anna Berger”",
-			"Leave unnamed",
+			"Create “Add “Anna Berger””",
 		]);
-		expect(screen.getByTestId(`speaker-field-${UNNAMED}`)).toHaveValue("Anna");
+		const field = screen.getByTestId(`speaker-field-${UNNAMED}`);
+		expect(field).toHaveFocus();
 		expect(callsTo(harness.transport, "speakers.options")).toEqual([
 			{
 				method: "speakers.options",
@@ -54,6 +54,25 @@ describe("TranscriptTab", () => {
 		await vi.waitFor(() =>
 			expect(screen.queryByRole("listbox")).not.toBeInTheDocument(),
 		);
+	});
+
+	it("never offers Me's clip", async () => {
+		const snapshot = await detail();
+		const [first, ...rest] = snapshot.speakers;
+		if (!first) {
+			throw new Error("fixture has no speakers");
+		}
+		const harness = await createBridgeHarness();
+		renderWithBridge(
+			<TranscriptTab
+				detail={{
+					...snapshot,
+					speakers: [{ ...first, clusterLabel: "Me", hasClip: true }, ...rest],
+				}}
+			/>,
+			harness,
+		);
+		expect(screen.queryByTestId(`speaker-play-${NICOLAI}`)).toBeNull();
 	});
 
 	it("plays and stops a speaker's clip", async () => {
