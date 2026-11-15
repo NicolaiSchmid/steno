@@ -452,7 +452,15 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 	[
 		"long-transcript-960",
 		"scenario=speakers-long&tab=transcript",
-		async () => {},
+		async (page) => {
+			// The long name truncates; the turn's time stays on its line.
+			const turn = page.getByTestId(/^turn-/).nth(1);
+			await expect(turn.locator(".font-mono")).toBeInViewport({ ratio: 1 });
+			await expect(turn.getByRole("button")).toHaveAttribute(
+				"aria-label",
+				/Hohenzollern-Sigmaringen$/,
+			);
+		},
 		{ width: 960, height: 600 },
 	],
 	[

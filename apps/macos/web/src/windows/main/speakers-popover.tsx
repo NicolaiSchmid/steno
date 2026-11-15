@@ -397,7 +397,7 @@ export function SpeakersPopover({
 	return (
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
 			<PopoverTrigger
-				className="min-w-0 max-w-full"
+				className="min-w-0 max-w-full shrink"
 				data-testid="speakers-trigger"
 				render={<Button size="pill" variant={PILL_VARIANT[state.kind]} />}
 			>

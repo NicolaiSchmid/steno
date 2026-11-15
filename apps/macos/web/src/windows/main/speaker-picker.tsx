@@ -194,7 +194,7 @@ export function SpeakerPicker({
 							? `${speaker.displayName}, suggested. ${tooltip}`
 							: speaker.displayName
 					}
-					className="-ml-[7px] min-w-0 max-w-full"
+					className="-ml-[7px] min-w-0 max-w-full shrink"
 					data-testid={`speaker-picker-${speaker.id}`}
 					onFocus={onFocus}
 					onKeyDown={onKeyDown}
