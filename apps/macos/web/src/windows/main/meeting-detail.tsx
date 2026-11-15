@@ -26,6 +26,7 @@ import {
 	Callout,
 	ContentColumn,
 	EmptyState,
+	focusRingClass,
 	Menu,
 	MenuItem,
 	MenuPopup,
@@ -53,7 +54,6 @@ import {
 } from "./format";
 import { NotesTab } from "./notes-tab";
 import { ProcessingCard } from "./processing-card";
-import { SOURCE } from "./source";
 import { SpeakersPopover } from "./speakers-popover";
 import { SummaryTab } from "./summary-tab";
 import { TagEditor } from "./tag-editor";
@@ -124,8 +124,16 @@ function SetupBanner({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 }
 
 /** A text link on a muted line: the words in full colour, underlined. */
-const lineLinkClass =
-	"rounded-xs text-foreground underline underline-offset-2 outline-none hover:no-underline focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface";
+const lineLinkClass = cn(
+	"rounded-xs text-foreground underline underline-offset-2 hover:no-underline",
+	focusRingClass,
+);
+
+/** The line's dismissal: a muted text button, quieter than the link. */
+const quietButtonClass = cn(
+	"ml-2 rounded-xs text-muted-foreground hover:text-foreground",
+	focusRingClass,
+);
 
 /**
  * Summaries or export still need setting up: one muted line over the
@@ -161,12 +169,11 @@ function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 						type="button"
 					>
 						Set up
-					</button>
-					{" · "}
+					</button>{" "}
 				</>
 			) : null}
 			<button
-				className={lineLinkClass}
+				className={quietButtonClass}
 				data-testid="banner-not-now"
 				onClick={() => send(client, "setup.dismissBanner")}
 				type="button"
@@ -192,7 +199,7 @@ function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
 			size="sm"
 			variant="primary"
 		>
-			<RecordMark pulse={!stopping} />
+			<RecordMark onPrimary pulse={!stopping} />
 			{stopping ? "Stopping…" : "Stop"}
 			{!stopping ? (
 				<span className="font-mono font-normal text-xs tabular-nums">
@@ -286,12 +293,12 @@ function KeepAudioToggle({
 
 const EXPORT_ICON: Record<
 	MeetingDetailSnapshot["export"]["status"],
-	{ icon: ReactNode; tone: "muted" | "success" | "warning" }
+	{ icon: ReactNode; tone: "muted" | "success" | "destructive" }
 > = {
 	notConfigured: { icon: <ShareIcon />, tone: "muted" },
 	pending: { icon: <ClockIcon />, tone: "muted" },
 	delivered: { icon: <CheckCircle2Icon />, tone: "success" },
-	failed: { icon: <CircleAlertIcon />, tone: "warning" },
+	failed: { icon: <CircleAlertIcon />, tone: "destructive" },
 };
 
 /**
@@ -498,7 +505,7 @@ function DetailBody({
 					icon={<CircleAlertIcon aria-hidden="true" />}
 					id={`empty-${current}`}
 					title="Processing failed"
-					variant="warning"
+					variant="destructive"
 				/>
 			);
 		}
@@ -627,32 +634,26 @@ function DetailBody({
 					variant="warning"
 				/>
 			) : null}
+			{/*
+			 * Each item after the first leads with its separator dot, so a
+			 * narrow column wraps the dot with its item instead of leaving it
+			 * at the end of the line. The source's own dot is neutral: the
+			 * person colours are for people.
+			 */}
 			<div
-				className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs [&>i]:size-[3px] [&>i]:rounded-full [&>i]:bg-border"
+				className="flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground text-xs [&>span+span]:before:size-[3px] [&>span+span]:before:rounded-full [&>span+span]:before:bg-border [&>span+span]:before:content-[''] [&>span]:inline-flex [&>span]:items-center [&>span]:gap-2"
 				data-testid="meeting-meta"
 			>
-				<span
-					className={cn(
-						"inline-flex items-center gap-[5px] font-medium text-muted-foreground before:size-1.5 before:rounded-full before:content-['']",
-						SOURCE[detail.source].dot,
-					)}
-				>
+				<span className="gap-[5px]! font-medium before:size-1.5 before:rounded-full before:bg-outline before:content-['']">
 					{formatSource(detail.source)}
 				</span>
-				<i />
 				<span>{format.when(detail.startedAt)}</span>
-				<i />
 				<span className="tabular-nums">
 					{format.duration(detail.durationSeconds)}
 				</span>
 				{detail.language ? (
-					<>
-						<i />
-						<span>{format.language(detail.language)}</span>
-					</>
+					<span>{format.language(detail.language)}</span>
 				) : null}
-				<i />
-				<span>{formatRetention(detail.retention)}</span>
 			</div>
 			<h2
 				className="mt-2 mb-3 font-semibold text-2xl leading-tight tracking-tight"

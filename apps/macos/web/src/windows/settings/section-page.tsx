@@ -39,7 +39,7 @@ export function SectionPage({
 					<Callout
 						icon={<CircleAlertIcon aria-hidden="true" />}
 						title={error}
-						variant="warning"
+						variant="destructive"
 					/>
 					{errorDetails ? (
 						<Disclosure data-testid="section-error-details">

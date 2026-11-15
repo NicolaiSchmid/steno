@@ -29,7 +29,7 @@ export function DownloadFailure({
 				icon={<CircleAlertIcon aria-hidden="true" />}
 				size="sm"
 				title="The download did not finish."
-				variant="warning"
+				variant="destructive"
 			/>
 			{failure ? <Disclosure data-testid={testId}>{failure}</Disclosure> : null}
 		</div>

@@ -148,7 +148,7 @@ export function PhoneSection() {
 					description="Relaunch Steno to try again."
 					icon={<CircleAlertIcon aria-hidden="true" />}
 					title="Pairing is unavailable right now."
-					variant="warning"
+					variant="destructive"
 				/>
 			</SectionPage>
 		);
@@ -271,7 +271,7 @@ export function PhoneSection() {
 					<Callout
 						icon={<CircleAlertIcon aria-hidden="true" />}
 						title="Steno cannot receive recordings right now."
-						variant="warning"
+						variant="destructive"
 					/>
 					{phone.listener.failure ? (
 						<Disclosure>{phone.listener.failure}</Disclosure>

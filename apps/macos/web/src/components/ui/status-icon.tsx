@@ -15,6 +15,7 @@ export const statusIconVariants = cva(
 				muted: "text-muted-foreground",
 				success: "text-success",
 				warning: "text-warning",
+				destructive: "text-destructive",
 			},
 		},
 		defaultVariants: { tone: "muted" },
