@@ -1,6 +1,6 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MeetingDetailSnapshot, SpeakerOption } from "@/bridge/contract";
 import { loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { BridgeError } from "@/bridge/transport";
@@ -14,6 +14,10 @@ const NICOLAI: SpeakerOption = {
 	label: "Nicolai",
 	personID: "00000000-0000-0000-0000-00000000000A",
 };
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 const WOULD_COMBINE = "Nicolai already speaks as Speaker 1 in this meeting.";
 
 async function unnamed(): Promise<Speaker> {
@@ -38,7 +42,9 @@ function refusingSelect(params: unknown) {
 describe("selectSpeaker", () => {
 	it("sends the pick without combining", async () => {
 		const harness = await createBridgeHarness();
-		await selectSpeaker(harness.client, await unnamed(), NICOLAI);
+		expect(
+			await selectSpeaker(harness.client, await unnamed(), NICOLAI),
+		).toEqual({ kind: "committed" });
 		expect(callsTo(harness.transport, "speakers.select")).toEqual([
 			{
 				method: "speakers.select",
@@ -55,7 +61,9 @@ describe("selectSpeaker", () => {
 			{ "speakers.select": refusingSelect },
 		);
 		const speaker = await unnamed();
-		await selectSpeaker(harness.client, speaker, NICOLAI);
+		expect(await selectSpeaker(harness.client, speaker, NICOLAI)).toEqual({
+			kind: "committed",
+		});
 		expect(callsTo(harness.transport, "ui.confirmDestructive")).toEqual([
 			{
 				method: "ui.confirmDestructive",
@@ -82,44 +90,83 @@ describe("selectSpeaker", () => {
 				"ui.confirmDestructive": { confirmed: false },
 			},
 		);
-		await selectSpeaker(harness.client, await unnamed(), NICOLAI);
+		expect(
+			await selectSpeaker(harness.client, await unnamed(), NICOLAI),
+		).toEqual({ kind: "cancelled" });
 		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(1);
 	});
 
-	it("rejects with any other failure", async () => {
+	it("answers any other failure with the host's message", async () => {
 		const harness = await createBridgeHarness(
 			"",
 			{},
 			{ "speakers.select": new Error("Speaker could not be named: busy") },
 		);
-		await expect(
-			selectSpeaker(harness.client, await unnamed(), NICOLAI),
-		).rejects.toThrow("Speaker could not be named: busy");
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		expect(
+			await selectSpeaker(harness.client, await unnamed(), NICOLAI),
+		).toEqual({ kind: "failed", message: "Speaker could not be named: busy" });
 		expect(callsTo(harness.transport, "ui.confirmDestructive")).toEqual([]);
 	});
 });
 
 describe("SpeakerNameField", () => {
-	it("hands a failed pick's message to onError", async () => {
+	async function field(replies: Record<string, unknown> = {}) {
 		const user = userEvent.setup();
-		const harness = await createBridgeHarness(
-			"",
-			{},
-			{ "speakers.select": new Error("Speaker could not be named: busy") },
-		);
-		const onError = vi.fn();
+		const harness = await createBridgeHarness("", {}, replies);
+		const onDone = vi.fn();
 		renderWithBridge(
-			<SpeakerNameField
-				onDone={() => {}}
-				onError={onError}
-				speaker={await unnamed()}
-			/>,
+			<SpeakerNameField onDone={onDone} speaker={await unnamed()} />,
 			harness,
 		);
 		await screen.findAllByRole("option");
-		await user.click(screen.getByRole("option", { name: /^Nicolai/ }));
+		const input = screen.getByTestId(`speaker-field-${UNNAMED}`);
+		await user.type(input, "Nic");
 		await vi.waitFor(() =>
-			expect(onError).toHaveBeenCalledWith("Speaker could not be named: busy"),
+			expect(
+				screen.getByRole("option", { name: /^Nicolai/ }),
+			).toBeInTheDocument(),
 		);
+		return { user, harness, onDone, input };
+	}
+
+	it("closes once the host took the pick", async () => {
+		const { user, onDone } = await field();
+		await user.click(screen.getByRole("option", { name: /^Nicolai/ }));
+		await vi.waitFor(() => expect(onDone).toHaveBeenCalledWith(true));
+		expect(onDone).toHaveBeenCalledTimes(1);
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
+	it("stays on the speaker with its text when the combine is cancelled", async () => {
+		const { user, harness, onDone, input } = await field({
+			"speakers.select": refusingSelect,
+			"ui.confirmDestructive": { confirmed: false },
+		});
+		await user.click(screen.getByRole("option", { name: /^Nicolai/ }));
+		await vi.waitFor(() => expect(input).toHaveFocus());
+		expect(callsTo(harness.transport, "ui.confirmDestructive")).toHaveLength(1);
+		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(1);
+		expect(onDone).not.toHaveBeenCalled();
+		expect(input).toHaveValue("Nic");
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
+	it("stays open with the host's message when the pick failed", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const { user, onDone, input } = await field({
+			"speakers.select": new Error("Speaker could not be named: busy"),
+		});
+		await user.click(screen.getByRole("option", { name: /^Nicolai/ }));
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"Speaker could not be named: busy",
+		);
+		expect(onDone).not.toHaveBeenCalled();
+		expect(input).toHaveValue("Nic");
+		expect(input).toHaveFocus();
+		expect(input).toHaveAttribute("aria-invalid", "true");
+
+		await user.type(input, "o");
+		expect(screen.queryByRole("alert")).toBeNull();
 	});
 });

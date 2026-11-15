@@ -20,7 +20,11 @@ import {
 	Tooltip,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import { SpeakerNameField, selectSpeaker } from "./speaker-name-field";
+import {
+	SelectError,
+	SpeakerNameField,
+	selectSpeaker,
+} from "./speaker-name-field";
 import {
 	firstName,
 	groupSpeakers,
@@ -228,21 +232,24 @@ function SpeakerRow({
 }: SpeakerRowProps) {
 	const client = useBridge();
 	const [preview, setPreview] = useState<string | undefined>(undefined);
+	const [error, setError] = useState<string | undefined>(undefined);
 	const named = isNamed(speaker);
 	const suggested = speaker.assignment === "suggested";
 	const said = named ? "" : snippet(speaker, transcript);
 
-	function confirmSuggestion() {
+	async function confirmSuggestion() {
 		if (!speaker.personID) {
 			return;
 		}
-		selectSpeaker(client, speaker, {
+		setError(undefined);
+		const outcome = await selectSpeaker(client, speaker, {
 			kind: "person",
 			label: speaker.displayName,
 			personID: speaker.personID,
-		}).catch((cause: unknown) => {
-			console.error("bridge: speakers.select failed", cause);
 		});
+		if (outcome.kind === "failed") {
+			setError(outcome.message);
+		}
 	}
 
 	return (
@@ -312,7 +319,7 @@ function SpeakerRow({
 							<>
 								<Button
 									data-testid={`speakers-popover-confirm-${speaker.id}`}
-									onClick={confirmSuggestion}
+									onClick={() => void confirmSuggestion()}
 									size="xs"
 									variant="outline"
 								>
@@ -361,6 +368,9 @@ function SpeakerRow({
 					“{said}”
 				</p>
 			) : null}
+			{editing ? null : (
+				<SelectError className="mt-0 mb-1 ml-[42px]" message={error} />
+			)}
 		</li>
 	);
 }
