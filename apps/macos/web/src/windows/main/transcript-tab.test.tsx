@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
 import { applyScenario, loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
+import { scopeLine } from "./speaker-picker";
 import { TranscriptTab } from "./transcript-tab";
 
 const UNNAMED = "00000000-0000-0000-0000-000000000017";
@@ -27,10 +28,19 @@ describe("TranscriptTab", () => {
 		if (!name) throw new Error("no unnamed turn");
 		await user.click(name);
 		const panel = await screen.findByTestId(`speaker-panel-${UNNAMED}`);
-		// The voice without a clip says so where its play would be.
+		// The voice without a clip says so, on screen, where its play would be.
 		expect(
-			within(panel).getByRole("button", { name: "No clip" }),
+			within(panel).getByRole("button", { name: "No sample" }),
 		).toBeDisabled();
+		expect(
+			within(panel).getByTestId(`speaker-panel-play-${UNNAMED}-none`),
+		).toHaveTextContent("No sample");
+		// The pick changes the whole voice, and the panel says so.
+		expect(
+			within(panel).getByTestId(`speaker-panel-scope-${UNNAMED}`),
+		).toHaveTextContent(
+			"Changes the one paragraph of Speaker 4 in this meeting.",
+		);
 		const options = await within(panel).findAllByRole("option");
 		expect(options.map((option) => option.textContent)).toEqual([
 			"AAnnaSounds like",
@@ -73,8 +83,18 @@ describe("TranscriptTab", () => {
 			"Anna, suggested. Sounds like Anna. Click to confirm or change",
 		);
 		await user.click(name);
+		// The "?" is the grey bubble of the pill and the avatars, decoration only.
+		expect(
+			screen.getAllByTestId(`speaker-suggested-${ANNA}`)[0],
+		).toHaveAttribute("aria-hidden", "true");
 		const panel = await screen.findByTestId(`speaker-panel-${ANNA}`);
 		expect(panel).toHaveTextContent("Sounds like Anna");
+		// Its play is the voice's sample, not this paragraph's audio.
+		expect(
+			within(panel).getByRole("button", {
+				name: "Play the voice sample of Speaker 3",
+			}),
+		).toHaveTextContent("Voice sample");
 		await user.click(within(panel).getByRole("button", { name: "Yes" }));
 		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(1);
 	});
@@ -118,5 +138,22 @@ describe("TranscriptTab", () => {
 		expect(within(turn).getAllByRole("button")).toHaveLength(1);
 		expect(screen.queryByTestId(/^speaker-play-/)).toBeNull();
 		expect(screen.queryByTestId("copy-transcript")).toBeNull();
+	});
+});
+
+describe("scopeLine", () => {
+	it("says the pick changes every paragraph of the voice, and whose", async () => {
+		const { speakers } = await detail();
+		const [nicolai, , anna] = speakers;
+		if (!nicolai || !anna) throw new Error("fixture speakers");
+		expect(scopeLine(anna, 3)).toBe(
+			"Changes all 3 paragraphs of Speaker 3 in this meeting.",
+		);
+		expect(scopeLine(nicolai, 2)).toBe(
+			"Changes all 2 paragraphs of Nicolai (Speaker 1) in this meeting.",
+		);
+		expect(scopeLine({ ...nicolai, clusterLabel: "Me" }, 4)).toBe(
+			"Changes all 4 paragraphs of Nicolai (you) in this meeting.",
+		);
 	});
 });

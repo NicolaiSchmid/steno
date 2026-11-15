@@ -19,6 +19,7 @@ import {
 	Badge,
 	Button,
 	focusRowClass,
+	Kbd,
 	Popover,
 	PopoverPopup,
 	PopoverTrigger,
@@ -36,6 +37,7 @@ import {
 	isNamed,
 	needsLabel,
 	nextToName,
+	optionColor,
 	type PanelLayout,
 	type PillState,
 	type Placement,
@@ -141,6 +143,13 @@ interface Failure {
 	text: string;
 }
 
+/** A pick on its way: the name it shows, in the colour it will have. */
+interface Saving {
+	label: string;
+	/** None for a Create: the new person's colour is the host's to fold. */
+	colorIndex: number | undefined;
+}
+
 /**
  * The header's one entry point to naming: a pill whose look says whether
  * work is left, and the panel it opens. The panel lists, in this order, an
@@ -148,7 +157,9 @@ interface Failure {
  * line the voice said, its clip, Yes and Change), "Need names" (the whole
  * row opens naming) and "Speakers" (confirmed people; a person's second
  * voice nests under them, and a voice that sounds like them asks "Also
- * Nicolai?"). Rows stay where they were while the panel is open.
+ * Nicolai?"). Rows stay where they were while the panel is open; a row
+ * named during the visit is marked done and can be opened again to
+ * correct it, but not confirmed twice.
  *
  * Naming keeps the voice's evidence on screen and opens the field under
  * it. A pick shows the name with "Saving"; once the host took it the field
@@ -158,8 +169,10 @@ interface Failure {
  *
  * Keyboard: the pill opens on the first row with work; Up and Down move
  * between rows, each one tab stop; on a row Enter names, Y confirms, N
- * changes and P plays. Escape closes the field and returns to its row; a
- * second Escape closes the panel and returns to the pill. Test ids carry a
+ * changes and P plays, the keys shown while keyboard focus is on the row.
+ * Tab and Shift+Tab leave the field for the next or previous row without a
+ * pick. Escape closes the field and returns to its row; a second Escape
+ * closes the panel and returns to the pill. Test ids carry a
  * `speakers-popover-` prefix so they never collide with the transcript's.
  */
 export function SpeakersPopover({
@@ -173,7 +186,7 @@ export function SpeakersPopover({
 	const [frozen, setFrozen] = useState<Map<string, Placement> | undefined>();
 	const [active, setActive] = useState<string | undefined>();
 	const [editing, setEditing] = useState<Editing | null>(null);
-	const [saving, setSaving] = useState<ReadonlyMap<string, string>>(new Map());
+	const [saving, setSaving] = useState<ReadonlyMap<string, Saving>>(new Map());
 	const [failures, setFailures] = useState<ReadonlyMap<string, Failure>>(
 		new Map(),
 	);
@@ -183,9 +196,13 @@ export function SpeakersPopover({
 	// which rows are saving now.
 	const isOpen = useRef(false);
 	const savingNow = useRef(new Set<string>());
+	// The panel as last drawn: a pick that settles after another one
+	// reads it, not the layout from before its await.
+	const latest = useRef<PanelLayout | undefined>(undefined);
 
 	const state = pillState(speakers, transcript.length > 0, finding);
 	const layout = panelLayout(speakers, frozen);
+	latest.current = layout;
 	const order = rowOrder(layout);
 	const current =
 		order.find((speaker) => speaker.id === active)?.id ?? order[0]?.id;
@@ -265,6 +282,30 @@ export function SpeakersPopover({
 		focusNext.current = speaker.id;
 	}
 
+	/** Tab out of the field: no pick, focus on the next (or previous) row. */
+	function tabFrom(speaker: Speaker, backward: boolean) {
+		const at = order.findIndex((row) => row.id === speaker.id);
+		const target =
+			order[
+				Math.min(Math.max(at + (backward ? -1 : 1), 0), order.length - 1)
+			] ?? speaker;
+		setEditing(null);
+		setActive(target.id);
+		focusNext.current = target.id;
+	}
+
+	/**
+	 * Focus left the field without a pick: the edit ends. Focus stays where
+	 * it went, or comes back to the row when it went nowhere; a Tab or a
+	 * pick that already chose where focus goes keeps its choice.
+	 */
+	function leaveNaming(speaker: Speaker, to: Element | null) {
+		setEditing((now) => (now?.speakerID === speaker.id ? null : now));
+		if (to === null) {
+			focusNext.current ??= speaker.id;
+		}
+	}
+
 	/**
 	 * Sends a pick and settles the row: "Saving" until the host answers,
 	 * then the next unnamed voice's field, or the row again with its text
@@ -285,7 +326,12 @@ export function SpeakersPopover({
 			next.delete(speaker.id);
 			return next;
 		});
-		setSaving((map) => new Map(map).set(speaker.id, option.label));
+		setSaving((map) =>
+			new Map(map).set(speaker.id, {
+				label: option.label,
+				colorIndex: optionColor(option, speakers),
+			}),
+		);
 		setEditing((now) => (now?.speakerID === speaker.id ? null : now));
 		focusNext.current = speaker.id;
 		const outcome = await select(speaker, option);
@@ -303,9 +349,10 @@ export function SpeakersPopover({
 			return;
 		}
 		if (outcome.kind === "committed") {
-			const next = work
-				? nextToName(layout, speaker.id, savingNow.current)
-				: undefined;
+			const next =
+				work && latest.current
+					? nextToName(latest.current, speaker.id, savingNow.current)
+					: undefined;
 			if (next) {
 				focusNext.current = null;
 				setActive(next.id);
@@ -330,7 +377,12 @@ export function SpeakersPopover({
 	}
 
 	function confirm(speaker: Speaker) {
-		if (!speaker.personID) {
+		// Confirmed already, or on its way: a second Yes sends nothing.
+		if (
+			!speaker.personID ||
+			isNamed(speaker) ||
+			savingNow.current.has(speaker.id)
+		) {
 			return;
 		}
 		void commit(
@@ -358,10 +410,8 @@ export function SpeakersPopover({
 		) {
 			return;
 		}
-		// A row saving, or settled during this visit, takes no new pick.
-		const settled =
-			saving.has(speaker.id) ||
-			(isNamed(speaker) && kind !== "person" && kind !== "voice");
+		// A row saving takes no new pick; a named row is not confirmed again.
+		const inert = saving.has(speaker.id);
 		const at = order.findIndex((row) => row.id === speaker.id);
 		const move: Record<string, number> = {
 			ArrowDown: Math.min(at + 1, order.length - 1),
@@ -377,12 +427,16 @@ export function SpeakersPopover({
 				setActive(target.id);
 				rows.current.get(target.id)?.focus();
 			}
-		} else if (settled && key !== "p") {
+		} else if (inert && key !== "p") {
 			return;
 		} else if (key === "Enter" || key === " ") {
 			event.preventDefault();
 			startNaming(speaker);
-		} else if (key === "y" && (kind === "check" || kind === "also")) {
+		} else if (
+			key === "y" &&
+			(kind === "check" || kind === "also") &&
+			!isNamed(speaker)
+		) {
 			event.preventDefault();
 			confirm(speaker);
 		} else if (key === "n" && (kind === "check" || kind === "also")) {
@@ -404,6 +458,7 @@ export function SpeakersPopover({
 			onConfirm={() => confirm(speaker)}
 			onFocus={() => setActive(speaker.id)}
 			onKeyDown={(event) => onRowKey(event, speaker, kind)}
+			onLeave={(to) => leaveNaming(speaker, to)}
 			onName={(excluded) => startNaming(speaker, excluded)}
 			onRetry={(failure) =>
 				void commit(
@@ -414,6 +469,7 @@ export function SpeakersPopover({
 				)
 			}
 			onSubmit={(option, text) => void commit(speaker, option, text)}
+			onTab={(backward) => tabFrom(speaker, backward)}
 			person={person}
 			rowRef={(element) => {
 				if (element) {
@@ -533,7 +589,7 @@ interface PanelRowProps {
 	speakers: readonly Speaker[];
 	transcript: readonly Turn[];
 	editing: Editing | null;
-	saving: string | undefined;
+	saving: Saving | undefined;
 	failure: Failure | undefined;
 	tabIndex: number;
 	rowRef: (element: HTMLElement | null) => void;
@@ -543,11 +599,17 @@ interface PanelRowProps {
 	onConfirm: () => void;
 	onSubmit: (option: SpeakerOption, text: string) => void;
 	onCancel: () => void;
+	onLeave: (to: Element | null) => void;
+	onTab: (backward: boolean) => void;
 	onRetry: (failure: Failure) => void;
 }
 
 /** What a row says for itself to a screen reader, and which keys it takes. */
 function rowLabel(speaker: Speaker, kind: RowKind, person?: Speaker): string {
+	if (isNamed(speaker) && kind !== "person" && kind !== "me") {
+		// Named during this visit, still in its section.
+		return `${speaker.clusterLabel}, ${speaker.displayName}`;
+	}
 	switch (kind) {
 		case "me":
 			return isNamed(speaker)
@@ -577,10 +639,25 @@ const KEYS: Record<RowKind, string> = {
 	also: "Enter Y N P",
 };
 
+/** A row's key, shown only while keyboard focus is on the row. */
+function KeyHint({ children }: { children: string }) {
+	return (
+		<Kbd
+			aria-hidden="true"
+			className="hidden group-focus-visible/row:inline-flex"
+			variant="plain"
+		>
+			{children}
+		</Kbd>
+	);
+}
+
 /**
  * One row of the panel: one tab stop (its buttons are reached by the
- * row's keys or the pointer), with the voice's evidence (a line it said,
- * its clip) on screen while it is named, the field under them.
+ * row's keys, hinted while the row has keyboard focus, or the pointer),
+ * with the voice's evidence (a line it said, its clip) on screen while it
+ * is named, the field under them. A row named during the visit is done:
+ * it opens again to correct the name, and offers no second Yes.
  */
 function PanelRow({
 	speaker,
@@ -599,6 +676,8 @@ function PanelRow({
 	onConfirm,
 	onSubmit,
 	onCancel,
+	onLeave,
+	onTab,
 	onRetry,
 }: PanelRowProps) {
 	const named = isNamed(speaker);
@@ -606,15 +685,22 @@ function PanelRow({
 	const done =
 		named &&
 		(kind === "me" || kind === "check" || kind === "need" || kind === "also");
+	// A confirmed person's line shows while they are renamed, as evidence.
 	const said =
-		kind === "person" || kind === "me" ? "" : snippet(speaker, transcript);
-	const wholeRow = kind !== "check" && kind !== "also";
+		(kind === "person" || kind === "me") && !editing
+			? ""
+			: snippet(speaker, transcript);
+	// The whole row opens naming, except where Yes and Change sit.
+	const opens =
+		(done || (kind !== "check" && kind !== "also")) &&
+		!editing &&
+		saving === undefined;
 
 	const title: ReactNode =
 		saving !== undefined ? (
 			<>
 				<span className="min-w-0 truncate font-medium text-title">
-					{saving}
+					{saving.label}
 				</span>
 				<span
 					className="shrink-0 text-meta text-muted-foreground"
@@ -688,10 +774,14 @@ function PanelRow({
 		kind === "voice" || kind === "also" || kind === "me" ? null : (
 			<Avatar
 				aria-hidden="true"
-				index={speaker.colorIndex}
-				name={saving ?? speaker.displayName}
+				index={saving ? (saving.colorIndex ?? 0) : speaker.colorIndex}
+				name={saving?.label ?? speaker.displayName}
 				size="lg"
-				unknown={speaker.assignment === "unknown" && saving === undefined}
+				unknown={
+					saving
+						? saving.colorIndex === undefined
+						: speaker.assignment === "unknown"
+				}
 			/>
 		);
 	const failureLine = failure ? (
@@ -719,6 +809,7 @@ function PanelRow({
 					variant="outline"
 				>
 					{kind === "also" ? "Same person" : "Yes"}
+					<KeyHint>Y</KeyHint>
 				</Button>
 				<Button
 					data-testid={`speakers-popover-change-${speaker.id}`}
@@ -731,6 +822,7 @@ function PanelRow({
 					variant="ghost"
 				>
 					{kind === "also" ? "Someone else" : "Change"}
+					<KeyHint>N</KeyHint>
 				</Button>
 			</div>
 		) : null;
@@ -743,23 +835,15 @@ function PanelRow({
 		>
 			{/* biome-ignore lint/a11y/useSemanticElements: a row of the panel holds its own buttons, so it cannot be one; it is one tab stop with keys. */}
 			<div
-				aria-keyshortcuts={KEYS[kind]}
+				aria-keyshortcuts={done ? "Enter P" : KEYS[kind]}
 				aria-label={rowLabel(speaker, kind, person)}
 				className={cn(
-					"flex min-w-0 gap-2.5 rounded-md px-2 py-1.5",
+					"group/row flex min-w-0 gap-2.5 rounded-md px-2 py-1.5",
 					focusRowClass,
-					wholeRow &&
-						!editing &&
-						!done &&
-						saving === undefined &&
-						"cursor-default hover:bg-row-hover",
+					opens && "cursor-default hover:bg-row-hover",
 				)}
 				data-testid={`speakers-popover-name-${speaker.id}`}
-				onClick={
-					wholeRow && !editing && !done && saving === undefined
-						? () => onName()
-						: undefined
-				}
+				onClick={opens ? () => onName() : undefined}
 				onFocus={onFocus}
 				onKeyDown={onKeyDown}
 				ref={rowRef}
@@ -774,6 +858,7 @@ function PanelRow({
 						</div>
 						{kind === "me" || (kind === "person" && isMe(speaker)) ? null : (
 							<SpeakerPlayButton
+								keyHint
 								speaker={speaker}
 								tabIndex={-1}
 								testID={`speakers-popover-play-${speaker.id}`}
@@ -793,14 +878,15 @@ function PanelRow({
 			</div>
 			{editing ? (
 				<SpeakerNameField
-					cancelOnBlur
 					className={cn("mt-1 mb-1.5 px-2", avatar && "pl-[50px]")}
 					{...(editing.excluded ? { excludedPersonID: editing.excluded } : {})}
 					initialText={editing.text}
 					listClassName="max-h-40"
 					notice={failureLine}
 					onCancel={onCancel}
+					onLeave={onLeave}
 					onSubmit={onSubmit}
+					onTab={onTab}
 					speaker={speaker}
 					speakers={speakers}
 				/>

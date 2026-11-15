@@ -2,13 +2,18 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
+import { BridgeProvider } from "@/bridge/hooks";
 import {
 	applyScenario,
 	type FixtureMap,
 	loadFixtureSnapshots,
 } from "@/bridge/mock-transport";
 import { BridgeError } from "@/bridge/transport";
+import * as ui from "@/components/ui";
+import { TooltipProvider } from "@/components/ui";
+import { PlatformProvider, SWIFT_MAC } from "@/lib/platform";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
+import type { Speaker } from "./speaker-names";
 import { SpeakersPopover } from "./speakers-popover";
 
 const ME = "00000000-0000-0000-0000-000000000014";
@@ -51,11 +56,47 @@ async function render(scenario = "", replies: FixtureMap = {}) {
 	const user = userEvent.setup();
 	const harness = await createBridgeHarness("", {}, replies);
 	const { speakers, transcript } = await detail(scenario);
-	renderWithBridge(
+	const { rerender } = renderWithBridge(
 		<SpeakersPopover speakers={speakers} transcript={transcript} />,
 		harness,
 	);
-	return { user, harness };
+	/** The host republishing the meeting with these speakers. */
+	const republish = (next: MeetingDetailSnapshot["speakers"]) =>
+		rerender(
+			<PlatformProvider platform={SWIFT_MAC}>
+				<TooltipProvider delay={0}>
+					<BridgeProvider client={harness.client}>
+						<SpeakersPopover speakers={next} transcript={transcript} />
+					</BridgeProvider>
+				</TooltipProvider>
+			</PlatformProvider>,
+		);
+	return { user, harness, speakers, republish };
+}
+
+/** `speaker` as the host republishes it once confirmed as `name`. */
+function named(speaker: Speaker, name: string): Speaker {
+	const { suggestionName: _name, ...rest } = speaker;
+	return {
+		...rest,
+		assignment: "confirmed",
+		displayName: name,
+		personID: speaker.personID ?? `person-${name}`,
+	};
+}
+
+/** Picks that wait for the test to settle them, one per voice. */
+function heldSelect() {
+	const held = new Map<string, () => void>();
+	const replies: FixtureMap = {
+		"speakers.select": (params: unknown) =>
+			new Promise<undefined>((resolve) => {
+				held.set((params as { speakerID: string }).speakerID, () =>
+					resolve(undefined),
+				);
+			}),
+	};
+	return { held, replies };
 }
 
 async function open(scenario = "", replies: FixtureMap = {}) {
@@ -109,10 +150,11 @@ describe("the speakers panel", () => {
 				.map((heading) => heading.textContent),
 		).toEqual(["Is this right?", "Need names", "Speakers"]);
 		expect(row(ANNA)).toHaveTextContent("Speaker 3Sounds like Anna");
-		// A voice without a clip keeps its slot, disabled, and says so.
+		// A voice without a clip keeps its slot, disabled, and says so on screen.
 		expect(
-			within(row(UNNAMED)).getByRole("button", { name: "No clip" }),
+			within(row(UNNAMED)).getByRole("button", { name: "No sample" }),
 		).toBeDisabled();
+		expect(row(UNNAMED)).toHaveTextContent("No sample");
 		// No email beside a confirmed name.
 		expect(within(panel).queryByText(/@example\.com/)).toBeNull();
 		expect(screen.queryByText(/87%/)).toBeNull();
@@ -300,5 +342,123 @@ describe("the speakers panel", () => {
 		await user.click(screen.getByRole("button", { name: "Someone else" }));
 		await screen.findAllByRole("option");
 		expect(screen.queryByRole("option", { name: /Nicolai/ })).toBeNull();
+	});
+
+	it("keeps a row confirmed during the visit in place, open to correct, never confirmed twice", async () => {
+		const { user, harness, speakers, republish } = await open();
+		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
+		await user.keyboard("y");
+		await vi.waitFor(() =>
+			expect(
+				screen.queryByTestId(`speakers-popover-saving-${ANNA}`),
+			).toBeNull(),
+		);
+		republish(
+			speakers.map((speaker) =>
+				speaker.id === ANNA ? named(speaker, "Anna") : speaker,
+			),
+		);
+		const check = screen.getByTestId("speakers-section-check");
+		expect(check).toContainElement(row(ANNA));
+		expect(within(row(ANNA)).getByLabelText("Named")).toBeVisible();
+		expect(screen.queryByTestId(`speakers-popover-yes-${ANNA}`)).toBeNull();
+		row(ANNA).focus();
+		await user.keyboard("y");
+		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(1);
+		await user.keyboard("{Enter}");
+		expect(screen.getByTestId(`speaker-field-${ANNA}`)).toHaveFocus();
+	});
+
+	it("takes no pick on a row while it saves", async () => {
+		const { user, harness } = await open("", NEVER);
+		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
+		await user.keyboard("y");
+		await screen.findByTestId(`speakers-popover-saving-${ANNA}`);
+		await user.keyboard("y");
+		await user.keyboard("{Enter}");
+		await user.click(row(ANNA));
+		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(1);
+		expect(screen.queryByRole("combobox")).toBeNull();
+	});
+
+	it("leaves the field for the next row with Tab and the previous with Shift+Tab, picking nothing", async () => {
+		const { user, harness } = await open("speakers-none");
+		await user.click(row(SPEAKER_1));
+		await screen.findAllByRole("option");
+		await user.keyboard("Ann");
+		await user.tab();
+		expect(screen.queryByRole("combobox")).toBeNull();
+		expect(row(SPEAKER_2)).toHaveFocus();
+		await user.keyboard("{Enter}");
+		await user.tab({ shift: true });
+		expect(row(SPEAKER_1)).toHaveFocus();
+		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(0);
+	});
+
+	it("shows a row's keys, hidden until keyboard focus is on the row", async () => {
+		await open();
+		const yes = screen.getByTestId(`speakers-popover-yes-${ANNA}`);
+		const key = within(yes).getByText("Y");
+		expect(key.tagName).toBe("KBD");
+		expect(key).toHaveAttribute("aria-hidden", "true");
+		expect(key).toHaveClass("hidden", "group-focus-visible/row:inline-flex");
+		expect(row(ANNA)).toHaveClass("group/row");
+		expect(within(row(ANNA)).getByText("N").tagName).toBe("KBD");
+		expect(within(row(ANNA)).getByText("P").tagName).toBe("KBD");
+	});
+
+	it("keeps a confirmed person's line on screen while they are renamed", async () => {
+		const { user } = await open();
+		expect(
+			screen.queryByTestId(`speakers-popover-snippet-${NICOLAI}`),
+		).toBeNull();
+		await user.click(row(NICOLAI));
+		expect(
+			screen.getByTestId(`speakers-popover-snippet-${NICOLAI}`),
+		).toBeVisible();
+	});
+
+	it("says You are Nicolai once Me is named", async () => {
+		const toast = vi.spyOn(ui, "notify");
+		const { user } = await open("speakers-none");
+		await user.click(row(ME));
+		await user.click(await screen.findByRole("option", { name: /Nicolai/ }));
+		await vi.waitFor(() =>
+			expect(toast).toHaveBeenCalledWith({ title: "You are Nicolai." }),
+		);
+	});
+
+	it("does not reopen a voice named meanwhile when an earlier pick settles last", async () => {
+		const { held, replies } = heldSelect();
+		const { user, speakers, republish } = await open("speakers-none", replies);
+		// Speaker 1's pick goes out and waits.
+		await user.click(row(SPEAKER_1));
+		await screen.findAllByRole("option");
+		await user.keyboard("{Enter}");
+		await screen.findByTestId(`speakers-popover-saving-${SPEAKER_1}`);
+		// Speaker 2 is named and the host takes it first.
+		await user.click(row(SPEAKER_2));
+		await screen.findAllByRole("option");
+		await user.keyboard("{Enter}");
+		await screen.findByTestId(`speakers-popover-saving-${SPEAKER_2}`);
+		held.get(SPEAKER_2)?.();
+		await vi.waitFor(() =>
+			expect(
+				screen.queryByTestId(`speakers-popover-saving-${SPEAKER_2}`),
+			).toBeNull(),
+		);
+		republish(
+			speakers.map((speaker) =>
+				speaker.id === SPEAKER_2 ? named(speaker, "Anna") : speaker,
+			),
+		);
+		// Then Speaker 1's: nothing after it is unnamed now, so no field opens.
+		held.get(SPEAKER_1)?.();
+		await vi.waitFor(() =>
+			expect(
+				screen.queryByTestId(`speakers-popover-saving-${SPEAKER_1}`),
+			).toBeNull(),
+		);
+		expect(screen.queryByRole("combobox")).toBeNull();
 	});
 });

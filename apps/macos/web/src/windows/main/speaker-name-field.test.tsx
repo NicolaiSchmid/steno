@@ -80,7 +80,7 @@ describe("selectSpeaker", () => {
 		).toEqual({ kind: "committed" });
 		expect(confirm).toHaveBeenCalledWith({
 			title: `Combine ${speaker.clusterLabel} with Nicolai?`,
-			consequence: `${WOULD_COMBINE} Their paragraphs become Nicolai’s. This cannot be undone.`,
+			consequence: `${WOULD_COMBINE} ${speaker.clusterLabel}’s paragraphs become Nicolai’s. This cannot be undone.`,
 		});
 		expect(
 			callsTo(harness.transport, "speakers.select").map(

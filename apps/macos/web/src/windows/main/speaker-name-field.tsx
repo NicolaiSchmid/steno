@@ -73,7 +73,7 @@ export async function selectSpeaker(
 			}
 			const confirmed = await confirm({
 				title: `Combine ${speaker.clusterLabel} with ${option.label}?`,
-				consequence: `${cause.message} Their paragraphs become ${option.label}’s. This cannot be undone.`,
+				consequence: `${cause.message} ${isMe(speaker) ? "Your" : `${speaker.clusterLabel}’s`} paragraphs become ${option.label}’s. This cannot be undone.`,
 			});
 			if (!confirmed) {
 				return { kind: "cancelled" };
@@ -179,13 +179,19 @@ export interface SpeakerNameFieldProps {
 	speakers: readonly Speaker[];
 	/** Called with the highlighted option and the typed text on Enter or a click. */
 	onSubmit: (option: SpeakerOption, text: string) => void;
-	/** Escape, and with `cancelOnBlur` focus leaving the field and its options. */
+	/** Escape. */
 	onCancel: () => void;
+	/**
+	 * Focus left the field and its scope (the edit ends without a pick),
+	 * for `to`, or for nothing (a click on the panel's background).
+	 */
+	onLeave?: (to: Element | null) => void;
+	/** Tab or Shift+Tab: the edit ends and focus moves to a neighbouring row. */
+	onTab?: (backward: boolean) => void;
 	/** The text to reopen with after a failed or cancelled pick. */
 	initialText?: string;
 	/** A person not to offer ("Someone else" after "Also Nicolai?"). */
 	excludedPersonID?: string;
-	cancelOnBlur?: boolean;
 	/** Under the field, above the options: a failed pick's line with Retry. */
 	notice?: ReactNode;
 	/** The options list's height cap; the panel keeps the evidence above it. */
@@ -205,19 +211,21 @@ type Answer =
  * are for the text on screen: while they load the list says "Searching…"
  * and Enter does nothing, so nothing is chosen that was not seen. If they
  * fail to load the list says so and keeps a highlighted Create row for the
- * typed name. Escape gives up; an input method's composing Enter is left
- * alone. With `cancelOnBlur`, focus leaving the field ends the edit, unless
- * it stays inside the nearest `data-naming-scope` (the row's evidence).
- * The placeholder is the voice's label; nothing is prefilled.
+ * typed name. Escape gives up and Tab moves on (`onTab`); an input
+ * method's composing Enter is left alone. Focus leaving the field ends the
+ * edit (`onLeave`), unless it stays inside the nearest `data-naming-scope`
+ * (the row's evidence). The placeholder is the voice's label; nothing is
+ * prefilled.
  */
 export function SpeakerNameField({
 	speaker,
 	speakers,
 	onSubmit,
 	onCancel,
+	onLeave,
+	onTab,
 	initialText = "",
 	excludedPersonID,
-	cancelOnBlur = false,
 	notice,
 	listClassName,
 	className,
@@ -271,12 +279,7 @@ export function SpeakerNameField({
 						{
 							id: "create" as const,
 							label: "New person",
-							rows: [
-								{
-									option: { kind: "create" as const, label: typed },
-									colorIndex: 0,
-								},
-							],
+							rows: [{ option: { kind: "create" as const, label: typed } }],
 						},
 					]
 				: [];
@@ -320,6 +323,10 @@ export function SpeakerNameField({
 			event.stopPropagation();
 			event.nativeEvent.stopImmediatePropagation();
 			onCancel();
+		} else if (event.key === "Tab" && onTab) {
+			// Moving on is not a pick: the row below takes focus, the text goes.
+			event.preventDefault();
+			onTab(event.shiftKey);
 		}
 	}
 
@@ -328,8 +335,15 @@ export function SpeakerNameField({
 		// button) without ending the edit: `data-naming-scope` marks it.
 		const scope =
 			event.currentTarget.closest("[data-naming-scope]") ?? event.currentTarget;
-		if (cancelOnBlur && !scope.contains(event.relatedTarget)) {
-			onCancel();
+		// Another app taking focus is no leaving: the field is there on return.
+		if (
+			onLeave &&
+			document.hasFocus() &&
+			!scope.contains(event.relatedTarget)
+		) {
+			onLeave(
+				event.relatedTarget instanceof Element ? event.relatedTarget : null,
+			);
 		}
 	}
 
@@ -427,7 +441,9 @@ export function SpeakerNameField({
 									{option.kind === "person" ? (
 										<Avatar
 											aria-hidden="true"
-											index={row.colorIndex}
+											{...(row.colorIndex === undefined
+												? {}
+												: { index: row.colorIndex })}
 											name={option.label}
 											size="sm"
 										/>

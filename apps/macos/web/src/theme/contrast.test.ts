@@ -319,7 +319,10 @@ function checks(mode: Mode): Check[] {
 	// Change and the neutral pill are words on the control fill, in the
 	// panel and on the canvas; "Saving", the reasons and the line a voice
 	// said are muted on the panel's rows, and the dashed chip is the dashed
-	// outline there (both measured on every host above).
+	// outline there (both measured on every host above). So are "No sample"
+	// and the P key hint beside a play, muted on a row and its hover, and
+	// the N hint in Change, muted on the accent hover; the Y hint sits in
+	// Yes, muted on the control fill, measured below.
 	for (const person of PEOPLE) {
 		on(
 			person,
@@ -337,17 +340,19 @@ function checks(mode: Mode): Check[] {
 		],
 		TEXT,
 	);
+	const controls = (["canvas", "popover"] as const).flatMap((surface) =>
+		(["--control", "--control-hover"] as const).map((fill) => ({
+			name: `${fill} over ${surface}`,
+			colour: layers(
+				token(mode, "--surface", surface),
+				token(mode, fill, surface),
+			),
+		})),
+	);
+	on("--foreground", controls, TEXT);
 	on(
-		"--foreground",
-		(["canvas", "popover"] as const).flatMap((surface) =>
-			(["--control", "--control-hover"] as const).map((fill) => ({
-				name: `${fill} over ${surface}`,
-				colour: layers(
-					token(mode, "--surface", surface),
-					token(mode, fill, surface),
-				),
-			})),
-		),
+		"--muted-foreground",
+		controls.filter((host) => host.name.endsWith("popover")),
 		TEXT,
 	);
 

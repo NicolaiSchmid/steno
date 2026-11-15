@@ -5,12 +5,14 @@ import { send, useBridge } from "@/bridge/hooks";
 import {
 	Avatar,
 	Button,
+	Kbd,
 	notify,
 	Popover,
 	PopoverPopup,
 	PopoverTrigger,
 	Tooltip,
 } from "@/components/ui";
+import { cn } from "@/lib/cn";
 import {
 	SelectFailure,
 	SpeakerNameField,
@@ -32,6 +34,10 @@ export interface SpeakerPlayButtonProps {
 	testID: string;
 	/** -1 inside a row that is one tab stop (its P key plays). */
 	tabIndex?: number;
+	/** Says "Voice sample" beside the icon: the clip is the voice's, not the turn's. */
+	labelled?: boolean;
+	/** Shows "P" while keyboard focus is on the row around it (`group/row`). */
+	keyHint?: boolean;
 	className?: string;
 }
 
@@ -53,13 +59,15 @@ export function togglePlay(
 /**
  * Plays or stops the voice's sample clip (`speakers.play`,
  * `speakers.stop`). A voice without a clip keeps the slot as a disabled
- * play labelled "No clip", so rows line up and the missing sound is said;
- * Me has no slot, the mic is the user's own voice.
+ * play with a muted "No sample" beside it, so rows line up and the missing
+ * sound is said on screen; Me has no slot, the mic is the user's own voice.
  */
 export function SpeakerPlayButton({
 	speaker,
 	testID,
 	tabIndex,
+	labelled = false,
+	keyHint = false,
 	className,
 }: SpeakerPlayButtonProps) {
 	const client = useBridge();
@@ -68,42 +76,88 @@ export function SpeakerPlayButton({
 	}
 	const playable = canPlay(speaker);
 	const label = !playable
-		? "No clip"
+		? "No sample"
 		: speaker.isPlaying
-			? `Stop the sample of ${speaker.clusterLabel}`
-			: `Play a sample of ${speaker.clusterLabel}`;
+			? `Stop the voice sample of ${speaker.clusterLabel}`
+			: `Play the voice sample of ${speaker.clusterLabel}`;
 	return (
-		<Button
-			aria-label={label}
-			{...(className ? { className } : {})}
-			data-testid={testID}
-			disabled={!playable}
-			onClick={(event) => {
-				event.stopPropagation();
-				togglePlay(client, speaker);
-			}}
-			size="icon-xs"
-			{...(tabIndex === undefined ? {} : { tabIndex })}
-			title={playable ? undefined : "No clip"}
-			variant="ghost"
-		>
-			{speaker.isPlaying ? (
-				<SquareIcon aria-hidden="true" />
-			) : (
-				<PlayIcon aria-hidden="true" />
-			)}
-		</Button>
+		<span className={cn("flex shrink-0 items-center gap-1.5", className)}>
+			{!playable ? (
+				<span
+					aria-hidden="true"
+					className="text-meta text-muted-foreground"
+					data-testid={`${testID}-none`}
+				>
+					No sample
+				</span>
+			) : keyHint ? (
+				<Kbd
+					aria-hidden="true"
+					className="hidden group-focus-visible/row:inline-flex"
+					variant="plain"
+				>
+					P
+				</Kbd>
+			) : null}
+			<Button
+				aria-label={label}
+				data-testid={testID}
+				disabled={!playable}
+				onClick={(event) => {
+					event.stopPropagation();
+					togglePlay(client, speaker);
+				}}
+				size={labelled && playable ? "xs" : "icon-xs"}
+				{...(tabIndex === undefined ? {} : { tabIndex })}
+				variant="ghost"
+			>
+				{speaker.isPlaying ? (
+					<SquareIcon aria-hidden="true" />
+				) : (
+					<PlayIcon aria-hidden="true" />
+				)}
+				{labelled && playable ? "Voice sample" : null}
+			</Button>
+		</span>
 	);
 }
 
-/** "Speaker 1 is now Anna." once the host took a pick. */
+/** "Speaker 1 is now Anna.", "You are Nicolai.", once the host took a pick. */
 export function announceNamed(speaker: Speaker, name: string) {
-	notify({ title: `${voiceLabel(speaker)} is now ${name}.` });
+	notify({
+		title: isMe(speaker)
+			? `You are ${name}.`
+			: `${voiceLabel(speaker)} is now ${name}.`,
+	});
+}
+
+/**
+ * What a transcript pick changes: every paragraph of the voice in this
+ * meeting, until paragraphs can move on their own. "Changes all 4
+ * paragraphs of Speaker 3 in this meeting.", the person named too once the
+ * voice is confirmed ("of Nicolai (Speaker 3)").
+ */
+export function scopeLine(speaker: Speaker, paragraphs: number): string {
+	const named = isNamed(speaker);
+	if (isMe(speaker)) {
+		const whose = named ? `of ${speaker.displayName} (you)` : "of yours";
+		return paragraphs === 1
+			? `Changes the one paragraph ${whose} in this meeting.`
+			: `Changes all ${paragraphs} paragraphs ${whose} in this meeting.`;
+	}
+	const whose = named
+		? `${speaker.displayName} (${speaker.clusterLabel})`
+		: speaker.clusterLabel;
+	return paragraphs === 1
+		? `Changes the one paragraph of ${whose} in this meeting.`
+		: `Changes all ${paragraphs} paragraphs of ${whose} in this meeting.`;
 }
 
 export interface SpeakerPickerProps {
 	speaker: Speaker;
 	speakers: readonly Speaker[];
+	/** How many of the meeting's paragraphs the voice leads, for the scope line. */
+	paragraphs: number;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	/** The turn the popup sits under, so its paragraph stays in view. */
@@ -120,12 +174,14 @@ export interface SpeakerPickerProps {
  * turn's paragraph: the voice, its clip, Yes for a suggestion, and the
  * same field as the Speakers panel. A pick names the voice in this meeting,
  * so every turn of it follows (all of them, until paragraphs can move on
- * their own); the result is announced and focus goes back to the name. A
- * suggestion carries a "?" and says why it is offered.
+ * their own), and the line under the field says so; the result is
+ * announced and focus goes back to the name. A suggestion carries the grey
+ * "?" bubble of the pill and the avatars, and says why it is offered.
  */
 export function SpeakerPicker({
 	speaker,
 	speakers,
+	paragraphs,
 	open,
 	onOpenChange,
 	anchor,
@@ -212,13 +268,12 @@ export function SpeakerPicker({
 						{speaker.displayName}
 					</span>
 					{suggested ? (
-						<span
+						<Avatar
 							aria-hidden="true"
-							className="shrink-0 font-normal text-muted-foreground"
 							data-testid={`speaker-suggested-${speaker.id}`}
-						>
-							?
-						</span>
+							size="sm"
+							unknown
+						/>
 					) : null}
 				</PopoverTrigger>
 			</Tooltip>
@@ -246,6 +301,7 @@ export function SpeakerPicker({
 						) : null}
 					</span>
 					<SpeakerPlayButton
+						labelled
 						speaker={speaker}
 						testID={`speaker-panel-play-${speaker.id}`}
 					/>
@@ -283,14 +339,22 @@ export function SpeakerPicker({
 						key={draft.attempt}
 						listClassName="max-h-56"
 						notice={
-							failure ? (
-								<SelectFailure
-									className="mt-1.5"
-									message={failure.message}
-									onRetry={() => void commit(failure.option, failure.text)}
-									testID="speaker-panel-failure"
-								/>
-							) : null
+							<>
+								<p
+									className="m-0 mt-1.5 px-2 text-meta text-muted-foreground"
+									data-testid={`speaker-panel-scope-${speaker.id}`}
+								>
+									{scopeLine(speaker, paragraphs)}
+								</p>
+								{failure ? (
+									<SelectFailure
+										className="mt-1.5"
+										message={failure.message}
+										onRetry={() => void commit(failure.option, failure.text)}
+										testID="speaker-panel-failure"
+									/>
+								) : null}
+							</>
 						}
 						onCancel={() => change(false)}
 						onSubmit={(option, text) => void commit(option, text)}

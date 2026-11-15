@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SpeakerOption } from "@/bridge/contract";
+import { personColor } from "@/lib/person-color";
 import {
 	groupOptions,
 	nextToName,
@@ -208,6 +209,24 @@ describe("groupOptions", () => {
 		).toBe("People");
 	});
 
+	it("shows each person in the colour the voice will take once picked", () => {
+		const groups = groupOptions(options, "", voice(2, "unknown"), speakers);
+		const colours = Object.fromEntries(
+			groups
+				.flatMap((group) => group.rows)
+				.map((row) => [row.option.label, row.colorIndex]),
+		);
+		// Nicolai's voice here keeps its colour; the others take their own.
+		expect(colours).toEqual({
+			Anna: personColor(person(3)),
+			Lea: personColor(person(4)),
+			Nicolai: 1,
+			Paul: personColor(person(5)),
+			// A Create has no person yet, so no colour (a plus, not an avatar).
+			Ann: undefined,
+		});
+	});
+
 	it("leaves out the excluded person", () => {
 		const groups = groupOptions(
 			options,
@@ -217,5 +236,13 @@ describe("groupOptions", () => {
 			person(1),
 		);
 		expect(groups.some((group) => group.id === "also")).toBe(false);
+	});
+});
+
+describe("personColor", () => {
+	it("folds a person's ID as both hosts do", () => {
+		// The same ID and index as `colours_are_stable_fnv_folds` in steno-host.
+		expect(personColor("00000000-0000-0000-0000-00000000000C")).toBe(1);
+		expect(personColor("00000000-0000-0000-0000-00000000000c")).toBe(1);
 	});
 });

@@ -1,3 +1,4 @@
+import { personColor } from "@/lib/person-color";
 import type {
 	ExportSettingsSnapshot,
 	GeneralSettingsSnapshot,
@@ -1148,11 +1149,16 @@ export function answerSpeakerSelect(
 		};
 	}
 	const { suggestionName: _name, ...rest } = speaker;
+	const personID = option.personID ?? mockPersonID(option.label);
 	const named: DetailSpeaker = {
 		...rest,
 		assignment: "confirmed",
 		displayName: option.label,
-		personID: option.personID ?? mockPersonID(option.label),
+		personID,
+		// A voice takes its person's colour, as the hosts fold it.
+		colorIndex:
+			detail.speakers.find((row) => row.personID === personID)?.colorIndex ??
+			personColor(personID),
 	};
 	return {
 		...detail,

@@ -311,8 +311,9 @@ const transcriptName = (page: Page, name: string) =>
 const SPEAKERS_STATES: readonly SpeakersState[] = [
 	["none-closed", "scenario=speakers-none", async () => {}],
 	["none", "scenario=speakers-none", openSpeakers],
-	["partly-closed", "", async () => {}],
-	["partly", "", openSpeakers],
+	// Every voice leads a paragraph, so each row shows its line and play.
+	["partly-closed", "scenario=speakers-partly", async () => {}],
+	["partly", "scenario=speakers-partly", openSpeakers],
 	["check-closed", "scenario=speakers-check", async () => {}],
 	["check", "scenario=speakers-check", openSpeakers],
 	["done-closed", "scenario=speakers-done", async () => {}],
@@ -325,14 +326,45 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 		},
 	],
 	["me-unnamed", "scenario=speakers-me-unnamed", openSpeakers],
+	// Me named: "Nicolai · You" among the people, without a play.
+	["me-named", "scenario=speakers-me", openSpeakers],
 	[
 		"keyboard",
-		"",
+		"scenario=speakers-partly",
 		async (page) => {
 			await page.getByTestId("speakers-trigger").focus();
 			await page.keyboard.press("Enter");
 			await expect(page.getByTestId("speakers-panel")).toBeVisible();
 			await page.keyboard.press("ArrowDown");
+		},
+	],
+	[
+		// Keyboard focus on the voice match: its Y, N and P keys show.
+		"keyboard-hints",
+		"scenario=speakers-partly",
+		async (page) => {
+			await page.getByTestId("speakers-trigger").focus();
+			await page.keyboard.press("Enter");
+			await expect(page.getByTestId("speakers-panel")).toBeVisible();
+			await expect(
+				page.getByTestId("speakers-panel").locator("kbd").first(),
+			).toBeVisible();
+		},
+	],
+	[
+		// Confirmed with Y, the row stays in place, done, and opens again.
+		"reopened",
+		"scenario=speakers-partly",
+		async (page) => {
+			await page.getByTestId("speakers-trigger").focus();
+			await page.keyboard.press("Enter");
+			await expect(page.getByTestId("speakers-panel")).toBeVisible();
+			await page.keyboard.press("y");
+			await expect(
+				page.getByTestId("speakers-section-check").getByLabel("Named"),
+			).toBeVisible();
+			await page.keyboard.press("Enter");
+			await expect(page.getByRole("option").first()).toBeVisible();
 		},
 	],
 	[

@@ -1,4 +1,5 @@
 import type { MeetingDetailSnapshot, SpeakerOption } from "@/bridge/contract";
+import { personColor } from "@/lib/person-color";
 
 export type Speaker = MeetingDetailSnapshot["speakers"][number];
 export type Turn = MeetingDetailSnapshot["transcript"][number];
@@ -313,8 +314,8 @@ export interface OptionRow {
 	reason?: string;
 	/** For a person who owns another voice here: "combines with Speaker 2". */
 	combines?: string;
-	/** The avatar's colour: the person's in this meeting, else from the name. */
-	colorIndex: number;
+	/** The avatar's colour, the voice's once picked (`optionColor`); none for Create. */
+	colorIndex?: number;
 }
 
 export interface OptionGroup {
@@ -331,12 +332,22 @@ const REASONS: Record<string, string> = {
 	Attendee: "Invited",
 };
 
-function nameColor(name: string): number {
-	let sum = 0;
-	for (const char of name) {
-		sum += char.codePointAt(0) ?? 0;
+/**
+ * The colour a voice will have once `option` is confirmed: that of the
+ * person's voice already in this meeting, else the person's own (the
+ * colour rule of `personColor`). A Create has no person yet, so no colour.
+ */
+export function optionColor(
+	option: SpeakerOption,
+	speakers: readonly Speaker[],
+): number | undefined {
+	if (!option.personID) {
+		return undefined;
 	}
-	return sum % 4;
+	return (
+		speakers.find((other) => other.personID === option.personID)?.colorIndex ??
+		personColor(option.personID)
+	);
 }
 
 /**
@@ -380,25 +391,20 @@ export function groupOptions(
 				)
 			: undefined;
 		const reason = option.detail ? REASONS[option.detail] : undefined;
-		const colorIndex =
-			owner?.colorIndex ??
-			(option.personID
-				? speakers.find((other) => other.personID === option.personID)
-						?.colorIndex
-				: undefined) ??
-			nameColor(option.label);
+		const color = optionColor(option, speakers);
+		const colorIndex = color === undefined ? {} : { colorIndex: color };
 		if (option.kind === "create") {
-			create.rows.push({ option, colorIndex });
+			create.rows.push({ option });
 		} else if (owner) {
 			also.rows.push({
 				option,
 				combines: `combines with ${owner.clusterLabel}`,
-				colorIndex,
+				...colorIndex,
 			});
 		} else if (reason) {
-			suggested.rows.push({ option, reason, colorIndex });
+			suggested.rows.push({ option, reason, ...colorIndex });
 		} else {
-			people.rows.push({ option, colorIndex });
+			people.rows.push({ option, ...colorIndex });
 		}
 	}
 	return groups.filter((group) => group.rows.length > 0);

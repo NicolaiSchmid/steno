@@ -89,6 +89,13 @@ export function TranscriptTab({
 		names.current[target]?.focus();
 	}
 
+	const paragraphs = new Map<string, number>();
+	for (const turn of detail.transcript) {
+		if (turn.speakerID) {
+			paragraphs.set(turn.speakerID, (paragraphs.get(turn.speakerID) ?? 0) + 1);
+		}
+	}
+
 	return (
 		<div data-testid="tab-content-transcript">
 			{detail.transcript.map((turn) => {
@@ -106,6 +113,9 @@ export function TranscriptTab({
 						onMove={move}
 						onOpenChange={(open) => setOpenTurnID(open ? turn.id : null)}
 						open={openTurnID === turn.id}
+						paragraphs={
+							turn.speakerID ? (paragraphs.get(turn.speakerID) ?? 0) : 0
+						}
 						speaker={speaker}
 						speakers={detail.speakers}
 						turn={turn}
@@ -120,6 +130,8 @@ interface TurnViewProps {
 	turn: Turn;
 	speaker: Speaker | undefined;
 	speakers: readonly Speaker[];
+	/** How many paragraphs the turn's voice leads in the meeting. */
+	paragraphs: number;
 	at: number;
 	focusable: boolean;
 	names: (HTMLButtonElement | null)[];
@@ -133,6 +145,7 @@ function TurnView({
 	turn,
 	speaker,
 	speakers,
+	paragraphs,
 	at,
 	focusable,
 	names,
@@ -160,6 +173,7 @@ function TurnView({
 							onKeyDown={(event) => onMove(event, at)}
 							onOpenChange={onOpenChange}
 							open={open}
+							paragraphs={paragraphs}
 							speaker={speaker}
 							speakers={speakers}
 							tabIndex={focusable ? 0 : -1}
