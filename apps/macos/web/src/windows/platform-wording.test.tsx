@@ -9,6 +9,7 @@ import type {
 import { loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { platformFor, SWIFT_MAC } from "@/lib/platform";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
+import { MainWindow } from "./main/main-window";
 import { MeetingDetail } from "./main/meeting-detail";
 import { MeetingList } from "./main/meeting-list";
 import { Sidebar } from "./main/sidebar";
@@ -164,24 +165,35 @@ describe("the meeting detail", () => {
 	});
 });
 
+describe("the main window", () => {
+	it.each([1024, 600])(
+		"records with Ctrl+Shift+R off the Mac, the sidebar shown or not (%i px), and leaves ⌘⇧R to the Mac's Record menu",
+		async (width) => {
+			const wide = window.innerWidth;
+			window.innerWidth = width;
+			try {
+				const linux = await createBridgeHarness();
+				const { unmount } = renderWithBridge(
+					<MainWindow />,
+					linux,
+					platformFor("linux"),
+				);
+				fireEvent.keyDown(window, { key: "R", ctrlKey: true, shiftKey: true });
+				expect(callsTo(linux.transport, "recording.toggle")).toHaveLength(1);
+				unmount();
+
+				const mac = await createBridgeHarness();
+				renderWithBridge(<MainWindow />, mac, platformFor("macos"));
+				fireEvent.keyDown(window, { key: "R", metaKey: true, shiftKey: true });
+				expect(callsTo(mac.transport, "recording.toggle")).toHaveLength(0);
+			} finally {
+				window.innerWidth = wide;
+			}
+		},
+	);
+});
+
 describe("the sidebar", () => {
-	it("records with Ctrl+Shift+R off the Mac, and leaves ⌘⇧R to the Mac's Record menu", async () => {
-		const linux = await createBridgeHarness();
-		const { unmount } = renderWithBridge(
-			<Sidebar />,
-			linux,
-			platformFor("linux"),
-		);
-		fireEvent.keyDown(window, { key: "R", ctrlKey: true, shiftKey: true });
-		expect(callsTo(linux.transport, "recording.toggle")).toHaveLength(1);
-		unmount();
-
-		const mac = await createBridgeHarness();
-		renderWithBridge(<Sidebar />, mac, platformFor("macos"));
-		fireEvent.keyDown(window, { key: "R", metaKey: true, shiftKey: true });
-		expect(callsTo(mac.transport, "recording.toggle")).toHaveLength(0);
-	});
-
 	it.each([
 		[
 			"macos",

@@ -28,12 +28,7 @@ import {
 	SplitButton,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import {
-	type PlatformWords,
-	SHORTCUTS,
-	usePlatform,
-	useShortcut,
-} from "@/lib/platform";
+import { type PlatformWords, usePlatform } from "@/lib/platform";
 import { useElapsedSeconds } from "@/lib/use-now";
 import { format } from "./format";
 import { RecorderNotices } from "./recorder-notices";
@@ -210,11 +205,6 @@ function RecordControl({
 export function Sidebar() {
 	const client = useBridge();
 	const platform = usePlatform();
-	useShortcut(
-		SHORTCUTS.record,
-		() => send(client, "recording.toggle"),
-		platform.bindsRecordShortcut,
-	);
 	const app = useSnapshot("app");
 	const recording = useSnapshot("recording");
 	const list = useSnapshot("meetings.list");
