@@ -88,6 +88,11 @@ const FIXTURES: &[(&str, Reencode)] = &[
     ("params.speakers.select", reencode::<SelectSpeakerParams>),
     ("params.speakers.reject", reencode::<RejectSpeakerParams>),
     ("params.speakerID", reencode::<SpeakerIdParams>),
+    (
+        "params.transcript.setTurnSpeaker",
+        reencode::<SetTurnSpeakerParams>,
+    ),
+    ("params.transcript.playTurn", reencode::<PlayTurnParams>),
     ("params.recording.start", reencode::<StartRecordingParams>),
     (
         "params.settings.recording.setRetention",

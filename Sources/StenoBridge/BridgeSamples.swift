@@ -16,6 +16,8 @@ public enum BridgeSamples {
   public static let speakerJerome = SampleData.speakerTwoID
   public static let speakerAnna = uuid(22)
   public static let speakerUnknown = uuid(23)
+  /// Combined into Nicolai's voice, so "Separate again" has a voice to show.
+  public static let speakerCombined = uuid(24)
   public static let personNicolai = SampleData.personNicolaiID
   public static let personJerome = SampleData.personJeromeID
   public static let personAnna = uuid(12)
@@ -106,7 +108,13 @@ public enum BridgeSamples {
         context:
           "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig "
           + "Prozent auf den Kern setzen.",
-        colorIndex: 7, hasClip: true, isPlaying: false, dismissed: false),
+        colorIndex: 7, hasClip: true, isPlaying: false, dismissed: false,
+        combined: [
+          .init(
+            id: speakerCombined, clusterLabel: "Speaker 5",
+            quote: "Und die Nebenprojekte pausieren wir bis zur Q1-Planung.", hasClip: true,
+            isPlaying: false)
+        ]),
       .init(
         id: speakerJerome, clusterLabel: "Speaker 2", displayName: "Jérôme", assignment: .confirmed,
         personID: personJerome,
@@ -154,8 +162,8 @@ public enum BridgeSamples {
         id: uuid(100), speakerID: speakerNicolai, speakerName: "Nicolai", startSeconds: 12,
         endSeconds: 41,
         text:
-          "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen."
-      ),
+          "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen.",
+        segmentIDs: [uuid(100), uuid(110)]),
       .init(
         id: uuid(101), speakerID: speakerJerome, speakerName: "Jérôme", startSeconds: 41,
         endSeconds: 65,
@@ -166,6 +174,7 @@ public enum BridgeSamples {
         id: uuid(102), speakerID: speakerUnknown, speakerName: "Speaker 4", startSeconds: 65,
         endSeconds: 90, text: "Die Partner sollten das nicht aus zweiter Hand hören."),
     ],
+    transcriptGeneration: 2,
     tasks: [
       .init(
         id: uuid(200), text: "Zahlen für beide Szenarien", assigneeName: "Jérôme",
@@ -514,6 +523,15 @@ extension BridgeSamples {
     BridgeFixture(
       "params.speakers.reject", RejectSpeakerParams(speakerID: speakerAnna, personID: personAnna)),
     BridgeFixture("params.speakerID", SpeakerIDParams(speakerID: speakerNicolai)),
+    BridgeFixture(
+      "params.transcript.setTurnSpeaker",
+      SetTurnSpeakerParams(
+        meetingID: meetingID, generation: 2,
+        segments: [.init(id: uuid(102), speakerID: speakerUnknown)],
+        option: .init(kind: .person, label: "Anna", personID: personAnna))),
+    BridgeFixture(
+      "params.transcript.playTurn",
+      PlayTurnParams(meetingID: meetingID, segmentIDs: [uuid(100), uuid(110)])),
     BridgeFixture("params.recording.start", StartRecordingParams(mode: .inPerson)),
     BridgeFixture(
       "params.settings.recording.setRetention",

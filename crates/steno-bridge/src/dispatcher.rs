@@ -19,11 +19,11 @@ use serde_json::Value;
 use crate::commands::{
     AssetIdParams, ChosenPathReply, ConfirmDestructiveParams, ConfirmReply, DeviceIdParams,
     ExportUpdateParams, MeetingIdParams, OpenUrlParams, PageLayoutParams, PermissionKindParams,
-    RejectSpeakerParams, SaveNotesParams, SelectSpeakerParams, SetAutomaticUpdatesParams,
-    SetBoolParams, SetFilterParams, SetQueryParams, SetRetentionParams, SetStringParams,
-    SetTabParams, SetTagFilterParams, SetTagsParams, SetTemplateParams, SetupStepParams,
-    SpeakerIdParams, SpeakerOptionsParams, SpeakerOptionsReply, StartRecordingParams,
-    SummariesUpdateParams, WindowParams,
+    PlayTurnParams, RejectSpeakerParams, SaveNotesParams, SelectSpeakerParams,
+    SetAutomaticUpdatesParams, SetBoolParams, SetFilterParams, SetQueryParams, SetRetentionParams,
+    SetStringParams, SetTabParams, SetTagFilterParams, SetTagsParams, SetTemplateParams,
+    SetTurnSpeakerParams, SetupStepParams, SpeakerIdParams, SpeakerOptionsParams,
+    SpeakerOptionsReply, StartRecordingParams, SummariesUpdateParams, WindowParams,
 };
 use crate::envelope::{BridgeError, BridgeEvent, BridgeMethod, BridgeReply, BridgeRequest};
 use crate::json;
@@ -151,6 +151,9 @@ bridge_host! {
     SpeakersClear => fn speakers_clear(params: SpeakerIdParams) -> ();
     SpeakersDismiss => fn speakers_dismiss(params: SpeakerIdParams) -> ();
     SpeakersRestore => fn speakers_restore(params: SpeakerIdParams) -> ();
+    SpeakersSeparate => fn speakers_separate(params: SpeakerIdParams) -> ();
+    TranscriptSetTurnSpeaker => fn transcript_set_turn_speaker(params: SetTurnSpeakerParams) -> ();
+    TranscriptPlayTurn => fn transcript_play_turn(params: PlayTurnParams) -> ();
 
     RecordingStart => fn recording_start(params: StartRecordingParams) -> ();
     RecordingStop => fn recording_stop() -> ();

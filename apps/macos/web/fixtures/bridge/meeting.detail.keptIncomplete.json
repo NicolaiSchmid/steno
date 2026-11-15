@@ -27,6 +27,15 @@
       "assignment" : "confirmed",
       "clusterLabel" : "Speaker 1",
       "colorIndex" : 7,
+      "combined" : [
+        {
+          "clusterLabel" : "Speaker 5",
+          "hasClip" : true,
+          "id" : "00000000-0000-0000-0000-000000000018",
+          "isPlaying" : false,
+          "quote" : "Und die Nebenprojekte pausieren wir bis zur Q1-Planung."
+        }
+      ],
       "context" : "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen.",
       "dismissed" : false,
       "displayName" : "Nicolai",
@@ -40,6 +49,9 @@
       "assignment" : "confirmed",
       "clusterLabel" : "Speaker 2",
       "colorIndex" : 4,
+      "combined" : [
+
+      ],
       "context" : "Das geht nur, wenn wir das Budget entsprechend umschichten. Ich rechne bis Freitag zwei Szenarien.",
       "dismissed" : false,
       "displayName" : "Jérôme",
@@ -52,6 +64,9 @@
       "assignment" : "suggested",
       "clusterLabel" : "Speaker 3",
       "colorIndex" : 1,
+      "combined" : [
+
+      ],
       "dismissed" : false,
       "displayName" : "Anna",
       "hasClip" : true,
@@ -65,6 +80,9 @@
       "assignment" : "unknown",
       "clusterLabel" : "Speaker 4",
       "colorIndex" : 0,
+      "combined" : [
+
+      ],
       "context" : "Die Partner sollten das nicht aus zweiter Hand hören.",
       "dismissed" : false,
       "displayName" : "Speaker 4",
@@ -144,6 +162,11 @@
     {
       "endSeconds" : 41,
       "id" : "00000000-0000-0000-0000-000000000064",
+      "isPlaying" : false,
+      "segmentIDs" : [
+        "00000000-0000-0000-0000-000000000064",
+        "00000000-0000-0000-0000-00000000006E"
+      ],
       "speakerID" : "00000000-0000-0000-0000-000000000014",
       "speakerName" : "Nicolai",
       "startSeconds" : 12,
@@ -152,6 +175,10 @@
     {
       "endSeconds" : 65,
       "id" : "00000000-0000-0000-0000-000000000065",
+      "isPlaying" : false,
+      "segmentIDs" : [
+        "00000000-0000-0000-0000-000000000065"
+      ],
       "speakerID" : "00000000-0000-0000-0000-000000000015",
       "speakerName" : "Jérôme",
       "startSeconds" : 41,
@@ -160,10 +187,15 @@
     {
       "endSeconds" : 90,
       "id" : "00000000-0000-0000-0000-000000000066",
+      "isPlaying" : false,
+      "segmentIDs" : [
+        "00000000-0000-0000-0000-000000000066"
+      ],
       "speakerID" : "00000000-0000-0000-0000-000000000017",
       "speakerName" : "Speaker 4",
       "startSeconds" : 65,
       "text" : "Die Partner sollten das nicht aus zweiter Hand hören."
     }
-  ]
+  ],
+  "transcriptGeneration" : 2
 }

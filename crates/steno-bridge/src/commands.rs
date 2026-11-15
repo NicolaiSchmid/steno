@@ -2,7 +2,7 @@
 //! `BridgeMethod` that takes arguments; methods without one take `null`.
 
 use serde::{Deserialize, Serialize};
-use steno_core::json::{uuid_text, uuid_text_opt};
+use steno_core::json::{uuid_text, uuid_text_opt, uuid_text_vec};
 use steno_core::string_enum;
 use uuid::Uuid;
 
@@ -159,6 +159,49 @@ pub struct SpeakerIdParams {
     #[serde(rename = "speakerID", with = "uuid_text")]
     pub speaker_id: Uuid,
 }
+
+/// One segment of a transcript turn and the voice the page shows it under
+/// (`None` for a turn without a voice).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnSegment {
+    #[serde(with = "uuid_text")]
+    pub id: Uuid,
+    #[serde(
+        rename = "speakerID",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "uuid_text_opt"
+    )]
+    pub speaker_id: Option<Uuid>,
+}
+
+/// `transcript.setTurnSpeaker`: "This paragraph". Every segment of the turn
+/// moves at once, to the voice of `option`'s person in this meeting, or to
+/// a new voice for that person when they have none here. Refused as
+/// `stale` when the meeting was processed again since `generation`, or a
+/// segment is no longer under the voice the page showed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetTurnSpeakerParams {
+    #[serde(rename = "meetingID", with = "uuid_text")]
+    pub meeting_id: Uuid,
+    /// The snapshot's `transcriptGeneration`.
+    pub generation: i64,
+    pub segments: Vec<TurnSegment>,
+    pub option: SpeakerOption,
+}
+
+/// `transcript.playTurn`: the turn's own span of the recording, at most
+/// [`TURN_AUDIO_LIMIT_SECONDS`]; `speakers.stop` stops it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayTurnParams {
+    #[serde(rename = "meetingID", with = "uuid_text")]
+    pub meeting_id: Uuid,
+    #[serde(rename = "segmentIDs", with = "uuid_text_vec")]
+    pub segment_ids: Vec<Uuid>,
+}
+
+/// The longest stretch of a turn `transcript.playTurn` plays.
+pub const TURN_AUDIO_LIMIT_SECONDS: f64 = 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartRecordingParams {

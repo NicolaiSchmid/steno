@@ -176,6 +176,53 @@ public struct SpeakerIDParams: Codable, Sendable, Equatable {
   public init(speakerID: UUID) { self.speakerID = speakerID }
 }
 
+/// One segment of a transcript turn and the voice the page shows it under
+/// (nil for a turn without a voice).
+public struct TurnSegment: Codable, Sendable, Equatable {
+  public var id: UUID
+  public var speakerID: UUID?
+
+  public init(id: UUID, speakerID: UUID?) {
+    self.id = id
+    self.speakerID = speakerID
+  }
+}
+
+/// `transcript.setTurnSpeaker`: "This paragraph". Every segment of the turn
+/// moves at once, to the voice of `option`'s person in this meeting, or to a
+/// new voice for that person when they have none here. Refused as `stale`
+/// when the meeting was processed again since `generation`, or a segment is
+/// no longer under the voice the page showed.
+public struct SetTurnSpeakerParams: Codable, Sendable, Equatable {
+  public var meetingID: UUID
+  /// The snapshot's `transcriptGeneration`.
+  public var generation: Int
+  public var segments: [TurnSegment]
+  public var option: SpeakerOption
+
+  public init(meetingID: UUID, generation: Int, segments: [TurnSegment], option: SpeakerOption) {
+    self.meetingID = meetingID
+    self.generation = generation
+    self.segments = segments
+    self.option = option
+  }
+}
+
+/// `transcript.playTurn`: the turn's own span of the recording, at most
+/// `limitSeconds`; `speakers.stop` stops it.
+public struct PlayTurnParams: Codable, Sendable, Equatable {
+  /// The longest stretch of a turn that plays.
+  public static let limitSeconds: Double = 60
+
+  public var meetingID: UUID
+  public var segmentIDs: [UUID]
+
+  public init(meetingID: UUID, segmentIDs: [UUID]) {
+    self.meetingID = meetingID
+    self.segmentIDs = segmentIDs
+  }
+}
+
 public struct StartRecordingParams: Codable, Sendable, Equatable {
   public var mode: BridgeCaptureMode
 

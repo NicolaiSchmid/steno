@@ -80,6 +80,9 @@ export const bridgeMethods = [
 	"speakers.clear",
 	"speakers.dismiss",
 	"speakers.restore",
+	"speakers.separate",
+	"transcript.setTurnSpeaker",
+	"transcript.playTurn",
 	"recording.start",
 	"recording.stop",
 	"recording.toggle",
@@ -188,6 +191,7 @@ export const bridgeError = z
 			"failed",
 			"cancelled",
 			"wouldCombine",
+			"stale",
 		]),
 		message: z.string(),
 	})
@@ -412,6 +416,21 @@ export const meetingDetailSnapshot = z
 					isPlaying: z.boolean(),
 					/** Not a person: out of the counts, its turns read "Not a person". */
 					dismissed: z.boolean(),
+					/**
+					 * Voices combined into this one, each of which "Separate again"
+					 * (`speakers.separate`) makes its own voice again.
+					 */
+					combined: z.array(
+						z
+							.object({
+								id: uuid,
+								clusterLabel: z.string(),
+								quote: z.string().optional(),
+								hasClip: z.boolean(),
+								isPlaying: z.boolean(),
+							})
+							.strict(),
+					),
 				})
 				.strict(),
 		),
@@ -450,9 +469,15 @@ export const meetingDetailSnapshot = z
 					startSeconds: z.number(),
 					endSeconds: z.number(),
 					text: z.string(),
+					/** Every segment the turn folds together; the first is `id`. */
+					segmentIDs: z.array(uuid),
+					/** The turn's own audio plays (`transcript.playTurn`). */
+					isPlaying: z.boolean(),
 				})
 				.strict(),
 		),
+		/** Process again writes a new transcript; a move against an older one is stale. */
+		transcriptGeneration: z.number().int(),
 		tasks: z.array(
 			z
 				.object({
@@ -901,6 +926,25 @@ export const selectSpeakerParams = z
 	.strict();
 export const speakerIDParams = z.object({ speakerID: uuid }).strict();
 /** No to the suggestion that the voice is `personID`. */
+/**
+ * `transcript.setTurnSpeaker`: "This paragraph". Each segment carries the
+ * voice the page shows it under; the host refuses the move as `stale` when
+ * one differs or the meeting was processed again since `generation`.
+ */
+export const setTurnSpeakerParams = z
+	.object({
+		meetingID: uuid,
+		generation: z.number().int(),
+		segments: z.array(
+			z.object({ id: uuid, speakerID: uuid.optional() }).strict(),
+		),
+		option: speakerOption,
+	})
+	.strict();
+/** `transcript.playTurn`: the turn's span of the recording, at most 60 s. */
+export const playTurnParams = z
+	.object({ meetingID: uuid, segmentIDs: z.array(uuid) })
+	.strict();
 export const rejectSpeakerParams = z
 	.object({ speakerID: uuid, personID: uuid })
 	.strict();
@@ -977,6 +1021,9 @@ export const methodParams = {
 	"speakers.clear": speakerIDParams,
 	"speakers.dismiss": speakerIDParams,
 	"speakers.restore": speakerIDParams,
+	"speakers.separate": speakerIDParams,
+	"transcript.setTurnSpeaker": setTurnSpeakerParams,
+	"transcript.playTurn": playTurnParams,
 	"recording.start": startRecordingParams,
 	"recording.stop": null,
 	"recording.toggle": null,
@@ -1095,6 +1142,8 @@ export const fixtureSchemas = {
 	"params.speakers.select": selectSpeakerParams,
 	"params.speakers.reject": rejectSpeakerParams,
 	"params.speakerID": speakerIDParams,
+	"params.transcript.setTurnSpeaker": setTurnSpeakerParams,
+	"params.transcript.playTurn": playTurnParams,
 	"params.recording.start": startRecordingParams,
 	"params.settings.recording.setRetention": setRetentionParams,
 	"params.permissionKind": permissionKindParams,

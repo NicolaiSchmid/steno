@@ -121,6 +121,28 @@ pub mod uuid_text_opt {
     }
 }
 
+/// `Vec<Uuid>` as a list of uppercase texts.
+pub mod uuid_text_vec {
+    use serde::ser::SerializeSeq as _;
+
+    use super::{Deserialize, Deserializer, Serializer, Uuid};
+
+    pub fn serialize<S: Serializer>(ids: &[Uuid], serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(ids.len()))?;
+        for id in ids {
+            sequence.serialize_element(&super::uuid_string(*id))?;
+        }
+        sequence.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Uuid>, D::Error> {
+        Vec::<String>::deserialize(deserializer)?
+            .iter()
+            .map(|text| super::uuid_from_text(text))
+            .collect()
+    }
+}
+
 /// `DateTime<Utc>` as `StenoJSON` text.
 pub mod iso_time {
     use super::{DateTime, Deserialize, Deserializer, Serializer, Utc, de};

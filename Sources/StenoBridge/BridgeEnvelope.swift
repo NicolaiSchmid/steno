@@ -80,6 +80,14 @@ public enum BridgeMethod: String, Codable, Sendable, CaseIterable {
   case speakersDismiss = "speakers.dismiss"
   /// A dismissed voice back among the people to name.
   case speakersRestore = "speakers.restore"
+  /// Undo a combine, or "Separate again": the combined voice is its own
+  /// voice again, with the paragraphs it still has.
+  case speakersSeparate = "speakers.separate"
+
+  /// "This paragraph": one turn to another voice.
+  case transcriptSetTurnSpeaker = "transcript.setTurnSpeaker"
+  /// The turn's own audio from the meeting's recording.
+  case transcriptPlayTurn = "transcript.playTurn"
 
   case recordingStart = "recording.start"
   case recordingStop = "recording.stop"
@@ -188,6 +196,10 @@ public struct BridgeError: Codable, Sendable, Equatable, Error {
     /// A `speakers.select` without `combine` that would join another voice
     /// of the meeting; the message names that voice.
     case wouldCombine
+    /// The page acted on a transcript or a voice that changed since its
+    /// snapshot (a move, a combine, Process again); the message says what
+    /// to refresh.
+    case stale
   }
 
   public var code: Code

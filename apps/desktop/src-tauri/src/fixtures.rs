@@ -56,6 +56,8 @@ fixtures![
     "params.speakers.select",
     "params.speakers.reject",
     "params.speakerID",
+    "params.transcript.setTurnSpeaker",
+    "params.transcript.playTurn",
     "params.recording.start",
     "params.settings.recording.setRetention",
     "params.permissionKind",
