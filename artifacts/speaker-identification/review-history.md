@@ -301,3 +301,53 @@ all-inclusive count and the candidate avatar preview.
 All accepted in one fix pass on #360 (Tab: arrows kept, Tab moves between
 rows, reconciling Fable's one-stop and Astra's every-row asks). Step 3
 rebases onto it.
+
+## 2026-11-15 — built speaker step 3 (#365)
+
+Request IDs `steno-built-speakers3-astra-r1`, `steno-built-speakers3-fable-r1`.
+
+**GPT-6-Astra: 7/10 (UX 8.5, implementation 6.5).** UI calmer than Jamie with
+better corrections; v6 migration sound; rejection does not train memory.
+Ranked:
+1. P1: reprocessing can carry a dismissal or rejection to a different voice:
+   answers kept by id (`store/meetings.rs:503`, `MeetingStore.swift:304`),
+   ids from "Speaker N" by first speech (`steno-diarize/src/mapping.rs:35`).
+   Reconcile cluster identity first; leave ambiguous ones for review.
+2. P1: Swift reprocessing deletes confirmed rows without recomputing the
+   persons' embeddings (`MeetingStore.swift:300`); orphaned contributions.
+3. P2: Remove name on Me undone by Rust reprocessing falling back to
+   `self_person_id` (`steno-pipeline/src/pipeline.rs:3296`).
+4. P2: after No, typing the rejected name still filters it out
+   (`speaker-names.ts:430`); exclude only for an empty query.
+5. P2: the quote is not what plays: whole overlapping segments
+   (`steno-host/src/speakers.rs:330`, `SpeakerExcerpts.swift:26`); use timed
+   words inside the clip.
+Thresholds: 0.65 provisionally; 0.75 strong provisional; neither validated.
+Gaps: Swift chip refresh belongs here; Swift reprocessing is a blocker;
+exports must mark dismissed voices.
+Step 4 (sent to that build): processing generation in stale checks, no
+training on moves, journal incl. dismissal, rejections and Me, undo across
+restart, actual paragraph audio with retention and cap.
+
+**Claude Fable 5.1: 8/10.** UX does what step 3 asks; stores mirror each
+other; migration safe; no path teaches voice memory from a No or dismissal.
+Ranked: Remove name on Me undone by Process again (`pipeline.rs:3296`);
+dismissal carried by label (`meetings.rs:510`, `MeetingStore.swift:309`);
+exports and the summary ignore dismissal (`model/people.rs:394` skip);
+rejections store no similarity (last cheap moment before v6 ships); the
+floor lives in the view models, not the pipelines (`pipeline.rs:2762`,
+`MatchSpeakers.swift:15`); store guards missing (dismissing Me, rejecting the
+confirmed person); pill when all dismissed; "Last invitee left" decided
+before dedupe; dismissing row reads as needing a name; quotation marks on a
+fallback quote. Thresholds: keep 0.60 and collect similarity on every
+answer. Step 4: keep the source row with `mergedInto` instead of averaging
+and deleting; paragraph moves have no stable key across Process again;
+null-embedding rows for moved paragraphs; both stores or neither.
+
+### Responses
+
+All findings from both go to one fix pass on #365 (v6 changed in place, it
+has not shipped). Floor: the council split (Astra 0.65, Fable 0.60 with
+data); coordinator's call is 0.65 provisionally plus similarity recorded on
+every No and Yes, revisited with data. Fable's `mergedInto` design and the
+reprocessing key sent to the step 4 build.
