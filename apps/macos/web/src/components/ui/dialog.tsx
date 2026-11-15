@@ -39,9 +39,14 @@ export function DialogPopup({
 }: DialogPopupProps) {
 	return (
 		<BaseDialog.Portal container={container}>
+			{/*
+			 * The backdrop shares the popups' layer, and a dialog's portal
+			 * comes after any popover it was opened from (the speakers
+			 * panel's combine confirm), so it covers that popover too.
+			 */}
 			<BaseDialog.Backdrop
 				className={cn(
-					"dialog-backdrop fixed inset-0 z-40 transition-opacity duration-(--duration-surface) ease-in-out",
+					"dialog-backdrop fixed inset-0 z-50 transition-opacity duration-(--duration-surface) ease-in-out",
 					"data-ending-style:opacity-0 data-starting-style:opacity-0",
 				)}
 			/>

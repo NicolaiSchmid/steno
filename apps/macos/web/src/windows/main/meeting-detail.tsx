@@ -52,17 +52,12 @@ import { SHORTCUTS, usePlatform, useShortcut } from "@/lib/platform";
 import { useCommitToast } from "@/lib/use-commit-toast";
 import { useElapsedSeconds } from "@/lib/use-now";
 import { deleteMeeting } from "./delete-meeting";
-import {
-	firstSentence,
-	format,
-	formatPeople,
-	formatRetention,
-	formatSource,
-} from "./format";
+import { firstSentence, format, formatRetention, formatSource } from "./format";
 import { MeetingsToggle, NarrowLayoutContext } from "./narrow-layout";
 import { NotesTab } from "./notes-tab";
 import { ProcessingCard } from "./processing-card";
 import { RecorderBar } from "./recorder-notices";
+import { DIARIZE_STAGE } from "./speaker-names";
 import { SpeakersPopover } from "./speakers-popover";
 import { SummaryTab } from "./summary-tab";
 import { TagEditor } from "./tag-editor";
@@ -793,16 +788,11 @@ function DetailBody({
 				className="@container/speakers mb-5 flex flex-wrap items-center gap-2"
 				data-testid="speakers-row"
 			>
-				{detail.speakers.length > 0 ? (
-					<SpeakersPopover
-						speakers={detail.speakers}
-						transcript={detail.transcript}
-					/>
-				) : (
-					<span className="text-body text-muted-foreground">
-						{formatPeople(detail.speakers)}
-					</span>
-				)}
+				<SpeakersPopover
+					finding={entry?.stage === DIARIZE_STAGE}
+					speakers={detail.speakers}
+					transcript={detail.transcript}
+				/>
 				{detail.tags.map((tag) => (
 					<Badge key={tag}>#{tag}</Badge>
 				))}

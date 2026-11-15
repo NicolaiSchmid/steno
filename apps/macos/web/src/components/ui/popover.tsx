@@ -34,10 +34,21 @@ export const popoverPopupVariants = cva(
 				sm: "w-64",
 				md: "w-80",
 				lg: "w-96",
+				/**
+				 * The speakers panel: 368 px, at most 440 px tall and never
+				 * past the space the positioner leaves (`--available-*`, a
+				 * zoomed or short window), scrolling on its own.
+				 */
+				panel:
+					"max-h-[min(27.5rem,var(--available-height))] w-92 max-w-(--available-width) overflow-y-auto overscroll-contain",
+				/** The transcript's speaker panel: 320 px, inside the reading column. */
+				picker:
+					"max-h-(--available-height) w-80 max-w-(--available-width) overflow-y-auto overscroll-contain",
 			},
 			padding: {
 				md: "p-4",
 				sm: "px-3 py-2",
+				panel: "px-2 py-2",
 			},
 		},
 		defaultVariants: { size: "md", padding: "md" },
@@ -51,6 +62,17 @@ export interface PopoverPopupProps
 	side?: ComponentProps<typeof BasePopover.Positioner>["side"];
 	align?: ComponentProps<typeof BasePopover.Positioner>["align"];
 	sideOffset?: number;
+	/** What the popup is placed against, when not its trigger. */
+	anchor?: ComponentProps<typeof BasePopover.Positioner>["anchor"];
+	/**
+	 * How the popup avoids the window's edges. A popup that scrolls on its
+	 * own passes `fallbackAxisSide: "none"`, so it keeps to its side and
+	 * takes the height there (`--available-height`) instead of moving
+	 * beside its trigger.
+	 */
+	collisionAvoidance?: ComponentProps<
+		typeof BasePopover.Positioner
+	>["collisionAvoidance"];
 	container?: ComponentProps<typeof BasePopover.Portal>["container"];
 }
 
@@ -61,6 +83,8 @@ export function PopoverPopup({
 	side = "bottom",
 	align = "center",
 	sideOffset = 4,
+	anchor,
+	collisionAvoidance,
 	container,
 	...props
 }: PopoverPopupProps) {
@@ -68,7 +92,10 @@ export function PopoverPopup({
 		<BasePopover.Portal container={container}>
 			<BasePopover.Positioner
 				align={align}
+				{...(anchor ? { anchor } : {})}
 				className="z-50 outline-none"
+				{...(collisionAvoidance ? { collisionAvoidance } : {})}
+				collisionPadding={8}
 				side={side}
 				sideOffset={sideOffset}
 			>

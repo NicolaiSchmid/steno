@@ -106,7 +106,7 @@ const buttonVariantNames = [
 	"dashed",
 ] as const;
 
-const badgeVariantNames = ["outline", "warning", "success"] as const;
+const badgeVariantNames = ["outline", "warning", "success", "dashed"] as const;
 
 function SwitchStory() {
 	const [on, setOn] = useState(true);
@@ -209,7 +209,32 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Badge: the three variants, then sm">
+			<ThemePair title="Button: pill, the speakers pill's four looks">
+				{() => (
+					<>
+						<Button size="pill" variant="dashed">
+							<PlusIcon aria-hidden="true" />
+							Name speakers
+						</Button>
+						<Button size="pill" variant="warning-outline">
+							<AvatarStack aria-hidden="true" ring="background">
+								<Avatar index={0} name="Nicolai" size="sm" solid />
+								<Avatar index={2} name="Anna" size="sm" solid />
+								<Avatar name="Unnamed" size="sm" unknown />
+							</AvatarStack>
+							2 need names
+						</Button>
+						<Button size="pill" variant="outline">
+							Check 1 name
+						</Button>
+						<Button size="pill" variant="ghost-muted">
+							Nicolai, Anna
+						</Button>
+					</>
+				)}
+			</ThemePair>
+
+			<ThemePair title="Badge: the four variants, then sm, then the dashed chip">
 				{() => (
 					<>
 						{badgeVariantNames.map((variant) => (
@@ -222,6 +247,9 @@ export function StoriesPage() {
 								{variant}
 							</Badge>
 						))}
+						<Badge size="chip" variant="dashed">
+							Speaker 1
+						</Badge>
 					</>
 				)}
 			</ThemePair>
@@ -234,6 +262,7 @@ export function StoriesPage() {
 						<Avatar index={2} name="Anna" size="lg" />
 						<Avatar index={3} name="Max" />
 						<Avatar name="Unknown speaker" unknown />
+						<Avatar index={1} name="Jérôme" solid />
 						<AvatarStack ring="background">
 							<Avatar index={0} name="Nicolai" size="sm" />
 							<Avatar index={1} name="Jérôme" size="sm" />

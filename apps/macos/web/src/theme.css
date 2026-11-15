@@ -195,6 +195,11 @@
 	--p2-surface: color-mix(in srgb, var(--p2) 16%, transparent);
 	--p3-surface: color-mix(in srgb, var(--p3) 16%, transparent);
 	--p4-surface: color-mix(in srgb, var(--p4) 16%, transparent);
+	/* The same tints mixed into the canvas, for an avatar on a tinted fill (the amber speakers pill). */
+	--p1-solid: color-mix(in srgb, var(--p1) 16%, var(--background));
+	--p2-solid: color-mix(in srgb, var(--p2) 16%, var(--background));
+	--p3-solid: color-mix(in srgb, var(--p3) 16%, var(--background));
+	--p4-solid: color-mix(in srgb, var(--p4) 16%, var(--background));
 	--warning-border: color-mix(in srgb, var(--warning) 32%, transparent);
 	--warning-border-hover: color-mix(in srgb, var(--warning) 40%, transparent);
 	--warning-surface-hover: rgba(245, 158, 11, 0.18);
@@ -364,6 +369,10 @@
 	--color-p2-surface: var(--p2-surface);
 	--color-p3-surface: var(--p3-surface);
 	--color-p4-surface: var(--p4-surface);
+	--color-p1-solid: var(--p1-solid);
+	--color-p2-solid: var(--p2-solid);
+	--color-p3-solid: var(--p3-solid);
+	--color-p4-solid: var(--p4-solid);
 	--color-warning-border: var(--warning-border);
 	--color-warning-border-hover: var(--warning-border-hover);
 	--color-warning-surface-hover: var(--warning-surface-hover);

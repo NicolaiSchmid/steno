@@ -1,65 +1,87 @@
 import {
 	CheckIcon,
 	ChevronDownIcon,
-	InfoIcon,
-	PencilIcon,
+	LoaderCircleIcon,
 	UserPlusIcon,
 } from "lucide-react";
-import { useState } from "react";
-import type { MeetingDetailSnapshot } from "@/bridge/contract";
+import {
+	type KeyboardEvent,
+	type ReactNode,
+	useEffect,
+	useRef,
+	useState,
+} from "react";
+import type { MeetingDetailSnapshot, SpeakerOption } from "@/bridge/contract";
 import { useBridge } from "@/bridge/hooks";
 import {
 	Avatar,
 	AvatarStack,
 	Badge,
 	Button,
+	focusRowClass,
 	Popover,
 	PopoverPopup,
-	PopoverTitle,
 	PopoverTrigger,
-	Tooltip,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import {
-	SelectError,
+	SelectFailure,
 	SpeakerNameField,
-	selectSpeaker,
+	useSpeakerSelect,
 } from "./speaker-name-field";
 import {
-	firstName,
-	groupSpeakers,
+	checkLabel,
+	firstWithWork,
 	isMe,
 	isNamed,
-	nameAction,
+	needsLabel,
 	nextToName,
+	type PanelLayout,
+	type PillState,
+	type Placement,
+	panelLayout,
+	peopleLabel,
+	pillState,
+	placements,
+	rowOrder,
 	type Speaker,
-	type SpeakerGroups,
 	snippet,
+	suggestionReason,
 	type Turn,
 } from "./speaker-names";
-import { SpeakerPlayButton } from "./speaker-picker";
-
-export const SPLIT_HINT =
-	"Sometimes one person is heard as two speakers. Giving both the same name joins them into one.";
+import { announceNamed, SpeakerPlayButton, togglePlay } from "./speaker-picker";
 
 export interface SpeakersPopoverProps {
 	speakers: MeetingDetailSnapshot["speakers"];
 	transcript: MeetingDetailSnapshot["transcript"];
+	/** The progress topic reports the Diarize stage for this meeting. */
+	finding?: boolean;
 }
 
-function needsLabel(count: number): string {
-	return count === 1 ? "1 needs a name" : `${count} need names`;
+const PILL_VARIANT = {
+	none: "dashed",
+	needs: "warning-outline",
+	check: "outline",
+	done: "ghost-muted",
+} as const;
+
+/** The pill's words, and the count it shows alone in a narrow header. */
+function pillWords(state: PillState): [words: ReactNode, count: number] {
+	switch (state.kind) {
+		case "needs":
+			return [needsLabel(state.count), state.count];
+		case "check":
+			return [checkLabel(state.count), state.count];
+		case "done":
+			return [peopleLabel(state.avatars), state.avatars.length];
+		default:
+			return ["Name speakers", 0];
+	}
 }
 
-/** The header's one entry point to naming, in three states. */
-function TriggerContent({
-	groups,
-	total,
-}: {
-	groups: SpeakerGroups;
-	total: number;
-}) {
-	if (groups.namedCount === 0) {
+/** The header pill's inside: avatars, the words, the chevron. */
+function PillContent({ state }: { state: PillState }) {
+	if (state.kind === "none") {
 		return (
 			<>
 				<UserPlusIcon aria-hidden="true" />
@@ -67,310 +89,682 @@ function TriggerContent({
 			</>
 		);
 	}
-	const missing = total - groups.namedCount;
+	if (state.kind === "hidden" || state.kind === "finding") {
+		return null;
+	}
+	const [words, count] = pillWords(state);
+	const avatars =
+		state.kind === "done" ? state.avatars.slice(0, 4) : state.avatars;
 	return (
 		<>
-			<AvatarStack ring="background">
-				{groups.named.map(({ speaker }) => (
+			<AvatarStack aria-hidden="true" ring="background">
+				{avatars.map((speaker) => (
 					<Avatar
 						index={speaker.colorIndex}
 						key={speaker.id}
 						name={speaker.displayName}
-						size="md"
+						size="sm"
+						solid
 					/>
 				))}
-				{missing > 0 ? <Avatar name="Unnamed" size="md" unknown /> : null}
+				{state.kind === "needs" ? (
+					<Avatar name="Unnamed" size="sm" unknown />
+				) : null}
 			</AvatarStack>
 			{/*
 			 * In a speakers row narrower than 18 rem the words go to the
 			 * screen reader and the eye gets the count, so the pill never
-			 * clips "2 need names" to a sliver.
+			 * clips "2 need names" to a sliver; it opens the same panel.
 			 */}
-			<span className="@max-[18rem]/speakers:sr-only truncate">
-				{missing > 0
-					? needsLabel(missing)
-					: groups.named
-							.map(({ speaker }) => firstName(speaker.displayName))
-							.join(", ")}
-			</span>
+			<span className="@max-[18rem]/speakers:sr-only truncate">{words}</span>
 			<span
 				aria-hidden="true"
 				className="@max-[18rem]/speakers:inline hidden tabular-nums"
 			>
-				{missing > 0 ? missing : total}
+				{count}
 			</span>
 			<ChevronDownIcon aria-hidden="true" />
 		</>
 	);
 }
 
+interface Editing {
+	speakerID: string;
+	text: string;
+	/** "Someone else": the person the voice was suggested as. */
+	excluded?: string;
+}
+
+interface Failure {
+	message: string;
+	option: SpeakerOption;
+	text: string;
+}
+
 /**
- * The header's Speakers button and its popover. The button reads "Name
- * speakers" (dashed) while nobody is named, the named avatars and "N need
- * names" while some are, and the avatars and first names once all are. The
- * popover lists the named speakers under "Speakers" and the rest under
- * "Need names", each unnamed one with something they said and the play
- * button for its sample clip. Clicking a row (or Enter on it) turns its name
- * into a text field (`SpeakerNameField`); after a pick the next speaker who
- * needs a name gets the field, so a meeting is named by typing and Enter. A
- * voice-matched suggestion has its own Confirm button. Test ids carry a
+ * The header's one entry point to naming: a pill whose look says whether
+ * work is left, and the panel it opens. The panel lists, in this order, an
+ * unnamed Me as one line, "Is this right?" (voice matches, each with the
+ * line the voice said, its clip, Yes and Change), "Need names" (the whole
+ * row opens naming) and "Speakers" (confirmed people; a person's second
+ * voice nests under them, and a voice that sounds like them asks "Also
+ * Nicolai?"). Rows stay where they were while the panel is open.
+ *
+ * Naming keeps the voice's evidence on screen and opens the field under
+ * it. A pick shows the name with "Saving"; once the host took it the field
+ * moves to the next unnamed voice, never back up and never to a
+ * suggestion; a failure reopens the row with its text and a red line with
+ * Retry. Combining two voices confirms first (`useSpeakerSelect`).
+ *
+ * Keyboard: the pill opens on the first row with work; Up and Down move
+ * between rows, each one tab stop; on a row Enter names, Y confirms, N
+ * changes and P plays. Escape closes the field and returns to its row; a
+ * second Escape closes the panel and returns to the pill. Test ids carry a
  * `speakers-popover-` prefix so they never collide with the transcript's.
  */
 export function SpeakersPopover({
 	speakers,
 	transcript,
+	finding = false,
 }: SpeakersPopoverProps) {
+	const client = useBridge();
+	const { select, asking, dialog } = useSpeakerSelect();
 	const [open, setOpen] = useState(false);
-	const [editing, setEditing] = useState<string | null>(null);
-	const groups = groupSpeakers(speakers);
-	const total = speakers.length;
+	const [frozen, setFrozen] = useState<Map<string, Placement> | undefined>();
+	const [active, setActive] = useState<string | undefined>();
+	const [editing, setEditing] = useState<Editing | null>(null);
+	const [saving, setSaving] = useState<ReadonlyMap<string, string>>(new Map());
+	const [failures, setFailures] = useState<ReadonlyMap<string, Failure>>(
+		new Map(),
+	);
+	const rows = useRef(new Map<string, HTMLElement>());
+	const focusNext = useRef<string | null>(null);
+
+	const state = pillState(speakers, transcript.length > 0, finding);
+	const layout = panelLayout(speakers, frozen);
+	const order = rowOrder(layout);
+	const current =
+		order.find((speaker) => speaker.id === active)?.id ?? order[0]?.id;
+
+	useEffect(() => {
+		const id = focusNext.current;
+		if (id && editing?.speakerID !== id) {
+			focusNext.current = null;
+			rows.current.get(id)?.focus();
+		}
+	});
+
+	useEffect(() => {
+		if (editing) {
+			rows.current
+				.get(editing.speakerID)
+				?.closest("li")
+				?.scrollIntoView?.({ block: "nearest" });
+		}
+	}, [editing]);
+
+	if (state.kind === "hidden") {
+		return null;
+	}
+	if (state.kind === "finding") {
+		return (
+			<Button
+				data-testid="speakers-finding"
+				disabled
+				size="pill"
+				variant="outline"
+			>
+				<LoaderCircleIcon
+					aria-hidden="true"
+					className="motion-safe:animate-spin"
+				/>
+				Finding speakers…
+			</Button>
+		);
+	}
 
 	function onOpenChange(next: boolean) {
+		if (!next && asking) {
+			return;
+		}
 		setOpen(next);
-		if (!next) {
+		if (next) {
+			const fresh = placements(speakers);
+			setFrozen(fresh);
+			const opened = panelLayout(speakers, fresh);
+			setActive((firstWithWork(opened) ?? rowOrder(opened)[0])?.id);
+		} else {
+			setFrozen(undefined);
 			setEditing(null);
+			setFailures(new Map());
 		}
 	}
 
-	function done(speaker: Speaker, picked: boolean) {
-		setEditing((current) => {
-			if (current !== speaker.id) {
-				return current;
-			}
-			// Naming moves on to whoever is next; a rename stays put.
-			return picked && !isNamed(speaker)
-				? (nextToName(speakers, speaker.id)?.id ?? null)
-				: null;
+	function startNaming(speaker: Speaker, excluded?: string) {
+		setActive(speaker.id);
+		setEditing({
+			speakerID: speaker.id,
+			text: failures.get(speaker.id)?.text ?? "",
+			...(excluded ? { excluded } : {}),
 		});
 	}
 
-	const row = (speaker: Speaker, extra: Partial<SpeakerRowProps> = {}) => (
-		<SpeakerRow
-			editing={editing === speaker.id}
+	function stopNaming(speaker: Speaker) {
+		setEditing(null);
+		focusNext.current = speaker.id;
+	}
+
+	/**
+	 * Sends a pick and settles the row: "Saving" until the host answers,
+	 * then the next unnamed voice's field, or the row again with its text
+	 * (`fromField`) and, on failure, the red line with Retry.
+	 */
+	async function commit(
+		speaker: Speaker,
+		option: SpeakerOption,
+		text: string,
+		fromField = true,
+	) {
+		const work = speaker.assignment === "unknown";
+		setFailures((map) => {
+			const next = new Map(map);
+			next.delete(speaker.id);
+			return next;
+		});
+		setSaving((map) => new Map(map).set(speaker.id, option.label));
+		setEditing((now) => (now?.speakerID === speaker.id ? null : now));
+		focusNext.current = speaker.id;
+		const outcome = await select(speaker, option);
+		setSaving((map) => {
+			const next = new Map(map);
+			next.delete(speaker.id);
+			return next;
+		});
+		if (outcome.kind === "committed") {
+			announceNamed(speaker, option.label);
+			const next = work
+				? nextToName(layout, speaker.id, new Set(saving.keys()))
+				: undefined;
+			if (next) {
+				focusNext.current = null;
+				setActive(next.id);
+				setEditing((now) => now ?? { speakerID: next.id, text: "" });
+			}
+			return;
+		}
+		if (outcome.kind === "failed") {
+			const failure = { message: outcome.message, option, text };
+			setFailures((map) => new Map(map).set(speaker.id, failure));
+		}
+		setActive(speaker.id);
+		if (fromField) {
+			// Failed or cancelled: the row reopens with what was typed.
+			focusNext.current = null;
+			setEditing({ speakerID: speaker.id, text });
+		}
+	}
+
+	function confirm(speaker: Speaker) {
+		if (!speaker.personID) {
+			return;
+		}
+		void commit(
+			speaker,
+			{
+				kind: "person",
+				label: speaker.suggestionName ?? speaker.displayName,
+				personID: speaker.personID,
+			},
+			"",
+			false,
+		);
+	}
+
+	function onRowKey(
+		event: KeyboardEvent<HTMLElement>,
+		speaker: Speaker,
+		kind: RowKind,
+	) {
+		if (event.target !== event.currentTarget) {
+			return;
+		}
+		const at = order.findIndex((row) => row.id === speaker.id);
+		const move: Record<string, number> = {
+			ArrowDown: Math.min(at + 1, order.length - 1),
+			ArrowUp: Math.max(at - 1, 0),
+			Home: 0,
+			End: order.length - 1,
+		};
+		const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+		if (key in move) {
+			event.preventDefault();
+			const target = order[move[key] ?? at];
+			if (target) {
+				setActive(target.id);
+				rows.current.get(target.id)?.focus();
+			}
+		} else if (key === "Enter" || key === " ") {
+			event.preventDefault();
+			startNaming(speaker);
+		} else if (key === "y" && (kind === "check" || kind === "also")) {
+			event.preventDefault();
+			confirm(speaker);
+		} else if (key === "n" && (kind === "check" || kind === "also")) {
+			event.preventDefault();
+			startNaming(speaker, kind === "also" ? speaker.personID : undefined);
+		} else if (key === "p") {
+			event.preventDefault();
+			togglePlay(client, speaker);
+		}
+	}
+
+	const row = (speaker: Speaker, kind: RowKind, person?: Speaker) => (
+		<PanelRow
+			editing={editing?.speakerID === speaker.id ? editing : null}
+			failure={failures.get(speaker.id)}
 			key={speaker.id}
-			onDone={(picked) => done(speaker, picked)}
-			onEdit={() => setEditing(speaker.id)}
+			kind={kind}
+			onCancel={() => stopNaming(speaker)}
+			onConfirm={() => confirm(speaker)}
+			onFocus={() => setActive(speaker.id)}
+			onKeyDown={(event) => onRowKey(event, speaker, kind)}
+			onName={(excluded) => startNaming(speaker, excluded)}
+			onRetry={(failure) =>
+				void commit(
+					speaker,
+					failure.option,
+					failure.text,
+					editing?.speakerID === speaker.id,
+				)
+			}
+			onSubmit={(option, text) => void commit(speaker, option, text)}
+			person={person}
+			rowRef={(element) => {
+				if (element) {
+					rows.current.set(speaker.id, element);
+				} else {
+					rows.current.delete(speaker.id);
+				}
+			}}
+			saving={saving.get(speaker.id)}
 			speaker={speaker}
+			speakers={speakers}
+			tabIndex={speaker.id === current ? 0 : -1}
 			transcript={transcript}
-			{...extra}
 		/>
 	);
 
 	return (
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
 			<PopoverTrigger
-				className={cn(groups.namedCount > 0 && "-ml-[7px] min-w-0 max-w-full")}
+				className="min-w-0 max-w-full"
 				data-testid="speakers-trigger"
-				render={
-					<Button
-						size="sm"
-						variant={groups.namedCount === 0 ? "dashed" : "ghost-muted"}
-					/>
-				}
+				render={<Button size="pill" variant={PILL_VARIANT[state.kind]} />}
 			>
-				<TriggerContent groups={groups} total={total} />
+				<PillContent state={state} />
 			</PopoverTrigger>
-			<PopoverPopup align="start" size="lg">
-				<div className="flex items-center gap-2">
-					<PopoverTitle>Speakers</PopoverTitle>
-					{groups.namedCount < total ? (
-						<Badge data-testid="speakers-named-count" size="sm">
-							{groups.namedCount} of {total} named
-						</Badge>
-					) : null}
-				</div>
-				{groups.named.length > 0 ? (
-					<ul className="my-0 mt-2 flex list-none flex-col gap-0.5 p-0">
-						{groups.named.flatMap(({ speaker, also }) => [
-							row(speaker),
-							...also.map((other, index) =>
-								row(other, { split: true, hint: index === 0 }),
-							),
-						])}
-					</ul>
-				) : null}
-				{groups.unnamed.length > 0 ? (
-					<>
-						<h3 className="mt-4 mb-0 font-medium text-meta text-muted-foreground">
-							Need names
-						</h3>
-						<ul className="my-0 mt-1.5 flex list-none flex-col gap-0.5 p-0">
-							{groups.unnamed.map((speaker) => row(speaker))}
-						</ul>
-					</>
-				) : null}
+			<PopoverPopup
+				align="start"
+				aria-label="Speakers"
+				// Always under the pill: in a short or zoomed window it takes
+				// the height left there and scrolls, the pill still in view.
+				collisionAvoidance={{ side: "none", fallbackAxisSide: "none" }}
+				data-testid="speakers-panel"
+				initialFocus={() =>
+					(current ? rows.current.get(current) : undefined) ?? true
+				}
+				padding="panel"
+				size="panel"
+			>
+				<Sections layout={layout} row={row} />
+				{dialog}
 			</PopoverPopup>
 		</Popover>
 	);
 }
 
-interface SpeakerRowProps {
-	speaker: Speaker;
-	transcript: readonly Turn[];
-	editing: boolean;
-	onEdit: () => void;
-	onDone: (picked: boolean) => void;
-	/** A second speaker of a named person, indented and dimmed. */
-	split?: boolean;
-	/** Shows the info tooltip that explains `split`. */
-	hint?: boolean;
+function Sections({
+	layout,
+	row,
+}: {
+	layout: PanelLayout;
+	row: (speaker: Speaker, kind: RowKind, person?: Speaker) => ReactNode;
+}) {
+	return (
+		<>
+			{layout.me ? (
+				<ul className="m-0 list-none p-0">{row(layout.me, "me")}</ul>
+			) : null}
+			<Section label="Is this right?" testID="speakers-section-check">
+				{layout.check.map((speaker) => row(speaker, "check"))}
+			</Section>
+			<Section label="Need names" testID="speakers-section-need">
+				{layout.need.map((speaker) => row(speaker, "need"))}
+			</Section>
+			<Section label="Speakers" testID="speakers-section-people">
+				{layout.people.map(({ speaker, voices, also }) => {
+					const nested = voices.length > 0 || also.length > 0;
+					if (!nested) {
+						return row(speaker, "person");
+					}
+					return (
+						<li className="flex flex-col" key={speaker.id}>
+							<ul className="m-0 list-none p-0">{row(speaker, "person")}</ul>
+							<ul
+								className="m-0 mb-1 ml-[19px] flex list-none flex-col gap-0.5 border-border border-l p-0 pl-2"
+								data-testid={`speakers-nested-${speaker.id}`}
+							>
+								{voices.map((voice) => row(voice, "voice", speaker))}
+								{also.map((voice) => row(voice, "also", speaker))}
+							</ul>
+						</li>
+					);
+				})}
+			</Section>
+		</>
+	);
 }
 
+function Section({
+	label,
+	testID,
+	children,
+}: {
+	label: string;
+	testID: string;
+	children: ReactNode[];
+}) {
+	if (children.length === 0) {
+		return null;
+	}
+	return (
+		<section className="mt-2 first:mt-0" data-testid={testID}>
+			<h3 className="m-0 px-2 pt-1 pb-1 font-medium text-meta text-muted-foreground">
+				{label}
+			</h3>
+			<ul className="m-0 flex list-none flex-col gap-0.5 p-0">{children}</ul>
+		</section>
+	);
+}
+
+type RowKind = "me" | "check" | "need" | "person" | "voice" | "also";
+
+interface PanelRowProps {
+	speaker: Speaker;
+	kind: RowKind;
+	/** The person a nested voice belongs to, or sounds like. */
+	person: Speaker | undefined;
+	speakers: readonly Speaker[];
+	transcript: readonly Turn[];
+	editing: Editing | null;
+	saving: string | undefined;
+	failure: Failure | undefined;
+	tabIndex: number;
+	rowRef: (element: HTMLElement | null) => void;
+	onFocus: () => void;
+	onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
+	onName: (excluded?: string) => void;
+	onConfirm: () => void;
+	onSubmit: (option: SpeakerOption, text: string) => void;
+	onCancel: () => void;
+	onRetry: (failure: Failure) => void;
+}
+
+/** What a row says for itself to a screen reader, and which keys it takes. */
+function rowLabel(speaker: Speaker, kind: RowKind, person?: Speaker): string {
+	switch (kind) {
+		case "me":
+			return isNamed(speaker)
+				? `You, ${speaker.displayName}`
+				: "You spoke on the mic. Name yourself";
+		case "check":
+			return `${speaker.clusterLabel}. ${suggestionReason(speaker)}`;
+		case "need":
+			return `${speaker.clusterLabel}, needs a name`;
+		case "also":
+			return `${speaker.clusterLabel}. Also ${person?.displayName ?? speaker.displayName}?`;
+		case "voice":
+			return `${speaker.clusterLabel}, ${speaker.displayName}`;
+		default:
+			return isMe(speaker)
+				? `${speaker.displayName}, you`
+				: speaker.displayName;
+	}
+}
+
+const KEYS: Record<RowKind, string> = {
+	me: "Enter",
+	check: "Enter Y N P",
+	need: "Enter P",
+	person: "Enter P",
+	voice: "Enter P",
+	also: "Enter Y N P",
+};
+
 /**
- * One speaker: the avatar, then the name (a named or suggested speaker) or
- * the dashed "Name Speaker 1" chip, the play button, and, for anyone not yet
- * named, a line they said. Editing swaps the name for the field.
+ * One row of the panel: one tab stop (its buttons are reached by the
+ * row's keys or the pointer), with the voice's evidence (a line it said,
+ * its clip) on screen while it is named, the field under them.
  */
-function SpeakerRow({
+function PanelRow({
 	speaker,
+	kind,
+	person,
+	speakers,
 	transcript,
 	editing,
-	onEdit,
-	onDone,
-	split = false,
-	hint = false,
-}: SpeakerRowProps) {
-	const client = useBridge();
-	const [preview, setPreview] = useState<string | undefined>(undefined);
-	const [error, setError] = useState<string | undefined>(undefined);
+	saving,
+	failure,
+	tabIndex,
+	rowRef,
+	onFocus,
+	onKeyDown,
+	onName,
+	onConfirm,
+	onSubmit,
+	onCancel,
+	onRetry,
+}: PanelRowProps) {
 	const named = isNamed(speaker);
-	const suggested = speaker.assignment === "suggested";
-	const said = named ? "" : snippet(speaker, transcript);
+	// Settled during this visit: confirmed, but still listed with the work.
+	const done =
+		named &&
+		(kind === "me" || kind === "check" || kind === "need" || kind === "also");
+	const said =
+		kind === "person" || kind === "me" ? "" : snippet(speaker, transcript);
+	const wholeRow = kind !== "check" && kind !== "also";
 
-	async function confirmSuggestion() {
-		if (!speaker.personID) {
-			return;
-		}
-		setError(undefined);
-		const outcome = await selectSpeaker(client, speaker, {
-			kind: "person",
-			label: speaker.displayName,
-			personID: speaker.personID,
-		});
-		if (outcome.kind === "failed") {
-			setError(outcome.message);
-		}
-	}
+	const title: ReactNode =
+		saving !== undefined ? (
+			<>
+				<span className="min-w-0 truncate font-medium text-title">
+					{saving}
+				</span>
+				<span
+					className="shrink-0 text-meta text-muted-foreground"
+					data-testid={`speakers-popover-saving-${speaker.id}`}
+				>
+					Saving
+				</span>
+			</>
+		) : done ? (
+			<>
+				<span className="min-w-0 truncate font-medium text-title">
+					{kind === "me"
+						? `You are ${speaker.displayName}`
+						: speaker.displayName}
+				</span>
+				<CheckIcon
+					aria-label="Named"
+					className="size-3.5 shrink-0 text-muted-foreground"
+				/>
+			</>
+		) : kind === "me" ? (
+			<>
+				<span className="min-w-0 truncate text-body text-muted-foreground">
+					You spoke on the mic.
+				</span>
+				<Badge size="chip" variant="dashed">
+					Name yourself
+				</Badge>
+			</>
+		) : kind === "need" ? (
+			<Badge className="min-w-0" size="chip" variant="dashed">
+				<span className="truncate">{speaker.clusterLabel}</span>
+			</Badge>
+		) : kind === "check" ? (
+			<>
+				<span className="shrink-0 font-medium text-title">
+					{speaker.clusterLabel}
+				</span>
+				<span className="min-w-0 truncate text-meta text-muted-foreground">
+					{suggestionReason(speaker)}
+				</span>
+			</>
+		) : kind === "also" ? (
+			<>
+				<span className="min-w-0 truncate font-medium text-title">
+					Also {person?.displayName}?
+				</span>
+				<span className="shrink-0 text-meta text-muted-foreground">
+					{speaker.clusterLabel}
+				</span>
+			</>
+		) : kind === "voice" ? (
+			<span className="min-w-0 truncate text-title">
+				{speaker.clusterLabel}
+			</span>
+		) : (
+			<>
+				<span
+					className="min-w-0 truncate font-medium text-title"
+					title={speaker.displayName}
+				>
+					{speaker.displayName}
+				</span>
+				{isMe(speaker) ? (
+					<span className="shrink-0 text-meta text-muted-foreground">You</span>
+				) : null}
+			</>
+		);
+
+	const avatar =
+		kind === "voice" || kind === "also" || kind === "me" ? null : (
+			<Avatar
+				aria-hidden="true"
+				index={speaker.colorIndex}
+				name={saving ?? speaker.displayName}
+				size="lg"
+				unknown={speaker.assignment === "unknown" && saving === undefined}
+			/>
+		);
+	const failureLine = failure ? (
+		<SelectFailure
+			className="mt-1.5"
+			message={failure.message}
+			onRetry={() => onRetry(failure)}
+			testID={`speakers-popover-failure-${speaker.id}`}
+		/>
+	) : null;
+	const actions =
+		(kind === "check" || kind === "also") &&
+		!done &&
+		saving === undefined &&
+		!editing ? (
+			<div className="mt-1.5 flex gap-2">
+				<Button
+					data-testid={`speakers-popover-yes-${speaker.id}`}
+					onClick={(event) => {
+						event.stopPropagation();
+						onConfirm();
+					}}
+					size="xs"
+					tabIndex={-1}
+					variant="outline"
+				>
+					{kind === "also" ? "Same person" : "Yes"}
+				</Button>
+				<Button
+					data-testid={`speakers-popover-change-${speaker.id}`}
+					onClick={(event) => {
+						event.stopPropagation();
+						onName(kind === "also" ? speaker.personID : undefined);
+					}}
+					size="xs"
+					tabIndex={-1}
+					variant="ghost"
+				>
+					{kind === "also" ? "Someone else" : "Change"}
+				</Button>
+			</div>
+		) : null;
 
 	return (
 		<li
-			className={cn("flex flex-col", split && "ml-8")}
+			className="flex flex-col"
+			data-naming-scope=""
 			data-testid={`speakers-popover-row-${speaker.id}`}
 		>
+			{/* biome-ignore lint/a11y/useSemanticElements: a row of the panel holds its own buttons, so it cannot be one; it is one tab stop with keys. */}
 			<div
-				className={
-					editing
-						? "flex min-w-0 items-start gap-2.5 py-1"
-						: "flex min-h-9 min-w-0 items-center gap-2.5"
-				}
+				aria-keyshortcuts={KEYS[kind]}
+				aria-label={rowLabel(speaker, kind, person)}
+				className={cn(
+					"flex min-w-0 gap-2.5 rounded-md px-2 py-1.5",
+					focusRowClass,
+					wholeRow && !editing && "cursor-default hover:bg-row-hover",
+				)}
+				data-testid={`speakers-popover-name-${speaker.id}`}
+				onClick={wholeRow && !editing ? () => onName() : undefined}
+				onFocus={onFocus}
+				onKeyDown={onKeyDown}
+				ref={rowRef}
+				role="group"
+				tabIndex={tabIndex}
 			>
-				<Avatar
-					className={cn(editing && "mt-px")}
-					index={speaker.colorIndex}
-					name={preview ?? speaker.displayName}
-					size="lg"
-					unknown={!preview && speaker.assignment === "unknown"}
-				/>
-				{editing ? (
-					<SpeakerNameField
-						cancelOnBlur
-						className="min-w-0 flex-1"
-						onDone={onDone}
-						onPreview={setPreview}
-						speaker={speaker}
-					/>
-				) : named || suggested ? (
-					<>
-						<Button
-							className="-ml-[9px] min-w-0 flex-1 justify-start"
-							data-testid={`speakers-popover-name-${speaker.id}`}
-							onClick={onEdit}
-							size="sm"
-							variant={split ? "ghost-muted" : "ghost"}
+				{avatar}
+				<div className="flex min-w-0 flex-1 flex-col">
+					<div className="flex min-h-8 min-w-0 items-center gap-2">
+						<div className="flex min-w-0 flex-1 items-center gap-2">
+							{title}
+						</div>
+						{kind === "me" || (kind === "person" && isMe(speaker)) ? null : (
+							<SpeakerPlayButton
+								speaker={speaker}
+								tabIndex={-1}
+								testID={`speakers-popover-play-${speaker.id}`}
+							/>
+						)}
+					</div>
+					{said ? (
+						<p
+							className="m-0 line-clamp-2 text-meta text-muted-foreground"
+							data-testid={`speakers-popover-snippet-${speaker.id}`}
 						>
-							<span className="truncate">{speaker.displayName}</span>
-							{named && isMe(speaker) ? (
-								<span className="shrink-0 font-normal text-muted-foreground">
-									You
-								</span>
-							) : named && speaker.email ? (
-								<span className="truncate font-normal text-muted-foreground">
-									{speaker.email}
-								</span>
-							) : null}
-							{suggested && !split ? (
-								<Badge className="shrink-0" size="sm" variant="warning">
-									Suggested
-								</Badge>
-							) : null}
-						</Button>
-						{hint ? (
-							<Tooltip label={SPLIT_HINT}>
-								<Button
-									aria-label={SPLIT_HINT}
-									size="icon-xs"
-									variant="ghost-muted"
-								>
-									<InfoIcon aria-hidden="true" />
-								</Button>
-							</Tooltip>
-						) : null}
-						{suggested ? (
-							<>
-								<Button
-									data-testid={`speakers-popover-confirm-${speaker.id}`}
-									onClick={() => void confirmSuggestion()}
-									size="xs"
-									variant="outline"
-								>
-									<CheckIcon aria-hidden="true" />
-									Confirm
-								</Button>
-								<Tooltip label="Change">
-									<Button
-										aria-label={`Change ${speaker.displayName}`}
-										onClick={onEdit}
-										size="icon-xs"
-										variant="ghost-muted"
-									>
-										<PencilIcon aria-hidden="true" />
-									</Button>
-								</Tooltip>
-							</>
-						) : null}
-					</>
-				) : (
-					<span className="min-w-0 flex-1">
-						<Button
-							className="max-w-full"
-							data-testid={`speakers-popover-name-${speaker.id}`}
-							onClick={onEdit}
-							size="xs"
-							variant="dashed"
-						>
-							<span className="truncate">{nameAction(speaker)}</span>
-						</Button>
-					</span>
-				)}
-				{editing ? null : (
-					<SpeakerPlayButton
-						iconOnly
-						speaker={speaker}
-						testID={`speakers-popover-play-${speaker.id}`}
-					/>
-				)}
+							“{said}”
+						</p>
+					) : null}
+					{actions}
+				</div>
 			</div>
-			{said && !editing ? (
-				<p
-					className="my-0 mb-1 ml-[42px] line-clamp-2 text-meta text-muted-foreground"
-					data-testid={`speakers-popover-snippet-${speaker.id}`}
-				>
-					“{said}”
-				</p>
+			{editing ? (
+				<SpeakerNameField
+					cancelOnBlur
+					className={cn("mt-1 mb-1.5 px-2", avatar && "pl-[50px]")}
+					{...(editing.excluded ? { excludedPersonID: editing.excluded } : {})}
+					initialText={editing.text}
+					listClassName="max-h-40"
+					notice={failureLine}
+					onCancel={onCancel}
+					onSubmit={onSubmit}
+					speaker={speaker}
+					speakers={speakers}
+				/>
+			) : failureLine ? (
+				<div className={cn("mb-1.5 px-2", avatar && "pl-[50px]")}>
+					{failureLine}
+				</div>
 			) : null}
-			{editing ? null : (
-				<SelectError className="mt-0 mb-1 ml-[42px]" message={error} />
-			)}
 		</li>
 	);
 }

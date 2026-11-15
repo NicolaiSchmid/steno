@@ -550,6 +550,15 @@ describe("MeetingDetail header", () => {
 		);
 	});
 
+	it("says it is finding speakers while the progress topic reports diarizing", async () => {
+		const harness = await createBridgeHarness("scenario=speakers-finding");
+		renderWithBridge(<MeetingDetail />, harness);
+		expect(screen.getByTestId("speakers-finding")).toHaveTextContent(
+			"Finding speakers…",
+		);
+		expect(screen.queryByTestId("speakers-trigger")).toBeNull();
+	});
+
 	it("shows the empty state with nothing selected", async () => {
 		const harness = await createBridgeHarness("scenario=empty");
 		renderWithBridge(<MeetingDetail />, harness);

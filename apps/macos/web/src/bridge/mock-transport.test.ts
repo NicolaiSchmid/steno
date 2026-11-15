@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import type { MeetingDetailSnapshot, ProgressSnapshot } from "./contract";
 import {
+	answerSpeakerSelect,
 	applyScenario,
 	createMockTransport,
 	fixtureKey,
@@ -49,6 +51,67 @@ describe("scenarios", () => {
 		const result = applyScenario(snapshots, new URLSearchParams(""));
 		expect(result["meetings.list"]).toBe(snapshots["meetings.list"]);
 		expect(result["recording.live"]).toBeUndefined();
+	});
+});
+
+describe("speaker naming outside the app", () => {
+	const SPEAKER_4 = "00000000-0000-0000-0000-000000000017";
+	const NICOLAI = "00000000-0000-0000-0000-00000000000A";
+	const detail = async (scenario: string) =>
+		applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams(`scenario=${scenario}`),
+		)["meeting.detail"] as MeetingDetailSnapshot;
+
+	it("names a voice and every turn of it", async () => {
+		const before = await detail("speakers-partly");
+		const after = await answerSpeakerSelect(before, {
+			speakerID: SPEAKER_4,
+			option: { kind: "create", label: "Lea" },
+			combine: false,
+		});
+		expect(after.speakers.find((row) => row.id === SPEAKER_4)).toMatchObject({
+			assignment: "confirmed",
+			displayName: "Lea",
+		});
+		expect(
+			after.transcript
+				.filter((turn) => turn.speakerID === SPEAKER_4)
+				.map((turn) => turn.speakerName),
+		).toEqual(["Lea"]);
+	});
+
+	it("refuses to combine without being asked, as the hosts do, then folds the voice in", async () => {
+		const before = await detail("speakers-split");
+		const pick = {
+			speakerID: SPEAKER_4,
+			option: { kind: "person" as const, label: "Nicolai", personID: NICOLAI },
+		};
+		expect(() =>
+			answerSpeakerSelect(before, { ...pick, combine: false }),
+		).toThrow(
+			expect.objectContaining({
+				code: "wouldCombine",
+				message: "Nicolai already speaks as Speaker 1 in this meeting.",
+			}),
+		);
+		const after = await answerSpeakerSelect(before, { ...pick, combine: true });
+		expect(after.speakers.map((row) => row.id)).not.toContain(SPEAKER_4);
+		expect(after.transcript.some((turn) => turn.speakerID === SPEAKER_4)).toBe(
+			false,
+		);
+	});
+
+	it("reports the Diarize stage for the processing meeting", async () => {
+		const snapshots = applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams("scenario=speakers-finding"),
+		);
+		const progress = snapshots.progress as ProgressSnapshot;
+		const meeting = snapshots["meeting.detail"] as MeetingDetailSnapshot;
+		expect(progress.entries).toEqual([
+			expect.objectContaining({ meetingID: meeting.id, stage: "diarize" }),
+		]);
 	});
 });
 

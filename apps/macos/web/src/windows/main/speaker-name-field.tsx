@@ -1,8 +1,9 @@
-import { PlusIcon, UserIcon } from "lucide-react";
+import { PlusIcon } from "lucide-react";
 import {
 	type ChangeEvent,
 	type FocusEvent,
 	type KeyboardEvent,
+	type ReactNode,
 	useEffect,
 	useId,
 	useRef,
@@ -12,27 +13,25 @@ import type { BridgeClient } from "@/bridge/client";
 import type { SpeakerOption } from "@/bridge/contract";
 import { useBridge } from "@/bridge/hooks";
 import { BridgeError } from "@/bridge/transport";
-import { Input, ResultLine } from "@/components/ui";
+import {
+	Avatar,
+	Button,
+	ConfirmDialog,
+	Input,
+	ResultLine,
+} from "@/components/ui";
 import { menuItemVariants } from "@/components/ui/menu";
 import { cn } from "@/lib/cn";
-import { groupOptions, optionText, type Speaker } from "./speaker-names";
+import {
+	groupOptions,
+	isMe,
+	type OptionRow,
+	optionText,
+	type Speaker,
+	voiceLabel,
+} from "./speaker-names";
 
 const SPEAKER_QUERY_DEBOUNCE_MS = 150;
-
-export interface SpeakerNameFieldProps {
-	speaker: Speaker;
-	/**
-	 * Called once with `true` after the host took a pick, with `false` on
-	 * Escape (and, with `cancelOnBlur`, when focus leaves the field). A
-	 * cancelled combine or a failed pick keeps the field open.
-	 */
-	onDone: (picked: boolean) => void;
-	/** The name the highlighted option would give, for the row's avatar. */
-	onPreview?: (name: string | undefined) => void;
-	/** Gives up when focus leaves, as a row edited in place does. */
-	cancelOnBlur?: boolean;
-	className?: string;
-}
 
 /**
  * How a pick ended: the host took it, the user cancelled the combine, or it
@@ -43,17 +42,26 @@ export type SelectOutcome =
 	| { kind: "cancelled" }
 	| { kind: "failed"; message: string };
 
+/** Asks before combining two voices; resolves whether to go on. */
+export type ConfirmCombine = (ask: {
+	title: string;
+	consequence: string;
+}) => Promise<boolean>;
+
 /**
  * Sends a pick as `speakers.select` without `combine`. When the host
  * refuses it as `wouldCombine` (the person already owns another voice of
- * the meeting, so naming would merge the two), the user confirms first and
- * the pick goes again with `combine: true`; Cancel leaves it. Never
- * rejects: any failure comes back as `failed`.
+ * the meeting, so naming would merge the two), `confirm` asks first, with
+ * the host's words and what it costs, and the pick goes again with
+ * `combine: true`; Cancel leaves it. Whether a pick combines is the host's
+ * call, so a Create or a Suggested pick that resolves to an owner asks too.
+ * Never rejects: any failure comes back as `failed`.
  */
 export async function selectSpeaker(
 	client: BridgeClient,
 	speaker: Speaker,
 	option: SpeakerOption,
+	confirm: ConfirmCombine,
 ): Promise<SelectOutcome> {
 	const params = { speakerID: speaker.id, option };
 	try {
@@ -63,10 +71,9 @@ export async function selectSpeaker(
 			if (!(cause instanceof BridgeError) || cause.code !== "wouldCombine") {
 				throw cause;
 			}
-			const { confirmed } = await client.call("ui.confirmDestructive", {
+			const confirmed = await confirm({
 				title: `Combine ${speaker.clusterLabel} with ${option.label}?`,
-				message: `${cause.message} Their paragraphs become ${option.label}’s. This cannot be undone.`,
-				confirmTitle: "Combine",
+				consequence: `${cause.message} Their paragraphs become ${option.label}’s. This cannot be undone.`,
 			});
 			if (!confirmed) {
 				return { kind: "cancelled" };
@@ -83,54 +90,146 @@ export async function selectSpeaker(
 	}
 }
 
-/** The host's message for a failed pick, under the field or row it came from. */
-export function SelectError({
-	message,
-	className,
-}: {
-	message: string | undefined;
-	className?: string;
-}) {
-	return message ? (
-		<ResultLine className={cn("mt-1.5", className)} tone="destructive">
-			{message}
-		</ResultLine>
-	) : null;
+/**
+ * `selectSpeaker` with its combine confirm: `select` sends a pick, and
+ * `dialog`, rendered once by the caller, is the confirm it may open (the
+ * consequence in words, Cancel first, a red Combine).
+ */
+export function useSpeakerSelect(): {
+	select: (speaker: Speaker, option: SpeakerOption) => Promise<SelectOutcome>;
+	asking: boolean;
+	dialog: ReactNode;
+} {
+	const client = useBridge();
+	const [ask, setAsk] = useState<{
+		title: string;
+		consequence: string;
+		resolve: (confirmed: boolean) => void;
+	} | null>(null);
+
+	const confirm: ConfirmCombine = (question) =>
+		new Promise((resolve) => setAsk({ ...question, resolve }));
+
+	function close(confirmed: boolean) {
+		ask?.resolve(confirmed);
+		setAsk(null);
+	}
+
+	return {
+		select: (speaker, option) =>
+			selectSpeaker(client, speaker, option, confirm),
+		asking: ask !== null,
+		dialog: (
+			<ConfirmDialog
+				confirmLabel="Combine"
+				confirmTestId="speakers-combine"
+				consequence={ask?.consequence ?? ""}
+				onConfirm={() => close(true)}
+				onOpenChange={(open) => {
+					if (!open && ask) {
+						close(false);
+					}
+				}}
+				open={ask !== null}
+				title={ask?.title ?? ""}
+			/>
+		),
+	};
 }
 
 /**
- * The text field that names one speaker, in place of its name, with the
- * host's options under it in three groups (`groupOptions`). The host is
- * asked as the text changes (`speakers.options`, debounced); arrow keys,
- * Home and End move the highlight, Enter sends the highlighted option
- * (`selectSpeaker`), Escape gives up. The field closes once the host took
- * the pick; a cancelled combine leaves it as it was, and a failure shows
- * the host's message under it. Enter on text the options have not
- * caught up with yet creates the typed name, which the host resolves to an
- * existing person of that name. Opens empty: a suggestion is confirmed
- * with its own button, not by Enter on a prefilled field.
+ * A failed pick where it happened: the host's message in red, announced,
+ * with Retry, which sends the same pick again.
+ */
+export function SelectFailure({
+	message,
+	onRetry,
+	testID,
+	className,
+}: {
+	message: string;
+	onRetry: () => void;
+	testID?: string;
+	className?: string;
+}) {
+	return (
+		<ResultLine
+			actions={
+				<Button
+					data-testid={testID ? `${testID}-retry` : undefined}
+					onClick={onRetry}
+					size="xs"
+					variant="outline"
+				>
+					Retry
+				</Button>
+			}
+			className={className}
+			data-testid={testID}
+			tone="destructive"
+		>
+			{message}
+		</ResultLine>
+	);
+}
+
+export interface SpeakerNameFieldProps {
+	speaker: Speaker;
+	/** Every speaker of the meeting, for "Also speaking here". */
+	speakers: readonly Speaker[];
+	/** Called with the highlighted option and the typed text on Enter or a click. */
+	onSubmit: (option: SpeakerOption, text: string) => void;
+	/** Escape, and with `cancelOnBlur` focus leaving the field and its options. */
+	onCancel: () => void;
+	/** The text to reopen with after a failed or cancelled pick. */
+	initialText?: string;
+	/** A person not to offer ("Someone else" after "Also Nicolai?"). */
+	excludedPersonID?: string;
+	cancelOnBlur?: boolean;
+	/** Under the field, above the options: a failed pick's line with Retry. */
+	notice?: ReactNode;
+	/** The options list's height cap; the panel keeps the evidence above it. */
+	listClassName?: string;
+	className?: string;
+}
+
+type Answer =
+	| { query: string; kind: "options"; options: readonly SpeakerOption[] }
+	| { query: string; kind: "failed" };
+
+/**
+ * The text field that names one voice, with the host's options under it
+ * (`groupOptions`), asked for as the text changes (`speakers.options`,
+ * debounced). Up and Down move the highlight; Home and End stay with the
+ * caret. Enter acts only on the highlighted row, and only once the options
+ * are for the text on screen: while they load the list says "Searching…"
+ * and Enter does nothing, so nothing is chosen that was not seen. If they
+ * fail to load the list says so and keeps a highlighted Create row for the
+ * typed name. Escape gives up; an input method's composing Enter is left
+ * alone. With `cancelOnBlur`, focus leaving the field ends the edit, unless
+ * it stays inside the nearest `data-naming-scope` (the row's evidence).
+ * The placeholder is the voice's label; nothing is prefilled.
  */
 export function SpeakerNameField({
 	speaker,
-	onDone,
-	onPreview,
+	speakers,
+	onSubmit,
+	onCancel,
+	initialText = "",
+	excludedPersonID,
 	cancelOnBlur = false,
+	notice,
+	listClassName,
 	className,
 }: SpeakerNameFieldProps) {
 	const client = useBridge();
 	const id = useId();
-	const [query, setQuery] = useState("");
-	const [answered, setAnswered] = useState<{
-		query: string;
-		options: readonly SpeakerOption[];
-	}>({ query: "", options: [] });
+	const [query, setQuery] = useState(initialText);
+	const [answer, setAnswer] = useState<Answer | null>(null);
 	const [active, setActive] = useState(0);
-	const [error, setError] = useState<string | undefined>(undefined);
-	const input = useRef<HTMLInputElement>(null);
-	const picking = useRef(false);
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 	const request = useRef(0);
-	const done = useRef(false);
+	const list = useRef<HTMLDivElement>(null);
 
 	function load(text: string) {
 		const ticket = ++request.current;
@@ -138,66 +237,63 @@ export function SpeakerNameField({
 			.call("speakers.options", { speakerID: speaker.id, query: text })
 			.then((reply) => {
 				if (ticket === request.current) {
-					setAnswered({ query: text, options: reply.options });
+					setAnswer({ query: text, kind: "options", options: reply.options });
 					setActive(0);
 				}
 			})
 			.catch((cause: unknown) => {
 				console.error("bridge: speakers.options failed", cause);
+				if (ticket === request.current) {
+					setAnswer({ query: text, kind: "failed" });
+					setActive(0);
+				}
 			});
 	}
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: one first request per speaker; `load` reads the latest id through the closure.
 	useEffect(() => {
-		load("");
+		load(initialText);
 		return () => {
 			clearTimeout(timer.current);
 			request.current += 1;
 		};
 	}, [speaker.id]);
 
-	const groups = groupOptions(answered.options, answered.query);
-	const flat = groups.flatMap((group) => group.options);
+	const typed = query.trim();
+	const loading = answer === null || answer.query !== query;
+	const failed = !loading && answer.kind === "failed";
+	const groups = loading
+		? []
+		: answer.kind === "options"
+			? groupOptions(answer.options, query, speaker, speakers, excludedPersonID)
+			: typed
+				? [
+						{
+							id: "create" as const,
+							label: "New person",
+							rows: [
+								{
+									option: { kind: "create" as const, label: typed },
+									colorIndex: 0,
+								},
+							],
+						},
+					]
+				: [];
+	const flat: OptionRow[] = groups.flatMap((group) => group.rows);
 	const highlightedAt = Math.min(active, flat.length - 1);
 	const highlighted = flat[highlightedAt];
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: the preview follows the highlighted row only.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: follows the highlight only.
 	useEffect(() => {
-		onPreview?.(highlighted?.label);
-	}, [highlighted?.label]);
-
-	function finish(picked: boolean) {
-		if (done.current) {
-			return;
-		}
-		done.current = true;
-		onPreview?.(undefined);
-		onDone(picked);
-	}
-
-	async function pick(option: SpeakerOption) {
-		if (picking.current) {
-			return;
-		}
-		picking.current = true;
-		setError(undefined);
-		const outcome = await selectSpeaker(client, speaker, option);
-		picking.current = false;
-		if (outcome.kind === "committed") {
-			finish(true);
-			return;
-		}
-		if (outcome.kind === "failed") {
-			setError(outcome.message);
-		}
-		// The confirm sheet took focus; the same speaker's edit goes on.
-		input.current?.focus();
-	}
+		list.current
+			?.querySelector("[data-highlighted]")
+			?.scrollIntoView?.({ block: "nearest" });
+	}, [highlightedAt, answer]);
 
 	function onChange(event: ChangeEvent<HTMLInputElement>) {
 		const value = event.target.value;
 		setQuery(value);
-		setError(undefined);
 		clearTimeout(timer.current);
 		timer.current = setTimeout(() => load(value), SPEAKER_QUERY_DEBOUNCE_MS);
 	}
@@ -207,43 +303,33 @@ export function SpeakerNameField({
 		if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
 			return;
 		}
-		const last = flat.length - 1;
-		const move: Record<string, number> = {
-			ArrowDown: Math.min(active + 1, last),
-			ArrowUp: Math.max(active - 1, 0),
-			Home: 0,
-			End: last,
-		};
-		if (event.key in move && flat.length > 0) {
+		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
 			event.preventDefault();
-			setActive(move[event.key] ?? 0);
+			if (flat.length > 0) {
+				const step = event.key === "ArrowDown" ? 1 : -1;
+				setActive(Math.min(Math.max(highlightedAt + step, 0), flat.length - 1));
+			}
 		} else if (event.key === "Enter") {
 			event.preventDefault();
-			const typed = query.trim();
-			if (answered.query.trim() !== typed) {
-				// The options are for older text; create what was typed.
-				if (typed) {
-					void pick({ kind: "create", label: typed });
-				}
-			} else if (highlighted) {
-				void pick(highlighted);
+			if (!loading && highlighted) {
+				onSubmit(highlighted.option, query);
 			}
 		} else if (event.key === "Escape") {
 			// The field gives up; the popover around it stays open.
 			event.preventDefault();
 			event.stopPropagation();
-			finish(false);
+			event.nativeEvent.stopImmediatePropagation();
+			onCancel();
 		}
 	}
 
 	function onBlur(event: FocusEvent<HTMLDivElement>) {
-		// A pick in flight may open the host's confirm, which takes focus.
-		if (
-			cancelOnBlur &&
-			!picking.current &&
-			!event.currentTarget.contains(event.relatedTarget)
-		) {
-			finish(false);
+		// Focus may go to the evidence around the field (the row's play
+		// button) without ending the edit: `data-naming-scope` marks it.
+		const scope =
+			event.currentTarget.closest("[data-naming-scope]") ?? event.currentTarget;
+		if (cancelOnBlur && !scope.contains(event.relatedTarget)) {
+			onCancel();
 		}
 	}
 
@@ -255,30 +341,49 @@ export function SpeakerNameField({
 		<div className={className} onBlur={onBlur}>
 			<Input
 				aria-activedescendant={
-					highlighted ? optionID(highlightedAt) : undefined
+					highlighted && !loading ? optionID(highlightedAt) : undefined
 				}
 				aria-autocomplete="list"
+				aria-busy={loading}
 				aria-controls={listID}
 				aria-expanded={flat.length > 0}
-				aria-invalid={error ? true : undefined}
 				aria-label={`Name for ${speaker.clusterLabel}`}
 				autoFocus
 				data-testid={`speaker-field-${speaker.id}`}
 				onChange={onChange}
 				onKeyDown={onKeyDown}
-				placeholder="Type a name"
-				ref={input}
+				placeholder={isMe(speaker) ? "Your name" : voiceLabel(speaker)}
 				role="combobox"
 				size="sm"
 				value={query}
 			/>
-			<SelectError message={error} />
+			{notice}
+			{loading ? (
+				<p
+					className="m-0 mt-1.5 px-2 py-1 text-body text-muted-foreground"
+					data-testid="speaker-options-searching"
+				>
+					Searching…
+				</p>
+			) : failed ? (
+				<ResultLine
+					className="mt-1.5"
+					data-testid="speaker-options-failed"
+					tone="destructive"
+				>
+					People could not be loaded
+				</ResultLine>
+			) : null}
 			<div
 				aria-label="People"
-				className="mt-1.5 flex max-h-64 flex-col gap-0.5 overflow-y-auto"
+				className={cn(
+					"mt-1.5 flex flex-col gap-0.5 overflow-y-auto empty:hidden",
+					listClassName ?? "max-h-64",
+				)}
 				id={listID}
 				// Clicks in the list keep focus in the field, so the edit goes on.
 				onMouseDown={(event) => event.preventDefault()}
+				ref={list}
 				role="listbox"
 			>
 				{groups.map((group) => (
@@ -297,9 +402,10 @@ export function SpeakerNameField({
 								{group.label}
 							</div>
 						) : null}
-						{group.options.map((option) => {
-							const at = flat.indexOf(option);
-							const isActive = option === highlighted;
+						{group.rows.map((row) => {
+							const at = flat.indexOf(row);
+							const isActive = row === highlighted;
+							const { option } = row;
 							return (
 								// biome-ignore lint/a11y/useKeyWithClickEvents: focus stays in the combobox, which owns the keys (aria-activedescendant).
 								<div
@@ -308,22 +414,33 @@ export function SpeakerNameField({
 									data-highlighted={isActive ? "" : undefined}
 									id={optionID(at)}
 									key={`${option.kind}-${option.personID ?? option.label}`}
-									onClick={() => void pick(option)}
+									onClick={() => onSubmit(option, query)}
 									onMouseMove={() => setActive(at)}
 									role="option"
 									tabIndex={-1}
 								>
 									{option.kind === "person" ? (
-										<UserIcon aria-hidden="true" />
+										<Avatar
+											aria-hidden="true"
+											index={row.colorIndex}
+											name={option.label}
+											size="sm"
+										/>
 									) : (
 										<PlusIcon aria-hidden="true" />
 									)}
 									<span className="min-w-0 flex-1 truncate">
 										{optionText(option)}
+										{row.combines ? (
+											<span className="text-muted-foreground">
+												{" · "}
+												{row.combines}
+											</span>
+										) : null}
 									</span>
-									{option.detail ? (
+									{row.reason ? (
 										<span className="shrink-0 text-meta text-muted-foreground">
-											{option.detail}
+											{row.reason}
 										</span>
 									) : null}
 								</div>

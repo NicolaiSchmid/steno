@@ -21,3 +21,11 @@ export const focusWithinRingClass =
  */
 export const focusInsetClass =
 	"focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-solid focus-visible:-outline-offset-2";
+
+/**
+ * The ring inside a row of a scrolling list (the speakers panel), where an
+ * outside ring would be clipped by the scroll: drawn inset, on the row's
+ * own fill, which the contrast test measures as a row host.
+ */
+export const focusRowClass =
+	"outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-inset";
