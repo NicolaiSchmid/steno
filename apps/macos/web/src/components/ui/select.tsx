@@ -20,7 +20,7 @@ const selectTriggerVariants = cva(
 	[
 		fieldFrameClass,
 		"inline-flex min-w-0 select-none items-center justify-between gap-2 text-left text-sm outline-none",
-		"focus-visible:border-ring focus-visible:shadow-none focus-visible:ring-[3px] focus-visible:ring-ring/24 focus-visible:before:shadow-none",
+		"focus-visible:border-focus focus-visible:shadow-none focus-visible:ring-[3px] focus-visible:ring-focus-field focus-visible:before:shadow-none",
 		"data-disabled:pointer-events-none data-placeholder:text-faint data-disabled:opacity-64",
 		"[&_svg]:pointer-events-none [&_svg]:shrink-0",
 	],
@@ -97,7 +97,7 @@ export function Select<V extends string = string>({
 				<BaseSelect.Icon className="flex">
 					<ChevronDownIcon
 						aria-hidden="true"
-						className="-me-1 size-3 opacity-50"
+						className="-me-1 size-3 text-muted-foreground"
 					/>
 				</BaseSelect.Icon>
 			</BaseSelect.Trigger>
@@ -115,7 +115,7 @@ export function Select<V extends string = string>({
 								<BaseSelect.Item
 									className={cn(
 										"grid min-h-7 cursor-default select-none grid-cols-[1fr_14px] items-center gap-2 rounded-sm px-2 py-1 text-foreground text-sm outline-none",
-										"data-highlighted:bg-accent data-selected:bg-foreground/8 data-disabled:opacity-64",
+										"data-highlighted:bg-accent data-selected:bg-item-selected data-disabled:opacity-64",
 									)}
 									disabled={option.disabled}
 									key={option.value}

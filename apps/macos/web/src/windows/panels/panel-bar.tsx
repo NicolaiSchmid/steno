@@ -19,7 +19,7 @@ export function PanelBar({ className, ...props }: ComponentProps<"div">) {
 	return (
 		<div
 			className={cn(
-				"inline-flex items-center rounded-2xl border border-border bg-popover text-foreground shadow-pop",
+				"surface-popover inline-flex items-center rounded-2xl border border-border bg-popover text-foreground shadow-pop",
 				className,
 			)}
 			data-tauri-drag-region
@@ -85,7 +85,7 @@ export function CountdownHairline({
 			data-testid="countdown-hairline"
 		>
 			<span
-				className="block h-full rounded-full bg-foreground/40 transition-[width] duration-(--duration-countdown-step) ease-linear motion-reduce:transition-none"
+				className="block h-full rounded-full bg-countdown transition-[width] duration-(--duration-countdown-step) ease-linear motion-reduce:transition-none"
 				style={{ width: `${fraction * 100}%` }}
 			/>
 		</span>

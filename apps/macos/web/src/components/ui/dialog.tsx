@@ -46,7 +46,7 @@ export function DialogPopup({
 			/>
 			<BaseDialog.Popup
 				className={cn(
-					"dialog-glass fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-32px)] w-full max-w-md -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border text-foreground shadow-dialog outline-none",
+					"dialog-glass surface-canvas fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-32px)] w-full max-w-md -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border text-foreground shadow-dialog outline-none",
 					"transition-[opacity,scale] duration-(--duration-surface) ease-in-out",
 					"data-starting-style:scale-[0.98] data-starting-style:opacity-0",
 					"data-ending-style:scale-[0.98] data-ending-style:opacity-0",
@@ -134,7 +134,7 @@ export function DialogCloseButton({
 
 /** The action band shared by `FooterBand` and `DialogFooter`: trailing buttons on the muted fill. */
 const bandClass =
-	"flex items-center justify-end gap-2 border-border border-t bg-muted/72 px-6 py-4";
+	"flex items-center justify-end gap-2 border-border border-t bg-band px-6 py-4";
 
 /** The action band at the foot of a page (onboarding): a `footer` landmark. */
 export function FooterBand({ className, ...props }: ComponentProps<"footer">) {

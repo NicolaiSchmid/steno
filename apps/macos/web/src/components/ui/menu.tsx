@@ -26,7 +26,7 @@ export function MenuTrigger(props: MenuTriggerProps) {
 
 /** The glass popup surface shared by menus, selects and popovers; padding is the caller's. */
 export const popupSurfaceClass =
-	"dropdown-glass rounded-lg border text-foreground shadow-pop outline-none";
+	"dropdown-glass surface-popover rounded-lg border text-foreground shadow-pop outline-none";
 
 export interface MenuPopupProps
 	extends Omit<ComponentProps<typeof BaseMenu.Popup>, "className"> {
@@ -67,7 +67,7 @@ export function MenuPopup({
 export const menuItemVariants = cva(
 	[
 		"flex min-h-7 cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-sm outline-none",
-		"[&>svg]:-mx-0.5 [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:opacity-80",
+		"[&>svg]:-mx-0.5 [&>svg]:size-4 [&>svg]:shrink-0",
 		"data-highlighted:bg-accent data-disabled:opacity-64",
 	],
 	{

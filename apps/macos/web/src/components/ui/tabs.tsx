@@ -25,7 +25,7 @@ export function TabsList({
 		<BaseTabs.List
 			activateOnFocus={activateOnFocus}
 			className={cn(
-				"inline-flex w-max shrink-0 gap-0.5 rounded-lg bg-input/40 p-0.5",
+				"inline-flex w-max shrink-0 gap-0.5 rounded-lg bg-tab-track p-0.5",
 				className,
 			)}
 			{...props}
@@ -51,16 +51,15 @@ export function TabsTab({
 			className={cn(
 				"inline-flex h-6 min-w-0 cursor-default select-none items-center gap-1 rounded-md px-2.5 font-medium text-muted-foreground text-xs outline-none",
 				"transition-[background-color,color,box-shadow] duration-(--duration-functional) ease-standard",
-				"hover:bg-background/55 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
-				"data-active:bg-background data-active:text-foreground data-active:shadow-xs",
-				"dark:data-active:bg-input/72 dark:hover:bg-input/32",
+				"hover:bg-tab-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus",
+				"data-active:bg-tab-active data-active:text-foreground data-active:shadow-xs",
 				className,
 			)}
 			{...props}
 		>
 			{children}
 			{count !== undefined ? (
-				<small className="font-semibold text-3xs text-muted-foreground/70 tabular-nums">
+				<small className="font-semibold text-3xs text-tab-count tabular-nums">
 					{count}
 				</small>
 			) : null}

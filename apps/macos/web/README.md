@@ -72,3 +72,19 @@ nothing but the SVG namespace.
 `min-h-0`); colour, type, radius, shadow and padding never appear at a call
 site. `pnpm lint:ui` (`scripts/check-ui-restyle.mjs`) fails the build when
 they do. Tokens live in `src/theme.css`; motion in `src/lib/motion.ts`.
+
+**Measured contrast.** `src/theme/contrast.test.ts` reads `src/theme.css`
+and measures, in light and dark, every text token at 4.5:1 and every
+outline, icon and focus ring at 3:1 on each surface it can sit on (the
+sidebar, canvas, card and popover, their row fills, each status and person
+tint composited over them), and the steps between surfaces at 1.07. The
+maths is `src/theme/contrast.ts`. Each surface utility (`surface-sidebar`,
+`surface-canvas`, `surface-card`, `surface-popover`) points `--surface`,
+`--accent`, `--row-hover` and `--row-selected` at its own for its subtree,
+so a focus ring's offset (`ring-offset-surface`) is what is around the
+control. The test can only see named colours: `pnpm lint:ui` rejects a
+`/NN` opacity on any colour token, in the kit too (name the veil in
+`theme.css`), and `opacity-*` on anything but a disabled state,
+`aria-hidden` decoration and a transition's 0 or 100. Pairs failing today
+are listed in `src/theme/known-failures.ts`; the test fails when one
+clears, so the list only shrinks.
