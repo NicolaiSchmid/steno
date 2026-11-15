@@ -4,7 +4,9 @@ import Foundation
 /// sidecars and mixdown together with the sample clips of the meeting's
 /// confirmed speakers, whose names no longer need a voice to check against.
 /// Unconfirmed speakers keep their clips until confirmation or meeting
-/// deletion, so an unnamed speaker still plays once the audio is gone. The
+/// deletion, so an unnamed speaker still plays once the audio is gone, and
+/// so do speakers combined into another (`MeetingStore.mergedSpeakers`), so
+/// "Separate again" gives a voice back with its clip. The
 /// asset row keeps its URLs and loses `expiresAt` once every file is gone,
 /// and the swept speakers lose `sampleClipURL`, so a sweep runs once per
 /// expiry. A missing file is skipped, not an error. A file that cannot be

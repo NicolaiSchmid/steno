@@ -73,4 +73,20 @@ public enum SpeakerExcerpts {
     if cutAtStart, !text.isEmpty { text = "…" + text }
     return Excerpt(text: text, inClip: inClip)
   }
+
+  /// What a combined voice says in its own clip: the text of the segments
+  /// that overlap its clip range, cut and marked as `text(for:in:)` does.
+  /// The segments are matched by time, not by speaker, since they now read
+  /// as the voice it joined. nil without a range or an overlapping segment.
+  public static func clipText(for speaker: Speaker, in segments: [TranscriptSegment]) -> String? {
+    guard let range = speaker.sampleClipRange else { return nil }
+    let overlapping = segments.filter { $0.start < range.upperBound && $0.end > range.lowerBound }
+      .map { segment in
+        var segment = segment
+        segment.speakerID = speaker.id
+        return segment
+      }
+    let text = text(for: speaker, in: overlapping)
+    return text.isEmpty ? nil : text
+  }
 }

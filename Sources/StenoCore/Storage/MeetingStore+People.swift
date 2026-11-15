@@ -18,10 +18,14 @@ extension MeetingStore {
     try await writer.write { db in try PersonRow(person).save(db) }
   }
 
+  /// The meeting's voices: its root speakers, by cluster label. A speaker
+  /// combined into another (`mergedInto` set) is not listed; its paragraphs
+  /// read as the voice it joined, and `mergedSpeakers(meetingID:)` lists it.
   public func speakers(meetingID: UUID) async throws -> [Speaker] {
     try await writer.read { db in
       try SpeakerRow
         .filter(SpeakerRow.Columns.meetingID == meetingID.uuidString)
+        .filter(SpeakerRow.Columns.mergedInto == nil)
         .order(SpeakerRow.Columns.clusterLabel, SpeakerRow.Columns.id)
         .fetchAll(db)
         .map(\.speaker)
@@ -39,6 +43,7 @@ extension MeetingStore {
       let speakers =
         try SpeakerRow
         .filter(keys.contains(SpeakerRow.Columns.meetingID))
+        .filter(SpeakerRow.Columns.mergedInto == nil)
         .order(
           SpeakerRow.Columns.meetingID, SpeakerRow.Columns.clusterLabel, SpeakerRow.Columns.id
         )
@@ -68,8 +73,8 @@ extension MeetingStore {
 
   /// People who own a confirmed speaker, most recently met first (the
   /// latest `meeting.startedAt` among their confirmed speakers), then by
-  /// name; a dismissed voice owns nobody. What the speaker picker lists
-  /// before anything is typed.
+  /// name; a dismissed voice owns nobody, and neither does one combined into
+  /// another. What the speaker picker lists before anything is typed.
   public func recentPersons() async throws -> [Person] {
     try await writer.read { db in
       try PersonRow.fetchAll(
@@ -77,7 +82,7 @@ extension MeetingStore {
         sql: """
           SELECT person.* FROM person
           JOIN speaker ON speaker.personID = person.id AND speaker.assignment = ?
-            AND speaker.dismissed = 0
+            AND speaker.dismissed = 0 AND speaker.mergedInto IS NULL
           JOIN meeting ON meeting.id = speaker.meetingID
           GROUP BY person.id
           ORDER BY MAX(meeting.startedAt) DESC, person.displayName COLLATE NOCASE, person.id
@@ -118,37 +123,32 @@ extension MeetingStore {
     }
   }
 
-  /// Two clusters inside one meeting: moves `source`'s segments to `target`,
-  /// averages the embeddings, keeps `target`'s assignment (or takes
-  /// `source`'s when `target` is unknown), deletes the `source` speaker and
-  /// recomputes the voices of the persons involved. `source`'s sample clip
-  /// moves to `target` when `target` has none and is deleted otherwise, so a
-  /// range never survives without its file.
+  /// Two clusters inside one meeting, combined so it can be undone:
+  /// `source` reads as `target`'s voice from now on (`mergeSpeakerRows`),
+  /// and the voices of the persons involved are recomputed. Nothing else
+  /// changes on either row, and no file is removed: `separateSpeaker(_:)`
+  /// undoes it.
   public func mergeSpeakers(_ source: UUID, into target: UUID, meetingID: UUID) async throws {
     guard source != target else { return }
-    let merge = try await writer.write { db in
-      let merge = try Self.mergeSpeakerRows(source, into: target, meetingID: meetingID, db)
-      for personID in merge.personIDs { try Self.refreshVoice(personID: personID, db) }
-      return merge
+    try await writer.write { db in
+      let personIDs = try Self.mergeSpeakerRows(source, into: target, meetingID: meetingID, db)
+      for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
     }
-    if let clip = merge.clipToRemove { try? FileManager.default.removeItem(at: clip) }
   }
 
-  /// What `mergeSpeakerRows` leaves for the caller: the clip file to remove
-  /// once the transaction commits (nil when it moved to the target) and the
-  /// persons whose voices the merge touched.
-  struct SpeakerMerge {
-    var clipToRemove: URL?
-    var personIDs: Set<UUID>
-  }
-
-  /// The row half of `mergeSpeakers`, inside a caller's transaction. Throws
-  /// for a missing speaker or one from another meeting; a self-merge is a
-  /// no-op. Voices are not refreshed here.
+  /// The row half of `mergeSpeakers`, inside a caller's transaction:
+  /// `source.mergedInto` becomes `target`'s root, and nothing else changes.
+  /// `source` keeps its segments, embedding, clip and range, confidence,
+  /// assignment, dismissal, name suggestion and Noes, so separating is
+  /// clearing the column; `target` keeps its own. Throws for a missing
+  /// speaker or one from another meeting; a self-merge, or one into a voice
+  /// that already reads as `source`, is a no-op. Returns the persons whose
+  /// voices the combine touched (`source`'s and the root's confirmed
+  /// persons); voices are not refreshed here. Rust: `merge_speaker_rows`.
   static func mergeSpeakerRows(
     _ source: UUID, into target: UUID, meetingID: UUID, _ db: Database
-  ) throws -> SpeakerMerge {
-    guard source != target else { return SpeakerMerge(clipToRemove: nil, personIDs: []) }
+  ) throws -> Set<UUID> {
+    guard source != target else { return [] }
     guard let sourceRow = try speakerRow(source, db) else {
       throw MeetingStoreError.speakerNotFound(source)
     }
@@ -158,34 +158,78 @@ extension MeetingStore {
     guard sourceRow.meetingID == meetingID, targetRow.meetingID == meetingID else {
       throw MeetingStoreError.speakersInDifferentMeetings(source, target)
     }
-    let merged = sourceRow.speaker
-    var kept = targetRow.speaker
+    let root = try rootOf(target, db)
+    guard root != source else { return [] }
     var personIDs: Set<UUID> = []
-    if case .confirmed(let personID) = merged.assignment { personIDs.insert(personID) }
-    switch (kept.embedding, merged.embedding) {
-    case (let lhs?, let rhs?):
-      kept.embedding = Embedding.weightedMean(lhs, weight: 1, rhs, weight: 1)
-    case (nil, let rhs?):
-      kept.embedding = rhs
-    default:
-      break
+    if let personID = sourceRow.speaker.confirmedPersonID { personIDs.insert(personID) }
+    if let personID = try speakerRow(root, db)?.speaker.confirmedPersonID {
+      personIDs.insert(personID)
     }
-    if case .unknown = kept.assignment { kept.assignment = merged.assignment }
-    if case .confirmed(let personID) = kept.assignment { personIDs.insert(personID) }
-    var clipToRemove = merged.sampleClipURL
-    if kept.sampleClipRange == nil {
-      kept.sampleClipRange = merged.sampleClipRange
-      kept.sampleClipURL = merged.sampleClipURL
-      clipToRemove = nil
-    }
-    kept.clusterConfidence = max(kept.clusterConfidence, merged.clusterConfidence)
-    try SpeakerRow(kept).update(db)
-
     try db.execute(
-      sql: "UPDATE transcriptSegment SET speakerID = ? WHERE speakerID = ?",
-      arguments: [target.uuidString, source.uuidString])
-    try SpeakerRow.filter(SpeakerRow.Columns.id == source.uuidString).deleteAll(db)
-    return SpeakerMerge(clipToRemove: clipToRemove, personIDs: personIDs)
+      sql: "UPDATE speaker SET mergedInto = ? WHERE id = ?",
+      arguments: [root.uuidString, source.uuidString])
+    return personIDs
+  }
+
+  /// The longest `mergedInto` chain a read follows.
+  static let mergeDepth = 64
+
+  /// The voice `id` combined into, nil for a root or a missing row.
+  static func mergedInto(_ id: UUID, _ db: Database) throws -> UUID? {
+    try UUID.fetchOne(
+      db, sql: "SELECT mergedInto FROM speaker WHERE id = ?", arguments: [id.uuidString])
+  }
+
+  /// The speaker `id` reads as: the end of its `mergedInto` chain, or `id`
+  /// itself. A dangling reference or a cycle stops where it breaks, after
+  /// at most `mergeDepth` steps. Rust: `root_of`.
+  static func rootOf(_ id: UUID, _ db: Database) throws -> UUID {
+    var current = id
+    for _ in 0..<mergeDepth {
+      guard let next = try mergedInto(current, db), next != id, try speakerRow(next, db) != nil
+      else { break }
+      current = next
+    }
+    return current
+  }
+
+  /// Every speaker id of the meeting, merged ones included, mapped to the
+  /// id it reads as, by `rootOf`'s rule in one read.
+  static func speakerRoots(meetingID: UUID, _ db: Database) throws -> [UUID: UUID] {
+    let rows = try Row.fetchAll(
+      db, sql: "SELECT id, mergedInto FROM speaker WHERE meetingID = ?",
+      arguments: [meetingID.uuidString])
+    var parent: [UUID: UUID?] = [:]
+    for row in rows {
+      guard let id = row["id"] as UUID? else { continue }
+      parent[id] = row["mergedInto"] as UUID?
+    }
+    var roots: [UUID: UUID] = [:]
+    for id in parent.keys {
+      var current = id
+      for _ in 0..<mergeDepth {
+        guard let next = parent[current] ?? nil, next != id, parent[next] != nil else { break }
+        current = next
+      }
+      roots[id] = current
+    }
+    return roots
+  }
+
+  /// The meeting's root speaker confirmed as `personID`, the first by
+  /// cluster label, other than `except`: the voice a confirm combines into
+  /// and a paragraph move lands on.
+  static func owner(meetingID: UUID, personID: UUID, except: UUID?, _ db: Database) throws
+    -> SpeakerRow?
+  {
+    var request =
+      SpeakerRow
+      .filter(SpeakerRow.Columns.meetingID == meetingID.uuidString)
+      .filter(SpeakerRow.Columns.personID == personID.uuidString)
+      .filter(SpeakerRow.Columns.assignment == SpeakerAssignment.Kind.confirmed.rawValue)
+      .filter(SpeakerRow.Columns.mergedInto == nil)
+    if let except { request = request.filter(SpeakerRow.Columns.id != except.uuidString) }
+    return try request.order(SpeakerRow.Columns.clusterLabel, SpeakerRow.Columns.id).fetchOne(db)
   }
 
   /// The person a typed or calendar name stands for: the stored person whose
@@ -207,28 +251,42 @@ extension MeetingStore {
   }
 
   /// The one operation that sets `.confirmed`. Saves the person when the
-  /// store does not know them, drops the speaker's name suggestion, which
-  /// the confirmation answered, and any No to this person for this voice,
-  /// and undoes a dismissal. Then: the same person again changes nothing
-  /// else; a person who already owns another speaker of this meeting takes
-  /// this speaker over (`mergeSpeakerRows`, Jamie's "add the same name
-  /// twice"); otherwise the speaker becomes `.confirmed(person)`. The voices
-  /// of the new person and of whoever the speaker was confirmed to before
-  /// are recomputed (`refreshVoice`), so a wrong name is taken back exactly.
-  /// The sample clip stays while the meeting's master recording exists, so a
-  /// confirmed speaker can still be heard; once the audio is gone the clip
-  /// goes with the confirmation.
+  /// store does not know them. When the person already owns another voice of
+  /// this meeting (a root confirmed as them), the speaker is combined into it
+  /// (`mergeSpeakerRows`, Jamie's "add the same name twice"): its row is
+  /// kept exactly as it is, suggestion, Noes and dismissal included, with
+  /// `mergedInto` set, so `separateSpeaker(_:)` undoes it; no clip goes.
+  /// Otherwise it drops the speaker's name suggestion, which the
+  /// confirmation answered, and any No to this person for this voice,
+  /// undoes a dismissal, and the speaker becomes `.confirmed(person)`; the
+  /// same person again changes nothing else. The voices of the new person
+  /// and of whoever the speaker was confirmed to before are recomputed
+  /// (`refreshVoice`), so a wrong name is taken back exactly. The sample
+  /// clip stays while the meeting's master recording exists, so a confirmed
+  /// speaker can still be heard; once the audio is gone the clip goes with
+  /// the confirmation.
   public func confirm(speakerID: UUID, person: Person) async throws {
     let clipsToRemove: [URL] = try await writer.write { db in
       guard var speaker = try Self.speakerRow(speakerID, db)?.speaker else {
         throw MeetingStoreError.speakerNotFound(speakerID)
       }
-      try SpeakerNameSuggestionRow
-        .filter(SpeakerNameSuggestionRow.Columns.speakerID == speakerID.uuidString)
-        .deleteAll(db)
       if try Self.personRow(person.id, db) == nil {
         try PersonRow(person).insert(db)
       }
+      let confirmedAsPerson = speaker.assignment == .confirmed(personID: person.id)
+      if !confirmedAsPerson,
+        let owner = try Self.owner(
+          meetingID: speaker.meetingID, personID: person.id, except: speakerID, db)
+      {
+        var personIDs = try Self.mergeSpeakerRows(
+          speakerID, into: owner.id, meetingID: speaker.meetingID, db)
+        personIDs.insert(person.id)
+        for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
+        return []
+      }
+      try SpeakerNameSuggestionRow
+        .filter(SpeakerNameSuggestionRow.Columns.speakerID == speakerID.uuidString)
+        .deleteAll(db)
       // Naming a voice answers an earlier No to this person (on the "me"
       // speaker every one, all from Remove name) and makes a dismissed
       // voice a person again.
@@ -244,35 +302,19 @@ extension MeetingStore {
         speaker.dismissed = false
         try SpeakerRow(speaker).update(db)
       }
-      if case .confirmed(let current) = speaker.assignment, current == person.id { return [] }
+      if confirmedAsPerson { return [] }
 
       var personIDs: Set<UUID> = [person.id]
-      if case .confirmed(let previous) = speaker.assignment { personIDs.insert(previous) }
+      if let previous = speaker.confirmedPersonID { personIDs.insert(previous) }
+      let stored = try Self.personRow(person.id, db)?.person ?? person
+      let similarity = Self.answerSimilarity(speaker, stored)
+      speaker.assignment = .confirmed(personID: person.id)
+      try SpeakerRow(speaker).update(db)
+      try Self.setConfirmedSimilarity(similarity, speakerID: speakerID, db)
       var clips: [URL] = []
-      let owner =
-        try SpeakerRow
-        .filter(SpeakerRow.Columns.meetingID == speaker.meetingID.uuidString)
-        .filter(SpeakerRow.Columns.personID == person.id.uuidString)
-        .filter(SpeakerRow.Columns.assignment == SpeakerAssignment.Kind.confirmed.rawValue)
-        .filter(SpeakerRow.Columns.id != speakerID.uuidString)
-        .order(SpeakerRow.Columns.clusterLabel, SpeakerRow.Columns.id)
-        .fetchOne(db)
-      let kept: UUID
-      if let owner {
-        let merge = try Self.mergeSpeakerRows(
-          speakerID, into: owner.id, meetingID: speaker.meetingID, db)
-        if let clip = merge.clipToRemove { clips.append(clip) }
-        personIDs.formUnion(merge.personIDs)
-        kept = owner.id
-      } else {
-        let stored = try Self.personRow(person.id, db)?.person ?? person
-        let similarity = Self.answerSimilarity(speaker, stored)
-        speaker.assignment = .confirmed(personID: person.id)
-        try SpeakerRow(speaker).update(db)
-        try Self.setConfirmedSimilarity(similarity, speakerID: speakerID, db)
-        kept = speakerID
+      if let clip = try Self.dropClipWhenAudioIsGone(speakerID: speakerID, db) {
+        clips.append(clip)
       }
-      if let clip = try Self.dropClipWhenAudioIsGone(speakerID: kept, db) { clips.append(clip) }
       for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
       return clips
     }
@@ -300,8 +342,11 @@ extension MeetingStore {
 
   /// Recomputes a person's voice from the speakers confirmed to them: the
   /// normalised mean of the newest `voiceWindow` embeddings by
-  /// `meeting.startedAt`, `sampleCount` their number; nil and 0 without any.
-  /// A dismissed voice never counts.
+  /// `meeting.startedAt`, then speaker id, `sampleCount` their number; nil
+  /// and 0 without any. The speakers are the roots confirmed as the person
+  /// and not dismissed, plus every speaker combined into one of them at any
+  /// depth, whatever its own assignment or dismissal; a combined speaker
+  /// never counts for its own assignment's person.
   /// Embeddings of another dimension than `Embedding.dimension` are skipped.
   /// A missing person is ignored.
   static func refreshVoice(personID: UUID, _ db: Database) throws {
@@ -309,10 +354,16 @@ extension MeetingStore {
     let rows = try SpeakerRow.fetchAll(
       db,
       sql: """
-        SELECT speaker.* FROM speaker
+        WITH RECURSIVE voice(id, depth) AS (
+          SELECT id, 0 FROM speaker
+          WHERE personID = ? AND assignment = ? AND dismissed = 0 AND mergedInto IS NULL
+          UNION ALL
+          SELECT speaker.id, voice.depth + 1 FROM speaker
+          JOIN voice ON speaker.mergedInto = voice.id WHERE voice.depth < \(mergeDepth))
+        SELECT speaker.* FROM voice
+        JOIN speaker ON speaker.id = voice.id
         JOIN meeting ON meeting.id = speaker.meetingID
-        WHERE speaker.personID = ? AND speaker.assignment = ? AND speaker.embedding IS NOT NULL
-          AND speaker.dismissed = 0
+        WHERE speaker.embedding IS NOT NULL
         ORDER BY meeting.startedAt DESC, speaker.id
         """,
       arguments: [personID.uuidString, SpeakerAssignment.Kind.confirmed.rawValue])
@@ -493,14 +544,26 @@ extension MeetingStore {
   }
 
   /// The meeting's "me" participant back to unnamed: no person, named
-  /// `LaneMerger.meSpeakerLabel`. This build never names it (`confirm`
-  /// leaves participants alone); the Rust host does when the user names
-  /// the "me" voice, so a shared database reads the same in both.
+  /// `LaneMerger.meSpeakerLabel`. `confirm` leaves participants alone in
+  /// this build; the Rust host names it when the user names the "me" voice,
+  /// so a shared database reads the same in both.
   static func unnameMeParticipant(meetingID: UUID, _ db: Database) throws {
     try db.execute(
       sql:
         "UPDATE participant SET personID = NULL, displayName = ? WHERE meetingID = ? AND role = ?",
       arguments: [LaneMerger.meSpeakerLabel, meetingID.uuidString, ParticipantRole.me.rawValue])
+  }
+
+  /// The meeting's "me" participant takes `person`'s id and name;
+  /// `separateSpeaker(_:)` for a "me" speaker confirmed as them.
+  static func nameMeParticipant(meetingID: UUID, person: Person, _ db: Database) throws {
+    try db.execute(
+      sql:
+        "UPDATE participant SET personID = ?, displayName = ? WHERE meetingID = ? AND role = ?",
+      arguments: [
+        person.id.uuidString, person.displayName, meetingID.uuidString,
+        ParticipantRole.me.rawValue,
+      ])
   }
 
   /// The meeting's Noes, by speaker id then person id.

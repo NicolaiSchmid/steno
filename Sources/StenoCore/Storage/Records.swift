@@ -245,6 +245,9 @@ struct SpeakerRow: StenoRecord {
     static let personID = Column(CodingKeys.personID)
     static let sampleClipURL = Column(CodingKeys.sampleClipURL)
     static let dismissed = Column(CodingKeys.dismissed)
+    /// Since v7, and not a property: the stores write it with their own SQL,
+    /// so a save of this row's columns never combines or separates a voice.
+    static let mergedInto = Column("mergedInto")
   }
 
   init(_ speaker: Speaker) {

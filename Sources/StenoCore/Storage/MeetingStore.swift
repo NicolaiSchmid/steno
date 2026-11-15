@@ -26,6 +26,14 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   /// phone announced another file under the id). Rust:
   /// `StoreError::ReceiptOfAnotherUpload`.
   case receiptOfAnotherUpload(UUID)
+  /// `separateSpeaker(_:)` for a speaker that is missing or not combined
+  /// into another. Rust: `StoreError::NotCombined`.
+  case notCombined(UUID)
+  /// A write made against a transcript that changed since the caller read
+  /// it: `moveTurn` with another generation, a missing segment or one no
+  /// longer under the voice shown, or `separateSpeaker(_:)` for a voice
+  /// whose every paragraph moved away. Rust: `StoreError::StaleTranscript`.
+  case staleTranscript
 
   public var description: String {
     switch self {
@@ -41,6 +49,8 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
       "speaker \(speaker) is confirmed as person \(person), which a No cannot answer"
     case .blankPersonName: "a person needs a name"
     case .receiptOfAnotherUpload(let id): "the receipt of recording \(id) belongs to another upload"
+    case .notCombined(let id): "speaker \(id) is not combined into another"
+    case .staleTranscript: "the transcript changed since it was read"
     }
   }
 }
@@ -317,15 +327,25 @@ public final class MeetingStore: Sendable {
   /// An answer whose voice is not found again, or whose match is contested,
   /// is dropped, and the voice shows for review. A name suggestion stays with its speaker id. Every
   /// person with a confirmed speaker before has their voice recomputed.
-  /// Rust: `Store::replace_transcript`.
+  /// Every combine and every paragraph move goes with the old rows: a voice
+  /// combined into another comes back uncombined, as its own row, and only
+  /// uncombined voices hand their answers on. `meeting.transcriptGeneration`
+  /// is raised by one in the same transaction, so a move made against the
+  /// old transcript is refused (`moveTurn`). Rust: `Store::replace_transcript`.
   public func replaceTranscript(
     _ meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker]
   ) async throws {
     let meetingID = meeting.id
     try await writer.write { db in
       try Self.writeProcessingResults(of: meeting, db)
+      try db.execute(
+        sql: "UPDATE meeting SET transcriptGeneration = transcriptGeneration + 1 WHERE id = ?",
+        arguments: [meetingID.uuidString])
       let meetingSpeakers = SpeakerRow.filter(SpeakerRow.Columns.meetingID == meetingID.uuidString)
-      let replaced = try meetingSpeakers.fetchAll(db).map(\.speaker)
+      // The voices answers can follow, and every row, combined ones too.
+      let replaced = try meetingSpeakers.filter(sql: "mergedInto IS NULL").fetchAll(db).map(
+        \.speaker)
+      let every = try meetingSpeakers.fetchAll(db).map(\.speaker)
       // Deleting the speakers cascades to their suggestions and the user's
       // Noes.
       let suggestions =
@@ -346,7 +366,7 @@ public final class MeetingStore: Sendable {
         yesScores[new] = try Self.confirmedSimilarity(speakerID: kept.id, db)
       }
       // Kept or dropped, each stored confirmation's person is recomputed.
-      let voices = Set(replaced.filter(\.assignment.isConfirmed).compactMap(\.personID))
+      let voices = Set(every.filter(\.assignment.isConfirmed).compactMap(\.personID))
       try TranscriptSegmentRow
         .filter(TranscriptSegmentRow.Columns.meetingID == meetingID.uuidString)
         .deleteAll(db)
@@ -500,11 +520,17 @@ public final class MeetingStore: Sendable {
   /// speaker id order: written with every summary, removed by `confirm` and
   /// with the speaker or the meeting. Never applied automatically; the
   /// speaker picker offers it beside the cosine match and the calendar
-  /// attendees (#78).
+  /// attendees (#78). A combined speaker keeps its suggestion for Separate
+  /// again but reads as the voice it joined meanwhile, so only the root
+  /// speakers' are listed.
   public func nameSuggestions(meetingID: UUID) async throws -> [SpeakerNameSuggestion] {
     try await writer.read { db in
       try SpeakerNameSuggestionRow
         .filter(SpeakerNameSuggestionRow.Columns.meetingID == meetingID.uuidString)
+        .filter(
+          sql: "speakerID IN (SELECT id FROM speaker WHERE meetingID = ? AND mergedInto IS NULL)",
+          arguments: [meetingID.uuidString]
+        )
         .order(SpeakerNameSuggestionRow.Columns.speakerID)
         .fetchAll(db)
         .map(\.suggestion)
@@ -539,7 +565,7 @@ public final class MeetingStore: Sendable {
   /// (`RecordingLayout(audioFolder:meetingID:)`, the folder named after the
   /// meeting id) the whole folder goes, sample clips included. Otherwise only
   /// the files the rows point at are removed (master, sidecars, mixdown,
-  /// clips), so an asset placed in a shared folder never takes its
+  /// clips, combined speakers' included), so an asset placed in a shared folder never takes its
   /// neighbours with it. The rows are gone and `MeetingEvent.deleted` is
   /// posted before any file is touched; a file that resists is thrown after
   /// the rest were removed.
