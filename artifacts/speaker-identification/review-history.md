@@ -280,3 +280,24 @@ Departures: all right.
 All accepted, one fix build on #360; Astra's "Changes all N paragraphs"
 copy and visible "No clip" are taken. Steps 3-4 must-haves recorded for
 those builds.
+
+## 2026-11-15 — built speaker step 2, round 2 (after fix 63bf95e91)
+
+**GPT-6-Astra: 8/10; now at least as good as Jamie (7.5) for step 2.**
+Resolved: scope, reopen, quote, No sample; locking reversed. Partly:
+keyboard (row-to-row Tab, `speakers-popover.tsx:484`). New: weak overflow
+affordance at 200 %.
+
+**Claude Fable 5.1: 8.5/10; at least as good as Jamie, ahead on honesty.**
+All round 1 items resolved (colour in logic; fixture colour indices are not
+FNV, so screens disagree). Ranked: reopened row stale (placeholder and
+"Anna · Sounds like" for a confirmed voice); pill undercounts (suggestions
+not counted); hints read as part of the label; scope line copy and
+placement; "Is this right?" over a done row. Jamie still wins on the
+all-inclusive count and the candidate avatar preview.
+
+### Responses
+
+All accepted in one fix pass on #360 (Tab: arrows kept, Tab moves between
+rows, reconciling Fable's one-stop and Astra's every-row asks). Step 3
+rebases onto it.
