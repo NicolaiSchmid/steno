@@ -328,7 +328,7 @@ export function Sidebar() {
 									"size-[7px] shrink-0 rounded-full",
 									phone.isReachable
 										? "bg-success shadow-[0_0_0_3px_var(--success-surface)]"
-										: "bg-faint",
+										: "bg-outline",
 								)}
 								role="img"
 							/>

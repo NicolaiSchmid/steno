@@ -63,7 +63,10 @@ export function NotesTab({ meetingID, notes }: NotesTabProps) {
 				value={text}
 				variant="reading"
 			/>
-			<p className="my-0 text-faint text-xs" data-testid="scratchpad-hint">
+			<p
+				className="my-0 text-muted-foreground text-xs"
+				data-testid="scratchpad-hint"
+			>
 				Saved with the meeting and exported alongside the summary.
 			</p>
 		</div>

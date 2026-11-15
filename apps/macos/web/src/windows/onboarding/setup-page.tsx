@@ -142,7 +142,7 @@ function SetupRow({ row, children }: { row: SetupStep; children: ReactNode }) {
 						<Badge>Optional</Badge>
 					</span>
 				}
-				tone={row.state === "saved" ? "success" : "faint"}
+				tone={row.state === "saved" ? "success" : "muted"}
 			>
 				{open ? children : null}
 			</FormRow>

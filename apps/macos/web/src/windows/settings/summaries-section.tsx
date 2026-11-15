@@ -263,7 +263,7 @@ export function SummariesSection() {
 							? "success"
 							: status.kind === "failed"
 								? "warning"
-								: "faint"
+								: "muted"
 					}
 				>
 					{status.detail ? (

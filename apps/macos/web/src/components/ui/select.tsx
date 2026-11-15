@@ -20,8 +20,8 @@ const selectTriggerVariants = cva(
 	[
 		fieldFrameClass,
 		"inline-flex min-w-0 select-none items-center justify-between gap-2 text-left text-sm outline-none",
-		"focus-visible:border-focus focus-visible:shadow-none focus-visible:ring-[3px] focus-visible:ring-focus-field focus-visible:before:shadow-none",
-		"data-disabled:pointer-events-none data-placeholder:text-faint data-disabled:opacity-64",
+		"focus-visible:border-focus focus-visible:shadow-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface focus-visible:before:shadow-none",
+		"data-disabled:pointer-events-none data-placeholder:text-muted-foreground data-disabled:opacity-64",
 		"[&_svg]:pointer-events-none [&_svg]:shrink-0",
 	],
 	{

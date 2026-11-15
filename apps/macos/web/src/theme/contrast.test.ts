@@ -9,7 +9,7 @@ import {
 	type Rgba,
 	toHex,
 } from "./contrast";
-import { KNOWN_FAILURES as KNOWN } from "./known-failures";
+import { dark, light, type Palette } from "./palette";
 
 describe("contrast", () => {
 	const white = parseColor("#ffffff");
@@ -183,23 +183,21 @@ function checks(mode: Mode): Check[] {
 		}
 	};
 	const sidebar = everyHost(mode, ["sidebar"]);
-	const content = everyHost(mode, ["canvas", "card"]);
-
 	// Text on every surface it may sit on.
-	for (const name of ["--foreground", "--muted-foreground", "--faint"]) {
+	for (const name of ["--foreground", "--muted-foreground"]) {
 		on(name, everyHost(mode), TEXT);
 	}
-	for (const name of [
-		"--sidebar-muted-foreground",
-		"--sidebar-row-foreground",
-		"--sidebar-label",
-	]) {
-		on(name, sidebar, TEXT);
-	}
-	for (const name of ["--form-heading", "--form-note"]) {
-		on(name, [...content, ...tinted(mode, "--group", ["canvas"])], TEXT);
-	}
-	on("--tab-count", tinted(mode, "--tab-track", ["canvas", "card"]), TEXT);
+	on("--sidebar-muted-foreground", sidebar, TEXT);
+	const tabs = tinted(mode, "--tab-track", ["canvas", "card"]);
+	on("--muted-foreground", tabs, TEXT);
+	on(
+		"--foreground",
+		tabs.map((host) => ({
+			name: `--tab-active over ${host.name}`,
+			colour: layers(host.colour, token(mode, "--tab-active")),
+		})),
+		TEXT,
+	);
 
 	// Status and live: text and icons bare, and on their own tint over every host.
 	for (const tone of TONES) {
@@ -210,16 +208,6 @@ function checks(mode: Mode): Check[] {
 		on(`--${tone}-foreground`, where, TEXT);
 		on(`--${tone}`, where, NON_TEXT);
 	}
-	on(
-		"--warning-body",
-		tinted(mode, "--warning-surface", ["canvas", "card"]),
-		TEXT,
-	);
-	on(
-		"--destructive-body",
-		tinted(mode, "--destructive-surface", ["canvas", "card"]),
-		TEXT,
-	);
 	on("--live-foreground", everyHost(mode, ["sidebar", "canvas", "card"]), TEXT);
 	on(
 		"--live",
@@ -251,11 +239,6 @@ function checks(mode: Mode): Check[] {
 	// Non-text: outlines and the switch's off track, focus, sidebar icons.
 	on("--outline", everyHost(mode), NON_TEXT);
 	on("--focus", everyHost(mode), NON_TEXT);
-	on(
-		"--focus-field",
-		ALL.map((surface) => hosts(mode, surface)[0] as Host),
-		NON_TEXT,
-	);
 	on("--sidebar-icon", sidebar, NON_TEXT);
 	const primary = layers(canvas, token(mode, "--primary"));
 	on(
@@ -295,40 +278,27 @@ function checks(mode: Mode): Check[] {
 	return list;
 }
 
-const KNOWN_FAILURES = new Set(KNOWN);
-
-describe.each(["light", "dark"] as const)("theme.css in %s", (mode) => {
-	const list = checks(mode);
-
-	it("measures every pair it names", () => {
-		expect(list.length).toBeGreaterThan(100);
-		const names = new Set(list.map((check) => check.name));
-		const stale = [...KNOWN_FAILURES].filter(
-			(name) => name.startsWith(`${mode}:`) && !names.has(name),
-		);
-		expect(stale, "known failures that are no longer measured").toEqual([]);
+describe.each([
+	["light", light],
+	["dark", dark],
+] as const)("theme.css in %s", (mode, palette: Palette) => {
+	it("holds the computed palette", () => {
+		const drift = Object.entries(palette)
+			.map(([name, value]) => [name, toHex(token(mode, name)), value])
+			.filter(([, actual, expected]) => actual !== expected?.toLowerCase())
+			.map(([name, actual, expected]) => `${name}: ${actual}, not ${expected}`);
+		expect(drift).toEqual([]);
 	});
 
-	it("passes every pair outside the known failures", () => {
+	it("passes every pair it measures", () => {
+		const list = checks(mode);
+		expect(list.length).toBeGreaterThan(100);
 		const failing = list
-			.filter(
-				(check) =>
-					check.ratio < check.minimum && !KNOWN_FAILURES.has(check.name),
-			)
+			.filter((check) => check.ratio < check.minimum)
 			.map(
 				(check) =>
 					`${check.name}: ${check.ratio.toFixed(2)} < ${check.minimum}`,
 			);
 		expect(failing).toEqual([]);
-	});
-
-	it("fails every known failure, so the list only shrinks", () => {
-		const cleared = list
-			.filter(
-				(check) =>
-					check.ratio >= check.minimum && KNOWN_FAILURES.has(check.name),
-			)
-			.map((check) => `${check.name}: ${check.ratio.toFixed(2)}`);
-		expect(cleared, "now passing: take them off KNOWN_FAILURES").toEqual([]);
 	});
 });

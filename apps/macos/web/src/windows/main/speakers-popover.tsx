@@ -273,9 +273,11 @@ function SpeakerRow({
 						>
 							<span className="truncate">{speaker.displayName}</span>
 							{named && isMe(speaker) ? (
-								<span className="shrink-0 font-normal text-faint">You</span>
+								<span className="shrink-0 font-normal text-muted-foreground">
+									You
+								</span>
 							) : named && speaker.email ? (
-								<span className="truncate font-normal text-faint">
+								<span className="truncate font-normal text-muted-foreground">
 									{speaker.email}
 								</span>
 							) : null}

@@ -36,7 +36,7 @@ function AssetRow({ asset }: { asset: Asset }) {
 		case "downloading":
 			control = (
 				<span
-					className="font-mono text-faint text-xs tabular-nums"
+					className="font-mono text-muted-foreground text-xs tabular-nums"
 					data-testid={`asset-${asset.id}-progress`}
 				>
 					{percent === null ? "…" : `${percent}%`}

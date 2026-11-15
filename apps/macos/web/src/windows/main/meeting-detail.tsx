@@ -264,9 +264,9 @@ function KeepAudioToggle({
 
 const EXPORT_ICON: Record<
 	MeetingDetailSnapshot["export"]["status"],
-	{ icon: ReactNode; tone: "faint" | "muted" | "success" | "warning" }
+	{ icon: ReactNode; tone: "muted" | "success" | "warning" }
 > = {
-	notConfigured: { icon: <ShareIcon />, tone: "faint" },
+	notConfigured: { icon: <ShareIcon />, tone: "muted" },
 	pending: { icon: <ClockIcon />, tone: "muted" },
 	delivered: { icon: <CheckCircle2Icon />, tone: "success" },
 	failed: { icon: <CircleAlertIcon />, tone: "warning" },
@@ -291,7 +291,7 @@ function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 				<div className="flex items-center gap-3" data-testid="retention-row">
 					<AudioWaveformIcon
 						aria-hidden="true"
-						className="size-4 shrink-0 text-faint"
+						className="size-4 shrink-0 text-muted-foreground"
 					/>
 					<span className="min-w-0 flex-1">
 						{formatRetention(detail.retention)}.

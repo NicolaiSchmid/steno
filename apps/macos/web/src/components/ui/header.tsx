@@ -36,7 +36,7 @@ export interface BreadcrumbProps
 	items: ReactNode[];
 }
 
-/** The trail in a header row: muted parents, a faint slash, the page in full colour. */
+/** The trail in a header row: muted parents, a muted slash, the page in full colour. */
 export function Breadcrumb({
 	className,
 	items,
@@ -67,7 +67,7 @@ export function Breadcrumb({
 							<li className="max-w-40 shrink-0 truncate text-muted-foreground">
 								{item}
 							</li>
-							<li aria-hidden="true" className="text-faint">
+							<li aria-hidden="true" className="text-muted-foreground">
 								/
 							</li>
 						</Fragment>
