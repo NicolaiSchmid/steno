@@ -280,6 +280,26 @@ async fn mixdown_is_a_16k_mono_wav_of_the_right_length() {
 /// A stereo 16-bit PCM WAV at 48 kHz built byte by byte: each channel
 /// decodes to its own samples, level and frequency.
 #[test]
+fn an_excerpt_is_its_span_of_every_lane_at_16k() {
+    let directory = tempfile::tempdir().unwrap();
+    let asset = make_call_asset(directory.path());
+    let master = steno_core::paths::file_url_path(&asset.url).unwrap();
+    let excerpt = directory.path().join("turn.wav");
+    SymphoniaAudioCodec::excerpt_path(&master, &excerpt, 0.5, 1.5).unwrap();
+    let file = WavFile::read(&excerpt).unwrap();
+    assert_eq!((file.sample_rate, file.channels.len()), (16_000, 1));
+    assert!((file.duration() - 1.0).abs() < 0.01, "{}", file.duration());
+    // Both lanes are 1 kHz in phase: the mono average is (0.5 + 0.25) / 2.
+    assert!(level_against_sine(&file.channels[0][2_000..14_000], 0.375).abs() < 1.0);
+
+    // A span past the end is cut at the end; one wholly past it is empty.
+    SymphoniaAudioCodec::excerpt_path(&master, &excerpt, 1.5, 90.0).unwrap();
+    assert!((WavFile::read(&excerpt).unwrap().duration() - 0.5).abs() < 0.01);
+    SymphoniaAudioCodec::excerpt_path(&master, &excerpt, 5.0, 6.0).unwrap();
+    assert!(WavFile::read(&excerpt).unwrap().duration() < 0.01);
+}
+
+#[test]
 fn a_stereo_wav_decodes_each_channel_on_its_own() {
     let frames = 24_000usize;
     let sine = |hertz: f64, amplitude: f64, i: usize| {

@@ -48,6 +48,8 @@ pub struct MeetingDetailViewModel {
     pub deliveries: Vec<Delivery>,
     /// Whether the master file is on disk, rechecked with every export.
     pub recording_files_exist: bool,
+    /// The meeting's transcript generation, which a paragraph move names.
+    pub transcript_generation: i64,
     /// `Settings::default_retention`, followed through the settings.
     pub default_retention: AudioRetention,
     pub llm_configured: bool,
@@ -78,6 +80,7 @@ impl MeetingDetailViewModel {
             export: None,
             deliveries: Vec::new(),
             recording_files_exist: false,
+            transcript_generation: 0,
             default_retention: settings.map_or(AudioRetention::KeepForever, |settings| {
                 settings.default_retention
             }),
@@ -115,6 +118,13 @@ impl MeetingDetailViewModel {
                     .and_then(|asset| file_url_path(&asset.url))
                     .is_some_and(|path| files.exists(&path));
                 self.export = export;
+                match store.transcript_generation(self.id) {
+                    Ok(generation) => self.transcript_generation = generation,
+                    Err(StoreError::MeetingNotFound(_)) => {}
+                    Err(error) => {
+                        self.error = Some(format!("Meeting could not be loaded: {error}"));
+                    }
+                }
                 if let Some(export) = self.export.clone() {
                     self.speakers.update(export, store, files);
                     if self.retry_redeliver_when_ready

@@ -1026,6 +1026,8 @@ pub struct FakeClipPlayer {
     file_system: Arc<dyn FileSystem>,
     playing: Mutex<Option<PathBuf>>,
     pub played: Mutex<Vec<PathBuf>>,
+    /// Each span played: the recording, its start and its end in seconds.
+    pub spans: Mutex<Vec<(PathBuf, f64, f64)>>,
 }
 
 impl FakeClipPlayer {
@@ -1035,6 +1037,7 @@ impl FakeClipPlayer {
             file_system,
             playing: Mutex::new(None),
             played: Mutex::new(Vec::new()),
+            spans: Mutex::new(Vec::new()),
         }
     }
 }
@@ -1048,6 +1051,19 @@ impl ClipPlayer for FakeClipPlayer {
         lock(&self.played).push(clip.to_path_buf());
         *lock(&self.playing) = Some(clip.to_path_buf());
         true
+    }
+
+    /// Plays `<recording>#<start>-<end>`, a name no file has, and records
+    /// the span in `spans`.
+    fn play_span(&self, recording: &Path, start: f64, end: f64) -> Option<PathBuf> {
+        *lock(&self.playing) = None;
+        if !self.file_system.exists(recording) {
+            return None;
+        }
+        lock(&self.spans).push((recording.to_path_buf(), start, end));
+        let playing = PathBuf::from(format!("{}#{start}-{end}", recording.display()));
+        *lock(&self.playing) = Some(playing.clone());
+        Some(playing)
     }
 
     fn stop(&self) {

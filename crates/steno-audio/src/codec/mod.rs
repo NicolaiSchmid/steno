@@ -178,6 +178,50 @@ impl SymphoniaAudioCodec {
         Self::mix(Frames::open(source)?, destination)
     }
 
+    /// `start..end` seconds of `source`, every channel averaged to mono,
+    /// written as 16 kHz Int16 WAV to `destination`: a turn's own audio.
+    /// Reads the file only up to `end`. A failure removes what was written.
+    pub fn excerpt_path(
+        source: &Path,
+        destination: &Path,
+        start: f64,
+        end: f64,
+    ) -> Result<(), CodecError> {
+        let mut frames = Frames::open(source)?;
+        let mut excerpt = Excerpt {
+            start: start.max(0.0),
+            end: end.max(start),
+            position: 0,
+            rate: 0,
+            samples: Vec::new(),
+            done: false,
+        };
+        match frames.stream(|event| excerpt.take(event)) {
+            Ok(_) => {}
+            Err(_) if excerpt.done => {}
+            Err(error) => return Err(error),
+        }
+        if excerpt.rate == 0 {
+            return Err(CodecError::UnsupportedFormat(
+                "no audio before the end".into(),
+            ));
+        }
+        let samples = Self::to_16k(&excerpt.samples, excerpt.rate);
+        create_parent(destination)?;
+        let written = WavStreamWriter::create(destination, 16_000).and_then(|mut writer| {
+            let ints: Vec<i16> = samples
+                .iter()
+                .map(|s| (s.clamp(-1.0, 1.0) * 32767.0).round() as i16)
+                .collect();
+            writer.write(&ints)?;
+            writer.finish()
+        });
+        written.map_err(|error| {
+            let _ = std::fs::remove_file(destination);
+            CodecError::Io(error.to_string())
+        })
+    }
+
     fn mix(mut frames: Frames, destination: &Path) -> Result<(), CodecError> {
         create_parent(destination)?;
         let mut mixdown = Mixdown::new(destination);
@@ -891,6 +935,56 @@ impl LaneDecode {
 
 /// The mixdown's state between blocks: the mono lane resampled, held back
 /// until settled, then written.
+/// [`SymphoniaAudioCodec::excerpt_path`]'s window over a stream: the mono
+/// frames from `start` to `end` seconds at the first shape's rate.
+struct Excerpt {
+    start: f64,
+    end: f64,
+    /// Frames of the stream seen so far.
+    position: usize,
+    rate: u32,
+    samples: Vec<f32>,
+    /// Past `end`: the stream is stopped with an error the caller ignores.
+    done: bool,
+}
+
+impl Excerpt {
+    fn take(&mut self, event: Event<'_>) -> Result<(), CodecError> {
+        match event {
+            // A later shape ends the excerpt: one rate per file.
+            Event::Start(spec) if self.rate == 0 => {
+                self.rate = spec.rate;
+                Ok(())
+            }
+            Event::Start(_) => self.stop(),
+            Event::Frames(spec, block) => {
+                let rate = f64::from(self.rate);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let (first, last) = ((self.start * rate) as usize, (self.end * rate) as usize);
+                let frames = block.len() / spec.channels.max(1);
+                let scale = 1.0 / spec.channels.max(1) as f32;
+                for (index, frame) in block.chunks_exact(spec.channels.max(1)).enumerate() {
+                    let at = self.position + index;
+                    if at >= first && at < last {
+                        self.samples
+                            .push(frame.iter().fold(0.0f32, |sum, s| sum + s * scale));
+                    }
+                }
+                self.position += frames;
+                if self.position >= last {
+                    return self.stop();
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn stop(&mut self) -> Result<(), CodecError> {
+        self.done = true;
+        Err(CodecError::Io("the excerpt is complete".into()))
+    }
+}
+
 struct Mixdown<'a> {
     destination: &'a Path,
     writer: Option<WavStreamWriter>,

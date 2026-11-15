@@ -1,11 +1,13 @@
 //! The speakers of one meeting as the header row, the popover and the
 //! transcript pickers show them: one row per speaker, the ranked options a
-//! picker offers, the excerpt a row shows, and the writes: naming
-//! ([`SpeakersViewModel::select`]), No to a suggestion, Remove name, and
-//! Not a person.
+//! picker offers, the excerpt a row shows, the voices combined into
+//! another, and the writes: naming ([`SpeakersViewModel::select`]), No to a
+//! suggestion, Remove name, Not a person, Separate again and moving one
+//! turn ([`SpeakersViewModel::move_turn`]). Playback of a clip or of a
+//! turn's span goes through one player.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use steno_core::{
@@ -459,6 +461,37 @@ impl SpeakerRow {
     }
 }
 
+/// A voice combined into another ([`Store::merged_speakers`]), kept so
+/// Separate again can undo the combine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CombinedRow {
+    pub speaker: Speaker,
+    /// The voice it reads as.
+    pub root: Uuid,
+    /// The words of its own clip: the transcript's text over the clip's
+    /// range, since its paragraphs read as the root's.
+    pub excerpt: String,
+    /// Whether its clip file exists.
+    pub can_play: bool,
+}
+
+/// What a combined voice's clip says: the meeting's segments over the clip
+/// range, cut as [`excerpt`] cuts them; nothing without a clip range.
+fn combined_excerpt(speaker: &Speaker, segments: &[TranscriptSegment]) -> String {
+    let Some(range) = speaker.sample_clip_range else {
+        return String::new();
+    };
+    let own: Vec<TranscriptSegment> = segments
+        .iter()
+        .filter(|segment| segment.start < range.upper && segment.end > range.lower)
+        .map(|segment| TranscriptSegment {
+            speaker_id: Some(speaker.id),
+            ..segment.clone()
+        })
+        .collect();
+    excerpt(speaker, &own)
+}
+
 /// Makes `person` [`Settings::self_person_id`](steno_core::Settings::self_person_id)
 /// unless a stored person is set, after confirming them as every
 /// still-unknown "me" speaker ([`Store::confirm_unnamed_me_speakers`])
@@ -513,6 +546,11 @@ fn combined_voice(
 #[derive(Debug, Default)]
 pub struct SpeakersViewModel {
     pub rows: Vec<SpeakerRow>,
+    /// The voices combined into one of `rows`, by cluster label.
+    pub combined: Vec<CombinedRow>,
+    /// The span [`SpeakersViewModel::play_turn`] started: the file the
+    /// player plays and the turn's first segment.
+    playing_turn: Option<(PathBuf, Uuid)>,
     pub export: Option<MeetingExport>,
     pub recent: Vec<Person>,
     pub persons: Vec<Person>,
@@ -569,8 +607,19 @@ impl SpeakersViewModel {
             })
             .collect();
         let meeting_id = export.meeting.id;
+        let segments = export.segments.clone();
         self.export = Some(export);
         let loaded = (|| -> steno_core::store::Result<()> {
+            self.combined = store
+                .merged_speakers(meeting_id)?
+                .into_iter()
+                .map(|merged| CombinedRow {
+                    excerpt: combined_excerpt(&merged.speaker, &segments),
+                    can_play: clip_path(&merged.speaker).is_some_and(|path| files.exists(&path)),
+                    root: merged.root,
+                    speaker: merged.speaker,
+                })
+                .collect();
             let suggestions = store.name_suggestions(meeting_id)?;
             let rejections = store.suggestion_rejections(meeting_id)?;
             let recent = store.recent_persons()?;
@@ -661,22 +710,7 @@ impl SpeakersViewModel {
         let Some(row) = self.row(speaker_id).cloned() else {
             return Ok(false);
         };
-        let person = match &option.kind {
-            OptionKind::Person(known) => known.clone(),
-            OptionKind::Create(name) => {
-                let attendee = self.export.as_ref().and_then(|export| {
-                    export.participants.iter().find(|participant| {
-                        participant.role == ParticipantRole::Them
-                            && Person::names_match(&participant.display_name, name)
-                    })
-                });
-                store.resolve_person(
-                    name,
-                    attendee.and_then(|attendee| attendee.email.as_deref()),
-                    now,
-                )?
-            }
-        };
+        let person = self.person_of(option, store, now)?;
         if row.speaker.assignment
             == (SpeakerAssignment::Confirmed {
                 person_id: person.id,
@@ -699,6 +733,60 @@ impl SpeakersViewModel {
         {
             self.error = Some(format!("Steno could not remember who you are: {error}"));
         }
+        Ok(true)
+    }
+
+    /// The person an option stands for: a person option's, or a create
+    /// option's name resolved, taking a same-named attendee's email.
+    fn person_of(
+        &self,
+        option: &SpeakerOption,
+        store: &Store,
+        now: DateTime<Utc>,
+    ) -> steno_core::store::Result<Person> {
+        match &option.kind {
+            OptionKind::Person(known) => Ok(known.clone()),
+            OptionKind::Create(name) => {
+                let attendee = self.export.as_ref().and_then(|export| {
+                    export.participants.iter().find(|participant| {
+                        participant.role == ParticipantRole::Them
+                            && Person::names_match(&participant.display_name, name)
+                    })
+                });
+                store.resolve_person(
+                    name,
+                    attendee.and_then(|attendee| attendee.email.as_deref()),
+                    now,
+                )
+            }
+        }
+    }
+
+    /// "This paragraph" ([`Store::move_turn`]): the turn's segments, each
+    /// with the voice the page showed it under, to the option's person's
+    /// voice here, or a new voice for them. The clips of voices the move
+    /// left empty are removed. Always a change when it succeeds.
+    pub fn move_turn(
+        &self,
+        meeting_id: Uuid,
+        generation: i64,
+        segments: &[(Uuid, Option<Uuid>)],
+        option: &SpeakerOption,
+        store: &Store,
+        now: DateTime<Utc>,
+    ) -> steno_core::store::Result<bool> {
+        let person = self.person_of(option, store, now)?;
+        let clips = store.move_turn(meeting_id, generation, segments, &person)?;
+        for clip in clips.iter().filter_map(|clip| file_url_path(clip)) {
+            let _ = std::fs::remove_file(clip);
+        }
+        Ok(true)
+    }
+
+    /// Undo a combine, or Separate again ([`Store::separate_speaker`]).
+    /// Returns whether a speaker changed.
+    pub fn separate(&self, speaker_id: Uuid, store: &Store) -> steno_core::store::Result<bool> {
+        store.separate_speaker(speaker_id)?;
         Ok(true)
     }
 
@@ -753,7 +841,13 @@ impl SpeakersViewModel {
     }
 
     pub fn play(&mut self, id: Uuid, player: &dyn ClipPlayer) {
-        let Some(path) = self.row(id).and_then(|row| clip_path(&row.speaker)) else {
+        let speaker = self.row(id).map(|row| &row.speaker).or_else(|| {
+            self.combined
+                .iter()
+                .find(|combined| combined.speaker.id == id)
+                .map(|combined| &combined.speaker)
+        });
+        let Some(path) = speaker.and_then(clip_path) else {
             self.error = Some("This speaker has no sample clip.".to_owned());
             return;
         };
@@ -770,13 +864,44 @@ impl SpeakersViewModel {
         player.stop();
     }
 
-    /// The row whose clip is playing.
+    /// `start..end` seconds of the meeting's `recording`, the turn whose
+    /// first segment is `turn`: the same player, so a clip stops it and it
+    /// stops a clip. False when the player could not start it.
+    pub fn play_turn(
+        &mut self,
+        recording: &Path,
+        start: f64,
+        end: f64,
+        turn: Uuid,
+        player: &dyn ClipPlayer,
+    ) -> bool {
+        self.playing_turn = player
+            .play_span(recording, start, end)
+            .map(|path| (path, turn));
+        self.playing_turn.is_some()
+    }
+
+    /// What is playing: the voice (a row or a combined voice) whose clip
+    /// plays, or the first segment of the turn whose span plays.
     #[must_use]
     pub fn playing(&self, player: &dyn ClipPlayer) -> Option<Uuid> {
         let playing = player.playing()?;
+        let is = |speaker: &Speaker| clip_path(speaker).as_deref() == Some(playing.as_path());
         self.rows
             .iter()
-            .find(|row| clip_path(&row.speaker).as_deref() == Some(playing.as_path()))
+            .find(|row| is(&row.speaker))
             .map(SpeakerRow::id)
+            .or_else(|| {
+                self.combined
+                    .iter()
+                    .find(|combined| is(&combined.speaker))
+                    .map(|combined| combined.speaker.id)
+            })
+            .or_else(|| {
+                self.playing_turn
+                    .as_ref()
+                    .filter(|(path, _)| *path == playing)
+                    .map(|(_, turn)| *turn)
+            })
     }
 }

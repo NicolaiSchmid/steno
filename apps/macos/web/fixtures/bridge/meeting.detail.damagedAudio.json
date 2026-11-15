@@ -172,7 +172,7 @@
       "speakerID" : "00000000-0000-0000-0000-000000000014",
       "speakerName" : "Nicolai",
       "startSeconds" : 12,
-      "text" : "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen."
+      "text" : "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen. Und die Nebenprojekte pausieren wir bis zur Q1-Planung."
     },
     {
       "endSeconds" : 65,
@@ -199,5 +199,5 @@
       "text" : "Die Partner sollten das nicht aus zweiter Hand hören."
     }
   ],
-  "transcriptGeneration" : 2
+  "transcriptGeneration" : 1
 }

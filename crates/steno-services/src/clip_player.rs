@@ -1,11 +1,13 @@
-//! The host's `ClipPlayer`: a speaker's sample clip played by the
-//! platform's own player in a child process, one clip at a time, behind the
+//! The host's `ClipPlayer`: a speaker's sample clip, or a turn's span of
+//! the meeting's recording cut to a private temporary WAV, played by the
+//! platform's own player in a child process, one at a time, behind the
 //! playback gate, so a recording that starts stops it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use steno_audio::codec::SymphoniaAudioCodec;
 use steno_audio::{Playback, PlaybackPermit};
 use steno_host::services::ClipPlayer;
 
@@ -42,6 +44,8 @@ pub struct ProcessClipPlayer {
     playback: Playback,
     command: fn(&Path) -> Command,
     slot: Slot,
+    /// The turn span cut last, removed when the next is cut and on drop.
+    span: Mutex<Option<PathBuf>>,
 }
 
 impl ProcessClipPlayer {
@@ -58,8 +62,47 @@ impl ProcessClipPlayer {
             playback,
             command,
             slot: Slot::default(),
+            span: Mutex::new(None),
         }
     }
+}
+
+impl Drop for ProcessClipPlayer {
+    fn drop(&mut self) {
+        end(&self.slot);
+        let span = self
+            .span
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(span) = span {
+            let _ = std::fs::remove_file(span);
+        }
+    }
+}
+
+/// The folder turn spans are cut into: in the temporary folder, readable by
+/// this user only.
+fn span_directory() -> std::io::Result<PathBuf> {
+    let directory = std::env::temp_dir().join(format!("steno-turn-audio-{}", user_tag()));
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(&directory)?;
+    Ok(directory)
+}
+
+/// Keeps two users' folders apart on a shared temporary folder.
+fn user_tag() -> String {
+    let variable = if cfg!(windows) { "USERNAME" } else { "USER" };
+    std::env::var(variable)
+        .ok()
+        .filter(|name| !name.is_empty() && name.chars().all(char::is_alphanumeric))
+        .unwrap_or_else(|| "user".to_owned())
 }
 
 impl Default for ProcessClipPlayer {
@@ -143,6 +186,33 @@ impl ClipPlayer for ProcessClipPlayer {
         true
     }
 
+    fn play_span(&self, recording: &Path, start: f64, end: f64) -> Option<PathBuf> {
+        let directory = match span_directory() {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::warn!(%error, "the folder for a turn's audio could not be made");
+                return None;
+            }
+        };
+        let span = directory.join(format!("turn-{}.wav", uuid::Uuid::new_v4()));
+        if let Err(error) = SymphoniaAudioCodec::excerpt_path(recording, &span, start, end) {
+            tracing::warn!(%error, "a turn's audio could not be cut from the recording");
+            return None;
+        }
+        let previous = self
+            .span
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(span.clone());
+        // After `play` ended the previous player, which Windows needs to
+        // remove its file.
+        let played = self.play(&span);
+        if let Some(previous) = previous {
+            let _ = std::fs::remove_file(previous);
+        }
+        played.then_some(span)
+    }
+
     fn stop(&self) {
         end(&self.slot);
     }
@@ -188,6 +258,43 @@ mod tests {
         assert!(player.play(clip.path()));
         assert_eq!(player.playing().as_deref(), Some(clip.path()));
         player.stop();
+        assert_eq!(player.playing(), None);
+    }
+
+    /// One second of silence at 16 kHz, as a recording to cut from.
+    fn recording() -> tempfile::NamedTempFile {
+        let file = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
+        let mut writer = steno_audio::writer::WavStreamWriter::create(file.path(), 16_000).unwrap();
+        writer.write(&[0i16; 16_000]).unwrap();
+        writer.finish().unwrap();
+        file
+    }
+
+    #[test]
+    fn a_span_plays_from_its_own_file_and_the_next_removes_it() {
+        let player = ProcessClipPlayer::with(Playback::new(), sleeper);
+        let recording = recording();
+        let first = player.play_span(recording.path(), 0.25, 0.75).unwrap();
+        assert!(first.is_file());
+        assert_eq!(player.playing().as_deref(), Some(first.as_path()));
+        let second = player.play_span(recording.path(), 0.0, 0.5).unwrap();
+        assert!(!first.exists(), "the earlier span is removed");
+        assert_eq!(player.playing().as_deref(), Some(second.as_path()));
+        // A clip stops the span.
+        let clip = clip();
+        assert!(player.play(clip.path()));
+        assert_eq!(player.playing().as_deref(), Some(clip.path()));
+        drop(player);
+        assert!(!second.exists(), "dropping the player removes the last span");
+    }
+
+    #[test]
+    fn a_missing_recording_plays_no_span() {
+        let player = ProcessClipPlayer::with(Playback::new(), sleeper);
+        assert_eq!(
+            player.play_span(Path::new("/nonexistent/master.caf"), 0.0, 1.0),
+            None
+        );
         assert_eq!(player.playing(), None);
     }
 

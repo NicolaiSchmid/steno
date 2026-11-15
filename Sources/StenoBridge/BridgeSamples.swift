@@ -162,7 +162,8 @@ public enum BridgeSamples {
         id: uuid(100), speakerID: speakerNicolai, speakerName: "Nicolai", startSeconds: 12,
         endSeconds: 41,
         text:
-          "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen.",
+          "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen. "
+          + "Und die Nebenprojekte pausieren wir bis zur Q1-Planung.",
         segmentIDs: [uuid(100), uuid(110)]),
       .init(
         id: uuid(101), speakerID: speakerJerome, speakerName: "Jérôme", startSeconds: 41,
@@ -174,7 +175,7 @@ public enum BridgeSamples {
         id: uuid(102), speakerID: speakerUnknown, speakerName: "Speaker 4", startSeconds: 65,
         endSeconds: 90, text: "Die Partner sollten das nicht aus zweiter Hand hören."),
     ],
-    transcriptGeneration: 2,
+    transcriptGeneration: 1,
     tasks: [
       .init(
         id: uuid(200), text: "Zahlen für beide Szenarien", assigneeName: "Jérôme",
@@ -526,7 +527,7 @@ extension BridgeSamples {
     BridgeFixture(
       "params.transcript.setTurnSpeaker",
       SetTurnSpeakerParams(
-        meetingID: meetingID, generation: 2,
+        meetingID: meetingID, generation: 1,
         segments: [.init(id: uuid(102), speakerID: speakerUnknown)],
         option: .init(kind: .person, label: "Anna", personID: personAnna))),
     BridgeFixture(

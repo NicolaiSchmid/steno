@@ -502,6 +502,12 @@ pub trait ClipPlayer: Send + Sync {
     /// Starts the clip; false when the file is missing or unreadable, or
     /// while a recording runs.
     fn play(&self, clip: &Path) -> bool;
+    /// Starts `start..end` seconds of `recording` (a meeting's master) the
+    /// same way, so playing a clip stops it and `stop` ends it. Returns the
+    /// file that plays, which [`ClipPlayer::playing`] then names; `None`
+    /// when the recording is missing or unreadable, or while a recording
+    /// runs.
+    fn play_span(&self, recording: &Path, start: f64, end: f64) -> Option<PathBuf>;
     fn stop(&self);
     fn playing(&self) -> Option<PathBuf>;
 }
