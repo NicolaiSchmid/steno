@@ -54,6 +54,7 @@ fixtures![
     "params.meeting.saveNotes",
     "params.speakers.options",
     "params.speakers.select",
+    "params.speakers.reject",
     "params.speakerID",
     "params.recording.start",
     "params.settings.recording.setRetention",
