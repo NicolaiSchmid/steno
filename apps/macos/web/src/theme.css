@@ -206,6 +206,13 @@
 	--control: var(--popover);
 	--control-hover: color-mix(in srgb, var(--canvas-accent) 50%, transparent);
 	--primary-hover: color-mix(in srgb, var(--primary) 90%, transparent);
+	/*
+	 * A disabled primary ("Asking…") steps down to the selected-row fill with
+	 * muted words instead of fading the primary, which left a bright grey
+	 * block in dark heavier than the enabled outline button.
+	 */
+	--primary-disabled: var(--canvas-row-selected);
+	--primary-disabled-foreground: var(--muted-foreground);
 	/* The deeper red in light, the paler in dark: the fill's text keeps 4.5. */
 	--destructive-hover: var(--destructive-foreground);
 	/* The dashed button's outline: the fields' 3:1, the focus colour on hover. */
@@ -380,6 +387,8 @@
 	--color-control: var(--control);
 	--color-control-hover: var(--control-hover);
 	--color-primary-hover: var(--primary-hover);
+	--color-primary-disabled: var(--primary-disabled);
+	--color-primary-disabled-foreground: var(--primary-disabled-foreground);
 	--color-destructive-hover: var(--destructive-hover);
 	--color-dashed-outline: var(--dashed-outline);
 	--color-dashed-outline-hover: var(--dashed-outline-hover);

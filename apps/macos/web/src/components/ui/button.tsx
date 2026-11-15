@@ -15,6 +15,8 @@ const ghost = "border-transparent hover:bg-accent data-popup-open:bg-accent";
 export const buttonLook = {
 	primary: [
 		"border-primary bg-primary text-primary-foreground hover:bg-primary-hover",
+		// Disabled, a step on the canvas with muted words, not a faded primary.
+		"disabled:border-primary-disabled disabled:bg-primary-disabled disabled:text-primary-disabled-foreground disabled:opacity-100",
 	],
 	outline: [
 		"border-outline bg-control text-foreground hover:bg-control-hover",
