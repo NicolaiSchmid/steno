@@ -78,7 +78,7 @@ function SpeechModelsRow({ models }: { models: SpeechModels }) {
 		case "downloading":
 			control = (
 				<span
-					className="font-mono text-faint text-xs tabular-nums"
+					className="font-mono text-muted-foreground text-xs tabular-nums"
 					data-testid="onboarding-models-progress"
 				>
 					{percent === null ? "…" : `${percent}%`}
@@ -110,7 +110,7 @@ function SpeechModelsRow({ models }: { models: SpeechModels }) {
 				)
 			}
 			label="Speech models"
-			tone={installed ? "success" : "faint"}
+			tone={installed ? "success" : "muted"}
 		>
 			{models.state === "downloading" ? (
 				<ProgressBar
@@ -142,7 +142,7 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 	let description: string;
 	let control: React.ReactNode;
 	let icon = <CircleIcon aria-hidden="true" />;
-	let tone: FormRowProps["tone"] = "faint";
+	let tone: FormRowProps["tone"] = "muted";
 	const checkAgain = (
 		<Button
 			data-testid="onboarding-vault-check"

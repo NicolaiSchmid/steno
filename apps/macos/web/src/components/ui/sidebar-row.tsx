@@ -10,7 +10,7 @@ import { cn } from "@/lib/cn";
  */
 export const sidebarRowVariants = cva(
 	[
-		"flex h-8 w-full shrink-0 select-none items-center gap-2 rounded-control px-2.5 py-1.5 text-left font-medium text-sidebar-row-foreground text-sm outline-none",
+		"flex h-8 w-full shrink-0 select-none items-center gap-2 rounded-control px-2.5 py-1.5 text-left font-medium text-sidebar-muted-foreground text-sm outline-none",
 		"transition-[background-color,color] duration-(--duration-functional) ease-standard",
 		"hover:bg-row-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus active:bg-row-pressed",
 		"[&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-icon hover:[&>svg]:text-foreground",
@@ -23,7 +23,7 @@ export const sidebarRowVariants = cva(
 			},
 			variant: {
 				default: "",
-				/** A tag row: a faint "#" where the icon would be. */
+				/** A tag row: a muted "#" where the icon would be. */
 				tag: "before:w-4 before:shrink-0 before:text-center before:text-sidebar-icon before:content-['#']",
 			},
 		},
@@ -57,7 +57,9 @@ export function SidebarRow({
 			{icon}
 			<span className="min-w-0 flex-1 truncate">{children}</span>
 			{count !== undefined ? (
-				<span className="text-sidebar-label text-xs tabular-nums">{count}</span>
+				<span className="text-sidebar-muted-foreground text-xs tabular-nums">
+					{count}
+				</span>
 			) : null}
 		</button>
 	);

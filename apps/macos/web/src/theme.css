@@ -18,81 +18,91 @@
 :root {
 	color-scheme: light;
 
-	/* Surfaces step by one shade: canvas 25, sidebar 50, accent 100. */
-	--background: #fcfcfc;
-	--sidebar: #fafafa;
+	/*
+	 * Values come from src/theme/palette.ts, which the contrast test holds this
+	 * file to. Light: the canvas, cards and popovers are white (the card and
+	 * popover in a hairline box), the sidebar one grey below.
+	 */
+	--background: #ffffff;
+	--sidebar: #f5f5f5;
 	--card: #ffffff;
 	--popover: #ffffff;
 	--muted: #fafafa;
 	--foreground: #27272a;
-	--muted-foreground: #71717a;
-	/* Derived from the muted text and the canvas so it tracks both appearances. */
-	--faint: color-mix(in srgb, var(--muted-foreground) 60%, var(--background));
-	--border: #e4e4e7;
-	/* Field and checkbox outlines and the switch's off track. */
-	--outline: #d4d4d8;
-	--focus: var(--primary);
+	/* Secondary words, placeholders and icons; 4.5:1 on every row fill. */
+	--muted-foreground: #68686e;
+	/* Dividers only. */
+	--border: #eaeaeb;
+	/* Field and checkbox outlines, the switch's off track: 3:1 on every fill. */
+	--outline: #858585;
+	/* The focus ring, drawn outside the control on a 2 px `--surface` offset. */
+	--focus: #68686e;
 
 	/*
 	 * Each surface's row fills. The surface utilities below (`surface-sidebar`
 	 * and the others) point `--surface`, `--accent`, `--row-hover` and
 	 * `--row-selected` at their own for the subtree; the root is the canvas.
 	 */
-	--canvas-accent: #f4f4f5;
-	--canvas-row-hover: #fcfcfc;
-	--canvas-row-selected: #ffffff;
-	--sidebar-accent: #f4f4f5;
-	--sidebar-row-hover: #fcfcfc;
+	--canvas-accent: #f5f5f5;
+	--canvas-row-hover: #f5f5f5;
+	--canvas-row-selected: #ededed;
+	--sidebar-accent: #ededed;
+	--sidebar-row-hover: #ededed;
 	--sidebar-row-selected: #ffffff;
 	--surface: var(--background);
 	--accent: var(--canvas-accent);
 	--row-hover: var(--canvas-row-hover);
 	--row-selected: var(--canvas-row-selected);
-	--row-pressed: #ffffff;
+	--row-pressed: #e5e5e5;
 
-	/* The sidebar: rows hover lighter than the surface, the selected one is white. */
+	/* The sidebar: rows hover a grey below the surface, the selected one is white. */
 	--sidebar-border: var(--border);
-	--sidebar-muted-foreground: var(--muted-foreground);
-	--sidebar-icon: color-mix(
-		in srgb,
-		var(--sidebar-muted-foreground) 60%,
-		var(--sidebar)
-	);
-	--sidebar-control-surface: #f4f4f5;
+	--sidebar-muted-foreground: #68686e;
+	--sidebar-icon: #68686e;
+	--sidebar-control-surface: var(--card);
 
 	/*
 	 * The primary is achromatic (near-black on light, white on dark), as in
 	 * the phone app and the native panels.
-	 * Red is reserved for what is live, amber for what needs the user.
+	 * Red is for what is live, for errors and for destructive actions; amber
+	 * for what needs the user but has not failed. Live and destructive have
+	 * their own tokens so they can drift apart; today both are red.
 	 */
 	--primary: #171717;
 	--primary-2: #262626;
 	--primary-foreground: #ffffff;
 	--primary-soft: rgba(0, 0, 0, 0.08);
-	--live: var(--destructive);
-	--live-foreground: var(--destructive-foreground);
+	--live: #dc2626;
+	--live-foreground: #b91c1c;
 
-	/* Status: the 500 for fills and icons, the 700 (400 in dark) for text. */
-	--warning: #f59e0b;
-	--warning-foreground: #b45309;
+	/*
+	 * Status: one colour per tone for its words and its icon (the 800 or 700
+	 * in light, the 300 in dark) on the tone's 500 tint, 8 percent in light
+	 * and 16 in dark. The destructive tone is the error's.
+	 */
+	--warning: #92400e;
+	--warning-foreground: #92400e;
 	--warning-surface: rgba(245, 158, 11, 0.08);
-	--destructive: #ef4444;
+	--destructive: #dc2626;
 	--destructive-foreground: #b91c1c;
 	--destructive-surface: rgba(239, 68, 68, 0.08);
 	/* Text on the destructive fill. */
 	--on-destructive: #ffffff;
-	--success: #10b981;
-	--success-foreground: #047857;
+	--success: #065f46;
+	--success-foreground: #065f46;
 	--success-surface: rgba(16, 185, 129, 0.08);
-	--info: #3b82f6;
+	--info: #1d4ed8;
 	--info-foreground: #1d4ed8;
 	--info-surface: rgba(59, 130, 246, 0.08);
 
-	/* People: the 600s as text on their own 16 % tint (the 400s in dark). */
-	--p1: #e11d48;
-	--p2: #d97706;
-	--p3: #059669;
-	--p4: #4f46e5;
+	/*
+	 * People: blue, teal, violet and green as text on their own 16 % tint.
+	 * Never red or amber, which mean live and needs-the-user.
+	 */
+	--p1: #1d4ed8;
+	--p2: #115e59;
+	--p3: #6d28d9;
+	--p4: #166534;
 
 	/*
 	 * Veils: every translucent colour the kit paints, named so the contrast
@@ -105,27 +115,17 @@
 	--p4-surface: color-mix(in srgb, var(--p4) 16%, transparent);
 	--warning-border: color-mix(in srgb, var(--warning) 32%, transparent);
 	--warning-border-hover: color-mix(in srgb, var(--warning) 40%, transparent);
-	--warning-surface-hover: color-mix(in srgb, var(--warning) 16%, transparent);
+	--warning-surface-hover: rgba(245, 158, 11, 0.16);
 	--info-border: color-mix(in srgb, var(--info) 32%, transparent);
 	--success-border: color-mix(in srgb, var(--success) 32%, transparent);
 	--destructive-border: color-mix(in srgb, var(--destructive) 32%, transparent);
-	/* Callout bodies under their title. */
-	--warning-body: color-mix(
-		in srgb,
-		var(--warning-foreground) 80%,
-		transparent
-	);
-	--destructive-body: color-mix(
-		in srgb,
-		var(--destructive-foreground) 80%,
-		transparent
-	);
 	/* Fields, outline buttons and their hover. */
 	--field: var(--background);
 	--control: var(--popover);
 	--control-hover: color-mix(in srgb, var(--canvas-accent) 50%, transparent);
 	--primary-hover: color-mix(in srgb, var(--primary) 90%, transparent);
-	--destructive-hover: color-mix(in srgb, var(--destructive) 90%, transparent);
+	/* The deeper red in light, the paler in dark: the fill's text keeps 4.5. */
+	--destructive-hover: var(--destructive-foreground);
 	--dashed-outline: color-mix(in srgb, var(--foreground) 24%, transparent);
 	--dashed-outline-hover: color-mix(
 		in srgb,
@@ -143,34 +143,22 @@
 		var(--primary-foreground) 60%,
 		transparent
 	);
-	--focus-field: color-mix(in srgb, var(--focus) 24%, transparent);
 	--resizer-hover: color-mix(in srgb, var(--focus) 30%, transparent);
 	--resizer-active: color-mix(in srgb, var(--focus) 60%, transparent);
-	/* Settings groups and their words. */
+	/* Settings groups. */
 	--group: color-mix(in srgb, var(--card) 40%, transparent);
 	--group-border: color-mix(in srgb, var(--border) 60%, transparent);
 	--group-divider: color-mix(in srgb, var(--border) 50%, transparent);
-	--form-heading: color-mix(in srgb, var(--foreground) 70%, transparent);
-	--form-note: color-mix(in srgb, var(--muted-foreground) 80%, transparent);
-	/* The sidebar's quieter words and its group hairline. */
-	--sidebar-row-foreground: color-mix(
-		in srgb,
-		var(--sidebar-muted-foreground) 80%,
-		transparent
-	);
-	--sidebar-label: color-mix(
-		in srgb,
-		var(--sidebar-muted-foreground) 60%,
-		transparent
-	);
+	/* The sidebar's group hairline. */
 	--sidebar-rule: color-mix(in srgb, var(--sidebar-border) 60%, transparent);
-	/* Segmented tabs: the track, a hovered and the active segment, its count. */
-	--tab-track: color-mix(in srgb, var(--outline) 40%, transparent);
+	/*
+	 * Segmented tabs: the track, a hovered and the active segment, and the
+	 * active segment's 1 px ring, which is what shows which tab is active.
+	 */
+	--tab-track: var(--canvas-row-selected);
 	--tab-hover: color-mix(in srgb, var(--background) 55%, transparent);
 	--tab-active: var(--background);
-	/* The active segment's fill is its only indicator. */
-	--tab-indicator: var(--tab-active);
-	--tab-count: color-mix(in srgb, var(--muted-foreground) 70%, transparent);
+	--tab-indicator: var(--outline);
 	--item-selected: color-mix(in srgb, var(--foreground) 8%, transparent);
 	--band: color-mix(in srgb, var(--muted) 72%, transparent);
 	--countdown: color-mix(in srgb, var(--foreground) 40%, transparent);
@@ -210,55 +198,67 @@
 .dark {
 	color-scheme: dark;
 
-	/* The sidebar is black under a near-black canvas; cards lift by 3 percent. */
-	--background: #0a0a0a;
-	--sidebar: #000000;
-	--card: #111111;
-	--popover: #111111;
-	/* Opaque (the dark card) so the dialog band still reads. */
-	--muted: #111111;
+	/*
+	 * Dark is not an inversion: surfaces are steps from #121212 toward white
+	 * (src/theme/palette.ts), the sidebar the base, the canvas 3.5 percent of
+	 * the way up, cards and popovers lifted again, so elevation is a lighter
+	 * surface where a shadow would not show.
+	 */
+	--background: #1a1a1a;
+	--sidebar: #121212;
+	--card: #232323;
+	--popover: #232323;
+	--muted: var(--card);
 	--foreground: #f5f5f5;
-	--muted-foreground: #818181;
-	--border: rgba(255, 255, 255, 0.06);
-	--outline: rgba(255, 255, 255, 0.08);
+	--muted-foreground: #a3a3a3;
+	--border: #2e2e2e;
+	--outline: #7a7a7a;
+	--focus: #a3a3a3;
 
-	--canvas-accent: rgba(255, 255, 255, 0.04);
-	--canvas-row-hover: rgba(255, 255, 255, 0.08);
-	--canvas-row-selected: rgba(255, 255, 255, 0.07);
-	--sidebar-accent: rgba(255, 255, 255, 0.04);
-	--sidebar-row-hover: rgba(255, 255, 255, 0.08);
-	--sidebar-row-selected: rgba(255, 255, 255, 0.07);
-	--row-pressed: rgba(255, 255, 255, 0.11);
+	--canvas-accent: #2a2a2a;
+	--canvas-row-hover: #2a2a2a;
+	--canvas-row-selected: #313131;
+	--sidebar-accent: #2a2a2a;
+	--sidebar-row-hover: #2a2a2a;
+	--sidebar-row-selected: #313131;
+	--row-pressed: #383838;
 
-	--sidebar-border: rgba(255, 255, 255, 0.08);
 	--sidebar-muted-foreground: #a3a3a3;
-	--sidebar-control-surface: #0a0a0a;
+	--sidebar-icon: #a3a3a3;
 
 	--primary: #ffffff;
 	--primary-2: #e5e5e5;
 	--primary-foreground: #0a0a0a;
 	--primary-soft: rgba(255, 255, 255, 0.12);
+	--live: #f87171;
+	--live-foreground: #fca5a5;
 
-	--warning-foreground: #fbbf24;
+	--warning: #fcd34d;
+	--warning-foreground: #fcd34d;
 	--warning-surface: rgba(245, 158, 11, 0.16);
-	--destructive-foreground: #f87171;
+	--destructive: #f87171;
+	--destructive-foreground: #fca5a5;
 	--destructive-surface: rgba(239, 68, 68, 0.16);
-	--success-foreground: #34d399;
+	--on-destructive: #1a1a1a;
+	--success: #6ee7b7;
+	--success-foreground: #6ee7b7;
 	--success-surface: rgba(16, 185, 129, 0.16);
-	--info-foreground: #60a5fa;
+	--info: #93c5fd;
+	--info-foreground: #93c5fd;
 	--info-surface: rgba(59, 130, 246, 0.16);
 
-	--p1: #fb7185;
-	--p2: #fbbf24;
-	--p3: #34d399;
-	--p4: #818cf8;
+	--p1: #93c5fd;
+	--p2: #5eead4;
+	--p3: #c4b5fd;
+	--p4: #bef264;
 
-	--warning-surface-hover: color-mix(in srgb, var(--warning) 24%, transparent);
-	--field: color-mix(in srgb, var(--outline) 32%, transparent);
-	--control: var(--field);
-	--control-hover: color-mix(in srgb, var(--outline) 64%, transparent);
-	--tab-hover: color-mix(in srgb, var(--outline) 32%, transparent);
-	--tab-active: color-mix(in srgb, var(--outline) 72%, transparent);
+	--warning-surface-hover: rgba(245, 158, 11, 0.24);
+	--field: var(--canvas-accent);
+	--control: var(--canvas-accent);
+	--control-hover: var(--canvas-row-selected);
+	--tab-track: var(--canvas-accent);
+	--tab-hover: color-mix(in srgb, var(--canvas-row-selected) 55%, transparent);
+	--tab-active: var(--canvas-row-selected);
 
 	--glass-blur: 16px;
 	--glass-sat: 1.08;
@@ -287,7 +287,6 @@
 	--color-muted: var(--muted);
 	--color-foreground: var(--foreground);
 	--color-muted-foreground: var(--muted-foreground);
-	--color-faint: var(--faint);
 	--color-border: var(--border);
 	--color-outline: var(--outline);
 	--color-focus: var(--focus);
@@ -333,8 +332,6 @@
 	--color-info-border: var(--info-border);
 	--color-success-border: var(--success-border);
 	--color-destructive-border: var(--destructive-border);
-	--color-warning-body: var(--warning-body);
-	--color-destructive-body: var(--destructive-body);
 	--color-field: var(--field);
 	--color-control: var(--control);
 	--color-control-hover: var(--control-hover);
@@ -344,22 +341,16 @@
 	--color-dashed-outline-hover: var(--dashed-outline-hover);
 	--color-primary-part-hover: var(--primary-part-hover);
 	--color-primary-part-focus: var(--primary-part-focus);
-	--color-focus-field: var(--focus-field);
 	--color-resizer-hover: var(--resizer-hover);
 	--color-resizer-active: var(--resizer-active);
 	--color-group: var(--group);
 	--color-group-border: var(--group-border);
 	--color-group-divider: var(--group-divider);
-	--color-form-heading: var(--form-heading);
-	--color-form-note: var(--form-note);
-	--color-sidebar-row-foreground: var(--sidebar-row-foreground);
-	--color-sidebar-label: var(--sidebar-label);
 	--color-sidebar-rule: var(--sidebar-rule);
 	--color-tab-track: var(--tab-track);
 	--color-tab-hover: var(--tab-hover);
 	--color-tab-active: var(--tab-active);
 	--color-tab-indicator: var(--tab-indicator);
-	--color-tab-count: var(--tab-count);
 	--color-item-selected: var(--item-selected);
 	--color-band: var(--band);
 	--color-countdown: var(--countdown);

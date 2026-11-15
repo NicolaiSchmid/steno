@@ -24,7 +24,7 @@ export const calloutVariants = cva(
 				default:
 					"border-border bg-card text-foreground [&_[data-slot=icon]]:text-muted-foreground",
 				warning:
-					"border-warning-border bg-warning-surface text-warning-foreground [&_[data-slot=description]]:text-warning-body [&_[data-slot=icon]]:text-warning",
+					"border-warning-border bg-warning-surface text-warning-foreground [&_[data-slot=description]]:text-warning-foreground [&_[data-slot=icon]]:text-warning",
 				info: "border-info-border bg-info-surface text-foreground [&_[data-slot=icon]]:text-info",
 				/** The recorder's own notices (the auto-stop countdown): the default look, the icon in the live red. */
 				live: "border-border bg-card text-foreground [&_[data-slot=icon]]:text-live",
@@ -32,7 +32,7 @@ export const calloutVariants = cva(
 				success:
 					"border-success-border bg-success-surface text-success-foreground [&_[data-slot=icon]]:text-success",
 				destructive:
-					"border-destructive-border bg-destructive-surface text-destructive-foreground [&_[data-slot=description]]:text-destructive-body [&_[data-slot=icon]]:text-destructive",
+					"border-destructive-border bg-destructive-surface text-destructive-foreground [&_[data-slot=description]]:text-destructive-foreground [&_[data-slot=icon]]:text-destructive",
 			},
 		},
 		defaultVariants: { size: "md", variant: "default" },

@@ -63,9 +63,7 @@ function AcknowledgementsDialog({
 										.filter((item) => item.group === group)
 										.map((item) => (
 											<FormRow
-												control={
-													<FormValue variant="faint">{item.licence}</FormValue>
-												}
+												control={<FormValue>{item.licence}</FormValue>}
 												description={
 													item.source.startsWith("https://") ? (
 														<Button

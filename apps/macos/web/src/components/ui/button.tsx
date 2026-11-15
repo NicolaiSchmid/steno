@@ -58,7 +58,7 @@ export const buttonVariants = cva(
 		"rounded-control border font-medium text-sm leading-none outline-none",
 		"transition-[background-color,border-color,box-shadow,color,scale,opacity]",
 		"duration-(--duration-functional) ease-standard",
-		"focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-1 focus-visible:ring-offset-surface",
+		"focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface",
 		"active:scale-[0.97] active:duration-(--duration-press-in)",
 		"disabled:pointer-events-none disabled:opacity-64",
 		"[&_svg]:pointer-events-none [&_svg]:-mx-0.5 [&_svg]:size-4 [&_svg]:shrink-0",

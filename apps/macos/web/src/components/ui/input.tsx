@@ -15,7 +15,7 @@ export const fieldFrameClass =
 
 /** The frame while its field has focus, and while the field is disabled. */
 export const fieldStateClass =
-	"focus-within:border-focus focus-within:shadow-none focus-within:ring-[3px] focus-within:ring-focus-field focus-within:before:shadow-none has-[:disabled]:opacity-64 has-[:disabled]:shadow-none";
+	"focus-within:border-focus focus-within:shadow-none focus-within:ring-2 focus-within:ring-focus focus-within:ring-offset-2 focus-within:ring-offset-surface focus-within:before:shadow-none has-[:disabled]:opacity-64 has-[:disabled]:shadow-none";
 
 /** The single-line field. Heights: sm 26, md 30, lg 34. */
 export const inputVariants = cva(
@@ -37,7 +37,7 @@ export const inputVariants = cva(
 );
 
 const fieldClass =
-	"min-w-0 rounded-[inherit] bg-transparent text-foreground outline-none placeholder:text-faint";
+	"min-w-0 rounded-[inherit] bg-transparent text-foreground outline-none placeholder:text-muted-foreground";
 
 export interface InputProps
 	extends Omit<ComponentProps<typeof BaseInput>, "className" | "size">,
@@ -58,7 +58,7 @@ const searchInputVariants = cva("", {
 	variants: {
 		variant: {
 			/** The framed field. */
-			field: "[&>svg]:text-faint",
+			field: "[&>svg]:text-muted-foreground",
 			/**
 			 * A quiet row in a list column: no frame, the row hover, the words
 			 * in the muted weight until something is typed.

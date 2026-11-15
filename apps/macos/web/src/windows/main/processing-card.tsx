@@ -71,7 +71,7 @@ export function ProcessingCard({ state, entry }: ProcessingCardProps) {
 				max={1}
 				value={entry ? entry.fraction : null}
 			/>
-			<p className="my-0 text-faint text-xs">
+			<p className="my-0 text-muted-foreground text-xs">
 				Audio stays on this {words.computer}. This usually takes a minute or
 				two.
 			</p>

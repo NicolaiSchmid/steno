@@ -10,7 +10,7 @@ import { fieldFrameClass, fieldStateClass } from "./input";
 const textareaFrameClass = cn(fieldFrameClass, "flex w-full", fieldStateClass);
 
 const textareaVariants = cva(
-	"block w-full min-w-0 resize-none rounded-[inherit] bg-transparent px-[11px] py-[7px] outline-none placeholder:text-faint",
+	"block w-full min-w-0 resize-none rounded-[inherit] bg-transparent px-[11px] py-[7px] outline-none placeholder:text-muted-foreground",
 	{
 		variants: {
 			variant: {
