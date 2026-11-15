@@ -619,18 +619,13 @@ export function StoriesPage() {
 						/>
 						<Callout
 							actions={
-								<>
-									<Button size="sm" variant="primary">
-										Set up
-									</Button>
-									<Button size="sm" variant="ghost">
-										Not now
-									</Button>
-								</>
+								<Button size="sm" variant="outline">
+									Open System Settings
+								</Button>
 							}
-							description="Choose an AI service and Steno writes a summary and tasks for every meeting. Only the transcript text is sent."
-							icon={<SparklesIcon aria-hidden="true" />}
-							title="Summaries are off."
+							description="Allow it in System Settings, then record again."
+							icon={<MicOffIcon aria-hidden="true" />}
+							title="Steno can't use the microphone."
 							variant="warning"
 						/>
 						<Callout

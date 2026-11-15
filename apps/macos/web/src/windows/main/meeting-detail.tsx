@@ -637,16 +637,14 @@ function DetailBody({
 			{/*
 			 * Each item after the first leads with its separator dot, so a
 			 * narrow column wraps the dot with its item instead of leaving it
-			 * at the end of the line. The source's own dot is neutral: the
-			 * person colours are for people.
+			 * at the end of the line, and no item breaks inside itself
+			 * ("Tuesday, Sep 29 · 14:50" stays whole at 200 % text).
 			 */}
 			<div
-				className="flex flex-wrap items-center gap-x-2 gap-y-1 text-meta text-muted-foreground [&>span+span]:before:size-[3px] [&>span+span]:before:rounded-full [&>span+span]:before:bg-border [&>span+span]:before:content-[''] [&>span]:inline-flex [&>span]:items-center [&>span]:gap-2"
+				className="flex flex-wrap items-center gap-x-2 gap-y-1 text-meta text-muted-foreground [&>span+span]:before:size-[3px] [&>span+span]:before:rounded-full [&>span+span]:before:bg-border [&>span+span]:before:content-[''] [&>span]:inline-flex [&>span]:items-center [&>span]:gap-2 [&>span]:whitespace-nowrap"
 				data-testid="meeting-meta"
 			>
-				<span className="gap-[5px]! font-medium before:size-1.5 before:rounded-full before:bg-outline before:content-['']">
-					{formatSource(detail.source)}
-				</span>
+				<span className="font-medium">{formatSource(detail.source)}</span>
 				<span>{format.when(detail.startedAt)}</span>
 				<span className="tabular-nums">
 					{format.duration(detail.durationSeconds)}
