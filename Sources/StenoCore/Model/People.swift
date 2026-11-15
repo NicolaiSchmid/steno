@@ -180,6 +180,38 @@ public struct Embedding: Codable, Sendable, Equatable, Hashable {
   }
 }
 
+/// How strongly a voice match speaks for its person, the word a voice
+/// suggestion carries ("Sounds like Anna · strong"). Never shown as a
+/// percentage. Rust: `VoiceStrength` in `steno-core`'s `model/people.rs`,
+/// with the same two thresholds.
+public enum VoiceStrength: String, Codable, Sendable, CaseIterable {
+  case strong
+  case likely
+
+  // The two thresholds were measured on the calibration corpus (seven real
+  // calls, 2026-11-15), each cluster against voices built from the person's
+  // other meetings: true matches 0.77-0.91, the best wrong person never above
+  // 0.54 (`.plans/2026-11-14-speaker-identification.md`, S4). Rust:
+  // `VOICE_STRONG` and `VOICE_FLOOR`, which must stay equal to these.
+
+  /// From this cosine similarity up a match is `.strong`; only true matches
+  /// reached it. Rust's `VoiceStrength::STRONG` (the case takes that name
+  /// here).
+  public static let strongThreshold: Float = 0.75
+  /// Below this similarity a voice match is not shown at all, 0.06 above the
+  /// highest wrong match measured; from it up it is `.likely` until
+  /// `strongThreshold`.
+  public static let floor: Float = 0.60
+
+  /// The word for a match of `similarity`; nil below `floor`, where no voice
+  /// suggestion is shown.
+  public static func of(_ similarity: Float) -> VoiceStrength? {
+    if similarity >= strongThreshold { return .strong }
+    if similarity >= Self.floor { return .likely }
+    return nil
+  }
+}
+
 /// How a diarization cluster maps to a person.
 public enum SpeakerAssignment: Codable, Sendable, Equatable, Hashable {
   case unknown
@@ -195,6 +227,12 @@ public enum SpeakerAssignment: Codable, Sendable, Equatable, Hashable {
   }
 
   public var isConfirmed: Bool { kind == .confirmed }
+
+  /// The match score of a `.suggested` assignment; nil otherwise.
+  public var similarity: Float? {
+    if case .suggested(_, let similarity) = self { return similarity }
+    return nil
+  }
 
   /// The case names, shared by `meeting.json` and the `speaker.assignment`
   /// column.
@@ -262,6 +300,11 @@ public struct Speaker: Codable, Sendable, Equatable, Hashable, Identifiable {
   public var sampleClipURL: URL?
   /// Diarizer cluster quality in `0...1`, not the match score.
   public var clusterConfidence: Float
+  /// The user marked the voice "Not a person" (music, noise): it leaves the
+  /// counts and the voice memory, its segments keep their text. Kept apart
+  /// from `assignment`, which every build reads as one of three cases; not
+  /// part of `meeting.json`.
+  public var dismissed: Bool = false
 
   public init(
     id: UUID,
@@ -271,7 +314,8 @@ public struct Speaker: Codable, Sendable, Equatable, Hashable, Identifiable {
     embedding: Embedding? = nil,
     sampleClipRange: ClosedRange<TimeInterval>? = nil,
     sampleClipURL: URL? = nil,
-    clusterConfidence: Float
+    clusterConfidence: Float,
+    dismissed: Bool = false
   ) {
     self.id = id
     self.meetingID = meetingID
@@ -281,6 +325,7 @@ public struct Speaker: Codable, Sendable, Equatable, Hashable, Identifiable {
     self.sampleClipRange = sampleClipRange
     self.sampleClipURL = sampleClipURL
     self.clusterConfidence = clusterConfidence
+    self.dismissed = dismissed
   }
 
   public var personID: UUID? { assignment.personID }

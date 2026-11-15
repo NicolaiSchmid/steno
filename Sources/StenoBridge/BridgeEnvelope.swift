@@ -71,6 +71,15 @@ public enum BridgeMethod: String, Codable, Sendable, CaseIterable {
   case speakersSelect = "speakers.select"
   case speakersPlay = "speakers.play"
   case speakersStop = "speakers.stop"
+  /// No to a voice suggestion: the person is not suggested for that voice
+  /// again.
+  case speakersReject = "speakers.reject"
+  /// Remove name: the voice is unnamed again in this meeting.
+  case speakersClear = "speakers.clear"
+  /// Not a person: the voice leaves the counts and voice memory.
+  case speakersDismiss = "speakers.dismiss"
+  /// A dismissed voice back among the people to name.
+  case speakersRestore = "speakers.restore"
 
   case recordingStart = "recording.start"
   case recordingStop = "recording.stop"

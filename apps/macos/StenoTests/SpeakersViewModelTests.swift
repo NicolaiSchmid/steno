@@ -33,13 +33,17 @@ final class SpeakersViewModelTests: XCTestCase {
     let first = try XCTUnwrap(model.rows.first)
     XCTAssertTrue(first.isConfirmed)
     XCTAssertEqual(first.displayName, "Nicolai")
-    XCTAssertEqual(first.excerpt, "", "confirmed rows show no excerpt")
+    XCTAssertEqual(
+      first.excerpt, "…Wir setzen neunzig Prozent auf den Kern.",
+      "a confirmed row quotes its clip too")
     let second = try XCTUnwrap(model.rows.last)
     XCTAssertFalse(second.isConfirmed)
     XCTAssertEqual(second.displayName, "Jérôme", "a suggested speaker reads as the person")
     XCTAssertTrue(
       second.excerpt.hasSuffix("Ich prüfe das Budget bis Freitag."), second.excerpt)
     XCTAssertFalse(second.canPlay, "the sample clip file does not exist")
+    XCTAssertEqual(second.suggestionStrength, .likely, "0.72 is between the floor and strong")
+    XCTAssertNil(first.suggestionStrength)
     XCTAssertEqual(model.unconfirmedCount, 1)
   }
 
@@ -48,7 +52,7 @@ final class SpeakersViewModelTests: XCTestCase {
     let model = try await makeModel(environment)
     let options = model.options(for: SampleData.speakerTwoID, query: "")
     XCTAssertEqual(options.first.flatMap(person)?.id, SampleData.personJeromeID)
-    XCTAssertEqual(options.first?.tag, .soundsLike)
+    XCTAssertEqual(options.first?.tag, .voice(.likely))
     XCTAssertTrue(
       options.contains { person($0)?.id == SampleData.personNicolaiID && $0.tag == .inThisMeeting })
     XCTAssertFalse(options.contains { createText($0) != nil }, "no create row without a query")
@@ -72,7 +76,7 @@ final class SpeakersViewModelTests: XCTestCase {
     model.onWrite = { writes += 1 }
 
     try await model.select(
-      SpeakerOptions.Option(kind: .person(SampleData.persons()[0]), tag: .soundsLike),
+      SpeakerOptions.Option(kind: .person(SampleData.persons()[0]), tag: .voice(.likely)),
       for: SampleData.speakerTwoID)
 
     XCTAssertNil(model.error, model.error ?? "")
@@ -169,7 +173,8 @@ final class SpeakersViewModelTests: XCTestCase {
 
     let options = model.options(for: SampleData.speakerTwoID, query: "")
     let maya = try XCTUnwrap(options.first { createText($0) == "Maya" })
-    XCTAssertEqual(maya.tag, .attendee)
+    XCTAssertEqual(
+      maya.tag, .lastInvitee, "Speaker 2 is the only open voice and Maya the only invitee")
 
     try await model.select(maya, for: SampleData.speakerTwoID)
     XCTAssertNil(model.error, model.error ?? "")
@@ -248,5 +253,130 @@ final class SpeakersViewModelTests: XCTestCase {
     model.play(SampleData.speakerTwoID)
     XCTAssertNotNil(model.error)
     XCTAssertNil(model.playing)
+  }
+
+  // MARK: - No, Remove name and Not a person
+
+  private func storedSpeaker(_ id: UUID, _ environment: AppEnvironment) async throws -> Speaker {
+    let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
+    return try XCTUnwrap(speakers.first { $0.id == id })
+  }
+
+  /// No to "Sounds like Jérôme": the voice is unnamed, Jérôme is never
+  /// suggested for it again (only found when typed), and his voice is
+  /// untouched.
+  func testRejectingASuggestionRecordsItAndLeavesTheVoice() async throws {
+    let environment = try await TestSupport.environment()
+    let model = try await makeModel(environment)
+    var writes = 0
+    model.onWrite = { writes += 1 }
+    let jeromeBefore = try await environment.store.person(id: SampleData.personJeromeID)
+
+    try await model.reject(speakerID: SampleData.speakerTwoID, personID: SampleData.personJeromeID)
+
+    XCTAssertEqual(writes, 1)
+    let stored = try await storedSpeaker(SampleData.speakerTwoID, environment)
+    XCTAssertEqual(stored.assignment, .unknown)
+    let jeromeAfter = try await environment.store.person(id: SampleData.personJeromeID)
+    XCTAssertEqual(jeromeAfter, jeromeBefore, "a No never touches voice memory")
+    try await refresh(model, environment)
+    await TestSupport.waitUntil("the No loaded") { !model.rejections.isEmpty }
+    XCTAssertNil(model.prefill(for: SampleData.speakerTwoID))
+    XCTAssertFalse(
+      model.options(for: SampleData.speakerTwoID, query: "").contains {
+        person($0)?.id == SampleData.personJeromeID
+      }, "never suggested again")
+    XCTAssertTrue(
+      model.options(for: SampleData.speakerTwoID, query: "jér").contains {
+        person($0)?.id == SampleData.personJeromeID
+      }, "still found when typed")
+
+    try await model.reject(speakerID: UUID(), personID: SampleData.personJeromeID)
+    XCTAssertEqual(writes, 1, "an unlisted speaker is ignored")
+    do {
+      try await model.reject(speakerID: SampleData.speakerTwoID, personID: UUID())
+      XCTFail("a No to a person the store does not know is reported")
+    } catch {}
+    XCTAssertEqual(writes, 1)
+  }
+
+  /// Remove name: the voice is unnamed in this meeting and the person keeps
+  /// their name; an unnamed voice again changes nothing.
+  func testClearUnnamesTheVoiceOnce() async throws {
+    let environment = try await TestSupport.environment()
+    let model = try await makeModel(environment)
+    var writes = 0
+    model.onWrite = { writes += 1 }
+
+    try await model.clear(speakerID: SampleData.speakerOneID)
+
+    XCTAssertEqual(writes, 1)
+    let stored = try await storedSpeaker(SampleData.speakerOneID, environment)
+    XCTAssertEqual(stored.assignment, .unknown)
+    let nicolaiRow = try await environment.store.person(id: SampleData.personNicolaiID)
+    let nicolai = try XCTUnwrap(nicolaiRow)
+    XCTAssertEqual(nicolai.displayName, "Nicolai")
+    XCTAssertEqual(nicolai.sampleCount, 0, "the voice forgets it")
+    try await refresh(model, environment)
+    XCTAssertEqual(model.row(SampleData.speakerOneID)?.displayName, "Speaker 1")
+
+    try await model.clear(speakerID: SampleData.speakerOneID)
+    try await model.clear(speakerID: UUID())
+    XCTAssertEqual(writes, 1, "an unnamed or unlisted voice is ignored")
+  }
+
+  /// Not a person: the voice leaves the count; Restore brings it back
+  /// unnamed; the same answer twice writes once.
+  func testDismissAndRestore() async throws {
+    let environment = try await TestSupport.environment()
+    let model = try await makeModel(environment)
+    var writes = 0
+    model.onWrite = { writes += 1 }
+
+    try await model.setDismissed(speakerID: SampleData.speakerTwoID, true)
+    XCTAssertEqual(writes, 1)
+    try await refresh(model, environment)
+    let dismissed = try XCTUnwrap(model.row(SampleData.speakerTwoID))
+    XCTAssertTrue(dismissed.speaker.dismissed)
+    XCTAssertEqual(dismissed.speaker.assignment, .unknown)
+    XCTAssertEqual(model.unconfirmedCount, 0, "a dismissed voice is nothing to review")
+    try await model.setDismissed(speakerID: SampleData.speakerTwoID, true)
+    XCTAssertEqual(writes, 1)
+
+    try await model.setDismissed(speakerID: SampleData.speakerTwoID, false)
+    XCTAssertEqual(writes, 2)
+    try await refresh(model, environment)
+    let restored = try XCTUnwrap(model.row(SampleData.speakerTwoID))
+    XCTAssertFalse(restored.speaker.dismissed)
+    XCTAssertEqual(restored.speaker.assignment, .unknown)
+    XCTAssertEqual(model.unconfirmedCount, 1)
+
+    try await model.setDismissed(speakerID: UUID(), true)
+    XCTAssertEqual(writes, 2, "an unlisted speaker is ignored")
+  }
+
+  /// A voice match below the floor is not shown: the row reads as unknown,
+  /// nothing is pre-filled or offered as the voice, and Remove name has
+  /// nothing to remove.
+  func testAVoiceMatchBelowTheFloorReadsAsUnknown() async throws {
+    let environment = try await TestSupport.environment()
+    var weak = try await storedSpeaker(SampleData.speakerTwoID, environment)
+    weak.assignment = .suggested(personID: SampleData.personJeromeID, similarity: 0.5)
+    try await environment.store.save(weak)
+    let model = try await makeModel(environment)
+    var writes = 0
+    model.onWrite = { writes += 1 }
+
+    let row = try XCTUnwrap(model.row(SampleData.speakerTwoID))
+    XCTAssertEqual(row.speaker.assignment, .unknown)
+    XCTAssertEqual(row.displayName, "Speaker 2")
+    XCTAssertNil(row.suggestionStrength)
+    XCTAssertNil(model.prefill(for: SampleData.speakerTwoID))
+    XCTAssertFalse(
+      model.options(for: SampleData.speakerTwoID, query: "").contains {
+        if case .voice = $0.tag { true } else { false }
+      })
+    try await model.clear(speakerID: SampleData.speakerTwoID)
+    XCTAssertEqual(writes, 0)
   }
 }

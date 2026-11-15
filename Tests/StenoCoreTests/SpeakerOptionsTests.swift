@@ -26,11 +26,12 @@ import Testing
     participants: [Participant] = SampleData.participants(),
     suggestion: SpeakerNameSuggestion? = nil,
     recent: [Person] = [],
+    rejected: Set<UUID> = [],
     query: String = ""
   ) -> [Option] {
     SpeakerOptions.build(
       speaker: speaker, speakers: speakers, persons: persons, participants: participants,
-      suggestion: suggestion, recent: recent, query: query)
+      suggestion: suggestion, recent: recent, rejected: rejected, query: query)
   }
 
   static func suggestion(_ name: String?) -> SpeakerNameSuggestion {
@@ -38,7 +39,7 @@ import Testing
       speakerID: speakerTwo.id, name: name, confidence: 0.8, evidence: "Speaker 1 says the name.")
   }
 
-  @Test func orderIsVoiceMatchGuessAttendeesThisMeetingThenRecent() {
+  @Test func orderIsVoiceMatchGuessInviteesThisMeetingThenRecent() {
     let attendee = Participant(
       id: SampleData.uuid(32), meetingID: SampleData.meetingID, personID: Self.anna.id,
       displayName: "Anna Berg", role: .them)
@@ -48,9 +49,9 @@ import Testing
       recent: [Self.jerome, Self.nicolai, Self.philipp])
     #expect(
       options == [
-        Option(kind: .person(Self.jerome), tag: .soundsLike),
+        Option(kind: .person(Self.jerome), tag: .voice(.likely)),
         Option(kind: .create("Ben"), tag: .mentioned),
-        Option(kind: .person(Self.anna), tag: .attendee),
+        Option(kind: .person(Self.anna), tag: .invited),
         Option(kind: .person(Self.nicolai), tag: .inThisMeeting),
         Option(kind: .person(Self.philipp)),
       ])
@@ -59,7 +60,7 @@ import Testing
   @Test func theSuggestedPersonIsNotRepeatedUnderRecent() {
     let options = Self.build(recent: [Self.jerome, Self.philipp])
     #expect(options.filter { $0.id == Self.jerome.id.uuidString }.count == 1)
-    #expect(options.first == Option(kind: .person(Self.jerome), tag: .soundsLike))
+    #expect(options.first == Option(kind: .person(Self.jerome), tag: .voice(.likely)))
     #expect(options.last == Option(kind: .person(Self.philipp)))
   }
 
@@ -89,7 +90,7 @@ import Testing
       id: SampleData.uuid(33), meetingID: SampleData.meetingID, displayName: "Mia Kurz",
       role: .them)
     let options = Self.build(participants: [attendee])
-    #expect(options.contains(Option(kind: .create("Mia Kurz"), tag: .attendee)))
+    #expect(options.contains(Option(kind: .create("Mia Kurz"), tag: .lastInvitee)))
     #expect(options.first { $0.id == "create:Mia Kurz" } != nil)
   }
 
@@ -101,7 +102,7 @@ import Testing
       role: .them)
     let options = Self.build(participants: [blank, padded])
     #expect(!options.contains { $0.displayName.isEmpty })
-    #expect(options.contains(Option(kind: .create("Mia Kurz"), tag: .attendee)))
+    #expect(options.contains(Option(kind: .create("Mia Kurz"), tag: .lastInvitee)))
   }
 
   @Test func anAttendeeWithoutAPersonIDResolvesByName() {
@@ -111,7 +112,7 @@ import Testing
       id: SampleData.uuid(35), meetingID: SampleData.meetingID, displayName: "philipp schroder",
       role: .them)
     let options = Self.build(participants: [attendee])
-    #expect(options.contains(Option(kind: .person(Self.philipp), tag: .attendee)))
+    #expect(options.contains(Option(kind: .person(Self.philipp), tag: .lastInvitee)))
     #expect(!options.contains { if case .create = $0.kind { true } else { false } })
   }
 
@@ -177,7 +178,8 @@ import Testing
 
   @Test func theVoiceMatchWinsOverTheSameLLMGuess() {
     let options = Self.build(suggestion: SampleData.summaryOutput().speakerNames[0])
-    #expect(options.filter { $0.id == Self.jerome.id.uuidString }.map(\.tag) == [.soundsLike])
+    #expect(
+      options.filter { $0.id == Self.jerome.id.uuidString }.map(\.tag) == [.voice(.likely)])
   }
 
   @Test func aNilOrEmptyGuessAddsNothing() {
@@ -206,10 +208,79 @@ import Testing
       ])
   }
 
-  @Test func tagsCarryTheirLabels() {
-    #expect(Option.Tag.soundsLike.rawValue == "Sounds like")
-    #expect(Option.Tag.mentioned.rawValue == "Mentioned")
-    #expect(Option.Tag.attendee.rawValue == "Attendee")
-    #expect(Option.Tag.inThisMeeting.rawValue == "In this meeting")
+  // MARK: - Voice strength, the user's Noes and the last invitee
+
+  @Test func voiceStrengthHasAFloorAndAStrongThreshold() {
+    #expect(VoiceStrength.of(0.59) == nil)
+    #expect(VoiceStrength.of(0.60) == .likely)
+    #expect(VoiceStrength.of(0.74) == .likely)
+    #expect(VoiceStrength.of(0.75) == .strong)
+  }
+
+  @Test func theVoiceMatchCarriesItsStrengthAndIsHiddenBelowTheFloor() {
+    var speaker = Self.speakerTwo
+    speaker.assignment = .suggested(personID: Self.jerome.id, similarity: 0.8)
+    #expect(Self.build(speaker: speaker).first?.tag == .voice(.strong))
+
+    speaker.assignment = .suggested(personID: Self.jerome.id, similarity: 0.5)
+    let options = Self.build(speaker: speaker)
+    #expect(!options.contains { if case .voice = $0.tag { true } else { false } })
+    #expect(
+      options.first == Option(kind: .person(Self.jerome), tag: .lastInvitee),
+      "Jérôme is still the invitee nobody is named as")
+  }
+
+  @Test func aRejectedPersonIsOfferedOnlyWhenTyped() {
+    let options = Self.build(rejected: [Self.jerome.id])
+    #expect(!options.contains { $0.id == Self.jerome.id.uuidString }, "neither voice nor invitee")
+    #expect(options == [Option(kind: .person(Self.nicolai), tag: .inThisMeeting)])
+
+    let typed = Self.build(rejected: [Self.jerome.id], query: "jér")
+    #expect(typed.contains { $0.id == Self.jerome.id.uuidString })
+  }
+
+  @Test func aRejectedNameHidesANamesakeToo() {
+    let namesake = Person(
+      id: SampleData.uuid(14), displayName: "Anna Berg", createdAt: SampleData.createdAt)
+    var speaker = Self.speakerTwo
+    speaker.assignment = .unknown
+    let options = Self.build(
+      speaker: speaker, persons: Self.persons + [namesake],
+      suggestion: Self.suggestion("anna berg"), rejected: [namesake.id])
+    #expect(!options.contains { Person.namesMatch($0.displayName, "Anna Berg") })
+  }
+
+  @Test func theOnlyInviteeForTheOnlyOpenVoiceIsTheLastInvitee() {
+    let mia = Participant(
+      id: SampleData.uuid(33), meetingID: SampleData.meetingID, displayName: "Mia Kurz",
+      role: .them)
+    let tom = Participant(
+      id: SampleData.uuid(34), meetingID: SampleData.meetingID, displayName: "Tom Ruh",
+      role: .them)
+    #expect(Self.build(participants: [mia]).contains { $0.tag == .lastInvitee })
+
+    let two = Self.build(participants: [mia, tom])
+    #expect(two.filter { $0.tag == .invited }.map(\.displayName) == ["Mia Kurz", "Tom Ruh"])
+
+    let another = Speaker(
+      id: SampleData.uuid(23), meetingID: SampleData.meetingID, clusterLabel: "Speaker 3",
+      clusterConfidence: 0.5)
+    #expect(
+      Self.build(speakers: Self.speakers + [another], participants: [mia])
+        .contains(Option(kind: .create("Mia Kurz"), tag: .invited)),
+      "another voice is still open")
+
+    var dismissed = another
+    dismissed.dismissed = true
+    #expect(
+      Self.build(speakers: Self.speakers + [dismissed], participants: [mia])
+        .contains(Option(kind: .create("Mia Kurz"), tag: .lastInvitee)),
+      "a dismissed voice is not open")
+
+    let me = LaneMerger.meSpeaker(meetingID: SampleData.meetingID, personID: nil)
+    #expect(
+      Self.build(speakers: Self.speakers + [me], participants: [mia])
+        .contains(Option(kind: .create("Mia Kurz"), tag: .lastInvitee)),
+      "no invitee is me")
   }
 }

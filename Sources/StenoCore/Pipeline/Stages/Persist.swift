@@ -4,9 +4,10 @@ extension ProcessingPipeline {
   /// Writes the mixdown for every asset that is not already AAC (beside the
   /// master, named by `RecordingLayout.mixdown(decoder.mixdownFormat)`),
   /// marks the meeting `.ready`, and posts `speakersNeedReview` when any
-  /// speaker is not `.confirmed`. The asset row is read again before the
-  /// write, so a retention changed while the meeting was processing (the
-  /// keep toggle, `RetentionSweep.keepAll()`) survives it.
+  /// speaker is neither `.confirmed` nor dismissed ("Not a person"). The
+  /// asset row is read again before the write, so a retention changed while
+  /// the meeting was processing (the keep toggle, `RetentionSweep.keepAll()`)
+  /// survives it.
   func persist(meeting: Meeting, asset: AudioAsset) async throws -> AudioAsset {
     let decoder = dependencies.decoder
     let store = self.store
@@ -25,7 +26,7 @@ extension ProcessingPipeline {
       try await store.save(updated)
       try await store.setState(.ready, meetingID: meeting.id, now: self.now)
       let unconfirmed = try await store.speakers(meetingID: meeting.id)
-        .filter { !$0.assignment.isConfirmed }
+        .filter { !$0.assignment.isConfirmed && !$0.dismissed }
         .map(\.id)
       if !unconfirmed.isEmpty {
         await events.post(.speakersNeedReview(meetingID: meeting.id, speakerIDs: unconfirmed))

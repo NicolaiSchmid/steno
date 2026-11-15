@@ -68,7 +68,8 @@ extension MeetingStore {
 
   /// People who own a confirmed speaker, most recently met first (the
   /// latest `meeting.startedAt` among their confirmed speakers), then by
-  /// name. What the speaker picker lists before anything is typed.
+  /// name; a dismissed voice owns nobody. What the speaker picker lists
+  /// before anything is typed.
   public func recentPersons() async throws -> [Person] {
     try await writer.read { db in
       try PersonRow.fetchAll(
@@ -76,6 +77,7 @@ extension MeetingStore {
         sql: """
           SELECT person.* FROM person
           JOIN speaker ON speaker.personID = person.id AND speaker.assignment = ?
+            AND speaker.dismissed = 0
           JOIN meeting ON meeting.id = speaker.meetingID
           GROUP BY person.id
           ORDER BY MAX(meeting.startedAt) DESC, person.displayName COLLATE NOCASE, person.id
@@ -205,8 +207,9 @@ extension MeetingStore {
   }
 
   /// The one operation that sets `.confirmed`. Saves the person when the
-  /// store does not know them and drops the speaker's name suggestion, which
-  /// the confirmation answered. Then: the same person again changes nothing
+  /// store does not know them, drops the speaker's name suggestion, which
+  /// the confirmation answered, and any No to this person for this voice,
+  /// and undoes a dismissal. Then: the same person again changes nothing
   /// else; a person who already owns another speaker of this meeting takes
   /// this speaker over (`mergeSpeakerRows`, Jamie's "add the same name
   /// twice"); otherwise the speaker becomes `.confirmed(person)`. The voices
@@ -225,6 +228,16 @@ extension MeetingStore {
         .deleteAll(db)
       if try Self.personRow(person.id, db) == nil {
         try PersonRow(person).insert(db)
+      }
+      // Naming a voice answers an earlier No to this person and makes a
+      // dismissed voice a person again.
+      try SpeakerSuggestionRejectionRow
+        .filter(SpeakerSuggestionRejectionRow.Columns.speakerID == speakerID.uuidString)
+        .filter(SpeakerSuggestionRejectionRow.Columns.personID == person.id.uuidString)
+        .deleteAll(db)
+      if speaker.dismissed {
+        speaker.dismissed = false
+        try SpeakerRow(speaker).update(db)
       }
       if case .confirmed(let current) = speaker.assignment, current == person.id { return [] }
 
@@ -280,6 +293,7 @@ extension MeetingStore {
   /// Recomputes a person's voice from the speakers confirmed to them: the
   /// normalised mean of the newest `voiceWindow` embeddings by
   /// `meeting.startedAt`, `sampleCount` their number; nil and 0 without any.
+  /// A dismissed voice never counts.
   /// Embeddings of another dimension than `Embedding.dimension` are skipped.
   /// A missing person is ignored.
   static func refreshVoice(personID: UUID, _ db: Database) throws {
@@ -290,6 +304,7 @@ extension MeetingStore {
         SELECT speaker.* FROM speaker
         JOIN meeting ON meeting.id = speaker.meetingID
         WHERE speaker.personID = ? AND speaker.assignment = ? AND speaker.embedding IS NOT NULL
+          AND speaker.dismissed = 0
         ORDER BY meeting.startedAt DESC, speaker.id
         """,
       arguments: [personID.uuidString, SpeakerAssignment.Kind.confirmed.rawValue])
@@ -299,5 +314,137 @@ extension MeetingStore {
     person.embedding = Embedding.mean(of: Array(samples))
     person.sampleCount = samples.count
     try PersonRow(person).update(db)
+  }
+
+  // MARK: - The user's other answers
+
+  /// "Remove name", beside `confirm`: the speaker goes back to `.unknown`
+  /// in this meeting. The person it was confirmed to keeps their name and
+  /// has their voice recomputed without it; for the "me" speaker
+  /// (`LaneMerger.meSpeakerID`) the meeting's "me" participant is unnamed
+  /// again. A suggestion is dropped the same way, without a No. An unknown
+  /// speaker is left alone; a missing one throws `speakerNotFound`.
+  public func clear(speakerID: UUID) async throws {
+    try await writer.write { db in _ = try Self.unassignSpeaker(speakerID, db) }
+  }
+
+  /// No to a suggestion: `personID` is recorded as not this voice and is not
+  /// suggested for it again, here or when the meeting is processed again. A
+  /// speaker still suggested as that person goes back to `.unknown`. Voice
+  /// memory is not touched: nobody's voice learns from a No. Throws for a
+  /// missing speaker or person.
+  public func rejectSuggestion(speakerID: UUID, personID: UUID) async throws {
+    try await writer.write { db in
+      guard var speaker = try Self.speakerRow(speakerID, db)?.speaker else {
+        throw MeetingStoreError.speakerNotFound(speakerID)
+      }
+      guard try Self.personRow(personID, db) != nil else {
+        throw MeetingStoreError.personNotFound(personID)
+      }
+      try db.execute(
+        sql: """
+          INSERT OR IGNORE INTO speakerSuggestionRejection (speakerID, personID, meetingID)
+          VALUES (?, ?, ?)
+          """,
+        arguments: [speakerID.uuidString, personID.uuidString, speaker.meetingID.uuidString])
+      if case .suggested(let suggested, _) = speaker.assignment, suggested == personID {
+        speaker.assignment = .unknown
+        try SpeakerRow(speaker).update(db)
+      }
+    }
+  }
+
+  /// The persons the user answered No to, per speaker of the meeting.
+  public func suggestionRejections(meetingID: UUID) async throws -> [UUID: Set<UUID>] {
+    try await writer.read { db in try Self.suggestionRejections(meetingID: meetingID, db) }
+  }
+
+  /// "Not a person", or a person again. Dismissing also takes back a
+  /// suggestion or confirmation as `clear(speakerID:)` does, so the voice
+  /// leaves voice memory; its segments keep their text and their speaker.
+  /// Restoring only clears the flag and leaves the voice unnamed. Throws
+  /// `speakerNotFound` for a missing speaker.
+  public func setDismissed(speakerID: UUID, _ dismissed: Bool) async throws {
+    try await writer.write { db in
+      var speaker: Speaker
+      if dismissed {
+        speaker = try Self.unassignSpeaker(speakerID, db)
+      } else {
+        guard let stored = try Self.speakerRow(speakerID, db)?.speaker else {
+          throw MeetingStoreError.speakerNotFound(speakerID)
+        }
+        speaker = stored
+      }
+      guard speaker.dismissed != dismissed else { return }
+      speaker.dismissed = dismissed
+      try SpeakerRow(speaker).update(db)
+    }
+  }
+
+  /// The speaker back to `.unknown`, inside a caller's transaction: the
+  /// voice of the person it was confirmed to is recomputed without it, and
+  /// a "me" speaker's participant is unnamed again. A speaker that is
+  /// already unknown is left alone. Returns the speaker as written.
+  static func unassignSpeaker(_ speakerID: UUID, _ db: Database) throws -> Speaker {
+    guard var speaker = try speakerRow(speakerID, db)?.speaker else {
+      throw MeetingStoreError.speakerNotFound(speakerID)
+    }
+    let previous = speaker.assignment
+    guard previous != .unknown else { return speaker }
+    speaker.assignment = .unknown
+    try SpeakerRow(speaker).update(db)
+    if case .confirmed(let personID) = previous {
+      try refreshVoice(personID: personID, db)
+      if speakerID == LaneMerger.meSpeakerID(meetingID: speaker.meetingID) {
+        try unnameMeParticipant(meetingID: speaker.meetingID, db)
+      }
+    }
+    return speaker
+  }
+
+  /// The meeting's "me" participant back to unnamed: no person, named
+  /// `LaneMerger.meSpeakerLabel`. This build never names it (`confirm`
+  /// leaves participants alone); the Rust host does when the user names
+  /// the "me" voice, so a shared database reads the same in both.
+  static func unnameMeParticipant(meetingID: UUID, _ db: Database) throws {
+    try db.execute(
+      sql:
+        "UPDATE participant SET personID = NULL, displayName = ? WHERE meetingID = ? AND role = ?",
+      arguments: [LaneMerger.meSpeakerLabel, meetingID.uuidString, ParticipantRole.me.rawValue])
+  }
+
+  static func suggestionRejections(meetingID: UUID, _ db: Database) throws -> [UUID: Set<UUID>] {
+    let rows =
+      try SpeakerSuggestionRejectionRow
+      .filter(SpeakerSuggestionRejectionRow.Columns.meetingID == meetingID.uuidString)
+      .order(
+        SpeakerSuggestionRejectionRow.Columns.speakerID,
+        SpeakerSuggestionRejectionRow.Columns.personID
+      )
+      .fetchAll(db)
+    var rejections: [UUID: Set<UUID>] = [:]
+    for row in rows { rejections[row.speakerID, default: []].insert(row.personID) }
+    return rejections
+  }
+
+  /// Writes rejections back for the meeting's speakers and persons that
+  /// exist; the others went with their rows.
+  static func restoreSuggestionRejections(
+    _ rejections: [UUID: Set<UUID>], meetingID: UUID, _ db: Database
+  ) throws {
+    for (speakerID, personIDs) in rejections {
+      for personID in personIDs {
+        try db.execute(
+          sql: """
+            INSERT OR IGNORE INTO speakerSuggestionRejection (speakerID, personID, meetingID)
+            SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM speaker WHERE id = ?)
+            AND EXISTS (SELECT 1 FROM person WHERE id = ?)
+            """,
+          arguments: [
+            speakerID.uuidString, personID.uuidString, meetingID.uuidString,
+            speakerID.uuidString, personID.uuidString,
+          ])
+      }
+    }
   }
 }

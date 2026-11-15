@@ -306,14 +306,24 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     /// The confirmed or suggested person's email, when known.
     public var email: String?
     public var suggestionName: String?
+    /// How strongly a `suggested` voice matches its person.
+    public var suggestionStrength: VoiceStrength?
+    /// The words the voice says in its sample clip, so the quote is what
+    /// plays; the longest thing it said when it has no clip. Absent without
+    /// any.
+    public var quote: String?
     public var colorIndex: Int
     public var hasClip: Bool
     public var isPlaying: Bool
+    /// Not a person: out of the counts and voice memory, its turns read
+    /// "Not a person".
+    public var dismissed: Bool
 
     public init(
       id: UUID, clusterLabel: String, displayName: String, assignment: Assignment,
-      personID: UUID? = nil, email: String? = nil, suggestionName: String? = nil, colorIndex: Int,
-      hasClip: Bool, isPlaying: Bool
+      personID: UUID? = nil, email: String? = nil, suggestionName: String? = nil,
+      suggestionStrength: VoiceStrength? = nil, quote: String? = nil, colorIndex: Int,
+      hasClip: Bool, isPlaying: Bool, dismissed: Bool
     ) {
       self.id = id
       self.clusterLabel = clusterLabel
@@ -322,9 +332,12 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
       self.personID = personID
       self.email = email
       self.suggestionName = suggestionName
+      self.suggestionStrength = suggestionStrength
+      self.quote = quote
       self.colorIndex = colorIndex
       self.hasClip = hasClip
       self.isPlaying = isPlaying
+      self.dismissed = dismissed
     }
   }
 

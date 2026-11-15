@@ -156,8 +156,10 @@ final class MeetingDetailViewModel: Identifiable {
     export.map(SummaryMarkdown.sections(for:)) ?? []
   }
 
+  /// The voices still to name; a dismissed voice ("Not a person") is not
+  /// one.
   var unconfirmedSpeakers: [Speaker] {
-    export?.speakers.filter { !$0.assignment.isConfirmed } ?? []
+    export?.speakers.filter { !$0.assignment.isConfirmed && !$0.dismissed } ?? []
   }
 
   /// The pipeline accepts a re-run or a re-export: ready or failed.
@@ -192,8 +194,21 @@ final class MeetingDetailViewModel: Identifiable {
     ExportStatus(deliveries: deliveries, vaultConfigured: vaultConfigured)
   }
 
+  /// What a turn of a dismissed voice reads instead of a name.
+  static let notAPerson = "Not a person"
+
+  /// The confirmed or suggested person's name, else the cluster label;
+  /// `notAPerson` for a dismissed voice, the label for a voice match below
+  /// `VoiceStrength.floor`, "Unknown" without a speaker.
   func displayName(forSpeaker id: UUID?) -> String {
     guard let id, let export else { return "Unknown" }
+    if let speaker = export.speakers.first(where: { $0.id == id }) {
+      if speaker.dismissed { return Self.notAPerson }
+      // A voice match below the floor is not shown: the label.
+      if let similarity = speaker.assignment.similarity, VoiceStrength.of(similarity) == nil {
+        return speaker.clusterLabel
+      }
+    }
     return export.displayName(forSpeaker: id)
   }
 

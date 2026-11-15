@@ -1,4 +1,5 @@
 import Foundation
+import StenoCore
 
 /// Params of the page's method calls, one type per `BridgeMethod` that takes
 /// arguments. Methods without a params type take `null`.
@@ -103,15 +104,35 @@ public struct SpeakerOption: Codable, Sendable, Equatable {
 
   public var kind: Kind
   public var label: String
-  public var detail: String?
+  public var reason: SpeakerOptionReason?
+  /// For a `voice` reason only: how strongly the voice matches.
+  public var strength: VoiceStrength?
   public var personID: UUID?
 
-  public init(kind: Kind, label: String, detail: String? = nil, personID: UUID? = nil) {
+  public init(
+    kind: Kind, label: String, reason: SpeakerOptionReason? = nil,
+    strength: VoiceStrength? = nil, personID: UUID? = nil
+  ) {
     self.kind = kind
     self.label = label
-    self.detail = detail
+    self.reason = reason
+    self.strength = strength
     self.personID = personID
   }
+}
+
+/// Why an option is offered. Only `voice` is voice evidence.
+public enum SpeakerOptionReason: String, Codable, Sendable, CaseIterable {
+  /// The voice matches this person's voice memory.
+  case voice
+  /// The summary heard the name for this speaker.
+  case mentioned
+  /// A calendar invitee nobody's voice is named as yet.
+  case invited
+  /// The only invitee left for the only voice left unnamed.
+  case lastInvitee
+  /// The person already owns another voice of this meeting.
+  case inThisMeeting
 }
 
 public struct SpeakerOptionsReply: Codable, Sendable, Equatable {
@@ -135,6 +156,17 @@ public struct SelectSpeakerParams: Codable, Sendable, Equatable {
     self.speakerID = speakerID
     self.option = option
     self.combine = combine
+  }
+}
+
+/// `speakers.reject`: No to the suggestion that this voice is `personID`.
+public struct RejectSpeakerParams: Codable, Sendable, Equatable {
+  public var speakerID: UUID
+  public var personID: UUID
+
+  public init(speakerID: UUID, personID: UUID) {
+    self.speakerID = speakerID
+    self.personID = personID
   }
 }
 

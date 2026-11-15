@@ -3,14 +3,16 @@ import StenoCore
 
 /// The speakers of one meeting as the header row, the popover and the
 /// transcript pickers show them: one row per speaker from the current
-/// export, the options a picker offers, and the one write, `select`.
-/// `MeetingDetailViewModel` feeds it on every export tick
-/// (`update(export:)`); it then loads the name suggestions, the recent
-/// people and the full people list in one cancellable task. Writes go
-/// through `MeetingStore.confirm(speakerID:person:)`, which merges,
-/// recomputes the voice and keeps the clip; the UI re-renders from the
-/// store observation, so nothing here is optimistic. A failed write throws,
-/// so the bridge replies with it.
+/// export, the options a picker offers, and the writes: naming (`select`),
+/// No to a suggestion (`reject`), Remove name (`clear`) and Not a person
+/// (`setDismissed`). `MeetingDetailViewModel` feeds it on every export tick
+/// (`update(export:)`); it then loads the name suggestions, the user's
+/// Noes, the recent people and the full people list in one cancellable
+/// task. Naming goes through `MeetingStore.confirm(speakerID:person:)`,
+/// which merges, recomputes the voice and keeps the clip; the UI re-renders
+/// from the store observation, so nothing here is optimistic. A failed
+/// write throws, so the bridge replies with it. Rust: `SpeakersViewModel`
+/// in `steno-host`'s `speakers.rs`.
 @MainActor
 @Observable
 final class SpeakersViewModel {
@@ -18,7 +20,7 @@ final class SpeakersViewModel {
     var speaker: Speaker
     /// The confirmed or suggested person, when the export has them.
     var person: Person?
-    /// What the speaker said in the clip range; empty for confirmed rows.
+    /// What the speaker says in the sample clip (`SpeakerExcerpts`).
     var excerpt: String
     /// Whether the sample clip file exists.
     var canPlay: Bool
@@ -27,6 +29,10 @@ final class SpeakersViewModel {
     var isConfirmed: Bool { speaker.assignment.isConfirmed }
     /// The confirmed or suggested person's name, else the cluster label.
     var displayName: String { person?.displayName ?? speaker.clusterLabel }
+    /// How strongly a `.suggested` voice matches its person.
+    var suggestionStrength: VoiceStrength? {
+      speaker.assignment.similarity.flatMap(VoiceStrength.of)
+    }
   }
 
   private(set) var rows: [Row] = []
@@ -34,6 +40,8 @@ final class SpeakersViewModel {
   private(set) var recent: [Person] = []
   private(set) var persons: [Person] = []
   private(set) var suggestions: [UUID: SpeakerNameSuggestion] = [:]
+  /// The persons the user said No to, per speaker.
+  private(set) var rejections: [UUID: Set<UUID>] = [:]
   private(set) var error: String?
   /// Called after every write that changed a speaker, so the owner can
   /// schedule the re-export.
@@ -53,22 +61,26 @@ final class SpeakersViewModel {
     self.init(store: environment.store, now: environment.now)
   }
 
-  var unconfirmedCount: Int { rows.filter { !$0.isConfirmed }.count }
+  /// The voices still to name or check; a dismissed voice is not one.
+  var unconfirmedCount: Int { rows.filter { !$0.isConfirmed && !$0.speaker.dismissed }.count }
 
   func row(_ id: UUID) -> Row? {
     rows.first { $0.id == id }
   }
 
   /// A new export from the store observation: rows are rebuilt at once, the
-  /// people lists reload in the background (the previous load is dropped).
+  /// suggestions, the user's Noes and the people lists reload in the
+  /// background (the previous load is dropped). A voice match below
+  /// `VoiceStrength.floor` reads as unknown everywhere.
   func update(export: MeetingExport) {
+    var export = export
+    export.speakers = export.speakers.map(Self.shown)
     self.export = export
     rows = export.speakers.map { speaker in
       Row(
         speaker: speaker,
         person: speaker.personID.flatMap { id in export.persons.first { $0.id == id } },
-        excerpt: speaker.assignment.isConfirmed
-          ? "" : SpeakerExcerpts.text(for: speaker, in: export.segments),
+        excerpt: SpeakerExcerpts.text(for: speaker, in: export.segments),
         canPlay: speaker.sampleClipURL.map { FileManager.default.fileExists(atPath: $0.path) }
           ?? false)
     }
@@ -77,11 +89,13 @@ final class SpeakersViewModel {
     loadTask = Task { [weak self, store] in
       do {
         let suggestions = try await store.nameSuggestions(meetingID: meetingID)
+        let rejections = try await store.suggestionRejections(meetingID: meetingID)
         let recent = try await store.recentPersons()
         let persons = try await store.persons()
         guard !Task.isCancelled, let self else { return }
         self.suggestions = Dictionary(
           suggestions.map { ($0.speakerID, $0) }, uniquingKeysWith: { first, _ in first })
+        self.rejections = rejections
         self.recent = recent
         self.persons = persons
       } catch {
@@ -111,7 +125,18 @@ final class SpeakersViewModel {
     let suggestion = suggestions[speakerID].flatMap { $0.name?.isEmpty == false ? $0 : nil }
     return SpeakerOptions.build(
       speaker: speaker, speakers: export.speakers, persons: known,
-      participants: export.participants, suggestion: suggestion, recent: recent, query: query)
+      participants: export.participants, suggestion: suggestion, recent: recent,
+      rejected: rejections[speakerID] ?? [], query: query)
+  }
+
+  /// A voice match below `VoiceStrength.floor` is not shown: the speaker
+  /// reads as unknown.
+  private static func shown(_ speaker: Speaker) -> Speaker {
+    guard let similarity = speaker.assignment.similarity, VoiceStrength.of(similarity) == nil
+    else { return speaker }
+    var speaker = speaker
+    speaker.assignment = .unknown
+    return speaker
   }
 
   /// Why `select` named nobody besides a store error.
@@ -156,6 +181,33 @@ final class SpeakersViewModel {
       throw SelectError.wouldCombine(person: person.displayName, voice: owner.clusterLabel)
     }
     try await store.confirm(speakerID: speakerID, person: person)
+    onWrite?()
+  }
+
+  /// No to the suggestion that the speaker is `personID`
+  /// (`MeetingStore.rejectSuggestion`): that person is not suggested for
+  /// this voice again and nobody's voice changes. A speaker the export does
+  /// not list is ignored.
+  func reject(speakerID: UUID, personID: UUID) async throws {
+    guard row(speakerID) != nil else { return }
+    try await store.rejectSuggestion(speakerID: speakerID, personID: personID)
+    onWrite?()
+  }
+
+  /// Remove name (`MeetingStore.clear(speakerID:)`): the voice is unnamed
+  /// again in this meeting; for "me" the meeting's "me" participant too. An
+  /// unlisted or unnamed speaker is ignored.
+  func clear(speakerID: UUID) async throws {
+    guard let row = row(speakerID), row.speaker.assignment != .unknown else { return }
+    try await store.clear(speakerID: speakerID)
+    onWrite?()
+  }
+
+  /// Not a person, or a person again (`MeetingStore.setDismissed`). An
+  /// unlisted speaker, or one already in that state, is ignored.
+  func setDismissed(speakerID: UUID, _ dismissed: Bool) async throws {
+    guard let row = row(speakerID), row.speaker.dismissed != dismissed else { return }
+    try await store.setDismissed(speakerID: speakerID, dismissed)
     onWrite?()
   }
 

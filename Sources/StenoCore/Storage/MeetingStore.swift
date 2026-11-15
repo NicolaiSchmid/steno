@@ -276,21 +276,43 @@ public final class MeetingStore: Sendable {
   /// One transaction: the meeting's processing columns (see
   /// `Meeting.applyProcessingResults`) plus every speaker and segment of the
   /// meeting, replaced. The pipeline's merge and cleanup stages call this.
+  /// The user's answers come back with a speaker id (ids derive from the
+  /// meeting id and the cluster label): a dismissed voice stays dismissed
+  /// and unnamed, and a No to a person stays, so a new suggestion of a
+  /// person the user said No to for that voice is dropped.
   public func replaceTranscript(
     _ meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker]
   ) async throws {
     let meetingID = meeting.id
     try await writer.write { db in
       try Self.writeProcessingResults(of: meeting, db)
+      let meetingSpeakers = SpeakerRow.filter(SpeakerRow.Columns.meetingID == meetingID.uuidString)
+      let dismissed = try Set(
+        UUID.fetchAll(
+          db,
+          meetingSpeakers.filter(SpeakerRow.Columns.dismissed == true).select(SpeakerRow.Columns.id)
+        ))
+      // Deleting the speakers cascades to the user's Noes.
+      let rejections = try Self.suggestionRejections(meetingID: meetingID, db)
       try TranscriptSegmentRow
         .filter(TranscriptSegmentRow.Columns.meetingID == meetingID.uuidString)
         .deleteAll(db)
-      try SpeakerRow.filter(SpeakerRow.Columns.meetingID == meetingID.uuidString).deleteAll(db)
+      try meetingSpeakers.deleteAll(db)
       for speaker in speakers {
         var speaker = speaker
         speaker.meetingID = meetingID
+        if case .suggested(let personID, _) = speaker.assignment,
+          rejections[speaker.id]?.contains(personID) == true
+        {
+          speaker.assignment = .unknown
+        }
+        if dismissed.contains(speaker.id) {
+          speaker.dismissed = true
+          speaker.assignment = .unknown
+        }
         try SpeakerRow(speaker).insert(db)
       }
+      try Self.restoreSuggestionRejections(rejections, meetingID: meetingID, db)
       for segment in segments {
         var segment = segment
         segment.meetingID = meetingID
