@@ -265,7 +265,7 @@ mod tests {
     fn recording() -> tempfile::NamedTempFile {
         let file = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
         let mut writer = steno_audio::writer::WavStreamWriter::create(file.path(), 16_000).unwrap();
-        writer.write(&[0i16; 16_000]).unwrap();
+        writer.write(&vec![0i16; 16_000]).unwrap();
         writer.finish().unwrap();
         file
     }
