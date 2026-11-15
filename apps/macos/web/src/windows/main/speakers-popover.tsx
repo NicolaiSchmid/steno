@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
-import { send, useBridge } from "@/bridge/hooks";
+import { useBridge } from "@/bridge/hooks";
 import {
 	Avatar,
 	AvatarStack,
@@ -20,7 +20,7 @@ import {
 	Tooltip,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import { SpeakerNameField } from "./speaker-name-field";
+import { SpeakerNameField, selectSpeaker } from "./speaker-name-field";
 import {
 	firstName,
 	groupSpeakers,
@@ -236,13 +236,12 @@ function SpeakerRow({
 		if (!speaker.personID) {
 			return;
 		}
-		send(client, "speakers.select", {
-			speakerID: speaker.id,
-			option: {
-				kind: "person",
-				label: speaker.displayName,
-				personID: speaker.personID,
-			},
+		selectSpeaker(client, speaker, {
+			kind: "person",
+			label: speaker.displayName,
+			personID: speaker.personID,
+		}).catch((cause: unknown) => {
+			console.error("bridge: speakers.select failed", cause);
 		});
 	}
 

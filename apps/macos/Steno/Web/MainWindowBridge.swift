@@ -291,10 +291,21 @@ final class MainWindowBridge: BridgeHost, TopicSource {
       let selection = try request.params(SelectSpeakerParams.self)
       let detail = try requireDetail()
       let option = try Self.option(from: selection.option, speakers: detail.speakers)
-      await detail.speakers.select(option, for: selection.speakerID)
+      let selected: Result<Void, BridgeError>
+      do {
+        try await detail.speakers.select(
+          option, for: selection.speakerID, combine: selection.combine)
+        selected = .success(())
+      } catch let refusal as SpeakersViewModel.SelectError {
+        selected = .failure(BridgeError(code: .wouldCombine, message: refusal.description))
+      } catch {
+        selected = .failure(
+          BridgeError(code: .failed, message: "Speaker could not be named: \(error)"))
+      }
       // The page has no "picker closed" moment the host can see; one
       // re-export per change is idempotent and the model retries a refusal.
       await detail.pickerClosed()
+      try selected.get()
     case .speakersPlay:
       let speakerID = try request.params(SpeakerIDParams.self).speakerID
       try requireDetail().speakers.play(speakerID)
@@ -398,9 +409,6 @@ final class MainWindowBridge: BridgeHost, TopicSource {
         throw BridgeError(code: .invalidParams, message: "A new person needs a name.")
       }
       return SpeakerOptions.Option(kind: .create(name))
-    case .unknown:
-      throw BridgeError(
-        code: .failed, message: "Marking a speaker as unknown is not available yet.")
     }
   }
 

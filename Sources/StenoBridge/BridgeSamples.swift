@@ -405,7 +405,8 @@ public enum BridgeSamples {
   // MARK: Envelope
 
   public static let selectSpeaker = SelectSpeakerParams(
-    speakerID: speakerUnknown, option: .init(kind: .person, label: "Anna", personID: personAnna))
+    speakerID: speakerUnknown, option: .init(kind: .person, label: "Anna", personID: personAnna),
+    combine: false)
 
   public static let request = BridgeRequest(
     id: "req-1", method: .speakersSelect, params: try? jsonValue(selectSpeaker))
@@ -426,13 +427,14 @@ public enum BridgeSamples {
 
   // MARK: Commands
 
+  /// What both hosts answer for Speaker 3, suggested as Anna, while "a" is
+  /// typed (`crates/steno-host/tests/parity.rs`).
   public static let speakerOptions = SpeakerOptionsReply(
     prefill: "Anna",
     options: [
-      .init(kind: .person, label: "Anna", detail: "Suggested, 87% match", personID: personAnna),
-      .init(kind: .person, label: "Nicolai", personID: personNicolai),
-      .init(kind: .create, label: "Add “Anna Berger”"),
-      .init(kind: .unknown, label: "Leave unnamed"),
+      .init(kind: .person, label: "Anna", detail: "Sounds like", personID: personAnna),
+      .init(kind: .person, label: "Nicolai", detail: "In this meeting", personID: personNicolai),
+      .init(kind: .create, label: "a"),
     ])
 }
 
@@ -500,11 +502,7 @@ extension BridgeSamples {
       SaveNotesParams(meetingID: meetingID, text: "Follow up with Anna on Monday.")),
     BridgeFixture(
       "params.speakers.options", SpeakerOptionsParams(speakerID: speakerUnknown, query: "an")),
-    BridgeFixture(
-      "params.speakers.select",
-      SelectSpeakerParams(
-        speakerID: speakerUnknown, option: .init(kind: .person, label: "Anna", personID: personAnna)
-      )),
+    BridgeFixture("params.speakers.select", selectSpeaker),
     BridgeFixture("params.speakerID", SpeakerIDParams(speakerID: speakerNicolai)),
     BridgeFixture("params.recording.start", StartRecordingParams(mode: .inPerson)),
     BridgeFixture(

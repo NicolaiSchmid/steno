@@ -146,8 +146,7 @@ export interface OptionGroup {
  * in the meeting, an attendee, a person already speaking here; the host
  * puts that reason in `detail`), then the people without one (recent people
  * while the field is empty, every match once something is typed), then the
- * row that creates the typed name. The host's "unknown" row is not offered:
- * a speaker left unnamed stays in "Need names".
+ * row that creates the typed name.
  */
 export function groupOptions(
 	options: readonly SpeakerOption[],
@@ -168,9 +167,6 @@ export function groupOptions(
 		OptionGroup,
 	];
 	for (const option of options) {
-		if (option.kind === "unknown") {
-			continue;
-		}
 		if (option.detail) {
 			meeting.options.push(option);
 		} else if (option.kind === "person") {

@@ -346,6 +346,36 @@ pub fn clip_path(speaker: &Speaker) -> Option<PathBuf> {
     speaker.sample_clip_url.as_deref().and_then(file_url_path)
 }
 
+/// Why [`SpeakersViewModel::select`] named nobody.
+#[derive(Debug, thiserror::Error)]
+pub enum SelectError {
+    /// The person already owns `voice` in this meeting, and confirming
+    /// would merge the two speakers; the pick did not ask to combine.
+    #[error("{person} already speaks as {voice} in this meeting.")]
+    WouldCombine { person: String, voice: String },
+    #[error("Speaker could not be named: {0}")]
+    Store(#[from] steno_core::StoreError),
+}
+
+/// The speaker [`Store::confirm_speaker`] would merge `speaker` into when
+/// confirmed as `person_id`: another speaker of the meeting confirmed as
+/// that person, the first by cluster label.
+fn combined_voice(
+    store: &Store,
+    speaker: &Speaker,
+    person_id: Uuid,
+) -> steno_core::store::Result<Option<Speaker>> {
+    Ok(store
+        .speakers(speaker.meeting_id)?
+        .into_iter()
+        .filter(|other| {
+            other.id != speaker.id && other.assignment == SpeakerAssignment::Confirmed { person_id }
+        })
+        .min_by(|left, right| {
+            (&left.cluster_label, left.id).cmp(&(&right.cluster_label, right.id))
+        }))
+}
+
 #[derive(Debug, Default)]
 pub struct SpeakersViewModel {
     pub rows: Vec<SpeakerRow>,
@@ -456,67 +486,63 @@ impl SpeakersViewModel {
         )
     }
 
-    /// The one write: a person option confirms that person (merging when
-    /// they own another speaker here); a create option resolves the name
-    /// first, taking a same-named attendee's email. The speaker's own person
-    /// again changes nothing; an unlisted speaker is ignored. The first
-    /// person the user names a "me" speaker as becomes the user's own
-    /// ([`adopt_self_person`]). Returns whether a speaker changed.
+    /// The one write: a person option confirms that person; a create option
+    /// resolves the name first, taking a same-named attendee's email. A
+    /// person who owns another speaker here is merged into only with
+    /// `combine`, else refused as [`SelectError::WouldCombine`]. The
+    /// speaker's own person again changes nothing; an unlisted speaker is
+    /// ignored. The first person the user names a "me" speaker as becomes the
+    /// user's own ([`adopt_self_person`]). Returns whether a speaker changed.
     pub fn select(
         &mut self,
         option: &SpeakerOption,
         speaker_id: Uuid,
+        combine: bool,
         store: &Store,
         now: DateTime<Utc>,
-    ) -> bool {
+    ) -> Result<bool, SelectError> {
         let Some(row) = self.row(speaker_id).cloned() else {
-            return false;
+            return Ok(false);
         };
-        let outcome = (|| -> steno_core::store::Result<Option<Person>> {
-            let person = match &option.kind {
-                OptionKind::Person(known) => known.clone(),
-                OptionKind::Create(name) => {
-                    let attendee = self.export.as_ref().and_then(|export| {
-                        export.participants.iter().find(|participant| {
-                            participant.role == ParticipantRole::Them
-                                && Person::names_match(&participant.display_name, name)
-                        })
-                    });
-                    store.resolve_person(
-                        name,
-                        attendee.and_then(|attendee| attendee.email.as_deref()),
-                        now,
-                    )?
-                }
-            };
-            if row.speaker.assignment
-                == (SpeakerAssignment::Confirmed {
-                    person_id: person.id,
-                })
-            {
-                return Ok(None);
+        let person = match &option.kind {
+            OptionKind::Person(known) => known.clone(),
+            OptionKind::Create(name) => {
+                let attendee = self.export.as_ref().and_then(|export| {
+                    export.participants.iter().find(|participant| {
+                        participant.role == ParticipantRole::Them
+                            && Person::names_match(&participant.display_name, name)
+                    })
+                });
+                store.resolve_person(
+                    name,
+                    attendee.and_then(|attendee| attendee.email.as_deref()),
+                    now,
+                )?
             }
-            let clips = store.confirm_speaker(speaker_id, &person)?;
-            for clip in clips.iter().filter_map(|clip| file_url_path(clip)) {
-                let _ = std::fs::remove_file(clip);
-            }
-            Ok(Some(person))
-        })();
-        match outcome {
-            Ok(Some(person)) => {
-                if speaker_id == me_speaker_id(row.speaker.meeting_id)
-                    && let Err(error) = adopt_self_person(&person, store)
-                {
-                    self.error = Some(format!("Steno could not remember who you are: {error}"));
-                }
-                true
-            }
-            Ok(None) => false,
-            Err(error) => {
-                self.error = Some(format!("Speaker could not be named: {error}"));
-                false
-            }
+        };
+        if row.speaker.assignment
+            == (SpeakerAssignment::Confirmed {
+                person_id: person.id,
+            })
+        {
+            return Ok(false);
         }
+        if !combine && let Some(owner) = combined_voice(store, &row.speaker, person.id)? {
+            return Err(SelectError::WouldCombine {
+                person: person.display_name,
+                voice: owner.cluster_label,
+            });
+        }
+        let clips = store.confirm_speaker(speaker_id, &person)?;
+        for clip in clips.iter().filter_map(|clip| file_url_path(clip)) {
+            let _ = std::fs::remove_file(clip);
+        }
+        if speaker_id == me_speaker_id(row.speaker.meeting_id)
+            && let Err(error) = adopt_self_person(&person, store)
+        {
+            self.error = Some(format!("Steno could not remember who you are: {error}"));
+        }
+        Ok(true)
     }
 
     pub fn play(&mut self, id: Uuid, player: &dyn ClipPlayer) {

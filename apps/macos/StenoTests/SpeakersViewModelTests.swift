@@ -71,7 +71,7 @@ final class SpeakersViewModelTests: XCTestCase {
     var writes = 0
     model.onWrite = { writes += 1 }
 
-    await model.select(
+    try await model.select(
       SpeakerOptions.Option(kind: .person(SampleData.persons()[0]), tag: .soundsLike),
       for: SampleData.speakerTwoID)
 
@@ -91,7 +91,7 @@ final class SpeakersViewModelTests: XCTestCase {
     let environment = try await TestSupport.environment()
     let model = try await makeModel(environment)
 
-    await model.select(
+    try await model.select(
       SpeakerOptions.Option(kind: .create("  Anna ")), for: SampleData.speakerTwoID)
 
     XCTAssertNil(model.error, model.error ?? "")
@@ -105,7 +105,8 @@ final class SpeakersViewModelTests: XCTestCase {
     XCTAssertEqual(awaited2, 3)
 
     try await refresh(model, environment)
-    await model.select(SpeakerOptions.Option(kind: .create("jérôme")), for: SampleData.speakerTwoID)
+    try await model.select(
+      SpeakerOptions.Option(kind: .create("jérôme")), for: SampleData.speakerTwoID)
     speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
     XCTAssertEqual(
       speakers.first { $0.id == SampleData.speakerTwoID }?.personID, SampleData.personJeromeID,
@@ -121,7 +122,7 @@ final class SpeakersViewModelTests: XCTestCase {
     model.onWrite = { writes += 1 }
     let before = try await environment.store.speakers(meetingID: SampleData.meetingID)
 
-    await model.select(
+    try await model.select(
       SpeakerOptions.Option(kind: .person(SampleData.persons()[1])), for: SampleData.speakerOneID)
 
     XCTAssertEqual(writes, 0)
@@ -129,13 +130,25 @@ final class SpeakersViewModelTests: XCTestCase {
     XCTAssertEqual(awaited4, before)
   }
 
-  func testSelectingAPersonWhoOwnsAnotherSpeakerMerges() async throws {
+  func testSelectingAPersonWhoOwnsAnotherSpeakerMergesOnlyWithCombine() async throws {
     let environment = try await TestSupport.environment()
     let model = try await makeModel(environment)
+    let nicolai = SpeakerOptions.Option(
+      kind: .person(SampleData.persons()[1]), tag: .inThisMeeting)
+    let before = try await environment.store.speakers(meetingID: SampleData.meetingID)
 
-    await model.select(
-      SpeakerOptions.Option(kind: .person(SampleData.persons()[1]), tag: .inThisMeeting),
-      for: SampleData.speakerTwoID)
+    do {
+      try await model.select(nicolai, for: SampleData.speakerTwoID)
+      XCTFail("a pick that would combine is refused without combine")
+    } catch let refusal as SpeakersViewModel.SelectError {
+      XCTAssertEqual(refusal, .wouldCombine(person: "Nicolai", voice: "Speaker 1"))
+      XCTAssertEqual(
+        refusal.description, "Nicolai already speaks as Speaker 1 in this meeting.")
+    }
+    let unchanged = try await environment.store.speakers(meetingID: SampleData.meetingID)
+    XCTAssertEqual(unchanged, before, "a refused pick changes nothing")
+
+    try await model.select(nicolai, for: SampleData.speakerTwoID, combine: true)
 
     XCTAssertNil(model.error, model.error ?? "")
     let export = try await environment.store.export(meetingID: SampleData.meetingID)
@@ -158,7 +171,7 @@ final class SpeakersViewModelTests: XCTestCase {
     let maya = try XCTUnwrap(options.first { createText($0) == "Maya" })
     XCTAssertEqual(maya.tag, .attendee)
 
-    await model.select(maya, for: SampleData.speakerTwoID)
+    try await model.select(maya, for: SampleData.speakerTwoID)
     XCTAssertNil(model.error, model.error ?? "")
     let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
     let personID = try XCTUnwrap(speakers.first { $0.id == SampleData.speakerTwoID }?.personID)
@@ -216,9 +229,12 @@ final class SpeakersViewModelTests: XCTestCase {
     var writes = 0
     model.onWrite = { writes += 1 }
 
-    await model.select(SpeakerOptions.Option(kind: .create("   ")), for: SampleData.speakerTwoID)
-    XCTAssertNotNil(model.error, "a blank name is reported, not created")
-    await model.select(SpeakerOptions.Option(kind: .create("Ghost")), for: UUID())
+    do {
+      try await model.select(
+        SpeakerOptions.Option(kind: .create("   ")), for: SampleData.speakerTwoID)
+      XCTFail("a blank name is reported, not created")
+    } catch {}
+    try await model.select(SpeakerOptions.Option(kind: .create("Ghost")), for: UUID())
 
     XCTAssertEqual(writes, 0)
     let awaited9 = try await environment.store.persons().count

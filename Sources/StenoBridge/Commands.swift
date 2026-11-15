@@ -99,8 +99,6 @@ public struct SpeakerOption: Codable, Sendable, Equatable {
     case person
     /// Create a person named `label`.
     case create
-    /// Mark the speaker as unknown.
-    case unknown
   }
 
   public var kind: Kind
@@ -129,10 +127,14 @@ public struct SpeakerOptionsReply: Codable, Sendable, Equatable {
 public struct SelectSpeakerParams: Codable, Sendable, Equatable {
   public var speakerID: UUID
   public var option: SpeakerOption
+  /// Whether the pick may join another voice of this meeting; without it
+  /// such a pick is refused as `wouldCombine`.
+  public var combine: Bool
 
-  public init(speakerID: UUID, option: SpeakerOption) {
+  public init(speakerID: UUID, option: SpeakerOption, combine: Bool) {
     self.speakerID = speakerID
     self.option = option
+    self.combine = combine
   }
 }
 

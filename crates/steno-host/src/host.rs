@@ -99,7 +99,7 @@ use crate::settings::{
     obsidian::VaultSave, overview, snapshots as settings_snapshots,
 };
 use crate::setup::engine_notice;
-use crate::speakers::{OptionKind, SpeakerOption as ModelOption};
+use crate::speakers::{OptionKind, SelectError, SpeakerOption as ModelOption};
 use crate::speech::{ModelAsset, SpeechEngineId};
 use crate::tray::{self, TrayMeetings};
 
@@ -1684,9 +1684,6 @@ impl Host {
                     tag: None,
                 })
             }
-            SpeakerOptionKind::Unknown => Err(BridgeError::failed(
-                "Marking a speaker as unknown is not available yet.",
-            )),
         }
     }
 }
@@ -2030,15 +2027,25 @@ impl BridgeHost for Host {
             let mut inner = self.lock();
             let option = Self::model_option(&params.option, &inner)?;
             let outcome = Self::with_detail(&mut inner, |detail, store| {
-                if detail
-                    .speakers
-                    .select(&option, params.speaker_id, store, now)
-                {
+                let selected =
+                    detail
+                        .speakers
+                        .select(&option, params.speaker_id, params.combine, store, now);
+                if matches!(selected, Ok(true)) {
                     detail.speakers_changed();
                 }
                 // The host cannot see the picker close; one re-export per
                 // change is idempotent.
                 detail.picker_closed(&*self.shared.services.pipeline);
+                selected
+            })
+            .and_then(|selected| {
+                selected.map(drop).map_err(|error| match error {
+                    SelectError::WouldCombine { .. } => {
+                        BridgeError::would_combine(error.to_string())
+                    }
+                    SelectError::Store(_) => BridgeError::failed(error.to_string()),
+                })
             });
             self.reload_detail(&mut inner);
             outcome

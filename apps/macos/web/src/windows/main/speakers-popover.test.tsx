@@ -63,8 +63,7 @@ describe("SpeakersPopover", () => {
 			within(list)
 				.getAllByRole("group")
 				.map((group) => group.getAttribute("aria-label")),
-		).toEqual(["In this meeting", "Recent people", "New person"]);
-		expect(within(list).queryByText("Leave unnamed")).toBeNull();
+		).toEqual(["In this meeting", "New person"]);
 
 		await user.keyboard("{ArrowDown}{Enter}");
 		expect(callsTo(harness.transport, "speakers.select")).toEqual([
@@ -73,10 +72,12 @@ describe("SpeakersPopover", () => {
 				params: {
 					speakerID: SPEAKER_1,
 					option: {
+						detail: "In this meeting",
 						kind: "person",
 						label: "Nicolai",
 						personID: "00000000-0000-0000-0000-00000000000A",
 					},
+					combine: false,
 				},
 			},
 		]);
@@ -89,7 +90,11 @@ describe("SpeakersPopover", () => {
 		await user.keyboard("Jo{Enter}");
 		expect(callsTo(harness.transport, "speakers.select").at(-1)).toEqual({
 			method: "speakers.select",
-			params: { speakerID: SPEAKER_1, option: { kind: "create", label: "Jo" } },
+			params: {
+				speakerID: SPEAKER_1,
+				option: { kind: "create", label: "Jo" },
+				combine: false,
+			},
 		});
 		expect(screen.getByTestId(`speaker-field-${SPEAKER_2}`)).toHaveFocus();
 
@@ -113,6 +118,7 @@ describe("SpeakersPopover", () => {
 						label: "Anna",
 						personID: "00000000-0000-0000-0000-00000000000C",
 					},
+					combine: false,
 				},
 			},
 		]);

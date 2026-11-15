@@ -8,8 +8,10 @@ import {
 	useRef,
 	useState,
 } from "react";
+import type { BridgeClient } from "@/bridge/client";
 import type { SpeakerOption } from "@/bridge/contract";
-import { send, useBridge } from "@/bridge/hooks";
+import { useBridge } from "@/bridge/hooks";
+import { BridgeError } from "@/bridge/transport";
 import { Input } from "@/components/ui";
 import { menuItemVariants } from "@/components/ui/menu";
 import { groupOptions, optionText, type Speaker } from "./speaker-names";
@@ -27,15 +29,50 @@ export interface SpeakerNameFieldProps {
 	onPreview?: (name: string | undefined) => void;
 	/** Gives up when focus leaves, as a row edited in place does. */
 	cancelOnBlur?: boolean;
+	/**
+	 * Called with the host's message when it did not take the pick, after
+	 * the field closed; the console otherwise.
+	 */
+	onError?: (message: string) => void;
 	className?: string;
+}
+
+/**
+ * Sends a pick as `speakers.select` without `combine`. When the host
+ * refuses it as `wouldCombine` (the person already owns another voice of
+ * the meeting, so naming would merge the two), the user confirms first and
+ * the pick goes again with `combine: true`; Cancel leaves it. Rejects with
+ * any other failure.
+ */
+export async function selectSpeaker(
+	client: BridgeClient,
+	speaker: Speaker,
+	option: SpeakerOption,
+): Promise<void> {
+	const params = { speakerID: speaker.id, option };
+	try {
+		await client.call("speakers.select", { ...params, combine: false });
+	} catch (cause) {
+		if (!(cause instanceof BridgeError) || cause.code !== "wouldCombine") {
+			throw cause;
+		}
+		const { confirmed } = await client.call("ui.confirmDestructive", {
+			title: `Combine ${speaker.clusterLabel} with ${option.label}?`,
+			message: `${cause.message} Their paragraphs become ${option.label}’s. This cannot be undone.`,
+			confirmTitle: "Combine",
+		});
+		if (confirmed) {
+			await client.call("speakers.select", { ...params, combine: true });
+		}
+	}
 }
 
 /**
  * The text field that names one speaker, in place of its name, with the
  * host's options under it in three groups (`groupOptions`). The host is
  * asked as the text changes (`speakers.options`, debounced); arrow keys,
- * Home and End move the highlight, Enter sends the highlighted option as
- * `speakers.select`, Escape gives up. Enter on text the options have not
+ * Home and End move the highlight, Enter sends the highlighted option
+ * (`selectSpeaker`), Escape gives up. Enter on text the options have not
  * caught up with yet creates the typed name, which the host resolves to an
  * existing person of that name. Opens empty: a suggestion is confirmed
  * with its own button, not by Enter on a prefilled field.
@@ -45,6 +82,7 @@ export function SpeakerNameField({
 	onDone,
 	onPreview,
 	cancelOnBlur = false,
+	onError,
 	className,
 }: SpeakerNameFieldProps) {
 	const client = useBridge();
@@ -103,7 +141,13 @@ export function SpeakerNameField({
 	}
 
 	function pick(option: SpeakerOption) {
-		send(client, "speakers.select", { speakerID: speaker.id, option });
+		selectSpeaker(client, speaker, option).catch((cause: unknown) => {
+			if (onError) {
+				onError(cause instanceof Error ? cause.message : String(cause));
+			} else {
+				console.error("bridge: speakers.select failed", cause);
+			}
+		});
 		finish(true);
 	}
 
