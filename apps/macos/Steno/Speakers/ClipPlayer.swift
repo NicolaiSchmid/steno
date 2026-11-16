@@ -12,8 +12,9 @@ final class ClipPlayer: NSObject, AVAudioPlayerDelegate {
   private(set) var playingURL: URL?
   /// The turn playing, by its first segment id; nil while a clip plays.
   private(set) var playingTurn: UUID?
-  /// The turn whose audio stopped on a decode error after it started,
-  /// until the next play or stop.
+  /// The turn whose audio stopped on a decode error after it started, or
+  /// whose player finished unsuccessfully, until the next play or stop. A
+  /// `stop()` is never a failure: `AVAudioPlayer.stop()` calls no delegate.
   private(set) var failedTurn: UUID?
   private var player: AVAudioPlayer?
   /// Stops a turn at the end of its span.
@@ -80,22 +81,23 @@ final class ClipPlayer: NSObject, AVAudioPlayerDelegate {
     }
   }
 
+  /// Stops the current player, `player`, keeping its turn as failed when
+  /// `failed`. A player that ended after another one started is not the
+  /// current one and changes nothing.
+  private func ended(_ player: ObjectIdentifier, failed: Bool) {
+    guard current == player else { return }
+    let turn = playingTurn
+    stop()
+    if failed { failedTurn = turn }
+  }
+
   nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: (any Error)?) {
     let failed = ObjectIdentifier(player)
-    Task { @MainActor in
-      guard self.current == failed else { return }
-      let turn = self.playingTurn
-      self.stop()
-      self.failedTurn = turn
-    }
+    Task { @MainActor in self.ended(failed, failed: true) }
   }
 
   nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
     let finished = ObjectIdentifier(player)
-    Task { @MainActor in
-      // A player that finished after another one started is not this one.
-      guard self.current == finished else { return }
-      self.stop()
-    }
+    Task { @MainActor in self.ended(finished, failed: !flag) }
   }
 }

@@ -80,7 +80,8 @@ struct Shared {
     /// Told when a span started or ended on its own thread.
     changed: Mutex<Option<Changed>>,
     /// The span of the current generation that could not be cut or start,
-    /// cleared by every play and every stop.
+    /// or whose player exited unsuccessfully, cleared by every play and
+    /// every stop.
     failed: Mutex<Option<PathBuf>>,
     /// Cuts stopped part-way by a play or a stop, for the tests.
     #[cfg(test)]
@@ -163,17 +164,30 @@ impl Shared {
         true
     }
 
-    /// The clip under way; a player that has exited is ended here.
+    /// The clip under way; a player that has exited is ended here. A span
+    /// whose player exited unsuccessfully is kept as failed. A stop, a play
+    /// or a recording that starts takes the player out of the slot before
+    /// ending it, so what they end never reads as a failure. The
+    /// generation's lock is taken first, as [`Shared::next`] takes it, so a
+    /// play or stop meanwhile never inherits this failure.
     fn playing(&self) -> Option<PathBuf> {
+        let _generation = lock(&self.generation);
         let mut slot = lock(&self.slot);
-        let running = slot
-            .as_mut()
-            .is_some_and(|playing| matches!(playing.child.try_wait(), Ok(None)));
-        if running {
-            return slot.as_ref().map(|playing| playing.clip.clone());
-        }
+        let failed = match slot.as_mut().map(|playing| playing.child.try_wait()) {
+            None => return None,
+            Some(Ok(None)) => return slot.as_ref().map(|playing| playing.clip.clone()),
+            Some(Ok(Some(status))) => !status.success(),
+            Some(Err(_)) => false,
+        };
         let finished = slot.take();
         drop(slot);
+        if let Some(finished) = &finished
+            && failed
+            && finished.owned
+        {
+            tracing::warn!("the player of a paragraph's audio exited unsuccessfully");
+            *lock(&self.failed) = Some(finished.clip.clone());
+        }
         drop(finished);
         None
     }
@@ -475,6 +489,10 @@ mod tests {
         Command::new("true")
     }
 
+    fn failing(_clip: &Path) -> Command {
+        Command::new("false")
+    }
+
     fn missing(_clip: &Path) -> Command {
         Command::new("/nonexistent/player")
     }
@@ -662,6 +680,44 @@ mod tests {
         assert_eq!(player.failed(), Some(span));
         player.stop();
         assert_eq!(player.failed(), None, "a stop clears it");
+    }
+
+    /// A player that exits unsuccessfully is a failure; one that ends well,
+    /// or that a stop ends, is not.
+    #[test]
+    fn a_player_that_exits_unsuccessfully_is_kept_as_failed() {
+        let fixture = Fixture::new();
+        let recording = recording(1);
+        let player = fixture.player(failing);
+        let changes = Arc::new(Mutex::new(0usize));
+        let counted = changes.clone();
+        player.on_change(move || *lock(&counted) += 1);
+        let span = player.play_span(recording.path(), 0.0, 0.5).unwrap();
+        wait_until("the failure reported", || {
+            *lock(&changes) >= 2 && player.failed().is_some()
+        });
+        assert_eq!(player.failed(), Some(span));
+        assert_eq!(player.playing(), None);
+        assert_eq!(fixture.files(), Vec::<PathBuf>::new());
+        player.stop();
+        assert_eq!(player.failed(), None, "a stop clears it");
+
+        let player = fixture.player(quick);
+        let changes = Arc::new(Mutex::new(0usize));
+        let counted = changes.clone();
+        player.on_change(move || *lock(&counted) += 1);
+        let span = player.play_span(recording.path(), 0.0, 0.5).unwrap();
+        wait_until("the span ending", || *lock(&changes) >= 2 && !span.exists());
+        assert_eq!(player.failed(), None, "a player that ends well");
+
+        let player = fixture.player(sleeper);
+        let span = player.play_span(recording.path(), 0.0, 0.5).unwrap();
+        wait_until("the span playing", || {
+            player.playing().as_deref() == Some(span.as_path())
+        });
+        player.stop();
+        assert_eq!(player.playing(), None);
+        assert_eq!(player.failed(), None, "a stop is no failure");
     }
 
     /// A long recording, so the cut is still under way when the stop or
