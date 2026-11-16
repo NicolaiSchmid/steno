@@ -382,6 +382,8 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 			await nameFirst(page);
 			await page.keyboard.type("Ann");
 			await expect(page.getByRole("option", { name: /Create/ })).toBeVisible();
+			// The keys' highlight draws the menu rows' inset focus line.
+			await expectFocusLine(page.locator('[role="option"][data-highlighted]'));
 		},
 	],
 	[
