@@ -496,6 +496,36 @@ export function optionColor(
 }
 
 /**
+ * A turn without a voice, nothing typed: the people named in this meeting,
+ * once each, from the snapshot. The host's options are a voice's own (its
+ * Noes left out, its evidence ranked first), and this paragraph has no
+ * voice, so nothing here is asked of the host.
+ */
+export function meetingPeopleOptions(
+	speakers: readonly Speaker[],
+): SpeakerOption[] {
+	const seen = new Set<string>();
+	const options: SpeakerOption[] = [];
+	for (const speaker of speakers) {
+		const personID = speaker.personID;
+		if (
+			isNamed(speaker) &&
+			!isDismissed(speaker) &&
+			personID &&
+			!seen.has(personID)
+		) {
+			seen.add(personID);
+			options.push({
+				kind: "person",
+				label: speaker.displayName,
+				personID,
+			});
+		}
+	}
+	return options;
+}
+
+/**
  * The host's ranked options in the field's groups, order kept within each:
  * Suggested (a voice match, a name heard in the meeting, an invitee; only
  * "Sounds like" is voice evidence), Also speaking here (people who already

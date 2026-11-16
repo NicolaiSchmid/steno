@@ -7,6 +7,7 @@ import {
 	defaultScope,
 	firstWithWork,
 	groupOptions,
+	meetingPeopleOptions,
 	nextToName,
 	optionReason,
 	panelLayout,
@@ -513,6 +514,23 @@ describe("combined voices", () => {
 			id(3),
 			id(1),
 			id(2),
+		]);
+	});
+});
+
+describe("meetingPeopleOptions", () => {
+	it("lists each person named here once, without a suggestion, a dismissed voice or a reason", () => {
+		const options = meetingPeopleOptions([
+			voice(1, "confirmed", "Nicolai", 1),
+			voice(2, "suggested", "Anna", 2),
+			voice(3, "confirmed", "Nicolai", 1),
+			notPerson(voice(4, "confirmed", "Jérôme", 3)),
+			voice(5, "unknown"),
+			voice(6, "confirmed", "Maya", 4),
+		]);
+		expect(options).toEqual([
+			{ kind: "person", label: "Nicolai", personID: person(1) },
+			{ kind: "person", label: "Maya", personID: person(4) },
 		]);
 	});
 });

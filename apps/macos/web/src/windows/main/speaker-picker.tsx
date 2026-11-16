@@ -466,7 +466,8 @@ export function SpeakerPicker({
 					: "Click to name";
 	const name = speaker ? speaker.displayName : turn.speakerName;
 	const testID = speaker?.id ?? `turn-${turn.id}`;
-	// Whom the field asks for options when the turn has no voice.
+	// Whom a typed name searches the people through when the turn has no
+	// voice; nothing typed, the field lists the people named here instead.
 	const asked =
 		speakers.find((other) => !isDismissed(other))?.id ?? speakers[0]?.id;
 

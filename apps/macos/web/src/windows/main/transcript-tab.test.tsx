@@ -416,7 +416,10 @@ describe("a paragraph's panel", () => {
 		expect(within(panel).queryByRole("radiogroup")).toBeNull();
 		expect(panel).toHaveTextContent(TURN_SCOPE_LINE);
 		expect(screen.queryByTestId(/^speaker-action-/)).toBeNull();
-		await user.click(screen.getByRole("option", { name: /^Anna/ }));
+		// Nothing typed lists only the people named here; Anna is found by typing.
+		expect(screen.queryByRole("option", { name: /^Anna/ })).toBeNull();
+		await user.type(within(panel).getByRole("combobox"), "Ann");
+		await user.click(await screen.findByRole("option", { name: /^Anna/ }));
 		expect(
 			callsTo(harness.transport, "transcript.setTurnSpeaker")[0]?.params,
 		).toMatchObject({

@@ -374,7 +374,7 @@ describe("a paragraph's field", () => {
 		);
 	});
 
-	it("asks another voice for a turn without one, its voice evidence left out", async () => {
+	it("lists the people named here for a turn without a voice, asking no voice", async () => {
 		const { harness } = await paragraph({
 			optionsSpeakerID: UNNAMED,
 			placeholder: "Unknown",
@@ -382,15 +382,54 @@ describe("a paragraph's field", () => {
 		const input = screen.getByTestId("speaker-field-turn");
 		expect(input).toHaveAttribute("placeholder", "Unknown");
 		const options = await screen.findAllByRole("option");
-		// Anna "Sounds like" Speaker 4, not this paragraph: a plain person here.
+		// No voice's options: Anna, only suggested for Speaker 3, is not
+		// named here, and nothing says "Sounds like".
 		expect(options.map((option) => option.textContent)).toEqual([
 			"NNicolai",
-			"AAnna",
+			"JJérôme",
 		]);
-		expect(callsTo(harness.transport, "speakers.options")[0]?.params).toEqual({
-			speakerID: UNNAMED,
-			query: "",
-		});
+		expect(callsTo(harness.transport, "speakers.options")).toHaveLength(0);
+	});
+
+	it("searches through another voice once typed, without its evidence or its Noes", async () => {
+		const user = userEvent.setup();
+		const recorded = (await loadFixtureReplies())["speakers.options"] as
+			| SpeakerOptionsReply
+			| undefined;
+		const anna = recorded?.options.find((option) => option.label === "Anna");
+		const harness = await createBridgeHarness(
+			"",
+			{},
+			{
+				// Speaker 4 said No to Anna: the hosts leave her out until typed.
+				"speakers.options": (params: unknown) =>
+					answerSpeakerOptions(
+						recorded,
+						params,
+						"",
+						new Set([`${UNNAMED} ${anna?.personID}`]),
+					),
+			},
+		);
+		renderWithBridge(
+			<SpeakerNameField
+				onCancel={vi.fn()}
+				onSubmit={vi.fn()}
+				optionsSpeakerID={UNNAMED}
+				scope="turn"
+				speaker={undefined}
+				speakers={(await meeting()).speakers}
+			/>,
+			harness,
+		);
+		await screen.findAllByRole("option");
+		await user.type(screen.getByTestId("speaker-field-turn"), "Ann");
+		const found = await screen.findByRole("option", { name: /^Anna/ });
+		// A plain person: no "Sounds like" from Speaker 4.
+		expect(found.textContent).toBe("AAnna");
+		expect(
+			callsTo(harness.transport, "speakers.options").at(-1)?.params,
+		).toEqual({ speakerID: UNNAMED, query: "Ann" });
 	});
 
 	it("offers only Create when the meeting has no voice to ask", async () => {

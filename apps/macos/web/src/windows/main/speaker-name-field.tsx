@@ -33,6 +33,7 @@ import {
 	isDismissed,
 	isMe,
 	isNamed,
+	meetingPeopleOptions,
 	NOT_A_PERSON,
 	type OptionRow,
 	optionText,
@@ -152,10 +153,10 @@ export function fieldAction(speaker: Speaker): FieldAction | undefined {
 }
 
 /**
- * Options asked for on another voice's behalf (a turn without a voice):
+ * A typed search asked on another voice's behalf (a turn without a voice):
  * that voice's own evidence ("Sounds like", "Last invitee left") says
  * nothing about this paragraph, so it goes; a name heard in the meeting or
- * an invitee stays.
+ * an invitee stays. Typed, the hosts leave none of that voice's Noes out.
  */
 function withoutVoiceReasons(
 	options: readonly SpeakerOption[],
@@ -183,8 +184,10 @@ export interface SpeakerNameFieldProps {
 	/** The voice named; none for a transcript turn without a voice. */
 	speaker: Speaker | undefined;
 	/**
-	 * Whose options to ask for when `speaker` is none: another voice of the
-	 * meeting, its voice-only reasons left out; without one, only Create.
+	 * When `speaker` is none, nothing typed lists the people named in this
+	 * meeting (`meetingPeopleOptions`), and a typed name searches the people
+	 * through this other voice of the meeting, its voice-only reasons left
+	 * out; without one, a typed name can only be created.
 	 */
 	optionsSpeakerID?: string | undefined;
 	/** A transcript pick for one paragraph names no voice (`groupOptions`). */
@@ -280,14 +283,19 @@ export function SpeakerNameField({
 
 	function load(text: string) {
 		const ticket = ++request.current;
-		if (askID === undefined) {
-			// Nobody to ask: the typed name can only be created.
-			const typed = text.trim();
+		const typed = text.trim();
+		if (askID === undefined || (!speaker && !typed)) {
+			// No voice of its own: the people named here, nobody's Noes or
+			// evidence; with nobody to ask, the typed name can only be created.
 			setAnswer({
 				query: text,
 				kind: "options",
-				options: typed ? [{ kind: "create", label: typed }] : [],
+				options: typed
+					? [{ kind: "create", label: typed }]
+					: meetingPeopleOptions(speakers),
 			});
+			setActive(0);
+			setMoved(false);
 			return;
 		}
 		client
