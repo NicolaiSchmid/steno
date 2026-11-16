@@ -1290,6 +1290,22 @@ function CombinedRow({
 								{saving ? "Saving" : "Combined"}
 							</span>
 						</div>
+						{saving ? null : (
+							<Button
+								className="shrink-0"
+								data-testid={`speakers-popover-separate-${voice.id}`}
+								onClick={(event) => {
+									event.stopPropagation();
+									onSeparate();
+								}}
+								size="xs"
+								tabIndex={-1}
+								variant="ghost"
+							>
+								Separate again
+								<KeyHint>S</KeyHint>
+							</Button>
+						)}
 						<SpeakerPlayButton
 							keyHint
 							speaker={voice}
@@ -1305,23 +1321,6 @@ function CombinedRow({
 							“{said}”
 						</p>
 					) : null}
-					{saving ? null : (
-						<div className="mt-1.5 flex gap-2">
-							<Button
-								data-testid={`speakers-popover-separate-${voice.id}`}
-								onClick={(event) => {
-									event.stopPropagation();
-									onSeparate();
-								}}
-								size="xs"
-								tabIndex={-1}
-								variant="outline"
-							>
-								Separate again
-								<KeyHint>S</KeyHint>
-							</Button>
-						</div>
-					)}
 				</div>
 			</div>
 			{failure ? (

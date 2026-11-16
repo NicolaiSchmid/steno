@@ -396,8 +396,8 @@ describe("the speakers panel", () => {
 		);
 		expect(nested).toContainElement(combined);
 		expect(combined).toHaveTextContent(
-			// The keys, shown only while keyboard focus is on the row, are P and S.
-			"Speaker 5CombinedP“Und die Nebenprojekte pausieren wir bis zur Q1-Planung.”Separate againS",
+			// The keys, shown only while keyboard focus is on the row, are S and P.
+			"Speaker 5CombinedSeparate againSP“Und die Nebenprojekte pausieren wir bis zur Q1-Planung.”",
 		);
 		await user.click(
 			within(combined).getByRole("button", {
