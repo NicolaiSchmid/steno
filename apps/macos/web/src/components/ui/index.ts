@@ -68,6 +68,7 @@ export {
 export type { EmptyStateProps } from "./empty-state";
 export { EmptyState, emptyStateIconVariants } from "./empty-state";
 export {
+	activeInsetClass,
 	focusInsetClass,
 	focusRingClass,
 	focusRowClass,

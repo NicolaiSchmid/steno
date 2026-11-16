@@ -15,6 +15,7 @@ import { useBridge } from "@/bridge/hooks";
 import { BridgeError } from "@/bridge/transport";
 import {
 	Avatar,
+	activeInsetClass,
 	Button,
 	ConfirmDialog,
 	Input,
@@ -236,6 +237,9 @@ export function SpeakerNameField({
 	const [query, setQuery] = useState(initialText);
 	const [answer, setAnswer] = useState<Answer | null>(null);
 	const [active, setActive] = useState(0);
+	// Whether the pointer, not the keys, last moved the highlight; the keys
+	// draw the inset focus line on it.
+	const [pointing, setPointing] = useState(false);
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 	const request = useRef(0);
 	const list = useRef<HTMLDivElement>(null);
@@ -312,6 +316,7 @@ export function SpeakerNameField({
 			if (flat.length > 0) {
 				const step = event.key === "ArrowDown" ? 1 : -1;
 				setActive(Math.min(Math.max(highlightedAt + step, 0), flat.length - 1));
+				setPointing(false);
 			}
 		} else if (event.key === "Enter") {
 			event.preventDefault();
@@ -406,9 +411,11 @@ export function SpeakerNameField({
 					"mt-1.5 flex flex-col gap-0.5 overflow-y-auto empty:hidden",
 					listClassName ?? "max-h-64",
 				)}
+				data-keys={pointing ? undefined : ""}
 				id={listID}
 				// Clicks in the list keep focus in the field, so the edit goes on.
 				onMouseDown={(event) => event.preventDefault()}
+				onMouseMove={() => setPointing(true)}
 				ref={list}
 				role="listbox"
 			>
@@ -436,7 +443,7 @@ export function SpeakerNameField({
 								// biome-ignore lint/a11y/useKeyWithClickEvents: focus stays in the combobox, which owns the keys (aria-activedescendant).
 								<div
 									aria-selected={isActive}
-									className={menuItemVariants()}
+									className={cn(menuItemVariants(), activeInsetClass)}
 									data-highlighted={isActive ? "" : undefined}
 									id={optionID(at)}
 									key={`${option.kind}-${option.personID ?? option.label}`}

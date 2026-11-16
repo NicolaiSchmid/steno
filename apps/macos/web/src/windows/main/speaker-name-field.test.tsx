@@ -206,6 +206,18 @@ describe("SpeakerNameField", () => {
 		);
 	});
 
+	it("marks the keys' highlight for the inset focus line, not the pointer's", async () => {
+		const { user } = await field();
+		const [first, second] = await screen.findAllByRole("option");
+		const list = screen.getByRole("listbox");
+		expect(list).toHaveAttribute("data-keys");
+		await user.hover(second as HTMLElement);
+		expect(list).not.toHaveAttribute("data-keys");
+		await user.keyboard("{ArrowUp}");
+		expect(list).toHaveAttribute("data-keys");
+		expect(first).toHaveAttribute("data-highlighted");
+	});
+
 	it("keeps a highlighted Create row when the options fail to load", async () => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
 		const { user, onSubmit, input } = await field((params, recorded) => {
