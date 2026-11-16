@@ -442,3 +442,35 @@ Cut: merge chains; flatten to depth 1 and drop the recursive CTEs.
 ### Responses
 
 All accepted into one fix pass on #366 (`steno-fix-speakers34-r3`).
+
+## 2026-11-16 — built steps 3 and 4, round 4 (rebased onto #359 3598c95a2; #365 6c4e0e3a4, #366 b6e637224)
+
+Request IDs `steno-built-speakers34-astra-r4`, `steno-built-speakers34-fable-r4`.
+Evidence: `speakers-rebased/after/`, `speakers-34-fix2/{before,after}/`.
+
+**GPT-6-Astra: #365 8.5/10 (UX 9, implementation 8); #366 8.5/10 (UX 9,
+implementation 8).** Beats Jamie; approves the direction; fix the P2s
+before merge. Round-3 findings fixed. Remaining:
+1. P2 (#365): Swift summary and task assignees use pre-reconciliation names
+   (`Merge.swift:38`, `ProcessingPipeline.swift:243`).
+2. P2 (#366): Remove name on a combined Me's root is undone by Rust Process
+   again (`people.rs:1094`, `MeetingStore+People.swift:385`,
+   `pipeline.rs:3347`).
+3. P2: a spawned player that exits unsuccessfully reads as completion
+   (`clip_player.rs:171`, `ClipPlayer.swift:93`).
+4. P3: at 200 % the active option sits inside the scroll fade
+   (`speaker-name-field.tsx:386`, `theme.css:620`).
+Cut: identical `into` and `root`. Retention still doesn't cancel playback.
+
+**Claude Fable 5.1: #365 UX 9, implementation 8.5; #366 UX 9,
+implementation 9.** No P1 or P2. Matches Jamie on naming and moving, beats
+it on undoable combines, voice strength, play failure; Jamie ahead on the
+deferred voiceless-paragraph case. New P3s: a combine under a Not-a-person
+root splits on Process again (`meetings.rs:498-501, 712-717`); a combined
+row's own name is lost across Process again (`meetings.rs:496`); the nested
+row under an unnamed root doesn't say what it reads as. Cut: `into`/`root`;
+`reads_as_me` + `sync_me_participant`.
+
+### Responses
+
+All accepted into one final fix pass (`steno-fix-speakers34-r4`).
