@@ -3,7 +3,8 @@ import { expect, type Page, test } from "@playwright/test";
 
 /**
  * Renders the main window in every state at both reference window sizes,
- * the Settings window's sections and states at its 960 by 640 default size,
+ * the Settings window's sections and states at its 960 by 640 default size
+ * (and at 200 % text and narrow, its sections in a drawer),
  * the onboarding window at its fixed 560 by 620 and the stories, each in
  * light and dark, to screens/, the speakers popover in each naming state
  * and the main window's column dividers. Every page must make zero requests
@@ -379,7 +380,7 @@ const FOCUS_STOPS: Record<string, string> = {
 	"speakers-trigger": "header-pill",
 	"tab-summary": "tab",
 	"setup-summaries": "link",
-	"banner-not-now": "text-button",
+	"banner-not-now": "link-not-now",
 	checkbox: "checkbox",
 	"keep-audio": "switch",
 };
@@ -506,7 +507,7 @@ for (const scheme of SCHEMES) {
 		);
 		await settle(page);
 		await expect(page.getByTestId("meeting-list")).toHaveCount(0);
-		await expect(page.getByTestId("header-stop")).toHaveCount(0);
+		await expect(page.getByTestId("header-live")).toHaveCount(0);
 		const bar = page.getByTestId("recorder-bar");
 		await expect(bar).toContainText("Recording");
 		for (const id of ["bar-stop", "auto-stop", "keep-recording"]) {
@@ -574,7 +575,9 @@ for (const scheme of SCHEMES) {
 		await page.goto(`/#/main?scenario=recording${dark}`);
 		await page.reload();
 		await settle(page);
-		await expect(page.getByTestId("header-stop")).toBeVisible();
+		await expect(page.getByTestId("header-live")).toBeVisible();
+		// One Stop: the sidebar's; the header holds only the live mark.
+		await expect(page.getByRole("button", { name: /^Stop/ })).toHaveCount(1);
 		const crumb = page.locator("main [aria-current=page]");
 		expect((await crumb.boundingBox())?.width ?? 0).toBeGreaterThan(60);
 	});
@@ -595,6 +598,67 @@ for (const scheme of SCHEMES) {
 			).toBeInViewport({ ratio: 1 });
 		}
 	});
+
+	/**
+	 * Settings at 200 % text (its 960 by 640 window is 480 by 320 CSS px)
+	 * and in a narrow 640 px window: the sections leave for a drawer behind
+	 * the header's Sections button, the form takes the window, and nothing
+	 * runs off its trailing edge, Open System Settings included.
+	 */
+	for (const [label, size] of [
+		["zoom-200", { width: 480, height: 320 }],
+		["narrow", { width: 640, height: 640 }],
+	] as const) {
+		test(`settings ${scheme} ${label}`, async ({ page }) => {
+			const external = watchExternalRequests(page);
+			await page.setViewportSize(size);
+			const dark = scheme === "dark" ? "&dark" : "";
+			for (const section of ["general", "iphone"]) {
+				await page.goto(`/#/settings?section=${section}${dark}`);
+				await page.reload();
+				await settle(page);
+				await expect(page.getByTestId("settings-window")).toHaveAttribute(
+					"data-narrow",
+				);
+				await expect(page.getByTestId("settings-general")).toHaveCount(0);
+				const overflow = await page.evaluate(() => {
+					let worst = 0;
+					for (const element of document.querySelectorAll(
+						"[data-testid=settings-window] button",
+					)) {
+						const box = element.getBoundingClientRect();
+						if (box.width > 0) {
+							worst = Math.max(worst, box.right - window.innerWidth);
+						}
+					}
+					return worst;
+				});
+				expect(overflow).toBeLessThanOrEqual(0);
+				await page.screenshot({
+					path: `${OUT}/settings-${scheme}-${label}-${section}.png`,
+				});
+			}
+			const open = page.getByTestId("phone-local-network-open");
+			if ((await open.count()) > 0) {
+				await open.scrollIntoViewIfNeeded();
+				await expect(open).toBeInViewport({ ratio: 1 });
+				await settle(page);
+				await page.screenshot({
+					path: `${OUT}/settings-${scheme}-${label}-iphone-local-network.png`,
+				});
+			}
+			await page.getByTestId("show-sections").click();
+			await expect(page.getByTestId("sections-drawer")).toBeVisible();
+			await settle(page);
+			await page.screenshot({
+				path: `${OUT}/settings-${scheme}-${label}-sections.png`,
+			});
+			await page.getByTestId("settings-recording").click();
+			await expect(page.getByTestId("sections-drawer")).toHaveCount(0);
+			await expect(page.getByTestId("show-sections")).toBeFocused();
+			expect(external).toEqual([]);
+		});
+	}
 
 	/** A dialog open with keyboard focus on its primary action. */
 	test(`settings ${scheme} dialog`, async ({ page }) => {

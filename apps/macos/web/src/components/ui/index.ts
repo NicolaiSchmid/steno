@@ -57,8 +57,14 @@ export type {
 	DrawerCloseButtonProps,
 	DrawerPopupProps,
 	DrawerProps,
+	DrawerToggleProps,
 } from "./drawer";
-export { Drawer, DrawerCloseButton, DrawerPopup } from "./drawer";
+export {
+	Drawer,
+	DrawerCloseButton,
+	DrawerPopup,
+	DrawerToggle,
+} from "./drawer";
 export type { EmptyStateProps } from "./empty-state";
 export { EmptyState, emptyStateIconVariants } from "./empty-state";
 export { focusRingClass, focusWithinRingClass } from "./focus-ring";

@@ -95,8 +95,8 @@ describe("MeetingDetail", () => {
 
 	it("processes a meeting again and holds the button until the host answers", async () => {
 		const user = userEvent.setup();
-		let answer: (value: undefined) => void = () => {};
-		const pending = new Promise<undefined>((resolve) => {
+		let answer: (value: { confirmed: boolean }) => void = () => {};
+		const pending = new Promise<{ confirmed: boolean }>((resolve) => {
 			answer = resolve;
 		});
 		const harness = await createBridgeHarness(
@@ -104,7 +104,13 @@ describe("MeetingDetail", () => {
 			{},
 			{ "meeting.processAgain": pending },
 		);
-		renderWithBridge(<MeetingDetail />, harness);
+		renderWithBridge(
+			<>
+				<MeetingDetail />
+				<ToastRegion />
+			</>,
+			harness,
+		);
 		const button = await screen.findByTestId("process-again");
 		expect(button).toHaveTextContent("Process again");
 		expect(button).toBeEnabled();
@@ -114,10 +120,34 @@ describe("MeetingDetail", () => {
 		]);
 		expect(button).toBeDisabled();
 		await act(async () => {
-			answer(undefined);
+			answer({ confirmed: true });
 			await pending;
 		});
 		expect(button).toBeEnabled();
+		expect(await screen.findByTestId("toast")).toHaveTextContent(
+			"Processing the meeting again.",
+		);
+	});
+
+	it("does not toast Process again when the host declines or refuses it", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness(
+			"scenario=failed",
+			{},
+			{ "meeting.processAgain": Promise.resolve({ confirmed: false }) },
+		);
+		renderWithBridge(
+			<>
+				<MeetingDetail />
+				<ToastRegion />
+			</>,
+			harness,
+		);
+		const button = await screen.findByTestId("process-again");
+		await user.click(button);
+		await vi.waitFor(() => expect(button).toBeEnabled());
+		expect(callsTo(harness.transport, "meeting.processAgain")).toHaveLength(1);
+		expect(screen.queryByTestId("toast")).not.toBeInTheDocument();
 	});
 
 	it("shows Process again only when the host offers it and disables it while busy", async () => {
@@ -181,6 +211,8 @@ describe("MeetingDetail", () => {
 		expect(
 			screen.queryByTestId("failure-rerun-summary"),
 		).not.toBeInTheDocument();
+		// No transcript: no tabs, which would all be empty.
+		expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
 	});
 
 	it("offers Re-run summary when only the summary failed", async () => {
@@ -204,6 +236,8 @@ describe("MeetingDetail", () => {
 		await user.click(within(line).getByTestId("failure-rerun-summary"));
 		expect(callsTo(harness.transport, "meeting.rerunSummary")).toHaveLength(1);
 		expect(screen.queryByTestId("process-again")).not.toBeInTheDocument();
+		// A transcript to read: the tabs stay.
+		expect(screen.getByRole("tablist")).toBeInTheDocument();
 	});
 
 	it("says a summary was skipped because the API key is not available yet", async () => {
@@ -422,34 +456,37 @@ describe("MeetingDetail", () => {
 });
 
 describe("MeetingDetail header", () => {
-	it("shows Stop in the header only while this meeting is being recorded", async () => {
-		const user = userEvent.setup();
+	it("marks the header live, without a second Stop, while this meeting is being recorded", async () => {
 		const harness = await createBridgeHarness("scenario=recording");
 		renderWithBridge(<MeetingDetail />, harness);
-		const stop = screen.getByTestId("header-stop");
-		expect(stop).toHaveTextContent(/^Stop\s*12:3\d$/);
-		await user.click(stop);
-		expect(callsTo(harness.transport, "recording.stop")).toHaveLength(1);
+		const live = screen.getByTestId("header-live");
+		expect(live).toHaveTextContent(/^Recording\s*12:3\d$/);
+		expect(live.closest("button")).toBeNull();
+		// Live: no finished duration on the meta line.
+		const meta = screen.getByTestId("meeting-meta");
+		expect(meta.children).toHaveLength(2);
+		expect(meta).not.toHaveTextContent("45:38");
+		expect(
+			screen.queryByRole("button", { name: /^Stop/ }),
+		).not.toBeInTheDocument();
 	});
 
-	it("keeps Stop out of the header when another meeting records", async () => {
+	it("keeps the live mark out of the header when another meeting records", async () => {
 		const live = (await loadFixtureSnapshots())["recording.live"] as object;
 		const harness = await createBridgeHarness("", {
 			recording: { ...live, meetingID: "00000000-0000-0000-0000-000000000099" },
 		});
 		renderWithBridge(<MeetingDetail />, harness);
-		expect(screen.queryByTestId("header-stop")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("header-live")).not.toBeInTheDocument();
 	});
 
-	it("disables Stop and reads Stopping while the recorder winds down", async () => {
+	it("reads Stopping in the header while the recorder winds down", async () => {
 		const live = (await loadFixtureSnapshots())["recording.live"] as object;
 		const harness = await createBridgeHarness("", {
 			recording: { ...live, state: "stopping" },
 		});
 		renderWithBridge(<MeetingDetail />, harness);
-		const stop = screen.getByTestId("header-stop");
-		expect(stop).toBeDisabled();
-		expect(stop).toHaveTextContent(/^Stopping…$/);
+		expect(screen.getByTestId("header-live")).toHaveTextContent(/^Stopping…$/);
 	});
 
 	it("names speakers from one header button that reads how far naming got", async () => {

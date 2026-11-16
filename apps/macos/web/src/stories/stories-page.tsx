@@ -594,7 +594,7 @@ export function StoriesPage() {
 							icon={<TimerIcon aria-hidden="true" />}
 							size="sm"
 							title={<>Stops in {countdown}</>}
-							variant="live"
+							variant="warning"
 						/>
 						<Callout
 							description="Nothing was heard for two minutes."

@@ -32,7 +32,7 @@ describe("RecorderBar", () => {
 		expect(within(bar).getByTestId("auto-stop")).toHaveTextContent(
 			"Zoom closed.",
 		);
-		expect(screen.queryByTestId("header-stop")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("header-live")).not.toBeInTheDocument();
 		await user.click(within(bar).getByTestId("keep-recording"));
 		await user.click(within(bar).getByTestId("bar-stop"));
 		expect(

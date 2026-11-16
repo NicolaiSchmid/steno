@@ -39,7 +39,9 @@ describe("PermissionsPage", () => {
 		expect(screen.getByTestId("permission-calendar-request")).toHaveTextContent(
 			"Allow",
 		);
-		expect(screen.getByTestId("permission-calendar-skip")).toBeInTheDocument();
+		// Both wait while the system audio test asks: Skip is not the way on.
+		expect(screen.getByTestId("permission-calendar-request")).toBeDisabled();
+		expect(screen.getByTestId("permission-calendar-skip")).toBeDisabled();
 		// Skipped: the badge, no action.
 		expect(
 			screen.getByTestId("permission-localNetwork-skipped"),

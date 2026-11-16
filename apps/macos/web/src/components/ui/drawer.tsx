@@ -1,6 +1,6 @@
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
-import { XIcon } from "lucide-react";
-import type { ComponentProps } from "react";
+import { PanelLeftIcon, XIcon } from "lucide-react";
+import type { ComponentProps, Ref } from "react";
 import { cn } from "@/lib/cn";
 import { Button } from "./button";
 
@@ -11,7 +11,8 @@ import { Button } from "./button";
  * inside and Escape, a click on the backdrop or `DrawerCloseButton` closes
  * it. Solid sidebar surface, the dialog shadow in light; the content lays
  * itself out. Opened from a button that is not its trigger, it takes
- * `finalFocus` to give the focus back to that button.
+ * `finalFocus` to give the focus back to that button. The main window's
+ * meetings and the Settings window's sections use it.
  */
 export const Drawer = BaseDialog.Root;
 
@@ -72,5 +73,32 @@ export function DrawerCloseButton({
 		>
 			<XIcon aria-hidden="true" />
 		</BaseDialog.Close>
+	);
+}
+
+export interface DrawerToggleProps
+	extends Omit<ComponentProps<"button">, "children" | "className" | "ref"> {
+	/** What the drawer holds, for a screen reader ("Show meetings"). */
+	"aria-label": string;
+	/**
+	 * Whether the header row starts under the traffic lights of an overlay
+	 * title bar (`usePlatform().titleBarInset`): the button moves clear.
+	 */
+	titleBarInset: boolean;
+	ref?: Ref<HTMLButtonElement>;
+}
+
+/**
+ * The header row's leading button that opens a drawer in a narrow window:
+ * a ghost sidebar glyph, clear of the traffic lights where the title bar
+ * overlays the page. The drawer takes it as `finalFocus`.
+ */
+export function DrawerToggle({ titleBarInset, ...props }: DrawerToggleProps) {
+	return (
+		<span className={cn("flex shrink-0", titleBarInset && "pl-16")}>
+			<Button size="icon-sm" variant="ghost" {...props}>
+				<PanelLeftIcon aria-hidden="true" />
+			</Button>
+		</span>
 	);
 }

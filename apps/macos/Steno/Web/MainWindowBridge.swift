@@ -253,7 +253,9 @@ final class MainWindowBridge: BridgeHost, TopicSource {
       let detail = try requireDetail()
       await detail.reexport()
     case .meetingProcessAgain:
+      // Never starts a run here: always a refusal, so not confirmed.
       try requireDetail().processAgain()
+      return try BridgeReplies.value(ConfirmReply(confirmed: false))
     case .meetingSetKeepAudio:
       let keep = try request.params(SetBoolParams.self).value
       let detail = try requireDetail()

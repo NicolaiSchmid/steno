@@ -1705,7 +1705,7 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
         false
     );
-    harness.host.meeting_process_again().unwrap();
+    assert!(!harness.host.meeting_process_again().unwrap().confirmed);
     assert_eq!(
         error_line(),
         "Only a failed meeting, or one whose results may be incomplete, can be processed again."
@@ -1722,7 +1722,7 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         harness.snapshot(BridgeTopic::MeetingDetail)["canProcessAgain"],
         true
     );
-    harness.host.meeting_process_again().unwrap();
+    assert!(harness.host.meeting_process_again().unwrap().confirmed);
     assert_eq!(error_line(), Value::Null, "accepted: the line clears");
     assert_eq!(
         *pipeline.processed_again.lock().unwrap(),
@@ -1758,7 +1758,10 @@ fn process_again_runs_a_failed_meeting_and_words_each_refusal() {
         ),
     ] {
         *pipeline.process_again_refusal.lock().unwrap() = Some(refusal.clone());
-        harness.host.meeting_process_again().unwrap();
+        assert!(
+            !harness.host.meeting_process_again().unwrap().confirmed,
+            "{refusal:?}"
+        );
         assert_eq!(error_line(), line, "{refusal:?}");
     }
 
@@ -1913,7 +1916,10 @@ fn process_again_asks_before_it_clears_confirmed_speaker_names() {
         true
     );
     harness.sink.clear();
-    harness.host.meeting_process_again().unwrap();
+    assert!(
+        !harness.host.meeting_process_again().unwrap().confirmed,
+        "declined: not confirmed"
+    );
     assert_eq!(
         *asked.lock().unwrap(),
         [steno_host::host::process_again_prompt()]
@@ -1939,7 +1945,7 @@ fn process_again_asks_before_it_clears_confirmed_speaker_names() {
     assert_eq!(detail["retention"]["kind"], "keptIncomplete");
 
     answer.store(true, Ordering::SeqCst);
-    harness.host.meeting_process_again().unwrap();
+    assert!(harness.host.meeting_process_again().unwrap().confirmed);
     assert_eq!(asked.lock().unwrap().len(), 2);
     assert_eq!(*pipeline.processed_again.lock().unwrap(), [uuid(MEETING)]);
     assert_eq!(

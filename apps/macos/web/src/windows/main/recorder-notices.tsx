@@ -12,6 +12,9 @@ type NoticeSize = "sm" | "md";
 /**
  * The recorder is about to stop on its own (the call ended): the seconds
  * left, counted down from the snapshot's figure, and a way to keep going.
+ * It asks the user to decide, so it is a warning (amber), not live red. A
+ * screen reader hears the impending stop once; the ticking seconds stay
+ * out of the live region.
  */
 function AutoStopNotice({
 	autoStop,
@@ -24,6 +27,9 @@ function AutoStopNotice({
 	// The host's figure is taken as of the moment it arrived; the page counts
 	// down from there until a snapshot with a new figure resets it.
 	const remaining = useCountdownSeconds(autoStop.remainingSeconds);
+	const reason = /[.!?]$/.test(autoStop.reason)
+		? autoStop.reason
+		: `${autoStop.reason}.`;
 	const countdown = (
 		<span className="font-mono tabular-nums">
 			{format.countdown(remaining)}
@@ -41,14 +47,13 @@ function AutoStopNotice({
 					Keep recording
 				</Button>
 			}
+			announcement={`Recording stops on its own soon. ${reason} Choose Keep recording to go on.`}
 			data-testid="auto-stop"
-			description={
-				/[.!?]$/.test(autoStop.reason) ? autoStop.reason : `${autoStop.reason}.`
-			}
+			description={reason}
 			icon={<TimerIcon aria-hidden="true" />}
 			size={size}
 			title={<>Stops in {countdown}</>}
-			variant="live"
+			variant="warning"
 		/>
 	);
 }

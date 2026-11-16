@@ -1,4 +1,4 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { loadFixtureSnapshots } from "@/bridge/mock-transport";
@@ -78,6 +78,13 @@ describe("Sidebar", () => {
 		const notice = screen.getByTestId("auto-stop");
 		expect(notice).toHaveTextContent(/Stops in 0:4[12]/);
 		expect(notice).toHaveTextContent("Zoom closed.");
+		// Announced once, in fixed words; the ticking seconds are not read.
+		expect(notice).not.toHaveAttribute("role");
+		const announcement = within(notice).getByRole("status");
+		expect(announcement).toHaveTextContent(
+			"Recording stops on its own soon. Zoom closed.",
+		);
+		expect(announcement).not.toHaveTextContent(/\d:\d\d/);
 		await user.click(screen.getByTestId("keep-recording"));
 		expect(callsTo(harness.transport, "recording.keepGoing")).toHaveLength(1);
 	});

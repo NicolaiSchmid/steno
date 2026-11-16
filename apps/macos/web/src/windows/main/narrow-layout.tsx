@@ -1,7 +1,5 @@
-import { PanelLeftIcon } from "lucide-react";
 import { createContext, type RefObject, useContext } from "react";
-import { Button } from "@/components/ui";
-import { cn } from "@/lib/cn";
+import { DrawerToggle } from "@/components/ui";
 import { usePlatform } from "@/lib/platform";
 
 /**
@@ -35,17 +33,12 @@ export function MeetingsToggle() {
 		return null;
 	}
 	return (
-		<span className={cn("flex shrink-0", titleBarInset && "pl-16")}>
-			<Button
-				aria-label="Show meetings"
-				data-testid="show-meetings"
-				onClick={openMeetings}
-				ref={toggleRef}
-				size="icon-sm"
-				variant="ghost"
-			>
-				<PanelLeftIcon aria-hidden="true" />
-			</Button>
-		</span>
+		<DrawerToggle
+			aria-label="Show meetings"
+			data-testid="show-meetings"
+			onClick={openMeetings}
+			ref={toggleRef}
+			titleBarInset={titleBarInset}
+		/>
 	);
 }

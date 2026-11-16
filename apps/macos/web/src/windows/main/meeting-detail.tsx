@@ -141,8 +141,8 @@ const lineLinkClass = cn(
 /**
  * Summaries or export still need setting up: one muted line over the
  * summary, led by the info glyph, with Set up (Settings at the section that
- * needs it) and Not now, a ghost text button as onboarding's Skip is.
- * Nothing on the other tabs.
+ * needs it) and Not now, both the line's underlined link, Not now a little
+ * further off. Nothing on the other tabs.
  */
 function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 	const client = useBridge();
@@ -177,44 +177,42 @@ function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 					</button>
 				) : null}
 			</span>
-			<Button
+			<button
+				className={cn(lineLinkClass, "ml-1")}
 				data-testid="banner-not-now"
 				onClick={() => send(client, "setup.dismissBanner")}
-				size="sm"
-				variant="ghost"
+				type="button"
 			>
 				Not now
-			</Button>
+			</button>
 		</div>
 	);
 }
 
 /**
- * The Stop control in the header row while the recorder holds this meeting
- * in a wide window; a narrow one has the recorder bar's.
+ * The header row's live mark while the recorder holds this meeting in a
+ * wide window: the pulsing mark, "Recording" and the elapsed time, not a
+ * control. The one Stop is the sidebar's (a narrow window's is in the
+ * recorder bar).
  */
-function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
-	const client = useBridge();
+function HeaderLive({ recording }: { recording: RecordingSnapshot }) {
 	const elapsed = useElapsedSeconds(
 		recording.state === "recording" ? recording.startedAt : undefined,
 	);
 	const stopping = recording.state === "stopping";
 	return (
-		<Button
-			data-testid="header-stop"
-			disabled={stopping}
-			onClick={() => send(client, "recording.stop")}
-			size="sm"
-			variant="primary"
+		<span
+			className="flex shrink-0 items-center gap-2 text-foreground text-label"
+			data-testid="header-live"
 		>
-			<RecordMark onPrimary pulse={!stopping} />
-			{stopping ? "Stopping…" : "Stop"}
+			<RecordMark pulse={!stopping} />
+			{stopping ? "Stopping…" : "Recording"}
 			{!stopping ? (
-				<span className="font-mono font-normal text-meta tabular-nums">
+				<span className="font-mono font-normal text-meta text-muted-foreground tabular-nums">
 					{format.duration(elapsed)}
 				</span>
 			) : null}
-		</Button>
+		</span>
 	);
 }
 
@@ -222,8 +220,9 @@ function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
  * "Process again" runs the meeting from the start with its recording; the
  * host says when it is offered (`canProcessAgain`) and words any refusal on
  * the error line. The button stays disabled until the host answers, so a
- * second click cannot start a second run. It sits in the header row, or on
- * the failure line when processing failed.
+ * second click cannot start a second run, and the toast shows only when the
+ * host confirms a run started (not on a declined prompt or a refusal). It
+ * sits in the header row, or on the failure line when processing failed.
  */
 function ProcessAgainButton({ disabled }: { disabled: boolean }) {
 	const client = useBridge();
@@ -231,8 +230,10 @@ function ProcessAgainButton({ disabled }: { disabled: boolean }) {
 	async function processAgain() {
 		setStarting(true);
 		try {
-			await client.call("meeting.processAgain");
-			notify({ title: "Processing the meeting again." });
+			const { confirmed } = await client.call("meeting.processAgain");
+			if (confirmed) {
+				notify({ title: "Processing the meeting again." });
+			}
 		} catch (cause: unknown) {
 			console.error("bridge: meeting.processAgain failed", cause);
 		} finally {
@@ -602,7 +603,7 @@ function DetailBody({
 	const actions = (
 		<div className="flex shrink-0 items-center gap-2">
 			{holdsRecorder && recording && !narrow ? (
-				<HeaderStop recording={recording} />
+				<HeaderLive recording={recording} />
 			) : null}
 			{detail.canProcessAgain && detail.state !== "failed" ? (
 				<ProcessAgainButton disabled={detail.isBusy} />
@@ -761,9 +762,13 @@ function DetailBody({
 			>
 				<span>{formatSource(detail.source)}</span>
 				<span>{format.when(detail.startedAt)}</span>
-				<span className="tabular-nums">
-					{format.duration(detail.durationSeconds)}
-				</span>
+				{detail.state === "recording" ? null : (
+					// Not known until the recording stops; the header shows the
+					// elapsed time meanwhile.
+					<span className="tabular-nums">
+						{format.duration(detail.durationSeconds)}
+					</span>
+				)}
 			</div>
 			<div
 				className="@container/speakers mb-5 flex flex-wrap items-center gap-2"
@@ -785,44 +790,50 @@ function DetailBody({
 				<TagEditor tags={detail.tags} />
 			</div>
 
-			<Tabs
-				onValueChange={(value) => {
-					if (isTab(value)) {
-						changeTab(value);
-					}
-				}}
-				value={tab}
-			>
-				<div className="mb-6 flex min-w-0">
-					<TabsList>
-						<TabsTab data-testid="tab-summary" value="summary">
-							Summary
-						</TabsTab>
-						<TabsTab
-							count={detail.transcript.length || undefined}
-							data-testid="tab-transcript"
-							value="transcript"
-						>
-							Transcript
-						</TabsTab>
-						<TabsTab
-							count={detail.tasks.length || undefined}
-							data-testid="tab-tasks"
-							value="tasks"
-						>
-							Tasks
-						</TabsTab>
-						<TabsTab data-testid="tab-notes" value="notes">
-							Notes
-						</TabsTab>
-					</TabsList>
-				</div>
-				{TABS.map((item) => (
-					<TabsPanel key={item} value={item} variant="reading">
-						{tab === item ? panel(item) : null}
-					</TabsPanel>
-				))}
-			</Tabs>
+			{detail.state === "failed" && detail.transcript.length === 0 ? (
+				// Transcription failed: every tab would be empty, so the red
+				// line with Process again stands alone in their place.
+				<FailureLine detail={detail} onRerunSummary={rerun} />
+			) : (
+				<Tabs
+					onValueChange={(value) => {
+						if (isTab(value)) {
+							changeTab(value);
+						}
+					}}
+					value={tab}
+				>
+					<div className="mb-6 flex min-w-0">
+						<TabsList>
+							<TabsTab data-testid="tab-summary" value="summary">
+								Summary
+							</TabsTab>
+							<TabsTab
+								count={detail.transcript.length || undefined}
+								data-testid="tab-transcript"
+								value="transcript"
+							>
+								Transcript
+							</TabsTab>
+							<TabsTab
+								count={detail.tasks.length || undefined}
+								data-testid="tab-tasks"
+								value="tasks"
+							>
+								Tasks
+							</TabsTab>
+							<TabsTab data-testid="tab-notes" value="notes">
+								Notes
+							</TabsTab>
+						</TabsList>
+					</div>
+					{TABS.map((item) => (
+						<TabsPanel key={item} value={item} variant="reading">
+							{tab === item ? panel(item) : null}
+						</TabsPanel>
+					))}
+				</Tabs>
+			)}
 			<DetailFooter detail={detail} onExport={reexport} />
 		</ContentColumn>
 	);

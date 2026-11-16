@@ -11,6 +11,11 @@ import { cn } from "@/lib/cn";
  * actions always on their own line under the text. One rule for every
  * tone: the variant colours the surface, the icon and the title; the
  * description is in the foreground colour, measured on every tint.
+ *
+ * The callout is a polite live region, so it is read when it appears. One
+ * whose words change while it shows (a countdown) passes `announcement`
+ * instead: that sentence, which must not change, is what is read, once,
+ * and the visible callout stays out of the live region.
  */
 export const calloutVariants = cva(
 	"flex flex-wrap items-center rounded-surface border text-foreground",
@@ -27,8 +32,6 @@ export const calloutVariants = cva(
 				warning:
 					"border-warning-border bg-warning-surface [&_[data-slot=icon]]:text-warning [&_[data-slot=title]]:text-warning-foreground",
 				info: "border-info-border bg-info-surface [&_[data-slot=icon]]:text-info [&_[data-slot=title]]:text-info-foreground",
-				/** The recorder's own notices (the auto-stop countdown): the default look, the icon in the live red. */
-				live: "border-border bg-card [&_[data-slot=icon]]:text-live",
 				/** A connected or saved state ("Using ChatGPT as …", a passed test). */
 				success:
 					"border-success-border bg-success-surface [&_[data-slot=icon]]:text-success [&_[data-slot=title]]:text-success-foreground",
@@ -80,6 +83,11 @@ export interface CalloutProps
 	description?: ReactNode;
 	/** Buttons, rendered after the text. */
 	actions?: ReactNode;
+	/**
+	 * Read once in place of the callout, for one whose visible words change
+	 * while it shows. Fixed text: a change is read again.
+	 */
+	announcement?: string;
 }
 
 export function Callout({
@@ -90,14 +98,20 @@ export function Callout({
 	title,
 	description,
 	actions,
+	announcement,
 	...props
 }: CalloutProps) {
 	return (
 		<div
 			className={cn(calloutVariants({ size, variant }), className)}
-			role="status"
+			role={announcement === undefined ? "status" : undefined}
 			{...props}
 		>
+			{announcement === undefined ? null : (
+				<span className="sr-only" role="status">
+					{announcement}
+				</span>
+			)}
 			<span className={calloutLeadVariants({ size })}>
 				<span className="flex shrink-0" data-slot="icon">
 					{icon}

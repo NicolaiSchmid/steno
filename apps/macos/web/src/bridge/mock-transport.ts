@@ -88,6 +88,7 @@ const REPLY_ALIASES: Record<string, readonly string[]> = {
 	"reply.confirm": [
 		"ui.confirmDestructive",
 		"meetings.delete",
+		"meeting.processAgain",
 		"meeting.deleteRecordingNow",
 		"meeting.setKeepAudio",
 		"settings.iphone.pairAgain",
@@ -248,7 +249,8 @@ function bareDetail(
 /**
  * Overrides the fixture snapshots for a scenario named in the query:
  * `empty` (no meetings, no selection), `recording` (`recording.live` as the
- * recording, started 12:34 ago, its auto-stop counting down),
+ * recording, started 12:34 ago, its auto-stop counting down, and the
+ * meeting it records selected and live: nothing produced, no duration yet),
  * `recording-elsewhere` (that, while another meeting is selected), `denied` (idle
  * with the microphone denied), `failed` (the failed meeting selected),
  * `processing` (a meeting in the progress entry, selected), `export-failed`
@@ -295,6 +297,32 @@ export function applyScenario(
 					: {}),
 				startedAt: new Date(Date.now() - RECORDING_ELAPSED_MS).toISOString(),
 			} satisfies RecordingSnapshot;
+		}
+		const row = live && list ? findRow(list, live.meetingID ?? "") : null;
+		if (scenario === "recording" && list && detail && row) {
+			// The meeting being recorded, as the host shows it: live, nothing
+			// produced, and no duration until it stops.
+			const liveRow: MeetingRow = {
+				...row,
+				state: "recording",
+				durationSeconds: 0,
+				hasSummary: false,
+				speakers: [],
+			};
+			result["meetings.list"] = {
+				...list,
+				groups: list.groups.map((group) => ({
+					...group,
+					meetings: group.meetings.map((meeting) =>
+						meeting.id === row.id ? liveRow : meeting,
+					),
+				})),
+				selection: row.id,
+			} satisfies MeetingsListSnapshot;
+			result["meeting.detail"] = bareDetail(detail, liveRow, {
+				canProcessAgain: false,
+				canRerunSummary: false,
+			});
 		}
 	}
 

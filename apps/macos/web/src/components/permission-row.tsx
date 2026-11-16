@@ -216,8 +216,11 @@ export function PermissionRow({
 							: "Allow"}
 				</Button>
 				{onSkip ? (
+					// Waits with Allow: a live Skip beside a disabled Allow reads
+					// as the recommended way on.
 					<Button
 						data-testid={`permission-${kind}-skip`}
+						disabled={isRequesting || requestDisabled}
 						onClick={onSkip}
 						size="sm"
 						variant="ghost"
