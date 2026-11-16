@@ -265,8 +265,11 @@ extension MeetingStore {
         personIDs.formUnion(merge.personIDs)
         kept = owner.id
       } else {
+        let stored = try Self.personRow(person.id, db)?.person ?? person
+        let similarity = Self.answerSimilarity(speaker, stored)
         speaker.assignment = .confirmed(personID: person.id)
         try SpeakerRow(speaker).update(db)
+        try Self.setConfirmedSimilarity(similarity, speakerID: speakerID, db)
         kept = speakerID
       }
       if let clip = try Self.dropClipWhenAudioIsGone(speakerID: kept, db) { clips.append(clip) }
@@ -379,24 +382,21 @@ extension MeetingStore {
       guard let person = try Self.personRow(personID, db)?.person else {
         throw MeetingStoreError.personNotFound(personID)
       }
-      var suggested: Float?
-      switch speaker.assignment {
-      case .confirmed(let confirmed) where confirmed == personID:
+      if speaker.assignment == .confirmed(personID: personID) {
         throw MeetingStoreError.rejectedConfirmedPerson(speakerID, personID)
-      case .suggested(let suggestedID, let similarity) where suggestedID == personID:
-        suggested = similarity
-      default:
-        break
       }
-      var similarity = suggested
-      if similarity == nil, let voice = speaker.embedding, let known = person.embedding {
-        similarity = voice.cosineSimilarity(to: known)
+      let suggested: Bool
+      if case .suggested(let suggestedID, _) = speaker.assignment {
+        suggested = suggestedID == personID
+      } else {
+        suggested = false
       }
+      let similarity = Self.answerSimilarity(speaker, person)
       try Self.insertRejection(
         SpeakerSuggestionRejectionRow(
           speakerID: speakerID, personID: personID, meetingID: speaker.meetingID,
           similarity: similarity), db)
-      if suggested != nil {
+      if suggested {
         speaker.assignment = .unknown
         try SpeakerRow(speaker).update(db)
       }
@@ -449,12 +449,47 @@ extension MeetingStore {
     speaker.assignment = .unknown
     try SpeakerRow(speaker).update(db)
     if case .confirmed(let personID) = previous {
+      try setConfirmedSimilarity(nil, speakerID: speakerID, db)
       try refreshVoice(personID: personID, db)
       if speakerID == LaneMerger.meSpeakerID(meetingID: speaker.meetingID) {
         try unnameMeParticipant(meetingID: speaker.meetingID, db)
       }
     }
     return speaker
+  }
+
+  /// The voice match's score for an answer about `speaker` and `person`:
+  /// the similarity Steno suggested `person` with, else the cosine of the
+  /// voice and the person's stored voice; nil without either. Rust:
+  /// `answer_similarity`.
+  static func answerSimilarity(_ speaker: Speaker, _ person: Person) -> Float? {
+    if case .suggested(let personID, let similarity) = speaker.assignment, personID == person.id {
+      return similarity
+    }
+    guard let voice = speaker.embedding, let known = person.embedding else { return nil }
+    return voice.cosineSimilarity(to: known)
+  }
+
+  /// `speaker.confirmedSimilarity`: the voice match's score when the user
+  /// said Yes (`answerSimilarity`), a labelled positive for the floor as a
+  /// No's score is a labelled negative. Not in `Speaker`: only `confirm`
+  /// sets it, and every save keeps it; it is cleared when the confirmation
+  /// goes and carried when Process again keeps it. Rust:
+  /// `set_confirmed_similarity`.
+  static func setConfirmedSimilarity(_ similarity: Float?, speakerID: UUID, _ db: Database)
+    throws
+  {
+    try db.execute(
+      sql: "UPDATE speaker SET confirmedSimilarity = ? WHERE id = ?",
+      arguments: [similarity.map { Double($0) }, speakerID.uuidString])
+  }
+
+  /// The score `setConfirmedSimilarity` kept for `speakerID`.
+  static func confirmedSimilarity(speakerID: UUID, _ db: Database) throws -> Float? {
+    try Double.fetchOne(
+      db, sql: "SELECT confirmedSimilarity FROM speaker WHERE id = ?",
+      arguments: [speakerID.uuidString]
+    ).map { Float($0) }
   }
 
   /// The meeting's "me" participant back to unnamed: no person, named

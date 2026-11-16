@@ -307,12 +307,65 @@ fn unassign_speaker(connection: &Connection, speaker_id: Uuid) -> Result<Speaker
     speaker.assignment = SpeakerAssignment::Unknown;
     save_speaker(connection, &speaker)?;
     if let SpeakerAssignment::Confirmed { person_id } = previous {
+        set_confirmed_similarity(connection, speaker_id, None)?;
         refresh_voice(connection, person_id)?;
         if speaker_id == me_speaker_id(speaker.meeting_id) {
             unname_me_participant(connection, speaker.meeting_id)?;
         }
     }
     Ok(speaker)
+}
+
+/// The voice match's score for an answer about `speaker` and `person`:
+/// the similarity Steno suggested `person` with, else the cosine of the
+/// voice and the person's stored voice; `None` without either.
+fn answer_similarity(speaker: &Speaker, person: &Person) -> Option<f32> {
+    match speaker.assignment {
+        SpeakerAssignment::Suggested {
+            person_id,
+            similarity,
+        } if person_id == person.id => Some(similarity),
+        _ => Some(
+            speaker
+                .embedding
+                .as_ref()?
+                .cosine_similarity(person.embedding.as_ref()?),
+        ),
+    }
+}
+
+/// `speaker.confirmedSimilarity`: the voice match's score when the user
+/// said Yes ([`answer_similarity`]), a labelled positive for the floor as a
+/// No's score is a labelled negative. Not in [`Speaker`]: only
+/// `confirm_speaker` sets it, and every save keeps it; it is cleared when
+/// the confirmation goes and carried when Process again keeps it.
+pub(super) fn set_confirmed_similarity(
+    connection: &Connection,
+    speaker_id: Uuid,
+    similarity: Option<f32>,
+) -> Result<()> {
+    execute_cached(
+        connection,
+        "UPDATE speaker SET confirmedSimilarity = ?1 WHERE id = ?2",
+        params![similarity.map(f64::from), DbUuid(speaker_id)],
+    )
+}
+
+/// The score [`set_confirmed_similarity`] kept for `speaker_id`.
+pub(super) fn confirmed_similarity(
+    connection: &Connection,
+    speaker_id: Uuid,
+) -> Result<Option<f32>> {
+    let similarity: Option<Option<f64>> = connection
+        .query_row(
+            "SELECT confirmedSimilarity FROM speaker WHERE id = ?1",
+            [DbUuid(speaker_id)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    // An `f32` widened to `f64`, as `speaker.similarity`.
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(similarity.flatten().map(|value| value as f32))
 }
 
 const REJECTION_COLUMNS: &str = "speakerID, personID, meetingID, similarity";
@@ -706,10 +759,14 @@ impl Store {
                 person_ids.extend(merge.person_ids);
                 owner
             } else {
+                let stored =
+                    fetch_person(transaction, person.id)?.unwrap_or_else(|| person.clone());
+                let similarity = answer_similarity(&speaker, &stored);
                 speaker.assignment = SpeakerAssignment::Confirmed {
                     person_id: person.id,
                 };
                 save_speaker(transaction, &speaker)?;
+                set_confirmed_similarity(transaction, speaker_id, similarity)?;
                 speaker_id
             };
             clips.extend(drop_clip_when_audio_is_gone(transaction, kept)?);
@@ -827,26 +884,14 @@ impl Store {
                 .ok_or(StoreError::SpeakerNotFound(speaker_id))?;
             let person = fetch_person(transaction, person_id)?
                 .ok_or(StoreError::PersonNotFound(person_id))?;
-            let suggested = match speaker.assignment {
-                SpeakerAssignment::Confirmed {
-                    person_id: confirmed,
-                } if confirmed == person_id => {
-                    return Err(StoreError::RejectedConfirmedPerson(speaker_id, person_id));
-                }
-                SpeakerAssignment::Suggested {
-                    person_id: suggested,
-                    similarity,
-                } if suggested == person_id => Some(similarity),
-                _ => None,
-            };
-            let similarity = suggested.or_else(|| {
-                Some(
-                    speaker
-                        .embedding
-                        .as_ref()?
-                        .cosine_similarity(person.embedding.as_ref()?),
-                )
-            });
+            if speaker.assignment == (SpeakerAssignment::Confirmed { person_id }) {
+                return Err(StoreError::RejectedConfirmedPerson(speaker_id, person_id));
+            }
+            let suggested = matches!(
+                speaker.assignment,
+                SpeakerAssignment::Suggested { person_id: suggested, .. } if suggested == person_id
+            );
+            let similarity = answer_similarity(&speaker, &person);
             insert_rejection(
                 transaction,
                 speaker.meeting_id,
@@ -856,7 +901,7 @@ impl Store {
                     similarity,
                 },
             )?;
-            if suggested.is_some() {
+            if suggested {
                 speaker.assignment = SpeakerAssignment::Unknown;
                 save_speaker(transaction, &speaker)?;
             }

@@ -276,6 +276,7 @@ public enum Migrations {
   static func v6(_ db: Database) throws {
     try db.alter(table: "speaker") { t in
       t.add(column: "dismissed", .boolean).notNull().defaults(to: false)
+      t.add(column: "confirmedSimilarity", .double)
     }
     try db.create(table: "speakerSuggestionRejection") { t in
       t.column("speakerID", .text).notNull().references("speaker", onDelete: .cascade)
