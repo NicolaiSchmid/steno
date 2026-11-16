@@ -52,6 +52,9 @@ pub enum CodecError {
     ConversionFailed(String),
     #[error("{0}")]
     Io(String),
+    /// The caller asked to stop before the work was done.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -180,26 +183,70 @@ impl SymphoniaAudioCodec {
 
     /// `start..end` seconds of `source`, every channel averaged to mono,
     /// written as 16 kHz Int16 WAV to `destination`: a turn's own audio.
-    /// Reads the file only up to `end`. A failure removes what was written.
+    /// Reads the file from near `start` where its format can seek, else
+    /// from its beginning, and only up to `end`. A failure removes what was
+    /// written.
     pub fn excerpt_path(
         source: &Path,
         destination: &Path,
         start: f64,
         end: f64,
     ) -> Result<(), CodecError> {
+        Self::excerpt_path_unless(source, destination, start, end, &|| false)
+    }
+
+    /// [`Self::excerpt_path`] that asks `cancelled` between blocks and
+    /// stops with [`CodecError::Cancelled`], writing nothing, once it says
+    /// yes.
+    pub fn excerpt_path_unless(
+        source: &Path,
+        destination: &Path,
+        start: f64,
+        end: f64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), CodecError> {
+        Self::excerpt(source, destination, start, end, true, cancelled)
+    }
+
+    fn excerpt(
+        source: &Path,
+        destination: &Path,
+        start: f64,
+        end: f64,
+        seek: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), CodecError> {
+        let start = start.max(0.0);
         let mut frames = Frames::open(source)?;
+        let mut position = 0;
+        if seek && start > EXCERPT_PREROLL_SECONDS {
+            match frames.seek(start - EXCERPT_PREROLL_SECONDS) {
+                Some(at) => position = at,
+                // A seek that failed may have moved the reader anyway.
+                None => frames = Frames::open(source)?,
+            }
+        }
         let mut excerpt = Excerpt {
-            start: start.max(0.0),
+            start,
             end: end.max(start),
-            position: 0,
+            position,
             rate: 0,
             samples: Vec::new(),
             done: false,
         };
-        match frames.stream(|event| excerpt.take(event)) {
+        let streamed = frames.stream(|event| {
+            if cancelled() {
+                return Err(CodecError::Cancelled);
+            }
+            excerpt.take(event)
+        });
+        match streamed {
             Ok(_) => {}
             Err(_) if excerpt.done => {}
             Err(error) => return Err(error),
+        }
+        if cancelled() {
+            return Err(CodecError::Cancelled);
         }
         if excerpt.rate == 0 {
             return Err(CodecError::UnsupportedFormat(
@@ -359,6 +406,22 @@ impl Frames {
                 Ok(spec)
             }
             Self::Symphonia(frames) => frames.stream(each),
+        }
+    }
+
+    /// Moves the stream to about `seconds`, no later, where the format
+    /// seeks: the crate's CAF reader to the frame, symphonia's demuxer to
+    /// the packet at or before it. Returns the frame the stream goes on
+    /// from, in the count [`Excerpt`] keeps (after the priming); `None`
+    /// when it cannot seek, and the reader is then to be opened again.
+    fn seek(&mut self, seconds: f64) -> Option<usize> {
+        match self {
+            Self::Caf { reader, .. } => {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let frame = (seconds * reader.sample_rate()) as usize;
+                Some(reader.seek(frame))
+            }
+            Self::Symphonia(frames) => frames.seek(seconds),
         }
     }
 
@@ -671,6 +734,39 @@ impl SymphoniaFrames {
         })
     }
 
+    /// A coarse seek of the demuxer to `seconds`; see [`Frames::seek`].
+    /// The salvage's packets do not seek. A panic in the demuxer is a
+    /// seek that failed.
+    fn seek(&mut self, seconds: f64) -> Option<usize> {
+        use symphonia::core::formats::{SeekMode, SeekTo};
+        let Source::Format(format) = &mut self.source else {
+            return None;
+        };
+        let rate = self.params.sample_rate.filter(|&rate| rate > 0)?;
+        let to = SeekTo::Time {
+            time: seconds.into(),
+            track_id: Some(self.track_id),
+        };
+        let seeked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crash_log::expected(|| format.seek(SeekMode::Coarse, to))
+        }))
+        .ok()?
+        .ok()?;
+        let ts = u128::from(seeked.actual_ts);
+        let frame = self.params.time_base.map_or(ts, |base| {
+            ts * u128::from(base.numer) * u128::from(rate) / u128::from(base.denom.max(1))
+        });
+        let primed = self.priming.map_or(0, |trim| u128::from(trim.frames));
+        let frame = usize::try_from(frame.saturating_sub(primed)).ok()?;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let wanted = (seconds * f64::from(rate)) as usize;
+        if frame > wanted {
+            return None;
+        }
+        self.decoder.reset();
+        Some(frame)
+    }
+
     /// Packet by packet. A packet that does not decode becomes silence of
     /// its length; a file with no decodable audio, or with more damaged
     /// packets than [`MAX_DAMAGED_SHARE`] allows, is an error.
@@ -935,6 +1031,10 @@ impl LaneDecode {
 
 /// The mixdown's state between blocks: the mono lane resampled, held back
 /// until settled, then written.
+/// How far before an excerpt's start its seek lands, so a decoder that
+/// starts cold (AAC's overlapping frames) has settled by the start.
+const EXCERPT_PREROLL_SECONDS: f64 = 0.5;
+
 /// [`SymphoniaAudioCodec::excerpt_path`]'s window over a stream: the mono
 /// frames from `start` to `end` seconds at the first shape's rate.
 struct Excerpt {
@@ -1324,5 +1424,89 @@ mod tests {
         let error = SymphoniaAudioCodec::mix(source, &destination).unwrap_err();
         assert!(matches!(error, CodecError::Io(_)), "{error:?}");
         assert!(!destination.exists(), "the partial mixdown is removed");
+    }
+
+    /// `start..end` of `source` cut with and without the seek.
+    fn both_excerpts(source: &Path, start: f64, end: f64) -> (Vec<f32>, Vec<f32>) {
+        let directory = tempfile::tempdir().unwrap();
+        let cut = |seek: bool| {
+            let destination = directory.path().join(format!("{seek}.wav"));
+            SymphoniaAudioCodec::excerpt(source, &destination, start, end, seek, &|| false)
+                .unwrap();
+            WavFile::read_16k_mono(&destination).unwrap()
+        };
+        (cut(true), cut(false))
+    }
+
+    fn tone(rate: f64, i: usize) -> f32 {
+        (0.4 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / rate).sin()) as f32
+    }
+
+    /// The seek gives the samples a decode from the start gives: exactly
+    /// for PCM, the crate's CAF reader and symphonia's WAV reader alike.
+    #[test]
+    fn a_seeked_excerpt_of_pcm_is_the_same_as_one_read_from_the_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let caf = directory.path().join("recording.caf");
+        let frames = 48_000 * 4;
+        let mut writer = CafStreamWriter::create(&caf, 48_000.0, 2).unwrap();
+        let interleaved: Vec<f32> = (0..frames)
+            .flat_map(|i| [tone(48_000.0, i), 0.5 * tone(48_000.0, i)])
+            .collect();
+        writer.write(&interleaved, frames).unwrap();
+        writer.finish().unwrap();
+        assert!(matches!(Frames::open(&caf).unwrap(), Frames::Caf { .. }));
+        let (seeked, read) = both_excerpts(&caf, 2.25, 3.5);
+        assert_eq!(seeked.len(), 20_000);
+        assert_eq!(seeked, read);
+
+        let wav = directory.path().join("recording.wav");
+        let mut writer = WavStreamWriter::create(&wav, 16_000).unwrap();
+        let ints: Vec<i16> = (0..16_000 * 4)
+            .map(|i| (tone(16_000.0, i) * 32_767.0) as i16)
+            .collect();
+        writer.write(&ints).unwrap();
+        writer.finish().unwrap();
+        let mut seeking = Frames::open(&wav).unwrap();
+        assert!(matches!(seeking, Frames::Symphonia(_)));
+        assert!(seeking.seek(1.0).is_some(), "the WAV reader seeks");
+        let (seeked, read) = both_excerpts(&wav, 2.25, 3.5);
+        assert_eq!(seeked.len(), 20_000);
+        assert_eq!(seeked, read);
+    }
+
+    /// AAC in an MP4: the seek lands on a packet before the start and the
+    /// priming is still taken off, so the samples match within the noise a
+    /// cold decoder leaves.
+    #[test]
+    fn a_seeked_excerpt_of_aac_matches_one_read_from_the_start() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Tests/Fixtures/audio/speech-44k1-avaudiofile.m4a");
+        let mut seeking = Frames::open(&fixture).unwrap();
+        assert!(seeking.seek(0.3).is_some(), "the MP4 reader seeks");
+        let (seeked, read) = both_excerpts(&fixture, 0.8, 1.5);
+        assert_eq!(seeked.len(), read.len());
+        assert_eq!(seeked.len(), 11_200);
+        let worst = seeked
+            .iter()
+            .zip(&read)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-3, "{worst}");
+    }
+
+    #[test]
+    fn a_cancelled_excerpt_writes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let wav = directory.path().join("recording.wav");
+        let mut writer = WavStreamWriter::create(&wav, 16_000).unwrap();
+        writer.write(&vec![0i16; 16_000 * 2]).unwrap();
+        writer.finish().unwrap();
+        let destination = directory.path().join("turn.wav");
+        let error =
+            SymphoniaAudioCodec::excerpt_path_unless(&wav, &destination, 0.5, 1.5, &|| true)
+                .unwrap_err();
+        assert_eq!(error, CodecError::Cancelled);
+        assert!(!destination.exists());
     }
 }
