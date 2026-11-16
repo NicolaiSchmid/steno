@@ -76,7 +76,7 @@ CREATE TABLE "person" ("id" TEXT PRIMARY KEY NOT NULL, "displayName" TEXT NOT NU
 
 CREATE TABLE "setting" ("key" TEXT PRIMARY KEY NOT NULL, "value" TEXT NOT NULL);
 
-CREATE TABLE "speaker" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "clusterLabel" TEXT NOT NULL, "assignment" TEXT NOT NULL, "personID" TEXT REFERENCES "person"("id") ON DELETE SET NULL, "similarity" DOUBLE, "embedding" BLOB, "sampleClipStart" DOUBLE, "sampleClipEnd" DOUBLE, "sampleClipURL" TEXT, "clusterConfidence" DOUBLE NOT NULL, "dismissed" BOOLEAN NOT NULL DEFAULT 0, "mergedInto" TEXT REFERENCES "speaker"("id") ON DELETE SET NULL);
+CREATE TABLE "speaker" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "clusterLabel" TEXT NOT NULL, "assignment" TEXT NOT NULL, "personID" TEXT REFERENCES "person"("id") ON DELETE SET NULL, "similarity" DOUBLE, "embedding" BLOB, "sampleClipStart" DOUBLE, "sampleClipEnd" DOUBLE, "sampleClipURL" TEXT, "clusterConfidence" DOUBLE NOT NULL, "dismissed" BOOLEAN NOT NULL DEFAULT 0, "confirmedSimilarity" DOUBLE, "mergedInto" TEXT REFERENCES "speaker"("id") ON DELETE SET NULL);
 
 CREATE TABLE "speakerNameSuggestion" ("speakerID" TEXT PRIMARY KEY NOT NULL REFERENCES "speaker"("id") ON DELETE CASCADE, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "name" TEXT NOT NULL, "confidence" DOUBLE NOT NULL, "evidence" TEXT NOT NULL);
 
