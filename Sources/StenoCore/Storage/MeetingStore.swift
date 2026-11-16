@@ -283,6 +283,24 @@ public final class MeetingStore: Sendable {
     }
   }
 
+  /// One transaction: the meeting's processing columns plus the `text` of
+  /// each of `segments` still stored. Speakers and other columns stay, so a
+  /// speaker named while the cleanup ran keeps its name, and the answers
+  /// the merge stage carried across Process again are not reconciled a
+  /// second time. Rust: `Store::update_segment_texts`.
+  public func updateSegmentTexts(_ meeting: Meeting, segments: [TranscriptSegment])
+    async throws
+  {
+    try await writer.write { db in
+      try Self.writeProcessingResults(of: meeting, db)
+      for segment in segments {
+        try db.execute(
+          sql: "UPDATE transcriptSegment SET text = ? WHERE id = ? AND meetingID = ?",
+          arguments: [segment.text, segment.id.uuidString, meeting.id.uuidString])
+      }
+    }
+  }
+
   /// One transaction: the meeting's processing columns (see
   /// `Meeting.applyProcessingResults`) plus every speaker and segment of the
   /// meeting, replaced. The pipeline's merge stage calls this.

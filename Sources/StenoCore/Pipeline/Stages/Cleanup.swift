@@ -9,6 +9,8 @@ extension ProcessingPipeline {
 
   /// Runs the `TranscriptCleaner` and persists the cleaned `text`; `rawText`,
   /// ids, order and count are the merge stage's and must come back intact.
+  /// `speakers` are the rows as stored after the merge (reconciled across
+  /// Process again) and are not rewritten.
   /// The transcript's token count replaces the run's guess from the audio
   /// duration before the stage's event is posted. Without a cleaner (no LLM
   /// endpoint) the stage posts its progress and hands the merged segments on
@@ -51,7 +53,7 @@ extension ProcessingPipeline {
       }
       var updated = meeting
       updated.updatedAt = self.now
-      try await store.replaceTranscript(updated, segments: cleaned, speakers: speakers)
+      try await store.updateSegmentTexts(updated, segments: cleaned)
       return Cleaned(segments: cleaned, usage: output.usage)
     }
   }
