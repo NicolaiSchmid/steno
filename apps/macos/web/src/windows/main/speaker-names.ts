@@ -146,7 +146,7 @@ export function allScopeLabel(speaker: Speaker, paragraphs: number): string {
 
 /** The scope line under This paragraph: what moves, and what undoes it. */
 export const TURN_SCOPE_LINE =
-	"Moves this paragraph only. Processing the meeting again redoes the speakers and drops this move.";
+	"Moves only this paragraph. Processing again resets this change.";
 
 /** The red line when the host refused a move as `stale`. */
 export const STALE_MOVE = "The transcript changed since you opened this.";
@@ -378,22 +378,29 @@ export function combinedOf(entry: PersonEntry): CombinedVoice[] {
 	return [entry.speaker, ...entry.voices].flatMap((voice) => voice.combined);
 }
 
+/** A speaker's row and, nested under it, the voices combined into it. */
+function andCombined(speaker: Speaker): (Speaker | CombinedVoice)[] {
+	return [speaker, ...speaker.combined];
+}
+
 /**
  * The panel's rows top to bottom, for the keyboard and for advancing: the
- * speakers, a person's combined voices after their own voices.
+ * speakers, each voice combined into one under it in every section (a
+ * person's after their own voices), so Separate again stays reachable
+ * after Remove name on the voice it joined.
  */
 export function panelRows(layout: PanelLayout): (Speaker | CombinedVoice)[] {
 	return [
-		...(layout.me ? [layout.me] : []),
-		...layout.check,
-		...layout.need,
+		...(layout.me ? andCombined(layout.me) : []),
+		...layout.check.flatMap(andCombined),
+		...layout.need.flatMap(andCombined),
 		...layout.people.flatMap((entry) => [
 			entry.speaker,
 			...entry.voices,
 			...combinedOf(entry),
 			...entry.also,
 		]),
-		...layout.dismissed,
+		...layout.dismissed.flatMap(andCombined),
 	];
 }
 

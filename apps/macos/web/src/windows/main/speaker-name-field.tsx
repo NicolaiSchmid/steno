@@ -192,8 +192,6 @@ export interface SpeakerNameFieldProps {
 	optionsSpeakerID?: string | undefined;
 	/** A transcript pick for one paragraph names no voice (`groupOptions`). */
 	scope?: PickScope;
-	/** The placeholder when `speaker` is none: the turn's name. */
-	placeholder?: string;
 	/** Every speaker of the meeting, for "Also speaking here". */
 	speakers: readonly Speaker[];
 	/** Called with the highlighted option and the typed text on Enter or a click. */
@@ -241,17 +239,23 @@ type Answer =
  * typed name. Escape gives up and Tab moves on (`onTab`); an input
  * method's composing Enter is left alone. Focus leaving the field ends the
  * edit (`onLeave`), unless it stays inside the nearest `data-naming-scope`
- * (the row's evidence). The placeholder is the voice's label; nothing is
+ * (the row's evidence). The placeholder is the voice's label, a question
+ * for a paragraph without a voice (`NO_VOICE_PLACEHOLDER`); nothing is
  * prefilled. While nothing is typed the voice's action (Not a person,
  * Remove name, Restore) closes the list; it is highlighted only by the
  * arrows or the pointer, never by the list arriving, so Enter cannot
  * dismiss or unname a voice unseen.
  */
+/**
+ * The empty field's placeholder for a paragraph without a voice: a
+ * question, so it never reads as a name already given.
+ */
+export const NO_VOICE_PLACEHOLDER = "Who said this?";
+
 export function SpeakerNameField({
 	speaker,
 	optionsSpeakerID,
 	scope = "voice",
-	placeholder,
 	speakers,
 	onSubmit,
 	onCancel,
@@ -462,7 +466,7 @@ export function SpeakerNameField({
 				onKeyDown={onKeyDown}
 				placeholder={
 					!speaker
-						? (placeholder ?? "")
+						? NO_VOICE_PLACEHOLDER
 						: isNamed(speaker)
 							? speaker.displayName
 							: isMe(speaker)

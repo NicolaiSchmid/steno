@@ -765,6 +765,10 @@ export function SpeakersPopover({
 	);
 }
 
+/** The list nested under a row: a person's other voices, combined voices. */
+const NESTED_LIST =
+	"m-0 mb-1 ml-[19px] flex list-none flex-col gap-0.5 border-border border-l p-0 pl-2";
+
 function Sections({
 	layout,
 	row,
@@ -774,10 +778,26 @@ function Sections({
 	row: (speaker: Speaker, kind: RowKind, person?: Speaker) => ReactNode;
 	combinedRow: (voice: CombinedVoice) => ReactNode;
 }) {
+	// Outside Speakers a voice can still have voices combined into it (its
+	// name removed, or it was dismissed): they nest under it all the same.
+	const withCombined = (speaker: Speaker, kind: RowKind) =>
+		speaker.combined.length === 0 ? (
+			row(speaker, kind)
+		) : (
+			<li className="flex flex-col" key={speaker.id}>
+				<ul className="m-0 list-none p-0">{row(speaker, kind)}</ul>
+				<ul
+					className={NESTED_LIST}
+					data-testid={`speakers-nested-${speaker.id}`}
+				>
+					{speaker.combined.map(combinedRow)}
+				</ul>
+			</li>
+		);
 	return (
 		<>
 			{layout.me ? (
-				<ul className="m-0 list-none p-0">{row(layout.me, "me")}</ul>
+				<ul className="m-0 list-none p-0">{withCombined(layout.me, "me")}</ul>
 			) : null}
 			<Section
 				// Every match answered during the visit: the heading says so.
@@ -788,10 +808,10 @@ function Sections({
 				}
 				testID="speakers-section-check"
 			>
-				{layout.check.map((speaker) => row(speaker, "check"))}
+				{layout.check.map((speaker) => withCombined(speaker, "check"))}
 			</Section>
 			<Section label="Need names" testID="speakers-section-need">
-				{layout.need.map((speaker) => row(speaker, "need"))}
+				{layout.need.map((speaker) => withCombined(speaker, "need"))}
 			</Section>
 			<Section label="Speakers" testID="speakers-section-people">
 				{layout.people.map((entry) => {
@@ -806,7 +826,7 @@ function Sections({
 						<li className="flex flex-col" key={speaker.id}>
 							<ul className="m-0 list-none p-0">{row(speaker, "person")}</ul>
 							<ul
-								className="m-0 mb-1 ml-[19px] flex list-none flex-col gap-0.5 border-border border-l p-0 pl-2"
+								className={NESTED_LIST}
 								data-testid={`speakers-nested-${speaker.id}`}
 							>
 								{voices.map((voice) => row(voice, "voice", speaker))}
@@ -818,7 +838,7 @@ function Sections({
 				})}
 			</Section>
 			<Section label="Not people" testID="speakers-section-dismissed">
-				{layout.dismissed.map((speaker) => row(speaker, "dismissed"))}
+				{layout.dismissed.map((speaker) => withCombined(speaker, "dismissed"))}
 			</Section>
 		</>
 	);

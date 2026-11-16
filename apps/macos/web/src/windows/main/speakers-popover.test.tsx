@@ -415,6 +415,35 @@ describe("the speakers panel", () => {
 		]);
 	});
 
+	it("keeps a combined voice nested, with Separate again, under a voice whose name was removed", async () => {
+		// Removed before this visit: the panel places rows as it opens.
+		const { user, speakers, republish } = await render("");
+		republish(
+			speakers.map((speaker) =>
+				speaker.id === NICOLAI
+					? {
+							...speaker,
+							assignment: "unknown" as const,
+							displayName: speaker.clusterLabel,
+						}
+					: speaker,
+			),
+		);
+		await user.click(screen.getByTestId("speakers-trigger"));
+		const nested = within(
+			screen.getByTestId("speakers-section-need"),
+		).getByTestId(`speakers-nested-${NICOLAI}`);
+		expect(
+			screen.queryByTestId("speakers-section-people"),
+		).not.toContainElement(nested);
+		const combined = within(nested).getByTestId(
+			`speakers-popover-combined-${COMBINED}`,
+		);
+		expect(
+			within(combined).getByRole("button", { name: /^Separate again/ }),
+		).toBeVisible();
+	});
+
 	it("separates with S on the row, and says why in red, without Retry, when its paragraphs moved", async () => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
 		const { user, harness } = await open("", {

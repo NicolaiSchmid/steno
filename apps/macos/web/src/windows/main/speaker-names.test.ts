@@ -465,6 +465,7 @@ describe("a paragraph's scope", () => {
 			text: "Hallo.",
 			segmentIDs: [id(100), id(101)],
 			isPlaying: false,
+			playFailed: false,
 		};
 		expect(turnSegments(turn)).toEqual([
 			{ id: id(100), speakerID: id(1) },
@@ -513,6 +514,27 @@ describe("combined voices", () => {
 			id(1),
 			id(2),
 			id(5),
+		]);
+	});
+
+	it("follow their voice in every section, so Separate again stays reachable after Remove name", () => {
+		const unnamed = {
+			...voice(1, "unknown"),
+			combined: [
+				{
+					id: id(5),
+					clusterLabel: "Speaker 5",
+					hasClip: true,
+					isPlaying: false,
+				},
+			],
+		};
+		const layout = panelLayout([unnamed, voice(2, "confirmed", "Anna", 2)]);
+		expect(layout.need.map((row) => row.id)).toEqual([id(1)]);
+		expect(panelRows(layout).map((row) => row.id)).toEqual([
+			id(1),
+			id(5),
+			id(2),
 		]);
 	});
 

@@ -377,10 +377,9 @@ describe("a paragraph's field", () => {
 	it("lists the people named here for a turn without a voice, asking no voice", async () => {
 		const { harness } = await paragraph({
 			optionsSpeakerID: UNNAMED,
-			placeholder: "Unknown",
 		});
 		const input = screen.getByTestId("speaker-field-turn");
-		expect(input).toHaveAttribute("placeholder", "Unknown");
+		expect(input).toHaveAttribute("placeholder", "Who said this?");
 		const options = await screen.findAllByRole("option");
 		// No voice's options: Anna, only suggested for Speaker 3, is not
 		// named here, and nothing says "Sounds like".
