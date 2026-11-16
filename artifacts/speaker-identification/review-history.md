@@ -351,3 +351,54 @@ has not shipped). Floor: the council split (Astra 0.65, Fable 0.60 with
 data); coordinator's call is 0.65 provisionally plus similarity recorded on
 every No and Yes, revisited with data. Fable's `mergedInto` design and the
 reprocessing key sent to the step 4 build.
+
+## 2026-11-16 — built step 3 round 2 (#365 after its fix pass) and built step 4 (#366)
+
+Request IDs `steno-built-speakers34-astra-r2`, `steno-built-speakers34-fable-r2`.
+Evidence: `speakers-3-fix/after/`, `speakers-4/{before,after}/`.
+
+**GPT-6-Astra: #365 7.5/10 (UX 8.5, implementation 7); #366 7.5/10 (UX 9,
+implementation 6.5).** Steps 2–4 beat Jamie on UX; keep `mergedInto`, cut the
+journal idea. Earlier findings: Swift orphaned contributions, Remove name on
+Me, typed rejected name fixed; reprocessing answers and quote vs playback
+partly. Ranked:
+1. P1 (#365): reconciliation lets only answered old rows compete and resolves
+   near ties automatically, so an answer can still move to another voice
+   (`meetings.rs:472, 693`, `MeetingStore.swift:316`). Reconcile all old
+   clusters; transfer only unambiguous matches.
+2. P1 (#366): generation not read atomically with the transcript
+   (`main_window/detail.rs:108,121`, `MeetingDetailViewModel.swift:110`);
+   segment ids reused by lane/index, so a move can hit another paragraph.
+3. P2: paragraph WAV outlives Stop, completion and meeting deletion
+   (`clip_player.rs:197,216`).
+4. P2: Swift doesn't name Me when combining (`MeetingStore+People.swift:277`
+   vs `people.rs:827`); the test papers over it.
+5. P2: paragraph preparation decodes from the start under the host lock
+   (`codec/mod.rs:190`, `host.rs:2199,1200`).
+6. P3: stale Separate again offers Retry (`speakers-popover.tsx:566`).
+Correction: a Yes stores no similarity (`people.rs:709`).
+
+**Claude Fable 5.1: #365 UX 8.5, implementation 8.5; #366 UX 8,
+implementation 7.5.** Steps 2–4 beat Jamie (Jamie still better: avatar
+photos, lighter nested duplicate row). All earlier findings fixed (Last
+invitee dedupe only from the PR text); a Yes still stores nothing. Step 4
+built as intended on all four points. Ranked:
+1. P2: paragraph WAV in shared `/tmp`, survives crashes, deletion and
+   retention; pre-created folder escapes 0700. Cut into the app's cache,
+   remove on stop/end, sweep on start.
+2. P3: Rust maps a stale Separate again to the move's message
+   (`host.rs:472-478`).
+3. P3: Retry on a stale Separate again.
+4. P3: a move can prune the Me row (`people.rs:624-657`).
+5. P3: moving to yourself while Me is unnamed makes a parallel row (note it).
+6. P3: a turn without a voice borrows another voice's Noes.
+7. P3: merged rows carry nothing across Process again; treat them as
+   confirmed as the root's person.
+8. P3: Swift detail mixes ticks (`MeetingDetailViewModel.swift:106-116`).
+Visual: Separate again as a text button beside play. Cut: overlap of
+`rowIDs` and `rowOrder`.
+
+### Responses
+
+All accepted into one fix pass on #365 and #366 (`steno-fix-speakers34`),
+plus a Yes recording its similarity (v6 still unshipped).
