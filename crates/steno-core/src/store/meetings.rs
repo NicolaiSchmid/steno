@@ -441,16 +441,18 @@ impl Store {
     /// and segment, replaced. The merge stage calls this.
     ///
     /// The user's answers about the stored voices come back on the new rows
-    /// that are the same voice ([`same_voices`]), never by id alone: ids
-    /// derive from "Speaker n", which counts by first speech, so another
-    /// run can give a label to another voice. A kept confirmation keeps its
-    /// person and, when the new row has no clip, the stored
-    /// `sampleClipURL` and `sampleClipRange`, so the clip the user
-    /// confirmed stays playable and is not swept; a dismissed voice stays
-    /// dismissed; a No to a person stays, so a new suggestion of that
+    /// that are unambiguously the same voice ([`same_voices`]), never by id
+    /// alone: ids derive from "Speaker n", which counts by first speech, so
+    /// another run can give a label to another voice. A kept confirmation
+    /// keeps its person, the score its Yes was given
+    /// (`speaker.confirmedSimilarity`) and, when the new row has no clip,
+    /// the stored `sampleClipURL` and `sampleClipRange`, so the clip the
+    /// user confirmed stays playable and is not swept; a dismissed voice
+    /// stays dismissed; a No to a person stays, so a new suggestion of that
     /// person for that voice is dropped. An answer whose voice is not found
-    /// again is dropped, and the voice shows for review. Every person with
-    /// a confirmed speaker before has their voice recomputed.
+    /// again, or whose match is contested, is dropped, and the voice shows
+    /// for review. Every person with a confirmed speaker before has their
+    /// voice recomputed.
     ///
     /// Commits durably ([`Store::write_durably`]): the pipeline removes the
     /// clips the earlier rows named once this returns, and a power loss
@@ -469,18 +471,10 @@ impl Store {
             // user's Noes.
             let suggestions = people::name_suggestions_of_meeting(transaction, meeting.id)?;
             let rejections = people::suggestion_rejections_of_meeting(transaction, meeting.id)?;
-            let answered: Vec<&Speaker> = replaced
-                .iter()
-                .filter(|speaker| {
-                    speaker.assignment.is_confirmed()
-                        || speaker.dismissed
-                        || rejections
-                            .iter()
-                            .any(|rejection| rejection.speaker_id == speaker.id)
-                })
-                .collect();
-            // New id -> the stored row whose answers it takes.
-            let earlier: BTreeMap<Uuid, &Speaker> = same_voices(meeting.id, &answered, speakers)
+            let stored: Vec<&Speaker> = replaced.iter().collect();
+            // New id -> the stored row whose answers it takes. Every stored
+            // row competes; only an unambiguous pair carries anything.
+            let earlier: BTreeMap<Uuid, &Speaker> = same_voices(meeting.id, &stored, speakers)
                 .into_iter()
                 .map(|(old, new)| (new, old))
                 .collect();
@@ -491,6 +485,13 @@ impl Store {
                 .filter(|speaker| speaker.assignment.is_confirmed())
                 .filter_map(Speaker::person_id)
                 .collect();
+            // The score each kept Yes was given, before its row goes.
+            let mut yes_scores = BTreeMap::new();
+            for (&new, &kept) in &earlier {
+                if kept.assignment.is_confirmed() {
+                    yes_scores.insert(new, people::confirmed_similarity(transaction, kept.id)?);
+                }
+            }
             transaction.execute(
                 "DELETE FROM transcriptSegment WHERE meetingID = ?1",
                 [DbUuid(meeting.id)],
@@ -533,6 +534,9 @@ impl Store {
                     }
                 }
                 people::insert_speaker(transaction, &speaker)?;
+                if let Some(&score) = yes_scores.get(&speaker.id) {
+                    people::set_confirmed_similarity(transaction, speaker.id, score)?;
+                }
             }
             people::replace_name_suggestions(transaction, meeting.id, &suggestions)?;
             people::restore_suggestion_rejections(transaction, meeting.id, &kept_rejections)?;
@@ -656,60 +660,77 @@ impl Store {
     }
 }
 
-/// Pairs each of `earlier` (stored rows the user answered) with the new
-/// row that is the same voice, one to one, best match first: the cosine of
-/// their embeddings, from [`VoiceStrength::FLOOR`] up; the same id wins a
-/// tie. The "me" speaker and the room row of a run without diarization
-/// are lanes, not clusters, so each pairs only with itself, whatever its
-/// embedding. A row without an embedding pairs with nothing else. Returns
-/// `(earlier row, new id)`.
+/// How far a pair's cosine must lead the runner-up, for the stored row and
+/// for the new row alike, before an answer moves across Process again.
+/// Re-diarizing the same audio scores a voice against itself near 1 and
+/// against other voices under 0.6 on the calibration corpus (the highest
+/// wrong-person score is 0.54), so a voice found again clears 0.10 with
+/// room; a voice the new run split in two, or joined with another, scores
+/// two candidates close together and is left for the user.
+const SAME_VOICE_MARGIN: f32 = 0.10;
+
+/// Pairs the stored rows with the new rows that are the same voice, one to
+/// one, and only where that is unambiguous. Every stored row competes,
+/// answered or not, so an answered row cannot take a voice another stored
+/// row matches better. A pair holds when the cosine of their embeddings is
+/// at least [`VoiceStrength::FLOOR`] and leads every other candidate of
+/// both rows by [`SAME_VOICE_MARGIN`]; anything closer is contested and
+/// pairs nothing. The "me" speaker and the room row of a run without
+/// diarization are lanes, not clusters, so each pairs only with itself,
+/// whatever its embedding. A row without an embedding pairs with nothing
+/// else. Returns `(earlier row, new id)`.
 pub(super) fn same_voices<'a>(
     meeting_id: Uuid,
     earlier: &[&'a Speaker],
     speakers: &[Speaker],
 ) -> Vec<(&'a Speaker, Uuid)> {
     let lanes = [me_speaker_id(meeting_id), room_speaker_id(meeting_id)];
-    let mut pairs: Vec<(f32, &'a Speaker, Uuid)> = Vec::new();
-    for &old in earlier {
-        for new in speakers {
-            let score = if lanes.contains(&old.id) || lanes.contains(&new.id) {
-                if old.id == new.id {
-                    f32::INFINITY
-                } else {
-                    continue;
-                }
-            } else if let (Some(lhs), Some(rhs)) = (&old.embedding, &new.embedding) {
-                let similarity = lhs.cosine_similarity(rhs);
-                if similarity < VoiceStrength::FLOOR {
-                    continue;
-                }
-                similarity
-            } else {
-                continue;
-            };
-            pairs.push((score, old, new.id));
+    let mut pairs: Vec<(&'a Speaker, Uuid)> = earlier
+        .iter()
+        .filter(|old| lanes.contains(&old.id) && speakers.iter().any(|new| new.id == old.id))
+        .map(|&old| (old, old.id))
+        .collect();
+    let clusters = |id: &Uuid| !lanes.contains(id);
+    let old_clusters: Vec<&'a Speaker> = earlier
+        .iter()
+        .copied()
+        .filter(|speaker| clusters(&speaker.id) && speaker.embedding.is_some())
+        .collect();
+    let new_clusters: Vec<&Speaker> = speakers
+        .iter()
+        .filter(|speaker| clusters(&speaker.id) && speaker.embedding.is_some())
+        .collect();
+    let score = |old: &Speaker, new: &Speaker| match (&old.embedding, &new.embedding) {
+        (Some(lhs), Some(rhs)) => lhs.cosine_similarity(rhs),
+        _ => f32::NEG_INFINITY,
+    };
+    for &old in &old_clusters {
+        let Some((best, similarity)) = new_clusters
+            .iter()
+            .map(|&new| (new, score(old, new)))
+            .max_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1))
+        else {
+            continue;
+        };
+        if similarity < VoiceStrength::FLOOR {
+            continue;
+        }
+        let runner_up = new_clusters
+            .iter()
+            .filter(|new| new.id != best.id)
+            .map(|&new| score(old, new))
+            .chain(
+                old_clusters
+                    .iter()
+                    .filter(|other| other.id != old.id)
+                    .map(|&other| score(other, best)),
+            )
+            .fold(f32::NEG_INFINITY, f32::max);
+        if similarity - runner_up >= SAME_VOICE_MARGIN {
+            pairs.push((old, best.id));
         }
     }
-    pairs.sort_by(|lhs, rhs| {
-        rhs.0
-            .total_cmp(&lhs.0)
-            .then_with(|| (rhs.1.id == rhs.2).cmp(&(lhs.1.id == lhs.2)))
-            .then_with(|| (lhs.1.id, lhs.2).cmp(&(rhs.1.id, rhs.2)))
-    });
-    let mut taken_old = BTreeSet::new();
-    let mut taken_new = BTreeSet::new();
     pairs
-        .into_iter()
-        .filter(|&(_, old, new)| {
-            let free = !taken_old.contains(&old.id) && !taken_new.contains(&new);
-            if free {
-                taken_old.insert(old.id);
-                taken_new.insert(new);
-            }
-            free
-        })
-        .map(|(_, old, new)| (old, new))
-        .collect()
 }
 
 #[cfg(test)]

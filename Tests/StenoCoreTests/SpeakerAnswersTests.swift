@@ -227,6 +227,41 @@ import Testing
     #expect(abs(cosine - 1) < 0.0001, "else the voices' cosine")
   }
 
+  /// The score a Yes was recorded with (`speaker.confirmedSimilarity`).
+  static func yesScore(_ speakerID: UUID, _ store: MeetingStore) async throws -> Float? {
+    try await store.writer.read { db in
+      try MeetingStore.confirmedSimilarity(speakerID: speakerID, db)
+    }
+  }
+
+  /// Rust: `a_yes_keeps_the_voice_match_score`.
+  @Test func aYesKeepsTheVoiceMatchScore() async throws {
+    let store = try await MeetingStoreTests.populated()
+    let jerome = try #require(try await store.person(id: SampleData.personJeromeID))
+    let speakerID = SampleData.speakerTwoID
+    try await store.confirm(speakerID: speakerID, person: jerome)
+    #expect(try await Self.yesScore(speakerID, store) == 0.72, "the suggestion's similarity")
+
+    // Kept across Process again with the confirmation.
+    var rerun = SampleData.speakers()
+    rerun[1].assignment = .unknown
+    try await store.replaceTranscript(
+      SampleData.meeting(), segments: SampleData.segments(), speakers: rerun)
+    #expect(try await Self.yesScore(speakerID, store) == 0.72)
+
+    // Someone else: the cosine with their stored voice.
+    var anna = try await store.resolvePerson(named: "Anna", now: Self.now)
+    anna.embedding = SampleData.embedding(axis: 1)
+    try await store.save(anna)
+    try await store.confirm(speakerID: speakerID, person: anna)
+    let cosine = try #require(try await Self.yesScore(speakerID, store))
+    #expect(abs(cosine - 1) < 0.0001)
+
+    // Remove name takes the Yes back.
+    try await store.clear(speakerID: speakerID)
+    #expect(try await Self.yesScore(speakerID, store) == nil)
+  }
+
   @Test func aNoCannotAnswerAConfirmedNameAndMeIsNeverDismissed() async throws {
     let store = try await MeetingStoreTests.populated()
     let speakerID = SampleData.speakerOneID
@@ -309,6 +344,71 @@ import Testing
     let voice = try #require(try await store.person(id: nicolai))
     #expect(voice.sampleCount == 0, "his voice no longer counts it")
     #expect(voice.embedding == nil)
+  }
+
+  /// `weights` of the sample's unit axes summed: each weight is the blend's
+  /// cosine with that axis.
+  static func blend(_ weights: [(Float, Int)]) -> Embedding {
+    var values = [Float](repeating: 0, count: Embedding.dimension)
+    for (weight, axis) in weights { values[axis] += weight }
+    return Embedding(values)
+  }
+
+  /// Nicolai is confirmed on Speaker 1, Speaker 2 is unanswered. The re-run
+  /// finds one voice that scores 0.66 with Nicolai's but is Speaker 2's: an
+  /// answered row must not take a voice an unanswered one matches better.
+  /// Rust: `processing_again_does_not_let_an_answer_take_another_voices_match`.
+  @Test func processingAgainDoesNotLetAnAnswerTakeAnotherVoicesMatch() async throws {
+    let store = try await MeetingStoreTests.populated()
+    let speakerTwo = Self.blend([(0.66, 0), (0.75, 1)])
+    var stored = SampleData.speakers()
+    stored[1].embedding = speakerTwo
+    stored[1].assignment = .unknown
+    try await store.save(stored[1])
+
+    var rerun = SampleData.speakers()
+    rerun[0].embedding = speakerTwo
+    rerun[0].assignment = .unknown
+    rerun[1].embedding = SampleData.embedding(axis: 2)
+    rerun[1].assignment = .unknown
+    try await store.replaceTranscript(
+      SampleData.meeting(), segments: SampleData.segments(), speakers: rerun)
+    let speakers = try await store.speakers(meetingID: SampleData.meetingID)
+    #expect(
+      speakers.allSatisfy { !$0.assignment.isConfirmed },
+      "Nicolai's name is not handed to Speaker 2's voice")
+    #expect(try await store.person(id: SampleData.personNicolaiID)?.sampleCount == 0)
+  }
+
+  /// Two new voices score 0.80 and 0.75 with a confirmed one: too close to
+  /// tell, so neither takes the name and both show for review. Rust:
+  /// `processing_again_leaves_a_near_tie_for_the_user`.
+  @Test func processingAgainLeavesANearTieForTheUser() async throws {
+    let store = try await MeetingStoreTests.populated()
+    try await store.setDismissed(speakerID: SampleData.speakerTwoID, true)
+    var rerun = SampleData.speakers()
+    rerun[0].embedding = Self.blend([(0.80, 0), (0.60, 1)])
+    rerun[0].assignment = .unknown
+    rerun[1].embedding = Self.blend([(0.75, 0), (0.66, 2)])
+    rerun[1].assignment = .unknown
+    try await store.replaceTranscript(
+      SampleData.meeting(), segments: SampleData.segments(), speakers: rerun)
+    var speakers = try await store.speakers(meetingID: SampleData.meetingID)
+    #expect(
+      speakers.allSatisfy { !$0.assignment.isConfirmed && !$0.dismissed },
+      "a contested match carries nothing")
+
+    // A clear match still carries: the same voice again, nothing close.
+    let nicolai = try #require(try await store.person(id: SampleData.personNicolaiID))
+    try await store.confirm(speakerID: SampleData.speakerOneID, person: nicolai)
+    var clear = rerun
+    clear[1].embedding = SampleData.embedding(axis: 2)
+    try await store.replaceTranscript(
+      SampleData.meeting(), segments: SampleData.segments(), speakers: clear)
+    speakers = try await store.speakers(meetingID: SampleData.meetingID)
+    #expect(
+      speakers.first { $0.id == SampleData.speakerOneID }?.assignment
+        == .confirmed(personID: nicolai.id))
   }
 
   /// A database from before v6 opens with every speaker a person and no

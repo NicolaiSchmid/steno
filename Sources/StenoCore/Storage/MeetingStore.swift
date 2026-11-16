@@ -288,14 +288,16 @@ public final class MeetingStore: Sendable {
   /// meeting, replaced. The pipeline's merge stage calls this.
   ///
   /// The user's answers about the stored voices come back on the new rows
-  /// that are the same voice (`sameVoices`), never by id alone: ids derive
+  /// that are unambiguously the same voice (`sameVoices`), never by id
+  /// alone: ids derive
   /// from "Speaker n", which counts by first speech, so another run can
-  /// give a label to another voice. A kept confirmation keeps its person
-  /// and, when the new row has no clip and no new row took its file, the
-  /// stored clip; a dismissed voice stays dismissed; a No to a person
+  /// give a label to another voice. A kept confirmation keeps its person,
+  /// the score its Yes was given (`speaker.confirmedSimilarity`) and,
+  /// when the new row has no clip and no new row took its file, the stored
+  /// clip; a dismissed voice stays dismissed; a No to a person
   /// stays, so a new suggestion of that person for that voice is dropped.
-  /// An answer whose voice is not found again is dropped, and the voice
-  /// shows for review. A name suggestion stays with its speaker id. Every
+  /// An answer whose voice is not found again, or whose match is contested,
+  /// is dropped, and the voice shows for review. A name suggestion stays with its speaker id. Every
   /// person with a confirmed speaker before has their voice recomputed.
   /// Rust: `Store::replace_transcript`.
   public func replaceTranscript(
@@ -313,15 +315,17 @@ public final class MeetingStore: Sendable {
         .filter(SpeakerNameSuggestionRow.Columns.meetingID == meetingID.uuidString)
         .fetchAll(db).map(\.suggestion)
       let rejections = try Self.rejectionRows(meetingID: meetingID, db)
-      let answered = replaced.filter { speaker in
-        speaker.assignment.isConfirmed || speaker.dismissed
-          || rejections.contains { $0.speakerID == speaker.id }
-      }
-      // New id -> the stored row whose answers it takes.
+      // New id -> the stored row whose answers it takes. Every stored row
+      // competes; only an unambiguous pair carries anything.
       var earlier: [UUID: Speaker] = [:]
-      for (old, new) in Self.sameVoices(meetingID: meetingID, earlier: answered, speakers: speakers)
+      for (old, new) in Self.sameVoices(meetingID: meetingID, earlier: replaced, speakers: speakers)
       {
         earlier[new] = old
+      }
+      // The score each kept Yes was given, before its row goes.
+      var yesScores: [UUID: Float?] = [:]
+      for (new, kept) in earlier where kept.assignment.isConfirmed {
+        yesScores[new] = try Self.confirmedSimilarity(speakerID: kept.id, db)
       }
       // Kept or dropped, each stored confirmation's person is recomputed.
       let voices = Set(replaced.filter(\.assignment.isConfirmed).compactMap(\.personID))
@@ -358,6 +362,9 @@ public final class MeetingStore: Sendable {
           }
         }
         try SpeakerRow(speaker).insert(db)
+        if let score = yesScores[speaker.id] {
+          try Self.setConfirmedSimilarity(score, speakerID: speaker.id, db)
+        }
       }
       try Self.replaceNameSuggestions(suggestions, meetingID: meetingID, db)
       for rejection in keptRejections { try Self.insertRejection(rejection, db) }
@@ -370,13 +377,26 @@ public final class MeetingStore: Sendable {
     }
   }
 
-  /// Pairs each of `earlier` (stored rows the user answered) with the new
-  /// row that is the same voice, one to one, best match first: the cosine of
-  /// their embeddings, from `VoiceStrength.floor` up; the same id wins a
-  /// tie. The "me" speaker and the Rust app's room row (a run without
-  /// diarization) are lanes, not clusters, so each pairs only with itself,
-  /// whatever its embedding. A row without an embedding pairs with nothing
-  /// else. Rust: `same_voices`.
+  /// How far a pair's cosine must lead the runner-up, for the stored row
+  /// and for the new row alike, before an answer moves across Process
+  /// again. Re-diarizing the same audio scores a voice against itself near
+  /// 1 and against other voices under 0.6 on the calibration corpus (the
+  /// highest wrong-person score is 0.54), so a voice found again clears
+  /// 0.10 with room; a voice the new run split in two, or joined with
+  /// another, scores two candidates close together and is left for the
+  /// user. Rust: `SAME_VOICE_MARGIN`.
+  static let sameVoiceMargin: Float = 0.10
+
+  /// Pairs the stored rows with the new rows that are the same voice, one
+  /// to one, and only where that is unambiguous. Every stored row competes,
+  /// answered or not, so an answered row cannot take a voice another
+  /// stored row matches better. A pair holds when the cosine of their
+  /// embeddings is at least `VoiceStrength.floor` and leads every other
+  /// candidate of both rows by `sameVoiceMargin`; anything closer is
+  /// contested and pairs nothing. The "me" speaker and the Rust app's room
+  /// row (a run without diarization) are lanes, not clusters, so each pairs
+  /// only with itself, whatever its embedding. A row without an embedding
+  /// pairs with nothing else. Rust: `same_voices`.
   static func sameVoices(meetingID: UUID, earlier: [Speaker], speakers: [Speaker])
     -> [(old: Speaker, new: UUID)]
   {
@@ -384,37 +404,29 @@ public final class MeetingStore: Sendable {
       LaneMerger.meSpeakerID(meetingID: meetingID),
       UUID(derivedFrom: meetingID, salt: "speaker-room"),
     ]
-    var pairs: [(score: Float, old: Speaker, new: UUID)] = []
-    for old in earlier {
-      for new in speakers {
-        let score: Float
-        if lanes.contains(old.id) || lanes.contains(new.id) {
-          guard old.id == new.id else { continue }
-          score = .infinity
-        } else if let lhs = old.embedding, let rhs = new.embedding {
-          score = lhs.cosineSimilarity(to: rhs)
-          guard score >= VoiceStrength.floor else { continue }
-        } else {
-          continue
-        }
-        pairs.append((score, old, new.id))
+    var matched: [(old: Speaker, new: UUID)] =
+      earlier
+      .filter { old in lanes.contains(old.id) && speakers.contains { $0.id == old.id } }
+      .map { ($0, $0.id) }
+    let oldClusters = earlier.filter { !lanes.contains($0.id) && $0.embedding != nil }
+    let newClusters = speakers.filter { !lanes.contains($0.id) && $0.embedding != nil }
+    func score(_ old: Speaker, _ new: Speaker) -> Float {
+      guard let lhs = old.embedding, let rhs = new.embedding else { return -.infinity }
+      return lhs.cosineSimilarity(to: rhs)
+    }
+    for old in oldClusters {
+      guard
+        let (best, similarity) = newClusters.map({ ($0, score(old, $0)) })
+          .max(by: { $0.1 < $1.1 }),
+        similarity >= VoiceStrength.floor
+      else { continue }
+      let rivals =
+        newClusters.filter { $0.id != best.id }.map { score(old, $0) }
+        + oldClusters.filter { $0.id != old.id }.map { score($0, best) }
+      let runnerUp = rivals.max() ?? -.infinity
+      if similarity - runnerUp >= sameVoiceMargin {
+        matched.append((old, best.id))
       }
-    }
-    pairs.sort { lhs, rhs in
-      if lhs.score != rhs.score { return lhs.score > rhs.score }
-      let lhsSame = lhs.old.id == lhs.new
-      let rhsSame = rhs.old.id == rhs.new
-      if lhsSame != rhsSame { return lhsSame }
-      if lhs.old.id != rhs.old.id { return lhs.old.id.uuidString < rhs.old.id.uuidString }
-      return lhs.new.uuidString < rhs.new.uuidString
-    }
-    var takenOld: Set<UUID> = []
-    var takenNew: Set<UUID> = []
-    var matched: [(old: Speaker, new: UUID)] = []
-    for pair in pairs where !takenOld.contains(pair.old.id) && !takenNew.contains(pair.new) {
-      takenOld.insert(pair.old.id)
-      takenNew.insert(pair.new)
-      matched.append((pair.old, pair.new))
     }
     return matched
   }

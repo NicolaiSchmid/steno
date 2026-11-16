@@ -318,6 +318,48 @@ fn a_no_keeps_the_voice_match_score() {
     );
 }
 
+/// The score a Yes was recorded with (`speaker.confirmedSimilarity`).
+fn yes_score(store: &Store, speaker_id: uuid::Uuid) -> Option<f64> {
+    store
+        .read(|connection| {
+            Ok(connection.query_row(
+                "SELECT confirmedSimilarity FROM speaker WHERE id = ?1",
+                [speaker_id.to_string().to_uppercase()],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_yes_keeps_the_voice_match_score() {
+    let (store, meeting) = populated();
+    let suggested = store.speakers(meeting.id).unwrap()[0].clone();
+    let jerome = store.person(uuid(PERSON_ID)).unwrap().unwrap();
+    store.confirm_speaker(suggested.id, &jerome).unwrap();
+    let round = |score: Option<f64>| score.map(|score| (score * 100.0).round() / 100.0);
+    assert_eq!(
+        round(yes_score(&store, suggested.id)),
+        Some(0.7),
+        "the suggestion's similarity"
+    );
+
+    // Kept across Process again with the confirmation.
+    process_again(&store, &meeting);
+    assert_eq!(round(yes_score(&store, suggested.id)), Some(0.7));
+
+    // Someone else: the cosine with their stored voice.
+    let mut anna = store.resolve_person("Anna", None, now()).unwrap();
+    anna.embedding = Some(common::other_voice());
+    store.save_person(&anna).unwrap();
+    store.confirm_speaker(suggested.id, &anna).unwrap();
+    assert_eq!(round(yes_score(&store, suggested.id)), Some(0.0));
+
+    // Remove name takes the Yes back.
+    store.clear_speaker(suggested.id).unwrap();
+    assert_eq!(yes_score(&store, suggested.id), None);
+}
+
 #[test]
 fn a_no_cannot_answer_a_confirmed_name_and_me_is_never_dismissed() {
     let (store, meeting) = populated();
@@ -441,6 +483,95 @@ fn processing_again_drops_answers_whose_voice_is_gone() {
     let voice = store.person(anna.id).unwrap().unwrap();
     assert_eq!(voice.sample_count, 0, "her voice no longer counts it");
     assert_eq!(voice.embedding, None);
+}
+
+/// `weights` of [`Embedding`]s summed: the sample's Speaker 1,
+/// [`common::other_voice`] and [`third_voice`] are orthogonal and of one
+/// length, so each weight is the blend's cosine with that voice.
+fn blend(weights: &[(f32, Embedding)]) -> Embedding {
+    Embedding(
+        (0..Embedding::DIMENSION)
+            .map(|index| {
+                weights
+                    .iter()
+                    .map(|(weight, voice)| weight * voice.0[index])
+                    .sum()
+            })
+            .collect(),
+    )
+}
+
+/// Anna is confirmed on Speaker 1, Speaker 2 is unanswered. The re-run
+/// finds one voice that scores 0.66 with Anna's but is Speaker 2's: an
+/// answered row must not take a voice an unanswered one matches better.
+#[test]
+fn processing_again_does_not_let_an_answer_take_another_voices_match() {
+    let (store, meeting) = populated();
+    let anna_voice = common::speakers(meeting.id)[0].embedding.clone().unwrap();
+    let speaker_two = blend(&[(0.66, anna_voice.clone()), (0.75, common::other_voice())]);
+    let mut speakers = common::speakers(meeting.id);
+    speakers[1].embedding = Some(speaker_two.clone());
+    store.save_speaker(&speakers[1]).unwrap();
+    let anna = store.resolve_person("Anna", None, now()).unwrap();
+    store.confirm_speaker(speakers[0].id, &anna).unwrap();
+
+    let mut rerun = speakers.clone();
+    rerun[0].embedding = Some(speaker_two);
+    rerun[0].assignment = SpeakerAssignment::Unknown;
+    rerun[1].embedding = Some(third_voice());
+    store
+        .replace_transcript(&meeting, &common::segments(meeting.id, &rerun), &rerun)
+        .unwrap();
+    let stored = store.speakers(meeting.id).unwrap();
+    assert!(
+        stored
+            .iter()
+            .all(|speaker| !speaker.assignment.is_confirmed()),
+        "Anna's name is not handed to Speaker 2's voice"
+    );
+    assert_eq!(store.person(anna.id).unwrap().unwrap().sample_count, 0);
+}
+
+/// Two new voices score 0.80 and 0.75 with a confirmed one: too close to
+/// tell, so neither takes the name and both show for review.
+#[test]
+fn processing_again_leaves_a_near_tie_for_the_user() {
+    let (store, meeting) = populated();
+    let anna_voice = common::speakers(meeting.id)[0].embedding.clone().unwrap();
+    let speakers = common::speakers(meeting.id);
+    let anna = store.resolve_person("Anna", None, now()).unwrap();
+    store.confirm_speaker(speakers[0].id, &anna).unwrap();
+    store.set_speaker_dismissed(speakers[1].id, true).unwrap();
+
+    let mut rerun = speakers.clone();
+    rerun[0].embedding = Some(blend(&[
+        (0.80, anna_voice.clone()),
+        (0.60, common::other_voice()),
+    ]));
+    rerun[0].assignment = SpeakerAssignment::Unknown;
+    rerun[1].embedding = Some(blend(&[(0.75, anna_voice), (0.66, third_voice())]));
+    store
+        .replace_transcript(&meeting, &common::segments(meeting.id, &rerun), &rerun)
+        .unwrap();
+    let stored = store.speakers(meeting.id).unwrap();
+    assert!(
+        stored
+            .iter()
+            .all(|speaker| !speaker.assignment.is_confirmed() && !speaker.dismissed),
+        "a contested match carries nothing"
+    );
+
+    // A clear match still carries: the same voice again, nothing close.
+    let mut clear = rerun.clone();
+    clear[1].embedding = Some(third_voice());
+    store.confirm_speaker(stored[0].id, &anna).unwrap();
+    store
+        .replace_transcript(&meeting, &common::segments(meeting.id, &clear), &clear)
+        .unwrap();
+    assert_eq!(
+        store.speakers(meeting.id).unwrap()[0].assignment,
+        SpeakerAssignment::Confirmed { person_id: anna.id }
+    );
 }
 
 /// A database from before v6 opens with every speaker a person and no
