@@ -415,6 +415,7 @@ fn every_open_backfills_the_ledger_from_admitted_receipts() {
             transaction.execute_batch(
                 "DROP TABLE speakerSuggestionRejection;
                  ALTER TABLE speaker DROP COLUMN dismissed;
+                 ALTER TABLE speaker DROP COLUMN confirmedSimilarity;
                  DELETE FROM grdb_migrations WHERE identifier = 'v6';
                  DROP TABLE handoverAdmission;
                  DELETE FROM grdb_migrations WHERE identifier = 'v5';",
