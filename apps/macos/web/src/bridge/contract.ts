@@ -473,6 +473,11 @@ export const meetingDetailSnapshot = z
 					segmentIDs: z.array(uuid),
 					/** The turn's own audio plays (`transcript.playTurn`). */
 					isPlaying: z.boolean(),
+					/**
+					 * The turn's audio could not be played after
+					 * `transcript.playTurn` replied, until the next play or stop.
+					 */
+					playFailed: z.boolean(),
 				})
 				.strict(),
 		),

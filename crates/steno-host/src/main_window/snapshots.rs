@@ -317,6 +317,7 @@ pub fn turns(
                 text: segment.text.clone(),
                 segment_ids: vec![segment.id],
                 is_playing: false,
+                play_failed: false,
             }),
         }
     }
@@ -387,14 +388,26 @@ fn export_snapshot(detail: &MeetingDetailViewModel, zone: FixedOffset) -> Detail
     }
 }
 
+/// What the player is doing for the detail: the voice or turn that plays,
+/// and the turn whose audio could not be played after the host replied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Playback {
+    pub playing: Option<Uuid>,
+    pub failed_turn: Option<Uuid>,
+}
+
 /// The detail pane once its export has loaded; `None` before.
 #[must_use]
 pub fn detail_snapshot(
     detail: &MeetingDetailViewModel,
-    playing: Option<Uuid>,
+    playback: Playback,
     now: DateTime<Utc>,
     zone: FixedOffset,
 ) -> Option<MeetingDetailSnapshot> {
+    let Playback {
+        playing,
+        failed_turn,
+    } = playback;
     let export = detail.export.as_ref()?;
     let meeting = &export.meeting;
     let (retention_kind, deletes_at) = match detail.recording_status() {
@@ -467,6 +480,7 @@ pub fn detail_snapshot(
             .into_iter()
             .map(|turn| DetailTurn {
                 is_playing: playing == Some(turn.id),
+                play_failed: failed_turn == Some(turn.id),
                 ..turn
             })
             .collect(),

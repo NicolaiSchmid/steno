@@ -12,6 +12,9 @@ final class ClipPlayer: NSObject, AVAudioPlayerDelegate {
   private(set) var playingURL: URL?
   /// The turn playing, by its first segment id; nil while a clip plays.
   private(set) var playingTurn: UUID?
+  /// The turn whose audio stopped on a decode error after it started,
+  /// until the next play or stop.
+  private(set) var failedTurn: UUID?
   private var player: AVAudioPlayer?
   /// Stops a turn at the end of its span.
   private var endOfSpan: Task<Void, Never>?
@@ -50,6 +53,7 @@ final class ClipPlayer: NSObject, AVAudioPlayerDelegate {
   }
 
   func stop() {
+    failedTurn = nil
     endOfSpan?.cancel()
     endOfSpan = nil
     player?.stop()
@@ -73,6 +77,16 @@ final class ClipPlayer: NSObject, AVAudioPlayerDelegate {
       return player
     } catch {
       return nil
+    }
+  }
+
+  nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: (any Error)?) {
+    let failed = ObjectIdentifier(player)
+    Task { @MainActor in
+      guard self.current == failed else { return }
+      let turn = self.playingTurn
+      self.stop()
+      self.failedTurn = turn
     }
   }
 

@@ -887,6 +887,18 @@ impl SpeakersViewModel {
         self.playing_turn.is_some()
     }
 
+    /// The first segment of the turn [`SpeakersViewModel::play_turn`]
+    /// started whose span could not be cut or start after the host
+    /// replied, until the next play or stop.
+    #[must_use]
+    pub fn failed_turn(&self, player: &dyn ClipPlayer) -> Option<Uuid> {
+        let failed = player.failed()?;
+        self.playing_turn
+            .as_ref()
+            .filter(|(path, _)| *path == failed)
+            .map(|(_, turn)| *turn)
+    }
+
     /// What is playing: the voice (a row or a combined voice) whose clip
     /// plays, or the first segment of the turn whose span plays.
     #[must_use]

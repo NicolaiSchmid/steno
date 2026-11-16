@@ -84,9 +84,11 @@ enum MainWindowSnapshots {
   /// segment in time order; a segment without a speaker is always its own
   /// turn. `displayName` names a speaker id (nil reads as "Unknown" through
   /// `MeetingDetailViewModel.displayName(forSpeaker:)`). The turn whose
-  /// first segment is `playingTurn` reads as playing.
+  /// first segment is `playingTurn` reads as playing, `failedTurn` as
+  /// failed.
   static func turns(
-    _ segments: [TranscriptSegment], playingTurn: UUID? = nil, displayName: (UUID?) -> String
+    _ segments: [TranscriptSegment], playingTurn: UUID? = nil, failedTurn: UUID? = nil,
+    displayName: (UUID?) -> String
   ) -> [MeetingDetailSnapshot.Turn] {
     var turns: [MeetingDetailSnapshot.Turn] = []
     for segment in segments.sorted(by: { $0.start < $1.start }) {
@@ -101,7 +103,8 @@ enum MainWindowSnapshots {
           MeetingDetailSnapshot.Turn(
             id: segment.id, speakerID: segment.speakerID,
             speakerName: displayName(segment.speakerID), startSeconds: segment.start,
-            endSeconds: segment.end, text: segment.text, isPlaying: segment.id == playingTurn))
+            endSeconds: segment.end, text: segment.text, isPlaying: segment.id == playingTurn,
+            playFailed: segment.id == failedTurn))
       }
     }
     return turns
@@ -429,9 +432,9 @@ extension MeetingDetailSnapshot {
           id: section.id, heading: section.heading,
           bullets: section.bullets.map(MainWindowSnapshots.bullet))
       },
-      transcript: MainWindowSnapshots.turns(export.segments, playingTurn: speakers.playingTurn) {
-        detail.displayName(forSpeaker: $0)
-      },
+      transcript: MainWindowSnapshots.turns(
+        export.segments, playingTurn: speakers.playingTurn, failedTurn: speakers.failedTurn
+      ) { detail.displayName(forSpeaker: $0) },
       transcriptGeneration: detail.transcriptGeneration, tasks: tasks,
       decisions: export.decisions.map(\.text), notes: meeting.scratchpad,
       export: exportSnapshot,

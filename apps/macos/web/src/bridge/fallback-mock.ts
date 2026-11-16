@@ -109,6 +109,7 @@ export function createFallbackTransport(): BridgeTransport {
 				"transcript.playTurn": republish((now, params) =>
 					answerPlaying(now, {
 						turn: (params as { segmentIDs: string[] }).segmentIDs[0] ?? "",
+						fails: scenario === "speakers-play-failed",
 					}),
 				),
 				"speakers.play": republish((now, params) =>

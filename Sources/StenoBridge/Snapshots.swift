@@ -415,10 +415,13 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     public var segmentIDs: [UUID]
     /// The turn's own audio plays (`transcript.playTurn`).
     public var isPlaying: Bool
+    /// The turn's audio could not be played after `transcript.playTurn`
+    /// replied, until the next play or stop.
+    public var playFailed: Bool
 
     public init(
       id: UUID, speakerID: UUID?, speakerName: String, startSeconds: Double, endSeconds: Double,
-      text: String, segmentIDs: [UUID]? = nil, isPlaying: Bool = false
+      text: String, segmentIDs: [UUID]? = nil, isPlaying: Bool = false, playFailed: Bool = false
     ) {
       self.id = id
       self.speakerID = speakerID
@@ -428,6 +431,7 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
       self.text = text
       self.segmentIDs = segmentIDs ?? [id]
       self.isPlaying = isPlaying
+      self.playFailed = playFailed
     }
   }
 

@@ -893,13 +893,16 @@ const SPEAKER_ANSWER_SCENARIOS = new Set([
 ]);
 
 /**
- * The scenarios that bend how the host answers a move or a separate: the
- * move refused as stale (`speakers-move-stale`) and Separate again refused
- * (`speakers-separate-failed`). Each starts from `speakers-partly`.
+ * The scenarios that bend how the host answers a move, a separate or a
+ * paragraph's play: the move refused as stale (`speakers-move-stale`),
+ * Separate again refused (`speakers-separate-failed`), and a paragraph
+ * whose audio fails after the host replied (`speakers-play-failed`). Each
+ * starts from `speakers-partly`.
  */
 const MOVE_ANSWER_SCENARIOS = new Set([
 	"speakers-move-stale",
 	"speakers-separate-failed",
+	"speakers-play-failed",
 ]);
 
 /** The host's words for a refused pick (`SelectError::Store`). */
@@ -1597,13 +1600,17 @@ export function answerTurnSpeaker(
 /**
  * `transcript.playTurn`, `speakers.play` and `speakers.stop` outside the
  * app: the one sound playing is marked, the rest stop. `null` stops all.
+ * A turn that `fails` (`speakers-play-failed`) plays nothing and reads as
+ * failed, as the hosts publish a cut that failed after they replied; any
+ * play or stop clears that.
  */
 export function answerPlaying(
 	detail: MeetingDetailSnapshot,
-	playing: { turn: string } | { voice: string } | null,
+	playing: { turn: string; fails?: boolean } | { voice: string } | null,
 ): MeetingDetailSnapshot {
 	const voice = playing && "voice" in playing ? playing.voice : undefined;
 	const turn = playing && "turn" in playing ? playing.turn : undefined;
+	const fails = playing !== null && "fails" in playing && playing.fails;
 	return {
 		...detail,
 		speakers: detail.speakers.map((row) => ({
@@ -1616,7 +1623,8 @@ export function answerPlaying(
 		})),
 		transcript: detail.transcript.map((entry) => ({
 			...entry,
-			isPlaying: entry.segmentIDs[0] === turn,
+			isPlaying: !fails && entry.segmentIDs[0] === turn,
+			playFailed: fails === true && entry.segmentIDs[0] === turn,
 		})),
 	};
 }

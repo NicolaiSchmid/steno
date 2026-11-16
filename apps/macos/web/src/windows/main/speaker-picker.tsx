@@ -294,6 +294,12 @@ export function scopeLine(speaker: Speaker, paragraphs: number): string {
 }
 
 /**
+ * The red line when the turn's audio failed after the host replied
+ * (`turn.playFailed`): the cut or the player, which the reply could not say.
+ */
+export const PARAGRAPH_UNPLAYABLE = "The paragraph could not be played.";
+
+/**
  * The turn's own audio (`transcript.playTurn` over its segments, at most a
  * minute; `speakers.stop` stops it), "Paragraph" beside the icon. Once the
  * recording is gone it keeps the slot as a disabled play with a muted "No
@@ -706,13 +712,13 @@ export function SpeakerPicker({
 						turn={turn}
 					/>
 				</div>
-				{playFailure ? (
+				{playFailure || turn.playFailed ? (
 					<ResultLine
 						className="mt-1.5"
 						data-testid="turn-play-failure"
 						tone="destructive"
 					>
-						{playFailure}
+						{playFailure ?? PARAGRAPH_UNPLAYABLE}
 					</ResultLine>
 				) : null}
 				{saving !== null ? (
@@ -795,7 +801,6 @@ export function SpeakerPicker({
 							onCancel={() => change(false)}
 							onSubmit={(option, text) => void commit(option, text)}
 							optionsSpeakerID={asked}
-							placeholder={turn.speakerName}
 							scope={scope}
 							speaker={speaker}
 							speakers={speakers}

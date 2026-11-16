@@ -477,6 +477,32 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 		},
 	],
 	[
+		// Remove name on Nicolai, whom Speaker 5 is combined into: reopened,
+		// Speaker 5 still nests under the voice, with Separate again.
+		"separate-again-unnamed-root",
+		"scenario=speakers-partly",
+		async (page) => {
+			await openSpeakers(page);
+			await page
+				.getByTestId("speakers-section-people")
+				.getByRole("group")
+				.first()
+				.click();
+			await page.getByTestId("speaker-action-clear").click();
+			await page.keyboard.press("Escape");
+			await page.keyboard.press("Escape");
+			await expect(page.getByTestId("speakers-panel")).toBeHidden();
+			await openSpeakers(page);
+			const combined = page
+				.getByTestId("speakers-section-need")
+				.getByTestId(/^speakers-popover-combined-/);
+			await combined.scrollIntoViewIfNeeded();
+			await expect(
+				combined.getByRole("button", { name: /^Separate again/ }),
+			).toBeVisible();
+		},
+	],
+	[
 		"transcript",
 		"scenario=speakers-partly&tab=transcript",
 		async (page) => {
@@ -579,6 +605,18 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 			await expect(
 				page.getByRole("button", { name: "Stop this paragraph" }),
 			).toBeVisible();
+		},
+	],
+	[
+		// The cut failed after the host replied: the turn says so in red.
+		"transcript-play-failed",
+		"scenario=speakers-play-failed&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Nicolai").click();
+			await page.getByRole("button", { name: "Play this paragraph" }).click();
+			await expect(page.getByTestId("turn-play-failure")).toHaveText(
+				"The paragraph could not be played.",
+			);
 		},
 	],
 	[

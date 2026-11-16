@@ -79,6 +79,9 @@ struct Shared {
     directory: PathBuf,
     /// Told when a span started or ended on its own thread.
     changed: Mutex<Option<Changed>>,
+    /// The span of the current generation that could not be cut or start,
+    /// cleared by every play and every stop.
+    failed: Mutex<Option<PathBuf>>,
     /// Cuts stopped part-way by a play or a stop, for the tests.
     #[cfg(test)]
     cancelled_cuts: std::sync::atomic::AtomicUsize,
@@ -91,6 +94,7 @@ impl Shared {
         let mut generation = lock(&self.generation);
         *generation += 1;
         let current = *generation;
+        *lock(&self.failed) = None;
         end(&self.slot);
         (generation, current)
     }
@@ -174,6 +178,15 @@ impl Shared {
         None
     }
 
+    /// Keeps `span` as the failed one while `generation` is current, under
+    /// the generation's lock, so a play or stop since is never marked.
+    fn fail(&self, generation: u64, span: &Path) {
+        let current = lock(&self.generation);
+        if *current == generation {
+            *lock(&self.failed) = Some(span.to_owned());
+        }
+    }
+
     /// The span thread's body: cuts `start..end` of `recording` to `span`
     /// while `generation` is current, plays it, and waits for it to end so
     /// its file goes at once.
@@ -193,6 +206,7 @@ impl Shared {
             Err(error) => {
                 tracing::warn!(%error, "a turn's audio could not be cut from the recording");
                 remove(span);
+                self.fail(generation, span);
                 self.changed();
                 return;
             }
@@ -200,7 +214,11 @@ impl Shared {
         let started = {
             let current = lock(&self.generation);
             if *current == generation {
-                self.start(span, true)
+                let started = self.start(span, true);
+                if !started {
+                    *lock(&self.failed) = Some(span.to_owned());
+                }
+                started
             } else {
                 remove(span);
                 return;
@@ -242,6 +260,7 @@ impl ProcessClipPlayer {
                 generation: Mutex::new(0),
                 directory,
                 changed: Mutex::new(None),
+                failed: Mutex::new(None),
                 #[cfg(test)]
                 cancelled_cuts: std::sync::atomic::AtomicUsize::new(0),
             }),
@@ -337,7 +356,11 @@ fn check_private(directory: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The per-user cache folder is this user's already.
+/// The per-user cache folder is this user's already: on Windows it lives
+/// under `%LOCALAPPDATA%`, whose ACL grants only this user (and SYSTEM and
+/// the administrators), so a directory there is private without the Unix
+/// owner and mode checks. Only that it is a real folder, not a link
+/// elsewhere, is checked.
 #[cfg(not(unix))]
 fn check_private(directory: &Path) -> std::io::Result<()> {
     if std::fs::symlink_metadata(directory)?.file_type().is_dir() {
@@ -428,6 +451,10 @@ impl ClipPlayer for ProcessClipPlayer {
     /// The clip under way; a span still being cut is not playing yet.
     fn playing(&self) -> Option<PathBuf> {
         self.shared.playing()
+    }
+
+    fn failed(&self) -> Option<PathBuf> {
+        lock(&self.shared.failed).clone()
     }
 }
 
@@ -607,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn a_span_that_fails_leaves_no_file() {
+    fn a_span_that_fails_leaves_no_file_and_is_kept_as_failed() {
         let fixture = Fixture::new();
         // The player does not start.
         let player = fixture.player(missing);
@@ -619,6 +646,7 @@ mod tests {
         wait_until("the failure reported", || *lock(&changes) >= 1);
         assert!(!span.exists());
         assert_eq!(player.playing(), None);
+        assert_eq!(player.failed(), Some(span), "the failure is kept");
 
         // The recording does not decode.
         let broken = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
@@ -627,10 +655,13 @@ mod tests {
         let changes = Arc::new(Mutex::new(0usize));
         let counted = changes.clone();
         player.on_change(move || *lock(&counted) += 1);
-        player.play_span(broken.path(), 0.0, 0.5).unwrap();
+        let span = player.play_span(broken.path(), 0.0, 0.5).unwrap();
         wait_until("the failure reported", || *lock(&changes) >= 1);
         assert_eq!(fixture.files(), Vec::<PathBuf>::new());
         assert_eq!(player.playing(), None);
+        assert_eq!(player.failed(), Some(span));
+        player.stop();
+        assert_eq!(player.failed(), None, "a stop clears it");
     }
 
     /// A long recording, so the cut is still under way when the stop or

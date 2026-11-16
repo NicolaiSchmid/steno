@@ -340,4 +340,6 @@ final class SpeakersViewModel {
 
   /// The turn whose audio plays, by the first segment id it was played with.
   var playingTurn: UUID? { player.playingTurn }
+  /// The turn whose audio failed after it started (`ClipPlayer.failedTurn`).
+  var failedTurn: UUID? { player.failedTurn }
 }

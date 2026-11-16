@@ -258,6 +258,35 @@ fn a_turn_plays_its_own_span_capped_at_a_minute() {
     );
 }
 
+/// A paragraph whose audio fails after the host replied (the cut or the
+/// player) reads as failed in the snapshot until the next play or stop.
+#[test]
+fn a_turn_that_fails_after_the_reply_reads_as_failed() {
+    let harness = sample();
+    let turn = detail(&harness)["transcript"][0].clone();
+    let play = || {
+        harness
+            .host
+            .transcript_play_turn(PlayTurnParams {
+                meeting_id: uuid(MEETING),
+                segment_ids: turn_segments(&turn).iter().map(|s| s.id).collect(),
+            })
+            .unwrap();
+    };
+    play();
+    assert_eq!(detail(&harness)["transcript"][0]["playFailed"], false);
+    harness.fakes.clip_player.fail();
+    let failed = detail(&harness);
+    assert_eq!(failed["transcript"][0]["isPlaying"], false);
+    assert_eq!(failed["transcript"][0]["playFailed"], true);
+    assert_eq!(failed["transcript"][1]["playFailed"], false);
+
+    harness.host.speakers_stop().unwrap();
+    assert_eq!(detail(&harness)["transcript"][0]["playFailed"], false);
+    play();
+    assert_eq!(detail(&harness)["transcript"][0]["playFailed"], false);
+}
+
 #[test]
 fn no_turn_plays_once_the_recording_is_gone() {
     let harness = sample();

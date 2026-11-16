@@ -454,6 +454,22 @@ describe("a paragraph's panel", () => {
 		expect(callsTo(harness.transport, "speakers.stop")).toHaveLength(1);
 	});
 
+	it("says in red when the paragraph's audio failed after the host replied", async () => {
+		const { snapshot, republish, turnOf, openTurn } = await transcript();
+		const turn = turnOf(NICOLAI);
+		await openTurn(turn);
+		expect(screen.queryByTestId("turn-play-failure")).toBeNull();
+		republish({
+			...snapshot,
+			transcript: snapshot.transcript.map((entry) =>
+				entry.id === turn.id ? { ...entry, playFailed: true } : entry,
+			),
+		});
+		expect(screen.getByTestId("turn-play-failure")).toHaveTextContent(
+			"The paragraph could not be played.",
+		);
+	});
+
 	it("says the recording is gone where the paragraph's play would be", async () => {
 		const { user, harness, turnOf, openTurn } = await transcript(
 			"speakers-no-recording",

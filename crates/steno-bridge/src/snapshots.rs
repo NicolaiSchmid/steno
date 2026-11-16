@@ -386,6 +386,10 @@ pub struct DetailTurn {
     pub segment_ids: Vec<Uuid>,
     /// The turn's own audio plays (`transcript.playTurn`).
     pub is_playing: bool,
+    /// The turn's audio could not be played after `transcript.playTurn`
+    /// replied (the recording would not cut or the player would not start),
+    /// until the next play or stop.
+    pub play_failed: bool,
 }
 
 pub use steno_core::TaskPriority;

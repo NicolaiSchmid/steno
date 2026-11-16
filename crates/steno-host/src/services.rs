@@ -513,6 +513,10 @@ pub trait ClipPlayer: Send + Sync {
     fn play_span(&self, recording: &Path, start: f64, end: f64) -> Option<PathBuf>;
     fn stop(&self);
     fn playing(&self) -> Option<PathBuf>;
+    /// The span [`ClipPlayer::play_span`] returned that could not be cut
+    /// or could not start after it returned, until the next play or stop:
+    /// the page shows the failure on that paragraph.
+    fn failed(&self) -> Option<PathBuf>;
 }
 
 /// The file manager, the default browser and the shell's windows.

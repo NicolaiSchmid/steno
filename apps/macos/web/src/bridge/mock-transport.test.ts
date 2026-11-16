@@ -181,6 +181,20 @@ describe("speaker naming outside the app", () => {
 		).toBe(false);
 	});
 
+	it("marks a paragraph whose audio failed, until the next play or stop", async () => {
+		const before = await detail("speakers-play-failed");
+		const [first] = before.transcript;
+		if (!first) throw new Error("no turn");
+		const failed = answerPlaying(before, { turn: first.id, fails: true });
+		expect(failed.transcript.map((turn) => turn.playFailed)).toEqual(
+			before.transcript.map((turn) => turn.id === first.id),
+		);
+		expect(failed.transcript.some((turn) => turn.isPlaying)).toBe(false);
+		expect(
+			answerPlaying(failed, null).transcript.some((turn) => turn.playFailed),
+		).toBe(false);
+	});
+
 	it("keeps every speaker state valid and every turn's segments its own", async () => {
 		const { meetingDetailSnapshot } = await import("./contract");
 		for (const scenario of [

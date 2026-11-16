@@ -202,6 +202,8 @@ struct Inner {
     /// The clip playing at the last pass, so the detail republishes once it
     /// ends.
     playing_clip: Option<PathBuf>,
+    /// The span the player last could not play, published with the detail.
+    failed_clip: Option<PathBuf>,
     general: GeneralSettingsViewModel,
     audio: AudioSettingsViewModel,
     speech: SpeechSettingsViewModel,
@@ -552,6 +554,7 @@ impl Host {
                 progress,
                 reviews: BTreeSet::new(),
                 playing_clip: None,
+                failed_clip: None,
                 general,
                 audio,
                 speech,
@@ -718,17 +721,17 @@ impl Host {
             BridgeTopic::MeetingDetail => {
                 self.sync_detail(inner);
                 self.follow_key_withheld(inner);
-                let playing = inner
-                    .detail
-                    .as_ref()
-                    .and_then(|detail| detail.speakers.playing(&*self.shared.services.clip_player));
+                let player = &*self.shared.services.clip_player;
                 inner
                     .detail
                     .as_ref()
                     .and_then(|detail| {
                         main_snapshots::detail_snapshot(
                             detail,
-                            playing,
+                            main_snapshots::Playback {
+                                playing: detail.speakers.playing(player),
+                                failed_turn: detail.speakers.failed_turn(player),
+                            },
                             now,
                             self.shared.config.zone,
                         )
@@ -973,9 +976,11 @@ impl Host {
             .phones
             .refresh_after_pairing(&self.shared.services, now);
         inner.publisher.schedule(BridgeTopic::SettingsPhone);
-        let playing = self.shared.services.clip_player.playing();
-        if playing != inner.playing_clip {
+        let player = &self.shared.services.clip_player;
+        let (playing, failed) = (player.playing(), player.failed());
+        if playing != inner.playing_clip || failed != inner.failed_clip {
             inner.playing_clip = playing;
+            inner.failed_clip = failed;
             inner.publisher.schedule(BridgeTopic::MeetingDetail);
         }
         if self.shared.services.recorder.status().state == RecordingState::Idle {
