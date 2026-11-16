@@ -415,7 +415,7 @@ describe("the speakers panel", () => {
 		]);
 	});
 
-	it("separates with S on the row, and says why in red when it cannot", async () => {
+	it("separates with S on the row, and says why in red, without Retry, when its paragraphs moved", async () => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
 		const { user, harness } = await open("", {
 			"speakers.separate": () => {
@@ -436,6 +436,22 @@ describe("the speakers panel", () => {
 		expect(failure).toHaveTextContent(
 			"Its paragraphs moved since. Nothing to separate.",
 		);
+		expect(within(failure).queryByRole("button", { name: "Retry" })).toBeNull();
+		expect(callsTo(harness.transport, "speakers.separate")).toHaveLength(1);
+	});
+
+	it("offers Retry when Separate again failed for a passing reason", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const { user, harness } = await open("", {
+			"speakers.separate": new Error("database is locked"),
+		});
+		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
+		await user.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}");
+		await user.keyboard("s");
+		const failure = await screen.findByTestId(
+			`speakers-popover-failure-${COMBINED}`,
+		);
+		expect(failure).toHaveTextContent("database is locked");
 		await user.click(within(failure).getByRole("button", { name: "Retry" }));
 		await vi.waitFor(() =>
 			expect(callsTo(harness.transport, "speakers.separate")).toHaveLength(2),

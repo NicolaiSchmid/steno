@@ -90,7 +90,8 @@ export async function selectSpeaker(
 
 /**
  * A failed pick where it happened: the host's message in red, announced,
- * with Retry, which sends the same pick again.
+ * with Retry, which sends the same pick again; without `onRetry` (a refusal
+ * that trying again cannot change) the line has no Retry.
  */
 export function SelectFailure({
 	message,
@@ -99,21 +100,23 @@ export function SelectFailure({
 	className,
 }: {
 	message: string;
-	onRetry: () => void;
+	onRetry?: () => void;
 	testID?: string;
 	className?: string;
 }) {
 	return (
 		<ResultLine
 			actions={
-				<Button
-					data-testid={testID ? `${testID}-retry` : undefined}
-					onClick={onRetry}
-					size="xs"
-					variant="outline"
-				>
-					Retry
-				</Button>
+				onRetry ? (
+					<Button
+						data-testid={testID ? `${testID}-retry` : undefined}
+						onClick={onRetry}
+						size="xs"
+						variant="outline"
+					>
+						Retry
+					</Button>
+				) : undefined
 			}
 			className={className}
 			data-testid={testID}

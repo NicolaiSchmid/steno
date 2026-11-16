@@ -204,20 +204,29 @@ export function announceAction(speaker: Speaker, action: FieldAction) {
 	notify({ title });
 }
 
+/** A refused Separate again: the host's words, and whether to offer Retry. */
+export interface SeparateFailure {
+	message: string;
+	/** Refused as `stale` (its paragraphs moved since): Retry cannot help. */
+	stale: boolean;
+}
+
 /**
  * Undo after a combine and Separate again (`speakers.separate`): the voice
- * is its own again. Resolves with the failure's message, or null once the
- * host took it.
+ * is its own again. Resolves with the failure, or null once the host took it.
  */
 export async function sendSeparate(
 	client: ReturnType<typeof useBridge>,
 	speakerID: string,
-): Promise<string | null> {
+): Promise<SeparateFailure | null> {
 	try {
 		await client.call("speakers.separate", { speakerID });
 		return null;
 	} catch (cause) {
-		return failureMessage("speakers.separate", cause);
+		return {
+			message: failureMessage("speakers.separate", cause),
+			stale: cause instanceof BridgeError && cause.code === "stale",
+		};
 	}
 }
 
@@ -236,11 +245,11 @@ export function announceCombined(
 		action: {
 			label: "Undo",
 			onClick: () => {
-				void sendSeparate(client, speaker.id).then((message) => {
-					if (message !== null) {
+				void sendSeparate(client, speaker.id).then((failure) => {
+					if (failure !== null) {
 						notify({
 							title: `${who} is still combined with ${name}.`,
-							description: message,
+							description: failure.message,
 							tone: "destructive",
 						});
 					}

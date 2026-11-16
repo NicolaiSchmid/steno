@@ -167,8 +167,8 @@ interface Editing {
 
 interface Failure {
 	message: string;
-	/** Sends the same pick, No or action again. */
-	retry: () => void;
+	/** Sends the same pick, No or action again; none when that cannot help. */
+	retry?: () => void;
 	text: string;
 }
 
@@ -476,7 +476,7 @@ export function SpeakersPopover({
 		});
 	}
 
-	function fail(row: { id: string }, message: string, retry: () => void) {
+	function fail(row: { id: string }, message: string, retry?: () => void) {
 		setFailures((map) =>
 			new Map(map).set(row.id, { message, retry, text: "" }),
 		);
@@ -553,7 +553,8 @@ export function SpeakersPopover({
 	/**
 	 * Separate again (`speakers.separate`): "Saving" on the nested row, which
 	 * the host's next snapshot turns back into the voice's own row; the
-	 * result is announced, a failure is the red line with Retry.
+	 * result is announced, a failure is the red line, with Retry unless the
+	 * host refused it as `stale` (its paragraphs moved since).
 	 */
 	async function separate(voice: CombinedVoice) {
 		if (savingNow.current.has(voice.id)) {
@@ -568,7 +569,11 @@ export function SpeakersPopover({
 		if (failure === null) {
 			notify({ title: `${voice.clusterLabel} is its own voice again.` });
 		} else if (isOpen.current) {
-			fail(voice, failure, () => void separate(voice));
+			fail(
+				voice,
+				failure.message,
+				failure.stale ? undefined : () => void separate(voice),
+			);
 		}
 	}
 
@@ -720,7 +725,7 @@ export function SpeakersPopover({
 				onLeave={(to) => leaveNaming(speaker, to)}
 				onName={() => startNaming(speaker)}
 				onReject={() => void reject(speaker)}
-				onRetry={(failure) => failure.retry()}
+				onRetry={(failure) => failure.retry?.()}
 				onSubmit={(option, text) => void commit(speaker, option, text)}
 				onTab={(backward) => tabFrom(speaker, backward)}
 				person={person}
@@ -1089,7 +1094,7 @@ function PanelRow({
 		<SelectFailure
 			className="mt-1.5"
 			message={failure.message}
-			onRetry={() => onRetry(failure)}
+			onRetry={failure.retry ? () => onRetry(failure) : undefined}
 			testID={`speakers-popover-failure-${speaker.id}`}
 		/>
 	) : null;
