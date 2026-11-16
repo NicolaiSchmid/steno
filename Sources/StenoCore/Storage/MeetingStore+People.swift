@@ -264,7 +264,8 @@ extension MeetingStore {
   /// (`refreshVoice`), so a wrong name is taken back exactly. The sample
   /// clip stays while the meeting's master recording exists, so a confirmed
   /// speaker can still be heard; once the audio is gone the clip goes with
-  /// the confirmation.
+  /// the confirmation. Naming or combining the "me" speaker names the
+  /// meeting's "me" participant too, as Rust's `confirm_speaker` does.
   public func confirm(speakerID: UUID, person: Person) async throws {
     let clipsToRemove: [URL] = try await writer.write { db in
       guard var speaker = try Self.speakerRow(speakerID, db)?.speaker else {
@@ -281,6 +282,9 @@ extension MeetingStore {
         var personIDs = try Self.mergeSpeakerRows(
           speakerID, into: owner.id, meetingID: speaker.meetingID, db)
         personIDs.insert(person.id)
+        if speakerID == LaneMerger.meSpeakerID(meetingID: speaker.meetingID) {
+          try Self.nameMeParticipant(meetingID: speaker.meetingID, person: person, db)
+        }
         for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
         return []
       }
@@ -314,6 +318,9 @@ extension MeetingStore {
       var clips: [URL] = []
       if let clip = try Self.dropClipWhenAudioIsGone(speakerID: speakerID, db) {
         clips.append(clip)
+      }
+      if speakerID == LaneMerger.meSpeakerID(meetingID: speaker.meetingID) {
+        try Self.nameMeParticipant(meetingID: speaker.meetingID, person: person, db)
       }
       for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
       return clips
@@ -544,9 +551,8 @@ extension MeetingStore {
   }
 
   /// The meeting's "me" participant back to unnamed: no person, named
-  /// `LaneMerger.meSpeakerLabel`. `confirm` leaves participants alone in
-  /// this build; the Rust host names it when the user names the "me" voice,
-  /// so a shared database reads the same in both.
+  /// `LaneMerger.meSpeakerLabel`, as `confirm` named it, the same as the
+  /// Rust store.
   static func unnameMeParticipant(meetingID: UUID, _ db: Database) throws {
     try db.execute(
       sql:
@@ -554,8 +560,9 @@ extension MeetingStore {
       arguments: [LaneMerger.meSpeakerLabel, meetingID.uuidString, ParticipantRole.me.rawValue])
   }
 
-  /// The meeting's "me" participant takes `person`'s id and name;
-  /// `separateSpeaker(_:)` for a "me" speaker confirmed as them.
+  /// The meeting's "me" participant takes `person`'s id and name: `confirm`
+  /// naming or combining the "me" speaker, and `separateSpeaker(_:)` for a
+  /// "me" speaker confirmed as them.
   static func nameMeParticipant(meetingID: UUID, person: Person, _ db: Database) throws {
     try db.execute(
       sql:

@@ -312,6 +312,60 @@ fn processing_again_raises_the_generation_and_drops_combines() {
     ));
 }
 
+/// A combined voice competes as a confirmation of its root's person, so
+/// the combine comes back as two voices of that person.
+#[test]
+fn processing_again_keeps_a_combine_as_a_plain_confirmation() {
+    let m = Meeting3::new();
+    let mut voices = m.speakers.clone();
+    voices[1].embedding = Some(common::other_voice());
+    voices[2].embedding = Some(Embedding(
+        (0..Embedding::DIMENSION)
+            .map(|index| {
+                if index < Embedding::DIMENSION / 2 {
+                    0.25
+                } else {
+                    -0.25
+                }
+            })
+            .collect(),
+    ));
+    for voice in &voices {
+        m.store.save_speaker(voice).unwrap();
+    }
+    let anna = m.anna();
+    m.store.confirm_speaker(voices[1].id, &anna).unwrap();
+    m.store.confirm_speaker(voices[2].id, &anna).unwrap();
+    assert_eq!(m.store.merged_speakers(m.meeting.id).unwrap().len(), 1);
+
+    let rerun: Vec<Speaker> = voices
+        .iter()
+        .map(|voice| Speaker {
+            assignment: SpeakerAssignment::Unknown,
+            ..voice.clone()
+        })
+        .collect();
+    let segments = m.store.segments(m.meeting.id).unwrap();
+    m.store
+        .replace_transcript(&m.meeting, &segments, &rerun)
+        .unwrap();
+    assert_eq!(
+        m.store.merged_speakers(m.meeting.id).unwrap(),
+        Vec::<MergedSpeaker>::new()
+    );
+    let stored = m.store.speakers(m.meeting.id).unwrap();
+    for voice in &voices[1..] {
+        assert_eq!(
+            stored
+                .iter()
+                .find(|speaker| speaker.id == voice.id)
+                .unwrap()
+                .assignment,
+            SpeakerAssignment::Confirmed { person_id: anna.id }
+        );
+    }
+}
+
 /// Every column of every row of the tables a combine could touch.
 fn snapshot(store: &Store) -> Vec<Vec<String>> {
     store
@@ -573,5 +627,49 @@ fn a_v6_database_has_no_combined_voices() {
     assert_eq!(
         store.segments(meeting_id).unwrap()[0].speaker_id,
         Some(speaker_id)
+    );
+}
+
+/// Moving the "me" speaker's only paragraph away leaves the Me row: a lane
+/// is never pruned.
+#[test]
+fn a_move_never_prunes_the_me_row() {
+    let (store, meeting) = populated();
+    let me = me_speaker_id(meeting.id);
+    let mut speakers = common::speakers(meeting.id);
+    speakers.push(Speaker {
+        id: me,
+        meeting_id: meeting.id,
+        cluster_label: "Me".to_owned(),
+        assignment: SpeakerAssignment::Unknown,
+        embedding: None,
+        sample_clip_range: None,
+        sample_clip_url: None,
+        cluster_confidence: 1.0,
+        dismissed: false,
+    });
+    let segments = vec![
+        segment(meeting.id, "a", 0.0, Some(speakers[0].id)),
+        segment(meeting.id, "m", 5.0, Some(me)),
+    ];
+    store
+        .replace_transcript(&meeting, &segments, &speakers)
+        .unwrap();
+    let jerome = store.person(uuid(PERSON_ID)).unwrap().unwrap();
+    let generation = store.transcript_generation(meeting.id).unwrap();
+    store
+        .move_turn(
+            meeting.id,
+            generation,
+            &[(derived_uuid(meeting.id, "m"), Some(me))],
+            &jerome,
+        )
+        .unwrap();
+    assert!(
+        store
+            .speakers(meeting.id)
+            .unwrap()
+            .iter()
+            .any(|speaker| speaker.id == me)
     );
 }

@@ -66,6 +66,25 @@ import Testing
     #expect(try await store.transcriptGeneration(meetingID: Self.meetingID) == 1)
   }
 
+  /// Moving the "me" speaker's only paragraph away leaves the Me row: a
+  /// lane is never pruned. Rust: `a_move_never_prunes_the_me_row`.
+  @Test func aMoveNeverPrunesTheMeRow() async throws {
+    let meID = LaneMerger.meSpeakerID(meetingID: Self.meetingID)
+    var segments = SampleData.segments()
+    segments[2].speakerID = meID
+    let store = try await Self.seeded(
+      speakers: SampleData.speakers()
+        + [LaneMerger.meSpeaker(meetingID: Self.meetingID, personID: nil)],
+      segments: segments)
+    let nicolai = try #require(try await store.person(id: SampleData.personNicolaiID))
+
+    _ = try await store.moveTurn(
+      meetingID: Self.meetingID, generation: 1, segments: Self.move([42], shown: meID),
+      to: nicolai)
+
+    #expect(try await store.speakers(meetingID: Self.meetingID).contains { $0.id == meID })
+  }
+
   /// Anna has no voice here: the move makes one, the next free label after
   /// every row's, the combined Speaker 2's included.
   @Test func aParagraphMovesToANewVoiceForAPersonWithoutOne() async throws {
@@ -297,10 +316,10 @@ import Testing
     #expect(
       try await store.person(id: nicolai.id)?.sampleCount == 2,
       "a combined row counts whatever its own assignment")
-    var named = participant
-    named.personID = nicolai.id
-    named.displayName = nicolai.displayName
-    try await store.save(named)
+    let named = try #require(
+      try await store.participants(meetingID: Self.meetingID).first { $0.role == .me })
+    #expect(named.personID == nicolai.id, "combining Me names the Me participant")
+    #expect(named.displayName == nicolai.displayName)
 
     try await store.separateSpeaker(meID)
 
@@ -407,7 +426,7 @@ import Testing
 
   // MARK: - Processing generation
 
-  @Test func processingAgainDropsMergesAndRaisesTheGeneration() async throws {
+  @Test func processingAgainKeepsACombineAsAConfirmationAndRaisesTheGeneration() async throws {
     let store = try await Self.seeded()
     #expect(try await store.transcriptGeneration(meetingID: Self.meetingID) == 1)
     try await store.mergeSpeakers(Self.two, into: Self.one, meetingID: Self.meetingID)
@@ -417,7 +436,10 @@ import Testing
 
     #expect(try await store.transcriptGeneration(meetingID: Self.meetingID) == 2)
     #expect(try await store.mergedSpeakers(meetingID: Self.meetingID).isEmpty)
-    #expect(try await store.speakers(meetingID: Self.meetingID) == SampleData.speakers())
+    // The combine comes back as a plain confirmation of Nicolai.
+    var expected = SampleData.speakers()
+    expected[1].assignment = .confirmed(personID: SampleData.personNicolaiID)
+    #expect(try await store.speakers(meetingID: Self.meetingID) == expected)
     await #expect(throws: MeetingStoreError.staleTranscript) {
       try await store.moveTurn(
         meetingID: Self.meetingID, generation: 1, segments: Self.move([41], shown: Self.two),

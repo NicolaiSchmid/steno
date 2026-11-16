@@ -231,7 +231,7 @@ impl Store {
                     params![DbUuid(destination), DbUuid(*id), DbUuid(meeting_id)],
                 )?;
             }
-            people::prune_emptied_speakers(transaction, left)
+            people::prune_emptied_speakers(transaction, left, destination)
         })
     }
 }

@@ -12,7 +12,7 @@ use super::{
 };
 use crate::model::{
     Embedding, Participant, ParticipantRole, Person, Speaker, SpeakerAssignment,
-    SpeakerAssignmentKind, SpeakerNameSuggestion, TimeRange, me_speaker_id,
+    SpeakerAssignmentKind, SpeakerNameSuggestion, TimeRange, me_speaker_id, room_speaker_id,
 };
 use crate::paths::file_url_path;
 
@@ -672,11 +672,13 @@ fn owns_segments(connection: &Connection, speaker_id: Uuid) -> Result<bool> {
 /// `mergedInto`, that no segment carries and no row is combined into: a
 /// voice a paragraph move left empty. Recomputes the voice of every person
 /// a deleted row counted for (its own, and its root's for a combined row).
-/// Returns the deleted rows' clip URLs for removal once the transaction
+/// `keeping` (the move's destination) and the lane rows, the "me" speaker
+/// and the room row, are never deleted. Returns the deleted rows' clip URLs for removal once the transaction
 /// committed.
 pub(super) fn prune_emptied_speakers(
     connection: &Connection,
     candidates: BTreeSet<Uuid>,
+    keeping: Uuid,
 ) -> Result<Vec<String>> {
     let mut queue: Vec<Uuid> = candidates.into_iter().collect();
     let mut clips = Vec::new();
@@ -685,6 +687,14 @@ pub(super) fn prune_emptied_speakers(
         let Some(speaker) = fetch_speaker(connection, id)? else {
             continue;
         };
+        // The move's destination and the lanes (the "me" speaker, the room
+        // row of a run without diarization) stay, segments or not.
+        if id == keeping
+            || id == me_speaker_id(speaker.meeting_id)
+            || id == room_speaker_id(speaker.meeting_id)
+        {
+            continue;
+        }
         let used: bool = connection.query_row(
             "SELECT EXISTS (SELECT 1 FROM transcriptSegment WHERE speakerID = ?1) \
              OR EXISTS (SELECT 1 FROM speaker WHERE mergedInto = ?1)",

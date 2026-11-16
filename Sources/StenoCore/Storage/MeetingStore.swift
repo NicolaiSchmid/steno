@@ -353,10 +353,24 @@ public final class MeetingStore: Sendable {
         .filter(SpeakerNameSuggestionRow.Columns.meetingID == meetingID.uuidString)
         .fetchAll(db).map(\.suggestion)
       let rejections = try Self.rejectionRows(meetingID: meetingID, db)
+      // A voice combined into another competes too, as a plain
+      // confirmation of its root's person, so a combine survives Process
+      // again as two voices of that person.
+      let combined: [Speaker] = try Self.mergedSpeakers(meetingID: meetingID, db).compactMap {
+        merged in
+        guard let root = replaced.first(where: { $0.id == merged.root }),
+          case .confirmed(let personID) = root.assignment
+        else { return nil }
+        var speaker = merged.speaker
+        speaker.assignment = .confirmed(personID: personID)
+        speaker.dismissed = false
+        return speaker
+      }
       // New id -> the stored row whose answers it takes. Every stored row
       // competes; only an unambiguous pair carries anything.
       var earlier: [UUID: Speaker] = [:]
-      for (old, new) in Self.sameVoices(meetingID: meetingID, earlier: replaced, speakers: speakers)
+      for (old, new) in Self.sameVoices(
+        meetingID: meetingID, earlier: replaced + combined, speakers: speakers)
       {
         earlier[new] = old
       }

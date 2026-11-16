@@ -477,7 +477,25 @@ impl Store {
             // user's Noes.
             let suggestions = people::name_suggestions_of_meeting(transaction, meeting.id)?;
             let rejections = people::suggestion_rejections_of_meeting(transaction, meeting.id)?;
-            let stored: Vec<&Speaker> = replaced.iter().collect();
+            // A voice combined into another competes too, as a plain
+            // confirmation of its root's person, so a combine survives
+            // Process again as two voices of that person.
+            let combined: Vec<Speaker> =
+                people::merged_speakers_of_meeting(transaction, meeting.id)?
+                    .into_iter()
+                    .filter_map(|merged| {
+                        let root = replaced.iter().find(|root| root.id == merged.root)?;
+                        let SpeakerAssignment::Confirmed { person_id } = root.assignment else {
+                            return None;
+                        };
+                        Some(Speaker {
+                            assignment: SpeakerAssignment::Confirmed { person_id },
+                            dismissed: false,
+                            ..merged.speaker
+                        })
+                    })
+                    .collect();
+            let stored: Vec<&Speaker> = replaced.iter().chain(&combined).collect();
             // New id -> the stored row whose answers it takes. Every stored
             // row competes; only an unambiguous pair carries anything.
             let earlier: BTreeMap<Uuid, &Speaker> = same_voices(meeting.id, &stored, speakers)

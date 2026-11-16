@@ -218,7 +218,8 @@ extension MeetingStore {
 
   /// Deletes each candidate, and then the voice each deleted one was
   /// combined into, while no segment carries it and no speaker is combined
-  /// into it; `keeping` is never deleted.
+  /// into it; `keeping` and the lane rows (the "me" speaker, the room row)
+  /// are never deleted. Rust: `prune_emptied_speakers`.
   static func pruneEmptiedSpeakers(_ candidates: [UUID], keeping: UUID, _ db: Database) throws
     -> PrunedSpeakers
   {
@@ -227,6 +228,14 @@ extension MeetingStore {
     while !queue.isEmpty {
       let candidate = queue.removeFirst()
       guard candidate != keeping, let row = try speakerRow(candidate, db) else { continue }
+      // The lanes (the "me" speaker, the Rust app's room row) stay,
+      // segments or not.
+      let meetingID = row.speaker.meetingID
+      if candidate == LaneMerger.meSpeakerID(meetingID: meetingID)
+        || candidate == UUID(derivedFrom: meetingID, salt: "speaker-room")
+      {
+        continue
+      }
       let inUse =
         try Bool.fetchOne(
           db,
