@@ -137,8 +137,11 @@ extension MeetingStore {
   }
 
   /// The row half of `mergeSpeakers`, inside a caller's transaction:
-  /// `source.mergedInto` becomes `target`'s root, and nothing else changes.
-  /// `source` keeps its segments, embedding, clip and range, confidence,
+  /// `source.mergedInto` becomes `target`'s root, and so does every row
+  /// combined into `source`, re-pointed in the same update, so a combined
+  /// row always points straight at a root. Nothing else changes. `source`
+  /// keeps its `confirmedSimilarity`, the score of its own answer: combining
+  /// records none. `source` keeps its segments, embedding, clip and range, confidence,
   /// assignment, dismissal, name suggestion and Noes, so separating is
   /// clearing the column; `target` keeps its own. Throws for a missing
   /// speaker or one from another meeting; a self-merge, or one into a voice
@@ -166,13 +169,10 @@ extension MeetingStore {
       personIDs.insert(personID)
     }
     try db.execute(
-      sql: "UPDATE speaker SET mergedInto = ? WHERE id = ?",
-      arguments: [root.uuidString, source.uuidString])
+      sql: "UPDATE speaker SET mergedInto = ? WHERE id = ? OR mergedInto = ?",
+      arguments: [root.uuidString, source.uuidString, source.uuidString])
     return personIDs
   }
-
-  /// The longest `mergedInto` chain a read follows.
-  static let mergeDepth = 64
 
   /// The voice `id` combined into, nil for a root or a missing row.
   static func mergedInto(_ id: UUID, _ db: Database) throws -> UUID? {
@@ -180,38 +180,23 @@ extension MeetingStore {
       db, sql: "SELECT mergedInto FROM speaker WHERE id = ?", arguments: [id.uuidString])
   }
 
-  /// The speaker `id` reads as: the end of its `mergedInto` chain, or `id`
-  /// itself. A dangling reference or a cycle stops where it breaks, after
-  /// at most `mergeDepth` steps. Rust: `root_of`.
+  /// The speaker `id` reads as: the voice it is combined into, or `id`
+  /// itself. Combining flattens (`mergeSpeakerRows`), so a combined row
+  /// always points at a root. Rust: `root_of`.
   static func rootOf(_ id: UUID, _ db: Database) throws -> UUID {
-    var current = id
-    for _ in 0..<mergeDepth {
-      guard let next = try mergedInto(current, db), next != id, try speakerRow(next, db) != nil
-      else { break }
-      current = next
-    }
-    return current
+    try mergedInto(id, db) ?? id
   }
 
-  /// Every speaker id of the meeting, merged ones included, mapped to the
-  /// id it reads as, by `rootOf`'s rule in one read.
+  /// Every combined speaker id of the meeting mapped to the root it reads
+  /// as; a root is not listed.
   static func speakerRoots(meetingID: UUID, _ db: Database) throws -> [UUID: UUID] {
     let rows = try Row.fetchAll(
-      db, sql: "SELECT id, mergedInto FROM speaker WHERE meetingID = ?",
+      db, sql: "SELECT id, mergedInto FROM speaker WHERE meetingID = ? AND mergedInto IS NOT NULL",
       arguments: [meetingID.uuidString])
-    var parent: [UUID: UUID?] = [:]
-    for row in rows {
-      guard let id = row["id"] as UUID? else { continue }
-      parent[id] = row["mergedInto"] as UUID?
-    }
     var roots: [UUID: UUID] = [:]
-    for id in parent.keys {
-      var current = id
-      for _ in 0..<mergeDepth {
-        guard let next = parent[current] ?? nil, next != id, parent[next] != nil else { break }
-        current = next
-      }
-      roots[id] = current
+    for row in rows {
+      guard let id = row["id"] as UUID?, let root = row["mergedInto"] as UUID? else { continue }
+      roots[id] = root
     }
     return roots
   }
@@ -264,8 +249,10 @@ extension MeetingStore {
   /// (`refreshVoice`), so a wrong name is taken back exactly. The sample
   /// clip stays while the meeting's master recording exists, so a confirmed
   /// speaker can still be heard; once the audio is gone the clip goes with
-  /// the confirmation. Naming or combining the "me" speaker names the
-  /// meeting's "me" participant too, as Rust's `confirm_speaker` does.
+  /// the confirmation. Naming, renaming or combining the voice the "me"
+  /// speaker reads as (the "me" speaker itself, or the voice it is combined
+  /// into) renames the meeting's "me" participant (`syncMeParticipant`), as
+  /// Rust's `confirm_speaker` does.
   public func confirm(speakerID: UUID, person: Person) async throws {
     let clipsToRemove: [URL] = try await writer.write { db in
       guard var speaker = try Self.speakerRow(speakerID, db)?.speaker else {
@@ -275,6 +262,9 @@ extension MeetingStore {
         try PersonRow(person).insert(db)
       }
       let confirmedAsPerson = speaker.assignment == .confirmed(personID: person.id)
+      // Naming, renaming or combining the voice the "me" speaker reads as
+      // renames the "me" participant.
+      let me = try Self.readsAsMe(meetingID: speaker.meetingID, speakerID: speakerID, db)
       if !confirmedAsPerson,
         let owner = try Self.owner(
           meetingID: speaker.meetingID, personID: person.id, except: speakerID, db)
@@ -282,9 +272,7 @@ extension MeetingStore {
         var personIDs = try Self.mergeSpeakerRows(
           speakerID, into: owner.id, meetingID: speaker.meetingID, db)
         personIDs.insert(person.id)
-        if speakerID == LaneMerger.meSpeakerID(meetingID: speaker.meetingID) {
-          try Self.nameMeParticipant(meetingID: speaker.meetingID, person: person, db)
-        }
+        if me { try Self.syncMeParticipant(meetingID: speaker.meetingID, db) }
         for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
         return []
       }
@@ -319,9 +307,7 @@ extension MeetingStore {
       if let clip = try Self.dropClipWhenAudioIsGone(speakerID: speakerID, db) {
         clips.append(clip)
       }
-      if speakerID == LaneMerger.meSpeakerID(meetingID: speaker.meetingID) {
-        try Self.nameMeParticipant(meetingID: speaker.meetingID, person: person, db)
-      }
+      if me { try Self.syncMeParticipant(meetingID: speaker.meetingID, db) }
       for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
       return clips
     }
@@ -351,8 +337,8 @@ extension MeetingStore {
   /// normalised mean of the newest `voiceWindow` embeddings by
   /// `meeting.startedAt`, then speaker id, `sampleCount` their number; nil
   /// and 0 without any. The speakers are the roots confirmed as the person
-  /// and not dismissed, plus every speaker combined into one of them at any
-  /// depth, whatever its own assignment or dismissal; a combined speaker
+  /// and not dismissed, plus every speaker combined into one of them,
+  /// whatever its own assignment or dismissal; a combined speaker
   /// never counts for its own assignment's person.
   /// Embeddings of another dimension than `Embedding.dimension` are skipped.
   /// A missing person is ignored.
@@ -361,16 +347,11 @@ extension MeetingStore {
     let rows = try SpeakerRow.fetchAll(
       db,
       sql: """
-        WITH RECURSIVE voice(id, depth) AS (
-          SELECT id, 0 FROM speaker
-          WHERE personID = ? AND assignment = ? AND dismissed = 0 AND mergedInto IS NULL
-          UNION ALL
-          SELECT speaker.id, voice.depth + 1 FROM speaker
-          JOIN voice ON speaker.mergedInto = voice.id WHERE voice.depth < \(mergeDepth))
-        SELECT speaker.* FROM voice
-        JOIN speaker ON speaker.id = voice.id
+        SELECT speaker.* FROM speaker
+        JOIN speaker AS root ON root.id = COALESCE(speaker.mergedInto, speaker.id)
         JOIN meeting ON meeting.id = speaker.meetingID
-        WHERE speaker.embedding IS NOT NULL
+        WHERE root.personID = ? AND root.assignment = ? AND root.dismissed = 0
+          AND root.mergedInto IS NULL AND speaker.embedding IS NOT NULL
         ORDER BY meeting.startedAt DESC, speaker.id
         """,
       arguments: [personID.uuidString, SpeakerAssignment.Kind.confirmed.rawValue])
@@ -496,7 +477,8 @@ extension MeetingStore {
 
   /// The speaker back to `.unknown`, inside a caller's transaction: the
   /// voice of the person it was confirmed to is recomputed without it, and
-  /// a "me" speaker's participant is unnamed again. A speaker that is
+  /// when the "me" speaker reads as it, the "me" participant follows
+  /// (`syncMeParticipant`). A speaker that is
   /// already unknown is left alone. Returns the speaker as written.
   static func unassignSpeaker(_ speakerID: UUID, _ db: Database) throws -> Speaker {
     guard var speaker = try speakerRow(speakerID, db)?.speaker else {
@@ -509,8 +491,8 @@ extension MeetingStore {
     if case .confirmed(let personID) = previous {
       try setConfirmedSimilarity(nil, speakerID: speakerID, db)
       try refreshVoice(personID: personID, db)
-      if speakerID == LaneMerger.meSpeakerID(meetingID: speaker.meetingID) {
-        try unnameMeParticipant(meetingID: speaker.meetingID, db)
+      if try readsAsMe(meetingID: speaker.meetingID, speakerID: speakerID, db) {
+        try syncMeParticipant(meetingID: speaker.meetingID, db)
       }
     }
     return speaker
@@ -560,9 +542,8 @@ extension MeetingStore {
       arguments: [LaneMerger.meSpeakerLabel, meetingID.uuidString, ParticipantRole.me.rawValue])
   }
 
-  /// The meeting's "me" participant takes `person`'s id and name: `confirm`
-  /// naming or combining the "me" speaker, and `separateSpeaker(_:)` for a
-  /// "me" speaker confirmed as them.
+  /// The meeting's "me" participant takes `person`'s id and name
+  /// (`syncMeParticipant`).
   static func nameMeParticipant(meetingID: UUID, person: Person, _ db: Database) throws {
     try db.execute(
       sql:
@@ -571,6 +552,32 @@ extension MeetingStore {
         person.id.uuidString, person.displayName, meetingID.uuidString,
         ParticipantRole.me.rawValue,
       ])
+  }
+
+  /// Whether the meeting's "me" speaker reads as `speakerID`: it is the
+  /// "me" speaker, or the voice the "me" speaker is combined into. Rust:
+  /// `reads_as_me`.
+  static func readsAsMe(meetingID: UUID, speakerID: UUID, _ db: Database) throws -> Bool {
+    let me = LaneMerger.meSpeakerID(meetingID: meetingID)
+    return try speakerID == me || rootOf(me, db) == speakerID
+  }
+
+  /// The meeting's "me" participant follows the voice the "me" speaker
+  /// reads as: named after the person that voice is confirmed as, else
+  /// unnamed. So renaming, removing the name of, dismissing or combining
+  /// the voice a combined "me" speaker joined renames the participant too.
+  /// A meeting without a "me" speaker is left alone. Rust:
+  /// `sync_me_participant`.
+  static func syncMeParticipant(meetingID: UUID, _ db: Database) throws {
+    let me = LaneMerger.meSpeakerID(meetingID: meetingID)
+    guard try speakerRow(me, db) != nil else { return }
+    if let personID = try speakerRow(try rootOf(me, db), db)?.speaker.confirmedPersonID,
+      let person = try personRow(personID, db)?.person
+    {
+      try nameMeParticipant(meetingID: meetingID, person: person, db)
+    } else {
+      try unnameMeParticipant(meetingID: meetingID, db)
+    }
   }
 
   /// The meeting's Noes, by speaker id then person id.

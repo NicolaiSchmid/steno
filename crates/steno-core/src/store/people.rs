@@ -151,10 +151,6 @@ fn fetch_speaker(connection: &Connection, id: Uuid) -> Result<Option<Speaker>> {
         .optional()?)
 }
 
-/// How far [`root_of`] follows `mergedInto` (the recursive reads stop at
-/// the same depth): a longer chain, or a cycle written by hand, stops there.
-const MERGE_DEPTH: usize = 64;
-
 /// The voice a combined row joined: `None` for a root or a missing row.
 fn merged_into(connection: &Connection, id: Uuid) -> Result<Option<Uuid>> {
     Ok(connection
@@ -167,28 +163,23 @@ fn merged_into(connection: &Connection, id: Uuid) -> Result<Option<Uuid>> {
         .flatten())
 }
 
-/// The speaker `id` reads as: the end of its `mergedInto` chain, or `id`
-/// itself. A dangling reference or a cycle stops where it breaks.
+/// The speaker `id` reads as: the voice it is combined into, or `id`
+/// itself. Combining flattens ([`merge_speaker_rows`]), so a combined row
+/// always points at a root and no chain is longer than one step.
 pub(super) fn root_of(connection: &Connection, id: Uuid) -> Result<Uuid> {
-    let mut current = id;
-    for _ in 0..MERGE_DEPTH {
-        match merged_into(connection, current)? {
-            Some(next) if next != id && fetch_speaker(connection, next)?.is_some() => {
-                current = next;
-            }
-            _ => break,
-        }
-    }
-    Ok(current)
+    Ok(merged_into(connection, id)?.unwrap_or(id))
 }
 
 /// Two clusters inside one meeting, combined so it can be undone:
-/// `source` reads as `target`'s root from now on (`mergedInto`). Nothing
-/// else changes on either row: `source` keeps its segments, embedding,
-/// clip, assignment, dismissal and answers, so [`Store::separate_speaker`]
-/// only clears the column. Returns the persons whose voices the combine
-/// touched; voices are not refreshed here.
-fn merge_speaker_rows(
+/// `source` reads as `target`'s root from now on (`mergedInto`), and so
+/// does every row that was combined into `source`, re-pointed in the same
+/// update, so every combined row points straight at a root. Nothing else
+/// changes on any row: `source` keeps its segments, embedding, clip,
+/// assignment, dismissal, answers and `confirmedSimilarity` (which stays
+/// the score of its own answer; combining records none), so
+/// [`Store::separate_speaker`] only clears the column. Returns the persons
+/// whose voices the combine touched; voices are not refreshed here.
+pub(super) fn merge_speaker_rows(
     connection: &Connection,
     source: Uuid,
     target: Uuid,
@@ -212,7 +203,7 @@ fn merge_speaker_rows(
         person_ids.extend(confirmed_person(&root_speaker));
     }
     connection.execute(
-        "UPDATE speaker SET mergedInto = ?1 WHERE id = ?2",
+        "UPDATE speaker SET mergedInto = ?1 WHERE id = ?2 OR mergedInto = ?2",
         params![DbUuid(root), DbUuid(source)],
     )?;
     Ok(person_ids)
@@ -262,16 +253,15 @@ pub(super) fn refresh_voice(connection: &Connection, person_id: Uuid) -> Result<
         return Ok(());
     };
     // Every root confirmed as the person, and every row combined into one
-    // of them, whatever its own assignment.
+    // of them, whatever its own assignment. A combined row points straight
+    // at its root.
     let embeddings: Vec<Embedding> = query_all(
         connection,
-        "WITH RECURSIVE voice(id, depth) AS ( \
-         SELECT id, 0 FROM speaker WHERE personID = ?1 AND assignment = ?2 AND dismissed = 0 \
-         AND mergedInto IS NULL \
-         UNION ALL SELECT speaker.id, voice.depth + 1 FROM speaker \
-         JOIN voice ON speaker.mergedInto = voice.id WHERE voice.depth < 64) \
-         SELECT speaker.embedding AS embedding FROM voice JOIN speaker ON speaker.id = voice.id \
-         JOIN meeting ON meeting.id = speaker.meetingID WHERE speaker.embedding IS NOT NULL \
+        "SELECT speaker.embedding AS embedding FROM speaker \
+         JOIN speaker AS root ON root.id = COALESCE(speaker.mergedInto, speaker.id) \
+         JOIN meeting ON meeting.id = speaker.meetingID \
+         WHERE root.personID = ?1 AND root.assignment = ?2 AND root.dismissed = 0 \
+         AND root.mergedInto IS NULL AND speaker.embedding IS NOT NULL \
          ORDER BY meeting.startedAt DESC, speaker.id",
         params![DbUuid(person_id), SpeakerAssignmentKind::Confirmed.as_str()],
         |row| row.col::<DbEmbedding<Embedding>>("embedding"),
@@ -313,10 +303,40 @@ fn unname_me_participant(connection: &Connection, meeting_id: Uuid) -> Result<()
     Ok(())
 }
 
+/// Whether the meeting's "me" speaker reads as `speaker_id`: it is the
+/// "me" speaker, or the voice the "me" speaker is combined into.
+fn reads_as_me(connection: &Connection, meeting_id: Uuid, speaker_id: Uuid) -> Result<bool> {
+    let me = me_speaker_id(meeting_id);
+    Ok(speaker_id == me || root_of(connection, me)? == speaker_id)
+}
+
+/// The meeting's "me" participant follows the voice the "me" speaker reads
+/// as: named after the person that voice is confirmed as, else unnamed. So
+/// renaming, removing the name of, dismissing or combining the voice a
+/// combined "me" speaker joined renames the participant too. A meeting
+/// without a "me" speaker is left alone.
+fn sync_me_participant(connection: &Connection, meeting_id: Uuid) -> Result<()> {
+    let me = me_speaker_id(meeting_id);
+    if fetch_speaker(connection, me)?.is_none() {
+        return Ok(());
+    }
+    let person = match fetch_speaker(connection, root_of(connection, me)?)?
+        .as_ref()
+        .and_then(confirmed_person)
+    {
+        Some(person_id) => fetch_person(connection, person_id)?,
+        None => None,
+    };
+    match person {
+        Some(person) => name_me_participant(connection, meeting_id, &person),
+        None => unname_me_participant(connection, meeting_id),
+    }
+}
+
 /// The speaker back to `unknown`, inside a caller's transaction: the voice
-/// of the person it was confirmed to is recomputed without it, and a "me"
-/// speaker's participant is unnamed again. A speaker that is already
-/// unknown is left alone. Returns the speaker as written.
+/// of the person it was confirmed to is recomputed without it, and when the
+/// "me" speaker reads as it, the "me" participant follows. A speaker that is
+/// already unknown is left alone. Returns the speaker as written.
 fn unassign_speaker(connection: &Connection, speaker_id: Uuid) -> Result<Speaker> {
     let mut speaker =
         fetch_speaker(connection, speaker_id)?.ok_or(StoreError::SpeakerNotFound(speaker_id))?;
@@ -329,8 +349,8 @@ fn unassign_speaker(connection: &Connection, speaker_id: Uuid) -> Result<Speaker
     if let SpeakerAssignment::Confirmed { person_id } = previous {
         set_confirmed_similarity(connection, speaker_id, None)?;
         refresh_voice(connection, person_id)?;
-        if speaker_id == me_speaker_id(speaker.meeting_id) {
-            unname_me_participant(connection, speaker.meeting_id)?;
+        if reads_as_me(connection, speaker.meeting_id, speaker_id)? {
+            sync_me_participant(connection, speaker.meeting_id)?;
         }
     }
     Ok(speaker)
@@ -497,7 +517,8 @@ pub struct MergedSpeaker {
     pub speaker: Speaker,
     /// The voice it joined.
     pub into: Uuid,
-    /// The voice it reads as: the end of the `mergedInto` chain.
+    /// The voice it reads as: the same as `into`, since combining
+    /// flattens.
     pub root: Uuid,
 }
 
@@ -656,13 +677,11 @@ pub(super) fn owner_of(
 }
 
 /// Whether a segment carries `speaker_id`, or the id of a speaker combined
-/// into it at any depth.
+/// into it.
 fn owns_segments(connection: &Connection, speaker_id: Uuid) -> Result<bool> {
     Ok(connection.query_row(
-        "WITH RECURSIVE tree(id, depth) AS (SELECT ?1, 0 \
-         UNION ALL SELECT speaker.id, tree.depth + 1 FROM speaker \
-         JOIN tree ON speaker.mergedInto = tree.id WHERE tree.depth < 64) \
-         SELECT EXISTS (SELECT 1 FROM transcriptSegment WHERE speakerID IN (SELECT id FROM tree))",
+        "SELECT EXISTS (SELECT 1 FROM transcriptSegment WHERE speakerID = ?1 \
+         OR speakerID IN (SELECT id FROM speaker WHERE mergedInto = ?1))",
         [DbUuid(speaker_id)],
         |row| row.get(0),
     )?)
@@ -862,8 +881,10 @@ impl Store {
     /// [`Store::separate_speaker`] undoes it. Otherwise it drops the
     /// speaker's name suggestion and any No to this person, undoes a
     /// dismissal, and the speaker becomes `confirmed(person)`; the same
-    /// person again changes nothing else. Naming the "me" speaker names the
-    /// meeting's "me" participant too. The voices of the new and the
+    /// person again changes nothing else. Naming, renaming or combining
+    /// the voice the "me" speaker reads as (the "me" speaker itself, or the
+    /// voice it is combined into) renames the meeting's "me" participant
+    /// ([`sync_me_participant`]). The voices of the new and the
     /// previous person are recomputed. The clip stays while the meeting's
     /// master exists. Returns the clip URLs to remove once the transaction
     /// committed.
@@ -883,12 +904,15 @@ impl Store {
             } else {
                 owner_of(transaction, speaker.meeting_id, person.id, speaker_id)?
             };
+            // Naming, renaming or combining the voice the "me" speaker
+            // reads as renames the "me" participant.
+            let me = reads_as_me(transaction, speaker.meeting_id, speaker_id)?;
             if let Some(owner) = owner {
                 let mut person_ids =
                     merge_speaker_rows(transaction, speaker_id, owner, speaker.meeting_id)?;
                 person_ids.insert(person.id);
-                if speaker_id == me_speaker_id(speaker.meeting_id) {
-                    name_me_participant(transaction, speaker.meeting_id, person)?;
+                if me {
+                    sync_me_participant(transaction, speaker.meeting_id)?;
                 }
                 for person_id in person_ids {
                     refresh_voice(transaction, person_id)?;
@@ -930,8 +954,8 @@ impl Store {
             let clips: Vec<String> = drop_clip_when_audio_is_gone(transaction, speaker_id)?
                 .into_iter()
                 .collect();
-            if speaker_id == me_speaker_id(speaker.meeting_id) {
-                name_me_participant(transaction, speaker.meeting_id, person)?;
+            if me {
+                sync_me_participant(transaction, speaker.meeting_id)?;
             }
             for person_id in person_ids {
                 refresh_voice(transaction, person_id)?;
@@ -951,7 +975,10 @@ impl Store {
     /// paragraphs that still carry it; a paragraph moved away since stays
     /// where it was moved. The voices of the person it read as and of its
     /// own person are recomputed, and for the "me" speaker the meeting's
-    /// "me" participant follows its own assignment again. Refused with
+    /// "me" participant follows its own assignment again. Only this row
+    /// separates: rows that were combined into it before it was combined
+    /// itself were re-pointed at the root then ([`merge_speaker_rows`]),
+    /// stay with the root, and each separates on its own. Refused with
     /// [`StoreError::NotCombined`] when it is not combined, and with
     /// [`StoreError::StaleTranscript`] when nothing of it is left.
     pub fn separate_speaker(&self, speaker_id: Uuid) -> Result<()> {
@@ -974,13 +1001,7 @@ impl Store {
                 [DbUuid(speaker_id)],
             )?;
             if speaker_id == me_speaker_id(speaker.meeting_id) {
-                match confirmed_person(&speaker).map(|id| fetch_person(transaction, id)) {
-                    Some(Ok(Some(person))) => {
-                        name_me_participant(transaction, speaker.meeting_id, &person)?;
-                    }
-                    Some(Err(error)) => return Err(error),
-                    _ => unname_me_participant(transaction, speaker.meeting_id)?,
-                }
+                sync_me_participant(transaction, speaker.meeting_id)?;
             }
             for person_id in person_ids {
                 refresh_voice(transaction, person_id)?;

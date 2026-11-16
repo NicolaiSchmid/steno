@@ -400,8 +400,11 @@ import Testing
   }
 
   /// Speaker 3 is combined into Speaker 2, which is then combined into
-  /// Speaker 1: Speaker 3 reads as Speaker 1 and counts for Nicolai.
-  @Test func aVoiceCountsEveryRowCombinedIntoItAtAnyDepth() async throws {
+  /// Speaker 1: combining flattens, so Speaker 3 points at Speaker 1 and
+  /// counts for Nicolai; Separate again on Speaker 2 restores only Speaker
+  /// 2, and Speaker 3 stays with Speaker 1. Rust:
+  /// `combining_flattens_and_separate_again_restores_only_its_row`.
+  @Test func combiningFlattensAndSeparateAgainRestoresOnlyItsRow() async throws {
     let deep = Speaker(
       id: Self.three, meetingID: Self.meetingID, clusterLabel: "Speaker 3",
       assignment: .confirmed(personID: SampleData.personJeromeID),
@@ -414,7 +417,7 @@ import Testing
 
     let merged = try await store.mergedSpeakers(meetingID: Self.meetingID)
     #expect(merged.map(\.speaker.id) == [Self.two, Self.three])
-    #expect(merged.map(\.into) == [Self.one, Self.two])
+    #expect(merged.map(\.into) == [Self.one, Self.one])
     #expect(merged.map(\.root) == [Self.one, Self.one])
     #expect(try await Self.segments(store)[SampleData.uuid(43)] == Self.one)
     #expect(try await store.person(id: SampleData.personNicolaiID)?.sampleCount == 3)
@@ -422,11 +425,20 @@ import Testing
       try await store.person(id: SampleData.personJeromeID)?.sampleCount == 0,
       "a combined row never counts for its own person")
     #expect(try await store.recentPersons().map(\.id) == [SampleData.personNicolaiID])
+
+    try await store.separateSpeaker(Self.two)
+    let left = try await store.mergedSpeakers(meetingID: Self.meetingID)
+    #expect(left.map(\.speaker.id) == [Self.three])
+    #expect(left.map(\.root) == [Self.one])
+    #expect(try await store.speakers(meetingID: Self.meetingID).map(\.id) == [Self.one, Self.two])
   }
 
   // MARK: - Processing generation
 
-  @Test func processingAgainKeepsACombineAsAConfirmationAndRaisesTheGeneration() async throws {
+  /// A combine survives Process again as one voice: the new row of the
+  /// combined voice is combined again into its root's new row. Rust:
+  /// `processing_again_keeps_a_combine_as_one_voice`.
+  @Test func processingAgainKeepsACombineAsOneVoiceAndRaisesTheGeneration() async throws {
     let store = try await Self.seeded()
     #expect(try await store.transcriptGeneration(meetingID: Self.meetingID) == 1)
     try await store.mergeSpeakers(Self.two, into: Self.one, meetingID: Self.meetingID)
@@ -435,11 +447,14 @@ import Testing
       SampleData.meeting(), segments: SampleData.segments(), speakers: SampleData.speakers())
 
     #expect(try await store.transcriptGeneration(meetingID: Self.meetingID) == 2)
-    #expect(try await store.mergedSpeakers(meetingID: Self.meetingID).isEmpty)
-    // The combine comes back as a plain confirmation of Nicolai.
+    // The combine comes back: Speaker 2, confirmed as Nicolai, combined
+    // into Speaker 1, one voice of Nicolai's.
     var expected = SampleData.speakers()
     expected[1].assignment = .confirmed(personID: SampleData.personNicolaiID)
-    #expect(try await store.speakers(meetingID: Self.meetingID) == expected)
+    #expect(try await store.speakers(meetingID: Self.meetingID) == [expected[0]])
+    #expect(
+      try await store.mergedSpeakers(meetingID: Self.meetingID)
+        == [MergedSpeaker(speaker: expected[1], into: Self.one, root: Self.one)])
     await #expect(throws: MeetingStoreError.staleTranscript) {
       try await store.moveTurn(
         meetingID: Self.meetingID, generation: 1, segments: Self.move([41], shown: Self.two),
@@ -448,6 +463,173 @@ import Testing
     await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.uuid(998))) {
       try await store.transcriptGeneration(meetingID: SampleData.uuid(998))
     }
+  }
+
+  // MARK: - Process again and combines (council round 3)
+
+  /// `SampleData.embedding(axis: from)` turned towards `towards` until its
+  /// cosine with the first is `cosine`.
+  static func voice(_ from: Int, towards: Int = 0, cosine: Float = 1) -> Embedding {
+    var values = [Float](repeating: 0, count: Embedding.dimension)
+    values[from] = cosine
+    if cosine < 1 { values[towards] += (1 - cosine * cosine).squareRoot() }
+    return Embedding(values)
+  }
+
+  /// Writes one paragraph per voice as a processing run would, `voices` by
+  /// cluster number, and returns the rows as written.
+  @discardableResult
+  static func process(_ store: MeetingStore, _ voices: [(Int, Embedding)]) async throws
+    -> [Speaker]
+  {
+    let speakers = voices.map { number, embedding in
+      Speaker(
+        id: UUID(derivedFrom: meetingID, salt: "speaker-Speaker \(number)"), meetingID: meetingID,
+        clusterLabel: "Speaker \(number)", embedding: embedding, clusterConfidence: 0.8)
+    }
+    let segments = speakers.enumerated().map { index, speaker in
+      TranscriptSegment(
+        id: UUID(derivedFrom: meetingID, salt: "segment-\(speaker.clusterLabel)"),
+        meetingID: meetingID, start: Double(index) * 10, end: Double(index) * 10 + 2,
+        speakerID: speaker.id, lane: .system, text: "Ja.", rawText: "ja")
+    }
+    try await store.replaceTranscript(SampleData.meeting(), segments: segments, speakers: speakers)
+    return speakers
+  }
+
+  /// Every row of the meeting, combined ones too.
+  static func row(_ id: UUID, _ store: MeetingStore) async throws -> Speaker? {
+    let roots = try await store.speakers(meetingID: meetingID)
+    let merged = try await store.mergedSpeakers(meetingID: meetingID).map(\.speaker)
+    return (roots + merged).first { $0.id == id }
+  }
+
+  /// After Remove name on a combine's root its combined voice still
+  /// competes, so another stored answer cannot take that voice. Rust:
+  /// `a_combined_voice_under_an_unnamed_root_still_competes`.
+  @Test func aCombinedVoiceUnderAnUnnamedRootStillCompetes() async throws {
+    let store = try await Self.seeded(persons: [Self.anna])
+    let jerome = try #require(try await store.person(id: SampleData.personJeromeID))
+    let old = try await Self.process(
+      store,
+      [(1, Self.voice(10)), (2, Self.voice(11)), (3, Self.voice(11, towards: 12, cosine: 0.8))])
+    try await store.confirm(speakerID: old[0].id, person: Self.anna)
+    try await store.confirm(speakerID: old[1].id, person: Self.anna)
+    try await store.confirm(speakerID: old[2].id, person: jerome)
+    try await store.clear(speakerID: old[0].id)
+    #expect(
+      try await store.mergedSpeakers(meetingID: Self.meetingID).count == 1,
+      "Remove name on the root keeps the combine")
+
+    let new = try await Self.process(store, [(11, Self.voice(10)), (12, Self.voice(11))])
+    #expect(
+      try await Self.row(new[1].id, store)?.assignment == .unknown,
+      "Jérôme's Yes does not move to Speaker 2's voice")
+  }
+
+  /// Two stored voices of one person do not veto each other. Rust:
+  /// `two_voices_of_one_person_do_not_contest_each_other`.
+  @Test func twoVoicesOfOnePersonDoNotContestEachOther() async throws {
+    var anna = Self.anna
+    anna.embedding = Self.voice(10)
+    let store = try await Self.seeded(persons: [anna])
+    let old = try await Self.process(
+      store, [(1, Self.voice(10)), (2, Self.voice(10, towards: 11, cosine: 0.9))])
+    try await store.confirm(speakerID: old[0].id, person: anna)
+    try await store.confirm(speakerID: old[1].id, person: anna)
+    let score = try await SpeakerAnswersTests.yesScore(old[0].id, store)
+    #expect(score != nil)
+
+    let new = try await Self.process(
+      store, [(11, Self.voice(10, towards: 11, cosine: 0.95)), (12, Self.voice(12))])
+    #expect(try await Self.row(new[0].id, store)?.assignment == .confirmed(personID: anna.id))
+    #expect(try await SpeakerAnswersTests.yesScore(new[0].id, store) == score)
+    #expect(try await store.mergedSpeakers(meetingID: Self.meetingID).isEmpty)
+  }
+
+  /// When the root is not found again, the combined voices still come back
+  /// as one voice of the person. Rust:
+  /// `a_combine_whose_root_is_gone_comes_back_as_one_voice`.
+  @Test func aCombineWhoseRootIsGoneComesBackAsOneVoice() async throws {
+    let store = try await Self.seeded(persons: [Self.anna])
+    let old = try await Self.process(
+      store, [(1, Self.voice(10)), (2, Self.voice(11)), (3, Self.voice(12))])
+    for voice in old { try await store.confirm(speakerID: voice.id, person: Self.anna) }
+    #expect(try await store.mergedSpeakers(meetingID: Self.meetingID).count == 2)
+
+    try await Self.process(
+      store, [(12, Self.voice(11)), (13, Self.voice(12)), (14, Self.voice(13))])
+    let roots = try await store.speakers(meetingID: Self.meetingID).filter {
+      $0.assignment == .confirmed(personID: Self.anna.id)
+    }
+    #expect(roots.count == 1)
+    let merged = try await store.mergedSpeakers(meetingID: Self.meetingID)
+    #expect(merged.map(\.root) == roots.map(\.id))
+  }
+
+  /// A combined voice keeps the score of its own Yes to another person, and
+  /// Process again never lends it to the person it reads as. Rust:
+  /// `a_combined_voice_never_carries_another_persons_score`.
+  @Test func aCombinedVoiceNeverCarriesAnotherPersonsScore() async throws {
+    var anna = Self.anna
+    anna.embedding = Self.voice(10)
+    let store = try await Self.seeded(persons: [anna])
+    let jerome = try #require(try await store.person(id: SampleData.personJeromeID))
+    let old = try await Self.process(
+      store, [(1, Self.voice(10)), (2, Self.voice(11, towards: 13, cosine: 0.6))])
+    try await store.confirm(speakerID: old[0].id, person: anna)
+    try await store.confirm(speakerID: old[1].id, person: jerome)
+    let own = try await SpeakerAnswersTests.yesScore(old[1].id, store)
+    #expect(own != nil)
+    try await store.confirm(speakerID: old[1].id, person: anna)
+    #expect(
+      try await SpeakerAnswersTests.yesScore(old[1].id, store) == own,
+      "combining records no score of its own")
+
+    let new = try await Self.process(
+      store, [(11, Self.voice(10)), (12, Self.voice(11, towards: 13, cosine: 0.6))])
+    #expect(try await Self.row(new[1].id, store)?.assignment == .confirmed(personID: anna.id))
+    #expect(try await SpeakerAnswersTests.yesScore(new[1].id, store) == nil)
+    #expect(try await SpeakerAnswersTests.yesScore(new[0].id, store) != nil)
+  }
+
+  /// The "me" participant, in the store and in the export, follows the
+  /// voice a combined "me" speaker reads as. Rust:
+  /// `a_combined_me_participant_follows_its_root`.
+  @Test func aCombinedMeParticipantFollowsItsRoot() async throws {
+    let bob = Person(id: SampleData.uuid(14), displayName: "Bob", createdAt: SampleData.createdAt)
+    let meID = LaneMerger.meSpeakerID(meetingID: Self.meetingID)
+    var me = LaneMerger.meSpeaker(meetingID: Self.meetingID, personID: nil)
+    me.embedding = SampleData.embedding(axis: 3)
+    var speakers = SampleData.speakers()
+    speakers[0].assignment = .unknown
+    var segments = SampleData.segments()
+    segments[2].speakerID = meID
+    let store = try await Self.seeded(
+      speakers: speakers + [me], segments: segments, persons: [Self.anna, bob])
+    /// The exported "me" participant as "person id, name".
+    func exported() async throws -> String {
+      let participant = try #require(
+        try await store.export(meetingID: Self.meetingID).participants.first { $0.role == .me })
+      return "\(participant.personID?.uuidString ?? "nil"), \(participant.displayName)"
+    }
+    try await store.confirm(speakerID: Self.one, person: Self.anna)
+    try await store.confirm(speakerID: meID, person: Self.anna)
+    #expect(try await exported() == "\(Self.anna.id.uuidString), Anna")
+
+    // Renaming the root renames Me.
+    try await store.confirm(speakerID: Self.one, person: bob)
+    #expect(try await exported() == "\(bob.id.uuidString), Bob")
+    // Remove name on the root unnames Me, and the combine stays.
+    try await store.clear(speakerID: Self.one)
+    #expect(try await exported() == "nil, \(LaneMerger.meSpeakerLabel)")
+    #expect(try await store.mergedSpeakers(meetingID: Self.meetingID).count == 1)
+    // Combining the root into another voice names Me after that voice.
+    try await store.confirm(speakerID: Self.two, person: Self.anna)
+    try await store.confirm(speakerID: Self.one, person: Self.anna)
+    #expect(try await exported() == "\(Self.anna.id.uuidString), Anna")
+    #expect(
+      try await store.mergedSpeakers(meetingID: Self.meetingID).allSatisfy { $0.root == Self.two })
   }
 
   /// The detail's rows come from one read: the export, its generation and

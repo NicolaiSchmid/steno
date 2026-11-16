@@ -3,7 +3,8 @@ import GRDB
 
 /// A speaker combined into another of its meeting (`MeetingStore.confirm`,
 /// `mergeSpeakers`): its own row, kept as it was, the voice it joined
-/// (`into`) and the voice it reads as (`root`, the end of the chain). Rust:
+/// (`into`) and the voice it reads as (`root`, the same as `into` since
+/// combining flattens). Rust:
 /// `MergedSpeaker`.
 public struct MergedSpeaker: Sendable, Equatable, Hashable {
   public var speaker: Speaker
@@ -116,7 +117,10 @@ extension MeetingStore {
   /// person it read as and of its own confirmed person are recomputed. For
   /// the "me" speaker the meeting's "me" participant follows the speaker's
   /// own assignment again: confirmed as a person names it after them,
-  /// anything else unnames it. Throws `notCombined` when the speaker is
+  /// anything else unnames it. Only this row separates: rows combined into
+  /// it before it was combined itself were re-pointed at the root then
+  /// (`mergeSpeakerRows`), stay with the root, and each separates on its
+  /// own. Throws `notCombined` when the speaker is
   /// missing or not combined, and `staleTranscript` when neither it nor any
   /// speaker combined into it owns a segment any more.
   public func separateSpeaker(_ speakerID: UUID) async throws {
@@ -136,32 +140,22 @@ extension MeetingStore {
       try db.execute(
         sql: "UPDATE speaker SET mergedInto = NULL WHERE id = ?", arguments: [speakerID.uuidString])
       if speakerID == LaneMerger.meSpeakerID(meetingID: speaker.meetingID) {
-        if let personID = speaker.confirmedPersonID,
-          let person = try Self.personRow(personID, db)?.person
-        {
-          try Self.nameMeParticipant(meetingID: speaker.meetingID, person: person, db)
-        } else {
-          try Self.unnameMeParticipant(meetingID: speaker.meetingID, db)
-        }
+        try Self.syncMeParticipant(meetingID: speaker.meetingID, db)
       }
       for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
     }
   }
 
-  /// Whether the speaker, or a speaker combined into it at any depth, still
-  /// carries a segment.
+  /// Whether the speaker, or a speaker combined into it, still carries a
+  /// segment.
   static func ownsSegments(_ speakerID: UUID, _ db: Database) throws -> Bool {
     try Bool.fetchOne(
       db,
       sql: """
-        WITH RECURSIVE tree(id, depth) AS (
-          SELECT ?, 0
-          UNION ALL
-          SELECT speaker.id, tree.depth + 1 FROM speaker
-          JOIN tree ON speaker.mergedInto = tree.id WHERE tree.depth < \(mergeDepth))
-        SELECT EXISTS (SELECT 1 FROM transcriptSegment WHERE speakerID IN (SELECT id FROM tree))
+        SELECT EXISTS (SELECT 1 FROM transcriptSegment WHERE speakerID = ?
+          OR speakerID IN (SELECT id FROM speaker WHERE mergedInto = ?))
         """,
-      arguments: [speakerID.uuidString]) ?? false
+      arguments: [speakerID.uuidString, speakerID.uuidString]) ?? false
   }
 
   /// "This paragraph": every listed segment moves to `person`'s voice in the

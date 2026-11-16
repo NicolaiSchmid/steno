@@ -57,21 +57,17 @@ pub(super) fn update_text(
 
 /// The meeting's transcript in time order, each segment under the voice it
 /// reads as: a speaker combined into another (`speaker.mergedInto`) gives
-/// its segments the root of its chain.
+/// its segments that voice, always a root.
 pub(super) fn segments_of_meeting(
     connection: &Connection,
     meeting_id: Uuid,
 ) -> Result<Vec<TranscriptSegment>> {
     query_all(
         connection,
-        "WITH RECURSIVE chain(id, root, depth) AS ( \
-         SELECT id, id, 0 FROM speaker WHERE meetingID = ?1 AND mergedInto IS NULL \
-         UNION ALL SELECT speaker.id, chain.root, chain.depth + 1 FROM speaker \
-         JOIN chain ON speaker.mergedInto = chain.id WHERE chain.depth < 64) \
-         SELECT segment.id AS id, segment.meetingID AS meetingID, segment.start AS start, \
-         segment.end AS end, COALESCE(chain.root, segment.speakerID) AS speakerID, \
+        "SELECT segment.id AS id, segment.meetingID AS meetingID, segment.start AS start, \
+         segment.end AS end, COALESCE(speaker.mergedInto, segment.speakerID) AS speakerID, \
          segment.lane AS lane, segment.text AS text, segment.rawText AS rawText \
-         FROM transcriptSegment AS segment LEFT JOIN chain ON chain.id = segment.speakerID \
+         FROM transcriptSegment AS segment LEFT JOIN speaker ON speaker.id = segment.speakerID \
          WHERE segment.meetingID = ?1 ORDER BY segment.start, segment.id",
         [DbUuid(meeting_id)],
         from_row,

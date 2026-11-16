@@ -312,10 +312,10 @@ fn processing_again_raises_the_generation_and_drops_combines() {
     ));
 }
 
-/// A combined voice competes as a confirmation of its root's person, so
-/// the combine comes back as two voices of that person.
+/// A combine survives Process again as one voice: the new row of the
+/// combined voice is combined again into the new row of its root.
 #[test]
-fn processing_again_keeps_a_combine_as_a_plain_confirmation() {
+fn processing_again_keeps_a_combine_as_one_voice() {
     let m = Meeting3::new();
     let mut voices = m.speakers.clone();
     voices[1].embedding = Some(common::other_voice());
@@ -349,21 +349,331 @@ fn processing_again_keeps_a_combine_as_a_plain_confirmation() {
     m.store
         .replace_transcript(&m.meeting, &segments, &rerun)
         .unwrap();
+    let merged = m.store.merged_speakers(m.meeting.id).unwrap();
+    assert_eq!(merged.len(), 1);
     assert_eq!(
-        m.store.merged_speakers(m.meeting.id).unwrap(),
-        Vec::<MergedSpeaker>::new()
+        (merged[0].speaker.id, merged[0].into, merged[0].root),
+        (voices[2].id, voices[1].id, voices[1].id)
     );
-    let stored = m.store.speakers(m.meeting.id).unwrap();
-    for voice in &voices[1..] {
-        assert_eq!(
-            stored
-                .iter()
-                .find(|speaker| speaker.id == voice.id)
-                .unwrap()
-                .assignment,
-            SpeakerAssignment::Confirmed { person_id: anna.id }
-        );
+    let roots: Vec<Speaker> = m
+        .store
+        .speakers(m.meeting.id)
+        .unwrap()
+        .into_iter()
+        .filter(|speaker| speaker.assignment == SpeakerAssignment::Confirmed { person_id: anna.id })
+        .collect();
+    assert_eq!(roots.len(), 1, "one voice per person per meeting");
+    assert_eq!(roots[0].id, voices[1].id);
+    assert_eq!(m.store.person(anna.id).unwrap().unwrap().sample_count, 2);
+}
+
+/// Orthogonal unit-free patterns for the reconciliation tests: bit `bit`
+/// of the index picks the sign, so two bits score 0 against each other.
+fn walsh(bit: u32) -> Vec<f32> {
+    (0..Embedding::DIMENSION)
+        .map(|index| if (index >> bit) & 1 == 0 { 1.0 } else { -1.0 })
+        .collect()
+}
+
+fn pure(bit: u32) -> Embedding {
+    Embedding(walsh(bit))
+}
+
+/// A voice whose cosine with `pure(from)` is `cosine`, the rest along
+/// `pure(towards)`.
+fn mix(from: u32, towards: u32, cosine: f32) -> Embedding {
+    let rest = (1.0 - cosine * cosine).sqrt();
+    Embedding(
+        walsh(from)
+            .iter()
+            .zip(walsh(towards))
+            .map(|(lhs, rhs)| lhs * cosine + rhs * rest)
+            .collect(),
+    )
+}
+
+fn cluster(meeting_id: Uuid, number: usize, embedding: Embedding) -> Speaker {
+    let label = format!("Speaker {number}");
+    Speaker {
+        id: derived_uuid(meeting_id, &format!("speaker-{label}")),
+        meeting_id,
+        cluster_label: label,
+        assignment: SpeakerAssignment::Unknown,
+        embedding: Some(embedding),
+        sample_clip_range: None,
+        sample_clip_url: None,
+        cluster_confidence: 0.8,
+        dismissed: false,
     }
+}
+
+/// Writes one paragraph per voice as a processing run would: `voices` by
+/// cluster number. Returns the rows as written.
+fn process(store: &Store, meeting: &Meeting, voices: &[(usize, Embedding)]) -> Vec<Speaker> {
+    let speakers: Vec<Speaker> = voices
+        .iter()
+        .map(|(number, embedding)| cluster(meeting.id, *number, embedding.clone()))
+        .collect();
+    let segments: Vec<TranscriptSegment> = speakers
+        .iter()
+        .enumerate()
+        .map(|(index, speaker)| {
+            #[allow(clippy::cast_precision_loss)]
+            let start = index as f64 * 10.0;
+            segment(meeting.id, &speaker.cluster_label, start, Some(speaker.id))
+        })
+        .collect();
+    store
+        .replace_transcript(meeting, &segments, &speakers)
+        .unwrap();
+    speakers
+}
+
+fn confirmed_similarity(store: &Store, speaker_id: Uuid) -> Option<f64> {
+    store
+        .read(|connection| {
+            Ok(connection.query_row(
+                "SELECT confirmedSimilarity FROM speaker WHERE id = ?1",
+                [speaker_id.to_string().to_uppercase()],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap()
+}
+
+fn speaker(store: &Store, meeting_id: Uuid, id: Uuid) -> Speaker {
+    store
+        .speakers(meeting_id)
+        .unwrap()
+        .into_iter()
+        .chain(
+            store
+                .merged_speakers(meeting_id)
+                .unwrap()
+                .into_iter()
+                .map(|merged| merged.speaker),
+        )
+        .find(|speaker| speaker.id == id)
+        .unwrap()
+}
+
+/// After Remove name on a combine's root, its combined voice still
+/// competes, so another stored answer cannot take that voice.
+#[test]
+fn a_combined_voice_under_an_unnamed_root_still_competes() {
+    let (store, meeting) = populated();
+    let jerome = store.person(uuid(PERSON_ID)).unwrap().unwrap();
+    let old = process(
+        &store,
+        &meeting,
+        &[(1, pure(0)), (2, pure(1)), (3, mix(1, 2, 0.8))],
+    );
+    let anna = store.resolve_person("Anna", None, now()).unwrap();
+    store.confirm_speaker(old[0].id, &anna).unwrap();
+    store.confirm_speaker(old[1].id, &anna).unwrap();
+    store.confirm_speaker(old[2].id, &jerome).unwrap();
+    store.clear_speaker(old[0].id).unwrap();
+    assert_eq!(
+        store.merged_speakers(meeting.id).unwrap().len(),
+        1,
+        "Remove name on the root keeps the combine"
+    );
+
+    // Speaker 12 is Speaker 2's voice; Jérôme's Speaker 3 scores 0.8.
+    let new = process(&store, &meeting, &[(11, pure(0)), (12, pure(1))]);
+    let taken = speaker(&store, meeting.id, new[1].id);
+    assert_eq!(
+        taken.assignment,
+        SpeakerAssignment::Unknown,
+        "Jérôme's Yes does not move to Speaker 2's voice"
+    );
+}
+
+/// Two stored voices of one person do not veto each other: one new voice
+/// close to both takes the person.
+#[test]
+fn two_voices_of_one_person_do_not_contest_each_other() {
+    let (store, meeting) = populated();
+    let old = process(&store, &meeting, &[(1, pure(0)), (2, mix(0, 1, 0.9))]);
+    let mut anna = store.resolve_person("Anna", None, now()).unwrap();
+    anna.embedding = Some(pure(0));
+    store.save_person(&anna).unwrap();
+    store.confirm_speaker(old[0].id, &anna).unwrap();
+    store.confirm_speaker(old[1].id, &anna).unwrap();
+    let yes_score = confirmed_similarity(&store, old[0].id);
+    assert!(yes_score.is_some());
+
+    let new = process(&store, &meeting, &[(11, mix(0, 1, 0.95)), (12, pure(2))]);
+    let taken = speaker(&store, meeting.id, new[0].id);
+    assert_eq!(
+        taken.assignment,
+        SpeakerAssignment::Confirmed { person_id: anna.id }
+    );
+    assert_eq!(confirmed_similarity(&store, new[0].id), yes_score);
+    assert_eq!(store.merged_speakers(meeting.id).unwrap(), vec![]);
+}
+
+/// When the root is not found again, the combined voices still come back as
+/// one voice of the person.
+#[test]
+fn a_combine_whose_root_is_gone_comes_back_as_one_voice() {
+    let (store, meeting) = populated();
+    let old = process(
+        &store,
+        &meeting,
+        &[(1, pure(0)), (2, pure(1)), (3, pure(2))],
+    );
+    let anna = store.resolve_person("Anna", None, now()).unwrap();
+    for voice in &old {
+        store.confirm_speaker(voice.id, &anna).unwrap();
+    }
+    assert_eq!(store.merged_speakers(meeting.id).unwrap().len(), 2);
+
+    process(
+        &store,
+        &meeting,
+        &[(12, pure(1)), (13, pure(2)), (14, pure(3))],
+    );
+    let roots: Vec<Speaker> = store
+        .speakers(meeting.id)
+        .unwrap()
+        .into_iter()
+        .filter(|speaker| speaker.assignment == SpeakerAssignment::Confirmed { person_id: anna.id })
+        .collect();
+    assert_eq!(roots.len(), 1);
+    let merged = store.merged_speakers(meeting.id).unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].root, roots[0].id);
+}
+
+/// A combined voice keeps the score of its own Yes to another person; Process
+/// again never lends that score to the person it now reads as.
+#[test]
+fn a_combined_voice_never_carries_another_persons_score() {
+    let (store, meeting) = populated();
+    let jerome = store.person(uuid(PERSON_ID)).unwrap().unwrap();
+    let old = process(&store, &meeting, &[(1, pure(0)), (2, mix(1, 3, 0.6))]);
+    let mut anna = store.resolve_person("Anna", None, now()).unwrap();
+    anna.embedding = Some(pure(0));
+    store.save_person(&anna).unwrap();
+    store.confirm_speaker(old[0].id, &anna).unwrap();
+    store.confirm_speaker(old[1].id, &jerome).unwrap();
+    let own = confirmed_similarity(&store, old[1].id);
+    assert!(own.is_some());
+    store.confirm_speaker(old[1].id, &anna).unwrap();
+    assert_eq!(
+        confirmed_similarity(&store, old[1].id),
+        own,
+        "combining records no score of its own"
+    );
+
+    let new = process(&store, &meeting, &[(11, pure(0)), (12, mix(1, 3, 0.6))]);
+    assert_eq!(
+        speaker(&store, meeting.id, new[1].id).assignment,
+        SpeakerAssignment::Confirmed { person_id: anna.id }
+    );
+    assert_eq!(confirmed_similarity(&store, new[1].id), None);
+    assert!(confirmed_similarity(&store, new[0].id).is_some());
+}
+
+/// Combining flattens: a voice combined into a combined voice points at the
+/// root, and Separate again on the middle row restores only that row.
+#[test]
+fn combining_flattens_and_separate_again_restores_only_its_row() {
+    let (store, meeting) = populated();
+    let old = process(
+        &store,
+        &meeting,
+        &[(1, pure(0)), (2, pure(1)), (3, pure(2))],
+    );
+    let anna = store.resolve_person("Anna", None, now()).unwrap();
+    let bob = store.resolve_person("Bob", None, now()).unwrap();
+    store.confirm_speaker(old[0].id, &anna).unwrap();
+    store.confirm_speaker(old[1].id, &bob).unwrap();
+    store.confirm_speaker(old[2].id, &bob).unwrap();
+    store.confirm_speaker(old[1].id, &anna).unwrap();
+    let merged = store.merged_speakers(meeting.id).unwrap();
+    assert_eq!(
+        merged
+            .iter()
+            .map(|merged| (merged.speaker.id, merged.into, merged.root))
+            .collect::<Vec<_>>(),
+        vec![
+            (old[1].id, old[0].id, old[0].id),
+            (old[2].id, old[0].id, old[0].id)
+        ]
+    );
+
+    store.separate_speaker(old[1].id).unwrap();
+    let merged = store.merged_speakers(meeting.id).unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        (merged[0].speaker.id, merged[0].root),
+        (old[2].id, old[0].id)
+    );
+    assert_eq!(
+        speaker(&store, meeting.id, old[1].id).assignment,
+        SpeakerAssignment::Confirmed { person_id: bob.id }
+    );
+}
+
+/// The "me" participant, in the store and in the export, follows the voice
+/// a combined "me" speaker reads as.
+#[test]
+fn a_combined_me_participant_follows_its_root() {
+    let (store, meeting) = populated();
+    let me = me_speaker_id(meeting.id);
+    let mut speakers = vec![
+        cluster(meeting.id, 1, pure(0)),
+        cluster(meeting.id, 2, pure(1)),
+    ];
+    speakers.push(Speaker {
+        id: me,
+        cluster_label: "Me".to_owned(),
+        ..cluster(meeting.id, 0, pure(2))
+    });
+    let segments = vec![
+        segment(meeting.id, "a", 0.0, Some(speakers[0].id)),
+        segment(meeting.id, "b", 3.0, Some(speakers[1].id)),
+        segment(meeting.id, "m", 5.0, Some(me)),
+    ];
+    store
+        .replace_transcript(&meeting, &segments, &speakers)
+        .unwrap();
+    let exported = |store: &Store| {
+        let participant = store
+            .export(meeting.id)
+            .unwrap()
+            .participants
+            .into_iter()
+            .find(|participant| participant.role == ParticipantRole::Me)
+            .unwrap();
+        (participant.person_id, participant.display_name)
+    };
+    let anna = store.resolve_person("Anna", None, now()).unwrap();
+    let bob = store.resolve_person("Bob", None, now()).unwrap();
+    store.confirm_speaker(speakers[0].id, &anna).unwrap();
+    store.confirm_speaker(me, &anna).unwrap();
+    assert_eq!(exported(&store), (Some(anna.id), "Anna".to_owned()));
+
+    // Renaming the root renames Me.
+    store.confirm_speaker(speakers[0].id, &bob).unwrap();
+    assert_eq!(exported(&store), (Some(bob.id), "Bob".to_owned()));
+    // Remove name on the root unnames Me, and the combine stays.
+    store.clear_speaker(speakers[0].id).unwrap();
+    assert_eq!(exported(&store), (None, "Me".to_owned()));
+    assert_eq!(store.merged_speakers(meeting.id).unwrap().len(), 1);
+    // Combining the root into another voice names Me after that voice.
+    store.confirm_speaker(speakers[1].id, &anna).unwrap();
+    store.confirm_speaker(speakers[0].id, &anna).unwrap();
+    assert_eq!(exported(&store), (Some(anna.id), "Anna".to_owned()));
+    assert!(
+        store
+            .merged_speakers(meeting.id)
+            .unwrap()
+            .iter()
+            .all(|merged| merged.root == speakers[1].id)
+    );
 }
 
 /// Every column of every row of the tables a combine could touch.

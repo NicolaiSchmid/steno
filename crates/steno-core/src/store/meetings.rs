@@ -454,6 +454,15 @@ impl Store {
     /// for review. Every person with a confirmed speaker before has their
     /// voice recomputed.
     ///
+    /// A voice combined into another competes with its own embedding,
+    /// whatever its root's answer, and carries its own Noes and its root's
+    /// confirmation or dismissal. A score is carried only when it was
+    /// measured against the person the new row is confirmed as. A new row
+    /// that took a combined voice's confirmation is combined again, into
+    /// the new row of its root when the root was found again, else into
+    /// another new row confirmed as that person, so a person keeps one voice
+    /// per meeting.
+    ///
     /// Commits durably ([`Store::write_durably`]): the pipeline removes the
     /// clips the earlier rows named once this returns, and a power loss
     /// must not bring those rows back. Returns the replaced rows for that
@@ -477,31 +486,30 @@ impl Store {
             // user's Noes.
             let suggestions = people::name_suggestions_of_meeting(transaction, meeting.id)?;
             let rejections = people::suggestion_rejections_of_meeting(transaction, meeting.id)?;
-            // A voice combined into another competes too, as a plain
-            // confirmation of its root's person, so a combine survives
-            // Process again as two voices of that person.
-            let combined: Vec<Speaker> =
-                people::merged_speakers_of_meeting(transaction, meeting.id)?
-                    .into_iter()
-                    .filter_map(|merged| {
-                        let root = replaced.iter().find(|root| root.id == merged.root)?;
-                        let SpeakerAssignment::Confirmed { person_id } = root.assignment else {
-                            return None;
-                        };
-                        Some(Speaker {
-                            assignment: SpeakerAssignment::Confirmed { person_id },
-                            dismissed: false,
-                            ..merged.speaker
-                        })
-                    })
-                    .collect();
+            // Every combined voice competes with its own embedding, read as
+            // its root: confirmed or dismissed as the root is, so it carries
+            // the root's answer, not its own.
+            let merged = people::merged_speakers_of_meeting(transaction, meeting.id)?;
+            let combined: Vec<Speaker> = merged
+                .iter()
+                .map(|merged| {
+                    let root = replaced.iter().find(|root| root.id == merged.root);
+                    Speaker {
+                        assignment: root
+                            .map_or(SpeakerAssignment::Unknown, |root| root.assignment.clone()),
+                        dismissed: root.is_some_and(|root| root.dismissed),
+                        ..merged.speaker.clone()
+                    }
+                })
+                .collect();
             let stored: Vec<&Speaker> = replaced.iter().chain(&combined).collect();
             // New id -> the stored row whose answers it takes. Every stored
-            // row competes; only an unambiguous pair carries anything.
-            let earlier: BTreeMap<Uuid, &Speaker> = same_voices(meeting.id, &stored, speakers)
-                .into_iter()
-                .map(|(old, new)| (new, old))
-                .collect();
+            // row competes; only an unambiguous pair carries anything. Two
+            // rows of one person can pair with one new row; the root wins.
+            let mut earlier: BTreeMap<Uuid, &Speaker> = BTreeMap::new();
+            for (old, new) in same_voices(meeting.id, &stored, speakers) {
+                earlier.entry(new).or_insert(old);
+            }
             // Kept or dropped, each stored confirmation's person is
             // recomputed.
             let voices: BTreeSet<Uuid> = every
@@ -509,10 +517,15 @@ impl Store {
                 .filter(|speaker| speaker.assignment.is_confirmed())
                 .filter_map(Speaker::person_id)
                 .collect();
-            // The score each kept Yes was given, before its row goes.
+            // The score each kept Yes was given, before its row goes: only
+            // when the row was itself confirmed as the person it now reads
+            // as, so a combined voice never lends its own person's score.
             let mut yes_scores = BTreeMap::new();
             for (&new, &kept) in &earlier {
-                if kept.assignment.is_confirmed() {
+                let own = every.iter().find(|speaker| speaker.id == kept.id);
+                if kept.assignment.is_confirmed()
+                    && own.is_some_and(|own| own.assignment == kept.assignment)
+                {
                     yes_scores.insert(new, people::confirmed_similarity(transaction, kept.id)?);
                 }
             }
@@ -562,6 +575,7 @@ impl Store {
                     people::set_confirmed_similarity(transaction, speaker.id, score)?;
                 }
             }
+            combine_again(transaction, meeting.id, &earlier, &merged)?;
             people::replace_name_suggestions(transaction, meeting.id, &suggestions)?;
             people::restore_suggestion_rejections(transaction, meeting.id, &kept_rejections)?;
             for segment in segments {
@@ -684,6 +698,39 @@ impl Store {
     }
 }
 
+/// Process again keeps one voice per person per meeting: each new row that
+/// took a combined voice's confirmation is combined again, into the new row
+/// of the root it read as when that root was found again, else into another
+/// new row confirmed as the person. Without either it stays its own voice.
+fn combine_again(
+    transaction: &Connection,
+    meeting_id: Uuid,
+    earlier: &BTreeMap<Uuid, &Speaker>,
+    merged: &[people::MergedSpeaker],
+) -> Result<()> {
+    for (&new, &kept) in earlier {
+        let (Some(merged), SpeakerAssignment::Confirmed { person_id }) = (
+            merged.iter().find(|merged| merged.speaker.id == kept.id),
+            &kept.assignment,
+        ) else {
+            continue;
+        };
+        let root_found_again = earlier
+            .iter()
+            .find(|(_, old)| old.id == merged.root)
+            .map(|(&id, _)| id)
+            .filter(|&id| id != new);
+        let into = match root_found_again {
+            Some(id) => Some(id),
+            None => people::owner_of(transaction, meeting_id, *person_id, new)?,
+        };
+        if let Some(into) = into {
+            people::merge_speaker_rows(transaction, new, into, meeting_id)?;
+        }
+    }
+    Ok(())
+}
+
 /// How far a pair's cosine must lead the runner-up, for the stored row and
 /// for the new row alike, before an answer moves across Process again.
 /// Re-diarizing the same audio scores a voice against itself near 1 and
@@ -699,7 +746,9 @@ const SAME_VOICE_MARGIN: f32 = 0.10;
 /// row matches better. A pair holds when the cosine of their embeddings is
 /// at least [`VoiceStrength::FLOOR`] and leads every other candidate of
 /// both rows by [`SAME_VOICE_MARGIN`]; anything closer is contested and
-/// pairs nothing. The "me" speaker and the room row of a run without
+/// pairs nothing. Two stored rows confirmed as the same person are no
+/// rivals: the user said they are one voice, so both may pair with the same
+/// new row. The "me" speaker and the room row of a run without
 /// diarization are lanes, not clusters, so each pairs only with itself,
 /// whatever its embedding. A row without an embedding pairs with nothing
 /// else. Returns `(earlier row, new id)`.
@@ -724,6 +773,9 @@ pub(super) fn same_voices<'a>(
         .iter()
         .filter(|speaker| clusters(&speaker.id) && speaker.embedding.is_some())
         .collect();
+    let same_person = |lhs: &Speaker, rhs: &Speaker| {
+        lhs.assignment.is_confirmed() && lhs.assignment == rhs.assignment
+    };
     let score = |old: &Speaker, new: &Speaker| match (&old.embedding, &new.embedding) {
         (Some(lhs), Some(rhs)) => lhs.cosine_similarity(rhs),
         _ => f32::NEG_INFINITY,
@@ -746,7 +798,7 @@ pub(super) fn same_voices<'a>(
             .chain(
                 old_clusters
                     .iter()
-                    .filter(|other| other.id != old.id)
+                    .filter(|other| other.id != old.id && !same_person(old, other))
                     .map(|&other| score(other, best)),
             )
             .fold(f32::NEG_INFINITY, f32::max);

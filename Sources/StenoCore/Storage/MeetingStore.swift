@@ -327,9 +327,13 @@ public final class MeetingStore: Sendable {
   /// An answer whose voice is not found again, or whose match is contested,
   /// is dropped, and the voice shows for review. A name suggestion stays with its speaker id. Every
   /// person with a confirmed speaker before has their voice recomputed.
-  /// Every combine and every paragraph move goes with the old rows: a voice
-  /// combined into another comes back uncombined, as its own row, and only
-  /// uncombined voices hand their answers on. `meeting.transcriptGeneration`
+  /// A voice combined into another competes with its own embedding,
+  /// whatever its root's answer, and carries its own Noes and its root's
+  /// confirmation or dismissal. A score is carried only when it was measured
+  /// against the person the new row is confirmed as. A new row that took a
+  /// combined voice's confirmation is combined again (`combineAgain`), so a
+  /// person keeps one voice per meeting; paragraph moves go with the old
+  /// rows. `meeting.transcriptGeneration`
   /// is raised by one in the same transaction, so a move made against the
   /// old transcript is refused (`moveTurn`). Rust: `Store::replace_transcript`.
   public func replaceTranscript(
@@ -353,30 +357,34 @@ public final class MeetingStore: Sendable {
         .filter(SpeakerNameSuggestionRow.Columns.meetingID == meetingID.uuidString)
         .fetchAll(db).map(\.suggestion)
       let rejections = try Self.rejectionRows(meetingID: meetingID, db)
-      // A voice combined into another competes too, as a plain
-      // confirmation of its root's person, so a combine survives Process
-      // again as two voices of that person.
-      let combined: [Speaker] = try Self.mergedSpeakers(meetingID: meetingID, db).compactMap {
-        merged in
-        guard let root = replaced.first(where: { $0.id == merged.root }),
-          case .confirmed(let personID) = root.assignment
-        else { return nil }
+      // Every combined voice competes with its own embedding, read as its
+      // root: confirmed or dismissed as the root is, so it carries the
+      // root's answer, not its own.
+      let merged = try Self.mergedSpeakers(meetingID: meetingID, db)
+      let combined: [Speaker] = merged.map { merged in
+        let root = replaced.first { $0.id == merged.root }
         var speaker = merged.speaker
-        speaker.assignment = .confirmed(personID: personID)
-        speaker.dismissed = false
+        speaker.assignment = root?.assignment ?? .unknown
+        speaker.dismissed = root?.dismissed ?? false
         return speaker
       }
       // New id -> the stored row whose answers it takes. Every stored row
-      // competes; only an unambiguous pair carries anything.
+      // competes; only an unambiguous pair carries anything. Two rows of one
+      // person can pair with one new row; the root wins.
       var earlier: [UUID: Speaker] = [:]
       for (old, new) in Self.sameVoices(
         meetingID: meetingID, earlier: replaced + combined, speakers: speakers)
-      {
+      where earlier[new] == nil {
         earlier[new] = old
       }
-      // The score each kept Yes was given, before its row goes.
+      // The score each kept Yes was given, before its row goes: only when
+      // the row was itself confirmed as the person it now reads as, so a
+      // combined voice never lends its own person's score.
       var yesScores: [UUID: Float?] = [:]
       for (new, kept) in earlier where kept.assignment.isConfirmed {
+        guard every.first(where: { $0.id == kept.id })?.assignment == kept.assignment else {
+          continue
+        }
         yesScores[new] = try Self.confirmedSimilarity(speakerID: kept.id, db)
       }
       // Kept or dropped, each stored confirmation's person is recomputed.
@@ -418,6 +426,7 @@ public final class MeetingStore: Sendable {
           try Self.setConfirmedSimilarity(score, speakerID: speaker.id, db)
         }
       }
+      try Self.combineAgain(meetingID: meetingID, earlier: earlier, merged: merged, db)
       try Self.replaceNameSuggestions(suggestions, meetingID: meetingID, db)
       for rejection in keptRejections { try Self.insertRejection(rejection, db) }
       for segment in segments {
@@ -426,6 +435,28 @@ public final class MeetingStore: Sendable {
         try TranscriptSegmentRow(segment).insert(db)
       }
       for personID in voices { try Self.refreshVoice(personID: personID, db) }
+    }
+  }
+
+  /// Process again keeps one voice per person per meeting: each new row
+  /// that took a combined voice's confirmation is combined again, into the
+  /// new row of the root it read as when that root was found again, else
+  /// into another new row confirmed as the person. Without either it stays
+  /// its own voice. Rust: `combine_again`.
+  static func combineAgain(
+    meetingID: UUID, earlier: [UUID: Speaker], merged: [MergedSpeaker], _ db: Database
+  ) throws {
+    for (new, kept) in earlier.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+      guard let combine = merged.first(where: { $0.speaker.id == kept.id }),
+        case .confirmed(let personID) = kept.assignment
+      else { continue }
+      let rootFoundAgain = earlier.first { $0.value.id == combine.root && $0.key != new }?.key
+      let into =
+        try rootFoundAgain
+        ?? owner(meetingID: meetingID, personID: personID, except: new, db)?.id
+      if let into {
+        _ = try mergeSpeakerRows(new, into: into, meetingID: meetingID, db)
+      }
     }
   }
 
@@ -445,7 +476,9 @@ public final class MeetingStore: Sendable {
   /// stored row matches better. A pair holds when the cosine of their
   /// embeddings is at least `VoiceStrength.floor` and leads every other
   /// candidate of both rows by `sameVoiceMargin`; anything closer is
-  /// contested and pairs nothing. The "me" speaker and the Rust app's room
+  /// contested and pairs nothing. Two stored rows confirmed as the same
+  /// person are no rivals: the user said they are one voice, so both may
+  /// pair with the same new row. The "me" speaker and the Rust app's room
   /// row (a run without diarization) are lanes, not clusters, so each pairs
   /// only with itself, whatever its embedding. A row without an embedding
   /// pairs with nothing else. Rust: `same_voices`.
@@ -462,6 +495,9 @@ public final class MeetingStore: Sendable {
       .map { ($0, $0.id) }
     let oldClusters = earlier.filter { !lanes.contains($0.id) && $0.embedding != nil }
     let newClusters = speakers.filter { !lanes.contains($0.id) && $0.embedding != nil }
+    func samePerson(_ lhs: Speaker, _ rhs: Speaker) -> Bool {
+      lhs.assignment.isConfirmed && lhs.assignment == rhs.assignment
+    }
     func score(_ old: Speaker, _ new: Speaker) -> Float {
       guard let lhs = old.embedding, let rhs = new.embedding else { return -.infinity }
       return lhs.cosineSimilarity(to: rhs)
@@ -474,7 +510,7 @@ public final class MeetingStore: Sendable {
       else { continue }
       let rivals =
         newClusters.filter { $0.id != best.id }.map { score(old, $0) }
-        + oldClusters.filter { $0.id != old.id }.map { score($0, best) }
+        + oldClusters.filter { $0.id != old.id && !samePerson(old, $0) }.map { score($0, best) }
       let runnerUp = rivals.max() ?? -.infinity
       if similarity - runnerUp >= sameVoiceMargin {
         matched.append((old, best.id))
