@@ -500,6 +500,7 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 			await expect(
 				combined.getByRole("button", { name: /^Separate again/ }),
 			).toBeVisible();
+			await expect(combined.getByText(/^Reads as /)).toBeVisible();
 		},
 	],
 	[

@@ -59,6 +59,7 @@ import {
 	type Speaker,
 	suggestionReason,
 	unsuggested,
+	voiceLabel,
 } from "./speaker-names";
 import {
 	announceAction,
@@ -685,13 +686,14 @@ export function SpeakersPopover({
 		}
 	};
 
-	const combinedRow = (voice: CombinedVoice) => (
+	const combinedRow = (voice: CombinedVoice, root?: Speaker) => (
 		<CombinedRow
 			failure={failures.get(voice.id)}
 			key={voice.id}
 			onFocus={() => setActive(voice.id)}
 			onKeyDown={(event) => onCombinedKey(event, voice)}
 			onSeparate={() => void separate(voice)}
+			readsAs={root && !isNamed(root) ? voiceLabel(root) : undefined}
 			rowRef={rowRef(voice.id)}
 			saving={saving.has(voice.id)}
 			tabIndex={voice.id === current ? 0 : -1}
@@ -776,7 +778,7 @@ function Sections({
 }: {
 	layout: PanelLayout;
 	row: (speaker: Speaker, kind: RowKind, person?: Speaker) => ReactNode;
-	combinedRow: (voice: CombinedVoice) => ReactNode;
+	combinedRow: (voice: CombinedVoice, root?: Speaker) => ReactNode;
 }) {
 	// Outside Speakers a voice can still have voices combined into it (its
 	// name removed, or it was dismissed): they nest under it all the same.
@@ -790,7 +792,7 @@ function Sections({
 					className={NESTED_LIST}
 					data-testid={`speakers-nested-${speaker.id}`}
 				>
-					{speaker.combined.map(combinedRow)}
+					{speaker.combined.map((voice) => combinedRow(voice, speaker))}
 				</ul>
 			</li>
 		);
@@ -1265,8 +1267,11 @@ function CombinedRow({
 	onFocus,
 	onKeyDown,
 	onSeparate,
+	readsAs,
 }: {
 	voice: CombinedVoice;
+	/** What an unnamed voice it joined is called, said under its label. */
+	readsAs?: string;
 	saving: boolean;
 	failure: Failure | undefined;
 	tabIndex: number;
@@ -1332,6 +1337,14 @@ function CombinedRow({
 							testID={`speakers-popover-play-${voice.id}`}
 						/>
 					</div>
+					{readsAs ? (
+						<p
+							className="m-0 truncate text-meta text-muted-foreground"
+							data-testid={`speakers-popover-reads-as-${voice.id}`}
+						>
+							Reads as {readsAs}
+						</p>
+					) : null}
 					{said ? (
 						<p
 							className="m-0 line-clamp-2 text-meta text-muted-foreground"

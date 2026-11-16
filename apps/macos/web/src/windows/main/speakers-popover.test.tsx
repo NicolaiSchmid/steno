@@ -415,7 +415,7 @@ describe("the speakers panel", () => {
 		]);
 	});
 
-	it("keeps a combined voice nested, with Separate again, under a voice whose name was removed", async () => {
+	it("keeps a combined voice nested, with Separate again and what it reads as, under a voice whose name was removed", async () => {
 		// Removed before this visit: the panel places rows as it opens.
 		const { user, speakers, republish } = await render("");
 		republish(
@@ -442,6 +442,10 @@ describe("the speakers panel", () => {
 		expect(
 			within(combined).getByRole("button", { name: /^Separate again/ }),
 		).toBeVisible();
+		const root = speakers.find((speaker) => speaker.id === NICOLAI);
+		expect(
+			within(combined).getByTestId(`speakers-popover-reads-as-${COMBINED}`),
+		).toHaveTextContent(`Reads as ${root?.clusterLabel}`);
 	});
 
 	it("separates with S on the row, and says why in red, without Retry, when its paragraphs moved", async () => {
