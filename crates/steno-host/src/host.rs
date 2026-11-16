@@ -465,9 +465,21 @@ fn no_selection() -> BridgeError {
     BridgeError::not_found("No meeting is selected.")
 }
 
-/// What the page reads when a move or a Separate again met a transcript
-/// that changed since its snapshot.
+/// What the page reads when a move met a transcript that changed since
+/// its snapshot.
 const TRANSCRIPT_CHANGED: &str = "The transcript changed. Refresh to see it as it is now.";
+
+/// [`speaker_write_error`] for Separate again: a combined voice with none
+/// of its paragraphs left has nothing to separate. Swift:
+/// `MainWindowBridge.separate`.
+fn separate_error(error: StoreError) -> BridgeError {
+    match error {
+        StoreError::StaleTranscript => {
+            BridgeError::stale("Its paragraphs moved since. Nothing to separate.")
+        }
+        error => speaker_write_error(error),
+    }
+}
 
 /// A speaker write's store error as the page reads it: `stale` when the
 /// page acted on what changed since, `failed` otherwise.
@@ -1677,6 +1689,18 @@ impl Host {
             &Store,
         ) -> steno_core::store::Result<bool>,
     ) -> Outcome<()> {
+        self.speakers_write_mapping(write, speaker_write_error)
+    }
+
+    /// [`Host::speakers_write`] with the store error read as `map_error`.
+    fn speakers_write_mapping(
+        &self,
+        write: impl FnOnce(
+            &crate::speakers::SpeakersViewModel,
+            &Store,
+        ) -> steno_core::store::Result<bool>,
+        map_error: fn(StoreError) -> BridgeError,
+    ) -> Outcome<()> {
         let outcome = {
             let mut inner = self.lock();
             let outcome = Self::with_detail(&mut inner, |detail, store| {
@@ -1687,7 +1711,7 @@ impl Host {
                 }
                 written
             })
-            .and_then(|written| written.map(drop).map_err(speaker_write_error));
+            .and_then(|written| written.map(drop).map_err(map_error));
             self.reload_detail(&mut inner);
             outcome
         };
@@ -2129,7 +2153,10 @@ impl BridgeHost for Host {
     }
 
     fn speakers_separate(&self, params: SpeakerIdParams) -> Outcome<()> {
-        self.speakers_write(|speakers, store| speakers.separate(params.speaker_id, store))
+        self.speakers_write_mapping(
+            |speakers, store| speakers.separate(params.speaker_id, store),
+            separate_error,
+        )
     }
 
     fn transcript_set_turn_speaker(&self, params: SetTurnSpeakerParams) -> Outcome<()> {
@@ -2900,5 +2927,22 @@ mod tests {
     #[tokio::test]
     async fn a_boundary_may_use_the_timer_from_inside_a_runtime() {
         block_on(a_boundary_with_a_timeout());
+    }
+
+    /// A Separate again with nothing left says so, not the move's line;
+    /// both stay `stale`, so the page offers no Retry.
+    #[test]
+    fn a_stale_separate_again_has_its_own_message() {
+        use steno_bridge::BridgeErrorCode;
+        use steno_core::StoreError;
+
+        let separate = super::separate_error(StoreError::StaleTranscript);
+        assert_eq!(separate.code, BridgeErrorCode::Stale);
+        assert_eq!(
+            separate.message,
+            "Its paragraphs moved since. Nothing to separate."
+        );
+        let moved = super::speaker_write_error(StoreError::StaleTranscript);
+        assert_eq!(moved.message, super::TRANSCRIPT_CHANGED);
     }
 }
