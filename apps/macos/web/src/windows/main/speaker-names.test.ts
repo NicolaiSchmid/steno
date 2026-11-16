@@ -11,12 +11,11 @@ import {
 	nextToName,
 	optionReason,
 	panelLayout,
+	panelRows,
 	peopleLabel,
 	pillState,
 	placements,
 	quote,
-	rowIDs,
-	rowOrder,
 	type Speaker,
 	suggestionReason,
 	type Turn,
@@ -184,7 +183,7 @@ describe("panelLayout", () => {
 
 	it("advances to the next unnamed voice, never a suggestion, never wrapping", () => {
 		const layout = panelLayout(speakers);
-		expect(rowOrder(layout)[0]?.id).toBe(ME.id);
+		expect(panelRows(layout)[0]?.id).toBe(ME.id);
 		expect(nextToName(layout, ME.id)?.id).toBe(id(3));
 		expect(nextToName(layout, id(3))?.id).toBe(id(6));
 		expect(nextToName(layout, id(6))).toBeUndefined();
@@ -355,7 +354,7 @@ describe("voices that are not people", () => {
 		const layout = panelLayout(speakers);
 		expect(layout.dismissed.map((speaker) => speaker.id)).toEqual([id(2)]);
 		expect(layout.need.map((speaker) => speaker.id)).toEqual([id(3)]);
-		expect(rowOrder(layout).at(-1)?.id).toBe(id(2));
+		expect(panelRows(layout).at(-1)?.id).toBe(id(2));
 		expect(firstWithWork(panelLayout([notPerson(voice(2, "unknown"))]))).toBe(
 			undefined,
 		);
@@ -509,12 +508,31 @@ describe("combined voices", () => {
 		const second = voice(2, "confirmed", "Nicolai", 1);
 		const unnamed = voice(3, "unknown");
 		const layout = panelLayout([nicolai, second, unnamed]);
-		expect(rowIDs(layout)).toEqual([id(3), id(1), id(2), id(5)]);
-		expect(rowOrder(layout).map((speaker) => speaker.id)).toEqual([
+		expect(panelRows(layout).map((row) => row.id)).toEqual([
 			id(3),
 			id(1),
 			id(2),
+			id(5),
 		]);
+	});
+
+	it("are passed over when naming moves on and when the panel opens", () => {
+		const nicolai = {
+			...voice(1, "confirmed", "Nicolai", 1),
+			combined: [
+				{
+					id: id(5),
+					clusterLabel: "Speaker 5",
+					hasClip: true,
+					isPlaying: false,
+				},
+			],
+		};
+		const layout = panelLayout([nicolai, voice(2, "unknown")]);
+		// From the combined row, the next row to name is past it.
+		expect(nextToName(layout, id(5))).toBeUndefined();
+		expect(nextToName(layout, id(2))).toBeUndefined();
+		expect(firstWithWork(layout)?.id).toBe(id(2));
 	});
 });
 

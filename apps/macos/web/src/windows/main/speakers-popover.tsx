@@ -51,12 +51,11 @@ import {
 	type PillState,
 	type Placement,
 	panelLayout,
+	panelRows,
 	peopleLabel,
 	pillState,
 	placements,
 	quote,
-	rowIDs,
-	rowOrder,
 	type Speaker,
 	suggestionReason,
 	unsuggested,
@@ -250,7 +249,7 @@ export function SpeakersPopover({
 	const state = pillState(shown, transcript.length > 0, finding);
 	const layout = panelLayout(shown, frozen);
 	latest.current = layout;
-	const order = rowIDs(layout);
+	const order = panelRows(layout).map((row) => row.id);
 	const current = order.find((id) => id === active) ?? order[0];
 
 	useEffect(() => {
@@ -306,7 +305,7 @@ export function SpeakersPopover({
 			const fresh = placements(speakers);
 			setFrozen(fresh);
 			const opened = panelLayout(speakers, fresh);
-			setActive((firstWithWork(opened) ?? rowOrder(opened)[0])?.id);
+			setActive((firstWithWork(opened) ?? panelRows(opened)[0])?.id);
 		} else {
 			setFrozen(undefined);
 		}

@@ -373,50 +373,40 @@ export function panelLayout(
 	return layout;
 }
 
-/** The panel's rows top to bottom, for the keyboard and for advancing. */
-export function rowOrder(layout: PanelLayout): Speaker[] {
-	return [
-		...(layout.me ? [layout.me] : []),
-		...layout.check,
-		...layout.need,
-		...layout.people.flatMap(({ speaker, voices, also }) => [
-			speaker,
-			...voices,
-			...also,
-		]),
-		...layout.dismissed,
-	];
-}
-
 /** The voices combined into a person's voices, nested under the person. */
 export function combinedOf(entry: PersonEntry): CombinedVoice[] {
 	return [entry.speaker, ...entry.voices].flatMap((voice) => voice.combined);
 }
 
 /**
- * Every row's ID top to bottom, for the keyboard: the speakers in
- * `rowOrder`, a person's combined voices after their own voices.
+ * The panel's rows top to bottom, for the keyboard and for advancing: the
+ * speakers, a person's combined voices after their own voices.
  */
-export function rowIDs(layout: PanelLayout): string[] {
+export function panelRows(layout: PanelLayout): (Speaker | CombinedVoice)[] {
 	return [
-		...(layout.me ? [layout.me.id] : []),
-		...layout.check.map((speaker) => speaker.id),
-		...layout.need.map((speaker) => speaker.id),
+		...(layout.me ? [layout.me] : []),
+		...layout.check,
+		...layout.need,
 		...layout.people.flatMap((entry) => [
-			entry.speaker.id,
-			...entry.voices.map((voice) => voice.id),
-			...combinedOf(entry).map((voice) => voice.id),
-			...entry.also.map((voice) => voice.id),
+			entry.speaker,
+			...entry.voices,
+			...combinedOf(entry),
+			...entry.also,
 		]),
-		...layout.dismissed.map((speaker) => speaker.id),
+		...layout.dismissed,
 	];
+}
+
+/** A speaker's row, not a voice combined into one. */
+function isSpeakerRow(row: Speaker | CombinedVoice): row is Speaker {
+	return "assignment" in row;
 }
 
 /** The first row with work: unnamed Me, a suggestion, an unnamed voice. */
 export function firstWithWork(layout: PanelLayout): Speaker | undefined {
-	return rowOrder(layout).find(
-		(speaker) => !isNamed(speaker) && !isDismissed(speaker),
-	);
+	return panelRows(layout)
+		.filter(isSpeakerRow)
+		.find((speaker) => !isNamed(speaker) && !isDismissed(speaker));
 }
 
 /**
@@ -429,10 +419,11 @@ export function nextToName(
 	current: string,
 	pending: ReadonlySet<string> = new Set(),
 ): Speaker | undefined {
-	const order = rowOrder(layout);
-	const at = order.findIndex((speaker) => speaker.id === current);
+	const order = panelRows(layout);
+	const at = order.findIndex((row) => row.id === current);
 	return order
 		.slice(at + 1)
+		.filter(isSpeakerRow)
 		.find(
 			(speaker) =>
 				speaker.assignment === "unknown" &&
