@@ -104,29 +104,27 @@ impl MeetingDetailViewModel {
     /// The export and the deliveries as the store has them now; retries a
     /// refused re-export once the meeting is ready.
     pub fn reload(&mut self, store: &Store, files: &dyn FileSystem, pipeline: &dyn Pipeline) {
-        // A meeting deleted under the detail has no export, not an error.
-        let export = match store.export(self.id) {
-            Ok(export) => Ok(Some(export)),
+        // The export, the generation moves are checked against and the
+        // combined voices, from one snapshot, so the page never pairs one
+        // transcript with another's generation. A meeting deleted under the
+        // detail has no export, not an error.
+        let rows = match store.detail_rows(self.id) {
+            Ok(rows) => Ok(Some(rows)),
             Err(StoreError::MeetingNotFound(_)) => Ok(None),
             Err(error) => Err(error),
         };
-        match export {
-            Ok(export) => {
+        match rows {
+            Ok(rows) => {
+                let export = rows.as_ref().map(|rows| rows.export.clone());
                 self.recording_files_exist = export
                     .as_ref()
                     .and_then(|export| export.audio.as_ref())
                     .and_then(|asset| file_url_path(&asset.url))
                     .is_some_and(|path| files.exists(&path));
                 self.export = export;
-                match store.transcript_generation(self.id) {
-                    Ok(generation) => self.transcript_generation = generation,
-                    Err(StoreError::MeetingNotFound(_)) => {}
-                    Err(error) => {
-                        self.error = Some(format!("Meeting could not be loaded: {error}"));
-                    }
-                }
-                if let Some(export) = self.export.clone() {
-                    self.speakers.update(export, store, files);
+                if let Some(rows) = rows {
+                    self.transcript_generation = rows.transcript_generation;
+                    self.speakers.update(rows, store, files);
                     if self.retry_redeliver_when_ready
                         && self
                             .meeting()

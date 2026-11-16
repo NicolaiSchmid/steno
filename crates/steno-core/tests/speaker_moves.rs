@@ -673,3 +673,24 @@ fn a_move_never_prunes_the_me_row() {
             .any(|speaker| speaker.id == me)
     );
 }
+
+/// The detail's rows come from one snapshot: the export, its generation
+/// and its combined voices agree.
+#[test]
+fn the_detail_rows_read_the_export_generation_and_combines_together() {
+    let m = Meeting3::new();
+    let anna = m.anna();
+    m.store.confirm_speaker(m.speakers[1].id, &anna).unwrap();
+    m.store.confirm_speaker(m.speakers[2].id, &anna).unwrap();
+    let rows = m.store.detail_rows(m.meeting.id).unwrap();
+    assert_eq!(rows.export, m.store.export(m.meeting.id).unwrap());
+    assert_eq!(rows.transcript_generation, m.generation());
+    assert_eq!(
+        rows.combined,
+        m.store.merged_speakers(m.meeting.id).unwrap()
+    );
+    assert!(matches!(
+        m.store.detail_rows(Uuid::new_v4()),
+        Err(StoreError::MeetingNotFound(_))
+    ));
+}

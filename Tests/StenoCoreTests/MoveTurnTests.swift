@@ -450,6 +450,21 @@ import Testing
     }
   }
 
+  /// The detail's rows come from one read: the export, its generation and
+  /// its combined voices agree. Rust:
+  /// `the_detail_rows_read_the_export_generation_and_combines_together`.
+  @Test func theDetailRowsReadTheExportGenerationAndCombinesTogether() async throws {
+    let store = try await Self.seeded()
+    try await store.mergeSpeakers(Self.two, into: Self.one, meetingID: Self.meetingID)
+    var iterator = store.observeMeetingDetail(id: Self.meetingID).makeAsyncIterator()
+    let rows = try #require(try await iterator.next() ?? nil)
+    #expect(rows.export == (try await store.export(meetingID: Self.meetingID)))
+    #expect(rows.transcriptGeneration == 1)
+    #expect(rows.combined == (try await store.mergedSpeakers(meetingID: Self.meetingID)))
+    var missing = store.observeMeetingDetail(id: SampleData.uuid(998)).makeAsyncIterator()
+    #expect(try await missing.next() == .some(nil))
+  }
+
   /// Saves write their own columns only: a combined speaker saved again
   /// stays combined, and a meeting saved or updated keeps its generation.
   @Test func savesLeaveTheCombineAndTheGenerationAlone() async throws {

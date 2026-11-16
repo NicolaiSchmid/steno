@@ -547,7 +547,7 @@ fn confirming_after_the_audio_is_gone_removes_the_run_clip_the_row_names() {
     }
     let mut speakers = SpeakersViewModel::default();
     speakers.update(
-        store.export(meeting.id).unwrap(),
+        store.detail_rows(meeting.id).unwrap(),
         &store,
         &steno_host::services::RealFileSystem,
     );
@@ -647,7 +647,7 @@ fn naming_me_the_first_time_makes_that_person_you_in_every_unnamed_meeting() {
     let name_me = |meeting_id: Uuid, person: &steno_core::Person| {
         let mut speakers = SpeakersViewModel::default();
         speakers.update(
-            store.export(meeting_id).unwrap(),
+            store.detail_rows(meeting_id).unwrap(),
             &store,
             &steno_host::services::RealFileSystem,
         );

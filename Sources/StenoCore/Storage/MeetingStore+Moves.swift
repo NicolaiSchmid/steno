@@ -29,6 +29,22 @@ public struct TurnSegmentMove: Sendable, Equatable, Hashable {
   }
 }
 
+/// What the meeting detail shows, from one read: the export, the transcript
+/// generation paragraph moves are checked against, and the voices combined
+/// into others, so a move never pairs one transcript with another's
+/// generation. Rust: `DetailRows`.
+public struct MeetingDetailRows: Sendable, Equatable {
+  public var export: MeetingExport
+  public var transcriptGeneration: Int
+  public var combined: [MergedSpeaker]
+
+  public init(export: MeetingExport, transcriptGeneration: Int, combined: [MergedSpeaker]) {
+    self.export = export
+    self.transcriptGeneration = transcriptGeneration
+    self.combined = combined
+  }
+}
+
 extension Speaker {
   /// The person this speaker is confirmed as, nil unless `.confirmed`.
   var confirmedPersonID: UUID? {
@@ -65,6 +81,19 @@ extension MeetingStore {
   /// How many transcripts processing has written for the meeting:
   /// `replaceTranscript` raises it, and `moveTurn` is refused against an
   /// older one. Throws `meetingNotFound` for a missing meeting.
+  /// `MeetingDetailRows` of one meeting, each value from one read
+  /// transaction; nil when the meeting does not exist.
+  public func observeMeetingDetail(id: UUID) -> AsyncThrowingStream<MeetingDetailRows?, any Error> {
+    writer.stream(
+      ValueObservation.tracking { db in
+        guard let export = try Self.exportRows(meetingID: id, db) else { return nil }
+        return MeetingDetailRows(
+          export: export,
+          transcriptGeneration: try Self.transcriptGeneration(meetingID: id, db) ?? 0,
+          combined: try Self.mergedSpeakers(meetingID: id, db))
+      })
+  }
+
   public func transcriptGeneration(meetingID: UUID) async throws -> Int {
     try await writer.read { db in
       guard let generation = try Self.transcriptGeneration(meetingID: meetingID, db) else {

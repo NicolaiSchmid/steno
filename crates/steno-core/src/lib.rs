@@ -29,7 +29,7 @@ pub use protocols::{
 };
 pub use recording_layout::RecordingLayout;
 pub use store::{
-    AdmissionCommit, ChangeMark, DeletedMeeting, ExpiredAsset, MergedSpeaker, SearchHit,
-    SettingProblem, StageRateRow, Store, StoreError,
+    AdmissionCommit, ChangeMark, DeletedMeeting, DetailRows, ExpiredAsset, MergedSpeaker,
+    SearchHit, SettingProblem, StageRateRow, Store, StoreError,
 };
 pub use string_enum::UnknownCase;

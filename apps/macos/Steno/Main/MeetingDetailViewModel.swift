@@ -1,7 +1,7 @@
 import Foundation
 import StenoCore
 
-/// One meeting's detail: the export from `observeMeeting(id:)`, deliveries
+/// One meeting's detail: the export from `observeMeetingDetail(id:)`, deliveries
 /// from `observeDeliveries`, the bundled templates, the selected tab and
 /// the speakers (`speakers`, fed from every export tick). Summary,
 /// Transcript and Tasks are display only; notes are saved by the bridge as
@@ -103,25 +103,19 @@ final class MeetingDetailViewModel: Identifiable {
 
   /// Follows the export until cancelled (one view `.task`), feeding the
   /// speakers and retrying a refused re-export once the meeting is ready.
-  /// The combined voices and the transcript generation are read beside each
-  /// export, before anything is set, so a snapshot never mixes two ticks.
+  /// The export, the transcript generation and the combined voices come
+  /// from one read (`observeMeetingDetail(id:)`), so the page never pairs
+  /// one transcript with another's generation.
   func observe() async {
     do {
-      for try await export in store.observeMeeting(id: id) {
-        var combined: [MergedSpeaker] = []
-        if export != nil {
-          // A meeting deleted in between reads as nothing combined; the
-          // next tick says it is gone.
-          combined = (try? await store.mergedSpeakers(meetingID: id)) ?? []
-          if let generation = try? await store.transcriptGeneration(meetingID: id) {
-            transcriptGeneration = generation
-          }
-        }
+      for try await rows in store.observeMeetingDetail(id: id) {
+        let export = rows?.export
+        if let rows { transcriptGeneration = rows.transcriptGeneration }
         self.export = export
         recordingFilesExist =
           export?.audio.map { FileManager.default.fileExists(atPath: $0.url.path) } ?? false
         guard let export else { continue }
-        speakers.update(export: export, combined: combined)
+        speakers.update(export: export, combined: rows?.combined ?? [])
         if retryRedeliverWhenReady, export.meeting.state == .ready {
           retryRedeliverWhenReady = false
           await redeliverSpeakerChanges()

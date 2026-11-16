@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use steno_core::{
-    MeetingExport, ParticipantRole, Person, Speaker, SpeakerAssignment, SpeakerNameSuggestion,
-    Store, TranscriptSegment, VoiceStrength, fold_name, me_speaker_id, paths::file_url_path,
+    DetailRows, MeetingExport, ParticipantRole, Person, Speaker, SpeakerAssignment,
+    SpeakerNameSuggestion, Store, TranscriptSegment, VoiceStrength, fold_name, me_speaker_id,
+    paths::file_url_path,
 };
 use uuid::Uuid;
 
@@ -588,10 +589,16 @@ impl SpeakersViewModel {
         self.rows.iter().find(|row| row.id() == id)
     }
 
-    /// A new export: rows are rebuilt and the suggestions, the user's
-    /// Noes, the recent people and the people list reloaded. A voice match
-    /// below [`VoiceStrength::FLOOR`] reads as unknown everywhere.
-    pub fn update(&mut self, mut export: MeetingExport, store: &Store, files: &dyn FileSystem) {
+    /// A new export with its combined voices, read in one snapshot
+    /// ([`Store::detail_rows`]): rows are rebuilt and the suggestions, the
+    /// user's Noes, the recent people and the people list reloaded. A voice
+    /// match below [`VoiceStrength::FLOOR`] reads as unknown everywhere.
+    pub fn update(&mut self, rows: DetailRows, store: &Store, files: &dyn FileSystem) {
+        let DetailRows {
+            mut export,
+            combined,
+            ..
+        } = rows;
         export.speakers = export.speakers.into_iter().map(shown).collect();
         self.rows = export
             .speakers
@@ -609,17 +616,16 @@ impl SpeakersViewModel {
         let meeting_id = export.meeting.id;
         let segments = export.segments.clone();
         self.export = Some(export);
+        self.combined = combined
+            .into_iter()
+            .map(|merged| CombinedRow {
+                excerpt: combined_excerpt(&merged.speaker, &segments),
+                can_play: clip_path(&merged.speaker).is_some_and(|path| files.exists(&path)),
+                root: merged.root,
+                speaker: merged.speaker,
+            })
+            .collect();
         let loaded = (|| -> steno_core::store::Result<()> {
-            self.combined = store
-                .merged_speakers(meeting_id)?
-                .into_iter()
-                .map(|merged| CombinedRow {
-                    excerpt: combined_excerpt(&merged.speaker, &segments),
-                    can_play: clip_path(&merged.speaker).is_some_and(|path| files.exists(&path)),
-                    root: merged.root,
-                    speaker: merged.speaker,
-                })
-                .collect();
             let suggestions = store.name_suggestions(meeting_id)?;
             let rejections = store.suggestion_rejections(meeting_id)?;
             let recent = store.recent_persons()?;

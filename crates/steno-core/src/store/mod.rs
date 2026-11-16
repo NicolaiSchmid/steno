@@ -30,6 +30,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use assets::ExpiredAsset;
+pub use export::DetailRows;
 pub use handover::AdmissionCommit;
 pub use meetings::DeletedMeeting;
 pub use people::MergedSpeaker;
