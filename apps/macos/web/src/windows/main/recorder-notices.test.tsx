@@ -1,8 +1,11 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { describe, expect, it } from "vitest";
-import type { RecordingSnapshot } from "@/bridge/contract";
+import type {
+	MeetingsListSnapshot,
+	RecordingSnapshot,
+} from "@/bridge/contract";
 import { loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { MeetingDetail } from "./meeting-detail";
@@ -45,6 +48,49 @@ describe("RecorderBar", () => {
 		const title = within(bar).getByTestId("bar-open-recording");
 		expect(title).toHaveTextContent("Tuesday 10:08");
 		await user.click(title);
+		expect(
+			callsTo(harness.transport, "meetings.select").map((call) => call.params),
+		).toEqual([{ meetingID: "00000000-0000-0000-0000-000000000003" }]);
+	});
+
+	it("keeps the recording's title when a search hides it from the list", async () => {
+		const harness = await createBridgeHarness("scenario=recording-elsewhere");
+		renderWithBridge(narrow(<MeetingDetail />), harness);
+		const bar = await screen.findByTestId("recorder-bar");
+		const title = within(bar).getByTestId("bar-open-recording");
+		expect(title).toHaveTextContent("Tuesday 10:08");
+		const list = (await loadFixtureSnapshots())[
+			"meetings.list"
+		] as MeetingsListSnapshot;
+		act(() => {
+			harness.transport.emit("meetings.list", {
+				...list,
+				query: "investor",
+				groups: list.groups
+					.map((group) => ({
+						...group,
+						meetings: group.meetings.filter(
+							(meeting) => meeting.title === "Investor update prep",
+						),
+					}))
+					.filter((group) => group.meetings.length > 0),
+			} satisfies MeetingsListSnapshot);
+		});
+		expect(within(bar).getByTestId("bar-open-recording")).toHaveTextContent(
+			"Tuesday 10:08",
+		);
+	});
+
+	it("links to the current recording when the list never showed its title", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness(
+			"scenario=recording-elsewhere&query=investor",
+		);
+		renderWithBridge(narrow(<MeetingDetail />), harness);
+		const bar = await screen.findByTestId("recorder-bar");
+		const link = within(bar).getByTestId("bar-open-recording");
+		expect(link).toHaveTextContent("Open current recording");
+		await user.click(link);
 		expect(
 			callsTo(harness.transport, "meetings.select").map((call) => call.params),
 		).toEqual([{ meetingID: "00000000-0000-0000-0000-000000000003" }]);

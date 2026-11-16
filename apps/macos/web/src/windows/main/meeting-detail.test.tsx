@@ -483,6 +483,22 @@ describe("MeetingDetail header", () => {
 		expect(screen.queryByTestId("export-status")).not.toBeInTheDocument();
 	});
 
+	it("draws no footer while processing without a keep switch", async () => {
+		const scenario = applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams("scenario=processing"),
+		)["meeting.detail"] as MeetingDetailSnapshot;
+		const harness = await createBridgeHarness("scenario=processing", {
+			"meeting.detail": {
+				...scenario,
+				retention: { ...scenario.retention, showsKeepToggle: false },
+			} satisfies MeetingDetailSnapshot,
+		});
+		renderWithBridge(<MeetingDetail />, harness);
+		expect(await screen.findByTestId("meeting-title")).toBeInTheDocument();
+		expect(screen.queryByTestId("meeting-footer")).not.toBeInTheDocument();
+	});
+
 	it("keeps the live mark out of the header when another meeting records", async () => {
 		const live = (await loadFixtureSnapshots())["recording.live"] as object;
 		const harness = await createBridgeHarness("", {

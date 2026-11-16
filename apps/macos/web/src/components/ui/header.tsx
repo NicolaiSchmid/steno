@@ -38,7 +38,7 @@ export interface BreadcrumbProps
 
 /**
  * The trail in a header row: muted parents, a muted slash, the page in full
- * colour. The trail is a container: once it is narrower than 14 rem (the
+ * colour. The trail is a container: once it is narrower than 20 rem (the
  * header's actions took the rest) the parents go, so the page keeps its
  * words instead of shrinking to a letter.
  */
@@ -69,12 +69,12 @@ export function Breadcrumb({
 						</li>
 					) : (
 						<Fragment key={key}>
-							<li className="@max-[14rem]/crumbs:hidden max-w-40 shrink-0 truncate text-muted-foreground">
+							<li className="@max-[20rem]/crumbs:hidden max-w-40 shrink-0 truncate text-muted-foreground">
 								{item}
 							</li>
 							<li
 								aria-hidden="true"
-								className="@max-[14rem]/crumbs:hidden text-muted-foreground"
+								className="@max-[20rem]/crumbs:hidden text-muted-foreground"
 							>
 								/
 							</li>

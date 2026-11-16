@@ -1,5 +1,5 @@
 import { CircleAlertIcon, TimerIcon } from "lucide-react";
-import { useContext } from "react";
+import { useContext, useRef } from "react";
 import type { RecordingSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import { Button, Callout, focusRingClass, RecordMark } from "@/components/ui";
@@ -150,14 +150,22 @@ export function RecorderBar() {
 		(recording?.autoStop !== undefined && state === "recording") ||
 		Boolean(recording?.error ?? recording?.warning);
 	// Another meeting is open: the bar names the one that records, as a
-	// link to it, so Stop says what it stops.
+	// link to it, so Stop says what it stops. The list is filtered, so the
+	// bar keeps the title it last saw for the recording meeting; a filter or
+	// search that hides the meeting leaves the name in place. A title it never
+	// saw reads "Open current recording".
+	const meetingID = recording?.meetingID;
+	const seen = useRef<{ id: string; title: string } | undefined>(undefined);
+	const listed = list?.groups
+		.flatMap((group) => group.meetings)
+		.find((meeting) => meeting.id === meetingID);
+	if (listed) seen.current = { id: listed.id, title: listed.title };
 	const elsewhere =
-		recording?.meetingID !== undefined &&
-		list?.selection !== recording.meetingID
-			? list?.groups
-					.flatMap((group) => group.meetings)
-					.find((meeting) => meeting.id === recording.meetingID)
+		meetingID !== undefined && list?.selection !== meetingID
+			? meetingID
 			: undefined;
+	const recordingTitle =
+		seen.current?.id === meetingID ? seen.current?.title : undefined;
 	if (!narrow || !recording || (!active && !notices)) {
 		return null;
 	}
@@ -169,34 +177,46 @@ export function RecorderBar() {
 			{active ? (
 				<div className="flex min-w-0 items-center gap-3">
 					<RecordMark pulse={state === "recording"} />
-					<span className="min-w-0 flex-1 truncate text-foreground text-label">
-						{ACTIVE_LABEL[state]}
+					<div className="flex min-w-0 flex-1 items-center gap-2 text-label">
+						<span className="shrink-0 text-foreground">
+							{ACTIVE_LABEL[state]}
+						</span>
 						{elsewhere ? (
-							<>
-								{" "}
-								<button
-									className={cn(
-										"rounded-xs font-normal text-foreground underline underline-offset-2 hover:no-underline",
-										focusRingClass,
-									)}
-									data-testid="bar-open-recording"
-									onClick={() =>
-										send(client, "meetings.select", {
-											meetingID: elsewhere.id,
-										})
-									}
-									type="button"
-								>
-									{elsewhere.title}
-								</button>
-							</>
+							<button
+								className={cn(
+									"flex min-w-0 rounded-xs font-normal text-foreground underline underline-offset-2 hover:no-underline",
+									focusRingClass,
+								)}
+								data-testid="bar-open-recording"
+								onClick={() =>
+									send(client, "meetings.select", { meetingID: elsewhere })
+								}
+								type="button"
+							>
+								<span className="min-w-0 truncate">
+									{recordingTitle ?? "Open current recording"}
+								</span>
+							</button>
 						) : null}
 						{state === "recording" ? (
-							<span className="ml-2 font-mono font-normal text-meta text-muted-foreground tabular-nums">
-								{format.duration(elapsed)}
-							</span>
+							<>
+								{elsewhere ? (
+									<span
+										aria-hidden="true"
+										className="shrink-0 text-muted-foreground"
+									>
+										·
+									</span>
+								) : null}
+								<span
+									className="shrink-0 font-mono text-meta text-muted-foreground tabular-nums"
+									data-testid="bar-elapsed"
+								>
+									{format.duration(elapsed)}
+								</span>
+							</>
 						) : null}
-					</span>
+					</div>
 					<Button
 						data-testid="bar-stop"
 						disabled={state !== "recording"}

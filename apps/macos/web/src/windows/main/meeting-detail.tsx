@@ -383,6 +383,8 @@ function DetailFooter({
 	const { words } = usePlatform();
 	const status = EXPORT_RESULT[detail.export.status];
 	const settled = detail.state === "ready" || detail.state === "failed";
+	// Without the keep row or the export line the footer would be a lone rule.
+	if (!detail.retention.showsKeepToggle && !settled) return null;
 	return (
 		<footer
 			className="mt-10 flex flex-col gap-3 border-border border-t pt-4 text-body text-muted-foreground"

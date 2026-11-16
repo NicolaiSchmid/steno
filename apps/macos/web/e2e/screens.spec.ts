@@ -167,6 +167,38 @@ async function expectFocusLine(row: Locator) {
 	expect(style).toEqual({ style: "solid", width: "2px", offset: "-2px" });
 }
 
+/**
+ * The ancestors that clip (overflow other than visible) and cut into the
+ * focus ring around `target`: the 2 px ring past the 2 px offset.
+ */
+async function clippedRing(target: Locator) {
+	return target.evaluate((element) => {
+		const ring = element.getBoundingClientRect();
+		const reach = 4;
+		const cut: string[] = [];
+		for (
+			let parent = element.parentElement;
+			parent;
+			parent = parent.parentElement
+		) {
+			const style = getComputedStyle(parent);
+			if (style.overflowX === "visible" && style.overflowY === "visible") {
+				continue;
+			}
+			const box = parent.getBoundingClientRect();
+			if (
+				ring.left - reach < box.left ||
+				ring.right + reach > box.right ||
+				ring.top - reach < box.top ||
+				ring.bottom + reach > box.bottom
+			) {
+				cut.push(parent.className);
+			}
+		}
+		return cut;
+	});
+}
+
 function shoot(
 	window: "main" | "settings" | "onboarding",
 	size: Size,
@@ -545,6 +577,82 @@ for (const scheme of SCHEMES) {
 	});
 
 	/**
+	 * The recorder bar's title link from the keyboard: its ring (2 px past a
+	 * 2 px offset) is drawn whole, no ancestor that clips holds it short.
+	 */
+	test(`main ${scheme} narrow recording focus title`, async ({ page }) => {
+		await page.setViewportSize({ width: 600, height: 380 });
+		await page.goto(
+			`/#/main?scenario=recording-elsewhere${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		const link = page.getByTestId("bar-open-recording");
+		await link.focus();
+		await page.keyboard.press("Shift+Tab");
+		await page.keyboard.press("Tab");
+		await expect(link).toBeFocused();
+		expect(await clippedRing(link)).toEqual([]);
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-narrow-recording-focus-title.png`,
+		});
+	});
+
+	/**
+	 * A long title in the recorder bar truncates inside its link; the middle
+	 * dot, the elapsed time and Stop keep their place.
+	 */
+	test(`main ${scheme} narrow recording long title`, async ({ page }) => {
+		await page.setViewportSize({ width: 600, height: 380 });
+		const title = encodeURIComponent(
+			"Quarterly planning with the platform, design and research teams",
+		);
+		await page.goto(
+			`/#/main?scenario=recording-elsewhere&recordingTitle=${title}${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		const bar = page.getByTestId("recorder-bar");
+		const text = bar.getByTestId("bar-open-recording").locator("span");
+		expect(
+			await text.evaluate(
+				(element) => element.scrollWidth > element.clientWidth,
+			),
+		).toBe(true);
+		await expect(bar).toContainText("·");
+		const elapsed = bar.getByTestId("bar-elapsed");
+		await expect(elapsed).toHaveText(/^12:3\d$/);
+		await expect(elapsed).toBeInViewport({ ratio: 1 });
+		const clock = await elapsed.boundingBox();
+		const stop = await bar.getByTestId("bar-stop").boundingBox();
+		expect((clock?.x ?? 0) + (clock?.width ?? 0)).toBeLessThanOrEqual(
+			stop?.x ?? 0,
+		);
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-narrow-recording-long-title.png`,
+		});
+	});
+
+	/**
+	 * A search that leaves the recording meeting out of the list: the bar
+	 * still links to it, as "Open current recording" when the list never
+	 * showed its title.
+	 */
+	test(`main ${scheme} narrow recording search`, async ({ page }) => {
+		await page.setViewportSize({ width: 600, height: 380 });
+		await page.goto(
+			`/#/main?scenario=recording-elsewhere&query=investor${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		const link = page
+			.getByTestId("recorder-bar")
+			.getByTestId("bar-open-recording");
+		await expect(link).toHaveText("Open current recording");
+		await expect(link).toBeInViewport({ ratio: 1 });
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-narrow-recording-search.png`,
+		});
+	});
+
+	/**
 	 * The ⋯ menu opened from the keyboard: the first template choice holds
 	 * the focus, its check in the leading slot, a separator before Re-run
 	 * summary.
@@ -660,7 +768,8 @@ for (const scheme of SCHEMES) {
 	 * and the first transcript paragraph show without scrolling, and with
 	 * the recorder held the page crumb keeps its whole title beside the
 	 * live mark, which drops its word and keeps the time. (The trail is
-	 * 165 px here, under the 14 rem below which "Meetings /" goes.)
+	 * 165 px here, under the 20 rem below which "Meetings /" goes, idle or
+	 * recording alike.)
 	 */
 	test(`main ${scheme} 960 reading`, async ({ page }) => {
 		await page.setViewportSize({ width: 960, height: 600 });
@@ -669,6 +778,13 @@ for (const scheme of SCHEMES) {
 		await settle(page);
 		const heading = page.getByTestId("tab-content-summary").locator("h3");
 		await expect(heading.first()).toBeInViewport({ ratio: 1 });
+		// Idle as recording: the trail is too narrow for "Meetings /", so the
+		// page crumb has the row to itself.
+		for (const parent of await page
+			.locator("main nav[aria-label=Breadcrumb] li:not([aria-current])")
+			.all()) {
+			await expect(parent).toBeHidden();
+		}
 		await page.goto(`/#/main?tab=transcript${dark}`);
 		await page.reload();
 		await settle(page);
@@ -681,6 +797,11 @@ for (const scheme of SCHEMES) {
 		await expect(page.getByTestId("header-live")).toBeVisible();
 		// One Stop: the sidebar's; the header holds only the live mark.
 		await expect(page.getByRole("button", { name: /^Stop/ })).toHaveCount(1);
+		for (const parent of await page
+			.locator("main nav[aria-label=Breadcrumb] li:not([aria-current])")
+			.all()) {
+			await expect(parent).toBeHidden();
+		}
 		const crumb = page.locator("main [aria-current=page]");
 		expect((await crumb.boundingBox())?.width ?? 0).toBeGreaterThan(60);
 		expect(

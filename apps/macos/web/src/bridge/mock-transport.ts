@@ -252,7 +252,8 @@ function bareDetail(
  * `empty` (no meetings, no selection), `recording` (`recording.live` as the
  * recording, started 12:34 ago, its auto-stop counting down, and the
  * meeting it records selected and live: nothing produced, no duration yet),
- * `recording-elsewhere` (that, while another meeting is selected), `denied` (idle
+ * `recording-elsewhere` (that, while another meeting is selected; with
+ * `recordingTitle=` for its title and `query=` for a search), `denied` (idle
  * with the microphone denied), `failed` (the failed meeting selected),
  * `processing` (a meeting in the progress entry, selected), `export-failed`
  * (the selected meeting's export failed), `damaged-audio`
@@ -325,6 +326,33 @@ export function applyScenario(
 				canRerunSummary: false,
 			});
 		}
+	}
+
+	if (scenario === "recording-elsewhere" && list) {
+		// `recordingTitle=` renames the meeting that records; `query=` searches
+		// the list as the host would, so a search can leave that meeting out.
+		const title = params.get("recordingTitle");
+		const query = params.get("query")?.toLowerCase();
+		const current = result["meetings.list"] as MeetingsListSnapshot;
+		result["meetings.list"] = {
+			...current,
+			query: query ?? current.query,
+			groups: current.groups
+				.map((group) => ({
+					...group,
+					meetings: group.meetings
+						.map((meeting) =>
+							title && meeting.id === RECORDING_ELSEWHERE_ID
+								? { ...meeting, title }
+								: meeting,
+						)
+						.filter(
+							(meeting) =>
+								!query || meeting.title.toLowerCase().includes(query),
+						),
+				}))
+				.filter((group) => group.meetings.length > 0),
+		} satisfies MeetingsListSnapshot;
 	}
 
 	if (scenario === "denied") {
