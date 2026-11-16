@@ -33,7 +33,7 @@ export function ContentColumn({
 }: ContentColumnProps) {
 	return (
 		<>
-			<HeaderRow>
+			<HeaderRow className="@container/header">
 				{leading}
 				<Breadcrumb items={crumbs} />
 				{actions}

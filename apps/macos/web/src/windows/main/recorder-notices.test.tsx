@@ -40,6 +40,23 @@ describe("RecorderBar", () => {
 				.map((call) => call.method)
 				.filter((method) => method.startsWith("recording.")),
 		).toEqual(["recording.keepGoing", "recording.stop"]);
+		// Another meeting is open: the bar names the one that records, and
+		// its title opens it.
+		const title = within(bar).getByTestId("bar-open-recording");
+		expect(title).toHaveTextContent("Tuesday 10:08");
+		await user.click(title);
+		expect(
+			callsTo(harness.transport, "meetings.select").map((call) => call.params),
+		).toEqual([{ meetingID: "00000000-0000-0000-0000-000000000003" }]);
+	});
+
+	it("names no meeting while the open one is the one recording", async () => {
+		const harness = await createBridgeHarness("scenario=recording");
+		renderWithBridge(narrow(<MeetingDetail />), harness);
+		const bar = await screen.findByTestId("recorder-bar");
+		expect(
+			within(bar).queryByTestId("bar-open-recording"),
+		).not.toBeInTheDocument();
 	});
 
 	it("keeps a recorder error in view while idle, and is gone in a wide window", async () => {

@@ -211,8 +211,11 @@ describe("MeetingDetail", () => {
 		expect(
 			screen.queryByTestId("failure-rerun-summary"),
 		).not.toBeInTheDocument();
-		// No transcript: no tabs, which would all be empty.
+		// No transcript: no tabs, which would all be empty, but the personal
+		// notes stay below the line, still editable.
 		expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+		const notes = screen.getByRole("region", { name: "Notes" });
+		expect(within(notes).getByRole("textbox")).toBeEnabled();
 	});
 
 	it("offers Re-run summary when only the summary failed", async () => {
@@ -236,8 +239,14 @@ describe("MeetingDetail", () => {
 		await user.click(within(line).getByTestId("failure-rerun-summary"));
 		expect(callsTo(harness.transport, "meeting.rerunSummary")).toHaveLength(1);
 		expect(screen.queryByTestId("process-again")).not.toBeInTheDocument();
-		// A transcript to read: the tabs stay.
+		// A transcript to read: the tabs stay, and the failure stays on the
+		// summary; the transcript reads as usual.
 		expect(screen.getByRole("tablist")).toBeInTheDocument();
+		await user.click(screen.getByTestId("tab-transcript"));
+		expect(screen.queryByTestId("processing-failed")).not.toBeInTheDocument();
+		expect(screen.getByTestId("tab-content-transcript")).toHaveTextContent(
+			ready.transcript[0]?.text ?? "",
+		);
 	});
 
 	it("says a summary was skipped because the API key is not available yet", async () => {
@@ -469,6 +478,9 @@ describe("MeetingDetail header", () => {
 		expect(
 			screen.queryByRole("button", { name: /^Stop/ }),
 		).not.toBeInTheDocument();
+		// Nothing to export yet: no export line in the footer.
+		expect(screen.getByTestId("meeting-footer")).toBeInTheDocument();
+		expect(screen.queryByTestId("export-status")).not.toBeInTheDocument();
 	});
 
 	it("keeps the live mark out of the header when another meeting records", async () => {

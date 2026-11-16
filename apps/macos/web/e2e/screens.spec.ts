@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 /**
  * Renders the main window in every state at both reference window sizes,
@@ -149,6 +149,22 @@ async function settle(page: Page) {
 		() => document.querySelector("[data-starting-style]") === null,
 	);
 	await page.waitForTimeout(300);
+}
+
+/**
+ * A row holding the keyboard focus in a menu or a select's list draws the
+ * 2 px `--focus` line inside it (`focusInsetClass`), not only the fill.
+ */
+async function expectFocusLine(row: Locator) {
+	const style = await row.evaluate((element) => {
+		const computed = getComputedStyle(element);
+		return {
+			style: computed.outlineStyle,
+			width: computed.outlineWidth,
+			offset: computed.outlineOffset,
+		};
+	});
+	expect(style).toEqual({ style: "solid", width: "2px", offset: "-2px" });
 }
 
 function shoot(
@@ -510,7 +526,16 @@ for (const scheme of SCHEMES) {
 		await expect(page.getByTestId("header-live")).toHaveCount(0);
 		const bar = page.getByTestId("recorder-bar");
 		await expect(bar).toContainText("Recording");
-		for (const id of ["bar-stop", "auto-stop", "keep-recording"]) {
+		// The meeting that records is named, as a link to it.
+		await expect(bar.getByTestId("bar-open-recording")).toHaveText(
+			"Tuesday 10:08",
+		);
+		for (const id of [
+			"bar-open-recording",
+			"bar-stop",
+			"auto-stop",
+			"keep-recording",
+		]) {
 			await expect(bar.getByTestId(id)).toBeInViewport({ ratio: 1 });
 		}
 		await page.screenshot({
@@ -536,6 +561,7 @@ for (const scheme of SCHEMES) {
 		const radio = menu.getByRole("menuitemradio").first();
 		await expect(radio).toBeFocused();
 		await expect(radio).toHaveAttribute("data-highlighted", "");
+		await expectFocusLine(radio);
 		await settle(page);
 		const box = await menu.boundingBox();
 		if (!box) {
@@ -555,9 +581,86 @@ for (const scheme of SCHEMES) {
 	});
 
 	/**
+	 * Keyboard focus on a plain ⋯ menu row and on a select's option: the
+	 * inset focus line over the highlight, measured at 3:1 on the popover.
+	 */
+	test(`main ${scheme} focus menu item`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		await page.goto(`/#/main?tab=summary${scheme === "dark" ? "&dark" : ""}`);
+		await settle(page);
+		await page.getByTestId("meeting-actions").focus();
+		await page.keyboard.press("Enter");
+		const menu = page.getByRole("menu");
+		await expect(menu).toBeVisible();
+		const item = menu.getByRole("menuitem", { name: "Copy transcript" });
+		for (let step = 0; step < 12; step += 1) {
+			if (
+				await item.evaluate((element) => element === document.activeElement)
+			) {
+				break;
+			}
+			await page.keyboard.press("ArrowDown");
+		}
+		await expect(item).toBeFocused();
+		await expectFocusLine(item);
+		await settle(page);
+		const box = await menu.boundingBox();
+		if (!box) {
+			throw new Error("the menu has no box");
+		}
+		const pad = 24;
+		await page.screenshot({
+			clip: {
+				x: box.x - pad,
+				y: box.y - pad,
+				width: box.width + pad * 2,
+				height: Math.min(760 - box.y + pad, box.height + pad * 2),
+			},
+			path: `${OUT}/main-${scheme}-focus-menu-item.png`,
+		});
+		expect(external).toEqual([]);
+	});
+
+	test(`settings ${scheme} focus select option`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize(SETTINGS_SIZE);
+		await page.goto(
+			`/#/settings?section=recording${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		await page.getByTestId("retention-mode").focus();
+		await page.keyboard.press("ArrowDown");
+		const list = page.getByRole("listbox");
+		await expect(list).toBeVisible();
+		const option = list.getByRole("option").first();
+		await page.keyboard.press("Home");
+		await expect(option).toBeFocused();
+		await expectFocusLine(option);
+		await settle(page);
+		const box = await list.boundingBox();
+		if (!box) {
+			throw new Error("the list has no box");
+		}
+		const pad = 24;
+		await page.screenshot({
+			clip: {
+				x: box.x - pad,
+				y: box.y - pad,
+				width: box.width + pad * 2,
+				height: box.height + pad * 2,
+			},
+			path: `${OUT}/settings-${scheme}-focus-select-option.png`,
+		});
+		expect(external).toEqual([]);
+	});
+
+	/**
 	 * 960 by 600 with the default column widths: the first summary heading
 	 * and the first transcript paragraph show without scrolling, and with
-	 * the recorder held the page crumb keeps its words beside Stop.
+	 * the recorder held the page crumb keeps its whole title beside the
+	 * live mark, which drops its word and keeps the time. (The trail is
+	 * 165 px here, under the 14 rem below which "Meetings /" goes.)
 	 */
 	test(`main ${scheme} 960 reading`, async ({ page }) => {
 		await page.setViewportSize({ width: 960, height: 600 });
@@ -580,6 +683,66 @@ for (const scheme of SCHEMES) {
 		await expect(page.getByRole("button", { name: /^Stop/ })).toHaveCount(1);
 		const crumb = page.locator("main [aria-current=page]");
 		expect((await crumb.boundingBox())?.width ?? 0).toBeGreaterThan(60);
+		expect(
+			await crumb.evaluate(
+				(element) => element.scrollWidth > element.clientWidth,
+			),
+		).toBe(false);
+		// The word is for a screen reader only here; the mark and time show.
+		const live = page.getByTestId("header-live");
+		await expect(live.getByText("Recording", { exact: true })).toHaveCSS(
+			"width",
+			"1px",
+		);
+		await expect(live).toContainText(/12:3\d/);
+		await page.screenshot({ path: `${OUT}/main-${scheme}-960-recording.png` });
+	});
+
+	/**
+	 * Transcription failed: the red line takes the empty tabs' place and the
+	 * personal notes stay below it, editable.
+	 */
+	test(`main ${scheme} failed notes`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		await page.goto(
+			`/#/main?scenario=failed${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		await expect(page.getByTestId("processing-failed")).toBeVisible();
+		await expect(page.getByRole("tablist")).toHaveCount(0);
+		const notes = page.getByTestId("failed-notes").getByRole("textbox");
+		await notes.fill("Ask Jérôme for the Q1 numbers again.");
+		await page.locator("body").click({ position: { x: 900, y: 700 } });
+		await settle(page);
+		await page.screenshot({ path: `${OUT}/main-${scheme}-failed-notes.png` });
+		expect(external).toEqual([]);
+	});
+
+	/**
+	 * Only the summary failed: the Summary tab holds the red line with
+	 * Re-run summary, and the transcript stays readable.
+	 */
+	test(`main ${scheme} summary failed`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		const dark = scheme === "dark" ? "&dark" : "";
+		await page.goto(`/#/main?scenario=summary-failed&tab=transcript${dark}`);
+		await settle(page);
+		await expect(
+			page.getByTestId("tab-content-transcript").locator("p").first(),
+		).toBeInViewport();
+		await expect(page.getByTestId("processing-failed")).toHaveCount(0);
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-summary-failed-transcript.png`,
+		});
+		await page.getByTestId("tab-summary").click();
+		await expect(page.getByTestId("failure-rerun-summary")).toBeVisible();
+		await settle(page);
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-summary-failed-summary.png`,
+		});
+		expect(external).toEqual([]);
 	});
 
 	/**
@@ -648,7 +811,12 @@ for (const scheme of SCHEMES) {
 				});
 			}
 			await page.getByTestId("show-sections").click();
-			await expect(page.getByTestId("sections-drawer")).toBeVisible();
+			const drawer = page.getByTestId("sections-drawer");
+			await expect(drawer).toBeVisible();
+			// Named in its header row, as the main window's drawer is.
+			await expect(
+				drawer.getByRole("heading", { name: "Sections" }),
+			).toBeInViewport({ ratio: 1 });
 			await settle(page);
 			await page.screenshot({
 				path: `${OUT}/settings-${scheme}-${label}-sections.png`,

@@ -193,7 +193,9 @@ function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
  * The header row's live mark while the recorder holds this meeting in a
  * wide window: the pulsing mark, "Recording" and the elapsed time, not a
  * control. The one Stop is the sidebar's (a narrow window's is in the
- * recorder bar).
+ * recorder bar). In a header row under 36 rem (a 960 px window) the word
+ * goes and the mark and the time stay, so the breadcrumb keeps its words;
+ * a screen reader still hears "Recording".
  */
 function HeaderLive({ recording }: { recording: RecordingSnapshot }) {
 	const elapsed = useElapsedSeconds(
@@ -206,7 +208,11 @@ function HeaderLive({ recording }: { recording: RecordingSnapshot }) {
 			data-testid="header-live"
 		>
 			<RecordMark pulse={!stopping} />
-			{stopping ? "Stopping…" : "Recording"}
+			{stopping ? (
+				"Stopping…"
+			) : (
+				<span className="@max-[36rem]/header:sr-only">Recording</span>
+			)}
 			{!stopping ? (
 				<span className="font-mono font-normal text-meta text-muted-foreground tabular-nums">
 					{format.duration(elapsed)}
@@ -361,9 +367,10 @@ const EXPORT_RESULT: Record<
 
 /**
  * The foot of the reading column: what happens to the recording, with the
- * keep switch when the host offers it, and where the export stands, with
- * Reveal in Finder (the platform's file manager) and Export again when
- * they apply.
+ * keep switch when the host offers it, and, once the meeting is ready or
+ * failed, where the export stands, with Reveal in Finder (the platform's
+ * file manager) and Export again when they apply. While it records or is
+ * processed there is nothing to export yet, so no export line.
  */
 function DetailFooter({
 	detail,
@@ -375,6 +382,7 @@ function DetailFooter({
 	const client = useBridge();
 	const { words } = usePlatform();
 	const status = EXPORT_RESULT[detail.export.status];
+	const settled = detail.state === "ready" || detail.state === "failed";
 	return (
 		<footer
 			className="mt-10 flex flex-col gap-3 border-border border-t pt-4 text-body text-muted-foreground"
@@ -395,42 +403,44 @@ function DetailFooter({
 					/>
 				</div>
 			) : null}
-			<ResultLine
-				actions={
-					detail.export.canReveal || detail.export.canReexport ? (
-						<>
-							{detail.export.canReveal ? (
-								<Button
-									data-testid="reveal-export"
-									onClick={() => send(client, "meeting.revealExport")}
-									size="sm"
-									variant="ghost"
-								>
-									<FolderIcon aria-hidden="true" />
-									{words.revealInFileManager}
-								</Button>
-							) : null}
-							{detail.export.canReexport ? (
-								<Button
-									data-testid="export-again"
-									disabled={detail.isBusy}
-									onClick={onExport}
-									size="sm"
-									variant="outline"
-								>
-									<ShareIcon aria-hidden="true" />
-									Export again
-								</Button>
-							) : null}
-						</>
-					) : undefined
-				}
-				data-testid="export-status"
-				icon={status.icon}
-				tone={status.tone}
-			>
-				{detail.export.message}
-			</ResultLine>
+			{settled ? (
+				<ResultLine
+					actions={
+						detail.export.canReveal || detail.export.canReexport ? (
+							<>
+								{detail.export.canReveal ? (
+									<Button
+										data-testid="reveal-export"
+										onClick={() => send(client, "meeting.revealExport")}
+										size="sm"
+										variant="ghost"
+									>
+										<FolderIcon aria-hidden="true" />
+										{words.revealInFileManager}
+									</Button>
+								) : null}
+								{detail.export.canReexport ? (
+									<Button
+										data-testid="export-again"
+										disabled={detail.isBusy}
+										onClick={onExport}
+										size="sm"
+										variant="outline"
+									>
+										<ShareIcon aria-hidden="true" />
+										Export again
+									</Button>
+								) : null}
+							</>
+						) : undefined
+					}
+					data-testid="export-status"
+					icon={status.icon}
+					tone={status.tone}
+				>
+					{detail.export.message}
+				</ResultLine>
+			) : null}
 		</footer>
 	);
 }
@@ -573,11 +583,15 @@ function DetailBody({
 		if (working) {
 			return <ProcessingCard entry={entry} state={detail.state} />;
 		}
-		if (detail.state === "failed") {
-			return <FailureLine detail={detail} onRerunSummary={rerun} />;
-		}
+		// Failed with a transcript: the summary failed, so the summary and its
+		// tasks show the red line and the transcript stays readable.
+		const summaryFailed = detail.state === "failed";
+		const failure = <FailureLine detail={detail} onRerunSummary={rerun} />;
 		switch (current) {
 			case "summary":
+				if (summaryFailed) {
+					return failure;
+				}
 				return (
 					<>
 						<SetupLine banner={setupBanner} />
@@ -596,6 +610,9 @@ function DetailBody({
 					/>
 				);
 			case "tasks":
+				if (summaryFailed && detail.tasks.length === 0) {
+					return failure;
+				}
 				return <TasksTab tasks={detail.tasks} />;
 		}
 	}
@@ -791,9 +808,25 @@ function DetailBody({
 			</div>
 
 			{detail.state === "failed" && detail.transcript.length === 0 ? (
-				// Transcription failed: every tab would be empty, so the red
-				// line with Process again stands alone in their place.
-				<FailureLine detail={detail} onRerunSummary={rerun} />
+				// Transcription failed: the summary, transcript and tasks would
+				// be empty, so the red line with Process again takes their place,
+				// and the personal notes stay below it, still editable.
+				<>
+					<FailureLine detail={detail} onRerunSummary={rerun} />
+					<section
+						aria-labelledby="failed-notes-title"
+						className="mt-8"
+						data-testid="failed-notes"
+					>
+						<h3
+							className="m-0 mb-3 text-foreground text-label"
+							id="failed-notes-title"
+						>
+							Notes
+						</h3>
+						<NotesTab meetingID={detail.id} notes={detail.notes} />
+					</section>
+				</>
 			) : (
 				<Tabs
 					onValueChange={(value) => {

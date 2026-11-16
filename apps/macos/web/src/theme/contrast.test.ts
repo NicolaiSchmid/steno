@@ -270,6 +270,22 @@ function checks(mode: Mode): Check[] {
 	on("--dashed-outline", everyHost(mode), NON_TEXT);
 	on("--dashed-outline-hover", everyHost(mode), NON_TEXT);
 	on("--focus", everyHost(mode), NON_TEXT);
+	// A menu row's and a select option's inset focus line (`focusInsetClass`)
+	// sits on the row's highlight: the accent fill (a host above) or a
+	// select's chosen option, the selected fill on the popover.
+	on(
+		"--focus",
+		[
+			{
+				name: "popover item selected",
+				colour: layers(
+					token(mode, "--surface", "popover"),
+					token(mode, "--item-selected", "popover"),
+				),
+			},
+		],
+		NON_TEXT,
+	);
 	on("--sidebar-icon", sidebar, NON_TEXT);
 	const primary = layers(canvas, token(mode, "--primary"));
 	on(

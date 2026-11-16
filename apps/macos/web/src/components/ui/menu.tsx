@@ -3,6 +3,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { CheckIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { focusInsetClass } from "./focus-ring";
 import { Kbd } from "./kbd";
 
 /**
@@ -68,12 +69,17 @@ export function MenuPopup({
 	);
 }
 
-/** A 28 px row: icon at 80 percent, the words, a shortcut at the trailing edge. */
+/**
+ * A 28 px row: icon at 80 percent, the words, a shortcut at the trailing
+ * edge. The highlight is the accent fill; keyboard focus adds the inset
+ * `--focus` line, since the fill alone is a step, not 3:1.
+ */
 export const menuItemVariants = cva(
 	[
 		"flex min-h-7 cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-body outline-none",
 		"[&>svg]:-mx-0.5 [&>svg]:size-4 [&>svg]:shrink-0",
 		"data-highlighted:bg-accent data-disabled:opacity-64",
+		focusInsetClass,
 	],
 	{
 		variants: {

@@ -153,6 +153,7 @@ export const scenarios = [
 	"recording-elsewhere",
 	"denied",
 	"failed",
+	"summary-failed",
 	"processing",
 	"export-failed",
 	"summary-key-withheld",
@@ -383,6 +384,34 @@ export function applyScenario(
 				canProcessAgain: true,
 				// No transcript, so no summary to re-run (the host's rule).
 				canRerunSummary: false,
+			});
+		}
+	}
+
+	// The same meeting failed later, in the summary: its transcript and
+	// speakers are there, the summary and tasks are not, and Re-run summary
+	// is offered.
+	if (scenario === "summary-failed" && list && detail) {
+		const row = findRow(list, FAILED_MEETING_ID);
+		if (row) {
+			const failureReason =
+				"Summary failed: the server answered 500. Try again later.";
+			result["meetings.list"] = {
+				...list,
+				groups: list.groups.map((group) => ({
+					...group,
+					meetings: group.meetings.map((meeting) =>
+						meeting.id === row.id ? { ...meeting, failureReason } : meeting,
+					),
+				})),
+				selection: row.id,
+			};
+			result["meeting.detail"] = bareDetail(detail, row, {
+				failureReason,
+				speakers: detail.speakers,
+				transcript: detail.transcript,
+				canProcessAgain: true,
+				canRerunSummary: true,
 			});
 		}
 	}

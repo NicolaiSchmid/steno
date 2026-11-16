@@ -14,6 +14,7 @@ import {
 	DrawerCloseButton,
 	DrawerPopup,
 	DrawerToggle,
+	HeaderRow,
 	SidebarColumn,
 	SidebarRow,
 	ToastRegion,
@@ -125,8 +126,8 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 		<SidebarColumn
 			aria-label="Settings sections"
 			as="nav"
-			className={narrow ? "w-64" : undefined}
-			titleBarInset={platform.titleBarInset}
+			className={narrow ? "min-h-0 flex-1" : undefined}
+			titleBarInset={narrow ? false : platform.titleBarInset}
 		>
 			{SECTIONS.map((info) => (
 				<SidebarRow
@@ -183,7 +184,24 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 						data-testid="sections-drawer"
 						finalFocus={() => toggleRef.current}
 					>
-						{sections}
+						{/*
+						 * The drawer's header row names it, as the main window's
+						 * drawer has "Meetings", with Close at its trailing edge;
+						 * the title starts clear of the traffic lights.
+						 */}
+						<div className="flex w-64 min-w-0 flex-col">
+							<HeaderRow inset="sm">
+								<h2
+									className={cn(
+										"m-0 me-9 min-w-0 truncate text-foreground text-title",
+										platform.titleBarInset && "ps-18",
+									)}
+								>
+									Sections
+								</h2>
+							</HeaderRow>
+							{sections}
+						</div>
 						<DrawerCloseButton data-testid="close-sections" />
 					</DrawerPopup>
 				</Drawer>

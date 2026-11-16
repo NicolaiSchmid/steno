@@ -1,4 +1,4 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AppSnapshot } from "@/bridge/contract";
@@ -42,6 +42,12 @@ describe("SettingsWindow", () => {
 			).not.toBeInTheDocument();
 			const toggle = screen.getByTestId("show-sections");
 			await user.click(toggle);
+			// The drawer's header row names it, beside its Close.
+			const drawer = await screen.findByTestId("sections-drawer");
+			expect(
+				within(drawer).getByRole("heading", { name: "Sections" }),
+			).toBeInTheDocument();
+			expect(within(drawer).getByTestId("close-sections")).toBeInTheDocument();
 			await user.click(await screen.findByTestId("settings-recording"));
 			expect(
 				screen.getByTestId("section-purpose-recording"),

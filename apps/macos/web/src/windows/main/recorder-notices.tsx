@@ -2,7 +2,8 @@ import { CircleAlertIcon, TimerIcon } from "lucide-react";
 import { useContext } from "react";
 import type { RecordingSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
-import { Button, Callout, RecordMark } from "@/components/ui";
+import { Button, Callout, focusRingClass, RecordMark } from "@/components/ui";
+import { cn } from "@/lib/cn";
 import { useCountdownSeconds, useElapsedSeconds } from "@/lib/use-now";
 import { format } from "./format";
 import { NarrowLayoutContext } from "./narrow-layout";
@@ -129,7 +130,8 @@ const ACTIVE_LABEL = {
 /**
  * The narrow window's recorder bar, under the reading column's header row:
  * while Steno records, the live mark, the elapsed time and Stop, whichever
- * meeting is open; and the recorder's notices. The sidebar holds these in a
+ * meeting is open, with the recording meeting's title (a link that opens
+ * it) when another one is; and the recorder's notices. The sidebar holds these in a
  * wide window, but in a narrow one it sits in the closed drawer. Nothing
  * when the window is wide or the recorder has nothing to say.
  */
@@ -137,6 +139,7 @@ export function RecorderBar() {
 	const { narrow } = useContext(NarrowLayoutContext);
 	const client = useBridge();
 	const recording = useSnapshot("recording");
+	const list = useSnapshot("meetings.list");
 	const state = recording?.state ?? "idle";
 	const active =
 		state === "starting" || state === "recording" || state === "stopping";
@@ -146,6 +149,15 @@ export function RecorderBar() {
 	const notices =
 		(recording?.autoStop !== undefined && state === "recording") ||
 		Boolean(recording?.error ?? recording?.warning);
+	// Another meeting is open: the bar names the one that records, as a
+	// link to it, so Stop says what it stops.
+	const elsewhere =
+		recording?.meetingID !== undefined &&
+		list?.selection !== recording.meetingID
+			? list?.groups
+					.flatMap((group) => group.meetings)
+					.find((meeting) => meeting.id === recording.meetingID)
+			: undefined;
 	if (!narrow || !recording || (!active && !notices)) {
 		return null;
 	}
@@ -159,6 +171,26 @@ export function RecorderBar() {
 					<RecordMark pulse={state === "recording"} />
 					<span className="min-w-0 flex-1 truncate text-foreground text-label">
 						{ACTIVE_LABEL[state]}
+						{elsewhere ? (
+							<>
+								{" "}
+								<button
+									className={cn(
+										"rounded-xs font-normal text-foreground underline underline-offset-2 hover:no-underline",
+										focusRingClass,
+									)}
+									data-testid="bar-open-recording"
+									onClick={() =>
+										send(client, "meetings.select", {
+											meetingID: elsewhere.id,
+										})
+									}
+									type="button"
+								>
+									{elsewhere.title}
+								</button>
+							</>
+						) : null}
 						{state === "recording" ? (
 							<span className="ml-2 font-mono font-normal text-meta text-muted-foreground tabular-nums">
 								{format.duration(elapsed)}
