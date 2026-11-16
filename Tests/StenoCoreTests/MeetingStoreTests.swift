@@ -323,8 +323,7 @@ import Testing
     let merged = try await store.mergedSpeakers(meetingID: SampleData.meetingID)
     #expect(
       merged == [
-        MergedSpeaker(
-          speaker: speakers[1], into: SampleData.speakerOneID, root: SampleData.speakerOneID)
+        MergedSpeaker(speaker: speakers[1], root: SampleData.speakerOneID)
       ])
     #expect(FileManager.default.fileExists(atPath: clip.path), "the source keeps its clip")
     let nicolai = try #require(try await store.person(id: SampleData.personNicolaiID))

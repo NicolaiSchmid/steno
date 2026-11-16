@@ -2,18 +2,15 @@ import Foundation
 import GRDB
 
 /// A speaker combined into another of its meeting (`MeetingStore.confirm`,
-/// `mergeSpeakers`): its own row, kept as it was, the voice it joined
-/// (`into`) and the voice it reads as (`root`, the same as `into` since
-/// combining flattens). Rust:
+/// `mergeSpeakers`): its own row, kept as it was, and the voice it reads
+/// as (`root`, the voice it joined, since combining flattens). Rust:
 /// `MergedSpeaker`.
 public struct MergedSpeaker: Sendable, Equatable, Hashable {
   public var speaker: Speaker
-  public var into: UUID
   public var root: UUID
 
-  public init(speaker: Speaker, into: UUID, root: UUID) {
+  public init(speaker: Speaker, root: UUID) {
     self.speaker = speaker
-    self.into = into
     self.root = root
   }
 }
@@ -60,7 +57,7 @@ extension Speaker {
 // Mac cutover, so a combine or a move written by one undoes in the other.
 extension MeetingStore {
   /// Every speaker of the meeting combined into another, by cluster label,
-  /// then id: each with the voice it joined and the voice it reads as.
+  /// then id: each with the voice it reads as.
   /// Combines from before v7 deleted their source and are not listed.
   public func mergedSpeakers(meetingID: UUID) async throws -> [MergedSpeaker] {
     try await writer.read { db in try Self.mergedSpeakers(meetingID: meetingID, db) }
@@ -74,8 +71,8 @@ extension MeetingStore {
       .order(SpeakerRow.Columns.clusterLabel, SpeakerRow.Columns.id)
       .fetchAll(db)
     return try rows.compactMap { row in
-      guard let into = try mergedInto(row.id, db) else { return nil }
-      return MergedSpeaker(speaker: row.speaker, into: into, root: try rootOf(row.id, db))
+      guard let root = try mergedInto(row.id, db) else { return nil }
+      return MergedSpeaker(speaker: row.speaker, root: root)
     }
   }
 
@@ -139,9 +136,7 @@ extension MeetingStore {
       }
       try db.execute(
         sql: "UPDATE speaker SET mergedInto = NULL WHERE id = ?", arguments: [speakerID.uuidString])
-      if speakerID == LaneMerger.meSpeakerID(meetingID: speaker.meetingID) {
-        try Self.syncMeParticipant(meetingID: speaker.meetingID, db)
-      }
+      try Self.followMe(meetingID: speaker.meetingID, speakerID: speakerID, db)
       for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
     }
   }

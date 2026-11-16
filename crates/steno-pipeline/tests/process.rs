@@ -690,6 +690,52 @@ async fn the_mic_lane_is_the_users_own_person_unless_the_meeting_named_it_otherw
     assert!(summary.contains("**Me**:"), "{summary}");
 }
 
+/// Remove name on the voice a combined "me" speaker joined survives
+/// processing again too: the mic lane is not named after the user's own
+/// person.
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_name_on_a_combined_mes_voice_survives_processing_again() {
+    let world = world(true, None, AudioRetention::KeepForever);
+    let anna = sample_data::person(0, "Anna");
+    let ben = sample_data::person(1, "Ben");
+    let mut settings = world.store.settings().unwrap();
+    settings.self_person_id = Some(anna.id);
+    world.store.save_settings(&settings).unwrap();
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let me = LaneMerger::me_speaker_id(meeting.id);
+    let voice = world
+        .store
+        .speakers(meeting.id)
+        .unwrap()
+        .into_iter()
+        .find(|speaker| speaker.id != me)
+        .unwrap();
+    let participant = || {
+        world
+            .store
+            .participants(meeting.id)
+            .unwrap()
+            .into_iter()
+            .find(|participant| participant.role == ParticipantRole::Me)
+            .unwrap()
+            .person_id
+    };
+    assert_eq!(participant(), Some(anna.id));
+
+    // Me combined into Ben's voice, then Remove name on that voice.
+    world.store.confirm_speaker(voice.id, &ben).unwrap();
+    world.store.confirm_speaker(me, &ben).unwrap();
+    assert_eq!(participant(), Some(ben.id));
+    world.store.clear_speaker(voice.id).unwrap();
+    assert_eq!(participant(), None);
+
+    world.pipeline.process(asset.id).await.unwrap();
+    assert_eq!(participant(), None, "the mic lane stays unnamed");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn without_an_llm_the_meeting_is_ready_with_no_summary() {
     let world = world(false, None, AudioRetention::KeepForever);

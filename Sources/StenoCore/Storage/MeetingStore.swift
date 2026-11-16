@@ -387,6 +387,12 @@ public final class MeetingStore: Sendable {
         }
         yesScores[new] = try Self.confirmedSimilarity(speakerID: kept.id, db)
       }
+      // Each combined row's own Yes score, for when it is combined again.
+      var ownScores: [UUID: Float?] = [:]
+      for combine in merged {
+        ownScores[combine.speaker.id] = try Self.confirmedSimilarity(
+          speakerID: combine.speaker.id, db)
+      }
       // Kept or dropped, each stored confirmation's person is recomputed.
       let voices = Set(every.filter(\.assignment.isConfirmed).compactMap(\.personID))
       try TranscriptSegmentRow
@@ -426,7 +432,8 @@ public final class MeetingStore: Sendable {
           try Self.setConfirmedSimilarity(score, speakerID: speaker.id, db)
         }
       }
-      try Self.combineAgain(meetingID: meetingID, earlier: earlier, merged: merged, db)
+      try Self.combineAgain(
+        meetingID: meetingID, earlier: earlier, merged: merged, ownScores: ownScores, db)
       try Self.replaceNameSuggestions(suggestions, meetingID: meetingID, db)
       for rejection in keptRejections { try Self.insertRejection(rejection, db) }
       for segment in segments {
@@ -438,25 +445,40 @@ public final class MeetingStore: Sendable {
     }
   }
 
-  /// Process again keeps one voice per person per meeting: each new row
-  /// that took a combined voice's confirmation is combined again, into the
-  /// new row of the root it read as when that root was found again, else
-  /// into another new row confirmed as the person. Without either it stays
-  /// its own voice. Rust: `combine_again`.
+  /// Process again keeps a combine: each new row that took a combined
+  /// voice's confirmation is combined again, into the new row of the root
+  /// it read as when that root was found again, else into another new row
+  /// confirmed as the person, so a person keeps one voice per meeting. One
+  /// that took its root's dismissal is combined again when the root was
+  /// found again, so a combine under Not a person stays one voice. Without
+  /// either it stays its own voice, with the root's answer. Combined again,
+  /// the new row takes back the combined row's own assignment, dismissal
+  /// and Yes score (`ownScores`, by the combined row's id), so Separate
+  /// again restores them. Rust: `combine_again`.
   static func combineAgain(
-    meetingID: UUID, earlier: [UUID: Speaker], merged: [MergedSpeaker], _ db: Database
+    meetingID: UUID, earlier: [UUID: Speaker], merged: [MergedSpeaker],
+    ownScores: [UUID: Float?], _ db: Database
   ) throws {
     for (new, kept) in earlier.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
-      guard let combine = merged.first(where: { $0.speaker.id == kept.id }),
-        case .confirmed(let personID) = kept.assignment
-      else { continue }
+      guard let combine = merged.first(where: { $0.speaker.id == kept.id }) else { continue }
       let rootFoundAgain = earlier.first { $0.value.id == combine.root && $0.key != new }?.key
-      let into =
-        try rootFoundAgain
-        ?? owner(meetingID: meetingID, personID: personID, except: new, db)?.id
-      if let into {
-        _ = try mergeSpeakerRows(new, into: into, meetingID: meetingID, db)
+      let into: UUID?
+      if let rootFoundAgain, kept.assignment.isConfirmed || kept.dismissed {
+        into = rootFoundAgain
+      } else if case .confirmed(let personID) = kept.assignment {
+        into = try owner(meetingID: meetingID, personID: personID, except: new, db)?.id
+      } else {
+        into = nil
       }
+      guard let into else { continue }
+      if var row = try speakerRow(new, db)?.speaker {
+        row.assignment = combine.speaker.assignment
+        row.dismissed = combine.speaker.dismissed
+        try SpeakerRow(row).update(db)
+        let score = row.assignment.isConfirmed ? ownScores[combine.speaker.id] ?? nil : nil
+        try setConfirmedSimilarity(score, speakerID: new, db)
+      }
+      _ = try mergeSpeakerRows(new, into: into, meetingID: meetingID, db)
     }
   }
 

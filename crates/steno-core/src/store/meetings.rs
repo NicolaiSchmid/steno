@@ -461,7 +461,10 @@ impl Store {
     /// that took a combined voice's confirmation is combined again, into
     /// the new row of its root when the root was found again, else into
     /// another new row confirmed as that person, so a person keeps one voice
-    /// per meeting.
+    /// per meeting; one that took its root's dismissal is combined again
+    /// when the root was found again. Combined again, it takes back the
+    /// combined row's own assignment, dismissal and Yes score, so Separate
+    /// again restores what the user said about it.
     ///
     /// Commits durably ([`Store::write_durably`]): the pipeline removes the
     /// clips the earlier rows named once this returns, and a power loss
@@ -529,6 +532,7 @@ impl Store {
                     yes_scores.insert(new, people::confirmed_similarity(transaction, kept.id)?);
                 }
             }
+            let own_rows = combined_rows(transaction, &merged)?;
             transaction.execute(
                 "DELETE FROM transcriptSegment WHERE meetingID = ?1",
                 [DbUuid(meeting.id)],
@@ -575,7 +579,7 @@ impl Store {
                     people::set_confirmed_similarity(transaction, speaker.id, score)?;
                 }
             }
-            combine_again(transaction, meeting.id, &earlier, &merged)?;
+            combine_again(transaction, meeting.id, &earlier, &own_rows)?;
             people::replace_name_suggestions(transaction, meeting.id, &suggestions)?;
             people::restore_suggestion_rejections(transaction, meeting.id, &kept_rejections)?;
             for segment in segments {
@@ -698,21 +702,38 @@ impl Store {
     }
 }
 
-/// Process again keeps one voice per person per meeting: each new row that
-/// took a combined voice's confirmation is combined again, into the new row
-/// of the root it read as when that root was found again, else into another
-/// new row confirmed as the person. Without either it stays its own voice.
+/// Each combined row as it is, with its own Yes score, by id, for
+/// [`combine_again`].
+fn combined_rows<'a>(
+    transaction: &Connection,
+    merged: &'a [people::MergedSpeaker],
+) -> Result<BTreeMap<Uuid, (&'a people::MergedSpeaker, Option<f32>)>> {
+    let mut rows = BTreeMap::new();
+    for merged in merged {
+        let score = people::confirmed_similarity(transaction, merged.speaker.id)?;
+        rows.insert(merged.speaker.id, (merged, score));
+    }
+    Ok(rows)
+}
+
+/// Process again keeps a combine: each new row that took a combined
+/// voice's confirmation is combined again, into the new row of the root it
+/// read as when that root was found again, else into another new row
+/// confirmed as the person, so a person keeps one voice per meeting. One
+/// that took its root's dismissal is combined again when the root was
+/// found again, so a combine under Not a person stays one voice. Without
+/// either it stays its own voice, with the root's answer. Combined again,
+/// the new row takes back the combined row's own assignment, dismissal and
+/// Yes score, so Separate again restores them. `merged` is keyed by the
+/// combined row's id, with its own Yes score.
 fn combine_again(
     transaction: &Connection,
     meeting_id: Uuid,
     earlier: &BTreeMap<Uuid, &Speaker>,
-    merged: &[people::MergedSpeaker],
+    merged: &BTreeMap<Uuid, (&people::MergedSpeaker, Option<f32>)>,
 ) -> Result<()> {
     for (&new, &kept) in earlier {
-        let (Some(merged), SpeakerAssignment::Confirmed { person_id }) = (
-            merged.iter().find(|merged| merged.speaker.id == kept.id),
-            &kept.assignment,
-        ) else {
+        let Some(&(merged, own_score)) = merged.get(&kept.id) else {
             continue;
         };
         let root_found_again = earlier
@@ -720,13 +741,24 @@ fn combine_again(
             .find(|(_, old)| old.id == merged.root)
             .map(|(&id, _)| id)
             .filter(|&id| id != new);
-        let into = match root_found_again {
-            Some(id) => Some(id),
-            None => people::owner_of(transaction, meeting_id, *person_id, new)?,
+        let into = match (&kept.assignment, root_found_again) {
+            (_, Some(id)) if kept.assignment.is_confirmed() || kept.dismissed => Some(id),
+            (SpeakerAssignment::Confirmed { person_id }, None) => {
+                people::owner_of(transaction, meeting_id, *person_id, new)?
+            }
+            _ => None,
         };
-        if let Some(into) = into {
-            people::merge_speaker_rows(transaction, new, into, meeting_id)?;
+        let Some(into) = into else {
+            continue;
+        };
+        if let Some(mut row) = people::fetch_speaker(transaction, new)? {
+            row.assignment = merged.speaker.assignment.clone();
+            row.dismissed = merged.speaker.dismissed;
+            people::save_speaker(transaction, &row)?;
+            let score = own_score.filter(|_| row.assignment.is_confirmed());
+            people::set_confirmed_similarity(transaction, new, score)?;
         }
+        people::merge_speaker_rows(transaction, new, into, meeting_id)?;
     }
     Ok(())
 }

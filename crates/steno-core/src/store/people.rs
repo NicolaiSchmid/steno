@@ -141,7 +141,7 @@ pub(super) fn save_speaker(connection: &Connection, speaker: &Speaker) -> Result
     write_speaker(connection, speaker, &upsert_sql("speaker", SPEAKER_COLUMNS))
 }
 
-fn fetch_speaker(connection: &Connection, id: Uuid) -> Result<Option<Speaker>> {
+pub(super) fn fetch_speaker(connection: &Connection, id: Uuid) -> Result<Option<Speaker>> {
     Ok(connection
         .query_row(
             &format!("SELECT {SPEAKER_COLUMNS} FROM speaker WHERE id = ?1"),
@@ -303,24 +303,28 @@ fn unname_me_participant(connection: &Connection, meeting_id: Uuid) -> Result<()
     Ok(())
 }
 
-/// Whether the meeting's "me" speaker reads as `speaker_id`: it is the
-/// "me" speaker, or the voice the "me" speaker is combined into.
-fn reads_as_me(connection: &Connection, meeting_id: Uuid, speaker_id: Uuid) -> Result<bool> {
-    let me = me_speaker_id(meeting_id);
-    Ok(speaker_id == me || root_of(connection, me)? == speaker_id)
+/// The voice the meeting's "me" speaker reads as: the "me" speaker itself,
+/// or the voice it is combined into.
+fn me_root(connection: &Connection, meeting_id: Uuid) -> Result<Uuid> {
+    root_of(connection, me_speaker_id(meeting_id))
 }
 
-/// The meeting's "me" participant follows the voice the "me" speaker reads
-/// as: named after the person that voice is confirmed as, else unnamed. So
-/// renaming, removing the name of, dismissing or combining the voice a
-/// combined "me" speaker joined renames the participant too. A meeting
-/// without a "me" speaker is left alone.
-fn sync_me_participant(connection: &Connection, meeting_id: Uuid) -> Result<()> {
+/// Called after a write touched `speaker_id`: when the "me" speaker reads
+/// as the same voice, the meeting's "me" participant follows that voice,
+/// named after the person it is confirmed as, else unnamed. So renaming,
+/// removing the name of, dismissing, combining or separating the voice a
+/// combined "me" speaker joined renames the participant too. Checked after
+/// the write, so a combine that moved the "me" speaker's voice counts. A
+/// meeting without a "me" speaker is left alone.
+fn follow_me(connection: &Connection, meeting_id: Uuid, speaker_id: Uuid) -> Result<()> {
     let me = me_speaker_id(meeting_id);
     if fetch_speaker(connection, me)?.is_none() {
         return Ok(());
     }
-    let person = match fetch_speaker(connection, root_of(connection, me)?)?
+    if root_of(connection, me)? != root_of(connection, speaker_id)? {
+        return Ok(());
+    }
+    let person = match fetch_speaker(connection, me_root(connection, meeting_id)?)?
         .as_ref()
         .and_then(confirmed_person)
     {
@@ -349,9 +353,7 @@ fn unassign_speaker(connection: &Connection, speaker_id: Uuid) -> Result<Speaker
     if let SpeakerAssignment::Confirmed { person_id } = previous {
         set_confirmed_similarity(connection, speaker_id, None)?;
         refresh_voice(connection, person_id)?;
-        if reads_as_me(connection, speaker.meeting_id, speaker_id)? {
-            sync_me_participant(connection, speaker.meeting_id)?;
-        }
+        follow_me(connection, speaker.meeting_id, speaker_id)?;
     }
     Ok(speaker)
 }
@@ -515,10 +517,8 @@ pub(super) fn all_speakers_of_meeting(
 pub struct MergedSpeaker {
     /// The row as it is, with its own assignment, clip and embedding.
     pub speaker: Speaker,
-    /// The voice it joined.
-    pub into: Uuid,
-    /// The voice it reads as: the same as `into`, since combining
-    /// flattens.
+    /// The voice it reads as: the voice it joined, since combining
+    /// flattens ([`merge_speaker_rows`]).
     pub root: Uuid,
 }
 
@@ -526,24 +526,20 @@ pub(super) fn merged_speakers_of_meeting(
     connection: &Connection,
     meeting_id: Uuid,
 ) -> Result<Vec<MergedSpeaker>> {
-    let rows = query_all(
+    query_all(
         connection,
         &format!(
             "SELECT {SPEAKER_COLUMNS}, mergedInto FROM speaker \
              WHERE meetingID = ?1 AND mergedInto IS NOT NULL ORDER BY clusterLabel, id"
         ),
         [DbUuid(meeting_id)],
-        |row| Ok((speaker_from_row(row)?, row.col::<DbUuid>("mergedInto")?)),
-    )?;
-    rows.into_iter()
-        .map(|(speaker, into)| {
+        |row| {
             Ok(MergedSpeaker {
-                root: root_of(connection, speaker.id)?,
-                speaker,
-                into,
+                speaker: speaker_from_row(row)?,
+                root: row.col::<DbUuid>("mergedInto")?,
             })
-        })
-        .collect()
+        },
+    )
 }
 
 const SUGGESTION_COLUMNS: &str = "speakerID, meetingID, name, confidence, evidence";
@@ -884,7 +880,7 @@ impl Store {
     /// person again changes nothing else. Naming, renaming or combining
     /// the voice the "me" speaker reads as (the "me" speaker itself, or the
     /// voice it is combined into) renames the meeting's "me" participant
-    /// ([`sync_me_participant`]). The voices of the new and the
+    /// ([`follow_me`]). The voices of the new and the
     /// previous person are recomputed. The clip stays while the meeting's
     /// master exists. Returns the clip URLs to remove once the transaction
     /// committed.
@@ -904,16 +900,19 @@ impl Store {
             } else {
                 owner_of(transaction, speaker.meeting_id, person.id, speaker_id)?
             };
-            // Naming, renaming or combining the voice the "me" speaker
-            // reads as renames the "me" participant.
-            let me = reads_as_me(transaction, speaker.meeting_id, speaker_id)?;
+            // Naming the voice the "me" speaker reads as answers the Noes
+            // Remove name recorded on the "me" speaker.
+            if me_root(transaction, speaker.meeting_id)? == speaker_id {
+                transaction.execute(
+                    "DELETE FROM speakerSuggestionRejection WHERE speakerID = ?1",
+                    [DbUuid(me_speaker_id(speaker.meeting_id))],
+                )?;
+            }
             if let Some(owner) = owner {
                 let mut person_ids =
                     merge_speaker_rows(transaction, speaker_id, owner, speaker.meeting_id)?;
                 person_ids.insert(person.id);
-                if me {
-                    sync_me_participant(transaction, speaker.meeting_id)?;
-                }
+                follow_me(transaction, speaker.meeting_id, speaker_id)?;
                 for person_id in person_ids {
                     refresh_voice(transaction, person_id)?;
                 }
@@ -923,17 +922,11 @@ impl Store {
                 "DELETE FROM speakerNameSuggestion WHERE speakerID = ?1",
                 [DbUuid(speaker_id)],
             )?;
-            // Naming a voice answers an earlier No to this person (on the
-            // "me" speaker every one, all from Remove name) and makes a
-            // dismissed voice a person again.
+            // Naming a voice answers an earlier No to this person and makes
+            // a dismissed voice a person again.
             transaction.execute(
-                "DELETE FROM speakerSuggestionRejection WHERE speakerID = ?1 \
-                 AND (personID = ?2 OR ?3)",
-                params![
-                    DbUuid(speaker_id),
-                    DbUuid(person.id),
-                    speaker_id == me_speaker_id(speaker.meeting_id)
-                ],
+                "DELETE FROM speakerSuggestionRejection WHERE speakerID = ?1 AND personID = ?2",
+                params![DbUuid(speaker_id), DbUuid(person.id)],
             )?;
             if speaker.dismissed {
                 speaker.dismissed = false;
@@ -954,9 +947,7 @@ impl Store {
             let clips: Vec<String> = drop_clip_when_audio_is_gone(transaction, speaker_id)?
                 .into_iter()
                 .collect();
-            if me {
-                sync_me_participant(transaction, speaker.meeting_id)?;
-            }
+            follow_me(transaction, speaker.meeting_id, speaker_id)?;
             for person_id in person_ids {
                 refresh_voice(transaction, person_id)?;
             }
@@ -965,7 +956,7 @@ impl Store {
     }
 
     /// The meeting's voices combined into others, by cluster label: each
-    /// with the voice it joined and the voice it reads as.
+    /// with the voice it reads as.
     pub fn merged_speakers(&self, meeting_id: Uuid) -> Result<Vec<MergedSpeaker>> {
         self.read(|connection| merged_speakers_of_meeting(connection, meeting_id))
     }
@@ -1000,9 +991,7 @@ impl Store {
                 "UPDATE speaker SET mergedInto = NULL WHERE id = ?1",
                 [DbUuid(speaker_id)],
             )?;
-            if speaker_id == me_speaker_id(speaker.meeting_id) {
-                sync_me_participant(transaction, speaker.meeting_id)?;
-            }
+            follow_me(transaction, speaker.meeting_id, speaker_id)?;
             for person_id in person_ids {
                 refresh_voice(transaction, person_id)?;
             }
@@ -1078,28 +1067,31 @@ impl Store {
     /// keeps their name and has their voice recomputed without it; for the
     /// "me" speaker the meeting's "me" participant is unnamed again, while
     /// who the user is (`Settings::self_person_id`) stays. A suggestion is
-    /// dropped the same way, without a No. Clearing the "me" speaker is
-    /// recorded as a No to the person it named and to the user's own
-    /// person, so processing again leaves the mic lane unnamed rather than
-    /// name it after the user (`ensure_me_participant` in
-    /// `steno-pipeline`, [`Store::confirm_unnamed_me_speakers`]); naming it
-    /// again answers that No.
+    /// dropped the same way, without a No. Clearing the voice the "me"
+    /// speaker reads as (the "me" speaker, or the voice it is combined
+    /// into) is recorded on the "me" speaker as a No to the person it named
+    /// and to the user's own person, so processing again leaves the mic
+    /// lane unnamed rather than name it after the user
+    /// (`ensure_me_participant` in `steno-pipeline`,
+    /// [`Store::confirm_unnamed_me_speakers`]); naming that voice again
+    /// answers those Noes.
     pub fn clear_speaker(&self, speaker_id: Uuid) -> Result<()> {
         self.write(|transaction| {
             let previous = fetch_speaker(transaction, speaker_id)?
                 .ok_or(StoreError::SpeakerNotFound(speaker_id))?
                 .assignment;
             let speaker = unassign_speaker(transaction, speaker_id)?;
+            let meeting_id = speaker.meeting_id;
             if let SpeakerAssignment::Confirmed { person_id } = previous
-                && speaker_id == me_speaker_id(speaker.meeting_id)
+                && me_root(transaction, meeting_id)? == speaker_id
             {
                 let user = settings::self_person_id(transaction);
                 for person_id in std::iter::once(person_id).chain(user) {
                     insert_rejection(
                         transaction,
-                        speaker.meeting_id,
+                        meeting_id,
                         &Rejection {
-                            speaker_id,
+                            speaker_id: me_speaker_id(meeting_id),
                             person_id,
                             similarity: None,
                         },

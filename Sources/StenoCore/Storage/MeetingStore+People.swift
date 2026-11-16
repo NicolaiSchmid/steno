@@ -251,7 +251,7 @@ extension MeetingStore {
   /// speaker can still be heard; once the audio is gone the clip goes with
   /// the confirmation. Naming, renaming or combining the voice the "me"
   /// speaker reads as (the "me" speaker itself, or the voice it is combined
-  /// into) renames the meeting's "me" participant (`syncMeParticipant`), as
+  /// into) renames the meeting's "me" participant (`followMe`), as
   /// Rust's `confirm_speaker` does.
   public func confirm(speakerID: UUID, person: Person) async throws {
     let clipsToRemove: [URL] = try await writer.write { db in
@@ -262,9 +262,14 @@ extension MeetingStore {
         try PersonRow(person).insert(db)
       }
       let confirmedAsPerson = speaker.assignment == .confirmed(personID: person.id)
-      // Naming, renaming or combining the voice the "me" speaker reads as
-      // renames the "me" participant.
-      let me = try Self.readsAsMe(meetingID: speaker.meetingID, speakerID: speakerID, db)
+      let meSpeakerID = LaneMerger.meSpeakerID(meetingID: speaker.meetingID)
+      // Naming the voice the "me" speaker reads as answers the Noes Remove
+      // name recorded on the "me" speaker.
+      if try Self.rootOf(meSpeakerID, db) == speakerID {
+        try SpeakerSuggestionRejectionRow
+          .filter(SpeakerSuggestionRejectionRow.Columns.speakerID == meSpeakerID.uuidString)
+          .deleteAll(db)
+      }
       if !confirmedAsPerson,
         let owner = try Self.owner(
           meetingID: speaker.meetingID, personID: person.id, except: speakerID, db)
@@ -272,24 +277,19 @@ extension MeetingStore {
         var personIDs = try Self.mergeSpeakerRows(
           speakerID, into: owner.id, meetingID: speaker.meetingID, db)
         personIDs.insert(person.id)
-        if me { try Self.syncMeParticipant(meetingID: speaker.meetingID, db) }
+        try Self.followMe(meetingID: speaker.meetingID, speakerID: speakerID, db)
         for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
         return []
       }
       try SpeakerNameSuggestionRow
         .filter(SpeakerNameSuggestionRow.Columns.speakerID == speakerID.uuidString)
         .deleteAll(db)
-      // Naming a voice answers an earlier No to this person (on the "me"
-      // speaker every one, all from Remove name) and makes a dismissed
-      // voice a person again.
-      var answered =
-        SpeakerSuggestionRejectionRow
+      // Naming a voice answers an earlier No to this person and makes a
+      // dismissed voice a person again.
+      try SpeakerSuggestionRejectionRow
         .filter(SpeakerSuggestionRejectionRow.Columns.speakerID == speakerID.uuidString)
-      if speakerID != LaneMerger.meSpeakerID(meetingID: speaker.meetingID) {
-        answered = answered.filter(
-          SpeakerSuggestionRejectionRow.Columns.personID == person.id.uuidString)
-      }
-      try answered.deleteAll(db)
+        .filter(SpeakerSuggestionRejectionRow.Columns.personID == person.id.uuidString)
+        .deleteAll(db)
       if speaker.dismissed {
         speaker.dismissed = false
         try SpeakerRow(speaker).update(db)
@@ -307,7 +307,7 @@ extension MeetingStore {
       if let clip = try Self.dropClipWhenAudioIsGone(speakerID: speakerID, db) {
         clips.append(clip)
       }
-      if me { try Self.syncMeParticipant(meetingID: speaker.meetingID, db) }
+      try Self.followMe(meetingID: speaker.meetingID, speakerID: speakerID, db)
       for personID in personIDs { try Self.refreshVoice(personID: personID, db) }
       return clips
     }
@@ -371,23 +371,25 @@ extension MeetingStore {
   /// (`LaneMerger.meSpeakerID`) the meeting's "me" participant is unnamed
   /// again. A suggestion is dropped the same way, without a No. An unknown
   /// speaker is left alone; a missing one throws `speakerNotFound`.
-  /// Clearing the "me" speaker is recorded as a No to the person it named
-  /// and to the user's own person (the Rust app's `selfPersonID`), so
-  /// processing again in either app leaves the mic lane unnamed; naming it
-  /// again answers those Noes.
+  /// Clearing the voice the "me" speaker reads as (the "me" speaker, or
+  /// the voice it is combined into) is recorded on the "me" speaker as a No
+  /// to the person it named and to the user's own person (the Rust app's
+  /// `selfPersonID`), so processing again in either app leaves the mic lane
+  /// unnamed; naming that voice again answers those Noes.
   public func clear(speakerID: UUID) async throws {
     try await writer.write { db in
       guard let previous = try Self.speakerRow(speakerID, db)?.speaker.assignment else {
         throw MeetingStoreError.speakerNotFound(speakerID)
       }
       let speaker = try Self.unassignSpeaker(speakerID, db)
+      let meSpeakerID = LaneMerger.meSpeakerID(meetingID: speaker.meetingID)
       guard case .confirmed(let personID) = previous,
-        speakerID == LaneMerger.meSpeakerID(meetingID: speaker.meetingID)
+        try Self.rootOf(meSpeakerID, db) == speakerID
       else { return }
       for person in [personID] + [try Self.selfPersonID(db)].compactMap({ $0 }) {
         try Self.insertRejection(
           SpeakerSuggestionRejectionRow(
-            speakerID: speakerID, personID: person, meetingID: speaker.meetingID,
+            speakerID: meSpeakerID, personID: person, meetingID: speaker.meetingID,
             similarity: nil), db)
       }
     }
@@ -478,7 +480,7 @@ extension MeetingStore {
   /// The speaker back to `.unknown`, inside a caller's transaction: the
   /// voice of the person it was confirmed to is recomputed without it, and
   /// when the "me" speaker reads as it, the "me" participant follows
-  /// (`syncMeParticipant`). A speaker that is
+  /// (`followMe`). A speaker that is
   /// already unknown is left alone. Returns the speaker as written.
   static func unassignSpeaker(_ speakerID: UUID, _ db: Database) throws -> Speaker {
     guard var speaker = try speakerRow(speakerID, db)?.speaker else {
@@ -491,9 +493,7 @@ extension MeetingStore {
     if case .confirmed(let personID) = previous {
       try setConfirmedSimilarity(nil, speakerID: speakerID, db)
       try refreshVoice(personID: personID, db)
-      if try readsAsMe(meetingID: speaker.meetingID, speakerID: speakerID, db) {
-        try syncMeParticipant(meetingID: speaker.meetingID, db)
-      }
+      try followMe(meetingID: speaker.meetingID, speakerID: speakerID, db)
     }
     return speaker
   }
@@ -543,7 +543,7 @@ extension MeetingStore {
   }
 
   /// The meeting's "me" participant takes `person`'s id and name
-  /// (`syncMeParticipant`).
+  /// (`followMe`).
   static func nameMeParticipant(meetingID: UUID, person: Person, _ db: Database) throws {
     try db.execute(
       sql:
@@ -554,23 +554,18 @@ extension MeetingStore {
       ])
   }
 
-  /// Whether the meeting's "me" speaker reads as `speakerID`: it is the
-  /// "me" speaker, or the voice the "me" speaker is combined into. Rust:
-  /// `reads_as_me`.
-  static func readsAsMe(meetingID: UUID, speakerID: UUID, _ db: Database) throws -> Bool {
-    let me = LaneMerger.meSpeakerID(meetingID: meetingID)
-    return try speakerID == me || rootOf(me, db) == speakerID
-  }
-
-  /// The meeting's "me" participant follows the voice the "me" speaker
-  /// reads as: named after the person that voice is confirmed as, else
-  /// unnamed. So renaming, removing the name of, dismissing or combining
-  /// the voice a combined "me" speaker joined renames the participant too.
-  /// A meeting without a "me" speaker is left alone. Rust:
-  /// `sync_me_participant`.
-  static func syncMeParticipant(meetingID: UUID, _ db: Database) throws {
+  /// Called after a write touched `speakerID`: when the "me" speaker reads
+  /// as the same voice (it is that voice, or both are combined into one),
+  /// the meeting's "me" participant follows that voice, named after the
+  /// person it is confirmed as, else unnamed. So renaming, removing the
+  /// name of, dismissing, combining or separating the voice a combined "me"
+  /// speaker joined renames the participant too. Checked after the write,
+  /// so a combine that moved the "me" speaker's voice counts. A meeting
+  /// without a "me" speaker is left alone. Rust: `follow_me`.
+  static func followMe(meetingID: UUID, speakerID: UUID, _ db: Database) throws {
     let me = LaneMerger.meSpeakerID(meetingID: meetingID)
     guard try speakerRow(me, db) != nil else { return }
+    guard try rootOf(me, db) == rootOf(speakerID, db) else { return }
     if let personID = try speakerRow(try rootOf(me, db), db)?.speaker.confirmedPersonID,
       let person = try personRow(personID, db)?.person
     {
