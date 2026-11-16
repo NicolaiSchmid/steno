@@ -420,3 +420,31 @@ fixed except Set up / Not now (partly). New, ranked:
 
 All nine accepted; one fix build on #359 (`steno-fix-design-r3`). The
 speaker stack rebases onto it.
+
+## 2026-11-16 — built design steps 1-6, round 4 (head of #359, bbfac8b8b)
+
+Request IDs `steno-built-design-astra-r4`, `steno-built-design-fable-r4`.
+Evidence: `design-fix3/{before,after}/`.
+
+**GPT-6-Astra: visual 9/10, accessibility and UX 8.5/10.** Round-3 findings
+all fixed (Settings drawer at 200 %, Process again toast only on a started
+run, countdown announced once). New, all medium:
+1. A transcription failure hides personal Notes (`meeting-detail.tsx:793`).
+2. A summary failure replaces an existing transcript in every non-Notes tab
+   (`meeting-detail.tsx:576`); predates round 3.
+3. Menu keyboard focus is the accent fill only, 1.07:1 dark and 1.09:1 light
+   (`menu.tsx:74`); needs a measured outline, Select options too.
+
+**Claude Fable 5.1: visual 9.5/10, accessibility and UX 9/10.** "The stack
+meets Damian's standard." Round-3 findings all fixed. New:
+1. Medium: at 960 px the live mark cuts the breadcrumb to "Produktstrat…"
+   (`meeting-detail.tsx:204-215`); drop the word under a container query.
+2. Medium: the narrow recorder bar's Stop names no meeting while another is
+   open (`recorder-notices.tsx:159-166`); show the title as a button.
+3. Low: "Not exported" shows while recording or transcribing
+   (`meeting-detail.tsx:398-433`).
+4. Low: the Settings sections drawer has no title beside its ✕.
+
+### Responses
+
+All seven accepted; one fix build on #359 (`steno-fix-design-r4`).
