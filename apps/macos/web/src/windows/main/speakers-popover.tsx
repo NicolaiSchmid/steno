@@ -832,7 +832,7 @@ function Sections({
 								data-testid={`speakers-nested-${speaker.id}`}
 							>
 								{voices.map((voice) => row(voice, "voice", speaker))}
-								{combined.map(combinedRow)}
+								{combined.map((voice) => combinedRow(voice))}
 								{also.map((voice) => row(voice, "also", speaker))}
 							</ul>
 						</li>
@@ -1271,7 +1271,7 @@ function CombinedRow({
 }: {
 	voice: CombinedVoice;
 	/** What an unnamed voice it joined is called, said under its label. */
-	readsAs?: string;
+	readsAs?: string | undefined;
 	saving: boolean;
 	failure: Failure | undefined;
 	tabIndex: number;
