@@ -296,6 +296,7 @@ fn private_directory(directory: &Path) -> std::io::Result<()> {
     if let Some(parent) = directory.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {

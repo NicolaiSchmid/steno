@@ -101,7 +101,7 @@ export function SelectFailure({
 	className,
 }: {
 	message: string;
-	onRetry?: () => void;
+	onRetry?: (() => void) | undefined;
 	testID?: string;
 	className?: string;
 }) {

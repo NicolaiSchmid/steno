@@ -167,7 +167,7 @@ interface Editing {
 interface Failure {
 	message: string;
 	/** Sends the same pick, No or action again; none when that cannot help. */
-	retry?: () => void;
+	retry?: (() => void) | undefined;
 	text: string;
 }
 
