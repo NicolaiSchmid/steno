@@ -448,3 +448,28 @@ meets Damian's standard." Round-3 findings all fixed. New:
 ### Responses
 
 All seven accepted; one fix build on #359 (`steno-fix-design-r4`).
+
+## 2026-11-16 — built design steps 1-6, round 5 (head of #359, 513c87e4b)
+
+Request IDs `steno-built-design-astra-r5`, `steno-built-design-fable-r5`.
+Evidence: `design-fix4/{before,after}/`.
+
+**GPT-6-Astra: visual 9/10, accessibility and UX 9/10.** Palette, type,
+elevation, tones and focus meet Damian's standard; round-4 findings fixed.
+New: (medium) the recorder bar's title comes from the filtered list and
+vanishes under a filter or search (`recorder-notices.tsx:154`); (low) the
+title link's focus ring is clipped by `truncate` and a long title pushes the
+clock out (`recorder-notices.tsx:172`).
+
+**Claude Fable 5.1: visual 9/10, accessibility and UX 9/10.** At Damian's
+standard; "nothing structural remains". Round-4 findings fixed; the dropped
+"Meetings /" at 960 doesn't matter while recording. New: (medium) an empty
+footer rule on processing meetings (`meeting-detail.tsx:386-389`); (medium)
+the same clipped focus ring; (low) the same filter case; (low) a middle dot
+between the title and the elapsed time; (low) raise the breadcrumb parent
+threshold to about 20 rem so idle and recording agree (`header.tsx:55`),
+which also covers "Stopping…".
+
+### Responses
+
+All accepted; one small fix build on #359 (`steno-fix-design-r5`).
