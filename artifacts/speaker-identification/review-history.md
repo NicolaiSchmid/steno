@@ -402,3 +402,43 @@ Visual: Separate again as a text button beside play. Cut: overlap of
 
 All accepted into one fix pass on #365 and #366 (`steno-fix-speakers34`),
 plus a Yes recording its similarity (v6 still unshipped).
+
+## 2026-11-16 — built steps 3 and 4, round 3 (#365 5880d187f, #366 a69749d95)
+
+Request IDs `steno-built-speakers34-astra-r3`, `steno-built-speakers34-fable-r3`.
+Evidence: `speakers-34-fix/{before,after}/`.
+
+**GPT-6-Astra: #365 8.5/10 (UX 8.5, implementation 8.5); #366 8/10 (UX 8.5,
+implementation 7.5).** Approves #365's design; beats Jamie in capability.
+All earlier findings fixed (reconciliation fixed in #365, partly in the
+stack). New, all #366:
+1. P1: reconciliation drops combined rows whose root is no longer confirmed
+   (`meetings.rs:488`, `MeetingStore.swift:343`); let every stored embedding
+   compete, decide transfer separately.
+2. P2: changing a combined Me's root leaves the Me participant stale
+   (`people.rs:933`, `MeetingStore+People.swift:322`).
+3. P2: a carried `confirmedSimilarity` belongs to the original person, not
+   the root's (`people.rs:886`, `meetings.rs:516`, `MeetingStore.swift:362`).
+4. P2: after Remove name on a root, its combined rows and Separate again
+   vanish on reopen (`speakers-popover.tsx:793`, `speaker-names.ts:390`).
+Warning text: "Moves only this paragraph. Processing again resets this change."
+
+**Claude Fable 5.1: #365 UX 9, implementation 8.5; #366 UX 8.5,
+implementation 8.** Beats Jamie; Jamie still ahead on a voiceless paragraph
+reaching invitees before typing. All earlier findings fixed (voiceless turn
+partly). New:
+1. P2: two rows of the same person veto each other's carry
+   (`meetings.rs:741-756`); skip same-person rivals.
+2. P2: Process again turns a combine into two roots confirmed as one person
+   (`meetings.rs:482-497`, `speaker_moves.rs:352-366`); re-combine after
+   insert.
+3. P3: Remove name on a root leaves combined rows outside the competition.
+4. P3: a cut failing after the reply is silent; carry the last failure in
+   the snapshot.
+5. P3: Windows folder check weaker; say why in a comment.
+6. P3: the voiceless field's placeholder "Unknown" reads as a value.
+Cut: merge chains; flatten to depth 1 and drop the recursive CTEs.
+
+### Responses
+
+All accepted into one fix pass on #366 (`steno-fix-speakers34-r3`).
