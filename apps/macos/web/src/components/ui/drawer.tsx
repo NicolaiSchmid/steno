@@ -85,7 +85,7 @@ export interface DrawerToggleProps
 	 * title bar (`usePlatform().titleBarInset`): the button moves clear.
 	 */
 	titleBarInset: boolean;
-	ref?: Ref<HTMLButtonElement>;
+	ref?: Ref<HTMLButtonElement> | undefined;
 }
 
 /**
