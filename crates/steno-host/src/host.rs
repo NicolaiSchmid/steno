@@ -1588,6 +1588,16 @@ impl Host {
             if inner.store.meeting(meeting_id)?.is_none() {
                 return Err(no_such_meeting());
             }
+            // Deleting the recording ends what plays from it, so no cut of
+            // a paragraph outlives it.
+            if !keep
+                && inner
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.id == meeting_id)
+            {
+                self.shared.services.clip_player.stop();
+            }
             let applied = detail::set_keep_audio(
                 meeting_id,
                 keep,
