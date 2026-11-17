@@ -8,7 +8,10 @@ import { StatusIcon, type statusIconVariants } from "./status-icon";
  * A group of settings: a heading, a group card of rows divided by
  * hairlines, and a footnote sentence under the card. The Settings sections
  * are built from these alone. The section is a container (`@container/form`)
- * so rows switch from stacked to two columns by the card's own width.
+ * so rows switch from stacked to two columns by the card's own width: under
+ * 520 px (onboarding's window) a row's buttons go under the description, so
+ * the explanation keeps its width; a row whose control is only a status (a
+ * badge, a value) keeps it at the trailing edge at every width.
  */
 export interface FormCardProps
 	extends Omit<ComponentProps<"section">, "title"> {
@@ -59,6 +62,11 @@ export interface FormRowProps
 	control?: ReactNode;
 	/** A small glyph before the label (a permission's state), in `tone`. */
 	icon?: ReactNode;
+	/**
+	 * The control is a status, not an action ("Allowed", a percentage): it
+	 * stays beside the label in a narrow card instead of going under it.
+	 */
+	statusOnly?: boolean;
 }
 
 export function FormRow({
@@ -68,12 +76,20 @@ export function FormRow({
 	control,
 	icon,
 	tone,
+	statusOnly = false,
 	children,
 	...props
 }: FormRowProps) {
 	return (
 		<div className={cn("flex flex-col gap-3 px-4 py-3", className)} {...props}>
-			<div className="flex @lg/form:grid @lg/form:grid-cols-[minmax(0,1fr)_minmax(10rem,auto)] flex-col @lg/form:items-center @lg/form:gap-8 gap-3">
+			<div
+				className={cn(
+					"@min-[520px]/form:grid @min-[520px]/form:grid-cols-[minmax(0,1fr)_minmax(10rem,auto)] @min-[520px]/form:items-center @min-[520px]/form:gap-8 gap-3",
+					statusOnly
+						? "grid grid-cols-[minmax(0,1fr)_auto] items-start"
+						: "flex flex-col",
+				)}
+			>
 				<div className="flex min-w-0 items-start gap-3">
 					{icon ? <StatusIcon tone={tone}>{icon}</StatusIcon> : null}
 					<div className="flex min-w-0 flex-col gap-0.5">
@@ -88,7 +104,12 @@ export function FormRow({
 					</div>
 				</div>
 				{control ? (
-					<div className="flex flex-wrap items-center justify-end gap-2">
+					<div
+						className={cn(
+							"flex flex-wrap items-center @min-[520px]/form:justify-end gap-2",
+							statusOnly ? "justify-end" : icon && "@max-[520px]/form:pl-7",
+						)}
+					>
 						{control}
 					</div>
 				) : null}

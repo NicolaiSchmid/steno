@@ -100,10 +100,9 @@ function RecordButton({
 				data-testid={state === "starting" ? "sidebar-record" : "sidebar-stop"}
 				disabled={busy}
 				onClick={busy ? undefined : () => send(client, "recording.stop")}
-				size="lg"
 				variant="primary"
 			>
-				<RecordMark pulse={state === "recording"} />
+				<RecordMark onPrimary pulse={state === "recording"} />
 				{state === "recording"
 					? "Stop"
 					: state === "starting"
@@ -144,7 +143,6 @@ function RecordButton({
 			menuLabel="Other ways to record"
 			menuTestId="sidebar-record-menu"
 			onClick={() => send(client, "recording.start", { mode: "call" })}
-			size="lg"
 			variant="primary"
 		>
 			<RecordMark />
@@ -220,7 +218,7 @@ function RecorderMessage({
 			icon={<CircleAlertIcon aria-hidden="true" />}
 			size="sm"
 			title={message}
-			variant="warning"
+			variant={kind === "error" ? "destructive" : "warning"}
 		/>
 	);
 }

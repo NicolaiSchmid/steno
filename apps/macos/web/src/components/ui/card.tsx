@@ -11,9 +11,9 @@ import { cn } from "@/lib/cn";
 export const cardVariants = cva("border text-foreground", {
 	variants: {
 		variant: {
-			default: "surface-card rounded-lg border-border bg-card shadow-xs",
+			default: "surface-card rounded-surface border-border bg-card",
 			group:
-				"rounded-xl border-group-border bg-group shadow-xs [&>*+*]:border-group-divider [&>*+*]:border-t",
+				"rounded-surface border-group-border bg-group [&>*+*]:border-group-divider [&>*+*]:border-t",
 			sidebar: "rounded-lg border-sidebar-border bg-sidebar-control-surface",
 		},
 		padding: {

@@ -1,6 +1,7 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { focusRingClass } from "./focus-ring";
 
 /**
  * A sidebar filter or tag: icon, label and a trailing count. A 32 px row in
@@ -12,7 +13,8 @@ export const sidebarRowVariants = cva(
 	[
 		"flex h-8 w-full shrink-0 select-none items-center gap-2 rounded-control px-2.5 py-1.5 text-left font-medium text-sidebar-muted-foreground text-sm outline-none",
 		"transition-[background-color,color] duration-(--duration-functional) ease-standard",
-		"hover:bg-row-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus active:bg-row-pressed",
+		"hover:bg-row-hover hover:text-foreground active:bg-row-pressed",
+		focusRingClass,
 		"[&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-icon hover:[&>svg]:text-foreground",
 	],
 	{

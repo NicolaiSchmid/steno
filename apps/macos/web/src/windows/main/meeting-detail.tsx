@@ -26,6 +26,7 @@ import {
 	Callout,
 	ContentColumn,
 	EmptyState,
+	focusRingClass,
 	Menu,
 	MenuItem,
 	MenuPopup,
@@ -53,7 +54,6 @@ import {
 } from "./format";
 import { NotesTab } from "./notes-tab";
 import { ProcessingCard } from "./processing-card";
-import { SOURCE } from "./source";
 import { SpeakersPopover } from "./speakers-popover";
 import { SummaryTab } from "./summary-tab";
 import { TagEditor } from "./tag-editor";
@@ -91,59 +91,27 @@ export interface MeetingDetailProps {
 }
 
 /**
- * The notice at the top of the reading column: summaries or export still
- * need setting up, or a one-time notice (`isNotice`) the host records as
- * seen once it is dismissed with OK.
+ * A one-time notice (`isNotice`) at the top of the reading column, which
+ * the host records as seen once it is dismissed with OK. Setup that is
+ * still open is not a notice: `SetupLine` says it once, quietly, in the
+ * summary tab.
  */
 function SetupBanner({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 	const client = useBridge();
-	if (!banner) {
+	if (!banner?.isNotice) {
 		return null;
 	}
-	const notice = banner.isNotice === true;
 	return (
 		<Callout
 			actions={
-				<>
-					{banner.offersSummaries ? (
-						<Button
-							data-testid="setup-summaries"
-							onClick={() =>
-								send(client, "window.open", {
-									window: "settings",
-									section: "summaries",
-								})
-							}
-							size="xs"
-							variant="primary"
-						>
-							Set up summaries
-						</Button>
-					) : null}
-					{banner.offersVault ? (
-						<Button
-							data-testid="choose-vault"
-							onClick={() =>
-								send(client, "window.open", {
-									window: "settings",
-									section: "export",
-								})
-							}
-							size="xs"
-							variant={banner.offersSummaries ? "outline" : "primary"}
-						>
-							Choose vault
-						</Button>
-					) : null}
-					<Button
-						data-testid="banner-not-now"
-						onClick={() => send(client, "setup.dismissBanner")}
-						size="xs"
-						variant={notice ? "outline" : "ghost"}
-					>
-						{notice ? "OK" : "Not now"}
-					</Button>
-				</>
+				<Button
+					data-testid="banner-not-now"
+					onClick={() => send(client, "setup.dismissBanner")}
+					size="xs"
+					variant="outline"
+				>
+					OK
+				</Button>
 			}
 			className="mb-6"
 			data-testid="setup-banner"
@@ -152,6 +120,67 @@ function SetupBanner({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 			title={banner.title}
 			variant="default"
 		/>
+	);
+}
+
+/** A text link on a muted line: the words in full colour, underlined. */
+const lineLinkClass = cn(
+	"rounded-xs text-foreground underline underline-offset-2 hover:no-underline",
+	focusRingClass,
+);
+
+/** The line's dismissal: a muted text button, quieter than the link. */
+const quietButtonClass = cn(
+	"ml-2 rounded-xs text-muted-foreground hover:text-foreground",
+	focusRingClass,
+);
+
+/**
+ * Summaries or export still need setting up: one muted line over the
+ * summary, with Set up (Settings at the section that needs it) and Not now.
+ * Nothing on the other tabs.
+ */
+function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
+	const client = useBridge();
+	if (!banner || banner.isNotice) {
+		return null;
+	}
+	const section = banner.offersSummaries
+		? "summaries"
+		: banner.offersVault
+			? "export"
+			: null;
+	return (
+		<p
+			className="mt-0 mb-6 text-muted-foreground text-sm"
+			data-testid="setup-line"
+		>
+			{banner.title}{" "}
+			{section ? (
+				<>
+					<button
+						className={lineLinkClass}
+						data-testid={
+							section === "summaries" ? "setup-summaries" : "choose-vault"
+						}
+						onClick={() =>
+							send(client, "window.open", { window: "settings", section })
+						}
+						type="button"
+					>
+						Set up
+					</button>{" "}
+				</>
+			) : null}
+			<button
+				className={quietButtonClass}
+				data-testid="banner-not-now"
+				onClick={() => send(client, "setup.dismissBanner")}
+				type="button"
+			>
+				Not now
+			</button>
+		</p>
 	);
 }
 
@@ -170,7 +199,7 @@ function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
 			size="sm"
 			variant="primary"
 		>
-			<RecordMark pulse={!stopping} />
+			<RecordMark onPrimary pulse={!stopping} />
 			{stopping ? "Stopping…" : "Stop"}
 			{!stopping ? (
 				<span className="font-mono font-normal text-xs tabular-nums">
@@ -264,12 +293,12 @@ function KeepAudioToggle({
 
 const EXPORT_ICON: Record<
 	MeetingDetailSnapshot["export"]["status"],
-	{ icon: ReactNode; tone: "muted" | "success" | "warning" }
+	{ icon: ReactNode; tone: "muted" | "success" | "destructive" }
 > = {
 	notConfigured: { icon: <ShareIcon />, tone: "muted" },
 	pending: { icon: <ClockIcon />, tone: "muted" },
 	delivered: { icon: <CheckCircle2Icon />, tone: "success" },
-	failed: { icon: <CircleAlertIcon />, tone: "warning" },
+	failed: { icon: <CircleAlertIcon />, tone: "destructive" },
 };
 
 /**
@@ -352,7 +381,7 @@ export function MeetingDetail({
 	const hasSelection = list?.selection !== undefined;
 
 	return (
-		<main className="surface-grain relative flex min-h-0 min-w-0 flex-col">
+		<main className="relative flex min-h-0 min-w-0 flex-col">
 			{hasSelection && detail ? (
 				<DetailBody
 					detail={detail}
@@ -476,18 +505,21 @@ function DetailBody({
 					icon={<CircleAlertIcon aria-hidden="true" />}
 					id={`empty-${current}`}
 					title="Processing failed"
-					variant="warning"
+					variant="destructive"
 				/>
 			);
 		}
 		switch (current) {
 			case "summary":
 				return (
-					<SummaryTab
-						detail={detail}
-						onRerunSummary={rerun}
-						onSetUpSummaries={openSummaries}
-					/>
+					<>
+						<SetupLine banner={setupBanner} />
+						<SummaryTab
+							detail={detail}
+							onRerunSummary={rerun}
+							onSetUpSummaries={openSummaries}
+						/>
+					</>
 				);
 			case "transcript":
 				return (
@@ -602,32 +634,26 @@ function DetailBody({
 					variant="warning"
 				/>
 			) : null}
+			{/*
+			 * Each item after the first leads with its separator dot, so a
+			 * narrow column wraps the dot with its item instead of leaving it
+			 * at the end of the line. The source's own dot is neutral: the
+			 * person colours are for people.
+			 */}
 			<div
-				className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs [&>i]:size-[3px] [&>i]:rounded-full [&>i]:bg-border"
+				className="flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground text-xs [&>span+span]:before:size-[3px] [&>span+span]:before:rounded-full [&>span+span]:before:bg-border [&>span+span]:before:content-[''] [&>span]:inline-flex [&>span]:items-center [&>span]:gap-2"
 				data-testid="meeting-meta"
 			>
-				<span
-					className={cn(
-						"inline-flex items-center gap-[5px] font-medium text-muted-foreground before:size-1.5 before:rounded-full before:content-['']",
-						SOURCE[detail.source].dot,
-					)}
-				>
+				<span className="gap-[5px]! font-medium before:size-1.5 before:rounded-full before:bg-outline before:content-['']">
 					{formatSource(detail.source)}
 				</span>
-				<i />
 				<span>{format.when(detail.startedAt)}</span>
-				<i />
 				<span className="tabular-nums">
 					{format.duration(detail.durationSeconds)}
 				</span>
 				{detail.language ? (
-					<>
-						<i />
-						<span>{format.language(detail.language)}</span>
-					</>
+					<span>{format.language(detail.language)}</span>
 				) : null}
-				<i />
-				<span>{formatRetention(detail.retention)}</span>
 			</div>
 			<h2
 				className="mt-2 mb-3 font-semibold text-2xl leading-tight tracking-tight"

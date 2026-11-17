@@ -2,6 +2,7 @@ import { Tabs as BaseTabs } from "@base-ui/react/tabs";
 import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { focusRingClass } from "./focus-ring";
 
 /**
  * Segmented tabs: a 2 px frame on the field tint, each tab a 24 px segment;
@@ -51,8 +52,9 @@ export function TabsTab({
 			className={cn(
 				"inline-flex h-6 min-w-0 cursor-default select-none items-center gap-1 rounded-md px-2.5 font-medium text-muted-foreground text-xs outline-none",
 				"transition-[background-color,color,box-shadow] duration-(--duration-functional) ease-standard",
-				"hover:bg-tab-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus",
-				"data-active:inset-ring data-active:inset-ring-tab-indicator data-active:bg-tab-active data-active:text-foreground data-active:shadow-xs",
+				"hover:bg-tab-hover hover:text-foreground",
+				focusRingClass,
+				"data-active:inset-ring data-active:inset-ring-tab-indicator data-active:bg-tab-active data-active:text-foreground",
 				className,
 			)}
 			{...props}

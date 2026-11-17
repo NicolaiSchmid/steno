@@ -16,9 +16,8 @@ export const splitButtonVariants = cva(
 	[
 		"relative inline-flex shrink-0 select-none items-stretch overflow-hidden whitespace-nowrap",
 		"rounded-control border font-medium text-sm leading-none",
-		"transition-[background-color,border-color,box-shadow,color,scale,opacity]",
+		"transition-[background-color,border-color,color,opacity]",
 		"duration-(--duration-functional) ease-standard",
-		"active:scale-[0.97] active:duration-(--duration-press-in)",
 		"has-[button:disabled]:pointer-events-none has-[button:disabled]:opacity-64",
 		"[&_svg]:size-4 [&_svg]:shrink-0",
 	],
@@ -29,8 +28,7 @@ export const splitButtonVariants = cva(
 				outline: buttonLook.outline,
 			},
 			size: {
-				md: "h-8",
-				lg: "h-9",
+				md: "h-9",
 			},
 		},
 		defaultVariants: { variant: "primary", size: "md" },

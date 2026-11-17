@@ -130,22 +130,24 @@ check that toasts and result lines are announced. Each waits for Nicolai's OK.
    | Token | Light | Dark |
    |---|---|---|
    | sidebar | #f5f5f5 | #121212 |
-   | canvas (`--background`) | #ffffff (1.09) | #1a1a1a (+3.5 %, 1.08) |
-   | card, popover | #ffffff, hairline box | #232323 (1.11) |
+   | canvas (`--background`) | #ffffff (1.09) | #1d1d1d (+4.5 %, 1.11; was #1a1a1a at 1.08, which read as one surface with the sidebar) |
+   | card, popover | #ffffff, hairline box | #252525 (1.10) |
    | accent, row hover | on sidebar #ededed; on canvas #f5f5f5 | #2a2a2a |
    | row selected | on sidebar #ffffff; on canvas #ededed (1.17) | #313131 |
    | hairline (dividers only) | #eaeaeb | #2e2e2e |
    | `--outline` (fields, checkboxes, switch off track) | #858585 (3.15 on #ededed) | #7a7a7a (3.03 on #313131) |
    | `--focus` | #68686e (4.73 on #ededed) | #a3a3a3 (5.16 on #313131) |
    | muted text, sidebar icons | #68686e (4.73 on #ededed) | #a3a3a3 (5.16 on #313131) |
-   | warning text and icons | #92400e (5.49 on its 8 % tint over #ededed) | #fcd34d (7.90 on its tint over #313131) |
-   | success text and icons | #065f46 (6.14 on its tint over #ededed) | #6ee7b7 (6.55 on its tint over #313131) |
-   | info text and icons | #1d4ed8 (5.41 on its tint over #ededed) | #93c5fd (5.65 on its tint over #313131) |
+   | warning icons (`--warning`) and text (`--warning-foreground`) | icon #a16207 (3.89), text #854d0e (5.42), both on the 12 % tint over #ededed; yellow, 35 to 39° of OKLCH hue from the error red (amber 800 #92400e was 18° and read brown) | #fcd34d (7.90 on its tint over #313131) |
+   | success icons and text | icon #047857 (4.24), text #065f46 (5.94) on the 12 % tint over #ededed | #6ee7b7 (6.55 on its tint over #313131) |
+   | info icons and text | icon #2563eb (3.89), text #1d4ed8 (5.05) on the 12 % tint over #ededed | #93c5fd (5.65 on its tint over #313131) |
    | person colours on their 16 % tint | #1d4ed8, #115e59, #6d28d9, #166534 (≥ 5.2) | #93c5fd, #5eead4, #c4b5fd, #bef264 (≥ 7.4) |
-   | live and error text (`--live-foreground`, `--destructive-foreground`) | #b91c1c (5.01 on its 8 % tint over #ededed) | #fca5a5 (6.00 on its tint over #313131) |
-   | live dot, error and destructive fill (`--live`, `--destructive`) | #dc2626, white text 4.83 | #f87171, text #1a1a1a 6.29 |
+   | live and error text (`--live-foreground`, `--destructive-foreground`) | #b91c1c (4.78 on its 12 % tint over #ededed) | #fca5a5 (6.00 on its tint over #313131) |
+   | live dot, error and destructive fill (`--live`, `--destructive`) | #dc2626, white text 4.83 | #f87171, text #1d1d1d 6.09 |
+| live mark on a primary fill (`--live-on-primary`, the Stop buttons) | #ef4444 (4.76 on #171717, 3.60 on its hover) | #dc2626 (4.83 on white, 3.92 on its hover) |
+| dashed button outline (`--dashed-outline`, hover `--focus`) | #858585 (3.15), hover #68686e | #7a7a7a (3.03), hover #a3a3a3 |
 
-   White is 18.7 on the dark base and 17.4 on the dark canvas. Person colours lose red and amber, which
+   White is 18.7 on the dark base and 16.9 on the dark canvas. Person colours lose red and amber, which
    belong to live and needs-the-user; they stay hues so speakers remain
    distinguishable. `--faint` is retired: its sites, every placeholder among
    them, move to muted text; anything fainter is decorative and

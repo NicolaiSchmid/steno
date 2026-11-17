@@ -5,7 +5,7 @@ import { cn } from "@/lib/cn";
 import { Kbd } from "./kbd";
 
 /**
- * The actions menu: a glass popup with the deep popover shadow. The popup
+ * The actions menu on the popup surface. The popup
  * mounts on open and unmounts on close (never `display: none`, which blanks
  * headless Chromium under `backdrop-filter`). Menus appear in place;
  * popovers and tooltips are the surfaces that scale in.
@@ -24,9 +24,13 @@ export function MenuTrigger(props: MenuTriggerProps) {
 	return <BaseMenu.Trigger {...props} />;
 }
 
-/** The glass popup surface shared by menus, selects and popovers; padding is the caller's. */
+/**
+ * The popup surface shared by menus, selects and popovers: solid, a
+ * hairline, the surface radius, the floating shadow in light and a lighter
+ * surface in dark. Padding is the caller's.
+ */
 export const popupSurfaceClass =
-	"dropdown-glass surface-popover rounded-lg border text-foreground shadow-pop outline-none";
+	"surface-popover rounded-surface border border-border bg-popover text-foreground shadow-pop outline-none";
 
 export interface MenuPopupProps
 	extends Omit<ComponentProps<typeof BaseMenu.Popup>, "className"> {

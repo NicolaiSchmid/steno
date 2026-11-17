@@ -151,7 +151,7 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Button: xs, sm, md, lg; icon-xs, icon-sm, icon">
+			<ThemePair title="Button: xs, sm, md; icon-xs, icon-sm, icon">
 				{() => (
 					<>
 						<Button size="xs" variant="outline">
@@ -163,9 +163,6 @@ export function StoriesPage() {
 						</Button>
 						<Button size="md" variant="outline">
 							Medium
-						</Button>
-						<Button size="lg" variant="outline">
-							Large
 						</Button>
 						<Button aria-label="Add" size="icon-xs" variant="ghost">
 							<PlusIcon aria-hidden="true" />
@@ -243,7 +240,7 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Input: sm, md, lg; disabled; SearchInput as field and row">
+			<ThemePair title="Input: sm, md; disabled; SearchInput as field and row">
 				{() => (
 					<>
 						<Input
@@ -256,12 +253,6 @@ export function StoriesPage() {
 							aria-label="Name"
 							className="w-48"
 							placeholder="Meeting title"
-						/>
-						<Input
-							aria-label="Large"
-							className="w-48"
-							placeholder="Large"
-							size="lg"
 						/>
 						<Input
 							aria-label="Disabled"

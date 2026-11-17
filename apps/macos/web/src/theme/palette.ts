@@ -5,19 +5,33 @@
  *
  * Dark is not an inversion. Its surfaces are steps from a #121212 base
  * toward white, achromatic as the primary is: the sidebar is the base, the
- * canvas lifts by 3.5 percent of the way, cards and popovers lift further,
+ * canvas lifts by 4.5 percent of the way (a 1.11 step, which still reads as
+ * two surfaces without a hairline between them), cards and popovers lift further,
  * and row fills lift again, so elevation reads as a lighter surface where
  * a shadow would not show. Status, live and people colours take their own
  * light Tailwind steps on dark rather than the light mode's.
+ *
+ * In light each status tone has two colours: the icon's, at 3:1 on its tint
+ * over every host, and the darker text's, at 4.5. Warning takes Tailwind's
+ * yellow rather than amber's 700 and 800, which sit 18 degrees of OKLCH hue
+ * from the error red and read as brown beside it; yellow's 700 and 800 sit
+ * 35 to 39 degrees away and read as amber.
  */
 import { parseColor, toHex } from "./contrast";
 
 /** Tailwind's colours at the steps Steno uses. */
 const tailwind = {
-	amber: { 300: "#fcd34d", 800: "#92400e" },
-	emerald: { 300: "#6ee7b7", 800: "#065f46" },
-	blue: { 300: "#93c5fd", 700: "#1d4ed8" },
-	red: { 300: "#fca5a5", 400: "#f87171", 600: "#dc2626", 700: "#b91c1c" },
+	amber: { 300: "#fcd34d" },
+	yellow: { 700: "#a16207", 800: "#854d0e" },
+	emerald: { 300: "#6ee7b7", 700: "#047857", 800: "#065f46" },
+	blue: { 300: "#93c5fd", 600: "#2563eb", 700: "#1d4ed8" },
+	red: {
+		300: "#fca5a5",
+		400: "#f87171",
+		500: "#ef4444",
+		600: "#dc2626",
+		700: "#b91c1c",
+	},
 	teal: { 300: "#5eead4", 800: "#115e59" },
 	violet: { 300: "#c4b5fd", 700: "#6d28d9" },
 	green: { 800: "#166534" },
@@ -41,8 +55,8 @@ export function lift(share: number): string {
 
 /** How far each dark step lifts from the base. */
 const DARK_STEPS = {
-	canvas: 0.035,
-	raised: 0.07,
+	canvas: 0.045,
+	raised: 0.08,
 	accent: 0.1,
 	hairline: 0.12,
 	selected: 0.13,
@@ -70,16 +84,18 @@ export const light: Palette = {
 	"--muted-foreground": "#68686e",
 	"--sidebar-muted-foreground": "#68686e",
 	"--sidebar-icon": "#68686e",
-	"--warning": tailwind.amber[800],
-	"--warning-foreground": tailwind.amber[800],
-	"--success": tailwind.emerald[800],
+	"--warning": tailwind.yellow[700],
+	"--warning-foreground": tailwind.yellow[800],
+	"--success": tailwind.emerald[700],
 	"--success-foreground": tailwind.emerald[800],
-	"--info": tailwind.blue[700],
+	"--info": tailwind.blue[600],
 	"--info-foreground": tailwind.blue[700],
 	"--destructive-foreground": tailwind.red[700],
 	"--live-foreground": tailwind.red[700],
 	"--destructive": tailwind.red[600],
 	"--live": tailwind.red[600],
+	// The primary is near-black in light: the 600 is 2.80 on its hover, the 500 is 3.60.
+	"--live-on-primary": tailwind.red[500],
 	"--on-destructive": "#ffffff",
 	"--p1": tailwind.blue[700],
 	"--p2": tailwind.teal[800],
@@ -115,6 +131,8 @@ export const dark: Palette = {
 	"--live-foreground": tailwind.red[300],
 	"--destructive": tailwind.red[400],
 	"--live": tailwind.red[400],
+	// The primary is white in dark: the 400 is 2.77 on it, the 600 is 4.83.
+	"--live-on-primary": tailwind.red[600],
 	"--on-destructive": lift(DARK_STEPS.canvas),
 	"--p1": tailwind.blue[300],
 	"--p2": tailwind.teal[300],

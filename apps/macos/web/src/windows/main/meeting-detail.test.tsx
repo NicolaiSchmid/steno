@@ -15,14 +15,30 @@ async function fixtureDetail(): Promise<MeetingDetailSnapshot> {
 }
 
 describe("MeetingDetail", () => {
-	it("shows the setup banner's Not now, and OK on a notice", async () => {
+	it("says open setup in one muted line, and a notice in its callout with OK", async () => {
 		const user = userEvent.setup();
 		const app = (await loadFixtureSnapshots()).app as AppSnapshot;
 		const setup = await createBridgeHarness();
 		const first = renderWithBridge(<MeetingDetail />, setup);
-		expect(await screen.findByTestId("banner-not-now")).toHaveTextContent(
-			"Not now",
+		expect(await screen.findByTestId("setup-line")).toHaveTextContent(
+			"Summaries are off. Set up Not now",
 		);
+		// The retention line lives in the footer only, beside its switch.
+		expect(screen.getByTestId("meeting-meta")).not.toHaveTextContent(
+			/Deletes|Recording/,
+		);
+		expect(screen.queryByTestId("setup-banner")).not.toBeInTheDocument();
+		await user.click(screen.getByTestId("setup-summaries"));
+		await vi.waitFor(() =>
+			expect(callsTo(setup.transport, "window.open")).toEqual([
+				{
+					method: "window.open",
+					params: { window: "settings", section: "summaries" },
+				},
+			]),
+		);
+		await user.click(screen.getByTestId("tab-transcript"));
+		expect(screen.queryByTestId("setup-line")).not.toBeInTheDocument();
 		first.unmount();
 		const harness = await createBridgeHarness("", {
 			app: {
@@ -39,6 +55,8 @@ describe("MeetingDetail", () => {
 		renderWithBridge(<MeetingDetail />, harness);
 		const ok = await screen.findByTestId("banner-not-now");
 		expect(ok).toHaveTextContent("OK");
+		expect(screen.getByTestId("setup-banner")).toBeInTheDocument();
+		expect(screen.queryByTestId("setup-line")).not.toBeInTheDocument();
 		expect(screen.queryByTestId("setup-summaries")).not.toBeInTheDocument();
 		expect(screen.queryByTestId("choose-vault")).not.toBeInTheDocument();
 		await user.click(ok);

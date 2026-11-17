@@ -3,6 +3,7 @@ import { cva } from "class-variance-authority";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { focusRingClass } from "./focus-ring";
 import { fieldFrameClass } from "./input";
 import { popupSurfaceClass } from "./menu";
 
@@ -13,14 +14,14 @@ export interface SelectOption<V extends string = string> {
 }
 
 /**
- * The trigger: the field frame with the field ring on focus. Heights: xs 24,
- * sm 28, md 32.
+ * The trigger: the field frame with the focus ring. Heights: xs 24, sm 32,
+ * md 36, as the buttons.
  */
 const selectTriggerVariants = cva(
 	[
 		fieldFrameClass,
 		"inline-flex min-w-0 select-none items-center justify-between gap-2 text-left text-sm outline-none",
-		"focus-visible:border-focus focus-visible:shadow-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface focus-visible:before:shadow-none",
+		focusRingClass,
 		"data-disabled:pointer-events-none data-placeholder:text-muted-foreground data-disabled:opacity-64",
 		"[&_svg]:pointer-events-none [&_svg]:shrink-0",
 	],
@@ -28,8 +29,8 @@ const selectTriggerVariants = cva(
 		variants: {
 			size: {
 				xs: "h-6 gap-1 rounded-md px-[7px] text-xs",
-				sm: "h-7 px-[9px]",
-				md: "h-8 px-[11px]",
+				sm: "h-8 px-[11px]",
+				md: "h-9 px-[11px]",
 			},
 		},
 		defaultVariants: { size: "md" },
@@ -54,7 +55,7 @@ export interface SelectProps<V extends string = string> {
 
 /**
  * A closed list of choices. The trigger is a field; the popup is the same
- * glass as the menu with 28 px rows aligned under it.
+ * surface as the menu with 28 px rows aligned under it.
  */
 export function Select<V extends string = string>({
 	options,

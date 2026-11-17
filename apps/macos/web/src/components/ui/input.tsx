@@ -3,21 +3,27 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { SearchIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { focusWithinRingClass } from "./focus-ring";
 import { Kbd } from "./kbd";
 
 /**
- * The field frame shared by `Input`, `Textarea` and `Select`: a 10 px radius
- * on the canvas colour, the 1 px edge highlight at rest, the border and
- * shadow in motion at the functional tempo.
+ * The field frame shared by `Input`, `Textarea` and `Select`: the control
+ * radius on the field fill inside the 3:1 outline, the border in motion at
+ * the functional tempo.
  */
 export const fieldFrameClass =
-	"relative rounded-lg border border-outline bg-field text-foreground shadow-xs edge-highlight transition-[border-color,box-shadow] duration-(--duration-functional) ease-standard";
+	"relative rounded-control border border-outline bg-field text-foreground transition-[border-color,box-shadow] duration-(--duration-functional) ease-standard";
 
-/** The frame while its field has focus, and while the field is disabled. */
-export const fieldStateClass =
-	"focus-within:border-focus focus-within:shadow-none focus-within:ring-2 focus-within:ring-focus focus-within:ring-offset-2 focus-within:ring-offset-surface focus-within:before:shadow-none has-[:disabled]:opacity-64 has-[:disabled]:shadow-none";
+/**
+ * The frame while its field has focus (the kit's one ring, the outline
+ * unchanged under it), and while the field is disabled.
+ */
+export const fieldStateClass = cn(
+	focusWithinRingClass,
+	"has-[:disabled]:opacity-64",
+);
 
-/** The single-line field. Heights: sm 26, md 30, lg 34. */
+/** The single-line field. Heights: sm 26, md 36 (the default button's). */
 export const inputVariants = cva(
 	[
 		fieldFrameClass,
@@ -28,8 +34,7 @@ export const inputVariants = cva(
 		variants: {
 			size: {
 				sm: "h-6.5 px-[9px]",
-				md: "h-7.5 px-[11px]",
-				lg: "h-8.5 px-[11px]",
+				md: "h-9 px-[11px]",
 			},
 		},
 		defaultVariants: { size: "md" },
@@ -67,6 +72,7 @@ const searchInputVariants = cva("", {
 				"flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 font-medium text-sidebar-muted-foreground text-sm",
 				"transition-colors duration-(--duration-functional) ease-standard",
 				"focus-within:bg-row-hover focus-within:text-foreground hover:bg-row-hover hover:text-foreground",
+				focusWithinRingClass,
 				"[&>svg]:text-sidebar-icon [&_input]:font-medium [&_input]:placeholder:text-current",
 			],
 		},

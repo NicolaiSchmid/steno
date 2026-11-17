@@ -4,7 +4,7 @@ import { cn } from "@/lib/cn";
 import { MenuShortcut, menuItemVariants, popupSurfaceClass } from "./menu";
 
 /**
- * The right-click menu on a meeting row: the same glass popup and rows as
+ * The right-click menu on a meeting row: the same popup surface and rows as
  * `Menu`, opened at the pointer. The trigger wraps the row; it renders a
  * `div` unless `render` says otherwise.
  */

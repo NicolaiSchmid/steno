@@ -104,9 +104,16 @@ function declarations(selector: string): Map<string, string> {
 type Mode = "light" | "dark";
 type SurfaceName = "sidebar" | "canvas" | "card" | "popover";
 
+/** The aliases, declared on `:root` and again on every `.dark` element. */
+const ALIASES = declarations(":where(:root, .dark)");
+
 const MODES: Record<Mode, Map<string, string>> = {
-	light: declarations(":root"),
-	dark: new Map([...declarations(":root"), ...declarations(".dark")]),
+	light: new Map([...declarations(":root"), ...ALIASES]),
+	dark: new Map([
+		...declarations(":root"),
+		...ALIASES,
+		...declarations(".dark"),
+	]),
 };
 
 /** What each surface utility points the scoped tokens at. */
@@ -208,6 +215,12 @@ function checks(mode: Mode): Check[] {
 		on(`--${tone}-foreground`, where, TEXT);
 		on(`--${tone}`, where, NON_TEXT);
 	}
+	// The warning-outline button's hover.
+	on(
+		"--warning-foreground",
+		tinted(mode, "--warning-surface-hover", ["sidebar", "canvas", "card"]),
+		TEXT,
+	);
 	on("--live-foreground", everyHost(mode, ["sidebar", "canvas", "card"]), TEXT);
 	on(
 		"--live",
@@ -236,14 +249,33 @@ function checks(mode: Mode): Check[] {
 		);
 	}
 
-	// Non-text: outlines and the switch's off track, focus, sidebar icons.
+	// Non-text: outlines and the switch's off track, the dashed button's
+	// outline and its hover, focus, sidebar icons.
 	on("--outline", everyHost(mode), NON_TEXT);
+	on("--dashed-outline", everyHost(mode), NON_TEXT);
+	on("--dashed-outline-hover", everyHost(mode), NON_TEXT);
 	on("--focus", everyHost(mode), NON_TEXT);
 	on("--sidebar-icon", sidebar, NON_TEXT);
 	const primary = layers(canvas, token(mode, "--primary"));
 	on(
 		"--primary-part-focus",
 		[{ name: "--primary", colour: primary }],
+		NON_TEXT,
+	);
+
+	// The live mark on a primary fill (the sidebar's Stop), resting and
+	// hovered, on each surface a primary button sits on.
+	on(
+		"--live-on-primary",
+		(["sidebar", "canvas", "card"] as const).flatMap((surface) =>
+			["--primary", "--primary-hover"].map((fill) => ({
+				name: `${fill} over ${surface}`,
+				colour: layers(
+					token(mode, "--surface", surface),
+					token(mode, fill, surface),
+				),
+			})),
+		),
 		NON_TEXT,
 	);
 

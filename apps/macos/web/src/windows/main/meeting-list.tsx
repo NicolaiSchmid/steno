@@ -221,7 +221,7 @@ export function MeetingList() {
 	return (
 		<section
 			aria-label="Meetings"
-			className="surface-grain surface-sidebar flex min-h-0 flex-col overflow-hidden border-sidebar-border border-r bg-sidebar"
+			className="surface-sidebar flex min-h-0 flex-col overflow-hidden border-sidebar-border border-r bg-sidebar"
 			data-testid="meeting-list"
 			onKeyDown={onKeyDown}
 		>
@@ -242,7 +242,7 @@ export function MeetingList() {
 					variant="row"
 				/>
 				{list?.error ? (
-					<p className="my-0 px-2 text-warning-foreground text-xs">
+					<p className="my-0 px-2 text-destructive-foreground text-xs">
 						{list.error}
 					</p>
 				) : null}

@@ -96,7 +96,7 @@ export function ImportPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 					title={
 						step.error ?? "This Mac's phone pairing has not been brought over."
 					}
-					variant="warning"
+					variant={step.error ? "destructive" : "warning"}
 				/>
 			) : null}
 		</OnboardingPage>

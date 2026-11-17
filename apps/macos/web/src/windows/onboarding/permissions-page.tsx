@@ -110,6 +110,7 @@ function SpeechModelsRow({ models }: { models: SpeechModels }) {
 				)
 			}
 			label="Speech models"
+			statusOnly={installed || models.state === "downloading"}
 			tone={installed ? "success" : "muted"}
 		>
 			{models.state === "downloading" ? (
@@ -198,6 +199,7 @@ function VaultAccessRow({ vault }: { vault: VaultAccess }) {
 			description={description}
 			icon={icon}
 			label="Obsidian vault"
+			statusOnly={vault.state === "checking" || vault.state === "writable"}
 			tone={tone}
 		>
 			{vault.validationMessage ? (
