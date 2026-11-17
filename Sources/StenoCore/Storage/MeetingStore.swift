@@ -7,6 +7,12 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   case speakerNotFound(UUID)
   case personNotFound(UUID)
   case speakersInDifferentMeetings(UUID, UUID)
+  /// `setDismissed(speakerID:_:)` on a meeting's "me" speaker: the mic lane
+  /// is the user's own voice. Rust: `StoreError::MeSpeakerNotDismissable`.
+  case meSpeakerNotDismissable(UUID)
+  /// `rejectSuggestion` for the person the speaker is confirmed as; that is
+  /// `clear(speakerID:)`. Rust: `StoreError::RejectedConfirmedPerson`.
+  case rejectedConfirmedPerson(UUID, UUID)
   /// `delete(meetingID:)` while the capture writer or the pipeline still
   /// holds the meeting's files.
   case meetingBusy(UUID, MeetingState.Kind)
@@ -29,6 +35,10 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
     case .personNotFound(let id): "person \(id) not found"
     case .speakersInDifferentMeetings(let a, let b):
       "speakers \(a) and \(b) belong to different meetings"
+    case .meSpeakerNotDismissable(let id):
+      "speaker \(id) is the user's own voice and cannot be dismissed"
+    case .rejectedConfirmedPerson(let speaker, let person):
+      "speaker \(speaker) is confirmed as person \(person), which a No cannot answer"
     case .blankPersonName: "a person needs a name"
     case .receiptOfAnotherUpload(let id): "the receipt of recording \(id) belongs to another upload"
     }
@@ -273,30 +283,170 @@ public final class MeetingStore: Sendable {
     }
   }
 
+  /// One transaction: the meeting's processing columns plus the `text` of
+  /// each of `segments` still stored. Speakers and other columns stay, so a
+  /// speaker named while the cleanup ran keeps its name, and the answers
+  /// the merge stage carried across Process again are not reconciled a
+  /// second time. Rust: `Store::update_segment_texts`.
+  public func updateSegmentTexts(_ meeting: Meeting, segments: [TranscriptSegment])
+    async throws
+  {
+    try await writer.write { db in
+      try Self.writeProcessingResults(of: meeting, db)
+      for segment in segments {
+        try db.execute(
+          sql: "UPDATE transcriptSegment SET text = ? WHERE id = ? AND meetingID = ?",
+          arguments: [segment.text, segment.id.uuidString, meeting.id.uuidString])
+      }
+    }
+  }
+
   /// One transaction: the meeting's processing columns (see
   /// `Meeting.applyProcessingResults`) plus every speaker and segment of the
-  /// meeting, replaced. The pipeline's merge and cleanup stages call this.
+  /// meeting, replaced. The pipeline's merge stage calls this.
+  ///
+  /// The user's answers about the stored voices come back on the new rows
+  /// that are unambiguously the same voice (`sameVoices`), never by id
+  /// alone: ids derive
+  /// from "Speaker n", which counts by first speech, so another run can
+  /// give a label to another voice. A kept confirmation keeps its person,
+  /// the score its Yes was given (`speaker.confirmedSimilarity`) and,
+  /// when the new row has no clip and no new row took its file, the stored
+  /// clip; a dismissed voice stays dismissed; a No to a person
+  /// stays, so a new suggestion of that person for that voice is dropped.
+  /// An answer whose voice is not found again, or whose match is contested,
+  /// is dropped, and the voice shows for review. A name suggestion stays with its speaker id. Every
+  /// person with a confirmed speaker before has their voice recomputed.
+  /// Rust: `Store::replace_transcript`.
   public func replaceTranscript(
     _ meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker]
   ) async throws {
     let meetingID = meeting.id
     try await writer.write { db in
       try Self.writeProcessingResults(of: meeting, db)
+      let meetingSpeakers = SpeakerRow.filter(SpeakerRow.Columns.meetingID == meetingID.uuidString)
+      let replaced = try meetingSpeakers.fetchAll(db).map(\.speaker)
+      // Deleting the speakers cascades to their suggestions and the user's
+      // Noes.
+      let suggestions =
+        try SpeakerNameSuggestionRow
+        .filter(SpeakerNameSuggestionRow.Columns.meetingID == meetingID.uuidString)
+        .fetchAll(db).map(\.suggestion)
+      let rejections = try Self.rejectionRows(meetingID: meetingID, db)
+      // New id -> the stored row whose answers it takes. Every stored row
+      // competes; only an unambiguous pair carries anything.
+      var earlier: [UUID: Speaker] = [:]
+      for (old, new) in Self.sameVoices(meetingID: meetingID, earlier: replaced, speakers: speakers)
+      {
+        earlier[new] = old
+      }
+      // The score each kept Yes was given, before its row goes.
+      var yesScores: [UUID: Float?] = [:]
+      for (new, kept) in earlier where kept.assignment.isConfirmed {
+        yesScores[new] = try Self.confirmedSimilarity(speakerID: kept.id, db)
+      }
+      // Kept or dropped, each stored confirmation's person is recomputed.
+      let voices = Set(replaced.filter(\.assignment.isConfirmed).compactMap(\.personID))
       try TranscriptSegmentRow
         .filter(TranscriptSegmentRow.Columns.meetingID == meetingID.uuidString)
         .deleteAll(db)
-      try SpeakerRow.filter(SpeakerRow.Columns.meetingID == meetingID.uuidString).deleteAll(db)
+      try meetingSpeakers.deleteAll(db)
+      var keptRejections: [SpeakerSuggestionRejectionRow] = []
       for speaker in speakers {
         var speaker = speaker
         speaker.meetingID = meetingID
+        if let kept = earlier[speaker.id] {
+          let own = rejections.filter { $0.speakerID == kept.id }
+          for var rejection in own {
+            rejection.speakerID = speaker.id
+            keptRejections.append(rejection)
+          }
+          if kept.assignment.isConfirmed {
+            speaker.assignment = kept.assignment
+            if speaker.sampleClipURL == nil, let clip = kept.sampleClipURL,
+              !speakers.contains(where: { $0.sampleClipURL == clip })
+            {
+              speaker.sampleClipURL = clip
+              speaker.sampleClipRange = kept.sampleClipRange
+            }
+          } else if case .suggested(let personID, _) = speaker.assignment,
+            own.contains(where: { $0.personID == personID })
+          {
+            speaker.assignment = .unknown
+          }
+          if kept.dismissed {
+            speaker.dismissed = true
+            speaker.assignment = .unknown
+          }
+        }
         try SpeakerRow(speaker).insert(db)
+        if let score = yesScores[speaker.id] {
+          try Self.setConfirmedSimilarity(score, speakerID: speaker.id, db)
+        }
       }
+      try Self.replaceNameSuggestions(suggestions, meetingID: meetingID, db)
+      for rejection in keptRejections { try Self.insertRejection(rejection, db) }
       for segment in segments {
         var segment = segment
         segment.meetingID = meetingID
         try TranscriptSegmentRow(segment).insert(db)
       }
+      for personID in voices { try Self.refreshVoice(personID: personID, db) }
     }
+  }
+
+  /// How far a pair's cosine must lead the runner-up, for the stored row
+  /// and for the new row alike, before an answer moves across Process
+  /// again. Re-diarizing the same audio scores a voice against itself near
+  /// 1 and against other voices under 0.6 on the calibration corpus (the
+  /// highest wrong-person score is 0.54), so a voice found again clears
+  /// 0.10 with room; a voice the new run split in two, or joined with
+  /// another, scores two candidates close together and is left for the
+  /// user. Rust: `SAME_VOICE_MARGIN`.
+  static let sameVoiceMargin: Float = 0.10
+
+  /// Pairs the stored rows with the new rows that are the same voice, one
+  /// to one, and only where that is unambiguous. Every stored row competes,
+  /// answered or not, so an answered row cannot take a voice another
+  /// stored row matches better. A pair holds when the cosine of their
+  /// embeddings is at least `VoiceStrength.floor` and leads every other
+  /// candidate of both rows by `sameVoiceMargin`; anything closer is
+  /// contested and pairs nothing. The "me" speaker and the Rust app's room
+  /// row (a run without diarization) are lanes, not clusters, so each pairs
+  /// only with itself, whatever its embedding. A row without an embedding
+  /// pairs with nothing else. Rust: `same_voices`.
+  static func sameVoices(meetingID: UUID, earlier: [Speaker], speakers: [Speaker])
+    -> [(old: Speaker, new: UUID)]
+  {
+    let lanes: Set<UUID> = [
+      LaneMerger.meSpeakerID(meetingID: meetingID),
+      UUID(derivedFrom: meetingID, salt: "speaker-room"),
+    ]
+    var matched: [(old: Speaker, new: UUID)] =
+      earlier
+      .filter { old in lanes.contains(old.id) && speakers.contains { $0.id == old.id } }
+      .map { ($0, $0.id) }
+    let oldClusters = earlier.filter { !lanes.contains($0.id) && $0.embedding != nil }
+    let newClusters = speakers.filter { !lanes.contains($0.id) && $0.embedding != nil }
+    func score(_ old: Speaker, _ new: Speaker) -> Float {
+      guard let lhs = old.embedding, let rhs = new.embedding else { return -.infinity }
+      return lhs.cosineSimilarity(to: rhs)
+    }
+    for old in oldClusters {
+      guard
+        let (best, similarity) = newClusters.map({ ($0, score(old, $0)) })
+          .max(by: { $0.1 < $1.1 }),
+        similarity >= VoiceStrength.floor
+      else { continue }
+      let rivals =
+        newClusters.filter { $0.id != best.id }.map { score(old, $0) }
+        + oldClusters.filter { $0.id != old.id }.map { score($0, best) }
+      let runnerUp = rivals.max() ?? -.infinity
+      if similarity - runnerUp >= sameVoiceMargin {
+        matched.append((old, best.id))
+      }
+    }
+    return matched
   }
 
   /// One transaction: the meeting's processing columns (summary JSON and

@@ -14,6 +14,7 @@ import {
 	SparklesIcon,
 	TimerIcon,
 	Trash2Icon,
+	UserXIcon,
 } from "lucide-react";
 import { useState } from "react";
 import {
@@ -262,6 +263,7 @@ export function StoriesPage() {
 						<Avatar index={2} name="Anna" size="lg" />
 						<Avatar index={3} name="Max" />
 						<Avatar name="Unknown speaker" unknown />
+						<Avatar icon={<UserXIcon />} name="Not a person" unknown />
 						<Avatar index={1} name="Jérôme" solid />
 						<AvatarStack ring="background">
 							<Avatar index={0} name="Nicolai" size="sm" />

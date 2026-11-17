@@ -290,7 +290,7 @@ extension MeetingRow {
   /// One entry: the display title (derived for the intake's default), the
   /// preview as the first summary bullet (nil while the meeting is queued or
   /// processing: the page shows the stage from the `progress` topic), the
-  /// speaker chips from the list's speaker map.
+  /// speaker chips from the list's speaker map, without dismissed voices.
   @MainActor
   init(meeting: Meeting, list: MeetingListViewModel) {
     let bullets = meeting.summary?.sections.flatMap(\.bullets) ?? []
@@ -301,10 +301,11 @@ extension MeetingRow {
     case .recording, .ready, .failed:
       preview = bullets.first.map { $0.lead.isEmpty ? $0.text : "\($0.lead): \($0.text)" }
     }
-    let speakers = (list.speakersByMeeting[meeting.id] ?? []).map { speaker in
-      SpeakerChip(
-        speaker: speaker, person: speaker.assignment.personID.flatMap { list.personsByID[$0] })
-    }
+    let speakers = (list.speakersByMeeting[meeting.id] ?? []).filter { !$0.dismissed }
+      .map { speaker in
+        SpeakerChip(
+          speaker: speaker, person: speaker.assignment.personID.flatMap { list.personsByID[$0] })
+      }
     self.init(
       id: meeting.id, title: meeting.displayTitle(calendar: list.calendar),
       startedAt: meeting.startedAt, durationSeconds: meeting.duration,
@@ -344,8 +345,11 @@ extension MeetingDetailSnapshot {
         id: row.id, clusterLabel: row.speaker.clusterLabel, displayName: row.displayName,
         assignment: row.speaker.assignment.kind, personID: row.speaker.assignment.personID,
         email: row.person?.email, suggestionName: speakers.prefill(for: row.id),
+        suggestionStrength: row.suggestionStrength,
+        quote: row.excerptInClip && !row.excerpt.isEmpty ? row.excerpt : nil,
+        context: !row.excerptInClip && !row.excerpt.isEmpty ? row.excerpt : nil,
         colorIndex: MainWindowSnapshots.colorIndex(for: row.person?.id ?? row.id),
-        hasClip: row.canPlay, isPlaying: playing == row.id)
+        hasClip: row.canPlay, isPlaying: playing == row.id, dismissed: row.speaker.dismissed)
     }
 
     let retentionKind: Retention.Kind

@@ -37,6 +37,7 @@ public enum Migrations {
     Step(identifier: "v3", migrate: v3),
     Step(identifier: "v4", migrate: v4),
     Step(identifier: "v5", migrate: v5),
+    Step(identifier: "v6", migrate: v6),
   ]
 
   /// Every identifier in registration order; tests compare it with what a
@@ -261,5 +262,31 @@ public enum Migrations {
       t.column("admittedAt", .datetime).notNull()
       t.primaryKey(["recordingID", "byteCount", "sha256"])
     }
+  }
+
+  /// The user's answers about voices in a meeting
+  /// (`.plans/2026-11-14-speaker-identification.md`, step 3): `dismissed`
+  /// on `speaker` for a voice that is not a person (music, noise), kept
+  /// apart from `assignment`, which every build reads as one of three
+  /// cases; and one `speakerSuggestionRejection` row per suggestion the user
+  /// answered No to, so that person is not offered for that voice again.
+  /// Neither touches voice memory. A defaulted column and a new table: an
+  /// older build that ignores this version reads a dismissed voice as an
+  /// unnamed one.
+  static func v6(_ db: Database) throws {
+    try db.alter(table: "speaker") { t in
+      t.add(column: "dismissed", .boolean).notNull().defaults(to: false)
+      t.add(column: "confirmedSimilarity", .double)
+    }
+    try db.create(table: "speakerSuggestionRejection") { t in
+      t.column("speakerID", .text).notNull().references("speaker", onDelete: .cascade)
+      t.column("personID", .text).notNull().references("person", onDelete: .cascade)
+      t.column("meetingID", .text).notNull().references("meeting", onDelete: .cascade)
+      t.column("similarity", .double)
+      t.primaryKey(["speakerID", "personID"])
+    }
+    try db.create(
+      index: "speakerSuggestionRejection_meetingID", on: "speakerSuggestionRejection",
+      columns: ["meetingID"])
   }
 }

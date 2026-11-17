@@ -102,19 +102,26 @@ public enum BridgeSamples {
       .init(
         id: speakerNicolai, clusterLabel: "Speaker 1", displayName: "Nicolai",
         assignment: .confirmed,
-        personID: personNicolai, email: "nicolai@example.com", colorIndex: 7, hasClip: true,
-        isPlaying: false),
+        personID: personNicolai, email: "nicolai@example.com",
+        context:
+          "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig "
+          + "Prozent auf den Kern setzen.",
+        colorIndex: 7, hasClip: true, isPlaying: false, dismissed: false),
       .init(
         id: speakerJerome, clusterLabel: "Speaker 2", displayName: "Jérôme", assignment: .confirmed,
-        personID: personJerome, colorIndex: 4, hasClip: true, isPlaying: false),
+        personID: personJerome,
+        context:
+          "Das geht nur, wenn wir das Budget entsprechend umschichten. Ich rechne bis Freitag "
+          + "zwei Szenarien.",
+        colorIndex: 4, hasClip: true, isPlaying: false, dismissed: false),
       .init(
         id: speakerAnna, clusterLabel: "Speaker 3", displayName: "Anna", assignment: .suggested,
-        personID: personAnna, suggestionName: "Anna", colorIndex: 1, hasClip: true, isPlaying: false
-      ),
+        personID: personAnna, suggestionName: "Anna", suggestionStrength: .strong, colorIndex: 1,
+        hasClip: true, isPlaying: false, dismissed: false),
       .init(
         id: speakerUnknown, clusterLabel: "Speaker 4", displayName: "Speaker 4",
-        assignment: .unknown,
-        colorIndex: 0, hasClip: false, isPlaying: false),
+        assignment: .unknown, context: "Die Partner sollten das nicht aus zweiter Hand hören.",
+        colorIndex: 0, hasClip: false, isPlaying: false, dismissed: false),
     ],
     templates: [
       .init(id: "default", name: "Meeting notes"), .init(id: "standup", name: "Standup"),
@@ -432,8 +439,9 @@ public enum BridgeSamples {
   public static let speakerOptions = SpeakerOptionsReply(
     prefill: "Anna",
     options: [
-      .init(kind: .person, label: "Anna", detail: "Sounds like", personID: personAnna),
-      .init(kind: .person, label: "Nicolai", detail: "In this meeting", personID: personNicolai),
+      .init(
+        kind: .person, label: "Anna", reason: .voice, strength: .strong, personID: personAnna),
+      .init(kind: .person, label: "Nicolai", reason: .inThisMeeting, personID: personNicolai),
       .init(kind: .create, label: "a"),
     ])
 }
@@ -503,6 +511,8 @@ extension BridgeSamples {
     BridgeFixture(
       "params.speakers.options", SpeakerOptionsParams(speakerID: speakerUnknown, query: "an")),
     BridgeFixture("params.speakers.select", selectSpeaker),
+    BridgeFixture(
+      "params.speakers.reject", RejectSpeakerParams(speakerID: speakerAnna, personID: personAnna)),
     BridgeFixture("params.speakerID", SpeakerIDParams(speakerID: speakerNicolai)),
     BridgeFixture("params.recording.start", StartRecordingParams(mode: .inPerson)),
     BridgeFixture(

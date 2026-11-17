@@ -765,6 +765,31 @@ import Testing
     #expect(beaRow.embedding == speaker.embedding?.normalized())
   }
 
+  /// Processing again sends the speakers as the store reconciled them to
+  /// the cleanup and the summary: a voice confirmed as Bob before reads as
+  /// Bob, not as whatever this run suggests. Rust: the pipeline reads the
+  /// speakers back before the summary.
+  @Test func processingAgainSummarizesTheReconciledSpeakers() async throws {
+    let summarizer = FakeSummarizer()
+    let harness = try await PipelineHarness(summarizer: summarizer)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    let speaker = try #require(
+      try await harness.store.speakers(meetingID: meeting.id).first { $0.embedding != nil })
+    let bob = Person(id: SampleData.uuid(14), displayName: "Bob", createdAt: PipelineHarness.now)
+    try await harness.store.confirm(speakerID: speaker.id, person: bob)
+
+    try await harness.pipeline.process(assetID: asset.id)
+    let input = try #require(await summarizer.inputs.entries.last)
+    let sent = try #require(input.speakers.first { $0.id == speaker.id })
+    #expect(sent.assignment == .confirmed(personID: bob.id), "the summary hears Bob")
+    let stored = try #require(
+      try await harness.store.speakers(meetingID: meeting.id).first { $0.id == speaker.id })
+    #expect(stored.assignment == .confirmed(personID: bob.id))
+  }
+
   @Test func aPhoneAACRecordingIsNotMixedDownAgain() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }

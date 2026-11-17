@@ -56,6 +56,8 @@ public struct FakeSummarizer: MeetingSummarizer, Sendable {
   public var onSummarize: (@Sendable () async -> Void)?
   /// Template ids of every `summarize` call.
   public let summaries = CallLog<String>()
+  /// The input of every `summarize` call.
+  public let inputs = CallLog<SummaryInput>()
 
   public init(
     canned: SummaryOutput? = nil,
@@ -69,6 +71,7 @@ public struct FakeSummarizer: MeetingSummarizer, Sendable {
 
   public func summarize(_ input: SummaryInput) async throws -> SummaryOutput {
     await summaries.record(input.template.id)
+    await inputs.record(input)
     await onSummarize?()
     if let failure { throw failure }
     if let canned { return canned }

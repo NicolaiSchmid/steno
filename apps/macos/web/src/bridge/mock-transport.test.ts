@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MeetingDetailSnapshot, ProgressSnapshot } from "./contract";
 import {
+	answerSpeakerChange,
+	answerSpeakerOptions,
 	answerSpeakerSelect,
 	applyScenario,
 	createMockTransport,
@@ -100,6 +102,106 @@ describe("speaker naming outside the app", () => {
 		expect(after.transcript.some((turn) => turn.speakerID === SPEAKER_4)).toBe(
 			false,
 		);
+	});
+
+	it("answers No, Not a person, Restore and Remove name as the hosts do", async () => {
+		const ANNA = "00000000-0000-0000-0000-000000000016";
+		const ANNA_PERSON = "00000000-0000-0000-0000-00000000000C";
+		const before = await detail("speakers-partly");
+		const rejected = answerSpeakerChange(before, "speakers.reject", {
+			speakerID: ANNA,
+			personID: ANNA_PERSON,
+		});
+		expect(rejected.speakers.find((row) => row.id === ANNA)).toMatchObject({
+			assignment: "unknown",
+			displayName: "Speaker 3",
+		});
+		expect(
+			rejected.speakers.find((row) => row.id === ANNA)?.suggestionName,
+		).toBeUndefined();
+
+		const dismissed = answerSpeakerChange(before, "speakers.dismiss", {
+			speakerID: SPEAKER_4,
+		});
+		expect(
+			dismissed.speakers.find((row) => row.id === SPEAKER_4)?.dismissed,
+		).toBe(true);
+		expect(
+			dismissed.transcript
+				.filter((turn) => turn.speakerID === SPEAKER_4)
+				.map((turn) => turn.speakerName),
+		).toEqual(["Not a person"]);
+		const restored = answerSpeakerChange(dismissed, "speakers.restore", {
+			speakerID: SPEAKER_4,
+		});
+		expect(restored.speakers.find((row) => row.id === SPEAKER_4)).toMatchObject(
+			{
+				dismissed: false,
+				assignment: "unknown",
+			},
+		);
+
+		const cleared = answerSpeakerChange(before, "speakers.clear", {
+			speakerID: "00000000-0000-0000-0000-000000000014",
+		});
+		expect(cleared.speakers[0]).toMatchObject({
+			assignment: "unknown",
+			displayName: "Speaker 1",
+		});
+	});
+
+	it("keeps a person answered No to out of that voice's options until typed", () => {
+		const recorded = {
+			options: [
+				{
+					kind: "person" as const,
+					label: "Anna",
+					personID: "p-anna",
+					reason: "voice" as const,
+					strength: "strong" as const,
+				},
+				{ kind: "person" as const, label: "Lea", personID: "p-lea" },
+			],
+		};
+		const rejected = new Set(["s-3 p-anna"]);
+		const labels = (query: string, speakerID = "s-3") =>
+			(
+				answerSpeakerOptions(recorded, { speakerID, query }, "", rejected) as {
+					options: { label: string }[];
+				}
+			).options.map((option) => option.label);
+		expect(labels("")).toEqual(["Lea"]);
+		expect(labels("", "s-4")).toEqual(["Anna", "Lea"]);
+		expect(labels("ann")).toEqual(["Anna", "ann"]);
+		// Typed, no longer a suggestion: no reason, no strength.
+		expect(
+			(
+				answerSpeakerOptions(
+					recorded,
+					{ speakerID: "s-3", query: "ann" },
+					"",
+					rejected,
+				) as { options: object[] }
+			).options[0],
+		).toEqual({ kind: "person", label: "Anna", personID: "p-anna" });
+	});
+
+	it("quotes what a clip plays, else gives the voice's nearby words", async () => {
+		const partly = await detail("speakers-partly");
+		const speaker4 = partly.speakers.find((row) => row.id === SPEAKER_4);
+		// Speaker 4 has no clip: nothing plays, so nothing is quoted.
+		expect(speaker4?.quote).toBeUndefined();
+		expect(speaker4?.context).toBeTruthy();
+		const withClip = partly.speakers.filter((row) => row.hasClip);
+		expect(withClip.every((row) => row.quote && !row.context)).toBe(true);
+		const near = await detail("speakers-context");
+		expect(near.speakers.every((row) => !row.quote && row.context)).toBe(true);
+	});
+
+	it("makes every voice not a person", async () => {
+		const meeting = await detail("speakers-not-people");
+		expect(meeting.speakers.length).toBeGreaterThan(0);
+		expect(meeting.speakers.every((row) => row.dismissed)).toBe(true);
 	});
 
 	it("reports the Diarize stage for the processing meeting", async () => {

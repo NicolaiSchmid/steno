@@ -233,14 +233,24 @@ public actor ProcessingPipeline {
           diarized.speakers, meetingID: meeting.id, settings: settings)
         let merged = try await merge(
           meeting: current, lanes: transcription.lanes, diarization: diarized)
+        // The speakers as the store reconciled them: a voice confirmed
+        // before keeps its name, not this run's suggestion.
+        let stored = try await attributing(.cleanup) {
+          try await store.speakers(meetingID: meeting.id)
+        }
         let cleaned = try await cleanup(
-          meeting: current, segments: merged.segments, speakers: merged.speakers)
+          meeting: current, segments: merged.segments, speakers: stored)
         // This run's usage starts from the cleanup pass (nil when it was
         // skipped) and the summarize stage adds its own; whatever an earlier
         // run wrote is replaced, never added to.
         current.llmUsage = cleaned.usage
+        // What the user named or combined while the cleanup ran wins too, as
+        // in Rust: the summary reads speakers and segments back.
+        let export = try await attributing(.summarize) {
+          try await store.export(meetingID: meeting.id)
+        }
         current = try await summarize(
-          meeting: current, segments: cleaned.segments, speakers: merged.speakers)
+          meeting: current, segments: export.segments, speakers: export.speakers)
         persisted = try await persist(meeting: current, asset: asset)
       } catch {
         // Every stage attributes its own errors; `.decode` is the fallback

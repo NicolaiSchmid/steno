@@ -305,7 +305,22 @@ final class MainWindowBridge: BridgeHost, TopicSource {
       // The page has no "picker closed" moment the host can see; one
       // re-export per change is idempotent and the model retries a refusal.
       await detail.pickerClosed()
+      list.reloadSpeakers()
       try selected.get()
+    case .speakersReject:
+      let answer = try request.params(RejectSpeakerParams.self)
+      try await speakersWrite {
+        try await $0.reject(speakerID: answer.speakerID, personID: answer.personID)
+      }
+    case .speakersClear:
+      let speakerID = try request.params(SpeakerIDParams.self).speakerID
+      try await speakersWrite { try await $0.clear(speakerID: speakerID) }
+    case .speakersDismiss:
+      let speakerID = try request.params(SpeakerIDParams.self).speakerID
+      try await speakersWrite { try await $0.setDismissed(speakerID: speakerID, true) }
+    case .speakersRestore:
+      let speakerID = try request.params(SpeakerIDParams.self).speakerID
+      try await speakersWrite { try await $0.setDismissed(speakerID: speakerID, false) }
     case .speakersPlay:
       let speakerID = try request.params(SpeakerIDParams.self).speakerID
       try requireDetail().speakers.play(speakerID)
@@ -359,6 +374,28 @@ final class MainWindowBridge: BridgeHost, TopicSource {
   private func requireDetail() throws -> MeetingDetailViewModel {
     guard let detail else { throw BridgeError(code: .notFound, message: "No meeting is selected.") }
     return detail
+  }
+
+  /// One speaker write other than naming: replied as `failed` when the
+  /// store refuses, re-exported once when a speaker changed (the model's
+  /// `onWrite` marks it), and republished from the store observation either
+  /// way; the list's speaker chips are reloaded, so a dismissed voice leaves
+  /// them at once. Rust: `Host::speakers_write`.
+  private func speakersWrite(
+    _ write: @MainActor (SpeakersViewModel) async throws -> Void
+  ) async throws {
+    let detail = try requireDetail()
+    let written: Result<Void, BridgeError>
+    do {
+      try await write(detail.speakers)
+      written = .success(())
+    } catch {
+      written = .failure(
+        BridgeError(code: .failed, message: "Speaker could not be changed: \(error)"))
+    }
+    await detail.pickerClosed()
+    list.reloadSpeakers()
+    try written.get()
   }
 
   /// Notes for a meeting that is not the selection: typed before the
@@ -432,16 +469,28 @@ final class MainWindowBridge: BridgeHost, TopicSource {
 }
 
 extension SpeakerOption {
-  /// A picker row in the wire vocabulary; the tag ("Sounds like",
-  /// "Attendee") is the row's detail.
+  /// A picker row in the wire vocabulary: the tag is the row's reason, and a
+  /// voice match's strength its `strength`.
   init(_ option: SpeakerOptions.Option) {
+    let reason: SpeakerOptionReason?
+    var strength: VoiceStrength?
+    switch option.tag {
+    case nil: reason = nil
+    case .voice(let match)?:
+      reason = .voice
+      strength = match
+    case .mentioned?: reason = .mentioned
+    case .invited?: reason = .invited
+    case .lastInvitee?: reason = .lastInvitee
+    case .inThisMeeting?: reason = .inThisMeeting
+    }
     switch option.kind {
     case .person(let person):
       self.init(
-        kind: .person, label: person.displayName, detail: option.tag?.rawValue,
+        kind: .person, label: person.displayName, reason: reason, strength: strength,
         personID: person.id)
     case .create(let name):
-      self.init(kind: .create, label: name, detail: option.tag?.rawValue)
+      self.init(kind: .create, label: name, reason: reason, strength: strength)
     }
   }
 }

@@ -169,6 +169,37 @@ fn empty_sections_are_omitted_and_durations_round_up_to_minutes() {
     ));
 }
 
+/// A voice the user marked "Not a person" says so in the note and the
+/// captions, is nobody in the participants, and is marked in
+/// `meeting.json`, which reads back the same.
+#[test]
+fn a_dismissed_voice_reads_not_a_person() {
+    let mut export = export();
+    let speaker = export
+        .speakers
+        .iter_mut()
+        .find(|speaker| speaker.person_id().is_none())
+        .expect("an unnamed voice");
+    speaker.dismissed = true;
+    let label = speaker.cluster_label.clone();
+    let r = renderer();
+    let transcript = r.render_transcript(&export, &plain());
+    assert!(transcript.contains("Not a person"), "{transcript}");
+    assert!(!transcript.contains(&label), "{transcript}");
+    assert!(r.render_vtt(&export).contains("<v Not a person>"));
+    let note = r.render_folder_note(&export, &plain(), None);
+    assert!(!note.contains(&format!("  - \"{label}\"")), "{note}");
+    assert!(
+        !note.contains("Not a person"),
+        "a dismissed voice is not a participant"
+    );
+    let json = r.render_json(&export).unwrap();
+    let text = String::from_utf8(json.clone()).unwrap();
+    assert_eq!(text.matches("\"dismissed\" : true").count(), 1, "{text}");
+    let back: MeetingExport = serde_json::from_slice(&json).unwrap();
+    assert_eq!(back, export);
+}
+
 /// User text never breaks out of a YAML scalar, a heading, a link or a
 /// voice span in the VTT file.
 #[test]

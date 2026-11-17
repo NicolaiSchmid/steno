@@ -119,6 +119,23 @@ describe("the speakers pill", () => {
 		expect(screen.getByTestId("speakers-trigger")).toHaveTextContent(words);
 	});
 
+	it("reads No speakers, with nothing to do, when no voice is a person", async () => {
+		const harness = await createBridgeHarness();
+		const { speakers, transcript } = await detail("speakers-dismissed");
+		renderWithBridge(
+			<SpeakersPopover
+				speakers={speakers
+					.filter((speaker) => speaker.clusterLabel !== "Me")
+					.map((speaker) => ({ ...speaker, dismissed: true }))}
+				transcript={transcript}
+			/>,
+			harness,
+		);
+		const pill = screen.getByTestId("speakers-trigger");
+		expect(pill).toHaveTextContent(/^No speakers$/);
+		expect(pill.querySelector("[aria-label='Unnamed']")).toBeNull();
+	});
+
 	it("says it is finding speakers, disabled, while the pipeline diarizes", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(
@@ -503,5 +520,163 @@ describe("the speakers panel", () => {
 			).toBeNull(),
 		);
 		expect(screen.queryByRole("combobox")).toBeNull();
+	});
+
+	it("says No to a voice match at once: the voice moves to Need names, its field without Anna", async () => {
+		const { user, harness, panel } = await open();
+		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
+		await user.keyboard("n");
+		expect(callsTo(harness.transport, "speakers.reject")).toEqual([
+			{
+				method: "speakers.reject",
+				params: {
+					speakerID: ANNA,
+					personID: "00000000-0000-0000-0000-00000000000C",
+				},
+			},
+		]);
+		expect(
+			within(screen.getByTestId("speakers-section-need")).getByTestId(
+				`speakers-popover-name-${ANNA}`,
+			),
+		).toBeVisible();
+		expect(screen.queryByTestId("speakers-section-check")).toBeNull();
+		expect(row(ANNA)).not.toHaveTextContent("Sounds like");
+		expect(screen.getByTestId(`speaker-field-${ANNA}`)).toHaveFocus();
+		const options = await within(panel).findAllByRole("option");
+		expect(options.map((option) => option.textContent)).not.toContain(
+			"AAnnaSounds like · strong",
+		);
+	});
+
+	it("offers the person said No to again once their name is typed", async () => {
+		const { user, panel } = await open();
+		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
+		await user.keyboard("n");
+		await within(panel).findAllByRole("option");
+		expect(within(panel).queryByRole("option", { name: /Anna/ })).toBeNull();
+		await user.keyboard("Ann");
+		const anna = await within(panel).findByRole("option", { name: /Anna/ });
+		expect(anna).toBeVisible();
+		// A person to pick again, not a voice match.
+		expect(anna).not.toHaveTextContent("Sounds like");
+	});
+
+	it("brings a suggestion back with Retry when the No fails", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const { user, harness } = await open("", {
+			"speakers.reject": new Error("Speaker could not be changed: busy"),
+		});
+		await user.click(screen.getByTestId(`speakers-popover-no-${ANNA}`));
+		const alert = await screen.findByTestId(`speakers-popover-failure-${ANNA}`);
+		expect(alert).toHaveTextContent("Speaker could not be changed: busy");
+		expect(row(ANNA)).toHaveTextContent("Sounds like Anna");
+		expect(screen.getByTestId("speakers-section-check")).toBeVisible();
+		await user.click(
+			screen.getByTestId(`speakers-popover-failure-${ANNA}-retry`),
+		);
+		expect(callsTo(harness.transport, "speakers.reject")).toHaveLength(2);
+	});
+
+	it("marks a voice Not a person from its field, in place, with Restore", async () => {
+		const toast = vi.spyOn(ui, "notify");
+		const { user, harness, speakers, republish } = await open("speakers-none");
+		await user.click(row(SPEAKER_1));
+		await user.click(await screen.findByTestId("speaker-action-dismiss"));
+		expect(callsTo(harness.transport, "speakers.dismiss")).toEqual([
+			{ method: "speakers.dismiss", params: { speakerID: SPEAKER_1 } },
+		]);
+		await vi.waitFor(() =>
+			expect(toast).toHaveBeenCalledWith({
+				title: "Speaker 1 is not a person.",
+			}),
+		);
+		republish(
+			speakers.map((speaker) =>
+				speaker.id === SPEAKER_1 ? { ...speaker, dismissed: true } : speaker,
+			),
+		);
+		// Still where it was during this visit, drawn as it is now.
+		expect(
+			within(screen.getByTestId("speakers-section-need")).getByTestId(
+				`speakers-popover-name-${SPEAKER_1}`,
+			),
+		).toHaveTextContent("Speaker 1Not a person");
+		expect(screen.getByTestId("speakers-trigger")).toHaveTextContent(
+			/^Name speakers$/,
+		);
+		await user.click(
+			screen.getByTestId(`speakers-popover-restore-${SPEAKER_1}`),
+		);
+		expect(callsTo(harness.transport, "speakers.restore")).toEqual([
+			{ method: "speakers.restore", params: { speakerID: SPEAKER_1 } },
+		]);
+	});
+
+	it("draws a voice being dismissed muted, never as needing a name", async () => {
+		const { user, speakers, republish } = await open("speakers-none", {
+			"speakers.dismiss": () => new Promise(() => {}),
+		});
+		await user.click(row(SPEAKER_1));
+		await user.click(await screen.findByTestId("speaker-action-dismiss"));
+		// On its way: already not a person, saving, in its old place.
+		expect(row(SPEAKER_1)).toHaveAccessibleName("Speaker 1, not a person");
+		expect(row(SPEAKER_1)).toHaveTextContent(/^Speaker 1Not a personSaving/);
+		expect(within(row(SPEAKER_1)).queryByText("?")).toBeNull();
+		republish(
+			speakers.map((speaker) =>
+				speaker.id === SPEAKER_1 ? { ...speaker, dismissed: true } : speaker,
+			),
+		);
+		// Saved: still in Need names for the visit, but no work there.
+		expect(row(SPEAKER_1)).toHaveAccessibleName("Speaker 1, not a person");
+		expect(within(row(SPEAKER_1)).queryByText("?")).toBeNull();
+		expect(row(SPEAKER_1)).not.toHaveTextContent("Name");
+	});
+
+	it("lists voices that are not people last, under Not people, and restores with R", async () => {
+		const { user, harness, panel } = await open("speakers-dismissed");
+		expect(
+			within(panel)
+				.getAllByRole("heading")
+				.map((heading) => heading.textContent),
+		).toEqual(["Is this right?", "Speakers", "Not people"]);
+		expect(screen.getByTestId("speakers-trigger")).toHaveTextContent(
+			"Check 1 name",
+		);
+		expect(row(UNNAMED)).toHaveTextContent("Speaker 4Not a person");
+		row(UNNAMED).focus();
+		await user.keyboard("r");
+		expect(callsTo(harness.transport, "speakers.restore")).toEqual([
+			{ method: "speakers.restore", params: { speakerID: UNNAMED } },
+		]);
+	});
+
+	it("quotes only what the clip plays; nearby words go unquoted", async () => {
+		await open("speakers-context");
+		const anna = screen.getByTestId(`speakers-popover-snippet-${ANNA}`);
+		expect(anna.textContent).toMatch(/^Around the sample: \S/);
+		expect(anna.textContent).not.toMatch(/[“”]/);
+		// Without a clip it sits beside "No sample", with nothing to anchor.
+		const unnamed = screen.getByTestId(`speakers-popover-snippet-${UNNAMED}`);
+		expect(unnamed.textContent).not.toMatch(/Around the sample|[“”]/);
+		expect(
+			screen.getByTestId(`speakers-popover-play-${UNNAMED}-none`),
+		).toHaveTextContent("No sample");
+	});
+
+	it("removes a confirmed name from the person's field", async () => {
+		const toast = vi.spyOn(ui, "notify");
+		const { user, harness } = await open();
+		await user.click(row(NICOLAI));
+		await user.click(await screen.findByTestId("speaker-action-clear"));
+		expect(callsTo(harness.transport, "speakers.clear")).toEqual([
+			{ method: "speakers.clear", params: { speakerID: NICOLAI } },
+		]);
+		await vi.waitFor(() =>
+			expect(toast).toHaveBeenCalledWith({
+				title: "Speaker 1 has no name now.",
+			}),
+		);
 	});
 });

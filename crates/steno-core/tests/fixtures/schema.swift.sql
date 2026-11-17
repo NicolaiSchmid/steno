@@ -10,6 +10,7 @@ index|meeting_state|meeting|CREATE INDEX "meeting_state" ON "meeting"("state")
 index|participant_meetingID|participant|CREATE INDEX "participant_meetingID" ON "participant"("meetingID")
 index|participant_personID|participant|CREATE INDEX "participant_personID" ON "participant"("personID")
 index|speakerNameSuggestion_meetingID|speakerNameSuggestion|CREATE INDEX "speakerNameSuggestion_meetingID" ON "speakerNameSuggestion"("meetingID")
+index|speakerSuggestionRejection_meetingID|speakerSuggestionRejection|CREATE INDEX "speakerSuggestionRejection_meetingID" ON "speakerSuggestionRejection"("meetingID")
 index|speaker_meetingID|speaker|CREATE INDEX "speaker_meetingID" ON "speaker"("meetingID")
 index|speaker_personID|speaker|CREATE INDEX "speaker_personID" ON "speaker"("personID")
 index|sqlite_autoindex_audioAsset_1|audioAsset|
@@ -27,6 +28,7 @@ index|sqlite_autoindex_participant_1|participant|
 index|sqlite_autoindex_person_1|person|
 index|sqlite_autoindex_setting_1|setting|
 index|sqlite_autoindex_speakerNameSuggestion_1|speakerNameSuggestion|
+index|sqlite_autoindex_speakerSuggestionRejection_1|speakerSuggestionRejection|
 index|sqlite_autoindex_speaker_1|speaker|
 index|sqlite_autoindex_stageRate_1|stageRate|
 index|sqlite_autoindex_transcriptSegment_1|transcriptSegment|
@@ -49,8 +51,9 @@ table|pairedDevice|pairedDevice|CREATE TABLE "pairedDevice" ("id" TEXT PRIMARY K
 table|participant|participant|CREATE TABLE "participant" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "personID" TEXT REFERENCES "person"("id") ON DELETE SET NULL, "displayName" TEXT NOT NULL, "role" TEXT NOT NULL, "email" TEXT)
 table|person|person|CREATE TABLE "person" ("id" TEXT PRIMARY KEY NOT NULL, "displayName" TEXT NOT NULL, "email" TEXT, "embedding" BLOB, "sampleCount" INTEGER NOT NULL DEFAULT 0, "createdAt" DATETIME NOT NULL)
 table|setting|setting|CREATE TABLE "setting" ("key" TEXT PRIMARY KEY NOT NULL, "value" TEXT NOT NULL)
-table|speaker|speaker|CREATE TABLE "speaker" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "clusterLabel" TEXT NOT NULL, "assignment" TEXT NOT NULL, "personID" TEXT REFERENCES "person"("id") ON DELETE SET NULL, "similarity" DOUBLE, "embedding" BLOB, "sampleClipStart" DOUBLE, "sampleClipEnd" DOUBLE, "sampleClipURL" TEXT, "clusterConfidence" DOUBLE NOT NULL)
+table|speaker|speaker|CREATE TABLE "speaker" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "clusterLabel" TEXT NOT NULL, "assignment" TEXT NOT NULL, "personID" TEXT REFERENCES "person"("id") ON DELETE SET NULL, "similarity" DOUBLE, "embedding" BLOB, "sampleClipStart" DOUBLE, "sampleClipEnd" DOUBLE, "sampleClipURL" TEXT, "clusterConfidence" DOUBLE NOT NULL, "dismissed" BOOLEAN NOT NULL DEFAULT 0, "confirmedSimilarity" DOUBLE)
 table|speakerNameSuggestion|speakerNameSuggestion|CREATE TABLE "speakerNameSuggestion" ("speakerID" TEXT PRIMARY KEY NOT NULL REFERENCES "speaker"("id") ON DELETE CASCADE, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "name" TEXT NOT NULL, "confidence" DOUBLE NOT NULL, "evidence" TEXT NOT NULL)
+table|speakerSuggestionRejection|speakerSuggestionRejection|CREATE TABLE "speakerSuggestionRejection" ("speakerID" TEXT NOT NULL REFERENCES "speaker"("id") ON DELETE CASCADE, "personID" TEXT NOT NULL REFERENCES "person"("id") ON DELETE CASCADE, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "similarity" DOUBLE, PRIMARY KEY ("speakerID", "personID"))
 table|stageRate|stageRate|CREATE TABLE "stageRate" ("stage" TEXT NOT NULL, "key" TEXT NOT NULL, "samples" INTEGER NOT NULL, "secondsPerUnit" DOUBLE NOT NULL, "updatedAt" DATETIME NOT NULL, PRIMARY KEY ("stage", "key"))
 table|transcriptSegment|transcriptSegment|CREATE TABLE "transcriptSegment" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "start" DOUBLE NOT NULL, "end" DOUBLE NOT NULL, "speakerID" TEXT REFERENCES "speaker"("id") ON DELETE SET NULL, "lane" TEXT NOT NULL, "text" TEXT NOT NULL, "rawText" TEXT NOT NULL)
 table|transcriptSegment_ft|transcriptSegment_ft|CREATE VIRTUAL TABLE "transcriptSegment_ft" USING fts5(text, tokenize='''unicode61''', content='transcriptSegment')
@@ -83,3 +86,4 @@ migration|v2
 migration|v3
 migration|v4
 migration|v5
+migration|v6

@@ -60,7 +60,8 @@ impl BridgeHost for SpyHost {
             options: vec![SpeakerOption {
                 kind: SpeakerOptionKind::Create,
                 label: format!("Add \u{201c}{}\u{201d}", params.query),
-                detail: None,
+                reason: None,
+                strength: None,
                 person_id: None,
             }],
         })

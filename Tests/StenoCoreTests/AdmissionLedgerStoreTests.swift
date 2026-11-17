@@ -222,7 +222,7 @@ import Testing
     #expect(try await Self.ledgerRows(store!).count == 2)
   }
 
-  /// A database a newer build migrated (here to a v6 that adds a table)
+  /// A database a newer build migrated (here to a v7 that adds a table)
   /// opens: GRDB's migrator ignores the identifier it does not know, the
   /// store does not ask `hasBeenSuperseded`, and it still reads and writes.
   /// Rust: `a_migration_this_build_does_not_know_is_ignored_with_a_warning`.
@@ -235,7 +235,7 @@ import Testing
       try db.execute(
         sql: """
           CREATE TABLE later (id INTEGER PRIMARY KEY);
-          INSERT INTO grdb_migrations (identifier) VALUES ('v6');
+          INSERT INTO grdb_migrations (identifier) VALUES ('v7');
           """)
     }
     store = nil
@@ -244,7 +244,7 @@ import Testing
     let applied = try await store!.writer.read { db in
       try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY rowid")
     }
-    #expect(applied == Migrations.identifiers + ["v6"])
+    #expect(applied == Migrations.identifiers + ["v7"])
     try await store!.save(SampleData.meeting())
     #expect(try await store!.meeting(id: SampleData.meetingID) != nil)
   }

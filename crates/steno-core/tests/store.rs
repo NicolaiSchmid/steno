@@ -907,7 +907,10 @@ fn replacing_the_transcript_keeps_the_earlier_clip_of_a_confirmed_speaker_given_
 #[test]
 fn a_confirmed_speaker_without_a_clip_takes_the_reruns_range() {
     let (store, meeting) = populated();
-    let speakers = common::speakers(meeting.id);
+    let mut speakers = common::speakers(meeting.id);
+    // Its own voice, so the re-run finds it again.
+    speakers[1].embedding = Some(common::other_voice());
+    store.save_speaker(&speakers[1]).unwrap();
     store
         .confirm_speaker(speakers[1].id, &common::person())
         .unwrap();

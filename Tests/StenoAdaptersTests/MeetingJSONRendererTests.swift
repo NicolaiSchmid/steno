@@ -25,6 +25,19 @@ import Testing
     #expect(try StenoJSON.encode(export) == data, "byte-identical to steno export")
   }
 
+  /// `dismissed` is in `meeting.json` only when set, and reads back.
+  @Test func aDismissedVoiceIsMarkedOnlyWhenSet() throws {
+    var export = self.export
+    let plain = String(decoding: try renderer.renderJSON(export), as: UTF8.self)
+    #expect(!plain.contains("dismissed"))
+    let index = try #require(export.speakers.firstIndex { $0.clusterLabel == "Speaker 2" })
+    export.speakers[index].dismissed = true
+    let data = try renderer.renderJSON(export)
+    let text = String(decoding: data, as: UTF8.self)
+    #expect(text.components(separatedBy: "\"dismissed\" : true").count == 2, "\(text)")
+    #expect(try StenoJSON.decode(MeetingExport.self, from: data) == export)
+  }
+
   @Test func shapeIsCamelCaseWithoutEmbeddings() throws {
     let text = String(decoding: try renderer.renderJSON(export), as: UTF8.self)
     #expect(!text.contains("embedding"))

@@ -38,6 +38,10 @@ pub const MIGRATIONS: &[Migration] = &[
         identifier: "v5",
         sql: include_str!("../../migrations/005_v5.sql"),
     },
+    Migration {
+        identifier: "v6",
+        sql: include_str!("../../migrations/006_v6.sql"),
+    },
 ];
 
 /// GRDB's own table, DDL for DDL.
@@ -257,19 +261,19 @@ mod tests {
         let store = Store::open_without_migrating(&current).unwrap();
         assert_eq!(
             store.applied_migrations().unwrap(),
-            ["v1", "v2", "v3", "v4", "v5"]
+            ["v1", "v2", "v3", "v4", "v5", "v6"]
         );
 
         let behind = directory.path().join("behind.sqlite");
         database_one_version_behind(&behind);
         let error = Store::open_without_migrating(&behind).expect_err("an older schema is refused");
         assert!(
-            matches!(error, StoreError::PendingMigration(ref id) if id == "v5"),
+            matches!(error, StoreError::PendingMigration(ref id) if id == "v6"),
             "{error}"
         );
         assert_eq!(
             recorded_migrations(&behind),
-            ["v1", "v2", "v3", "v4"],
+            ["v1", "v2", "v3", "v4", "v5"],
             "nothing was migrated"
         );
 

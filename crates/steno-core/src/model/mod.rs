@@ -46,8 +46,9 @@ pub use meeting::{
     RecordingEndReasonKind, TitleOrigin,
 };
 pub use people::{
-    Embedding, Participant, ParticipantRole, Person, Speaker, SpeakerAssignment,
-    SpeakerAssignmentKind, SpeakerMatch, SpeakerNameSuggestion, TimeRange, fold_name,
+    Embedding, NOT_A_PERSON, Participant, ParticipantRole, Person, Speaker, SpeakerAssignment,
+    SpeakerAssignmentKind, SpeakerMatch, SpeakerNameSuggestion, TimeRange, VoiceStrength,
+    fold_name,
 };
 pub use settings::{LlmProvider, ObsidianSettings, Settings};
 pub use speech::{

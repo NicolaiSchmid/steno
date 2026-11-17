@@ -362,6 +362,7 @@ mod tests {
                     sample_clip_range: None,
                     sample_clip_url: Some(file_url(&layout.sample_clip(id), false)),
                     cluster_confidence: 1.0,
+                    dismissed: false,
                 })
                 .unwrap();
         }

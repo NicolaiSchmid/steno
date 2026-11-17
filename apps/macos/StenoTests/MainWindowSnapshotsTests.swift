@@ -128,6 +128,20 @@ private var utc: Calendar {
     #expect(filtered.selection == SampleData.meetingID, "a filter never drops the selection")
   }
 
+  /// A dismissed voice ("Not a person") has no chip in the list.
+  @Test func theListLeavesADismissedVoiceOutOfTheChips() async throws {
+    let environment = try await TestSupport.environment()
+    try await environment.store.setDismissed(speakerID: SampleData.speakerTwoID, true)
+    let list = MeetingListViewModel(store: environment.store, clock: ManualClock(), calendar: utc)
+    let observing = Task { await list.observe() }
+    defer { observing.cancel() }
+    await eventually("speaker chips") { list.speakersByMeeting[SampleData.meetingID] != nil }
+
+    let snapshot = MeetingsListSnapshot(list: list)
+    let sample = try #require(snapshot.groups.first?.meetings.first)
+    #expect(sample.speakers.map(\.id) == [SampleData.speakerOneID])
+  }
+
   /// The sample meeting's detail: sections with the speaker names
   /// substituted and the bold markers gone, the speaker rows with their
   /// assignments, the transcript as three turns, the retention kind the
@@ -169,11 +183,18 @@ private var utc: Calendar {
     #expect(one.suggestionName == nil)
     #expect(one.colorIndex == MainWindowSnapshots.colorIndex(for: SampleData.personNicolaiID))
     #expect(!one.isPlaying)
+    #expect(one.quote == nil, "the segment starts before the clip: not a quote")
+    #expect(one.context == "…Wir setzen neunzig Prozent auf den Kern.", "its words around it")
+    #expect(one.suggestionStrength == nil)
+    #expect(!one.dismissed)
     let two = try #require(speakers[SampleData.speakerTwoID])
     #expect(two.displayName == "Jérôme")
     #expect(two.assignment == .suggested)
     #expect(two.personID == SampleData.personJeromeID)
     #expect(two.suggestionName == "Jérôme", "the suggested name pre-fills the picker")
+    #expect(two.suggestionStrength == .likely, "0.72 is between the floor and strong")
+    #expect(two.quote == nil)
+    #expect(two.context == "…Ich prüfe das Budget bis Freitag.")
     #expect(!two.hasClip, "the fixture's clip path is not on disk")
 
     #expect(snapshot.transcript.map(\.speakerName) == ["Nicolai", "Jérôme", "Unknown"])
@@ -338,6 +359,98 @@ private var utc: Calendar {
     await eventually("the detail republished") {
       sink.last(.meetingDetail)?["tab"] == .string("notes")
     }
+  }
+
+  /// The detail's speaker row `id` as the page reads it.
+  private func detailSpeaker(_ sink: RecordingSink, _ id: UUID) -> JSONValue? {
+    guard case .array(let speakers)? = sink.last(.meetingDetail)?["speakers"] else { return nil }
+    return speakers.first { $0["id"] == .string(id.uuidString) }
+  }
+
+  /// The name the transcript's first turn of `id` reads under.
+  private func turnName(_ sink: RecordingSink, _ id: UUID) -> JSONValue? {
+    guard case .array(let turns)? = sink.last(.meetingDetail)?["transcript"] else { return nil }
+    return turns.first { $0["speakerID"] == .string(id.uuidString) }?["speakerName"]
+  }
+
+  /// `speakers.dismiss` reads the voice as "Not a person" in the transcript
+  /// and marks its row; `speakers.restore` brings it back
+  /// unnamed; `speakers.clear` unnames a voice; `speakers.reject` takes the
+  /// suggestion back; a refused write replies `failed`.
+  @Test func theSpeakerAnswersReachTheStoreAndRepublish() async throws {
+    let environment = try await TestSupport.environment()
+    let host = bridge(environment)
+    let sink = RecordingSink()
+    host.attach(sink)
+    let running = Task { await host.run() }
+    defer { running.cancel() }
+    await eventually("the list observed the store") { host.list.all.count == 1 }
+    _ = await BridgeDispatcher.dispatch(request("r0", "page.ready"), host: host)
+    await eventually("the detail loaded and published") {
+      self.detailSpeaker(sink, SampleData.speakerTwoID) != nil
+    }
+    let two = ["speakerID": SampleData.speakerTwoID.uuidString]
+
+    let dismiss = await BridgeDispatcher.dispatch(
+      request("r1", "speakers.dismiss", two), host: host)
+    #expect(dismiss == BridgeReply(id: "r1"))
+    await eventually("the dismissal republished") {
+      self.detailSpeaker(sink, SampleData.speakerTwoID)?["dismissed"] == .bool(true)
+    }
+    #expect(detailSpeaker(sink, SampleData.speakerTwoID)?["assignment"] == .string("unknown"))
+    #expect(turnName(sink, SampleData.speakerTwoID) == .string("Not a person"))
+
+    let restore = await BridgeDispatcher.dispatch(
+      request("r2", "speakers.restore", two), host: host)
+    #expect(restore == BridgeReply(id: "r2"))
+    await eventually("the restore republished") {
+      self.detailSpeaker(sink, SampleData.speakerTwoID)?["dismissed"] == .bool(false)
+    }
+    #expect(turnName(sink, SampleData.speakerTwoID) == .string("Speaker 2"))
+
+    let clear = await BridgeDispatcher.dispatch(
+      request("r3", "speakers.clear", ["speakerID": SampleData.speakerOneID.uuidString]),
+      host: host)
+    #expect(clear == BridgeReply(id: "r3"))
+    await eventually("Remove name republished") {
+      self.detailSpeaker(sink, SampleData.speakerOneID)?["displayName"] == .string("Speaker 1")
+    }
+    #expect(try await environment.store.person(id: SampleData.personNicolaiID) != nil)
+
+    // Speaker 2 is unnamed since the dismissal; suggest Jérôme again and
+    // answer No.
+    var suggested = try #require(
+      try await environment.store.speakers(meetingID: SampleData.meetingID).first {
+        $0.id == SampleData.speakerTwoID
+      })
+    suggested.assignment = .suggested(personID: SampleData.personJeromeID, similarity: 0.8)
+    try await environment.store.save(suggested)
+    await eventually("the suggestion republished") {
+      self.detailSpeaker(sink, SampleData.speakerTwoID)?["suggestionStrength"]
+        == .string("strong")
+    }
+    let reject = await BridgeDispatcher.dispatch(
+      request(
+        "r4", "speakers.reject",
+        [
+          "speakerID": SampleData.speakerTwoID.uuidString,
+          "personID": SampleData.personJeromeID.uuidString,
+        ]), host: host)
+    #expect(reject == BridgeReply(id: "r4"))
+    await eventually("the No republished") {
+      self.detailSpeaker(sink, SampleData.speakerTwoID)?["assignment"] == .string("unknown")
+    }
+    #expect(detailSpeaker(sink, SampleData.speakerTwoID)?["suggestionStrength"] == nil)
+    #expect(
+      try await environment.store.suggestionRejections(meetingID: SampleData.meetingID)
+        == [SampleData.speakerTwoID: [SampleData.personJeromeID]])
+
+    let refused = await BridgeDispatcher.dispatch(
+      request(
+        "r5", "speakers.reject",
+        ["speakerID": SampleData.speakerTwoID.uuidString, "personID": UUID().uuidString]),
+      host: host)
+    #expect(refused.error?.code == .failed)
   }
 
   /// A declined confirmation leaves the meeting; a confirmed one deletes it

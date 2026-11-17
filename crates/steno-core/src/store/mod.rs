@@ -73,6 +73,14 @@ pub enum StoreError {
     PersonNotFound(Uuid),
     #[error("speakers {0} and {1} belong to different meetings")]
     SpeakersInDifferentMeetings(Uuid, Uuid),
+    /// `set_speaker_dismissed` on a meeting's "me" speaker: the mic lane
+    /// is the user's own voice.
+    #[error("speaker {0} is the user's own voice and cannot be dismissed")]
+    MeSpeakerNotDismissable(Uuid),
+    /// `reject_suggestion` for the person the speaker is confirmed as; that
+    /// is `clear_speaker`.
+    #[error("speaker {0} is confirmed as person {1}, which a No cannot answer")]
+    RejectedConfirmedPerson(Uuid, Uuid),
     /// `resolve_person` with nothing but whitespace.
     #[error("a person needs a name")]
     BlankPersonName,

@@ -102,8 +102,10 @@ pub fn tray_meetings(
 /// longer has, or one whose speakers are all confirmed by now, leaves.
 pub fn prune_reviews(reviews: &mut BTreeSet<Uuid>, list: &MeetingListViewModel) {
     reviews.retain(|id| {
-        list.speakers_by_meeting
-            .get(id)
-            .is_some_and(|speakers| speakers.iter().any(|s| !s.assignment.is_confirmed()))
+        list.speakers_by_meeting.get(id).is_some_and(|speakers| {
+            speakers
+                .iter()
+                .any(|s| !s.assignment.is_confirmed() && !s.dismissed)
+        })
     });
 }

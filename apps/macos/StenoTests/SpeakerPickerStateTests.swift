@@ -2,8 +2,8 @@ import StenoCore
 import XCTest
 
 final class SpeakerPickerStateTests: XCTestCase {
-  /// Speaker 2's options over the sample data: Jérôme ("Sounds like"), then
-  /// Nicolai ("In this meeting").
+  /// Speaker 2's options over the sample data: Jérôme (the voice match),
+  /// then Nicolai (in this meeting).
   private var options: [SpeakerOptions.Option] {
     SpeakerOptions.build(
       speaker: SampleData.speakers()[1], speakers: SampleData.speakers(),

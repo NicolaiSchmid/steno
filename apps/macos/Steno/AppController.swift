@@ -156,8 +156,8 @@ final class AppController {
 
   /// A pending review for a meeting the store no longer lists is dropped,
   /// so a badge never points at nothing; one whose speakers are all
-  /// confirmed by now is dropped too, so a badge never asks for a review
-  /// that has nothing left to review.
+  /// confirmed (or dismissed) by now is dropped too, so a badge never asks
+  /// for a review that has nothing left to review.
   private func meetingsChanged(_ meetings: [Meeting]) async {
     let listed = Set(meetings.map(\.id))
     listedMeetingIDs = listed
@@ -194,10 +194,11 @@ final class AppController {
   }
 
   /// The one rule: a review is pending while any speaker of the meeting is
-  /// not `.confirmed`. No speakers at all is nothing to review.
+  /// neither `.confirmed` nor dismissed ("Not a person"). No speakers at all
+  /// is nothing to review.
   private func reviewChanged(_ meetingID: UUID, speakers: [Speaker]) {
     guard pendingReviews.contains(meetingID) else { return }
-    if speakers.allSatisfy(\.assignment.isConfirmed) {
+    if speakers.allSatisfy({ $0.assignment.isConfirmed || $0.dismissed }) {
       clearReview(meetingID)
     }
   }

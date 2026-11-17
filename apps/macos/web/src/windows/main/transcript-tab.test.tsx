@@ -41,10 +41,12 @@ describe("TranscriptTab", () => {
 		).toHaveTextContent("Changes Speaker 4’s only paragraph in this meeting.");
 		const options = await within(panel).findAllByRole("option");
 		expect(options.map((option) => option.textContent)).toEqual([
-			"AAnnaSounds like",
+			"AAnnaSounds like · strong",
 			"NNicolai · combines with Speaker 1",
 			// The recorded reply's own Create row, for the recording's query.
 			"Create “a”",
+			// The voice's own action closes the list.
+			"Not a person",
 		]);
 		expect(screen.getByTestId(`speaker-field-${UNNAMED}`)).toHaveFocus();
 		// The scope is read under the voice, before the field.
@@ -63,7 +65,8 @@ describe("TranscriptTab", () => {
 				params: {
 					speakerID: UNNAMED,
 					option: {
-						detail: "Sounds like",
+						reason: "voice",
+						strength: "strong",
 						kind: "person",
 						label: "Anna",
 						personID: "00000000-0000-0000-0000-00000000000C",
@@ -86,7 +89,7 @@ describe("TranscriptTab", () => {
 		if (!name) throw new Error("no suggested turn");
 		expect(name).toHaveTextContent("Anna?");
 		expect(name).toHaveAccessibleName(
-			"Anna, suggested. Sounds like Anna. Click to confirm or change",
+			"Anna, suggested. Sounds like Anna · strong. Click to confirm or change",
 		);
 		await user.click(name);
 		// The "?" is the grey bubble of the pill and the avatars, decoration only.
@@ -144,6 +147,47 @@ describe("TranscriptTab", () => {
 		expect(within(turn).getAllByRole("button")).toHaveLength(1);
 		expect(screen.queryByTestId(/^speaker-play-/)).toBeNull();
 		expect(screen.queryByTestId("copy-transcript")).toBeNull();
+	});
+	it("reads a voice that is not a person so, its text kept", async () => {
+		const harness = await createBridgeHarness();
+		const dismissed = applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams("scenario=speakers-dismissed"),
+		)["meeting.detail"] as MeetingDetailSnapshot;
+		renderWithBridge(<TranscriptTab detail={dismissed} />, harness);
+		const name = screen.getAllByTestId(`speaker-picker-${UNNAMED}`)[0];
+		if (!name) throw new Error("no dismissed turn");
+		expect(name).toHaveTextContent("Not a person");
+		const turn = dismissed.transcript.find(
+			(entry) => entry.speakerID === UNNAMED,
+		);
+		expect(turn?.text).toBeTruthy();
+		expect(screen.getAllByText(turn?.text ?? "").length).toBeGreaterThan(0);
+	});
+
+	it("says No to a suggestion from the turn's panel", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness();
+		renderWithBridge(<TranscriptTab detail={await detail()} />, harness);
+		const name = screen.getAllByTestId(`speaker-picker-${ANNA}`)[0];
+		if (!name) throw new Error("no suggested turn");
+		await user.click(name);
+		await user.click(await screen.findByTestId(`speaker-panel-no-${ANNA}`));
+		expect(callsTo(harness.transport, "speakers.reject")).toEqual([
+			{
+				method: "speakers.reject",
+				params: {
+					speakerID: ANNA,
+					personID: "00000000-0000-0000-0000-00000000000C",
+				},
+			},
+		]);
+		// The suggestion goes at once; the field offers everyone else.
+		expect(screen.queryByTestId(`speaker-panel-yes-${ANNA}`)).toBeNull();
+		const options = await screen.findAllByRole("option");
+		expect(
+			options.some((option) => option.textContent?.startsWith("AAnna")),
+		).toBe(false);
 	});
 });
 

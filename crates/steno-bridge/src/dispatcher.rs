@@ -19,11 +19,11 @@ use serde_json::Value;
 use crate::commands::{
     AssetIdParams, ChosenPathReply, ConfirmDestructiveParams, ConfirmReply, DeviceIdParams,
     ExportUpdateParams, MeetingIdParams, OpenUrlParams, PageLayoutParams, PermissionKindParams,
-    SaveNotesParams, SelectSpeakerParams, SetAutomaticUpdatesParams, SetBoolParams,
-    SetFilterParams, SetQueryParams, SetRetentionParams, SetStringParams, SetTabParams,
-    SetTagFilterParams, SetTagsParams, SetTemplateParams, SetupStepParams, SpeakerIdParams,
-    SpeakerOptionsParams, SpeakerOptionsReply, StartRecordingParams, SummariesUpdateParams,
-    WindowParams,
+    RejectSpeakerParams, SaveNotesParams, SelectSpeakerParams, SetAutomaticUpdatesParams,
+    SetBoolParams, SetFilterParams, SetQueryParams, SetRetentionParams, SetStringParams,
+    SetTabParams, SetTagFilterParams, SetTagsParams, SetTemplateParams, SetupStepParams,
+    SpeakerIdParams, SpeakerOptionsParams, SpeakerOptionsReply, StartRecordingParams,
+    SummariesUpdateParams, WindowParams,
 };
 use crate::envelope::{BridgeError, BridgeEvent, BridgeMethod, BridgeReply, BridgeRequest};
 use crate::json;
@@ -147,6 +147,10 @@ bridge_host! {
     SpeakersSelect => fn speakers_select(params: SelectSpeakerParams) -> ();
     SpeakersPlay => fn speakers_play(params: SpeakerIdParams) -> ();
     SpeakersStop => fn speakers_stop() -> ();
+    SpeakersReject => fn speakers_reject(params: RejectSpeakerParams) -> ();
+    SpeakersClear => fn speakers_clear(params: SpeakerIdParams) -> ();
+    SpeakersDismiss => fn speakers_dismiss(params: SpeakerIdParams) -> ();
+    SpeakersRestore => fn speakers_restore(params: SpeakerIdParams) -> ();
 
     RecordingStart => fn recording_start(params: StartRecordingParams) -> ();
     RecordingStop => fn recording_stop() -> ();

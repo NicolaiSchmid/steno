@@ -72,12 +72,12 @@ use steno_bridge::{
     AppPhone, AssetIdParams, BridgeError, BridgeEvent, BridgeHost, BridgeTopic, BridgeWindow,
     ChosenPathReply, ConfirmDestructiveParams, ConfirmReply, DeviceIdParams, EventSink,
     ExportUpdateParams, MeetingIdParams, OpenUrlParams, Outcome, PageLayoutParams, PermissionKind,
-    PermissionKindParams, PermissionState, Platform, RecordingState, SaveNotesParams,
-    SelectSpeakerParams, SetAutomaticUpdatesParams, SetBoolParams, SetFilterParams, SetQueryParams,
-    SetRetentionParams, SetStringParams, SetTabParams, SetTagFilterParams, SetTagsParams,
-    SetTemplateParams, SettingsSection, SetupStepParams, SpeakerIdParams, SpeakerOption,
-    SpeakerOptionKind, SpeakerOptionsParams, SpeakerOptionsReply, StartRecordingParams,
-    SummariesUpdateParams, WindowParams,
+    PermissionKindParams, PermissionState, Platform, RecordingState, RejectSpeakerParams,
+    SaveNotesParams, SelectSpeakerParams, SetAutomaticUpdatesParams, SetBoolParams,
+    SetFilterParams, SetQueryParams, SetRetentionParams, SetStringParams, SetTabParams,
+    SetTagFilterParams, SetTagsParams, SetTemplateParams, SettingsSection, SetupStepParams,
+    SpeakerIdParams, SpeakerOption, SpeakerOptionKind, SpeakerOptionReason, SpeakerOptionsParams,
+    SpeakerOptionsReply, StartRecordingParams, SummariesUpdateParams, WindowParams,
 };
 use steno_core::paths::file_url_path;
 use steno_core::protocols::SecretKey;
@@ -99,7 +99,7 @@ use crate::settings::{
     obsidian::VaultSave, overview, snapshots as settings_snapshots,
 };
 use crate::setup::engine_notice;
-use crate::speakers::{OptionKind, SelectError, SpeakerOption as ModelOption};
+use crate::speakers::{OptionKind, OptionTag, SelectError, SpeakerOption as ModelOption};
 use crate::speech::{ModelAsset, SpeechEngineId};
 use crate::tray::{self, TrayMeetings};
 
@@ -1652,6 +1652,38 @@ impl Host {
         }
     }
 
+    /// One speaker write other than naming: reported as `failed` when the
+    /// store refuses, re-exported once when a speaker changed, and
+    /// republished either way.
+    fn speakers_write(
+        &self,
+        write: impl FnOnce(
+            &crate::speakers::SpeakersViewModel,
+            &Store,
+        ) -> steno_core::store::Result<bool>,
+    ) -> Outcome<()> {
+        let outcome = {
+            let mut inner = self.lock();
+            let outcome = Self::with_detail(&mut inner, |detail, store| {
+                let written = write(&detail.speakers, store);
+                if matches!(written, Ok(true)) {
+                    detail.speakers_changed();
+                    detail.picker_closed(&*self.shared.services.pipeline);
+                }
+                written
+            })
+            .and_then(|written| {
+                written.map(drop).map_err(|error| {
+                    BridgeError::failed(format!("Speaker could not be changed: {error}"))
+                })
+            });
+            self.reload_detail(&mut inner);
+            outcome
+        };
+        self.publish();
+        outcome
+    }
+
     /// The page's option back into the model's: a person is looked up
     /// among the picker's people; a create row carries its name.
     fn model_option(option: &SpeakerOption, inner: &Inner) -> Outcome<ModelOption> {
@@ -1704,19 +1736,28 @@ impl Inner {
 }
 
 fn wire_option(option: &ModelOption) -> SpeakerOption {
-    match &option.kind {
-        OptionKind::Person(person) => SpeakerOption {
-            kind: SpeakerOptionKind::Person,
-            label: person.display_name.clone(),
-            detail: option.tag.map(|tag| tag.as_str().to_owned()),
-            person_id: Some(person.id),
-        },
-        OptionKind::Create(name) => SpeakerOption {
-            kind: SpeakerOptionKind::Create,
-            label: name.clone(),
-            detail: option.tag.map(|tag| tag.as_str().to_owned()),
-            person_id: None,
-        },
+    let (reason, strength) = match option.tag {
+        None => (None, None),
+        Some(OptionTag::Voice(strength)) => (Some(SpeakerOptionReason::Voice), Some(strength)),
+        Some(OptionTag::Mentioned) => (Some(SpeakerOptionReason::Mentioned), None),
+        Some(OptionTag::Invited) => (Some(SpeakerOptionReason::Invited), None),
+        Some(OptionTag::LastInvitee) => (Some(SpeakerOptionReason::LastInvitee), None),
+        Some(OptionTag::InThisMeeting) => (Some(SpeakerOptionReason::InThisMeeting), None),
+    };
+    let (kind, label, person_id) = match &option.kind {
+        OptionKind::Person(person) => (
+            SpeakerOptionKind::Person,
+            person.display_name.clone(),
+            Some(person.id),
+        ),
+        OptionKind::Create(name) => (SpeakerOptionKind::Create, name.clone(), None),
+    };
+    SpeakerOption {
+        kind,
+        label,
+        reason,
+        strength,
+        person_id,
     }
 }
 
@@ -2052,6 +2093,28 @@ impl BridgeHost for Host {
         };
         self.publish();
         outcome
+    }
+
+    fn speakers_reject(&self, params: RejectSpeakerParams) -> Outcome<()> {
+        self.speakers_write(|speakers, store| {
+            speakers.reject(params.speaker_id, params.person_id, store)
+        })
+    }
+
+    fn speakers_clear(&self, params: SpeakerIdParams) -> Outcome<()> {
+        self.speakers_write(|speakers, store| speakers.clear(params.speaker_id, store))
+    }
+
+    fn speakers_dismiss(&self, params: SpeakerIdParams) -> Outcome<()> {
+        self.speakers_write(|speakers, store| {
+            speakers.set_dismissed(params.speaker_id, true, store)
+        })
+    }
+
+    fn speakers_restore(&self, params: SpeakerIdParams) -> Outcome<()> {
+        self.speakers_write(|speakers, store| {
+            speakers.set_dismissed(params.speaker_id, false, store)
+        })
     }
 
     fn speakers_play(&self, params: SpeakerIdParams) -> Outcome<()> {

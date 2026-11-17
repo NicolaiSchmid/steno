@@ -297,6 +297,8 @@ impl Refused {
             | StoreError::SpeakerNotFound(_)
             | StoreError::PersonNotFound(_)
             | StoreError::SpeakersInDifferentMeetings(..)
+            | StoreError::MeSpeakerNotDismissable(_)
+            | StoreError::RejectedConfirmedPerson(..)
             | StoreError::BlankPersonName
             | StoreError::MeetingBusy(..)
             | StoreError::NotRecording(..)

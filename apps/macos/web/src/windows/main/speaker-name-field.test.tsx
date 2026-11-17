@@ -164,7 +164,7 @@ describe("SpeakerNameField", () => {
 		await field();
 		const options = await screen.findAllByRole("option");
 		expect(options.map((option) => option.textContent)).toEqual([
-			"AAnnaSounds like",
+			"AAnnaSounds like · strong",
 			"NNicolai · combines with Speaker 1",
 		]);
 		expect(
@@ -258,5 +258,101 @@ describe("SpeakerNameField", () => {
 		const { user, onCancel } = await field();
 		await user.keyboard("{Escape}");
 		expect(onCancel).toHaveBeenCalledTimes(1);
+	});
+
+	describe("the voice's action", () => {
+		async function withAction(
+			speaker: Speaker,
+			options: (params: unknown, recorded?: SpeakerOptionsReply) => unknown = (
+				params,
+				recorded,
+			) => answerSpeakerOptions(recorded, params),
+		) {
+			const user = userEvent.setup();
+			const recorded = (await loadFixtureReplies())["speakers.options"] as
+				| SpeakerOptionsReply
+				| undefined;
+			const harness = await createBridgeHarness(
+				"",
+				{},
+				{ "speakers.options": (params: unknown) => options(params, recorded) },
+			);
+			const onSubmit = vi.fn();
+			const onAction = vi.fn();
+			renderWithBridge(
+				<SpeakerNameField
+					onAction={onAction}
+					onCancel={vi.fn()}
+					onSubmit={onSubmit}
+					speaker={speaker}
+					speakers={(await meeting()).speakers}
+				/>,
+				harness,
+			);
+			return {
+				user,
+				onSubmit,
+				onAction,
+				input: screen.getByTestId(`speaker-field-${speaker.id}`),
+			};
+		}
+
+		it("closes the list, reached by the arrows but never highlighted on its own", async () => {
+			const { user, onSubmit, onAction } = await withAction(await unnamed());
+			const action = await screen.findByTestId("speaker-action-dismiss");
+			expect(action).toHaveTextContent("Not a person");
+			expect(action).toHaveAttribute("aria-selected", "false");
+			await user.keyboard("{ArrowDown}{ArrowDown}");
+			expect(action).toHaveAttribute("aria-selected", "true");
+			await user.keyboard("{Enter}");
+			expect(onAction).toHaveBeenCalledWith("dismiss");
+			expect(onSubmit).not.toHaveBeenCalled();
+		});
+
+		it("is not chosen by Enter when it is the only row", async () => {
+			const { user, onAction } = await withAction(await unnamed(), () => ({
+				options: [],
+			}));
+			const action = await screen.findByTestId("speaker-action-dismiss");
+			expect(action).toHaveAttribute("aria-selected", "false");
+			await user.keyboard("{Enter}");
+			expect(onAction).not.toHaveBeenCalled();
+		});
+
+		it("goes while something is typed", async () => {
+			const { user, input } = await withAction(await unnamed());
+			await screen.findByTestId("speaker-action-dismiss");
+			await user.type(input, "Ann");
+			await vi.waitFor(() =>
+				expect(screen.getByRole("option", { name: /Create/ })).toBeVisible(),
+			);
+			expect(screen.queryByTestId("speaker-action-dismiss")).toBeNull();
+		});
+
+		it("is Remove name for a confirmed voice", async () => {
+			const speaker = await unnamed();
+			await withAction({
+				...speaker,
+				assignment: "confirmed",
+				displayName: "Lea",
+				personID: "00000000-0000-0000-0000-0000000000AA",
+			});
+			expect(
+				await screen.findByTestId("speaker-action-clear"),
+			).toHaveTextContent("Remove name");
+		});
+
+		it("is Restore for a voice that is not a person", async () => {
+			await withAction({ ...(await unnamed()), dismissed: true });
+			expect(
+				await screen.findByTestId("speaker-action-restore"),
+			).toHaveTextContent("Restore");
+		});
+
+		it("is not offered for unnamed Me", async () => {
+			await withAction({ ...(await unnamed()), clusterLabel: "Me" });
+			await screen.findAllByRole("option");
+			expect(screen.queryByTestId(/^speaker-action-/)).toBeNull();
+		});
 	});
 });

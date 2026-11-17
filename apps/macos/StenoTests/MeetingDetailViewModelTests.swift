@@ -89,6 +89,24 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(model.displayName(forSpeaker: nil), "Unknown")
   }
 
+  /// A turn of a voice match below the floor reads the cluster label, and a
+  /// dismissed voice reads "Not a person" (`crates/steno-host` detail.rs).
+  func testTurnNamesHideAWeakMatchAndADismissedVoice() async throws {
+    let environment = try await TestSupport.environment()
+    let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
+    var weak = try XCTUnwrap(speakers.first { $0.id == SampleData.speakerTwoID })
+    weak.assignment = .suggested(personID: SampleData.personJeromeID, similarity: 0.5)
+    try await environment.store.save(weak)
+    let model = await makeModel(environment)
+    XCTAssertEqual(model.displayName(forSpeaker: SampleData.speakerTwoID), "Speaker 2")
+
+    try await environment.store.setDismissed(speakerID: SampleData.speakerTwoID, true)
+    await TestSupport.waitUntil("the dismissal observed") {
+      model.export?.speakers.contains { $0.id == SampleData.speakerTwoID && $0.dismissed } ?? false
+    }
+    XCTAssertEqual(model.displayName(forSpeaker: SampleData.speakerTwoID), "Not a person")
+  }
+
   /// Cancelling the observation (the view going away) ends the updates.
   func testObservationEndsWhenCancelled() async throws {
     let environment = try await TestSupport.environment()

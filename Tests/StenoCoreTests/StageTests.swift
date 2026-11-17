@@ -311,6 +311,20 @@ import Testing
       speakers, meetingID: SampleData.meetingID, settings: strict)
     #expect(strictMatch[3].assignment == .unknown)
     #expect(strictMatch[0].assignment.personID == SampleData.personNicolaiID)
+
+    // A loose setting never matches below the floor.
+    var weak = [Float](repeating: 0, count: Embedding.dimension)
+    weak[0] = 0.62
+    weak[7] = (1 - 0.62 * 0.62).squareRoot()
+    var loose = harness.settings
+    loose.speakerMatchThreshold = 0.3
+    let below = try await harness.pipeline.matchSpeakers(
+      [
+        Speaker(
+          id: SampleData.uuid(24), meetingID: SampleData.meetingID, clusterLabel: "Speaker 5",
+          embedding: Embedding(weak), clusterConfidence: 0.6)
+      ], meetingID: SampleData.meetingID, settings: loose)
+    #expect(below[0].assignment == .unknown, "0.62 is below the floor")
   }
 }
 

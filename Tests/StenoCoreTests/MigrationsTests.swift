@@ -10,7 +10,7 @@ import Testing
     try Migrations.migrator().migrate(queue)
     try queue.read { (db) throws in
       #expect(try Migrations.migrator().appliedIdentifiers(db) == Set(Migrations.identifiers))
-      #expect(Migrations.identifiers == ["v1", "v2", "v3", "v4", "v5"])
+      #expect(Migrations.identifiers == ["v1", "v2", "v3", "v4", "v5", "v6"])
       let tables = try String.fetchAll(
         db, sql: "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       for expected in [
@@ -43,6 +43,20 @@ import Testing
       arguments: StatementArguments(names.map { columns[$0]! }))
   }
 
+  /// Inserts `speaker` into a database that predates `v6`: the row's columns
+  /// minus `dismissed`.
+  static func insertPreV6(_ speaker: Speaker, _ db: Database) throws {
+    var columns = try SpeakerRow(speaker).databaseDictionary
+    columns["dismissed"] = nil
+    let names = columns.keys.sorted()
+    try db.execute(
+      sql: """
+        INSERT INTO speaker (\(names.joined(separator: ", ")))
+        VALUES (\(names.map { _ in "?" }.joined(separator: ", ")))
+        """,
+      arguments: StatementArguments(names.map { columns[$0]! }))
+  }
+
   /// A database created before `v2` (a release that shipped `v1` alone)
   /// upgrades in place: the later versions alone are applied, every row
   /// survives, the new cascade holds, the `v3` columns read as "no reason"
@@ -57,7 +71,7 @@ import Testing
     try queue.write { db in
       try Self.insertPreV3(SampleData.meeting(), db)
       for person in SampleData.persons() { try PersonRow(person).insert(db) }
-      for speaker in SampleData.speakers() { try SpeakerRow(speaker).insert(db) }
+      for speaker in SampleData.speakers() { try Self.insertPreV6(speaker, db) }
       try AudioAssetRow(SampleData.audioAsset()).insert(db)
     }
     try queue.read { (db) throws in

@@ -234,6 +234,8 @@ struct SpeakerRow: StenoRecord {
   var sampleClipEnd: Double?
   var sampleClipURL: URL?
   var clusterConfidence: Float
+  /// Since v6.
+  var dismissed: Bool
 
   enum Columns {
     static let id = Column(CodingKeys.id)
@@ -242,6 +244,7 @@ struct SpeakerRow: StenoRecord {
     static let assignment = Column(CodingKeys.assignment)
     static let personID = Column(CodingKeys.personID)
     static let sampleClipURL = Column(CodingKeys.sampleClipURL)
+    static let dismissed = Column(CodingKeys.dismissed)
   }
 
   init(_ speaker: Speaker) {
@@ -256,6 +259,7 @@ struct SpeakerRow: StenoRecord {
     sampleClipEnd = speaker.sampleClipRange?.upperBound
     sampleClipURL = speaker.sampleClipURL
     clusterConfidence = speaker.clusterConfidence
+    dismissed = speaker.dismissed
   }
 
   var speaker: Speaker {
@@ -279,8 +283,28 @@ struct SpeakerRow: StenoRecord {
       embedding: embedding,
       sampleClipRange: range,
       sampleClipURL: sampleClipURL,
-      clusterConfidence: clusterConfidence
+      clusterConfidence: clusterConfidence,
+      dismissed: dismissed
     )
+  }
+}
+
+// MARK: - speakerSuggestionRejection
+
+/// The user's No to suggesting `personID` for the voice `speakerID` (v6).
+struct SpeakerSuggestionRejectionRow: StenoRecord {
+  static let databaseTableName = "speakerSuggestionRejection"
+
+  var speakerID: UUID
+  var personID: UUID
+  var meetingID: UUID
+  /// The voice match's score when the user said No, when there was one.
+  var similarity: Float?
+
+  enum Columns {
+    static let speakerID = Column(CodingKeys.speakerID)
+    static let personID = Column(CodingKeys.personID)
+    static let meetingID = Column(CodingKeys.meetingID)
   }
 }
 

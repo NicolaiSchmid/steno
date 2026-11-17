@@ -8,8 +8,8 @@ use steno_bridge::DetailTab;
 use steno_core::protocols::{BoundaryResult, BoxError};
 use steno_core::{
     AudioRetention, Delivery, Meeting, MeetingExport, MeetingOperation, MeetingStateKind, Platform,
-    Settings, SpeakerAssignment, Store, StoreError, SummaryTemplate, paths::file_url_path,
-    results_need_the_audio,
+    Settings, SpeakerAssignment, Store, StoreError, SummaryTemplate, VoiceStrength,
+    paths::file_url_path, results_need_the_audio,
 };
 use uuid::Uuid;
 
@@ -17,6 +17,9 @@ use crate::main_window::ProgressEntry;
 use crate::services::{ClipPlayer, FileSystem, Pipeline, ProcessAgainRefusal};
 use crate::setup::{ExportStatus, SummaryStatus, all_delivered, llm_configured, vault_configured};
 use crate::speakers::SpeakersViewModel;
+
+/// What a turn of a dismissed voice reads instead of a name.
+pub use steno_core::NOT_A_PERSON;
 
 /// What the header's "Recording" line says; `None` for the one case
 /// Settings already covers: kept forever with the files present.
@@ -236,10 +239,32 @@ impl MeetingDetailViewModel {
     }
 
     /// The confirmed or suggested person's name, else the cluster label;
-    /// "Unknown" without a speaker.
+    /// [`NOT_A_PERSON`] for a dismissed voice, the label for a voice match
+    /// below [`VoiceStrength::FLOOR`], "Unknown" without a speaker.
     #[must_use]
     pub fn display_name(&self, speaker_id: Option<Uuid>) -> String {
         match (speaker_id, &self.export) {
+            (Some(id), Some(export))
+                if export
+                    .speakers
+                    .iter()
+                    .any(|speaker| speaker.id == id && speaker.dismissed) =>
+            {
+                NOT_A_PERSON.to_owned()
+            }
+            // A voice match below the floor is not shown: the label.
+            (Some(id), Some(export))
+                if export.speaker(id).is_some_and(|speaker| {
+                    speaker
+                        .assignment
+                        .similarity()
+                        .is_some_and(|similarity| VoiceStrength::of(similarity).is_none())
+                }) =>
+            {
+                export
+                    .speaker(id)
+                    .map_or_else(String::new, |speaker| speaker.cluster_label.clone())
+            }
             (Some(id), Some(export)) => export.display_name_for_speaker(id),
             _ => "Unknown".to_owned(),
         }

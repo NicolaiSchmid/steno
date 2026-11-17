@@ -43,6 +43,22 @@ import Testing
     #expect(note.hasSuffix("\n## [[Nicolai Schmid]] — 00:01:10\n\nDanke, bis nächste Woche.\n"))
   }
 
+  /// A voice the user marked "Not a person" says so in the note and the
+  /// captions, and is nobody in the participants. Rust:
+  /// `a_dismissed_voice_reads_not_a_person`.
+  @Test func aDismissedVoiceReadsNotAPerson() throws {
+    var export = self.export
+    let index = try #require(export.speakers.firstIndex { $0.clusterLabel == "Speaker 2" })
+    export.speakers[index].dismissed = true
+    let note = renderer.renderTranscript(export, options: FixtureMeeting.plain)
+    #expect(note.contains("\n## Not a person — 00:00:30\n"), "\(note)")
+    #expect(!note.contains("Speaker 2"))
+    #expect(renderer.renderVTT(export).contains("<v Not a person>"))
+    let folder = renderer.renderFolderNote(export, options: FixtureMeeting.plain)
+    #expect(!folder.contains("  - \"Speaker 2\""), "\(folder)")
+    #expect(!folder.contains("Not a person"), "a dismissed voice is not a participant")
+  }
+
   @Test func plainStyleWritesNamesWithoutLinks() {
     let note = renderer.renderTranscript(export, options: FixtureMeeting.plain)
     #expect(!note.contains("[["))

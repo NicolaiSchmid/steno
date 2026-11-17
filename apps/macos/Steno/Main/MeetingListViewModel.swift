@@ -70,11 +70,10 @@ final class MeetingListViewModel {
   private(set) var searchHits: Set<UUID>?
   private(set) var error: String?
   /// The speakers of every listed meeting and the people they resolve to,
-  /// reloaded in two reads after each list update, for the rows' speaker
-  /// chips. The speaker table is not part of `observeMeetings()`, so a name
-  /// confirmed in the detail pane reaches the chips with the next
-  /// meeting-table write (the re-export the confirmation schedules), not at
-  /// once.
+  /// reloaded in two reads after each list update and after each speaker
+  /// write the main window makes (`reloadSpeakers()`), for the rows' speaker
+  /// chips: the speaker table is not part of `observeMeetings()`. Rust
+  /// reloads them after every write too.
   private(set) var speakersByMeeting: [UUID: [Speaker]] = [:]
   private(set) var personsByID: [UUID: Person] = [:]
   var query = "" {
@@ -121,9 +120,10 @@ final class MeetingListViewModel {
   }
 
   /// One read for the speakers of every listed meeting and one for the
-  /// people, side by side, after each list update; an update that lands mid-pass drops
-  /// the pass and starts over, so the map never mixes two lists.
-  private func reloadSpeakers() {
+  /// people, side by side, after each list update and speaker write; an
+  /// update that lands mid-pass drops the pass and starts over, so the map
+  /// never mixes two lists.
+  func reloadSpeakers() {
     speakersTask?.cancel()
     let ids = all.map(\.id)
     let store = self.store

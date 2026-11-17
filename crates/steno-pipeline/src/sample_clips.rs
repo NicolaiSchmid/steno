@@ -181,6 +181,7 @@ mod tests {
             sample_clip_range: None,
             sample_clip_url: clip.map(|path| file_url(path, false)),
             cluster_confidence: 1.0,
+            dismissed: false,
         }
     }
 

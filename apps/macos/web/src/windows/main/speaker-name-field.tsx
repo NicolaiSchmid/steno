@@ -1,4 +1,10 @@
-import { PlusIcon } from "lucide-react";
+import {
+	type LucideIcon,
+	PlusIcon,
+	UndoIcon,
+	UserXIcon,
+	XIcon,
+} from "lucide-react";
 import {
 	type ChangeEvent,
 	type FocusEvent,
@@ -25,8 +31,10 @@ import { menuItemVariants } from "@/components/ui/menu";
 import { cn } from "@/lib/cn";
 import {
 	groupOptions,
+	isDismissed,
 	isMe,
 	isNamed,
+	NOT_A_PERSON,
 	type OptionRow,
 	optionText,
 	type Speaker,
@@ -175,6 +183,40 @@ export function SelectFailure({
 	);
 }
 
+/**
+ * What a voice offers besides a name, under its options while nothing is
+ * typed: Not a person for an unnamed or suggested voice (never Me),
+ * Remove name for a confirmed one, Restore for one that is not a person.
+ */
+export type FieldAction = "dismiss" | "clear" | "restore";
+
+const ACTIONS: Record<FieldAction, { label: string; icon: LucideIcon }> = {
+	dismiss: { label: NOT_A_PERSON, icon: UserXIcon },
+	clear: { label: "Remove name", icon: XIcon },
+	restore: { label: "Restore", icon: UndoIcon },
+};
+
+/** The action a voice offers in its field, if any (`FieldAction`). */
+export function fieldAction(speaker: Speaker): FieldAction | undefined {
+	if (isDismissed(speaker)) {
+		return "restore";
+	}
+	if (isNamed(speaker)) {
+		return "clear";
+	}
+	return isMe(speaker) ? undefined : "dismiss";
+}
+
+interface ActionRow {
+	action: FieldAction;
+}
+
+type Entry = OptionRow | ActionRow;
+
+function isAction(entry: Entry | undefined): entry is ActionRow {
+	return entry !== undefined && "action" in entry;
+}
+
 export interface SpeakerNameFieldProps {
 	speaker: Speaker;
 	/** Every speaker of the meeting, for "Also speaking here". */
@@ -190,9 +232,17 @@ export interface SpeakerNameFieldProps {
 	onLeave?: (to: Element | null) => void;
 	/** Tab or Shift+Tab: the edit ends and focus moves to a neighbouring row. */
 	onTab?: (backward: boolean) => void;
+	/**
+	 * The voice's action row (`fieldAction`) was chosen; without a handler
+	 * the field offers none.
+	 */
+	onAction?: (action: FieldAction) => void;
 	/** The text to reopen with after a failed or cancelled pick. */
 	initialText?: string;
-	/** A person not to offer ("Someone else" after "Also Nicolai?"). */
+	/**
+	 * The person just answered No (No, or "Someone else" after "Also
+	 * Nicolai?"): not offered until typed.
+	 */
 	excludedPersonID?: string;
 	/** Under the field, above the options: a failed pick's line with Retry. */
 	notice?: ReactNode;
@@ -217,7 +267,10 @@ type Answer =
  * method's composing Enter is left alone. Focus leaving the field ends the
  * edit (`onLeave`), unless it stays inside the nearest `data-naming-scope`
  * (the row's evidence). The placeholder is the voice's label; nothing is
- * prefilled.
+ * prefilled. While nothing is typed the voice's action (Not a person,
+ * Remove name, Restore) closes the list; it is highlighted only by the
+ * arrows or the pointer, never by the list arriving, so Enter cannot
+ * dismiss or unname a voice unseen.
  */
 export function SpeakerNameField({
 	speaker,
@@ -226,6 +279,7 @@ export function SpeakerNameField({
 	onCancel,
 	onLeave,
 	onTab,
+	onAction,
 	initialText = "",
 	excludedPersonID,
 	notice,
@@ -240,6 +294,9 @@ export function SpeakerNameField({
 	// Whether the pointer, not the keys, last moved the highlight; the keys
 	// draw the inset focus line on it.
 	const [pointing, setPointing] = useState(false);
+	// Whether the arrows or the pointer chose the highlight since the list
+	// arrived; until then an action row is never highlighted.
+	const [moved, setMoved] = useState(false);
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 	const request = useRef(0);
 	const list = useRef<HTMLDivElement>(null);
@@ -252,6 +309,7 @@ export function SpeakerNameField({
 				if (ticket === request.current) {
 					setAnswer({ query: text, kind: "options", options: reply.options });
 					setActive(0);
+					setMoved(false);
 				}
 			})
 			.catch((cause: unknown) => {
@@ -259,6 +317,7 @@ export function SpeakerNameField({
 				if (ticket === request.current) {
 					setAnswer({ query: text, kind: "failed" });
 					setActive(0);
+					setMoved(false);
 				}
 			});
 	}
@@ -288,9 +347,23 @@ export function SpeakerNameField({
 						},
 					]
 				: [];
-	const flat: OptionRow[] = groups.flatMap((group) => group.rows);
-	const highlightedAt = Math.min(active, flat.length - 1);
-	const highlighted = flat[highlightedAt];
+	const action =
+		onAction && !loading && !typed ? fieldAction(speaker) : undefined;
+	const flat: Entry[] = [
+		...groups.flatMap((group) => group.rows),
+		...(action ? [{ action }] : []),
+	];
+	const clamped = Math.min(active, flat.length - 1);
+	const highlightedAt = !moved && isAction(flat[clamped]) ? -1 : clamped;
+	const highlighted = highlightedAt < 0 ? undefined : flat[highlightedAt];
+
+	function choose(entry: Entry) {
+		if (isAction(entry)) {
+			onAction?.(entry.action);
+		} else {
+			onSubmit(entry.option, query);
+		}
+	}
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: follows the highlight only.
 	useEffect(() => {
@@ -317,11 +390,12 @@ export function SpeakerNameField({
 				const step = event.key === "ArrowDown" ? 1 : -1;
 				setActive(Math.min(Math.max(highlightedAt + step, 0), flat.length - 1));
 				setPointing(false);
+				setMoved(true);
 			}
 		} else if (event.key === "Enter") {
 			event.preventDefault();
 			if (!loading && highlighted) {
-				onSubmit(highlighted.option, query);
+				choose(highlighted);
 			}
 		} else if (event.key === "Escape") {
 			// The field gives up; the popover around it stays open.
@@ -447,8 +521,11 @@ export function SpeakerNameField({
 									data-highlighted={isActive ? "" : undefined}
 									id={optionID(at)}
 									key={`${option.kind}-${option.personID ?? option.label}`}
-									onClick={() => onSubmit(option, query)}
-									onMouseMove={() => setActive(at)}
+									onClick={() => choose(row)}
+									onMouseMove={() => {
+										setActive(at);
+										setMoved(true);
+									}}
 									role="option"
 									tabIndex={-1}
 								>
@@ -483,6 +560,57 @@ export function SpeakerNameField({
 						})}
 					</div>
 				))}
+				{action ? (
+					<ActionOption
+						action={action}
+						highlighted={highlighted !== undefined && isAction(highlighted)}
+						id={optionID(flat.length - 1)}
+						onChoose={() => onAction?.(action)}
+						onPoint={() => {
+							setActive(flat.length - 1);
+							setMoved(true);
+						}}
+					/>
+				) : null}
+			</div>
+		</div>
+	);
+}
+
+/**
+ * The voice's action at the end of the list, under a rule: an option like
+ * the others, so the arrows and Enter reach it.
+ */
+function ActionOption({
+	action,
+	highlighted,
+	id,
+	onChoose,
+	onPoint,
+}: {
+	action: FieldAction;
+	highlighted: boolean;
+	id: string;
+	onChoose: () => void;
+	onPoint: () => void;
+}) {
+	const { label, icon: Icon } = ACTIONS[action];
+	return (
+		<div className="mt-1 border-border border-t pt-1">
+			{/* biome-ignore lint/a11y/useKeyWithClickEvents: focus stays in the combobox, which owns the keys (aria-activedescendant). */}
+			<div
+				aria-selected={highlighted}
+				className={cn(menuItemVariants(), activeInsetClass)}
+				data-highlighted={highlighted ? "" : undefined}
+				data-testid={`speaker-action-${action}`}
+				id={id}
+				onClick={onChoose}
+				onMouseMove={onPoint}
+				role="option"
+				tabIndex={-1}
+			>
+				<Icon aria-hidden="true" />
+				<span className="min-w-0 flex-1 truncate">{label}</span>
 			</div>
 		</div>
 	);

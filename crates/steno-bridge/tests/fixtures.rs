@@ -86,6 +86,7 @@ const FIXTURES: &[(&str, Reencode)] = &[
     ("params.meeting.saveNotes", reencode::<SaveNotesParams>),
     ("params.speakers.options", reencode::<SpeakerOptionsParams>),
     ("params.speakers.select", reencode::<SelectSpeakerParams>),
+    ("params.speakers.reject", reencode::<RejectSpeakerParams>),
     ("params.speakerID", reencode::<SpeakerIdParams>),
     ("params.recording.start", reencode::<StartRecordingParams>),
     (
@@ -280,6 +281,11 @@ fn contract_ts_shared_vocabulary_matches() {
     assert_eq!(top_level("detailTab"), raw(DetailTab::ALL));
     assert_eq!(top_level("retentionMode"), raw(RetentionMode::ALL));
     assert_eq!(top_level("platform"), raw(Platform::ALL));
+    assert_eq!(top_level("voiceStrength"), raw(VoiceStrength::ALL));
+    assert_eq!(
+        top_level("speakerOptionReason"),
+        raw(SpeakerOptionReason::ALL)
+    );
 }
 
 /// `READS_CALENDAR` in `src/lib/platform.tsx` against whether

@@ -177,6 +177,53 @@ string_enum! {
     }
 }
 
+string_enum! {
+    /// How strongly a voice match speaks for its person, the word a voice
+    /// suggestion carries ("Sounds like Anna · strong"). Never shown as a
+    /// percentage.
+    pub enum VoiceStrength {
+        Strong = "strong",
+        Likely = "likely",
+    }
+}
+
+impl VoiceStrength {
+    /// From this cosine similarity up a match is `Strong`: only true
+    /// matches reached it on the calibration corpus
+    /// (`.plans/2026-11-14-speaker-identification.md`, S4).
+    pub const STRONG: f32 = VOICE_STRONG;
+    /// Below this similarity a voice match is not shown at all, nor stored
+    /// (the pipeline never matches below it), 0.11 above the highest wrong
+    /// match measured; from it up it is `Likely` until
+    /// [`VoiceStrength::STRONG`].
+    pub const FLOOR: f32 = VOICE_FLOOR;
+
+    /// The word for a match of `similarity`; `None` below
+    /// [`VoiceStrength::FLOOR`], where no voice suggestion is shown.
+    #[must_use]
+    pub fn of(similarity: f32) -> Option<VoiceStrength> {
+        if similarity >= Self::STRONG {
+            Some(VoiceStrength::Strong)
+        } else if similarity >= Self::FLOOR {
+            Some(VoiceStrength::Likely)
+        } else {
+            None
+        }
+    }
+}
+
+// Measured on the calibration corpus (seven real calls, 2026-11-15), each
+// cluster against voices built from the person's other meetings: true
+// matches 0.77-0.91 for the two people with labels in several calls, the
+// best wrong person never above 0.54 (95th percentile of all wrong pairs
+// 0.43). Swift and Rust embeddings agree within 0.03. The floor is 0.65,
+// not the 0.60 the measurement allowed, provisionally: with few anchored
+// positives, a wrong suggestion costs more than a missed one, and 0.65
+// loses none of the six measured true matches. The score of every No is
+// stored to revisit it.
+const VOICE_STRONG: f32 = 0.75;
+const VOICE_FLOOR: f32 = 0.65;
+
 /// How a diarization cluster maps to a person.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpeakerAssignment {
@@ -345,7 +392,18 @@ pub struct Speaker {
     pub sample_clip_url: Option<String>,
     /// Diarizer cluster quality in `0...1`, not the match score.
     pub cluster_confidence: f32,
+    /// The user marked the voice "Not a person" (music, noise): it leaves
+    /// the counts and the voice memory, its segments keep their text. Kept
+    /// apart from `assignment`, which every build reads as one of three
+    /// cases; in `meeting.json` only when set, so an export without a
+    /// dismissed voice is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dismissed: bool,
 }
+
+/// What a dismissed voice's turns read instead of a name, in the app and
+/// in the exported notes.
+pub const NOT_A_PERSON: &str = "Not a person";
 
 impl Speaker {
     #[must_use]
@@ -401,6 +459,15 @@ pub struct SpeakerNameSuggestion {
 mod tests {
     use super::*;
     use crate::json::to_column_string;
+
+    #[test]
+    fn voice_strength_is_hidden_below_the_floor_and_strong_from_its_threshold() {
+        assert_eq!(VoiceStrength::of(0.64), None);
+        assert_eq!(VoiceStrength::of(0.65), Some(VoiceStrength::Likely));
+        assert_eq!(VoiceStrength::of(0.74), Some(VoiceStrength::Likely));
+        assert_eq!(VoiceStrength::of(0.75), Some(VoiceStrength::Strong));
+        assert_eq!(VoiceStrength::of(f32::NAN), None);
+    }
 
     #[test]
     fn embeddings_round_trip_as_little_endian_bytes() {

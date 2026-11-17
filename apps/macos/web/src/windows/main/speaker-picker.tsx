@@ -14,15 +14,18 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import {
+	type FieldAction,
 	SelectFailure,
 	SpeakerNameField,
 	useSpeakerSelect,
 } from "./speaker-name-field";
 import {
 	canPlay,
+	isDismissed,
 	isMe,
 	isNamed,
 	isSuggested,
+	NOT_A_PERSON,
 	type Speaker,
 	suggestionReason,
 	voiceLabel,
@@ -122,6 +125,73 @@ export function SpeakerPlayButton({
 	);
 }
 
+/** The command behind each field action. */
+const ACTION_METHODS = {
+	dismiss: "speakers.dismiss",
+	clear: "speakers.clear",
+	restore: "speakers.restore",
+} as const;
+
+/** A failed call's message, for the red line. */
+function failureMessage(method: string, cause: unknown): string {
+	console.error(`bridge: ${method} failed`, cause);
+	return cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * No to the suggestion that the voice is `personID` (`speakers.reject`):
+ * that person is never suggested for it again. Resolves with the failure's
+ * message, or null once the host took it.
+ */
+export async function sendReject(
+	client: ReturnType<typeof useBridge>,
+	speakerID: string,
+	personID: string,
+): Promise<string | null> {
+	try {
+		await client.call("speakers.reject", { speakerID, personID });
+		return null;
+	} catch (cause) {
+		return failureMessage("speakers.reject", cause);
+	}
+}
+
+/**
+ * Not a person, Remove name or Restore. Resolves with the failure's
+ * message, or null once the host took it.
+ */
+export async function sendAction(
+	client: ReturnType<typeof useBridge>,
+	speakerID: string,
+	action: FieldAction,
+): Promise<string | null> {
+	const method = ACTION_METHODS[action];
+	try {
+		await client.call(method, { speakerID });
+		return null;
+	} catch (cause) {
+		return failureMessage(method, cause);
+	}
+}
+
+/**
+ * "Speaker 4 is not a person.", "Speaker 2 has no name now.", "You have no
+ * name in this meeting now.", "Speaker 4 is back among the speakers.",
+ * once the host took the action.
+ */
+export function announceAction(speaker: Speaker, action: FieldAction) {
+	const who = voiceLabel(speaker);
+	const title =
+		action === "dismiss"
+			? `${who} is not a person.`
+			: action === "restore"
+				? `${who} is back among the speakers.`
+				: isMe(speaker)
+					? "You have no name in this meeting now."
+					: `${who} has no name now.`;
+	notify({ title });
+}
+
 /** "Speaker 1 is now Anna.", "You are Nicolai.", once the host took a pick. */
 export function announceNamed(speaker: Speaker, name: string) {
 	notify({
@@ -199,16 +269,23 @@ export function SpeakerPicker({
 	const [draft, setDraft] = useState({ text: "", attempt: 0 });
 	const [failure, setFailure] = useState<{
 		message: string;
-		option: SpeakerOption;
+		retry: () => void;
 		text: string;
 	} | null>(null);
+	// The person answered No to while the popup is open: the field leaves
+	// them out until the options are asked for again.
+	const [rejected, setRejected] = useState<string | null>(null);
+	const client = useBridge();
 	const named = isNamed(speaker);
-	const suggested = isSuggested(speaker);
+	const suggested = isSuggested(speaker) && rejected === null;
+	const dismissed = isDismissed(speaker);
 	const tooltip = suggested
 		? `${suggestionReason(speaker)}. Click to confirm or change`
-		: named
-			? "Click to change"
-			: "Click to name";
+		: dismissed
+			? `${NOT_A_PERSON}. Click to name or restore`
+			: named
+				? "Click to change"
+				: "Click to name";
 
 	function change(next: boolean) {
 		if (!next && (asking || saving !== null)) {
@@ -216,6 +293,7 @@ export function SpeakerPicker({
 		}
 		if (!next) {
 			setFailure(null);
+			setRejected(null);
 			setDraft({ text: "", attempt: 0 });
 		}
 		onOpenChange(next);
@@ -232,8 +310,42 @@ export function SpeakerPicker({
 		} else {
 			setDraft((now) => ({ text, attempt: now.attempt + 1 }));
 			if (outcome.kind === "failed") {
-				setFailure({ message: outcome.message, option, text });
+				setFailure({
+					message: outcome.message,
+					retry: () => void commit(option, text),
+					text,
+				});
 			}
+		}
+	}
+
+	/** No: the suggestion goes at once and the field offers everyone else. */
+	async function reject() {
+		const personID = speaker.personID;
+		if (!personID) {
+			return;
+		}
+		setFailure(null);
+		setRejected(personID);
+		const message = await sendReject(client, speaker.id, personID);
+		if (message !== null) {
+			setRejected(null);
+			setFailure({ message, retry: () => void reject(), text: "" });
+		}
+	}
+
+	/** Not a person, Remove name or Restore: announced, and the popup closes. */
+	async function act(action: FieldAction) {
+		setFailure(null);
+		setSaving(action === "dismiss" ? NOT_A_PERSON : speaker.clusterLabel);
+		const message = await sendAction(client, speaker.id, action);
+		setSaving(null);
+		if (message === null) {
+			announceAction(speaker, action);
+			onOpenChange(false);
+		} else {
+			setDraft((now) => ({ text: "", attempt: now.attempt + 1 }));
+			setFailure({ message, retry: () => void act(action), text: "" });
 		}
 	}
 
@@ -267,8 +379,11 @@ export function SpeakerPicker({
 					render={<Button size="name" variant="ghost" />}
 					tabIndex={tabIndex}
 				>
-					<span className="truncate" title={speaker.displayName}>
-						{speaker.displayName}
+					<span
+						className={cn("truncate", dismissed && "text-muted-foreground")}
+						title={speaker.displayName}
+					>
+						{dismissed ? NOT_A_PERSON : speaker.displayName}
 					</span>
 					{suggested ? (
 						<Avatar
@@ -295,10 +410,16 @@ export function SpeakerPicker({
 						index={speaker.colorIndex}
 						name={speaker.displayName}
 						size="md"
-						unknown={speaker.assignment === "unknown"}
+						unknown={speaker.assignment === "unknown" || rejected !== null}
 					/>
 					<span className="min-w-0 flex-1 truncate font-medium text-title">
 						{named ? speaker.displayName : voiceLabel(speaker)}
+						{dismissed ? (
+							<span className="font-normal text-muted-foreground">
+								{" "}
+								{NOT_A_PERSON}
+							</span>
+						) : null}
 						{named && isMe(speaker) ? (
 							<span className="font-normal text-muted-foreground"> You</span>
 						) : null}
@@ -323,6 +444,14 @@ export function SpeakerPicker({
 							<CheckIcon aria-hidden="true" />
 							Yes
 						</Button>
+						<Button
+							data-testid={`speaker-panel-no-${speaker.id}`}
+							onClick={() => void reject()}
+							size="xs"
+							variant="ghost"
+						>
+							No
+						</Button>
 					</div>
 				) : null}
 				{saving !== null ? (
@@ -346,6 +475,7 @@ export function SpeakerPicker({
 						</p>
 						<SpeakerNameField
 							className="mt-1.5"
+							{...(rejected ? { excludedPersonID: rejected } : {})}
 							initialText={draft.text}
 							key={draft.attempt}
 							listClassName="max-h-56"
@@ -354,11 +484,12 @@ export function SpeakerPicker({
 									<SelectFailure
 										className="mt-1.5"
 										message={failure.message}
-										onRetry={() => void commit(failure.option, failure.text)}
+										onRetry={failure.retry}
 										testID="speaker-panel-failure"
 									/>
 								) : null
 							}
+							onAction={(action) => void act(action)}
 							onCancel={() => change(false)}
 							onSubmit={(option, text) => void commit(option, text)}
 							speaker={speaker}

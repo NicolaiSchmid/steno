@@ -2021,6 +2021,7 @@ fn process_again_on_a_failed_meeting_asks_only_with_a_confirmed_speaker() {
         sample_clip_range: None,
         sample_clip_url: None,
         cluster_confidence: 0.0,
+        dismissed: false,
     };
     harness
         .store
@@ -2186,6 +2187,7 @@ fn a_room_row_beside_diarized_speakers_reads_kept_incomplete() {
         sample_clip_range: None,
         sample_clip_url: None,
         cluster_confidence: 0.0,
+        dismissed: false,
     });
     let mut segments = export.segments.clone();
     segments
