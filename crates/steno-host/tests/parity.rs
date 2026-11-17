@@ -911,22 +911,11 @@ fn speakers_options_reply() {
         .host
         .speakers_options(SpeakerOptionsParams {
             speaker_id: uuid(SPEAKER_ANNA),
-            query: "an".to_owned(),
+            query: "a".to_owned(),
         })
         .unwrap();
     let host = serde_json::to_value(&reply).unwrap();
-    assert_parity(
-        "speakers.options.reply",
-        &host,
-        &[deviation(
-            "/options",
-            json!([
-                {"detail": "Sounds like", "kind": "person", "label": "Anna", "personID": "00000000-0000-0000-0000-00000000000C"},
-                {"kind": "create", "label": "an"}
-            ]),
-            "the rows are `SpeakerOptions.build`'s: the voice match tagged \"Sounds like\", a create row named after the query; the fixture's \"Suggested, 87% match\", \"Add “…”\" and the unknown row are labels the host never produces",
-        )],
-    );
+    assert_parity("speakers.options.reply", &host, &[]);
 }
 
 #[test]

@@ -24,9 +24,9 @@ describe("TranscriptTab", () => {
 		await user.click(screen.getByTestId(`speaker-picker-${UNNAMED}`));
 		const options = await screen.findAllByRole("option");
 		expect(options.map((option) => option.textContent)).toEqual([
-			"AnnaSuggested, 87% match",
-			"Nicolai",
-			"Create “Add “Anna Berger””",
+			"AnnaSounds like",
+			"NicolaiIn this meeting",
+			"Create “a”",
 		]);
 		const field = screen.getByTestId(`speaker-field-${UNNAMED}`);
 		expect(field).toHaveFocus();
@@ -44,10 +44,12 @@ describe("TranscriptTab", () => {
 				params: {
 					speakerID: UNNAMED,
 					option: {
+						detail: "In this meeting",
 						kind: "person",
 						label: "Nicolai",
 						personID: "00000000-0000-0000-0000-00000000000A",
 					},
+					combine: false,
 				},
 			},
 		]);

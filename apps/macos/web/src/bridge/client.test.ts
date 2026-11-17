@@ -54,7 +54,6 @@ describe("bridge client", () => {
 			"person",
 			"person",
 			"create",
-			"unknown",
 		]);
 	});
 

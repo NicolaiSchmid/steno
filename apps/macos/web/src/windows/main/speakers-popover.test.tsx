@@ -1,8 +1,13 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
-import { applyScenario, loadFixtureSnapshots } from "@/bridge/mock-transport";
+import {
+	applyScenario,
+	type FixtureMap,
+	loadFixtureSnapshots,
+} from "@/bridge/mock-transport";
+import { BridgeError } from "@/bridge/transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { SPLIT_HINT, SpeakersPopover } from "./speakers-popover";
 
@@ -20,9 +25,34 @@ async function detail(scenario = ""): Promise<MeetingDetailSnapshot> {
 	)["meeting.detail"] as MeetingDetailSnapshot;
 }
 
-async function open(scenario = "") {
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
+/** `speakers.select` refusing without `combine`, as the hosts do. */
+function refusingSelect(params: unknown) {
+	if (!(params as { combine: boolean }).combine) {
+		throw new BridgeError(
+			"speakers.select",
+			"wouldCombine",
+			"Nicolai already speaks as Speaker 2 in this meeting.",
+		);
+	}
+	return undefined;
+}
+
+const CANCEL_COMBINE: FixtureMap = {
+	"speakers.select": refusingSelect,
+	"ui.confirmDestructive": { confirmed: false },
+};
+
+const BUSY: FixtureMap = {
+	"speakers.select": new Error("Speaker could not be named: busy"),
+};
+
+async function open(scenario = "", replies: FixtureMap = {}) {
 	const user = userEvent.setup();
-	const harness = await createBridgeHarness();
+	const harness = await createBridgeHarness("", {}, replies);
 	const { speakers, transcript } = await detail(scenario);
 	renderWithBridge(
 		<SpeakersPopover speakers={speakers} transcript={transcript} />,
@@ -63,8 +93,7 @@ describe("SpeakersPopover", () => {
 			within(list)
 				.getAllByRole("group")
 				.map((group) => group.getAttribute("aria-label")),
-		).toEqual(["In this meeting", "Recent people", "New person"]);
-		expect(within(list).queryByText("Leave unnamed")).toBeNull();
+		).toEqual(["In this meeting", "New person"]);
 
 		await user.keyboard("{ArrowDown}{Enter}");
 		expect(callsTo(harness.transport, "speakers.select")).toEqual([
@@ -73,10 +102,12 @@ describe("SpeakersPopover", () => {
 				params: {
 					speakerID: SPEAKER_1,
 					option: {
+						detail: "In this meeting",
 						kind: "person",
 						label: "Nicolai",
 						personID: "00000000-0000-0000-0000-00000000000A",
 					},
+					combine: false,
 				},
 			},
 		]);
@@ -89,7 +120,11 @@ describe("SpeakersPopover", () => {
 		await user.keyboard("Jo{Enter}");
 		expect(callsTo(harness.transport, "speakers.select").at(-1)).toEqual({
 			method: "speakers.select",
-			params: { speakerID: SPEAKER_1, option: { kind: "create", label: "Jo" } },
+			params: {
+				speakerID: SPEAKER_1,
+				option: { kind: "create", label: "Jo" },
+				combine: false,
+			},
 		});
 		expect(screen.getByTestId(`speaker-field-${SPEAKER_2}`)).toHaveFocus();
 
@@ -113,9 +148,67 @@ describe("SpeakersPopover", () => {
 						label: "Anna",
 						personID: "00000000-0000-0000-0000-00000000000C",
 					},
+					combine: false,
 				},
 			},
 		]);
+	});
+
+	it("keeps naming the same speaker when the combine is cancelled", async () => {
+		const { user, harness } = await open("speakers-me", CANCEL_COMBINE);
+		await user.click(screen.getByRole("button", { name: "Name Speaker 1" }));
+		await screen.findAllByRole("option");
+		await user.keyboard("{ArrowDown}{Enter}");
+		const field = screen.getByTestId(`speaker-field-${SPEAKER_1}`);
+		await vi.waitFor(() => expect(field).toHaveFocus());
+		expect(callsTo(harness.transport, "ui.confirmDestructive")).toHaveLength(1);
+		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(1);
+		expect(screen.queryByTestId(`speaker-field-${SPEAKER_2}`)).toBeNull();
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
+	it("keeps the field and shows the host's message when a pick failed", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const { user } = await open("speakers-none", BUSY);
+		await user.click(screen.getByRole("button", { name: "Name Speaker 1" }));
+		await screen.findAllByRole("option");
+		await user.keyboard("Jo{Enter}");
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"Speaker could not be named: busy",
+		);
+		const field = screen.getByTestId(`speaker-field-${SPEAKER_1}`);
+		expect(field).toHaveValue("Jo");
+		expect(field).toHaveFocus();
+		expect(screen.queryByTestId(`speaker-field-${SPEAKER_2}`)).toBeNull();
+	});
+
+	it("leaves a suggestion when its Confirm's combine is cancelled", async () => {
+		const { user, harness, popover } = await open("", CANCEL_COMBINE);
+		await user.click(
+			within(popover).getByTestId(`speakers-popover-confirm-${ANNA}`),
+		);
+		await vi.waitFor(() =>
+			expect(callsTo(harness.transport, "ui.confirmDestructive")).toHaveLength(
+				1,
+			),
+		);
+		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(1);
+		expect(
+			within(popover).getByTestId(`speakers-popover-confirm-${ANNA}`),
+		).toBeInTheDocument();
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
+	it("shows a failed Confirm's message on its row", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const { user, popover } = await open("", BUSY);
+		await user.click(
+			within(popover).getByTestId(`speakers-popover-confirm-${ANNA}`),
+		);
+		const row = within(popover).getByTestId(`speakers-popover-row-${ANNA}`);
+		expect(await within(row).findByRole("alert")).toHaveTextContent(
+			"Speaker could not be named: busy",
+		);
 	});
 
 	it("puts a person heard as two speakers under the first, with the reason", async () => {

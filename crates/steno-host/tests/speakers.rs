@@ -54,9 +54,19 @@ fn select(
     speaker: u32,
     option: SpeakerOption,
 ) -> Result<(), steno_bridge::BridgeError> {
+    select_combining(harness, speaker, option, false)
+}
+
+fn select_combining(
+    harness: &Harness,
+    speaker: u32,
+    option: SpeakerOption,
+    combine: bool,
+) -> Result<(), steno_bridge::BridgeError> {
     harness.host.speakers_select(SelectSpeakerParams {
         speaker_id: uuid(speaker),
         option,
+        combine,
     })
 }
 
@@ -151,6 +161,79 @@ fn options_start_with_the_voice_match_and_never_list_the_own_person() {
     );
 }
 
+/// Confirming a suggestion as a person who owns another voice here would
+/// merge the two; without `combine` the host refuses and names that voice.
+#[test]
+fn a_pick_that_would_combine_needs_combine() {
+    let harness = sample();
+    let _ = harness.snapshot(BridgeTopic::MeetingDetail);
+    let refused = select(
+        &harness,
+        SPEAKER_ANNA,
+        person_option(PERSON_NICOLAI, "Nicolai"),
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, BridgeErrorCode::WouldCombine);
+    assert_eq!(
+        refused.message,
+        "Nicolai already speaks as Speaker 1 in this meeting."
+    );
+    assert_eq!(harness.store.speakers(uuid(MEETING)).unwrap().len(), 4);
+    assert!(
+        harness
+            .fakes
+            .pipeline
+            .redeliveries
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+
+    select_combining(
+        &harness,
+        SPEAKER_ANNA,
+        person_option(PERSON_NICOLAI, "Nicolai"),
+        true,
+    )
+    .unwrap();
+    let speakers = harness.store.speakers(uuid(MEETING)).unwrap();
+    assert!(
+        speakers
+            .iter()
+            .all(|speaker| speaker.id != uuid(SPEAKER_ANNA))
+    );
+    assert_eq!(
+        *harness.fakes.pipeline.redeliveries.lock().unwrap(),
+        vec![uuid(MEETING)]
+    );
+}
+
+/// A pick the store refuses replies as an error instead of a success with
+/// the failure left in the detail.
+#[test]
+fn a_failed_pick_replies_as_an_error() {
+    let harness = sample();
+    let _ = harness.snapshot(BridgeTopic::MeetingDetail);
+    // Gone behind the host's back: the rows still list the speaker.
+    harness.store.delete_meeting(uuid(MEETING)).unwrap();
+    let error = select(&harness, SPEAKER_ANNA, person_option(PERSON_ANNA, "Anna")).unwrap_err();
+    assert_eq!(error.code, BridgeErrorCode::Failed);
+    assert!(
+        error.message.starts_with("Speaker could not be named: "),
+        "{}",
+        error.message
+    );
+    assert!(
+        harness
+            .fakes
+            .pipeline
+            .redeliveries
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// Selecting the own person is a no-op; closing the picker redelivers once
 /// after changes.
 #[test]
@@ -205,18 +288,6 @@ fn selecting_a_person_confirms_and_re_exports_once() {
     assert_eq!(unknown.code, BridgeErrorCode::NotFound);
     let blank = select(&harness, SPEAKER_UNKNOWN, create_option("   ")).unwrap_err();
     assert_eq!(blank.code, BridgeErrorCode::InvalidParams);
-    let leave = select(
-        &harness,
-        SPEAKER_UNKNOWN,
-        SpeakerOption {
-            kind: SpeakerOptionKind::Unknown,
-            label: "Leave unnamed".to_owned(),
-            detail: None,
-            person_id: None,
-        },
-    )
-    .unwrap_err();
-    assert_eq!(leave.code, BridgeErrorCode::Failed);
     assert_eq!(
         harness.store.persons().unwrap().len(),
         3,
@@ -259,12 +330,24 @@ fn selecting_create_names_a_new_person_reuses_an_existing_name_and_takes_an_atte
     );
     assert_eq!(harness.store.persons().unwrap().len(), 4);
 
-    select(&harness, SPEAKER_UNKNOWN, create_option("jérôme")).unwrap();
+    let refused = select(&harness, SPEAKER_UNKNOWN, create_option("jérôme")).unwrap_err();
+    assert_eq!(refused.code, BridgeErrorCode::WouldCombine);
+    assert_eq!(
+        refused.message,
+        "Jérôme already speaks as Speaker 2 in this meeting."
+    );
+    assert_eq!(
+        harness.store.speakers(uuid(MEETING)).unwrap()[3].person_id(),
+        Some(person_id),
+        "a refused pick changes nothing"
+    );
+
+    select_combining(&harness, SPEAKER_UNKNOWN, create_option("jérôme"), true).unwrap();
     let speakers = harness.store.speakers(uuid(MEETING)).unwrap();
     assert_eq!(
         speakers.len(),
         3,
-        "Jérôme already owns Speaker 2: the two merge"
+        "Jérôme already owns Speaker 2: with combine the two merge"
     );
     assert_eq!(harness.store.persons().unwrap().len(), 4, "no fifth person");
     assert_eq!(
@@ -452,7 +535,11 @@ fn confirming_after_the_audio_is_gone_removes_the_run_clip_the_row_names() {
         kind: OptionKind::Person(anna),
         tag: None,
     };
-    assert!(speakers.select(&option, confirmed, &store, meeting.started_at));
+    assert!(
+        speakers
+            .select(&option, confirmed, false, &store, meeting.started_at)
+            .unwrap()
+    );
 
     assert!(!layout.run_sample_clip(confirmed, run).exists());
     assert!(unnamed.exists(), "a file no row names is not confirm's");
@@ -546,12 +633,17 @@ fn naming_me_the_first_time_makes_that_person_you_in_every_unnamed_meeting() {
             kind: OptionKind::Person(person.clone()),
             tag: None,
         };
-        assert!(speakers.select(
-            &option,
-            me_speaker_id(meeting_id),
-            &store,
-            sample_data::started_at()
-        ));
+        assert!(
+            speakers
+                .select(
+                    &option,
+                    me_speaker_id(meeting_id),
+                    false,
+                    &store,
+                    sample_data::started_at()
+                )
+                .unwrap()
+        );
         assert_eq!(speakers.error, None);
     };
     let me_of = |meeting_id: Uuid| {

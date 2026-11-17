@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
-import { send, useBridge } from "@/bridge/hooks";
+import { useBridge } from "@/bridge/hooks";
 import {
 	Avatar,
 	AvatarStack,
@@ -20,7 +20,11 @@ import {
 	Tooltip,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import { SpeakerNameField } from "./speaker-name-field";
+import {
+	SelectError,
+	SpeakerNameField,
+	selectSpeaker,
+} from "./speaker-name-field";
 import {
 	firstName,
 	groupSpeakers,
@@ -228,22 +232,24 @@ function SpeakerRow({
 }: SpeakerRowProps) {
 	const client = useBridge();
 	const [preview, setPreview] = useState<string | undefined>(undefined);
+	const [error, setError] = useState<string | undefined>(undefined);
 	const named = isNamed(speaker);
 	const suggested = speaker.assignment === "suggested";
 	const said = named ? "" : snippet(speaker, transcript);
 
-	function confirmSuggestion() {
+	async function confirmSuggestion() {
 		if (!speaker.personID) {
 			return;
 		}
-		send(client, "speakers.select", {
-			speakerID: speaker.id,
-			option: {
-				kind: "person",
-				label: speaker.displayName,
-				personID: speaker.personID,
-			},
+		setError(undefined);
+		const outcome = await selectSpeaker(client, speaker, {
+			kind: "person",
+			label: speaker.displayName,
+			personID: speaker.personID,
 		});
+		if (outcome.kind === "failed") {
+			setError(outcome.message);
+		}
 	}
 
 	return (
@@ -313,7 +319,7 @@ function SpeakerRow({
 							<>
 								<Button
 									data-testid={`speakers-popover-confirm-${speaker.id}`}
-									onClick={confirmSuggestion}
+									onClick={() => void confirmSuggestion()}
 									size="xs"
 									variant="outline"
 								>
@@ -362,6 +368,9 @@ function SpeakerRow({
 					“{said}”
 				</p>
 			) : null}
+			{editing ? null : (
+				<SelectError className="mt-0 mb-1 ml-[42px]" message={error} />
+			)}
 		</li>
 	);
 }

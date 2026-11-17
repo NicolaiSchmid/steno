@@ -203,6 +203,9 @@ string_enum! {
         NotFound = "notFound",
         Failed = "failed",
         Cancelled = "cancelled",
+        /// A `speakers.select` without `combine` that would join another
+        /// voice of the meeting; the message names that voice.
+        WouldCombine = "wouldCombine",
     }
 }
 
@@ -240,6 +243,10 @@ impl BridgeError {
 
     pub fn cancelled(message: impl Into<String>) -> Self {
         Self::new(BridgeErrorCode::Cancelled, message)
+    }
+
+    pub fn would_combine(message: impl Into<String>) -> Self {
+        Self::new(BridgeErrorCode::WouldCombine, message)
     }
 
     /// The error for a method a host does not route; the `BridgeHost`
@@ -430,7 +437,8 @@ mod tests {
                 "invalidParams",
                 "notFound",
                 "failed",
-                "cancelled"
+                "cancelled",
+                "wouldCombine"
             ]
         );
         let error = BridgeError::not_answered(BridgeMethod::MeetingSetTab);

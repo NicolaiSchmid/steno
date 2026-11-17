@@ -88,8 +88,6 @@ string_enum! {
         Person = "person",
         /// Create a person named `label`.
         Create = "create",
-        /// Mark the speaker as unknown.
-        Unknown = "unknown",
     }
 }
 
@@ -121,6 +119,9 @@ pub struct SelectSpeakerParams {
     #[serde(rename = "speakerID", with = "uuid_text")]
     pub speaker_id: Uuid,
     pub option: SpeakerOption,
+    /// Whether the pick may join another voice of this meeting; without it
+    /// such a pick is refused as `wouldCombine`.
+    pub combine: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

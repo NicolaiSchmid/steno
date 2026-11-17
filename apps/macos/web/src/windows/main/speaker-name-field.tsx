@@ -8,10 +8,13 @@ import {
 	useRef,
 	useState,
 } from "react";
+import type { BridgeClient } from "@/bridge/client";
 import type { SpeakerOption } from "@/bridge/contract";
-import { send, useBridge } from "@/bridge/hooks";
-import { Input } from "@/components/ui";
+import { useBridge } from "@/bridge/hooks";
+import { BridgeError } from "@/bridge/transport";
+import { Input, ResultLine } from "@/components/ui";
 import { menuItemVariants } from "@/components/ui/menu";
+import { cn } from "@/lib/cn";
 import { groupOptions, optionText, type Speaker } from "./speaker-names";
 
 const SPEAKER_QUERY_DEBOUNCE_MS = 150;
@@ -19,8 +22,9 @@ const SPEAKER_QUERY_DEBOUNCE_MS = 150;
 export interface SpeakerNameFieldProps {
 	speaker: Speaker;
 	/**
-	 * Called once with `true` after a pick was sent, with `false` on Escape
-	 * (and, with `cancelOnBlur`, when focus leaves the field).
+	 * Called once with `true` after the host took a pick, with `false` on
+	 * Escape (and, with `cancelOnBlur`, when focus leaves the field). A
+	 * cancelled combine or a failed pick keeps the field open.
 	 */
 	onDone: (picked: boolean) => void;
 	/** The name the highlighted option would give, for the row's avatar. */
@@ -31,11 +35,77 @@ export interface SpeakerNameFieldProps {
 }
 
 /**
+ * How a pick ended: the host took it, the user cancelled the combine, or it
+ * failed with the host's message.
+ */
+export type SelectOutcome =
+	| { kind: "committed" }
+	| { kind: "cancelled" }
+	| { kind: "failed"; message: string };
+
+/**
+ * Sends a pick as `speakers.select` without `combine`. When the host
+ * refuses it as `wouldCombine` (the person already owns another voice of
+ * the meeting, so naming would merge the two), the user confirms first and
+ * the pick goes again with `combine: true`; Cancel leaves it. Never
+ * rejects: any failure comes back as `failed`.
+ */
+export async function selectSpeaker(
+	client: BridgeClient,
+	speaker: Speaker,
+	option: SpeakerOption,
+): Promise<SelectOutcome> {
+	const params = { speakerID: speaker.id, option };
+	try {
+		try {
+			await client.call("speakers.select", { ...params, combine: false });
+		} catch (cause) {
+			if (!(cause instanceof BridgeError) || cause.code !== "wouldCombine") {
+				throw cause;
+			}
+			const { confirmed } = await client.call("ui.confirmDestructive", {
+				title: `Combine ${speaker.clusterLabel} with ${option.label}?`,
+				message: `${cause.message} Their paragraphs become ${option.label}’s. This cannot be undone.`,
+				confirmTitle: "Combine",
+			});
+			if (!confirmed) {
+				return { kind: "cancelled" };
+			}
+			await client.call("speakers.select", { ...params, combine: true });
+		}
+		return { kind: "committed" };
+	} catch (cause) {
+		console.error("bridge: speakers.select failed", cause);
+		return {
+			kind: "failed",
+			message: cause instanceof Error ? cause.message : String(cause),
+		};
+	}
+}
+
+/** The host's message for a failed pick, under the field or row it came from. */
+export function SelectError({
+	message,
+	className,
+}: {
+	message: string | undefined;
+	className?: string;
+}) {
+	return message ? (
+		<ResultLine className={cn("mt-1.5", className)} tone="destructive">
+			{message}
+		</ResultLine>
+	) : null;
+}
+
+/**
  * The text field that names one speaker, in place of its name, with the
  * host's options under it in three groups (`groupOptions`). The host is
  * asked as the text changes (`speakers.options`, debounced); arrow keys,
- * Home and End move the highlight, Enter sends the highlighted option as
- * `speakers.select`, Escape gives up. Enter on text the options have not
+ * Home and End move the highlight, Enter sends the highlighted option
+ * (`selectSpeaker`), Escape gives up. The field closes once the host took
+ * the pick; a cancelled combine leaves it as it was, and a failure shows
+ * the host's message under it. Enter on text the options have not
  * caught up with yet creates the typed name, which the host resolves to an
  * existing person of that name. Opens empty: a suggestion is confirmed
  * with its own button, not by Enter on a prefilled field.
@@ -55,6 +125,9 @@ export function SpeakerNameField({
 		options: readonly SpeakerOption[];
 	}>({ query: "", options: [] });
 	const [active, setActive] = useState(0);
+	const [error, setError] = useState<string | undefined>(undefined);
+	const input = useRef<HTMLInputElement>(null);
+	const picking = useRef(false);
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 	const request = useRef(0);
 	const done = useRef(false);
@@ -102,14 +175,29 @@ export function SpeakerNameField({
 		onDone(picked);
 	}
 
-	function pick(option: SpeakerOption) {
-		send(client, "speakers.select", { speakerID: speaker.id, option });
-		finish(true);
+	async function pick(option: SpeakerOption) {
+		if (picking.current) {
+			return;
+		}
+		picking.current = true;
+		setError(undefined);
+		const outcome = await selectSpeaker(client, speaker, option);
+		picking.current = false;
+		if (outcome.kind === "committed") {
+			finish(true);
+			return;
+		}
+		if (outcome.kind === "failed") {
+			setError(outcome.message);
+		}
+		// The confirm sheet took focus; the same speaker's edit goes on.
+		input.current?.focus();
 	}
 
 	function onChange(event: ChangeEvent<HTMLInputElement>) {
 		const value = event.target.value;
 		setQuery(value);
+		setError(undefined);
 		clearTimeout(timer.current);
 		timer.current = setTimeout(() => load(value), SPEAKER_QUERY_DEBOUNCE_MS);
 	}
@@ -135,10 +223,10 @@ export function SpeakerNameField({
 			if (answered.query.trim() !== typed) {
 				// The options are for older text; create what was typed.
 				if (typed) {
-					pick({ kind: "create", label: typed });
+					void pick({ kind: "create", label: typed });
 				}
 			} else if (highlighted) {
-				pick(highlighted);
+				void pick(highlighted);
 			}
 		} else if (event.key === "Escape") {
 			// The field gives up; the popover around it stays open.
@@ -149,7 +237,12 @@ export function SpeakerNameField({
 	}
 
 	function onBlur(event: FocusEvent<HTMLDivElement>) {
-		if (cancelOnBlur && !event.currentTarget.contains(event.relatedTarget)) {
+		// A pick in flight may open the host's confirm, which takes focus.
+		if (
+			cancelOnBlur &&
+			!picking.current &&
+			!event.currentTarget.contains(event.relatedTarget)
+		) {
 			finish(false);
 		}
 	}
@@ -167,16 +260,19 @@ export function SpeakerNameField({
 				aria-autocomplete="list"
 				aria-controls={listID}
 				aria-expanded={flat.length > 0}
+				aria-invalid={error ? true : undefined}
 				aria-label={`Name for ${speaker.clusterLabel}`}
 				autoFocus
 				data-testid={`speaker-field-${speaker.id}`}
 				onChange={onChange}
 				onKeyDown={onKeyDown}
 				placeholder="Type a name"
+				ref={input}
 				role="combobox"
 				size="sm"
 				value={query}
 			/>
+			<SelectError message={error} />
 			<div
 				aria-label="People"
 				className="mt-1.5 flex max-h-64 flex-col gap-0.5 overflow-y-auto"
@@ -212,7 +308,7 @@ export function SpeakerNameField({
 									data-highlighted={isActive ? "" : undefined}
 									id={optionID(at)}
 									key={`${option.kind}-${option.personID ?? option.label}`}
-									onClick={() => pick(option)}
+									onClick={() => void pick(option)}
 									onMouseMove={() => setActive(at)}
 									role="option"
 									tabIndex={-1}

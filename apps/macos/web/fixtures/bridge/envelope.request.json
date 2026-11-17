@@ -2,6 +2,7 @@
   "id" : "req-1",
   "method" : "speakers.select",
   "params" : {
+    "combine" : false,
     "option" : {
       "kind" : "person",
       "label" : "Anna",

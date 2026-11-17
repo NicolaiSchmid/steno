@@ -160,9 +160,9 @@ final class MeetingDetailViewModelTests: XCTestCase {
     defer { try? FileManager.default.removeItem(at: vault) }
     let model = await makeModel(environment)
 
-    await model.speakers.select(
+    try await model.speakers.select(
       SpeakerOptions.Option(kind: .person(SampleData.persons()[0])), for: SampleData.speakerTwoID)
-    await model.speakers.select(
+    try await model.speakers.select(
       SpeakerOptions.Option(kind: .create("Anna")), for: SampleData.speakerTwoID)
     XCTAssertNil(model.speakers.error, model.speakers.error ?? "")
     XCTAssertTrue(model.speakersDirty)
@@ -196,7 +196,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
     let vault = try await configureVault(environment)
     defer { try? FileManager.default.removeItem(at: vault) }
     let model = await makeModel(environment)
-    await model.speakers.select(
+    try await model.speakers.select(
       SpeakerOptions.Option(kind: .person(SampleData.persons()[0])), for: SampleData.speakerTwoID)
     XCTAssertTrue(model.speakersDirty)
 

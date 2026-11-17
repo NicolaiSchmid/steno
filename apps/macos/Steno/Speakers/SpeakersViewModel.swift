@@ -9,7 +9,8 @@ import StenoCore
 /// people and the full people list in one cancellable task. Writes go
 /// through `MeetingStore.confirm(speakerID:person:)`, which merges,
 /// recomputes the voice and keeps the clip; the UI re-renders from the
-/// store observation, so nothing here is optimistic.
+/// store observation, so nothing here is optimistic. A failed write throws,
+/// so the bridge replies with it.
 @MainActor
 @Observable
 final class SpeakersViewModel {
@@ -113,30 +114,58 @@ final class SpeakersViewModel {
       participants: export.participants, suggestion: suggestion, recent: recent, query: query)
   }
 
-  /// The one write: a person option confirms that person (merging when they
-  /// already own another speaker here, inside `confirm`); a create option
-  /// resolves the name to an existing or new person first, taking the email
-  /// of a calendar attendee of that name. Selecting the speaker's own person
-  /// again changes nothing. A speaker the export does not list is ignored.
-  func select(_ option: SpeakerOptions.Option, for speakerID: UUID) async {
-    guard let row = row(speakerID) else { return }
-    do {
-      let person: Person
-      switch option.kind {
-      case .person(let known):
-        person = known
-      case .create(let name):
-        let attendee = export?.participants.first {
-          $0.role == .them && Person.namesMatch($0.displayName, name)
-        }
-        person = try await store.resolvePerson(named: name, email: attendee?.email, now: now())
+  /// Why `select` named nobody besides a store error.
+  enum SelectError: Error, Equatable, CustomStringConvertible {
+    /// The person already owns `voice` in this meeting, and confirming would
+    /// merge the two speakers; the pick did not ask to combine.
+    case wouldCombine(person: String, voice: String)
+
+    var description: String {
+      switch self {
+      case .wouldCombine(let person, let voice):
+        "\(person) already speaks as \(voice) in this meeting."
       }
-      if row.speaker.assignment == .confirmed(personID: person.id) { return }
-      try await store.confirm(speakerID: speakerID, person: person)
-      onWrite?()
-    } catch {
-      self.error = "Speaker could not be named: \(error)"
     }
+  }
+
+  /// The one write: a person option confirms that person; a create option
+  /// resolves the name to an existing or new person first, taking the email
+  /// of a calendar attendee of that name. A person who owns another speaker
+  /// here is merged into (inside `confirm`) only with `combine`, else
+  /// `SelectError.wouldCombine` is thrown. Selecting the speaker's own person
+  /// again changes nothing. A speaker the export does not list is ignored.
+  /// Store errors are thrown, for the bridge to reply with.
+  func select(_ option: SpeakerOptions.Option, for speakerID: UUID, combine: Bool = false)
+    async throws
+  {
+    guard let row = row(speakerID) else { return }
+    let person: Person
+    switch option.kind {
+    case .person(let known):
+      person = known
+    case .create(let name):
+      let attendee = export?.participants.first {
+        $0.role == .them && Person.namesMatch($0.displayName, name)
+      }
+      person = try await store.resolvePerson(named: name, email: attendee?.email, now: now())
+    }
+    if row.speaker.assignment == .confirmed(personID: person.id) { return }
+    if !combine,
+      let owner = try await combinedVoice(of: row.speaker, personID: person.id)
+    {
+      throw SelectError.wouldCombine(person: person.displayName, voice: owner.clusterLabel)
+    }
+    try await store.confirm(speakerID: speakerID, person: person)
+    onWrite?()
+  }
+
+  /// The speaker `confirm` would merge `speaker` into when confirmed as
+  /// `personID`: another speaker of the meeting confirmed as that person,
+  /// the first by cluster label.
+  private func combinedVoice(of speaker: Speaker, personID: UUID) async throws -> Speaker? {
+    try await store.speakers(meetingID: speaker.meetingID)
+      .filter { $0.id != speaker.id && $0.assignment == .confirmed(personID: personID) }
+      .min { ($0.clusterLabel, $0.id.uuidString) < ($1.clusterLabel, $1.id.uuidString) }
   }
 
   // MARK: - Playback

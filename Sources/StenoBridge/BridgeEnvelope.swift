@@ -176,6 +176,9 @@ public struct BridgeError: Codable, Sendable, Equatable, Error {
     case notFound
     case failed
     case cancelled
+    /// A `speakers.select` without `combine` that would join another voice
+    /// of the meeting; the message names that voice.
+    case wouldCombine
   }
 
   public var code: Code

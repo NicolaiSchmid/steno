@@ -183,6 +183,7 @@ export const bridgeError = z
 			"notFound",
 			"failed",
 			"cancelled",
+			"wouldCombine",
 		]),
 		message: z.string(),
 	})
@@ -848,7 +849,7 @@ export const speakerOptionsParams = z
 	.strict();
 export const speakerOption = z
 	.object({
-		kind: z.enum(["person", "create", "unknown"]),
+		kind: z.enum(["person", "create"]),
 		label: z.string(),
 		detail: z.string().optional(),
 		personID: uuid.optional(),
@@ -859,8 +860,12 @@ export const speakerOptionsReply = z
 	.object({ prefill: z.string().optional(), options: z.array(speakerOption) })
 	.strict();
 export type SpeakerOptionsReply = z.infer<typeof speakerOptionsReply>;
+/**
+ * `combine: false` asks the host to refuse, as `wouldCombine`, a pick that
+ * would join another voice of the meeting; `true` lets it merge the two.
+ */
 export const selectSpeakerParams = z
-	.object({ speakerID: uuid, option: speakerOption })
+	.object({ speakerID: uuid, option: speakerOption, combine: z.boolean() })
 	.strict();
 export const speakerIDParams = z.object({ speakerID: uuid }).strict();
 export const startRecordingParams = z.object({ mode: captureMode }).strict();

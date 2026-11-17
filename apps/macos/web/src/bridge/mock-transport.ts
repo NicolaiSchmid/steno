@@ -912,9 +912,9 @@ function speakersScenario(
  * `speakers.options` answered the way the host ranks them, from the
  * recorded reply: its people whose name contains the query, then, once
  * something is typed and no one is called exactly that, a row creating the
- * typed name. The recorded create and unknown rows stand for labels the
- * host never sends (`crates/steno-host/tests/parity.rs`), so they are left
- * out. Used by the page outside the app; the unit tests keep the recording.
+ * typed name. The recorded create row is for the recording's own query
+ * ("a", `crates/steno-host/tests/parity.rs`), so it is left out. Used by the
+ * page outside the app; the unit tests keep the recording.
  */
 export function answerSpeakerOptions(
 	recorded: SpeakerOptionsReply | undefined,
