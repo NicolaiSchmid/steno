@@ -125,6 +125,25 @@ import Testing
     #expect(nicolai.map(\.tag) == [.inThisMeeting])
   }
 
+  @Test func aParagraphWithoutAVoiceSuggestsTheInviteesNobodyIsYet() {
+    // Jérôme is Speaker 2's suggestion and Nicolai is Me: neither is
+    // offered; Anna, known, and Mia, not yet, are, each once.
+    let anna = Participant(
+      id: SampleData.uuid(32), meetingID: SampleData.meetingID, personID: Self.anna.id,
+      displayName: "Anna Berg", role: .them)
+    let mia = Participant(
+      id: SampleData.uuid(33), meetingID: SampleData.meetingID, displayName: "Mia Kurz",
+      role: .them)
+    let options = SpeakerOptions.meetingInvitees(
+      speakers: Self.speakers, persons: Self.persons,
+      participants: SampleData.participants() + [anna, mia, mia])
+    #expect(
+      options == [
+        Option(kind: .person(Self.anna), tag: .invited),
+        Option(kind: .create("Mia Kurz"), tag: .invited),
+      ])
+  }
+
   @Test func jeromeFindsJérôme() {
     let options = Self.build(speaker: Self.speakerOne, query: "jerome")
     #expect(options == [Option(kind: .person(Self.jerome), tag: .inThisMeeting)])

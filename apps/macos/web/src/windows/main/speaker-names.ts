@@ -494,16 +494,18 @@ export function optionColor(
 }
 
 /**
- * A turn without a voice, nothing typed: the people named in this meeting,
- * once each, from the snapshot. The host's options are a voice's own (its
- * Noes left out, its evidence ranked first), and this paragraph has no
- * voice, so nothing here is asked of the host.
+ * A turn without a voice, nothing typed: the meeting's invitees nobody's
+ * voice is yet (the snapshot's `invitees`, each "Invited"), then the
+ * people named in this meeting, once each. The host's options are a
+ * voice's own (its Noes left out, its evidence ranked first), and this
+ * paragraph has no voice, so nothing here is asked of the host.
  */
 export function meetingPeopleOptions(
 	speakers: readonly Speaker[],
+	invitees: readonly SpeakerOption[] = [],
 ): SpeakerOption[] {
 	const seen = new Set<string>();
-	const options: SpeakerOption[] = [];
+	const options: SpeakerOption[] = [...invitees];
 	for (const speaker of speakers) {
 		const personID = speaker.personID;
 		if (

@@ -593,7 +593,8 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 		"scenario=speakers-no-voice&tab=transcript",
 		async (page) => {
 			await transcriptName(page, "Unknown").click();
-			await expect(page.getByRole("option").first()).toBeVisible();
+			// The invitee nobody is yet, suggested before anything is typed.
+			await expect(page.getByRole("option").first()).toHaveText(/Lena/);
 			await expect(page.getByRole("radiogroup")).toHaveCount(0);
 		},
 	],

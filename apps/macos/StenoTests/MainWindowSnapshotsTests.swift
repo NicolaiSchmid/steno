@@ -196,6 +196,7 @@ private var utc: Calendar {
     #expect(two.quote == nil)
     #expect(two.context == "…Ich prüfe das Budget bis Freitag.")
     #expect(!two.hasClip, "the fixture's clip path is not on disk")
+    #expect(snapshot.invitees == nil, "the one invitee, Jérôme, is Speaker 2's suggestion")
 
     #expect(snapshot.transcript.map(\.speakerName) == ["Nicolai", "Jérôme", "Unknown"])
     #expect(snapshot.transcript.map(\.startSeconds) == [0, 2.5, 5.5])

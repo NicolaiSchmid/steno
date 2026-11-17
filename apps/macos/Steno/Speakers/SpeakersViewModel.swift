@@ -157,16 +157,31 @@ final class SpeakersViewModel {
     return row.person?.displayName
   }
 
+  /// Every person Steno knows, and the export's own.
+  private func knownPersons(_ export: MeetingExport) -> [Person] {
+    var known = persons
+    for person in export.persons where !known.contains(where: { $0.id == person.id }) {
+      known.append(person)
+    }
+    return known
+  }
+
+  /// The invitees a paragraph without a voice suggests
+  /// (`SpeakerOptions.meetingInvitees`). Reads only.
+  func invitees() -> [SpeakerOptions.Option] {
+    guard let export else { return [] }
+    return SpeakerOptions.meetingInvitees(
+      speakers: export.speakers, persons: knownPersons(export),
+      participants: export.participants)
+  }
+
   /// The ranked options for one speaker's picker (`SpeakerOptions.build`).
   /// Reads only.
   func options(for speakerID: UUID, query: String) -> [SpeakerOptions.Option] {
     guard let export, let speaker = export.speakers.first(where: { $0.id == speakerID }) else {
       return []
     }
-    var known = persons
-    for person in export.persons where !known.contains(where: { $0.id == person.id }) {
-      known.append(person)
-    }
+    let known = knownPersons(export)
     let suggestion = suggestions[speakerID].flatMap { $0.name?.isEmpty == false ? $0 : nil }
     return SpeakerOptions.build(
       speaker: speaker, speakers: export.speakers, persons: known,

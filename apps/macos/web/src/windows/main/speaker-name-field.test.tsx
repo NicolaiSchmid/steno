@@ -184,12 +184,40 @@ describe("SpeakerNameField", () => {
 		const { user } = await field();
 		const [first, second] = await screen.findAllByRole("option");
 		const list = screen.getByRole("listbox");
+		await user.keyboard("{ArrowDown}");
 		expect(list).toHaveAttribute("data-keys");
 		await user.hover(second as HTMLElement);
 		expect(list).not.toHaveAttribute("data-keys");
 		await user.keyboard("{ArrowUp}");
 		expect(list).toHaveAttribute("data-keys");
 		expect(first).toHaveAttribute("data-highlighted");
+	});
+
+	it("draws no focus line before the arrows, and Enter still takes the first row", async () => {
+		const { user, onSubmit, input } = await field();
+		const [first] = await screen.findAllByRole("option");
+		const list = screen.getByRole("listbox");
+		expect(list).not.toHaveAttribute("data-keys");
+		expect(first).toHaveAttribute("data-highlighted");
+		expect(input).toHaveAttribute("aria-activedescendant", first?.id);
+		await user.keyboard("{Enter}");
+		expect(onSubmit).toHaveBeenCalledWith(
+			expect.objectContaining({ label: "Anna" }),
+			"",
+		);
+	});
+
+	it("draws no focus line again for a new list until the arrows move", async () => {
+		const { user, input } = await field();
+		await screen.findAllByRole("option");
+		const list = screen.getByRole("listbox");
+		await user.keyboard("{ArrowDown}");
+		expect(list).toHaveAttribute("data-keys");
+		await user.type(input, "Ann");
+		await vi.waitFor(() =>
+			expect(screen.getByRole("option", { name: /Create/ })).toBeVisible(),
+		);
+		expect(list).not.toHaveAttribute("data-keys");
 	});
 
 	it("keeps a highlighted Create row when the options fail to load", async () => {
@@ -388,6 +416,34 @@ describe("a paragraph's field", () => {
 			"JJérôme",
 		]);
 		expect(callsTo(harness.transport, "speakers.options")).toHaveLength(0);
+	});
+
+	it("suggests the invitees nobody is yet before anything is typed, for a turn without a voice", async () => {
+		const detail = await meeting();
+		expect(detail.invitees).toEqual([
+			{ kind: "create", label: "Lena", reason: "invited" },
+		]);
+		const { user, harness, onSubmit } = await paragraph({
+			invitees: detail.invitees,
+			optionsSpeakerID: UNNAMED,
+		});
+		const options = await screen.findAllByRole("option");
+		expect(options.map((option) => option.textContent)).toEqual([
+			"Create “Lena”Invited",
+			"NNicolai",
+			"JJérôme",
+		]);
+		expect(
+			screen
+				.getAllByRole("group")
+				.map((group) => group.getAttribute("aria-label")),
+		).toEqual(["Suggested", "Also speaking here"]);
+		expect(callsTo(harness.transport, "speakers.options")).toHaveLength(0);
+		await user.keyboard("{Enter}");
+		expect(onSubmit).toHaveBeenCalledWith(
+			{ kind: "create", label: "Lena", reason: "invited" },
+			"",
+		);
 	});
 
 	it("searches through another voice once typed, without its evidence or its Noes", async () => {

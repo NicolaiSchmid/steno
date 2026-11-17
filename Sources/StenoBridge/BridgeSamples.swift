@@ -131,6 +131,7 @@ public enum BridgeSamples {
         assignment: .unknown, context: "Die Partner sollten das nicht aus zweiter Hand hören.",
         colorIndex: 0, hasClip: false, isPlaying: false, dismissed: false),
     ],
+    invitees: [.init(kind: .create, label: "Lena", reason: .invited)],
     templates: [
       .init(id: "default", name: "Meeting notes"), .init(id: "standup", name: "Standup"),
     ],

@@ -518,6 +518,10 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
   public var tab: Tab
   public var retention: Retention
   public var speakers: [Speaker]
+  /// The calendar invitees nobody's voice is named or suggested as, each
+  /// with the reason `invited`: what a paragraph without a voice suggests
+  /// before anything is typed. Nil when there are none.
+  public var invitees: [SpeakerOption]?
   public var templates: [Template]
   public var templateID: String
   public var summaryStatus: SummaryStatus
@@ -541,7 +545,7 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     id: UUID, title: String, startedAt: Date, durationSeconds: Double, language: String?,
     source: BridgeMeetingSource, state: BridgeMeetingState, failureReason: String? = nil,
     endReason: String? = nil, audioWarning: String? = nil, tags: [String], tab: Tab,
-    retention: Retention, speakers: [Speaker],
+    retention: Retention, speakers: [Speaker], invitees: [SpeakerOption]? = nil,
     templates: [Template], templateID: String, summaryStatus: SummaryStatus,
     summary: [SummarySection], transcript: [Turn], transcriptGeneration: Int = 0, tasks: [Task],
     decisions: [String],
@@ -562,6 +566,7 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     self.tab = tab
     self.retention = retention
     self.speakers = speakers
+    self.invitees = invitees
     self.templates = templates
     self.templateID = templateID
     self.summaryStatus = summaryStatus

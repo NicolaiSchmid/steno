@@ -346,6 +346,7 @@ extension MeetingDetailSnapshot {
     let meeting = export.meeting
     let speakers = detail.speakers
     let playing = speakers.playing
+    let invitees = speakers.invitees().map(SpeakerOption.init)
     let speakerRows = speakers.rows.map { row in
       MeetingDetailSnapshot.Speaker(
         id: row.id, clusterLabel: row.speaker.clusterLabel, displayName: row.displayName,
@@ -422,6 +423,7 @@ extension MeetingDetailSnapshot {
         kind: retentionKind, deletesAt: deletesAt, keepsAudio: detail.keepsAudio,
         showsKeepToggle: detail.showsKeepToggle, filesExist: detail.recordingFilesExist),
       speakers: speakerRows,
+      invitees: invitees.isEmpty ? nil : invitees,
       templates: detail.templates.map { Template(id: $0.id, name: $0.displayName) },
       templateID: meeting.templateID,
       summaryStatus: MeetingDetailSnapshot.SummaryStatus(

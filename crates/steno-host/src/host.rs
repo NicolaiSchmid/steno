@@ -1785,7 +1785,8 @@ impl Inner {
     }
 }
 
-fn wire_option(option: &ModelOption) -> SpeakerOption {
+/// A picker row in the wire vocabulary.
+pub(crate) fn wire_option(option: &ModelOption) -> SpeakerOption {
     let (reason, strength) = match option.tag {
         None => (None, None),
         Some(OptionTag::Voice(strength)) => (Some(SpeakerOptionReason::Voice), Some(strength)),

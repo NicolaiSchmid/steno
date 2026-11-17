@@ -7,6 +7,7 @@ use steno_core::json::{iso_time, iso_time_opt, uuid_text, uuid_text_opt};
 use steno_core::string_enum;
 use uuid::Uuid;
 
+use crate::commands::SpeakerOption;
 use crate::envelope::{
     BridgeTopic, CaptureMode, MeetingSource, MeetingState, PermissionKind, PermissionState,
     SettingsSection,
@@ -479,6 +480,11 @@ pub struct MeetingDetailSnapshot {
     pub tab: DetailTab,
     pub retention: DetailRetention,
     pub speakers: Vec<DetailSpeaker>,
+    /// The calendar invitees nobody's voice is named or suggested as, each
+    /// with the reason `invited`: what a paragraph without a voice suggests
+    /// before anything is typed. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invitees: Vec<SpeakerOption>,
     pub templates: Vec<DetailTemplate>,
     #[serde(rename = "templateID")]
     pub template_id: String,

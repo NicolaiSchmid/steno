@@ -381,6 +381,8 @@ export interface SpeakerPickerProps {
 	/** The turn's voice; none for a turn without one. */
 	speaker: Speaker | undefined;
 	speakers: readonly Speaker[];
+	/** The meeting's invitees nobody's voice is yet, for a turn without one. */
+	invitees?: readonly SpeakerOption[] | undefined;
 	/** How many of the meeting's paragraphs the voice leads, for All. */
 	paragraphs: number;
 	meetingID: string;
@@ -430,6 +432,7 @@ export function SpeakerPicker({
 	turn,
 	speaker,
 	speakers,
+	invitees,
 	paragraphs,
 	meetingID,
 	generation,
@@ -792,6 +795,7 @@ export function SpeakerPicker({
 								? { excludedPersonID: rejected }
 								: {})}
 							initialText={draft.text}
+							invitees={invitees}
 							key={draft.attempt}
 							listClassName="max-h-56"
 							notice={notice}

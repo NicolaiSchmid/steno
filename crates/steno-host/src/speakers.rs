@@ -220,6 +220,26 @@ fn invitees(
         })
 }
 
+/// The meeting's invitees nobody's voice is named or suggested as, each
+/// tagged `Invited`, for a paragraph without a voice: what its picker
+/// suggests before anything is typed. No voice's Noes apply, as no voice
+/// is asked about.
+#[must_use]
+pub fn meeting_invitees(
+    speakers: &[Speaker],
+    persons: &[Person],
+    participants: &[steno_core::Participant],
+) -> Vec<SpeakerOption> {
+    let used: Vec<Uuid> = speakers.iter().filter_map(Speaker::person_id).collect();
+    invitees(participants, persons, &used, &BTreeSet::new())
+        .into_iter()
+        .map(|kind| SpeakerOption {
+            kind,
+            tag: Some(OptionTag::Invited),
+        })
+        .collect()
+}
+
 /// What [`build_options`] ranks from besides the speaker and the query.
 pub struct OptionSources<'a> {
     /// Every speaker of the meeting.
@@ -658,6 +678,30 @@ impl SpeakersViewModel {
         }
     }
 
+    /// Every person Steno knows, and the export's own.
+    fn known_persons(&self, export: &MeetingExport) -> Vec<Person> {
+        let mut known = self.persons.clone();
+        for person in &export.persons {
+            if !known.iter().any(|candidate| candidate.id == person.id) {
+                known.push(person.clone());
+            }
+        }
+        known
+    }
+
+    /// The invitees a paragraph without a voice suggests
+    /// ([`meeting_invitees`]). Reads only.
+    #[must_use]
+    pub fn invitees(&self) -> Vec<SpeakerOption> {
+        self.export.as_ref().map_or_else(Vec::new, |export| {
+            meeting_invitees(
+                &export.speakers,
+                &self.known_persons(export),
+                &export.participants,
+            )
+        })
+    }
+
     /// The ranked options for one speaker's picker. Reads only.
     #[must_use]
     pub fn options(&self, speaker_id: Uuid, query: &str) -> Vec<SpeakerOption> {
@@ -671,12 +715,7 @@ impl SpeakersViewModel {
         else {
             return Vec::new();
         };
-        let mut known = self.persons.clone();
-        for person in &export.persons {
-            if !known.iter().any(|candidate| candidate.id == person.id) {
-                known.push(person.clone());
-            }
-        }
+        let known = self.known_persons(export);
         let suggestion = self.suggestions.get(&speaker_id).filter(|suggestion| {
             suggestion
                 .name
