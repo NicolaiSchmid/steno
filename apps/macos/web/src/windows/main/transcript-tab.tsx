@@ -1,6 +1,6 @@
 import { MessageSquareTextIcon } from "lucide-react";
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
-import type { MeetingDetailSnapshot } from "@/bridge/contract";
+import type { MeetingDetailSnapshot, SpeakerOption } from "@/bridge/contract";
 import { Avatar, EmptyState } from "@/components/ui";
 import { format } from "./format";
 import type { Speaker, Turn } from "./speaker-names";
@@ -115,6 +115,7 @@ export function TranscriptTab({
 						at={at}
 						focusable={at === focusable}
 						generation={detail.transcriptGeneration}
+						invitees={detail.invitees}
 						key={turn.id}
 						meetingID={detail.id}
 						names={names.current}
@@ -141,6 +142,8 @@ interface TurnViewProps {
 	/** The turn's voice; none for a turn without one. */
 	speaker: Speaker | undefined;
 	speakers: readonly Speaker[];
+	/** The meeting's invitees nobody's voice is yet, for a turn without one. */
+	invitees: readonly SpeakerOption[] | undefined;
 	/** How many paragraphs the turn's voice leads in the meeting. */
 	paragraphs: number;
 	meetingID: string;
@@ -160,6 +163,7 @@ function TurnView({
 	turn,
 	speaker,
 	speakers,
+	invitees,
 	paragraphs,
 	meetingID,
 	generation,
@@ -186,6 +190,7 @@ function TurnView({
 				<SpeakerPicker
 					anchor={anchor}
 					generation={generation}
+					invitees={invitees}
 					meetingID={meetingID}
 					onFocus={onFocusName}
 					onKeyDown={(event) => onMove(event, at)}

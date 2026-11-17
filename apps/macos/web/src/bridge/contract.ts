@@ -300,6 +300,29 @@ export type ProgressSnapshot = z.infer<typeof progressSnapshot>;
 export const voiceStrength = z.enum(["strong", "likely"]);
 export type VoiceStrength = z.infer<typeof voiceStrength>;
 
+/**
+ * Why an option is offered. Only `voice` is voice evidence and only it
+ * carries a `strength`.
+ */
+export const speakerOptionReason = z.enum([
+	"voice",
+	"mentioned",
+	"invited",
+	"lastInvitee",
+	"inThisMeeting",
+]);
+export type SpeakerOptionReason = z.infer<typeof speakerOptionReason>;
+export const speakerOption = z
+	.object({
+		kind: z.enum(["person", "create"]),
+		label: z.string(),
+		reason: speakerOptionReason.optional(),
+		strength: voiceStrength.optional(),
+		personID: uuid.optional(),
+	})
+	.strict();
+export type SpeakerOption = z.infer<typeof speakerOption>;
+
 export const speakerChip = z
 	.object({
 		id: uuid,
@@ -434,6 +457,12 @@ export const meetingDetailSnapshot = z
 				})
 				.strict(),
 		),
+		/**
+		 * The calendar invitees nobody's voice is named or suggested as, each
+		 * with the reason `invited`: what a paragraph without a voice suggests
+		 * before anything is typed. Absent when there are none.
+		 */
+		invitees: z.array(speakerOption).optional(),
 		templates: z.array(template),
 		templateID: z.string(),
 		summaryStatus: z
@@ -896,28 +925,6 @@ export const saveNotesParams = z
 export const speakerOptionsParams = z
 	.object({ speakerID: uuid, query: z.string() })
 	.strict();
-/**
- * Why an option is offered. Only `voice` is voice evidence and only it
- * carries a `strength`.
- */
-export const speakerOptionReason = z.enum([
-	"voice",
-	"mentioned",
-	"invited",
-	"lastInvitee",
-	"inThisMeeting",
-]);
-export type SpeakerOptionReason = z.infer<typeof speakerOptionReason>;
-export const speakerOption = z
-	.object({
-		kind: z.enum(["person", "create"]),
-		label: z.string(),
-		reason: speakerOptionReason.optional(),
-		strength: voiceStrength.optional(),
-		personID: uuid.optional(),
-	})
-	.strict();
-export type SpeakerOption = z.infer<typeof speakerOption>;
 export const speakerOptionsReply = z
 	.object({ prefill: z.string().optional(), options: z.array(speakerOption) })
 	.strict();

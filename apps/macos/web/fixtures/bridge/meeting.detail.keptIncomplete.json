@@ -12,6 +12,13 @@
     "status" : "notConfigured"
   },
   "id" : "00000000-0000-0000-0000-000000000001",
+  "invitees" : [
+    {
+      "kind" : "create",
+      "label" : "Lena",
+      "reason" : "invited"
+    }
+  ],
   "isBusy" : false,
   "language" : "de",
   "notes" : "",

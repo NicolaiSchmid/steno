@@ -573,4 +573,24 @@ describe("meetingPeopleOptions", () => {
 			{ kind: "person", label: "Maya", personID: person(4) },
 		]);
 	});
+
+	it("puts the invitees first, which group as suggestions", () => {
+		const speakers = [voice(1, "confirmed", "Nicolai", 1)];
+		const lena = { kind: "create", label: "Lena", reason: "invited" } as const;
+		const options = meetingPeopleOptions(speakers, [lena]);
+		expect(options).toEqual([
+			lena,
+			{ kind: "person", label: "Nicolai", personID: person(1) },
+		]);
+		const groups = groupOptions(
+			options,
+			"",
+			undefined,
+			speakers,
+			undefined,
+			"turn",
+		);
+		expect(groups.map((group) => group.id)).toEqual(["suggested", "also"]);
+		expect(groups[0]?.rows[0]?.reason).toBe("Invited");
+	});
 });

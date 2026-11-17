@@ -87,6 +87,17 @@ describe("speaker naming outside the app", () => {
 		).toEqual(["Lea"]);
 	});
 
+	it("no longer suggests an invitee once a voice is them", async () => {
+		const before = await detail("speakers-partly");
+		expect(before.invitees?.map((option) => option.label)).toEqual(["Lena"]);
+		const after = await answerSpeakerSelect(before, {
+			speakerID: SPEAKER_4,
+			option: { kind: "create", label: "Lena", reason: "invited" },
+			combine: false,
+		});
+		expect(after.invitees).toBeUndefined();
+	});
+
 	it("refuses to combine without being asked, as the hosts do, then folds the voice in", async () => {
 		const before = await detail("speakers-split");
 		const pick = {

@@ -382,7 +382,10 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 			await nameFirst(page);
 			await page.keyboard.type("Ann");
 			await expect(page.getByRole("option", { name: /Create/ })).toBeVisible();
-			// The keys' highlight draws the menu rows' inset focus line.
+			// The focus line waits for the arrow keys; down and back up
+			// draws it on the first row again.
+			await page.keyboard.press("ArrowDown");
+			await page.keyboard.press("ArrowUp");
 			await expectFocusLine(page.locator('[role="option"][data-highlighted]'));
 		},
 	],
@@ -593,7 +596,8 @@ const SPEAKERS_STATES: readonly SpeakersState[] = [
 		"scenario=speakers-no-voice&tab=transcript",
 		async (page) => {
 			await transcriptName(page, "Unknown").click();
-			await expect(page.getByRole("option").first()).toBeVisible();
+			// The invitee nobody is yet, suggested before anything is typed.
+			await expect(page.getByRole("option").first()).toHaveText(/Lena/);
 			await expect(page.getByRole("radiogroup")).toHaveCount(0);
 		},
 	],

@@ -152,6 +152,22 @@ public enum SpeakerOptions {
     return list.options
   }
 
+  /// The meeting's invitees nobody's voice is named or suggested as, each
+  /// tagged `.invited`, for a paragraph without a voice: what its picker
+  /// suggests before anything is typed. No voice's Noes apply, as no voice
+  /// is asked about. Rust: `meeting_invitees` in `steno-host`'s
+  /// `speakers.rs`.
+  public static func meetingInvitees(
+    speakers: [Speaker], persons: [Person], participants: [Participant]
+  ) -> [Option] {
+    let personsByID = Dictionary(persons.map { ($0.id, $0) }) { first, _ in first }
+    let used = Set(speakers.compactMap(\.assignment.personID))
+    return invitees(
+      participants: participants, persons: persons, personsByID: personsByID,
+      othersPersonIDs: used, rejected: []
+    ).map { Option(kind: $0, tag: .invited) }
+  }
+
   /// The meeting's voices still to name: neither confirmed nor dismissed,
   /// and not "me", which no invitee is.
   private static func openVoices(_ speakers: [Speaker]) -> [Speaker] {

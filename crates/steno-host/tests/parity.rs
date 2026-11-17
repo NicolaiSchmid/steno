@@ -324,16 +324,22 @@ fn meeting_detail() {
     assert_parity(
         "meeting.detail",
         &harness.snapshot(BridgeTopic::MeetingDetail),
-        &[deviation(
-            "/templates",
-            json!([
-                {"id": "default", "name": "Default"},
-                {"id": "customer-discovery", "name": "Customer Discovery"},
-                {"id": "daily-standup", "name": "Daily Standup"},
-                {"id": "interview", "name": "Interview"}
-            ]),
-            "the templates are the four bundled ones; the fixture names two that do not exist",
-        )],
+        &[
+            deviation(
+                "/templates",
+                json!([
+                    {"id": "default", "name": "Default"},
+                    {"id": "customer-discovery", "name": "Customer Discovery"},
+                    {"id": "daily-standup", "name": "Daily Standup"},
+                    {"id": "interview", "name": "Interview"}
+                ]),
+                "the templates are the four bundled ones; the fixture names two that do not exist",
+            ),
+            removed(
+                "/invitees",
+                "the sample meeting has no calendar invitees; `speakers.rs` proves the host sends them",
+            ),
+        ],
     );
 }
 

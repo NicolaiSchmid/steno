@@ -190,6 +190,12 @@ export interface SpeakerNameFieldProps {
 	 * out; without one, a typed name can only be created.
 	 */
 	optionsSpeakerID?: string | undefined;
+	/**
+	 * The meeting's invitees nobody's voice is yet (the snapshot's
+	 * `invitees`): what a turn without a voice suggests before anything is
+	 * typed.
+	 */
+	invitees?: readonly SpeakerOption[] | undefined;
 	/** A transcript pick for one paragraph names no voice (`groupOptions`). */
 	scope?: PickScope;
 	/** Every speaker of the meeting, for "Also speaking here". */
@@ -231,8 +237,10 @@ type Answer =
 /**
  * The text field that names one voice, with the host's options under it
  * (`groupOptions`), asked for as the text changes (`speakers.options`,
- * debounced). Up and Down move the highlight; Home and End stay with the
- * caret. Enter acts only on the highlighted row, and only once the options
+ * debounced). Up and Down move the highlight, and only they draw its
+ * focus line: the first row is highlighted (and announced) from the start
+ * so Enter takes it, without the line. Home and End stay with the caret.
+ * Enter acts only on the highlighted row, and only once the options
  * are for the text on screen: while they load the list says "Searching…"
  * and Enter does nothing, so nothing is chosen that was not seen. If they
  * fail to load the list says so and keeps a highlighted Create row for the
@@ -255,6 +263,7 @@ export const NO_VOICE_PLACEHOLDER = "Who said this?";
 export function SpeakerNameField({
 	speaker,
 	optionsSpeakerID,
+	invitees,
 	scope = "voice",
 	speakers,
 	onSubmit,
@@ -273,8 +282,8 @@ export function SpeakerNameField({
 	const [query, setQuery] = useState(initialText);
 	const [answer, setAnswer] = useState<Answer | null>(null);
 	const [active, setActive] = useState(0);
-	// Whether the pointer, not the keys, last moved the highlight; the keys
-	// draw the inset focus line on it.
+	// Whether the pointer, not the keys, last moved the highlight; only the
+	// arrows draw the inset focus line on it, never the list arriving.
 	const [pointing, setPointing] = useState(false);
 	// Whether the arrows or the pointer chose the highlight since the list
 	// arrived; until then an action row is never highlighted.
@@ -296,7 +305,7 @@ export function SpeakerNameField({
 				kind: "options",
 				options: typed
 					? [{ kind: "create", label: typed }]
-					: meetingPeopleOptions(speakers),
+					: meetingPeopleOptions(speakers, invitees),
 			});
 			setActive(0);
 			setMoved(false);
@@ -505,7 +514,7 @@ export function SpeakerNameField({
 					"mt-1.5 flex flex-col gap-0.5 overflow-y-auto empty:hidden",
 					listClassName ?? "max-h-64",
 				)}
-				data-keys={pointing ? undefined : ""}
+				data-keys={moved && !pointing ? "" : undefined}
 				id={listID}
 				// Clicks in the list keep focus in the field, so the edit goes on.
 				onMouseDown={(event) => event.preventDefault()}

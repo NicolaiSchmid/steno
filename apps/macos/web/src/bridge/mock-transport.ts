@@ -1322,6 +1322,24 @@ export function answerSpeakerChange(
 }
 
 /**
+ * The detail's invitees without the one just named: a voice is that
+ * person now, as the hosts leave out an invitee somebody's voice is.
+ */
+function withoutInvitee(
+	detail: MeetingDetailSnapshot,
+	option: SpeakerOption,
+): MeetingDetailSnapshot {
+	const { invitees: all = [], ...rest } = detail;
+	const fold = (text: string) => text.trim().toLowerCase();
+	const invitees = all.filter((invitee) =>
+		option.personID && invitee.personID
+			? invitee.personID !== option.personID
+			: fold(invitee.label) !== fold(option.label),
+	);
+	return invitees.length > 0 ? { ...rest, invitees } : rest;
+}
+
+/**
  * `speakers.select` outside the app, as the hosts answer it: a pick of a
  * person who already owns another confirmed voice here is refused as
  * `wouldCombine` unless it asks to `combine`, and then folds the voice
@@ -1405,17 +1423,20 @@ export function answerSpeakerSelect(
 		// A voice takes its person's colour, as the hosts fold it.
 		colorIndex: personColor(personID),
 	};
-	return {
-		...detail,
-		speakers: detail.speakers.map((row) =>
-			row.id === speakerID ? named : row,
-		),
-		transcript: detail.transcript.map((turn) =>
-			turn.speakerID === speakerID
-				? { ...turn, speakerName: option.label }
-				: turn,
-		),
-	};
+	return withoutInvitee(
+		{
+			...detail,
+			speakers: detail.speakers.map((row) =>
+				row.id === speakerID ? named : row,
+			),
+			transcript: detail.transcript.map((turn) =>
+				turn.speakerID === speakerID
+					? { ...turn, speakerName: option.label }
+					: turn,
+			),
+		},
+		option,
+	);
 }
 
 /** What a combine took away, for Separate again to put back as it was. */
@@ -1594,7 +1615,7 @@ export function answerTurnSpeaker(
 			row.combined.length > 0 ||
 			transcript.some((turn) => turn.speakerID === row.id),
 	);
-	return { ...detail, speakers, transcript };
+	return withoutInvitee({ ...detail, speakers, transcript }, option);
 }
 
 /**

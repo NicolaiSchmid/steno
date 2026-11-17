@@ -452,6 +452,12 @@ pub fn detail_snapshot(
             files_exist: detail.recording_files_exist,
         },
         speakers: speaker_rows(detail, playing),
+        invitees: detail
+            .speakers
+            .invitees()
+            .iter()
+            .map(crate::host::wire_option)
+            .collect(),
         templates: MeetingDetailViewModel::templates()
             .iter()
             .map(|template| DetailTemplate {

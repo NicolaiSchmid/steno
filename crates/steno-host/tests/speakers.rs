@@ -838,6 +838,33 @@ fn the_last_invitee_counts_names_once_and_outranks_mentioned() {
     assert_eq!(mayas[0].reason, Some(SpeakerOptionReason::LastInvitee));
 }
 
+/// The detail sends the invitees nobody's voice is named or suggested as,
+/// for a paragraph without a voice to suggest before anything is typed:
+/// Anna is Speaker 3's suggestion, Maya nobody yet.
+#[test]
+fn the_detail_sends_the_invitees_nobody_is_yet() {
+    let harness = sample();
+    let invitee = |n: u32, name: &str| Participant {
+        id: uuid(n),
+        meeting_id: uuid(MEETING),
+        person_id: None,
+        display_name: name.to_owned(),
+        role: ParticipantRole::Them,
+        email: None,
+    };
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert!(detail.get("invitees").is_none(), "no invitees, no field");
+    for (n, name) in [(0x31, "Maya"), (0x32, "Anna")] {
+        harness.store.save_participant(&invitee(n, name)).unwrap();
+    }
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(
+        detail["invitees"],
+        json!([{"kind": "create", "label": "Maya", "reason": "invited"}])
+    );
+}
+
 /// Not a person: the voice leaves the counts and the chips, its turn keeps
 /// its text and reads "Not a person"; Restore brings it back unnamed.
 #[test]
