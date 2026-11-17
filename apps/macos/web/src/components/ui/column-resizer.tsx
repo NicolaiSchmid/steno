@@ -111,8 +111,8 @@ export function ColumnResizer({
 				"absolute inset-y-0 -right-[7px] z-20 w-[9px] cursor-col-resize touch-none select-none outline-none",
 				"after:absolute after:inset-y-0 after:left-px after:w-px after:bg-transparent",
 				"after:transition-[background-color] after:duration-(--duration-functional) after:ease-standard",
-				"hover:after:bg-ring/30 focus-visible:after:bg-ring/60",
-				dragging && "after:bg-ring/60",
+				"hover:after:bg-resizer-hover focus-visible:after:bg-resizer-active",
+				dragging && "after:bg-resizer-active",
 				className,
 			)}
 			onDoubleClick={() => {

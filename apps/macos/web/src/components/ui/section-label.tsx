@@ -19,7 +19,7 @@ export function SectionLabel({
 	return (
 		<div
 			className={cn(
-				"mx-0.5 flex h-8 select-none items-center gap-2 px-2 font-medium text-sidebar-muted-foreground/60 text-xs",
+				"mx-0.5 flex h-8 select-none items-center gap-2 px-2 font-medium text-sidebar-label text-xs",
 				className,
 			)}
 			{...props}
@@ -27,7 +27,7 @@ export function SectionLabel({
 			{children}
 			<span
 				aria-hidden="true"
-				className="h-px min-w-2 flex-1 bg-sidebar-border/60"
+				className="h-px min-w-2 flex-1 bg-sidebar-rule"
 			/>
 			{trailing}
 		</div>

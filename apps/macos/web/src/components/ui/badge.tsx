@@ -8,11 +8,11 @@ import { cn } from "@/lib/cn";
  * the 400 in dark); `sm` is the 16 px counter.
  */
 export const badgeVariants = cva(
-	"inline-flex h-4.5 min-w-4.5 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-sm border border-transparent px-[5px] font-medium text-xs leading-none [&_svg]:size-3 [&_svg]:shrink-0 [&_svg]:opacity-80",
+	"inline-flex h-4.5 min-w-4.5 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-sm border border-transparent px-[5px] font-medium text-xs leading-none [&_svg]:size-3 [&_svg]:shrink-0",
 	{
 		variants: {
 			variant: {
-				outline: "border-input bg-background text-foreground dark:bg-input/32",
+				outline: "border-outline bg-field text-foreground",
 				warning: "bg-warning-surface text-warning-foreground",
 				success: "bg-success-surface text-success-foreground",
 			},

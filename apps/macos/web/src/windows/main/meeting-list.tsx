@@ -221,7 +221,7 @@ export function MeetingList() {
 	return (
 		<section
 			aria-label="Meetings"
-			className="surface-grain flex min-h-0 flex-col overflow-hidden border-sidebar-border border-r bg-sidebar"
+			className="surface-grain surface-sidebar flex min-h-0 flex-col overflow-hidden border-sidebar-border border-r bg-sidebar"
 			data-testid="meeting-list"
 			onKeyDown={onKeyDown}
 		>
@@ -378,7 +378,7 @@ function MeetingRowView({
 				<button
 					aria-current={active ? "true" : undefined}
 					className={cn(
-						"relative block w-full rounded-md px-2.5 py-2 text-left outline-none transition-colors duration-(--duration-functional) ease-standard focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+						"relative block w-full rounded-md px-2.5 py-2 text-left outline-none transition-colors duration-(--duration-functional) ease-standard focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-inset",
 						active ? "bg-row-selected text-foreground" : "hover:bg-row-hover",
 					)}
 					data-testid={`meeting-${meeting.id}`}

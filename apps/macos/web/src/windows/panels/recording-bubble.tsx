@@ -108,7 +108,7 @@ export function RecordingBubble() {
 			<div className="flex min-h-7 items-center gap-2.5">
 				<button
 					aria-label={presentation.text ?? "Recording"}
-					className="flex items-center gap-2.5 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+					className="flex items-center gap-2.5 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-focus"
 					data-testid="bubble-open"
 					onClick={open}
 					title="Open the meeting in Steno"

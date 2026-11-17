@@ -33,7 +33,7 @@ export function Disclosure({
 				className={cn(
 					"group inline-flex h-6 w-max items-center gap-1 rounded-md px-1.5 font-medium text-muted-foreground text-xs outline-none",
 					"transition-colors duration-(--duration-functional) ease-standard",
-					"hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+					"hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus",
 				)}
 				data-testid={testId}
 			>

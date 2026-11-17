@@ -39,6 +39,30 @@ describe("check-ui-restyle", () => {
 	});
 });
 
+describe("the paint rule", () => {
+	it("reports veiled tokens and faded elements, not the exceptions", () => {
+		const result = runScript(["--root", "scripts/__fixtures__"]);
+		expect(result.status).toBe(1);
+		expect(result.output).toContain(
+			'scripts/__fixtures__/paint-violation.tsx:7: "bg-foreground/40" veils --foreground',
+		);
+		expect(result.output).toContain('"text-muted-foreground/80" veils');
+		expect(result.output).toContain(
+			'paint-violation.tsx:8: "opacity-50" fades text or icons',
+		);
+		expect(result.output).not.toContain('"w-1/2"');
+		expect(result.output).not.toContain('"disabled:opacity-64"');
+		expect(result.output).not.toContain('"data-starting-style:opacity-0"');
+		expect(result.output).not.toContain('"opacity-70"');
+	});
+
+	it("passes the app", () => {
+		const result = runScript([]);
+		expect(result.output).toContain("no unmeasured paint");
+		expect(result.status).toBe(0);
+	});
+});
+
 describe("isLayoutClass", async () => {
 	const { isLayoutClass } = await import("./check-ui-restyle.mjs");
 
