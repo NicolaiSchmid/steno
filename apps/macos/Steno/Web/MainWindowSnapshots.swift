@@ -203,9 +203,10 @@ extension RecordingSnapshot {
   /// for the elapsed time, the lanes' levels while recording only (the
   /// recorder keeps the last reading through `.stopping`, and a frozen
   /// meter under a spinner reads as live), the armed auto-stop as seconds
-  /// so the page counts down, and the messages.
+  /// so the page counts down, the messages, and the recording meeting's
+  /// title as the list calls it (`list.all`, so a rename republishes it).
   @MainActor
-  init(recorder: RecordingController) {
+  init(recorder: RecordingController, list: MeetingListViewModel? = nil) {
     let state: RecordingSnapshot.State
     var startedAt: Date?
     switch recorder.recording {
@@ -234,7 +235,11 @@ extension RecordingSnapshot {
     }
     self.init(
       state: state, startedAt: startedAt, mode: mode, callApp: recorder.activeCallApp,
-      meetingID: recorder.activeMeetingID, level: level, autoStop: autoStop,
+      meetingID: recorder.activeMeetingID,
+      meetingTitle: recorder.activeMeetingID.flatMap { id in
+        list?.all.first { $0.id == id }?.displayTitle(calendar: list?.calendar ?? .current)
+      },
+      level: level, autoStop: autoStop,
       deniedPermissions: recorder.deniedPermissions.compactMap {
         BridgePermissionKind(rawValue: $0.rawValue)
       },

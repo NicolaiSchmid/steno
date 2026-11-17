@@ -255,6 +255,34 @@ private var utc: Calendar {
     #expect(stopped.level == nil)
   }
 
+  /// The recording names its meeting as the list does, and a rename while
+  /// it records reaches the snapshot.
+  @Test func theRecordingSnapshotNamesItsMeetingAndFollowsARename() async throws {
+    let environment = try await TestSupport.environment()
+    let recorder = RecordingController(environment: environment)
+    let list = MeetingListViewModel(store: environment.store, clock: ManualClock(), calendar: utc)
+    let observing = Task { await list.observe() }
+    defer { observing.cancel() }
+
+    await recorder.start(mode: .call)
+    let meetingID = try #require(recorder.activeMeetingID)
+    await eventually("the list holds the live row") {
+      list.all.contains { $0.id == meetingID }
+    }
+    let live = RecordingSnapshot(recorder: recorder, list: list)
+    let row = try #require(list.all.first { $0.id == meetingID })
+    #expect(live.meetingTitle == row.displayTitle(calendar: utc))
+
+    try await environment.store.rename(
+      meetingID: meetingID, title: "Board prep", now: TestSupport.now)
+    await eventually("the rename reaches the recording") {
+      RecordingSnapshot(recorder: recorder, list: list).meetingTitle == "Board prep"
+    }
+
+    await recorder.stop()
+    #expect(RecordingSnapshot(recorder: recorder, list: list).meetingTitle == nil)
+  }
+
   @Test func theAppSnapshotCarriesTheBannerUntilDismissed() async throws {
     let environment = try await TestSupport.environment()
     let controller = AppController(environment: environment)

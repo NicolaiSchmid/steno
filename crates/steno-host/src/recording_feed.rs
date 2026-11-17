@@ -45,6 +45,9 @@ pub(crate) type Position = (RecordingState, Option<Uuid>);
 pub(crate) trait Source: Send + Sync {
     fn feed(&self) -> &RecordingFeed;
     fn status(&self) -> RecorderStatus;
+    /// What the list calls `meeting_id`, while it is the recording meeting
+    /// the host last reloaded.
+    fn title(&self, meeting_id: Uuid) -> Option<String>;
     /// The sink attached now, the slot's lock released.
     fn sink(&self) -> Option<Arc<dyn EventSink>>;
     /// The recorder's state or meeting moved: asks the reload owner for a
@@ -169,7 +172,8 @@ fn pass<S: Source>(
     if !ready {
         return None;
     }
-    let snapshot = recording_snapshot(&status);
+    let title = status.meeting_id.and_then(|id| source.title(id));
+    let snapshot = recording_snapshot(&status, title);
     let now = Instant::now();
     if let Some(wait) = sent.wait(&snapshot, resend, now) {
         return Some(wait);
@@ -394,12 +398,15 @@ mod tests {
     #[test]
     fn a_held_level_update_stamps_no_interval() {
         let at = |mic: f64| {
-            recording_snapshot(&RecorderStatus {
-                state: RecordingState::Recording,
-                meeting_id: Some(Uuid::from_u128(1)),
-                levels: Some(LaneLevels { mic, system: None }),
-                ..RecorderStatus::idle()
-            })
+            recording_snapshot(
+                &RecorderStatus {
+                    state: RecordingState::Recording,
+                    meeting_id: Some(Uuid::from_u128(1)),
+                    levels: Some(LaneLevels { mic, system: None }),
+                    ..RecorderStatus::idle()
+                },
+                None,
+            )
         };
         let start = Instant::now();
         let ms = |n: u64| start + Duration::from_millis(n);

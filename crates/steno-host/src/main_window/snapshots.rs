@@ -118,9 +118,13 @@ pub fn app_snapshot(
 }
 
 /// The recorder as the sidebar control renders it: the levels while
-/// recording only, the armed auto-stop as seconds, and the messages.
+/// recording only, the armed auto-stop as seconds, the messages, and
+/// `meeting_title`, what the list calls the recording meeting.
 #[must_use]
-pub fn recording_snapshot(status: &RecorderStatus) -> RecordingSnapshot {
+pub fn recording_snapshot(
+    status: &RecorderStatus,
+    meeting_title: Option<String>,
+) -> RecordingSnapshot {
     let recording = status.state == steno_bridge::RecordingState::Recording;
     RecordingSnapshot {
         state: status.state,
@@ -128,6 +132,7 @@ pub fn recording_snapshot(status: &RecorderStatus) -> RecordingSnapshot {
         mode: status.mode,
         call_app: status.call_app.clone(),
         meeting_id: status.meeting_id,
+        meeting_title: meeting_title.filter(|_| status.meeting_id.is_some()),
         level: status
             .levels
             .filter(|_| recording)

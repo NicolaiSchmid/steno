@@ -1483,6 +1483,63 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
     });
 }
 
+/// The recording names its meeting as the list does, whether or not the
+/// list shows it, and follows a rename while it records.
+#[test]
+fn recording_names_its_meeting_and_follows_a_rename() {
+    let seeded = sample_meeting();
+    let harness = Harness::builder()
+        .seed(move |store, _| store.save_meeting(&seeded).unwrap())
+        .build();
+    harness
+        .fakes
+        .recorder
+        .set_status(steno_host::services::RecorderStatus {
+            state: RecordingState::Recording,
+            started_at: Some(now()),
+            meeting_id: Some(uuid(MEETING)),
+            ..steno_host::services::RecorderStatus::idle()
+        });
+    // The reload owner's pass the recorder's move asks for.
+    harness.host.recorder_changed();
+    harness.host.store_changed();
+    let titled = |title: &'static str| {
+        move |harness: &Harness| {
+            harness
+                .sink
+                .last(BridgeTopic::Recording)
+                .is_some_and(|recording| recording["meetingTitle"] == title)
+        }
+    };
+    harness.wait_for("the recording's title", titled("Produktstrategie 90/10"));
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Recording)["meetingTitle"],
+        "Produktstrategie 90/10"
+    );
+
+    harness
+        .store
+        .rename(uuid(MEETING), "Board prep", now())
+        .unwrap();
+    harness.host.store_changed();
+    harness.wait_for("the renamed title", titled("Board prep"));
+
+    harness
+        .fakes
+        .recorder
+        .set_status(steno_host::services::RecorderStatus::idle());
+    harness.host.recorder_changed();
+    harness.host.store_changed();
+    harness.wait_for("the stop", |harness| {
+        harness
+            .sink
+            .last(BridgeTopic::Recording)
+            .is_some_and(|recording| {
+                recording["state"] == "idle" && recording.get("meetingTitle").is_none()
+            })
+    });
+}
+
 /// While the recorder records, or another process writes the master, every
 /// such row is refused.
 #[test]

@@ -260,6 +260,8 @@ export const recordingSnapshot = z
 		mode: captureMode.optional(),
 		callApp: z.string().optional(),
 		meetingID: uuid.optional(),
+		/** What the list calls the recording meeting, renames included. */
+		meetingTitle: z.string().optional(),
 		level: z
 			.object({ mic: z.number(), system: z.number() })
 			.strict()

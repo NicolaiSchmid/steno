@@ -91,13 +91,14 @@ final class MainWindowBridge: BridgeHost, TopicSource {
   /// pane), nil for topics this window never publishes. Each reads only its
   /// own inputs: the `app` snapshot reads the bridge's `hasMeetings`, not
   /// the list, and the list snapshot reads the list model, not the progress
-  /// model.
+  /// model. The `recording` snapshot reads the list's rows for the
+  /// recording meeting's title, so a rename republishes it.
   func snapshot(for topic: BridgeTopic) -> (any Encodable)? {
     switch topic {
     case .app:
       return AppSnapshot(controller: controller, hasMeetings: hasMeetings)
     case .recording:
-      return RecordingSnapshot(recorder: controller.recorder)
+      return RecordingSnapshot(recorder: controller.recorder, list: list)
     case .progress:
       return ProgressSnapshot(model: controller.progress)
     case .meetingsList:

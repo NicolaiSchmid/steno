@@ -27,6 +27,11 @@ export interface Formatter {
 	range(startSeconds: number, endSeconds: number): string;
 	/** `14:50`. */
 	time(iso: string): string;
+	/**
+	 * `Tuesday 14:50`: what the list calls an untitled meeting from the last
+	 * six days, as the hosts derive it.
+	 */
+	untitled(iso: string): string;
 	/** `Tuesday, Sep 29`. */
 	date(iso: string): string;
 	/** `Sep 29`, with the year once it is not the current one. */
@@ -129,6 +134,10 @@ export function createFormatter(options: FormatOptions = {}): Formatter {
 		},
 		time(iso) {
 			return timeFormat.format(new Date(iso));
+		},
+		untitled(iso) {
+			const date = new Date(iso);
+			return `${weekdayFormat.format(date)} ${timeFormat.format(date)}`;
 		},
 		date(iso) {
 			return dateFormat.format(new Date(iso));

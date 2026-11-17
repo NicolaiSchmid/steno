@@ -206,7 +206,10 @@ fn recording_idle() {
 
 #[test]
 fn recording_live() {
-    let harness = Harness::builder().build();
+    let seeded = sample_meeting();
+    let harness = Harness::builder()
+        .seed(move |store, _| store.save_meeting(&seeded).unwrap())
+        .build();
     harness.fakes.recorder.set_status(RecorderStatus {
         state: RecordingState::Recording,
         started_at: Some(now()),
@@ -226,6 +229,8 @@ fn recording_live() {
         warning: None,
         error: None,
     });
+    // The reload the recorder's move asks for names the meeting.
+    harness.host.store_changed();
     assert_parity(
         "recording.live",
         &harness.snapshot(BridgeTopic::Recording),

@@ -1091,8 +1091,7 @@ for (const scheme of SCHEMES) {
 
 	/**
 	 * A search that leaves the recording meeting out of the list: the bar
-	 * still links to it, as "Open current recording" when the list never
-	 * showed its title.
+	 * still names it, with the title the host sends, and links to it.
 	 */
 	test(`main ${scheme} narrow recording search`, async ({ page }) => {
 		await page.setViewportSize({ width: 600, height: 380 });
@@ -1103,7 +1102,7 @@ for (const scheme of SCHEMES) {
 		const link = page
 			.getByTestId("recorder-bar")
 			.getByTestId("bar-open-recording");
-		await expect(link).toHaveText("Open current recording");
+		await expect(link).toHaveText("Tuesday 10:08");
 		await expect(link).toBeInViewport({ ratio: 1 });
 		await page.screenshot({
 			path: `${OUT}/main-${scheme}-narrow-recording-search.png`,
