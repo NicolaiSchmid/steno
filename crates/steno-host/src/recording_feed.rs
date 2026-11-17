@@ -323,6 +323,7 @@ mod tests {
         host.page_ready().unwrap();
         sink.nth_recording(1, "page.ready's snapshot");
         let held = host.hold_view_models();
+        let interval = interval_as_served();
         for step in 1..=5u8 {
             let mic = f64::from(step) / 10.0;
             recording_with(&fakes, mic);
@@ -346,8 +347,9 @@ mod tests {
             let took = reached.saturating_duration_since(poked);
             // A level update may wait out the rest of the interval.
             assert!(
-                took < RECORDING_INTERVAL + LIVE,
-                "level {mic} reached the sink {took:?} after its hook"
+                took < interval + LIVE,
+                "level {mic} reached the sink {took:?} after its hook \
+                 (the interval takes {interval:?} here)"
             );
         }
         fakes.recorder.set_status(RecorderStatus {
@@ -493,6 +495,20 @@ mod tests {
     }
 
     /// Waits up to [`PATIENCE`] for `probe` to find `what`.
+    /// How long the feed's wait for the rest of [`RECORDING_INTERVAL`]
+    /// takes on this machine, the longest of a few: a loaded VM's timers
+    /// fire late (a 50 ms park takes 100 to 130 ms on a hosted macOS
+    /// runner).
+    fn interval_as_served() -> Duration {
+        (0..5)
+            .map(|_| {
+                let parked = Instant::now();
+                thread::park_timeout(RECORDING_INTERVAL);
+                parked.elapsed()
+            })
+            .fold(RECORDING_INTERVAL, Duration::max)
+    }
+
     fn found<T>(what: &str, probe: impl Fn() -> Option<T>) -> T {
         let deadline = Instant::now() + PATIENCE;
         loop {
