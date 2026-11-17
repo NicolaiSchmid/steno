@@ -1,6 +1,6 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AppSnapshot } from "@/bridge/contract";
 import { loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
@@ -25,6 +25,45 @@ describe("SettingsWindow", () => {
 			"true",
 		);
 		expect(screen.queryByTestId("section-general")).not.toBeInTheDocument();
+	});
+
+	it("puts the sections in a drawer in a narrow window", async () => {
+		const user = userEvent.setup();
+		const wide = window.innerWidth;
+		window.innerWidth = 480;
+		try {
+			const harness = await createBridgeHarness();
+			renderWithBridge(<SettingsWindow />, harness);
+			expect(screen.getByTestId("settings-window")).toHaveAttribute(
+				"data-narrow",
+			);
+			expect(
+				screen.queryByTestId("settings-recording"),
+			).not.toBeInTheDocument();
+			const toggle = screen.getByTestId("show-sections");
+			await user.click(toggle);
+			// The drawer's header row names it, beside its Close.
+			const drawer = await screen.findByTestId("sections-drawer");
+			expect(
+				within(drawer).getByRole("heading", { name: "Sections" }),
+			).toBeInTheDocument();
+			expect(within(drawer).getByTestId("close-sections")).toBeInTheDocument();
+			await user.click(await screen.findByTestId("settings-recording"));
+			expect(
+				screen.getByTestId("section-purpose-recording"),
+			).toBeInTheDocument();
+			await vi.waitFor(() =>
+				expect(screen.queryByTestId("sections-drawer")).not.toBeInTheDocument(),
+			);
+			act(() => {
+				window.innerWidth = wide;
+				window.dispatchEvent(new Event("resize"));
+			});
+			expect(screen.queryByTestId("show-sections")).not.toBeInTheDocument();
+			expect(screen.getByTestId("settings-recording")).toBeInTheDocument();
+		} finally {
+			window.innerWidth = wide;
+		}
 	});
 
 	it("opens on the route's section", async () => {

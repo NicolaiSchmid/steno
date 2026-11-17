@@ -88,6 +88,7 @@ const REPLY_ALIASES: Record<string, readonly string[]> = {
 	"reply.confirm": [
 		"ui.confirmDestructive",
 		"meetings.delete",
+		"meeting.processAgain",
 		"meeting.deleteRecordingNow",
 		"meeting.setKeepAudio",
 		"settings.iphone.pairAgain",
@@ -149,8 +150,10 @@ export function loadFixtureReplies(): Promise<FixtureMap> {
 export const scenarios = [
 	"empty",
 	"recording",
+	"recording-elsewhere",
 	"denied",
 	"failed",
+	"summary-failed",
 	"processing",
 	"export-failed",
 	"summary-key-withheld",
@@ -204,6 +207,8 @@ const PROCESSING_MEETING_ID = "00000000-0000-0000-0000-000000000002";
 const FAILED_MEETING_ID = "00000000-0000-0000-0000-000000000044";
 /** How long the live recording has run when the page opens: 12:34. */
 const RECORDING_ELAPSED_MS = 754_000;
+/** The meeting `recording-elsewhere` records: not the one selected. */
+const RECORDING_ELSEWHERE_ID = "00000000-0000-0000-0000-000000000003";
 
 function findRow(list: MeetingsListSnapshot, id: string): MeetingRow | null {
 	for (const group of list.groups) {
@@ -245,7 +250,10 @@ function bareDetail(
 /**
  * Overrides the fixture snapshots for a scenario named in the query:
  * `empty` (no meetings, no selection), `recording` (`recording.live` as the
- * recording, started 12:34 ago, its auto-stop counting down), `denied` (idle
+ * recording, started 12:34 ago, its auto-stop counting down, and the
+ * meeting it records selected and live: nothing produced, no duration yet),
+ * `recording-elsewhere` (that, while another meeting is selected; with
+ * `recordingTitle=` for its title and `query=` for a search), `denied` (idle
  * with the microphone denied), `failed` (the failed meeting selected),
  * `processing` (a meeting in the progress entry, selected), `export-failed`
  * (the selected meeting's export failed), `damaged-audio`
@@ -281,14 +289,70 @@ export function applyScenario(
 		delete result["meeting.detail"];
 	}
 
-	if (scenario === "recording") {
+	if (scenario === "recording" || scenario === "recording-elsewhere") {
 		const live = snapshots["recording.live"] as RecordingSnapshot | undefined;
 		if (live) {
 			result.recording = {
 				...live,
+				...(scenario === "recording-elsewhere"
+					? { meetingID: RECORDING_ELSEWHERE_ID }
+					: {}),
 				startedAt: new Date(Date.now() - RECORDING_ELAPSED_MS).toISOString(),
 			} satisfies RecordingSnapshot;
 		}
+		const row = live && list ? findRow(list, live.meetingID ?? "") : null;
+		if (scenario === "recording" && list && detail && row) {
+			// The meeting being recorded, as the host shows it: live, nothing
+			// produced, and no duration until it stops.
+			const liveRow: MeetingRow = {
+				...row,
+				state: "recording",
+				durationSeconds: 0,
+				hasSummary: false,
+				speakers: [],
+			};
+			result["meetings.list"] = {
+				...list,
+				groups: list.groups.map((group) => ({
+					...group,
+					meetings: group.meetings.map((meeting) =>
+						meeting.id === row.id ? liveRow : meeting,
+					),
+				})),
+				selection: row.id,
+			} satisfies MeetingsListSnapshot;
+			result["meeting.detail"] = bareDetail(detail, liveRow, {
+				canProcessAgain: false,
+				canRerunSummary: false,
+			});
+		}
+	}
+
+	if (scenario === "recording-elsewhere" && list) {
+		// `recordingTitle=` renames the meeting that records; `query=` searches
+		// the list as the host would, so a search can leave that meeting out.
+		const title = params.get("recordingTitle");
+		const query = params.get("query")?.toLowerCase();
+		const current = result["meetings.list"] as MeetingsListSnapshot;
+		result["meetings.list"] = {
+			...current,
+			query: query ?? current.query,
+			groups: current.groups
+				.map((group) => ({
+					...group,
+					meetings: group.meetings
+						.map((meeting) =>
+							title && meeting.id === RECORDING_ELSEWHERE_ID
+								? { ...meeting, title }
+								: meeting,
+						)
+						.filter(
+							(meeting) =>
+								!query || meeting.title.toLowerCase().includes(query),
+						),
+				}))
+				.filter((group) => group.meetings.length > 0),
+		} satisfies MeetingsListSnapshot;
 	}
 
 	if (scenario === "denied") {
@@ -345,6 +409,35 @@ export function applyScenario(
 					showsKeepToggle: false,
 					filesExist: true,
 				},
+				canProcessAgain: true,
+				// No transcript, so no summary to re-run (the host's rule).
+				canRerunSummary: false,
+			});
+		}
+	}
+
+	// The same meeting failed later, in the summary: its transcript and
+	// speakers are there, the summary and tasks are not, and Re-run summary
+	// is offered.
+	if (scenario === "summary-failed" && list && detail) {
+		const row = findRow(list, FAILED_MEETING_ID);
+		if (row) {
+			const failureReason =
+				"Summary failed: the server answered 500. Try again later.";
+			result["meetings.list"] = {
+				...list,
+				groups: list.groups.map((group) => ({
+					...group,
+					meetings: group.meetings.map((meeting) =>
+						meeting.id === row.id ? { ...meeting, failureReason } : meeting,
+					),
+				})),
+				selection: row.id,
+			};
+			result["meeting.detail"] = bareDetail(detail, row, {
+				failureReason,
+				speakers: detail.speakers,
+				transcript: detail.transcript,
 				canProcessAgain: true,
 				canRerunSummary: true,
 			});

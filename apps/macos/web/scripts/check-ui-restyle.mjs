@@ -11,7 +11,9 @@
  * or icons, except in a disabled state, on `aria-hidden` decoration, and the
  * 0 and 100 a transition starts or ends at. Text is sized from the type
  * scale in src/theme.css only: Tailwind's own sizes and arbitrary sizes are
- * rejected everywhere.
+ * rejected everywhere. And only the kit announces: `role="status"`,
+ * `role="alert"` and `aria-live` outside src/components/ui are rejected, so
+ * a result is announced through `ResultLine` or a toast.
  *
  * Usage: node scripts/check-ui-restyle.mjs [--root src] [--ui src/components/ui] [--theme src/theme.css]
  * Exit 1 lists every offending class as `file:line: <Component> "class"`.
@@ -355,6 +357,18 @@ export function checkPaint(source, file, colours) {
 	return findings;
 }
 
+/** A live region declared outside the kit: `role="status"`, `"alert"`, `aria-live`. */
+export function checkAnnounce(source, file) {
+	const findings = [];
+	const pattern =
+		/\brole=(?:\{\s*)?["'](status|alert|log)["']|\baria-live\s*=/g;
+	for (const match of source.matchAll(pattern)) {
+		const line = source.slice(0, match.index).split("\n").length;
+		findings.push({ file, line, token: match[0] });
+	}
+	return findings;
+}
+
 export function run({
 	root,
 	ui,
@@ -372,10 +386,11 @@ export function run({
 		(path) => path.endsWith(".tsx") && !path.startsWith(`${uiDirectory}/`),
 	);
 	const findings = [];
+	const announce = [];
 	for (const file of files) {
-		findings.push(
-			...checkSource(readFileSync(file, "utf8"), relative(cwd, file), uiNames),
-		);
+		const source = readFileSync(file, "utf8");
+		findings.push(...checkSource(source, relative(cwd, file), uiNames));
+		announce.push(...checkAnnounce(source, relative(cwd, file)));
 	}
 	// The paint rule covers the kit too, and plain modules that build classes.
 	const painted = walk(
@@ -388,7 +403,7 @@ export function run({
 			...checkPaint(readFileSync(file, "utf8"), relative(cwd, file), colours),
 		);
 	}
-	return { files: files.length, uiNames, findings, paint };
+	return { files: files.length, uiNames, findings, paint, announce };
 }
 
 const invokedDirectly =
@@ -408,9 +423,18 @@ if (invokedDirectly) {
 			`${finding.file}:${finding.line}: "${finding.token}" ${finding.problem}`,
 		);
 	}
-	if (result.findings.length > 0 || result.paint.length > 0) {
+	for (const finding of result.announce) {
 		console.error(
-			`\n${result.findings.length} restyle(s) in ${result.files} file(s); callers may add layout classes only. ${result.paint.length} unmeasured paint(s).`,
+			`${finding.file}:${finding.line}: "${finding.token}" declares a live region outside the kit; use ResultLine or notify()`,
+		);
+	}
+	if (
+		result.findings.length > 0 ||
+		result.paint.length > 0 ||
+		result.announce.length > 0
+	) {
+		console.error(
+			`\n${result.findings.length} restyle(s) in ${result.files} file(s); callers may add layout classes only. ${result.paint.length} unmeasured paint(s). ${result.announce.length} live region(s) outside the kit.`,
 		);
 		process.exit(1);
 	}

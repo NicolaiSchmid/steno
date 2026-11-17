@@ -14,6 +14,8 @@ export type { CheckboxProps } from "./checkbox";
 export { Checkbox } from "./checkbox";
 export type { ColumnResizerProps } from "./column-resizer";
 export { ColumnResizer } from "./column-resizer";
+export type { ConfirmDialogProps } from "./confirm-dialog";
+export { ConfirmDialog } from "./confirm-dialog";
 export type { ContentColumnProps } from "./content-column";
 export { ContentColumn } from "./content-column";
 export type {
@@ -51,11 +53,25 @@ export {
 } from "./dialog";
 export type { DisclosureProps } from "./disclosure";
 export { Disclosure } from "./disclosure";
-export type { DrawerPopupProps, DrawerProps } from "./drawer";
-export { Drawer, DrawerPopup } from "./drawer";
+export type {
+	DrawerCloseButtonProps,
+	DrawerPopupProps,
+	DrawerProps,
+	DrawerToggleProps,
+} from "./drawer";
+export {
+	Drawer,
+	DrawerCloseButton,
+	DrawerPopup,
+	DrawerToggle,
+} from "./drawer";
 export type { EmptyStateProps } from "./empty-state";
 export { EmptyState, emptyStateIconVariants } from "./empty-state";
-export { focusRingClass, focusWithinRingClass } from "./focus-ring";
+export {
+	focusInsetClass,
+	focusRingClass,
+	focusWithinRingClass,
+} from "./focus-ring";
 export type { FormCardProps, FormRowProps, FormValueProps } from "./form-row";
 export { FormCard, FormRow, FormValue, formValueVariants } from "./form-row";
 export type { BreadcrumbProps, HeaderRowProps } from "./header";
@@ -103,6 +119,8 @@ export type { QRCodeProps } from "./qr-code";
 export { QRCode } from "./qr-code";
 export type { RecordMarkProps } from "./record-mark";
 export { RecordMark } from "./record-mark";
+export type { ResultLineProps } from "./result-line";
+export { ResultLine, resultLineVariants } from "./result-line";
 export type { ScrollAreaProps } from "./scroll-area";
 export { ScrollArea } from "./scroll-area";
 export type { SectionLabelProps } from "./section-label";
@@ -128,5 +146,7 @@ export type {
 export { Tabs, TabsList, TabsPanel, TabsTab, tabsPanelVariants } from "./tabs";
 export type { TextareaProps } from "./textarea";
 export { Textarea } from "./textarea";
+export type { NotifyOptions, ToastTone } from "./toast";
+export { notify, ToastRegion } from "./toast";
 export type { TooltipProps } from "./tooltip";
 export { Tooltip, TooltipProvider } from "./tooltip";

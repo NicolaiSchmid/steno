@@ -997,6 +997,7 @@ export const methodParams = {
 export const methodReplies = {
 	"speakers.options": speakerOptionsReply,
 	"meetings.delete": confirmReply,
+	"meeting.processAgain": confirmReply,
 	"meeting.deleteRecordingNow": confirmReply,
 	"meeting.setKeepAudio": confirmReply,
 	"settings.recording.chooseFolder": chosenPathReply,

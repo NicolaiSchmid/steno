@@ -58,7 +58,8 @@ public enum BridgeMethod: String, Codable, Sendable, CaseIterable {
   case meetingRerunSummary = "meeting.rerunSummary"
   case meetingReexport = "meeting.reexport"
   /// "Process again": the selected failed meeting runs from the start with
-  /// its recording.
+  /// its recording. Replies `ConfirmReply`, confirmed only when a run
+  /// started.
   case meetingProcessAgain = "meeting.processAgain"
   case meetingSetKeepAudio = "meeting.setKeepAudio"
   case meetingDeleteRecordingNow = "meeting.deleteRecordingNow"

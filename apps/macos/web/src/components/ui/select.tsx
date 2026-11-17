@@ -3,7 +3,7 @@ import { cva } from "class-variance-authority";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
-import { focusRingClass } from "./focus-ring";
+import { focusInsetClass, focusRingClass } from "./focus-ring";
 import { fieldFrameClass } from "./input";
 import { popupSurfaceClass } from "./menu";
 
@@ -117,6 +117,7 @@ export function Select<V extends string = string>({
 									className={cn(
 										"grid min-h-7 cursor-default select-none grid-cols-[1fr_14px] items-center gap-2 rounded-sm px-2 py-1 text-body text-foreground outline-none",
 										"data-highlighted:bg-accent data-selected:bg-item-selected data-disabled:opacity-64",
+										focusInsetClass,
 									)}
 									disabled={option.disabled}
 									key={option.value}

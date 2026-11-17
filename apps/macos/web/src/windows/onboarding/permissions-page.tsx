@@ -231,6 +231,10 @@ export function PermissionsPage({
 	const client = useBridge();
 	const { words } = usePlatform();
 	const busy = onboarding.permissions.some((step) => step.isRequesting);
+	// One primary on the page: the first required step not yet allowed.
+	const next = onboarding.permissions.find(
+		(step) => step.isRequired && step.state !== "granted",
+	)?.kind;
 	return (
 		<OnboardingPage
 			aside={onboarding.retentionSentence}
@@ -265,6 +269,7 @@ export function PermissionsPage({
 						isRequesting={step.isRequesting}
 						key={step.kind}
 						kind={step.kind}
+						leads={step.kind === next}
 						onCheckAgain={() => send(client, "onboarding.refresh")}
 						onOpenSystemSettings={() =>
 							send(client, "system.openSystemSettings", { kind: step.kind })

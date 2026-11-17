@@ -41,9 +41,9 @@ impl BridgeHost for SpyHost {
         Ok(())
     }
 
-    fn meeting_process_again(&self) -> Outcome<()> {
+    fn meeting_process_again(&self) -> Outcome<ConfirmReply> {
         self.record("meeting.processAgain");
-        Ok(())
+        Ok(ConfirmReply { confirmed: true })
     }
 
     fn settings_export_choose_vault(&self) -> Outcome<ChosenPathReply> {
@@ -170,8 +170,8 @@ fn every_request_gets_its_reply() {
     );
 }
 
-/// "Process again" takes no params, and its request envelope prints back
-/// byte for byte.
+/// "Process again" takes no params, its request envelope prints back byte
+/// for byte, and it replies whether a run started.
 #[test]
 fn process_again_routes_without_params() {
     let (host, dispatcher) = dispatcher();
@@ -181,7 +181,7 @@ fn process_again_routes_without_params() {
     assert_eq!(json::to_canonical_string(&decoded).unwrap(), request);
     assert_eq!(
         call(&dispatcher, &serde_json::from_str(request).unwrap()),
-        json!({"id": "req-9"})
+        json!({"id": "req-9", "result": {"confirmed": true}})
     );
     assert_eq!(host.calls(), ["meeting.processAgain"]);
 }

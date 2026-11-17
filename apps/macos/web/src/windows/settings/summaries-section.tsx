@@ -1,9 +1,4 @@
-import {
-	CheckCircle2Icon,
-	CircleAlertIcon,
-	InfoIcon,
-	TriangleAlertIcon,
-} from "lucide-react";
+import { CircleAlertIcon, TriangleAlertIcon } from "lucide-react";
 import type { SummariesSettingsSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import {
@@ -23,9 +18,11 @@ import {
 	Disclosure,
 	FormCard,
 	FormRow,
+	ResultLine,
 	Select,
 } from "@/components/ui";
 import { keyHome, usePlatform } from "@/lib/platform";
+import { useCommitToast } from "@/lib/use-commit-toast";
 import { SectionPage } from "./section-page";
 
 /** The consent card until confirmed, then the account line and the model. */
@@ -162,13 +159,19 @@ function statusOf(summaries: SummariesSettingsSnapshot): {
 
 /**
  * Summaries: the service preset, the server, model and key for an endpoint,
- * or the ChatGPT consent and model; then the connection status.
+ * or the ChatGPT consent and model; then the connection status, so a test's
+ * result sits under the fields it tested; then Advanced.
  */
 export function SummariesSection() {
 	const client = useBridge();
 	const platform = usePlatform();
 	const { words } = platform;
 	const summaries = useSnapshot("settings.summaries");
+	const startTest = useCommitToast(
+		summaries?.isTesting === false && summaries.testResult?.ok === true,
+		summaries?.isTesting === false && summaries.testResult?.ok === false,
+		{ title: "Connected.", description: summaries?.testResult?.message },
+	);
 	if (!summaries) {
 		return <SectionPage id="summaries" />;
 	}
@@ -212,6 +215,48 @@ export function SummariesSection() {
 				/>
 			) : null}
 
+			<FormCard title="Connection">
+				<ResultLine
+					actions={
+						summaries.isConfigured ? (
+							<Button
+								data-testid="test-connection"
+								disabled={summaries.isTesting}
+								onClick={() => {
+									startTest();
+									send(client, "settings.summaries.test");
+								}}
+								size="sm"
+								variant="outline"
+							>
+								Test again
+							</Button>
+						) : undefined
+					}
+					className="my-2"
+					data-testid="summaries-status"
+					details={
+						status.detail ? (
+							<Disclosure
+								data-testid="test-result-details"
+								defaultOpen={status.kind === "failed"}
+							>
+								{status.detail}
+							</Disclosure>
+						) : undefined
+					}
+					tone={
+						status.kind === "ok"
+							? "success"
+							: status.kind === "failed"
+								? "destructive"
+								: "muted"
+					}
+				>
+					{status.title}
+				</ResultLine>
+			</FormCard>
+
 			{codex ? null : (
 				<FormCard
 					footer={`How much text the model can read at once. Leave the default of ${summaries.defaultContextTokens.toLocaleString()} unless the service reports a shorter limit.`}
@@ -231,51 +276,6 @@ export function SummariesSection() {
 					/>
 				</FormCard>
 			)}
-
-			<FormCard title="Connection">
-				<FormRow
-					control={
-						summaries.isConfigured ? (
-							<Button
-								data-testid="test-connection"
-								disabled={summaries.isTesting}
-								onClick={() => send(client, "settings.summaries.test")}
-								size="sm"
-								variant="outline"
-							>
-								Test again
-							</Button>
-						) : undefined
-					}
-					data-testid="summaries-status"
-					icon={
-						status.kind === "ok" ? (
-							<CheckCircle2Icon aria-hidden="true" />
-						) : status.kind === "failed" ? (
-							<CircleAlertIcon aria-hidden="true" />
-						) : (
-							<InfoIcon aria-hidden="true" />
-						)
-					}
-					label={status.title}
-					tone={
-						status.kind === "ok"
-							? "success"
-							: status.kind === "failed"
-								? "destructive"
-								: "muted"
-					}
-				>
-					{status.detail ? (
-						<Disclosure
-							data-testid="test-result-details"
-							defaultOpen={status.kind === "failed"}
-						>
-							{status.detail}
-						</Disclosure>
-					) : null}
-				</FormRow>
-			</FormCard>
 		</SectionPage>
 	);
 }

@@ -6,6 +6,7 @@ import {
 	CopyIcon,
 	EllipsisIcon,
 	FolderIcon,
+	InfoIcon,
 	RefreshCwIcon,
 	RotateCcwIcon,
 	ShareIcon,
@@ -13,7 +14,7 @@ import {
 	TextAlignStartIcon,
 	Trash2Icon,
 } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useContext, useEffect, useState } from "react";
 import type {
 	AppSnapshot,
 	MeetingDetailSnapshot,
@@ -37,8 +38,9 @@ import {
 	MenuRadioItem,
 	MenuSeparator,
 	MenuTrigger,
+	notify,
 	RecordMark,
-	StatusIcon,
+	ResultLine,
 	Switch,
 	Tabs,
 	TabsList,
@@ -47,6 +49,7 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { SHORTCUTS, usePlatform, useShortcut } from "@/lib/platform";
+import { useCommitToast } from "@/lib/use-commit-toast";
 import { useElapsedSeconds } from "@/lib/use-now";
 import { deleteMeeting } from "./delete-meeting";
 import {
@@ -56,9 +59,10 @@ import {
 	formatRetention,
 	formatSource,
 } from "./format";
-import { MeetingsToggle } from "./narrow-layout";
+import { MeetingsToggle, NarrowLayoutContext } from "./narrow-layout";
 import { NotesTab } from "./notes-tab";
 import { ProcessingCard } from "./processing-card";
+import { RecorderBar } from "./recorder-notices";
 import { SpeakersPopover } from "./speakers-popover";
 import { SummaryTab } from "./summary-tab";
 import { TagEditor } from "./tag-editor";
@@ -134,16 +138,11 @@ const lineLinkClass = cn(
 	focusRingClass,
 );
 
-/** The line's dismissal: a muted text button, quieter than the link. */
-const quietButtonClass = cn(
-	"ml-2 rounded-xs text-muted-foreground hover:text-foreground",
-	focusRingClass,
-);
-
 /**
  * Summaries or export still need setting up: one muted line over the
- * summary, with Set up (Settings at the section that needs it) and Not now.
- * Nothing on the other tabs.
+ * summary, led by the info glyph, with Set up (Settings at the section that
+ * needs it) and Not now, both the line's underlined link, Not now a little
+ * further off. Nothing on the other tabs.
  */
 function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 	const client = useBridge();
@@ -156,13 +155,14 @@ function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 			? "export"
 			: null;
 	return (
-		<p
-			className="mt-0 mb-6 text-body text-muted-foreground"
+		<div
+			className="mt-0 mb-6 flex flex-wrap items-center gap-x-2 gap-y-1 text-body text-muted-foreground"
 			data-testid="setup-line"
 		>
-			{banner.title}{" "}
-			{section ? (
-				<>
+			<InfoIcon aria-hidden="true" className="size-4 shrink-0 text-info" />
+			<span className="min-w-0">
+				{banner.title}{" "}
+				{section ? (
 					<button
 						className={lineLinkClass}
 						data-testid={
@@ -174,44 +174,51 @@ function SetupLine({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 						type="button"
 					>
 						Set up
-					</button>{" "}
-				</>
-			) : null}
+					</button>
+				) : null}
+			</span>
 			<button
-				className={quietButtonClass}
+				className={cn(lineLinkClass, "ml-1")}
 				data-testid="banner-not-now"
 				onClick={() => send(client, "setup.dismissBanner")}
 				type="button"
 			>
 				Not now
 			</button>
-		</p>
+		</div>
 	);
 }
 
-/** The Stop control in the header row while the recorder holds this meeting. */
-function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
-	const client = useBridge();
+/**
+ * The header row's live mark while the recorder holds this meeting in a
+ * wide window: the pulsing mark, "Recording" and the elapsed time, not a
+ * control. The one Stop is the sidebar's (a narrow window's is in the
+ * recorder bar). In a header row under 36 rem (a 960 px window) the word
+ * goes and the mark and the time stay, so the breadcrumb keeps its words;
+ * a screen reader still hears "Recording".
+ */
+function HeaderLive({ recording }: { recording: RecordingSnapshot }) {
 	const elapsed = useElapsedSeconds(
 		recording.state === "recording" ? recording.startedAt : undefined,
 	);
 	const stopping = recording.state === "stopping";
 	return (
-		<Button
-			data-testid="header-stop"
-			disabled={stopping}
-			onClick={() => send(client, "recording.stop")}
-			size="sm"
-			variant="primary"
+		<span
+			className="flex shrink-0 items-center gap-2 text-foreground text-label"
+			data-testid="header-live"
 		>
-			<RecordMark onPrimary pulse={!stopping} />
-			{stopping ? "Stopping…" : "Stop"}
+			<RecordMark pulse={!stopping} />
+			{stopping ? (
+				"Stopping…"
+			) : (
+				<span className="@max-[36rem]/header:sr-only">Recording</span>
+			)}
 			{!stopping ? (
-				<span className="font-mono font-normal text-meta tabular-nums">
+				<span className="font-mono font-normal text-meta text-muted-foreground tabular-nums">
 					{format.duration(elapsed)}
 				</span>
 			) : null}
-		</Button>
+		</span>
 	);
 }
 
@@ -219,15 +226,20 @@ function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
  * "Process again" runs the meeting from the start with its recording; the
  * host says when it is offered (`canProcessAgain`) and words any refusal on
  * the error line. The button stays disabled until the host answers, so a
- * second click cannot start a second run.
+ * second click cannot start a second run, and the toast shows only when the
+ * host confirms a run started (not on a declined prompt or a refusal). It
+ * sits in the header row, or on the failure line when processing failed.
  */
-function HeaderProcessAgain({ disabled }: { disabled: boolean }) {
+function ProcessAgainButton({ disabled }: { disabled: boolean }) {
 	const client = useBridge();
 	const [starting, setStarting] = useState(false);
 	async function processAgain() {
 		setStarting(true);
 		try {
-			await client.call("meeting.processAgain");
+			const { confirmed } = await client.call("meeting.processAgain");
+			if (confirmed) {
+				notify({ title: "Processing the meeting again." });
+			}
 		} catch (cause: unknown) {
 			console.error("bridge: meeting.processAgain failed", cause);
 		} finally {
@@ -245,6 +257,52 @@ function HeaderProcessAgain({ disabled }: { disabled: boolean }) {
 			<RotateCcwIcon aria-hidden="true" />
 			Process again
 		</Button>
+	);
+}
+
+/**
+ * Processing failed: a red result line in the tab's place, with the one
+ * action that recovers from where it failed. With no transcript the
+ * transcription failed, and only Process again (the whole run) helps; with
+ * a transcript the summary failed, and Re-run summary is enough, or
+ * Process again where the host does not allow that.
+ */
+function FailureLine({
+	detail,
+	onRerunSummary,
+}: {
+	detail: MeetingDetailSnapshot;
+	onRerunSummary: () => void;
+}) {
+	const summaryFailed = detail.transcript.length > 0;
+	let action: ReactNode;
+	if (summaryFailed && detail.canRerunSummary) {
+		action = (
+			<Button
+				data-testid="failure-rerun-summary"
+				disabled={detail.isBusy}
+				onClick={onRerunSummary}
+				size="sm"
+				variant="outline"
+			>
+				<RefreshCwIcon aria-hidden="true" />
+				Re-run summary
+			</Button>
+		);
+	} else if (detail.canProcessAgain) {
+		action = <ProcessAgainButton disabled={detail.isBusy} />;
+	}
+	return (
+		<ResultLine
+			actions={action}
+			data-testid="processing-failed"
+			tone="destructive"
+		>
+			<span className="font-medium">Processing failed.</span>{" "}
+			{detail.failureReason
+				? firstSentence(detail.failureReason)
+				: "No reason was reported."}
+		</ResultLine>
 	);
 }
 
@@ -296,26 +354,37 @@ function KeepAudioToggle({
 	);
 }
 
-const EXPORT_ICON: Record<
+/** Where the export stands, as a result line: a tint once it ran. */
+const EXPORT_RESULT: Record<
 	MeetingDetailSnapshot["export"]["status"],
 	{ icon: ReactNode; tone: "muted" | "success" | "destructive" }
 > = {
-	notConfigured: { icon: <ShareIcon />, tone: "muted" },
-	pending: { icon: <ClockIcon />, tone: "muted" },
-	delivered: { icon: <CheckCircle2Icon />, tone: "success" },
-	failed: { icon: <CircleAlertIcon />, tone: "destructive" },
+	notConfigured: { icon: <ShareIcon aria-hidden="true" />, tone: "muted" },
+	pending: { icon: <ClockIcon aria-hidden="true" />, tone: "muted" },
+	delivered: { icon: <CheckCircle2Icon aria-hidden="true" />, tone: "success" },
+	failed: { icon: <CircleAlertIcon aria-hidden="true" />, tone: "destructive" },
 };
 
 /**
  * The foot of the reading column: what happens to the recording, with the
- * keep switch when the host offers it, and where the export stands, with
- * Reveal in Finder (the platform's file manager) and Export again when
- * they apply.
+ * keep switch when the host offers it, and, once the meeting is ready or
+ * failed, where the export stands, with Reveal in Finder (the platform's
+ * file manager) and Export again when they apply. While it records or is
+ * processed there is nothing to export yet, so no export line.
  */
-function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
+function DetailFooter({
+	detail,
+	onExport,
+}: {
+	detail: MeetingDetailSnapshot;
+	onExport: () => void;
+}) {
 	const client = useBridge();
 	const { words } = usePlatform();
-	const status = EXPORT_ICON[detail.export.status];
+	const status = EXPORT_RESULT[detail.export.status];
+	const settled = detail.state === "ready" || detail.state === "failed";
+	// Without the keep row or the export line the footer would be a lone rule.
+	if (!detail.retention.showsKeepToggle && !settled) return null;
 	return (
 		<footer
 			className="mt-10 flex flex-col gap-3 border-border border-t pt-4 text-body text-muted-foreground"
@@ -336,36 +405,44 @@ function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 					/>
 				</div>
 			) : null}
-			<div
-				className="flex flex-wrap items-center gap-x-3 gap-y-2"
-				data-testid="export-status"
-			>
-				<StatusIcon tone={status.tone}>{status.icon}</StatusIcon>
-				<span className="min-w-0 flex-1">{detail.export.message}</span>
-				{detail.export.canReveal ? (
-					<Button
-						data-testid="reveal-export"
-						onClick={() => send(client, "meeting.revealExport")}
-						size="sm"
-						variant="ghost"
-					>
-						<FolderIcon aria-hidden="true" />
-						{words.revealInFileManager}
-					</Button>
-				) : null}
-				{detail.export.canReexport ? (
-					<Button
-						data-testid="export-again"
-						disabled={detail.isBusy}
-						onClick={() => send(client, "meeting.reexport")}
-						size="sm"
-						variant="outline"
-					>
-						<ShareIcon aria-hidden="true" />
-						Export again
-					</Button>
-				) : null}
-			</div>
+			{settled ? (
+				<ResultLine
+					actions={
+						detail.export.canReveal || detail.export.canReexport ? (
+							<>
+								{detail.export.canReveal ? (
+									<Button
+										data-testid="reveal-export"
+										onClick={() => send(client, "meeting.revealExport")}
+										size="sm"
+										variant="ghost"
+									>
+										<FolderIcon aria-hidden="true" />
+										{words.revealInFileManager}
+									</Button>
+								) : null}
+								{detail.export.canReexport ? (
+									<Button
+										data-testid="export-again"
+										disabled={detail.isBusy}
+										onClick={onExport}
+										size="sm"
+										variant="outline"
+									>
+										<ShareIcon aria-hidden="true" />
+										Export again
+									</Button>
+								) : null}
+							</>
+						) : undefined
+					}
+					data-testid="export-status"
+					icon={status.icon}
+					tone={status.tone}
+				>
+					{detail.export.message}
+				</ResultLine>
+			) : null}
 		</footer>
 	);
 }
@@ -396,7 +473,11 @@ export function MeetingDetail({
 					setupBanner={app?.setupBanner}
 				/>
 			) : list && !hasSelection ? (
-				<ContentColumn crumbs={["Meetings"]} leading={<MeetingsToggle />}>
+				<ContentColumn
+					bar={<RecorderBar />}
+					crumbs={["Meetings"]}
+					leading={<MeetingsToggle />}
+				>
 					<SetupBanner banner={app?.setupBanner} />
 					<EmptyState
 						body="Pick a meeting on the left to read its summary, transcript and tasks."
@@ -442,6 +523,8 @@ function DetailBody({
 		send(client, "meeting.setTab", { tab: next });
 	}
 
+	// A narrow window's recorder bar holds Stop for every meeting.
+	const { narrow } = useContext(NarrowLayoutContext);
 	const entry = progress?.entries.find((item) => item.meetingID === detail.id);
 	const working = detail.state === "processing" || detail.state === "queued";
 	const holdsRecorder =
@@ -460,17 +543,23 @@ function DetailBody({
 	function copyTranscript() {
 		navigator.clipboard
 			?.writeText(transcriptText(detail.transcript))
+			.then(() => notify({ title: "Transcript copied." }))
 			.catch((cause: unknown) => {
 				console.error("copy transcript failed", cause);
 			});
 	}
 
 	const canReexport = detail.export.canReexport && !detail.isBusy;
-	useShortcut(
-		SHORTCUTS.exportAgain,
-		() => send(client, "meeting.reexport"),
-		canReexport,
+	const startExport = useCommitToast(
+		detail.export.status === "delivered",
+		detail.export.status === "failed",
+		{ title: "Exported.", description: detail.export.message },
 	);
+	function reexport() {
+		startExport();
+		send(client, "meeting.reexport");
+	}
+	useShortcut(SHORTCUTS.exportAgain, reexport, canReexport);
 
 	function panel(current: Tab) {
 		if (current === "notes") {
@@ -496,34 +585,15 @@ function DetailBody({
 		if (working) {
 			return <ProcessingCard entry={entry} state={detail.state} />;
 		}
-		if (detail.state === "failed") {
-			return (
-				<EmptyState
-					action={
-						<Button
-							data-testid={`${current}-try-again`}
-							disabled={!detail.canRerunSummary || detail.isBusy}
-							onClick={rerun}
-							variant="outline"
-						>
-							<RefreshCwIcon aria-hidden="true" />
-							Try again
-						</Button>
-					}
-					body={
-						detail.failureReason
-							? firstSentence(detail.failureReason)
-							: "No reason was reported."
-					}
-					icon={<CircleAlertIcon aria-hidden="true" />}
-					id={`empty-${current}`}
-					title="Processing failed"
-					variant="destructive"
-				/>
-			);
-		}
+		// Failed with a transcript: the summary failed, so the summary and its
+		// tasks show the red line and the transcript stays readable.
+		const summaryFailed = detail.state === "failed";
+		const failure = <FailureLine detail={detail} onRerunSummary={rerun} />;
 		switch (current) {
 			case "summary":
+				if (summaryFailed) {
+					return failure;
+				}
 				return (
 					<>
 						<SetupLine banner={setupBanner} />
@@ -542,20 +612,25 @@ function DetailBody({
 					/>
 				);
 			case "tasks":
+				if (summaryFailed && detail.tasks.length === 0) {
+					return failure;
+				}
 				return <TasksTab tasks={detail.tasks} />;
 		}
 	}
 
 	const actions = (
 		<div className="flex shrink-0 items-center gap-2">
-			{holdsRecorder && recording ? <HeaderStop recording={recording} /> : null}
-			{detail.canProcessAgain ? (
-				<HeaderProcessAgain disabled={detail.isBusy} />
+			{holdsRecorder && recording && !narrow ? (
+				<HeaderLive recording={recording} />
+			) : null}
+			{detail.canProcessAgain && detail.state !== "failed" ? (
+				<ProcessAgainButton disabled={detail.isBusy} />
 			) : null}
 			<Button
 				data-testid="export-meeting"
 				disabled={!canReexport}
-				onClick={() => send(client, "meeting.reexport")}
+				onClick={reexport}
 				size="sm"
 				variant="outline"
 			>
@@ -596,6 +671,7 @@ function DetailBody({
 									))}
 								</MenuRadioGroup>
 							</MenuGroup>
+							<MenuSeparator />
 						</>
 					) : null}
 					<MenuItem
@@ -617,7 +693,7 @@ function DetailBody({
 					<MenuItem
 						disabled={!canReexport}
 						icon={<ShareIcon />}
-						onClick={() => send(client, "meeting.reexport")}
+						onClick={reexport}
 						shortcut={platform.label(SHORTCUTS.exportAgain)}
 					>
 						Export again
@@ -665,6 +741,7 @@ function DetailBody({
 	return (
 		<ContentColumn
 			actions={actions}
+			bar={<RecorderBar />}
 			crumbs={["Meetings", detail.title]}
 			leading={<MeetingsToggle />}
 		>
@@ -704,9 +781,13 @@ function DetailBody({
 			>
 				<span>{formatSource(detail.source)}</span>
 				<span>{format.when(detail.startedAt)}</span>
-				<span className="tabular-nums">
-					{format.duration(detail.durationSeconds)}
-				</span>
+				{detail.state === "recording" ? null : (
+					// Not known until the recording stops; the header shows the
+					// elapsed time meanwhile.
+					<span className="tabular-nums">
+						{format.duration(detail.durationSeconds)}
+					</span>
+				)}
 			</div>
 			<div
 				className="@container/speakers mb-5 flex flex-wrap items-center gap-2"
@@ -728,45 +809,67 @@ function DetailBody({
 				<TagEditor tags={detail.tags} />
 			</div>
 
-			<Tabs
-				onValueChange={(value) => {
-					if (isTab(value)) {
-						changeTab(value);
-					}
-				}}
-				value={tab}
-			>
-				<div className="mb-6 flex min-w-0">
-					<TabsList>
-						<TabsTab data-testid="tab-summary" value="summary">
-							Summary
-						</TabsTab>
-						<TabsTab
-							count={detail.transcript.length || undefined}
-							data-testid="tab-transcript"
-							value="transcript"
+			{detail.state === "failed" && detail.transcript.length === 0 ? (
+				// Transcription failed: the summary, transcript and tasks would
+				// be empty, so the red line with Process again takes their place,
+				// and the personal notes stay below it, still editable.
+				<>
+					<FailureLine detail={detail} onRerunSummary={rerun} />
+					<section
+						aria-labelledby="failed-notes-title"
+						className="mt-8"
+						data-testid="failed-notes"
+					>
+						<h3
+							className="m-0 mb-3 text-foreground text-label"
+							id="failed-notes-title"
 						>
-							Transcript
-						</TabsTab>
-						<TabsTab
-							count={detail.tasks.length || undefined}
-							data-testid="tab-tasks"
-							value="tasks"
-						>
-							Tasks
-						</TabsTab>
-						<TabsTab data-testid="tab-notes" value="notes">
 							Notes
-						</TabsTab>
-					</TabsList>
-				</div>
-				{TABS.map((item) => (
-					<TabsPanel key={item} value={item} variant="reading">
-						{tab === item ? panel(item) : null}
-					</TabsPanel>
-				))}
-			</Tabs>
-			<DetailFooter detail={detail} />
+						</h3>
+						<NotesTab meetingID={detail.id} notes={detail.notes} />
+					</section>
+				</>
+			) : (
+				<Tabs
+					onValueChange={(value) => {
+						if (isTab(value)) {
+							changeTab(value);
+						}
+					}}
+					value={tab}
+				>
+					<div className="mb-6 flex min-w-0">
+						<TabsList>
+							<TabsTab data-testid="tab-summary" value="summary">
+								Summary
+							</TabsTab>
+							<TabsTab
+								count={detail.transcript.length || undefined}
+								data-testid="tab-transcript"
+								value="transcript"
+							>
+								Transcript
+							</TabsTab>
+							<TabsTab
+								count={detail.tasks.length || undefined}
+								data-testid="tab-tasks"
+								value="tasks"
+							>
+								Tasks
+							</TabsTab>
+							<TabsTab data-testid="tab-notes" value="notes">
+								Notes
+							</TabsTab>
+						</TabsList>
+					</div>
+					{TABS.map((item) => (
+						<TabsPanel key={item} value={item} variant="reading">
+							{tab === item ? panel(item) : null}
+						</TabsPanel>
+					))}
+				</Tabs>
+			)}
+			<DetailFooter detail={detail} onExport={reexport} />
 		</ContentColumn>
 	);
 }

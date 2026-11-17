@@ -1930,23 +1930,24 @@ impl BridgeHost for Host {
     }
 
     /// "Process again" on the selected meeting, after
-    /// [`process_again_prompt`] when needed. A decline changes nothing;
-    /// when the selection moved while the prompt was up, nothing starts.
-    fn meeting_process_again(&self) -> Outcome<()> {
+    /// [`process_again_prompt`] when needed. Confirmed only when a run
+    /// started: a decline changes nothing, a refusal goes on the error line,
+    /// and when the selection moved while the prompt was up, nothing starts.
+    fn meeting_process_again(&self) -> Outcome<ConfirmReply> {
         let (meeting_id, asks) = {
             let inner = self.lock();
             let detail = inner.detail.as_ref().ok_or_else(no_selection)?;
             (detail.id, detail.process_again_asks_first())
         };
         if asks && !self.confirm(&process_again_prompt()) {
-            return Ok(());
+            return Ok(ConfirmReply { confirmed: false });
         }
         let platform = self.shared.config.platform;
-        self.detail_write(|detail, _| {
-            if detail.id == meeting_id {
-                detail.process_again(&*self.shared.services.pipeline, platform);
-            }
-        })
+        let confirmed = self.detail_write(|detail, _| {
+            detail.id == meeting_id
+                && detail.process_again(&*self.shared.services.pipeline, platform)
+        })?;
+        Ok(ConfirmReply { confirmed })
     }
 
     fn meeting_set_keep_audio(&self, params: SetBoolParams) -> Outcome<ConfirmReply> {

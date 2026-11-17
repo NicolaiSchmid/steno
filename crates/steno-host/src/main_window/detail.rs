@@ -308,10 +308,10 @@ impl MeetingDetailViewModel {
     /// "Process again", while [`can_process_again`] holds: the pipeline
     /// saves the meeting queued and runs it from the start. A refusal is
     /// the error line in [`process_again_refusal_line`]'s words; one while
-    /// the app quits shows nothing.
+    /// the app quits shows nothing. Whether a run started.
     ///
     /// [`can_process_again`]: Self::can_process_again
-    pub fn process_again(&mut self, pipeline: &dyn Pipeline, platform: Platform) {
+    pub fn process_again(&mut self, pipeline: &dyn Pipeline, platform: Platform) -> bool {
         let outcome = if let Some(refusal) = self.process_again_refusal() {
             Err(refusal)
         } else {
@@ -321,11 +321,15 @@ impl MeetingDetailViewModel {
             outcome
         };
         match outcome {
-            Ok(()) => self.error = None,
+            Ok(()) => {
+                self.error = None;
+                true
+            }
             Err(refusal) => {
                 if let Some(line) = process_again_refusal_line(&refusal, platform) {
                     self.error = Some(line);
                 }
+                false
             }
         }
     }

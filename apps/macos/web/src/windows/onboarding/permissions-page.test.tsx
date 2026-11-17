@@ -39,7 +39,9 @@ describe("PermissionsPage", () => {
 		expect(screen.getByTestId("permission-calendar-request")).toHaveTextContent(
 			"Allow",
 		);
-		expect(screen.getByTestId("permission-calendar-skip")).toBeInTheDocument();
+		// Both wait while the system audio test asks: Skip is not the way on.
+		expect(screen.getByTestId("permission-calendar-request")).toBeDisabled();
+		expect(screen.getByTestId("permission-calendar-skip")).toBeDisabled();
 		// Skipped: the badge, no action.
 		expect(
 			screen.getByTestId("permission-localNetwork-skipped"),
@@ -88,6 +90,26 @@ describe("PermissionsPage", () => {
 		await user.click(screen.getByTestId("onboarding-later"));
 		expect(callsTo(harness.transport, "onboarding.advance")).toHaveLength(1);
 	});
+
+	it.each([
+		["onboarding-unknown", "permission-microphone-request"],
+		["onboarding-denied", "permission-microphone-open"],
+	])(
+		"fills only the first required step's action (%s)",
+		async (scenario, lead) => {
+			const harness = await createBridgeHarness(`scenario=${scenario}`);
+			renderWithBridge(<OnboardingWindow />, harness);
+			expect(screen.getByTestId(lead)).toHaveClass("bg-primary");
+			expect(
+				screen.getByTestId("permission-systemAudio-request"),
+			).not.toHaveClass("bg-primary");
+			expect(
+				screen
+					.getAllByRole("button")
+					.filter((button) => button.classList.contains("bg-primary")),
+			).toHaveLength(1);
+		},
+	);
 
 	it("sends a denied permission to System Settings and checks again", async () => {
 		const user = userEvent.setup();

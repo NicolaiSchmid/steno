@@ -1,6 +1,13 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { send, useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
-import { ColumnResizer, Drawer, DrawerPopup } from "@/components/ui";
+import {
+	ColumnResizer,
+	Drawer,
+	DrawerCloseButton,
+	DrawerPopup,
+	ToastRegion,
+} from "@/components/ui";
+import { SHORTCUTS, usePlatform, useShortcut } from "@/lib/platform";
 import {
 	COLUMNS,
 	type ColumnName,
@@ -40,7 +47,9 @@ const RESIZER_LABELS: Record<ColumnName, string> = {
  * In a window too narrow for all three (`isNarrow`, under 840 CSS px, as a
  * 1200 px window at 200 % zoom is), the reading column takes the window and
  * the sidebar and list open as a drawer from the header's Meetings button;
- * picking a meeting closes it.
+ * picking a meeting or its Close closes it, and the focus goes back to the
+ * Meetings button. The record shortcut is bound here, in both layouts. The recorder's status, Stop and its urgent notices stay
+ * outside the drawer, in the reading column's recorder bar.
  */
 export function MainWindow({
 	menuOpen = false,
@@ -48,17 +57,27 @@ export function MainWindow({
 }: MainWindowProps) {
 	const client = useBridge();
 	usePageReady(client);
+	const platform = usePlatform();
+	// Bound here, not in the sidebar, which a narrow window keeps in the
+	// closed drawer.
+	useShortcut(
+		SHORTCUTS.record,
+		() => send(client, "recording.toggle"),
+		platform.bindsRecordShortcut,
+	);
 	const { widths: stored, update, commit } = useColumnWidths();
 	const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
 	const widths = fitColumns(stored, windowWidth);
 	const narrow = isNarrow(windowWidth);
 	const [drawerOpen, setDrawerOpen] = useState(false);
+	const toggleRef = useRef<HTMLButtonElement>(null);
 	const selection = useSnapshot("meetings.list")?.selection;
 	const layout = useMemo(
 		() => ({
 			narrow,
 			openMeetings: () => setDrawerOpen(true),
 			closeMeetings: () => setDrawerOpen(false),
+			toggleRef,
 		}),
 		[narrow],
 	);
@@ -120,7 +139,11 @@ export function MainWindow({
 					{detail}
 				</div>
 				<Drawer onOpenChange={setDrawerOpen} open={drawerOpen}>
-					<DrawerPopup aria-label="Meetings" data-testid="meetings-drawer">
+					<DrawerPopup
+						aria-label="Meetings"
+						data-testid="meetings-drawer"
+						finalFocus={() => toggleRef.current}
+					>
 						<div
 							className="grid h-full min-h-0"
 							style={{
@@ -130,8 +153,10 @@ export function MainWindow({
 							<Sidebar />
 							<MeetingList />
 						</div>
+						<DrawerCloseButton data-testid="close-meetings" />
 					</DrawerPopup>
 				</Drawer>
+				<ToastRegion />
 			</NarrowLayoutContext.Provider>
 		);
 	}
@@ -149,6 +174,7 @@ export function MainWindow({
 				{column("list", <MeetingList />)}
 				{detail}
 			</div>
+			<ToastRegion />
 		</NarrowLayoutContext.Provider>
 	);
 }

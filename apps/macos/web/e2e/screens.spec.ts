@@ -1,9 +1,10 @@
 import { mkdirSync } from "node:fs";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 /**
  * Renders the main window in every state at both reference window sizes,
- * the Settings window's sections and states at its 960 by 640 default size,
+ * the Settings window's sections and states at its 960 by 640 default size
+ * (and at 200 % text and narrow, its sections in a drawer),
  * the onboarding window at its fixed 560 by 620 and the stories, each in
  * light and dark, to screens/, the speakers popover in each naming state
  * and the main window's column dividers. Every page must make zero requests
@@ -31,7 +32,7 @@ const MAIN_STATES: readonly State[] = [
 	["empty", "scenario=empty", "empty-detail-title"],
 	["recording", "scenario=recording", "auto-stop"],
 	["denied", "scenario=denied", "denied-microphone"],
-	["failed", "scenario=failed", "summary-try-again"],
+	["failed", "scenario=failed", "processing-failed"],
 	["processing", "scenario=processing", "processing-card"],
 	// The footer sits below the fold; the shot scrolls it into view.
 	["export-failed", "scenario=export-failed&tab=summary", "export-again"],
@@ -115,7 +116,12 @@ const ONBOARDING_STATES: readonly State[] = [
 /** Clicked before the shot: the trigger of a dialog state. */
 const CLICKS: Record<string, string> = { acknowledgements: "acknowledgements" };
 /** Scrolled into view before the shot. */
-const SCROLLS: Record<string, string> = { "export-failed": "meeting-footer" };
+const SCROLLS: Record<string, string> = {
+	"export-failed": "meeting-footer",
+	summaries: "summaries-status",
+	"summaries-connected": "summaries-status",
+	"summaries-failed": "summaries-status",
+};
 
 mkdirSync(OUT, { recursive: true });
 
@@ -143,6 +149,54 @@ async function settle(page: Page) {
 		() => document.querySelector("[data-starting-style]") === null,
 	);
 	await page.waitForTimeout(300);
+}
+
+/**
+ * A row holding the keyboard focus in a menu or a select's list draws the
+ * 2 px `--focus` line inside it (`focusInsetClass`), not only the fill.
+ */
+async function expectFocusLine(row: Locator) {
+	const style = await row.evaluate((element) => {
+		const computed = getComputedStyle(element);
+		return {
+			style: computed.outlineStyle,
+			width: computed.outlineWidth,
+			offset: computed.outlineOffset,
+		};
+	});
+	expect(style).toEqual({ style: "solid", width: "2px", offset: "-2px" });
+}
+
+/**
+ * The ancestors that clip (overflow other than visible) and cut into the
+ * focus ring around `target`: the 2 px ring past the 2 px offset.
+ */
+async function clippedRing(target: Locator) {
+	return target.evaluate((element) => {
+		const ring = element.getBoundingClientRect();
+		const reach = 4;
+		const cut: string[] = [];
+		for (
+			let parent = element.parentElement;
+			parent;
+			parent = parent.parentElement
+		) {
+			const style = getComputedStyle(parent);
+			if (style.overflowX === "visible" && style.overflowY === "visible") {
+				continue;
+			}
+			const box = parent.getBoundingClientRect();
+			if (
+				ring.left - reach < box.left ||
+				ring.right + reach > box.right ||
+				ring.top - reach < box.top ||
+				ring.bottom + reach > box.bottom
+			) {
+				cut.push(parent.className);
+			}
+		}
+		return cut;
+	});
 }
 
 function shoot(
@@ -374,7 +428,7 @@ const FOCUS_STOPS: Record<string, string> = {
 	"speakers-trigger": "header-pill",
 	"tab-summary": "tab",
 	"setup-summaries": "link",
-	"banner-not-now": "text-button",
+	"banner-not-now": "link-not-now",
 	checkbox: "checkbox",
 	"keep-audio": "switch",
 };
@@ -467,20 +521,255 @@ for (const scheme of SCHEMES) {
 		await expect(page.getByTestId("meetings-drawer")).toBeVisible();
 		await expect(page.getByTestId("meeting-list")).toBeVisible();
 		await settle(page);
+		await expect(page.getByTestId("close-meetings")).toBeInViewport({
+			ratio: 1,
+		});
 		await page.screenshot({
 			path: `${OUT}/main-${scheme}-zoom-200-meetings.png`,
 		});
+		// Close gives the focus back to the Meetings button; so does a pick.
+		await page.getByTestId("close-meetings").click();
+		await expect(page.getByTestId("meetings-drawer")).toHaveCount(0);
+		await expect(page.getByTestId("show-meetings")).toBeFocused();
+		await page.getByTestId("show-meetings").click();
 		await page
 			.getByTestId("meeting-00000000-0000-0000-0000-000000000003")
 			.click();
 		await expect(page.getByTestId("meetings-drawer")).toHaveCount(0);
+		await expect(page.getByTestId("show-meetings")).toBeFocused();
+		await expect(page.getByTestId("recorder-bar")).toHaveCount(0);
+		expect(external).toEqual([]);
+	});
+
+	/**
+	 * Recording in a narrow window (200 % text), another meeting open: the
+	 * sidebar is in the closed drawer, so the recorder bar under the header
+	 * row holds the status, Stop, the auto-stop countdown and Keep
+	 * recording, all in view without opening the drawer.
+	 */
+	test(`main ${scheme} narrow recording`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 600, height: 380 });
+		await page.goto(
+			`/#/main?scenario=recording-elsewhere${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		await expect(page.getByTestId("meeting-list")).toHaveCount(0);
+		await expect(page.getByTestId("header-live")).toHaveCount(0);
+		const bar = page.getByTestId("recorder-bar");
+		await expect(bar).toContainText("Recording");
+		// The meeting that records is named, as a link to it.
+		await expect(bar.getByTestId("bar-open-recording")).toHaveText(
+			"Tuesday 10:08",
+		);
+		for (const id of [
+			"bar-open-recording",
+			"bar-stop",
+			"auto-stop",
+			"keep-recording",
+		]) {
+			await expect(bar.getByTestId(id)).toBeInViewport({ ratio: 1 });
+		}
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-narrow-recording.png`,
+		});
+		expect(external).toEqual([]);
+	});
+
+	/**
+	 * The recorder bar's title link from the keyboard: its ring (2 px past a
+	 * 2 px offset) is drawn whole, no ancestor that clips holds it short.
+	 */
+	test(`main ${scheme} narrow recording focus title`, async ({ page }) => {
+		await page.setViewportSize({ width: 600, height: 380 });
+		await page.goto(
+			`/#/main?scenario=recording-elsewhere${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		const link = page.getByTestId("bar-open-recording");
+		await link.focus();
+		await page.keyboard.press("Shift+Tab");
+		await page.keyboard.press("Tab");
+		await expect(link).toBeFocused();
+		expect(await clippedRing(link)).toEqual([]);
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-narrow-recording-focus-title.png`,
+		});
+	});
+
+	/**
+	 * A long title in the recorder bar truncates inside its link; the middle
+	 * dot, the elapsed time and Stop keep their place.
+	 */
+	test(`main ${scheme} narrow recording long title`, async ({ page }) => {
+		await page.setViewportSize({ width: 600, height: 380 });
+		const title = encodeURIComponent(
+			"Quarterly planning with the platform, design and research teams",
+		);
+		await page.goto(
+			`/#/main?scenario=recording-elsewhere&recordingTitle=${title}${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		const bar = page.getByTestId("recorder-bar");
+		const text = bar.getByTestId("bar-open-recording").locator("span");
+		expect(
+			await text.evaluate(
+				(element) => element.scrollWidth > element.clientWidth,
+			),
+		).toBe(true);
+		await expect(bar).toContainText("·");
+		const elapsed = bar.getByTestId("bar-elapsed");
+		await expect(elapsed).toHaveText(/^12:3\d$/);
+		await expect(elapsed).toBeInViewport({ ratio: 1 });
+		const clock = await elapsed.boundingBox();
+		const stop = await bar.getByTestId("bar-stop").boundingBox();
+		expect((clock?.x ?? 0) + (clock?.width ?? 0)).toBeLessThanOrEqual(
+			stop?.x ?? 0,
+		);
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-narrow-recording-long-title.png`,
+		});
+	});
+
+	/**
+	 * A search that leaves the recording meeting out of the list: the bar
+	 * still links to it, as "Open current recording" when the list never
+	 * showed its title.
+	 */
+	test(`main ${scheme} narrow recording search`, async ({ page }) => {
+		await page.setViewportSize({ width: 600, height: 380 });
+		await page.goto(
+			`/#/main?scenario=recording-elsewhere&query=investor${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		const link = page
+			.getByTestId("recorder-bar")
+			.getByTestId("bar-open-recording");
+		await expect(link).toHaveText("Open current recording");
+		await expect(link).toBeInViewport({ ratio: 1 });
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-narrow-recording-search.png`,
+		});
+	});
+
+	/**
+	 * The ⋯ menu opened from the keyboard: the first template choice holds
+	 * the focus, its check in the leading slot, a separator before Re-run
+	 * summary.
+	 */
+	test(`main ${scheme} focus menu radio`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		await page.goto(`/#/main?tab=summary${scheme === "dark" ? "&dark" : ""}`);
+		await settle(page);
+		await page.getByTestId("meeting-actions").focus();
+		await page.keyboard.press("Enter");
+		const menu = page.getByRole("menu");
+		await expect(menu).toBeVisible();
+		const radio = menu.getByRole("menuitemradio").first();
+		await expect(radio).toBeFocused();
+		await expect(radio).toHaveAttribute("data-highlighted", "");
+		await expectFocusLine(radio);
+		await settle(page);
+		const box = await menu.boundingBox();
+		if (!box) {
+			throw new Error("the menu has no box");
+		}
+		const pad = 24;
+		await page.screenshot({
+			clip: {
+				x: box.x - pad,
+				y: box.y - pad,
+				width: box.width + pad * 2,
+				height: Math.min(760 - box.y + pad, box.height + pad * 2),
+			},
+			path: `${OUT}/main-${scheme}-focus-menu-radio.png`,
+		});
+		expect(external).toEqual([]);
+	});
+
+	/**
+	 * Keyboard focus on a plain ⋯ menu row and on a select's option: the
+	 * inset focus line over the highlight, measured at 3:1 on the popover.
+	 */
+	test(`main ${scheme} focus menu item`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		await page.goto(`/#/main?tab=summary${scheme === "dark" ? "&dark" : ""}`);
+		await settle(page);
+		await page.getByTestId("meeting-actions").focus();
+		await page.keyboard.press("Enter");
+		const menu = page.getByRole("menu");
+		await expect(menu).toBeVisible();
+		const item = menu.getByRole("menuitem", { name: "Copy transcript" });
+		for (let step = 0; step < 12; step += 1) {
+			if (
+				await item.evaluate((element) => element === document.activeElement)
+			) {
+				break;
+			}
+			await page.keyboard.press("ArrowDown");
+		}
+		await expect(item).toBeFocused();
+		await expectFocusLine(item);
+		await settle(page);
+		const box = await menu.boundingBox();
+		if (!box) {
+			throw new Error("the menu has no box");
+		}
+		const pad = 24;
+		await page.screenshot({
+			clip: {
+				x: box.x - pad,
+				y: box.y - pad,
+				width: box.width + pad * 2,
+				height: Math.min(760 - box.y + pad, box.height + pad * 2),
+			},
+			path: `${OUT}/main-${scheme}-focus-menu-item.png`,
+		});
+		expect(external).toEqual([]);
+	});
+
+	test(`settings ${scheme} focus select option`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize(SETTINGS_SIZE);
+		await page.goto(
+			`/#/settings?section=recording${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		await page.getByTestId("retention-mode").focus();
+		await page.keyboard.press("ArrowDown");
+		const list = page.getByRole("listbox");
+		await expect(list).toBeVisible();
+		const option = list.getByRole("option").first();
+		await page.keyboard.press("Home");
+		await expect(option).toBeFocused();
+		await expectFocusLine(option);
+		await settle(page);
+		const box = await list.boundingBox();
+		if (!box) {
+			throw new Error("the list has no box");
+		}
+		const pad = 24;
+		await page.screenshot({
+			clip: {
+				x: box.x - pad,
+				y: box.y - pad,
+				width: box.width + pad * 2,
+				height: box.height + pad * 2,
+			},
+			path: `${OUT}/settings-${scheme}-focus-select-option.png`,
+		});
 		expect(external).toEqual([]);
 	});
 
 	/**
 	 * 960 by 600 with the default column widths: the first summary heading
 	 * and the first transcript paragraph show without scrolling, and with
-	 * the recorder held the page crumb keeps its words beside Stop.
+	 * the recorder held the page crumb keeps its whole title beside the
+	 * live mark, which drops its word and keeps the time. (The trail is
+	 * 165 px here, under the 20 rem below which "Meetings /" goes, idle or
+	 * recording alike.)
 	 */
 	test(`main ${scheme} 960 reading`, async ({ page }) => {
 		await page.setViewportSize({ width: 960, height: 600 });
@@ -489,6 +778,13 @@ for (const scheme of SCHEMES) {
 		await settle(page);
 		const heading = page.getByTestId("tab-content-summary").locator("h3");
 		await expect(heading.first()).toBeInViewport({ ratio: 1 });
+		// Idle as recording: the trail is too narrow for "Meetings /", so the
+		// page crumb has the row to itself.
+		for (const parent of await page
+			.locator("main nav[aria-label=Breadcrumb] li:not([aria-current])")
+			.all()) {
+			await expect(parent).toBeHidden();
+		}
 		await page.goto(`/#/main?tab=transcript${dark}`);
 		await page.reload();
 		await settle(page);
@@ -498,9 +794,76 @@ for (const scheme of SCHEMES) {
 		await page.goto(`/#/main?scenario=recording${dark}`);
 		await page.reload();
 		await settle(page);
-		await expect(page.getByTestId("header-stop")).toBeVisible();
+		await expect(page.getByTestId("header-live")).toBeVisible();
+		// One Stop: the sidebar's; the header holds only the live mark.
+		await expect(page.getByRole("button", { name: /^Stop/ })).toHaveCount(1);
+		for (const parent of await page
+			.locator("main nav[aria-label=Breadcrumb] li:not([aria-current])")
+			.all()) {
+			await expect(parent).toBeHidden();
+		}
 		const crumb = page.locator("main [aria-current=page]");
 		expect((await crumb.boundingBox())?.width ?? 0).toBeGreaterThan(60);
+		expect(
+			await crumb.evaluate(
+				(element) => element.scrollWidth > element.clientWidth,
+			),
+		).toBe(false);
+		// The word is for a screen reader only here; the mark and time show.
+		const live = page.getByTestId("header-live");
+		await expect(live.getByText("Recording", { exact: true })).toHaveCSS(
+			"width",
+			"1px",
+		);
+		await expect(live).toContainText(/12:3\d/);
+		await page.screenshot({ path: `${OUT}/main-${scheme}-960-recording.png` });
+	});
+
+	/**
+	 * Transcription failed: the red line takes the empty tabs' place and the
+	 * personal notes stay below it, editable.
+	 */
+	test(`main ${scheme} failed notes`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		await page.goto(
+			`/#/main?scenario=failed${scheme === "dark" ? "&dark" : ""}`,
+		);
+		await settle(page);
+		await expect(page.getByTestId("processing-failed")).toBeVisible();
+		await expect(page.getByRole("tablist")).toHaveCount(0);
+		const notes = page.getByTestId("failed-notes").getByRole("textbox");
+		await notes.fill("Ask Jérôme for the Q1 numbers again.");
+		await page.locator("body").click({ position: { x: 900, y: 700 } });
+		await settle(page);
+		await page.screenshot({ path: `${OUT}/main-${scheme}-failed-notes.png` });
+		expect(external).toEqual([]);
+	});
+
+	/**
+	 * Only the summary failed: the Summary tab holds the red line with
+	 * Re-run summary, and the transcript stays readable.
+	 */
+	test(`main ${scheme} summary failed`, async ({ page }) => {
+		const external = watchExternalRequests(page);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		const dark = scheme === "dark" ? "&dark" : "";
+		await page.goto(`/#/main?scenario=summary-failed&tab=transcript${dark}`);
+		await settle(page);
+		await expect(
+			page.getByTestId("tab-content-transcript").locator("p").first(),
+		).toBeInViewport();
+		await expect(page.getByTestId("processing-failed")).toHaveCount(0);
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-summary-failed-transcript.png`,
+		});
+		await page.getByTestId("tab-summary").click();
+		await expect(page.getByTestId("failure-rerun-summary")).toBeVisible();
+		await settle(page);
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-summary-failed-summary.png`,
+		});
+		expect(external).toEqual([]);
 	});
 
 	/**
@@ -519,6 +882,72 @@ for (const scheme of SCHEMES) {
 			).toBeInViewport({ ratio: 1 });
 		}
 	});
+
+	/**
+	 * Settings at 200 % text (its 960 by 640 window is 480 by 320 CSS px)
+	 * and in a narrow 640 px window: the sections leave for a drawer behind
+	 * the header's Sections button, the form takes the window, and nothing
+	 * runs off its trailing edge, Open System Settings included.
+	 */
+	for (const [label, size] of [
+		["zoom-200", { width: 480, height: 320 }],
+		["narrow", { width: 640, height: 640 }],
+	] as const) {
+		test(`settings ${scheme} ${label}`, async ({ page }) => {
+			const external = watchExternalRequests(page);
+			await page.setViewportSize(size);
+			const dark = scheme === "dark" ? "&dark" : "";
+			for (const section of ["general", "iphone"]) {
+				await page.goto(`/#/settings?section=${section}${dark}`);
+				await page.reload();
+				await settle(page);
+				await expect(page.getByTestId("settings-window")).toHaveAttribute(
+					"data-narrow",
+				);
+				await expect(page.getByTestId("settings-general")).toHaveCount(0);
+				const overflow = await page.evaluate(() => {
+					let worst = 0;
+					for (const element of document.querySelectorAll(
+						"[data-testid=settings-window] button",
+					)) {
+						const box = element.getBoundingClientRect();
+						if (box.width > 0) {
+							worst = Math.max(worst, box.right - window.innerWidth);
+						}
+					}
+					return worst;
+				});
+				expect(overflow).toBeLessThanOrEqual(0);
+				await page.screenshot({
+					path: `${OUT}/settings-${scheme}-${label}-${section}.png`,
+				});
+			}
+			const open = page.getByTestId("phone-local-network-open");
+			if ((await open.count()) > 0) {
+				await open.scrollIntoViewIfNeeded();
+				await expect(open).toBeInViewport({ ratio: 1 });
+				await settle(page);
+				await page.screenshot({
+					path: `${OUT}/settings-${scheme}-${label}-iphone-local-network.png`,
+				});
+			}
+			await page.getByTestId("show-sections").click();
+			const drawer = page.getByTestId("sections-drawer");
+			await expect(drawer).toBeVisible();
+			// Named in its header row, as the main window's drawer is.
+			await expect(
+				drawer.getByRole("heading", { name: "Sections" }),
+			).toBeInViewport({ ratio: 1 });
+			await settle(page);
+			await page.screenshot({
+				path: `${OUT}/settings-${scheme}-${label}-sections.png`,
+			});
+			await page.getByTestId("settings-recording").click();
+			await expect(page.getByTestId("sections-drawer")).toHaveCount(0);
+			await expect(page.getByTestId("show-sections")).toBeFocused();
+			expect(external).toEqual([]);
+		});
+	}
 
 	/** A dialog open with keyboard focus on its primary action. */
 	test(`settings ${scheme} dialog`, async ({ page }) => {
@@ -541,12 +970,9 @@ for (const scheme of SCHEMES) {
 }
 
 /**
- * Results are announced: each result line shown today sits in a live
- * region. The toast region does not exist yet (step 6 of
- * .plans/2026-11-14-design-contrast-and-calm.md adds it with `ResultLine`).
- * `UNANNOUNCED` lists the result lines that are not announced today; step 6
- * moves them onto `ResultLine`, and this test fails once one is announced
- * so the list only shrinks.
+ * Results are announced: each result line shown sits in a live region (a
+ * `ResultLine`, a `Callout`), and a toast lands in the region's polite live
+ * viewport. The Remove confirm names what it costs on a red button.
  */
 const RESULTS: readonly (readonly [
 	window: "main" | "settings" | "onboarding",
@@ -563,10 +989,6 @@ const RESULTS: readonly (readonly [
 		"summaries-status",
 	],
 ];
-const UNANNOUNCED = new Set([
-	"main export-status",
-	"settings summaries-status",
-]);
 
 for (const [window, query, testId] of RESULTS) {
 	test(`${window} live region ${testId}`, async ({ page }) => {
@@ -580,6 +1002,43 @@ for (const [window, query, testId] of RESULTS) {
 				element.querySelector("[role=status],[role=alert],[aria-live]") !==
 					null,
 		);
-		expect(announced).toBe(!UNANNOUNCED.has(`${window} ${testId}`));
+		expect(announced).toBe(true);
+	});
+}
+
+for (const scheme of SCHEMES) {
+	const dark = scheme === "dark" ? "&dark" : "";
+
+	test(`main ${scheme} toast`, async ({ page, context }) => {
+		await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+		await page.setViewportSize({ width: 1200, height: 760 });
+		await page.goto(`/#/main?tab=transcript${dark}`);
+		await settle(page);
+		await page.getByTestId("meeting-actions").click();
+		await page.getByTestId("copy-transcript").click();
+		const toast = page.getByTestId("toast");
+		await expect(toast).toContainText("Transcript copied.");
+		expect(
+			await toast.evaluate(
+				(element) => element.closest("[aria-live]") !== null,
+			),
+		).toBe(true);
+		await page.waitForTimeout(300);
+		await page.screenshot({ path: `${OUT}/main-${scheme}-toast.png` });
+	});
+
+	test(`settings ${scheme} confirm remove`, async ({ page }) => {
+		await page.setViewportSize(SETTINGS_SIZE);
+		await page.goto(`/#/settings?section=iphone${dark}`);
+		await settle(page);
+		await page.locator("[data-testid^=revoke-]").first().click();
+		const dialog = page.getByTestId("confirm-dialog");
+		await expect(dialog).toBeVisible();
+		await expect(dialog).toContainText("can no longer send recordings");
+		await expect(page.getByTestId("confirm-cancel")).toBeFocused();
+		await settle(page);
+		await page.screenshot({
+			path: `${OUT}/settings-${scheme}-confirm-remove.png`,
+		});
 	});
 }

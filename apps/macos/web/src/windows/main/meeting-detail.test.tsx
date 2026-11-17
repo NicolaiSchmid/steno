@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AppSnapshot, MeetingDetailSnapshot } from "@/bridge/contract";
 import { applyScenario, loadFixtureSnapshots } from "@/bridge/mock-transport";
+import { ToastRegion } from "@/components/ui";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { MeetingDetail } from "./meeting-detail";
 import { transcriptText } from "./transcript-tab";
@@ -22,7 +23,7 @@ describe("MeetingDetail", () => {
 		const setup = await createBridgeHarness();
 		const first = renderWithBridge(<MeetingDetail />, setup);
 		expect(await screen.findByTestId("setup-line")).toHaveTextContent(
-			"Summaries are off. Set up Not now",
+			/^Summaries are off\. Set up\s*Not now$/,
 		);
 		// The retention line lives in the footer only, beside its switch.
 		expect(screen.getByTestId("meeting-meta")).not.toHaveTextContent(
@@ -94,8 +95,8 @@ describe("MeetingDetail", () => {
 
 	it("processes a meeting again and holds the button until the host answers", async () => {
 		const user = userEvent.setup();
-		let answer: (value: undefined) => void = () => {};
-		const pending = new Promise<undefined>((resolve) => {
+		let answer: (value: { confirmed: boolean }) => void = () => {};
+		const pending = new Promise<{ confirmed: boolean }>((resolve) => {
 			answer = resolve;
 		});
 		const harness = await createBridgeHarness(
@@ -103,7 +104,13 @@ describe("MeetingDetail", () => {
 			{},
 			{ "meeting.processAgain": pending },
 		);
-		renderWithBridge(<MeetingDetail />, harness);
+		renderWithBridge(
+			<>
+				<MeetingDetail />
+				<ToastRegion />
+			</>,
+			harness,
+		);
 		const button = await screen.findByTestId("process-again");
 		expect(button).toHaveTextContent("Process again");
 		expect(button).toBeEnabled();
@@ -113,10 +120,34 @@ describe("MeetingDetail", () => {
 		]);
 		expect(button).toBeDisabled();
 		await act(async () => {
-			answer(undefined);
+			answer({ confirmed: true });
 			await pending;
 		});
 		expect(button).toBeEnabled();
+		expect(await screen.findByTestId("toast")).toHaveTextContent(
+			"Processing the meeting again.",
+		);
+	});
+
+	it("does not toast Process again when the host declines or refuses it", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness(
+			"scenario=failed",
+			{},
+			{ "meeting.processAgain": Promise.resolve({ confirmed: false }) },
+		);
+		renderWithBridge(
+			<>
+				<MeetingDetail />
+				<ToastRegion />
+			</>,
+			harness,
+		);
+		const button = await screen.findByTestId("process-again");
+		await user.click(button);
+		await vi.waitFor(() => expect(button).toBeEnabled());
+		expect(callsTo(harness.transport, "meeting.processAgain")).toHaveLength(1);
+		expect(screen.queryByTestId("toast")).not.toBeInTheDocument();
 	});
 
 	it("shows Process again only when the host offers it and disables it while busy", async () => {
@@ -135,15 +166,19 @@ describe("MeetingDetail", () => {
 			} satisfies MeetingDetailSnapshot);
 		});
 		expect(screen.getByTestId("process-again")).toBeDisabled();
-		// Not offered (the recording is gone, or the host is the Swift app).
+		// Not offered (the recording is gone, or the host is the Swift app):
+		// the failure says so in red, with nothing to run.
 		act(() => {
 			harness.transport.emit("meeting.detail", {
 				...failed,
 				canProcessAgain: false,
 			} satisfies MeetingDetailSnapshot);
 		});
-		expect(screen.getByTestId("summary-try-again")).toBeInTheDocument();
+		expect(screen.getByTestId("processing-failed")).toBeInTheDocument();
 		expect(screen.queryByTestId("process-again")).not.toBeInTheDocument();
+		expect(
+			screen.queryByTestId("failure-rerun-summary"),
+		).not.toBeInTheDocument();
 		// A plain ready meeting: not offered.
 		act(() => {
 			harness.transport.emit("meeting.detail", ready);
@@ -159,6 +194,59 @@ describe("MeetingDetail", () => {
 			} satisfies MeetingDetailSnapshot);
 		});
 		expect(screen.getByTestId("process-again")).toBeEnabled();
+	});
+
+	it("announces a failed transcription in red with Process again, once", async () => {
+		const harness = await createBridgeHarness("scenario=failed");
+		renderWithBridge(<MeetingDetail />, harness);
+		const line = await screen.findByTestId("processing-failed");
+		expect(line).toHaveAttribute("role", "alert");
+		expect(line).toHaveAttribute("data-tone", "destructive");
+		expect(line).toHaveTextContent(
+			"Processing failed. Transcription failed: model not installed",
+		);
+		// One recovery: the line's Process again, none in the header.
+		expect(screen.getAllByTestId("process-again")).toHaveLength(1);
+		expect(within(line).getByTestId("process-again")).toBeEnabled();
+		expect(
+			screen.queryByTestId("failure-rerun-summary"),
+		).not.toBeInTheDocument();
+		// No transcript: no tabs, which would all be empty, but the personal
+		// notes stay below the line, still editable.
+		expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+		const notes = screen.getByRole("region", { name: "Notes" });
+		expect(within(notes).getByRole("textbox")).toBeEnabled();
+	});
+
+	it("offers Re-run summary when only the summary failed", async () => {
+		const user = userEvent.setup();
+		const snapshots = await loadFixtureSnapshots();
+		const failed = applyScenario(
+			snapshots,
+			new URLSearchParams("scenario=failed"),
+		)["meeting.detail"] as MeetingDetailSnapshot;
+		const ready = await fixtureDetail();
+		const harness = await createBridgeHarness("scenario=failed", {
+			"meeting.detail": {
+				...failed,
+				transcript: ready.transcript,
+				failureReason: "Summary failed: the server answered 500.",
+				canRerunSummary: true,
+			} satisfies MeetingDetailSnapshot,
+		});
+		renderWithBridge(<MeetingDetail />, harness);
+		const line = await screen.findByTestId("processing-failed");
+		await user.click(within(line).getByTestId("failure-rerun-summary"));
+		expect(callsTo(harness.transport, "meeting.rerunSummary")).toHaveLength(1);
+		expect(screen.queryByTestId("process-again")).not.toBeInTheDocument();
+		// A transcript to read: the tabs stay, and the failure stays on the
+		// summary; the transcript reads as usual.
+		expect(screen.getByRole("tablist")).toBeInTheDocument();
+		await user.click(screen.getByTestId("tab-transcript"));
+		expect(screen.queryByTestId("processing-failed")).not.toBeInTheDocument();
+		expect(screen.getByTestId("tab-content-transcript")).toHaveTextContent(
+			ready.transcript[0]?.text ?? "",
+		);
 	});
 
 	it("says a summary was skipped because the API key is not available yet", async () => {
@@ -280,7 +368,10 @@ describe("MeetingDetail", () => {
 		const detail = await fixtureDetail();
 		const harness = await createBridgeHarness("scenario=export-failed");
 		renderWithBridge(<MeetingDetail />, harness);
-		expect(screen.getByTestId("export-status")).toHaveTextContent("Failed");
+		const status = screen.getByTestId("export-status");
+		expect(status).toHaveTextContent("Failed");
+		expect(status).toHaveAttribute("role", "alert");
+		expect(status).toHaveAttribute("data-tone", "destructive");
 		await user.click(screen.getByTestId("export-again"));
 		await user.click(screen.getByTestId("export-meeting"));
 		expect(callsTo(harness.transport, "meeting.reexport")).toHaveLength(2);
@@ -297,6 +388,39 @@ describe("MeetingDetail", () => {
 		});
 		await user.click(screen.getByTestId("reveal-export"));
 		expect(callsTo(harness.transport, "meeting.revealExport")).toHaveLength(1);
+	});
+
+	it("toasts once an export the user asked for has run", async () => {
+		const user = userEvent.setup();
+		const detail = await fixtureDetail();
+		const harness = await createBridgeHarness("scenario=export-failed");
+		renderWithBridge(
+			<>
+				<MeetingDetail />
+				<ToastRegion />
+			</>,
+			harness,
+		);
+		await user.click(screen.getByTestId("export-again"));
+		const publish = (status: "pending" | "delivered") =>
+			act(() => {
+				harness.transport.emit("meeting.detail", {
+					...detail,
+					export: {
+						status,
+						message:
+							status === "pending" ? "Exporting…" : "Obsidian · Exported 10:02",
+						canReexport: true,
+						canReveal: status === "delivered",
+					},
+				} satisfies MeetingDetailSnapshot);
+			});
+		publish("pending");
+		expect(screen.queryByTestId("toast")).not.toBeInTheDocument();
+		publish("delivered");
+		expect(await screen.findByTestId("toast")).toHaveTextContent(
+			"Exported.Obsidian · Exported 10:02",
+		);
 	});
 
 	it("lets the template be changed from the actions menu", async () => {
@@ -341,34 +465,56 @@ describe("MeetingDetail", () => {
 });
 
 describe("MeetingDetail header", () => {
-	it("shows Stop in the header only while this meeting is being recorded", async () => {
-		const user = userEvent.setup();
+	it("marks the header live, without a second Stop, while this meeting is being recorded", async () => {
 		const harness = await createBridgeHarness("scenario=recording");
 		renderWithBridge(<MeetingDetail />, harness);
-		const stop = screen.getByTestId("header-stop");
-		expect(stop).toHaveTextContent(/^Stop\s*12:3\d$/);
-		await user.click(stop);
-		expect(callsTo(harness.transport, "recording.stop")).toHaveLength(1);
+		const live = screen.getByTestId("header-live");
+		expect(live).toHaveTextContent(/^Recording\s*12:3\d$/);
+		expect(live.closest("button")).toBeNull();
+		// Live: no finished duration on the meta line.
+		const meta = screen.getByTestId("meeting-meta");
+		expect(meta.children).toHaveLength(2);
+		expect(meta).not.toHaveTextContent("45:38");
+		expect(
+			screen.queryByRole("button", { name: /^Stop/ }),
+		).not.toBeInTheDocument();
+		// Nothing to export yet: no export line in the footer.
+		expect(screen.getByTestId("meeting-footer")).toBeInTheDocument();
+		expect(screen.queryByTestId("export-status")).not.toBeInTheDocument();
 	});
 
-	it("keeps Stop out of the header when another meeting records", async () => {
+	it("draws no footer while processing without a keep switch", async () => {
+		const scenario = applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams("scenario=processing"),
+		)["meeting.detail"] as MeetingDetailSnapshot;
+		const harness = await createBridgeHarness("scenario=processing", {
+			"meeting.detail": {
+				...scenario,
+				retention: { ...scenario.retention, showsKeepToggle: false },
+			} satisfies MeetingDetailSnapshot,
+		});
+		renderWithBridge(<MeetingDetail />, harness);
+		expect(await screen.findByTestId("meeting-title")).toBeInTheDocument();
+		expect(screen.queryByTestId("meeting-footer")).not.toBeInTheDocument();
+	});
+
+	it("keeps the live mark out of the header when another meeting records", async () => {
 		const live = (await loadFixtureSnapshots())["recording.live"] as object;
 		const harness = await createBridgeHarness("", {
 			recording: { ...live, meetingID: "00000000-0000-0000-0000-000000000099" },
 		});
 		renderWithBridge(<MeetingDetail />, harness);
-		expect(screen.queryByTestId("header-stop")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("header-live")).not.toBeInTheDocument();
 	});
 
-	it("disables Stop and reads Stopping while the recorder winds down", async () => {
+	it("reads Stopping in the header while the recorder winds down", async () => {
 		const live = (await loadFixtureSnapshots())["recording.live"] as object;
 		const harness = await createBridgeHarness("", {
 			recording: { ...live, state: "stopping" },
 		});
 		renderWithBridge(<MeetingDetail />, harness);
-		const stop = screen.getByTestId("header-stop");
-		expect(stop).toBeDisabled();
-		expect(stop).toHaveTextContent(/^Stopping…$/);
+		expect(screen.getByTestId("header-live")).toHaveTextContent(/^Stopping…$/);
 	});
 
 	it("names speakers from one header button that reads how far naming got", async () => {

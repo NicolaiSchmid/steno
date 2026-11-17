@@ -17,6 +17,10 @@ export function checkPaint(
 	file: string,
 	colours: Set<string>,
 ): { file: string; line: number; token: string; problem: string }[];
+export function checkAnnounce(
+	source: string,
+	file: string,
+): { file: string; line: number; token: string }[];
 export function run(options: {
 	root: string;
 	ui: string;
@@ -27,4 +31,5 @@ export function run(options: {
 	uiNames: Set<string>;
 	findings: { file: string; line: number; name: string; token: string }[];
 	paint: { file: string; line: number; token: string; problem: string }[];
+	announce: { file: string; line: number; token: string }[];
 };

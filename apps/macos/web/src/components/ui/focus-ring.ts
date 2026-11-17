@@ -10,3 +10,14 @@ export const focusRingClass =
 /** The same ring for a frame whose focus is on a field inside it. */
 export const focusWithinRingClass =
 	"focus-within:ring-2 focus-within:ring-focus focus-within:ring-offset-2 focus-within:ring-offset-surface";
+
+/**
+ * The focus style for a row in a menu or a select's list, where the rows
+ * touch and a ring outside would sit on the next row: the same 2 px
+ * `--focus` line drawn just inside the row, over its highlight (the accent
+ * fill, or the selected fill of a select's chosen option). Both are measured
+ * at 3:1 on the popover. Only for keyboard focus; the fill alone follows the
+ * pointer.
+ */
+export const focusInsetClass =
+	"focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-solid focus-visible:-outline-offset-2";

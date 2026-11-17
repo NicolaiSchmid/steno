@@ -100,6 +100,7 @@ const REPLY_ALIASES: &[(&str, &[&str])] = &[
         &[
             "ui.confirmDestructive",
             "meetings.delete",
+            "meeting.processAgain",
             "meeting.deleteRecordingNow",
             "meeting.setKeepAudio",
             "settings.iphone.pairAgain",

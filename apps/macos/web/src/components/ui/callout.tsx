@@ -8,11 +8,17 @@ import { cn } from "@/lib/cn";
  * title alone, as the recorder's joined warnings are), and the actions at
  * the trailing edge. When the text would fall under 360 px the actions wrap
  * onto their own line. The `sm` size is the sidebar's: smaller type, the
- * actions always on their own line under the text. The variant colours the
- * surface, the icon slot and the description slot from the root.
+ * actions always on their own line under the text. One rule for every
+ * tone: the variant colours the surface, the icon and the title; the
+ * description is in the foreground colour, measured on every tint.
+ *
+ * The callout is a polite live region, so it is read when it appears. One
+ * whose words change while it shows (a countdown) passes `announcement`
+ * instead: that sentence, which must not change, is what is read, once,
+ * and the visible callout stays out of the live region.
  */
 export const calloutVariants = cva(
-	"flex flex-wrap items-center rounded-surface border",
+	"flex flex-wrap items-center rounded-surface border text-foreground",
 	{
 		variants: {
 			size: {
@@ -22,17 +28,15 @@ export const calloutVariants = cva(
 			variant: {
 				/** A quiet notice on the card surface (T3's default alert). */
 				default:
-					"border-border bg-card text-foreground [&_[data-slot=icon]]:text-muted-foreground",
+					"border-border bg-card [&_[data-slot=icon]]:text-muted-foreground",
 				warning:
-					"border-warning-border bg-warning-surface text-warning-foreground [&_[data-slot=description]]:text-warning-foreground [&_[data-slot=icon]]:text-warning",
-				info: "border-info-border bg-info-surface text-foreground [&_[data-slot=icon]]:text-info",
-				/** The recorder's own notices (the auto-stop countdown): the default look, the icon in the live red. */
-				live: "border-border bg-card text-foreground [&_[data-slot=icon]]:text-live",
+					"border-warning-border bg-warning-surface [&_[data-slot=icon]]:text-warning [&_[data-slot=title]]:text-warning-foreground",
+				info: "border-info-border bg-info-surface [&_[data-slot=icon]]:text-info [&_[data-slot=title]]:text-info-foreground",
 				/** A connected or saved state ("Using ChatGPT as …", a passed test). */
 				success:
-					"border-success-border bg-success-surface text-success-foreground [&_[data-slot=icon]]:text-success",
+					"border-success-border bg-success-surface [&_[data-slot=icon]]:text-success [&_[data-slot=title]]:text-success-foreground",
 				destructive:
-					"border-destructive-border bg-destructive-surface text-destructive-foreground [&_[data-slot=description]]:text-destructive-foreground [&_[data-slot=icon]]:text-destructive",
+					"border-destructive-border bg-destructive-surface [&_[data-slot=icon]]:text-destructive [&_[data-slot=title]]:text-destructive-foreground",
 			},
 		},
 		defaultVariants: { size: "md", variant: "default" },
@@ -51,7 +55,7 @@ const calloutLeadVariants = cva("flex min-w-0 items-center", {
 });
 
 /** In `sm` the title and text stack; in `md` they run on as one sentence. */
-const calloutDescriptionVariants = cva("text-muted-foreground", {
+const calloutDescriptionVariants = cva("text-foreground", {
 	variants: {
 		size: {
 			md: "",
@@ -79,6 +83,11 @@ export interface CalloutProps
 	description?: ReactNode;
 	/** Buttons, rendered after the text. */
 	actions?: ReactNode;
+	/**
+	 * Read once in place of the callout, for one whose visible words change
+	 * while it shows. Fixed text: a change is read again.
+	 */
+	announcement?: string;
 }
 
 export function Callout({
@@ -89,20 +98,28 @@ export function Callout({
 	title,
 	description,
 	actions,
+	announcement,
 	...props
 }: CalloutProps) {
 	return (
 		<div
 			className={cn(calloutVariants({ size, variant }), className)}
-			role="status"
+			role={announcement === undefined ? "status" : undefined}
 			{...props}
 		>
+			{announcement === undefined ? null : (
+				<span className="sr-only" role="status">
+					{announcement}
+				</span>
+			)}
 			<span className={calloutLeadVariants({ size })}>
 				<span className="flex shrink-0" data-slot="icon">
 					{icon}
 				</span>
 				<span className="min-w-0">
-					<span className="font-medium">{title}</span>
+					<span className="font-medium" data-slot="title">
+						{title}
+					</span>
 					{description ? (
 						<>
 							{" "}

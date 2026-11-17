@@ -41,7 +41,8 @@ string_enum! {
         MeetingRerunSummary = "meeting.rerunSummary",
         MeetingReexport = "meeting.reexport",
         /// "Process again": the selected failed meeting runs from the start
-        /// with its recording.
+        /// with its recording. Replies `ConfirmReply`: `confirmed` only when
+        /// a run started, not on a declined prompt or a refusal.
         MeetingProcessAgain = "meeting.processAgain",
         MeetingSetKeepAudio = "meeting.setKeepAudio",
         MeetingDeleteRecordingNow = "meeting.deleteRecordingNow",
