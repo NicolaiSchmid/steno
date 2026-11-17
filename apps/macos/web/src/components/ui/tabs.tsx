@@ -50,7 +50,7 @@ export function TabsTab({
 	return (
 		<BaseTabs.Tab
 			className={cn(
-				"inline-flex h-6 min-w-0 cursor-default select-none items-center gap-1 rounded-md px-2.5 font-medium text-muted-foreground text-xs outline-none",
+				"inline-flex h-6 min-w-0 cursor-default select-none items-center gap-1 rounded-md px-2.5 text-label text-muted-foreground outline-none",
 				"transition-[background-color,color,box-shadow] duration-(--duration-functional) ease-standard",
 				"hover:bg-tab-hover hover:text-foreground",
 				focusRingClass,
@@ -61,7 +61,7 @@ export function TabsTab({
 		>
 			{children}
 			{count !== undefined ? (
-				<small className="font-semibold text-3xs text-muted-foreground tabular-nums">
+				<small className="text-caption text-muted-foreground tabular-nums">
 					{count}
 				</small>
 			) : null}

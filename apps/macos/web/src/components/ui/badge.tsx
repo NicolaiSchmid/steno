@@ -8,7 +8,7 @@ import { cn } from "@/lib/cn";
  * the 400 in dark); `sm` is the 16 px counter.
  */
 export const badgeVariants = cva(
-	"inline-flex h-4.5 min-w-4.5 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-sm border border-transparent px-[5px] font-medium text-xs leading-none [&_svg]:size-3 [&_svg]:shrink-0",
+	"inline-flex h-4.5 min-w-4.5 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-sm border border-transparent px-[5px] text-caption leading-none [&_svg]:size-3 [&_svg]:shrink-0",
 	{
 		variants: {
 			variant: {
@@ -18,7 +18,7 @@ export const badgeVariants = cva(
 			},
 			size: {
 				md: "",
-				sm: "h-4 min-w-4 rounded-xs px-1 text-3xs",
+				sm: "h-4 min-w-4 rounded-xs px-1 text-caption",
 			},
 		},
 		defaultVariants: { variant: "outline", size: "md" },

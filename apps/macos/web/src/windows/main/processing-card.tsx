@@ -52,7 +52,7 @@ export function ProcessingCard({ state, entry }: ProcessingCardProps) {
 			data-testid="processing-card"
 			padding="lg"
 		>
-			<div className="flex items-baseline justify-between gap-3 text-sm">
+			<div className="flex items-baseline justify-between gap-3 text-body">
 				<span className="font-medium" data-testid="processing-stage">
 					{title}
 				</span>
@@ -71,7 +71,7 @@ export function ProcessingCard({ state, entry }: ProcessingCardProps) {
 				max={1}
 				value={entry ? entry.fraction : null}
 			/>
-			<p className="my-0 text-muted-foreground text-xs">
+			<p className="my-0 text-meta text-muted-foreground">
 				Audio stays on this {words.computer}. This usually takes a minute or
 				two.
 			</p>

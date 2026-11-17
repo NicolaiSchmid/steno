@@ -72,7 +72,7 @@ export function DialogTitle({
 }: ComponentProps<typeof BaseDialog.Title> & { className?: string }) {
 	return (
 		<BaseDialog.Title
-			className={cn("m-0 font-semibold text-xl leading-none", className)}
+			className={cn("m-0 text-headline", className)}
 			{...props}
 		/>
 	);
@@ -84,7 +84,7 @@ export function DialogDescription({
 }: ComponentProps<typeof BaseDialog.Description> & { className?: string }) {
 	return (
 		<BaseDialog.Description
-			className={cn("m-0 text-muted-foreground text-sm", className)}
+			className={cn("m-0 text-body text-muted-foreground", className)}
 			{...props}
 		/>
 	);

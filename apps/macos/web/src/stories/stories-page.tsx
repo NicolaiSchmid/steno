@@ -122,6 +122,18 @@ function SwitchStory() {
 	);
 }
 
+/** The type scale (src/theme.css), largest first, each named in its own size. */
+const TYPE_SCALE = [
+	["text-display", "Display 22/30: page and meeting titles"],
+	["text-headline", "Headline 18/26: section titles, summary headings"],
+	["text-reading", "Reading 15/24: the summary, transcript and notes"],
+	["text-title", "Title 14/20: row titles and labels"],
+	["text-body", "Body 14/22: descriptions and settings text"],
+	["text-label", "Label 13/20: sidebar rows, buttons and tabs"],
+	["text-meta", "Meta 12/16: list metadata and times"],
+	["text-caption", "Caption 11/14: badges and counters"],
+] as const;
+
 /** Every component in every variant, light beside dark. */
 export function StoriesPage() {
 	const countdown = <span className="font-mono tabular-nums">0:42</span>;
@@ -130,7 +142,22 @@ export function StoriesPage() {
 			className="mx-auto flex max-w-[1160px] flex-col gap-8 p-8 text-foreground"
 			data-testid="stories"
 		>
-			<h1 className="m-0 font-semibold text-xl">Steno ui</h1>
+			<h1 className="m-0 text-display">Steno ui</h1>
+
+			<ThemePair title="Type: the scale, then muted">
+				{() => (
+					<div className="flex flex-col gap-2">
+						{TYPE_SCALE.map(([size, words]) => (
+							<p className={`m-0 ${size}`} key={size}>
+								{words}
+							</p>
+						))}
+						<p className="m-0 text-meta text-muted-foreground">
+							Meta in the muted colour: hierarchy without opacity
+						</p>
+					</div>
+				)}
+			</ThemePair>
 
 			<ThemePair title="Button: the seven variants">
 				{() => (
@@ -592,18 +619,13 @@ export function StoriesPage() {
 						/>
 						<Callout
 							actions={
-								<>
-									<Button size="sm" variant="primary">
-										Set up
-									</Button>
-									<Button size="sm" variant="ghost">
-										Not now
-									</Button>
-								</>
+								<Button size="sm" variant="outline">
+									Open System Settings
+								</Button>
 							}
-							description="Choose an AI service and Steno writes a summary and tasks for every meeting. Only the transcript text is sent."
-							icon={<SparklesIcon aria-hidden="true" />}
-							title="Summaries are off."
+							description="Allow it in System Settings, then record again."
+							icon={<MicOffIcon aria-hidden="true" />}
+							title="Steno can't use the microphone."
 							variant="warning"
 						/>
 						<Callout

@@ -60,7 +60,7 @@ allowed). Interactive elements carry the
 `speaker-picker-<uuid>`, `processing-card`, `empty-detail-title`, …) so the
 screens and `WebShellTests` find them by the same names.
 
-## Two rules
+## The rules
 
 **Offline.** The bundle runs from the app with `connect-src 'none'`. No CDN,
 no fetch. The type is Geist and Geist Mono (400, 500, 600 and the mono 400,
@@ -75,6 +75,14 @@ nothing but the SVG namespace.
 `min-h-0`); colour, type, radius, shadow and padding never appear at a call
 site. `pnpm lint:ui` (`scripts/check-ui-restyle.mjs`) fails the build when
 they do. Tokens live in `src/theme.css`; motion in `src/lib/motion.ts`.
+
+**One type scale.** Eight sizes in `src/theme.css` (`text-display` 22/30,
+`text-headline` 18/26, `text-reading` 15/24, `text-title` 14/20,
+`text-body` 14/22, `text-label` 13/20, `text-meta` 12/16, `text-caption`
+11/14), each with its weight and tracking; `pnpm lint:ui` rejects
+Tailwind's own sizes and arbitrary ones. Hierarchy comes from size, weight
+and the muted colour, never opacity. `cn()` knows the names, so a size and
+a colour do not merge away.
 
 **Measured contrast.** `src/theme/contrast.test.ts` reads `src/theme.css`
 and measures, in light and dark, every text token at 4.5:1 and every

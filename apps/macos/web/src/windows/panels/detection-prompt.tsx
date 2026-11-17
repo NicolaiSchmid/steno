@@ -71,12 +71,12 @@ export function DetectionPrompt({
 		>
 			<div className="flex min-w-0 flex-col gap-0.5">
 				<p
-					className="truncate font-semibold text-foreground text-sm"
+					className="truncate text-foreground text-title"
 					data-testid="prompt-title"
 				>
 					{request.appName} opened the microphone
 				</p>
-				<p className="truncate text-muted-foreground text-xs">
+				<p className="truncate text-meta text-muted-foreground">
 					Record with Steno? Audio stays on this device.
 				</p>
 			</div>

@@ -206,6 +206,13 @@
 	--control: var(--popover);
 	--control-hover: color-mix(in srgb, var(--canvas-accent) 50%, transparent);
 	--primary-hover: color-mix(in srgb, var(--primary) 90%, transparent);
+	/*
+	 * A disabled primary ("Asking…") steps down to the selected-row fill with
+	 * muted words instead of fading the primary, which left a bright grey
+	 * block in dark heavier than the enabled outline button.
+	 */
+	--primary-disabled: var(--canvas-row-selected);
+	--primary-disabled-foreground: var(--muted-foreground);
 	/* The deeper red in light, the paler in dark: the fill's text keeps 4.5. */
 	--destructive-hover: var(--destructive-foreground);
 	/* The dashed button's outline: the fields' 3:1, the focus colour on hover. */
@@ -380,6 +387,8 @@
 	--color-control: var(--control);
 	--color-control-hover: var(--control-hover);
 	--color-primary-hover: var(--primary-hover);
+	--color-primary-disabled: var(--primary-disabled);
+	--color-primary-disabled-foreground: var(--primary-disabled-foreground);
 	--color-destructive-hover: var(--destructive-hover);
 	--color-dashed-outline: var(--dashed-outline);
 	--color-dashed-outline-hover: var(--dashed-outline-hover);
@@ -406,14 +415,44 @@
 		sans-serif;
 	--font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
-	/* The two dense tiers under `text-xs`: metadata at 11, counters at 10. */
-	--text-2xs: 0.6875rem;
-	--text-2xs--line-height: calc(1 / 0.6875);
-	--text-3xs: 0.625rem;
-	--text-3xs--line-height: calc(0.875 / 0.625);
-	/* Long-form content (notes, summaries): 15 px on a 1.6 line height. */
+	/*
+	 * The type scale, set for Geist; nothing else sizes text (`pnpm lint:ui`
+	 * rejects Tailwind's own sizes). Hierarchy comes from size, weight and
+	 * `--muted-foreground`, never opacity. Sizes, line heights and tracking
+	 * are in rem so a larger text size scales all three.
+	 */
+	--text-*: initial;
+	/* Page and meeting titles. */
+	--text-display: 1.375rem;
+	--text-display--line-height: 1.875rem;
+	--text-display--font-weight: 600;
+	--text-display--letter-spacing: -0.015625rem;
+	/* Settings section titles, summary headings, dialog titles. */
+	--text-headline: 1.125rem;
+	--text-headline--line-height: 1.625rem;
+	--text-headline--font-weight: 600;
+	/* Long-form content: the summary, transcript and notes. */
 	--text-reading: 0.9375rem;
-	--text-reading--line-height: 1.6;
+	--text-reading--line-height: 1.5rem;
+	/* Row titles and labels. */
+	--text-title: 0.875rem;
+	--text-title--line-height: 1.25rem;
+	--text-title--font-weight: 500;
+	--text-title--letter-spacing: -0.009375rem;
+	/* Descriptions and settings text; the page's default. */
+	--text-body: 0.875rem;
+	--text-body--line-height: 1.375rem;
+	/* Sidebar rows, buttons and tabs. */
+	--text-label: 0.8125rem;
+	--text-label--line-height: 1.25rem;
+	--text-label--font-weight: 500;
+	/* List metadata, times, hints. */
+	--text-meta: 0.75rem;
+	--text-meta--line-height: 1rem;
+	/* Badges and counters. */
+	--text-caption: 0.6875rem;
+	--text-caption--line-height: 0.875rem;
+	--text-caption--font-weight: 500;
 
 	--radius-*: initial;
 	--radius-xs: calc(var(--radius) - 6px);
@@ -492,7 +531,7 @@
 	}
 
 	html {
-		/* The rem base: `text-sm` is the 14 px UI size, `text-xs` the 12 px tier. */
+		/* The rem base: `text-body` is the 14 px UI size, `text-meta` the 12 px tier. */
 		font-size: 16px;
 	}
 
@@ -509,8 +548,8 @@
 		background: transparent;
 		color: var(--foreground);
 		font-family: var(--font-sans);
-		font-size: var(--text-sm);
-		line-height: var(--text-sm--line-height);
+		font-size: var(--text-body);
+		line-height: var(--text-body--line-height);
 		-webkit-font-smoothing: antialiased;
 		overscroll-behavior: none;
 	}

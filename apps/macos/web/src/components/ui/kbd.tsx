@@ -4,7 +4,7 @@ import { cn } from "@/lib/cn";
 
 /** A key hint: a filled 20 px chip without a border, set in the UI font. */
 export const kbdVariants = cva(
-	"inline-flex shrink-0 select-none items-center justify-center gap-1 font-medium font-sans text-muted-foreground text-xs leading-none",
+	"inline-flex shrink-0 select-none items-center justify-center gap-1 font-medium font-sans text-meta text-muted-foreground leading-none",
 	{
 		variants: {
 			variant: {

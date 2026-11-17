@@ -249,6 +249,20 @@ function checks(mode: Mode): Check[] {
 		);
 	}
 
+	// The disabled primary: muted words on its fill over each surface, and
+	// the fill a step off the canvas so it still reads as a button.
+	on(
+		"--primary-disabled-foreground",
+		(["sidebar", "canvas", "card", "popover"] as const).map((surface) => ({
+			name: `--primary-disabled over ${surface}`,
+			colour: layers(
+				token(mode, "--surface", surface),
+				token(mode, "--primary-disabled", surface),
+			),
+		})),
+		TEXT,
+	);
+
 	// Non-text: outlines and the switch's off track, the dashed button's
 	// outline and its hover, focus, sidebar icons.
 	on("--outline", everyHost(mode), NON_TEXT);
@@ -300,6 +314,11 @@ function checks(mode: Mode): Check[] {
 			minimum: STEP,
 		});
 	step("sidebar to canvas", token(mode, "--sidebar"), canvas);
+	step(
+		"canvas to --primary-disabled",
+		canvas,
+		layers(canvas, token(mode, "--primary-disabled")),
+	);
 	for (const raised of ["--card", "--popover"]) {
 		if (mode === "light") {
 			// Exempt: the light card and popover are the canvas white in a hairline box.

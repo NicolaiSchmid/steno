@@ -29,7 +29,7 @@ export function SectionPage({
 	return (
 		<div className="flex flex-col gap-8" data-testid={`section-${id}`}>
 			<p
-				className="m-0 text-muted-foreground text-sm"
+				className="m-0 text-body text-muted-foreground"
 				data-testid={`section-purpose-${id}`}
 			>
 				{info.purpose(words)}

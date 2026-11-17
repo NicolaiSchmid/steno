@@ -13,9 +13,9 @@ export const avatarVariants = cva(
 	{
 		variants: {
 			size: {
-				sm: "size-4.5 text-[9px]",
-				md: "size-6 text-[10px]",
-				lg: "size-8 text-xs",
+				sm: "size-4.5 text-caption",
+				md: "size-6 text-caption",
+				lg: "size-8 text-meta",
 			},
 			tone: {
 				0: "bg-p1-surface text-p1",

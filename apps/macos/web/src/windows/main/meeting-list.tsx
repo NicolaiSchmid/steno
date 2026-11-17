@@ -226,7 +226,7 @@ export function MeetingList() {
 			onKeyDown={onKeyDown}
 		>
 			<HeaderRow inset="sm">
-				<h1 className="m-0 min-w-0 truncate font-medium text-foreground text-sm">
+				<h1 className="m-0 min-w-0 truncate text-foreground text-title">
 					Meetings
 				</h1>
 			</HeaderRow>
@@ -242,7 +242,7 @@ export function MeetingList() {
 					variant="row"
 				/>
 				{list?.error ? (
-					<p className="my-0 px-2 text-destructive-foreground text-xs">
+					<p className="my-0 px-2 text-destructive-foreground text-meta">
 						{list.error}
 					</p>
 				) : null}
@@ -388,17 +388,17 @@ function MeetingRowView({
 					ref={row}
 					type="button"
 				>
-					<div className="flex h-5 min-w-0 items-center gap-1.5 text-xs [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-icon">
+					<div className="flex h-5 min-w-0 items-center gap-1.5 text-meta [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-icon">
 						{SOURCE[meeting.source].icon}
 						<span className="min-w-0 flex-1 truncate font-medium text-muted-foreground">
 							{formatSource(meeting.source)}
 						</span>
 						<RowStatus live={live} meeting={meeting} />
 					</div>
-					<div className="mt-1 truncate font-medium text-foreground text-sm">
+					<div className="mt-1 truncate text-foreground text-title">
 						{meeting.title}
 					</div>
-					<div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
+					<div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
 						<span className="min-w-0 flex-1 truncate">
 							{rowPreview(meeting, progress, live)}
 						</span>

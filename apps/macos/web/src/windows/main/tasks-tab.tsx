@@ -22,13 +22,13 @@ export function TaskCard({ task }: { task: Task }) {
 			/>
 			<span
 				className={cn(
-					"min-w-0 flex-1 text-sm leading-5",
+					"min-w-0 flex-1 text-body",
 					task.done && "text-muted-foreground line-through",
 				)}
 			>
 				{task.text}
 				{meta.length > 0 || task.priority === "high" ? (
-					<small className="mt-0.5 flex items-center gap-2 text-muted-foreground text-xs no-underline">
+					<small className="mt-0.5 flex items-center gap-2 text-meta text-muted-foreground no-underline">
 						{meta.length > 0 ? <span>{meta.join(" · ")}</span> : null}
 						{task.priority === "high" ? (
 							<Badge size="sm" variant="warning">
