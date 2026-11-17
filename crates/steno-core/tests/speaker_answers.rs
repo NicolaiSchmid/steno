@@ -585,8 +585,8 @@ fn a_v5_database_reads_every_voice_as_not_dismissed() {
     transaction
         .execute_batch("CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
         .unwrap();
-    let (latest, older) = migrator::MIGRATIONS.split_last().unwrap();
-    assert_eq!(latest.identifier, "v6");
+    let older = &migrator::MIGRATIONS[..5];
+    assert_eq!(older.last().unwrap().identifier, "v5");
     for migration in older {
         transaction.execute_batch(migration.sql).unwrap();
         transaction

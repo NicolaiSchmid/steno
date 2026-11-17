@@ -321,12 +321,17 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     /// Not a person: out of the counts and voice memory, its turns read
     /// "Not a person".
     public var dismissed: Bool
+    /// The voices combined into this one since step 4's migration, each of
+    /// which "Separate again" makes its own voice again. A combine from
+    /// before it left no such voice.
+    public var combined: [CombinedVoice]
 
     public init(
       id: UUID, clusterLabel: String, displayName: String, assignment: Assignment,
       personID: UUID? = nil, email: String? = nil, suggestionName: String? = nil,
       suggestionStrength: VoiceStrength? = nil, quote: String? = nil, context: String? = nil,
-      colorIndex: Int, hasClip: Bool, isPlaying: Bool, dismissed: Bool
+      colorIndex: Int, hasClip: Bool, isPlaying: Bool, dismissed: Bool,
+      combined: [CombinedVoice] = []
     ) {
       self.id = id
       self.clusterLabel = clusterLabel
@@ -342,6 +347,27 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
       self.hasClip = hasClip
       self.isPlaying = isPlaying
       self.dismissed = dismissed
+      self.combined = combined
+    }
+  }
+
+  /// A voice combined into another: its own clip and words, kept so the
+  /// combine can be undone.
+  public struct CombinedVoice: Codable, Sendable, Equatable {
+    /// The voice's own speaker id, which `speakers.play` and
+    /// `speakers.separate` take.
+    public var id: UUID
+    public var clusterLabel: String
+    public var quote: String?
+    public var hasClip: Bool
+    public var isPlaying: Bool
+
+    public init(id: UUID, clusterLabel: String, quote: String?, hasClip: Bool, isPlaying: Bool) {
+      self.id = id
+      self.clusterLabel = clusterLabel
+      self.quote = quote
+      self.hasClip = hasClip
+      self.isPlaying = isPlaying
     }
   }
 
@@ -384,10 +410,18 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     public var startSeconds: Double
     public var endSeconds: Double
     public var text: String
+    /// Every segment the turn folds together, in time order; the first is
+    /// `id`. `transcript.setTurnSpeaker` and `transcript.playTurn` take them.
+    public var segmentIDs: [UUID]
+    /// The turn's own audio plays (`transcript.playTurn`).
+    public var isPlaying: Bool
+    /// The turn's audio could not be played after `transcript.playTurn`
+    /// replied, until the next play or stop.
+    public var playFailed: Bool
 
     public init(
       id: UUID, speakerID: UUID?, speakerName: String, startSeconds: Double, endSeconds: Double,
-      text: String
+      text: String, segmentIDs: [UUID]? = nil, isPlaying: Bool = false, playFailed: Bool = false
     ) {
       self.id = id
       self.speakerID = speakerID
@@ -395,6 +429,9 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
       self.startSeconds = startSeconds
       self.endSeconds = endSeconds
       self.text = text
+      self.segmentIDs = segmentIDs ?? [id]
+      self.isPlaying = isPlaying
+      self.playFailed = playFailed
     }
   }
 
@@ -486,6 +523,9 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
   public var summaryStatus: SummaryStatus
   public var summary: [SummarySection]
   public var transcript: [Turn]
+  /// Counts the meeting's transcripts: Process again writes a new one, and a
+  /// paragraph move made against an older one is refused.
+  public var transcriptGeneration: Int
   public var tasks: [Task]
   public var decisions: [String]
   public var notes: String
@@ -503,7 +543,8 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     endReason: String? = nil, audioWarning: String? = nil, tags: [String], tab: Tab,
     retention: Retention, speakers: [Speaker],
     templates: [Template], templateID: String, summaryStatus: SummaryStatus,
-    summary: [SummarySection], transcript: [Turn], tasks: [Task], decisions: [String],
+    summary: [SummarySection], transcript: [Turn], transcriptGeneration: Int = 0, tasks: [Task],
+    decisions: [String],
     notes: String, export: Export, canProcessAgain: Bool, canRerunSummary: Bool, isBusy: Bool,
     error: String? = nil
   ) {
@@ -526,6 +567,7 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     self.summaryStatus = summaryStatus
     self.summary = summary
     self.transcript = transcript
+    self.transcriptGeneration = transcriptGeneration
     self.tasks = tasks
     self.decisions = decisions
     self.notes = notes

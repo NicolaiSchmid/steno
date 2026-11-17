@@ -12,6 +12,9 @@ extension MeetingStore {
     }
   }
 
+  /// The meeting as it reads: its root speakers only (a voice combined into
+  /// another is not one of its own), and every segment under the speaker it
+  /// resolves to (`speakerRoots`).
   static func exportRows(meetingID: UUID, _ db: Database) throws -> MeetingExport? {
     guard let meeting = try meetingRow(meetingID, db)?.meeting else { return nil }
     let key = meetingID.uuidString
@@ -24,15 +27,21 @@ extension MeetingStore {
     let speakers =
       try SpeakerRow
       .filter(SpeakerRow.Columns.meetingID == key)
+      .filter(SpeakerRow.Columns.mergedInto == nil)
       .order(SpeakerRow.Columns.clusterLabel, SpeakerRow.Columns.id)
       .fetchAll(db)
       .map(\.speaker)
+    let roots = try speakerRoots(meetingID: meetingID, db)
     let segments =
       try TranscriptSegmentRow
       .filter(TranscriptSegmentRow.Columns.meetingID == key)
       .order(TranscriptSegmentRow.Columns.start, TranscriptSegmentRow.Columns.id)
       .fetchAll(db)
-      .map(\.segment)
+      .map { row in
+        var segment = row.segment
+        segment.speakerID = segment.speakerID.map { roots[$0] ?? $0 }
+        return segment
+      }
     let tasks =
       try MeetingTaskRow
       .filter(MeetingTaskRow.Columns.meetingID == key)

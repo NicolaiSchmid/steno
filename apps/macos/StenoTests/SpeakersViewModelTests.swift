@@ -379,4 +379,99 @@ final class SpeakersViewModelTests: XCTestCase {
     try await model.clear(speakerID: SampleData.speakerTwoID)
     XCTAssertEqual(writes, 0)
   }
+
+  // MARK: - Combine, Separate again and This paragraph
+
+  private func refreshWithCombined(_ model: SpeakersViewModel, _ environment: AppEnvironment)
+    async throws
+  {
+    let store = environment.store
+    model.update(
+      export: try await store.export(meetingID: SampleData.meetingID),
+      combined: try await store.mergedSpeakers(meetingID: SampleData.meetingID))
+  }
+
+  /// Naming Speaker 2 Nicolai combines it into Speaker 1, where it nests
+  /// (with its own clip's words when they lie inside the clip, which the
+  /// sample's do not); Separate again gives it back, and a second
+  /// Separate is refused by the store.
+  func testCombiningNestsTheVoiceAndSeparateGivesItBack() async throws {
+    let environment = try await TestSupport.environment()
+    let model = try await makeModel(environment)
+    var writes = 0
+    model.onWrite = { writes += 1 }
+
+    try await model.select(
+      SpeakerOptions.Option(kind: .person(SampleData.persons()[1])), for: SampleData.speakerTwoID,
+      combine: true)
+    try await refreshWithCombined(model, environment)
+    XCTAssertEqual(model.rows.map(\.id), [SampleData.speakerOneID])
+    let combined = try XCTUnwrap(model.combinedVoices(into: SampleData.speakerOneID).first)
+    XCTAssertEqual(combined.id, SampleData.speakerTwoID)
+    XCTAssertNil(
+      combined.excerpt,
+      "its paragraph reaches outside its clip: context, which a combined voice does not show")
+    XCTAssertFalse(combined.canPlay, "the fixture's clip path is not on disk")
+
+    try await model.separate(speakerID: SampleData.speakerTwoID)
+    XCTAssertEqual(writes, 2)
+    try await refreshWithCombined(model, environment)
+    XCTAssertEqual(model.rows.map(\.id), [SampleData.speakerOneID, SampleData.speakerTwoID])
+    XCTAssertTrue(model.combined.isEmpty)
+    do {
+      try await model.separate(speakerID: SampleData.speakerTwoID)
+      XCTFail("a voice that is its own is not separated again")
+    } catch let error as MeetingStoreError {
+      XCTAssertEqual(error, .notCombined(SampleData.speakerTwoID))
+    }
+    XCTAssertEqual(writes, 2)
+  }
+
+  /// "This paragraph" to a new person: the turn moves to a new voice for
+  /// them and the emptied Speaker 2 goes; a move against another
+  /// generation is refused.
+  func testMovingATurnToANewPerson() async throws {
+    let environment = try await TestSupport.environment()
+    let model = try await makeModel(environment)
+    var writes = 0
+    model.onWrite = { writes += 1 }
+    let generation = try await environment.store.transcriptGeneration(
+      meetingID: SampleData.meetingID)
+    let turn = [
+      TurnSegmentMove(
+        segmentID: SampleData.segments()[1].id, shownSpeakerID: SampleData.speakerTwoID)
+    ]
+
+    do {
+      try await model.moveTurn(
+        segments: turn, generation: generation + 1, to: SpeakerOptions.Option(kind: .create("Anna"))
+      )
+      XCTFail("a move against another transcript is refused")
+    } catch let error as MeetingStoreError {
+      XCTAssertEqual(error, .staleTranscript)
+    }
+    XCTAssertEqual(writes, 0)
+
+    try await model.moveTurn(
+      segments: turn, generation: generation, to: SpeakerOptions.Option(kind: .create("Anna")))
+    XCTAssertEqual(writes, 1)
+    try await refresh(model, environment)
+    XCTAssertEqual(model.rows.map(\.displayName), ["Nicolai", "Anna"])
+    XCTAssertEqual(model.rows.last?.speaker.clusterLabel, "Speaker 3")
+    let moved = model.export?.segments.first { $0.id == SampleData.segments()[1].id }
+    XCTAssertEqual(moved?.speakerID, model.rows.last?.id)
+  }
+
+  func testPlayingATurnWithoutTheRecordingThrows() async throws {
+    let environment = try await TestSupport.environment()
+    let model = try await makeModel(environment)
+    let master = try XCTUnwrap(model.export?.audio?.url)
+    try XCTSkipIf(FileManager.default.fileExists(atPath: master.path), "a master on this machine")
+    XCTAssertThrowsError(
+      try model.playTurn(segmentIDs: [SampleData.segments()[0].id], limit: 60)
+    ) { error in
+      XCTAssertEqual(error as? SpeakersViewModel.PlayTurnError, .recordingGone)
+    }
+    XCTAssertNil(model.playingTurn)
+  }
 }

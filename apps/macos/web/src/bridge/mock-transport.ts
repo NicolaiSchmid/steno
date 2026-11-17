@@ -892,8 +892,32 @@ const SPEAKER_ANSWER_SCENARIOS = new Set([
 	"speakers-options-failed",
 ]);
 
+/**
+ * The scenarios that bend how the host answers a move, a separate or a
+ * paragraph's play: the move refused as stale (`speakers-move-stale`),
+ * Separate again refused (`speakers-separate-failed`), and a paragraph
+ * whose audio fails after the host replied (`speakers-play-failed`). Each
+ * starts from `speakers-partly`.
+ */
+const MOVE_ANSWER_SCENARIOS = new Set([
+	"speakers-move-stale",
+	"speakers-separate-failed",
+	"speakers-play-failed",
+]);
+
 /** The host's words for a refused pick (`SelectError::Store`). */
 export const SELECT_FAILURE = "Speaker could not be named: database is locked";
+
+/** The host's words for a move against a transcript that changed. */
+export const STALE_TRANSCRIPT =
+	"The transcript changed. Refresh to see it as it is now.";
+
+/** The host's words for Separate again after the voice's paragraphs moved. */
+export const NOTHING_TO_SEPARATE =
+	"Its paragraphs moved since. Nothing to separate.";
+
+/** What the hosts call a turn without a voice. */
+const NO_VOICE = "Unknown";
 
 /**
  * The selected meeting's speakers bent into a naming state, its turns
@@ -910,8 +934,10 @@ export const SELECT_FAILURE = "Speaker could not be named: database is locked";
  * (the fixture's speakers, no voice's words exactly what its clip plays)
  * and `speakers-last-invitee` (Anna confirmed, so the unnamed voice is the
  * only one left). Without one of these the fixture's own speakers stay:
- * two named, a suggestion and an unnamed voice without a clip;
- * `speakers-partly` keeps them and gives each a paragraph. All but
+ * two named (Nicolai with a voice combined into his), a suggestion and an
+ * unnamed voice without a clip; `speakers-partly` keeps them and gives
+ * each a paragraph, `speakers-no-voice` takes the voice off one paragraph
+ * and `speakers-no-recording` deletes the meeting's recording. All but
  * `speakers-none`, `speakers-me` and `speakers-me-unnamed` spread the
  * turns over every voice (`spread`). Each voice with a clip quotes its
  * first paragraph, as the host quotes its clip; one without a clip, or
@@ -964,7 +990,9 @@ function bendSpeakers(
 	}
 	const scenario = SPEAKER_ANSWER_SCENARIOS.has(requested)
 		? "speakers-none"
-		: requested;
+		: MOVE_ANSWER_SCENARIOS.has(requested)
+			? "speakers-partly"
+			: requested;
 	const confirmed = (speaker: DetailSpeaker, name: string, person: string) => {
 		const { suggestionName: _name, ...rest } = speaker;
 		return {
@@ -985,6 +1013,30 @@ function bendSpeakers(
 	});
 	if (scenario === "speakers-partly" || scenario === "speakers-context") {
 		return spread({ ...detail });
+	}
+	if (scenario === "speakers-no-voice") {
+		const spreadOut = spread({ ...detail });
+		return {
+			...spreadOut,
+			transcript: spreadOut.transcript.map((turn, index) => {
+				if (index !== NO_VOICE_TURN) {
+					return turn;
+				}
+				const { speakerID: _speaker, ...rest } = turn;
+				return { ...rest, speakerName: NO_VOICE };
+			}),
+		};
+	}
+	if (scenario === "speakers-no-recording") {
+		return spread({
+			...detail,
+			retention: {
+				kind: "deleted",
+				keepsAudio: false,
+				showsKeepToggle: false,
+				filesExist: false,
+			},
+		});
 	}
 	if (scenario === "speakers-last-invitee") {
 		return spread(
@@ -1069,6 +1121,7 @@ function bendSpeakers(
 		hasClip: label !== "Me",
 		isPlaying: false,
 		dismissed: false,
+		combined: [],
 	});
 	const me =
 		scenario === "speakers-me"
@@ -1102,11 +1155,14 @@ function mockPersonID(name: string): string {
 	return `00000000-0000-0000-0001-${hash.toString(16).padStart(12, "0")}`;
 }
 const SPREAD_TURNS = 6;
+/** The paragraph `speakers-no-voice` takes the voice off: Nicolai's second. */
+const NO_VOICE_TURN = 4;
 
 /**
  * The meeting's turns repeated to six and handed round its speakers, so
  * every voice, the suggested one too, leads a paragraph; turn IDs keep the
- * fixture's form, numbered on from the last.
+ * fixture's form, numbered on from the last. A turn that keeps its
+ * fixture ID keeps the segments it folds; a repeat is one segment.
  */
 function spread(detail: MeetingDetailSnapshot): MeetingDetailSnapshot {
 	const turns = detail.transcript;
@@ -1121,9 +1177,11 @@ function spread(detail: MeetingDetailSnapshot): MeetingDetailSnapshot {
 		const speaker = speakers[index % speakers.length] as DetailSpeaker;
 		const startSeconds = at;
 		at += turn.endSeconds - turn.startSeconds;
+		const id = `00000000-0000-0000-0000-${(base + index).toString(16).padStart(12, "0")}`;
 		return {
 			...turn,
-			id: `00000000-0000-0000-0000-${(base + index).toString(16).padStart(12, "0")}`,
+			id,
+			segmentIDs: id === turn.id ? turn.segmentIDs : [id],
 			speakerID: speaker.id,
 			speakerName: speaker.displayName,
 			startSeconds,
@@ -1309,9 +1367,27 @@ export function answerSpeakerSelect(
 		);
 	}
 	if (owner) {
+		// The voice nests under the owner's, its own clip and words kept,
+		// so Separate again (`answerSpeakerSeparate`) can bring it back.
+		const nested = {
+			id: speaker.id,
+			clusterLabel: speaker.clusterLabel,
+			...(speaker.quote ? { quote: speaker.quote } : {}),
+			hasClip: speaker.hasClip,
+			isPlaying: false,
+		};
 		return {
 			...detail,
-			speakers: detail.speakers.filter((row) => row.id !== speakerID),
+			speakers: detail.speakers
+				.filter((row) => row.id !== speakerID)
+				.map((row) =>
+					row.id === owner.id
+						? {
+								...row,
+								combined: [...row.combined, ...speaker.combined, nested],
+							}
+						: row,
+				),
 			transcript: detail.transcript.map((turn) =>
 				turn.speakerID === speakerID
 					? { ...turn, speakerID: owner.id, speakerName: owner.displayName }
@@ -1339,6 +1415,217 @@ export function answerSpeakerSelect(
 				? { ...turn, speakerName: option.label }
 				: turn,
 		),
+	};
+}
+
+/** What a combine took away, for Separate again to put back as it was. */
+export interface CombineRecord {
+	speaker: DetailSpeaker;
+	turnIDs: readonly string[];
+}
+
+/**
+ * The record `answerSpeakerSeparate` needs to undo a combine of `params`'
+ * voice in `before`: the voice as it was and the turns it led. None when
+ * the pick does not combine.
+ */
+export function combineRecord(
+	before: MeetingDetailSnapshot,
+	params: unknown,
+): CombineRecord | undefined {
+	const { speakerID } = params as { speakerID: string };
+	const speaker = before.speakers.find((row) => row.id === speakerID);
+	return speaker
+		? {
+				speaker,
+				turnIDs: before.transcript
+					.filter((turn) => turn.speakerID === speakerID)
+					.map((turn) => turn.id),
+			}
+		: undefined;
+}
+
+/**
+ * `speakers.separate` outside the app (Undo and Separate again): the voice
+ * leaves the person's `combined` and is its own row again, as `record`
+ * kept it (its turns back), or unnamed with its clip and words when the
+ * combine predates the page. Refused as `stale` with the host's words
+ * under `speakers-separate-failed`, as `stale` when the voice is not
+ * combined.
+ */
+export function answerSpeakerSeparate(
+	detail: MeetingDetailSnapshot,
+	params: unknown,
+	scenario = "",
+	record?: CombineRecord,
+): MeetingDetailSnapshot {
+	if (scenario === "speakers-separate-failed") {
+		throw new BridgeError("speakers.separate", "stale", NOTHING_TO_SEPARATE);
+	}
+	const { speakerID } = params as { speakerID: string };
+	const owner = detail.speakers.find((row) =>
+		row.combined.some((voice) => voice.id === speakerID),
+	);
+	const voice = owner?.combined.find((row) => row.id === speakerID);
+	if (!owner || !voice) {
+		throw new BridgeError(
+			"speakers.separate",
+			"stale",
+			"This voice is no longer combined.",
+		);
+	}
+	const { quote: _quote, ...restVoice } = voice;
+	const restored: DetailSpeaker = record?.speaker ?? {
+		...restVoice,
+		...(voice.quote ? { quote: voice.quote } : {}),
+		displayName: voice.clusterLabel,
+		assignment: "unknown",
+		colorIndex: personColor(voice.id),
+		dismissed: false,
+		combined: [],
+	};
+	const at = detail.speakers.indexOf(owner);
+	const speakers = detail.speakers.map((row) =>
+		row === owner
+			? {
+					...row,
+					combined: row.combined.filter((entry) => entry.id !== speakerID),
+				}
+			: row,
+	);
+	speakers.splice(at + 1, 0, restored);
+	const turns = new Set(record?.turnIDs ?? []);
+	return {
+		...detail,
+		speakers,
+		transcript: detail.transcript.map((turn) =>
+			turns.has(turn.id)
+				? {
+						...turn,
+						speakerID: restored.id,
+						speakerName: restored.displayName,
+					}
+				: turn,
+		),
+	};
+}
+
+/**
+ * `transcript.setTurnSpeaker` outside the app: refused as `stale` when the
+ * generation or a segment's voice is not what the page sent (and always
+ * under `speakers-move-stale`); otherwise the turns of those segments go
+ * to the meeting's voice confirmed as the person, or to a new voice
+ * ("Speaker N", no clip), and a voice left without a turn goes.
+ */
+export function answerTurnSpeaker(
+	detail: MeetingDetailSnapshot,
+	params: unknown,
+	scenario = "",
+): MeetingDetailSnapshot {
+	const { generation, segments, option } = params as {
+		generation: number;
+		segments: { id: string; speakerID?: string }[];
+		option: SpeakerOption;
+	};
+	const stale = () =>
+		new BridgeError("transcript.setTurnSpeaker", "stale", STALE_TRANSCRIPT);
+	if (
+		scenario === "speakers-move-stale" ||
+		generation !== detail.transcriptGeneration
+	) {
+		throw stale();
+	}
+	const moved = new Set<string>();
+	const left = new Set<string>();
+	for (const segment of segments) {
+		const turn = detail.transcript.find((entry) =>
+			entry.segmentIDs.includes(segment.id),
+		);
+		if (!turn || turn.speakerID !== segment.speakerID) {
+			throw stale();
+		}
+		moved.add(turn.id);
+		if (turn.speakerID) {
+			left.add(turn.speakerID);
+		}
+	}
+	const fold = (text: string) => text.trim().toLowerCase();
+	const personID = option.personID ?? mockPersonID(option.label);
+	const existing = detail.speakers.find(
+		(row) =>
+			row.assignment === "confirmed" &&
+			(row.personID === personID ||
+				(!option.personID && fold(row.displayName) === fold(option.label))),
+	);
+	// The next free label among every voice, combined ones included.
+	const labels = detail.speakers
+		.flatMap((row) => [row, ...row.combined])
+		.map((row) => /^Speaker (\d+)$/.exec(row.clusterLabel)?.[1])
+		.map(Number)
+		.filter(Number.isFinite);
+	const destination: DetailSpeaker = existing ?? {
+		id: mockPersonID(`voice ${option.label}`),
+		clusterLabel: `Speaker ${Math.max(0, ...labels) + 1}`,
+		displayName: option.label,
+		assignment: "confirmed",
+		personID,
+		colorIndex: personColor(personID),
+		hasClip: false,
+		isPlaying: false,
+		dismissed: false,
+		combined: [],
+	};
+	const transcript = detail.transcript.map((turn) =>
+		moved.has(turn.id)
+			? {
+					...turn,
+					speakerID: destination.id,
+					speakerName: destination.displayName,
+				}
+			: turn,
+	);
+	// A voice the move left without a paragraph goes, as the hosts prune it.
+	const speakers = [
+		...detail.speakers,
+		...(existing ? [] : [destination]),
+	].filter(
+		(row) =>
+			!left.has(row.id) ||
+			row.combined.length > 0 ||
+			transcript.some((turn) => turn.speakerID === row.id),
+	);
+	return { ...detail, speakers, transcript };
+}
+
+/**
+ * `transcript.playTurn`, `speakers.play` and `speakers.stop` outside the
+ * app: the one sound playing is marked, the rest stop. `null` stops all.
+ * A turn that `fails` (`speakers-play-failed`) plays nothing and reads as
+ * failed, as the hosts publish a cut that failed after they replied; any
+ * play or stop clears that.
+ */
+export function answerPlaying(
+	detail: MeetingDetailSnapshot,
+	playing: { turn: string; fails?: boolean } | { voice: string } | null,
+): MeetingDetailSnapshot {
+	const voice = playing && "voice" in playing ? playing.voice : undefined;
+	const turn = playing && "turn" in playing ? playing.turn : undefined;
+	const fails = playing !== null && "fails" in playing && playing.fails;
+	return {
+		...detail,
+		speakers: detail.speakers.map((row) => ({
+			...row,
+			isPlaying: row.id === voice,
+			combined: row.combined.map((entry) => ({
+				...entry,
+				isPlaying: entry.id === voice,
+			})),
+		})),
+		transcript: detail.transcript.map((entry) => ({
+			...entry,
+			isPlaying: !fails && entry.segmentIDs[0] === turn,
+			playFailed: fails === true && entry.segmentIDs[0] === turn,
+		})),
 	};
 }
 

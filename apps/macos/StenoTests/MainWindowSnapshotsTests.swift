@@ -453,6 +453,113 @@ private var utc: Calendar {
     #expect(refused.error?.code == .failed)
   }
 
+  /// The ids of the voices nested under the detail's speaker row `id`.
+  private func combinedIDs(_ sink: RecordingSink, _ id: UUID) -> [JSONValue]? {
+    guard case .array(let voices)? = detailSpeaker(sink, id)?["combined"] else { return nil }
+    return voices.compactMap { $0["id"] }
+  }
+
+  /// A combining pick nests Speaker 2 under Nicolai, `speakers.separate`
+  /// gives it back and is `stale` the second time; `transcript.setTurnSpeaker`
+  /// moves one paragraph and is `stale` against another generation or
+  /// voice; `transcript.playTurn` without the recording is `notFound`.
+  @Test func combinesSeparationsAndParagraphMovesReachTheStoreAndRepublish() async throws {
+    let environment = try await TestSupport.environment()
+    let host = bridge(environment)
+    let sink = RecordingSink()
+    host.attach(sink)
+    let running = Task { await host.run() }
+    defer { running.cancel() }
+    await eventually("the list observed the store") { host.list.all.count == 1 }
+    _ = await BridgeDispatcher.dispatch(request("r0", "page.ready"), host: host)
+    await eventually("the detail loaded and published") {
+      self.detailSpeaker(sink, SampleData.speakerTwoID) != nil
+    }
+    let generation = try await environment.store.transcriptGeneration(
+      meetingID: SampleData.meetingID)
+    #expect(sink.last(.meetingDetail)?["transcriptGeneration"] == .number(Double(generation)))
+    guard case .array(let turns)? = sink.last(.meetingDetail)?["transcript"] else {
+      Issue.record("no transcript")
+      return
+    }
+    #expect(turns.first?["segmentIDs"] == .array([.string(SampleData.uuid(40).uuidString)]))
+    #expect(turns.first?["isPlaying"] == .bool(false))
+
+    let combine = await BridgeDispatcher.dispatch(
+      request(
+        "r1", "speakers.select",
+        [
+          "speakerID": SampleData.speakerTwoID.uuidString,
+          "option": [
+            "kind": "person", "label": "Nicolai",
+            "personID": SampleData.personNicolaiID.uuidString,
+          ],
+          "combine": true,
+        ] as [String: Any]), host: host)
+    #expect(combine == BridgeReply(id: "r1"))
+    await eventually("the combine republished") {
+      self.combinedIDs(sink, SampleData.speakerOneID)
+        == [.string(SampleData.speakerTwoID.uuidString)]
+    }
+    #expect(detailSpeaker(sink, SampleData.speakerTwoID) == nil)
+
+    let two = ["speakerID": SampleData.speakerTwoID.uuidString]
+    let separate = await BridgeDispatcher.dispatch(
+      request("r2", "speakers.separate", two), host: host)
+    #expect(separate == BridgeReply(id: "r2"))
+    await eventually("the separation republished") {
+      self.detailSpeaker(sink, SampleData.speakerTwoID) != nil
+        && self.combinedIDs(sink, SampleData.speakerOneID) == []
+    }
+    let again = await BridgeDispatcher.dispatch(
+      request("r3", "speakers.separate", two), host: host)
+    #expect(again.error?.code == .stale)
+    #expect(again.error?.message == "This voice is no longer combined.")
+
+    func move(_ id: String, generation: Int, shown: UUID) -> [String: Any] {
+      request(
+        id, "transcript.setTurnSpeaker",
+        [
+          "meetingID": SampleData.meetingID.uuidString, "generation": generation,
+          "segments": [
+            ["id": SampleData.uuid(41).uuidString, "speakerID": shown.uuidString]
+          ],
+          "option": ["kind": "create", "label": "Anna"],
+        ] as [String: Any])
+    }
+    let older = await BridgeDispatcher.dispatch(
+      move("r4", generation: generation - 1, shown: SampleData.speakerTwoID), host: host)
+    #expect(older.error?.code == .stale)
+    #expect(older.error?.message == MainWindowBridge.staleTranscript.message)
+    let elsewhere = await BridgeDispatcher.dispatch(
+      move("r5", generation: generation, shown: SampleData.speakerOneID), host: host)
+    #expect(elsewhere.error?.code == .stale)
+    let moved = await BridgeDispatcher.dispatch(
+      move("r6", generation: generation, shown: SampleData.speakerTwoID), host: host)
+    #expect(moved == BridgeReply(id: "r6"))
+    await eventually("the move republished") {
+      guard case .array(let turns)? = sink.last(.meetingDetail)?["transcript"] else {
+        return false
+      }
+      return turns.contains {
+        $0["id"] == .string(SampleData.uuid(41).uuidString) && $0["speakerName"] == .string("Anna")
+      }
+    }
+    #expect(detailSpeaker(sink, SampleData.speakerTwoID) == nil, "the emptied voice went")
+
+    if !(host.detail?.recordingFilesExist ?? true) {
+      let play = await BridgeDispatcher.dispatch(
+        request(
+          "r7", "transcript.playTurn",
+          [
+            "meetingID": SampleData.meetingID.uuidString,
+            "segmentIDs": [SampleData.uuid(40).uuidString],
+          ] as [String: Any]), host: host)
+      #expect(play.error?.code == .notFound)
+      #expect(play.error?.message == "The recording is gone.")
+    }
+  }
+
   /// A declined confirmation leaves the meeting; a confirmed one deletes it
   /// through the list model.
   @Test func deleteAsksFirst() async throws {

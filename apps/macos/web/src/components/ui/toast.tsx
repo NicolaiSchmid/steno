@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { buttonVariants } from "./button";
 import { focusRingClass } from "./focus-ring";
 
 /**
@@ -41,6 +42,11 @@ export interface NotifyOptions {
 	tone?: ToastTone;
 	/** Milliseconds before it goes; hovering or focusing it holds it. */
 	timeout?: number;
+	/**
+	 * One button after the words ("Undo"): it closes the toast and runs.
+	 * A toast with an action stays twice as long, so it can be reached.
+	 */
+	action?: { label: string; onClick: () => void };
 }
 
 /** Shows a toast in the window's region. Returns its id. */
@@ -48,9 +54,27 @@ export function notify({
 	title,
 	description,
 	tone = "success",
-	timeout = 4000,
+	timeout,
+	action,
 }: NotifyOptions): string {
-	return manager.add({ title, description, type: tone, timeout });
+	const id: string = manager.add({
+		title,
+		description,
+		type: tone,
+		timeout: timeout ?? (action ? 8000 : 4000),
+		...(action
+			? {
+					actionProps: {
+						children: action.label,
+						onClick: () => {
+							manager.close(id);
+							action.onClick();
+						},
+					},
+				}
+			: {}),
+	});
+	return id;
 }
 
 function isTone(value: string | undefined): value is ToastTone {
@@ -90,6 +114,11 @@ function ToastList() {
 						<Toast.Title className="m-0 text-title" />
 						<Toast.Description className="m-0 text-body text-foreground" />
 					</div>
+					{/* Renders only for a toast with an action. */}
+					<Toast.Action
+						className={buttonVariants({ variant: "outline", size: "xs" })}
+						data-testid="toast-action"
+					/>
 					<Toast.Close
 						aria-label="Dismiss"
 						className={cn(

@@ -63,6 +63,14 @@ string_enum! {
         SpeakersDismiss = "speakers.dismiss",
         /// A dismissed voice back among the people to name.
         SpeakersRestore = "speakers.restore",
+        /// Undo a combine, or "Separate again": the combined voice is its
+        /// own voice again, with the paragraphs it still has.
+        SpeakersSeparate = "speakers.separate",
+
+        /// "This paragraph": one turn to another voice.
+        TranscriptSetTurnSpeaker = "transcript.setTurnSpeaker",
+        /// The turn's own audio from the meeting's recording.
+        TranscriptPlayTurn = "transcript.playTurn",
 
         RecordingStart = "recording.start",
         RecordingStop = "recording.stop",
@@ -215,6 +223,10 @@ string_enum! {
         /// A `speakers.select` without `combine` that would join another
         /// voice of the meeting; the message names that voice.
         WouldCombine = "wouldCombine",
+        /// The page acted on a transcript or a voice that changed since its
+        /// snapshot (a move, a combine, Process again); the message says
+        /// what to refresh.
+        Stale = "stale",
     }
 }
 
@@ -256,6 +268,10 @@ impl BridgeError {
 
     pub fn would_combine(message: impl Into<String>) -> Self {
         Self::new(BridgeErrorCode::WouldCombine, message)
+    }
+
+    pub fn stale(message: impl Into<String>) -> Self {
+        Self::new(BridgeErrorCode::Stale, message)
     }
 
     /// The error for a method a host does not route; the `BridgeHost`
@@ -447,7 +463,8 @@ mod tests {
                 "notFound",
                 "failed",
                 "cancelled",
-                "wouldCombine"
+                "wouldCombine",
+                "stale"
             ]
         );
         let error = BridgeError::not_answered(BridgeMethod::MeetingSetTab);

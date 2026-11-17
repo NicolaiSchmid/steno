@@ -373,6 +373,12 @@ impl CafReader {
         self.layout.frames
     }
 
+    /// Moves to `frame`, at most the end; returns where it is now.
+    pub(crate) fn seek(&mut self, frame: usize) -> usize {
+        self.position = frame.min(self.layout.frames);
+        self.position
+    }
+
     /// Replaces `samples` with the next frames, at most `max_frames`,
     /// interleaved; returns how many frames, zero at the end.
     pub(crate) fn read_frames(

@@ -321,11 +321,21 @@ final class MainWindowBridge: BridgeHost, TopicSource {
     case .speakersRestore:
       let speakerID = try request.params(SpeakerIDParams.self).speakerID
       try await speakersWrite { try await $0.setDismissed(speakerID: speakerID, false) }
+    case .speakersSeparate:
+      let speakerID = try request.params(SpeakerIDParams.self).speakerID
+      try await separate(speakerID)
     case .speakersPlay:
+      // A row's clip or a combined voice's own.
       let speakerID = try request.params(SpeakerIDParams.self).speakerID
       try requireDetail().speakers.play(speakerID)
     case .speakersStop:
+      // Stops a clip and a turn alike: one player.
       try requireDetail().speakers.stopPlayback()
+
+    case .transcriptSetTurnSpeaker:
+      try await setTurnSpeaker(try request.params(SetTurnSpeakerParams.self))
+    case .transcriptPlayTurn:
+      try playTurn(try request.params(PlayTurnParams.self))
 
     case .recordingStart:
       let mode = try request.params(StartRecordingParams.self).mode
@@ -396,6 +406,88 @@ final class MainWindowBridge: BridgeHost, TopicSource {
     await detail.pickerClosed()
     list.reloadSpeakers()
     try written.get()
+  }
+
+  static let staleTranscript = BridgeError(
+    code: .stale, message: "The transcript changed. Refresh to see it as it is now.")
+
+  /// "This paragraph": the turn's segments move to the option's person in
+  /// the selected meeting. Replied `stale` when the meeting is not the
+  /// selected one, the generation is not the detail's, or the store finds
+  /// the transcript changed; `notFound` for an unknown person id; `failed`
+  /// for any other refusal. A move re-exports once, and the detail
+  /// republishes whatever the outcome, so the page's Refresh reads the
+  /// current snapshot. Rust: `Host::set_turn_speaker`.
+  private func setTurnSpeaker(_ move: SetTurnSpeakerParams) async throws {
+    let detail = try requireDetail()
+    let moved: Result<Void, BridgeError>
+    do {
+      guard move.meetingID == detail.id, move.generation == detail.transcriptGeneration else {
+        throw Self.staleTranscript
+      }
+      let option = try Self.option(from: move.option, speakers: detail.speakers)
+      try await detail.speakers.moveTurn(
+        segments: move.segments.map {
+          TurnSegmentMove(segmentID: $0.id, shownSpeakerID: $0.speakerID)
+        },
+        generation: move.generation, to: option)
+      moved = .success(())
+    } catch let refusal as BridgeError {
+      moved = .failure(refusal)
+    } catch MeetingStoreError.staleTranscript {
+      moved = .failure(Self.staleTranscript)
+    } catch {
+      moved = .failure(
+        BridgeError(code: .failed, message: "The paragraph could not be moved: \(error)"))
+    }
+    await detail.pickerClosed()
+    publisher.schedule(.meetingDetail)
+    try moved.get()
+  }
+
+  /// Undo after a combine, and Separate again. The store's two refusals
+  /// reply `stale` with what changed, any other `failed`; a separation
+  /// re-exports once, and the detail republishes either way. Rust:
+  /// `Host::separate_speaker`.
+  private func separate(_ speakerID: UUID) async throws {
+    let detail = try requireDetail()
+    let separated: Result<Void, BridgeError>
+    do {
+      try await detail.speakers.separate(speakerID: speakerID)
+      separated = .success(())
+    } catch MeetingStoreError.notCombined {
+      separated = .failure(
+        BridgeError(code: .stale, message: "This voice is no longer combined."))
+    } catch MeetingStoreError.staleTranscript {
+      separated = .failure(
+        BridgeError(code: .stale, message: "Its paragraphs moved since. Nothing to separate."))
+    } catch {
+      separated = .failure(
+        BridgeError(code: .failed, message: "The voice could not be separated: \(error)"))
+    }
+    await detail.pickerClosed()
+    publisher.schedule(.meetingDetail)
+    try separated.get()
+  }
+
+  /// The turn's own audio from the selected meeting's recording, through
+  /// the clip player, so `speakers.stop` stops it and a clip replaces it.
+  /// `notFound` when the recording is gone or no listed segment exists.
+  private func playTurn(_ play: PlayTurnParams) throws {
+    let detail = try requireDetail()
+    guard play.meetingID == detail.id else {
+      throw BridgeError(code: .notFound, message: "That meeting is not the one selected.")
+    }
+    do {
+      try detail.speakers.playTurn(
+        segmentIDs: play.segmentIDs, limit: PlayTurnParams.limitSeconds)
+    } catch SpeakersViewModel.PlayTurnError.recordingGone {
+      throw BridgeError(code: .notFound, message: "The recording is gone.")
+    } catch SpeakersViewModel.PlayTurnError.noSuchSegment {
+      throw BridgeError(code: .notFound, message: "This paragraph is no longer in the transcript.")
+    } catch {
+      throw BridgeError(code: .failed, message: "The paragraph could not be played.")
+    }
   }
 
   /// Notes for a meeting that is not the selection: typed before the

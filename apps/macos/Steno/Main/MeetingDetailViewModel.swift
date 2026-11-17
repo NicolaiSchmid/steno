@@ -1,7 +1,7 @@
 import Foundation
 import StenoCore
 
-/// One meeting's detail: the export from `observeMeeting(id:)`, deliveries
+/// One meeting's detail: the export from `observeMeetingDetail(id:)`, deliveries
 /// from `observeDeliveries`, the bundled templates, the selected tab and
 /// the speakers (`speakers`, fed from every export tick). Summary,
 /// Transcript and Tasks are display only; notes are saved by the bridge as
@@ -59,6 +59,9 @@ final class MeetingDetailViewModel: Identifiable {
   /// the recording now; the view asks first.
   var confirmsDeleteNow = false
   let speakers: SpeakersViewModel
+  /// The meeting's `transcriptGeneration`, read with every export: what a
+  /// paragraph move is made against.
+  private(set) var transcriptGeneration = 0
   /// A speaker was named or reassigned since the last re-export.
   private(set) var speakersDirty = false
   /// The last re-export was refused because the pipeline held the meeting;
@@ -100,14 +103,19 @@ final class MeetingDetailViewModel: Identifiable {
 
   /// Follows the export until cancelled (one view `.task`), feeding the
   /// speakers and retrying a refused re-export once the meeting is ready.
+  /// The export, the transcript generation and the combined voices come
+  /// from one read (`observeMeetingDetail(id:)`), so the page never pairs
+  /// one transcript with another's generation.
   func observe() async {
     do {
-      for try await export in store.observeMeeting(id: id) {
+      for try await rows in store.observeMeetingDetail(id: id) {
+        let export = rows?.export
+        if let rows { transcriptGeneration = rows.transcriptGeneration }
         self.export = export
         recordingFilesExist =
           export?.audio.map { FileManager.default.fileExists(atPath: $0.url.path) } ?? false
         guard let export else { continue }
-        speakers.update(export: export)
+        speakers.update(export: export, combined: rows?.combined ?? [])
         if retryRedeliverWhenReady, export.meeting.state == .ready {
           retryRedeliverWhenReady = false
           await redeliverSpeakerChanges()

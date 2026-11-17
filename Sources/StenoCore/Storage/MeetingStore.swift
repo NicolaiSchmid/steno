@@ -26,6 +26,14 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   /// phone announced another file under the id). Rust:
   /// `StoreError::ReceiptOfAnotherUpload`.
   case receiptOfAnotherUpload(UUID)
+  /// `separateSpeaker(_:)` for a speaker that is missing or not combined
+  /// into another. Rust: `StoreError::NotCombined`.
+  case notCombined(UUID)
+  /// A write made against a transcript that changed since the caller read
+  /// it: `moveTurn` with another generation, a missing segment or one no
+  /// longer under the voice shown, or `separateSpeaker(_:)` for a voice
+  /// whose every paragraph moved away. Rust: `StoreError::StaleTranscript`.
+  case staleTranscript
 
   public var description: String {
     switch self {
@@ -41,6 +49,8 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
       "speaker \(speaker) is confirmed as person \(person), which a No cannot answer"
     case .blankPersonName: "a person needs a name"
     case .receiptOfAnotherUpload(let id): "the receipt of recording \(id) belongs to another upload"
+    case .notCombined(let id): "speaker \(id) is not combined into another"
+    case .staleTranscript: "the transcript changed since it was read"
     }
   }
 }
@@ -317,15 +327,29 @@ public final class MeetingStore: Sendable {
   /// An answer whose voice is not found again, or whose match is contested,
   /// is dropped, and the voice shows for review. A name suggestion stays with its speaker id. Every
   /// person with a confirmed speaker before has their voice recomputed.
-  /// Rust: `Store::replace_transcript`.
+  /// A voice combined into another competes with its own embedding,
+  /// whatever its root's answer, and carries its own Noes and its root's
+  /// confirmation or dismissal. A score is carried only when it was measured
+  /// against the person the new row is confirmed as. A new row that took a
+  /// combined voice's confirmation is combined again (`combineAgain`), so a
+  /// person keeps one voice per meeting; paragraph moves go with the old
+  /// rows. `meeting.transcriptGeneration`
+  /// is raised by one in the same transaction, so a move made against the
+  /// old transcript is refused (`moveTurn`). Rust: `Store::replace_transcript`.
   public func replaceTranscript(
     _ meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker]
   ) async throws {
     let meetingID = meeting.id
     try await writer.write { db in
       try Self.writeProcessingResults(of: meeting, db)
+      try db.execute(
+        sql: "UPDATE meeting SET transcriptGeneration = transcriptGeneration + 1 WHERE id = ?",
+        arguments: [meetingID.uuidString])
       let meetingSpeakers = SpeakerRow.filter(SpeakerRow.Columns.meetingID == meetingID.uuidString)
-      let replaced = try meetingSpeakers.fetchAll(db).map(\.speaker)
+      // The voices answers can follow, and every row, combined ones too.
+      let replaced = try meetingSpeakers.filter(sql: "mergedInto IS NULL").fetchAll(db).map(
+        \.speaker)
+      let every = try meetingSpeakers.fetchAll(db).map(\.speaker)
       // Deleting the speakers cascades to their suggestions and the user's
       // Noes.
       let suggestions =
@@ -333,20 +357,44 @@ public final class MeetingStore: Sendable {
         .filter(SpeakerNameSuggestionRow.Columns.meetingID == meetingID.uuidString)
         .fetchAll(db).map(\.suggestion)
       let rejections = try Self.rejectionRows(meetingID: meetingID, db)
+      // Every combined voice competes with its own embedding, read as its
+      // root: confirmed or dismissed as the root is, so it carries the
+      // root's answer, not its own.
+      let merged = try Self.mergedSpeakers(meetingID: meetingID, db)
+      let combined: [Speaker] = merged.map { merged in
+        let root = replaced.first { $0.id == merged.root }
+        var speaker = merged.speaker
+        speaker.assignment = root?.assignment ?? .unknown
+        speaker.dismissed = root?.dismissed ?? false
+        return speaker
+      }
       // New id -> the stored row whose answers it takes. Every stored row
-      // competes; only an unambiguous pair carries anything.
+      // competes; only an unambiguous pair carries anything. Two rows of one
+      // person can pair with one new row; the root wins.
       var earlier: [UUID: Speaker] = [:]
-      for (old, new) in Self.sameVoices(meetingID: meetingID, earlier: replaced, speakers: speakers)
-      {
+      for (old, new) in Self.sameVoices(
+        meetingID: meetingID, earlier: replaced + combined, speakers: speakers)
+      where earlier[new] == nil {
         earlier[new] = old
       }
-      // The score each kept Yes was given, before its row goes.
+      // The score each kept Yes was given, before its row goes: only when
+      // the row was itself confirmed as the person it now reads as, so a
+      // combined voice never lends its own person's score.
       var yesScores: [UUID: Float?] = [:]
       for (new, kept) in earlier where kept.assignment.isConfirmed {
+        guard every.first(where: { $0.id == kept.id })?.assignment == kept.assignment else {
+          continue
+        }
         yesScores[new] = try Self.confirmedSimilarity(speakerID: kept.id, db)
       }
+      // Each combined row's own Yes score, for when it is combined again.
+      var ownScores: [UUID: Float?] = [:]
+      for combine in merged {
+        ownScores[combine.speaker.id] = try Self.confirmedSimilarity(
+          speakerID: combine.speaker.id, db)
+      }
       // Kept or dropped, each stored confirmation's person is recomputed.
-      let voices = Set(replaced.filter(\.assignment.isConfirmed).compactMap(\.personID))
+      let voices = Set(every.filter(\.assignment.isConfirmed).compactMap(\.personID))
       try TranscriptSegmentRow
         .filter(TranscriptSegmentRow.Columns.meetingID == meetingID.uuidString)
         .deleteAll(db)
@@ -384,6 +432,8 @@ public final class MeetingStore: Sendable {
           try Self.setConfirmedSimilarity(score, speakerID: speaker.id, db)
         }
       }
+      try Self.combineAgain(
+        meetingID: meetingID, earlier: earlier, merged: merged, ownScores: ownScores, db)
       try Self.replaceNameSuggestions(suggestions, meetingID: meetingID, db)
       for rejection in keptRejections { try Self.insertRejection(rejection, db) }
       for segment in segments {
@@ -392,6 +442,43 @@ public final class MeetingStore: Sendable {
         try TranscriptSegmentRow(segment).insert(db)
       }
       for personID in voices { try Self.refreshVoice(personID: personID, db) }
+    }
+  }
+
+  /// Process again keeps a combine: each new row that took a combined
+  /// voice's confirmation is combined again, into the new row of the root
+  /// it read as when that root was found again, else into another new row
+  /// confirmed as the person, so a person keeps one voice per meeting. One
+  /// that took its root's dismissal is combined again when the root was
+  /// found again, so a combine under Not a person stays one voice. Without
+  /// either it stays its own voice, with the root's answer. Combined again,
+  /// the new row takes back the combined row's own assignment, dismissal
+  /// and Yes score (`ownScores`, by the combined row's id), so Separate
+  /// again restores them. Rust: `combine_again`.
+  static func combineAgain(
+    meetingID: UUID, earlier: [UUID: Speaker], merged: [MergedSpeaker],
+    ownScores: [UUID: Float?], _ db: Database
+  ) throws {
+    for (new, kept) in earlier.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+      guard let combine = merged.first(where: { $0.speaker.id == kept.id }) else { continue }
+      let rootFoundAgain = earlier.first { $0.value.id == combine.root && $0.key != new }?.key
+      let into: UUID?
+      if let rootFoundAgain, kept.assignment.isConfirmed || kept.dismissed {
+        into = rootFoundAgain
+      } else if case .confirmed(let personID) = kept.assignment {
+        into = try owner(meetingID: meetingID, personID: personID, except: new, db)?.id
+      } else {
+        into = nil
+      }
+      guard let into else { continue }
+      if var row = try speakerRow(new, db)?.speaker {
+        row.assignment = combine.speaker.assignment
+        row.dismissed = combine.speaker.dismissed
+        try SpeakerRow(row).update(db)
+        let score = row.assignment.isConfirmed ? ownScores[combine.speaker.id] ?? nil : nil
+        try setConfirmedSimilarity(score, speakerID: new, db)
+      }
+      _ = try mergeSpeakerRows(new, into: into, meetingID: meetingID, db)
     }
   }
 
@@ -411,7 +498,9 @@ public final class MeetingStore: Sendable {
   /// stored row matches better. A pair holds when the cosine of their
   /// embeddings is at least `VoiceStrength.floor` and leads every other
   /// candidate of both rows by `sameVoiceMargin`; anything closer is
-  /// contested and pairs nothing. The "me" speaker and the Rust app's room
+  /// contested and pairs nothing. Two stored rows confirmed as the same
+  /// person are no rivals: the user said they are one voice, so both may
+  /// pair with the same new row. The "me" speaker and the Rust app's room
   /// row (a run without diarization) are lanes, not clusters, so each pairs
   /// only with itself, whatever its embedding. A row without an embedding
   /// pairs with nothing else. Rust: `same_voices`.
@@ -428,6 +517,9 @@ public final class MeetingStore: Sendable {
       .map { ($0, $0.id) }
     let oldClusters = earlier.filter { !lanes.contains($0.id) && $0.embedding != nil }
     let newClusters = speakers.filter { !lanes.contains($0.id) && $0.embedding != nil }
+    func samePerson(_ lhs: Speaker, _ rhs: Speaker) -> Bool {
+      lhs.assignment.isConfirmed && lhs.assignment == rhs.assignment
+    }
     func score(_ old: Speaker, _ new: Speaker) -> Float {
       guard let lhs = old.embedding, let rhs = new.embedding else { return -.infinity }
       return lhs.cosineSimilarity(to: rhs)
@@ -440,7 +532,7 @@ public final class MeetingStore: Sendable {
       else { continue }
       let rivals =
         newClusters.filter { $0.id != best.id }.map { score(old, $0) }
-        + oldClusters.filter { $0.id != old.id }.map { score($0, best) }
+        + oldClusters.filter { $0.id != old.id && !samePerson(old, $0) }.map { score($0, best) }
       let runnerUp = rivals.max() ?? -.infinity
       if similarity - runnerUp >= sameVoiceMargin {
         matched.append((old, best.id))
@@ -500,11 +592,17 @@ public final class MeetingStore: Sendable {
   /// speaker id order: written with every summary, removed by `confirm` and
   /// with the speaker or the meeting. Never applied automatically; the
   /// speaker picker offers it beside the cosine match and the calendar
-  /// attendees (#78).
+  /// attendees (#78). A combined speaker keeps its suggestion for Separate
+  /// again but reads as the voice it joined meanwhile, so only the root
+  /// speakers' are listed.
   public func nameSuggestions(meetingID: UUID) async throws -> [SpeakerNameSuggestion] {
     try await writer.read { db in
       try SpeakerNameSuggestionRow
         .filter(SpeakerNameSuggestionRow.Columns.meetingID == meetingID.uuidString)
+        .filter(
+          sql: "speakerID IN (SELECT id FROM speaker WHERE meetingID = ? AND mergedInto IS NULL)",
+          arguments: [meetingID.uuidString]
+        )
         .order(SpeakerNameSuggestionRow.Columns.speakerID)
         .fetchAll(db)
         .map(\.suggestion)
@@ -539,7 +637,7 @@ public final class MeetingStore: Sendable {
   /// (`RecordingLayout(audioFolder:meetingID:)`, the folder named after the
   /// meeting id) the whole folder goes, sample clips included. Otherwise only
   /// the files the rows point at are removed (master, sidecars, mixdown,
-  /// clips), so an asset placed in a shared folder never takes its
+  /// clips, combined speakers' included), so an asset placed in a shared folder never takes its
   /// neighbours with it. The rows are gone and `MeetingEvent.deleted` is
   /// posted before any file is touched; a file that resists is thrown after
   /// the rest were removed.

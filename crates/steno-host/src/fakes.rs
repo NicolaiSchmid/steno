@@ -1026,6 +1026,11 @@ pub struct FakeClipPlayer {
     file_system: Arc<dyn FileSystem>,
     playing: Mutex<Option<PathBuf>>,
     pub played: Mutex<Vec<PathBuf>>,
+    /// Each span played: the recording, its start and its end in seconds.
+    pub spans: Mutex<Vec<(PathBuf, f64, f64)>>,
+    /// The span that could not be played after it was started
+    /// ([`FakeClipPlayer::fail`]), cleared by the next play or stop.
+    failed: Mutex<Option<PathBuf>>,
 }
 
 impl FakeClipPlayer {
@@ -1035,13 +1040,24 @@ impl FakeClipPlayer {
             file_system,
             playing: Mutex::new(None),
             played: Mutex::new(Vec::new()),
+            spans: Mutex::new(Vec::new()),
+            failed: Mutex::new(None),
         }
+    }
+}
+
+impl FakeClipPlayer {
+    /// What plays fails, as a span whose cut failed after `play_span`
+    /// returned: it stops and is kept as the failed one.
+    pub fn fail(&self) {
+        *lock(&self.failed) = lock(&self.playing).take();
     }
 }
 
 impl ClipPlayer for FakeClipPlayer {
     fn play(&self, clip: &Path) -> bool {
         *lock(&self.playing) = None;
+        *lock(&self.failed) = None;
         if !self.file_system.exists(clip) {
             return false;
         }
@@ -1050,12 +1066,31 @@ impl ClipPlayer for FakeClipPlayer {
         true
     }
 
+    /// Plays `<recording>#<start>-<end>`, a name no file has, and records
+    /// the span in `spans`.
+    fn play_span(&self, recording: &Path, start: f64, end: f64) -> Option<PathBuf> {
+        *lock(&self.playing) = None;
+        *lock(&self.failed) = None;
+        if !self.file_system.exists(recording) {
+            return None;
+        }
+        lock(&self.spans).push((recording.to_path_buf(), start, end));
+        let playing = PathBuf::from(format!("{}#{start}-{end}", recording.display()));
+        *lock(&self.playing) = Some(playing.clone());
+        Some(playing)
+    }
+
     fn stop(&self) {
         *lock(&self.playing) = None;
+        *lock(&self.failed) = None;
     }
 
     fn playing(&self) -> Option<PathBuf> {
         lock(&self.playing).clone()
+    }
+
+    fn failed(&self) -> Option<PathBuf> {
+        lock(&self.failed).clone()
     }
 }
 

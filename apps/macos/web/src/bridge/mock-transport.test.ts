@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MeetingDetailSnapshot, ProgressSnapshot } from "./contract";
 import {
+	answerPlaying,
 	answerSpeakerChange,
 	answerSpeakerOptions,
 	answerSpeakerSelect,
+	answerSpeakerSeparate,
+	answerTurnSpeaker,
 	applyScenario,
+	combineRecord,
 	createMockTransport,
 	fixtureKey,
 	isSnapshotKey,
@@ -102,6 +106,115 @@ describe("speaker naming outside the app", () => {
 		expect(after.transcript.some((turn) => turn.speakerID === SPEAKER_4)).toBe(
 			false,
 		);
+		// It nests under Nicolai's voice, and Separate again brings it back.
+		const owner = after.speakers.find((row) => row.personID === NICOLAI);
+		expect(owner?.combined.map((voice) => voice.id)).toContain(SPEAKER_4);
+		const record = combineRecord(before, pick);
+		const separated = answerSpeakerSeparate(
+			after,
+			{ speakerID: SPEAKER_4 },
+			"",
+			record,
+		);
+		expect(separated.speakers.find((row) => row.id === SPEAKER_4)).toEqual(
+			before.speakers.find((row) => row.id === SPEAKER_4),
+		);
+		expect(separated.transcript).toEqual(before.transcript);
+		expect(() =>
+			answerSpeakerSeparate(separated, { speakerID: SPEAKER_4 }),
+		).toThrow(expect.objectContaining({ code: "stale" }));
+	});
+
+	it("moves one paragraph to a new voice, refusing a stale one, as the hosts do", async () => {
+		const before = await detail("speakers-partly");
+		const turn = before.transcript.find(
+			(entry) => entry.speakerID === SPEAKER_4,
+		);
+		if (!turn) throw new Error("no turn of Speaker 4");
+		const params = {
+			meetingID: before.id,
+			generation: before.transcriptGeneration,
+			segments: turn.segmentIDs.map((id) => ({ id, speakerID: SPEAKER_4 })),
+			option: { kind: "create" as const, label: "Lea" },
+		};
+		const after = answerTurnSpeaker(before, params);
+		const moved = after.transcript.find((entry) => entry.id === turn.id);
+		const lea = after.speakers.find((row) => row.id === moved?.speakerID);
+		expect(lea).toMatchObject({
+			// Speaker 5 is combined into Nicolai's voice: the next is 6.
+			clusterLabel: "Speaker 6",
+			displayName: "Lea",
+			assignment: "confirmed",
+			hasClip: false,
+		});
+		// Speaker 4 led only that paragraph: it goes.
+		expect(after.speakers.map((row) => row.id)).not.toContain(SPEAKER_4);
+		expect(() => answerTurnSpeaker(after, params)).toThrow(
+			expect.objectContaining({ code: "stale" }),
+		);
+		expect(() =>
+			answerTurnSpeaker(before, {
+				...params,
+				generation: params.generation + 1,
+			}),
+		).toThrow(expect.objectContaining({ code: "stale" }));
+		expect(() =>
+			answerTurnSpeaker(before, params, "speakers-move-stale"),
+		).toThrow(expect.objectContaining({ code: "stale" }));
+	});
+
+	it("marks the one sound playing", async () => {
+		const before = await detail("speakers-partly");
+		const [first] = before.transcript;
+		if (!first) throw new Error("no turn");
+		const playing = answerPlaying(before, { turn: first.id });
+		expect(playing.transcript.map((turn) => turn.isPlaying)).toEqual(
+			before.transcript.map((turn) => turn.id === first.id),
+		);
+		const voice = answerPlaying(playing, { voice: SPEAKER_4 });
+		expect(voice.transcript.some((turn) => turn.isPlaying)).toBe(false);
+		expect(voice.speakers.find((row) => row.id === SPEAKER_4)?.isPlaying).toBe(
+			true,
+		);
+		expect(
+			answerPlaying(voice, null).speakers.some((row) => row.isPlaying),
+		).toBe(false);
+	});
+
+	it("marks a paragraph whose audio failed, until the next play or stop", async () => {
+		const before = await detail("speakers-play-failed");
+		const [first] = before.transcript;
+		if (!first) throw new Error("no turn");
+		const failed = answerPlaying(before, { turn: first.id, fails: true });
+		expect(failed.transcript.map((turn) => turn.playFailed)).toEqual(
+			before.transcript.map((turn) => turn.id === first.id),
+		);
+		expect(failed.transcript.some((turn) => turn.isPlaying)).toBe(false);
+		expect(
+			answerPlaying(failed, null).transcript.some((turn) => turn.playFailed),
+		).toBe(false);
+	});
+
+	it("keeps every speaker state valid and every turn's segments its own", async () => {
+		const { meetingDetailSnapshot } = await import("./contract");
+		for (const scenario of [
+			"speakers-none",
+			"speakers-me",
+			"speakers-me-unnamed",
+			"speakers-saving",
+			"speakers-partly",
+			"speakers-no-voice",
+			"speakers-no-recording",
+			"speakers-move-stale",
+		]) {
+			const snapshot = await detail(scenario);
+			expect(meetingDetailSnapshot.safeParse(snapshot).success, scenario).toBe(
+				true,
+			);
+			for (const turn of snapshot.transcript) {
+				expect(turn.segmentIDs[0], scenario).toBe(turn.id);
+			}
+		}
 	});
 
 	it("answers No, Not a person, Restore and Remove name as the hosts do", async () => {

@@ -62,9 +62,14 @@ import Testing
     try await store.replaceSummary(
       SampleData.meeting(), tasks: [], decisions: [], speakerNames: [Self.jerome, nicolai])
 
+    // A combined speaker keeps its suggestion for Separate again, but reads
+    // as the voice it joined meanwhile.
     try await store.mergeSpeakers(
       SampleData.speakerTwoID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
     #expect(try await store.nameSuggestions(meetingID: SampleData.meetingID) == [nicolai])
+    try await store.separateSpeaker(SampleData.speakerTwoID)
+    #expect(
+      try await store.nameSuggestions(meetingID: SampleData.meetingID) == [nicolai, Self.jerome])
 
     try await store.replaceTranscript(SampleData.meeting(), segments: [], speakers: [])
     #expect(try await store.nameSuggestions(meetingID: SampleData.meetingID).isEmpty)

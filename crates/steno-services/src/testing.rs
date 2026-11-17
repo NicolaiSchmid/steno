@@ -404,6 +404,7 @@ fn app_over_pipeline(
         live_recording_check: crate::recovery::LiveRecordingCheck::default(),
         tone_directory: None,
         launch_work: std::sync::Mutex::default(),
+        clip_player: None,
         secrets_unlocked: std::sync::Mutex::new(None),
         database_lock: None,
     }

@@ -21,6 +21,7 @@ import {
 	Button,
 	focusRowClass,
 	Kbd,
+	notify,
 	Popover,
 	PopoverPopup,
 	PopoverTrigger,
@@ -30,11 +31,13 @@ import {
 	type FieldAction,
 	SelectFailure,
 	SpeakerNameField,
-	useSpeakerSelect,
+	selectSpeaker,
 } from "./speaker-name-field";
 import {
+	type CombinedVoice,
 	canPlay,
 	checkLabel,
+	combinedOf,
 	context,
 	firstWithWork,
 	isDismissed,
@@ -48,21 +51,24 @@ import {
 	type PillState,
 	type Placement,
 	panelLayout,
+	panelRows,
 	peopleLabel,
 	pillState,
 	placements,
 	quote,
-	rowOrder,
 	type Speaker,
 	suggestionReason,
 	unsuggested,
+	voiceLabel,
 } from "./speaker-names";
 import {
 	announceAction,
+	announceCombined,
 	announceNamed,
 	SpeakerPlayButton,
 	sendAction,
 	sendReject,
+	sendSeparate,
 	togglePlay,
 } from "./speaker-picker";
 
@@ -161,8 +167,8 @@ interface Editing {
 
 interface Failure {
 	message: string;
-	/** Sends the same pick, No or action again. */
-	retry: () => void;
+	/** Sends the same pick, No or action again; none when that cannot help. */
+	retry?: (() => void) | undefined;
 	text: string;
 }
 
@@ -195,13 +201,15 @@ interface Saving {
  * it. A pick shows the name with "Saving"; once the host took it the field
  * moves to the next unnamed voice, never back up and never to a
  * suggestion; a failure reopens the row with its text and a red line with
- * Retry. Combining two voices confirms first (`useSpeakerSelect`).
+ * Retry. A pick that combines two voices goes through without asking and
+ * its toast offers Undo; under a person each voice combined into theirs
+ * nests with its own line, its clip and Separate again.
  *
  * Keyboard: the pill opens on the first row with work; Up and Down, or
  * Tab and Shift+Tab, move between rows, each one tab stop (Tab past the
  * last row leaves the panel); on a row Enter names, Y confirms, N says
- * No, R restores and P plays, the keys shown while keyboard focus is on
- * the row.
+ * No, R restores, S separates a combined voice again and P plays, the
+ * keys shown while keyboard focus is on the row.
  * Tab and Shift+Tab leave the field for the next or previous row without a
  * pick. Escape closes the field and returns to its row; a second Escape
  * closes the panel and returns to the pill. Test ids carry a
@@ -213,7 +221,6 @@ export function SpeakersPopover({
 	finding = false,
 }: SpeakersPopoverProps) {
 	const client = useBridge();
-	const { select, asking, dialog } = useSpeakerSelect();
 	const [open, setOpen] = useState(false);
 	const [frozen, setFrozen] = useState<Map<string, Placement> | undefined>();
 	const [active, setActive] = useState<string | undefined>();
@@ -243,9 +250,8 @@ export function SpeakersPopover({
 	const state = pillState(shown, transcript.length > 0, finding);
 	const layout = panelLayout(shown, frozen);
 	latest.current = layout;
-	const order = rowOrder(layout);
-	const current =
-		order.find((speaker) => speaker.id === active)?.id ?? order[0]?.id;
+	const order = panelRows(layout).map((row) => row.id);
+	const current = order.find((id) => id === active) ?? order[0];
 
 	useEffect(() => {
 		const id = focusNext.current;
@@ -291,9 +297,6 @@ export function SpeakersPopover({
 	}
 
 	function onOpenChange(next: boolean) {
-		if (!next && asking) {
-			return;
-		}
 		setOpen(next);
 		isOpen.current = next;
 		setEditing(null);
@@ -303,7 +306,7 @@ export function SpeakersPopover({
 			const fresh = placements(speakers);
 			setFrozen(fresh);
 			const opened = panelLayout(speakers, fresh);
-			setActive((firstWithWork(opened) ?? rowOrder(opened)[0])?.id);
+			setActive((firstWithWork(opened) ?? panelRows(opened)[0])?.id);
 		} else {
 			setFrozen(undefined);
 		}
@@ -325,14 +328,14 @@ export function SpeakersPopover({
 
 	/** Tab out of the field: no pick, focus on the next (or previous) row. */
 	function tabFrom(speaker: Speaker, backward: boolean) {
-		const at = order.findIndex((row) => row.id === speaker.id);
+		const at = order.indexOf(speaker.id);
 		const target =
 			order[
 				Math.min(Math.max(at + (backward ? -1 : 1), 0), order.length - 1)
-			] ?? speaker;
+			] ?? speaker.id;
 		setEditing(null);
-		setActive(target.id);
-		focusNext.current = target.id;
+		setActive(target);
+		focusNext.current = target;
 	}
 
 	/**
@@ -375,7 +378,7 @@ export function SpeakersPopover({
 		);
 		setEditing((now) => (now?.speakerID === speaker.id ? null : now));
 		focusNext.current = speaker.id;
-		const outcome = await select(speaker, option);
+		const outcome = await selectSpeaker(client, speaker, option);
 		savingNow.current.delete(speaker.id);
 		setSaving((map) => {
 			const next = new Map(map);
@@ -384,12 +387,14 @@ export function SpeakersPopover({
 		});
 		if (outcome.kind === "committed") {
 			announceNamed(speaker, option.label);
+		} else if (outcome.kind === "combined") {
+			announceCombined(client, speaker, option.label);
 		}
 		if (!isOpen.current) {
 			// The panel closed while saving: the next visit starts clean.
 			return;
 		}
-		if (outcome.kind === "committed") {
+		if (outcome.kind !== "failed") {
 			const next =
 				work && latest.current
 					? nextToName(latest.current, speaker.id, savingNow.current)
@@ -401,18 +406,16 @@ export function SpeakersPopover({
 			}
 			return;
 		}
-		if (outcome.kind === "failed") {
-			const failure = {
-				message: outcome.message,
-				retry: () =>
-					void commit(speaker, option, text, editing?.speakerID === speaker.id),
-				text,
-			};
-			setFailures((map) => new Map(map).set(speaker.id, failure));
-		}
+		const failure = {
+			message: outcome.message,
+			retry: () =>
+				void commit(speaker, option, text, editing?.speakerID === speaker.id),
+			text,
+		};
+		setFailures((map) => new Map(map).set(speaker.id, failure));
 		setActive(speaker.id);
 		if (fromField) {
-			// Failed or cancelled: the row reopens with what was typed.
+			// Failed: the row reopens with what was typed.
 			focusNext.current = null;
 			setEditing({
 				speakerID: speaker.id,
@@ -444,40 +447,45 @@ export function SpeakersPopover({
 	}
 
 	/**
-	 * Shows "Saving" on the row while `action` is on its way, or clears it.
-	 * Each action leaves the voice unnamed, so the row shows no colour.
+	 * Shows "Saving" on the row while `action` is on its way, or clears it:
+	 * Not a person, Remove name or Restore on a voice, or Separate again on
+	 * a combined one. Each leaves the voice unnamed, so the row shows no
+	 * colour.
 	 */
-	function markSaving(speaker: Speaker, action: FieldAction | null) {
+	function markSaving(
+		row: { id: string; clusterLabel: string },
+		action: FieldAction | "separate" | null,
+	) {
 		if (action === null) {
-			savingNow.current.delete(speaker.id);
+			savingNow.current.delete(row.id);
 		} else {
-			savingNow.current.add(speaker.id);
+			savingNow.current.add(row.id);
 		}
 		setSaving((map) => {
 			const next = new Map(map);
 			if (action === null) {
-				next.delete(speaker.id);
+				next.delete(row.id);
 			} else {
-				next.set(speaker.id, {
-					label: speaker.clusterLabel,
+				next.set(row.id, {
+					label: row.clusterLabel,
 					colorIndex: undefined,
-					action,
+					...(action === "separate" ? {} : { action }),
 				});
 			}
 			return next;
 		});
 	}
 
-	function fail(speaker: Speaker, message: string, retry: () => void) {
+	function fail(row: { id: string }, message: string, retry?: () => void) {
 		setFailures((map) =>
-			new Map(map).set(speaker.id, { message, retry, text: "" }),
+			new Map(map).set(row.id, { message, retry, text: "" }),
 		);
 	}
 
-	function clearFailure(speaker: Speaker) {
+	function clearFailure(row: { id: string }) {
 		setFailures((map) => {
 			const next = new Map(map);
-			next.delete(speaker.id);
+			next.delete(row.id);
 			return next;
 		});
 	}
@@ -542,47 +550,104 @@ export function SpeakersPopover({
 		}
 	}
 
-	function onRowKey(
-		event: KeyboardEvent<HTMLElement>,
-		speaker: Speaker,
-		kind: RowKind,
-	) {
-		if (
-			event.target !== event.currentTarget ||
-			event.metaKey ||
-			event.ctrlKey ||
-			event.altKey
-		) {
+	/**
+	 * Separate again (`speakers.separate`): "Saving" on the nested row, which
+	 * the host's next snapshot turns back into the voice's own row; the
+	 * result is announced, a failure is the red line, with Retry unless the
+	 * host refused it as `stale` (its paragraphs moved since).
+	 */
+	async function separate(voice: CombinedVoice) {
+		if (savingNow.current.has(voice.id)) {
 			return;
 		}
-		// A row saving takes no new pick; a named row is not confirmed again.
-		const inert = saving.has(speaker.id);
-		const at = order.findIndex((row) => row.id === speaker.id);
+		clearFailure(voice);
+		setActive(voice.id);
+		focusNext.current = voice.id;
+		markSaving(voice, "separate");
+		const failure = await sendSeparate(client, voice.id);
+		markSaving(voice, null);
+		if (failure === null) {
+			notify({ title: `${voice.clusterLabel} is its own voice again.` });
+		} else if (isOpen.current) {
+			fail(
+				voice,
+				failure.message,
+				failure.stale ? undefined : () => void separate(voice),
+			);
+		}
+	}
+
+	/**
+	 * Up, Down, Home, End, Tab and Shift+Tab between the rows, whatever
+	 * their kind; true when the key moved focus.
+	 */
+	function moveKey(event: KeyboardEvent<HTMLElement>, id: string): boolean {
+		const at = order.indexOf(id);
 		const move: Record<string, number> = {
 			ArrowDown: Math.min(at + 1, order.length - 1),
 			ArrowUp: Math.max(at - 1, 0),
 			Home: 0,
 			End: order.length - 1,
 		};
-		const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
 		// Tab walks the rows too, so each one is reached without the
 		// arrows; past the last (or before the first) it leaves the panel.
-		const tabTo =
-			key === "Tab" ? order[at + (event.shiftKey ? -1 : 1)] : undefined;
-		if (tabTo) {
-			event.preventDefault();
-			setActive(tabTo.id);
-			rows.current.get(tabTo.id)?.focus();
-		} else if (key in move) {
-			event.preventDefault();
-			const target = order[move[key] ?? at];
-			if (target) {
-				setActive(target.id);
-				rows.current.get(target.id)?.focus();
-			}
-		} else if (inert && key !== "p") {
+		const target =
+			event.key === "Tab"
+				? order[at + (event.shiftKey ? -1 : 1)]
+				: event.key in move
+					? order[move[event.key] ?? at]
+					: undefined;
+		if (target === undefined) {
+			return false;
+		}
+		event.preventDefault();
+		setActive(target);
+		rows.current.get(target)?.focus();
+		return true;
+	}
+
+	/** Whether a key on a row is the row's own, not a modified or a child's. */
+	function ownKey(event: KeyboardEvent<HTMLElement>): boolean {
+		return (
+			event.target === event.currentTarget &&
+			!event.metaKey &&
+			!event.ctrlKey &&
+			!event.altKey
+		);
+	}
+
+	function onCombinedKey(
+		event: KeyboardEvent<HTMLElement>,
+		voice: CombinedVoice,
+	) {
+		if (!ownKey(event) || moveKey(event, voice.id)) {
 			return;
-		} else if (kind === "dismissed" && (key === "Enter" || key === "r")) {
+		}
+		const key = event.key.toLowerCase();
+		if (key === "p") {
+			event.preventDefault();
+			togglePlay(client, voice);
+		} else if (key === "s" && !saving.has(voice.id)) {
+			event.preventDefault();
+			void separate(voice);
+		}
+	}
+
+	function onRowKey(
+		event: KeyboardEvent<HTMLElement>,
+		speaker: Speaker,
+		kind: RowKind,
+	) {
+		if (!ownKey(event) || moveKey(event, speaker.id)) {
+			return;
+		}
+		// A row saving takes no new pick; a named row is not confirmed again.
+		const inert = saving.has(speaker.id);
+		const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+		if (inert && key !== "p") {
+			return;
+		}
+		if (kind === "dismissed" && (key === "Enter" || key === "r")) {
 			event.preventDefault();
 			void act(speaker, "restore");
 		} else if (kind === "dismissed") {
@@ -613,6 +678,29 @@ export function SpeakersPopover({
 		}
 	}
 
+	const rowRef = (id: string) => (element: HTMLElement | null) => {
+		if (element) {
+			rows.current.set(id, element);
+		} else {
+			rows.current.delete(id);
+		}
+	};
+
+	const combinedRow = (voice: CombinedVoice, root?: Speaker) => (
+		<CombinedRow
+			failure={failures.get(voice.id)}
+			key={voice.id}
+			onFocus={() => setActive(voice.id)}
+			onKeyDown={(event) => onCombinedKey(event, voice)}
+			onSeparate={() => void separate(voice)}
+			readsAs={root && !isNamed(root) ? voiceLabel(root) : undefined}
+			rowRef={rowRef(voice.id)}
+			saving={saving.has(voice.id)}
+			tabIndex={voice.id === current ? 0 : -1}
+			voice={voice}
+		/>
+	);
+
 	const row = (speaker: Speaker, placed: RowKind, person?: Speaker) => {
 		// Drawn as it is now, or as it will be once its action is saved:
 		// dismissed during the visit in its old place, or restored while
@@ -638,17 +726,11 @@ export function SpeakersPopover({
 				onLeave={(to) => leaveNaming(speaker, to)}
 				onName={() => startNaming(speaker)}
 				onReject={() => void reject(speaker)}
-				onRetry={(failure) => failure.retry()}
+				onRetry={(failure) => failure.retry?.()}
 				onSubmit={(option, text) => void commit(speaker, option, text)}
 				onTab={(backward) => tabFrom(speaker, backward)}
 				person={person}
-				rowRef={(element) => {
-					if (element) {
-						rows.current.set(speaker.id, element);
-					} else {
-						rows.current.delete(speaker.id);
-					}
-				}}
+				rowRef={rowRef(speaker.id)}
 				saving={saving.get(speaker.id)}
 				speaker={speaker}
 				speakers={shown}
@@ -679,24 +761,45 @@ export function SpeakersPopover({
 				padding="panel"
 				size="panel"
 			>
-				<Sections layout={layout} row={row} />
-				{dialog}
+				<Sections combinedRow={combinedRow} layout={layout} row={row} />
 			</PopoverPopup>
 		</Popover>
 	);
 }
 
+/** The list nested under a row: a person's other voices, combined voices. */
+const NESTED_LIST =
+	"m-0 mb-1 ml-[19px] flex list-none flex-col gap-0.5 border-border border-l p-0 pl-2";
+
 function Sections({
 	layout,
 	row,
+	combinedRow,
 }: {
 	layout: PanelLayout;
 	row: (speaker: Speaker, kind: RowKind, person?: Speaker) => ReactNode;
+	combinedRow: (voice: CombinedVoice, root?: Speaker) => ReactNode;
 }) {
+	// Outside Speakers a voice can still have voices combined into it (its
+	// name removed, or it was dismissed): they nest under it all the same.
+	const withCombined = (speaker: Speaker, kind: RowKind) =>
+		speaker.combined.length === 0 ? (
+			row(speaker, kind)
+		) : (
+			<li className="flex flex-col" key={speaker.id}>
+				<ul className="m-0 list-none p-0">{row(speaker, kind)}</ul>
+				<ul
+					className={NESTED_LIST}
+					data-testid={`speakers-nested-${speaker.id}`}
+				>
+					{speaker.combined.map((voice) => combinedRow(voice, speaker))}
+				</ul>
+			</li>
+		);
 	return (
 		<>
 			{layout.me ? (
-				<ul className="m-0 list-none p-0">{row(layout.me, "me")}</ul>
+				<ul className="m-0 list-none p-0">{withCombined(layout.me, "me")}</ul>
 			) : null}
 			<Section
 				// Every match answered during the visit: the heading says so.
@@ -707,14 +810,17 @@ function Sections({
 				}
 				testID="speakers-section-check"
 			>
-				{layout.check.map((speaker) => row(speaker, "check"))}
+				{layout.check.map((speaker) => withCombined(speaker, "check"))}
 			</Section>
 			<Section label="Need names" testID="speakers-section-need">
-				{layout.need.map((speaker) => row(speaker, "need"))}
+				{layout.need.map((speaker) => withCombined(speaker, "need"))}
 			</Section>
 			<Section label="Speakers" testID="speakers-section-people">
-				{layout.people.map(({ speaker, voices, also }) => {
-					const nested = voices.length > 0 || also.length > 0;
+				{layout.people.map((entry) => {
+					const { speaker, voices, also } = entry;
+					const combined = combinedOf(entry);
+					const nested =
+						voices.length > 0 || also.length > 0 || combined.length > 0;
 					if (!nested) {
 						return row(speaker, "person");
 					}
@@ -722,10 +828,11 @@ function Sections({
 						<li className="flex flex-col" key={speaker.id}>
 							<ul className="m-0 list-none p-0">{row(speaker, "person")}</ul>
 							<ul
-								className="m-0 mb-1 ml-[19px] flex list-none flex-col gap-0.5 border-border border-l p-0 pl-2"
+								className={NESTED_LIST}
 								data-testid={`speakers-nested-${speaker.id}`}
 							>
 								{voices.map((voice) => row(voice, "voice", speaker))}
+								{combined.map((voice) => combinedRow(voice))}
 								{also.map((voice) => row(voice, "also", speaker))}
 							</ul>
 						</li>
@@ -733,7 +840,7 @@ function Sections({
 				})}
 			</Section>
 			<Section label="Not people" testID="speakers-section-dismissed">
-				{layout.dismissed.map((speaker) => row(speaker, "dismissed"))}
+				{layout.dismissed.map((speaker) => withCombined(speaker, "dismissed"))}
 			</Section>
 		</>
 	);
@@ -1008,7 +1115,7 @@ function PanelRow({
 		<SelectFailure
 			className="mt-1.5"
 			message={failure.message}
-			onRetry={() => onRetry(failure)}
+			onRetry={failure.retry ? () => onRetry(failure) : undefined}
 			testID={`speakers-popover-failure-${speaker.id}`}
 		/>
 	) : null;
@@ -1139,6 +1246,123 @@ function PanelRow({
 			) : failureLine ? (
 				<div className={cn("mb-1.5 px-2", avatar && "pl-[50px]")}>
 					{failureLine}
+				</div>
+			) : null}
+		</li>
+	);
+}
+
+/**
+ * A voice combined into a person's, nested under them: its label, the
+ * clip's own words and play (`speakers.play` plays its own clip), and
+ * Separate again, which makes it the voice it was before the combine. One
+ * tab stop: S separates, P plays. A failure is the red line with Retry.
+ */
+function CombinedRow({
+	voice,
+	saving,
+	failure,
+	tabIndex,
+	rowRef,
+	onFocus,
+	onKeyDown,
+	onSeparate,
+	readsAs,
+}: {
+	voice: CombinedVoice;
+	/** What an unnamed voice it joined is called, said under its label. */
+	readsAs?: string | undefined;
+	saving: boolean;
+	failure: Failure | undefined;
+	tabIndex: number;
+	rowRef: (element: HTMLElement | null) => void;
+	onFocus: () => void;
+	onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
+	onSeparate: () => void;
+}) {
+	const said = voice.quote?.trim() ?? "";
+	return (
+		<li
+			className="flex flex-col"
+			data-testid={`speakers-popover-combined-${voice.id}`}
+		>
+			{/* biome-ignore lint/a11y/useSemanticElements: a row of the panel holds its own buttons, so it cannot be one; it is one tab stop with keys. */}
+			<div
+				aria-keyshortcuts="S P"
+				aria-label={`${voice.clusterLabel}, combined`}
+				className={cn(
+					"group/row flex min-w-0 gap-2.5 rounded-md px-2 py-1.5",
+					focusRowClass,
+				)}
+				data-testid={`speakers-popover-name-${voice.id}`}
+				onFocus={onFocus}
+				onKeyDown={onKeyDown}
+				ref={rowRef}
+				role="group"
+				tabIndex={tabIndex}
+			>
+				<div className="flex min-w-0 flex-1 flex-col">
+					<div className="flex min-h-8 min-w-0 items-center gap-2">
+						<div className="flex min-w-0 flex-1 items-center gap-2">
+							<span className="min-w-0 truncate text-title">
+								{voice.clusterLabel}
+							</span>
+							<span
+								className="shrink-0 text-meta text-muted-foreground"
+								data-testid={`speakers-popover-saving-${voice.id}`}
+							>
+								{saving ? "Saving" : "Combined"}
+							</span>
+						</div>
+						{saving ? null : (
+							<Button
+								className="shrink-0"
+								data-testid={`speakers-popover-separate-${voice.id}`}
+								onClick={(event) => {
+									event.stopPropagation();
+									onSeparate();
+								}}
+								size="xs"
+								tabIndex={-1}
+								variant="ghost"
+							>
+								Separate again
+								<KeyHint>S</KeyHint>
+							</Button>
+						)}
+						<SpeakerPlayButton
+							keyHint
+							speaker={voice}
+							tabIndex={-1}
+							testID={`speakers-popover-play-${voice.id}`}
+						/>
+					</div>
+					{readsAs ? (
+						<p
+							className="m-0 truncate text-meta text-muted-foreground"
+							data-testid={`speakers-popover-reads-as-${voice.id}`}
+						>
+							Reads as {readsAs}
+						</p>
+					) : null}
+					{said ? (
+						<p
+							className="m-0 line-clamp-2 text-meta text-muted-foreground"
+							data-testid={`speakers-popover-snippet-${voice.id}`}
+						>
+							“{said}”
+						</p>
+					) : null}
+				</div>
+			</div>
+			{failure ? (
+				<div className="mb-1.5 px-2">
+					<SelectFailure
+						className="mt-1.5"
+						message={failure.message}
+						onRetry={failure.retry}
+						testID={`speakers-popover-failure-${voice.id}`}
+					/>
 				</div>
 			) : null}
 		</li>

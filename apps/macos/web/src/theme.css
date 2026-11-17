@@ -616,8 +616,11 @@
 	 * A popup that scrolls on its own (`PopupScroll`): while content is
 	 * left below, its last 2 rem fade out, the top fade's curve upside
 	 * down, so a panel cut short says it scrolls. At the end nothing fades.
+	 * The fade's height is reserved as scroll padding, so an option the
+	 * arrows scroll to (`scrollIntoView`) stops above the fade, fully clear.
 	 */
 	.scroll-fade-bottom[data-overflow-y-end] {
+		scroll-padding-block-end: 2rem;
 		mask-image:
 			linear-gradient(
 				to top,

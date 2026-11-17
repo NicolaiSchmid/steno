@@ -5,12 +5,13 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use steno_bridge::{
-    AppPhone, AppSetupBanner, AppSnapshot, DetailExport, DetailExportStatus, DetailRetention,
-    DetailRetentionKind, DetailSpeaker, DetailSummaryStatus, DetailSummaryStatusKind, DetailTask,
-    DetailTemplate, DetailTurn, ListCounts, ListDayGroup, ListFilter, ListTag,
-    MeetingDetailSnapshot, MeetingRow, MeetingSource as BridgeSource, MeetingState as BridgeState,
-    MeetingsListSnapshot, Platform, ProgressEntry as BridgeProgressEntry, ProgressSnapshot,
-    RecordingAutoStop, RecordingLevel, RecordingSnapshot, SettingsSection, SpeakerChip,
+    AppPhone, AppSetupBanner, AppSnapshot, DetailCombinedVoice, DetailExport, DetailExportStatus,
+    DetailRetention, DetailRetentionKind, DetailSpeaker, DetailSummaryStatus,
+    DetailSummaryStatusKind, DetailTask, DetailTemplate, DetailTurn, ListCounts, ListDayGroup,
+    ListFilter, ListTag, MeetingDetailSnapshot, MeetingRow, MeetingSource as BridgeSource,
+    MeetingState as BridgeState, MeetingsListSnapshot, Platform,
+    ProgressEntry as BridgeProgressEntry, ProgressSnapshot, RecordingAutoStop, RecordingLevel,
+    RecordingSnapshot, SettingsSection, SpeakerChip,
 };
 use steno_core::{
     Delivery, DeliveryStatus, Meeting, MeetingSource, MeetingStateKind, Person, Settings, Speaker,
@@ -305,6 +306,7 @@ pub fn turns(
                 last.text.push(' ');
                 last.text.push_str(&segment.text);
                 last.end_seconds = last.end_seconds.max(segment.end);
+                last.segment_ids.push(segment.id);
             }
             _ => turns.push(DetailTurn {
                 id: segment.id,
@@ -313,6 +315,9 @@ pub fn turns(
                 start_seconds: segment.start,
                 end_seconds: segment.end,
                 text: segment.text.clone(),
+                segment_ids: vec![segment.id],
+                is_playing: false,
+                play_failed: false,
             }),
         }
     }
@@ -383,14 +388,26 @@ fn export_snapshot(detail: &MeetingDetailViewModel, zone: FixedOffset) -> Detail
     }
 }
 
+/// What the player is doing for the detail: the voice or turn that plays,
+/// and the turn whose audio could not be played after the host replied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Playback {
+    pub playing: Option<Uuid>,
+    pub failed_turn: Option<Uuid>,
+}
+
 /// The detail pane once its export has loaded; `None` before.
 #[must_use]
 pub fn detail_snapshot(
     detail: &MeetingDetailViewModel,
-    playing: Option<Uuid>,
+    playback: Playback,
     now: DateTime<Utc>,
     zone: FixedOffset,
 ) -> Option<MeetingDetailSnapshot> {
+    let Playback {
+        playing,
+        failed_turn,
+    } = playback;
     let export = detail.export.as_ref()?;
     let meeting = &export.meeting;
     let (retention_kind, deletes_at) = match detail.recording_status() {
@@ -459,7 +476,15 @@ pub fn detail_snapshot(
             action_title: skipped.map(|row| row.action.title().to_owned()),
         },
         summary: detail_sections(export),
-        transcript: turns(&export.segments, |id| detail.display_name(id)),
+        transcript: turns(&export.segments, |id| detail.display_name(id))
+            .into_iter()
+            .map(|turn| DetailTurn {
+                is_playing: playing == Some(turn.id),
+                play_failed: failed_turn == Some(turn.id),
+                ..turn
+            })
+            .collect(),
+        transcript_generation: detail.transcript_generation,
         tasks: task_rows(export),
         decisions: export
             .decisions
@@ -504,6 +529,21 @@ fn speaker_rows(detail: &MeetingDetailViewModel, playing: Option<Uuid>) -> Vec<D
             has_clip: row.can_play,
             is_playing: playing == Some(row.id()),
             dismissed: row.speaker.dismissed,
+            combined: speakers
+                .combined
+                .iter()
+                .filter(|combined| combined.root == row.id())
+                .map(|combined| DetailCombinedVoice {
+                    id: combined.speaker.id,
+                    cluster_label: combined.speaker.cluster_label.clone(),
+                    // Only the clip's own words: a combined voice shows no
+                    // context.
+                    quote: Some(combined.excerpt.text.clone())
+                        .filter(|quote| combined.excerpt.in_clip && !quote.is_empty()),
+                    has_clip: combined.can_play,
+                    is_playing: playing == Some(combined.speaker.id),
+                })
+                .collect(),
         })
         .collect()
 }

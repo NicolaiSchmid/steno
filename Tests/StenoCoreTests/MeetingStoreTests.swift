@@ -302,7 +302,7 @@ import Testing
     }
   }
 
-  @Test func mergeSpeakersMovesSegmentsAndDeletesTheSource() async throws {
+  @Test func mergeSpeakersCombinesAndKeepsTheSourceRow() async throws {
     let store = try await Self.populated()
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -317,19 +317,24 @@ import Testing
       SampleData.speakerTwoID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
 
     let export = try await store.export(meetingID: SampleData.meetingID)
-    #expect(export.speakers.map(\.id) == [SampleData.speakerOneID])
+    #expect(export.speakers == [speakers[0]], "the target is left as it was")
     #expect(
       export.segments.compactMap(\.speakerID) == [SampleData.speakerOneID, SampleData.speakerOneID])
-    let merged = try #require(export.speakers.first)
-    #expect(merged.assignment == .confirmed(personID: SampleData.personNicolaiID))
-    let embedding = try #require(merged.embedding)
-    #expect(abs(embedding.values[0] - 0.7071) < 0.001)
-    #expect(abs(embedding.values[1] - 0.7071) < 0.001)
-    #expect(!FileManager.default.fileExists(atPath: clip.path))
-    await #expect(throws: MeetingStoreError.speakerNotFound(SampleData.speakerTwoID)) {
-      try await store.mergeSpeakers(
-        SampleData.speakerTwoID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
-    }
+    let merged = try await store.mergedSpeakers(meetingID: SampleData.meetingID)
+    #expect(
+      merged == [
+        MergedSpeaker(speaker: speakers[1], root: SampleData.speakerOneID)
+      ])
+    #expect(FileManager.default.fileExists(atPath: clip.path), "the source keeps its clip")
+    let nicolai = try #require(try await store.person(id: SampleData.personNicolaiID))
+    #expect(nicolai.sampleCount == 2, "the combined voice counts for the voice it joined")
+    let values = try #require(nicolai.embedding?.values)
+    #expect(abs(values[0] - 0.7071) < 0.001)
+    #expect(abs(values[1] - 0.7071) < 0.001)
+
+    try await store.mergeSpeakers(
+      SampleData.speakerTwoID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
+    #expect(try await store.mergedSpeakers(meetingID: SampleData.meetingID) == merged)
   }
 
   /// A store whose asset points at a master file that exists, so confirm
@@ -488,11 +493,11 @@ import Testing
     try await store.confirm(speakerID: SampleData.speakerTwoID, person: SampleData.persons()[1])
 
     let export = try await store.export(meetingID: SampleData.meetingID)
-    #expect(export.speakers.map(\.id) == [SampleData.speakerOneID], "Speaker 2 merged into 1")
+    #expect(export.speakers.map(\.id) == [SampleData.speakerOneID], "Speaker 2 combined into 1")
     #expect(
       export.segments.compactMap(\.speakerID) == [SampleData.speakerOneID, SampleData.speakerOneID])
     let nicolai = try #require(export.person(id: SampleData.personNicolaiID))
-    #expect(nicolai.sampleCount == 1, "one merged cluster")
+    #expect(nicolai.sampleCount == 2, "both rows of the combined voice")
     let values = try #require(nicolai.embedding?.values)
     #expect(abs(values[0] - 0.7071) < 0.001)
     #expect(abs(values[1] - 0.7071) < 0.001)
@@ -516,7 +521,9 @@ import Testing
     #expect(!FileManager.default.fileExists(atPath: clip.path))
   }
 
-  @Test func mergeIntoAnUnknownTargetKeepsTheVoice() async throws {
+  /// The target keeps its own assignment, and the source no longer counts
+  /// for the person it was confirmed as: it reads as the unnamed voice.
+  @Test func mergeIntoAnUnknownTargetLeavesItUnnamed() async throws {
     let store = try await Self.populated()
     var speakers = SampleData.speakers()
     speakers[0].assignment = .unknown
@@ -528,11 +535,10 @@ import Testing
     try await store.mergeSpeakers(
       SampleData.speakerTwoID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
 
-    let kept = try #require(try await store.speakers(meetingID: SampleData.meetingID).first)
-    #expect(kept.assignment == .confirmed(personID: SampleData.personJeromeID))
+    #expect(try await store.speakers(meetingID: SampleData.meetingID) == [speakers[0]])
     let jerome = try #require(try await store.person(id: SampleData.personJeromeID))
-    #expect(jerome.sampleCount == 1)
-    #expect(jerome.embedding == SampleData.embedding(axis: 1))
+    #expect(jerome.sampleCount == 0)
+    #expect(jerome.embedding == nil)
   }
 
   /// Fifty-one confirmed speakers over fifty-one meetings plus one whose
@@ -875,7 +881,7 @@ import Testing
     #expect(a.uuidString[a.uuidString.index(a.uuidString.startIndex, offsetBy: 14)] == "4")
   }
 
-  @Test func mergeSpeakersTakesTheSourceAssignmentAndClipWhenTheTargetHasNone() async throws {
+  @Test func mergeSpeakersLeavesTheTargetAndTheSourceAsTheyWere() async throws {
     let store = try await Self.populated()
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -893,17 +899,10 @@ import Testing
     try await store.mergeSpeakers(
       SampleData.speakerTwoID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
 
-    let remaining = try await store.speakers(meetingID: SampleData.meetingID)
-    #expect(remaining.map(\.id) == [SampleData.speakerOneID])
-    let kept = try #require(remaining.first)
-    #expect(kept.assignment == .suggested(personID: SampleData.personJeromeID, similarity: 0.72))
-    #expect(kept.sampleClipRange == 3...5.5)
-    #expect(kept.sampleClipURL == clip, "the clip moves with its range")
+    #expect(try await store.speakers(meetingID: SampleData.meetingID) == [speakers[0]])
+    let merged = try await store.mergedSpeakers(meetingID: SampleData.meetingID)
+    #expect(merged.map(\.speaker) == [speakers[1]], "assignment, clip and confidence stay")
     #expect(FileManager.default.fileExists(atPath: clip.path))
-    #expect(kept.clusterConfidence == 0.75)
-    #expect(
-      kept.embedding == SampleData.embedding(axis: 1), "a missing embedding takes the source's")
-    #expect(kept.clusterLabel == "Speaker 1")
   }
 
   @Test func mergeSpeakersRefusesOtherMeetingsAndSelfMergesAreNoOps() async throws {
@@ -957,9 +956,9 @@ import Testing
     let nicolai = try #require(try await store.person(id: SampleData.personNicolaiID))
     #expect(nicolai.displayName == "Nicolai", "an existing person row is not overwritten")
     #expect(nicolai.email == "nicolai@example.com")
-    // Nicolai already owned Speaker 1, so Speaker 2 merged into it: one
-    // cluster with the averaged embedding is his voice now.
-    #expect(nicolai.sampleCount == 1)
+    // Nicolai already owned Speaker 1, so Speaker 2 combined into it: both
+    // rows of the one voice count, at equal weight.
+    #expect(nicolai.sampleCount == 2)
     let values = try #require(nicolai.embedding?.values)
     #expect(abs(values[0] - values[1]) < 1e-6)
     #expect(try await store.persons().count == 2)

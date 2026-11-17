@@ -23,6 +23,8 @@ const SPEAKER_1 = "00000000-0000-0000-0000-000000000015";
 const SPEAKER_2 = "00000000-0000-0000-0000-000000000016";
 const ANNA = "00000000-0000-0000-0000-000000000016";
 const UNNAMED = "00000000-0000-0000-0000-000000000017";
+// Speaker 5, combined into Nicolai's voice in the fixture.
+const COMBINED = "00000000-0000-0000-0000-000000000018";
 
 async function detail(scenario = ""): Promise<MeetingDetailSnapshot> {
 	return applyScenario(
@@ -317,19 +319,24 @@ describe("the speakers panel", () => {
 		expect(screen.getByTestId("speakers-trigger")).toHaveFocus();
 	});
 
-	it("asks before combining a voice into a person, then combines", async () => {
-		const { user, harness } = await open("speakers-split", {
-			"speakers.select": refusingSelect,
-		});
-		expect(row(UNNAMED)).toHaveTextContent("Also Nicolai?Speaker 4");
-		expect(screen.getByTestId(`speakers-nested-${NICOLAI}`)).toContainElement(
-			row(UNNAMED),
+	it("combines a voice into a person without asking, and Undo separates it again", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness(
+			"",
+			{},
+			{ "speakers.select": refusingSelect },
 		);
+		const { speakers, transcript } = await detail("speakers-split");
+		renderWithBridge(
+			<>
+				<SpeakersPopover speakers={speakers} transcript={transcript} />
+				<ui.ToastRegion />
+			</>,
+			harness,
+		);
+		await user.click(screen.getByTestId("speakers-trigger"));
+		expect(row(UNNAMED)).toHaveTextContent("Also Nicolai?Speaker 4");
 		await user.click(screen.getByRole("button", { name: "Same person" }));
-		const dialog = await screen.findByTestId("confirm-dialog");
-		expect(dialog).toHaveTextContent("Combine Speaker 4 with Nicolai?");
-		expect(dialog).toHaveTextContent("This cannot be undone.");
-		await user.click(within(dialog).getByRole("button", { name: "Combine" }));
 		await vi.waitFor(() =>
 			expect(
 				callsTo(harness.transport, "speakers.select").map(
@@ -337,22 +344,151 @@ describe("the speakers panel", () => {
 				),
 			).toEqual([false, true]),
 		);
+		expect(screen.queryByTestId("confirm-dialog")).toBeNull();
+		const toast = await screen.findByTestId("toast");
+		expect(toast).toHaveTextContent("Speaker 4 combined with Nicolai.");
+		await user.click(within(toast).getByRole("button", { name: "Undo" }));
+		await vi.waitFor(() =>
+			expect(callsTo(harness.transport, "speakers.separate")).toEqual([
+				{ method: "speakers.separate", params: { speakerID: UNNAMED } },
+			]),
+		);
 	});
 
-	it("leaves the voice when the combine is cancelled", async () => {
-		const { user, harness } = await open("speakers-split", {
-			"speakers.select": refusingSelect,
-		});
-		await user.click(screen.getByRole("button", { name: "Same person" }));
-		const dialog = await screen.findByTestId("confirm-dialog");
-		await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-		await vi.waitFor(() =>
-			expect(screen.queryByTestId("confirm-dialog")).toBeNull(),
+	it("says so in a toast when Undo fails", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness(
+			"",
+			{},
+			{
+				"speakers.select": refusingSelect,
+				"speakers.separate": new Error("This voice is no longer combined."),
+			},
 		);
-		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(1);
-		expect(screen.getByTestId("speakers-panel")).toBeInTheDocument();
-		expect(screen.queryByRole("combobox")).toBeNull();
-		expect(screen.getByRole("button", { name: "Same person" })).toBeVisible();
+		const { speakers, transcript } = await detail("speakers-split");
+		renderWithBridge(
+			<>
+				<SpeakersPopover speakers={speakers} transcript={transcript} />
+				<ui.ToastRegion />
+			</>,
+			harness,
+		);
+		await user.click(screen.getByTestId("speakers-trigger"));
+		await user.click(screen.getByRole("button", { name: "Same person" }));
+		await user.click(await screen.findByRole("button", { name: "Undo" }));
+		await vi.waitFor(() =>
+			expect(
+				screen
+					.getAllByTestId("toast")
+					.find((toast) => toast.dataset.tone === "destructive"),
+			).toHaveTextContent(
+				"Speaker 4 is still combined with Nicolai.This voice is no longer combined.",
+			),
+		);
+	});
+
+	it("nests a voice combined into a person's under them, with its line, play and Separate again", async () => {
+		const { user, harness } = await open();
+		const nested = screen.getByTestId(`speakers-nested-${NICOLAI}`);
+		const combined = screen.getByTestId(
+			`speakers-popover-combined-${COMBINED}`,
+		);
+		expect(nested).toContainElement(combined);
+		expect(combined).toHaveTextContent(
+			// The keys, shown only while keyboard focus is on the row, are S and P.
+			"Speaker 5CombinedSeparate againSP“Und die Nebenprojekte pausieren wir bis zur Q1-Planung.”",
+		);
+		await user.click(
+			within(combined).getByRole("button", {
+				name: "Play the voice sample of Speaker 5",
+			}),
+		);
+		expect(callsTo(harness.transport, "speakers.play")).toEqual([
+			{ method: "speakers.play", params: { speakerID: COMBINED } },
+		]);
+		await user.click(
+			within(combined).getByRole("button", { name: /^Separate again/ }),
+		);
+		expect(callsTo(harness.transport, "speakers.separate")).toEqual([
+			{ method: "speakers.separate", params: { speakerID: COMBINED } },
+		]);
+	});
+
+	it("keeps a combined voice nested, with Separate again and what it reads as, under a voice whose name was removed", async () => {
+		// Removed before this visit: the panel places rows as it opens.
+		const { user, speakers, republish } = await render("");
+		republish(
+			speakers.map((speaker) =>
+				speaker.id === NICOLAI
+					? {
+							...speaker,
+							assignment: "unknown" as const,
+							displayName: speaker.clusterLabel,
+						}
+					: speaker,
+			),
+		);
+		await user.click(screen.getByTestId("speakers-trigger"));
+		const nested = within(
+			screen.getByTestId("speakers-section-need"),
+		).getByTestId(`speakers-nested-${NICOLAI}`);
+		expect(
+			screen.queryByTestId("speakers-section-people"),
+		).not.toContainElement(nested);
+		const combined = within(nested).getByTestId(
+			`speakers-popover-combined-${COMBINED}`,
+		);
+		expect(
+			within(combined).getByRole("button", { name: /^Separate again/ }),
+		).toBeVisible();
+		const root = speakers.find((speaker) => speaker.id === NICOLAI);
+		expect(
+			within(combined).getByTestId(`speakers-popover-reads-as-${COMBINED}`),
+		).toHaveTextContent(`Reads as ${root?.clusterLabel}`);
+	});
+
+	it("separates with S on the row, and says why in red, without Retry, when its paragraphs moved", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const { user, harness } = await open("", {
+			"speakers.separate": () => {
+				throw new BridgeError(
+					"speakers.separate",
+					"stale",
+					"Its paragraphs moved since. Nothing to separate.",
+				);
+			},
+		});
+		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
+		await user.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}");
+		expect(row(COMBINED)).toHaveFocus();
+		await user.keyboard("s");
+		const failure = await screen.findByTestId(
+			`speakers-popover-failure-${COMBINED}`,
+		);
+		expect(failure).toHaveTextContent(
+			"Its paragraphs moved since. Nothing to separate.",
+		);
+		expect(within(failure).queryByRole("button", { name: "Retry" })).toBeNull();
+		expect(callsTo(harness.transport, "speakers.separate")).toHaveLength(1);
+	});
+
+	it("offers Retry when Separate again failed for a passing reason", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const { user, harness } = await open("", {
+			"speakers.separate": new Error("database is locked"),
+		});
+		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
+		await user.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}");
+		await user.keyboard("s");
+		const failure = await screen.findByTestId(
+			`speakers-popover-failure-${COMBINED}`,
+		);
+		expect(failure).toHaveTextContent("database is locked");
+		await user.click(within(failure).getByRole("button", { name: "Retry" }));
+		await vi.waitFor(() =>
+			expect(callsTo(harness.transport, "speakers.separate")).toHaveLength(2),
+		);
 	});
 
 	it("opens the field without the person on Someone else", async () => {
@@ -416,13 +552,13 @@ describe("the speakers panel", () => {
 	it("walks every row with Tab and Shift+Tab, and leaves the panel past the last", async () => {
 		const { user } = await open();
 		await vi.waitFor(() => expect(row(ANNA)).toHaveFocus());
-		const order = [ANNA, UNNAMED, NICOLAI, SPEAKER_1];
+		const order = [ANNA, UNNAMED, NICOLAI, COMBINED, SPEAKER_1];
 		for (const id of order.slice(1)) {
 			await user.tab();
 			expect(row(id)).toHaveFocus();
 		}
 		await user.tab({ shift: true });
-		expect(row(NICOLAI)).toHaveFocus();
+		expect(row(COMBINED)).toHaveFocus();
 		await user.tab();
 		await user.tab();
 		expect(

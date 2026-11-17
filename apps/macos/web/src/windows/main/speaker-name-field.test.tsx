@@ -54,9 +54,8 @@ function refusingSelect(params: unknown) {
 describe("selectSpeaker", () => {
 	it("sends the pick without combining", async () => {
 		const harness = await createBridgeHarness();
-		const confirm = vi.fn();
 		expect(
-			await selectSpeaker(harness.client, await unnamed(), NICOLAI, confirm),
+			await selectSpeaker(harness.client, await unnamed(), NICOLAI),
 		).toEqual({ kind: "committed" });
 		expect(callsTo(harness.transport, "speakers.select")).toEqual([
 			{
@@ -64,46 +63,22 @@ describe("selectSpeaker", () => {
 				params: { speakerID: UNNAMED, option: NICOLAI, combine: false },
 			},
 		]);
-		expect(confirm).not.toHaveBeenCalled();
 	});
 
-	it("confirms a pick that would combine, naming the cost, then combines", async () => {
+	it("combines a pick that would combine without asking, since Undo can take it back", async () => {
 		const harness = await createBridgeHarness(
 			"",
 			{},
 			{ "speakers.select": refusingSelect },
 		);
-		const speaker = await unnamed();
-		const confirm = vi.fn().mockResolvedValue(true);
 		expect(
-			await selectSpeaker(harness.client, speaker, NICOLAI, confirm),
-		).toEqual({ kind: "committed" });
-		expect(confirm).toHaveBeenCalledWith({
-			title: `Combine ${speaker.clusterLabel} with Nicolai?`,
-			consequence: `${WOULD_COMBINE} ${speaker.clusterLabel}’s paragraphs become Nicolai’s. This cannot be undone.`,
-		});
+			await selectSpeaker(harness.client, await unnamed(), NICOLAI),
+		).toEqual({ kind: "combined" });
 		expect(
 			callsTo(harness.transport, "speakers.select").map(
 				(call) => (call.params as { combine: boolean }).combine,
 			),
 		).toEqual([false, true]);
-	});
-
-	it("leaves the pick when the combine is cancelled", async () => {
-		const harness = await createBridgeHarness(
-			"",
-			{},
-			{ "speakers.select": refusingSelect },
-		);
-		expect(
-			await selectSpeaker(
-				harness.client,
-				await unnamed(),
-				NICOLAI,
-				vi.fn().mockResolvedValue(false),
-			),
-		).toEqual({ kind: "cancelled" });
-		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(1);
 	});
 
 	it("answers any other failure with the host's message", async () => {
@@ -113,11 +88,10 @@ describe("selectSpeaker", () => {
 			{ "speakers.select": new Error("Speaker could not be named: busy") },
 		);
 		vi.spyOn(console, "error").mockImplementation(() => {});
-		const confirm = vi.fn();
 		expect(
-			await selectSpeaker(harness.client, await unnamed(), NICOLAI, confirm),
+			await selectSpeaker(harness.client, await unnamed(), NICOLAI),
 		).toEqual({ kind: "failed", message: "Speaker could not be named: busy" });
-		expect(confirm).not.toHaveBeenCalled();
+		expect(callsTo(harness.transport, "speakers.select")).toHaveLength(1);
 	});
 });
 
@@ -354,5 +328,119 @@ describe("SpeakerNameField", () => {
 			await screen.findAllByRole("option");
 			expect(screen.queryByTestId(/^speaker-action-/)).toBeNull();
 		});
+	});
+});
+
+describe("a paragraph's field", () => {
+	async function paragraph(
+		props: Partial<Parameters<typeof SpeakerNameField>[0]>,
+	) {
+		const user = userEvent.setup();
+		const recorded = (await loadFixtureReplies())["speakers.options"] as
+			| SpeakerOptionsReply
+			| undefined;
+		const harness = await createBridgeHarness(
+			"",
+			{},
+			{
+				"speakers.options": (params: unknown) =>
+					answerSpeakerOptions(recorded, params),
+			},
+		);
+		const onSubmit = vi.fn();
+		renderWithBridge(
+			<SpeakerNameField
+				onCancel={vi.fn()}
+				onSubmit={onSubmit}
+				scope="turn"
+				speaker={undefined}
+				speakers={(await meeting()).speakers}
+				{...props}
+			/>,
+			harness,
+		);
+		return { user, harness, onSubmit };
+	}
+
+	it("says nothing combines when one paragraph moves", async () => {
+		await paragraph({ speaker: await unnamed() });
+		const options = await screen.findAllByRole("option");
+		expect(options.map((option) => option.textContent)).toEqual([
+			"AAnnaSounds like · strong",
+			"NNicolai",
+		]);
+		expect(screen.getByRole("combobox")).toHaveAccessibleName(
+			"Name for this paragraph",
+		);
+	});
+
+	it("lists the people named here for a turn without a voice, asking no voice", async () => {
+		const { harness } = await paragraph({
+			optionsSpeakerID: UNNAMED,
+		});
+		const input = screen.getByTestId("speaker-field-turn");
+		expect(input).toHaveAttribute("placeholder", "Who said this?");
+		const options = await screen.findAllByRole("option");
+		// No voice's options: Anna, only suggested for Speaker 3, is not
+		// named here, and nothing says "Sounds like".
+		expect(options.map((option) => option.textContent)).toEqual([
+			"NNicolai",
+			"JJérôme",
+		]);
+		expect(callsTo(harness.transport, "speakers.options")).toHaveLength(0);
+	});
+
+	it("searches through another voice once typed, without its evidence or its Noes", async () => {
+		const user = userEvent.setup();
+		const recorded = (await loadFixtureReplies())["speakers.options"] as
+			| SpeakerOptionsReply
+			| undefined;
+		const anna = recorded?.options.find((option) => option.label === "Anna");
+		const harness = await createBridgeHarness(
+			"",
+			{},
+			{
+				// Speaker 4 said No to Anna: the hosts leave her out until typed.
+				"speakers.options": (params: unknown) =>
+					answerSpeakerOptions(
+						recorded,
+						params,
+						"",
+						new Set([`${UNNAMED} ${anna?.personID}`]),
+					),
+			},
+		);
+		renderWithBridge(
+			<SpeakerNameField
+				onCancel={vi.fn()}
+				onSubmit={vi.fn()}
+				optionsSpeakerID={UNNAMED}
+				scope="turn"
+				speaker={undefined}
+				speakers={(await meeting()).speakers}
+			/>,
+			harness,
+		);
+		await screen.findAllByRole("option");
+		await user.type(screen.getByTestId("speaker-field-turn"), "Ann");
+		const found = await screen.findByRole("option", { name: /^Anna/ });
+		// A plain person: no "Sounds like" from Speaker 4.
+		expect(found.textContent).toBe("AAnna");
+		expect(
+			callsTo(harness.transport, "speakers.options").at(-1)?.params,
+		).toEqual({ speakerID: UNNAMED, query: "Ann" });
+	});
+
+	it("offers only Create when the meeting has no voice to ask", async () => {
+		const { user, harness, onSubmit } = await paragraph({});
+		await user.type(screen.getByTestId("speaker-field-turn"), "Ann");
+		const create = await screen.findByRole("option", { name: "Create “Ann”" });
+		expect(create).toHaveAttribute("aria-selected", "true");
+		await user.keyboard("{Enter}");
+		expect(onSubmit).toHaveBeenCalledWith(
+			{ kind: "create", label: "Ann" },
+			"Ann",
+		);
+		expect(callsTo(harness.transport, "speakers.options")).toHaveLength(0);
 	});
 });

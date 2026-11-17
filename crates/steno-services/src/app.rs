@@ -171,6 +171,9 @@ pub struct App {
     /// the Mac.
     pub tone_directory: Option<std::path::PathBuf>,
     pub(crate) launch_work: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The services' clip player, whose span threads ask the host for a
+    /// pass once a paragraph starts or ends ([`App::launch`]).
+    pub(crate) clip_player: Option<Arc<crate::clip_player::ProcessClipPlayer>>,
     /// Resolves once the secret store chose where the secrets are, true when
     /// it turned a read away while the keyring asked the user, so
     /// [`App::launch`] reads the API key and the identity again.
@@ -679,6 +682,9 @@ pub fn build_with_import(
         })
     });
 
+    let clip_player = Arc::new(crate::clip_player::ProcessClipPlayer::new(
+        paths.paragraph_audio_directory(),
+    ));
     let services = Services {
         clock,
         login_item: options
@@ -702,7 +708,7 @@ pub fn build_with_import(
         audio_devices: Arc::new(PlatformAudioDevices),
         folder_usage: Arc::new(DiskFolderUsage),
         file_system: Arc::new(steno_host::services::RealFileSystem),
-        clip_player: Arc::new(crate::clip_player::ProcessClipPlayer::new()),
+        clip_player: clip_player.clone(),
         opener: options.opener,
         preferences,
         secrets: secrets.clone(),
@@ -734,6 +740,7 @@ pub fn build_with_import(
         tone_directory: cfg!(target_os = "macos")
             .then(steno_audio::capture::permission::tone_directory),
         launch_work: std::sync::Mutex::default(),
+        clip_player: Some(clip_player),
         secrets_unlocked: std::sync::Mutex::new(secrets_unlocked),
         database_lock,
     })
@@ -1106,6 +1113,14 @@ impl App {
         }));
         if let Some(detection) = &self.detection {
             detection.run();
+        }
+        if let Some(player) = &self.clip_player {
+            let player_host = Arc::downgrade(host);
+            player.on_change(move || {
+                if let Some(host) = player_host.upgrade() {
+                    host.request_reload();
+                }
+            });
         }
         self.report_update_checks(host);
 

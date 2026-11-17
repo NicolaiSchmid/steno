@@ -38,6 +38,7 @@ public enum Migrations {
     Step(identifier: "v4", migrate: v4),
     Step(identifier: "v5", migrate: v5),
     Step(identifier: "v6", migrate: v6),
+    Step(identifier: "v7", migrate: v7),
   ]
 
   /// Every identifier in registration order; tests compare it with what a
@@ -288,5 +289,24 @@ public enum Migrations {
     try db.create(
       index: "speakerSuggestionRejection_meetingID", on: "speakerSuggestionRejection",
       columns: ["meetingID"])
+  }
+
+  /// Undoable combining and paragraph moves
+  /// (`.plans/2026-11-14-speaker-identification.md`, step 4). A voice
+  /// combined into another keeps its own `speaker` row, embedding, clip and
+  /// answers, with `mergedInto` naming the voice it now reads as; its
+  /// segments keep its id, so "Separate again" is clearing the column. And
+  /// `meeting.transcriptGeneration`, raised each time processing writes the
+  /// transcript, so a paragraph move made against an older one is refused.
+  /// Two defaulted columns: an older build that ignores this version reads a
+  /// combined voice as a voice of its own again, and never raises the count.
+  static func v7(_ db: Database) throws {
+    try db.alter(table: "speaker") { t in
+      t.add(column: "mergedInto", .text).references("speaker", onDelete: .setNull)
+    }
+    try db.create(index: "speaker_mergedInto", on: "speaker", columns: ["mergedInto"])
+    try db.alter(table: "meeting") { t in
+      t.add(column: "transcriptGeneration", .integer).notNull().defaults(to: 0)
+    }
   }
 }

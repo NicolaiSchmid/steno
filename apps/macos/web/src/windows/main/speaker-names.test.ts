@@ -2,19 +2,24 @@ import { describe, expect, it } from "vitest";
 import type { SpeakerOption } from "@/bridge/contract";
 import { personColor } from "@/lib/person-color";
 import {
+	allScopeLabel,
 	context,
+	defaultScope,
 	firstWithWork,
 	groupOptions,
+	meetingPeopleOptions,
 	nextToName,
 	optionReason,
 	panelLayout,
+	panelRows,
 	peopleLabel,
 	pillState,
 	placements,
 	quote,
-	rowOrder,
 	type Speaker,
 	suggestionReason,
+	type Turn,
+	turnSegments,
 	unsuggested,
 } from "./speaker-names";
 
@@ -39,6 +44,7 @@ function voice(
 		hasClip: true,
 		isPlaying: false,
 		dismissed: false,
+		combined: [],
 	};
 }
 
@@ -177,7 +183,7 @@ describe("panelLayout", () => {
 
 	it("advances to the next unnamed voice, never a suggestion, never wrapping", () => {
 		const layout = panelLayout(speakers);
-		expect(rowOrder(layout)[0]?.id).toBe(ME.id);
+		expect(panelRows(layout)[0]?.id).toBe(ME.id);
 		expect(nextToName(layout, ME.id)?.id).toBe(id(3));
 		expect(nextToName(layout, id(3))?.id).toBe(id(6));
 		expect(nextToName(layout, id(6))).toBeUndefined();
@@ -348,7 +354,7 @@ describe("voices that are not people", () => {
 		const layout = panelLayout(speakers);
 		expect(layout.dismissed.map((speaker) => speaker.id)).toEqual([id(2)]);
 		expect(layout.need.map((speaker) => speaker.id)).toEqual([id(3)]);
-		expect(rowOrder(layout).at(-1)?.id).toBe(id(2));
+		expect(panelRows(layout).at(-1)?.id).toBe(id(2));
 		expect(firstWithWork(panelLayout([notPerson(voice(2, "unknown"))]))).toBe(
 			undefined,
 		);
@@ -418,5 +424,153 @@ describe("the evidence and the reasons", () => {
 		expect(unsuggested(anna)).toEqual({
 			...voice(3, "unknown"),
 		});
+	});
+});
+
+describe("a paragraph's scope", () => {
+	it("opens on All while the voice is unnamed or suggested, on This paragraph once confirmed", () => {
+		expect(defaultScope(voice(1, "unknown"))).toBe("voice");
+		expect(defaultScope(voice(2, "suggested", "Anna", 3))).toBe("voice");
+		expect(defaultScope(voice(3, "confirmed", "Jérôme", 4))).toBe("turn");
+		expect(
+			defaultScope({
+				...voice(9, "confirmed", "Nicolai", 1),
+				clusterLabel: "Me",
+			}),
+		).toBe("turn");
+		expect(defaultScope(undefined)).toBe("turn");
+	});
+
+	it("names All by the voice, the person once confirmed, yours for Me", () => {
+		expect(allScopeLabel(voice(2, "unknown"), 4)).toBe(
+			"All 4 paragraphs of Speaker 2",
+		);
+		expect(allScopeLabel(voice(2, "suggested", "Anna", 3), 4)).toBe(
+			"All 4 paragraphs of Speaker 2",
+		);
+		expect(allScopeLabel(voice(2, "confirmed", "Nicolai", 1), 4)).toBe(
+			"All 4 paragraphs of Nicolai",
+		);
+		expect(allScopeLabel(voice(2, "unknown"), 1)).toBe("All of Speaker 2");
+		expect(allScopeLabel(ME, 4)).toBe("All of yours");
+	});
+
+	it("sends every segment of the turn with the voice it shows, or none", () => {
+		const turn: Turn = {
+			id: id(100),
+			speakerID: id(1),
+			speakerName: "Speaker 1",
+			startSeconds: 0,
+			endSeconds: 4,
+			text: "Hallo.",
+			segmentIDs: [id(100), id(101)],
+			isPlaying: false,
+			playFailed: false,
+		};
+		expect(turnSegments(turn)).toEqual([
+			{ id: id(100), speakerID: id(1) },
+			{ id: id(101), speakerID: id(1) },
+		]);
+		const { speakerID: _speaker, ...voiceless } = turn;
+		expect(turnSegments(voiceless)).toEqual([{ id: id(100) }, { id: id(101) }]);
+	});
+
+	it("says nothing combines when one paragraph moves", () => {
+		const nicolai = voice(1, "confirmed", "Nicolai", 1);
+		const options: SpeakerOption[] = [
+			{ kind: "person", label: "Nicolai", personID: person(1) },
+		];
+		const [also] = groupOptions(
+			options,
+			"",
+			voice(2, "unknown"),
+			[nicolai, voice(2, "unknown")],
+			undefined,
+			"turn",
+		);
+		expect(also?.id).toBe("also");
+		expect(also?.rows[0]?.combines).toBeUndefined();
+	});
+});
+
+describe("combined voices", () => {
+	it("follow their person's voices in the keyboard's order", () => {
+		const nicolai = {
+			...voice(1, "confirmed", "Nicolai", 1),
+			combined: [
+				{
+					id: id(5),
+					clusterLabel: "Speaker 5",
+					hasClip: true,
+					isPlaying: false,
+				},
+			],
+		};
+		const second = voice(2, "confirmed", "Nicolai", 1);
+		const unnamed = voice(3, "unknown");
+		const layout = panelLayout([nicolai, second, unnamed]);
+		expect(panelRows(layout).map((row) => row.id)).toEqual([
+			id(3),
+			id(1),
+			id(2),
+			id(5),
+		]);
+	});
+
+	it("follow their voice in every section, so Separate again stays reachable after Remove name", () => {
+		const unnamed = {
+			...voice(1, "unknown"),
+			combined: [
+				{
+					id: id(5),
+					clusterLabel: "Speaker 5",
+					hasClip: true,
+					isPlaying: false,
+				},
+			],
+		};
+		const layout = panelLayout([unnamed, voice(2, "confirmed", "Anna", 2)]);
+		expect(layout.need.map((row) => row.id)).toEqual([id(1)]);
+		expect(panelRows(layout).map((row) => row.id)).toEqual([
+			id(1),
+			id(5),
+			id(2),
+		]);
+	});
+
+	it("are passed over when naming moves on and when the panel opens", () => {
+		const nicolai = {
+			...voice(1, "confirmed", "Nicolai", 1),
+			combined: [
+				{
+					id: id(5),
+					clusterLabel: "Speaker 5",
+					hasClip: true,
+					isPlaying: false,
+				},
+			],
+		};
+		const layout = panelLayout([nicolai, voice(2, "unknown")]);
+		// From the combined row, the next row to name is past it.
+		expect(nextToName(layout, id(5))).toBeUndefined();
+		expect(nextToName(layout, id(2))).toBeUndefined();
+		expect(firstWithWork(layout)?.id).toBe(id(2));
+	});
+});
+
+describe("meetingPeopleOptions", () => {
+	it("lists each person named here once, without a suggestion, a dismissed voice or a reason", () => {
+		const options = meetingPeopleOptions([
+			voice(1, "confirmed", "Nicolai", 1),
+			voice(2, "suggested", "Anna", 2),
+			voice(3, "confirmed", "Nicolai", 1),
+			notPerson(voice(4, "confirmed", "Jérôme", 3)),
+			voice(5, "unknown"),
+			voice(6, "confirmed", "Maya", 4),
+		]);
+		expect(options).toEqual([
+			{ kind: "person", label: "Nicolai", personID: person(1) },
+			{ kind: "person", label: "Maya", personID: person(4) },
+		]);
 	});
 });

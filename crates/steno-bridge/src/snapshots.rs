@@ -322,6 +322,26 @@ pub struct DetailSpeaker {
     /// Not a person: out of the counts and voice memory, its turns read
     /// "Not a person".
     pub dismissed: bool,
+    /// The voices combined into this one since step 4's migration, each of
+    /// which "Separate again" makes its own voice again. A combine from
+    /// before it left no such voice.
+    pub combined: Vec<DetailCombinedVoice>,
+}
+
+/// A voice combined into another: its own clip and words, kept so the
+/// combine can be undone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailCombinedVoice {
+    /// The voice's own speaker id, which `speakers.play` and
+    /// `speakers.separate` take.
+    #[serde(with = "uuid_text")]
+    pub id: Uuid,
+    pub cluster_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    pub has_clip: bool,
+    pub is_playing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,6 +379,17 @@ pub struct DetailTurn {
     pub start_seconds: f64,
     pub end_seconds: f64,
     pub text: String,
+    /// Every segment the turn folds together, in time order; the first is
+    /// `id`. `transcript.setTurnSpeaker` and `transcript.playTurn` take
+    /// them.
+    #[serde(rename = "segmentIDs", with = "steno_core::json::uuid_text_vec")]
+    pub segment_ids: Vec<Uuid>,
+    /// The turn's own audio plays (`transcript.playTurn`).
+    pub is_playing: bool,
+    /// The turn's audio could not be played after `transcript.playTurn`
+    /// replied (the recording would not cut or the player would not start),
+    /// until the next play or stop.
+    pub play_failed: bool,
 }
 
 pub use steno_core::TaskPriority;
@@ -454,6 +485,9 @@ pub struct MeetingDetailSnapshot {
     pub summary_status: DetailSummaryStatus,
     pub summary: Vec<DetailSummarySection>,
     pub transcript: Vec<DetailTurn>,
+    /// Counts the meeting's transcripts: Process again writes a new one,
+    /// and a paragraph move made against an older one is refused.
+    pub transcript_generation: i64,
     pub tasks: Vec<DetailTask>,
     pub decisions: Vec<String>,
     pub notes: String,

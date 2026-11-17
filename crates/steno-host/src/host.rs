@@ -72,12 +72,13 @@ use steno_bridge::{
     AppPhone, AssetIdParams, BridgeError, BridgeEvent, BridgeHost, BridgeTopic, BridgeWindow,
     ChosenPathReply, ConfirmDestructiveParams, ConfirmReply, DeviceIdParams, EventSink,
     ExportUpdateParams, MeetingIdParams, OpenUrlParams, Outcome, PageLayoutParams, PermissionKind,
-    PermissionKindParams, PermissionState, Platform, RecordingState, RejectSpeakerParams,
-    SaveNotesParams, SelectSpeakerParams, SetAutomaticUpdatesParams, SetBoolParams,
-    SetFilterParams, SetQueryParams, SetRetentionParams, SetStringParams, SetTabParams,
-    SetTagFilterParams, SetTagsParams, SetTemplateParams, SettingsSection, SetupStepParams,
-    SpeakerIdParams, SpeakerOption, SpeakerOptionKind, SpeakerOptionReason, SpeakerOptionsParams,
-    SpeakerOptionsReply, StartRecordingParams, SummariesUpdateParams, WindowParams,
+    PermissionKindParams, PermissionState, Platform, PlayTurnParams, RecordingState,
+    RejectSpeakerParams, SaveNotesParams, SelectSpeakerParams, SetAutomaticUpdatesParams,
+    SetBoolParams, SetFilterParams, SetQueryParams, SetRetentionParams, SetStringParams,
+    SetTabParams, SetTagFilterParams, SetTagsParams, SetTemplateParams, SetTurnSpeakerParams,
+    SettingsSection, SetupStepParams, SpeakerIdParams, SpeakerOption, SpeakerOptionKind,
+    SpeakerOptionReason, SpeakerOptionsParams, SpeakerOptionsReply, StartRecordingParams,
+    SummariesUpdateParams, TURN_AUDIO_LIMIT_SECONDS, WindowParams,
 };
 use steno_core::paths::file_url_path;
 use steno_core::protocols::SecretKey;
@@ -201,6 +202,8 @@ struct Inner {
     /// The clip playing at the last pass, so the detail republishes once it
     /// ends.
     playing_clip: Option<PathBuf>,
+    /// The span the player last could not play, published with the detail.
+    failed_clip: Option<PathBuf>,
     general: GeneralSettingsViewModel,
     audio: AudioSettingsViewModel,
     speech: SpeechSettingsViewModel,
@@ -464,6 +467,32 @@ fn no_selection() -> BridgeError {
     BridgeError::not_found("No meeting is selected.")
 }
 
+/// What the page reads when a move met a transcript that changed since
+/// its snapshot.
+const TRANSCRIPT_CHANGED: &str = "The transcript changed. Refresh to see it as it is now.";
+
+/// [`speaker_write_error`] for Separate again: a combined voice with none
+/// of its paragraphs left has nothing to separate. Swift:
+/// `MainWindowBridge.separate`.
+fn separate_error(error: StoreError) -> BridgeError {
+    match error {
+        StoreError::StaleTranscript => {
+            BridgeError::stale("Its paragraphs moved since. Nothing to separate.")
+        }
+        error => speaker_write_error(error),
+    }
+}
+
+/// A speaker write's store error as the page reads it: `stale` when the
+/// page acted on what changed since, `failed` otherwise.
+fn speaker_write_error(error: StoreError) -> BridgeError {
+    match error {
+        StoreError::StaleTranscript => BridgeError::stale(TRANSCRIPT_CHANGED),
+        StoreError::NotCombined(_) => BridgeError::stale("This voice is no longer combined."),
+        error => BridgeError::failed(format!("Speaker could not be changed: {error}")),
+    }
+}
+
 impl Host {
     /// Loads every view model; nothing is published until a sink is
     /// attached and `page.ready` arrives. Holds a reader of its own until
@@ -525,6 +554,7 @@ impl Host {
                 progress,
                 reviews: BTreeSet::new(),
                 playing_clip: None,
+                failed_clip: None,
                 general,
                 audio,
                 speech,
@@ -691,17 +721,17 @@ impl Host {
             BridgeTopic::MeetingDetail => {
                 self.sync_detail(inner);
                 self.follow_key_withheld(inner);
-                let playing = inner
-                    .detail
-                    .as_ref()
-                    .and_then(|detail| detail.speakers.playing(&*self.shared.services.clip_player));
+                let player = &*self.shared.services.clip_player;
                 inner
                     .detail
                     .as_ref()
                     .and_then(|detail| {
                         main_snapshots::detail_snapshot(
                             detail,
-                            playing,
+                            main_snapshots::Playback {
+                                playing: detail.speakers.playing(player),
+                                failed_turn: detail.speakers.failed_turn(player),
+                            },
                             now,
                             self.shared.config.zone,
                         )
@@ -946,9 +976,11 @@ impl Host {
             .phones
             .refresh_after_pairing(&self.shared.services, now);
         inner.publisher.schedule(BridgeTopic::SettingsPhone);
-        let playing = self.shared.services.clip_player.playing();
-        if playing != inner.playing_clip {
+        let player = &self.shared.services.clip_player;
+        let (playing, failed) = (player.playing(), player.failed());
+        if playing != inner.playing_clip || failed != inner.failed_clip {
             inner.playing_clip = playing;
+            inner.failed_clip = failed;
             inner.publisher.schedule(BridgeTopic::MeetingDetail);
         }
         if self.shared.services.recorder.status().state == RecordingState::Idle {
@@ -1561,6 +1593,16 @@ impl Host {
             if inner.store.meeting(meeting_id)?.is_none() {
                 return Err(no_such_meeting());
             }
+            // Deleting the recording ends what plays from it, so no cut of
+            // a paragraph outlives it.
+            if !keep
+                && inner
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.id == meeting_id)
+            {
+                self.shared.services.clip_player.stop();
+            }
             let applied = detail::set_keep_audio(
                 meeting_id,
                 keep,
@@ -1662,6 +1704,18 @@ impl Host {
             &Store,
         ) -> steno_core::store::Result<bool>,
     ) -> Outcome<()> {
+        self.speakers_write_mapping(write, speaker_write_error)
+    }
+
+    /// [`Host::speakers_write`] with the store error read as `map_error`.
+    fn speakers_write_mapping(
+        &self,
+        write: impl FnOnce(
+            &crate::speakers::SpeakersViewModel,
+            &Store,
+        ) -> steno_core::store::Result<bool>,
+        map_error: fn(StoreError) -> BridgeError,
+    ) -> Outcome<()> {
         let outcome = {
             let mut inner = self.lock();
             let outcome = Self::with_detail(&mut inner, |detail, store| {
@@ -1672,11 +1726,7 @@ impl Host {
                 }
                 written
             })
-            .and_then(|written| {
-                written.map(drop).map_err(|error| {
-                    BridgeError::failed(format!("Speaker could not be changed: {error}"))
-                })
-            });
+            .and_then(|written| written.map(drop).map_err(map_error));
             self.reload_detail(&mut inner);
             outcome
         };
@@ -2115,6 +2165,87 @@ impl BridgeHost for Host {
         self.speakers_write(|speakers, store| {
             speakers.set_dismissed(params.speaker_id, false, store)
         })
+    }
+
+    fn speakers_separate(&self, params: SpeakerIdParams) -> Outcome<()> {
+        self.speakers_write_mapping(
+            |speakers, store| speakers.separate(params.speaker_id, store),
+            separate_error,
+        )
+    }
+
+    fn transcript_set_turn_speaker(&self, params: SetTurnSpeakerParams) -> Outcome<()> {
+        let now = self.now();
+        let outcome = {
+            let mut inner = self.lock();
+            let option = Self::model_option(&params.option, &inner)?;
+            let segments: Vec<(Uuid, Option<Uuid>)> = params
+                .segments
+                .iter()
+                .map(|segment| (segment.id, segment.speaker_id))
+                .collect();
+            let outcome = Self::with_detail(&mut inner, |detail, store| {
+                if detail.id != params.meeting_id {
+                    return Err(StoreError::StaleTranscript);
+                }
+                let moved = detail.speakers.move_turn(
+                    params.meeting_id,
+                    params.generation,
+                    &segments,
+                    &option,
+                    store,
+                    now,
+                );
+                if matches!(moved, Ok(true)) {
+                    detail.speakers_changed();
+                    detail.picker_closed(&*self.shared.services.pipeline);
+                }
+                moved
+            })
+            .and_then(|moved| moved.map(drop).map_err(speaker_write_error));
+            self.reload_detail(&mut inner);
+            outcome
+        };
+        self.publish();
+        outcome
+    }
+
+    fn transcript_play_turn(&self, params: PlayTurnParams) -> Outcome<()> {
+        let files = &*self.shared.services.file_system;
+        let player = &*self.shared.services.clip_player;
+        self.detail_command(|detail| {
+            let export = detail
+                .export
+                .as_ref()
+                .filter(|export| export.meeting.id == params.meeting_id)
+                .ok_or_else(|| BridgeError::stale(TRANSCRIPT_CHANGED))?;
+            let recording = export
+                .audio
+                .as_ref()
+                .and_then(|asset| file_url_path(&asset.url))
+                .filter(|path| files.exists(path))
+                .ok_or_else(|| BridgeError::not_found("The recording is gone."))?;
+            let (start, end) = export
+                .segments
+                .iter()
+                .filter(|segment| params.segment_ids.contains(&segment.id))
+                .fold(None, |span: Option<(f64, f64)>, segment| {
+                    Some(span.map_or((segment.start, segment.end), |(start, end)| {
+                        (start.min(segment.start), end.max(segment.end))
+                    }))
+                })
+                .ok_or_else(|| BridgeError::not_found("That paragraph is gone."))?;
+            let end = end.min(start + TURN_AUDIO_LIMIT_SECONDS);
+            let turn = params.segment_ids.first().copied().unwrap_or_default();
+            if detail
+                .speakers
+                .play_turn(&recording, start, end, turn, player)
+            {
+                Ok(())
+            } else {
+                Err(BridgeError::failed("The paragraph could not be played."))
+            }
+        })?
     }
 
     fn speakers_play(&self, params: SpeakerIdParams) -> Outcome<()> {
@@ -2811,5 +2942,22 @@ mod tests {
     #[tokio::test]
     async fn a_boundary_may_use_the_timer_from_inside_a_runtime() {
         block_on(a_boundary_with_a_timeout());
+    }
+
+    /// A Separate again with nothing left says so, not the move's line;
+    /// both stay `stale`, so the page offers no Retry.
+    #[test]
+    fn a_stale_separate_again_has_its_own_message() {
+        use steno_bridge::BridgeErrorCode;
+        use steno_core::StoreError;
+
+        let separate = super::separate_error(StoreError::StaleTranscript);
+        assert_eq!(separate.code, BridgeErrorCode::Stale);
+        assert_eq!(
+            separate.message,
+            "Its paragraphs moved since. Nothing to separate."
+        );
+        let moved = super::speaker_write_error(StoreError::StaleTranscript);
+        assert_eq!(moved.message, super::TRANSCRIPT_CHANGED);
     }
 }

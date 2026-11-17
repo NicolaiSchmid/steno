@@ -389,6 +389,8 @@ pub const SPEAKER_NICOLAI: u32 = 0x14;
 pub const SPEAKER_JEROME: u32 = 0x15;
 pub const SPEAKER_ANNA: u32 = 0x16;
 pub const SPEAKER_UNKNOWN: u32 = 0x17;
+/// Combined into Nicolai's voice, so Separate again has a voice to show.
+pub const SPEAKER_COMBINED: u32 = 0x18;
 pub const PHONE: u32 = 0x28;
 
 pub fn person(n: u32, name: &str, email: Option<&str>, axis: usize) -> Person {
@@ -616,16 +618,39 @@ pub fn populate_sample(store: &Store, fakes: &FakeServices) {
             None,
             3,
         ),
+        Speaker {
+            sample_clip_range: Some(TimeRange {
+                lower: 30.0,
+                upper: 41.0,
+            }),
+            ..speaker(
+                SPEAKER_COMBINED,
+                sample.id,
+                "Speaker 5",
+                SpeakerAssignment::Unknown,
+                clip(SPEAKER_COMBINED),
+                4,
+            )
+        },
     ];
     let segments = vec![
         segment(
             0x64,
             sample.id,
             12.0,
-            41.0,
+            30.0,
             Some(SPEAKER_NICOLAI),
             AudioLane::Mic,
             "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen.",
+        ),
+        segment(
+            0x6E,
+            sample.id,
+            30.0,
+            41.0,
+            Some(SPEAKER_COMBINED),
+            AudioLane::Mic,
+            "Und die Nebenprojekte pausieren wir bis zur Q1-Planung.",
         ),
         segment(
             0x65,
@@ -648,6 +673,11 @@ pub fn populate_sample(store: &Store, fakes: &FakeServices) {
     ];
     store
         .replace_transcript(&sample, &segments, &speakers)
+        .unwrap();
+    // Speaker 5 named Nicolai, who owns Speaker 1: combined, undoably.
+    let nicolai = store.person(uuid(PERSON_NICOLAI)).unwrap().unwrap();
+    store
+        .confirm_speaker(uuid(SPEAKER_COMBINED), &nicolai)
         .unwrap();
     let tasks = vec![
         MeetingTask {

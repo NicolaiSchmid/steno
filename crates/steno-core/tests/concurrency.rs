@@ -134,7 +134,7 @@ fn two_stores_open_a_fresh_file_at_once() {
         .collect();
     for opener in openers {
         let applied = opener.join().unwrap().unwrap().unwrap();
-        assert_eq!(applied, ["v1", "v2", "v3", "v4", "v5", "v6"]);
+        assert_eq!(applied, ["v1", "v2", "v3", "v4", "v5", "v6", "v7"]);
     }
     let store = Store::open(&path).unwrap();
     let identifiers: Vec<String> = store
@@ -145,7 +145,7 @@ fn two_stores_open_a_fresh_file_at_once() {
             Ok(rows.collect::<Result<_, _>>()?)
         })
         .unwrap();
-    assert_eq!(identifiers, ["v1", "v2", "v3", "v4", "v5", "v6"]);
+    assert_eq!(identifiers, ["v1", "v2", "v3", "v4", "v5", "v6", "v7"]);
 }
 
 /// `Store::export` takes no write lock: it returns while the other store holds

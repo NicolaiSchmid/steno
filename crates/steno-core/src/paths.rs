@@ -7,24 +7,36 @@ use std::path::{Path, PathBuf};
 
 use directories::BaseDirs;
 
-/// The support directory and what hangs off it.
+/// The support directory, the cache directory and what hangs off them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StenoPaths {
     pub support_directory: PathBuf,
+    /// Files the app may lose at any time.
+    pub cache_directory: PathBuf,
 }
 
 impl StenoPaths {
-    /// Paths under `support_directory`; nothing is created.
+    /// Paths under `support_directory`, the cache in its `Cache` folder;
+    /// nothing is created.
     #[must_use]
     pub fn new(support_directory: impl Into<PathBuf>) -> Self {
+        let support_directory = support_directory.into();
         StenoPaths {
-            support_directory: support_directory.into(),
+            cache_directory: support_directory.join("Cache"),
+            support_directory,
         }
     }
 
     #[must_use]
     pub fn database_path(&self) -> PathBuf {
         self.support_directory.join("steno.sqlite")
+    }
+
+    /// Where a paragraph's audio is cut to play, in the cache. The clip
+    /// player makes it, keeps it to this user and empties it at launch.
+    #[must_use]
+    pub fn paragraph_audio_directory(&self) -> PathBuf {
+        self.cache_directory.join("paragraph-audio")
     }
 
     /// [`StenoPaths::support_directory`] for the process environment.
@@ -74,9 +86,59 @@ impl StenoPaths {
         data.join("Steno")
     }
 
-    /// The default paths with the support directory created.
+    /// [`StenoPaths::cache_directory`] for the process environment.
+    #[must_use]
+    pub fn default_cache_directory() -> PathBuf {
+        Self::cache_directory(|name| std::env::var_os(name))
+    }
+
+    /// The platform's per-user cache directory for the environment
+    /// `lookup` answers:
+    ///
+    /// - macOS: `$HOME/Library/Caches/Steno`
+    /// - Linux: `$XDG_CACHE_HOME/Steno`, else `$HOME/.cache/Steno`
+    /// - Windows: `%LOCALAPPDATA%\Steno\Cache`
+    ///
+    /// A relative path counts as unset.
+    #[must_use]
+    pub fn cache_directory(lookup: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+        let absolute = |key: &str| {
+            lookup(key)
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        let base_dirs = BaseDirs::new();
+        let home = || {
+            absolute("HOME")
+                .or_else(|| base_dirs.as_ref().map(|dirs| dirs.home_dir().to_path_buf()))
+                .unwrap_or_else(|| PathBuf::from("."))
+        };
+        if cfg!(target_os = "macos") {
+            home().join("Library").join("Caches").join("Steno")
+        } else if cfg!(windows) {
+            absolute("LOCALAPPDATA")
+                .or_else(|| {
+                    base_dirs
+                        .as_ref()
+                        .map(|dirs| dirs.data_local_dir().to_path_buf())
+                })
+                .unwrap_or_else(home)
+                .join("Steno")
+                .join("Cache")
+        } else {
+            absolute("XDG_CACHE_HOME")
+                .unwrap_or_else(|| home().join(".cache"))
+                .join("Steno")
+        }
+    }
+
+    /// The default paths with the support directory created; the cache
+    /// directory is the platform's, made when something is cached.
     pub fn create_default() -> std::io::Result<StenoPaths> {
-        let paths = StenoPaths::new(Self::default_support_directory());
+        let paths = StenoPaths {
+            cache_directory: Self::default_cache_directory(),
+            ..StenoPaths::new(Self::default_support_directory())
+        };
         std::fs::create_dir_all(&paths.support_directory)?;
         Ok(paths)
     }
@@ -194,6 +256,28 @@ fn drop_trailing_slash(bytes: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cache_follows_the_platform_and_new_keeps_it_with_the_support() {
+        let root = std::env::temp_dir();
+        let cache = StenoPaths::cache_directory(|name| {
+            matches!(name, "HOME" | "XDG_CACHE_HOME" | "LOCALAPPDATA")
+                .then(|| root.clone().into_os_string())
+        });
+        let expected = if cfg!(target_os = "macos") {
+            root.join("Library").join("Caches").join("Steno")
+        } else if cfg!(windows) {
+            root.join("Steno").join("Cache")
+        } else {
+            root.join("Steno")
+        };
+        assert_eq!(cache, expected);
+        let support = root.join("support");
+        assert_eq!(
+            StenoPaths::new(&support).paragraph_audio_directory(),
+            support.join("Cache").join("paragraph-audio")
+        );
+    }
 
     #[test]
     fn file_urls_match_foundation() {

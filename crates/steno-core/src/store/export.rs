@@ -7,6 +7,18 @@ use uuid::Uuid;
 
 use super::{Result, Store, StoreError, assets, meetings, people, tasks, transcript};
 use crate::model::{MeetingExport, Speaker};
+use crate::store::MergedSpeaker;
+
+/// What the meeting detail shows, from one snapshot: the export, the
+/// transcript generation paragraph moves are checked against, and the
+/// voices combined into others. Read together so a move never pairs one
+/// transcript with another's generation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailRows {
+    pub export: MeetingExport,
+    pub transcript_generation: i64,
+    pub combined: Vec<MergedSpeaker>,
+}
 
 /// Everything an adapter receives, each list in its stable order. `None`
 /// when there is no such meeting. Takes the transaction so no query can
@@ -71,6 +83,20 @@ impl Store {
     pub fn export(&self, meeting_id: Uuid) -> Result<MeetingExport> {
         self.snapshot(|transaction| {
             export_rows(transaction, meeting_id)?.ok_or(StoreError::MeetingNotFound(meeting_id))
+        })
+    }
+
+    /// [`DetailRows`]: [`Store::export`], the transcript generation and the
+    /// combined voices, in one deferred transaction.
+    pub fn detail_rows(&self, meeting_id: Uuid) -> Result<DetailRows> {
+        self.snapshot(|transaction| {
+            let export = export_rows(transaction, meeting_id)?
+                .ok_or(StoreError::MeetingNotFound(meeting_id))?;
+            Ok(DetailRows {
+                export,
+                transcript_generation: transcript::transcript_generation(transaction, meeting_id)?,
+                combined: people::merged_speakers_of_meeting(transaction, meeting_id)?,
+            })
         })
     }
 }

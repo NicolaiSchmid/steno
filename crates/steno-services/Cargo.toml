@@ -48,7 +48,6 @@ uuid.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 steno-speech-coreml = { path = "../steno-speech-coreml" }
 # The Swift import's keychain and account lookups.
-nix.workspace = true
 security-framework.workspace = true
 steno-macos = { path = "../steno-macos" }
 
@@ -56,6 +55,9 @@ steno-macos = { path = "../steno-macos" }
 # without using it.
 [target.'cfg(not(windows))'.dependencies]
 keyring.workspace = true
+# The Swift import's account lookup on the Mac; on every Unix, the user
+# the clip player's paragraph-audio folder must belong to (`geteuid`).
+nix.workspace = true
 
 # The credential store (`secrets::credentials`).
 [target.'cfg(windows)'.dependencies]
