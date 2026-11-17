@@ -6,8 +6,9 @@ import type {
 	MeetingsListSnapshot,
 	RecordingSnapshot,
 } from "@/bridge/contract";
-import { loadFixtureSnapshots } from "@/bridge/mock-transport";
+import { applyScenario, loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
+import { format } from "./format";
 import { MeetingDetail } from "./meeting-detail";
 import { NarrowLayoutContext } from "./narrow-layout";
 
@@ -23,6 +24,14 @@ function narrow(children: ReactNode, isNarrow = true) {
 			{children}
 		</NarrowLayoutContext.Provider>
 	);
+}
+
+/** The `recording` snapshot `scenario=recording-elsewhere` sends. */
+async function elsewhereRecording(): Promise<RecordingSnapshot> {
+	return applyScenario(
+		await loadFixtureSnapshots(),
+		new URLSearchParams("scenario=recording-elsewhere"),
+	).recording as RecordingSnapshot;
 }
 
 describe("RecorderBar", () => {
@@ -81,7 +90,7 @@ describe("RecorderBar", () => {
 		);
 	});
 
-	it("links to the current recording when the list never showed its title", async () => {
+	it("names the recording from the host when the list never showed it", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness(
 			"scenario=recording-elsewhere&query=investor",
@@ -89,11 +98,40 @@ describe("RecorderBar", () => {
 		renderWithBridge(narrow(<MeetingDetail />), harness);
 		const bar = await screen.findByTestId("recorder-bar");
 		const link = within(bar).getByTestId("bar-open-recording");
-		expect(link).toHaveTextContent("Open current recording");
+		expect(link).toHaveTextContent("Tuesday 10:08");
 		await user.click(link);
 		expect(
 			callsTo(harness.transport, "meetings.select").map((call) => call.params),
 		).toEqual([{ meetingID: "00000000-0000-0000-0000-000000000003" }]);
+	});
+
+	it("follows a rename the host sends while it records", async () => {
+		const harness = await createBridgeHarness("scenario=recording-elsewhere");
+		renderWithBridge(narrow(<MeetingDetail />), harness);
+		const bar = await screen.findByTestId("recorder-bar");
+		const recording = await elsewhereRecording();
+		act(() => {
+			harness.transport.emit("recording", {
+				...recording,
+				meetingTitle: "Board prep",
+			} satisfies RecordingSnapshot);
+		});
+		expect(within(bar).getByTestId("bar-open-recording")).toHaveTextContent(
+			"Board prep",
+		);
+	});
+
+	it("names an untitled recording as the list would", async () => {
+		const harness = await createBridgeHarness("scenario=recording-elsewhere");
+		renderWithBridge(narrow(<MeetingDetail />), harness);
+		const bar = await screen.findByTestId("recorder-bar");
+		const { meetingTitle: _, ...untitled } = await elsewhereRecording();
+		act(() => {
+			harness.transport.emit("recording", untitled);
+		});
+		expect(within(bar).getByTestId("bar-open-recording")).toHaveTextContent(
+			format.untitled(untitled.startedAt ?? ""),
+		);
 	});
 
 	it("names no meeting while the open one is the one recording", async () => {

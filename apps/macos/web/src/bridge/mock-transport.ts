@@ -295,10 +295,18 @@ export function applyScenario(
 	if (scenario === "recording" || scenario === "recording-elsewhere") {
 		const live = snapshots["recording.live"] as RecordingSnapshot | undefined;
 		if (live) {
+			// `recording-elsewhere` records another meeting, named as the
+			// host names it, `recordingTitle=` included.
+			const elsewhere =
+				params.get("recordingTitle") ??
+				(list ? findRow(list, RECORDING_ELSEWHERE_ID)?.title : undefined);
 			result.recording = {
 				...live,
 				...(scenario === "recording-elsewhere"
 					? { meetingID: RECORDING_ELSEWHERE_ID }
+					: {}),
+				...(scenario === "recording-elsewhere" && elsewhere
+					? { meetingTitle: elsewhere }
 					: {}),
 				startedAt: new Date(Date.now() - RECORDING_ELAPSED_MS).toISOString(),
 			} satisfies RecordingSnapshot;

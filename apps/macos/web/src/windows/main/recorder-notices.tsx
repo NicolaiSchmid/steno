@@ -1,5 +1,5 @@
 import { CircleAlertIcon, TimerIcon } from "lucide-react";
-import { useContext, useRef } from "react";
+import { useContext } from "react";
 import type { RecordingSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import { Button, Callout, focusRingClass, RecordMark } from "@/components/ui";
@@ -150,22 +150,19 @@ export function RecorderBar() {
 		(recording?.autoStop !== undefined && state === "recording") ||
 		Boolean(recording?.error ?? recording?.warning);
 	// Another meeting is open: the bar names the one that records, as a
-	// link to it, so Stop says what it stops. The list is filtered, so the
-	// bar keeps the title it last saw for the recording meeting; a filter or
-	// search that hides the meeting leaves the name in place. A title it never
-	// saw reads "Open current recording".
+	// link to it, so Stop says what it stops. The host sends its title, so
+	// a filter or search that hides the meeting from the list leaves the
+	// name in place.
 	const meetingID = recording?.meetingID;
-	const seen = useRef<{ id: string; title: string } | undefined>(undefined);
-	const listed = list?.groups
-		.flatMap((group) => group.meetings)
-		.find((meeting) => meeting.id === meetingID);
-	if (listed) seen.current = { id: listed.id, title: listed.title };
 	const elsewhere =
 		meetingID !== undefined && list?.selection !== meetingID
 			? meetingID
 			: undefined;
 	const recordingTitle =
-		seen.current?.id === meetingID ? seen.current?.title : undefined;
+		recording?.meetingTitle ??
+		(recording?.startedAt
+			? format.untitled(recording.startedAt)
+			: "Untitled meeting");
 	if (!narrow || !recording || (!active && !notices)) {
 		return null;
 	}
@@ -193,9 +190,7 @@ export function RecorderBar() {
 								}
 								type="button"
 							>
-								<span className="min-w-0 truncate">
-									{recordingTitle ?? "Open current recording"}
-								</span>
+								<span className="min-w-0 truncate">{recordingTitle}</span>
 							</button>
 						) : null}
 						{state === "recording" ? (

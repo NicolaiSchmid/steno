@@ -273,6 +273,7 @@ fn an_event_sink_publishes_snapshots_on_their_topic() {
         mode: None,
         call_app: None,
         meeting_id: None,
+        meeting_title: None,
         level: None,
         auto_stop: None,
         denied_permissions: vec![],

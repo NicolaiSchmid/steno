@@ -120,6 +120,10 @@ pub struct RecordingSnapshot {
         with = "uuid_text_opt"
     )]
     pub meeting_id: Option<Uuid>,
+    /// What the list calls the recording meeting, renames included, so the
+    /// page names it without finding it in the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<RecordingLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

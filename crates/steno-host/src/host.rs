@@ -231,6 +231,10 @@ struct Shared {
     dialogs: RwLock<Dialogs>,
     /// The `recording` topic's feed, which takes none of the locks above.
     feed: RecordingFeed,
+    /// The recording meeting and what the list calls it, set by each reload
+    /// of the rows, so the feed names the meeting without the view models'
+    /// lock. A leaf lock, held only to read or swap it.
+    recording_title: Mutex<Option<(Uuid, String)>>,
     /// The shell's tray, told the meeting rows with every publish that
     /// moved them.
     tray: Mutex<Option<TraySink>>,
@@ -263,6 +267,13 @@ impl recording_feed::Source for Shared {
 
     fn status(&self) -> RecorderStatus {
         self.services.recorder.status()
+    }
+
+    fn title(&self, meeting_id: Uuid) -> Option<String> {
+        lock(&self.recording_title)
+            .as_ref()
+            .filter(|(id, _)| *id == meeting_id)
+            .map(|(_, title)| title.clone())
     }
 
     fn sink(&self) -> Option<Arc<dyn EventSink>> {
@@ -573,6 +584,7 @@ impl Host {
                 choose_folder: Box::new(|_| None),
             }),
             feed: RecordingFeed::new(),
+            recording_title: Mutex::new(None),
             tray: Mutex::new(None),
             reloads: Reloads::default(),
         });
@@ -682,8 +694,10 @@ impl Host {
     /// not send; `null` for `meeting.detail` without a selection.
     pub fn snapshot(&self, topic: BridgeTopic) -> Option<Value> {
         if topic == BridgeTopic::Recording {
+            use recording_feed::Source as _;
             let status = self.shared.services.recorder.status();
-            return to_value(main_snapshots::recording_snapshot(&status)).ok();
+            let title = status.meeting_id.and_then(|id| self.shared.title(id));
+            return to_value(main_snapshots::recording_snapshot(&status, title)).ok();
         }
         let mut inner = self.lock();
         self.build(&mut inner, topic)
@@ -949,6 +963,7 @@ impl Host {
     fn reload_rows(&self, inner: &mut Inner) {
         let now = self.now();
         inner.list.reload(&inner.store);
+        self.follow_recording_title(inner, now);
         inner.progress.meetings_changed(&inner.list.all, now);
         tray::prune_reviews(&mut inner.reviews, &inner.list);
         if let Some(detail) = inner.detail.as_mut() {
@@ -964,6 +979,34 @@ impl Host {
             BridgeTopic::MeetingDetail,
         ] {
             inner.publisher.schedule(topic);
+        }
+    }
+
+    /// Keeps the recording meeting's title as the reloaded rows name it, and
+    /// pokes the feed when it moved, so a rename during the recording
+    /// reaches the page.
+    fn follow_recording_title(&self, inner: &Inner, now: DateTime<Utc>) {
+        let current = self
+            .shared
+            .services
+            .recorder
+            .status()
+            .meeting_id
+            .and_then(|id| inner.list.all.iter().find(|meeting| meeting.id == id))
+            .map(|meeting| {
+                (
+                    meeting.id,
+                    crate::labels::display_title(meeting, now, inner.list.zone),
+                )
+            });
+        let changed = {
+            let mut title = lock(&self.shared.recording_title);
+            let changed = *title != current;
+            *title = current;
+            changed
+        };
+        if changed {
+            self.shared.feed.poke();
         }
     }
 

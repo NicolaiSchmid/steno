@@ -89,6 +89,9 @@ public struct RecordingSnapshot: Codable, Sendable, Equatable {
   public var mode: BridgeCaptureMode?
   public var callApp: String?
   public var meetingID: UUID?
+  /// What the list calls the recording meeting, renames included, so the
+  /// page names it without finding it in the list.
+  public var meetingTitle: String?
   public var level: Level?
   public var autoStop: AutoStop?
   public var deniedPermissions: [BridgePermissionKind]
@@ -97,7 +100,8 @@ public struct RecordingSnapshot: Codable, Sendable, Equatable {
 
   public init(
     state: State, startedAt: Date? = nil, mode: BridgeCaptureMode? = nil, callApp: String? = nil,
-    meetingID: UUID? = nil, level: Level? = nil, autoStop: AutoStop? = nil,
+    meetingID: UUID? = nil, meetingTitle: String? = nil, level: Level? = nil,
+    autoStop: AutoStop? = nil,
     deniedPermissions: [BridgePermissionKind] = [], warning: String? = nil, error: String? = nil
   ) {
     self.state = state
@@ -105,6 +109,7 @@ public struct RecordingSnapshot: Codable, Sendable, Equatable {
     self.mode = mode
     self.callApp = callApp
     self.meetingID = meetingID
+    self.meetingTitle = meetingTitle
     self.level = level
     self.autoStop = autoStop
     self.deniedPermissions = deniedPermissions

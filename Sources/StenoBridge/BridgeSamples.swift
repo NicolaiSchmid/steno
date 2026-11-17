@@ -40,7 +40,7 @@ public enum BridgeSamples {
 
   public static let recordingLive = RecordingSnapshot(
     state: .recording, startedAt: startedAt, mode: .call, callApp: "Zoom", meetingID: meetingID,
-    level: .init(mic: 0.42, system: 0.18),
+    meetingTitle: "Produktstrategie 90/10", level: .init(mic: 0.42, system: 0.18),
     autoStop: .init(remainingSeconds: 42, totalSeconds: 60, reason: "Zoom closed"),
     deniedPermissions: [], warning: nil, error: nil)
 
