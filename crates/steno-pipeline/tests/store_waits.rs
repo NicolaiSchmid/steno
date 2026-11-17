@@ -225,6 +225,25 @@ impl World {
         lock
     }
 
+    /// How long one write waits out the store's five-second busy timeout on
+    /// the held lock on this machine, from SQLite's busy handler as the
+    /// store's connections use it.
+    async fn one_busy_wait(&self) -> Duration {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = rusqlite::Connection::open(path).unwrap();
+            connection.busy_timeout(Duration::from_secs(5)).unwrap();
+            let started = std::time::Instant::now();
+            let begun = connection.execute_batch("BEGIN IMMEDIATE");
+            let waited = started.elapsed();
+            let error = StoreError::Sqlite(begun.expect_err("the lock is held"));
+            assert!(error.is_busy(), "{error}");
+            waited
+        })
+        .await
+        .unwrap()
+    }
+
     /// The pipeline's connection gives up on a lock at once instead of after
     /// five seconds.
     fn without_busy_timeout(&self) {
@@ -304,10 +323,14 @@ async fn a_run_the_store_keeps_locked_past_its_busy_timeout_waits_queued_and_the
         waited >= Duration::from_secs(5),
         "the write waited out the busy timeout"
     );
-    // The park writes nothing over a meeting still `queued`.
+    // The park writes nothing over a meeting still `queued`: the run waited
+    // out one busy timeout, not two. Measured against one wait on this
+    // machine, since a loaded VM sleeps past each of the busy handler's
+    // naps (one five-second wait takes nine on a hosted macOS runner).
+    let one_wait = world.one_busy_wait().await;
     assert!(
-        waited < Duration::from_secs(8),
-        "the park waited on the lock again: {waited:?}"
+        waited < one_wait + one_wait / 2,
+        "the park waited on the lock again: {waited:?}, one wait {one_wait:?}"
     );
     let row = world.store.meeting(meeting).unwrap().unwrap();
     assert_eq!(row.state, MeetingState::Queued);
