@@ -494,7 +494,6 @@ mod tests {
             .expect("the host's reader closed with the host");
     }
 
-    /// Waits up to [`PATIENCE`] for `probe` to find `what`.
     /// How long the feed's wait for the rest of [`RECORDING_INTERVAL`]
     /// takes on this machine, the longest of a few: a loaded VM's timers
     /// fire late (a 50 ms park takes 100 to 130 ms on a hosted macOS
@@ -509,6 +508,7 @@ mod tests {
             .fold(RECORDING_INTERVAL, Duration::max)
     }
 
+    /// Waits up to [`PATIENCE`] for `probe` to find `what`.
     fn found<T>(what: &str, probe: impl Fn() -> Option<T>) -> T {
         let deadline = Instant::now() + PATIENCE;
         loop {
