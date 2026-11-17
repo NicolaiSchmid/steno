@@ -382,3 +382,94 @@ opens the panel and is not trapped by the drawer.
 All accepted: design findings from both reviewers go to one fix build on
 #359 (council round 3 there); speaker items to the speaker step 2 build,
 which rebases onto the fixed design stack before finishing.
+
+## 2026-11-16 — built design steps 1-6, round 3 (head of #359, d4ed91723)
+
+Request IDs `steno-built-design-astra-r3`, `steno-built-design-fable-r3`.
+Evidence: `design-fix2/after/`.
+
+**GPT-6-Astra: visual 9/10, accessibility and UX 8/10.** All earlier design
+findings fixed (zoom reflow in Main, failure rows red and announced, 960
+gutter, onboarding denied, recorder bar outside the drawer, processing
+failure red with the right retry, drawer Close and focus, Connection before
+Advanced). Remaining, all medium:
+1. Settings has no zoom reflow: 256 px navigation at every width leaves
+   176 px of form at 960 px and 200 % (`settings-window.tsx:98`,
+   `iphone-section.tsx:252`). Collapse the navigation when narrow.
+2. Process again toasts success on Cancel and on a refusal
+   (`meeting-detail.tsx:234`, `host.rs:1941`). Toast only on acceptance.
+3. The auto-stop countdown ticks inside `role="status"`
+   (`recorder-notices.tsx:26`, `callout.tsx:98`). Announce once; keep the
+   counter outside the live region.
+
+**Claude Fable 5.1: visual 9/10, accessibility and UX 8.5/10.** "At Damian's
+standard for colour, elevation, tones and feedback." All earlier findings
+fixed except Set up / Not now (partly). New, ranked:
+1. Two filled Stop buttons on the wide recording screen
+   (`meeting-detail.tsx:603-605`, `sidebar.tsx:100-105`).
+2. The auto-stop countdown is the one notice without a tint
+   (`callout.tsx:30-31`); it asks the user, so warning tone.
+3. Set up is a link, Not now a ghost button, on one line
+   (`meeting-detail.tsx:161-187`).
+4. A failed meeting without a transcript keeps four empty tabs
+   (`meeting-detail.tsx:575`).
+5. Onboarding: Allow disabled while Skip stays live (`permission-row.tsx:82`).
+6. Fixture: the live recording shows a finished 45:38 duration.
+
+### Responses
+
+All nine accepted; one fix build on #359 (`steno-fix-design-r3`). The
+speaker stack rebases onto it.
+
+## 2026-11-16 — built design steps 1-6, round 4 (head of #359, bbfac8b8b)
+
+Request IDs `steno-built-design-astra-r4`, `steno-built-design-fable-r4`.
+Evidence: `design-fix3/{before,after}/`.
+
+**GPT-6-Astra: visual 9/10, accessibility and UX 8.5/10.** Round-3 findings
+all fixed (Settings drawer at 200 %, Process again toast only on a started
+run, countdown announced once). New, all medium:
+1. A transcription failure hides personal Notes (`meeting-detail.tsx:793`).
+2. A summary failure replaces an existing transcript in every non-Notes tab
+   (`meeting-detail.tsx:576`); predates round 3.
+3. Menu keyboard focus is the accent fill only, 1.07:1 dark and 1.09:1 light
+   (`menu.tsx:74`); needs a measured outline, Select options too.
+
+**Claude Fable 5.1: visual 9.5/10, accessibility and UX 9/10.** "The stack
+meets Damian's standard." Round-3 findings all fixed. New:
+1. Medium: at 960 px the live mark cuts the breadcrumb to "Produktstrat…"
+   (`meeting-detail.tsx:204-215`); drop the word under a container query.
+2. Medium: the narrow recorder bar's Stop names no meeting while another is
+   open (`recorder-notices.tsx:159-166`); show the title as a button.
+3. Low: "Not exported" shows while recording or transcribing
+   (`meeting-detail.tsx:398-433`).
+4. Low: the Settings sections drawer has no title beside its ✕.
+
+### Responses
+
+All seven accepted; one fix build on #359 (`steno-fix-design-r4`).
+
+## 2026-11-16 — built design steps 1-6, round 5 (head of #359, 513c87e4b)
+
+Request IDs `steno-built-design-astra-r5`, `steno-built-design-fable-r5`.
+Evidence: `design-fix4/{before,after}/`.
+
+**GPT-6-Astra: visual 9/10, accessibility and UX 9/10.** Palette, type,
+elevation, tones and focus meet Damian's standard; round-4 findings fixed.
+New: (medium) the recorder bar's title comes from the filtered list and
+vanishes under a filter or search (`recorder-notices.tsx:154`); (low) the
+title link's focus ring is clipped by `truncate` and a long title pushes the
+clock out (`recorder-notices.tsx:172`).
+
+**Claude Fable 5.1: visual 9/10, accessibility and UX 9/10.** At Damian's
+standard; "nothing structural remains". Round-4 findings fixed; the dropped
+"Meetings /" at 960 doesn't matter while recording. New: (medium) an empty
+footer rule on processing meetings (`meeting-detail.tsx:386-389`); (medium)
+the same clipped focus ring; (low) the same filter case; (low) a middle dot
+between the title and the elapsed time; (low) raise the breadcrumb parent
+threshold to about 20 rem so idle and recording agree (`header.tsx:55`),
+which also covers "Stopping…".
+
+### Responses
+
+All accepted; one small fix build on #359 (`steno-fix-design-r5`).

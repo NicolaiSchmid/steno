@@ -236,3 +236,241 @@ Accepted from both:
 
 Final scores: Astra 8, Fable 8 (from 5.5 and 5 for #348). Remaining
 disagreement: S2 (Astra: always This paragraph). Handed to Nicolai.
+
+## 2026-11-15 — built speaker step 2 (#360 on #352 on the design stack)
+
+Request IDs `steno-built-speakers2-astra-r1`, `steno-built-speakers2-fable-r1`.
+Evidence: `speakers-2/{before,after}/` (31 states per theme) against the
+#348 screens and the Jamie teardown.
+
+**GPT-6-Astra: 7/10 (Jamie 7.5); not yet equal.** Resolved: hidden merges,
+Enter on an unseen person, advance before success; largely: visual noise.
+Partly: evidence (confirmed-person editing drops the quote), suggestion
+honesty, keyboard. Not: transcript scope. Ranked:
+1. Transcript picker hides that it changes the whole voice
+   (`speaker-picker.tsx:165,225`): say "Changes all N paragraphs of
+   Speaker 3 in this meeting"; label play "Voice sample".
+2. A confirmed row cannot be reopened right away
+   (`speakers-popover.tsx:362,759`): freeze placement, not editability.
+3. Keyboard: blur cancels and Tab does not move to the next row
+   (`speaker-name-field.tsx:326`, `speakers-popover.tsx:263`); no visible
+   Y/N/P hints.
+4. Confirmed-person editing suppresses the snippet (`speakers-popover.tsx:609`).
+5. "No clip" only in the accessible label (`speaker-picker.tsx:70`).
+Departures: web combine dialog right; voice-first title right; No clip right
+in intent; locking completed rows wrong.
+
+**Claude Fable 5.1: 8/10 (Jamie 7.5); at least as good, ahead on honesty.**
+Short of Jamie on paragraph moves (step 4) and clip words (step 3).
+Resolved: trigger, controls per row, vocabularies, split row, silent merges,
+optimistic and error state, focus and tab stops, play twice, avatars.
+Partly: a wrong match reads as fact (the bare "?" is weak). Ranked:
+1. Me toast reads "You is now Nicolai." (`speaker-picker.tsx:101`).
+2. Out-of-order picks reopen a named voice: stale `layout` after the await
+   (`speakers-popover.tsx:306-307`).
+3. Transcript "?" as the same grey bubble used in the pill.
+4. Combine copy leaves "Their" dangling (`speaker-name-field.tsx:76`).
+5. The headline "partly" capture uses the raw fixture (no line, greyed
+   play); no capture of a named Me row (`e2e/screens.spec.ts:265-266`).
+6. Option avatar colour flips after the pick.
+Departures: all right.
+
+### Responses
+
+All accepted, one fix build on #360; Astra's "Changes all N paragraphs"
+copy and visible "No clip" are taken. Steps 3-4 must-haves recorded for
+those builds.
+
+## 2026-11-15 — built speaker step 2, round 2 (after fix 63bf95e91)
+
+**GPT-6-Astra: 8/10; now at least as good as Jamie (7.5) for step 2.**
+Resolved: scope, reopen, quote, No sample; locking reversed. Partly:
+keyboard (row-to-row Tab, `speakers-popover.tsx:484`). New: weak overflow
+affordance at 200 %.
+
+**Claude Fable 5.1: 8.5/10; at least as good as Jamie, ahead on honesty.**
+All round 1 items resolved (colour in logic; fixture colour indices are not
+FNV, so screens disagree). Ranked: reopened row stale (placeholder and
+"Anna · Sounds like" for a confirmed voice); pill undercounts (suggestions
+not counted); hints read as part of the label; scope line copy and
+placement; "Is this right?" over a done row. Jamie still wins on the
+all-inclusive count and the candidate avatar preview.
+
+### Responses
+
+All accepted in one fix pass on #360 (Tab: arrows kept, Tab moves between
+rows, reconciling Fable's one-stop and Astra's every-row asks). Step 3
+rebases onto it.
+
+## 2026-11-15 — built speaker step 3 (#365)
+
+Request IDs `steno-built-speakers3-astra-r1`, `steno-built-speakers3-fable-r1`.
+
+**GPT-6-Astra: 7/10 (UX 8.5, implementation 6.5).** UI calmer than Jamie with
+better corrections; v6 migration sound; rejection does not train memory.
+Ranked:
+1. P1: reprocessing can carry a dismissal or rejection to a different voice:
+   answers kept by id (`store/meetings.rs:503`, `MeetingStore.swift:304`),
+   ids from "Speaker N" by first speech (`steno-diarize/src/mapping.rs:35`).
+   Reconcile cluster identity first; leave ambiguous ones for review.
+2. P1: Swift reprocessing deletes confirmed rows without recomputing the
+   persons' embeddings (`MeetingStore.swift:300`); orphaned contributions.
+3. P2: Remove name on Me undone by Rust reprocessing falling back to
+   `self_person_id` (`steno-pipeline/src/pipeline.rs:3296`).
+4. P2: after No, typing the rejected name still filters it out
+   (`speaker-names.ts:430`); exclude only for an empty query.
+5. P2: the quote is not what plays: whole overlapping segments
+   (`steno-host/src/speakers.rs:330`, `SpeakerExcerpts.swift:26`); use timed
+   words inside the clip.
+Thresholds: 0.65 provisionally; 0.75 strong provisional; neither validated.
+Gaps: Swift chip refresh belongs here; Swift reprocessing is a blocker;
+exports must mark dismissed voices.
+Step 4 (sent to that build): processing generation in stale checks, no
+training on moves, journal incl. dismissal, rejections and Me, undo across
+restart, actual paragraph audio with retention and cap.
+
+**Claude Fable 5.1: 8/10.** UX does what step 3 asks; stores mirror each
+other; migration safe; no path teaches voice memory from a No or dismissal.
+Ranked: Remove name on Me undone by Process again (`pipeline.rs:3296`);
+dismissal carried by label (`meetings.rs:510`, `MeetingStore.swift:309`);
+exports and the summary ignore dismissal (`model/people.rs:394` skip);
+rejections store no similarity (last cheap moment before v6 ships); the
+floor lives in the view models, not the pipelines (`pipeline.rs:2762`,
+`MatchSpeakers.swift:15`); store guards missing (dismissing Me, rejecting the
+confirmed person); pill when all dismissed; "Last invitee left" decided
+before dedupe; dismissing row reads as needing a name; quotation marks on a
+fallback quote. Thresholds: keep 0.60 and collect similarity on every
+answer. Step 4: keep the source row with `mergedInto` instead of averaging
+and deleting; paragraph moves have no stable key across Process again;
+null-embedding rows for moved paragraphs; both stores or neither.
+
+### Responses
+
+All findings from both go to one fix pass on #365 (v6 changed in place, it
+has not shipped). Floor: the council split (Astra 0.65, Fable 0.60 with
+data); coordinator's call is 0.65 provisionally plus similarity recorded on
+every No and Yes, revisited with data. Fable's `mergedInto` design and the
+reprocessing key sent to the step 4 build.
+
+## 2026-11-16 — built step 3 round 2 (#365 after its fix pass) and built step 4 (#366)
+
+Request IDs `steno-built-speakers34-astra-r2`, `steno-built-speakers34-fable-r2`.
+Evidence: `speakers-3-fix/after/`, `speakers-4/{before,after}/`.
+
+**GPT-6-Astra: #365 7.5/10 (UX 8.5, implementation 7); #366 7.5/10 (UX 9,
+implementation 6.5).** Steps 2–4 beat Jamie on UX; keep `mergedInto`, cut the
+journal idea. Earlier findings: Swift orphaned contributions, Remove name on
+Me, typed rejected name fixed; reprocessing answers and quote vs playback
+partly. Ranked:
+1. P1 (#365): reconciliation lets only answered old rows compete and resolves
+   near ties automatically, so an answer can still move to another voice
+   (`meetings.rs:472, 693`, `MeetingStore.swift:316`). Reconcile all old
+   clusters; transfer only unambiguous matches.
+2. P1 (#366): generation not read atomically with the transcript
+   (`main_window/detail.rs:108,121`, `MeetingDetailViewModel.swift:110`);
+   segment ids reused by lane/index, so a move can hit another paragraph.
+3. P2: paragraph WAV outlives Stop, completion and meeting deletion
+   (`clip_player.rs:197,216`).
+4. P2: Swift doesn't name Me when combining (`MeetingStore+People.swift:277`
+   vs `people.rs:827`); the test papers over it.
+5. P2: paragraph preparation decodes from the start under the host lock
+   (`codec/mod.rs:190`, `host.rs:2199,1200`).
+6. P3: stale Separate again offers Retry (`speakers-popover.tsx:566`).
+Correction: a Yes stores no similarity (`people.rs:709`).
+
+**Claude Fable 5.1: #365 UX 8.5, implementation 8.5; #366 UX 8,
+implementation 7.5.** Steps 2–4 beat Jamie (Jamie still better: avatar
+photos, lighter nested duplicate row). All earlier findings fixed (Last
+invitee dedupe only from the PR text); a Yes still stores nothing. Step 4
+built as intended on all four points. Ranked:
+1. P2: paragraph WAV in shared `/tmp`, survives crashes, deletion and
+   retention; pre-created folder escapes 0700. Cut into the app's cache,
+   remove on stop/end, sweep on start.
+2. P3: Rust maps a stale Separate again to the move's message
+   (`host.rs:472-478`).
+3. P3: Retry on a stale Separate again.
+4. P3: a move can prune the Me row (`people.rs:624-657`).
+5. P3: moving to yourself while Me is unnamed makes a parallel row (note it).
+6. P3: a turn without a voice borrows another voice's Noes.
+7. P3: merged rows carry nothing across Process again; treat them as
+   confirmed as the root's person.
+8. P3: Swift detail mixes ticks (`MeetingDetailViewModel.swift:106-116`).
+Visual: Separate again as a text button beside play. Cut: overlap of
+`rowIDs` and `rowOrder`.
+
+### Responses
+
+All accepted into one fix pass on #365 and #366 (`steno-fix-speakers34`),
+plus a Yes recording its similarity (v6 still unshipped).
+
+## 2026-11-16 — built steps 3 and 4, round 3 (#365 5880d187f, #366 a69749d95)
+
+Request IDs `steno-built-speakers34-astra-r3`, `steno-built-speakers34-fable-r3`.
+Evidence: `speakers-34-fix/{before,after}/`.
+
+**GPT-6-Astra: #365 8.5/10 (UX 8.5, implementation 8.5); #366 8/10 (UX 8.5,
+implementation 7.5).** Approves #365's design; beats Jamie in capability.
+All earlier findings fixed (reconciliation fixed in #365, partly in the
+stack). New, all #366:
+1. P1: reconciliation drops combined rows whose root is no longer confirmed
+   (`meetings.rs:488`, `MeetingStore.swift:343`); let every stored embedding
+   compete, decide transfer separately.
+2. P2: changing a combined Me's root leaves the Me participant stale
+   (`people.rs:933`, `MeetingStore+People.swift:322`).
+3. P2: a carried `confirmedSimilarity` belongs to the original person, not
+   the root's (`people.rs:886`, `meetings.rs:516`, `MeetingStore.swift:362`).
+4. P2: after Remove name on a root, its combined rows and Separate again
+   vanish on reopen (`speakers-popover.tsx:793`, `speaker-names.ts:390`).
+Warning text: "Moves only this paragraph. Processing again resets this change."
+
+**Claude Fable 5.1: #365 UX 9, implementation 8.5; #366 UX 8.5,
+implementation 8.** Beats Jamie; Jamie still ahead on a voiceless paragraph
+reaching invitees before typing. All earlier findings fixed (voiceless turn
+partly). New:
+1. P2: two rows of the same person veto each other's carry
+   (`meetings.rs:741-756`); skip same-person rivals.
+2. P2: Process again turns a combine into two roots confirmed as one person
+   (`meetings.rs:482-497`, `speaker_moves.rs:352-366`); re-combine after
+   insert.
+3. P3: Remove name on a root leaves combined rows outside the competition.
+4. P3: a cut failing after the reply is silent; carry the last failure in
+   the snapshot.
+5. P3: Windows folder check weaker; say why in a comment.
+6. P3: the voiceless field's placeholder "Unknown" reads as a value.
+Cut: merge chains; flatten to depth 1 and drop the recursive CTEs.
+
+### Responses
+
+All accepted into one fix pass on #366 (`steno-fix-speakers34-r3`).
+
+## 2026-11-16 — built steps 3 and 4, round 4 (rebased onto #359 3598c95a2; #365 6c4e0e3a4, #366 b6e637224)
+
+Request IDs `steno-built-speakers34-astra-r4`, `steno-built-speakers34-fable-r4`.
+Evidence: `speakers-rebased/after/`, `speakers-34-fix2/{before,after}/`.
+
+**GPT-6-Astra: #365 8.5/10 (UX 9, implementation 8); #366 8.5/10 (UX 9,
+implementation 8).** Beats Jamie; approves the direction; fix the P2s
+before merge. Round-3 findings fixed. Remaining:
+1. P2 (#365): Swift summary and task assignees use pre-reconciliation names
+   (`Merge.swift:38`, `ProcessingPipeline.swift:243`).
+2. P2 (#366): Remove name on a combined Me's root is undone by Rust Process
+   again (`people.rs:1094`, `MeetingStore+People.swift:385`,
+   `pipeline.rs:3347`).
+3. P2: a spawned player that exits unsuccessfully reads as completion
+   (`clip_player.rs:171`, `ClipPlayer.swift:93`).
+4. P3: at 200 % the active option sits inside the scroll fade
+   (`speaker-name-field.tsx:386`, `theme.css:620`).
+Cut: identical `into` and `root`. Retention still doesn't cancel playback.
+
+**Claude Fable 5.1: #365 UX 9, implementation 8.5; #366 UX 9,
+implementation 9.** No P1 or P2. Matches Jamie on naming and moving, beats
+it on undoable combines, voice strength, play failure; Jamie ahead on the
+deferred voiceless-paragraph case. New P3s: a combine under a Not-a-person
+root splits on Process again (`meetings.rs:498-501, 712-717`); a combined
+row's own name is lost across Process again (`meetings.rs:496`); the nested
+row under an unnamed root doesn't say what it reads as. Cut: `into`/`root`;
+`reads_as_me` + `sync_me_participant`.
+
+### Responses
+
+All accepted into one final fix pass (`steno-fix-speakers34-r4`).
