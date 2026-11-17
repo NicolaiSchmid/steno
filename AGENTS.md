@@ -108,7 +108,7 @@ missing local setup, run it. Do not ask first.
   `vercel.json`; keep its paths in step with the workspace. `mobile/` and `apps/macos/web/` stay
   outside the root workspace; `pnpm-workspace.yaml` says why.
 - Design and structure follow t3.codes (pingdotgg/t3code `apps/marketing`):
-  dark only, DM Sans and JetBrains Mono, hero → feature blocks → closing CTA.
+  dark only, Geist and Geist Mono, hero → feature blocks → closing CTA.
   Tokens live in `src/app/globals.css`; no raw colours at call sites. Hue is
   reserved for the red live state, the primary action is white on dark.
 - Copy presents Steno as multi-platform (macOS, Windows, Linux) and does not

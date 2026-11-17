@@ -50,11 +50,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
 	return (
 		<html lang="en">
 			<head>
-				{/* The latin DM Sans file carries the headline; everything else may swap in. */}
+				{/* The Geist file carries the headline; the mono may swap in. */}
 				<link
 					as="font"
 					crossOrigin="anonymous"
-					href="/fonts/dm-sans-latin.woff2"
+					href="/fonts/geist-variable.woff2"
 					rel="preload"
 					type="font/woff2"
 				/>
